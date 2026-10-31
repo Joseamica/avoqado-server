@@ -43,6 +43,20 @@ export async function addActivity(access: CrmAccess, accountId: string, input: {
         assigneeStaffId: account.ownerStaffId ?? access.staffId,
       },
     })
+    // Every change leaves its event (spec §5.10), and the activity itself does not keep who scheduled it.
+    await addEvent(tx, {
+      accountId,
+      kind: 'SYSTEM',
+      actorStaffId: access.staffId,
+      data: {
+        event: 'ACTIVITY_SCHEDULED',
+        activityId: activity.id,
+        type: activity.type,
+        title: activity.title,
+        dueAt: activity.dueAt.toISOString(),
+        assigneeStaffId: activity.assigneeStaffId,
+      },
+    })
     await recomputeNext(tx, accountId)
     return activity
   })

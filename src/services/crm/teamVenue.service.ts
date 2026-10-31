@@ -138,9 +138,9 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
 }
 
 /**
- * The ficha's owner selector (ruling 13): every active member who can own accounts — holds «Ver negocios» and has a
- * working Avoqado account — by name. Only for whoever can reassign («Editar: todos» or admin); anyone else gets `[]`, so a
- * «propios» seller does not even learn the names of the team.
+ * The ficha's owner selector (ruling 13): every active member who can own accounts, by name — exactly the people
+ * `reassign` accepts (M-4), the ones `getCrmAccess` gives «Ver negocios» to. Only for whoever can reassign («Editar:
+ * todos» or admin); anyone else gets `[]`, so a «propios» seller does not even learn the names of the team.
  *
  * ponytail: one page of 100 members; a team that grows past it needs a search box instead of a selector.
  */
@@ -153,16 +153,20 @@ export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId
     take: MAX_PAGE_SIZE,
   })
   if (!rows.length) return []
-  // Like `listTeamMembers`: a claimed row is the person who claimed it; an unclaimed one, whoever holds the email today.
+  // The same person `getCrmAccess` would give the keys to. A claimed row: whoever claimed it, while their email still leads
+  // to this row (it is looked up by the person's email). An unclaimed one: whoever holds the email today, with it verified —
+  // nobody else ever claims it.
   const claimed = rows.flatMap(row => (row.staffId ? [row.staffId] : []))
   const unclaimed = rows.flatMap(row => (row.staffId ? [] : [row.email]))
   const people = await prisma.staff.findMany({
-    where: { active: true, OR: [{ id: { in: claimed } }, { email: { in: unclaimed } }] },
-    select: { id: true, email: true, firstName: true, lastName: true },
+    where: { active: true, OR: [{ id: { in: claimed } }, { email: { in: unclaimed }, emailVerified: true }] },
+    select: { id: true, email: true, emailVerified: true, firstName: true, lastName: true },
     take: rows.length,
   })
   return rows.flatMap(row => {
-    const person = people.find(candidate => (row.staffId ? candidate.id === row.staffId : candidate.email === row.email))
+    const person = row.staffId
+      ? people.find(candidate => candidate.id === row.staffId && candidate.email.toLowerCase() === row.email)
+      : people.find(candidate => candidate.email === row.email && candidate.emailVerified)
     return person ? [{ staffId: person.id, name: `${person.firstName} ${person.lastName}`.trim() }] : []
   })
 }

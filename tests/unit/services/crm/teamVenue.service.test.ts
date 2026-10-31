@@ -806,17 +806,24 @@ describe('listTeamOptions', () => {
     await expect(listTeamOptions(actor({ editar: 'propios', admin: false }))).resolves.toEqual([])
     expect(prismaMock.platformAccess.findMany).not.toHaveBeenCalled()
 
-    // Whoever can reassign gets every active member who can own accounts (holds «Ver negocios»), with an account.
+    // Whoever can reassign gets every member `reassign` would accept (M-4): active keys with «Ver negocios», and a person
+    // `getCrmAccess` would really give them to.
+    const CHANGED_ID = 'cstaffchg0000000000000001'
     prismaMock.platformAccess.findMany.mockResolvedValue([
       { staffId: SELLER_ID, email: 'carla@avoqado.io' },
-      // Not claimed yet: whoever holds the email today, the one who will claim it.
+      // Not claimed yet: whoever holds the email today, the one who will claim it — only with a verified email.
       { staffId: null, email: 'beto@avoqado.io' },
       // Invited and never accepted: nobody to give an account to yet.
       { staffId: null, email: 'nadie@avoqado.io' },
+      // Claimed, but that person changed their email since: the keys no longer reach them (`getCrmAccess` looks the row up by
+      // the person's email), so `reassign` would refuse them.
+      { staffId: CHANGED_ID, email: 'luis@avoqado.io' },
     ])
     prismaMock.staff.findMany.mockResolvedValue([
-      { id: SELLER_ID, email: 'carla@avoqado.io', firstName: 'Carla', lastName: 'Ruiz' },
-      { id: OTHER_ID, email: 'beto@avoqado.io', firstName: 'Beto', lastName: 'Díaz' },
+      // The email of a Staff may keep the capitals typed in; the keys are stored lowercase.
+      { id: SELLER_ID, email: 'Carla@Avoqado.io', emailVerified: true, firstName: 'Carla', lastName: 'Ruiz' },
+      { id: OTHER_ID, email: 'beto@avoqado.io', emailVerified: true, firstName: 'Beto', lastName: 'Díaz' },
+      { id: CHANGED_ID, email: 'luis.nuevo@avoqado.io', emailVerified: true, firstName: 'Luis', lastName: 'Ramírez' },
     ])
 
     await expect(listTeamOptions(actor({ editar: 'todos', admin: false }))).resolves.toEqual([
@@ -832,7 +839,11 @@ describe('listTeamOptions', () => {
     )
     expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { active: true, OR: [{ id: { in: [SELLER_ID] } }, { email: { in: ['beto@avoqado.io', 'nadie@avoqado.io'] } }] },
+        // An unclaimed row only goes to someone with a verified email: `getCrmAccess` never claims it for anyone else.
+        where: {
+          active: true,
+          OR: [{ id: { in: [SELLER_ID, CHANGED_ID] } }, { email: { in: ['beto@avoqado.io', 'nadie@avoqado.io'] }, emailVerified: true }],
+        },
       }),
     )
 

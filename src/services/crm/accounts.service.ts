@@ -77,8 +77,12 @@ export async function listLostReasons() {
   return prisma.crmLostReason.findMany({ select: LOST_REASON_SELECT, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: CATALOG_CAP })
 }
 
-/** A new stage is always an OPEN one: there is one «Ganado» and one «Perdido». */
+/**
+ * A new stage is always an OPEN one: there is one «Ganado» and one «Perdido». The defaults go in first (M-3): on a new
+ * database a stage created before them would leave the table non-empty forever, with no way to win or lose.
+ */
 export async function createStage(actor: CrmAccess, input: { name: string; order: number; staleDays?: number | null }) {
+  await ensureCrmDefaults()
   const stage = await prisma.crmStage
     .create({ data: { name: input.name, order: input.order, staleDays: input.staleDays ?? null, kind: 'ABIERTA' }, select: STAGE_SELECT })
     .catch(nameTaken)
@@ -116,7 +120,9 @@ export async function updateStage(actor: CrmAccess, id: string, input: { name?: 
   return stage
 }
 
+/** Like `createStage`: the five default reasons go in first, or a first reason would keep them out forever (M-3). */
 export async function createLostReason(actor: CrmAccess, input: { name: string }) {
+  await ensureCrmDefaults()
   const reason = await prisma.crmLostReason.create({ data: { name: input.name }, select: LOST_REASON_SELECT }).catch(nameTaken)
   void logAction({
     staffId: actor.staffId,
@@ -669,6 +675,22 @@ export async function takeAccount(access: CrmAccess, id: string) {
 }
 
 /**
+ * What a reassignment answers: the whole row to whoever sees the account, and only its new owner to whoever does not. An
+ * admin of the team without «Ver negocios» changes owners from «Equipo de ventas», but never sees an account (M-1).
+ */
+async function reassignedView(tx: Prisma.TransactionClient, access: CrmAccess, id: string, staffId: string | null, now: Date) {
+  const visible = await tx.crmAccount.findFirst({ where: { AND: [{ id }, scopeWhere(access, 'ver')] }, select: ROW_SELECT })
+  if (visible) {
+    const [row] = await toRows(tx, [visible], now)
+    return row
+  }
+  const owner = staffId
+    ? await tx.staff.findUnique({ where: { id: staffId }, select: { id: true, firstName: true, lastName: true } })
+    : null
+  return { id, owner: owner ? { id: owner.id, name: fullName(owner) } : null }
+}
+
+/**
  * Gives the account to someone on the team, or to nobody (`null`). Only with «Editar: todos» or as an admin, who reach
  * every account. Its pending activities go with it (ruling 12).
  */
@@ -693,7 +715,7 @@ export async function reassign(access: CrmAccess, id: string, staffId: string | 
         data: { fromStaffId: account.ownerStaffId, toStaffId: staffId, reason },
       })
     }
-    return { row: await rowTx(tx, id, now), fromStaffId: account.ownerStaffId }
+    return { row: await reassignedView(tx, access, id, staffId, now), fromStaffId: account.ownerStaffId }
   })
   // Who owns an account decides which «propios» sellers see it: an access change, so it goes to the audit trail too.
   if (fromStaffId !== staffId) {

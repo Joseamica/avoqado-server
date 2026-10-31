@@ -95,6 +95,25 @@ describe('activities', () => {
       data: { lastTouchAt: expect.any(Date) },
     })
     expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({ where: { id: ACCOUNT }, data: { nextActivityAt: TOMORROW } })
+    // M-2: scheduling is a change too (spec §5.10). The activity does not keep who created it, so the timeline does.
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          accountId: ACCOUNT,
+          kind: 'SYSTEM',
+          actorStaffId: SELLER,
+          data: {
+            event: 'ACTIVITY_SCHEDULED',
+            activityId: ACTIVITY,
+            type: 'LLAMADA',
+            title: 'Llamar para la demo',
+            dueAt: TOMORROW.toISOString(),
+            assigneeStaffId: OWNER,
+          },
+        },
+      ],
+      skipDuplicates: true,
+    })
 
     // On an account nobody owns yet, it belongs to whoever scheduled it.
     editable({ ownerStaffId: null })

@@ -13,6 +13,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import type { CrmAccess } from '@/services/crm/access.service'
 import {
   addNote,
+  createLostReason,
   createManual,
   createStage,
   ensureCrmDefaults,
@@ -267,7 +268,9 @@ describe('losing and winning', () => {
         lostNote: null,
       },
     })
-    expect(prismaMock.crmTimelineEvent.createMany.mock.calls.map(([args]) => args.data[0].kind)).toEqual(['LINKED', 'WON'])
+    expect(
+      prismaMock.crmTimelineEvent.createMany.mock.calls.map(([args]: [{ data: Array<{ kind: string }> }]) => args.data[0].kind),
+    ).toEqual(['LINKED', 'WON'])
 
     // The sales team's own organization is never anybody's client.
     await expect(win(access(), ACCOUNT_B, { organizationId: TEAM_ORG })).rejects.toMatchObject({
@@ -406,6 +409,8 @@ describe('who sees and changes what', () => {
       admin: false,
     })
     editable()
+    // They see it (`ver: todos`): the answer is the whole row.
+    prismaMock.crmAccount.findFirst.mockResolvedValue(account())
 
     // «Editar: todos» may: the owner changes, its pending activities go with it (ruling 12), one OWNER_CHANGE.
     await reassign(access({ ver: 'todos', editar: 'todos' }), ACCOUNT, OTHER)
@@ -451,6 +456,49 @@ describe('who sees and changes what', () => {
     await expect(reassign(access({ admin: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
       statusCode: 422,
       code: 'CRM_REASSIGN_TARGET_INVALID',
+    })
+  })
+
+  it('reasignar_sin_ver_solo_dice_el_nuevo_dueno', async () => {
+    // M-1: an admin of the team without «Ver negocios» reassigns (from «Equipo de ventas»), but never sees the account:
+    // the answer says who owns it now, and nothing about the account itself.
+    prismaMock.staff.findUnique.mockImplementation(async ({ select }: { select?: Record<string, boolean> }) =>
+      select?.firstName
+        ? { id: OTHER, firstName: 'Ana', lastName: 'López' }
+        : { email: 'ana@avoqado.io', active: true, emailVerified: true },
+    )
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000001',
+      staffId: OTHER,
+      verScope: 'propios',
+      editarScope: 'propios',
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+    })
+    editable()
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    const adminWithoutVer = access({ ver: null, editar: null, admin: true })
+
+    await expect(reassign(adminWithoutVer, ACCOUNT, OTHER)).resolves.toEqual({ id: ACCOUNT, owner: { id: OTHER, name: 'Ana López' } })
+    // The account is read back with THEIR «ver» scope, which for them matches nothing.
+    expect(prismaMock.crmAccount.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { AND: [{ id: ACCOUNT }, { id: { in: [] } }] } }),
+    )
+    await expect(reassign(adminWithoutVer, ACCOUNT, null)).resolves.toEqual({ id: ACCOUNT, owner: null })
+
+    // Whoever sees it gets the whole row, as always.
+    prismaMock.crmAccount.findFirst.mockResolvedValue(
+      account({ ownerStaffId: OTHER, owner: { id: OTHER, firstName: 'Ana', lastName: 'López' } }),
+    )
+    await expect(reassign(access({ ver: 'todos', editar: 'todos' }), ACCOUNT, OTHER)).resolves.toMatchObject({
+      id: ACCOUNT,
+      name: 'Café Tlalpan',
+      owner: { id: OTHER, name: 'Ana López' },
+      stage: { id: PROSPECTO, kind: 'ABIERTA' },
     })
   })
 })
@@ -513,7 +561,7 @@ describe('lists', () => {
       expect(section).toMatchObject({ total: 3, rows: [expect.objectContaining({ id: ACCOUNT })] })
 
     const mine = { assigneeStaffId: SELLER, doneAt: null }
-    const calls = prismaMock.crmAccount.findMany.mock.calls.map(([args]) => args)
+    const calls = prismaMock.crmAccount.findMany.mock.calls.map(([args]: [Prisma.CrmAccountFindManyArgs]) => args)
     expect(calls).toEqual([
       {
         // What I owe from before today (Mexico City), the oldest first.
@@ -561,7 +609,9 @@ describe('lists', () => {
       },
     ])
     // Every total counts with its own section's filter, not with the 50 rows.
-    expect(prismaMock.crmAccount.count.mock.calls.map(([args]) => args.where)).toEqual(calls.map(call => call.where))
+    expect(prismaMock.crmAccount.count.mock.calls.map(([args]: [Prisma.CrmAccountCountArgs]) => args.where)).toEqual(
+      calls.map(call => call.where),
+    )
   })
 
   it('buscar_org_maximo_10_solo_nombre_y_ciudad', async () => {
@@ -664,6 +714,36 @@ describe('stages and lost reasons', () => {
     expect(prismaMock.crmLostReason.createMany).not.toHaveBeenCalled()
   })
 
+  it('primera_escritura_siembra_ganado_y_perdido', async () => {
+    // M-3: on a brand-new database the first CRM write is an admin creating a stage. Without seeding first, the table
+    // would stop being empty, «Ganado» and «Perdido» would never be created, and winning or losing would fail for good.
+    const admin = access({ admin: true })
+    prismaMock.crmStage.count.mockResolvedValue(0)
+    prismaMock.crmLostReason.count.mockResolvedValue(0)
+    prismaMock.crmStage.create.mockResolvedValue(stage({ id: DEMO, name: 'Seguimiento' }))
+
+    await createStage(admin, { name: 'Seguimiento', order: 8 })
+
+    expect(prismaMock.crmStage.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({ name: 'Ganado', kind: 'GANADA' }),
+        expect.objectContaining({ name: 'Perdido', kind: 'PERDIDA' }),
+      ]),
+    })
+    expect(prismaMock.crmStage.createMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.crmStage.create.mock.invocationCallOrder[0])
+
+    // The same for the first lost reason someone adds.
+    jest.clearAllMocks()
+    prismaMock.crmLostReason.create.mockResolvedValue({ id: REASON, name: 'Sin presupuesto', active: true })
+
+    await createLostReason(admin, { name: 'Sin presupuesto' })
+
+    expect(prismaMock.crmLostReason.createMany).toHaveBeenCalledWith({ data: expect.arrayContaining([{ name: 'Precio' }]) })
+    expect(prismaMock.crmLostReason.createMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.crmLostReason.create.mock.invocationCallOrder[0],
+    )
+  })
+
   it('etapa_ganada_no_cambia_de_tipo_ni_se_desactiva', async () => {
     // The PATCH takes the name, the order and the days for «Estancado» — and nothing else.
     const patch = (body: unknown) => updateStageSchema.safeParse({ params: { id: GANADO }, body }).success
@@ -681,6 +761,7 @@ describe('stages and lost reasons', () => {
     expect(prismaMock.crmStage.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: GANADO }, data: { name: 'Cerrado' } }))
 
     // A new stage is always an open one: there is one Ganado and one Perdido.
+    seeded()
     prismaMock.crmStage.create.mockResolvedValue(stage({ id: DEMO, name: 'Seguimiento' }))
     await createStage(admin, { name: 'Seguimiento', order: 4, staleDays: 3, kind: 'GANADA' } as never)
     expect(prismaMock.crmStage.create).toHaveBeenCalledWith(
