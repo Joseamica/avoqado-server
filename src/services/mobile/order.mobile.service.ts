@@ -87,6 +87,7 @@ import {
   assertOrderCancellableUnderLock,
   avisarOrdenCancelada,
   rechazarCancelacionLocalDeRappi,
+  type OrderCancelGuardOptions,
 } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
@@ -6475,6 +6476,8 @@ export async function cancelOrderInTransaction(
   performedBy?: string,
   /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
   dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
+  /** Lo que el panel exige además (`cancelarCuentaSinCobrar`): pagos registrados y «ya cancelada». El POS no lo pasa. */
+  opcionesDeGuardia?: OrderCancelGuardOptions,
 ) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -6486,7 +6489,7 @@ export async function cancelOrderInTransaction(
     throw error
   }
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
-  await assertOrderCancellableUnderLock(tx, { venueId, orderId })
+  await assertOrderCancellableUnderLock(tx, { venueId, orderId }, opcionesDeGuardia)
   // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
   const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
   const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
@@ -6520,6 +6523,8 @@ export async function publishCancelledOrder(
   result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
   staffId?: string,
   reason?: string,
+  /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
+  datosDeBitacora?: Record<string, unknown>,
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
@@ -6548,7 +6553,14 @@ export async function publishCancelledOrder(
     }
   }
   const { logAction } = await import('../dashboard/activity-log.service')
-  void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
+  void logAction({
+    action: 'ORDER_CANCELLED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { ...datosDeBitacora, reason: reason ?? null },
+  })
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })

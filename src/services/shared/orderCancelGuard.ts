@@ -42,6 +42,8 @@ export interface OrdenBajoCandado {
    * que un CAS de versión no la ve. Quien recalcule el total debe usar ésta, no la de una prelectura.
    */
   tipAmount: Prisma.Decimal
+  /** La mesa de la cuenta, releída bajo el candado (`rechazarCuentaDeMesa`). */
+  tableId?: string | null
 }
 
 /**
@@ -65,6 +67,7 @@ export async function lockAndReadOrderForCancel(
       version: true,
       paidAmount: true,
       tipAmount: true,
+      tableId: true,
     },
   })
   if (!order) throw new NotFoundError(notFoundMessage)
@@ -105,6 +108,8 @@ export async function assertNoLiveTerminalCharge(
   }
 }
 
+export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).'
+
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
   mensajeConDinero?: string
@@ -114,6 +119,16 @@ export interface OrderCancelGuardOptions {
    */
   contarPagosRegistrados?: boolean
   notFoundMessage?: string
+  /**
+   * Una cuenta ya CANCELLED/DELETED responde 409 `ORDER_ALREADY_CANCELLED` en vez de volver a cancelarse (y a auditarse).
+   * El panel lo exige: su cliente HTTP reintenta solo los errores de red (Codex plan r1 #6, 30-oct). El POS no lo pide.
+   */
+  rechazarYaCancelada?: boolean
+  /**
+   * Una cuenta de mesa responde 400 `ORDER_IS_TABLE`: el panel no cancela mesas (se anulan en el POS). Se revisa BAJO el candado:
+   * «Mover» puede ligarle una mesa entre una lectura previa y la cancelación (Codex código r1 #1, 30-oct).
+   */
+  rechazarCuentaDeMesa?: boolean
 }
 
 /** Se llama con la orden releída bajo su candado; sólo el aviso del proveedor puede cancelar un Rappi. */
@@ -133,6 +148,12 @@ export async function assertOrderCancellableUnderLock(
 ): Promise<OrdenBajoCandado> {
   const order = await lockAndReadOrderForCancel(tx, input, opciones.notFoundMessage)
   rechazarCancelacionLocalDeRappi(order)
+  if (opciones.rechazarYaCancelada && (order.status === 'CANCELLED' || order.status === 'DELETED')) {
+    throw new ConflictError('Esta cuenta ya estaba cancelada.', 'ORDER_ALREADY_CANCELLED')
+  }
+  if (opciones.rechazarCuentaDeMesa && order.tableId) {
+    throw new BadRequestError(MENSAJE_CUENTA_DE_MESA, 'ORDER_IS_TABLE')
+  }
 
   // 🔴 Ninguna orden CON DINERO ENCIMA se cancela — ni PAID ni PARTIAL. Con pagos hechos el camino es reembolsar y
   // después cancelar, igual que en Square.

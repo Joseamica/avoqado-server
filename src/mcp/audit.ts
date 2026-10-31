@@ -38,6 +38,14 @@ export async function auditMcpWrite(
 }
 
 /**
+ * La procedencia MCP de una escritura (`source` + la app): para la escritura que ya deja su PROPIA entrada de bitácora y no
+ * debe dejar otra (`cancel_unpaid_order`, Codex «Cancelar orden» código r2 #2). Va al final de sus datos, como aquí.
+ */
+export async function mcpProvenance(scope: McpScope): Promise<Record<string, string>> {
+  return { source: 'customer-mcp', ...(await mcpClientStamp(scope.clientId)) }
+}
+
+/**
  * Qué app hizo la escritura (founder, 15-oct-2026: evidencia si un cliente dice «yo no fui»): su id, que se verifica
  * contra su registro OAuth (`mcp_oauth_clients`, con sus redirect URIs), y el nombre con el que se registró, leído
  * ahora. Va DESPUÉS de los datos de la herramienta: ninguna puede declarar otra app. Best effort: si la lectura falla
