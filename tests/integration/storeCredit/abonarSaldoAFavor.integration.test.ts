@@ -12,7 +12,14 @@
 import { Prisma } from '@prisma/client'
 import cuid from 'cuid'
 import prisma from '@/utils/prismaClient'
-import { abonarSaldoAFavorEnTx, esSobreDeSaldoAFavor, prepararSobreDeSaldoAFavorEnTx } from '@/services/giftCards/giftCardLedger'
+import {
+  abonarSaldoAFavorEnTx,
+  canjearSobresEnTx,
+  esSobreDeSaldoAFavor,
+  lockGiftCardsForUpdate,
+  prepararSobreDeSaldoAFavorEnTx,
+  revertirCanjeEnTx,
+} from '@/services/giftCards/giftCardLedger'
 import { esperarAQueAlguienEspereA, pidDe } from '../giftCards/sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
@@ -157,5 +164,50 @@ describe('saldo a favor en la libreta · Postgres real', () => {
       take: 10,
     })
     expect(conLaLlave).toHaveLength(1)
+  })
+
+  it('🔴 un reverso al MISMO sobre entre preparar y abonar (Cambio pagado con su saldo) deja bien el balanceAfter y respeta el tope (revisión I1)', async () => {
+    const customerId = await clienta('+525512340003')
+    const nuevo = () => ({ orderId: cuid(), refundPaymentId: cuid() })
+    // Un sobre de saldo de $8,000 del que se gastan $6,000: quedan $2,000 y $6,000 que todavía pueden regresar.
+    const { giftCardId } = await prisma.$transaction(async tx => {
+      const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
+      return abonarSaldoAFavorEnTx(tx, { preparado, monto: D(8000), staffId, origen: nuevo(), folio: 'F-1', tipo: 'CAMBIO' })
+    }, PRESUPUESTO)
+    const cobroConSaldo = cuid()
+    await prisma.$transaction(async tx => {
+      const cards = await lockGiftCardsForUpdate(tx, [giftCardId])
+      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cobroConSaldo, amount: D(6000), cards, staffId })
+    }, PRESUPUESTO)
+
+    // Como el Cambio de S5: preparar → regresar $1,000 de lo pagado con saldo a ese sobre → abonar el resto a saldo.
+    const cambio = (abono: number) =>
+      prisma.$transaction(async tx => {
+        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
+        await revertirCanjeEnTx(tx, { venueId, originalPaymentId: cobroConSaldo, refundPaymentId: cuid(), amount: D(1000), staffId })
+        return abonarSaldoAFavorEnTx(tx, { preparado, monto: D(abono), staffId, origen: nuevo(), folio: 'F-2', tipo: 'CAMBIO' })
+      }, PRESUPUESTO)
+
+    // Tras el reverso: $3,000 de saldo + $5,000 que pueden regresar + $2,500 = $10,500 ⇒ se rechaza y la transacción se deshace.
+    // Con el saldo viejo de `preparar` ($2,000) daba $9,500 y se aceptaba.
+    await expect(cambio(2500)).rejects.toMatchObject({ code: 'STORE_CREDIT_OVER_CAP', details: { sobrante: 500 } })
+    expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: giftCardId } })).balance.toFixed(2)).toBe('2000.00')
+
+    // $3,000 + $5,000 + $1,500 = $9,500 cabe; el renglón dice $4,500 (con el saldo viejo habría escrito $3,500).
+    const ok = await cambio(1500)
+    expect(ok.saldoNuevo.toFixed(2)).toBe('4500.00')
+    const libreta = await prisma.giftCardActivity.findMany({
+      where: { giftCardId },
+      select: { type: true, amount: true, balanceAfter: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 10,
+    })
+    expect(libreta.map(m => [m.type, m.amount.toFixed(2), m.balanceAfter.toFixed(2)])).toEqual([
+      ['ACTIVATE', '8000.00', '8000.00'],
+      ['REDEEM', '6000.00', '2000.00'],
+      ['REDEEM_REVERSAL', '1000.00', '3000.00'],
+      ['ADJUST_INCREMENT', '1500.00', '4500.00'],
+    ])
+    expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: giftCardId } })).balance.toFixed(2)).toBe('4500.00')
   })
 })

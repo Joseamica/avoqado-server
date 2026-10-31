@@ -51,6 +51,10 @@ function base(p: { sobreDeSaldo?: LockedGiftCard | null } = {}) {
     if (sql.includes('FROM "GiftCard"')) return p.sobreDeSaldo ? [{ id: p.sobreDeSaldo.id }] : []
     throw new Error(`SQL inesperado: ${sql}`)
   }) as any)
+  // Lo que vale HOY el sobre ya bloqueado (la relectura de `abonar`): por omisión, lo mismo que vio `preparar`.
+  prismaMock.giftCard.findFirst
+    .mockReset()
+    .mockResolvedValue(p.sobreDeSaldo ? ({ balance: p.sobreDeSaldo.balance, status: p.sobreDeSaldo.status } as any) : null)
 }
 
 const preparar = () => prepararSobreDeSaldoAFavorEnTx(prismaMock, { venueId: VENUE, customerId: CLIENTA })
@@ -290,7 +294,12 @@ describe('abonarSaldoAFavorEnTx', () => {
 
   it('la misma operationKey dos veces abona una sola', async () => {
     base({ sobreDeSaldo: sobre({ balance: D(500) }) })
-    prismaMock.giftCardActivity.findUnique.mockResolvedValue({ giftCardId: 'gc-saldo', amount: D(200), balanceAfter: D(500) } as any)
+    prismaMock.giftCardActivity.findUnique.mockResolvedValue({
+      giftCardId: 'gc-saldo',
+      amount: D(200),
+      balanceAfter: D(500),
+      refundPaymentId: 'ref-1',
+    } as any)
 
     const out = await abonar(200)
 
@@ -305,8 +314,90 @@ describe('abonarSaldoAFavorEnTx', () => {
 
   it('la misma operationKey con otro monto es IDEMPOTENCY_KEY_REUSED y no escribe', async () => {
     base({ sobreDeSaldo: sobre({ balance: D(500) }) })
-    prismaMock.giftCardActivity.findUnique.mockResolvedValue({ giftCardId: 'gc-saldo', amount: D(200), balanceAfter: D(500) } as any)
+    prismaMock.giftCardActivity.findUnique.mockResolvedValue({
+      giftCardId: 'gc-saldo',
+      amount: D(200),
+      balanceAfter: D(500),
+      refundPaymentId: 'ref-1',
+    } as any)
     await expect(abonar(300)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', statusCode: 409 })
+    expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+  })
+
+  it('una llave saldo-a-favor:<id> que ya usó OTRO movimiento (no este abono) es IDEMPOTENCY_KEY_REUSED (revisión M3)', async () => {
+    base({ sobreDeSaldo: sobre({ balance: D(500) }) })
+    prismaMock.giftCardActivity.findUnique.mockResolvedValue({
+      giftCardId: 'gc-saldo',
+      amount: D(200),
+      balanceAfter: D(500),
+      refundPaymentId: null,
+    } as any)
+    await expect(abonar(200)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', statusCode: 409 })
+    expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 recarga con el saldo de HOY: si un reverso regresó saldo al mismo sobre después de preparar, balanceAfter y saldoNuevo lo cuentan (revisión I1)', async () => {
+    // `preparar` vio $300; en la MISMA transacción un `revertirCanjeEnTx` regresó $1,000 a ese sobre (Cambio pagado con su saldo).
+    base({ sobreDeSaldo: sobre({ balance: D(300) }) })
+    const preparado = await preparar()
+    prismaMock.giftCard.findFirst.mockResolvedValue({ balance: D(1300), status: 'ACTIVE' } as any)
+
+    const out = await abonarSaldoAFavorEnTx(prismaMock, {
+      preparado,
+      monto: D(200),
+      staffId: 'cajera-1',
+      origen: { orderId: 'order-1', refundPaymentId: 'ref-1' },
+      folio: 'F-12',
+      tipo: 'CAMBIO',
+    })
+
+    expect(prismaMock.giftCard.findFirst).toHaveBeenCalledWith({
+      where: { id: 'gc-saldo', venueId: VENUE },
+      select: { balance: true, status: true },
+    })
+    expect(prismaMock.giftCardActivity.create.mock.calls[0][0].data).toMatchObject({ type: 'ADJUST_INCREMENT', balanceAfter: D(1500) })
+    expect(out.saldoNuevo).toEqual(D(1500))
+  })
+
+  it('🔴 el tope cuenta el saldo de HOY: $4,000 vistos, un reverso de $1,000 al mismo sobre y $500 más pasan de $10,000 (revisión I1)', async () => {
+    // Saldo $4,000 + $6,000 canjeados que pueden regresar = $10,000. Regresan $1,000 (SAME): $5,000 + $5,000. Abonar $500 ⇒ $10,500.
+    base({ sobreDeSaldo: sobre({ balance: D(4000), initialAmount: D(10000) }) })
+    const preparado = await preparar()
+    prismaMock.giftCard.findFirst.mockResolvedValue({ balance: D(5000), status: 'ACTIVE' } as any)
+    prismaMock.giftCardActivity.groupBy.mockResolvedValue([
+      { type: 'REDEEM', _sum: { amount: D(6000) } },
+      { type: 'REDEEM_REVERSAL', _sum: { amount: D(1000) } },
+    ] as any)
+
+    await expect(
+      abonarSaldoAFavorEnTx(prismaMock, {
+        preparado,
+        monto: D(500),
+        staffId: 'cajera-1',
+        origen: { orderId: 'order-1', refundPaymentId: 'ref-1' },
+        folio: 'F-12',
+        tipo: 'CAMBIO',
+      }),
+    ).rejects.toMatchObject({ code: 'STORE_CREDIT_OVER_CAP', details: { sobrante: 500 } })
+    expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
+  })
+
+  it('el estado también es el de HOY: si se bloqueó después de preparar, STORE_CREDIT_CARD_BLOCKED sin escribir', async () => {
+    base({ sobreDeSaldo: sobre() })
+    const preparado = await preparar()
+    prismaMock.giftCard.findFirst.mockResolvedValue({ balance: D(300), status: 'BLOCKED' } as any)
+    await expect(
+      abonarSaldoAFavorEnTx(prismaMock, {
+        preparado,
+        monto: D(100),
+        staffId: 'cajera-1',
+        origen: { orderId: 'order-1', refundPaymentId: 'ref-1' },
+        folio: 'F-12',
+        tipo: 'CAMBIO',
+      }),
+    ).rejects.toMatchObject({ code: 'STORE_CREDIT_CARD_BLOCKED' })
+    expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
     expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
   })
 

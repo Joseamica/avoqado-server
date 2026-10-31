@@ -996,11 +996,12 @@ export async function abonarSaldoAFavorEnTx(
 
   const previa = await tx.giftCardActivity.findUnique({
     where: { venueId_operationKey: { venueId: s.venueId, operationKey } },
-    select: { giftCardId: true, amount: true, balanceAfter: true },
+    select: { giftCardId: true, amount: true, balanceAfter: true, refundPaymentId: true },
   })
   if (previa) {
-    if (!previa.amount.equals(monto)) {
-      throw new GiftCardError('IDEMPOTENCY_KEY_REUSED', 'Este saldo a favor ya se registró con otro monto.', 409)
+    // La llave comparte espacio con las de gerente: sólo es repetición si es ESTE abono (su devolución y su monto).
+    if (previa.refundPaymentId !== p.origen.refundPaymentId || !previa.amount.equals(monto)) {
+      throw new GiftCardError('IDEMPOTENCY_KEY_REUSED', 'Este saldo a favor ya se registró con otros datos.', 409)
     }
     return {
       giftCardId: previa.giftCardId,
@@ -1012,6 +1013,14 @@ export async function abonarSaldoAFavorEnTx(
   }
 
   const card = s.sobre
+  if (card) {
+    // El saldo y el estado de HOY: entre `preparar` y aquí otra función de la libreta pudo mover este sobre en la MISMA transacción
+    // (en el Cambio, `revertirCanjeEnTx` le regresa lo pagado con saldo). Sigue bloqueado por `preparar`: basta leerlo.
+    const vigente = await tx.giftCard.findFirst({ where: { id: card.id, venueId: s.venueId }, select: { balance: true, status: true } })
+    if (!vigente) throw noEncontrada()
+    card.balance = vigente.balance
+    card.status = vigente.status
+  }
   if (card?.status === 'BLOCKED') {
     throw new GiftCardError(
       'STORE_CREDIT_CARD_BLOCKED',

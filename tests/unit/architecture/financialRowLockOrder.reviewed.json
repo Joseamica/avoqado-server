@@ -95,6 +95,11 @@
       "loops": 0,
       "reason": "Saldo a favor (S2): candado consultivo «primer-sobre» por sucursal, sin FOR UPDATE; se inventaría para que cada llamador quede registrado. Siempre el PRIMER candado de su transacción, antes de Orders, Payments, sobres y turno («primer-sobre» → filas → turno)."
     },
+    "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): la versión condicional del candado «primer-sobre» (sólo si la sucursal no tiene sobres activados), sin FOR UPDATE; se inventaría para que el Cambio y el Reembolso a saldo queden registrados al llamarla. Siempre como PRIMERA sentencia de su transacción."
+    },
     "src/services/shared/cobroDelProtocolo.ts#bloquearPayments": {
       "count": 1,
       "loops": 0,
