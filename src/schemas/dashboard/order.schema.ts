@@ -34,7 +34,8 @@ export const SettleOrderSchema = z.object({
  * Lo que Postgres no guarda en `jsonb` ni en `text`: el carácter nulo y una mitad de un par sustituto (un emoji partido). Es
  * TODA esa familia (Codex «Cancelar orden» código r1 #3 y r2 #1); los emojis enteros sí pasan.
  */
-const NO_SE_PUEDE_GUARDAR = /\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+const SUSTITUTO_SUELTO = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+const noSePuedeGuardar = (texto: string) => texto.includes('\u0000') || SUSTITUTO_SUELTO.test(texto)
 
 /**
  * El motivo de «Cancelar orden» (panel y MCP): obligatorio, va a la bitácora. La cancelación se confirma ANTES de escribir la
@@ -45,7 +46,7 @@ export const motivoDeCancelacionSchema = z
   .trim()
   .min(3, 'Escribe el motivo de la cancelación (al menos 3 letras).')
   .max(300, 'El motivo no puede pasar de 300 caracteres.')
-  .refine(motivo => !NO_SE_PUEDE_GUARDAR.test(motivo), 'El motivo tiene un carácter que no se puede guardar.')
+  .refine(motivo => !noSePuedeGuardar(motivo), 'El motivo tiene un carácter que no se puede guardar.')
 
 /** «Cancelar orden» del panel (`cancelarCuentaSinCobrar`). */
 export const CancelarCuentaSinCobrarSchema = z.object({

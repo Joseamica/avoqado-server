@@ -85,7 +85,11 @@ describe('MCP cancel_unpaid_order', () => {
 
   it('sin confirm sólo muestra la cuenta y pide confirmación', async () => {
     const r = json(await tool()(entrada))
-    expect(r).toMatchObject({ ok: false, requiresConfirmation: true, preview: { cuenta: 'ORD-77', total: 250, motivo: 'La abrí por error' } })
+    expect(r).toMatchObject({
+      ok: false,
+      requiresConfirmation: true,
+      preview: { cuenta: 'ORD-77', total: 250, motivo: 'La abrí por error' },
+    })
     expect(cancelarCuentaSinCobrar).not.toHaveBeenCalled()
   })
 

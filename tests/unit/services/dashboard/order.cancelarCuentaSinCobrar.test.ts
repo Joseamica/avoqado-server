@@ -22,7 +22,13 @@ const VENUE = 'venue-1'
 const ORDER = 'order-1'
 
 function cuenta(
-  datos: { tableId?: string | null; mesaBajoCandado?: string | null; onlineOrder?: { id: string } | null; status?: string; paymentStatus?: string } = {},
+  datos: {
+    tableId?: string | null
+    mesaBajoCandado?: string | null
+    onlineOrder?: { id: string } | null
+    status?: string
+    paymentStatus?: string
+  } = {},
 ) {
   prismaMock.order.findFirst.mockResolvedValue({
     id: ORDER,

@@ -118,7 +118,8 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
             estado: order.status,
             cobro: order.paymentStatus,
             motivo: reason,
-            efecto: 'La cuenta queda cancelada y sale de Cuentas por cobrar. Si tiene un pago, es de mesa o es un pedido en línea, no se cancela y se dice por qué.',
+            efecto:
+              'La cuenta queda cancelada y sale de Cuentas por cobrar. Si tiene un pago, es de mesa o es un pedido en línea, no se cancela y se dice por qué.',
           },
           mensaje: 'Vuelve a llamar con confirm:true para cancelarla.',
         })
