@@ -1,0 +1,181 @@
+/**
+ * The CRM's emails to the sales team (spec 2026-10-30 §5.3 and §5.4). Here: «Nuevo prospecto», sent the moment a new
+ * landing prospect arrives, because getting there first counts. Task 7 adds the daily digest to this file.
+ */
+import logger from '../../config/logger'
+import prisma from '../../utils/prismaClient'
+import emailService from '../email.service'
+import { effectiveKeys } from './access.service'
+
+// ponytail: the sales team is a handful of people; past 200 rows with «Editar» the oldest 200 get the notice (logged).
+const TEAM_CAP = 200
+/** «Nuevo prospecto: » plus this stays under the 60 characters of the email standard. */
+const SUBJECT_NAME_MAX = 40
+const LOGO = 'https://avoqado.io/isotipo.svg'
+
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
+const escapeHtml = (value: string) =>
+  value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] ?? char)
+
+interface Recipient {
+  id: string
+  email: string
+}
+
+/**
+ * Everyone who holds «Editar» (ruling 21): each active key row whose EFFECTIVE keys include `editar`, resolved to its
+ * person by the rule of `getCrmAccess` — a claimed row is its Staff, if active; an unclaimed one is the active Staff
+ * with that exact (lowercase) email AND a verified email. Superadmins without a row get none: every landing signup
+ * already emails onboarding.
+ */
+async function editors(): Promise<Recipient[]> {
+  const rows = await prisma.platformAccess.findMany({
+    where: { active: true, verScope: { not: null }, editarScope: { not: null } },
+    select: {
+      email: true,
+      staffId: true,
+      verScope: true,
+      editarScope: true,
+      contactar: true,
+      campanas: true,
+      exportar: true,
+      ventas: true,
+      admin: true,
+    },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: TEAM_CAP,
+  })
+  if (rows.length === TEAM_CAP) logger.warn('[CRM] More people with «Editar» than the new-prospect notice reaches', { cap: TEAM_CAP })
+  const withEditar = rows.filter(row => effectiveKeys(row).editar)
+  if (!withEditar.length) return []
+
+  // ONE query for every row: claimed ones by id, unclaimed ones by email.
+  const people = await prisma.staff.findMany({
+    where: {
+      OR: [
+        { id: { in: withEditar.flatMap(row => (row.staffId ? [row.staffId] : [])) } },
+        { email: { in: withEditar.flatMap(row => (row.staffId ? [] : [row.email])) } },
+      ],
+    },
+    select: { id: true, email: true, active: true, emailVerified: true },
+    take: withEditar.length,
+  })
+  const byId = new Map(people.map(person => [person.id, person]))
+  const byEmail = new Map(people.map(person => [person.email, person]))
+  const recipients = new Map<string, Recipient>()
+  for (const row of withEditar) {
+    const person = row.staffId ? byId.get(row.staffId) : byEmail.get(row.email)
+    if (!person?.active || (!row.staffId && !person.emailVerified)) continue
+    recipients.set(person.id, { id: person.id, email: person.email })
+  }
+  return [...recipients.values()]
+}
+
+/**
+ * The notice: the business and how it qualified, and the way to the CRM. Never its phone or email — those stay in the
+ * CRM (spec §5.10).
+ */
+function newProspectEmail(account: {
+  name: string
+  giro: string | null
+  ventasRango: string | null
+  sucursales: number | null
+  modulos: string[]
+}) {
+  const name = account.name.replace(/\s+/g, ' ').trim()
+  const shortName = name.length > SUBJECT_NAME_MAX ? `${name.slice(0, SUBJECT_NAME_MAX - 1).trimEnd()}…` : name
+  const crmUrl = `${(process.env.SUPERADMIN_URL || 'https://superadmin.avoqado.io').replace(/\/$/, '')}/crm/pendientes`
+  const rows: Array<[string, string]> = [
+    ['Tipo de negocio', account.giro ?? '—'],
+    ['Sucursales', account.sucursales === null ? '—' : String(account.sucursales)],
+    ['Ventas al mes', account.ventasRango ?? '—'],
+    ['Qué pidió', account.modulos.length ? account.modulos.join(', ') : '—'],
+  ]
+  const nota = 'Entró sin dueño desde la landing: el primero que lo tome se queda con él.'
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Nuevo prospecto</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+    <div style="padding-bottom:32px;">
+      <img src="${LOGO}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom:24px;">
+      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">Nuevo prospecto</h1>
+      <p style="margin:0;font-size:16px;color:#666;">${escapeHtml(name)}</p>
+    </div>
+    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Calificación</h2>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:24px;">
+      ${rows
+        .map(
+          ([label, value]) => `<tr>
+        <td style="width:160px;padding:10px 14px;border-bottom:1px solid #e5e7eb;color:#666;font-size:13px;">${escapeHtml(label)}</td>
+        <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;color:#000;font-size:14px;">${escapeHtml(value)}</td>
+      </tr>`,
+        )
+        .join('')}
+    </table>
+    <p style="margin:0 0 8px 0;font-size:14px;color:#666;">${nota}</p>
+    <div style="padding:24px 0;text-align:center;">
+      <a href="${escapeHtml(crmUrl)}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">Ver en el CRM</a>
+    </div>
+    <hr style="border:none;border-top:1px solid #e0e0e0;margin:40px 0 24px 0;">
+    <div>
+      <div style="margin-bottom:16px;">
+        <img src="${LOGO}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
+        <span style="font-size:16px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+      </div>
+      <p style="margin:0 0 16px 0;font-size:14px;color:#000;">Servicios Tecnológicos Avo S.A. de C.V.<br>Ciudad de México, México</p>
+      <p style="margin:16px 0 0 0;font-size:14px;"><a href="https://avoqado.io/privacy" style="color:#000;text-decoration:none;font-weight:600;">Política de Privacidad</a></p>
+    </div>
+  </div>
+</body></html>`
+
+  const text = `Nuevo prospecto: ${name}
+
+CALIFICACIÓN
+${rows.map(([label, value]) => `${label}: ${value}`).join('\n')}
+
+${nota}
+Ver en el CRM: ${crmUrl}
+
+Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
+Política de Privacidad: https://avoqado.io/privacy
+`
+  return { subject: `Nuevo prospecto: ${shortName}`, html, text }
+}
+
+/**
+ * «Nuevo prospecto: <negocio>» to every person with «Editar», one email per person: Resend takes one recipient per call
+ * and refuses an idempotency key reused with other content, so the key is per account AND person — a retry or the
+ * sweep never repeats it, and each seller gets theirs. Never throws: a notice that does not go out is logged.
+ */
+export async function notifyNewProspect(accountId: string): Promise<void> {
+  try {
+    const account = await prisma.crmAccount.findUnique({
+      where: { id: accountId },
+      select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true },
+    })
+    if (!account) return
+    const recipients = await editors()
+    if (!recipients.length) return
+    const email = newProspectEmail(account)
+    const results = await Promise.allSettled(
+      recipients.map(person =>
+        emailService.sendEmailWithResult({ ...email, to: person.email, idempotencyKey: `crm-nuevo:${account.id}:${person.id}` }),
+      ),
+    )
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled' && result.value.ok) return
+      logger.warn('[CRM] A new-prospect notice did not go out', {
+        accountId,
+        staffId: recipients[index].id,
+        error: result.status === 'rejected' ? errorText(result.reason) : (result.value.errorCode ?? 'not sent'),
+      })
+    })
+  } catch (error) {
+    logger.error('[CRM] The new-prospect notice could not be sent', { accountId, error: errorText(error) })
+  }
+}

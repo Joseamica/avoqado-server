@@ -2,7 +2,13 @@ import { Request, Response, NextFunction } from 'express'
 import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
-import { reenviarCodigoDeLanding, signupFromLanding, verificarCodigoDeLanding } from '../../services/onboarding/signup.service'
+import {
+  reenviarCodigoDeLanding,
+  signupFromLanding,
+  verificarCodigoDeLanding,
+  type LandingSignupResult,
+} from '../../services/onboarding/signup.service'
+import { applyEntry, recordSignupOutcome, saveLandingEntry } from '../../services/crm/inbound.service'
 import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../services/onboarding/campanaDelCorreo.service'
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
@@ -178,6 +184,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       throw new BadRequestError('Todos los campos son requeridos')
     }
 
+    // CRM propio (spec 2026-10-30 §5.3): el formulario crudo se guarda ANTES que todo lo demás. Nunca lanza: si la base
+    // no responde, el alta sigue como siempre y la copia es el correo interno.
+    const entradaCrm = await saveLandingEntry(req.body || {})
+
     const logoUrl = 'https://avoqado.io/isotipo.svg'
     const nombre = `${String(firstName)} ${String(lastName)}`.trim()
 
@@ -206,8 +216,10 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     let ofertaTexto: string | null = null
     // «No pude leerla» no es «no tiene oferta»: si la lectura falla, el correo no promete precio ni «sin tarjeta».
     let ofertaIncierta = false
+    // Fuera del `try`: el CRM anota lo que el alta devolvió de verdad (`null` = falló).
+    let alta: LandingSignupResult | null = null
     try {
-      const alta = await signupFromLanding({
+      alta = await signupFromLanding({
         email: String(email),
         firstName: String(firstName),
         lastName: String(lastName),
@@ -259,6 +271,13 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         companyName,
         error: err instanceof Error ? err.message : String(err),
       })
+    }
+    // Los campos reales del alta, no `altaEstado`: ése llama «creada» también a una cuenta incompleta que ya existía.
+    if (entradaCrm) {
+      await recordSignupOutcome(
+        entradaCrm.entryId,
+        alta && { organizationId: alta.organizationId, alreadyExisted: alta.alreadyExisted, yaEsCliente: alta.yaEsCliente },
+      )
     }
     const utmTexto =
       utm && typeof utm === 'object' && Object.keys(utm as object).length > 0
@@ -596,6 +615,19 @@ Política de Privacidad: https://avoqado.io/privacy
       }),
     ])
 
+    // Al final, la entrada al CRM, con su propio `try`: un CRM caído nunca cambia la respuesta ni el alta. Lo que no se
+    // aplique aquí lo aplica el barrido.
+    if (entradaCrm) {
+      try {
+        await applyEntry(entradaCrm.entryId)
+      } catch (err) {
+        logger.error('[CONTACT_SUBMIT] No se pudo aplicar la entrada al CRM; la aplica el barrido', {
+          entryId: entradaCrm.entryId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
     // Basta con que UNO de los internos llegue para no perder el lead.
     const leadCreated = internosOk.some(Boolean)
     const conversion = { leadCreated, registrationCompleted, ...(eventId ? { eventId } : {}) }
@@ -887,7 +919,8 @@ export async function verificarAlta(req: Request, res: Response, next: NextFunct
     res.json({ success: true, entrarUrl })
   } catch (error) {
     // Los errores de la landing llevan `success:false` + `code` + `message` (la landing lee esos tres).
-    if (error instanceof BadRequestError) return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
+    if (error instanceof BadRequestError)
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
     next(error)
   }
 }
