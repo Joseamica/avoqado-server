@@ -3,9 +3,10 @@
  *
  * 1. `saveLandingEntry` — the FIRST thing the controller does: the raw form, cleaned, as a `CrmInboundEntry`.
  * 2. The signup (`signupFromLanding`) runs exactly as before; `recordSignupOutcome` writes down what it really returned.
- * 3. `applyEntry` turns the entry into THE account of that email: one upsert by (LANDING, email) plus the timeline event
- *    that proves the entry was applied. It never throws, and running it again — the sweep after a crash, or both at
- *    once — changes nothing.
+ * 3. `applyEntry` applies the entry to the ONE account it belongs to — the landing account of that email or, one per
+ *    Organization, the account the Organization the person owns already has — and creates it only when there is
+ *    neither; the timeline event `entry:<id>` proves it was applied. It never throws, and running it again — the sweep
+ *    after a crash, or both at once — changes nothing.
  *
  * Nothing here can stop the signup: every function swallows its own failure into the log, and the sweep (task 6) picks
  * up whatever was left half done.
@@ -228,13 +229,15 @@ async function ownershipOf(email: string): Promise<Ownership | null> {
 
 /**
  * The signup never said how it went (its process died before `recordSignupOutcome`): what that email has now answers
- * (ruling 25). Nobody who owns an Organization → the signup failed. Otherwise it already existed if the person is older
- * than the form, and a customer only if, besides, they had a password and their Organization was older than the form:
- * a new signup that confirmed its code within the 5 minutes already has a password and is still a new prospect.
+ * (rulings 25 and 27). It already existed if the person is older than the form — even owning nothing, like an invited
+ * employee: then it has nothing to link. A customer also had a password AND owned an Organization older than the form:
+ * a new signup that confirmed its code within the 5 minutes already has a password and is still a new prospect. Nobody
+ * with that email, or someone newer than the form who owns nothing → the signup failed.
  */
 function outcomeFromOwnership(owner: Ownership | null, receivedAt: Date): SignupOutcome | null {
-  if (!owner?.organization) return null
+  if (!owner) return null
   const alreadyExisted = owner.createdAt < receivedAt
+  if (!owner.organization) return alreadyExisted ? { organizationId: null, alreadyExisted, yaEsCliente: false } : null
   return {
     organizationId: owner.organization.id,
     alreadyExisted,
@@ -295,6 +298,16 @@ async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizat
 const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: string) =>
   addEvent(tx, { accountId, kind: 'NOTE', actorStaffId: null, data: { entryId, text: CUSTOMER_NOTE } })
 
+/**
+ * An entry a run already applied (it died before `appliedAt`) repeats THAT run, never a fresh lookup that may now lead
+ * elsewhere: its account, and its notice again if it created a prospect's account — the email's idempotency key keeps
+ * it from repeating (ruling 26).
+ */
+function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }) {
+  const data: Prisma.JsonObject = previous.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
+  return { accountId: previous.accountId, announce: data.created === true && data.signup !== 'CUSTOMER' }
+}
+
 async function applyTx(
   tx: Prisma.TransactionClient,
   entry: { id: string; externalKey: string },
@@ -303,6 +316,13 @@ async function applyTx(
   organizationId: string | null,
   stageId: string,
 ): Promise<{ accountId: string; announce: boolean }> {
+  const sourceKey = `entry:${entry.id}`
+  const applied = { accountId: true, data: true } as const
+  // Read before anything is looked up or created: if the person stopped owning the Organization whose account a first
+  // run used, a fresh lookup would create an orphan account (empty, never announced).
+  const previous = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: applied })
+  if (previous) return repeatOf(previous)
+
   const customer = outcome?.yaEsCliente === true
   const select = { id: true, organizationId: true } as const
   // THE account of this entry: the landing one of this email or — one CRM account per Organization (ruling 25) — the
@@ -323,7 +343,8 @@ async function applyTx(
     account = upserted.account
     created = upserted.created
     // ponytail: only if an Organization gets its CRM account between the lookup above and this insert (a «Ganar» in the
-    // same instant); the account is created unlinked, and the sweep's link logs it.
+    // same instant): the account is created unlinked — and announced, unless it is a customer's — and the sweep's link
+    // logs it.
     if (created && organizationId && account.organizationId !== organizationId) {
       logger.warn('[CRM] New landing account created unlinked: its Organization already has a CRM account', {
         accountId: account.id,
@@ -335,9 +356,8 @@ async function applyTx(
   // instead of deadlocking between the event's foreign key and the touch (ruling 26).
   if (!created) await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${account.id} FOR UPDATE`
 
-  // The proof the entry was applied. A second run inserts nothing here (`sourceKey` is unique) and stops: one set of
-  // events per entry, even after a crash before `appliedAt`.
-  const sourceKey = `entry:${entry.id}`
+  // The proof the entry was applied, and the gate against a run at the same time: the second insert of this `sourceKey`
+  // (unique) adds nothing, and that run repeats the first one. One set of events per entry.
   const firstRun = await addEvent(tx, {
     accountId: account.id,
     kind: 'ENTRY_APPLIED',
@@ -346,12 +366,8 @@ async function applyTx(
     data: { entryId: entry.id, signup: signupBranch(outcome), created },
   })
   if (!firstRun) {
-    // Applied by a run that died before `appliedAt`. If that run created the account, its notice may never have gone
-    // out: it goes again — the email's idempotency key keeps it from repeating — unless it was a customer (ruling 26).
-    const previous = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: { accountId: true, data: true } })
-    const data: Prisma.JsonObject =
-      previous?.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
-    return { accountId: previous?.accountId ?? account.id, announce: data.created === true && data.signup !== 'CUSTOMER' }
+    const winner = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: applied })
+    return winner ? repeatOf(winner) : { accountId: account.id, announce: false }
   }
   if (created) {
     // A customer is not a new prospect: the note instead of «Nuevo prospecto» (ruling 23).
@@ -386,12 +402,14 @@ async function applyTx(
  * Applies a saved entry to the CRM (spec §5.3, step 4), by the signup's outcome:
  * - new signup: the account is created, linked to its new Organization;
  * - an account that already existed: its qualification is updated, with a FIELD_CHANGE;
- * - already a customer: only a note;
- * - the signup failed: the account stays without an Organization (the sweep links it when one appears).
+ * - a customer — the signup's «has a password» AND the person owns an Organization (ruling 27): only a note;
+ * - the signup failed: nothing to link — unless the person owns an Organization after all (in a race, the signup of the
+ *   other form created it).
  *
  * The Organization (ruling 25): a new signup's is the one it just created — the person is its OWNER by construction.
- * Anyone else links only to the Organization they OWN (never the primary membership the signup returns, of any role),
- * and if that Organization already has a CRM account, of any source, the entry goes to THAT account.
+ * In every other case, failed signups included, only the Organization the person OWNS (never the primary membership
+ * the signup returns, of any role); if it already has a CRM account, of any source, the entry goes to THAT account.
+ * Without one, the account stays unlinked and the sweep links it when an Organization appears.
  *
  * With no account to apply to, one is created — «Sin dueño», in the first stage, with its primary person — and
  * announced to the team (`notifyNewProspect`), unless it is a customer's. Never throws: a failure stays on the entry
@@ -421,7 +439,11 @@ export async function applyEntry(entryId: string): Promise<void> {
     const recorded = resolved ? asOutcome(entry.signupOutcome) : null
     // Only a recorded new signup knows its Organization without asking; everyone else answers by what they OWN.
     const owner = recorded && !recorded.alreadyExisted ? null : await ownershipOf(entry.externalKey)
-    const outcome = resolved ? recorded : outcomeFromOwnership(owner, entry.receivedAt)
+    // «Customer» for the CRM (ruling 27): the signup's «has a password» AND an Organization of their own — what the email
+    // path decides too. An invited employee with a password, filling the form for a business of their own, is a prospect.
+    const outcome = resolved
+      ? recorded && { ...recorded, yaEsCliente: recorded.yaEsCliente && !!owner?.organization }
+      : outcomeFromOwnership(owner, entry.receivedAt)
     const candidate = outcome && !outcome.alreadyExisted ? outcome.organizationId : (owner?.organization?.id ?? null)
 
     const [stage, organizationId] = await Promise.all([getInitialStage(), linkable(candidate)])

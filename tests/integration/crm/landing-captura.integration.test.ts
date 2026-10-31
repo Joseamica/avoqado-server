@@ -49,6 +49,18 @@ const form = (email: string, over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
+/** A person with a password who owns an Organization: a customer for the CRM (ruling 27). */
+async function ownerOfAnOrganization(email: string) {
+  const staff = await prisma.staff.create({
+    data: { email, firstName: 'Ana', lastName: 'Dueña', password: 'hash', active: true, emailVerified: true },
+  })
+  const organization = await prisma.organization.create({ data: { name: `Negocio ${suffix}`, email, phone: '5500000000' } })
+  await prisma.staffOrganization.create({
+    data: { staffId: staff.id, organizationId: organization.id, role: OrgRole.OWNER, isPrimary: true, isActive: true },
+  })
+  return { staff, organization }
+}
+
 async function submit(email: string) {
   const req = { body: form(email) } as Request
   const res = { statusCode: 200 } as Response & { body?: unknown }
@@ -157,7 +169,9 @@ describe('landing → CRM against Postgres', () => {
       { businessType: 'Restaurante', employees: '4' },
       { organizationId: null, alreadyExisted: true, yaEsCliente: false },
     )
-    // Now as a customer: one note — the event a second run would really repeat («una sola nota por entrada», spec §7).
+    // Now as a customer — who, for the CRM, owns an Organization (ruling 27): one note, the event a second run would
+    // really repeat («una sola nota por entrada», spec §7).
+    await ownerOfAnOrganization(CRASH_EMAIL)
     await crashThenSweep({ businessType: 'Bar' }, { organizationId: null, alreadyExisted: true, yaEsCliente: true })
 
     expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: CRASH_EMAIL } })).toBe(1)
@@ -169,13 +183,7 @@ describe('landing → CRM against Postgres', () => {
 
   it('an Organization with a CRM account of another source gets its owner’s entry on THAT account (ruling 25)', async () => {
     // A customer won through WhatsApp: their Organization already holds its one CRM account.
-    const staff = await prisma.staff.create({
-      data: { email: HOLDER_EMAIL, firstName: 'Carla', lastName: 'Cliente', password: 'hash', active: true, emailVerified: true },
-    })
-    const organization = await prisma.organization.create({ data: { name: `Cliente ${suffix}`, email: HOLDER_EMAIL, phone: '5500000000' } })
-    await prisma.staffOrganization.create({
-      data: { staffId: staff.id, organizationId: organization.id, role: OrgRole.OWNER, isPrimary: true, isActive: true },
-    })
+    const { organization } = await ownerOfAnOrganization(HOLDER_EMAIL)
     const whatsapp = await prisma.crmAccount.create({
       data: {
         name: `Cliente ${suffix}`,

@@ -251,7 +251,11 @@ describe('applyEntry', () => {
       },
     },
   ])('aplicar_cuatro_ramas: $branch', async ({ outcome, existing, check }) => {
-    if (existing) seedAccount({ organizationId: ORG })
+    if (existing) {
+      // An account already linked to ORG, whose person owns it.
+      seedAccount({ organizationId: ORG })
+      prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    }
     const entry = seedEntry({ signupOutcome: outcome })
 
     await applyEntry(entry.id)
@@ -403,6 +407,52 @@ describe('applyEntry', () => {
     },
   )
 
+  it('a re-run goes to the account its first run used, even when the lookup no longer leads there: no orphan account', async () => {
+    // The first run applies to the WhatsApp account that holds ORG (its owner filled the form), then dies before
+    // `appliedAt`.
+    const whatsapp = seedAccount({ id: 'cacctwhats000000000000001', source: 'WHATSAPP', externalKey: '+525500000000', organizationId: ORG })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false } })
+    prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
+    await applyEntry(entry.id)
+
+    // Before the sweep, the person stops owning ORG (membership deactivated): a fresh lookup would find no account.
+    prismaMock.staff.findUnique.mockResolvedValue({ ...owner(ORG), organizations: [] })
+    prismaMock.crmAccount.createMany.mockClear()
+    await applyEntry(entry.id)
+
+    expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
+    expect(db.accounts).toEqual([expect.objectContaining({ id: whatsapp.id })])
+    expect(db.contacts).toHaveLength(0)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: whatsapp.id })
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      path: 'desenlace registrado del alta',
+      entry: { signupOutcome: { organizationId: PATRON_ORG, alreadyExisted: true, yaEsCliente: true } },
+    },
+    {
+      path: 'por el correo, sin desenlace',
+      entry: { signupOutcome: null, signupResolvedAt: null, receivedAt: new Date(Date.now() - 6 * MINUTE) },
+    },
+  ])(
+    'an invited employee with a password who owns no Organization is a prospect, and both paths say so (ruling 27): $path',
+    async ({ entry }) => {
+      // The signup calls them a customer (they have a password); for the CRM, a customer also owns an Organization.
+      prismaMock.staff.findUnique.mockResolvedValue({ ...owner(PATRON_ORG, { password: 'hash' }), organizations: [] })
+      const saved = seedEntry(entry)
+
+      await applyEntry(saved.id)
+
+      expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId: null })])
+      expect(eventsOf('NOTE')).toHaveLength(0)
+      expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ signup: 'EXISTING_ACCOUNT', created: true })
+      expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id)
+    },
+  )
+
   it('sin_desenlace_y_reciente_no_aplica', async () => {
     const entry = seedEntry({ signupOutcome: null, signupResolvedAt: null, receivedAt: new Date(Date.now() - MINUTE) })
 
@@ -474,6 +524,7 @@ describe('applyEntry', () => {
     { branch: 'ya es cliente', outcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: true }, kind: 'NOTE' },
   ])('aplicar_dos_veces_misma_entrada_un_evento: $branch', async ({ outcome, kind }) => {
     seedAccount({ organizationId: ORG })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
     const entry = seedEntry({ signupOutcome: outcome })
     // The account and its events are written, then the process «dies» before `appliedAt`.
     prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
