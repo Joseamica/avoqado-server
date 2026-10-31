@@ -301,3 +301,29 @@ export const hubspotImportFilesSchema = z.object(
     invalid_type_error: 'Sube los dos archivos de HubSpot: contactos y negocios',
   },
 )
+
+// ── Clients, live data, reports and export (plan task 9) ──────────────────────────────────────────────────────────────
+
+const listQuery = listAccountsSchema.shape.query.shape
+
+/** GET /crm/clients. The cursor is an Organization id (not always a cuid); the service caps the page at 100. */
+export const listClientsSchema = z.object({
+  query: z.object({ q: listQuery.q, cursor: existing('El cursor no es válido').optional(), limit: listQuery.limit }),
+})
+
+/** A calendar day that exists: «2026-02-30» has the shape and is not one. */
+const isRealDay = (value: string) => {
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+const day = (label: string) =>
+  z
+    .string({ required_error: `Falta la fecha ${label}`, invalid_type_error: `La fecha ${label} no es válida` })
+    .regex(/^\d{4}-\d{2}-\d{2}$/, `La fecha ${label} va como AAAA-MM-DD`)
+    .refine(isRealDay, `La fecha ${label} no existe`)
+
+/** GET /crm/reports?desde=&hasta= — days on Mexico City's calendar. Their order and the one-year cap are the service's. */
+export const reportsSchema = z.object({ query: z.object({ desde: day('inicial'), hasta: day('final') }) })
+
+/** GET /crm/export.csv — the list's own filters, without its paging: the service walks the pages. */
+export const exportAccountsSchema = z.object({ query: listAccountsSchema.shape.query.omit({ cursor: true, limit: true }) })

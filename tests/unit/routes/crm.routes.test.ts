@@ -174,3 +174,34 @@ describe('importar lo de HubSpot', () => {
     }
   })
 })
+
+describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
+  it('exportar_pide_su_propia_llave', async () => {
+    // Sees and edits every account, but without «Exportar».
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: 'todos',
+      contactar: true,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+    })
+
+    const res = await request(app).get('/crm/export.csv')
+    expect(res.status).toBe(403)
+    expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN', message: 'No tienes la llave «Exportar»' })
+    expect(prismaMock.crmAccount.findMany).not.toHaveBeenCalled()
+  })
+
+  it('sin_ver_negocios_no_hay_clientes_ni_ficha_ni_reportes', async () => {
+    // The admin of the team from `beforeEach`: «Administrar» on, «Ver negocios» off.
+    for (const path of ['/crm/clients', '/crm/accounts/caccounta0000000000000001/live', '/crm/reports?desde=2026-10-01&hasta=2026-10-31']) {
+      const res = await request(app).get(path)
+      expect(res.status).toBe(403)
+      expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+    }
+  })
+})

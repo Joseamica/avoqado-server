@@ -54,8 +54,8 @@ const ANNOUNCE_WITHIN_MS = DAY_MS
  * clean-up) by the `demoExpiresAt` it keeps — only the conversion deletes the sales and clears the date (I-1). The
  * oldest-charge read (`fillFirstMoney`) writes the same rule in SQL.
  */
-const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } satisfies Prisma.PaymentWhereInput
-const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES }, demoExpiresAt: null } satisfies Prisma.VenueWhereInput
+export const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } satisfies Prisma.PaymentWhereInput
+export const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES }, demoExpiresAt: null } satisfies Prisma.VenueWhereInput
 
 type Cursor = { createdAt: Date; id: string }
 

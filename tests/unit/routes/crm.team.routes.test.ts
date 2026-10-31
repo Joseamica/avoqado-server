@@ -69,6 +69,11 @@ describe('crm team routes', () => {
       { route: 'POST /accounts/:id/reactivate', keys: editar },
       { route: 'POST /accounts/:id/notes', keys: editar },
       { route: 'POST /accounts/:id/activities', keys: editar },
+      // Task 9: what is live, «Clientes» and the reports with «Ver negocios»; the CSV with its own key.
+      { route: 'GET /accounts/:id/live', keys: ver },
+      { route: 'GET /clients', keys: ver },
+      { route: 'GET /reports', keys: ver },
+      { route: 'GET /export.csv', keys: ['crm:exportar'] },
       { route: 'POST /activities/:id/done', keys: editar },
       // «Importar lo de HubSpot» (task 8).
       { route: 'POST /import/hubspot/preview', keys: admin },

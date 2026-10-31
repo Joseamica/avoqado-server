@@ -3,8 +3,11 @@ import { ValidationError } from '../../errors/AppError'
 import { hubspotImportFilesSchema } from '../../schemas/crm.schema'
 import * as accounts from '../../services/crm/accounts.service'
 import { addActivity, completeActivity } from '../../services/crm/activities.service'
+import * as clients from '../../services/crm/clients.service'
 import { applyHubspot, previewHubspot } from '../../services/crm/hubspotImport.service'
+import * as reports from '../../services/crm/reports.service'
 import { addTeamMember, listTeamMembers, listTeamOptions, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
+import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 
 /**
  * GET /api/v1/crm/me — the caller's own CRM keys, so the console shows only the sections they open.
@@ -151,6 +154,40 @@ export async function createActivity(req: Request, res: Response): Promise<void>
 /** POST /api/v1/crm/activities/:id/done */
 export async function markActivityDone(req: Request, res: Response): Promise<void> {
   res.json({ data: await completeActivity(req.crmAccess!, req.params.id, req.body) })
+}
+
+// Clients, what is live in Avoqado, reports and the CSV export (plan task 9).
+
+/** GET /api/v1/crm/clients */
+export async function listClients(req: Request, res: Response): Promise<void> {
+  // `validateRequest(listClientsSchema)` already turned the limit into a number.
+  const { rows, nextCursor, total } = await clients.listClients(req.crmAccess!, req.query as unknown as clients.ClientFilters)
+  res.json({ data: rows, meta: { total, nextCursor } })
+}
+
+/** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */
+export async function getLive(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.getLive(req.crmAccess!, req.params.id) })
+}
+
+/** GET /api/v1/crm/reports?desde=&hasta= */
+export async function getReports(req: Request, res: Response): Promise<void> {
+  res.json({ data: await reports.getReports(req.crmAccess!, req.query as unknown as { desde: string; hasta: string }) })
+}
+
+/**
+ * GET /api/v1/crm/export.csv — the file, with the real total and whether it was cut at 10,000 in headers the browser may
+ * read. The BOM makes Excel read the accents as UTF-8.
+ */
+export async function exportAccountsCsv(req: Request, res: Response): Promise<void> {
+  const { csv, total, truncado } = await reports.exportAccountsCsv(req.crmAccess!, req.query as unknown as reports.ExportFilters)
+  const today = formatInVenueTimezone(new Date(), DEFAULT_TIMEZONE, 'yyyy-MM-dd')
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename="negocios-crm-${today}.csv"`)
+  res.setHeader('X-Total-Count', String(total))
+  res.setHeader('X-Export-Truncated', String(truncado))
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Total-Count, X-Export-Truncated')
+  res.send(`\uFEFF${csv}`)
 }
 
 // «Importar lo de HubSpot» (`crm:admin`). Both receive the two CSVs multer read into memory.

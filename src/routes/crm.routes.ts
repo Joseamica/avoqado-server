@@ -25,11 +25,14 @@ import {
   createAccountSchema,
   createLostReasonSchema,
   createStageSchema,
+  exportAccountsSchema,
   listAccountsSchema,
+  listClientsSchema,
   listTeamSchema,
   loseAccountSchema,
   moveStageSchema,
   reassignAccountSchema,
+  reportsSchema,
   removeTeamMemberSchema,
   searchOrganizationsSchema,
   updateLostReasonSchema,
@@ -45,6 +48,7 @@ router.use(authenticateTokenMiddleware)
 const ver = requireCrm('crm:ver')
 const editar = requireCrm('crm:editar')
 const admin = requireCrm('crm:admin')
+const exportar = requireCrm('crm:exportar')
 
 // Any key opens it: 403 only for whoever holds none.
 router.get('/me', requireCrm(CRM_KEYS), crmController.getMe)
@@ -90,6 +94,14 @@ router.post('/accounts/:id/archive', editar, validateRequest(accountIdSchema), c
 router.post('/accounts/:id/reactivate', editar, validateRequest(accountIdSchema), crmController.reactivateAccount)
 router.post('/accounts/:id/notes', editar, validateRequest(addNoteSchema), crmController.addNote)
 router.post('/accounts/:id/activities', editar, validateRequest(addActivitySchema), crmController.createActivity)
+
+// What is live in Avoqado for one account; «Ver ventas» is decided inside, so without it the ficha says it is hidden.
+router.get('/accounts/:id/live', ver, validateRequest(accountIdSchema), crmController.getLive)
+
+// «Clientes», the reports and the CSV of the filtered list (plan task 9).
+router.get('/clients', ver, validateRequest(listClientsSchema), crmController.listClients)
+router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)
+router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmController.exportAccountsCsv)
 
 // Activities.
 router.post('/activities/:id/done', editar, validateRequest(completeActivitySchema), crmController.markActivityDone)

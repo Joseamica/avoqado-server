@@ -349,17 +349,26 @@ function semaforoWhere(color: Semaforo, now: Date): Prisma.CrmAccountWhereInput 
   }
 }
 
-/** «Estancado», asked to the database stage by stage — the same rule as `estancadoDias`. */
+/** «Estancado» over these stages, as a filter — the same rule as `estancadoDias`. Stages that cannot go stale are skipped. */
+export function staleWhereFor(
+  stages: Array<{ id: string; kind?: string; staleDays: number | null }>,
+  now: Date,
+): Prisma.CrmAccountWhereInput {
+  const limited = stages.filter(stage => (stage.kind ?? 'ABIERTA') === 'ABIERTA' && stage.staleDays)
+  if (!limited.length) return { id: { in: [] } }
+  return {
+    OR: limited.map(stage => ({ stageId: stage.id, lastTouchAt: { lt: new Date(now.getTime() - (stage.staleDays ?? 0) * DAY_MS) } })),
+  }
+}
+
+/** «Estancado», asked to the database stage by stage. */
 async function staleWhere(now: Date): Promise<Prisma.CrmAccountWhereInput> {
   const stages = await prisma.crmStage.findMany({
     where: { kind: 'ABIERTA', staleDays: { gt: 0 } },
     select: { id: true, staleDays: true },
     take: CATALOG_CAP,
   })
-  if (!stages.length) return { id: { in: [] } }
-  return {
-    OR: stages.map(stage => ({ stageId: stage.id, lastTouchAt: { lt: new Date(now.getTime() - (stage.staleDays ?? 0) * DAY_MS) } })),
-  }
+  return staleWhereFor(stages, now)
 }
 
 /** By the account's name, or its people's name, email or phone (digits only, any format). */
@@ -373,11 +382,10 @@ function searchWhere(q: string): Prisma.CrmAccountWhereInput {
 }
 
 /**
- * The pipeline as a list, a page at a time: filters and search run in the database, the server caps the page at 100, and
- * the total is the real one. Archived accounts are out of it, but a search finds them (to reactivate them).
+ * What the pipeline list — and its CSV export — shows for these filters, within the caller's scope. Archived accounts are
+ * out of it, but a search finds them (to reactivate them).
  */
-export async function listAccounts(access: CrmAccess, filters: AccountFilters = {}, now = new Date()) {
-  const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
+export async function accountsWhere(access: CrmAccess, filters: AccountFilters, now: Date): Promise<Prisma.CrmAccountWhereInput> {
   const and: Prisma.CrmAccountWhereInput[] = [scopeWhere(access, 'ver')]
   if (!filters.q) and.push({ archivedAt: null })
   if (filters.stageId) and.push({ stageId: filters.stageId })
@@ -387,7 +395,16 @@ export async function listAccounts(access: CrmAccess, filters: AccountFilters = 
   if (filters.semaforo) and.push(LIVE, semaforoWhere(filters.semaforo, now))
   if (filters.estancados) and.push(LIVE, await staleWhere(now))
   if (filters.q) and.push(searchWhere(filters.q))
-  const where: Prisma.CrmAccountWhereInput = { AND: and }
+  return { AND: and }
+}
+
+/**
+ * The pipeline as a list, a page at a time: filters and search run in the database, the server caps the page at 100, and
+ * the total is the real one.
+ */
+export async function listAccounts(access: CrmAccess, filters: AccountFilters = {}, now = new Date()) {
+  const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
+  const where = await accountsWhere(access, filters, now)
 
   const [found, total] = await Promise.all([
     prisma.crmAccount.findMany({
@@ -494,7 +511,7 @@ const ACTIVITIES_CAP = 50
 const TIMELINE_CAP = 100
 
 /** Names of these people in one query. */
-async function staffNames(ids: Array<string | null>): Promise<Map<string, string>> {
+export async function staffNames(ids: Array<string | null>): Promise<Map<string, string>> {
   const unique = [...new Set(ids.filter((id): id is string => !!id))]
   if (!unique.length) return new Map()
   const people = await prisma.staff.findMany({
