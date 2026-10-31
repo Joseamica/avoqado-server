@@ -4,6 +4,7 @@ import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type E
 import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
 import { ExchangeError } from '../exchanges/exchangeErrors'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { candadoDeLaLlave, rechazarSiLaLlaveSeCerroEnTx } from './pagarDespuesLlave'
 import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -1458,14 +1459,14 @@ export async function crearVentaDeMostradorEnTx(
   // re-verificación: un reintento que llega mientras el primer intento sigue en vuelo espera aquí y sale con ESA orden,
   // nunca con un 409 por un precio que ya se aceptó. Así un 409 de abajo queda acreditado: no había venta con esta llave.
   if (externalId) {
-    await tx.$queryRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:order-mobile-external:v1:${venueId}:${externalId}`}, 0))::text`,
-    )
+    await tx.$queryRaw(candadoDeLaLlave(venueId, externalId))
     const existente = await tx.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },
       include: createdOrderInclude,
     })
     if (existente) return { existente }
+    // D9: si el POS ya devolvió esta venta a «Carritos guardados» (cerró su llave), la cuenta no nace.
+    await rechazarSiLaLlaveSeCerroEnTx(tx, venueId, externalId)
   }
 
   // 🔴 buildOrderItemsData lanza 'At least one item is required' con lista

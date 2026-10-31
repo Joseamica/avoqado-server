@@ -21,6 +21,7 @@ import { findLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { logAction } from '../dashboard/activity-log.service'
 import { conIvaApagado, exigirIvaApagadoTx } from './exclusionIva'
 import { rechazarLlaveDeCambio } from '../exchanges/exchangeMarks'
+import { rechazarLlaveDePagarDespues } from '../mobile/pagarDespuesLlave'
 
 // Cache to track recent payment commands to prevent double deduction
 interface RecentPayment {
@@ -187,6 +188,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   logger.info(`[🥾 PosSyncOrder] Procesando orden ${externalId} para Venue ${venueId}`)
   // La llave «exchange:» es del cambio de producto (codex-apartada-r3): antes de escribir nada; el consumidor la manda a la DLQ.
   rechazarLlaveDeCambio(externalId)
+  rechazarLlaveDePagarDespues(externalId) // D9: la llave `pay-later:` es sólo de `/mobile`
   // logger.info(JSON.stringify(payload))
 
   const venue = await prisma.venue.findUnique({ where: { id: venueId } })
