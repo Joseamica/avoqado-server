@@ -2277,3 +2277,27 @@ export async function resolveCustomPermissionsForRole(venueId: string, role: Sta
 
   return (customPermissionRecord?.permissions as string[]) || null
 }
+
+/**
+ * CRM platform keys (spec 2026-10-30 §5.1). They are NOT venue role permissions: each person's keys live in
+ * `PlatformAccess` (by email), `requireCrm` re-reads them from the database on every request, and they never enter
+ * `DEFAULT_PERMISSIONS` or the role editor's catalog — a venue admin must never be able to hand out access to Avoqado's
+ * own sales pipeline. Mirrored by exact name in `avoqado-superadmin/src/features/crm/access.ts`.
+ *
+ * `crm:ver` and `crm:editar` carry a scope (`propios` = mine + unowned, or `todos`). `crm:editar`, `crm:contactar`,
+ * `crm:exportar` and `crm:ventas` only work on top of `crm:ver`; `crm:campanas` and `crm:admin` stand alone.
+ */
+export const CRM_KEYS = ['crm:ver', 'crm:editar', 'crm:contactar', 'crm:campanas', 'crm:exportar', 'crm:ventas', 'crm:admin'] as const
+
+export type CrmKey = (typeof CRM_KEYS)[number]
+
+/** The name a person reads, in the 403 («No tienes la llave «…»») and in the console. */
+export const CRM_KEY_LABELS: Record<CrmKey, string> = {
+  'crm:ver': 'Ver negocios',
+  'crm:editar': 'Editar',
+  'crm:contactar': 'Mandar correo',
+  'crm:campanas': 'Campañas masivas',
+  'crm:exportar': 'Exportar',
+  'crm:ventas': 'Ver ventas',
+  'crm:admin': 'Administrar',
+}

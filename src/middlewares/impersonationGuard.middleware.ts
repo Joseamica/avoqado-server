@@ -24,8 +24,11 @@ const IMPERSONATION_CONTROL_PATHS = [
  * Path prefixes that are BLOCKED during impersonation (even for GET).
  * Rationale: `/superadmin/*` surfaces platform-wide admin data that the
  * impersonated user would never see, so exposing it would break the illusion.
+ * `/api/v1/crm` is Avoqado's own sales pipeline — the same kind of data: an
+ * impersonation session never reaches it, so the CRM guard never has to decide
+ * whose keys an impersonation token carries.
  */
-const BLOCKED_PREFIXES = ['/api/v1/dashboard/superadmin', '/api/v1/superadmin']
+const BLOCKED_PREFIXES = ['/api/v1/dashboard/superadmin', '/api/v1/superadmin', '/api/v1/crm']
 
 // Simple per-process TTL cache for "is target still an active venue member?".
 // Caches answers for 60s to avoid a DB hit on every request.
