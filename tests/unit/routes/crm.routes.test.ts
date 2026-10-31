@@ -204,4 +204,39 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
       expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
     }
   })
+
+  it('ocultar_y_regresar_piden_crm_admin', async () => {
+    const ORG = 'corgprime0000000000000001'
+    prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })
+    prismaMock.crmHiddenClient.createMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmHiddenClient.deleteMany.mockResolvedValue({ count: 1 })
+
+    // The admin of the team from `beforeEach`: «Administrar» on, even without «Ver negocios».
+    const hidden = await request(app).post(`/crm/clients/${ORG}/hide`)
+    expect(hidden.status).toBe(200)
+    expect(hidden.body.data).toEqual({ organizationId: ORG, oculta: true })
+    const shown = await request(app).post(`/crm/clients/${ORG}/unhide`)
+    expect(shown.status).toBe(200)
+    expect(shown.body.data).toEqual({ organizationId: ORG, oculta: false })
+
+    // A seller who sees and edits everything, without «Administrar».
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: 'todos',
+      contactar: true,
+      campanas: false,
+      exportar: true,
+      ventas: true,
+      admin: false,
+    })
+    prismaMock.crmHiddenClient.createMany.mockClear()
+    for (const action of ['hide', 'unhide']) {
+      const res = await request(app).post(`/crm/clients/${ORG}/${action}`)
+      expect(res.status).toBe(403)
+      expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+    }
+    expect(prismaMock.crmHiddenClient.createMany).not.toHaveBeenCalled()
+  })
 })

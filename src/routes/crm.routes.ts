@@ -26,6 +26,7 @@ import {
   createLostReasonSchema,
   createStageSchema,
   exportAccountsSchema,
+  hideClientSchema,
   listAccountsSchema,
   listClientsSchema,
   listTeamSchema,
@@ -100,6 +101,9 @@ router.get('/accounts/:id/live', ver, validateRequest(accountIdSchema), crmContr
 
 // «Clientes», the reports and the CSV of the filtered list (plan task 9).
 router.get('/clients', ver, validateRequest(listClientsSchema), crmController.listClients)
+// Prime or any internal or test organization never listed as a client (ruling 39): the admin hides it and brings it back.
+router.post('/clients/:organizationId/hide', admin, validateRequest(hideClientSchema), crmController.hideClient)
+router.post('/clients/:organizationId/unhide', admin, validateRequest(hideClientSchema), crmController.unhideClient)
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)
 router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmController.exportAccountsCsv)
 

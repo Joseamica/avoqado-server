@@ -649,6 +649,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 22. CRM (equipo de ventas de Avoqado) — spec 2026-10-30
   PlatformAccess: 'CRM (equipo de ventas de Avoqado)',
   CrmTeam: 'CRM (equipo de ventas de Avoqado)',
+  CrmHiddenClient: 'CRM (equipo de ventas de Avoqado)',
   CrmAccount: 'CRM (equipo de ventas de Avoqado)',
   CrmContact: 'CRM (equipo de ventas de Avoqado)',
   CrmStage: 'CRM (equipo de ventas de Avoqado)',

@@ -165,6 +165,16 @@ export async function listClients(req: Request, res: Response): Promise<void> {
   res.json({ data: rows, meta: { total, nextCursor } })
 }
 
+/** POST /api/v1/crm/clients/:organizationId/hide — «Ocultar de Clientes» (ruling 39). */
+export async function hideClient(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.hideClient(req.crmAccess!, req.params.organizationId) })
+}
+
+/** POST /api/v1/crm/clients/:organizationId/unhide */
+export async function unhideClient(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.unhideClient(req.crmAccess!, req.params.organizationId) })
+}
+
 /** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */
 export async function getLive(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.getLive(req.crmAccess!, req.params.id) })

@@ -11,7 +11,8 @@ import { Prisma, TransactionStatus, VenueStatus } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { getLive, listClients } from '@/services/crm/clients.service'
+import { getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '@/services/dashboard/planState.service'
 
 jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
@@ -89,7 +90,17 @@ const planState = (over: Partial<PlanState> = {}): PlanState => ({
   ...over,
 })
 
-const MODELS = ['crmAccount', 'crmTeam', 'organization', 'venue', 'staffOrganization', 'onboardingProgress', 'terminal', 'payment'] as const
+const MODELS = [
+  'crmAccount',
+  'crmTeam',
+  'crmHiddenClient',
+  'organization',
+  'venue',
+  'staffOrganization',
+  'onboardingProgress',
+  'terminal',
+  'payment',
+] as const
 
 beforeEach(() => {
   for (const model of MODELS) for (const fn of Object.values(prismaMock[model]) as jest.Mock[]) fn.mockReset()
@@ -212,6 +223,78 @@ describe('listClients', () => {
   })
 })
 
+describe('organizaciones ocultas (ruling 39)', () => {
+  const HIDDEN = { crmHiddenClient: { is: null } }
+  const ONLY_HIDDEN = { crmHiddenClient: { isNot: null } }
+
+  it('clientes_ocultos_no_salen_ni_cuentan', async () => {
+    await listClients(access(), {}, NOW)
+    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
+    // In the database, before the page and in the total: Prime never takes a slot of the page.
+    expect(where.AND).toContainEqual(HIDDEN)
+    expect(prismaMock.organization.count).toHaveBeenCalledWith({ where })
+  })
+
+  it('ocultos_con_admin_lista_solo_las_ocultas', async () => {
+    await listClients(access({ admin: true }), { ocultos: true }, NOW)
+    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
+    expect(where.AND).toContainEqual(ONLY_HIDDEN)
+    expect(where.AND).not.toContainEqual(HIDDEN)
+    // Still clients by the same rule, and never the team's organization.
+    expect(where.AND).toContainEqual({ id: { not: TEAM_ORG } })
+  })
+
+  it('ocultos_sin_admin_se_ignora', async () => {
+    await listClients(access(), { ocultos: true }, NOW)
+    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
+    expect(where.AND).toContainEqual(HIDDEN)
+    expect(where.AND).not.toContainEqual(ONLY_HIDDEN)
+  })
+
+  it('ocultar_es_idempotente_y_queda_en_la_bitacora', async () => {
+    const admin = access({ admin: true, ver: null, editar: null })
+    prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })
+    prismaMock.crmHiddenClient.createMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 })
+    jest.mocked(logAction).mockClear()
+
+    await expect(hideClient(admin, ORG)).resolves.toEqual({ organizationId: ORG, oculta: true })
+    expect(prismaMock.crmHiddenClient.createMany).toHaveBeenCalledWith({ data: [{ organizationId: ORG }], skipDuplicates: true })
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: SELLER,
+      venueId: null,
+      organizationId: ORG,
+      action: 'CRM_CLIENT_HIDDEN',
+      entity: 'Organization',
+      entityId: ORG,
+      data: { organizationName: 'Grupo de pruebas' },
+    })
+
+    // Hiding it again changes nothing and logs nothing.
+    await expect(hideClient(admin, ORG)).resolves.toEqual({ organizationId: ORG, oculta: true })
+    expect(logAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('ocultar_una_organizacion_que_no_existe_es_404', async () => {
+    prismaMock.organization.findUnique.mockResolvedValue(null)
+    await expect(hideClient(access({ admin: true }), ORG)).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.crmHiddenClient.createMany).not.toHaveBeenCalled()
+  })
+
+  it('regresar_es_idempotente_y_queda_en_la_bitacora', async () => {
+    prismaMock.crmHiddenClient.deleteMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 })
+    jest.mocked(logAction).mockClear()
+
+    await expect(unhideClient(access({ admin: true }), ORG)).resolves.toEqual({ organizationId: ORG, oculta: false })
+    expect(prismaMock.crmHiddenClient.deleteMany).toHaveBeenCalledWith({ where: { organizationId: ORG } })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: SELLER, organizationId: ORG, action: 'CRM_CLIENT_UNHIDDEN', entityId: ORG }),
+    )
+    // A visible one: nothing to do, nothing logged.
+    await expect(unhideClient(access({ admin: true }), ORG)).resolves.toEqual({ organizationId: ORG, oculta: false })
+    expect(logAction).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('getLive', () => {
   /** A linked account with one venue and everything else empty. */
   function linked(over: { venues?: unknown[]; ventas?: unknown } = {}) {
@@ -298,7 +381,7 @@ describe('getLive', () => {
     for (const leak of ['paymentMethod', 'visa', '4242', 'sub_secreto_123', 'stripe']) expect(text).not.toContain(leak)
   })
 
-  it('vivo_trae_estado_kyc_alta_acceso_del_dueno_y_terminales', async () => {
+  it('vivo_trae_estado_alta_acceso_del_dueno_y_terminales', async () => {
     linked({
       venues: [
         { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', _count: { terminals: 2 } },
@@ -313,8 +396,8 @@ describe('getLive', () => {
       ligada: true,
       organizationId: ORG,
       venues: [
-        { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', terminales: 2, plan: { tier: 'PRO' } },
-        { id: VENUE_2, name: 'Norte', status: 'ONBOARDING', kycStatus: 'PENDING_REVIEW', terminales: 0, plan: { tier: 'PRO' } },
+        { id: VENUE, name: 'Centro', status: 'ACTIVE', terminales: 2, plan: { tier: 'PRO' } },
+        { id: VENUE_2, name: 'Norte', status: 'ONBOARDING', terminales: 0, plan: { tier: 'PRO' } },
       ],
       sucursales: 2,
       terminales: 2,
@@ -326,6 +409,52 @@ describe('getLive', () => {
     expect(prismaMock.staffOrganization.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { organizationId: ORG, role: 'OWNER', isActive: true } }),
     )
+  })
+
+  it('vivo_kyc_solo_con_admin', async () => {
+    // Spec §5.10 (ruling 40): the seller never sees KYC — not even its status.
+    linked()
+    const seller = await getLive(access({ ver: 'todos', ventas: true }), ACCOUNT, NOW)
+    expect(seller.ligada && seller.venues[0]).not.toHaveProperty('kycStatus')
+    expect(JSON.stringify(seller)).not.toContain('VERIFIED')
+
+    const admin = await getLive(access({ admin: true }), ACCOUNT, NOW)
+    expect(admin.ligada && admin.venues[0]).toMatchObject({ kycStatus: 'VERIFIED' })
+  })
+
+  it('vivo_lee_el_plan_de_a_lo_mas_4_venues_a_la_vez', async () => {
+    const venues = Array.from({ length: 10 }, (_, i) => ({
+      id: `cvenue${String(i).padStart(19, '0')}`,
+      name: `Sucursal ${i}`,
+      status: 'ACTIVE',
+      kycStatus: 'VERIFIED',
+      _count: { terminals: 0 },
+    }))
+    linked({ venues })
+    // getPlanState can go to Stripe with retries: each call waits until the test lets it go.
+    let running = 0
+    let peak = 0
+    const waiting: Array<() => void> = []
+    jest.mocked(getPlanState).mockImplementation(async () => {
+      running++
+      peak = Math.max(peak, running)
+      await new Promise<void>(resolve => waiting.push(resolve))
+      running--
+      return planState()
+    })
+
+    const pending = getLive(access(), ACCOUNT, NOW)
+    for (let released = 0; released < venues.length; released++) {
+      while (!waiting.length) await new Promise(resolve => setImmediate(resolve))
+      expect(running).toBeLessThanOrEqual(4)
+      waiting.shift()!()
+    }
+    const live = await pending
+
+    expect(peak).toBe(4)
+    expect(getPlanState).toHaveBeenCalledTimes(10)
+    // Still one plan per venue, in the venues' order.
+    expect(live.ligada && live.venues.map(venue => venue.id)).toEqual(venues.map(venue => venue.id))
   })
 
   it('vivo_de_cuenta_sin_organizacion_responde_no_ligada', async () => {

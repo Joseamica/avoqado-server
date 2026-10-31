@@ -6,6 +6,9 @@
 -- único, la tabla CrmTeam con sus llaves (RESTRICT) a Organization y Venue, y los índices de CrmInboundEntry.accountId,
 -- CrmActivity.doneById y CrmTimelineEvent.actorStaffId.
 -- Tarea 4 (ruling 12), también antes de aplicarse: CrmActivity.assigneeStaffId acepta null (actividad sin responsable).
+-- Tarea 9 (rulings 39 y 41), también antes de aplicarse: la tabla CrmHiddenClient (organizaciones internas o de pruebas que
+-- nunca salen en «Clientes», CASCADE con Organization) y los índices de los reportes: CrmAccount.wonAt, CrmAccount.lostAt y
+-- CrmActivity.doneAt.
 
 -- CreateTable
 CREATE TABLE "PlatformAccess" (
@@ -175,6 +178,15 @@ CREATE TABLE "CrmDigestSend" (
     CONSTRAINT "CrmDigestSend_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "CrmHiddenClient" (
+    "id" TEXT NOT NULL,
+    "organizationId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "CrmHiddenClient_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "PlatformAccess_email_key" ON "PlatformAccess"("email");
 
@@ -206,6 +218,12 @@ CREATE INDEX "CrmAccount_source_organizationId_idx" ON "CrmAccount"("source", "o
 CREATE UNIQUE INDEX "CrmAccount_source_externalKey_key" ON "CrmAccount"("source", "externalKey");
 
 -- CreateIndex
+CREATE INDEX "CrmAccount_wonAt_idx" ON "CrmAccount"("wonAt");
+
+-- CreateIndex
+CREATE INDEX "CrmAccount_lostAt_idx" ON "CrmAccount"("lostAt");
+
+-- CreateIndex
 CREATE INDEX "CrmContact_accountId_idx" ON "CrmContact"("accountId");
 
 -- CreateIndex
@@ -230,6 +248,9 @@ CREATE INDEX "CrmActivity_accountId_idx" ON "CrmActivity"("accountId");
 CREATE INDEX "CrmActivity_doneById_idx" ON "CrmActivity"("doneById");
 
 -- CreateIndex
+CREATE INDEX "CrmActivity_doneAt_idx" ON "CrmActivity"("doneAt");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "CrmTimelineEvent_sourceKey_key" ON "CrmTimelineEvent"("sourceKey");
 
 -- CreateIndex
@@ -246,6 +267,9 @@ CREATE INDEX "CrmInboundEntry_accountId_idx" ON "CrmInboundEntry"("accountId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "CrmDigestSend_staffId_day_kind_key" ON "CrmDigestSend"("staffId", "day", "kind");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "CrmHiddenClient_organizationId_key" ON "CrmHiddenClient"("organizationId");
 
 -- AddForeignKey
 ALTER TABLE "CrmTeam" ADD CONSTRAINT "CrmTeam_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -276,3 +300,6 @@ ALTER TABLE "CrmTimelineEvent" ADD CONSTRAINT "CrmTimelineEvent_accountId_fkey" 
 
 -- AddForeignKey
 ALTER TABLE "CrmInboundEntry" ADD CONSTRAINT "CrmInboundEntry_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "CrmAccount"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CrmHiddenClient" ADD CONSTRAINT "CrmHiddenClient_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;

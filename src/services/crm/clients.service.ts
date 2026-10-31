@@ -11,9 +11,11 @@
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import { NotFoundError } from '../../errors/AppError'
+import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
+import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import { teamOrganizationId } from './inbound.service'
@@ -24,6 +26,8 @@ const MAX_PAGE = 100
 // ponytail: the ficha shows an organization's first 20 venues (plan read per venue, Stripe included) and says how many
 // there are; page them if a client with more ever needs the rest in the ficha.
 const VENUES_CAP = 20
+/** `getPlanState` can go to Stripe with retries: at most this many venues of the ficha at once (ruling 41). */
+const PLANS_AT_ONCE = 4
 /** The steps of the signup, the same count as `getOnboardingCompletionPercentage`. */
 const ONBOARDING_STEPS = 8
 
@@ -67,6 +71,8 @@ export interface ClientFilters {
   q?: string
   cursor?: string
   limit?: number
+  /** Only the hidden ones (ruling 39), to bring one back. Only with «Administrar»; for anyone else it is ignored. */
+  ocultos?: boolean
 }
 
 const fullName = (person: { firstName: string; lastName: string }) => `${person.firstName} ${person.lastName}`.trim()
@@ -75,11 +81,13 @@ const fullName = (person: { firstName: string; lastName: string }) => `${person.
  * «Clientes», a page at a time: filters and search in the database, the page capped at 100 by the server, the real total.
  * Every client is listed for whoever has «Ver negocios» — they are Avoqado's clients, not anybody's prospects — but a
  * linked CRM account shows its owner and stage only inside the caller's scope (`cuentaAjena` says there is one).
- * `yaCobro` is «Ya cobró» / «Aún no cobra».
+ * `yaCobro` is «Ya cobró» / «Aún no cobra». An organization marked hidden (Prime, or any internal or test one, ruling 39)
+ * never takes a slot of the page nor counts in the total; `ocultos` with «Administrar» lists only those.
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
   const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
   const and = clientWhere(await teamOrganizationId(), now)
+  and.push({ crmHiddenClient: filters.ocultos && access.admin ? { isNot: null } : { is: null } })
   if (filters.q) and.push({ name: { contains: filters.q, mode: 'insensitive' } })
   const where: Prisma.OrganizationWhereInput = { AND: and }
 
@@ -168,10 +176,10 @@ async function monthSales(organizationId: string, now: Date): Promise<Prisma.Dec
 }
 
 /**
- * The ficha's live part (spec §5.5): for an account linked to an Organization, its venues with their effective plan,
- * status and KYC; the signup's progress; the owner's last sign-in; how many venues and terminals. What it sells only
- * with «Ver ventas». An account without an Organization answers `{ ligada: false }` so the ficha can say why there is
- * nothing live; one outside the caller's scope is a 404, as in `getAccount`.
+ * The ficha's live part (spec §5.5): for an account linked to an Organization, its venues with their effective plan and
+ * status (KYC only for «Administrar», ruling 40); the signup's progress; the owner's last sign-in; how many venues and
+ * terminals. What it sells only with «Ver ventas». An account without an Organization answers `{ ligada: false }` so the
+ * ficha can say why there is nothing live; one outside the caller's scope is a 404, as in `getAccount`.
  */
 export async function getLive(access: CrmAccess, accountId: string, now = new Date()) {
   const account = await prisma.crmAccount.findFirst({
@@ -199,7 +207,7 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
     prisma.terminal.count({ where: { venue: { organizationId } } }),
     access.ventas ? monthSales(organizationId, now) : null,
   ])
-  const plans = await Promise.all(venues.map(venue => getPlanState(venue.id)))
+  const plans = await enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id))
   const steps = onboarding?.completedSteps
   const done = Array.isArray(steps) ? steps.length : 0
 
@@ -210,7 +218,8 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
       id: venue.id,
       name: venue.name,
       status: venue.status,
-      kycStatus: venue.kycStatus,
+      // Spec §5.10 (ruling 40): the seller never sees KYC, not even its status.
+      ...(access.admin ? { kycStatus: venue.kycStatus } : {}),
       terminales: venue._count.terminals,
       plan: effectivePlan(plans[i]),
     })),
@@ -227,4 +236,44 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
     ventasMes,
     ventasBloqueadas: !access.ventas,
   }
+}
+
+// ── Hidden organizations (ruling 39) ──────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * «Ocultar de Clientes» (`crm:admin`): Prime or any internal or test organization stops being listed as a client. Hiding
+ * twice is a no-op, and only a real change leaves its ActivityLog with who did it.
+ */
+export async function hideClient(access: CrmAccess, organizationId: string) {
+  const organization = await prisma.organization.findUnique({ where: { id: organizationId }, select: { id: true, name: true } })
+  if (!organization) throw new NotFoundError('No encontramos esa organización', 'CRM_ORGANIZACION_NO_EXISTE')
+  const { count } = await prisma.crmHiddenClient.createMany({ data: [{ organizationId }], skipDuplicates: true })
+  if (count) {
+    await logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId,
+      action: 'CRM_CLIENT_HIDDEN',
+      entity: 'Organization',
+      entityId: organizationId,
+      data: { organizationName: organization.name },
+    })
+  }
+  return { organizationId, oculta: true }
+}
+
+/** Back into «Clientes» (`crm:admin`). Unhiding one that is not hidden is a no-op. */
+export async function unhideClient(access: CrmAccess, organizationId: string) {
+  const { count } = await prisma.crmHiddenClient.deleteMany({ where: { organizationId } })
+  if (count) {
+    await logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId,
+      action: 'CRM_CLIENT_UNHIDDEN',
+      entity: 'Organization',
+      entityId: organizationId,
+    })
+  }
+  return { organizationId, oculta: false }
 }

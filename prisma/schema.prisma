@@ -162,9 +162,11 @@ model Organization {
   shopifyStores ShopifyStore[]
 
   /// CRM propio (spec 2026-10-30): el negocio del CRM ligado a esta organización, si lo hay (a lo más uno).
-  crmAccount CrmAccount?
+  crmAccount      CrmAccount?
   /// CRM propio: sólo en la organización del equipo de ventas de Avoqado.
-  crmTeam    CrmTeam?
+  crmTeam         CrmTeam?
+  /// CRM propio (ruling 39): marcada como interna o de pruebas, nunca sale en «Clientes».
+  crmHiddenClient CrmHiddenClient?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -20571,6 +20573,15 @@ model CrmTeam {
   createdAt      DateTime     @default(now())
 }
 
+/// Una organización que no es cliente aunque cumpla la regla (ruling 39): Prime y cualquier organización interna o de
+/// pruebas. Se marca y se quita desde «Clientes» con la llave `crm:admin`; quién lo hizo queda en `ActivityLog`.
+model CrmHiddenClient {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+}
+
 /// Un negocio del CRM: va de prospecto a cliente en UN solo registro y se liga a su Organization.
 /// Abierto, ganado o perdido se deduce del `kind` de su etapa; no se guarda dos veces.
 model CrmAccount {
@@ -20630,6 +20641,8 @@ model CrmAccount {
   @@index([ownerStaffId, stageId])
   @@index([nextActivityAt])
   @@index([source, organizationId])
+  @@index([wonAt]) // reportes: ganados del rango
+  @@index([lostAt]) // reportes: perdidos del rango
 }
 
 /// Una persona de un negocio del CRM. El teléfono y el correo AVISAN de duplicados pero no son únicos: el mismo
@@ -20692,6 +20705,7 @@ model CrmActivity {
   @@index([assigneeStaffId, doneAt, dueAt])
   @@index([accountId])
   @@index([doneById]) // deleting a person (and every expired demo) asks whether they did any activity
+  @@index([doneAt]) // reportes: actividades hechas del rango
 }
 
 /// Línea de tiempo de un negocio: sólo se agrega, nunca se edita. sourceKey (único) deja que el barrido no repita.

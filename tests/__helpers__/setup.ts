@@ -531,6 +531,7 @@ const prismaMock: any = {
   // «Cannot read properties of undefined» instead of failing on its assertion.
   platformAccess: createMockModel(),
   crmTeam: createMockModel(),
+  crmHiddenClient: createMockModel(),
   crmAccount: createMockModel(),
   crmContact: createMockModel(),
   crmStage: createMockModel(),

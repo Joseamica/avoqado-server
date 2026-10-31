@@ -72,6 +72,9 @@ describe('crm team routes', () => {
       // Task 9: what is live, «Clientes» and the reports with «Ver negocios»; the CSV with its own key.
       { route: 'GET /accounts/:id/live', keys: ver },
       { route: 'GET /clients', keys: ver },
+      // Ruling 39: hiding an internal or test organization from «Clientes» is the admin's.
+      { route: 'POST /clients/:organizationId/hide', keys: admin },
+      { route: 'POST /clients/:organizationId/unhide', keys: admin },
       { route: 'GET /reports', keys: ver },
       { route: 'GET /export.csv', keys: ['crm:exportar'] },
       { route: 'POST /activities/:id/done', keys: editar },

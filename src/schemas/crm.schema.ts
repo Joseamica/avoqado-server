@@ -306,9 +306,22 @@ export const hubspotImportFilesSchema = z.object(
 
 const listQuery = listAccountsSchema.shape.query.shape
 
-/** GET /crm/clients. The cursor is an Organization id (not always a cuid); the service caps the page at 100. */
+/**
+ * GET /crm/clients. The cursor is an Organization id (not always a cuid); the service caps the page at 100. `ocultos=true`
+ * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39).
+ */
 export const listClientsSchema = z.object({
-  query: z.object({ q: listQuery.q, cursor: existing('El cursor no es válido').optional(), limit: listQuery.limit }),
+  query: z.object({
+    q: listQuery.q,
+    cursor: existing('El cursor no es válido').optional(),
+    limit: listQuery.limit,
+    ocultos: flagQuery,
+  }),
+})
+
+/** POST /crm/clients/:organizationId/hide y /unhide — an Organization id, not always a cuid. */
+export const hideClientSchema = z.object({
+  params: z.object({ organizationId: existing('El id de la organización no es válido', 'Falta la organización') }),
 })
 
 /** A calendar day that exists: «2026-02-30» has the shape and is not one. */
