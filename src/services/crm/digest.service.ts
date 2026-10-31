@@ -24,10 +24,11 @@ interface Recipient {
 }
 
 /**
- * Everyone who holds «Editar» (ruling 21): each active key row whose EFFECTIVE keys include `editar`, resolved to its
- * person by the rule of `getCrmAccess` — a claimed row is its Staff, if active; an unclaimed one is the active Staff
- * with that exact (lowercase) email AND a verified email. Superadmins without a row get none: every landing signup
- * already emails onboarding.
+ * Everyone who holds «Editar» (rulings 21 and 26): each active key row whose EFFECTIVE keys include `editar`, resolved
+ * to its person by the rule of `getCrmAccess`/`holdsRow` — a claimed row is its Staff, if active and while their
+ * current email still leads to it; an unclaimed one is the active Staff with that exact (lowercase) email, with a
+ * verified email and no other row of their own. Superadmins without a row get none: every landing signup already
+ * emails onboarding.
  */
 async function editors(): Promise<Recipient[]> {
   const rows = await prisma.platformAccess.findMany({
@@ -63,10 +64,31 @@ async function editors(): Promise<Recipient[]> {
   })
   const byId = new Map(people.map(person => [person.id, person]))
   const byEmail = new Map(people.map(person => [person.email, person]))
+  // Whoever is found by email but already holds ANOTHER row: `holdsRow` refuses them that one (P2002) — no access, no
+  // notice (ruling 26). One bounded query: `staffId` is unique, so at most one row each.
+  const byEmailIds = withEditar.flatMap(row => {
+    const person = row.staffId ? undefined : byEmail.get(row.email)
+    return person ? [person.id] : []
+  })
+  const holders = new Set(
+    byEmailIds.length
+      ? (
+          await prisma.platformAccess.findMany({
+            where: { staffId: { in: byEmailIds } },
+            select: { staffId: true },
+            take: byEmailIds.length,
+          })
+        ).map(holder => holder.staffId)
+      : [],
+  )
+
   const recipients = new Map<string, Recipient>()
   for (const row of withEditar) {
     const person = row.staffId ? byId.get(row.staffId) : byEmail.get(row.email)
-    if (!person?.active || (!row.staffId && !person.emailVerified)) continue
+    if (!person?.active) continue
+    // Claimed: only while that Staff's CURRENT email still leads to this row, as `getCrmAccess` looks it up (ruling 10).
+    if (row.staffId && person.email.toLowerCase() !== row.email) continue
+    if (!row.staffId && (!person.emailVerified || holders.has(person.id))) continue
     recipients.set(person.id, { id: person.id, email: person.email })
   }
   return [...recipients.values()]

@@ -15,9 +15,22 @@ import { applyEntry, recordSignupOutcome, sanitizeEntry, saveLandingEntry, type 
 jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn() }))
 
 const ORG = 'corglandn0000000000000001'
+/** Where an invited manager works: their PRIMARY membership, of any role — never what their own form links to. */
+const PATRON_ORG = 'corgpatron000000000000001'
 const TEAM_ORG = 'corgteam00000000000000001'
 const EMAIL = 'ana@cafe.mx'
 const MINUTE = 60_000
+const DAY = 24 * 60 * MINUTE
+
+/** What `prisma.staff.findUnique` returns for the entry's email: an active OWNER of `organizationId` (ruling 25). */
+function owner(organizationId: string, over: { createdAt?: Date; password?: string | null; organizationCreatedAt?: Date } = {}) {
+  return {
+    active: true,
+    password: over.password ?? null,
+    createdAt: over.createdAt ?? new Date(Date.now() - 30 * DAY),
+    organizations: [{ organization: { id: organizationId, createdAt: over.organizationCreatedAt ?? new Date(Date.now() - 30 * DAY) } }],
+  }
+}
 
 /** The landing form as `contactSchema` leaves it. */
 const FORM = {
@@ -81,7 +94,6 @@ const eventsOf = (kind: string) => db.events.filter(event => event.kind === kind
 
 beforeEach(() => {
   db = installCrmInboundFake(prismaMock)
-  prismaMock.staff.findUnique.mockReset()
   ;(notifyNewProspect as jest.Mock).mockResolvedValue(undefined)
 })
 
@@ -266,20 +278,130 @@ describe('applyEntry', () => {
     expect(notifyNewProspect).not.toHaveBeenCalled()
   })
 
-  it('never links the sales team’s own organization, nor one another account already holds', async () => {
+  it('never links the sales team’s own organization', async () => {
     prismaMock.crmTeam.findUnique.mockResolvedValue({ organizationId: TEAM_ORG })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(TEAM_ORG))
     const team = seedEntry({ signupOutcome: { organizationId: TEAM_ORG, alreadyExisted: true, yaEsCliente: true } })
-    await applyEntry(team.id)
-    expect(db.accounts[0].organizationId).toBeNull()
 
-    // ORG is already some other account's (a won WhatsApp prospect): this one is created unlinked.
-    db.accounts.push({ id: 'cacctwhats000000000000001', source: 'WHATSAPP', externalKey: '+525500000000', organizationId: ORG })
-    const held = seedEntry({ externalKey: 'otro@cafe.mx', payload: { ...FORM, email: 'otro@cafe.mx' } })
-    await applyEntry(held.id)
-    const landing = db.accounts.find(account => account.externalKey === 'otro@cafe.mx')
-    expect(landing).toMatchObject({ organizationId: null })
-    expect(db.entries.find(entry => entry.id === held.id)).toMatchObject({ appliedAt: expect.any(Date), accountId: landing?.id })
+    await applyEntry(team.id)
+
+    expect(db.accounts[0].organizationId).toBeNull()
   })
+
+  it('a person who already had an account links only to the Organization they OWN, never to the primary one the signup returned (ruling 25)', async () => {
+    // An invited manager with a password fills the form for their own business: the signup says «customer» with their
+    // boss's Organization (their primary membership). The account links to the one they own.
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    const manager = seedEntry({ signupOutcome: { organizationId: PATRON_ORG, alreadyExisted: true, yaEsCliente: true } })
+
+    await applyEntry(manager.id)
+
+    expect(prismaMock.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: EMAIL } }))
+    expect(db.accounts[0].organizationId).toBe(ORG)
+
+    // Owning nothing: no Organization at all, never the boss's.
+    prismaMock.staff.findUnique.mockResolvedValue(null)
+    const employee = seedEntry({
+      externalKey: 'empleado@cafe.mx',
+      payload: { ...FORM, email: 'empleado@cafe.mx' },
+      signupOutcome: { organizationId: PATRON_ORG, alreadyExisted: true, yaEsCliente: false },
+    })
+
+    await applyEntry(employee.id)
+
+    expect(db.accounts.find(account => account.externalKey === 'empleado@cafe.mx')).toMatchObject({ organizationId: null })
+  })
+
+  it.each([
+    { branch: 'cliente', outcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: true }, kind: 'NOTE' },
+    { branch: 'cuenta que ya existía', outcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false }, kind: 'FIELD_CHANGE' },
+  ])(
+    'an Organization that already has a CRM account gets the entry on THAT account, whatever its source (ruling 25): $branch',
+    async ({ outcome, kind }) => {
+      // A won WhatsApp prospect holds ORG; its owner now fills the landing form.
+      const whatsapp = seedAccount({
+        id: 'cacctwhats000000000000001',
+        source: 'WHATSAPP',
+        externalKey: '+525500000000',
+        organizationId: ORG,
+      })
+      prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+      const entry = seedEntry({ signupOutcome: outcome })
+
+      await applyEntry(entry.id)
+
+      expect(db.accounts).toHaveLength(1)
+      expect(eventsOf(kind)).toEqual([expect.objectContaining({ accountId: whatsapp.id })])
+      expect(eventsOf('ENTRY_APPLIED')).toEqual([expect.objectContaining({ accountId: whatsapp.id, sourceKey: `entry:${entry.id}` })])
+      expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: whatsapp.id })
+      expect(db.contacts).toHaveLength(0)
+      expect(notifyNewProspect).not.toHaveBeenCalled()
+    },
+  )
+
+  it('a customer new to the CRM gets the «ya es cliente» note, and no «Nuevo prospecto» (ruling 23)', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG, { password: 'hash' }))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: true } })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId: ORG })])
+    expect(eventsOf('NOTE')).toEqual([
+      expect.objectContaining({ data: expect.objectContaining({ text: expect.stringMatching(/ya es cliente/i) }) }),
+    ])
+    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ signup: 'CUSTOMER', created: true })
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it('an unnormalizable phone leaves the person without a phone, and the entry still applies', async () => {
+    const entry = seedEntry({ payload: { ...FORM, phone: 'llámame' } })
+
+    await applyEntry(entry.id)
+
+    expect(db.contacts).toEqual([expect.objectContaining({ phoneE164: null, email: EMAIL })])
+    expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+  })
+
+  it('locks an account that already existed before writing its ENTRY_APPLIED, so two entries queue instead of deadlocking (ruling 26)', async () => {
+    const account = seedAccount({ organizationId: ORG })
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false } })
+
+    await applyEntry(entry.id)
+
+    const calls = prismaMock.$queryRaw.mock.calls as Array<[TemplateStringsArray, ...unknown[]]>
+    const lock = calls.findIndex(([sql]) => sql.join('?').includes('FOR UPDATE'))
+    expect(lock).toBeGreaterThanOrEqual(0)
+    expect(calls[lock].slice(1)).toEqual([account.id])
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[lock]).toBeLessThan(
+      prismaMock.crmTimelineEvent.createMany.mock.invocationCallOrder[0],
+    )
+
+    // A brand-new account is nobody else's yet: no lock needed.
+    prismaMock.$queryRaw.mockClear()
+    const fresh = seedEntry({ externalKey: 'nueva@cafe.mx', payload: { ...FORM, email: 'nueva@cafe.mx' }, signupOutcome: null })
+    await applyEntry(fresh.id)
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { branch: 'alta nueva', outcome: NEW_SIGNUP, announcements: 2 },
+    { branch: 'cliente', outcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: true }, announcements: 0 },
+  ])(
+    'a re-run announces again an account its first run created — the email key keeps it from repeating — unless it is a customer (ruling 26): $branch',
+    async ({ outcome, announcements }) => {
+      prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+      const entry = seedEntry({ signupOutcome: outcome })
+      prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
+
+      await applyEntry(entry.id)
+      await applyEntry(entry.id)
+
+      expect(db.accounts).toHaveLength(1)
+      expect(notifyNewProspect).toHaveBeenCalledTimes(announcements)
+      if (announcements) expect(notifyNewProspect).toHaveBeenLastCalledWith(db.accounts[0].id)
+      expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+    },
+  )
 
   it('sin_desenlace_y_reciente_no_aplica', async () => {
     const entry = seedEntry({ signupOutcome: null, signupResolvedAt: null, receivedAt: new Date(Date.now() - MINUTE) })
@@ -293,31 +415,57 @@ describe('applyEntry', () => {
     expect(db.entries[0].appliedAt).toBeNull()
   })
 
-  it('sin_desenlace_viejo_resuelve_por_correo', async () => {
-    // An active OWNER with that exact email: the account it has is the outcome (alreadyExisted, with its Organization).
-    prismaMock.staff.findUnique.mockResolvedValue({ active: true, password: null, organizations: [{ organizationId: ORG }] })
-    const owned = seedEntry({ signupOutcome: null, signupResolvedAt: null, receivedAt: new Date(Date.now() - 6 * MINUTE) })
+  describe('sin_desenlace_viejo_resuelve_por_correo', () => {
+    const SENT = new Date(Date.now() - 6 * MINUTE)
+    const BEFORE = new Date(SENT.getTime() - DAY)
+    const AFTER = new Date(SENT.getTime() + 30_000)
+    /** An entry whose signup never wrote its outcome, old enough for the email to answer. */
+    const unresolved = (email: string) =>
+      seedEntry({ externalKey: email, payload: { ...FORM, email }, signupOutcome: null, signupResolvedAt: null, receivedAt: SENT })
 
-    await applyEntry(owned.id)
+    it.each([
+      {
+        case: 'an OWNER from before the form, without a password: an account that already existed',
+        staff: owner(ORG, { createdAt: BEFORE, organizationCreatedAt: BEFORE }),
+        signup: 'EXISTING_ACCOUNT',
+        organizationId: ORG,
+        announced: true,
+      },
+      {
+        // M-5: the signup's own rule — a password means the business already operates.
+        case: 'an OWNER from before the form, with a password and an Organization from before: a customer',
+        staff: owner(ORG, { createdAt: BEFORE, organizationCreatedAt: BEFORE, password: 'hash' }),
+        signup: 'CUSTOMER',
+        organizationId: ORG,
+        announced: false,
+      },
+      {
+        // M-1: this very signup created the person and confirmed its code within the 5 minutes — still a new prospect.
+        case: 'a person this form created, password already set by the code: a new signup, never a customer',
+        staff: owner(ORG, { createdAt: AFTER, organizationCreatedAt: AFTER, password: 'hash' }),
+        signup: 'NEW_SIGNUP',
+        organizationId: ORG,
+        announced: true,
+      },
+      {
+        case: 'nobody with that email owns an Organization: the signup failed',
+        staff: null,
+        signup: 'SIGNUP_FAILED',
+        organizationId: null,
+        announced: true,
+      },
+    ])('$case', async ({ staff, signup, organizationId, announced }) => {
+      prismaMock.staff.findUnique.mockResolvedValue(staff)
+      const entry = unresolved(EMAIL)
 
-    expect(prismaMock.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: EMAIL } }))
-    expect(db.accounts[0]).toMatchObject({ externalKey: EMAIL, organizationId: ORG })
-    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ signup: 'EXISTING_ACCOUNT' })
+      await applyEntry(entry.id)
 
-    // Nobody with that email owns an Organization: the signup failed, and the account is created without one.
-    prismaMock.staff.findUnique.mockResolvedValue(null)
-    const orphan = seedEntry({
-      externalKey: 'nadie@cafe.mx',
-      payload: { ...FORM, email: 'nadie@cafe.mx' },
-      signupOutcome: null,
-      signupResolvedAt: null,
-      receivedAt: new Date(Date.now() - 6 * MINUTE),
+      expect(prismaMock.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: EMAIL } }))
+      expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId })])
+      expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ signup })
+      expect(eventsOf('NOTE')).toHaveLength(signup === 'CUSTOMER' ? 1 : 0)
+      expect(notifyNewProspect).toHaveBeenCalledTimes(announced ? 1 : 0)
     })
-
-    await applyEntry(orphan.id)
-
-    expect(db.accounts.find(account => account.externalKey === 'nadie@cafe.mx')).toMatchObject({ organizationId: null })
-    expect(eventsOf('ENTRY_APPLIED')[1].data).toMatchObject({ signup: 'SIGNUP_FAILED' })
   })
 
   it.each([

@@ -204,34 +204,49 @@ function asOutcome(value: Prisma.JsonValue): SignupOutcome | null {
   }
 }
 
-/**
- * The signup never said how it went (its process died before `recordSignupOutcome`): the account that email has now
- * answers. An active OWNER of an Organization counts as an account that already existed — a customer if it has a
- * password, the signup's own rule — and nobody means the signup failed.
- */
-async function outcomeByEmail(email: string): Promise<SignupOutcome | null> {
+/** The person with that exact email (the login's rule) and the Organization they OWN, if any. */
+type Ownership = { createdAt: Date; hasPassword: boolean; organization: { id: string; createdAt: Date } | null }
+
+async function ownershipOf(email: string): Promise<Ownership | null> {
   const staff = await prisma.staff.findUnique({
     where: { email },
     select: {
       active: true,
       password: true,
+      createdAt: true,
       organizations: {
         where: { role: OrgRole.OWNER, isActive: true },
-        select: { organizationId: true },
+        select: { organization: { select: { id: true, createdAt: true } } },
         orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }],
         take: 1,
       },
     },
   })
-  if (!staff?.active || !staff.organizations.length) return null
-  return { organizationId: staff.organizations[0].organizationId, alreadyExisted: true, yaEsCliente: staff.password !== null }
+  if (!staff?.active) return null
+  return { createdAt: staff.createdAt, hasPassword: staff.password !== null, organization: staff.organizations[0]?.organization ?? null }
 }
 
-/** The Organization the account may link to. The sales team's own is never anybody's client (ruling 14). */
-async function linkableOrganization(outcome: SignupOutcome | null): Promise<string | null> {
-  if (!outcome?.organizationId) return null
+/**
+ * The signup never said how it went (its process died before `recordSignupOutcome`): what that email has now answers
+ * (ruling 25). Nobody who owns an Organization → the signup failed. Otherwise it already existed if the person is older
+ * than the form, and a customer only if, besides, they had a password and their Organization was older than the form:
+ * a new signup that confirmed its code within the 5 minutes already has a password and is still a new prospect.
+ */
+function outcomeFromOwnership(owner: Ownership | null, receivedAt: Date): SignupOutcome | null {
+  if (!owner?.organization) return null
+  const alreadyExisted = owner.createdAt < receivedAt
+  return {
+    organizationId: owner.organization.id,
+    alreadyExisted,
+    yaEsCliente: alreadyExisted && owner.hasPassword && owner.organization.createdAt < receivedAt,
+  }
+}
+
+/** The sales team's own Organization is never anybody's client (ruling 14). */
+async function linkable(organizationId: string | null): Promise<string | null> {
+  if (!organizationId) return null
   const team = await prisma.crmTeam.findUnique({ where: { key: 'default' }, select: { organizationId: true } })
-  return team?.organizationId === outcome.organizationId ? null : outcome.organizationId
+  return team?.organizationId === organizationId ? null : organizationId
 }
 
 function signupBranch(outcome: SignupOutcome | null) {
@@ -277,6 +292,9 @@ async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizat
   })
 }
 
+const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: string) =>
+  addEvent(tx, { accountId, kind: 'NOTE', actorStaffId: null, data: { entryId, text: CUSTOMER_NOTE } })
+
 async function applyTx(
   tx: Prisma.TransactionClient,
   entry: { id: string; externalKey: string },
@@ -284,40 +302,73 @@ async function applyTx(
   outcome: SignupOutcome | null,
   organizationId: string | null,
   stageId: string,
-): Promise<{ accountId: string; created: boolean }> {
-  const { account, created } = await upsertAccountBySource(tx, {
-    source: LANDING,
-    externalKey: entry.externalKey,
-    data: { name: form.name, ...form.qualification, sourceDetail: form.sourceDetail, stageId, organizationId },
-    contact: form.contact,
+): Promise<{ accountId: string; announce: boolean }> {
+  const customer = outcome?.yaEsCliente === true
+  const select = { id: true, organizationId: true } as const
+  // THE account of this entry: the landing one of this email or — one CRM account per Organization (ruling 25) — the
+  // one its Organization already has, whatever its source. Only when there is neither is one created.
+  let account = await tx.crmAccount.findUnique({
+    where: { source_externalKey: { source: LANDING, externalKey: entry.externalKey } },
+    select,
   })
-  if (created && organizationId && account.organizationId !== organizationId) {
-    logger.warn('[CRM] New landing account created unlinked: its Organization already has a CRM account', {
-      accountId: account.id,
-      organizationId,
+  if (!account && organizationId) account = await tx.crmAccount.findUnique({ where: { organizationId }, select })
+  let created = false
+  if (!account) {
+    const upserted = await upsertAccountBySource(tx, {
+      source: LANDING,
+      externalKey: entry.externalKey,
+      data: { name: form.name, ...form.qualification, sourceDetail: form.sourceDetail, stageId, organizationId },
+      contact: form.contact,
     })
+    account = upserted.account
+    created = upserted.created
+    // ponytail: only if an Organization gets its CRM account between the lookup above and this insert (a «Ganar» in the
+    // same instant); the account is created unlinked, and the sweep's link logs it.
+    if (created && organizationId && account.organizationId !== organizationId) {
+      logger.warn('[CRM] New landing account created unlinked: its Organization already has a CRM account', {
+        accountId: account.id,
+        organizationId,
+      })
+    }
   }
+  // An account that was already there is locked BEFORE its event is written: two entries of the same email queue here
+  // instead of deadlocking between the event's foreign key and the touch (ruling 26).
+  if (!created) await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${account.id} FOR UPDATE`
+
   // The proof the entry was applied. A second run inserts nothing here (`sourceKey` is unique) and stops: one set of
   // events per entry, even after a crash before `appliedAt`.
+  const sourceKey = `entry:${entry.id}`
   const firstRun = await addEvent(tx, {
     accountId: account.id,
     kind: 'ENTRY_APPLIED',
     actorStaffId: null,
-    sourceKey: `entry:${entry.id}`,
+    sourceKey,
     data: { entryId: entry.id, signup: signupBranch(outcome), created },
   })
-  if (!firstRun || created) return { accountId: account.id, created: created && firstRun }
+  if (!firstRun) {
+    // Applied by a run that died before `appliedAt`. If that run created the account, its notice may never have gone
+    // out: it goes again — the email's idempotency key keeps it from repeating — unless it was a customer (ruling 26).
+    const previous = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: { accountId: true, data: true } })
+    const data: Prisma.JsonObject =
+      previous?.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
+    return { accountId: previous?.accountId ?? account.id, announce: data.created === true && data.signup !== 'CUSTOMER' }
+  }
+  if (created) {
+    // A customer is not a new prospect: the note instead of «Nuevo prospecto» (ruling 23).
+    if (customer) await customerNote(tx, account.id, entry.id)
+    return { accountId: account.id, announce: !customer }
+  }
 
-  // The account was already there. Touching it takes its row lock — two entries on one account apply one after the
-  // other — and returns what the other one left. Coming back through the landing is a touch: «Estancado» restarts.
+  // The account was already there (its row is ours now). Coming back through the landing is a touch: «Estancado»
+  // restarts.
   const current = await tx.crmAccount.update({
     where: { id: account.id },
     data: { lastTouchAt: new Date() },
     select: { giro: true, ventasRango: true, sucursales: true, modulos: true, organizationId: true },
   })
-  if (outcome?.yaEsCliente) {
+  if (customer) {
     // A customer's account is theirs: what they type in the form does not overwrite it.
-    await addEvent(tx, { accountId: account.id, kind: 'NOTE', actorStaffId: null, data: { entryId: entry.id, text: CUSTOMER_NOTE } })
+    await customerNote(tx, account.id, entry.id)
   } else {
     const changes = qualificationChanges(current, form.qualification)
     if (changes.length) {
@@ -328,7 +379,7 @@ async function applyTx(
     }
   }
   if (!current.organizationId && organizationId) await linkTx(tx, account.id, organizationId)
-  return { accountId: account.id, created: false }
+  return { accountId: account.id, announce: false }
 }
 
 /**
@@ -338,9 +389,13 @@ async function applyTx(
  * - already a customer: only a note;
  * - the signup failed: the account stays without an Organization (the sweep links it when one appears).
  *
- * Whatever the outcome, a missing account is created — «Sin dueño», in the first stage, with its primary person — and
- * a new one is announced to the team (`notifyNewProspect`). Never throws: a failure stays on the entry (`lastError`)
- * and the sweep (task 6) runs this same function again.
+ * The Organization (ruling 25): a new signup's is the one it just created — the person is its OWNER by construction.
+ * Anyone else links only to the Organization they OWN (never the primary membership the signup returns, of any role),
+ * and if that Organization already has a CRM account, of any source, the entry goes to THAT account.
+ *
+ * With no account to apply to, one is created — «Sin dueño», in the first stage, with its primary person — and
+ * announced to the team (`notifyNewProspect`), unless it is a customer's. Never throws: a failure stays on the entry
+ * (`lastError`) and the sweep (task 6) runs this same function again.
  */
 export async function applyEntry(entryId: string): Promise<void> {
   try {
@@ -361,10 +416,15 @@ export async function applyEntry(entryId: string): Promise<void> {
     if (!entry.externalKey) throw new Error('The entry has no email')
 
     // No outcome yet and younger than 5 minutes: the signup is still running. Nothing is guessed; the sweep applies it.
-    if (!entry.signupResolvedAt && Date.now() - entry.receivedAt.getTime() < SIGNUP_GRACE_MS) return
-    const outcome = entry.signupResolvedAt ? asOutcome(entry.signupOutcome) : await outcomeByEmail(entry.externalKey)
+    const resolved = entry.signupResolvedAt !== null
+    if (!resolved && Date.now() - entry.receivedAt.getTime() < SIGNUP_GRACE_MS) return
+    const recorded = resolved ? asOutcome(entry.signupOutcome) : null
+    // Only a recorded new signup knows its Organization without asking; everyone else answers by what they OWN.
+    const owner = recorded && !recorded.alreadyExisted ? null : await ownershipOf(entry.externalKey)
+    const outcome = resolved ? recorded : outcomeFromOwnership(owner, entry.receivedAt)
+    const candidate = outcome && !outcome.alreadyExisted ? outcome.organizationId : (owner?.organization?.id ?? null)
 
-    const [stage, organizationId] = await Promise.all([getInitialStage(), linkableOrganization(outcome)])
+    const [stage, organizationId] = await Promise.all([getInitialStage(), linkable(candidate)])
     const form = readForm(entry.payload, entry.externalKey)
     const applied = await prisma.$transaction(tx => applyTx(tx, entry, form, outcome, organizationId, stage.id))
     try {
@@ -373,8 +433,8 @@ export async function applyEntry(entryId: string): Promise<void> {
         data: { appliedAt: new Date(), accountId: applied.accountId, lastError: null },
       })
     } finally {
-      // Announced even if the mark fails: a re-run would find the account and never announce it.
-      if (applied.created) await notifyNewProspect(applied.accountId)
+      // Announced even if the mark fails; and a re-run announces again what its first run created (ruling 26).
+      if (applied.announce) await notifyNewProspect(applied.accountId)
     }
   } catch (error) {
     const message = errorText(error)

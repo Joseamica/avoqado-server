@@ -23,13 +23,17 @@ jest.mock('@/services/integrations/hubspot.client', () => ({
 import { OrgRole } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 import { submitContact } from '@/controllers/public/landing.public.controller'
+import { getInitialStage } from '@/services/crm/accounts.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `crml${Date.now()}`
 const RACE_EMAIL = `ana-${suffix}@test.mx`
 const CRASH_EMAIL = `beto-${suffix}@test.mx`
-const EMAILS = [RACE_EMAIL, CRASH_EMAIL]
+const HOLDER_EMAIL = `carla-${suffix}@test.mx`
+const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL]
+/** Accounts this file creates under another source (not found by `source: LANDING`). */
+const otherAccountIds: string[] = []
 
 const form = (email: string, over: Record<string, unknown> = {}) => ({
   firstName: 'Ana',
@@ -67,6 +71,7 @@ describe('landing → CRM against Postgres', () => {
     // Every delete is keyed by the emails this file made up: never a `where` that could be undefined. Deleting the
     // accounts cascades to their people and their timeline.
     await prisma.crmAccount.deleteMany({ where: { source: 'LANDING', externalKey: { in: EMAILS } } })
+    if (otherAccountIds.length) await prisma.crmAccount.deleteMany({ where: { id: { in: otherAccountIds } } })
     await prisma.crmInboundEntry.deleteMany({ where: { externalKey: { in: EMAILS } } })
     const people = await prisma.staff.findMany({
       where: { email: { in: EMAILS } },
@@ -160,5 +165,43 @@ describe('landing → CRM against Postgres', () => {
     expect(await prisma.crmTimelineEvent.count({ where: { accountId: account.id, kind: 'FIELD_CHANGE' } })).toBe(1)
     expect(await prisma.crmTimelineEvent.count({ where: { accountId: account.id, kind: 'NOTE' } })).toBe(1)
     expect(await prisma.crmTimelineEvent.count({ where: { accountId: account.id, kind: 'ENTRY_APPLIED' } })).toBe(3)
+  })
+
+  it('an Organization with a CRM account of another source gets its owner’s entry on THAT account (ruling 25)', async () => {
+    // A customer won through WhatsApp: their Organization already holds its one CRM account.
+    const staff = await prisma.staff.create({
+      data: { email: HOLDER_EMAIL, firstName: 'Carla', lastName: 'Cliente', password: 'hash', active: true, emailVerified: true },
+    })
+    const organization = await prisma.organization.create({ data: { name: `Cliente ${suffix}`, email: HOLDER_EMAIL, phone: '5500000000' } })
+    await prisma.staffOrganization.create({
+      data: { staffId: staff.id, organizationId: organization.id, role: OrgRole.OWNER, isPrimary: true, isActive: true },
+    })
+    const whatsapp = await prisma.crmAccount.create({
+      data: {
+        name: `Cliente ${suffix}`,
+        source: 'WHATSAPP',
+        externalKey: `+52${String(Date.now()).slice(-10)}`,
+        stageId: (await getInitialStage()).id,
+        organizationId: organization.id,
+      },
+    })
+    otherAccountIds.push(whatsapp.id)
+
+    // The customer fills the landing form.
+    const entry = await saveLandingEntry(form(HOLDER_EMAIL))
+    expect(entry).not.toBeNull()
+    await recordSignupOutcome(entry!.entryId, { organizationId: organization.id, alreadyExisted: true, yaEsCliente: true })
+    await applyEntry(entry!.entryId)
+
+    // No second account: one note and the entry's ENTRY_APPLIED on the WhatsApp one.
+    expect(await prisma.crmAccount.count({ where: { OR: [{ externalKey: HOLDER_EMAIL }, { organizationId: organization.id }] } })).toBe(1)
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId: whatsapp.id, kind: 'NOTE' } })).toBe(1)
+    expect(await prisma.crmTimelineEvent.findUniqueOrThrow({ where: { sourceKey: `entry:${entry!.entryId}` } })).toMatchObject({
+      accountId: whatsapp.id,
+    })
+    expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
+      appliedAt: expect.any(Date),
+      accountId: whatsapp.id,
+    })
   })
 })

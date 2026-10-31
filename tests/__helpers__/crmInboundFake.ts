@@ -32,6 +32,8 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmAccount.update,
     prismaMock.crmContact.create,
     prismaMock.crmTimelineEvent.createMany,
+    prismaMock.crmTimelineEvent.findUnique,
+    prismaMock.staff.findUnique,
     prismaMock.crmTeam.findUnique,
     prismaMock.organization.findUnique,
     prismaMock.crmStage.count,
@@ -101,8 +103,13 @@ export function installCrmInboundFake(prismaMock: any) {
     db.events.push(event)
     return { count: 1 }
   })
+  prismaMock.crmTimelineEvent.findUnique.mockImplementation(
+    async ({ where }: Row) => db.events.find(event => event.sourceKey === where.sourceKey) ?? null,
+  )
 
-  // No sales-team organization, an Organization with a name, and the pipeline already seeded.
+  // Nobody with the entry's email owns an Organization, no sales-team organization, an Organization with a name, and
+  // the pipeline already seeded.
+  prismaMock.staff.findUnique.mockResolvedValue(null)
   prismaMock.crmTeam.findUnique.mockResolvedValue(null)
   prismaMock.organization.findUnique.mockResolvedValue({ name: 'Café Ana S.A.' })
   prismaMock.crmStage.count.mockResolvedValue(7)

@@ -17,6 +17,12 @@ const STAFF_A = 'cstaffsla0000000000000001'
 const STAFF_B = 'cstaffslb0000000000000001'
 const STAFF_C = 'cstaffslc0000000000000001'
 const STAFF_D = 'cstaffsld0000000000000001'
+const STAFF_F = 'cstaffslf0000000000000001'
+const STAFF_G = 'cstaffslg0000000000000001'
+
+let keyRows: Array<Record<string, unknown>>
+/** Staff ids that already hold a claimed row somewhere (`PlatformAccess.staffId`). */
+let holders: string[]
 
 /** A key row as `PlatformAccess` stores it. */
 const row = (over: Record<string, unknown>) => ({
@@ -44,13 +50,18 @@ beforeEach(() => {
     sucursales: 3,
     modulos: ['mesas', 'cocina'],
   })
-  prismaMock.platformAccess.findMany.mockResolvedValue([
+  keyRows = [
     row({ email: 'a@avoqado.io', staffId: STAFF_A, verScope: 'todos' }), // claimed: that Staff
     row({ email: 'b@avoqado.io' }), // unclaimed: the verified Staff with that exact email
     row({ email: 'c@avoqado.io', staffId: STAFF_C, editarScope: null }), // sees, does not edit
     row({ email: 'e@avoqado.io', verScope: null, editarScope: 'todos' }), // «Editar» without «Ver» grants nothing
     row({ email: 'd@avoqado.io' }), // unclaimed, but its Staff never verified the email
-  ])
+  ]
+  holders = []
+  // The key rows, or — asked by `staffId` — which of those people already hold a row.
+  prismaMock.platformAccess.findMany.mockImplementation(async ({ where }: { where: { staffId?: { in: string[] } } }) =>
+    where.staffId ? holders.filter(id => where.staffId?.in.includes(id)).map(staffId => ({ staffId })) : keyRows,
+  )
   prismaMock.staff.findMany.mockResolvedValue([
     { id: STAFF_A, email: 'a@avoqado.io', active: true, emailVerified: true },
     { id: STAFF_B, email: 'b@avoqado.io', active: true, emailVerified: true },
@@ -82,6 +93,28 @@ describe('notifyNewProspect', () => {
     )
     // Rows the database could not have narrowed are still filtered by `effectiveKeys`, and the lookup is ONE query.
     expect(prismaMock.staff.findMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('nobody without CRM access gets it: a claimed row whose Staff changed email, or a Staff who already holds another row (ruling 26)', async () => {
+    keyRows.push(
+      row({ email: 'f@avoqado.io', staffId: STAFF_F }), // claimed by F, who now signs in as f-nuevo@: the row is not F's
+      row({ email: 'g@avoqado.io' }), // unclaimed; its verified Staff G already holds another row (P2002 in `holdsRow`)
+    )
+    holders = [STAFF_G]
+    prismaMock.staff.findMany.mockResolvedValue([
+      { id: STAFF_A, email: 'a@avoqado.io', active: true, emailVerified: true },
+      { id: STAFF_B, email: 'b@avoqado.io', active: true, emailVerified: true },
+      { id: STAFF_F, email: 'f-nuevo@avoqado.io', active: true, emailVerified: true },
+      { id: STAFF_G, email: 'g@avoqado.io', active: true, emailVerified: true },
+    ])
+
+    await notifyNewProspect(ACCOUNT)
+
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['a@avoqado.io', 'b@avoqado.io'])
+    // Asked only about the Staff found by email — the claimed rows already say who holds them.
+    expect(prismaMock.platformAccess.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: { staffId: { in: [STAFF_B, STAFF_G] } } }),
+    )
   })
 
   it('nuevo_prospecto_no_lanza_si_falla_el_correo', async () => {
