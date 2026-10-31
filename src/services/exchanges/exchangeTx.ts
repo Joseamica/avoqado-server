@@ -109,6 +109,7 @@ export async function chainRefundSemanticsInTx(
   tx: Prisma.TransactionClient,
   venueId: string,
   creditPaymentId: string,
+  destino?: 'STORE_CREDIT',
 ): Promise<ChainRefundResolution> {
   const link = await tx.exchangeCreditLink.findFirst({ where: { venueId, creditPaymentId } })
   const root = link
@@ -117,7 +118,7 @@ export async function chainRefundSemanticsInTx(
         include: { tenderType: { select: { systemKind: true } } },
       })
     : null
-  return resolveChainRefund(link, root)
+  return resolveChainRefund(link, root, destino)
 }
 
 /** La llave decide antes que el estado vigente de la venta: repetir algo ya hecho nunca devuelve dos piezas. */

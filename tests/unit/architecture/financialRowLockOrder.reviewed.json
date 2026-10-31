@@ -100,6 +100,11 @@
       "loops": 0,
       "reason": "Saldo a favor (S2): la versión condicional del candado «primer-sobre» (sólo si la sucursal no tiene sobres activados), sin FOR UPDATE; se inventaría para que el Cambio y el Reembolso a saldo queden registrados al llamarla. Siempre como PRIMERA sentencia de su transacción."
     },
+    "src/services/storeCredit/respaldoDeLaRaiz.ts#respaldoVigenteDeLaRaiz": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S3): UNA Payment, la raíz de una cadena de créditos de cambio, FOR UPDATE para medir su respaldo vigente. Sus Orders (la del crédito y su ascendencia, que trae la de la raíz) ya están poseídas; el llamador la aparta en el orden de Payments por id (antes que el cobro con crédito, que nace después que su raíz)."
+    },
     "src/services/shared/cobroDelProtocolo.ts#bloquearPayments": {
       "count": 1,
       "loops": 0,
@@ -393,9 +398,24 @@
       "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
     },
     "src/services/dashboard/refund.dashboard.service.ts#issueRefund#lockExistingOrderForPayment": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S3 (saldo a favor desde un crédito de cambio): la primera es la Order del crédito con su ascendencia ANTES de apartar la raíz; bloquearCobroParaReembolso la vuelve a tomar (reentrada) y la segunda es la de la raíz, ya poseída como ascendencia."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
       "count": 1,
       "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+      "reason": "Saldo a favor (S3): la PRIMERA sentencia de la transacción del reembolso a saldo, antes de Orders, Payments, sobres y turno («primer-sobre» → filas → turno)."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund#respaldoVigenteDeLaRaiz": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Saldo a favor (S3): la raíz de un crédito de cambio. Con la pista leída fuera de la transacción y la raíz de id menor, va tras las Orders y ANTES del cobro con crédito (Payments por id); sin pista en orden, la segunda llamada la aparta tras el crédito. Nunca después de sobres ni turno."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx#prepararSobreDeSaldoAFavorEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S3): el candado por clienta y su sobre, DESPUÉS de apartar el cobro (Order → Payments) y ANTES del reclamo del turno, como el gasto con saldo; nunca en bucle."
     },
     "src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification#lockExistingOrderForPayment": {
       "count": 1,

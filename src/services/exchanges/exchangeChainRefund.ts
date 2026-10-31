@@ -11,10 +11,17 @@ export type ChainRefundResolution =
   | { kind: 'INHERIT'; rootPaymentId: string; exchangeId: string; money: RefundMoneySemantics }
   | { kind: 'BLOCKED'; error: ExchangeError }
 
-/** Regla única sin lecturas: admite tanto la carga individual como los vínculos y raíces leídos en lote. */
+/**
+ * Regla única sin lecturas: admite tanto la carga individual como los vínculos y raíces leídos en lote.
+ * `destino` = `'STORE_CREDIT'` (saldo a favor, spec 2026-10-30 §5.4): lo devuelto no regresa a la tarjeta ni al banco, se abona al
+ * sobre de la clienta. Entonces una raíz en efectivo, transferencia o tarjeta bancaria (también procesada por Avoqado) sí se hereda
+ * como origen fiscal; la raíz en tarjeta de regalo sigue bloqueada. Que la raíz todavía respalde lo pedido lo decide el llamador bajo
+ * su candado (`respaldoVigenteDeLaRaiz`).
+ */
 export function resolveChainRefund(
   link: Pick<ExchangeCreditLink, 'exchangeId'> | null | undefined,
   root: ChainRefundRoot | null | undefined,
+  destino?: 'STORE_CREDIT',
 ): ChainRefundResolution {
   if (!link || !root || isExchangeCreditTenderKind(root.tenderType?.systemKind))
     throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'No se pudo comprobar el origen de este crédito de cambio.', 422)
@@ -28,7 +35,7 @@ export function resolveChainRefund(
       ),
     }
   const processorRoot = !!root.merchantAccountId || !!root.ecommerceMerchantId || paymentIsAvoqadoSettled(root)
-  if (seDevuelveEnTerminal(root) || processorRoot)
+  if (destino !== 'STORE_CREDIT' && (seDevuelveEnTerminal(root) || processorRoot))
     return {
       kind: 'BLOCKED',
       error: new ExchangeError(
