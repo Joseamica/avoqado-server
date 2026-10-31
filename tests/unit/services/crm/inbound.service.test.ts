@@ -194,7 +194,14 @@ describe('applyEntry', () => {
         })
         expect(db.accounts[0]).not.toHaveProperty('ownerStaffId') // «Sin dueño»
         expect(db.contacts).toEqual([
-          { accountId: db.accounts[0].id, name: 'Ana López', phoneE164: '+525512345678', email: EMAIL, isPrimary: true },
+          {
+            id: expect.any(String),
+            accountId: db.accounts[0].id,
+            name: 'Ana López',
+            phoneE164: '+525512345678',
+            email: EMAIL,
+            isPrimary: true,
+          },
         ])
         expect(db.events.map(event => event.kind)).toEqual(['ENTRY_APPLIED'])
         expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id, expect.objectContaining({ name: 'Café Ana' }))
@@ -225,7 +232,8 @@ describe('applyEntry', () => {
           },
         })
         expect(eventsOf('NOTE')).toHaveLength(0)
-        expect(db.contacts).toHaveLength(0)
+        // Seeded without any person: the entry's email and phone become its contact (ruling 57).
+        expect(db.contacts).toEqual([expect.objectContaining({ accountId: db.accounts[0].id, email: EMAIL, phoneE164: '+525512345678' })])
         expect(notifyNewProspect).not.toHaveBeenCalled()
       },
     },
@@ -345,7 +353,8 @@ describe('applyEntry', () => {
       expect(eventsOf(kind)).toEqual([expect.objectContaining({ accountId: whatsapp.id })])
       expect(eventsOf('ENTRY_APPLIED')).toEqual([expect.objectContaining({ accountId: whatsapp.id, sourceKey: `entry:${entry.id}` })])
       expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: whatsapp.id })
-      expect(db.contacts).toHaveLength(0)
+      // No second account — and the person's email and phone stay with the one that took the entry (ruling 57).
+      expect(db.contacts).toEqual([expect.objectContaining({ accountId: whatsapp.id, email: EMAIL, phoneE164: '+525512345678' })])
       expect(notifyNewProspect).not.toHaveBeenCalled()
     },
   )
@@ -436,7 +445,8 @@ describe('applyEntry', () => {
 
     expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
     expect(db.accounts).toEqual([expect.objectContaining({ id: whatsapp.id })])
-    expect(db.contacts).toHaveLength(0)
+    // The person the first run added (ruling 57), once.
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: whatsapp.id, email: EMAIL })])
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: whatsapp.id })
     expect(notifyNewProspect).not.toHaveBeenCalled()
   })
@@ -689,7 +699,8 @@ describe('ruling 48: one account per PERSON, whatever source found them first', 
     expect(eventsOf('FIELD_CHANGE')).toHaveLength(1)
     // A touch: the person came back, at the moment they sent the form.
     expect(db.accounts[0].lastTouchAt).toEqual(entry.receivedAt)
-    expect(db.contacts).toHaveLength(1)
+    // Ruling 57: the WhatsApp person (phone, no email) now carries the landing's email — the same contact, not a second one.
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: whatsapp.id, phoneE164: PHONE, email: EMAIL })])
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: whatsapp.id })
     expect(notifyNewProspect).not.toHaveBeenCalled()
     expect(notifyReturningProspect).not.toHaveBeenCalled()
@@ -880,5 +891,61 @@ describe('ruling 49: the notice is marked only once it reached everyone', () => 
 
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), noticeSentAt: null, noticeAttempts: 0 })
     expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('noticeContent')
+  })
+})
+
+describe('ruling 57 (a): the account that takes the entry keeps the person’s email and phone', () => {
+  const PHONE = '+525512345678'
+  const contactOf = (accountId: string, contact: Record<string, unknown>) => {
+    const row = { id: `ccontact${String(db.contacts.length + 1).padStart(17, '0')}`, accountId, name: 'Ana', isPrimary: true, ...contact }
+    db.contacts.push(row)
+    return row
+  }
+
+  it('whatsapp_con_telefono_sin_correo_recibe_el_correo_en_su_mismo_contacto (Codex r2, R2-1)', async () => {
+    // The signup failed: nothing to link yet. The email must stay, or nothing finds the account by it later.
+    const whatsapp = seedAccount({
+      id: 'cacctwhats000000000000001',
+      source: 'WHATSAPP',
+      externalKey: PHONE,
+      giro: null,
+      ventasRango: null,
+      sucursales: null,
+      modulos: [],
+    })
+    const phoneOnly = contactOf(whatsapp.id, { email: null, phoneE164: PHONE })
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+
+    expect(db.contacts).toEqual([{ ...phoneOnly, email: EMAIL }])
+    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ created: false, contactAdded: true })
+  })
+
+  it('nothing is duplicated: an account that already has both keeps its contacts as they are', async () => {
+    const whatsapp = seedAccount({ id: 'cacctwhats000000000000002', source: 'WHATSAPP', externalKey: PHONE })
+    contactOf(whatsapp.id, { email: null, phoneE164: PHONE })
+    contactOf(whatsapp.id, { email: EMAIL, phoneE164: null, isPrimary: false })
+    const before = db.contacts.map(contact => ({ ...contact }))
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+
+    expect(db.contacts).toEqual(before)
+    expect(prismaMock.crmContact.create).not.toHaveBeenCalled()
+    expect(prismaMock.crmContact.update).not.toHaveBeenCalled()
+    expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('contactAdded')
+  })
+
+  it('a person found by another way (its Organization) with neither gets a new contact with both, not the primary one', async () => {
+    const holder = seedAccount({ id: 'cacctholdr000000000000001', source: 'MANUAL', externalKey: null, organizationId: ORG })
+    contactOf(holder.id, { name: 'Socio', email: 'socio@cafe.mx', phoneE164: '+525599990000' })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false } })
+
+    await applyEntry(entry.id)
+
+    expect(db.contacts).toHaveLength(2)
+    expect(db.contacts[1]).toMatchObject({ accountId: holder.id, name: 'Ana López', email: EMAIL, phoneE164: PHONE, isPrimary: false })
   })
 })

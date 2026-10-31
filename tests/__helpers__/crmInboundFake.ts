@@ -41,6 +41,7 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmAccount.findMany,
     prismaMock.crmAccount.update,
     prismaMock.crmContact.create,
+    prismaMock.crmContact.update,
     prismaMock.crmTimelineEvent.createMany,
     prismaMock.crmTimelineEvent.findUnique,
     prismaMock.staff.findUnique,
@@ -101,10 +102,15 @@ export function installCrmInboundFake(prismaMock: any) {
       : db.accounts.find(account => Object.entries(where).every(([field, value]) => account[field] === value))
     return found ? { ...found } : null
   })
-  prismaMock.crmAccount.findUniqueOrThrow.mockImplementation(async ({ where }: Row) => {
+  // With `select.contacts`, its people too (id, email, phone), oldest first.
+  prismaMock.crmAccount.findUniqueOrThrow.mockImplementation(async ({ where, select }: Row) => {
     const row = db.accounts.find(account => account.id === where.id)
     if (!row) throw new Error('No CrmAccount found')
-    return withStage(row)
+    if (!select?.contacts) return withStage(row)
+    const contacts = db.contacts
+      .filter(contact => contact.accountId === row.id)
+      .map(contact => ({ id: contact.id, email: contact.email ?? null, phoneE164: contact.phoneE164 ?? null }))
+    return { ...withStage(row), contacts }
   })
   /**
    * The landing's lookup by person (ruling 48): accounts with a contact of that exact email or phone, newest touch first,
@@ -137,8 +143,15 @@ export function installCrmInboundFake(prismaMock: any) {
     return { ...row }
   })
   prismaMock.crmContact.create.mockImplementation(async ({ data }: Row) => {
-    db.contacts.push(data)
-    return { id: nextId('cont') }
+    const id = nextId('cont')
+    db.contacts.push({ id, ...data })
+    return { id }
+  })
+  prismaMock.crmContact.update.mockImplementation(async ({ where, data }: Row) => {
+    const row = db.contacts.find(contact => contact.id === where.id)
+    if (!row) throw new Error('Record to update not found')
+    Object.assign(row, data)
+    return { ...row }
   })
   prismaMock.crmTimelineEvent.createMany.mockImplementation(async ({ data: [event] }: Row) => {
     if (event.sourceKey && db.events.some(existing => existing.sourceKey === event.sourceKey)) return { count: 0 }

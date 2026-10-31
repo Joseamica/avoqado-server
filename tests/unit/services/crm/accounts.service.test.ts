@@ -298,7 +298,7 @@ describe('losing and winning', () => {
       where: { accountId: { in: [ACCOUNT] }, doneAt: null },
       data: { assigneeStaffId: SELLER },
     })
-    const events = prismaMock.crmTimelineEvent.createMany.mock.calls.map(
+    const events: Array<Record<string, unknown>> = prismaMock.crmTimelineEvent.createMany.mock.calls.map(
       ([args]: [{ data: Array<Record<string, unknown>> }]) => args.data[0],
     )
     expect(events.map(event => event.kind)).toEqual(['OWNER_CHANGE', 'WON'])

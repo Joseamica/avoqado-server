@@ -25,6 +25,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { submitContact } from '@/controllers/public/landing.public.controller'
 import { getInitialStage } from '@/services/crm/accounts.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
+import { linkLandingAccounts, resetSweepCursors } from '@/services/crm/sweep.service'
 import { canonicalPhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
 
@@ -34,7 +35,8 @@ const CRASH_EMAIL = `beto-${suffix}@test.mx`
 const HOLDER_EMAIL = `carla-${suffix}@test.mx`
 const WHATSAPP_EMAIL = `dani-${suffix}@test.mx`
 const LATE_EMAIL = `eva-${suffix}@test.mx`
-const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL, WHATSAPP_EMAIL, LATE_EMAIL]
+const LINK_EMAIL = `fer-${suffix}@test.mx`
+const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL, WHATSAPP_EMAIL, LATE_EMAIL, LINK_EMAIL]
 /** Accounts this file creates under another source (not found by `source: LANDING`). */
 const otherAccountIds: string[] = []
 
@@ -259,6 +261,47 @@ describe('landing → CRM against Postgres', () => {
     expect(await prisma.crmTimelineEvent.findUniqueOrThrow({ where: { sourceKey: `entry:${entries[0].id}` } })).toMatchObject({
       accountId: whatsapp.id,
     })
+  })
+
+  it('whatsapp_alta_fallida_y_negocio_despues_el_barrido_la_liga (ruling 57, Codex r2 R2-1)', async () => {
+    // WhatsApp met the person first: phone, no email.
+    const phone = canonicalPhoneE164(phoneOf(LINK_EMAIL))
+    const whatsapp = await prisma.crmAccount.create({
+      data: {
+        name: `WhatsApp ${suffix} 2`,
+        source: 'WHATSAPP',
+        externalKey: phone,
+        stageId: (await getInitialStage()).id,
+        contacts: { create: [{ name: 'Fer', phoneE164: phone, isPrimary: true }] },
+      },
+    })
+    otherAccountIds.push(whatsapp.id)
+
+    // The landing, same phone and a new email; the signup FAILS, so there is nothing to link yet.
+    const entry = await saveLandingEntry(form(LINK_EMAIL))
+    expect(entry).not.toBeNull()
+    await recordSignupOutcome(entry!.entryId, null)
+    await applyEntry(entry!.entryId)
+
+    expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: LINK_EMAIL } })).toBe(0)
+    // The email stays with the person — on the same contact, not a second one.
+    expect(await prisma.crmContact.findMany({ where: { accountId: whatsapp.id }, take: 5 })).toEqual([
+      expect.objectContaining({ phoneE164: phone, email: LINK_EMAIL }),
+    ])
+
+    // Days later the person opens their business through the dashboard.
+    const { organization } = await ownerOfAnOrganization(LINK_EMAIL)
+
+    // The sweep's late link starts from the applied entry, whatever the account's source. It walks pages of 200 over the
+    // shared database: a few passes reach this account wherever it sits.
+    resetSweepCursors()
+    for (let pass = 0; pass < 10; pass++) {
+      await linkLandingAccounts()
+      if ((await prisma.crmAccount.findUniqueOrThrow({ where: { id: whatsapp.id } })).organizationId) break
+    }
+
+    expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: whatsapp.id } })).toMatchObject({ organizationId: organization.id })
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId: whatsapp.id, kind: 'LINKED' } })).toBe(1)
   })
 
   it('una_entrada_vieja_reparada_tarde_no_pisa_la_mas_nueva ni mueve el toque a «ahora» (ruling 50)', async () => {

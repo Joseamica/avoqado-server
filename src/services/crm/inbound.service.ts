@@ -25,6 +25,8 @@ const MAX_TEXT = 500
 const MAX_LIST = 20
 // ponytail: the accounts that already have this person; past 20 (never seen) the newest-touched 20 are ranked.
 const PERSON_CANDIDATES = 20
+// ponytail: the people of an account read when an entry or a signup lands on it; the ficha shows the same 50.
+const ACCOUNT_CONTACTS = 50
 /** Long enough for any signup to finish: an entry younger than this without an outcome waits for the sweep. */
 const SIGNUP_GRACE_MS = 5 * 60_000
 /** Control characters and lone UTF-16 surrogates: PostgreSQL refuses `\u0000` and broken text in JSONB. */
@@ -377,7 +379,7 @@ export function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }
  * depends on the run. An account linked to ANOTHER Organization than the one this person just got is somebody else's
  * business — a shared phone — and never takes the entry.
  */
-async function accountOfPerson(
+export async function accountOfPerson(
   tx: Prisma.TransactionClient,
   email: string,
   phoneE164: string | null,
@@ -403,6 +405,54 @@ async function accountOfPerson(
     .filter(account => !organizationId || !account.organizationId || account.organizationId === organizationId)
     .sort((a, b) => rank(b) - rank(a))
   return best ? { id: best.id, organizationId: best.organizationId } : null
+}
+
+/** An account's people, as `addPersonTx` needs them. */
+export const PERSON_CONTACTS = {
+  select: { id: true, email: true, phoneE164: true },
+  orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  take: ACCOUNT_CONTACTS,
+} satisfies Prisma.CrmAccount$contactsArgs
+
+type PersonContact = { id: string; email: string | null; phoneE164: string | null }
+type Person = { name: string; email: string | null; phoneE164: string | null }
+
+/** Whether the account still lacks this person's email or phone (ruling 57). */
+export const lacksPerson = (contacts: PersonContact[], person: Person) =>
+  (!!person.email && !contacts.some(contact => contact.email === person.email)) ||
+  (!!person.phoneE164 && !contacts.some(contact => contact.phoneE164 === person.phoneE164))
+
+/**
+ * Ruling 57: the account that takes someone's entry — or signup — keeps their email and phone, or nothing would find it
+ * by them later (the sweep's late link reads the entry; a seller searches by email). Never a second contact with the same
+ * email or phone: the contact that already has one of them and lacks the other gets it (WhatsApp's phone-only person
+ * gets the landing's email); otherwise a new contact, primary only on an account that had none. The caller holds the
+ * account's row lock. True when it wrote.
+ */
+export async function addPersonTx(tx: Prisma.TransactionClient, accountId: string, contacts: PersonContact[], person: Person) {
+  const missingEmail = !!person.email && !contacts.some(contact => contact.email === person.email)
+  const missingPhone = !!person.phoneE164 && !contacts.some(contact => contact.phoneE164 === person.phoneE164)
+  if (!missingEmail && !missingPhone) return false
+  const half = contacts.find(contact =>
+    missingEmail
+      ? !missingPhone && contact.phoneE164 === person.phoneE164 && !contact.email
+      : contact.email === person.email && !contact.phoneE164,
+  )
+  if (half) {
+    await tx.crmContact.update({ where: { id: half.id }, data: missingEmail ? { email: person.email } : { phoneE164: person.phoneE164 } })
+  } else {
+    await tx.crmContact.create({
+      data: {
+        accountId,
+        name: person.name,
+        email: missingEmail ? person.email : null,
+        phoneE164: missingPhone ? person.phoneE164 : null,
+        isPrimary: contacts.length === 0,
+      },
+      select: { id: true },
+    })
+  }
+  return true
 }
 
 async function applyTx(
@@ -505,8 +555,11 @@ async function applyTx(
       organizationId: true,
       archivedAt: true,
       stage: { select: { kind: true } },
+      contacts: PERSON_CONTACTS,
     },
   })
+  // Ruling 57: the account keeps this person's email and phone (an account of another source may lack them).
+  const addsPerson = lacksPerson(state.contacts, form.contact)
   // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24).
   const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
   // Ruling 50: the qualification is the NEWEST form's. An older one the sweep repaired late keeps its story in the
@@ -528,9 +581,11 @@ async function applyTx(
     created,
     ...(reactivate ? { reactivated: true } : {}),
     ...(!customer && carries && !newer ? { qualificationSkipped: true } : {}),
+    ...(addsPerson ? { contactAdded: true } : {}),
     ...(content ? { noticeContent: { ...content } } : {}),
   })
   if (repeated) return repeated
+  if (addsPerson) await addPersonTx(tx, accountId, state.contacts, form.contact)
 
   // Coming back through the landing is a touch: «Estancado» restarts — from when the form was SENT, never earlier than
   // the touch it already has (ruling 50). Archived, it is back in the pipeline, in «Sin dueño» if nobody owns it.

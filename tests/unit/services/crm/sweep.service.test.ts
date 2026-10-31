@@ -67,6 +67,7 @@ function matches(row: Row, where: Row = {}): boolean {
       if (operator === 'in') return (operand as unknown[]).includes(value)
       if (operator === 'gt') return value !== null && value > operand
       if (operator === 'gte') return value !== null && value >= operand
+      if (operator === 'not') return operand === null ? value !== null : value !== operand
       throw new Error(`The sweep fake does not know the filter ${field}.${operator}`)
     })
   })
@@ -134,13 +135,25 @@ function installSweepWorld() {
   )
   prismaMock.crmAccount.findMany.mockImplementation(async (args: Row) => {
     if (args.where?.contacts) return byPerson!(args)
-    const { where, orderBy, take } = args
+    const {
+      where: { inboundEntries, ...where },
+      select,
+      orderBy,
+      take,
+    } = args
+    // The late link (ruling 57): accounts that took an entry matching `inboundEntries.some`, with those entries' emails.
+    const entriesOf = (account: Row, filter: Row) => db.entries.filter(entry => entry.accountId === account.id && matches(entry, filter))
     return ordered(
-      db.accounts.filter(account => matches(account, where)),
+      db.accounts.filter(account => matches(account, where) && (!inboundEntries || entriesOf(account, inboundEntries.some).length > 0)),
       orderBy,
     )
       .slice(0, take)
-      .map(account => ({ ...account }))
+      .map(account => {
+        const wanted = select?.inboundEntries
+        if (!wanted) return { ...account }
+        const entries = ordered(entriesOf(account, wanted.where), wanted.orderBy).slice(0, wanted.take)
+        return { ...account, inboundEntries: entries.map(entry => ({ externalKey: entry.externalKey })) }
+      })
   })
   prismaMock.crmAccount.updateMany.mockImplementation(async ({ where, data }: Row) => {
     const rows = db.accounts.filter(account => matches(account, where))
@@ -290,6 +303,7 @@ function pendingNoticesRead(query: Prisma.Sql) {
     'e."noticeSentAt" IS NULL AND e."appliedAt" IS NOT NULL',
     'e."noticeAttempts" <',
     `e."receivedAt" >= (`,
+    `e."receivedAt" + e."noticeAttempts" * INTERVAL '1 hour' < (`,
     "AT TIME ZONE 'UTC')",
     `t."kind" = 'ENTRY_APPLIED'`,
     `COALESCE(t."data"->>'signup', '') <> 'CUSTOMER'`,
@@ -297,12 +311,18 @@ function pendingNoticesRead(query: Prisma.Sql) {
     'ORDER BY e."receivedAt" ASC, e."id" ASC',
     'LIMIT',
   ])
-  const [maxAttempts, since] = query.values as [number, Date]
+  const [maxAttempts, since, now] = query.values as [number, Date, Date]
   const limit = query.values.at(-1) as number
+  const HOUR_MS = 60 * 60_000
+  const spaced = (entry: Row) => entry.receivedAt.getTime() + (entry.noticeAttempts ?? 0) * HOUR_MS < now.getTime()
   return ordered(
     db.entries.filter(
       entry =>
-        (entry.noticeSentAt ?? null) === null && entry.appliedAt && (entry.noticeAttempts ?? 0) < maxAttempts && entry.receivedAt >= since,
+        (entry.noticeSentAt ?? null) === null &&
+        entry.appliedAt &&
+        (entry.noticeAttempts ?? 0) < maxAttempts &&
+        entry.receivedAt >= since &&
+        spaced(entry),
     ),
     [{ receivedAt: 'asc' }, { id: 'asc' }],
   )
@@ -367,6 +387,20 @@ function seedAccount(over: Row = {}) {
     ...over,
   }
   db.accounts.push(account)
+  return account
+}
+
+/** A landing account with the applied entry that made it, as the landing leaves it: the late link starts from the entry. */
+function seedLandingAccount(over: Row = {}) {
+  const account = seedAccount(over)
+  seedEntry({
+    externalKey: account.externalKey,
+    payload: { ...FORM, email: account.externalKey },
+    signupOutcome: null,
+    accountId: account.id,
+    appliedAt: account.createdAt,
+    lastError: null,
+  })
   return account
 }
 
@@ -475,8 +509,22 @@ describe('applyPending', () => {
       }),
     ])
     expect(db.contacts).toEqual([
-      { accountId: db.accounts[0].id, name: 'Ana López', phoneE164: '+525512345678', email: EMAIL, isPrimary: true },
-      { accountId: db.accounts[1].id, name: 'Beto López', phoneE164: '+525512345678', email: 'beto@taller.mx', isPrimary: true },
+      {
+        id: expect.any(String),
+        accountId: db.accounts[0].id,
+        name: 'Ana López',
+        phoneE164: '+525512345678',
+        email: EMAIL,
+        isPrimary: true,
+      },
+      {
+        id: expect.any(String),
+        accountId: db.accounts[1].id,
+        name: 'Beto López',
+        phoneE164: '+525512345678',
+        email: 'beto@taller.mx',
+        isPrimary: true,
+      },
     ])
     expect(db.entries.map(entry => entry.appliedAt)).toEqual([expect.any(Date), expect.any(Date), expect.any(Date)])
     expect(db.entries.map(entry => entry.lastError)).toEqual([null, null, null])
@@ -510,7 +558,7 @@ describe('linkLandingAccounts', () => {
   it('liga_cuando_aparece_el_dueno_por_otro_camino', async () => {
     // The signup failed, so the landing account stayed without Organization. Days later the person signs up through the
     // dashboard: they own one now.
-    const account = seedAccount()
+    const account = seedLandingAccount()
     seedOrganization()
     seedStaff(EMAIL, {}, ORG)
 
@@ -530,7 +578,7 @@ describe('linkLandingAccounts', () => {
   })
 
   it('ligar_no_repite_evento', async () => {
-    const account = seedAccount()
+    const account = seedLandingAccount()
     seedOrganization()
     seedStaff(EMAIL, {}, ORG)
 
@@ -552,7 +600,7 @@ describe('linkLandingAccounts', () => {
     expect(eventsOf('LINKED')).toHaveLength(1)
 
     // Linked by someone else between the page and the lock (an entry, «Ganar»): the lock sees it and leaves it alone.
-    const raced = seedAccount({ externalKey: 'beto@taller.mx' })
+    const raced = seedLandingAccount({ externalKey: 'beto@taller.mx' })
     seedOrganization({ id: OTHER_ORG, name: 'Taller Beto' })
     seedStaff('beto@taller.mx', {}, OTHER_ORG)
     prismaMock.$queryRaw.mockResolvedValueOnce([{ id: raced.id, organizationId: cuid('orgwon', 1) }])
@@ -564,7 +612,7 @@ describe('linkLandingAccounts', () => {
   it('org_ya_ligada_no_se_roba', async () => {
     // A seller already won that Organization from a WhatsApp account; the person's old landing account stays as it is.
     const holder = seedAccount({ source: 'WHATSAPP', externalKey: '+525512345678', organizationId: ORG })
-    const landing = seedAccount()
+    const landing = seedLandingAccount()
     seedOrganization()
     seedStaff(EMAIL, {}, ORG)
 
@@ -583,13 +631,13 @@ describe('linkLandingAccounts', () => {
     prismaMock.crmTeam.findUnique.mockResolvedValue({ organizationId: TEAM_ORG })
     seedOrganization({ id: TEAM_ORG, name: 'Avoqado · Equipo de ventas' })
     seedOrganization()
-    seedAccount({ externalKey: 'vendedor@avoqado.io' })
+    seedLandingAccount({ externalKey: 'vendedor@avoqado.io' })
     seedStaff('vendedor@avoqado.io', {}, TEAM_ORG)
-    seedAccount({ externalKey: 'empleada@cafe.mx' })
+    seedLandingAccount({ externalKey: 'empleada@cafe.mx' })
     seedStaff('empleada@cafe.mx', {
       memberships: [{ organizationId: ORG, role: 'MEMBER', isActive: true, isPrimary: true, joinedAt: new Date() }],
     })
-    seedAccount({ externalKey: 'baja@cafe.mx' })
+    seedLandingAccount({ externalKey: 'baja@cafe.mx' })
     seedStaff('baja@cafe.mx', { active: false }, ORG)
 
     await expect(linkLandingAccounts()).resolves.toBe(0)
@@ -601,8 +649,8 @@ describe('linkLandingAccounts', () => {
   it('an account that fails to link never stops the next one', async () => {
     seedOrganization()
     seedOrganization({ id: OTHER_ORG, name: 'Taller Beto' })
-    const first = seedAccount({ createdAt: new Date(Date.now() - 2 * DAY) })
-    const second = seedAccount({ externalKey: 'beto@taller.mx', createdAt: new Date(Date.now() - DAY) })
+    const first = seedLandingAccount({ createdAt: new Date(Date.now() - 2 * DAY) })
+    const second = seedLandingAccount({ externalKey: 'beto@taller.mx', createdAt: new Date(Date.now() - DAY) })
     seedStaff(EMAIL, {}, ORG)
     seedStaff('beto@taller.mx', {}, OTHER_ORG)
     prismaMock.$transaction.mockImplementationOnce(async () => {
@@ -618,7 +666,7 @@ describe('linkLandingAccounts', () => {
 
   it('an Organization another account holds is skipped before any transaction, and warned about once per process (M-1)', async () => {
     const holder = seedAccount({ source: 'WHATSAPP', externalKey: '+525512345678', organizationId: ORG })
-    const landing = seedAccount()
+    const landing = seedLandingAccount()
     seedOrganization()
     seedStaff(EMAIL, {}, ORG)
     const warningsFor = (accountId: string) =>
@@ -639,8 +687,31 @@ describe('linkLandingAccounts', () => {
     expect(warningsFor(landing.id)).toHaveLength(2)
   })
 
+  it('liga_la_ficha_de_whatsapp_que_tomo_una_entrada_de_la_landing (ruling 57 b, Codex r2 R2-1)', async () => {
+    // The landing reused the WhatsApp account (phone, no email) and the signup failed. Days later the person opens their
+    // business through the dashboard.
+    const whatsapp = seedAccount({ source: 'WHATSAPP', externalKey: '+525512345678', createdAt: new Date(Date.now() - 5 * DAY) })
+    seedEntry({ accountId: whatsapp.id, appliedAt: new Date(Date.now() - 4 * DAY), lastError: null, signupOutcome: null })
+    // A WhatsApp account no landing entry ever reached is not the sweep's to link (spec §5.3: a phone is not enough).
+    const untouched = seedAccount({ source: 'WHATSAPP', externalKey: '+525599990000', createdAt: new Date(Date.now() - 6 * DAY) })
+    seedOrganization()
+    seedStaff(EMAIL, {}, ORG)
+
+    await expect(linkLandingAccounts()).resolves.toBe(1)
+
+    expect(accountOf(whatsapp.id)?.organizationId).toBe(ORG)
+    expect(accountOf(untouched.id)?.organizationId).toBeNull()
+    expect(eventsOf('LINKED')).toEqual([expect.objectContaining({ accountId: whatsapp.id, sourceKey: `link:${whatsapp.id}:${ORG}` })])
+    // Only APPLIED landing entries count: a pending one gives nothing to link from.
+    expect(prismaMock.crmAccount.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ organizationId: null, inboundEntries: { some: { source: 'LANDING', appliedAt: { not: null } } } }),
+      }),
+    )
+  })
+
   it('a re-link after its Organization was deleted leaves its own LINKED event (M-4)', async () => {
-    const account = seedAccount()
+    const account = seedLandingAccount()
     seedOrganization()
     const ana = seedStaff(EMAIL, {}, ORG)
     await linkLandingAccounts()
@@ -685,7 +756,14 @@ describe('backfillFromOnboarding', () => {
     expect(db.accounts[0]).not.toHaveProperty('ownerStaffId')
     expect(db.accounts[0]).not.toHaveProperty('giro')
     expect(db.contacts).toEqual([
-      { accountId: db.accounts[0].id, name: 'Lalo Pérez', phoneE164: '+525511112222', email: 'lalo@taqueria.mx', isPrimary: true },
+      {
+        id: expect.any(String),
+        accountId: db.accounts[0].id,
+        name: 'Lalo Pérez',
+        phoneE164: '+525511112222',
+        email: 'lalo@taqueria.mx',
+        isPrimary: true,
+      },
     ])
     expect(eventsOf('SYSTEM')).toEqual([
       expect.objectContaining({
@@ -755,6 +833,34 @@ describe('backfillFromOnboarding', () => {
     expect((notifyNewProspect as jest.Mock).mock.calls).toEqual(
       signups.filter(({ announced }) => announced).map(({ email }) => [db.accounts.find(row => row.externalKey === email)?.id]),
     )
+  })
+
+  it('backfill_reusa_la_ficha_de_la_persona (ruling 59): a signup whose person is already in the CRM by phone gets no second account', async () => {
+    // WhatsApp met them first; the signup's entry was never saved, so only the backfill sees the signup.
+    const whatsapp = seedAccount({ source: 'WHATSAPP', externalKey: '+525512345678', organizationId: null })
+    db.contacts.push({
+      id: cuid('cont', 900),
+      accountId: whatsapp.id,
+      name: 'Ana',
+      email: null,
+      phoneE164: '+525512345678',
+      isPrimary: true,
+    })
+    seedOrganization()
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 2 * 60 * MINUTE) })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+
+    expect(db.accounts).toEqual([expect.objectContaining({ id: whatsapp.id, organizationId: ORG })])
+    expect(eventsOf('LINKED')).toEqual([expect.objectContaining({ accountId: whatsapp.id, sourceKey: `link:${whatsapp.id}:${ORG}` })])
+    // The same person: the signup's email lands on the phone's contact, and nobody is told about a «new» prospect.
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: whatsapp.id, email: EMAIL, phoneE164: '+525512345678' })])
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+
+    // Linked now: the next pass skips the signup (its Organization has its account).
+    resetSweepCursors()
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+    expect(eventsOf('LINKED')).toHaveLength(1)
   })
 
   it('la_marca_de_una_persona_borrada_no_crea_nada (I-2)', async () => {
@@ -977,14 +1083,14 @@ describe('resendPendingNotices (ruling 49)', () => {
     qualificationAvailable: true,
   }
 
-  /** An entry applied by the landing whose notice did not reach everyone. */
+  /** An entry applied by the landing whose notice did not reach everyone (its first try, two hours ago). */
   function pendingNotice(over: Row = {}, applied: Row = { signup: 'NEW_SIGNUP', created: true, noticeContent: CONTENT }) {
     const account = seedAccount({ id: cuid('acctntc', db.accounts.length + 1) })
     const entry = seedEntry({
-      appliedAt: new Date(Date.now() - HOUR),
+      appliedAt: new Date(Date.now() - 2 * HOUR),
       accountId: account.id,
       lastError: null,
-      receivedAt: new Date(Date.now() - HOUR),
+      receivedAt: new Date(Date.now() - 2 * HOUR),
       noticeSentAt: null,
       noticeAttempts: 1,
       ...over,
@@ -1025,7 +1131,7 @@ describe('resendPendingNotices (ruling 49)', () => {
   })
 
   it('a failing retry counts, stops at 5 tries, and never after the 24 h of the entry (Resend’s idempotency window)', async () => {
-    pendingNotice({ noticeAttempts: 4 })
+    pendingNotice({ noticeAttempts: 4, receivedAt: new Date(Date.now() - 5 * HOUR) })
     pendingNotice({ externalKey: 'vieja@cafe.mx', receivedAt: new Date(Date.now() - 25 * HOUR), noticeAttempts: 1 })
     ;(notifyNewProspect as jest.Mock).mockResolvedValue(false)
 
@@ -1036,6 +1142,22 @@ describe('resendPendingNotices (ruling 49)', () => {
     expect(notifyNewProspect).toHaveBeenCalledTimes(1)
     const [read] = rawReads('CrmInboundEntry')
     expect(read.values[0]).toBe(5)
+  })
+
+  it('reintentos_espaciados (ruling 59): one more hour of wait per try already made, within the 24 h', async () => {
+    // Tried once, 30 minutes ago: waits until an hour after the entry. Tried three times, entry 2.5 h old: waits until 3 h.
+    pendingNotice({ receivedAt: new Date(Date.now() - 30 * MINUTE), noticeAttempts: 1 })
+    pendingNotice({ externalKey: 'tres@cafe.mx', receivedAt: new Date(Date.now() - 150 * MINUTE), noticeAttempts: 3 })
+    // A notice that never got its first try (the process died after applying it) goes at once.
+    const fresh = pendingNotice({ externalKey: 'cero@cafe.mx', receivedAt: new Date(Date.now() - MINUTE), noticeAttempts: 0 })
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(true)
+
+    await expect(resendPendingNotices()).resolves.toBe(1)
+    expect(notifyNewProspect).toHaveBeenCalledWith(fresh.account.id, CONTENT)
+
+    // The spacing is in the database: the entry's age against its tries, with «now» through utcTs.
+    const [read] = rawReads('CrmInboundEntry')
+    expect(read.sql).toContain(`e."receivedAt" + e."noticeAttempts" * INTERVAL '1 hour' < (? AT TIME ZONE 'UTC')`)
   })
 
   it('an entry with nothing to announce is never retried: a customer, or a return that brought nothing back', async () => {
@@ -1083,12 +1205,12 @@ describe('todo_con_tope_de_lote', () => {
       pass: 'linkLandingAccounts',
       seed: () =>
         three.forEach(({ email, organizationId, createdAt }) => {
-          seedAccount({ externalKey: email, createdAt })
+          seedLandingAccount({ externalKey: email, createdAt })
           seedOrganization({ id: organizationId })
           seedStaff(email, {}, organizationId)
         }),
       run: linkLandingAccounts,
-      limit: () => lastTake(prismaMock.crmAccount.findMany, args => args.where.source === 'LANDING'),
+      limit: () => lastTake(prismaMock.crmAccount.findMany, args => !!args.where.inboundEntries),
       done: () => db.accounts.filter(account => account.organizationId).length,
     },
     {
@@ -1135,9 +1257,9 @@ describe('todo_con_tope_de_lote', () => {
       pass: 'linkLandingAccounts',
       // The two oldest landing accounts belong to people who own nothing — the ones that never link.
       seed: () => {
-        seedAccount({ externalKey: 'nada1@cafe.mx', createdAt: new Date(Date.now() - 9 * DAY) })
-        seedAccount({ externalKey: 'nada2@cafe.mx', createdAt: new Date(Date.now() - 8 * DAY) })
-        seedAccount({ createdAt: new Date(Date.now() - DAY) })
+        seedLandingAccount({ externalKey: 'nada1@cafe.mx', createdAt: new Date(Date.now() - 9 * DAY) })
+        seedLandingAccount({ externalKey: 'nada2@cafe.mx', createdAt: new Date(Date.now() - 8 * DAY) })
+        seedLandingAccount({ createdAt: new Date(Date.now() - DAY) })
         seedOrganization()
         seedStaff(EMAIL, {}, ORG)
       },
@@ -1187,7 +1309,7 @@ describe('todo_con_tope_de_lote', () => {
 describe('runSweep', () => {
   it('a pass that fails never stops the others', async () => {
     // An account to link and an account with a charge; the read of pending entries fails.
-    const landing = seedAccount()
+    const landing = seedLandingAccount()
     seedOrganization()
     seedStaff(EMAIL, {}, ORG)
     const charged = seedAccount({ source: 'MANUAL', externalKey: null, organizationId: OTHER_ORG })

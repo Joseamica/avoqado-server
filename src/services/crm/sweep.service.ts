@@ -5,11 +5,14 @@
  * 1. `applyPending` — every entry not applied yet (a crash, an error, a signup still running), oldest first, through the
  *    same `applyEntry` the landing calls: every field of the form, one account and one set of events per entry.
  *    `resendPendingNotices` — the notice of an applied entry that did not reach everyone (ruling 49), again with the
- *    same keys and content, up to 5 tries within the entry's 24 h.
- * 2. `linkLandingAccounts` — a landing account still without an Organization is linked as soon as its email owns one,
- *    whatever path made the person an owner: the landing, the dashboard signup, an invitation. One LINKED event, no note.
+ *    same keys and content, up to 5 tries within the entry's 24 h, an hour more apart each time (ruling 59).
+ * 2. `linkLandingAccounts` — an account that took a landing entry and is still without an Organization — whatever its
+ *    source: the landing may have reused a WhatsApp or HubSpot account (rulings 48 and 57) — is linked as soon as the
+ *    entry's email owns one, whatever path made the person an owner: the landing, the dashboard signup, an invitation.
+ *    One LINKED event, no note.
  * 3. `backfillFromOnboarding` — every landing signup (`LANDING_SIGNUP_CREATED`) without its CRM account gets one, without
- *    the form's qualification, which old signups never kept.
+ *    the form's qualification, which old signups never kept — or, when the person is already in the CRM by email or
+ *    phone, that account (ruling 59).
  * 4. `fillFirstMoney` — the date a linked account's Organization first got paid for real: the oldest charge of any of its
  *    venues. Set once; commissions (another project) read it.
  *
@@ -30,11 +33,14 @@ import { utcTs } from '../../utils/sqlDates'
 import { getInitialStage } from './accounts.service'
 import { notifyNewProspect } from './digest.service'
 import {
+  accountOfPerson,
+  addPersonTx,
   announceEntry,
   applyEntry,
   LANDING,
   linkTx,
   OWNED_ORGANIZATION,
+  PERSON_CONTACTS,
   repeatOf,
   sourceDetailOf,
   teamOrganizationId,
@@ -54,6 +60,11 @@ const ANNOUNCE_WITHIN_MS = DAY_MS
 const NOTICE_MAX_ATTEMPTS = 5
 /** …and only within the entry's first 24 h: Resend's idempotency window, after which a key no longer stops a repeat. */
 const NOTICE_WINDOW_MS = DAY_MS
+// ponytail: the newest landing emails of one account the late link tries; an account reused by more people than this is
+// left to «Ganar».
+const LINK_EMAILS_PER_ACCOUNT = 5
+/** What the late link starts from (ruling 57): a landing entry that was applied to an account. */
+const APPLIED_LANDING = { source: LANDING, appliedAt: { not: null } } satisfies Prisma.CrmInboundEntryWhereInput
 
 /**
  * Real money (spec §8, Codex plan r1 #1): a charge processed in a real venue. A plan on trial or courtesy charges
@@ -132,11 +143,16 @@ export async function applyPending(limit = BATCH): Promise<number> {
  * fixed, so a person who already got it gets nothing new. Up to 5 tries, and only within the entry's 24 h; returns how
  * many it retried. `announceEntry` never throws and writes down how each one went.
  *
+ * Spaced (ruling 59): an entry is retried only once `receivedAt + tries × 1 h` has passed — an entry that never got its
+ * first try goes at once, then one hour after the entry, two, three, four — so a Resend outage of minutes does not burn
+ * the five tries in one go.
+ *
  * The (noticeSentAt, receivedAt) index bounds the read to the last day's pending entries, and the join is one lookup
  * per entry on the event's unique `sourceKey`.
  */
 export async function resendPendingNotices(limit = BATCH): Promise<number> {
-  const since = new Date(Date.now() - NOTICE_WINDOW_MS)
+  const now = new Date()
+  const since = new Date(now.getTime() - NOTICE_WINDOW_MS)
   const pending = await entryRead('crm-sweep.resendPendingNotices', () =>
     prisma.$queryRaw<Array<{ id: string; accountId: string; data: Prisma.JsonValue }>>(Prisma.sql`
       SELECT e."id", t."accountId", t."data"
@@ -144,6 +160,7 @@ export async function resendPendingNotices(limit = BATCH): Promise<number> {
       JOIN "CrmTimelineEvent" t ON t."sourceKey" = 'entry:' || e."id"
       WHERE e."noticeSentAt" IS NULL AND e."appliedAt" IS NOT NULL AND e."noticeAttempts" < ${NOTICE_MAX_ATTEMPTS}
         AND e."receivedAt" >= ${utcTs(since)}
+        AND e."receivedAt" + e."noticeAttempts" * INTERVAL '1 hour' < ${utcTs(now)}
         AND t."kind" = 'ENTRY_APPLIED'
         AND COALESCE(t."data"->>'signup', '') <> 'CUSTOMER'
         AND ((t."data"->>'created') = 'true' OR (t."data"->>'reactivated') = 'true')
@@ -157,25 +174,37 @@ export async function resendPendingNotices(limit = BATCH): Promise<number> {
 // ── 2. Linking ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Links landing accounts still without an Organization to the one their email owns now, by the same rule as the entry
- * (`OWNED_ORGANIZATION`, the login's exact email), never the sales team's own; returns how many it linked. A page per
- * pass: the cursor walks every unlinked account, so the ones that will never link (their person owns nothing) never
- * keep a newer one waiting.
+ * Links the accounts that took a landing entry and are still without an Organization — LANDING ones, or one of another
+ * source the landing reused (rulings 48 and 57) — to the one the entry's email owns now, by the same rule as the entry
+ * (`OWNED_ORGANIZATION`, the login's exact email), never the sales team's own nor one another account holds; returns how
+ * many it linked. The emails are the account's newest applied entries'; the first that owns an Organization wins. A
+ * page per pass: the cursor walks every such account, so the ones that will never link (their person owns nothing) never
+ * keep a newer one waiting. An account no landing entry reached (WhatsApp, HubSpot, by hand) is never linked here: a
+ * phone is not enough to name a business (spec §5.3); «Ganar» links it.
  */
 export async function linkLandingAccounts(limit = BATCH): Promise<number> {
   const size = batchOf(limit)
   const from = cursors.link
   const accounts = await entryRead('crm-sweep.linkLandingAccounts', () =>
     prisma.crmAccount.findMany({
-      where: { source: LANDING, organizationId: null, ...(from ? after(from) : {}) },
-      select: { id: true, externalKey: true, createdAt: true },
+      where: { organizationId: null, inboundEntries: { some: APPLIED_LANDING }, ...(from ? after(from) : {}) },
+      select: {
+        id: true,
+        createdAt: true,
+        inboundEntries: {
+          where: APPLIED_LANDING,
+          select: { externalKey: true },
+          orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
+          take: LINK_EMAILS_PER_ACCOUNT,
+        },
+      },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: size,
     }),
   )
   // A full page: the next pass goes on after it. A short one reached the end: the next pass starts over.
   cursors.link = accounts.length === size ? cursorOf(accounts[accounts.length - 1]) : null
-  const emails = [...new Set(accounts.flatMap(account => (account.externalKey ? [account.externalKey] : [])))]
+  const emails = [...new Set(accounts.flatMap(account => account.inboundEntries.map(entry => entry.externalKey).filter(Boolean)))]
   if (!emails.length) return 0
 
   // Who owns what, for the whole page in one read.
@@ -207,7 +236,7 @@ export async function linkLandingAccounts(limit = BATCH): Promise<number> {
 
   let linked = 0
   for (const account of accounts) {
-    const organizationId = account.externalKey ? owned.get(account.externalKey) : undefined
+    const organizationId = account.inboundEntries.map(entry => owned.get(entry.externalKey)).find(Boolean)
     if (!organizationId) continue
     const holder = heldBy.get(organizationId)
     if (holder) {
@@ -333,8 +362,26 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
     const phone = signup.phone || organization.phone
     const age = startedAt - signup.createdAt.getTime()
     const archived = age > ARCHIVE_AFTER_MS
+    const person = {
+      name: [signup.firstName, signup.lastName].filter(Boolean).join(' ') || organization.name,
+      email,
+      phoneE164: phone ? canonicalPhoneE164(phone) : null,
+    }
     try {
       const accountId = await prisma.$transaction(async tx => {
+        // Ruling 59, the family of ruling 48: a person the CRM already has by email or phone (WhatsApp, HubSpot, by hand)
+        // keeps that ONE account — linked to this Organization, with this email and phone — and nothing is announced.
+        const known = await accountOfPerson(tx, email, person.phoneE164, organization.id)
+        if (known) {
+          await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${known.id} FOR UPDATE`
+          const current = await tx.crmAccount.findUniqueOrThrow({
+            where: { id: known.id },
+            select: { organizationId: true, contacts: PERSON_CONTACTS },
+          })
+          await addPersonTx(tx, known.id, current.contacts, person)
+          if (!current.organizationId) await linkTx(tx, known.id, organization.id)
+          return null
+        }
         const upserted = await upsertAccountBySource(tx, {
           source: LANDING,
           externalKey: email,
@@ -346,12 +393,7 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
             sourceDetail: sourceDetailOf(data),
             ...(archived ? { archivedAt: new Date(startedAt) } : {}),
           },
-          contact: {
-            name: [signup.firstName, signup.lastName].filter(Boolean).join(' ') || organization.name,
-            phoneE164: phone ? canonicalPhoneE164(phone) : null,
-            email,
-            isPrimary: true,
-          },
+          contact: { ...person, isPrimary: true },
         })
         // Its landing account already existed (linked somewhere else, or waiting for the link pass).
         if (!upserted.created) return null
