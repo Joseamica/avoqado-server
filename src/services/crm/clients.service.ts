@@ -5,8 +5,8 @@
  * pays a plan, or one a seller linked when winning it. «Real money» and «real venue» are the sweep's own `MONEY` and
  * `REAL_VENUE`, so «cliente» and «primer dinero» say the same thing: a demo's sample sales never make anyone a client.
  *
- * The list reads no client's live data (spec §5.12); the ficha reads it for ONE account, when it is opened. Nothing is
- * copied into the CRM.
+ * The list reads no client's live data (spec §5.12); the ficha reads it for ONE account — or, for a client without a CRM
+ * account, ONE Organization (ruling 47) — when it is opened. Nothing is copied into the CRM.
  */
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
@@ -14,12 +14,13 @@ import { NotFoundError } from '../../errors/AppError'
 import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
+import { utcTs } from '../../utils/sqlDates'
 import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import { teamOrganizationId } from './inbound.service'
-import { MONEY, REAL_VENUE } from './sweep.service'
+import { MONEY, REAL_VENUE, REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './sweep.service'
 
 const DEFAULT_PAGE = 50
 const MAX_PAGE = 100
@@ -31,40 +32,53 @@ const PLANS_AT_ONCE = 4
 /** The steps of the signup, the same count as `getOnboardingCompletionPercentage`. */
 const ONBOARDING_STEPS = 8
 
-/** A paid plan in force: the classic row without a trial end, as `endDate` means in the schema. */
-const PAID_PLAN_ROW = {
-  feature: { code: { in: [...PAID_PLAN_TIER_CODES] } },
-  active: true,
-  suspendedAt: null,
-  endDate: null,
-} satisfies Prisma.VenueFeatureWhereInput
+/**
+ * Ruling 35: who is a client — over an Organization aliased `o`, in ONE bounded query over the tables `getPlanState`
+ * reads, never `getPlanState` per row: a REAL venue that charged real money, holds a paid plan in force (the classic row
+ * without a trial end, as `endDate` means in the schema) or a commercial contract in force (the same rule as
+ * `planContractOrigin`); or a CRM account a seller won. Never the sales team's own organization (ruling 14).
+ *
+ * Raw SQL with correlated EXISTS (ruling 51): as Prisma relation filters inside this OR, «charged real money» became a
+ * hashed subplan over every completed payment of the platform, on every page and every total. Each EXISTS here stops at
+ * the first row, on `Payment(venueId, status, createdAt)`, `VenueFeature(venueId)` and `HybridContract(venueId, …)`.
+ */
+function clientSql(teamOrgId: string | null, now: Date): Prisma.Sql {
+  return Prisma.sql`${teamOrgId ? Prisma.sql`o."id" <> ${teamOrgId} AND ` : Prisma.empty}(
+    EXISTS (
+      SELECT 1 FROM "Venue" v
+      WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL}
+        AND (
+          ${VENUE_HAS_MONEY_SQL}
+          OR EXISTS (
+            SELECT 1 FROM "VenueFeature" vf JOIN "Feature" f ON f."id" = vf."featureId"
+            WHERE vf."venueId" = v."id" AND f."code" IN (${Prisma.join(PAID_PLAN_TIER_CODES)})
+              AND vf."active" = true AND vf."suspendedAt" IS NULL AND vf."endDate" IS NULL
+          )
+          OR EXISTS (
+            SELECT 1 FROM "HybridContract" hc
+            WHERE hc."venueId" = v."id" AND hc."endedAt" IS NULL AND hc."planTier" IN ('PRO', 'PREMIUM')
+              AND (hc."cancelAt" IS NULL OR hc."cancelAt" > ${utcTs(now)})
+          )
+        )
+    )
+    OR EXISTS (
+      SELECT 1 FROM "CrmAccount" ca JOIN "CrmStage" cs ON cs."id" = ca."stageId"
+      WHERE ca."organizationId" = o."id" AND cs."kind" = 'GANADA'
+    )
+  )`
+}
 
-/** A commercial contract in force, by the same rule `getPlanState` reads it (`planContractOrigin`). */
-const liveContract = (now: Date) =>
-  ({
-    endedAt: null,
-    planTier: { in: ['PRO', 'PREMIUM'] },
-    OR: [{ cancelAt: null }, { cancelAt: { gt: now } }],
-  }) satisfies Prisma.HybridContractWhereInput
+/** A typed «%» or «_» is a letter, not a wildcard: `ILIKE`'s default escape is the backslash. */
+const likeContaining = (text: string) => `%${text.replace(/[\\%_]/g, '\\$&')}%`
 
-/** Ruling 35: who is a client, in ONE bounded query over the tables `getPlanState` reads — never `getPlanState` per row. */
-function clientWhere(teamOrgId: string | null, now: Date): Prisma.OrganizationWhereInput[] {
-  return [
-    ...(teamOrgId ? [{ id: { not: teamOrgId } }] : []),
-    {
-      OR: [
-        {
-          venues: {
-            some: {
-              ...REAL_VENUE,
-              OR: [{ payments: { some: MONEY } }, { features: { some: PAID_PLAN_ROW } }, { hybridContracts: { some: liveContract(now) } }],
-            },
-          },
-        },
-        { crmAccount: { is: { stage: { kind: 'GANADA' } } } },
-      ],
-    },
-  ]
+/**
+ * The clients «Clientes» lists, as a filter over `o`: the client rule, the hidden ones out — or only them (ruling 39) —
+ * and the name search, all in the database, before the page and in the total.
+ */
+function clientsFilter(teamOrgId: string | null, now: Date, opts: { onlyHidden: boolean; q?: string }): Prisma.Sql {
+  const hidden = Prisma.sql`EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")`
+  return Prisma.sql`${clientSql(teamOrgId, now)}
+    AND ${opts.onlyHidden ? hidden : Prisma.sql`NOT ${hidden}`}${opts.q ? Prisma.sql` AND o."name" ILIKE ${likeContaining(opts.q)}` : Prisma.empty}`
 }
 
 export interface ClientFilters {
@@ -86,32 +100,28 @@ const fullName = (person: { firstName: string; lastName: string }) => `${person.
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
   const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
-  const and = clientWhere(await teamOrganizationId(), now)
-  and.push({ crmHiddenClient: filters.ocultos && access.admin ? { isNot: null } : { is: null } })
-  if (filters.q) and.push({ name: { contains: filters.q, mode: 'insensitive' } })
-  const where: Prisma.OrganizationWhereInput = { AND: and }
+  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: !!(filters.ocultos && access.admin), q: filters.q })
+  // After the cursor's row in the same (createdAt DESC, id DESC) order; an unknown cursor leaves nothing after it.
+  const after = filters.cursor
+    ? Prisma.sql` AND (o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ${filters.cursor})`
+    : Prisma.empty
 
-  const [found, total] = await Promise.all([
-    prisma.organization.findMany({
-      where,
-      select: {
-        id: true,
-        name: true,
-        createdAt: true,
-        crmAccount: { select: { id: true } },
-        _count: { select: { venues: { where: { ...REAL_VENUE, payments: { some: MONEY } } } } },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      // One more than the page says whether there is a next one.
-      take: limit + 1,
-      ...(filters.cursor ? { cursor: { id: filters.cursor }, skip: 1 } : {}),
-    }),
-    prisma.organization.count({ where }),
+  const [found, [{ total }]] = await Promise.all([
+    prisma.$queryRaw<Array<{ id: string; name: string; createdAt: Date; crmAccountId: string | null; yaCobro: boolean }>>(Prisma.sql`
+      SELECT o."id", o."name", o."createdAt",
+        (SELECT ca."id" FROM "CrmAccount" ca WHERE ca."organizationId" = o."id") AS "crmAccountId",
+        EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro"
+      FROM "Organization" o
+      WHERE ${filter}${after}
+      ORDER BY o."createdAt" DESC, o."id" DESC
+      LIMIT ${limit + 1}`),
+    // One more than the page says whether there is a next one; the total counts the same filter, without the cursor.
+    prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`SELECT COUNT(*)::int AS "total" FROM "Organization" o WHERE ${filter}`),
   ])
   const page = found.slice(0, limit)
 
   // The page's CRM accounts the caller may see, in one query through the same scope as every account list.
-  const linked = page.filter(organization => organization.crmAccount).map(organization => organization.id)
+  const linked = page.filter(organization => organization.crmAccountId).map(organization => organization.id)
   const visible = linked.length
     ? await prisma.crmAccount.findMany({
         where: { AND: [{ organizationId: { in: linked } }, scopeWhere(access, 'ver')] },
@@ -134,7 +144,7 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
         id: organization.id,
         name: organization.name,
         createdAt: organization.createdAt,
-        yaCobro: organization._count.venues > 0,
+        yaCobro: organization.yaCobro,
         cuenta: account
           ? {
               id: account.id,
@@ -142,7 +152,7 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
               stage: account.stage,
             }
           : null,
-        cuentaAjena: !!organization.crmAccount && !account,
+        cuentaAjena: !!organization.crmAccountId && !account,
       }
     }),
     nextCursor: found.length > limit ? page[page.length - 1].id : null,
@@ -187,9 +197,28 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
     select: { organizationId: true },
   })
   if (!account) throw new NotFoundError('No encontramos ese negocio', 'CRM_ACCOUNT_NOT_FOUND')
-  const { organizationId } = account
-  if (!organizationId) return { ligada: false as const }
+  if (!account.organizationId) return { ligada: false as const }
+  return liveOf(access, account.organizationId, now)
+}
 
+/**
+ * Ruling 47 — `GET /crm/clients/:organizationId/live`: the same live part, with the same locks, for an Organization that
+ * is a client by the rule of «Clientes» (not hidden, never the team's own), so a client without a CRM account — signed
+ * up by another path — is seen without creating one. Anything else is a 404.
+ *
+ * Every seller with «Ver» lists every client, with or without an account (ruling 35); what the CRM scope hides in that
+ * list — a colleague's owner and stage — is not part of the live data.
+ */
+export async function getClientLive(access: CrmAccess, organizationId: string, now = new Date()) {
+  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: false })
+  const [client] = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT o."id" FROM "Organization" o WHERE o."id" = ${organizationId} AND ${filter}`)
+  if (!client) throw new NotFoundError('Esa organización no es cliente', 'CRM_NO_ES_CLIENTE')
+  return liveOf(access, organizationId, now)
+}
+
+/** What is live in Avoqado for one Organization, read when the ficha opens (see `getLive`). */
+async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
   const [venues, sucursales, owner, onboarding, terminales, ventasMes] = await Promise.all([
     prisma.venue.findMany({
       where: { organizationId },

@@ -11,7 +11,7 @@ import { Prisma, TransactionStatus, VenueStatus } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
+import { getClientLive, getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '@/services/dashboard/planState.service'
 
@@ -49,15 +49,6 @@ const access = (over: Partial<CrmAccess> = {}): CrmAccess => ({
 const MINE_OR_UNOWNED = { OR: [{ ownerStaffId: SELLER }, { ownerStaffId: null }] }
 const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } }
 const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES }, demoExpiresAt: null }
-
-const org = (over: Record<string, unknown> = {}) => ({
-  id: ORG,
-  name: 'Tacos El Güero',
-  createdAt: new Date('2026-09-01T12:00:00.000Z'),
-  crmAccount: null,
-  _count: { venues: 1 },
-  ...over,
-})
 
 const planState = (over: Partial<PlanState> = {}): PlanState => ({
   hasPlan: true,
@@ -105,90 +96,127 @@ const MODELS = [
 beforeEach(() => {
   for (const model of MODELS) for (const fn of Object.values(prismaMock[model]) as jest.Mock[]) fn.mockReset()
   jest.mocked(getPlanState).mockReset()
+  prismaMock.$queryRaw.mockReset()
   prismaMock.crmTeam.findUnique.mockResolvedValue({ organizationId: TEAM_ORG })
-  prismaMock.organization.findMany.mockResolvedValue([])
-  prismaMock.organization.count.mockResolvedValue(0)
   prismaMock.crmAccount.findMany.mockResolvedValue([])
+  clientsDb()
+})
+
+/**
+ * «Clientes» reads in raw SQL (ruling 51): the page and its total. Each test answers the page with these rows and the
+ * total with this number.
+ */
+function clientsDb(rows: Array<Record<string, unknown>> = [], total = rows.length) {
+  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (query.sql.includes('COUNT(*)') ? [{ total }] : rows))
+}
+const rawQueries = () => (prismaMock.$queryRaw.mock.calls as Array<[Prisma.Sql]>).map(([query]) => query)
+const pageQuery = (n = 0) => rawQueries().filter(query => !query.sql.includes('COUNT(*)'))[n]
+const countQuery = (n = 0) => rawQueries().filter(query => query.sql.includes('COUNT(*)'))[n]
+/** What follows `FROM "Organization" o`: the filter of the page (before its order) and of the total. */
+const filterOf = (query: Prisma.Sql) => {
+  const from = query.sql.slice(query.sql.indexOf('FROM "Organization" o')).replace(/\s+/g, ' ')
+  return (from.includes('ORDER BY') ? from.slice(0, from.indexOf('ORDER BY')) : from).trim()
+}
+
+/** A row of the page as the SQL returns it. */
+const client = (over: Record<string, unknown> = {}) => ({
+  id: ORG,
+  name: 'Tacos El Güero',
+  createdAt: new Date('2026-09-01T12:00:00.000Z'),
+  crmAccountId: null,
+  yaCobro: true,
+  ...over,
 })
 
 describe('listClients', () => {
   it('clientes_excluye_demo_y_equipo', async () => {
     await listClients(access(), {}, NOW)
 
-    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
+    const page = pageQuery()
     // The team's organization, by its CrmTeam row (ruling 14) — never its name or slug.
     expect(prismaMock.crmTeam.findUnique).toHaveBeenCalledWith({ where: { key: 'default' }, select: { organizationId: true } })
-    expect(where.AND).toContainEqual({ id: { not: TEAM_ORG } })
+    expect(page.sql).toContain('o."id" <> ?')
+    expect(page.values).toContain(TEAM_ORG)
     // Money or a paid plan only counts in a REAL venue: a TRIAL or LIVE_DEMO comes seeded with sample sales.
-    const [clientRule] = where.AND.filter((part: any) => part.OR)
-    const [byVenue, byWin] = clientRule.OR
-    expect(byVenue.venues.some).toMatchObject(REAL_VENUE)
-    expect(PRODUCTION_VENUE_STATUSES).not.toContain(VenueStatus.TRIAL)
-    expect(PRODUCTION_VENUE_STATUSES).not.toContain(VenueStatus.LIVE_DEMO)
-    const reasons = byVenue.venues.some.OR
-    expect(reasons).toContainEqual({ payments: { some: MONEY } })
+    expect(page.sql).toContain('v."status"::text IN (')
+    expect(page.sql).toContain('v."demoExpiresAt" IS NULL')
+    for (const status of PRODUCTION_VENUE_STATUSES) expect(page.values).toContain(status)
+    expect(page.values).not.toContain(VenueStatus.TRIAL)
+    expect(page.values).not.toContain(VenueStatus.LIVE_DEMO)
+    // Real money: a correlated EXISTS per venue that stops at the first charge (ruling 51), never `payments.some` inside an
+    // OR, which Postgres runs as a hashed subplan over every completed payment of the platform.
+    expect(page.sql).toContain(
+      `EXISTS (SELECT 1 FROM "Payment" p WHERE p."venueId" = v."id" AND p."status" = 'COMPLETED' AND p."amount" > 0)`,
+    )
+    expect(page.sql).not.toMatch(/IN \(\s*SELECT/i)
     // A paid plan: the classic row in force without a trial end, or a live contract — the tables getPlanState reads.
-    expect(reasons).toContainEqual({
-      features: { some: { feature: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } }, active: true, suspendedAt: null, endDate: null } },
-    })
-    expect(reasons).toContainEqual({
-      hybridContracts: {
-        some: { endedAt: null, planTier: { in: ['PRO', 'PREMIUM'] }, OR: [{ cancelAt: null }, { cancelAt: { gt: NOW } }] },
-      },
-    })
+    expect(page.sql).toMatch(/FROM "VenueFeature" vf JOIN "Feature" f ON f\."id" = vf\."featureId"/)
+    expect(page.sql).toContain('vf."active" = true AND vf."suspendedAt" IS NULL AND vf."endDate" IS NULL')
+    expect(page.values).toEqual(expect.arrayContaining(['PLAN_PRO', 'PLAN_PREMIUM']))
+    expect(page.sql).toContain(`hc."endedAt" IS NULL AND hc."planTier" IN ('PRO', 'PREMIUM')`)
+    // «Now» goes through utcTs: the column stores UTC, and a bare bind would shift with the session's zone.
+    expect(page.sql).toContain(`hc."cancelAt" IS NULL OR hc."cancelAt" > (? AT TIME ZONE 'UTC')`)
+    expect(page.values).toContainEqual(NOW)
     // Or a seller marked it «Ganado».
-    expect(byWin).toEqual({ crmAccount: { is: { stage: { kind: 'GANADA' } } } })
-    // The total counts the same thing the page lists.
-    expect(prismaMock.organization.count).toHaveBeenCalledWith({ where })
+    expect(page.sql).toContain(`cs."kind" = 'GANADA'`)
+    // The total counts the same thing the page lists, with the same binds.
+    const count = countQuery()
+    expect(filterOf(count)).toBe(filterOf(page))
+    expect(count.values).toEqual(page.values.slice(PRODUCTION_VENUE_STATUSES.length, -1))
   })
 
   it('sin_equipo_creado_no_excluye_nada_de_mas', async () => {
     prismaMock.crmTeam.findUnique.mockResolvedValue(null)
     await listClients(access(), {}, NOW)
-    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
-    expect(where.AND).not.toContainEqual(expect.objectContaining({ id: expect.anything() }))
+    expect(pageQuery().sql).not.toContain('o."id" <>')
   })
 
   it('el_servidor_pone_el_tope_y_dice_el_total_real', async () => {
-    prismaMock.organization.count.mockResolvedValue(935)
-    await listClients(access(), { limit: 10_000 }, NOW)
-    const args = prismaMock.organization.findMany.mock.calls[0][0]
+    clientsDb([], 935)
+    await expect(listClients(access(), { limit: 10_000 }, NOW)).resolves.toMatchObject({ total: 935 })
     // 100 a page whatever the client asks, plus one to know whether there is a next page.
-    expect(args.take).toBe(101)
-    expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    expect(pageQuery().values.at(-1)).toBe(101)
+    expect(pageQuery().sql).toContain('ORDER BY o."createdAt" DESC, o."id" DESC')
 
     await listClients(access(), { limit: 0 }, NOW)
-    expect(prismaMock.organization.findMany.mock.calls[1][0].take).toBe(2)
+    expect(pageQuery(1).values.at(-1)).toBe(2)
   })
 
   it('pagina_con_cursor_y_total', async () => {
-    const page = Array.from({ length: 3 }, (_, i) => org({ id: `corgclient00000000000001${i}`, name: `Negocio ${i}` }))
-    prismaMock.organization.findMany.mockResolvedValue(page)
-    prismaMock.organization.count.mockResolvedValue(7)
+    const page = Array.from({ length: 3 }, (_, i) => client({ id: `corgclient00000000000001${i}`, name: `Negocio ${i}` }))
+    clientsDb(page, 7)
 
     const first = await listClients(access(), { limit: 2 }, NOW)
     expect(first.rows.map(row => row.name)).toEqual(['Negocio 0', 'Negocio 1'])
     expect(first.nextCursor).toBe('corgclient000000000000011')
     expect(first.total).toBe(7)
+    expect(pageQuery().sql).not.toContain('(o."createdAt", o."id") <')
 
-    prismaMock.organization.findMany.mockResolvedValue(page.slice(2))
+    clientsDb(page.slice(2), 7)
     const last = await listClients(access(), { limit: 2, cursor: 'corgclient000000000000011' }, NOW)
-    expect(prismaMock.organization.findMany.mock.calls[1][0]).toMatchObject({ cursor: { id: 'corgclient000000000000011' }, skip: 1 })
+    // After the cursor's row in the same (createdAt DESC, id DESC) order.
+    expect(pageQuery(1).sql).toContain('(o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ?)')
+    expect(pageQuery(1).values).toContain('corgclient000000000000011')
     expect(last.rows).toHaveLength(1)
     expect(last.nextCursor).toBeNull()
   })
 
   it('busca_por_nombre_en_la_base', async () => {
     await listClients(access(), { q: 'güero' }, NOW)
-    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
-    expect(where.AND).toContainEqual({ name: { contains: 'güero', mode: 'insensitive' } })
+    expect(pageQuery().sql).toContain('o."name" ILIKE ?')
+    expect(pageQuery().values).toContain('%güero%')
+    expect(countQuery().values).toContain('%güero%')
+
+    // A «%» or «_» typed in the search is a letter, not a wildcard.
+    await listClients(access(), { q: '50%_off' }, NOW)
+    expect(pageQuery(1).values).toContain('%50\\%\\_off%')
   })
 
   it('propios_ve_a_todos_los_clientes_pero_no_el_dueno_de_otro', async () => {
-    prismaMock.organization.findMany.mockResolvedValue([
-      org({ id: ORG, crmAccount: { id: ACCOUNT } }),
-      org({ id: ORG_2, crmAccount: { id: ACCOUNT_B }, _count: { venues: 0 } }),
-      org({ id: ORG_3 }),
+    clientsDb([
+      client({ id: ORG, crmAccountId: ACCOUNT }),
+      client({ id: ORG_2, crmAccountId: ACCOUNT_B, yaCobro: false }),
+      client({ id: ORG_3 }),
     ])
     // Only ORG's account is in the seller's scope: ORG_2's belongs to a colleague.
     prismaMock.crmAccount.findMany.mockResolvedValue([
@@ -220,35 +248,33 @@ describe('listClients', () => {
       // A client nobody has in the CRM yet.
       expect.objectContaining({ id: ORG_3, cuenta: null, cuentaAjena: false }),
     ])
+    // «Ya cobró» is the same real-money EXISTS, per row.
+    expect(pageQuery().sql).toMatch(/AS "yaCobro"/)
   })
 })
 
 describe('organizaciones ocultas (ruling 39)', () => {
-  const HIDDEN = { crmHiddenClient: { is: null } }
-  const ONLY_HIDDEN = { crmHiddenClient: { isNot: null } }
+  const HIDDEN = 'NOT EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")'
+  const ONLY_HIDDEN = /(?<!NOT )EXISTS \(SELECT 1 FROM "CrmHiddenClient" h WHERE h\."organizationId" = o\."id"\)/
 
   it('clientes_ocultos_no_salen_ni_cuentan', async () => {
     await listClients(access(), {}, NOW)
-    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
     // In the database, before the page and in the total: Prime never takes a slot of the page.
-    expect(where.AND).toContainEqual(HIDDEN)
-    expect(prismaMock.organization.count).toHaveBeenCalledWith({ where })
+    expect(pageQuery().sql).toContain(HIDDEN)
+    expect(countQuery().sql).toContain(HIDDEN)
   })
 
   it('ocultos_con_admin_lista_solo_las_ocultas', async () => {
     await listClients(access({ admin: true }), { ocultos: true }, NOW)
-    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
-    expect(where.AND).toContainEqual(ONLY_HIDDEN)
-    expect(where.AND).not.toContainEqual(HIDDEN)
+    expect(pageQuery().sql).toMatch(ONLY_HIDDEN)
+    expect(pageQuery().sql).not.toContain(HIDDEN)
     // Still clients by the same rule, and never the team's organization.
-    expect(where.AND).toContainEqual({ id: { not: TEAM_ORG } })
+    expect(pageQuery().values).toContain(TEAM_ORG)
   })
 
   it('ocultos_sin_admin_se_ignora', async () => {
     await listClients(access(), { ocultos: true }, NOW)
-    const { where } = prismaMock.organization.findMany.mock.calls[0][0]
-    expect(where.AND).toContainEqual(HIDDEN)
-    expect(where.AND).not.toContainEqual(ONLY_HIDDEN)
+    expect(pageQuery().sql).toContain(HIDDEN)
   })
 
   it('ocultar_es_idempotente_y_queda_en_la_bitacora', async () => {
@@ -476,5 +502,55 @@ describe('getLive', () => {
     linked()
     await getLive(access({ ver: 'todos', staffId: OTHER }), ACCOUNT, NOW)
     expect(prismaMock.crmAccount.findFirst.mock.calls[0][0].where).toEqual({ AND: [{ id: ACCOUNT }, {}] })
+  })
+})
+
+describe('getClientLive (ruling 47): a client without a CRM account opens its live data by Organization', () => {
+  function liveWorld() {
+    prismaMock.venue.findMany.mockResolvedValue([
+      { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', _count: { terminals: 2 } },
+    ])
+    prismaMock.venue.count.mockResolvedValue(1)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue({
+      staff: { firstName: 'Ana', lastName: 'López', lastLoginAt: new Date('2026-10-30T15:00:00.000Z') },
+    })
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({ completedSteps: [1, 2, 3], completedAt: null })
+    prismaMock.terminal.count.mockResolvedValue(2)
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: new Prisma.Decimal('1500.50') } })
+    jest.mocked(getPlanState).mockResolvedValue(planState())
+  }
+
+  it('cliente_sin_ficha_ve_lo_vivo_con_la_misma_forma_y_candados', async () => {
+    liveWorld()
+    clientsDb([{ id: ORG }])
+
+    const seller = await getClientLive(access({ ventas: false }), ORG, NOW)
+
+    // The same shape `GET /accounts/:id/live` answers for a linked account.
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ organizationId: ORG })
+    expect(seller).toEqual(await getLive(access({ ventas: false }), ACCOUNT, NOW))
+    expect(seller).toMatchObject({ ligada: true, organizationId: ORG, ventasMes: null, ventasBloqueadas: true })
+    expect(seller.venues[0]).not.toHaveProperty('kycStatus')
+    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    // The same locks: «Ver ventas» brings the month, «Administrar» the KYC.
+    const admin = await getClientLive(access({ ventas: true, admin: true }), ORG, NOW)
+    expect(admin).toMatchObject({ ventasBloqueadas: false, venues: [expect.objectContaining({ kycStatus: 'VERIFIED' })] })
+    expect(admin.ventasMes?.toString()).toBe('1500.5')
+
+    // Asked by the client rule of «Clientes» — this Organization, not the team's, not hidden — in one raw read.
+    const [check] = rawQueries()
+    expect(check.sql).toContain('o."id" = ?')
+    expect(check.values).toContain(ORG)
+    expect(check.values).toContain(TEAM_ORG)
+    expect(check.sql).toContain('NOT EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")')
+    expect(check.sql).toContain(`EXISTS (SELECT 1 FROM "Payment" p WHERE p."venueId" = v."id"`)
+  })
+
+  it('no_es_cliente_404: not a client, hidden, the team’s own or gone — and nothing live is read', async () => {
+    clientsDb([])
+
+    await expect(getClientLive(access({ ventas: true }), ORG, NOW)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_NO_ES_CLIENTE' })
+    expect(prismaMock.venue.findMany).not.toHaveBeenCalled()
+    expect(getPlanState).not.toHaveBeenCalled()
   })
 })
