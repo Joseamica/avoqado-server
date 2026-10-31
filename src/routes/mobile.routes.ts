@@ -784,6 +784,18 @@ router.get('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermissi
 router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, checkPermission('orders:read'), orderMobileController.getOrder)
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/orders/by-external-id/:externalId/release
+ * D9: el POS cierra la llave de una «Pagar después» rechazada al reenviarse, antes de devolver la venta a «Carritos guardados».
+ * `orders:read`, como leer la cuenta: un empleado al que le quitaron `orders:create` también recupera su venta.
+ */
+router.post(
+  '/venues/:venueId/orders/by-external-id/:externalId/release',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  orderMobileController.releaseOrderKey,
+)
+
+/**
  * Aceptar o rechazar un pedido de una app de delivery, desde el punto de venta.
  *
  * 🔴 Sin esto, el modo MANUAL era una trampa: el dashboard dejaba activarlo, entraban los

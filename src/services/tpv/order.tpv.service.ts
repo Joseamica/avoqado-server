@@ -62,6 +62,7 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { rechazarLlaveDePagarDespues } from '../mobile/pagarDespuesLlave'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -381,6 +382,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
   )
 
   rechazarLlaveDeCambio(input.externalId)
+  rechazarLlaveDePagarDespues(input.externalId)
   if (input.externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: {
@@ -1003,6 +1005,7 @@ export async function createOrderWithItems(
   // no crear otra (que en free-cart significaba segunda deducción de stock).
   const externalId = input.externalId?.trim() || null
   rechazarLlaveDeCambio(externalId)
+  rechazarLlaveDePagarDespues(externalId)
   if (externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },

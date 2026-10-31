@@ -3998,6 +3998,20 @@ enum PromoterLocationSource {
   CLOCK_OUT
 }
 
+/// D9 (31-oct-2026): llave de «Pagar después» (`pay-later:<uuid>`) que el POS devolvió a «Carritos guardados» tras un rechazo del
+/// reenvío. `crearVentaDeMostradorEnTx` la rechaza (409 ORDER_KEY_RELEASED) bajo el mismo candado con que se cerró
+/// (`services/mobile/pagarDespuesLlave.ts`): una creación en vuelo ya no puede aparecer después. Sin FK a Venue a propósito: sólo
+/// guarda un hecho, y una sucursal borrada no la usa nadie.
+model OrderKeyRelease {
+  id         String   @id @default(cuid())
+  venueId    String
+  externalId String
+  staffId    String?
+  createdAt  DateTime @default(now())
+
+  @@unique([venueId, externalId])
+}
+
 model Order {
   onlineOrder    OnlineOrder?
   paymentEffects PaymentEffect[]
