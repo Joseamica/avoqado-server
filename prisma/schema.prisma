@@ -20627,7 +20627,10 @@ model CrmAccount {
   consentNoticeVersion String?
 
   // false = se creó desde un alta vieja, sin los datos del formulario (giro, ventas, sucursales).
-  qualificationAvailable Boolean @default(true)
+  qualificationAvailable Boolean   @default(true)
+  // Cuándo se recibió la entrada de la landing que fijó la calificación (ruling 50): una entrada más vieja que el barrido
+  // reparó tarde no pisa lo que dijo una más nueva. null = ninguna entrada de la landing la ha fijado.
+  qualifiedAt            DateTime?
 
   contacts       CrmContact[]
   activities     CrmActivity[]
@@ -20643,6 +20646,13 @@ model CrmAccount {
   @@index([source, organizationId])
   @@index([wonAt]) // reportes: ganados del rango
   @@index([lostAt]) // reportes: perdidos del rango
+  // 🔴 ÍNDICE PARCIAL MANTENIDO A MANO — Prisma no tiene `where:` en `@@index`, así que no se ve aquí y vive sólo en el SQL
+  // de la migración `20261031024450_crm_propio` (ruling 51):
+  //
+  //   CREATE INDEX "CrmAccount_first_money_pending_idx" ON "CrmAccount"("createdAt", "id")
+  //     WHERE "firstMoneyAt" IS NULL AND "organizationId" IS NOT NULL;
+  //
+  // Lo lee el barrido del primer dinero (`fillFirstMoney`) cada 5 minutos, con esas dos condiciones escritas como literales.
 }
 
 /// Una persona de un negocio del CRM. El teléfono y el correo AVISAN de duplicados pero no son únicos: el mismo
@@ -20737,9 +20747,16 @@ model CrmInboundEntry {
   accountId        String?
   account          CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
   lastError        String?
+  // El aviso «Nuevo prospecto» / «Volvió un prospecto» de esta entrada (ruling 49): se marca sólo cuando salió a TODOS;
+  // si no, sube el contador y el barrido lo reintenta con las mismas llaves, hasta 5 veces y dentro de las 24 h de la
+  // entrada. Una entrada que no anuncia nada (un cliente, un reingreso sin reactivar) se queda en null y el barrido la
+  // salta por su ENTRY_APPLIED.
+  noticeSentAt     DateTime?
+  noticeAttempts   Int         @default(0)
 
   @@index([appliedAt])
   @@index([accountId]) // deleting an account sets it null here: without it, every delete scans the table
+  @@index([noticeSentAt, receivedAt]) // el barrido sólo lee los avisos pendientes de las últimas 24 h
 }
 
 /// El aviso diario de cada persona: se APARTA antes de mandarlo (la llave única impide mandarlo dos veces) y guarda el

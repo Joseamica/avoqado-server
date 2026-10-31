@@ -9,6 +9,9 @@
 -- Tarea 9 (rulings 39 y 41), también antes de aplicarse: la tabla CrmHiddenClient (organizaciones internas o de pruebas que
 -- nunca salen en «Clientes», CASCADE con Organization) y los índices de los reportes: CrmAccount.wonAt, CrmAccount.lostAt y
 -- CrmActivity.doneAt.
+-- Revisión final (rulings 49, 50 y 51), también antes de aplicarse: CrmAccount.qualifiedAt, CrmInboundEntry.noticeSentAt y
+-- noticeAttempts con su índice (noticeSentAt, receivedAt), y el índice PARCIAL CrmAccount_first_money_pending_idx, que
+-- Prisma no sabe expresar (vive sólo aquí; ver el comentario del modelo CrmAccount).
 
 -- CreateTable
 CREATE TABLE "PlatformAccess" (
@@ -71,6 +74,7 @@ CREATE TABLE "CrmAccount" (
     "consentSource" TEXT,
     "consentNoticeVersion" TEXT,
     "qualificationAvailable" BOOLEAN NOT NULL DEFAULT true,
+    "qualifiedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -158,6 +162,8 @@ CREATE TABLE "CrmInboundEntry" (
     "appliedAt" TIMESTAMP(3),
     "accountId" TEXT,
     "lastError" TEXT,
+    "noticeSentAt" TIMESTAMP(3),
+    "noticeAttempts" INTEGER NOT NULL DEFAULT 0,
 
     CONSTRAINT "CrmInboundEntry_pkey" PRIMARY KEY ("id")
 );
@@ -223,6 +229,11 @@ CREATE INDEX "CrmAccount_wonAt_idx" ON "CrmAccount"("wonAt");
 -- CreateIndex
 CREATE INDEX "CrmAccount_lostAt_idx" ON "CrmAccount"("lostAt");
 
+-- Partial index, by hand (ruling 51): the first-money sweep (`fillFirstMoney`) walks, every 5 minutes, only the linked
+-- accounts still without their first money. Prisma cannot express `WHERE` on an index, so `schema.prisma` only names it
+-- in a comment; the query writes both conditions as literals, so any plan can prove the predicate.
+CREATE INDEX "CrmAccount_first_money_pending_idx" ON "CrmAccount"("createdAt", "id") WHERE "firstMoneyAt" IS NULL AND "organizationId" IS NOT NULL;
+
 -- CreateIndex
 CREATE INDEX "CrmContact_accountId_idx" ON "CrmContact"("accountId");
 
@@ -264,6 +275,9 @@ CREATE INDEX "CrmInboundEntry_appliedAt_idx" ON "CrmInboundEntry"("appliedAt");
 
 -- CreateIndex
 CREATE INDEX "CrmInboundEntry_accountId_idx" ON "CrmInboundEntry"("accountId");
+
+-- CreateIndex
+CREATE INDEX "CrmInboundEntry_noticeSentAt_receivedAt_idx" ON "CrmInboundEntry"("noticeSentAt", "receivedAt");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "CrmDigestSend_staffId_day_kind_key" ON "CrmDigestSend"("staffId", "day", "kind");
