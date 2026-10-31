@@ -304,7 +304,7 @@ async function revisarAltas(where: { venueId: { in: string[] } }, items: AltaPed
           : !f.skuGenerated && !SKU_REGEX.test(f.sku)
             ? {
                 problem: 'SKU_INVALIDO',
-                detail: 'El SKU sólo lleva letras sin acento, números, - y _.',
+                detail: 'El SKU sólo lleva letras sin acento, números, espacios, puntos, - y _.',
                 ...(sugerido ? { suggestion: sugerido } : {}),
               }
             : (vecesSku.get(f.sku) ?? 0) > 1
@@ -655,7 +655,7 @@ export function registerCatalogInBulkTools(server: McpServer, scope: McpScope) {
               .min(1, 'El SKU no puede ir vacío')
               .max(64, 'El SKU tiene a lo más 64 caracteres')
               .optional()
-              .describe('SKU: letters without accents, digits, - and _. Derived from the name if omitted'),
+              .describe('SKU: letters without accents, digits, spaces, dots, - and _. Derived from the name if omitted'),
             barcode: z
               .string()
               .trim()

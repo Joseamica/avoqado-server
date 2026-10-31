@@ -26,7 +26,7 @@
 import { Prisma } from '@prisma/client'
 import Papa from 'papaparse'
 
-import { GTIN_MAX_LENGTH, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
+import { GTIN_MAX_LENGTH, SKU_FORMAT_MESSAGE, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
 import { generateSlug } from '../../utils/slugify'
 import type { ImportMenuData } from './menu.dashboard.service'
 
@@ -228,8 +228,7 @@ export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, cont
       else if (PACK.test(type) || PACK.test(tags))
         problems.push({ code: 'PACK', detail: `Type «${type}» / Tags «${tags}»: se decidirá si se arma como combo` })
       else if (!get(row, 'sku')) problems.push({ code: 'SIN_SKU', detail: 'La variante no tiene SKU' })
-      else if (!SKU_REGEX.test(get(row, 'sku')))
-        problems.push({ code: 'SKU_FORMATO', detail: 'El SKU sólo admite letras sin acento, números, guion y guion bajo' })
+      else if (!SKU_REGEX.test(get(row, 'sku'))) problems.push({ code: 'SKU_FORMATO', detail: SKU_FORMAT_MESSAGE })
       variants.push({
         handle,
         sku: get(row, 'sku'),
