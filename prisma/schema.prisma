@@ -20681,7 +20681,8 @@ model CrmActivity {
   type            String
   title           String
   dueAt           DateTime
-  assigneeStaffId String
+  // Pending ones follow their account to its new owner; null = nobody in charge (the account was left «Sin dueño»).
+  assigneeStaffId String?
   doneAt          DateTime?
   doneById        String?
   result          String?

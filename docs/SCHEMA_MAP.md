@@ -149,12 +149,12 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CrmAccount` → `schema.prisma:L20576`
 - `CrmActivity` → `schema.prisma:L20677`
 - `CrmContact` → `schema.prisma:L20637`
-- `CrmDigestSend` → `schema.prisma:L20732`
-- `CrmInboundEntry` → `schema.prisma:L20712`
+- `CrmDigestSend` → `schema.prisma:L20733`
+- `CrmInboundEntry` → `schema.prisma:L20713`
 - `CrmLostReason` → `schema.prisma:L20667`
 - `CrmStage` → `schema.prisma:L20655`
 - `CrmTeam` → `schema.prisma:L20563`
-- `CrmTimelineEvent` → `schema.prisma:L20697`
+- `CrmTimelineEvent` → `schema.prisma:L20698`
 - `Customer` → `schema.prisma:L7903`
 - `CustomerApprovalDelivery` → `schema.prisma:L10481`
 - `CustomerApprovalOutbox` → `schema.prisma:L10456`

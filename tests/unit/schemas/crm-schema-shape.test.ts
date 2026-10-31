@@ -57,6 +57,11 @@ describe('CRM propio — forma del esquema', () => {
     expect(modelo('CrmDigestSend')?.uniqueFields).toContainEqual(['staffId', 'day', 'kind'])
   })
 
+  // Ruling 12: an account left «Sin dueño» takes its pending activities with it, to nobody.
+  it('una actividad puede quedar sin responsable', () => {
+    expect(campo('CrmActivity', 'assigneeStaffId')).toMatchObject({ isRequired: false })
+  })
+
   it('ningún campo de los modelos nuevos usa un enum de Prisma: tipos, fuentes y estados van como String', () => {
     for (const nombre of MODELOS) expect(modelo(nombre)).toBeDefined()
     const conEnum = MODELOS.flatMap(nombre => (modelo(nombre)?.fields ?? []).filter(f => f.kind === 'enum').map(f => `${nombre}.${f.name}`))

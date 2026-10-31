@@ -5,6 +5,7 @@
 -- Editada a mano antes de aplicarse en ningún lado (tarea 3, rulings 7, 10, 14 y 15 y N-2): PlatformAccess.staffId
 -- único, la tabla CrmTeam con sus llaves (RESTRICT) a Organization y Venue, y los índices de CrmInboundEntry.accountId,
 -- CrmActivity.doneById y CrmTimelineEvent.actorStaffId.
+-- Tarea 4 (ruling 12), también antes de aplicarse: CrmActivity.assigneeStaffId acepta null (actividad sin responsable).
 
 -- CreateTable
 CREATE TABLE "PlatformAccess" (
@@ -119,7 +120,7 @@ CREATE TABLE "CrmActivity" (
     "type" TEXT NOT NULL,
     "title" TEXT NOT NULL,
     "dueAt" TIMESTAMP(3) NOT NULL,
-    "assigneeStaffId" TEXT NOT NULL,
+    "assigneeStaffId" TEXT,
     "doneAt" TIMESTAMP(3),
     "doneById" TEXT,
     "result" TEXT,
