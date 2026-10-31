@@ -600,9 +600,10 @@ describe('removeTeamMember', () => {
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(tx.platformAccess.update).toHaveBeenCalledWith({ where: { id: ROW_ID }, data: { active: false, staffId: null } })
+    // The seat gives its PIN back: @@unique([venueId, pin]) counts inactive seats, so a kept PIN could never be reused.
     expect(tx.staffVenue.updateMany).toHaveBeenCalledWith({
       where: { staffId: SELLER_ID, venueId: VENUE_ID, active: true },
-      data: { active: false, endDate: expect.any(Date) },
+      data: { active: false, endDate: expect.any(Date), pin: null },
     })
     expect(tx.crmAccount.updateManyAndReturn).toHaveBeenCalledWith({
       where: { ownerStaffId: SELLER_ID, stage: { kind: 'ABIERTA' } },

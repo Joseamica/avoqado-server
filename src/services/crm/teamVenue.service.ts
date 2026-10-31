@@ -263,7 +263,11 @@ export async function removeTeamMember(actor: CrmAccess, id: string, opts: { rea
     })
     if (!memberStaffId) return 0
     const now = new Date()
-    await tx.staffVenue.updateMany({ where: { staffId: memberStaffId, venueId, active: true }, data: { active: false, endDate: now } })
+    // pin: null — the PIN goes back to the venue; a retained PIN blocks reuse via @@unique([venueId, pin]).
+    await tx.staffVenue.updateMany({
+      where: { staffId: memberStaffId, venueId, active: true },
+      data: { active: false, endDate: now, pin: null },
+    })
     // The team's organization holds only this venue, so leaving the venue is leaving the organization.
     await tx.staffOrganization.updateMany({
       where: { staffId: memberStaffId, organizationId, isActive: true },
