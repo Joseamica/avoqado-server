@@ -4,6 +4,17 @@ import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
 import { describeSaleStampForPayment } from '../../services/shared/loyaltyOnLateCustomer'
 import { customerAttributionActor, customerAttributionActorForRecordedPayment } from '../../middlewares/customerAttribution.middleware'
 
+export async function getCashPaymentByKey(req: Request, res: Response, next: NextFunction): Promise<void> {
+  res.set('Cache-Control', 'no-store')
+  try {
+    const { venueId, idempotencyKey } = req.params
+    const data = await orderMobileService.getCashPaymentByKey(venueId, idempotencyKey)
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
 /**
  * Record a fast payment (no order, just amount)
  * Used for custom amounts and quick payments from iOS app
