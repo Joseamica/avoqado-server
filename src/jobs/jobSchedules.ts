@@ -86,4 +86,8 @@ export const DATABASE_JOB_SCHEDULES = {
   // outbox de catálogo (:29) y su watchdog (:32). De los jobs de cada 5 o 10 min, en esos minutos sólo cae
   // `cfdiReconcile`, y en el segundo :00.
   crmSweep: '30 2-59/5 * * * *',
+  // CRM propio (tarea 7): el aviso diario de pendientes. Cada 15 min de 8 a 11 de lunes a viernes (CDMX); el servicio sólo
+  // trabaja de 8:30 a 11:00 — la primera vuelta manda y las demás retoman lo que quedó a medias. Segundo :33, libre entre
+  // el watchdog de catálogo (:32) y las altas a medio pago (:34, cada 10 min).
+  crmDailyDigest: '33 */15 8-11 * * 1-5',
 } as const
