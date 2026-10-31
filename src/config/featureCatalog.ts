@@ -661,6 +661,18 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         requirement: null,
         names: { es: 'Variantes de producto', en: 'Product variants', fr: 'Variantes de produit' },
       },
+      {
+        // Incluida en Pro y Premium, sin precio suelto (founder, 30-oct): su fila `Feature` lleva `monthlyPrice: 0`.
+        id: 'DEVICE_MENUS',
+        featureCode: 'DEVICE_MENUS',
+        name: 'Menú de cada aparato',
+        description: 'Elige qué menús muestra cada aparato; la búsqueda y el escáner siguen encontrando todo.',
+        category: 'sell',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: { es: 'Menú de cada aparato', en: 'Menu per device', fr: 'Menu par appareil' },
+      },
     ] as FeatureCatalogEntry[]
   ).map(entry => Object.freeze({ ...entry, names: Object.freeze(entry.names) })),
 )

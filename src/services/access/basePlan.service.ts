@@ -134,6 +134,7 @@ const LEGACY_PLAN_CODES = new Set([
   'CUSTOMER_DISPLAY_PROMOS', // Pro (founder, spec §5.8, 21-sep): promos en reposo de la pantalla del cliente; sin venta suelta ni fila Feature hasta F3.
   'GIFT_CARDS', // Pro (founder D1, 14-oct): tarjetas de regalo; suelta $249/mes con IVA. El candado sólo cubre VENDER y PRENDER.
   'PRODUCT_VARIANTS', // Pro (founder, 12-oct): variantes de producto (talla, color, presentación). Square y Clip las dan gratis; aquí se cobran en el plan.
+  'DEVICE_MENUS', // Pro (founder 30-oct): menú de cada aparato, sin precio suelto
   ...PREMIUM_ONLY_CODES,
   ...PREMIUM_ONLY_SIN_CATALOGO,
 ])
