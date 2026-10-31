@@ -2440,8 +2440,11 @@ export async function applyOrderDiscountInTransaction(
   const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
-  const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
-  const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
+  // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope
+  // de $10 descontaba $30). En el reparto sólo viaja el de un %: el recálculo re-deriva los % y conserva el importe de un fijo.
+  const topeDelCatalogo = discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
+  const tope = discount.type === 'PERCENTAGE' ? topeDelCatalogo : null
+  const amount = Math.min(rawAmount, topeDelCatalogo ?? Infinity, remainingDiscountable)
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
