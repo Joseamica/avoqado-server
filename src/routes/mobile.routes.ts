@@ -87,6 +87,7 @@ import * as switchUserMobileController from '../controllers/mobile/switch-user.m
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
+import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mobile.schema'
 import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
@@ -1902,6 +1903,16 @@ router.post(
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentMobileController.recordFastPayment,
+)
+
+/** GET exact cash evidence for recovery; absence never creates a replacement payment. */
+router.get(
+  '/venues/:venueId/payments/by-key/:idempotencyKey',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('payments:read'),
+  validateRequest(cashPaymentByKeyParamsSchema),
+  paymentMobileController.getCashPaymentByKey,
 )
 
 // BAJO-2 (full-testing, 15-oct-2026): el body se valida (un `customerId` numérico respondía 500). El schema nombra TODOS los

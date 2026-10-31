@@ -71,7 +71,7 @@ import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
-import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
+import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
 import {
   bloquearVentaParaLiga,
@@ -3553,6 +3553,87 @@ function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | num
 /** Lo que se quedó en la caja por ESE cobro: venta + propina + lo cobrado por cuenta de terceros (Rappi 2b), en centavos. */
 function retenidoDelCobro(pago: { amount: unknown; tipAmount: unknown; thirdPartyCashAmount?: unknown }): number {
   return pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)) + pesosToCents(Number(pago.thirdPartyCashAmount ?? 0))
+}
+
+/** Evidence only: retrying a read must never run a payment responder's receipt/table/customer effects. */
+export async function getCashPaymentByKey(venueId: string, idempotencyKey: string) {
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 64) {
+    throw new BadRequestError('El folio del cobro debe tener entre 1 y 64 caracteres')
+  }
+  const payment = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+    select: {
+      ...TENDER_SEMANTICS_SELECT,
+      id: true,
+      venueId: true,
+      idempotencyKey: true,
+      orderId: true,
+      type: true,
+      status: true,
+      tenderRevision: true,
+      amount: true,
+      tipAmount: true,
+      thirdPartyCashAmount: true,
+      splitType: true,
+      order: { select: { id: true, venueId: true, externalId: true } },
+    },
+  })
+  if (
+    !payment ||
+    payment.venueId !== venueId ||
+    payment.idempotencyKey !== idempotencyKey ||
+    payment.status !== 'COMPLETED' ||
+    (payment.type !== 'REGULAR' && payment.type !== 'FAST') ||
+    payment.method !== 'CASH' ||
+    !paymentCountsAsDrawerCash(payment) ||
+    payment.order?.venueId !== venueId ||
+    payment.order.id !== payment.orderId
+  ) {
+    return null
+  }
+  // Rappi freezes its channel tender on a pure-cash payment; its persisted allocation is the proof, not today's catalog.
+  if (payment.tenderTypeId != null) {
+    if (
+      payment.type !== 'REGULAR' ||
+      payment.fundsFlow !== PaymentFundsFlow.CASH_DRAWER ||
+      payment.thirdPartyCashAmount == null ||
+      !payment.tenderTypeId.trim() ||
+      typeof payment.tenderRevision !== 'number' ||
+      !Number.isInteger(payment.tenderRevision) ||
+      payment.tenderRevision < 1
+    )
+      return null
+  } else if (payment.tenderRevision != null) return null
+  const snapshot = await readOrderBalanceSnapshot(venueId, payment.orderId)
+  if (snapshot.remainingBalanceCents == null || snapshot.orderPaymentStatus == null) return null
+  return {
+    idempotencyKey: payment.idempotencyKey,
+    venueId: payment.venueId,
+    paymentId: payment.id,
+    orderId: payment.orderId,
+    orderExternalId: payment.order.externalId,
+    type: payment.type,
+    status: payment.status,
+    method: payment.method,
+    fundsFlow: payment.fundsFlow,
+    tenderTypeId: payment.tenderTypeId,
+    tenderRevision: payment.tenderRevision,
+    amountCents: pesosToCents(Number(payment.amount)),
+    tipCents: pesosToCents(Number(payment.tipAmount)),
+    cashRetainedCents: retenidoDelCobro(payment),
+    splitType: payment.splitType,
+    ...(payment.thirdPartyCashAmount != null
+      ? {
+          deliveryCashAllocation: {
+            saleCents: pesosToCents(Number(payment.amount)),
+            tipCents: pesosToCents(Number(payment.tipAmount)),
+            thirdPartyCents: pesosToCents(Number(payment.thirdPartyCashAmount)),
+          },
+        }
+      : {}),
+    remainingBalanceCents: snapshot.remainingBalanceCents,
+    orderPaymentStatus: snapshot.orderPaymentStatus,
+  }
 }
 
 /**
