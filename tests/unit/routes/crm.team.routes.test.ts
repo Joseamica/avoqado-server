@@ -70,6 +70,17 @@ describe('crm team routes', () => {
       { route: 'POST /accounts/:id/notes', keys: editar },
       { route: 'POST /accounts/:id/activities', keys: editar },
       { route: 'POST /activities/:id/done', keys: editar },
+      // «Importar lo de HubSpot» (task 8).
+      { route: 'POST /import/hubspot/preview', keys: admin },
+      { route: 'POST /import/hubspot/apply', keys: admin },
     ])
+  })
+
+  it('importar_pide_crm_admin_antes_de_leer_los_archivos', () => {
+    // The key is the FIRST handler: a caller without it never has its upload read into memory.
+    for (const path of ['/import/hubspot/preview', '/import/hubspot/apply']) {
+      const layer = (router.stack as unknown as Layer[]).find(candidate => candidate.route?.path === path)
+      expect(layer!.route!.stack[0].handle.crmKey).toBe('crm:admin')
+    }
   })
 })

@@ -1,6 +1,9 @@
 import { Request, Response } from 'express'
+import { ValidationError } from '../../errors/AppError'
+import { hubspotImportFilesSchema } from '../../schemas/crm.schema'
 import * as accounts from '../../services/crm/accounts.service'
 import { addActivity, completeActivity } from '../../services/crm/activities.service'
+import { applyHubspot, previewHubspot } from '../../services/crm/hubspotImport.service'
 import { addTeamMember, listTeamMembers, listTeamOptions, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
 
 /**
@@ -148,4 +151,25 @@ export async function createActivity(req: Request, res: Response): Promise<void>
 /** POST /api/v1/crm/activities/:id/done */
 export async function markActivityDone(req: Request, res: Response): Promise<void> {
   res.json({ data: await completeActivity(req.crmAccess!, req.params.id, req.body) })
+}
+
+// «Importar lo de HubSpot» (`crm:admin`). Both receive the two CSVs multer read into memory.
+
+/** The contacts and deals files as text; 422 when one is missing. */
+function hubspotCsvs(req: Request): { contactos: string; negocios: string } {
+  const files = hubspotImportFilesSchema.safeParse(req.files)
+  if (!files.success) throw new ValidationError(files.error.errors[0].message, 'CRM_IMPORT_ARCHIVO_INVALIDO')
+  return { contactos: files.data.contactos[0].buffer.toString('utf8'), negocios: files.data.negocios[0].buffer.toString('utf8') }
+}
+
+/** POST /api/v1/crm/import/hubspot/preview — what importing would do. Writes nothing. */
+export async function previewHubspotImport(req: Request, res: Response): Promise<void> {
+  const { contactos, negocios } = hubspotCsvs(req)
+  res.json({ data: await previewHubspot(contactos, negocios) })
+}
+
+/** POST /api/v1/crm/import/hubspot/apply */
+export async function applyHubspotImport(req: Request, res: Response): Promise<void> {
+  const { contactos, negocios } = hubspotCsvs(req)
+  res.json({ data: await applyHubspot(req.crmAccess!, contactos, negocios) })
 }

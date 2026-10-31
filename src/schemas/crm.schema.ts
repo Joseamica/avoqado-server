@@ -282,3 +282,22 @@ export const updateLostReasonSchema = z.object({
     .strict({ message: 'Sólo se cambian el nombre y si está activo' })
     .refine(somethingToChange, 'No hay nada que cambiar'),
 })
+
+// «Importar lo de HubSpot» (`crm:admin`, plan task 8). The two CSVs arrive as multipart; multer already capped them at
+// 5 MB each and leaves them in `req.files`, which `validateRequest` does not read: the controller parses it with this.
+const hubspotFile = (label: string) =>
+  z
+    .array(z.object({ buffer: z.instanceof(Buffer) }), {
+      required_error: `Falta el archivo de ${label}`,
+      invalid_type_error: `Falta el archivo de ${label}`,
+    })
+    .min(1, `Falta el archivo de ${label}`)
+
+/** POST /crm/import/hubspot/preview y /apply: el CSV de contactos y el de negocios de la exportación de HubSpot. */
+export const hubspotImportFilesSchema = z.object(
+  { contactos: hubspotFile('contactos'), negocios: hubspotFile('negocios') },
+  {
+    required_error: 'Sube los dos archivos de HubSpot: contactos y negocios',
+    invalid_type_error: 'Sube los dos archivos de HubSpot: contactos y negocios',
+  },
+)

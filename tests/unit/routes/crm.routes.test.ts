@@ -3,6 +3,7 @@
  * manages the team but does not see the pipeline still reads and edits the stages and the lost reasons, and still does
  * not see a single account.
  */
+import 'express-async-errors'
 import express from 'express'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -24,6 +25,19 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 import router from '@/routes/crm.routes'
 
 const app = express().use(express.json()).use('/crm', router)
+/** With the app's error handler reduced to what these tests read: the status, the code and the message. */
+const appWithErrors = express()
+  .use('/crm', router)
+  .use(
+    (
+      error: { statusCode?: number; code?: string; message: string },
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction,
+    ) => {
+      res.status(error.statusCode ?? 500).json({ code: error.code, message: error.message })
+    },
+  )
 
 beforeEach(() => {
   for (const fn of [
@@ -74,4 +88,57 @@ it('admin_sin_ver_lee_etapas_y_motivos', async () => {
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
   }
+})
+
+describe('importar lo de HubSpot', () => {
+  const FIVE_MB = 5 * 1024 * 1024
+  const DEALS = Buffer.from('Record ID,Deal Name,Deal Stage,Associated Contact IDs\n')
+  const preview = () => request(appWithErrors).post('/crm/import/hubspot/preview')
+
+  it('archivo_de_mas_de_5_mb_es_422_no_500', async () => {
+    const res = await preview()
+      .attach('contactos', Buffer.alloc(FIVE_MB + 1, 'a'), 'contactos.csv')
+      .attach('negocios', DEALS, 'negocios.csv')
+
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ code: 'CRM_IMPORT_ARCHIVO_INVALIDO', message: 'Cada archivo puede pesar hasta 5 MB' })
+  })
+
+  it('5_mb_exactos_se_leen_y_la_vista_previa_dice_por_que_no_sirve', async () => {
+    const res = await preview().attach('contactos', Buffer.alloc(FIVE_MB, 'a'), 'contactos.csv').attach('negocios', DEALS, 'negocios.csv')
+
+    expect(res.status).toBe(200)
+    expect(res.body.data.conError).toEqual([{ archivo: 'contactos', fila: 1, razon: 'Falta la columna «Record ID»' }])
+  })
+
+  it('sin_uno_de_los_dos_archivos_es_422', async () => {
+    const res = await preview().attach('contactos', Buffer.from('Record ID\n1\n'), 'contactos.csv')
+
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ code: 'CRM_IMPORT_ARCHIVO_INVALIDO', message: 'Falta el archivo de negocios' })
+  })
+
+  it('sin_crm_admin_es_403', async () => {
+    // A seller who sees and edits every account, but does not administer the CRM.
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: 'todos',
+      contactar: true,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+    })
+
+    for (const path of ['/crm/import/hubspot/preview', '/crm/import/hubspot/apply']) {
+      const res = await request(appWithErrors)
+        .post(path)
+        .attach('contactos', DEALS, 'contactos.csv')
+        .attach('negocios', DEALS, 'negocios.csv')
+      expect(res.status).toBe(403)
+      expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+    }
+  })
 })

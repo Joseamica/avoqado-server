@@ -6,12 +6,16 @@
  * it asks for with `requireCrm` — re-read from the database on every request. The services then narrow every account
  * query to the caller's scope (`scopeWhere`).
  */
-import express from 'express'
+import express, { type NextFunction, type Request, type Response } from 'express'
+import multer from 'multer'
+import logger from '../config/logger'
 import * as crmController from '../controllers/crm/crm.controller'
+import { ValidationError } from '../errors/AppError'
 import { CRM_KEYS } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { requireCrm } from '../middlewares/requireCrm.middleware'
 import { validateRequest } from '../middlewares/validation'
+import { preserveContext } from '../observability/preserveContext'
 import {
   accountIdSchema,
   addActivitySchema,
@@ -89,5 +93,38 @@ router.post('/accounts/:id/activities', editar, validateRequest(addActivitySchem
 
 // Activities.
 router.post('/activities/:id/done', editar, validateRequest(completeActivitySchema), crmController.markActivityDone)
+
+// «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
+const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024
+// `+ 1`: busboy cuts a file that REACHES the limit, so a file of exactly 5 MB would not pass with the bare number.
+// `fields: 0`: nothing but the two files.
+const hubspotUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: HUBSPOT_FILE_MAX_BYTES + 1, files: 2, fields: 0 } })
+const readHubspotFiles = preserveContext(
+  hubspotUpload.fields([
+    { name: 'contactos', maxCount: 1 },
+    { name: 'negocios', maxCount: 1 },
+  ]),
+)
+/**
+ * Whatever goes wrong reading the upload — too big, a third file, a field, a broken multipart — is the file the client
+ * sent, never a 500: the storage is memory, there is nothing of ours that can fail here.
+ */
+function hubspotFiles(req: Request, res: Response, next: NextFunction) {
+  readHubspotFiles(req, res, (error?: unknown) => {
+    if (!error) return next()
+    const multerCode = error instanceof multer.MulterError ? error.code : null
+    // A broken multipart is busboy's, not multer's: without this line nobody could tell why that upload failed.
+    if (!multerCode)
+      logger.warn('[CRM] The HubSpot upload could not be read', { error: error instanceof Error ? error.message : String(error) })
+    const message =
+      multerCode === 'LIMIT_FILE_SIZE'
+        ? 'Cada archivo puede pesar hasta 5 MB'
+        : 'Sube sólo los dos archivos de HubSpot: contactos y negocios'
+    return next(new ValidationError(message, 'CRM_IMPORT_ARCHIVO_INVALIDO', multerCode ? { multerCode } : undefined))
+  })
+}
+// The key first: whoever is not an admin of the CRM never gets 10 MB read into memory.
+router.post('/import/hubspot/preview', admin, hubspotFiles, crmController.previewHubspotImport)
+router.post('/import/hubspot/apply', admin, hubspotFiles, crmController.applyHubspotImport)
 
 export default router

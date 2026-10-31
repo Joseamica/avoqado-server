@@ -36,7 +36,8 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 
 // ── 1. The raw entry ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-function cleanText(value: string): string {
+/** Also cleans every cell of the HubSpot import (task 8). */
+export function cleanText(value: string): string {
   // Cutting at 500 can split an emoji in two: the second pass drops the half it leaves behind.
   return value.replace(UNSAFE, '').slice(0, MAX_TEXT).replace(UNSAFE, '').trim()
 }

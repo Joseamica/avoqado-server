@@ -1,0 +1,11 @@
+Record ID,First Name,Last Name,Phone Number,Email,Company Name,Lifecycle Stage
+101,Ana,López,55 1234 5601,ana@cafe.mx,Café Ana,Lead
+102,Beto,Ruiz,5512345602,Beto@Cafe.mx,Café Ana,Lead
+103,Carla,Díaz,5512345603,carla@tienda.mx,Tienda Carla,Customer
+104,Dani,Soto,5512345604,dani@x.mx,Estética Dani,Lead
+105,Eva,Mora,,eva@x.mx,,Lead
+106,,,5512345606,,Barbería Seis,Lead
+107,Gil,Paz,5512345607,gil@x.mx,Gimnasio Gil,Lead
+108,Hugo,Luna,5512345608,hugo@x.mx,Taller Hugo,Lead
+109,Iris,Vega,5512345609,iris@x.mx,Spa Iris,Lead
+110,,,,solo@correo.mx,,Lead
