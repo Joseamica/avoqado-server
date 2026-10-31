@@ -15,7 +15,7 @@
  *   deal's contacts — already is (it came through the landing or by hand). It is counted, nothing of it is written and
  *   nothing of what is there is touched; a repeated deal's aviso names the account and the stage it had in HubSpot.
  *
- * A file that cannot be read — empty, wider than 200 columns, with an unclosed quote, missing a column the import needs,
+ * A file that cannot be read — empty, wider than 2000 columns, with an unclosed quote, missing a column the import needs,
  * or not UTF-8 (the controller decodes it) — is refused whole, before anything is written. The preview writes nothing and lists the first 100
  * errors, notices and ignored columns with their totals; applying runs the same plan in batches of 200 records per
  * transaction, and a batch that fails keeps the earlier ones: importing the same files again completes it.
@@ -38,8 +38,11 @@ const BATCH = 200
 const BATCH_TX = { maxWait: 10_000, timeout: 60_000 }
 /** Keys, emails or phones per lookup query. */
 const LOOKUP_CHUNK = 1000
-/** A HubSpot export «with the columns of the view» has a few dozen; more is a file that is not one (M-2). */
-const MAX_COLUMNS = 200
+/**
+ * «Export all properties» gives several hundred columns; millions is a file that is not one (M-2, ruling 37). With the
+ * alias map each column costs one lookup, so 2000 keeps the worst case small.
+ */
+const MAX_COLUMNS = 2000
 /** Errors, notices and ignored columns the answer lists; their totals always come along. */
 const LIST_CAP = 100
 const WON_NOTE = 'Ganado en HubSpot: falta ligar su negocio de Avoqado'

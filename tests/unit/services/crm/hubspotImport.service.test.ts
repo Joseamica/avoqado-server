@@ -372,14 +372,19 @@ it('contacto_de_un_negocio_que_no_puede_entrar_se_avisa_antes_de_aplicar', async
   ])
 })
 
-it('cabecera_de_mas_de_200_columnas_no_se_lee', async () => {
-  const header = ['Record ID', ...Array.from({ length: 200 }, (_, i) => `x${i}`)].join(',')
-  const preview = await previewHubspot(`${header}\n`, NO_DEALS)
+it('cabecera_de_mas_de_2000_columnas_no_se_lee', async () => {
+  const header = (columns: number) => ['Record ID', ...Array.from({ length: columns - 1 }, (_, i) => `x${i}`)].join(',')
 
-  expect(preview.conError).toEqual([
-    { archivo: 'contactos', fila: 1, razon: 'Tiene 201 columnas y el máximo es 200: en HubSpot exporta sólo las columnas de la vista' },
+  // «Export all properties» gives several hundred: up to 2000 is read (ruling 37, amended).
+  const wide = await previewHubspot(`${header(2000)}\n`, NO_DEALS)
+  expect(wide.conError).toEqual([])
+  expect(wide.columnasIgnoradasTotal.contactos).toBe(1999)
+
+  const tooWide = await previewHubspot(`${header(2001)}\n`, NO_DEALS)
+  expect(tooWide.conError).toEqual([
+    { archivo: 'contactos', fila: 1, razon: 'Tiene 2001 columnas y el máximo es 2000: en HubSpot exporta sólo las columnas de la vista' },
   ])
-  expect(preview.nuevos).toBe(0)
+  expect(tooWide.nuevos).toBe(0)
 })
 
 it('listas_con_tope_de_100_y_su_total', async () => {
