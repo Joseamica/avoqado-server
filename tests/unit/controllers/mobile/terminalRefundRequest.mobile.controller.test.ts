@@ -8,14 +8,14 @@ import type { Request, Response } from 'express'
 import { requestRefundOnTerminal } from '@/controllers/mobile/terminal-payment.mobile.controller'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
-import { BadRequestError } from '@/errors/AppError'
+import AppError, { BadRequestError } from '@/errors/AppError'
 
 jest.mock('@/services/terminal-payment.service', () => ({ terminalPaymentService: { requestRefundOnTerminal: jest.fn() } }))
 jest.mock('@/communication/sockets/terminal-registry', () => ({ terminalRegistry: { getTerminal: jest.fn() } }))
 
 const abrir = terminalPaymentService.requestRefundOnTerminal as jest.Mock
 
-function llamar() {
+function llamar(body: Record<string, unknown> = { paymentId: 'pay-1' }) {
   const res = { statusCode: 200, payload: undefined as unknown } as Response & { statusCode: number; payload: any }
   res.status = jest.fn((code: number) => {
     res.statusCode = code
@@ -27,7 +27,7 @@ function llamar() {
   }) as never
   const req = {
     params: { venueId: 'v1', terminalId: 'AVQD-T1' },
-    body: { paymentId: 'pay-1' },
+    body,
     authContext: { userId: 'staff-1' },
   } as unknown as Request
   return requestRefundOnTerminal(req, res).then(() => res)
@@ -56,5 +56,22 @@ describe('POST /terminals/:terminalId/refund-request — rechazos de tarjetas de
     const res = await llamar()
     expect(res.statusCode).toBe(400)
     expect(res.payload).toEqual({ success: false, message: 'La terminal sólo puede devolver cobros con tarjeta hechos en la terminal.' })
+  })
+})
+
+describe('POST /terminals/:terminalId/refund-request — «Sólo saldo a favor»', () => {
+  it('pasa la excepción al servicio', async () => {
+    abrir.mockResolvedValue({ requestId: 'r1', status: 'opened' })
+    await llamar({ paymentId: 'pay-1', storeCreditOnlyException: 'DEFECTIVE' })
+    expect(abrir).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'pay-1', storeCreditOnlyException: 'DEFECTIVE' }))
+  })
+
+  it('🔴 el rechazo STORE_CREDIT_ONLY llega con su 422, su code y su texto (no un 500)', async () => {
+    const texto =
+      'Este negocio devuelve sólo como saldo a favor. Usa Reembolso → Saldo a favor, o marca que es por defecto o cobro por error.'
+    abrir.mockRejectedValue(new AppError(texto, 422, true, 'STORE_CREDIT_ONLY'))
+    const res = await llamar()
+    expect(res.statusCode).toBe(422)
+    expect(res.payload).toEqual({ success: false, code: 'STORE_CREDIT_ONLY', message: texto })
   })
 })

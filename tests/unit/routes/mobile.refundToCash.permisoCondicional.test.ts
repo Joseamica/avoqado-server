@@ -98,6 +98,13 @@ describe('el reembolso móvil revisa UN permiso según «Devolver con»', () => 
     expect(await correr(StaffRole.MANAGER, { amount: 5000, refundMethod: 'CASH' })).toEqual({ next: true })
   })
 
+  it('🔴 saldo a favor (STORE_CREDIT) pide payments:refund, no payments:refund-to-cash: el CASHIER pasa y el WAITER recibe ESE 403', async () => {
+    expect(await correr(StaffRole.CASHIER, { amount: 5000, refundMethod: 'STORE_CREDIT', customerId: 'c1' })).toEqual({ next: true })
+    const out = await correr(StaffRole.WAITER, { amount: 5000, refundMethod: 'STORE_CREDIT', customerId: 'c1' })
+    expect(out.status).toBe(403)
+    expect(out.json).toMatchObject({ required: 'payments:refund' })
+  })
+
   it('la ruta tiene UNA sola revisión de permiso, justo antes del controlador', () => {
     const capa = (mobileRouter as any).stack.find(
       (l: any) => l.route?.path === '/venues/:venueId/payments/:paymentId/refund' && l.route.methods.post,

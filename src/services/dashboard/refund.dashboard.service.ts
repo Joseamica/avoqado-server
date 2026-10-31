@@ -20,7 +20,7 @@ import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
 import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
-import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
+import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import {
   MENSAJE_SALDO_SOLO_A_SALDO,
@@ -123,7 +123,7 @@ export interface IssueRefundInput {
    * Con qué se devolvió el dinero, si NO fue por el mismo medio (30-sep-2026). Ausente = como siempre.
    * Sólo se acepta donde `sePuedeEscogerComoDevolver` es verdadero; si no, 400.
    */
-  refundMethod?: DevolverCon
+  refundMethod?: DevolverEnDinero
   /**
    * Saldo a favor (spec 2026-10-30-saldo-a-favor §5.3): lo devuelto se abona al sobre de la clienta en la MISMA transacción que la
    * devolución, con el medio de sistema `STORE_CREDIT` como destino. Excluyente con `refundMethod`. Quien llama ya preparó los medios
@@ -567,7 +567,7 @@ interface WriteRefundBase {
   /** @internal `issueRefund` ya bloqueó y leyó el cobro en ESTE tx: no se repite. */
   bloqueado?: CobroBloqueado
   /** Con qué se devolvió, si NO fue por el mismo medio (spec 2026-09-30). Ausente = como siempre. */
-  devolverCon?: DevolverCon
+  devolverCon?: DevolverEnDinero
   /**
    * La semántica de dinero de la fila, cuando no es la del cobro devuelto: el gemelo del crédito de un cambio (no regresó por la
    * tarjeta ni por la caja) o lo que sale del dinero de una raíz. Reemplaza método, flujo, comercio, origen y tipo de pago
@@ -978,7 +978,12 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   if (input.idempotencyKey !== undefined && !/^[A-Za-z0-9_-]{8,64}$/.test(input.idempotencyKey)) {
     throw new BadRequestError('La llave de idempotencia debe tener de 8 a 64 caracteres alfanuméricos, guiones o guiones bajos')
   }
-  const requestHash = input.idempotencyKey ? operationHash({ ...input, idempotencyKey: undefined }) : null
+  // Saldo a favor (spec §5.5, Codex r2 h1): la huella NO lleva a la cajera. Si la app muere tras el commit y reenvía OTRA cajera con la
+  // misma llave, se reconoce el reembolso original (que conserva a quien lo hizo) en vez de responder IDEMPOTENCY_KEY_REUSED. Fuera del
+  // saldo a favor sigue como siempre. `abonar` (una función) no entra al JSON; `customerId` sí: otra clienta no es repetición.
+  const requestHash = input.idempotencyKey
+    ? operationHash({ ...input, idempotencyKey: undefined, ...(input.aSaldoAFavor ? { staffId: undefined } : {}) })
+    : null
   const existingAttempt = async (db: Pick<Prisma.TransactionClient, 'payment'>): Promise<IssueRefundResult | null> => {
     if (!input.idempotencyKey) return null
     const previous = await db.payment.findUnique({

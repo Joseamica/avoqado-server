@@ -8,7 +8,8 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import * as refundService from '../../services/mobile/refund.mobile.service'
-import * as refundDashboardService from '../../services/dashboard/refund.dashboard.service'
+import type { RefundReason } from '../../services/dashboard/refund.dashboard.service'
+import { issuePosRefund } from '../../services/storeCredit/storeCreditRefund.service'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
 /**
@@ -61,12 +62,17 @@ export const createRefund = async (req: Request, res: Response, next: NextFuncti
  *
  * Body: { amount?: number (cents), items?: [{ orderItemId, quantity? }],
  *         restockItemIds?: string[], reason: RefundReason, note?: string,
- *         tipRefundCents?: number (cents), refundMethod?: 'CASH' | 'BANK_TRANSFER' }
+ *         tipRefundCents?: number (cents), refundMethod?: 'CASH' | 'BANK_TRANSFER' | 'STORE_CREDIT',
+ *         customerId?: string, idempotencyKey?: string, defective?: boolean }
+ *
+ * Saldo a favor (spec 2026-10-30-saldo-a-favor §5.5, campos nuevos y opcionales): `STORE_CREDIT` abona lo devuelto al sobre de
+ * `customerId`, con `idempotencyKey` obligatoria; la respuesta trae `storeCredit`. `defective` sólo cuenta con «Sólo saldo a favor».
  */
 export const issueAssociatedRefund = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, paymentId } = req.params
-    const { amount, items, restockItemIds, reason, note, tipRefundCents, refundMethod } = req.body ?? {}
+    const { amount, items, restockItemIds, reason, note, tipRefundCents, refundMethod, customerId, idempotencyKey, defective } =
+      req.body ?? {}
 
     const hasItems = Array.isArray(items) && items.length > 0
     if (!vieneAusente(amount) && !esCantidadPositivaEnCentavos(amount)) {
@@ -84,21 +90,35 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
     if (!reason || typeof reason !== 'string') {
       return res.status(400).json({ success: false, message: 'reason es requerido' })
     }
-    if (!vieneAusente(refundMethod) && refundMethod !== 'CASH' && refundMethod !== 'BANK_TRANSFER') {
-      return res.status(400).json({ success: false, message: 'refundMethod debe ser CASH o BANK_TRANSFER' })
+    if (!vieneAusente(refundMethod) && refundMethod !== 'CASH' && refundMethod !== 'BANK_TRANSFER' && refundMethod !== 'STORE_CREDIT') {
+      return res.status(400).json({ success: false, message: 'refundMethod debe ser CASH, BANK_TRANSFER o STORE_CREDIT' })
+    }
+    if (!vieneAusente(defective) && typeof defective !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'defective debe ser true o false' })
+    }
+    for (const [campo, valor] of [
+      ['customerId', customerId],
+      ['idempotencyKey', idempotencyKey],
+    ] as const) {
+      if (!vieneAusente(valor) && typeof valor !== 'string') {
+        return res.status(400).json({ success: false, message: `${campo} debe ser texto` })
+      }
     }
 
-    const result = await refundDashboardService.issueRefund({
+    const result = await issuePosRefund({
       venueId,
       paymentId,
       amount: typeof amount === 'number' ? amount : undefined,
       items: hasItems ? items : undefined,
       restockItemIds: Array.isArray(restockItemIds) ? restockItemIds : undefined,
-      reason: reason as refundDashboardService.RefundReason,
+      reason: reason as RefundReason,
       staffId: req.authContext?.userId,
       note: typeof note === 'string' ? note : null,
       tipRefundCents: typeof tipRefundCents === 'number' ? tipRefundCents : undefined,
       refundMethod: vieneAusente(refundMethod) ? undefined : refundMethod,
+      customerId: vieneAusente(customerId) ? undefined : customerId,
+      idempotencyKey: vieneAusente(idempotencyKey) ? undefined : idempotencyKey,
+      defective: defective === true,
     })
 
     return res.status(201).json({ success: true, data: result })

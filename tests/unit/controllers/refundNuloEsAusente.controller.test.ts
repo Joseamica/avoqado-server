@@ -175,11 +175,43 @@ describe('móvil · POST /mobile/venues/:venueId/payments/:paymentId/refund', ()
     expect(issueRefundMock).toHaveBeenCalledWith(expect.objectContaining({ refundMethod: undefined }))
   })
 
+  it('saldo a favor: pasa refundMethod STORE_CREDIT, la clienta, la llave y «es por defecto» al servicio', async () => {
+    const res = hacerRes()
+    await mobileController.issueAssociatedRefund(
+      reqMovil({
+        amount: 5000,
+        reason: 'RETURNED_GOODS',
+        refundMethod: 'STORE_CREDIT',
+        customerId: 'cliente-1',
+        idempotencyKey: 'llave-0001',
+        defective: true,
+      }),
+      res,
+      jest.fn(),
+    )
+    expect(codigoDeRespuesta(res)).toBe(201)
+    expect(issueRefundMock).toHaveBeenCalledWith(
+      expect.objectContaining({ aSaldoAFavor: expect.objectContaining({ customerId: 'cliente-1' }), idempotencyKey: 'llave-0001' }),
+    )
+  })
+
+  it.each([
+    ['defective no booleano', { defective: 'si' }, 'defective'],
+    ['customerId no texto', { customerId: 12 }, 'customerId'],
+    ['idempotencyKey no texto', { idempotencyKey: 12 }, 'idempotencyKey'],
+  ])('%s ⇒ 400 sin llamar al servicio', async (_caso, extra, campo) => {
+    const res = hacerRes()
+    await mobileController.issueAssociatedRefund(reqMovil({ amount: 5000, reason: 'OTHER', ...extra }), res, jest.fn())
+    expect(codigoDeRespuesta(res)).toBe(400)
+    expect(mensajeDeRespuesta(res)).toContain(campo)
+    expect(issueRefundMock).not.toHaveBeenCalled()
+  })
+
   it('refundMethod inválido ⇒ 400 sin llamar al servicio', async () => {
     const res = hacerRes()
     await mobileController.issueAssociatedRefund(reqMovil({ amount: 5000, reason: 'OTHER', refundMethod: 'CREDIT_CARD' }), res, jest.fn())
     expect(codigoDeRespuesta(res)).toBe(400)
-    expect(mensajeDeRespuesta(res)).toBe('refundMethod debe ser CASH o BANK_TRANSFER')
+    expect(mensajeDeRespuesta(res)).toBe('refundMethod debe ser CASH, BANK_TRANSFER o STORE_CREDIT')
     expect(issueRefundMock).not.toHaveBeenCalled()
   })
 })
