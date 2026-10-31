@@ -198,7 +198,13 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
 
   it('sin_ver_negocios_no_hay_clientes_ni_ficha_ni_reportes', async () => {
     // The admin of the team from `beforeEach`: «Administrar» on, «Ver negocios» off.
-    for (const path of ['/crm/clients', '/crm/accounts/caccounta0000000000000001/live', '/crm/reports?desde=2026-10-01&hasta=2026-10-31']) {
+    for (const path of [
+      '/crm/clients',
+      '/crm/accounts/caccounta0000000000000001/live',
+      // Ruling 47: a client's live data by Organization asks for «Ver» too.
+      '/crm/clients/corgclient000000000000001/live',
+      '/crm/reports?desde=2026-10-01&hasta=2026-10-31',
+    ]) {
       const res = await request(app).get(path)
       expect(res.status).toBe(403)
       expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
@@ -238,5 +244,31 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
       expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
     }
     expect(prismaMock.crmHiddenClient.createMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('reagendar (ruling 55)', () => {
+  it('reagendar_pide_editar_y_una_fecha_valida', async () => {
+    // The admin of the team from `beforeEach`: «Administrar», without «Editar negocios».
+    const forbidden = await request(app)
+      .post('/crm/activities/cactivity0000000000000001/reschedule')
+      .send({ dueAt: '2026-11-07T17:00:00.000Z' })
+    expect(forbidden.status).toBe(403)
+    expect(forbidden.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+
+    // A seller who edits their own: the date is checked before anything is read.
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'propios',
+      editarScope: 'propios',
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+    })
+    const invalid = await request(appWithErrors).post('/crm/activities/cactivity0000000000000001/reschedule').send({ dueAt: 'el viernes' })
+    expect(invalid.status).toBe(400)
   })
 })

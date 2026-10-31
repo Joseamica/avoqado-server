@@ -35,6 +35,7 @@ import {
   reassignAccountSchema,
   reportsSchema,
   removeTeamMemberSchema,
+  rescheduleActivitySchema,
   searchOrganizationsSchema,
   updateLostReasonSchema,
   updateStageSchema,
@@ -104,11 +105,14 @@ router.get('/clients', ver, validateRequest(listClientsSchema), crmController.li
 // Prime or any internal or test organization never listed as a client (ruling 39): the admin hides it and brings it back.
 router.post('/clients/:organizationId/hide', admin, validateRequest(hideClientSchema), crmController.hideClient)
 router.post('/clients/:organizationId/unhide', admin, validateRequest(hideClientSchema), crmController.unhideClient)
+// What is live for a client without a CRM account (ruling 47): the same answer and locks as `/accounts/:id/live`.
+router.get('/clients/:organizationId/live', ver, validateRequest(hideClientSchema), crmController.getClientLive)
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)
 router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmController.exportAccountsCsv)
 
 // Activities.
 router.post('/activities/:id/done', editar, validateRequest(completeActivitySchema), crmController.markActivityDone)
+router.post('/activities/:id/reschedule', editar, validateRequest(rescheduleActivitySchema), crmController.rescheduleActivityHandler)
 
 // «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
 const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024

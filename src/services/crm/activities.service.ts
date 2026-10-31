@@ -98,3 +98,43 @@ export async function completeActivity(access: CrmAccess, id: string, input: { r
     return activity
   })
 }
+
+/**
+ * «Reagendar» (ruling 55): moves a PENDING activity to another moment — the call of Thursday goes to Friday. The same
+ * scope as «Hecha»: found through the caller's «Ver» (a 404 otherwise), and the account locked and touched with their
+ * «Editar». A compare-and-set on «not done yet» (409 if it already was), the account's next step recomputed in the same
+ * transaction, and a SYSTEM event with the date before and after (the contract the console reads: `fromDueAt` and
+ * `toDueAt`, ISO). Like the other activity changes, the timeline is its audit trail.
+ */
+export async function rescheduleActivity(access: CrmAccess, id: string, input: { dueAt: Date }) {
+  const found = await prisma.crmActivity.findFirst({ where: { id, account: scopeWhere(access, 'ver') }, select: { accountId: true } })
+  if (!found) throw new NotFoundError('No encontramos esa actividad', 'CRM_ACTIVITY_NOT_FOUND')
+  const { accountId } = found
+  const now = new Date()
+
+  return prisma.$transaction(async tx => {
+    await touchEditableTx(tx, access, accountId, now)
+    // Read under the account's lock: «Hecha» takes the same lock, so nothing completes it in between.
+    const before = await tx.crmActivity.findUnique({ where: { id }, select: { dueAt: true, doneAt: true, type: true, title: true } })
+    if (!before) throw new NotFoundError('No encontramos esa actividad', 'CRM_ACTIVITY_NOT_FOUND')
+    if (before.doneAt) throw new ConflictError('Esta actividad ya estaba hecha', 'CRM_ACTIVIDAD_YA_HECHA')
+    const { count } = await tx.crmActivity.updateMany({ where: { id, doneAt: null }, data: { dueAt: input.dueAt } })
+    if (count === 0) throw new ConflictError('Esta actividad ya estaba hecha', 'CRM_ACTIVIDAD_YA_HECHA')
+
+    await addEvent(tx, {
+      accountId,
+      kind: 'SYSTEM',
+      actorStaffId: access.staffId,
+      data: {
+        event: 'ACTIVITY_RESCHEDULED',
+        activityId: id,
+        type: before.type,
+        title: before.title,
+        fromDueAt: before.dueAt.toISOString(),
+        toDueAt: input.dueAt.toISOString(),
+      },
+    })
+    await recomputeNext(tx, accountId)
+    return tx.crmActivity.findUniqueOrThrow({ where: { id } })
+  })
+}

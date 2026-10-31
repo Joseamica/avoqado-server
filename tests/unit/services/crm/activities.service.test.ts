@@ -8,7 +8,7 @@
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { addActivity, completeActivity, recomputeNext } from '@/services/crm/activities.service'
+import { addActivity, completeActivity, recomputeNext, rescheduleActivity } from '@/services/crm/activities.service'
 import { movePendingActivitiesTx } from '@/services/crm/ownership'
 import { addEvent } from '@/services/crm/timeline.service'
 
@@ -238,5 +238,68 @@ describe('timeline', () => {
     await expect(addEvent(tx as never, event)).resolves.toBe(true)
     await expect(addEvent(tx as never, event)).resolves.toBe(false)
     expect(tx.crmTimelineEvent.createMany).toHaveBeenCalledWith({ data: [event], skipDuplicates: true })
+  })
+})
+
+describe('reagendar (ruling 55)', () => {
+  it('reagendar_mueve_la_fecha_recalcula_la_siguiente_y_deja_su_evento', async () => {
+    activityLookup({ found: { accountId: ACCOUNT }, next: { dueAt: NEXT_WEEK } })
+    editable()
+    prismaMock.crmActivity.findUnique.mockResolvedValue(activity())
+    prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmActivity.findUniqueOrThrow.mockResolvedValue(activity({ dueAt: NEXT_WEEK }))
+
+    await expect(rescheduleActivity(access(), ACTIVITY, { dueAt: NEXT_WEEK })).resolves.toMatchObject({ id: ACTIVITY, dueAt: NEXT_WEEK })
+
+    // The same scope as «Hecha»: found through the caller's «Ver», then the account is locked and touched with «Editar».
+    expect(prismaMock.crmActivity.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: ACTIVITY, account: MINE_OR_UNOWNED } }),
+    )
+    expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
+      where: { AND: [{ id: ACCOUNT }, MINE_OR_UNOWNED] },
+      data: { lastTouchAt: expect.any(Date) },
+    })
+    // Only while still pending: a compare-and-set, like «Hecha».
+    expect(prismaMock.crmActivity.updateMany).toHaveBeenCalledWith({ where: { id: ACTIVITY, doneAt: null }, data: { dueAt: NEXT_WEEK } })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          accountId: ACCOUNT,
+          kind: 'SYSTEM',
+          actorStaffId: SELLER,
+          data: {
+            event: 'ACTIVITY_RESCHEDULED',
+            activityId: ACTIVITY,
+            type: 'LLAMADA',
+            title: 'Llamar para la demo',
+            fromDueAt: TOMORROW.toISOString(),
+            toDueAt: NEXT_WEEK.toISOString(),
+          },
+        },
+      ],
+      skipDuplicates: true,
+    })
+    // The account's next step is recomputed in the same transaction.
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({ where: { id: ACCOUNT }, data: { nextActivityAt: NEXT_WEEK } })
+  })
+
+  it('reagendar_una_hecha_409_y_una_ajena_404', async () => {
+    activityLookup({ found: { accountId: ACCOUNT }, next: null })
+    editable()
+    prismaMock.crmActivity.findUnique.mockResolvedValue(activity({ doneAt: new Date(), doneById: SELLER }))
+
+    await expect(rescheduleActivity(access(), ACTIVITY, { dueAt: NEXT_WEEK })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_ACTIVIDAD_YA_HECHA',
+    })
+    expect(prismaMock.crmActivity.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+
+    // On an account the caller cannot see, the activity does not exist for them: the same 404 as a wrong id.
+    activityLookup({ found: null, next: null })
+    await expect(rescheduleActivity(access(), ACTIVITY, { dueAt: NEXT_WEEK })).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'CRM_ACTIVITY_NOT_FOUND',
+    })
   })
 })

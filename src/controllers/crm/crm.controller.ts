@@ -2,7 +2,7 @@ import { Request, Response } from 'express'
 import { ValidationError } from '../../errors/AppError'
 import { hubspotImportFilesSchema } from '../../schemas/crm.schema'
 import * as accounts from '../../services/crm/accounts.service'
-import { addActivity, completeActivity } from '../../services/crm/activities.service'
+import { addActivity, completeActivity, rescheduleActivity } from '../../services/crm/activities.service'
 import * as clients from '../../services/crm/clients.service'
 import { applyHubspot, previewHubspot } from '../../services/crm/hubspotImport.service'
 import * as reports from '../../services/crm/reports.service'
@@ -156,6 +156,11 @@ export async function markActivityDone(req: Request, res: Response): Promise<voi
   res.json({ data: await completeActivity(req.crmAccess!, req.params.id, req.body) })
 }
 
+/** POST /api/v1/crm/activities/:id/reschedule — `{ dueAt }` (ruling 55). */
+export async function rescheduleActivityHandler(req: Request, res: Response): Promise<void> {
+  res.json({ data: await rescheduleActivity(req.crmAccess!, req.params.id, req.body) })
+}
+
 // Clients, what is live in Avoqado, reports and the CSV export (plan task 9).
 
 /** GET /api/v1/crm/clients */
@@ -178,6 +183,11 @@ export async function unhideClient(req: Request, res: Response): Promise<void> {
 /** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */
 export async function getLive(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.getLive(req.crmAccess!, req.params.id) })
+}
+
+/** GET /api/v1/crm/clients/:organizationId/live — the same answer for a client without a CRM account (ruling 47). */
+export async function getClientLive(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.getClientLive(req.crmAccess!, req.params.organizationId) })
 }
 
 /** GET /api/v1/crm/reports?desde=&hasta= */

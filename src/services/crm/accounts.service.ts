@@ -392,7 +392,8 @@ export async function accountsWhere(access: CrmAccess, filters: AccountFilters, 
   if (!filters.q && !filters.email) and.push({ archivedAt: null })
   if (filters.stageId) and.push({ stageId: filters.stageId })
   if (filters.ownerStaffId) and.push({ ownerStaffId: filters.ownerStaffId })
-  if (filters.sinDueno) and.push({ ownerStaffId: null })
+  // «Sin dueño» is work to take: only open stages — a won or lost account nobody owns is history (m-6).
+  if (filters.sinDueno) and.push({ ownerStaffId: null, stage: { kind: 'ABIERTA' } })
   if (filters.source) and.push({ source: filters.source })
   if (filters.semaforo) and.push(LIVE, semaforoWhere(filters.semaforo, now))
   if (filters.estancados) and.push(LIVE, await staleWhere(now))
@@ -712,14 +713,18 @@ async function reassignedView(tx: Prisma.TransactionClient, access: CrmAccess, i
 
 /**
  * Gives the account to someone on the team, or to nobody (`null`). Only with «Editar: todos» or as an admin, who reach
- * every account. Its pending activities go with it (ruling 12).
+ * every account. The new owner must be able to EDIT accounts — with only «Ver» they would own accounts they cannot touch,
+ * frozen until someone reassigns them (m-3). Its pending activities go with it (ruling 12).
  */
 export async function reassign(access: CrmAccess, id: string, staffId: string | null) {
   if (!(access.admin || access.editar === 'todos')) {
     throw new ForbiddenError('Sólo quien edita todos los negocios o administra el CRM puede cambiar el dueño', 'CRM_NO_PUEDE_REASIGNAR')
   }
-  if (staffId && !(await getCrmAccess(staffId))?.ver) {
-    throw new ValidationError('El nuevo dueño tiene que estar en el equipo de ventas', 'CRM_REASSIGN_TARGET_INVALID')
+  if (staffId && !(await getCrmAccess(staffId))?.editar) {
+    throw new ValidationError(
+      'El nuevo dueño tiene que estar en el equipo de ventas y poder editar negocios',
+      'CRM_REASSIGN_TARGET_INVALID',
+    )
   }
   const now = new Date()
   const { row, fromStaffId } = await prisma.$transaction(async tx => {
@@ -827,7 +832,9 @@ const orgTaken = () => new ConflictError('Esa cuenta de Avoqado ya está ligada 
 /**
  * «Ganar» links the account to its real Organization — one CRM account per Organization — and closes it as «Ganado».
  * Without `organizationId`, the one it is already linked to (it came from the landing). The sales team's own
- * organization is never anybody's client.
+ * organization is never anybody's client. An account nobody owns is won by whoever wins it (I-3, like Pipedrive: who
+ * closes it keeps it): in the same transaction it becomes theirs, with its pending activities and its OWNER_CHANGE —
+ * spec §5.4 keeps the owner of a won account, and the CRM exists so every sale has one.
  */
 export async function win(access: CrmAccess, id: string, input: { organizationId?: string }) {
   const wonStage = await closedStage('GANADA')
@@ -857,10 +864,30 @@ export async function win(access: CrmAccess, id: string, input: { organizationId
         return rowTx(tx, id, now)
       }
 
+      const takes = account.ownerStaffId === null
       await tx.crmAccount.update({
         where: { id },
-        data: { organizationId, stageId: wonStage.id, stageEnteredAt: now, wonAt: now, lostAt: null, lostReasonId: null, lostNote: null },
+        data: {
+          organizationId,
+          stageId: wonStage.id,
+          stageEnteredAt: now,
+          wonAt: now,
+          lostAt: null,
+          lostReasonId: null,
+          lostNote: null,
+          ...(takes ? { ownerStaffId: access.staffId } : {}),
+        },
       })
+      if (takes) {
+        await movePendingActivitiesTx(tx, [id], access.staffId)
+        const reason: OwnerChangeReason = 'TAKEN'
+        await addEvent(tx, {
+          accountId: id,
+          kind: 'OWNER_CHANGE',
+          actorStaffId: access.staffId,
+          data: { fromStaffId: null, toStaffId: access.staffId, reason },
+        })
+      }
       if (linking) {
         await addEvent(tx, { accountId: id, kind: 'LINKED', actorStaffId: access.staffId, data: { organizationId, organizationName } })
       }

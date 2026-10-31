@@ -281,6 +281,42 @@ describe('losing and winning', () => {
     await expect(win(access(), ACCOUNT_B, {})).rejects.toMatchObject({ statusCode: 422, code: 'CRM_FALTA_ORGANIZACION' })
   })
 
+  it('ganar_sin_dueno_queda_a_nombre_de_quien_gana (I-3, ruling 52): one owner per sale, like Pipedrive', async () => {
+    seeded()
+    prismaMock.crmStage.findFirst.mockResolvedValue(ganado)
+    // A landing account: nobody owns it yet and it is already linked, so «Ganar» is one click.
+    editable(account({ ownerStaffId: null, owner: null, organizationId: ORG }))
+
+    await win(access(), ACCOUNT, {})
+
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: expect.objectContaining({ ownerStaffId: SELLER, stageId: GANADO, wonAt: expect.any(Date) }),
+    })
+    // Its pending activities go with it, and the timeline says who took it before saying it was won.
+    expect(prismaMock.crmActivity.updateMany).toHaveBeenCalledWith({
+      where: { accountId: { in: [ACCOUNT] }, doneAt: null },
+      data: { assigneeStaffId: SELLER },
+    })
+    const events = prismaMock.crmTimelineEvent.createMany.mock.calls.map(
+      ([args]: [{ data: Array<Record<string, unknown>> }]) => args.data[0],
+    )
+    expect(events.map(event => event.kind)).toEqual(['OWNER_CHANGE', 'WON'])
+    expect(events[0]).toMatchObject({ actorStaffId: SELLER, data: { fromStaffId: null, toStaffId: SELLER, reason: 'TAKEN' } })
+
+    // Someone's account keeps its owner: no owner change.
+    prismaMock.crmAccount.update.mockClear()
+    prismaMock.crmActivity.updateMany.mockClear()
+    prismaMock.crmTimelineEvent.createMany.mockClear()
+    editable(account({ organizationId: ORG }))
+    await win(access(), ACCOUNT, {})
+    expect(prismaMock.crmAccount.update.mock.calls[0][0].data).not.toHaveProperty('ownerStaffId')
+    expect(prismaMock.crmActivity.updateMany).not.toHaveBeenCalled()
+    expect(
+      prismaMock.crmTimelineEvent.createMany.mock.calls.map(([args]: [{ data: Array<{ kind: string }> }]) => args.data[0].kind),
+    ).toEqual(['WON'])
+  })
+
   it('etapa_esperada_cambio_409: a move or a loss that expected another stage reopens nothing', async () => {
     seeded()
     const demo = stage({ id: DEMO, name: 'Demo', staleDays: 5 })
@@ -492,6 +528,28 @@ describe('who sees and changes what', () => {
     })
   })
 
+  it('reasignar_a_quien_solo_ve_422 (m-3, ruling 52): the new owner must be able to edit, or the accounts freeze', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ email: 'ana@avoqado.io', active: true, emailVerified: true })
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000001',
+      staffId: OTHER,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+    })
+
+    await expect(reassign(access({ admin: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CRM_REASSIGN_TARGET_INVALID',
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
   it('reasignar_sin_ver_solo_dice_el_nuevo_dueno', async () => {
     // M-1: an admin of the team without «Ver negocios» reassigns (from «Equipo de ventas»), but never sees the account:
     // the answer says who owns it now, and nothing about the account itself.
@@ -537,6 +595,17 @@ describe('who sees and changes what', () => {
 })
 
 describe('lists', () => {
+  it('sin_dueno_solo_etapas_abiertas (m-6, ruling 52): won and lost accounts without an owner are history, not work', async () => {
+    prismaMock.crmAccount.findMany.mockResolvedValue([])
+    prismaMock.crmAccount.count.mockResolvedValue(0)
+
+    await listAccounts(access(), { sinDueno: true }, NOW)
+
+    const { where } = prismaMock.crmAccount.findMany.mock.calls[0][0]
+    expect(where.AND).toContainEqual({ ownerStaffId: null, stage: { kind: 'ABIERTA' } })
+    expect(prismaMock.crmAccount.count).toHaveBeenCalledWith({ where })
+  })
+
   it('lista_tope_100_y_total', async () => {
     const ids = Array.from({ length: 101 }, (_, i) => `caccount${String(i).padStart(16, '0')}`)
     prismaMock.crmAccount.findMany.mockResolvedValue(ids.map(id => account({ id })))

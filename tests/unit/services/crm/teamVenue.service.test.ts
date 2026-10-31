@@ -738,6 +738,22 @@ describe('removeTeamMember', () => {
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
 
+  it('reasignar_a_quien_solo_ve_422 (m-3, ruling 52): whoever receives the accounts must be able to edit them', async () => {
+    teamExists()
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
+    prismaMock.staff.findUnique.mockResolvedValue({ email: 'beto@avoqado.io', active: true, emailVerified: true })
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.platformAccess.findUnique.mockResolvedValue(
+      storedRow({ id: ROW2_ID, email: 'beto@avoqado.io', staffId: OTHER_ID, editarScope: null }),
+    )
+
+    await expect(removeTeamMember(actor(), ROW_ID, { reasignarA: OTHER_ID })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CRM_REASSIGN_TARGET_INVALID',
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
   it('reasignar_a_staff_uuid', async () => {
     // M-3: some Staff ids are UUIDs (an accepted invitation can create the account with uuidv4). The schema takes any id;
     // the service is what checks that the person is on the team.
@@ -806,8 +822,8 @@ describe('listTeamOptions', () => {
     await expect(listTeamOptions(actor({ editar: 'propios', admin: false }))).resolves.toEqual([])
     expect(prismaMock.platformAccess.findMany).not.toHaveBeenCalled()
 
-    // Whoever can reassign gets every member `reassign` would accept (M-4): active keys with «Ver negocios», and a person
-    // `getCrmAccess` would really give them to.
+    // Whoever can reassign gets every member `reassign` would accept (M-4): active keys with «Ver» AND «Editar» (m-3,
+    // ruling 52), and a person `getCrmAccess` would really give them to.
     const CHANGED_ID = 'cstaffchg0000000000000001'
     prismaMock.platformAccess.findMany.mockResolvedValue([
       { staffId: SELLER_ID, email: 'carla@avoqado.io' },
@@ -835,7 +851,7 @@ describe('listTeamOptions', () => {
     ])
     expect(prismaMock.platformAccess.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { active: true, verScope: { in: ['propios', 'todos'] } },
+        where: { active: true, verScope: { in: ['propios', 'todos'] }, editarScope: { in: ['propios', 'todos'] } },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         take: 100,
       }),

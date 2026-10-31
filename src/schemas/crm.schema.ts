@@ -204,17 +204,26 @@ export const addNoteSchema = z.object({
   body: z.object({ text: text(5000, 'Escribe la nota') }),
 })
 
-/** POST /crm/accounts/:id/activities. `dueAt` is an ISO 8601 instant with its offset (the screen sends UTC). */
+/** An activity's moment: an ISO 8601 instant with its offset (the screen sends UTC). */
+const dueAt = z
+  .string({ required_error: 'Di para cuándo', invalid_type_error: 'La fecha no es válida' })
+  .datetime({ offset: true, message: 'La fecha no es válida' })
+  .transform(value => new Date(value))
+
+/** POST /crm/accounts/:id/activities */
 export const addActivitySchema = z.object({
   params: byId,
   body: z.object({
     type: z.enum(ACTIVITY_TYPES, { errorMap: () => ({ message: 'El tipo es llamada, WhatsApp, correo, reunión, demo o tarea' }) }),
     title: text(200, 'Escribe qué hay que hacer'),
-    dueAt: z
-      .string({ required_error: 'Di para cuándo', invalid_type_error: 'La fecha no es válida' })
-      .datetime({ offset: true, message: 'La fecha no es válida' })
-      .transform(value => new Date(value)),
+    dueAt,
   }),
+})
+
+/** POST /crm/activities/:id/reschedule (ruling 55): the new moment. */
+export const rescheduleActivitySchema = z.object({
+  params: byId,
+  body: z.object({ dueAt }),
 })
 
 /** POST /crm/activities/:id/done */
@@ -319,7 +328,10 @@ export const listClientsSchema = z.object({
   }),
 })
 
-/** POST /crm/clients/:organizationId/hide y /unhide — an Organization id, not always a cuid. */
+/**
+ * POST /crm/clients/:organizationId/hide y /unhide, and GET /crm/clients/:organizationId/live (ruling 47) — an
+ * Organization id, not always a cuid.
+ */
 export const hideClientSchema = z.object({
   params: z.object({ organizationId: existing('El id de la organización no es válido', 'Falta la organización') }),
 })

@@ -147,7 +147,8 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
 export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId: string; name: string }>> {
   if (!(actor.admin || actor.editar === 'todos')) return []
   const rows = await prisma.platformAccess.findMany({
-    where: { active: true, verScope: { in: ['propios', 'todos'] } },
+    // Whoever `reassign` accepts: «Editar» on top of «Ver» (m-3).
+    where: { active: true, verScope: { in: ['propios', 'todos'] }, editarScope: { in: ['propios', 'todos'] } },
     select: { staffId: true, email: true },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: MAX_PAGE_SIZE,
@@ -281,8 +282,12 @@ export async function removeTeamMember(actor: CrmAccess, id: string, opts: { rea
     if (toStaffId === memberStaffId) {
       throw new ValidationError('No le puedes pasar sus negocios a la misma persona que das de baja', 'CRM_REASSIGN_TARGET_INVALID')
     }
-    if (!(await getCrmAccess(toStaffId))?.ver) {
-      throw new ValidationError('A quien le pasas los negocios tiene que estar en el equipo de ventas', 'CRM_REASSIGN_TARGET_INVALID')
+    // Able to EDIT them, like `reassign` (m-3): with only «Ver» the accounts would freeze in their hands.
+    if (!(await getCrmAccess(toStaffId))?.editar) {
+      throw new ValidationError(
+        'A quien le pasas los negocios tiene que estar en el equipo de ventas y poder editar negocios',
+        'CRM_REASSIGN_TARGET_INVALID',
+      )
     }
   }
   const { venueId, organizationId } = await ensureCrmTeamVenue()
