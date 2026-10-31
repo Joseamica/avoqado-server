@@ -16,7 +16,10 @@ jest.mock('@/services/dashboard/order.dashboard.service', () => ({
   cancelarCuentaSinCobrar: (...a: unknown[]) => cancelarCuentaSinCobrar(...a),
 }))
 const auditMcpWrite = jest.fn()
-jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => auditMcpWrite(...a) }))
+jest.mock('@/mcp/audit', () => ({
+  ...jest.requireActual('@/mcp/audit'),
+  auditMcpWrite: (...a: unknown[]) => auditMcpWrite(...a),
+}))
 
 const ambito = (scopes: string[], corePermissions: string[]) => ({
   staffId: 'staff-1',
@@ -89,7 +92,8 @@ describe('MCP cancel_unpaid_order', () => {
   it('con confirm cancela con el autor de la conexión; la bitácora la deja la cancelación, UNA vez (Codex código r1 #2)', async () => {
     const r = json(await tool()({ ...entrada, confirm: true }))
     expect(r).toEqual({ ok: true, cuenta: 'ORD-77', status: 'CANCELLED' })
-    expect(cancelarCuentaSinCobrar).toHaveBeenCalledWith('venue-1', 'order-1', 'La abrí por error', 'staff-1')
+    // La única entrada lleva la procedencia MCP (Codex código r2 #2); sin `clientId` en la conexión, sólo `source`.
+    expect(cancelarCuentaSinCobrar).toHaveBeenCalledWith('venue-1', 'order-1', 'La abrí por error', 'staff-1', { source: 'customer-mcp' })
     expect(auditMcpWrite).not.toHaveBeenCalled()
   })
 

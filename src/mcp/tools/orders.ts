@@ -20,7 +20,7 @@ import {
   parseCourtesyReviewPublicInput,
   toCourtesyReviewPublicReply,
 } from '@/services/mobile/cortesia-pendiente.public'
-import { auditMcpWrite } from '../audit'
+import { auditMcpWrite, mcpProvenance } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { motivoDeCancelacionSchema } from '@/schemas/dashboard/order.schema'
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
@@ -125,12 +125,13 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       }
       try {
         const { cancelarCuentaSinCobrar } = await import('@/services/dashboard/order.dashboard.service')
-        await cancelarCuentaSinCobrar(venueId, orderId, reason, scope.staffId)
+        await cancelarCuentaSinCobrar(venueId, orderId, reason, scope.staffId, await mcpProvenance(scope))
       } catch (error) {
         if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
         throw error
       }
-      // Sin `auditMcpWrite`: la cancelación ya deja UNA entrada (`ORDER_CANCELLED`, con autor y motivo; Codex código r1 #2).
+      // Sin `auditMcpWrite`: la cancelación deja UNA entrada (`ORDER_CANCELLED`) con autor, motivo y la procedencia MCP
+      // (`mcpProvenance`, Codex código r1 #2 y r2 #2).
       return text({ ok: true, cuenta: order.orderNumber, status: 'CANCELLED' })
     },
   )

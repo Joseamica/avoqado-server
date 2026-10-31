@@ -6523,6 +6523,8 @@ export async function publishCancelledOrder(
   result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
   staffId?: string,
   reason?: string,
+  /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
+  datosDeBitacora?: Record<string, unknown>,
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
@@ -6551,7 +6553,14 @@ export async function publishCancelledOrder(
     }
   }
   const { logAction } = await import('../dashboard/activity-log.service')
-  void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
+  void logAction({
+    action: 'ORDER_CANCELLED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { ...datosDeBitacora, reason: reason ?? null },
+  })
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })

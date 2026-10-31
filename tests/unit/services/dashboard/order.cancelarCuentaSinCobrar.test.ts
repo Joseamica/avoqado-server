@@ -78,6 +78,15 @@ describe('cancelarCuentaSinCobrar — el panel cancela una cuenta sin cobrar', (
     )
   })
 
+  it('la procedencia (la app del MCP) va en la MISMA entrada, sin pisar el motivo', async () => {
+    await cancelarCuentaSinCobrar(VENUE, ORDER, 'Duplicada', 'staff-1', { source: 'customer-mcp', mcpClientId: 'app-1', reason: 'otro' })
+
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { source: 'customer-mcp', mcpClientId: 'app-1', reason: 'Duplicada' } }),
+    )
+  })
+
   it('🔴 una cuenta de MESA no se cancela desde el panel: se anula en el POS', async () => {
     cuenta({ tableId: 'mesa-7' })
 
@@ -141,13 +150,25 @@ describe('CancelarCuentaSinCobrarSchema — el motivo es obligatorio', () => {
   const { CancelarCuentaSinCobrarSchema } = require('@/schemas/dashboard/order.schema')
   const params = { venueId: 'cmhabcdefghijklmnopqrstuv', orderId: 'cmhzyxwvutsrqponmlkjihgfe' }
 
+  it('un emoji entero sí pasa', () => {
+    expect(CancelarCuentaSinCobrarSchema.safeParse({ params, body: { reason: 'El cliente nunca vino 😀' } }).success).toBe(true)
+  })
+
   it('recorta el motivo y lo acepta', () => {
     const r = CancelarCuentaSinCobrarSchema.safeParse({ params, body: { reason: '  Cuenta duplicada  ' } })
     expect(r.success).toBe(true)
     expect(r.data.body.reason).toBe('Cuenta duplicada')
   })
 
-  it.each([[{}], [{ reason: '' }], [{ reason: '  a  ' }], [{ reason: 'x'.repeat(301) }], [{ reason: 'error\u0000' }]])('rechaza %j', body => {
+  it.each([
+    [{}],
+    [{ reason: '' }],
+    [{ reason: '  a  ' }],
+    [{ reason: 'x'.repeat(301) }],
+    [{ reason: 'error\u0000' }],
+    [{ reason: 'error\ud800' }],
+    [{ reason: '\udc00 error' }],
+  ])('rechaza %j: Postgres no lo guarda o no es un motivo', body => {
     expect(CancelarCuentaSinCobrarSchema.safeParse({ params, body }).success).toBe(false)
   })
 })

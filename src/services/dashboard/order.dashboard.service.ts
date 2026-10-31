@@ -841,7 +841,14 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
  *   · una ya cancelada responde 409 sin escribir otra vez (r1 #6);
  *   · el motivo va sólo a la bitácora: no pisa las notas de la cuenta (r1 #5).
  */
-export async function cancelarCuentaSinCobrar(venueId: string, orderId: string, motivo: string, staffId: string) {
+export async function cancelarCuentaSinCobrar(
+  venueId: string,
+  orderId: string,
+  motivo: string,
+  staffId: string,
+  /** La procedencia MCP (`mcpProvenance`): la ÚNICA entrada de bitácora dice qué app la hizo (Codex código r2 #2). */
+  datosDeBitacora?: Record<string, unknown>,
+) {
   const { cancelOrderInTransaction, publishCancelledOrder } = await import('@/services/mobile/order.mobile.service')
   const result = await prisma.$transaction(async tx => {
     // La mesa y el pedido en línea no cambian bajo una cancelación: se leen sin candado, antes del orden de candados del POS.
@@ -862,7 +869,7 @@ export async function cancelarCuentaSinCobrar(venueId: string, orderId: string, 
       mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
     })
   }, ORDER_LOCK_WAIT_BUDGET)
-  await publishCancelledOrder(venueId, result, staffId, motivo)
+  await publishCancelledOrder(venueId, result, staffId, motivo, datosDeBitacora)
 }
 
 /**

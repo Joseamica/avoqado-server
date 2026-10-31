@@ -33,8 +33,16 @@ export async function auditMcpWrite(
     action: params.action,
     entity: params.entity,
     entityId: params.entityId,
-    data: { ...params.data, source: 'customer-mcp', ...(await mcpClientStamp(scope.clientId)) },
+    data: { ...params.data, ...(await mcpProvenance(scope)) },
   })
+}
+
+/**
+ * La procedencia MCP de una escritura (`source` + la app): para la escritura que ya deja su PROPIA entrada de bitácora y no
+ * debe dejar otra (`cancel_unpaid_order`, Codex «Cancelar orden» código r2 #2). Va al final de sus datos, como aquí.
+ */
+export async function mcpProvenance(scope: McpScope): Promise<Record<string, string>> {
+  return { source: 'customer-mcp', ...(await mcpClientStamp(scope.clientId)) }
 }
 
 /**
