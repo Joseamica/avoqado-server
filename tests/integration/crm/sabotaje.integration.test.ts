@@ -98,6 +98,19 @@ describe('CRM: un vendedor con todas las llaves crm:* sigue siendo VIEWER fuera 
     expect(res.status).toBe(403)
   })
 
+  it.each(['/mcp', '/mcp/directory'])('POST %s con el token del vendedor no sirve nada', async ruta => {
+    const res = await request(server)
+      .post(ruta)
+      .set('Authorization', `Bearer ${token}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+
+    // A token of the API is not a token of the MCP: its bearer check rejects it before any tool runs. Today that rejection
+    // answers 500 instead of 401 (reported apart); what this pins is that nothing is served.
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(res.body?.result).toBeUndefined()
+  })
+
   it('GET /api/v1/crm/me → 200 con sus llaves, leídas de la base', async () => {
     const res = await request(server).get('/api/v1/crm/me').set('Authorization', `Bearer ${token}`)
 
