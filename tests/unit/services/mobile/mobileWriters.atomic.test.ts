@@ -205,6 +205,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   committed = false
   tx = {
+    // D9: la llave de la cuenta no está cerrada (OrderKeyRelease).
+    orderKeyRelease: { findUnique: jest.fn().mockResolvedValue(null) },
     $queryRaw: jest.fn().mockImplementation(async (query: any) => {
       const sql = Array.isArray(query) ? query.join('?') : query.sql
       return [
