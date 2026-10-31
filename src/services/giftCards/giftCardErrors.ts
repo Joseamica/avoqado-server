@@ -46,6 +46,12 @@ export type GiftCardErrorCode =
   // Cierre A (C4): el 429 del límite de reenvíos por tarjeta (`resend` y `change-destination`, POS y panel). Lo responde el
   // limitador de ruta (`gift-card-lookup-rate-limit.middleware.ts`), no un `GiftCardError`.
   | 'GIFT_CARD_RESEND_RATE_LIMITED'
+  // Saldo a favor (spec 2026-10-30-saldo-a-favor §5.2, aditivos). 🔴 Todo código `STORE_CREDIT_` es un 4xx SIN escritura: las apps
+  // borran lo pendiente con cualquier código de ese prefijo (`esRechazoDefinitivoDeSaldo`), así que nunca se lanza tras escribir.
+  | 'STORE_CREDIT_OVER_CAP'
+  | 'STORE_CREDIT_CARD_BLOCKED'
+  | 'STORE_CREDIT_CUSTOMER_REQUIRED'
+  | 'STORE_CREDIT_CUSTOMER_PHONE_REQUIRED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {

@@ -55,6 +55,11 @@
       "loops": 0,
       "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
     },
+    "src/services/giftCards/giftCardLedger.ts#prepararSobreDeSaldoAFavorEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): sin FOR UPDATE propio; se inventaría para que cada llamador quede registrado. Toma el candado consultivo por clienta y aparta UN sobre (su sobre de saldo) con lockGiftCardsForUpdate; va DESPUÉS de Order/Payments y ANTES del turno (Order → Payments → clienta + sobre → Shift)."
+    },
     "src/services/mobile/areaTicketV7.mobile.service.ts#lockAreaTicketCheckoutHierarchy": {
       "count": 1,
       "loops": 0,
@@ -84,6 +89,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Una Payment de la unión global ya ordenada de candadosDelLote; NOWAIT/savepoints liberan el intento antes de retomarlo (R6)."
+    },
+    "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): candado consultivo «primer-sobre» por sucursal, sin FOR UPDATE; se inventaría para que cada llamador quede registrado. Siempre el PRIMER candado de su transacción, antes de Orders, Payments, sobres y turno («primer-sobre» → filas → turno)."
     },
     "src/services/shared/cobroDelProtocolo.ts#bloquearPayments": {
       "count": 1,
@@ -521,6 +531,16 @@
       "count": 1,
       "loops": 0,
       "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#prepararSobreDeSaldoAFavorEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): UN sobre (el de saldo a favor de la clienta) bajo su candado consultivo por clienta; se llama tras apartar Order y Payments y antes de reclamar el turno, como el gasto con saldo (order.mobile.service.ts:5589)."
+    },
+    "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreSiHaceFaltaEnTx#tomarCandadoPrimerSobreEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): el mismo candado «primer-sobre», sólo mientras la sucursal no tiene sobres activados; el llamador lo toma como PRIMERA sentencia de su transacción."
     },
     "src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets#lockExistingOrderForPayment": {
       "count": 1,
