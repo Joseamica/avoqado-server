@@ -1,0 +1,602 @@
+/**
+ * The CRM's MCP tools (spec 2026-10-30 §5.8, plan task 10): the founder's Claude routine writes WhatsApp prospects and
+ * follow-ups into the CRM through these.
+ *
+ * What they pin: they exist only in the free catalog and only for a SUPERADMIN — never in the certified one, and a direct
+ * call without SUPERADMIN or without the key is refused; the WhatsApp upsert of ruling 38 (one business per person, two
+ * identical calls = one business and one event, a person already in the CRM gets a note and comes back from the archive
+ * unless lost); and «sólo avanza» (never back, «Ganado» goes through the ficha, «Perdido» resolves its reason by name).
+ */
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { prismaMock } from '@tests/__helpers__/setup'
+import { FAKE_LOST_STAGE_ID, FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
+import { configureToolCatalog, TOOL_EFFECTS } from '@/mcp/catalog'
+import { DIRECTORY_TOOLS } from '@/mcp/directory/catalog'
+import { registerAllTools } from '@/mcp/server'
+import type { McpScope } from '@/mcp/scope'
+import { registerCrmTools } from '@/mcp/tools/crm'
+import { auditMcpWrite } from '@/mcp/audit'
+import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
+import { addNote, getPending, listAccounts, listLostReasons, listStages, lose, moveStage } from '@/services/crm/accounts.service'
+import { addActivity } from '@/services/crm/activities.service'
+import { getReports } from '@/services/crm/reports.service'
+
+jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
+jest.mock('@/services/crm/access.service', () => ({
+  ...jest.requireActual('@/services/crm/access.service'),
+  getCrmAccess: jest.fn(),
+}))
+// The WhatsApp upsert runs on the REAL `touchEditableTx`, `findDuplicates` and `getInitialStage` over the in-memory CRM;
+// the rest of the services are already tested on their own, so here they only answer.
+jest.mock('@/services/crm/accounts.service', () => ({
+  ...jest.requireActual('@/services/crm/accounts.service'),
+  listAccounts: jest.fn(),
+  getPending: jest.fn(),
+  moveStage: jest.fn(),
+  lose: jest.fn(),
+  addNote: jest.fn(),
+  listStages: jest.fn(),
+  listLostReasons: jest.fn(),
+}))
+jest.mock('@/services/crm/activities.service', () => ({ addActivity: jest.fn() }))
+jest.mock('@/services/crm/reports.service', () => ({ getReports: jest.fn() }))
+
+const cuid = (prefix: string) => `c${prefix}`.padEnd(25, '0')
+
+const CRM_TOOLS = [
+  'crm_find_account',
+  'crm_upsert_whatsapp_prospect',
+  'crm_advance_stage',
+  'crm_add_note',
+  'crm_add_activity',
+  'crm_pending',
+  'crm_pipeline_summary',
+]
+const EFFECTS: Record<string, 'read' | 'write'> = {
+  crm_find_account: 'read',
+  crm_upsert_whatsapp_prospect: 'write',
+  crm_advance_stage: 'write',
+  crm_add_note: 'write',
+  crm_add_activity: 'write',
+  crm_pending: 'read',
+  crm_pipeline_summary: 'read',
+}
+const WRITES = CRM_TOOLS.filter(name => EFFECTS[name] === 'write')
+
+const ACC = cuid('acct')
+const SUPER = {
+  staffId: cuid('staffsup'),
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
+  perVenueAccess: new Map(),
+  isSuperAdmin: true,
+  scopes: ['mcp:read', 'mcp:write'],
+} as McpScope
+
+const ADMIN: CrmAccess = {
+  staffId: SUPER.staffId,
+  isSuperadmin: true,
+  ver: 'todos',
+  editar: 'todos',
+  contactar: true,
+  campanas: true,
+  exportar: true,
+  ventas: true,
+  admin: true,
+}
+
+/** A plausible call of every tool. */
+const ARGS: Record<string, Record<string, unknown>> = {
+  crm_find_account: { q: 'Café' },
+  crm_upsert_whatsapp_prospect: { phoneE164: '+525512345678' },
+  crm_advance_stage: { accountId: ACC, stageName: 'Demo' },
+  crm_add_note: { accountId: ACC, text: 'Pidió precios' },
+  crm_add_activity: { accountId: ACC, type: 'LLAMADA', title: 'Llamarle', dueAt: '2026-11-03T10:00:00-06:00' },
+  crm_pending: {},
+  crm_pipeline_summary: {},
+}
+
+/** What the services answer for an account. */
+const ROW = {
+  id: ACC,
+  name: 'Tacos Lupe',
+  giro: 'Taquería',
+  ventasRango: null,
+  source: 'WHATSAPP',
+  owner: null,
+  stage: { id: cuid('stage4'), name: 'Demo', kind: 'ABIERTA' },
+  nextActivityAt: new Date('2026-11-03T16:00:00.000Z'),
+  nextActivity: { id: cuid('act'), type: 'LLAMADA', title: 'Llamarle', dueAt: new Date('2026-11-03T16:00:00.000Z'), assigneeStaffId: null },
+  semaforo: 'gris',
+  estancadoDias: null,
+  firstMoneyAt: null,
+  organizationId: null,
+  archivedAt: null,
+  createdAt: new Date('2026-10-30T18:00:00.000Z'),
+}
+
+/** Every handler of `registerCrmTools`, called the way the catalog calls it, its JSON answer parsed. */
+function setup(over: Partial<McpScope> = {}) {
+  const handlers: Record<string, (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>> = {}
+  const descriptions: Record<string, string> = {}
+  const server = {
+    tool: jest.fn((name: string, description: string, _schema: unknown, handler: (typeof handlers)[string]) => {
+      handlers[name] = handler
+      descriptions[name] = description
+    }),
+  }
+  const scope = { ...SUPER, ...over } as McpScope
+  registerCrmTools(server as unknown as McpServer, scope)
+  const call = async (name: string, args: Record<string, unknown> = ARGS[name]) => JSON.parse((await handlers[name](args)).content[0].text)
+  return { server, scope, call, descriptions }
+}
+
+/** The whole catalog as `server.ts` registers it, names only. */
+function catalogFor(scope: Partial<McpScope>): string[] {
+  const names: string[] = []
+  const server = { tool: (...a: unknown[]) => names.push(a[0] as string) } as never
+  registerAllTools(server, { ...SUPER, ...scope } as McpScope, { serializedEnabled: true, whiteLabelEnabled: true, catalogEnabled: true })
+  return names
+}
+
+/** The real protocol: `configureToolCatalog` (effects, write scope, certified catalog) in front of the CRM tools. */
+async function connect(profile: 'manual' | 'directory') {
+  const server = new McpServer({ name: 'crm-test', version: '1' })
+  configureToolCatalog(server, SUPER, profile)
+  registerCrmTools(server, SUPER)
+  const client = new Client({ name: 'test', version: '1' })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(a), client.connect(b)])
+  return {
+    client,
+    close: async () => {
+      await client.close()
+      await server.close()
+    },
+  }
+}
+
+beforeEach(() => {
+  ;(getCrmAccess as jest.Mock).mockResolvedValue(ADMIN)
+})
+
+// ── Who sees them ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('CRM MCP — catalogs', () => {
+  it('catalogo_libre_las_trae: the free catalog lists the seven for a SUPERADMIN, through server.ts and the real protocol', async () => {
+    expect(catalogFor({ isSuperAdmin: true })).toEqual(expect.arrayContaining(CRM_TOOLS))
+
+    const c = await connect('manual')
+    try {
+      const { tools } = await c.client.listTools()
+      for (const name of CRM_TOOLS) {
+        const tool = tools.find(t => t.name === name)
+        expect({ name, readOnly: tool?.annotations?.readOnlyHint }).toEqual({ name, readOnly: EFFECTS[name] === 'read' })
+      }
+    } finally {
+      await c.close()
+    }
+  })
+
+  it('catalogo_certificado_no_las_trae: none is in a certified tier, none is listed there, and a direct call is refused', async () => {
+    for (const name of CRM_TOOLS) expect({ name, certified: DIRECTORY_TOOLS.has(name) }).toEqual({ name, certified: false })
+
+    const c = await connect('directory')
+    try {
+      const listed = (await c.client.listTools()).tools.map(t => t.name)
+      expect(listed.filter(name => name.startsWith('crm_'))).toEqual([])
+      expect((await c.client.callTool({ name: 'crm_pending', arguments: {} })).isError).toBe(true)
+      expect(getCrmAccess).not.toHaveBeenCalled()
+      expect(getPending).not.toHaveBeenCalled()
+    } finally {
+      await c.close()
+    }
+  })
+
+  it('no_superadmin_no_las_ve: a customer connection never gets them, not even registered', () => {
+    expect(catalogFor({ isSuperAdmin: false }).filter(name => name.startsWith('crm_'))).toEqual([])
+    expect(catalogFor({ isSuperAdmin: undefined }).filter(name => name.startsWith('crm_'))).toEqual([])
+    expect(setup({ isSuperAdmin: false }).server.tool).not.toHaveBeenCalled()
+  })
+
+  it('toda_herramienta_tiene_efecto_declarado: each one declares its effect, and TOOL_EFFECTS has no CRM tool that is not registered', () => {
+    const registered = setup().server.tool.mock.calls.map(([name]) => name)
+    expect([...registered].sort()).toEqual([...CRM_TOOLS].sort())
+    for (const name of CRM_TOOLS) expect({ name, effect: TOOL_EFFECTS[name] }).toEqual({ name, effect: EFFECTS[name] })
+    expect(
+      Object.keys(TOOL_EFFECTS)
+        .filter(name => name.startsWith('crm_'))
+        .sort(),
+    ).toEqual([...CRM_TOOLS].sort())
+  })
+
+  it('descriptions speak business, never internals', () => {
+    const { descriptions } = setup()
+    for (const name of CRM_TOOLS) {
+      expect(descriptions[name]).toMatch(/Sólo para el equipo de Avoqado/)
+      expect(descriptions[name]).not.toMatch(/\bprisma\b|\bpostgres|src\/|\/api\/v1\//i)
+      // No model names and no `Modelo.campo`.
+      expect(descriptions[name]).not.toMatch(/\bCrm[A-Z][a-zA-Z]+\b|\b[A-Z][a-zA-Z]+\.[a-z][a-zA-Z]+\b/)
+    }
+  })
+})
+
+// ── Who can call them ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('CRM MCP — access', () => {
+  it('llamada_directa_sin_superadmin_rechazada: a handler registered for a SUPERADMIN refuses once the connection is not one', async () => {
+    const { scope, call } = setup()
+    scope.isSuperAdmin = false
+    for (const name of CRM_TOOLS) expect({ name, ...(await call(name)) }).toMatchObject({ name, ok: false })
+    expect(getCrmAccess).not.toHaveBeenCalled()
+    for (const service of [listAccounts, getPending, moveStage, lose, addNote, addActivity, getReports])
+      expect(service).not.toHaveBeenCalled()
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('a SUPERADMIN the CRM does not recognize (inactive) gets ok:false with the reason', async () => {
+    ;(getCrmAccess as jest.Mock).mockResolvedValue(null)
+    const { call } = setup()
+    for (const name of CRM_TOOLS) {
+      const answer = await call(name)
+      expect({ name, ok: answer.ok, error: typeof answer.error }).toEqual({ name, ok: false, error: 'string' })
+    }
+    for (const service of [listAccounts, getPending, moveStage, lose, addNote, addActivity, getReports])
+      expect(service).not.toHaveBeenCalled()
+  })
+
+  it('without «crm:editar» the writes refuse and name the key; the reads still answer', async () => {
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, editar: null })
+    ;(getPending as jest.Mock).mockResolvedValue({
+      vencidas: { rows: [], total: 0 },
+      hoy: { rows: [], total: 0 },
+      sinSiguientePaso: { rows: [], total: 0 },
+      estancados: { rows: [], total: 0 },
+      nuevosSinDueno: { rows: [], total: 0 },
+    })
+    const { call } = setup()
+    for (const name of WRITES)
+      expect({ name, ...(await call(name)) }).toMatchObject({ name, ok: false, error: expect.stringContaining('crm:editar') })
+    expect(await call('crm_pending')).toMatchObject({ ok: true })
+    for (const service of [moveStage, lose, addNote, addActivity]) expect(service).not.toHaveBeenCalled()
+  })
+
+  it('a SUPERADMIN connection without the write grant cannot write', async () => {
+    const { call } = setup({ scopes: ['mcp:read'] })
+    await expect(call('crm_add_note')).rejects.toThrow(/mcp:write/)
+    expect(addNote).not.toHaveBeenCalled()
+  })
+})
+
+// ── WhatsApp (ruling 38) ──────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('crm_upsert_whatsapp_prospect', () => {
+  const PHONE = '+525512345678'
+  const LANDING_ACC = cuid('acctlnd')
+  let db: ReturnType<typeof installCrmInboundFake>
+
+  beforeEach(() => {
+    db = installCrmInboundFake(prismaMock)
+    // `findDuplicates`: the accounts with a person of this phone.
+    prismaMock.crmAccount.findMany.mockImplementation(async ({ where }: any) => {
+      const phone = where.contacts.some.OR.find((by: { phoneE164?: string }) => by.phoneE164)?.phoneE164
+      const ids = new Set(db.contacts.filter(contact => contact.phoneE164 === phone).map(contact => contact.accountId))
+      return db.accounts.filter(account => ids.has(account.id)).map(account => ({ ...account, ownerStaffId: null, owner: null }))
+    })
+    // `touchEditableTx`: the scoped UPDATE that locks and touches.
+    prismaMock.crmAccount.updateMany.mockImplementation(async ({ where, data }: any) => {
+      const row = db.accounts.find(account => account.id === where.AND[0].id)
+      if (!row) return { count: 0 }
+      Object.assign(row, data)
+      return { count: 1 }
+    })
+  })
+
+  /** An account the CRM already has for this person, from the landing. */
+  function seedLanding(over: Record<string, unknown> = {}) {
+    const account = {
+      id: LANDING_ACC,
+      name: 'Café Ana',
+      source: 'LANDING',
+      externalKey: 'ana@cafe.mx',
+      stageId: FAKE_STAGE_ID,
+      organizationId: null,
+      archivedAt: new Date('2026-09-01T18:00:00.000Z'),
+      lastTouchAt: new Date('2026-09-01T18:00:00.000Z'),
+      ...over,
+    }
+    db.accounts.push(account)
+    db.contacts.push({ accountId: account.id, name: 'Ana', phoneE164: PHONE, isPrimary: true })
+    return account
+  }
+
+  it('upsert_dos_veces_un_negocio: the same call twice leaves ONE business «Sin dueño» in the first stage and ONE event', async () => {
+    const { call } = setup()
+    const input = { phoneE164: '55 1234 5678', name: 'Tacos Lupe', giro: 'Taquería', campaign: 'pos22' }
+    const first = await call('crm_upsert_whatsapp_prospect', input)
+    const second = await call('crm_upsert_whatsapp_prospect', input)
+
+    expect(first).toMatchObject({ ok: true, creado: true, yaExistia: false })
+    expect(second).toMatchObject({ ok: true, accountId: first.accountId, creado: false, yaExistia: true })
+    expect(db.accounts).toHaveLength(1)
+    expect(db.accounts[0]).toMatchObject({
+      id: first.accountId,
+      source: 'WHATSAPP',
+      externalKey: PHONE,
+      name: 'Tacos Lupe',
+      giro: 'Taquería',
+      ownerStaffId: null,
+      stageId: FAKE_STAGE_ID,
+      sourceDetail: { campaign: 'pos22' },
+    })
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: first.accountId, phoneE164: PHONE, isPrimary: true })])
+    expect(db.events).toEqual([
+      expect.objectContaining({
+        accountId: first.accountId,
+        kind: 'SYSTEM',
+        data: expect.objectContaining({ event: 'CREATED', source: 'WHATSAPP' }),
+      }),
+    ])
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+    expect(auditMcpWrite).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: SUPER.staffId }),
+      expect.objectContaining({ entity: 'CrmAccount', entityId: first.accountId, venueId: null }),
+    )
+  })
+
+  it('a person already in the CRM from another source: no WhatsApp business, a note, back from the archive — once', async () => {
+    seedLanding()
+    const { call } = setup()
+    const first = await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Otro nombre', campaign: 'pos22' })
+    const again = await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Otro nombre', campaign: 'pos22' })
+
+    expect(first).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: true })
+    expect(again).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: false })
+    expect(db.accounts).toHaveLength(1)
+    expect(db.accounts[0]).toMatchObject({ source: 'LANDING', name: 'Café Ana', archivedAt: null })
+    expect(db.accounts[0].lastTouchAt.getTime()).toBeGreaterThan(new Date('2026-09-01T18:00:00.000Z').getTime())
+    expect(db.events).toHaveLength(2)
+    expect(db.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: LANDING_ACC,
+          kind: 'NOTE',
+          data: expect.objectContaining({ text: expect.stringMatching(/Volvió a escribir por WhatsApp.*pos22/) }),
+        }),
+        expect.objectContaining({ accountId: LANDING_ACC, kind: 'REACTIVATED', data: expect.objectContaining({ via: 'WHATSAPP' }) }),
+      ]),
+    )
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+  })
+
+  it('a LOST account stays lost and archived: it only gets the note', async () => {
+    const archivedAt = new Date('2026-09-01T18:00:00.000Z')
+    seedLanding({ stageId: FAKE_LOST_STAGE_ID, archivedAt })
+    const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })
+
+    expect(answer).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: false })
+    expect(db.accounts[0].archivedAt).toEqual(archivedAt)
+    expect(db.events.map(event => event.kind)).toEqual(['NOTE'])
+  })
+
+  it('a phone in two businesses is resolved, not guessed: nothing is written and both come back', async () => {
+    seedLanding({ archivedAt: null })
+    db.accounts.push({ id: cuid('acctman'), name: 'Tienda Ana', source: 'MANUAL', externalKey: null, stageId: FAKE_STAGE_ID })
+    db.contacts.push({ accountId: cuid('acctman'), name: 'Ana', phoneE164: PHONE })
+
+    const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })
+    expect(answer).toMatchObject({ ok: false, candidatos: expect.arrayContaining([expect.objectContaining({ id: LANDING_ACC })]) })
+    expect(answer.candidatos).toHaveLength(2)
+    expect(db.accounts).toHaveLength(2)
+    expect(db.events).toEqual([])
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('a phone that is not one writes nothing', async () => {
+    expect(await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: 'no tengo' })).toMatchObject({ ok: false })
+    expect(db.accounts).toEqual([])
+  })
+})
+
+// ── Advancing (ruling 38) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('crm_advance_stage', () => {
+  const STAGES = [
+    { id: cuid('stage1'), name: 'Prospecto', order: 1, kind: 'ABIERTA', staleDays: 2 },
+    { id: cuid('stage2'), name: 'Contacto inicial', order: 2, kind: 'ABIERTA', staleDays: 3 },
+    { id: cuid('stage3'), name: 'Calificado', order: 3, kind: 'ABIERTA', staleDays: 5 },
+    { id: cuid('stage4'), name: 'Demo', order: 4, kind: 'ABIERTA', staleDays: 5 },
+    { id: cuid('stage5'), name: 'Negociación', order: 5, kind: 'ABIERTA', staleDays: 7 },
+    { id: cuid('stage6'), name: 'Ganado', order: 6, kind: 'GANADA', staleDays: null },
+    { id: cuid('stage7'), name: 'Perdido', order: 7, kind: 'PERDIDA', staleDays: null },
+  ]
+  const REASONS = [
+    { id: cuid('reason1'), name: 'Dijo que no', active: true },
+    { id: cuid('reason2'), name: 'Precio', active: true },
+    { id: cuid('reason3'), name: 'Précio', active: true },
+    { id: cuid('reason4'), name: 'Ya no se usa', active: false },
+  ]
+  const at = (name: string) => ({ id: ACC, stage: STAGES.find(stage => stage.name === name) })
+
+  beforeEach(() => {
+    ;(listStages as jest.Mock).mockResolvedValue(STAGES)
+    ;(listLostReasons as jest.Mock).mockResolvedValue(REASONS)
+    prismaMock.crmAccount.findFirst.mockResolvedValue(at('Demo'))
+    ;(moveStage as jest.Mock).mockResolvedValue({ ...ROW, stage: { id: STAGES[4].id, name: 'Negociación', kind: 'ABIERTA' } })
+    ;(lose as jest.Mock).mockResolvedValue({ ...ROW, stage: { id: STAGES[6].id, name: 'Perdido', kind: 'PERDIDA' } })
+  })
+
+  it('avanzar_no_retrocede: an earlier or the same stage is refused; a later one moves it, by name without accents or capitals', async () => {
+    const { call } = setup()
+    expect(await call('crm_advance_stage', { accountId: ACC, stageName: 'Contacto inicial' })).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/no retrocede/i),
+    })
+    expect(await call('crm_advance_stage', { accountId: ACC, stageName: 'Demo' })).toMatchObject({ ok: false })
+    expect(moveStage).not.toHaveBeenCalled()
+
+    const moved = await call('crm_advance_stage', { accountId: ACC, stageName: '  negociacion ' })
+    expect(moved).toMatchObject({ ok: true, negocio: expect.objectContaining({ id: ACC, etapa: 'Negociación' }) })
+    expect(moveStage).toHaveBeenCalledWith(ADMIN, ACC, STAGES[4].id)
+    expect(auditMcpWrite).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ entity: 'CrmAccount', entityId: ACC, venueId: null }),
+    )
+  })
+
+  it('a closed business does not move, not even «forward» to Perdido', async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValue(at('Ganado'))
+    expect(await setup().call('crm_advance_stage', { accountId: ACC, stageName: 'Perdido', lostReason: 'Precio' })).toMatchObject({
+      ok: false,
+    })
+    expect(lose).not.toHaveBeenCalled()
+  })
+
+  it('«Ganado» is refused: it goes through the ficha, which links the Avoqado business', async () => {
+    const answer = await setup().call('crm_advance_stage', { accountId: ACC, stageName: 'ganado' })
+    expect(answer).toMatchObject({ ok: false, error: expect.stringContaining('SUPERADMIN') })
+    expect(moveStage).not.toHaveBeenCalled()
+  })
+
+  it('«Perdido» without a reason, or with one that does not resolve to exactly one active reason, answers the list', async () => {
+    const { call } = setup()
+    const active = ['Dijo que no', 'Precio', 'Précio']
+    for (const lostReason of [undefined, 'caro', 'precio', 'Ya no se usa']) {
+      const answer = await call('crm_advance_stage', { accountId: ACC, stageName: 'Perdido', lostReason })
+      expect({ lostReason, ...answer }).toMatchObject({ lostReason, ok: false, motivos: active })
+    }
+    expect(lose).not.toHaveBeenCalled()
+
+    expect(await call('crm_advance_stage', { accountId: ACC, stageName: 'perdido', lostReason: 'DIJO QUE NO' })).toMatchObject({ ok: true })
+    expect(lose).toHaveBeenCalledWith(ADMIN, ACC, expect.objectContaining({ lostReasonId: REASONS[0].id }))
+    expect(moveStage).not.toHaveBeenCalled()
+  })
+
+  it('a stage that does not exist answers the stages; a business it cannot see answers not found', async () => {
+    const { call } = setup()
+    expect(await call('crm_advance_stage', { accountId: ACC, stageName: 'Cerrado' })).toMatchObject({
+      ok: false,
+      etapas: STAGES.map(stage => stage.name),
+    })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    expect(await call('crm_advance_stage', { accountId: ACC, stageName: 'Negociación' })).toMatchObject({ ok: false })
+    expect(moveStage).not.toHaveBeenCalled()
+  })
+})
+
+// ── Notes and activities ──────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('crm_add_note and crm_add_activity', () => {
+  it('a note is added once: the same note again the same day is not repeated', async () => {
+    const { call } = setup()
+    prismaMock.crmTimelineEvent.findFirst.mockResolvedValueOnce(null)
+    expect(await call('crm_add_note')).toMatchObject({ ok: true, yaEstaba: false })
+    expect(addNote).toHaveBeenCalledWith(ADMIN, ACC, { text: 'Pidió precios' })
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+
+    prismaMock.crmTimelineEvent.findFirst.mockResolvedValueOnce({ id: cuid('event') })
+    expect(await call('crm_add_note')).toMatchObject({ ok: true, yaEstaba: true })
+    expect(addNote).toHaveBeenCalledTimes(1)
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+  })
+
+  it('an activity is scheduled once, and its due time comes back in Mexico City time', async () => {
+    const { call } = setup()
+    const dueAt = new Date('2026-11-03T16:00:00.000Z')
+    ;(addActivity as jest.Mock).mockResolvedValue({ id: cuid('act'), type: 'LLAMADA', title: 'Llamarle', dueAt })
+    prismaMock.crmActivity.findFirst.mockResolvedValueOnce(null)
+    expect(await call('crm_add_activity')).toMatchObject({ ok: true, yaEstaba: false, vence: '2026-11-03 10:00' })
+    expect(addActivity).toHaveBeenCalledWith(ADMIN, ACC, { type: 'LLAMADA', title: 'Llamarle', dueAt })
+
+    prismaMock.crmActivity.findFirst.mockResolvedValueOnce({ id: cuid('act'), dueAt })
+    expect(await call('crm_add_activity')).toMatchObject({ ok: true, yaEstaba: true })
+    expect(addActivity).toHaveBeenCalledTimes(1)
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refusal written for the operator comes back as ok:false with its code', async () => {
+    const { NotFoundError } = jest.requireActual('@/errors/AppError')
+    prismaMock.crmTimelineEvent.findFirst.mockResolvedValueOnce(null)
+    ;(addNote as jest.Mock).mockRejectedValueOnce(new NotFoundError('No encontramos ese negocio', 'CRM_ACCOUNT_NOT_FOUND'))
+    expect(await setup().call('crm_add_note')).toEqual({ ok: false, error: 'No encontramos ese negocio', code: 'CRM_ACCOUNT_NOT_FOUND' })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+})
+
+// ── Reads ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('crm_find_account, crm_pending and crm_pipeline_summary', () => {
+  beforeEach(() => {
+    ;(listAccounts as jest.Mock).mockResolvedValue({ rows: [ROW], nextCursor: null, total: 1 })
+  })
+
+  it('finds by canonical phone, by email or by text, within the caller scope and at most 20', async () => {
+    const { call } = setup()
+    const found = await call('crm_find_account', { phone: '55 1234 5678' })
+    expect(listAccounts).toHaveBeenLastCalledWith(ADMIN, { q: '+525512345678', limit: 20 })
+    expect(found).toMatchObject({
+      ok: true,
+      total: 1,
+      hayMas: false,
+      negocios: [expect.objectContaining({ id: ACC, nombre: 'Tacos Lupe', etapa: 'Demo', dueno: 'Sin dueño' })],
+    })
+    expect(found.negocios[0].proximaActividad).toMatchObject({ tipo: 'LLAMADA', vence: '2026-11-03 10:00' })
+
+    await call('crm_find_account', { email: ' ANA@Cafe.mx ' })
+    expect(listAccounts).toHaveBeenLastCalledWith(ADMIN, { q: 'ana@cafe.mx', limit: 20 })
+    await call('crm_find_account', { q: 'Tacos' })
+    expect(listAccounts).toHaveBeenLastCalledWith(ADMIN, { q: 'Tacos', limit: 20 })
+  })
+
+  it('nothing to search by, or a phone that is not one, does not search', async () => {
+    const { call } = setup()
+    expect(await call('crm_find_account', {})).toMatchObject({ ok: false })
+    expect(await call('crm_find_account', { phone: 'abc' })).toMatchObject({ ok: false })
+    expect(listAccounts).not.toHaveBeenCalled()
+  })
+
+  it('«Mis pendientes» comes by section with its real total', async () => {
+    const empty = { rows: [], total: 0 }
+    ;(getPending as jest.Mock).mockResolvedValue({
+      vencidas: { rows: [ROW], total: 73 },
+      hoy: empty,
+      sinSiguientePaso: empty,
+      estancados: empty,
+      nuevosSinDueno: empty,
+    })
+    const answer = await setup().call('crm_pending')
+    expect(getPending).toHaveBeenCalledWith(ADMIN)
+    expect(answer).toMatchObject({
+      ok: true,
+      vencidas: { total: 73, negocios: [expect.objectContaining({ id: ACC })] },
+      hoy: { total: 0, negocios: [] },
+    })
+  })
+
+  it('the pipeline summary is the reports of the current Mexico City month', async () => {
+    jest.useFakeTimers({ now: new Date('2026-11-01T05:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+    try {
+      ;(getReports as jest.Mock).mockResolvedValue({
+        porEtapa: [{ id: cuid('stage1'), name: 'Prospecto', kind: 'ABIERTA', total: 12, estancados: 3 }],
+        abiertos: 12,
+        estancados: 3,
+        ganados: { total: 2 },
+        perdidos: { total: 1 },
+      })
+      const answer = await setup().call('crm_pipeline_summary')
+      // 05:00 UTC on Nov 1 is still Oct 31 in Mexico City.
+      expect(getReports).toHaveBeenCalledWith(ADMIN, { desde: '2026-10-01', hasta: '2026-10-31' })
+      expect(answer).toMatchObject({
+        ok: true,
+        porEtapa: [{ etapa: 'Prospecto', total: 12, estancados: 3 }],
+        abiertos: 12,
+        estancados: 3,
+        mes: { desde: '2026-10-01', hasta: '2026-10-31', ganados: 2, perdidos: 1 },
+      })
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+})
