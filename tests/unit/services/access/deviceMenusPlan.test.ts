@@ -11,7 +11,8 @@
  *  1. quién la concede: Pro y Premium por su plan; Gratis no (salvo una exención de la sede);
  *  2. su entrada en el catálogo: Pro, CONFIGURABLE y sin requisito, y un plan publicado desde hoy la incluye;
  *  3. que entre a los contratos de plan que ya están vivos (`PLAN_CATCH_UP_CODES`);
- *  4. que su fila `Feature` se siembre con precio 0 (no se vende suelta) y que correr la siembra otra vez no toque nada.
+ *  (La siembra de la fila `Feature` y de los contratos vivos, con precio 0, tiene su propia prueba:
+ *  tests/unit/scripts/seedDeviceMenusFeature.test.ts.)
  *
  * «Gratis» se prueba a nivel de NEGOCIO (sin plan): `elPlanConcede` sólo recibe PRO o PREMIUM (`BaseTier`) y, llamada con
  * otra cosa, contestaría como Pro.
@@ -25,16 +26,12 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     // `groupBy` lo usa `getVenuePlanInfo` (vía `grantedCapabilityCodes`): sin concesiones sueltas devuelve [].
     capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     hybridContract: { findFirst: jest.fn().mockResolvedValue(null) },
-    // Siembra de la fila `Feature` (scripts/seed-device-menus-feature.ts).
-    feature: { upsert: jest.fn().mockResolvedValue({}) },
-    $disconnect: jest.fn().mockResolvedValue(undefined),
   },
 }))
 
 import fs from 'fs'
 import path from 'path'
 import prisma from '../../../../src/utils/prismaClient'
-import logger from '../../../../src/config/logger'
 import { FEATURE_CATALOG } from '../../../../src/config/featureCatalog'
 import {
   elPlanConcede,
@@ -162,39 +159,5 @@ describe('🔴 DEVICE_MENUS tiene UN solo resolver: el de funciones del plan (nu
       .filter(f => MODULO.test(fs.readFileSync(f, 'utf8')))
       .map(f => path.relative(SRC, f))
     expect(culpables).toEqual([])
-  })
-})
-
-describe('siembra de la fila Feature (scripts/seed-device-menus-feature.ts)', () => {
-  let upserts: any[][]
-  let desconexiones: number
-  let errores: number
-
-  beforeAll(async () => {
-    jest.clearAllMocks()
-    // `main()` corre suelto al importar el script (igual que el de PRODUCT_VARIANTS): se espera a que termine su `.finally`.
-    await import('../../../../scripts/seed-device-menus-feature')
-    await new Promise(resolve => setImmediate(resolve))
-    upserts = [...db.feature.upsert.mock.calls]
-    desconexiones = db.$disconnect.mock.calls.length
-    errores = (logger.error as jest.Mock).mock.calls.length
-  })
-
-  it('escribe UNA fila con el código, precio 0 (no se vende suelta) y sin nada de Stripe', () => {
-    expect(upserts).toHaveLength(1)
-    const { where, create } = upserts[0][0]
-    expect(where).toEqual({ code: CODIGO })
-    expect(create).toMatchObject({ code: CODIGO, name: 'Menú de cada aparato', category: 'OPERATIONS', monthlyPrice: 0, active: true })
-    expect(create).not.toHaveProperty('stripeProductId')
-    expect(create).not.toHaveProperty('stripePriceId')
-  })
-
-  it('🔴 es idempotente: si la fila ya existe sólo la deja activa, y NO pisa precio, nombre ni Stripe', () => {
-    expect(upserts[0][0].update).toEqual({ active: true })
-  })
-
-  it('cierra la conexión una vez y termina sin error', () => {
-    expect(desconexiones).toBe(1)
-    expect(errores).toBe(0)
   })
 })
