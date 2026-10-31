@@ -11,6 +11,11 @@
  *   TEST_DATABASE_URL='postgresql://<user>:<password>@localhost:5432/<disposable database>' \
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/reportes.integration.test.ts --ci
  */
+// The integration setup replaces `logAction` with an empty mock for every suite (`tests/__helpers__/integration-setup.ts`).
+// Hiding an organization must leave a REAL audit row — with its actor and its organization, the columns the audit screens
+// filter by — so this file writes through the real one, as `venueActivityLog.service.test.ts` does in unit.
+jest.unmock('@/services/dashboard/activity-log.service')
+
 import type { Prisma } from '@prisma/client'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { listLostReasons, listStages } from '@/services/crm/accounts.service'
@@ -121,7 +126,11 @@ describe('CRM reports and «Clientes» against Postgres', () => {
       await prisma.activityLog.deleteMany({ where: { staffId: { in: staffIds } } })
       await prisma.staff.deleteMany({ where: { id: { in: staffIds } } })
     }
-    if (organizationIds.length) await prisma.organization.deleteMany({ where: { id: { in: organizationIds } } })
+    if (organizationIds.length) {
+      // `ActivityLog.organization` is RESTRICT: the hide/unhide rows go before their organization.
+      await prisma.activityLog.deleteMany({ where: { organizationId: { in: organizationIds } } })
+      await prisma.organization.deleteMany({ where: { id: { in: organizationIds } } })
+    }
   })
 
   it('las_cubetas_de_mes_y_semana_caen_en_el_calendario_de_ciudad_de_mexico', async () => {
@@ -176,6 +185,11 @@ describe('CRM reports and «Clientes» against Postgres', () => {
     ).toBe(1)
 
     await unhideClient(admin, organization.id)
+    await unhideClient(admin, organization.id)
     expect((await listClients(access(seller.id), { q: suffix })).total).toBe(1)
+    // Twice, but one change: one row, with who did it and on which organization.
+    expect(
+      await prisma.activityLog.count({ where: { action: 'CRM_CLIENT_UNHIDDEN', organizationId: organization.id, staffId: seller.id } }),
+    ).toBe(1)
   })
 })
