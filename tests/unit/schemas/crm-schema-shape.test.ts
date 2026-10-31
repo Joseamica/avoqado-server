@@ -48,6 +48,9 @@ describe('CRM propio — forma del esquema', () => {
     expect(campo('CrmTeam', 'key')).toMatchObject({ isUnique: true, hasDefaultValue: true, default: 'default' })
     expect(campo('CrmTeam', 'organizationId')).toMatchObject({ isUnique: true, isRequired: true })
     expect(campo('CrmTeam', 'venueId')).toMatchObject({ isUnique: true, isRequired: true })
+    // N-2: deleting the team's organization or venue fails in plain sight instead of leaving CrmTeam pointing at nothing.
+    expect(campo('CrmTeam', 'organization')).toMatchObject({ relationFromFields: ['organizationId'], relationOnDelete: 'Restrict' })
+    expect(campo('CrmTeam', 'venue')).toMatchObject({ relationFromFields: ['venueId'], relationOnDelete: 'Restrict' })
     expect(campo('CrmStage', 'name')?.isUnique).toBe(true)
     expect(campo('CrmLostReason', 'name')?.isUnique).toBe(true)
     expect(campo('CrmTimelineEvent', 'sourceKey')).toMatchObject({ isUnique: true, isRequired: false })

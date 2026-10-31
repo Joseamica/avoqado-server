@@ -203,7 +203,8 @@ describe('ensureCrmTeamVenue', () => {
     await expect(ensureCrmTeamVenue()).resolves.toEqual({ venueId: VENUE_ID, organizationId: ORG_ID })
 
     const org = teamTx.organization.create.mock.calls[0][0].data
-    expect(org).toEqual({ name: 'Avoqado · Equipo de ventas', email: 'hola@avoqado.io', phone: '+525667976805' })
+    expect(org).toEqual(expect.objectContaining({ name: 'Avoqado · Equipo de ventas', email: 'hola@avoqado.io', phone: '+525667976805' }))
+    expect(org).not.toHaveProperty('slug')
     expect(teamTx.organization.create.mock.invocationCallOrder[0]).toBeLessThan(teamTx.venue.create.mock.invocationCallOrder[0])
     expect(teamTx.venue.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ organizationId: ORG_ID }) }))
     expect(teamTx.crmTeam.create).toHaveBeenCalledWith({ data: { key: 'default', organizationId: ORG_ID, venueId: VENUE_ID } })
@@ -215,6 +216,15 @@ describe('ensureCrmTeamVenue', () => {
     // Nothing of it written outside that transaction.
     expect(prismaMock.organization.create).not.toHaveBeenCalled()
     expect(prismaMock.venue.create).not.toHaveBeenCalled()
+  })
+
+  it('organizacion_del_equipo_nace_con_alta_terminada', async () => {
+    // N-3: login treats as an OWNER in onboarding whoever has their organization's email and no working venue while the
+    // organization's onboarding is unfinished — and the dashboard sends them to the wizard, where they could create real
+    // venues inside the team's empty organization. It is born with its onboarding done.
+    await ensureCrmTeamVenue()
+
+    expect(teamTx.organization.create.mock.calls[0][0].data.onboardingCompletedAt).toBeInstanceOf(Date)
   })
 
   it('idempotente_dos_veces_un_venue', async () => {
@@ -265,9 +275,13 @@ describe('addTeamMember', () => {
     prismaMock.staff.create.mockImplementation(async ({ data }: any) => ({ id: 'cstaffnew0000000000000001', ...data }))
     prismaMock.staffOrganization.create.mockResolvedValue({})
     prismaMock.venueFeature.findMany.mockResolvedValue([]) // no paid plan: a venue that is not exempt would be Free, capped at 2
-    // Carla already has a working Avoqado account; Ana and Beto do not.
-    prismaMock.staff.findFirst.mockImplementation(async ({ where }: any) =>
-      where.email.equals === 'carla@avoqado.io' ? { id: SELLER_ID, active: true } : null,
+    // Carla already has a working Avoqado account; Ana and Beto do not. (By id: the admin who invites.)
+    prismaMock.staff.findUnique.mockImplementation(async ({ where }: any) =>
+      where.id === ADMIN_ID
+        ? { id: ADMIN_ID, firstName: 'Founder', lastName: 'Avoqado' }
+        : where.email === 'carla@avoqado.io'
+          ? { id: SELLER_ID, active: true }
+          : null,
     )
 
     await addTeamMember(actor(), newMember({ email: 'carla@avoqado.io', firstName: 'Carla', lastName: 'Ruiz' }))
@@ -318,7 +332,6 @@ describe('addTeamMember', () => {
     teamExists()
     const provisional = { id: 'cstaffprv0000000000000001', email: 'ana@avoqado.io', active: false, emailVerified: false, password: null }
     prismaMock.platformAccess.findUnique.mockResolvedValue(storedRow({ email: 'ana@avoqado.io', staffId: null, active: false }))
-    prismaMock.staff.findFirst.mockResolvedValue(provisional)
     prismaMock.staff.findUnique.mockImplementation(async ({ where }: any) =>
       where.id === ADMIN_ID
         ? { id: ADMIN_ID, firstName: 'Founder', lastName: 'Avoqado' }
@@ -354,20 +367,58 @@ describe('addTeamMember', () => {
     })
   })
 
-  it('cuenta_con_mayusculas_no_se_duplica', async () => {
-    // M-4: Staff.email may keep the capitals someone typed (getCrmAccess already reads it ignoring case). The add finds that
-    // account and gives it the seat, instead of inviting — and creating — a second account in lowercase.
+  it('cuenta_con_mayusculas_recibe_invitacion', async () => {
+    // Ruling 16 (N-1): the account is looked up EXACTLY like login, reset, Google and invitation acceptance do — the exact
+    // lowercase email. An active account stored with capitals (typed into the superadmin) can never log in, so a seat would
+    // leave Ana with no way in. She gets an invitation instead: accepting it makes the lowercase account she CAN log in with.
+    const capitalized = { id: SELLER_ID, email: 'Ana.Lopez@avoqado.io', active: true }
+    prismaMock.staff.findUnique.mockImplementation(async ({ where }: any) =>
+      where.id === ADMIN_ID
+        ? { id: ADMIN_ID, firstName: 'Founder', lastName: 'Avoqado' }
+        : where.email === capitalized.email
+          ? capitalized
+          : null,
+    )
+    // A case-insensitive lookup WOULD find that account — the trap this test guards against.
     prismaMock.staff.findFirst.mockImplementation(async ({ where }: any) =>
-      where.email.mode === 'insensitive' && where.email.equals === 'ana.lopez@avoqado.io' ? { id: SELLER_ID, active: true } : null,
+      where.email?.mode === 'insensitive' && String(where.email.equals).toLowerCase() === 'ana.lopez@avoqado.io' ? capitalized : null,
     )
 
-    await expect(addTeamMember(actor(), newMember({ email: 'Ana.Lopez@Avoqado.IO' }))).resolves.toEqual(
-      expect.objectContaining({ invited: false }),
+    await expect(addTeamMember(actor(), newMember({ email: 'Ana.Lopez@avoqado.io' }))).resolves.toEqual(
+      expect.objectContaining({ invited: true }),
     )
-    expect(invite).not.toHaveBeenCalled()
-    expect(prismaMock.staffVenue.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { staffId_venueId: { staffId: SELLER_ID, venueId: VENUE_ID } } }),
+    expect(prismaMock.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: 'ana.lopez@avoqado.io' } }))
+    expect(prismaMock.staffVenue.upsert).not.toHaveBeenCalled()
+    expect(invite).toHaveBeenCalledWith(VENUE_ID, ADMIN_ID, expect.objectContaining({ email: 'ana.lopez@avoqado.io' }))
+  })
+
+  it('invitacion_sin_correo_devuelve_liga', async () => {
+    // N-4: the new invitation's email did not go out — and the old link was already revoked. The admin gets the link to
+    // send it by hand, and the ActivityLog says it was not sent (without the link: it opens the invitation).
+    const link = 'https://dashboard.avoqado.io/invite/tok-no-enviado'
+    invite.mockResolvedValue({ emailSent: false, isTPVOnly: false, invitation: {}, inviteLink: link })
+
+    await expect(addTeamMember(actor(), newMember())).resolves.toEqual(
+      expect.objectContaining({ invited: true, invitationEmailSent: false, inviteLink: link }),
     )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CRM_TEAM_INVITATION_EMAIL_NOT_SENT',
+        entity: 'PlatformAccess',
+        entityId: ROW_ID,
+        staffId: ADMIN_ID,
+        venueId: null,
+      }),
+    )
+    expect(JSON.stringify(jest.mocked(logAction).mock.calls)).not.toContain('tok-no-enviado')
+
+    // When the email does go out, the link stays out of the response.
+    jest.mocked(logAction).mockClear()
+    invite.mockResolvedValue({ emailSent: true, isTPVOnly: false, invitation: {}, inviteLink: `${link}-2` })
+    const sent = await addTeamMember(actor(), newMember())
+    expect(sent).toEqual(expect.objectContaining({ invited: true, invitationEmailSent: true }))
+    expect((sent as { inviteLink?: string }).inviteLink).toBeUndefined()
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_TEAM_INVITATION_EMAIL_NOT_SENT' }))
   })
 
   it('si_la_invitacion_falla_queda_en_bitacora', async () => {
@@ -393,9 +444,7 @@ describe('addTeamMember', () => {
         create: expect.objectContaining({ email: 'ana.lopez@avoqado.io', createdById: ADMIN_ID }),
       }),
     )
-    expect(prismaMock.staff.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { email: { equals: 'ana.lopez@avoqado.io', mode: 'insensitive' } } }),
-    )
+    expect(prismaMock.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: 'ana.lopez@avoqado.io' } }))
     expect(invite).toHaveBeenCalledWith(VENUE_ID, ADMIN_ID, expect.objectContaining({ email: 'ana.lopez@avoqado.io' }))
   })
 
@@ -622,7 +671,6 @@ describe('removeTeamMember', () => {
     const noAccount = transactionClient([])
     prismaMock.$transaction.mockImplementationOnce((callback: any) => callback(noAccount))
     prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ email: 'nadie@avoqado.io', staffId: null }))
-    prismaMock.staff.findFirst.mockResolvedValue(null)
 
     await removeTeamMember(actor(), ROW_ID, {})
 
@@ -691,13 +739,13 @@ describe('listTeamMembers', () => {
   it('lista_del_equipo_acotada_a_100', async () => {
     prismaMock.platformAccess.findMany.mockResolvedValue([
       storedRow(),
-      // Not claimed yet (Beto has not entered the CRM): his account is found by email, ignoring case.
+      // Not claimed yet (Beto has not entered the CRM): his account is found by its exact lowercase email.
       storedRow({ id: ROW2_ID, email: 'beto@avoqado.io', staffId: null, contactar: false }),
     ])
     prismaMock.platformAccess.count.mockResolvedValue(250)
     prismaMock.staff.findMany.mockResolvedValue([
       { id: SELLER_ID, email: 'carla@avoqado.io', firstName: 'Carla', lastName: 'Ruiz' },
-      { id: OTHER_ID, email: 'Beto@Avoqado.io', firstName: 'Beto', lastName: 'Díaz' },
+      { id: OTHER_ID, email: 'beto@avoqado.io', firstName: 'Beto', lastName: 'Díaz' },
     ])
     prismaMock.crmAccount.groupBy.mockResolvedValue([{ ownerStaffId: SELLER_ID, _count: { _all: 3 } }])
 
@@ -709,7 +757,8 @@ describe('listTeamMembers', () => {
     )
     expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { OR: [{ id: { in: [SELLER_ID] } }, { email: { in: ['beto@avoqado.io'], mode: 'insensitive' } }] },
+        // Exact lowercase email, the login's rule (ruling 16): an account stored with capitals cannot log in anyway.
+        where: { OR: [{ id: { in: [SELLER_ID] } }, { email: { in: ['beto@avoqado.io'] } }] },
       }),
     )
     expect(page.meta).toEqual({ total: 250, page: 2, pageSize: 100, totalPages: 3 })

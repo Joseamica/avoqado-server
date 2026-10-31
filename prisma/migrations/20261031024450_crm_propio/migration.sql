@@ -2,8 +2,9 @@
 -- Generada con `prisma migrate dev --create-only` contra una base desechable; se quitaron a mano 5 sentencias de
 -- deriva que ya existían entre el historial y el esquema de develop (Customer_tags_gin_idx, BirthdayAutomation,
 -- PaymentEffect, VenueFeature y el nombre recortado de DocumentRequestDelivery): no son de este cambio.
--- Editada a mano antes de aplicarse en ningún lado (tarea 3, rulings 7, 10, 14 y 15): PlatformAccess.staffId único,
--- la tabla CrmTeam, y los índices de CrmInboundEntry.accountId, CrmActivity.doneById y CrmTimelineEvent.actorStaffId.
+-- Editada a mano antes de aplicarse en ningún lado (tarea 3, rulings 7, 10, 14 y 15 y N-2): PlatformAccess.staffId
+-- único, la tabla CrmTeam con sus llaves (RESTRICT) a Organization y Venue, y los índices de CrmInboundEntry.accountId,
+-- CrmActivity.doneById y CrmTimelineEvent.actorStaffId.
 
 -- CreateTable
 CREATE TABLE "PlatformAccess" (
@@ -244,6 +245,12 @@ CREATE INDEX "CrmInboundEntry_accountId_idx" ON "CrmInboundEntry"("accountId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "CrmDigestSend_staffId_day_kind_key" ON "CrmDigestSend"("staffId", "day", "kind");
+
+-- AddForeignKey
+ALTER TABLE "CrmTeam" ADD CONSTRAINT "CrmTeam_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "CrmTeam" ADD CONSTRAINT "CrmTeam_venueId_fkey" FOREIGN KEY ("venueId") REFERENCES "Venue"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "CrmAccount" ADD CONSTRAINT "CrmAccount_ownerStaffId_fkey" FOREIGN KEY ("ownerStaffId") REFERENCES "Staff"("id") ON DELETE SET NULL ON UPDATE CASCADE;

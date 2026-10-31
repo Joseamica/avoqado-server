@@ -40,7 +40,9 @@ export async function ensureCrmTeamVenue(): Promise<{ venueId: string; organizat
     if (made) return made
 
     const organization = await tx.organization.create({
-      data: { name: CRM_TEAM_NAME, email: 'hola@avoqado.io', phone: '+525667976805' },
+      // `onboardingCompletedAt`: with it unfinished, login takes whoever has this email and no working venue for an OWNER
+      // in onboarding and sends them to the wizard, where they could open real venues in this empty organization.
+      data: { name: CRM_TEAM_NAME, email: 'hola@avoqado.io', phone: '+525667976805', onboardingCompletedAt: new Date() },
       select: { id: true },
     })
     let venueId: string
@@ -103,13 +105,13 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
   const unclaimed = rows.filter(row => !row.staffId).map(row => row.email)
   const people = rows.length
     ? await prisma.staff.findMany({
-        where: { OR: [{ id: { in: claimed } }, { email: { in: unclaimed, mode: Prisma.QueryMode.insensitive } }] },
+        where: { OR: [{ id: { in: claimed } }, { email: { in: unclaimed } }] },
         select: { id: true, email: true, firstName: true, lastName: true },
         take: rows.length,
       })
     : []
   const personOf = (row: { staffId: string | null; email: string }) =>
-    people.find(person => (row.staffId ? person.id === row.staffId : person.email.toLowerCase() === row.email))
+    people.find(person => (row.staffId ? person.id === row.staffId : person.email === row.email))
   const staffIds = rows.flatMap(row => personOf(row)?.id ?? [])
   const open = staffIds.length
     ? await prisma.crmAccount.groupBy({
@@ -135,9 +137,11 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
   return { data, meta: { total, page, pageSize, totalPages: Math.ceil(total / pageSize) } }
 }
 
-/** A Staff by email, ignoring capitals: `Staff.email` keeps the ones the person typed (as `getCrmAccess` assumes). */
-const staffByEmail = (email: string) =>
-  prisma.staff.findFirst({ where: { email: { equals: email, mode: Prisma.QueryMode.insensitive } }, select: { id: true, active: true } })
+/**
+ * A Staff by the exact lowercase email: the same rule as login, password reset, Google and invitation acceptance (ruling
+ * 16). An account stored with capitals can never log in, so it must not count as "already has an account".
+ */
+const staffByEmail = (email: string) => prisma.staff.findUnique({ where: { email }, select: { id: true, active: true } })
 
 /**
  * Gives keys to a person by email. Someone with a working Avoqado account gets a VIEWER seat in the internal venue right
@@ -181,15 +185,33 @@ export async function addTeamMember(actor: CrmAccess, input: { email: string; fi
       update: { active: true, endDate: null },
       create: { staffId: staff.id, venueId, role: StaffRole.VIEWER, active: true },
     })
-  } else {
-    // A new invitation every time: an expired one leaves no way in, and «it never arrived» is why people add again.
-    await prisma.invitation.updateMany({
-      where: { email, venueId, status: InvitationStatus.PENDING },
-      data: { status: InvitationStatus.REVOKED },
-    })
-    await inviteTeamMember(venueId, actor.staffId, { role: StaffRole.VIEWER, email, firstName: input.firstName, lastName: input.lastName })
+    return { id: row.id, email, keys: effectiveKeys(row), invited }
   }
-  return { id: row.id, email, keys: effectiveKeys(row), invited }
+
+  // A new invitation every time: an expired one leaves no way in, and «it never arrived» is why people add again.
+  await prisma.invitation.updateMany({
+    where: { email, venueId, status: InvitationStatus.PENDING },
+    data: { status: InvitationStatus.REVOKED },
+  })
+  const sent = await inviteTeamMember(venueId, actor.staffId, {
+    role: StaffRole.VIEWER,
+    email,
+    firstName: input.firstName,
+    lastName: input.lastName,
+  })
+  if (sent.emailSent) return { id: row.id, email, keys: effectiveKeys(row), invited, invitationEmailSent: true }
+
+  // The email did not go out and the old link is already revoked: the admin gets the link to send it by hand. The audit
+  // trail says so, without the link (it opens the invitation).
+  void logAction({
+    staffId: actor.staffId,
+    venueId: null,
+    action: 'CRM_TEAM_INVITATION_EMAIL_NOT_SENT',
+    entity: 'PlatformAccess',
+    entityId: row.id,
+    data: { email },
+  })
+  return { id: row.id, email, keys: effectiveKeys(row), invited, invitationEmailSent: false, inviteLink: sent.inviteLink }
 }
 
 /** Changes the keys of someone on the team. */

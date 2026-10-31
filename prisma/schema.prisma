@@ -163,6 +163,8 @@ model Organization {
 
   /// CRM propio (spec 2026-10-30): el negocio del CRM ligado a esta organización, si lo hay (a lo más uno).
   crmAccount CrmAccount?
+  /// CRM propio: sólo en la organización del equipo de ventas de Avoqado.
+  crmTeam    CrmTeam?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -730,6 +732,9 @@ model Venue {
 
   // Conector Shopify (spec 2026-10-07): una sucursal ↔ una ubicación de Shopify
   shopifyLocationLink ShopifyLocationLink?
+
+  // CRM propio: sólo en el venue del equipo de ventas de Avoqado
+  crmTeam CrmTeam?
 
   @@unique([id, organizationId])
   @@index([organizationId])
@@ -20556,11 +20561,14 @@ model PlatformAccess {
 /// (`key = 'default'`), creada por `ensureCrmTeamVenue`. Lo que excluye al equipo (búsquedas, clientes) lee esta fila,
 /// nunca un slug ni un nombre.
 model CrmTeam {
-  id             String   @id @default(cuid())
-  key            String   @unique @default("default")
-  organizationId String   @unique
-  venueId        String   @unique
-  createdAt      DateTime @default(now())
+  id             String       @id @default(cuid())
+  key            String       @unique @default("default")
+  // Restrict: borrar la organización o el venue del equipo falla a la vista, en vez de dejar esta fila apuntando a nada.
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId        String       @unique
+  venue          Venue        @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  createdAt      DateTime     @default(now())
 }
 
 /// Un negocio del CRM: va de prospecto a cliente en UN solo registro y se liga a su Organization.
