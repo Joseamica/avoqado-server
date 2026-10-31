@@ -266,7 +266,8 @@ describe('exportAccountsCsv', () => {
         MINE_OR_UNOWNED,
         { archivedAt: null },
         { stageId: PROSPECTO },
-        { ownerStaffId: null },
+        // «Sin dueño» is work to take: open stages only (m-6), in the export as in the list.
+        { ownerStaffId: null, stage: { kind: 'ABIERTA' } },
         { source: 'LANDING' },
       ]),
     )
