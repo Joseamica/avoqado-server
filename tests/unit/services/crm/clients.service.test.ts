@@ -537,6 +537,8 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     expect(admin).toMatchObject({ ventasBloqueadas: false, venues: [expect.objectContaining({ kycStatus: 'VERIFIED' })] })
     expect(admin.ventasMes?.toString()).toBe('1500.5')
 
+    // Without a CRM account there is no account scope to ask.
+    expect(prismaMock.crmAccount.findFirst).toHaveBeenCalledTimes(1) // only the `getLive` comparison above
     // Asked by the client rule of «Clientes» — this Organization, not the team's, not hidden — in one raw read.
     const [check] = rawQueries()
     expect(check.sql).toContain('o."id" = ?')
@@ -544,6 +546,26 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     expect(check.values).toContain(TEAM_ORG)
     expect(check.sql).toContain('NOT EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")')
     expect(check.sql).toContain(`EXISTS (SELECT 1 FROM "Payment" p WHERE p."venueId" = v."id"`)
+  })
+
+  it('cliente_de_otro_vendedor_404 (ruling 56): the Organization route never bypasses the account scope of `/accounts/:id/live`', async () => {
+    liveWorld()
+    // A client whose CRM account belongs to a colleague: not in this «propios» seller's scope.
+    clientsDb([{ id: ORG, crmAccountId: ACCOUNT_B }])
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+
+    await expect(getClientLive(access(), ORG, NOW)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_ACCOUNT_NOT_FOUND' })
+    expect(prismaMock.crmAccount.findFirst).toHaveBeenCalledWith({
+      where: { AND: [{ id: ACCOUNT_B }, MINE_OR_UNOWNED] },
+      select: { id: true },
+    })
+    expect(prismaMock.venue.findMany).not.toHaveBeenCalled()
+    expect(getPlanState).not.toHaveBeenCalled()
+
+    // An account the caller does see — theirs, nobody's, or anyone's with «Ver: todos» — keeps working.
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT_B })
+    await expect(getClientLive(access({ ver: 'todos' }), ORG, NOW)).resolves.toMatchObject({ ligada: true, organizationId: ORG })
+    expect(prismaMock.crmAccount.findFirst).toHaveBeenLastCalledWith({ where: { AND: [{ id: ACCOUNT_B }, {}] }, select: { id: true } })
   })
 
   it('no_es_cliente_404: not a client, hidden, the team’s own or gone — and nothing live is read', async () => {

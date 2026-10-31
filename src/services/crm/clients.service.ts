@@ -206,14 +206,22 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
  * is a client by the rule of «Clientes» (not hidden, never the team's own), so a client without a CRM account — signed
  * up by another path — is seen without creating one. Anything else is a 404.
  *
- * Every seller with «Ver» lists every client, with or without an account (ruling 35); what the CRM scope hides in that
- * list — a colleague's owner and stage — is not part of the live data.
+ * Ruling 56: an Organization linked to a CRM account outside the caller's «Ver» (a «propios» seller and a colleague's
+ * client) answers the same 404 as `GET /accounts/:id/live` — this route never goes around the account scope.
  */
 export async function getClientLive(access: CrmAccess, organizationId: string, now = new Date()) {
   const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: false })
-  const [client] = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-    SELECT o."id" FROM "Organization" o WHERE o."id" = ${organizationId} AND ${filter}`)
+  const [client] = await prisma.$queryRaw<Array<{ id: string; crmAccountId: string | null }>>(Prisma.sql`
+    SELECT o."id", (SELECT ca."id" FROM "CrmAccount" ca WHERE ca."organizationId" = o."id") AS "crmAccountId"
+    FROM "Organization" o WHERE o."id" = ${organizationId} AND ${filter}`)
   if (!client) throw new NotFoundError('Esa organización no es cliente', 'CRM_NO_ES_CLIENTE')
+  if (client.crmAccountId) {
+    const visible = await prisma.crmAccount.findFirst({
+      where: { AND: [{ id: client.crmAccountId }, scopeWhere(access, 'ver')] },
+      select: { id: true },
+    })
+    if (!visible) throw new NotFoundError('No encontramos ese negocio', 'CRM_ACCOUNT_NOT_FOUND')
+  }
   return liveOf(access, organizationId, now)
 }
 
