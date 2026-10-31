@@ -20,6 +20,7 @@ import { TpvSettings, getTpvSettings, updateTpvSettings } from '../../services/d
 import { assertSettingsConfigurable, resolveConfigurableSettings } from '../../services/device-capabilities.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { effectiveExchangesEnabled } from '../../services/exchanges/exchangeRules'
+import { storeCreditAvailable } from '../../services/storeCredit/storeCreditTender'
 import type { UpdateDisplayModeInput, UpdateTerminalSettingsInput } from '../../schemas/mobile/tpvSettings.mobile.schema'
 import {
   DisplayModeRequestError,
@@ -111,7 +112,13 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       prisma.venueSettings
         .findUnique({
           where: { venueId },
-          select: { promotionsPanelCashier: true, promotionsPanelCustomer: true, managerPinOverrideEnabled: true, exchangesEnabled: true },
+          select: {
+            promotionsPanelCashier: true,
+            promotionsPanelCustomer: true,
+            managerPinOverrideEnabled: true,
+            exchangesEnabled: true,
+            storeCreditOnly: true,
+          },
         })
         .then(
           fila => ({ ok: true as const, fila }),
@@ -212,6 +219,10 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         // aquí y no dentro de `settings`.
         managerPinOverrideEnabled: venueSettings?.managerPinOverrideEnabled ?? false,
         exchangesEnabled: effectiveExchangesEnabled(venueSettings?.exchangesEnabled, venue?.type),
+        // Saldo a favor (spec 2026-10-30 §5.1). Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo ignora; uno nuevo sin
+        // el campo cae a false. `storeCreditOnly` es de VENUE; `storeCreditAvailable` = el SERVIDOR sabe dar saldo (las dos llaves).
+        storeCreditOnly: venueSettings?.storeCreditOnly ?? false,
+        storeCreditAvailable: storeCreditAvailable(),
         // Encabezado y diseño del ticket (aditivo y opcional, mismo contrato que `plan`):
         // un POS viejo los ignora. `receiptInfo` conserva EXACTAMENTE sus campos de siempre
         // y suma los emisores por venta; `receiptLayout` es nuevo (spec § 7.3).
