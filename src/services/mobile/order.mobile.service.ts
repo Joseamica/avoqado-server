@@ -1142,7 +1142,10 @@ export async function buildOrderItemsData(
       const baseAjustadaCents = lineaAjustadaCents + Math.round(modifierTotal * 100) * item.quantity
       lineDiscount = calculateDiscountCents(appliedDiscount, baseAjustadaCents) / 100
     } else if (appliedDiscount) {
-      lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)
+      // «El centavo» (30-oct): también sin ajuste, el monto en centavos enteros como las apps ($21.35 al 10 %: 2.14, no 2.13);
+      // en pesos flotantes una venta sin red de tres renglones así quedaba PARCIAL. El mínimo de compra se sigue exigiendo.
+      calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
+      lineDiscount = calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100
     }
     const discountAmount = ajuste > 0 ? roundPesos(ajuste + lineDiscount) : lineDiscount
     itemDiscountTotal += discountAmount
@@ -1191,7 +1194,9 @@ export async function buildOrderItemsData(
     if (appliedDiscount) {
       validateDiscountScopeForItem(appliedDiscount, { productId: null, categoryId: null })
     }
-    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
+    // «El centavo» (30-oct): en centavos enteros como las apps; el mínimo de compra se sigue exigiendo.
+    if (appliedDiscount) calculateDiscountPesos(appliedDiscount, itemTotal)
+    const lineDiscount = appliedDiscount ? calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100 : 0
     itemDiscountTotal += lineDiscount
 
     return {
@@ -2441,8 +2446,11 @@ export async function applyOrderDiscountInTransaction(
   const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
-  const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
-  const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
+  // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope
+  // de $10 descontaba $30). En el reparto sólo viaja el de un %: el recálculo re-deriva los % y conserva el importe de un fijo.
+  const topeDelCatalogo = discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
+  const tope = discount.type === 'PERCENTAGE' ? topeDelCatalogo : null
+  const amount = Math.min(rawAmount, topeDelCatalogo ?? Infinity, remainingDiscountable)
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
