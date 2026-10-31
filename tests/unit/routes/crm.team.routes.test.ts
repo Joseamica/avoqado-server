@@ -8,13 +8,6 @@
 jest.mock('@/middlewares/requireCrm.middleware', () => ({
   requireCrm: (key: unknown) => Object.assign((_req: unknown, _res: unknown, next: () => void) => next(), { crmKey: key }),
 }))
-jest.mock('@/controllers/crm/crm.controller', () => ({
-  getMe: jest.fn(),
-  listTeam: jest.fn(),
-  addTeam: jest.fn(),
-  updateTeam: jest.fn(),
-  removeTeam: jest.fn(),
-}))
 
 import router from '@/routes/crm.routes'
 
