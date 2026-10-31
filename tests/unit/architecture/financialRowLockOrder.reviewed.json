@@ -457,6 +457,21 @@
       "loops": 1,
       "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6). R8 fija una fecha contable común; la lectura de la porción recién creada no agrega candados."
     },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S5): la PRIMERA sentencia de la transacción del Cambio con STORE_CREDIT, antes de la llave avoqado:exchange:v1, Orders, Payments, sobres y turno («primer-sobre» → filas → turno), como el Reembolso a saldo (S3)."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#respaldoVigenteDeLaRaiz": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Saldo a favor (S5): la raíz de un crédito de cambio que se abona a saldo. Va DENTRO del bucle de Payments por id ASC, justo después de que bloquearCobroParaReembolso apartó esa MISMA fila (reentrada, sin fila nueva); sus Orders ya son ascendencia poseída. Nunca después de sobres ni turno."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#prepararSobreDeSaldoAFavorEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S5): el candado por clienta y su sobre, después de los Payments y ANTES de la venta nueva y de cualquier turno. Es el ÚNICO grupo de sobres del Cambio (revisión de S2, M2): con STORE_CREDIT ningún tramo PAYOUT sale de un cobro con saldo de regalo, así que bloquearSobresDelReembolsoEnTx no aparta nada; writeRefundInTx lo vuelve a pedir en la misma transacción (reentrada)."
+    },
     "src/services/fiscal/cfdi.service.ts#emitirConEntrada#bloquearOrdenParaFacturar": {
       "count": 1,
       "loops": 0,

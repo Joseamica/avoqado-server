@@ -14,24 +14,16 @@ import * as refundDashboardService from '../dashboard/refund.dashboard.service'
 import type { IssueRefundInput, IssueRefundResult } from '../dashboard/refund.dashboard.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { abonarSaldoAFavorEnTx } from '../giftCards/giftCardLedger'
-import { telefonoDeTarjeta } from '../giftCards/giftCardEntrega'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import { sinSaldoAFavorPorque, type CobroParaDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
 import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from './storeCreditTender'
+import { saldosAFavorDeReembolsos, type StoreCreditDelReembolso } from './saldoAbonado'
+
+// La forma y su lector viven en `saldoAbonado.ts` (sin dependencias del núcleo del reembolso: el Cambio también la lee); se re-exportan
+// para los lectores de siempre (la lista y el detalle de transacciones del POS).
+export { saldosAFavorDeReembolsos, type StoreCreditDelReembolso }
 
 const SIN_LLAVES = 'Pide a Avoqado que active el saldo a favor.'
-
-/** Lo que la app ve del saldo que se le dio a la clienta (la misma forma que el Cambio, spec §5.4). */
-export interface StoreCreditDelReembolso {
-  customerId: string | null
-  customerName: string
-  amountCents: number
-  newBalanceCents: number
-  /** Los últimos 4 del teléfono con que se gasta (`recipientPhone`), no el de la ficha. */
-  phoneLast4: string
-  /** El teléfono de la ficha no es el del sobre: la cajera lo avisa y un gerente lo cambia en el DASHBOARD (Codex r3, h3). */
-  phoneMismatch: boolean
-}
 
 export type PosRefundInput = Omit<IssueRefundInput, 'refundMethod' | 'aSaldoAFavor'> & {
   refundMethod?: DevolverCon
@@ -182,45 +174,4 @@ export async function issuePosRefund(
     })
   }
   return { ...result, ...(storeCredit ? { storeCredit } : {}) }
-}
-
-/**
- * A quién y cuánto se abonó por cada devolución a saldo, leído del movimiento `saldo-a-favor:<id del REFUND>` de la libreta (S2) y de
- * su sobre. Lo usan la respuesta del Reembolso y la lista y el detalle de transacciones del POS (reimpresión del ticket). Acotado por
- * los ids que recibe (una página).
- */
-export async function saldosAFavorDeReembolsos(venueId: string, refundIds: string[]): Promise<Map<string, StoreCreditDelReembolso>> {
-  if (refundIds.length === 0) return new Map()
-  const movimientos = await prisma.giftCardActivity.findMany({
-    where: { venueId, operationKey: { in: refundIds.map(id => `saldo-a-favor:${id}`) } },
-    select: {
-      refundPaymentId: true,
-      amount: true,
-      balanceAfter: true,
-      giftCard: {
-        select: {
-          customerId: true,
-          recipientName: true,
-          recipientPhone: true,
-          customer: { select: { firstName: true, lastName: true, phone: true } },
-        },
-      },
-    },
-    take: refundIds.length,
-  })
-  const out = new Map<string, StoreCreditDelReembolso>()
-  for (const m of movimientos) {
-    if (!m.refundPaymentId) continue
-    const { customer, recipientPhone } = m.giftCard
-    const ficha = telefonoDeTarjeta(customer?.phone)
-    out.set(m.refundPaymentId, {
-      customerId: m.giftCard.customerId,
-      customerName: `${customer?.firstName ?? ''} ${customer?.lastName ?? ''}`.trim() || m.giftCard.recipientName || 'Cliente',
-      amountCents: Math.round(m.amount.toNumber() * 100),
-      newBalanceCents: Math.round(m.balanceAfter.toNumber() * 100),
-      phoneLast4: (recipientPhone ?? '').slice(-4),
-      phoneMismatch: ficha === null || telefonoDeTarjeta(recipientPhone) !== ficha,
-    })
-  }
-  return out
 }

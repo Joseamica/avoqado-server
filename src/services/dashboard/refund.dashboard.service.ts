@@ -12,7 +12,7 @@ import { operationHash } from '@/utils/operationHash'
 
 import { PaymentFundsFlow, PaymentMethod, PaymentSource, PaymentType, Prisma, type PrismaClient, TransactionStatus } from '@prisma/client'
 import logger from '../../config/logger'
-import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { restockOrderItems } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
@@ -60,7 +60,7 @@ import { chainRefundSemanticsInTx } from '../exchanges/exchangeTx'
 import { prepararSobreDeSaldoAFavorEnTx, type AbonoDeSaldoAFavor, type SobrePreparado } from '../giftCards/giftCardLedger'
 import { tomarCandadoPrimerSobreSiHaceFaltaEnTx } from '../storeCredit/primerSobreLock'
 import { resolveStoreCreditTenderInTx } from '../storeCredit/storeCreditTender'
-import { respaldoVigenteDeLaRaiz } from '../storeCredit/respaldoDeLaRaiz'
+import { raizYaDevuelta, respaldoVigenteDeLaRaiz } from '../storeCredit/respaldoDeLaRaiz'
 
 export type RefundReason =
   | 'RETURNED_GOODS'
@@ -1234,17 +1234,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       }
       // Saldo a favor desde la cadena (Codex plan r4 h2, r5 h1): si la terminal ya le devolvió la compra original a la tarjeta, dar saldo
       // encima sería devolver dos veces. Nada se escribe: el rechazo va antes del turno, de la fila y del abono.
-      if (chain?.kind === 'INHERIT' && respaldo && refundCents > respaldo.cents) {
-        throw new AppError(
-          respaldo.cents === 0
-            ? 'La compra original ya se devolvió.'
-            : `La compra original ya se devolvió en parte: de este crédito sólo se pueden pasar $${centsToNumber(respaldo.cents).toFixed(2)} a saldo a favor.`,
-          422,
-          true,
-          'STORE_CREDIT_ROOT_ALREADY_REFUNDED',
-          { maxCents: respaldo.cents },
-        )
-      }
+      if (chain?.kind === 'INHERIT' && respaldo && refundCents > respaldo.cents) throw raizYaDevuelta(respaldo.cents)
       // Saldo a favor: el medio de sistema resuelto con su revisión vigente; fuera del cajón y del banco, sin comercio.
       const saldo = input.aSaldoAFavor
         ? {

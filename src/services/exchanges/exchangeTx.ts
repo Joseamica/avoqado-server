@@ -1,5 +1,5 @@
 import { OrderSource, OrderType, Prisma } from '@prisma/client'
-import { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
+import AppError, { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
 import { exchangeAccountingAt } from './exchangeAccountingAt'
 import { prepareCardSettlementInTx, exchangeSalePostingInTx, ExchangeGenerationChanged, type ExchangeSettleTxInput } from './exchangeSettle'
 import type { ExchangeChargeEvidence } from './exchangeCharge'
@@ -11,7 +11,7 @@ import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { keptMarkdownDiscountRow } from '../shared/discount.service'
 import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { assertRefundableLines, assertPromotionLineFullQuantity, bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
-import type { RefundMoneySemantics } from '../dashboard/refund.dashboard.service'
+import type { AbonarSaldoAFavor, RefundMoneySemantics } from '../dashboard/refund.dashboard.service'
 import { writeRefundInTx } from '../shared/writeRefundInTx'
 import { anotarRegresoEnTx, faltaPorReponerEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
 import type { AbonoEnTx, AbonoEnTxContexto, AbonoEnTxEntrada } from '../mobile/order.mobile.service'
@@ -19,6 +19,11 @@ import type { TenderSemanticsPayment } from '../shared/tenderSemantics'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { bloquearSobresDelReembolsoEnTx, alRegistrarReembolsoEnTx } from '../giftCards/giftCardCancel.service'
+import { abonarSaldoAFavorEnTx, prepararSobreDeSaldoAFavorEnTx } from '../giftCards/giftCardLedger'
+import { tomarCandadoPrimerSobreSiHaceFaltaEnTx } from '../storeCredit/primerSobreLock'
+import { raizYaDevuelta, respaldoVigenteDeLaRaiz } from '../storeCredit/respaldoDeLaRaiz'
+import { resolveStoreCreditTenderInTx, storeCreditAvailable } from '../storeCredit/storeCreditTender'
+import { saldosAFavorDeReembolsos } from '../storeCredit/saldoAbonado'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { loadSaleForExchange, MAX_EXCHANGE_SALE_PAYMENTS } from './exchangeSale'
 import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
@@ -27,10 +32,14 @@ import {
   allocateAcrossPayments,
   effectiveExchangeCapacity,
   lineBlockReason,
-  modesForExchangeCreditRoot,
+  modesForExchangeCredit,
   payoutModesFor,
+  payoutOptionsOf,
+  rigeSoloSaldoAFavor,
   saleBlockReason,
+  soloSaldoAFavor,
   type AllocationSlice,
+  type PayoutMethod,
 } from './exchangeRules'
 import { EXCHANGE_REFUND_ROLE } from './exchangeMarks'
 import { ensureExchangeCreditTender, resolveExchangeCreditTenderInTx } from './exchangeCreditTender'
@@ -128,6 +137,9 @@ export async function prepareExchangeInTx(
 ): Promise<PreparedExchange | ExchangeTxEarly> {
   if ('mode' in input) return prepareCardSettlementInTx(tx, input)
   const { venueId, body, actorStaffId, originalOrderId } = input
+  const aSaldo = body.settlement.method === 'STORE_CREDIT'
+  // Saldo a favor: «primer-sobre» es SIEMPRE el primer candado de su transacción (S2), antes de la llave, Orders, Payments, sobres y turno.
+  if (aSaldo) await tomarCandadoPrimerSobreSiHaceFaltaEnTx(tx, venueId)
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange:v1:' + venueId + ':' + body.idempotencyKey}, 0))::text`
   const existing = await tx.exchange.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: body.idempotencyKey } } })
   if (existing) {
@@ -305,6 +317,8 @@ export async function prepareExchangeInTx(
         reason: 'GIFT_CARD_COLLECT_NOT_AVAILABLE',
       },
     )
+  if (aSaldo && calc.kind !== 'PAYOUT')
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'El saldo a favor sólo se da cuando el cambio le deja dinero a favor.', 422)
   if (settlement.method === 'TENDER' && (calc.kind !== 'COLLECT' || !settlement.tenderTypeId || settlement.tenderRevision == null))
     throw new BadRequestError('Selecciona un tipo de pago vigente para cobrar la diferencia.')
   const orderedPayments = [...sale.payments].sort(
@@ -313,28 +327,52 @@ export async function prepareExchangeInTx(
       a.createdAt.getTime() - b.createdAt.getTime() ||
       a.id.localeCompare(b.id),
   )
-  // Una raíz con procesador tampoco presta capacidad de PAYOUT aunque su método diga efectivo.
+  // Una raíz con procesador tampoco presta capacidad de PAYOUT aunque su método diga efectivo (el saldo a favor sí: no le regresa a
+  // la tarjeta). Saldo a favor (spec 2026-10-30 §5.4): con las llaves, «Devolver con» también al sobre; «sólo saldo a favor» sin pieza
+  // con Defecto deja sólo el saldo a favor y regresar al mismo sobre de regalo.
+  const storeCredit = storeCreditAvailable()
+  const soloSaldo =
+    calc.kind === 'PAYOUT' &&
+    rigeSoloSaldoAFavor(
+      (await tx.venueSettings.findUnique({ where: { venueId }, select: { storeCreditOnly: true } }))?.storeCreditOnly ?? false,
+      body.returned.map(r => r.reason),
+    )
   const chains = new Map<string, ChainRefundResolution>()
   const capacities = []
   for (const p of orderedPayments) {
     const loaded = sale.chainByPaymentId.get(p.id)
     const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? resolveChainRefund(loaded?.link, loaded?.root) : null
     if (chain) chains.set(p.id, chain)
+    const modes = chain
+      ? modesForExchangeCredit(p.rootMoney, chain, storeCredit ? resolveChainRefund(loaded?.link, loaded?.root, 'STORE_CREDIT') : null)
+      : payoutModesFor(p.money, storeCredit)
     capacities.push({
       paymentId: p.id,
       saleRemainingCents: effectiveExchangeCapacity(p),
-      modes: chain ? (chain.kind === 'INHERIT' ? modesForExchangeCreditRoot(p.rootMoney) : {}) : payoutModesFor(p.money),
+      modes: soloSaldo ? soloSaldoAFavor(modes) : modes,
     })
   }
   const payoutMethod = settlement.method
-  if (calc.kind === 'PAYOUT' && payoutMethod !== 'CASH' && payoutMethod !== 'BANK_TRANSFER' && payoutMethod !== 'GIFT_CARD_BALANCE')
+  if (soloSaldo && (payoutMethod === 'CASH' || payoutMethod === 'BANK_TRANSFER'))
+    throw new AppError(
+      'Este negocio devuelve sólo como saldo a favor. Elige Saldo a favor, o marca con Defecto la pieza que lo tiene.',
+      400,
+      true,
+      'STORE_CREDIT_ONLY',
+      { payoutOptions: payoutOptionsOf(capacities) },
+    )
+  if (
+    calc.kind === 'PAYOUT' &&
+    payoutMethod !== 'CASH' &&
+    payoutMethod !== 'BANK_TRANSFER' &&
+    payoutMethod !== 'GIFT_CARD_BALANCE' &&
+    payoutMethod !== 'STORE_CREDIT'
+  )
     throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'Selecciona un medio disponible para devolver la diferencia.', 422)
   const allocation = allocateAcrossPayments(
     capacities,
     Math.min(calc.returnedCents, calc.takenCents),
-    calc.kind === 'PAYOUT'
-      ? { method: payoutMethod as 'CASH' | 'BANK_TRANSFER' | 'GIFT_CARD_BALANCE', cents: -calc.differenceCents }
-      : null,
+    calc.kind === 'PAYOUT' ? { method: payoutMethod as PayoutMethod, cents: -calc.differenceCents } : null,
   )
   if (!allocation.ok) {
     if (allocation.reason === 'NOTHING_LEFT_TO_REFUND') notReturnable(allocation.reason)
@@ -385,6 +423,14 @@ export async function prepareExchangeInTx(
   // Se crea sólo tras validar topes y en ESTA transacción: no se suelta el cerco Venue/Orders ni se deja configuración al rechazar.
   await ensureExchangeCreditTender(tx, venueId, true)
   const ec = await resolveExchangeCreditTenderInTx(tx, venueId)
+  // Saldo a favor desde un crédito de cambio (S3): la raíz todavía tiene que respaldar lo que se abona (la terminal pudo devolverle la
+  // compra a la tarjeta). Se mide bajo SU candado, en el orden de Payments por id, antes de sobres y turno.
+  const pedidoALaRaiz = new Map<string, number>()
+  for (const s of slices) {
+    const p = paymentById.get(s.paymentId)!
+    if (aSaldo && s.role === 'PAYOUT' && isExchangeCreditTenderKind(p.money.tenderSystemKind))
+      pedidoALaRaiz.set(p.rootPaymentId, (pedidoALaRaiz.get(p.rootPaymentId) ?? 0) + s.cents)
+  }
   // Las órdenes y TODAS sus raíces ya están tomadas por fecha; aquí el id sólo ordena Payments, nunca Orders.
   const lockIds = [...new Set(slices.flatMap(s => [s.paymentId, paymentById.get(s.paymentId)!.rootPaymentId]))].sort()
   for (const id of lockIds) {
@@ -403,6 +449,11 @@ export async function prepareExchangeInTx(
           }))
     )
       notReturnable('NOT_ATTRIBUTABLE')
+    const pedido = pedidoALaRaiz.get(id)
+    if (pedido !== undefined) {
+      const respaldo = await respaldoVigenteDeLaRaiz(tx, id, venueId)
+      if (pedido > respaldo) throw raizYaDevuelta(respaldo)
+    }
   }
   // Todos los sobres se toman antes del primer reclamo de turno (también si otro cobro aporta crédito).
   const giftPayoutIds = slices
@@ -417,6 +468,10 @@ export async function prepareExchangeInTx(
         tenderSystemKind: 'GIFT_CARD',
       },
     })
+  // Saldo a favor: el candado por clienta y su sobre, después de los cobros y ANTES de la venta nueva y de cualquier turno. Es el
+  // ÚNICO grupo de sobres del Cambio (revisión de S2, M2): lo pagado con saldo de regalo sólo sale por GIFT_CARD_BALANCE
+  // (`payoutModesFor`), así que con STORE_CREDIT `giftPayoutIds` siempre está vacío. El núcleo lo vuelve a pedir (reentrada).
+  if (aSaldo) await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId: settlement.customerId! })
   const payoutCash = calc.kind === 'PAYOUT' && settlement.method === 'CASH'
   const drawer = payoutCash ? await tx.cashDrawerSession.findFirst({ where: { venueId, status: 'OPEN' }, select: { id: true } }) : null
   if (payoutCash && settlement.cashDrawerSessionId && drawer?.id !== settlement.cashDrawerSessionId)
@@ -530,6 +585,25 @@ export async function prepareExchangeCreditsInTx(
     line.pieceValuesCents.map(paidCents => ({ orderItemId: line.orderItemId, paidCents })),
   )
   const money: RefundMoneySemantics = { ...ec, merchantAccountId: null, source: 'OTHER' }
+  // Saldo a favor (spec 2026-10-30 §5.4): cada tramo PAYOUT se escribe con el medio STORE_CREDIT y se abona al sobre en ESTA
+  // transacción (el núcleo, §5.3); el origen fiscal es el del cobro devuelto o el de su raíz (`exchangeMark.rootPaymentId`).
+  const abonar: AbonarSaldoAFavor = (t, refundPaymentId, preparado, fila) =>
+    abonarSaldoAFavorEnTx(t, {
+      preparado,
+      monto: pesos(fila.montoCents),
+      staffId: actorStaffId,
+      origen: { orderId: fila.orderId, refundPaymentId },
+      folio: sale.order.orderNumber,
+      tipo: 'CAMBIO',
+    })
+  const aSaldo =
+    settlement.method === 'STORE_CREDIT'
+      ? {
+          tender: { ...(await resolveStoreCreditTenderInTx(tx, venueId)), merchantAccountId: null, source: 'OTHER' as const },
+          customerId: settlement.customerId!,
+          abonar,
+        }
+      : null
   const split = splitItemsAcrossRefundRows(
     pieces.map(p => ({ orderItemId: p.orderItemId, cents: p.paidCents })),
     slices.map((s, i) => ({ key: String(i), cents: s.cents })),
@@ -554,9 +628,11 @@ export async function prepareExchangeCreditsInTx(
       createdAt: accountingAt,
       ...(credit
         ? { moneyAs: money, skipNegativeCostObligation: true }
-        : chain?.kind === 'INHERIT'
-          ? { moneyAs: chain.money }
-          : { devolverCon: slice.mode === 'CHOSEN' ? (settlement.method as 'CASH' | 'BANK_TRANSFER') : undefined }),
+        : aSaldo
+          ? { aSaldoAFavor: aSaldo }
+          : chain?.kind === 'INHERIT'
+            ? { moneyAs: chain.money }
+            : { devolverCon: slice.mode === 'CHOSEN' ? (settlement.method as 'CASH' | 'BANK_TRANSFER') : undefined }),
       exchangeMark: {
         exchangeId,
         role: credit ? EXCHANGE_REFUND_ROLE.CREDIT : EXCHANGE_REFUND_ROLE.DIFFERENCE,
@@ -825,6 +901,12 @@ export async function finishExchangeInTx(
     noReponer,
   })
   const returnPosting = regreso.postingId ? { id: regreso.postingId } : null
+  // Saldo a favor: lo abonado por sus tramos (todos al mismo sobre, en orden), leído de la libreta en esta transacción con la misma forma
+  // que el Reembolso del POS: el total y el saldo final. Queda en `result`: la repetición por llave responde lo mismo.
+  const tramosASaldo = p.input.body.settlement.method === 'STORE_CREDIT' ? p.refundRows.filter(r => r.role === 'PAYOUT').map(r => r.id) : []
+  const porTramo = await saldosAFavorDeReembolsos(venueId, tramosASaldo, tx)
+  const abonos = tramosASaldo.flatMap(id => porTramo.get(id) ?? [])
+  const storeCredit = abonos.length ? { ...abonos.at(-1)!, amountCents: abonos.reduce((sum, a) => sum + a.amountCents, 0) } : undefined
   const response: ExchangeResponse = {
     id: p.exchangeId,
     status: p.finalStatus,
@@ -845,6 +927,7 @@ export async function finishExchangeInTx(
         method: r.money.method,
         amountCents: r.cents,
       })),
+      ...(storeCredit ? { storeCredit } : {}),
     },
     lines: p.lines,
     refundPaymentIds: p.refundRows.map(r => r.id),
@@ -883,6 +966,17 @@ export async function finishExchangeInTx(
         takenAmount: response.takenCents / 100,
         differenceAmount: response.differenceCents / 100,
         settlement: { kind: response.settlement.kind, method: response.settlement.method, amount: response.settlement.amountCents / 100 },
+        ...(storeCredit
+          ? {
+              storeCredit: {
+                customerId: storeCredit.customerId,
+                customerName: storeCredit.customerName,
+                amount: storeCredit.amountCents / 100,
+                newBalance: storeCredit.newBalanceCents / 100,
+                phoneMismatch: storeCredit.phoneMismatch,
+              },
+            }
+          : {}),
         reasons: p.input.body.returned.map(r => ({
           orderItemId: r.orderItemId,
           reason: r.reason,

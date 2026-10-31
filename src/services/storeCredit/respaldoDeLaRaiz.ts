@@ -9,7 +9,7 @@
  * (`laTerminalYaDevolvio` no sirve aquí: dice si la raíz se devuelve en terminal, no si ya se devolvió.)
  */
 import type { Prisma } from '@prisma/client'
-import { ConflictError } from '@/errors/AppError'
+import AppError, { ConflictError } from '@/errors/AppError'
 import { EXCHANGE_REFUND_ROLE, sqlOrigenEconomico } from '../exchanges/exchangeMarks'
 
 /**
@@ -32,4 +32,17 @@ export async function respaldoVigenteDeLaRaiz(tx: Prisma.TransactionClient, root
       AND ${sqlOrigenEconomico('r')} = ${rootPaymentId}
       AND r."processorData"->'exchange'->>'role' IS DISTINCT FROM ${EXCHANGE_REFUND_ROLE.CREDIT}`
   return Math.max(0, Number(raiz.cobradoCents) - Number(suma?.devueltoCents ?? 0))
+}
+
+/** El rechazo cuando lo pedido pasa del respaldo vigente (Reembolso y Cambio): 422 sin escritura, con lo que todavía cabe. */
+export function raizYaDevuelta(maxCents: number): AppError {
+  return new AppError(
+    maxCents === 0
+      ? 'La compra original ya se devolvió.'
+      : `La compra original ya se devolvió en parte: de este crédito sólo se pueden pasar $${(maxCents / 100).toFixed(2)} a saldo a favor.`,
+    422,
+    true,
+    'STORE_CREDIT_ROOT_ALREADY_REFUNDED',
+    { maxCents },
+  )
 }

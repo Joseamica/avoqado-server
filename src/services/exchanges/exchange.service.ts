@@ -6,10 +6,11 @@ import type { MoneyShape } from './exchangeRules'
 import type { FilaDeReembolso } from '../shared/devueltoDeUnCobro'
 import type { ChainRefundRoot } from './exchangeChainRefund'
 import type { OrderInventoryWarning } from '../tpv/payment.tpv.service'
+import type { StoreCreditDelReembolso } from '../storeCredit/saldoAbonado'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import AppError, { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
 import { validateStaffVenue } from '@/utils/staff-venue.util'
 import socketManager from '@/communication/sockets'
@@ -27,6 +28,8 @@ import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import { postCashSaleToDrawer, postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { effectiveExchangesEnabled } from './exchangeRules'
 import { ExchangeError } from './exchangeErrors'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import type { ExchangeTxOutcome } from './exchangeTx'
 
 export interface CreateExchangeBody {
@@ -49,6 +52,8 @@ export interface CreateExchangeBody {
     tenderTypeId?: string | null
     tenderRevision?: number | null
     cashFromNonCash?: boolean
+    /** Saldo a favor (`method: 'STORE_CREDIT'`): a quién se le abona; no tiene que ser la clienta de la venta. */
+    customerId?: string | null
   }
   staffId: string
   deviceId: string
@@ -150,6 +155,8 @@ export interface ExchangeResponse {
     method: ExchangeSettlementMethod | null
     amountCents: number
     sources: Array<{ originalPaymentId: string; refundPaymentId: string; method: string; amountCents: number }>
+    /** Saldo a favor: a quién y cuánto se abonó (la misma forma que el Reembolso del POS), y su saldo nuevo. */
+    storeCredit?: StoreCreditDelReembolso
   }
   lines: { returned: ExchangeReturnedLine[]; taken: ExchangeTakenLine[] }
   refundPaymentIds: string[]
@@ -199,6 +206,15 @@ export async function createExchange(input: {
     )
   await assertVenueSalesEnabled(venueId)
   await validateStaffVenue(actorStaffId, venueId)
+  // Saldo a favor (spec 2026-10-30 §5.4): después de reconocer la repetición, como el Reembolso del POS. Todo rechazo `STORE_CREDIT_` es
+  // un 4xx sin escritura.
+  if (body.settlement.method === 'STORE_CREDIT') {
+    if (!body.settlement.customerId)
+      throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'Elige a quién se le abona el saldo a favor.', 400)
+    if (!storeCreditAvailable()) throw new AppError('Pide a Avoqado que active el saldo a favor.', 422, true, 'STORE_CREDIT_UNAVAILABLE')
+    // Con el cliente global y FUERA de la transacción del Cambio (S1): un P2002 adentro la abortaría entera.
+    await prepararMediosDeSaldoAFavor(venueId)
+  }
   const original = await prisma.payment.findFirst({
     where: { id: body.originalPaymentId, venueId, OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     select: { orderId: true },
