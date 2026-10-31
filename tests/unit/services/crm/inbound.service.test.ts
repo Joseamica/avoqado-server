@@ -7,12 +7,12 @@
  * and an entry applied twice leaves one set of events.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
+import { FAKE_LOST_STAGE_ID, FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
 import logger from '@/config/logger'
-import { notifyNewProspect } from '@/services/crm/digest.service'
+import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
 import { applyEntry, recordSignupOutcome, sanitizeEntry, saveLandingEntry, type SignupOutcome } from '@/services/crm/inbound.service'
 
-jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn() }))
+jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn(), notifyReturningProspect: jest.fn() }))
 
 const ORG = 'corglandn0000000000000001'
 /** Where an invited manager works: their PRIMARY membership, of any role — never what their own form links to. */
@@ -95,6 +95,7 @@ const eventsOf = (kind: string) => db.events.filter(event => event.kind === kind
 beforeEach(() => {
   db = installCrmInboundFake(prismaMock)
   ;(notifyNewProspect as jest.Mock).mockResolvedValue(undefined)
+  ;(notifyReturningProspect as jest.Mock).mockResolvedValue(undefined)
 })
 
 describe('sanitizeEntry', () => {
@@ -550,5 +551,89 @@ describe('applyEntry', () => {
     prismaMock.crmAccount.createMany.mockClear()
     await applyEntry(entry.id)
     expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('ruling 31: an entry that lands on an ARCHIVED account brings it back', () => {
+  const ARCHIVED_AT = new Date(Date.now() - 20 * DAY)
+  /** The backfill archived this person's old signup (ruling 30); now they fill the form again. */
+  const returning = (over: Record<string, unknown> = {}) => {
+    const account = seedAccount({ organizationId: ORG, archivedAt: ARCHIVED_AT, ...over })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false } })
+    return { account, entry }
+  }
+
+  it('archivada_vuelve_por_la_landing_se_reactiva_y_se_anuncia_con_su_llave', async () => {
+    const { account, entry } = returning()
+
+    await applyEntry(entry.id)
+
+    // Back in the pipeline: no owner, so it is in «Sin dueño».
+    expect(db.accounts[0]).toMatchObject({ id: account.id, archivedAt: null })
+    expect(eventsOf('REACTIVATED')).toEqual([
+      expect.objectContaining({ accountId: account.id, actorStaffId: null, data: { entryId: entry.id, via: 'LANDING' } }),
+    ])
+    // What a re-run needs to announce it again is in the entry's proof.
+    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ entryId: entry.id, created: false, reactivated: true })
+    // Its own notice (its own email key per person), never «Nuevo prospecto», whose key may already be used.
+    expect(notifyReturningProspect).toHaveBeenCalledTimes(1)
+    expect(notifyReturningProspect).toHaveBeenCalledWith(account.id, entry.id)
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it('a re-run repeats nothing, and re-sends the same notice only because the first send may have been lost (M-3)', async () => {
+    const { account, entry } = returning()
+    // The process dies after the commit, before `appliedAt` (and maybe before the email).
+    prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
+    await applyEntry(entry.id)
+    const before = db.events.map(event => ({ ...event }))
+
+    await applyEntry(entry.id)
+
+    // Not one event more: the entry's ENTRY_APPLIED key stops the second run before it touches the account.
+    expect(db.events).toEqual(before)
+    expect(db.accounts[0]).toMatchObject({ id: account.id, archivedAt: null })
+    // The same notice with the same arguments, so the same email keys: Resend sends it at most once.
+    expect((notifyReturningProspect as jest.Mock).mock.calls).toEqual([
+      [account.id, entry.id],
+      [account.id, entry.id],
+    ])
+    expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+
+    // Applied: a third run reads the entry and stops.
+    await applyEntry(entry.id)
+    expect(notifyReturningProspect).toHaveBeenCalledTimes(2)
+  })
+
+  it('a customer comes back too, with the «ya es cliente» note and no notice (rulings 23 and 27)', async () => {
+    const account = seedAccount({ organizationId: ORG, archivedAt: ARCHIVED_AT })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG, { password: 'hash' }))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: true } })
+    // It dies before `appliedAt`, so the sweep runs it again: neither run announces.
+    prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
+
+    await applyEntry(entry.id)
+    await applyEntry(entry.id)
+
+    expect(db.accounts[0]).toMatchObject({ id: account.id, archivedAt: null })
+    expect(eventsOf('REACTIVATED')).toHaveLength(1)
+    expect(eventsOf('NOTE')).toHaveLength(1)
+    expect(eventsOf('NOTE')[0].data.text).toMatch(/ya es cliente/i)
+    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ signup: 'CUSTOMER', reactivated: true })
+    expect(notifyReturningProspect).not.toHaveBeenCalled()
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it('a LOST account stays lost and archived (ruling 24)', async () => {
+    const { account, entry } = returning({ stageId: FAKE_LOST_STAGE_ID })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts[0]).toMatchObject({ id: account.id, stageId: FAKE_LOST_STAGE_ID, archivedAt: ARCHIVED_AT })
+    expect(eventsOf('REACTIVATED')).toHaveLength(0)
+    expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('reactivated')
+    expect(notifyReturningProspect).not.toHaveBeenCalled()
+    expect(notifyNewProspect).not.toHaveBeenCalled()
   })
 })

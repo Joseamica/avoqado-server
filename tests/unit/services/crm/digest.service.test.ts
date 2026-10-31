@@ -5,7 +5,7 @@
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
-import { notifyNewProspect } from '@/services/crm/digest.service'
+import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
 import emailService from '@/services/email.service'
 
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendEmailWithResult: jest.fn() } }))
@@ -149,5 +149,75 @@ describe('notifyNewProspect', () => {
     prismaMock.platformAccess.findMany.mockResolvedValueOnce([])
     await notifyNewProspect(ACCOUNT)
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('the notice of an account without the form’s qualification', () => {
+  it('says «no disponible (alta anterior al CRM)» instead of four blank rows', async () => {
+    // An old signup the sweep loaded (ruling 30b): the form's answers were never kept.
+    prismaMock.crmAccount.findUnique.mockResolvedValueOnce({
+      id: ACCOUNT,
+      name: 'Taquería Lalo',
+      giro: null,
+      ventasRango: null,
+      sucursales: null,
+      modulos: [],
+      qualificationAvailable: false,
+    })
+
+    await notifyNewProspect(ACCOUNT)
+
+    const [email] = send.mock.calls[0]
+    expect(email.text).toContain('Calificación: no disponible (alta anterior al CRM)')
+    expect(email.html).toContain('no disponible (alta anterior al CRM)')
+    for (const blank of ['Tipo de negocio', 'Sucursales', 'Ventas al mes', 'Qué pidió']) {
+      expect(email.text).not.toContain(blank)
+      expect(email.html).not.toContain(blank)
+    }
+    expect(email.text).not.toMatch(/: —$/m) // the footer's «S.A. de C.V. — Ciudad» is not a blank row
+  })
+
+  it('keeps the four rows when the account has its qualification', async () => {
+    await notifyNewProspect(ACCOUNT)
+
+    const [email] = send.mock.calls[0]
+    expect(email.text).toContain('Tipo de negocio: Cafetería')
+    expect(email.text).toContain('Qué pidió: mesas, cocina')
+    expect(email.text).not.toContain('no disponible')
+  })
+})
+
+describe('notifyReturningProspect (ruling 31)', () => {
+  const ENTRY = 'centrylnd0000000000000009'
+
+  it('volvio_su_propia_llave_por_vendedor: an archived prospect that came back, keyed by account, entry and person', async () => {
+    await notifyReturningProspect(ACCOUNT, ENTRY)
+
+    expect(send.mock.calls.map(([email]) => [email.to, email.idempotencyKey])).toEqual([
+      ['a@avoqado.io', `crm-volvio:${ACCOUNT}:${ENTRY}:${STAFF_A}`],
+      ['b@avoqado.io', `crm-volvio:${ACCOUNT}:${ENTRY}:${STAFF_B}`],
+    ])
+    const [email] = send.mock.calls[0]
+    expect(email.subject).toBe('Volvió un prospecto: Café Ana')
+    expect(email.text).toMatch(/archivado/i)
+    expect(email.text).toContain('/crm/pendientes')
+    expect(email.html.match(/https:\/\/avoqado\.io\/isotipo\.svg/g)).toHaveLength(2)
+  })
+
+  it('a long name keeps its subject within 60 characters, and nothing makes it throw', async () => {
+    prismaMock.crmAccount.findUnique.mockResolvedValueOnce({
+      id: ACCOUNT,
+      name: 'N'.repeat(300),
+      giro: null,
+      ventasRango: null,
+      sucursales: null,
+      modulos: [],
+    })
+    await notifyReturningProspect(ACCOUNT, ENTRY)
+    expect(send.mock.calls[0][0].subject.length).toBeLessThanOrEqual(60)
+
+    prismaMock.crmAccount.findUnique.mockRejectedValueOnce(new Error('database is down'))
+    await expect(notifyReturningProspect(ACCOUNT, ENTRY)).resolves.toBeUndefined()
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ accountId: ACCOUNT }))
   })
 })

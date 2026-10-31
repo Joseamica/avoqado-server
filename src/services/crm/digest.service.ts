@@ -1,6 +1,7 @@
 /**
  * The CRM's emails to the sales team (spec 2026-10-30 §5.3 and §5.4). Here: «Nuevo prospecto», sent the moment a new
- * landing prospect arrives, because getting there first counts. Task 7 adds the daily digest to this file.
+ * landing prospect arrives, because getting there first counts, and «Volvió un prospecto», when an archived one comes
+ * back through the landing (ruling 31). Task 7 adds the daily digest to this file.
  */
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -95,29 +96,60 @@ async function editors(): Promise<Recipient[]> {
 }
 
 /**
+ * Why the team hears about an account: a new prospect, or one that came back from the archive through the landing
+ * (ruling 31). Each has its own text and its own email key.
+ */
+const NOTICES = {
+  NEW: { title: 'Nuevo prospecto', nota: 'Entró sin dueño desde la landing: el primero que lo tome se queda con él.' },
+  RETURNED: {
+    title: 'Volvió un prospecto',
+    nota: 'Estaba archivado y volvió a llenar el formulario de la landing: ya está otra vez en el embudo.',
+  },
+} as const
+
+type Notice = keyof typeof NOTICES
+
+/** What an old signup the sweep loaded says instead of four blank rows (ruling 30b): the form's answers were never kept. */
+const QUALIFICATION_UNAVAILABLE = 'no disponible (alta anterior al CRM)'
+
+/**
  * The notice: the business and how it qualified, and the way to the CRM. Never its phone or email — those stay in the
  * CRM (spec §5.10).
  */
-function newProspectEmail(account: {
-  name: string
-  giro: string | null
-  ventasRango: string | null
-  sucursales: number | null
-  modulos: string[]
-}) {
+function prospectEmail(
+  account: {
+    name: string
+    giro: string | null
+    ventasRango: string | null
+    sucursales: number | null
+    modulos: string[]
+    qualificationAvailable?: boolean
+  },
+  notice: Notice,
+) {
+  const { title, nota } = NOTICES[notice]
   const name = account.name.replace(/\s+/g, ' ').trim()
-  const shortName = name.length > SUBJECT_NAME_MAX ? `${name.slice(0, SUBJECT_NAME_MAX - 1).trimEnd()}…` : name
+  // «<title>: » plus the name stays under the 60 characters of the email standard.
+  const nameMax = Math.min(SUBJECT_NAME_MAX, 60 - title.length - 2)
+  const shortName = name.length > nameMax ? `${name.slice(0, nameMax - 1).trimEnd()}…` : name
   const crmUrl = `${(process.env.SUPERADMIN_URL || 'https://superadmin.avoqado.io').replace(/\/$/, '')}/crm/pendientes`
-  const rows: Array<[string, string]> = [
-    ['Tipo de negocio', account.giro ?? '—'],
-    ['Sucursales', account.sucursales === null ? '—' : String(account.sucursales)],
-    ['Ventas al mes', account.ventasRango ?? '—'],
-    ['Qué pidió', account.modulos.length ? account.modulos.join(', ') : '—'],
-  ]
-  const nota = 'Entró sin dueño desde la landing: el primero que lo tome se queda con él.'
+  const qualified = account.qualificationAvailable !== false
+  const rows: Array<[string, string]> = qualified
+    ? [
+        ['Tipo de negocio', account.giro ?? '—'],
+        ['Sucursales', account.sucursales === null ? '—' : String(account.sucursales)],
+        ['Ventas al mes', account.ventasRango ?? '—'],
+        ['Qué pidió', account.modulos.length ? account.modulos.join(', ') : '—'],
+      ]
+    : [['Calificación', QUALIFICATION_UNAVAILABLE]]
+  // The section heading only above the four rows: the single row already says «Calificación».
+  const headingHtml = qualified
+    ? '<h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Calificación</h2>'
+    : ''
+  const headingText = qualified ? 'CALIFICACIÓN\n' : ''
 
   const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Nuevo prospecto</title></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
   <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
     <div style="padding-bottom:32px;">
@@ -125,10 +157,10 @@ function newProspectEmail(account: {
       <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
     </div>
     <div style="padding-bottom:24px;">
-      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">Nuevo prospecto</h1>
+      <h1 style="margin:0 0 8px 0;font-size:32px;font-weight:400;color:#000;">${title}</h1>
       <p style="margin:0;font-size:16px;color:#666;">${escapeHtml(name)}</p>
     </div>
-    <h2 style="margin:0 0 12px 0;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Calificación</h2>
+    ${headingHtml}
     <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:24px;">
       ${rows
         .map(
@@ -155,10 +187,9 @@ function newProspectEmail(account: {
   </div>
 </body></html>`
 
-  const text = `Nuevo prospecto: ${name}
+  const text = `${title}: ${name}
 
-CALIFICACIÓN
-${rows.map(([label, value]) => `${label}: ${value}`).join('\n')}
+${headingText}${rows.map(([label, value]) => `${label}: ${value}`).join('\n')}
 
 ${nota}
 Ver en el CRM: ${crmUrl}
@@ -166,38 +197,51 @@ Ver en el CRM: ${crmUrl}
 Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
 Política de Privacidad: https://avoqado.io/privacy
 `
-  return { subject: `Nuevo prospecto: ${shortName}`, html, text }
+  return { subject: `${title}: ${shortName}`, html, text }
 }
 
 /**
- * «Nuevo prospecto: <negocio>» to every person with «Editar», one email per person: Resend takes one recipient per call
- * and refuses an idempotency key reused with other content, so the key is per account AND person — a retry or the
- * sweep never repeats it, and each seller gets theirs. Never throws: a notice that does not go out is logged.
+ * One notice to every person with «Editar», one email per person: Resend takes one recipient per call and refuses an
+ * idempotency key reused with other content, so the key names the account AND the person — a retry or the sweep never
+ * repeats it, and each seller gets theirs. Never throws: a notice that does not go out is logged.
  */
-export async function notifyNewProspect(accountId: string): Promise<void> {
+async function notifyTeam(accountId: string, notice: Notice, keyFor: (staffId: string) => string): Promise<void> {
   try {
     const account = await prisma.crmAccount.findUnique({
       where: { id: accountId },
-      select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true },
+      select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true, qualificationAvailable: true },
     })
     if (!account) return
     const recipients = await editors()
     if (!recipients.length) return
-    const email = newProspectEmail(account)
+    const email = prospectEmail(account, notice)
     const results = await Promise.allSettled(
-      recipients.map(person =>
-        emailService.sendEmailWithResult({ ...email, to: person.email, idempotencyKey: `crm-nuevo:${account.id}:${person.id}` }),
-      ),
+      recipients.map(person => emailService.sendEmailWithResult({ ...email, to: person.email, idempotencyKey: keyFor(person.id) })),
     )
     results.forEach((result, index) => {
       if (result.status === 'fulfilled' && result.value.ok) return
-      logger.warn('[CRM] A new-prospect notice did not go out', {
+      logger.warn('[CRM] A prospect notice did not go out', {
         accountId,
+        notice,
         staffId: recipients[index].id,
         error: result.status === 'rejected' ? errorText(result.reason) : (result.value.errorCode ?? 'not sent'),
       })
     })
   } catch (error) {
-    logger.error('[CRM] The new-prospect notice could not be sent', { accountId, error: errorText(error) })
+    logger.error('[CRM] The prospect notice could not be sent', { accountId, notice, error: errorText(error) })
   }
+}
+
+/** «Nuevo prospecto: <negocio>», keyed `crm-nuevo:<account>:<person>`. Never throws. */
+export async function notifyNewProspect(accountId: string): Promise<void> {
+  await notifyTeam(accountId, 'NEW', staffId => `crm-nuevo:${accountId}:${staffId}`)
+}
+
+/**
+ * «Volvió un prospecto: <negocio>»: an archived account that an entry of the landing brought back (ruling 31). Its own key,
+ * `crm-volvio:<account>:<entry>:<person>` — the «nuevo» one may already have gone out with other content, and an account
+ * can come back more than once. Never throws.
+ */
+export async function notifyReturningProspect(accountId: string, entryId: string): Promise<void> {
+  await notifyTeam(accountId, 'RETURNED', staffId => `crm-volvio:${accountId}:${entryId}:${staffId}`)
 }

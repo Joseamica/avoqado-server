@@ -16,7 +16,7 @@ import logger from '../../config/logger'
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { getInitialStage } from './accounts.service'
-import { notifyNewProspect } from './digest.service'
+import { notifyNewProspect, notifyReturningProspect } from './digest.service'
 import { addEvent } from './timeline.service'
 
 export const LANDING = 'LANDING'
@@ -317,14 +317,18 @@ export async function linkTx(tx: Prisma.TransactionClient, accountId: string, or
 const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: string) =>
   addEvent(tx, { accountId, kind: 'NOTE', actorStaffId: null, data: { entryId, text: CUSTOMER_NOTE } })
 
+/** What the team hears after the commit: a new prospect, one that came back from the archive (ruling 31), or nothing. */
+type Notice = 'NEW' | 'RETURNED' | null
+
 /**
  * An entry a run already applied (it died before `appliedAt`) repeats THAT run, never a fresh lookup that may now lead
- * elsewhere: its account, and its notice again if it created a prospect's account — the email's idempotency key keeps
- * it from repeating (ruling 26).
+ * elsewhere: its account, and its notice again if it created a prospect's account or brought one back from the archive
+ * — the email's idempotency key keeps it from repeating (ruling 26). A customer is never announced.
  */
-function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }) {
+function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }): { accountId: string; notice: Notice } {
   const data: Prisma.JsonObject = previous.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
-  return { accountId: previous.accountId, announce: data.created === true && data.signup !== 'CUSTOMER' }
+  if (data.signup === 'CUSTOMER') return { accountId: previous.accountId, notice: null }
+  return { accountId: previous.accountId, notice: data.created === true ? 'NEW' : data.reactivated === true ? 'RETURNED' : null }
 }
 
 async function applyTx(
@@ -334,7 +338,7 @@ async function applyTx(
   outcome: SignupOutcome | null,
   organizationId: string | null,
   stageId: string,
-): Promise<{ accountId: string; announce: boolean }> {
+): Promise<{ accountId: string; notice: Notice }> {
   const sourceKey = `entry:${entry.id}`
   const applied = { accountId: true, data: true } as const
   // Read before anything is looked up or created: if the person stopped owning the Organization whose account a first
@@ -373,7 +377,17 @@ async function applyTx(
   }
   // An account that was already there is locked BEFORE its event is written: two entries of the same email queue here
   // instead of deadlocking between the event's foreign key and the touch (ruling 26).
-  if (!created) await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${account.id} FOR UPDATE`
+  let reactivate = false
+  if (!created) {
+    await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${account.id} FOR UPDATE`
+    // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24). Read under
+    // the lock, and written into ENTRY_APPLIED below, so a re-run knows to announce it again.
+    const state = await tx.crmAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      select: { archivedAt: true, stage: { select: { kind: true } } },
+    })
+    reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
+  }
 
   // The proof the entry was applied, and the gate against a run at the same time: the second insert of this `sourceKey`
   // (unique) adds nothing, and that run repeats the first one. One set of events per entry.
@@ -382,25 +396,28 @@ async function applyTx(
     kind: 'ENTRY_APPLIED',
     actorStaffId: null,
     sourceKey,
-    data: { entryId: entry.id, signup: signupBranch(outcome), created },
+    data: { entryId: entry.id, signup: signupBranch(outcome), created, ...(reactivate ? { reactivated: true } : {}) },
   })
   if (!firstRun) {
     const winner = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: applied })
-    return winner ? repeatOf(winner) : { accountId: account.id, announce: false }
+    return winner ? repeatOf(winner) : { accountId: account.id, notice: null }
   }
   if (created) {
     // A customer is not a new prospect: the note instead of «Nuevo prospecto» (ruling 23).
     if (customer) await customerNote(tx, account.id, entry.id)
-    return { accountId: account.id, announce: !customer }
+    return { accountId: account.id, notice: customer ? null : 'NEW' }
   }
 
   // The account was already there (its row is ours now). Coming back through the landing is a touch: «Estancado»
-  // restarts.
+  // restarts. Archived, it is back in the pipeline — in «Sin dueño» if nobody owns it.
   const current = await tx.crmAccount.update({
     where: { id: account.id },
-    data: { lastTouchAt: new Date() },
+    data: { lastTouchAt: new Date(), ...(reactivate ? { archivedAt: null } : {}) },
     select: { giro: true, ventasRango: true, sucursales: true, modulos: true, organizationId: true },
   })
+  if (reactivate) {
+    await addEvent(tx, { accountId: account.id, kind: 'REACTIVATED', actorStaffId: null, data: { entryId: entry.id, via: LANDING } })
+  }
   if (customer) {
     // A customer's account is theirs: what they type in the form does not overwrite it.
     await customerNote(tx, account.id, entry.id)
@@ -414,7 +431,8 @@ async function applyTx(
     }
   }
   if (!current.organizationId && organizationId) await linkTx(tx, account.id, organizationId)
-  return { accountId: account.id, announce: false }
+  // Back from the archive, it is a prospect again for the team — a customer is not (rulings 23 and 27).
+  return { accountId: account.id, notice: reactivate && !customer ? 'RETURNED' : null }
 }
 
 /**
@@ -474,8 +492,10 @@ export async function applyEntry(entryId: string): Promise<void> {
         data: { appliedAt: new Date(), accountId: applied.accountId, lastError: null },
       })
     } finally {
-      // Announced even if the mark fails; and a re-run announces again what its first run created (ruling 26).
-      if (applied.announce) await notifyNewProspect(applied.accountId)
+      // Announced even if the mark fails; and a re-run announces again what its first run created or brought back
+      // (ruling 26) — the same email keys, so the team gets each notice once.
+      if (applied.notice === 'NEW') await notifyNewProspect(applied.accountId)
+      if (applied.notice === 'RETURNED') await notifyReturningProspect(applied.accountId, entry.id)
     }
   } catch (error) {
     const message = errorText(error)

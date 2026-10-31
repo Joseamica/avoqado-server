@@ -11,6 +11,9 @@ import { Prisma } from '@prisma/client'
 type Row = Record<string, any>
 
 export const FAKE_STAGE_ID = 'cstageprs0000000000000001'
+/** «Perdido»: a lost account stays lost when its person comes back (ruling 24). */
+export const FAKE_LOST_STAGE_ID = 'cstageprd0000000000000001'
+const STAGE_KINDS: Record<string, string> = { [FAKE_STAGE_ID]: 'ABIERTA', [FAKE_LOST_STAGE_ID]: 'PERDIDA' }
 
 export function installCrmInboundFake(prismaMock: any) {
   const db = { entries: [] as Row[], accounts: [] as Row[], contacts: [] as Row[], events: [] as Row[] }
@@ -29,6 +32,7 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmInboundEntry.updateMany,
     prismaMock.crmAccount.createMany,
     prismaMock.crmAccount.findUnique,
+    prismaMock.crmAccount.findUniqueOrThrow,
     prismaMock.crmAccount.update,
     prismaMock.crmContact.create,
     prismaMock.crmTimelineEvent.createMany,
@@ -87,6 +91,12 @@ export function installCrmInboundFake(prismaMock: any) {
       ? db.accounts.find(account => account.source === key.source && account.externalKey === key.externalKey)
       : db.accounts.find(account => Object.entries(where).every(([field, value]) => account[field] === value))
     return found ? { ...found } : null
+  })
+  // An account with its stage's kind, as `select: { stage: { select: { kind } } }` returns it.
+  prismaMock.crmAccount.findUniqueOrThrow.mockImplementation(async ({ where }: Row) => {
+    const row = db.accounts.find(account => account.id === where.id)
+    if (!row) throw new Error('No CrmAccount found')
+    return { ...row, archivedAt: row.archivedAt ?? null, stage: { kind: STAGE_KINDS[row.stageId] ?? 'ABIERTA' } }
   })
   prismaMock.crmAccount.update.mockImplementation(async ({ where, data }: Row) => {
     const row = db.accounts.find(account => account.id === where.id)
