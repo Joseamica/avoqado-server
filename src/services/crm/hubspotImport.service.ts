@@ -1,5 +1,5 @@
 /**
- * «Importar lo de HubSpot», una sola vez (spec 2026-10-30 §5.3.4; rulings 4, 28, 30 and 33).
+ * «Importar lo de HubSpot», una sola vez (spec 2026-10-30 §5.3.4; rulings 4, 28, 30, 33 and 36).
  *
  * Specific to HubSpot's export, not a general column mapper: a contacts file and a deals file, their headers read
  * without case or accents and with a few aliases (ruling 4). Every record enters with its key — `hubspot:deal:<id>` or
@@ -11,12 +11,14 @@
  *   «Dijo que no». Nothing is linked to an Organization: only the landing links by itself (ruling 28).
  * - A contact without a deal enters ARCHIVED and «Sin dueño» (ruling 30): out of the pipeline and the digest, found by a
  *   search.
- * - «Repetido» (ruling 33): its key is already in the CRM — or, for a contact without a deal, its email or phone already
- *   is (it came through the landing or by hand). It is counted and never touched.
+ * - «Repetido» (rulings 33 and 36): its key is already in the CRM, or the email or phone of the contact — of any of a
+ *   deal's contacts — already is (it came through the landing or by hand). It is counted, nothing of it is written and
+ *   nothing of what is there is touched; a repeated deal's aviso names the account and the stage it had in HubSpot.
  *
- * A file that cannot be read — empty, or missing a column the import needs — is refused whole, before anything is
- * written. The preview writes nothing; applying runs the same plan in batches of 200 records per transaction, and a
- * batch that fails keeps the earlier ones: importing the same files again completes it.
+ * A file that cannot be read — empty, wider than 200 columns, with an unclosed quote, missing a column the import needs,
+ * or not UTF-8 (the controller decodes it) — is refused whole, before anything is written. The preview writes nothing and lists the first 100
+ * errors, notices and ignored columns with their totals; applying runs the same plan in batches of 200 records per
+ * transaction, and a batch that fails keeps the earlier ones: importing the same files again completes it.
  */
 import { Prisma } from '@prisma/client'
 import Papa from 'papaparse'
@@ -36,6 +38,10 @@ const BATCH = 200
 const BATCH_TX = { maxWait: 10_000, timeout: 60_000 }
 /** Keys, emails or phones per lookup query. */
 const LOOKUP_CHUNK = 1000
+/** A HubSpot export «with the columns of the view» has a few dozen; more is a file that is not one (M-2). */
+const MAX_COLUMNS = 200
+/** Errors, notices and ignored columns the answer lists; their totals always come along. */
+const LIST_CAP = 100
 const WON_NOTE = 'Ganado en HubSpot: falta ligar su negocio de Avoqado'
 const LOST_REASON = 'Dijo que no'
 /** HubSpot's closed stages, in the founder's pipeline and in HubSpot's default one. */
@@ -71,16 +77,24 @@ export interface ImportError {
 export interface HubspotPreview {
   nuevos: number
   repetidos: number
+  /** The first 100 rows with an error, in the order of the files; `conErrorTotal` says how many there are. */
   conError: ImportError[]
+  conErrorTotal: number
   /** New deals, in the pipeline. */
   negocios: number
   /** New contacts without a deal, archived. */
   archivados: number
   /** Contacts that go inside their deal's account instead of getting their own. */
   contactosDeNegocios: number
-  /** What enters differently from the file: a stage the CRM lacks, a phone that is not one, a contact not in the file. */
+  /**
+   * What does not enter as the file says: a deal of someone already in the CRM, a stage the CRM lacks, a phone that is not
+   * one, a deal's contact that cannot come in. The first 100, and their total.
+   */
   avisos: string[]
+  avisosTotal: number
+  /** The first 100 of each file, and their totals. */
   columnasIgnoradas: Record<Archivo, string[]>
+  columnasIgnoradasTotal: Record<Archivo, number>
 }
 
 export interface HubspotApplied extends HubspotPreview {
@@ -95,55 +109,61 @@ export interface HubspotApplied extends HubspotPreview {
 /** Headers and stage names compare without case, accents or extra spaces. */
 const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').trim().toLowerCase()
 
-const PARSE_ERRORS: Record<string, string> = { MissingQuotes: 'Tiene comillas sin cerrar', InvalidQuotes: 'Tiene comillas mal puestas' }
-
 type Values<F extends string> = Partial<Record<F, string>>
 
+/** A row of the file, read — or the reason it could not be. In the order of the file. */
+type CsvRow<F extends string> = { fila: number; values: Values<F> } | { fila: number; razon: string }
+
 interface CsvFile<F extends string> {
-  rows: { fila: number; values: Values<F> }[]
-  errors: ImportError[]
-  /** The whole file is unreadable: nothing of either file is imported. */
-  unreadable: boolean
+  rows: CsvRow<F>[]
+  /** Why nothing of either file is imported: the file cannot be read as a whole. */
+  unreadable: ImportError | null
   ignored: string[]
 }
 
 /**
  * The rows of one file, each cell cleaned like the landing's (no NUL or control characters, at most 500 characters).
- * Empty rows are skipped; a row Papa could not read, or with a different number of columns than the header — an
- * unquoted comma that shifted every cell after it — is an error, never a guess.
+ * Empty rows are skipped; a row with a different number of columns than the header — an unquoted comma that shifted
+ * every cell after it — or a misplaced quote is an error of that row, never a guess. An unclosed quote makes Papa fold
+ * every row after it into one cell, so that file is not read at all (M-4).
  */
 function readCsv<F extends string>(csv: string, archivo: Archivo, columns: Record<F, string[]>, required: NoInfer<F>[]): CsvFile<F> {
+  const unreadable = (fila: number, razon: string, ignored: string[] = []): CsvFile<F> => ({
+    rows: [],
+    unreadable: { archivo, fila, razon },
+    ignored,
+  })
   // Without a header row: Papa's row numbers then match the spreadsheet's, header included. It strips the BOM itself.
   const { data, errors: parseErrors } = Papa.parse<string[]>(csv, { skipEmptyLines: false })
   const [header = [], ...lines] = data
-  const fields = Object.keys(columns) as F[]
-  // Cleaned (at most 500 characters) before anything else: a file that is not a CSV can be one 5 MB header cell.
-  const names = header.map(cleanText)
-  const fieldAt = names.map(name => {
-    const wanted = normalize(name)
-    return fields.find(field => columns[field].some(alias => normalize(alias) === wanted)) ?? null
-  })
-  const ignored = names.filter((name, column) => name && !fieldAt[column])
-  const unreadable = (razon: string): CsvFile<F> => ({ rows: [], errors: [{ archivo, fila: 1, razon }], unreadable: true, ignored })
-
-  if (!names.some(Boolean)) return unreadable('El archivo está vacío')
-  const missing = required.find(field => !fieldAt.includes(field))
-  if (missing) return unreadable(`Falta la columna «${columns[missing][0]}»`)
-
-  const broken = new Map<number, string>()
-  for (const error of parseErrors) {
-    if (error.row !== undefined && !broken.has(error.row + 1)) broken.set(error.row + 1, PARSE_ERRORS[error.code] ?? 'No se pudo leer')
+  // Before touching a single header: a file that is not a CSV can be millions of columns (M-2).
+  if (header.length > MAX_COLUMNS) {
+    return unreadable(1, `Tiene ${header.length} columnas y el máximo es ${MAX_COLUMNS}: en HubSpot exporta sólo las columnas de la vista`)
   }
-  const rows: CsvFile<F>['rows'] = []
-  const errors: ImportError[] = []
+  const unclosed = parseErrors.find(error => error.code === 'MissingQuotes' && error.row !== undefined)
+  if (unclosed) return unreadable(unclosed.row! + 1, 'Tiene comillas sin cerrar: no se pudo leer nada desde esta fila')
+
+  // Each alias normalized once; each header looked up once.
+  const fieldOf = new Map<string, F>()
+  for (const field of Object.keys(columns) as F[]) for (const alias of columns[field]) fieldOf.set(normalize(alias), field)
+  const names = header.map(cleanText)
+  const fieldAt = names.map(name => fieldOf.get(normalize(name)) ?? null)
+  const ignored = names.filter((name, column) => name && !fieldAt[column])
+
+  if (!names.some(Boolean)) return unreadable(1, 'El archivo está vacío', ignored)
+  const missing = required.find(field => !fieldAt.includes(field))
+  if (missing) return unreadable(1, `Falta la columna «${columns[missing][0]}»`, ignored)
+
+  const misquoted = new Set(
+    parseErrors.flatMap(error => (error.code === 'InvalidQuotes' && error.row !== undefined ? [error.row + 1] : [])),
+  )
+  const rows: CsvRow<F>[] = []
   lines.forEach((line, index) => {
     const fila = index + 2
     if (line.every(cell => !cleanText(cell))) return
-    const razon =
-      broken.get(fila) ?? (line.length !== header.length ? `Tiene ${line.length} columnas y el encabezado ${header.length}` : null)
-    if (razon) {
-      errors.push({ archivo, fila, razon })
-      return
+    if (misquoted.has(fila)) return void rows.push({ fila, razon: 'Tiene comillas mal puestas' })
+    if (line.length !== header.length) {
+      return void rows.push({ fila, razon: `Tiene ${line.length} columnas y el encabezado ${header.length}` })
     }
     const values: Values<F> = {}
     line.forEach((cell, column) => {
@@ -153,7 +173,20 @@ function readCsv<F extends string>(csv: string, archivo: Archivo, columns: Recor
     })
     rows.push({ fila, values })
   })
-  return { rows, errors, unreadable: false, ignored }
+  return { rows, unreadable: null, ignored }
+}
+
+/** A list that keeps its first 100 items and counts them all. */
+function capped<T>() {
+  const list = {
+    items: [] as T[],
+    total: 0,
+    add(item: T) {
+      list.total++
+      if (list.items.length < LIST_CAP) list.items.push(item)
+    },
+  }
+  return list
 }
 
 // ── The plan ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -216,54 +249,89 @@ async function existingKeys(keys: string[]): Promise<Set<string>> {
  * gives each value once, however many people share it; every CRM writer stores emails in lowercase (the landing,
  * «Nuevo prospecto», this import), so the exact match uses the index.
  */
-async function knownEmailsAndPhones(contacts: ContactRow[]): Promise<Set<string>> {
+async function knownEmailsAndPhones(contacts: ContactRow[]): Promise<Map<string, string>> {
   const emails = [...new Set(contacts.flatMap(contact => (contact.email ? [contact.email] : [])))]
   const phones = [...new Set(contacts.flatMap(contact => (contact.phoneE164 ? [contact.phoneE164] : [])))]
   const notImported = { source: { not: IMPORTACION } }
-  const found = new Set<string>()
+  // Each email or phone → ONE account that has it (the smallest id: the same answer on every run).
+  const found = new Map<string, string>()
   for (const chunk of chunksOf(emails, LOOKUP_CHUNK)) {
-    const rows = await prisma.crmContact.groupBy({ by: ['email'], where: { email: { in: chunk }, account: notImported } })
-    for (const { email } of rows) if (email) found.add(email)
+    const rows = await prisma.crmContact.groupBy({
+      by: ['email'],
+      where: { email: { in: chunk }, account: notImported },
+      _min: { accountId: true },
+    })
+    for (const { email, _min } of rows) if (email && _min.accountId) found.set(email, _min.accountId)
   }
   for (const chunk of chunksOf(phones, LOOKUP_CHUNK)) {
-    const rows = await prisma.crmContact.groupBy({ by: ['phoneE164'], where: { phoneE164: { in: chunk }, account: notImported } })
-    for (const { phoneE164 } of rows) if (phoneE164) found.add(phoneE164)
+    const rows = await prisma.crmContact.groupBy({
+      by: ['phoneE164'],
+      where: { phoneE164: { in: chunk }, account: notImported },
+      _min: { accountId: true },
+    })
+    for (const { phoneE164, _min } of rows) if (phoneE164 && _min.accountId) found.set(phoneE164, _min.accountId)
   }
   return found
 }
 
-const isKnown = (known: Set<string>, contact: ContactRow) =>
-  (!!contact.email && known.has(contact.email)) || (!!contact.phoneE164 && known.has(contact.phoneE164))
+/** The account someone already in the CRM is in, if they are. */
+const knownAccountOf = (known: Map<string, string>, contact: ContactRow) =>
+  (contact.email && known.get(contact.email)) || (contact.phoneE164 && known.get(contact.phoneE164)) || null
+
+/** The names of the accounts the avisos point to (only deals of someone already in the CRM: a handful). */
+async function accountNames(ids: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>()
+  for (const chunk of chunksOf([...new Set(ids)], LOOKUP_CHUNK)) {
+    const accounts = await prisma.crmAccount.findMany({
+      where: { id: { in: chunk } },
+      select: { id: true, name: true },
+      orderBy: { id: 'asc' },
+      take: chunk.length,
+    })
+    for (const account of accounts) names.set(account.id, account.name)
+  }
+  return names
+}
 
 /** What the two files would do to the CRM now, and the accounts to create. Reads; never writes. */
 async function plan(contactsCsv: string, dealsCsv: string) {
   const contactsFile = readCsv(contactsCsv, 'contactos', CONTACT_COLUMNS, ['id'])
   const dealsFile = readCsv(dealsCsv, 'negocios', DEAL_COLUMNS, ['id', 'name', 'stage', 'contactIds'])
-  const summary: HubspotPreview = {
-    nuevos: 0,
-    repetidos: 0,
-    conError: [...contactsFile.errors, ...dealsFile.errors],
-    negocios: 0,
-    archivados: 0,
-    contactosDeNegocios: 0,
-    avisos: [],
-    columnasIgnoradas: { contactos: contactsFile.ignored, negocios: dealsFile.ignored },
-  }
+  const counts = { nuevos: 0, repetidos: 0, negocios: 0, archivados: 0, contactosDeNegocios: 0 }
+  // Both files are read in order, contacts first: the first 100 of each list are the first ones of the files.
+  const errors = capped<ImportError>()
+  const avisos = capped<string>()
+  const summary = (): HubspotPreview => ({
+    ...counts,
+    conError: errors.items,
+    conErrorTotal: errors.total,
+    avisos: avisos.items,
+    avisosTotal: avisos.total,
+    columnasIgnoradas: { contactos: contactsFile.ignored.slice(0, LIST_CAP), negocios: dealsFile.ignored.slice(0, LIST_CAP) },
+    columnasIgnoradasTotal: { contactos: contactsFile.ignored.length, negocios: dealsFile.ignored.length },
+  })
   const records: PlannedAccount[] = []
-  if (contactsFile.unreadable || dealsFile.unreadable) return { summary, records, unreadable: true }
-  const rowError = (archivo: Archivo, fila: number, razon: string) => summary.conError.push({ archivo, fila, razon })
+  for (const file of [contactsFile, dealsFile]) if (file.unreadable) errors.add(file.unreadable)
+  if (errors.total) return { summary: summary(), records, unreadable: true }
 
   // Contacts: one per Record ID, with a name or a phone.
   const contacts = new Map<string, ContactRow>()
   const contactIdsInFile = new Set<string>()
-  for (const { fila, values } of contactsFile.rows) {
+  /** Contacts whose row has an error, by id: a deal that names one comes in without it (M-6). */
+  const badContactRows = new Map<string, number>()
+  for (const row of contactsFile.rows) {
+    if ('razon' in row) {
+      errors.add({ archivo: 'contactos', fila: row.fila, razon: row.razon })
+      continue
+    }
+    const { fila, values } = row
     const id = values.id
     if (!id) {
-      rowError('contactos', fila, 'Sin Record ID')
+      errors.add({ archivo: 'contactos', fila, razon: 'Sin Record ID' })
       continue
     }
     if (contactIdsInFile.has(id)) {
-      rowError('contactos', fila, `El Record ID ${id} se repite en el archivo`)
+      errors.add({ archivo: 'contactos', fila, razon: `El Record ID ${id} se repite en el archivo` })
       continue
     }
     contactIdsInFile.add(id)
@@ -271,11 +339,11 @@ async function plan(contactsCsv: string, dealsCsv: string) {
     const company = values.company ?? null
     const phoneE164 = values.phone ? canonicalPhoneE164(values.phone) : null
     if (!person && !company && !phoneE164) {
-      rowError('contactos', fila, 'Sin nombre ni teléfono')
+      errors.add({ archivo: 'contactos', fila, razon: 'Sin nombre ni teléfono' })
+      badContactRows.set(id, fila)
       continue
     }
-    if (values.phone && !phoneE164)
-      summary.avisos.push(`Contactos, fila ${fila}: el teléfono «${values.phone}» no es válido; entra sin teléfono`)
+    if (values.phone && !phoneE164) avisos.add(`Contactos, fila ${fila}: el teléfono «${values.phone}» no es válido; entra sin teléfono`)
     contacts.set(id, { id, person, company, phoneE164, email: values.email?.toLowerCase() ?? null })
   }
 
@@ -284,18 +352,23 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   const inDeals = new Set<string>()
   const deals: { fila: number; id: string; name: string; stage: string; contactIds: string[] }[] = []
   const dealIds = new Set<string>()
-  for (const { fila, values } of dealsFile.rows) {
+  for (const row of dealsFile.rows) {
+    if ('razon' in row) {
+      errors.add({ archivo: 'negocios', fila: row.fila, razon: row.razon })
+      continue
+    }
+    const { fila, values } = row
     const contactIds = (values.contactIds ?? '').split(/[;,\s]+/).filter(Boolean)
     for (const contactId of contactIds) inDeals.add(contactId)
     const id = values.id
-    if (!id) rowError('negocios', fila, 'Sin Record ID')
-    else if (dealIds.has(id)) rowError('negocios', fila, `El Record ID ${id} se repite en el archivo`)
-    else if (!values.name) rowError('negocios', fila, 'Sin nombre del negocio')
+    if (!id) errors.add({ archivo: 'negocios', fila, razon: 'Sin Record ID' })
+    else if (dealIds.has(id)) errors.add({ archivo: 'negocios', fila, razon: `El Record ID ${id} se repite en el archivo` })
+    else if (!values.name) errors.add({ archivo: 'negocios', fila, razon: 'Sin nombre del negocio' })
     else deals.push({ fila, id, name: values.name, stage: values.stage ?? '', contactIds })
     if (id) dealIds.add(id)
   }
   const alone = [...contacts.values()].filter(contact => !inDeals.has(contact.id))
-  summary.contactosDeNegocios = contacts.size - alone.length
+  counts.contactosDeNegocios = contacts.size - alone.length
 
   const [stages, reasons, initial, existing, known] = await Promise.all([
     listStages(),
@@ -304,6 +377,21 @@ async function plan(contactsCsv: string, dealsCsv: string) {
     existingKeys([...deals.map(deal => dealKey(deal.id)), ...alone.map(contact => contactKey(contact.id))]),
     knownEmailsAndPhones([...contacts.values()]),
   ])
+  // Ruling 36 (ruling 33 as written): a deal with someone already in the CRM is «repetido» — the person, and the account
+  // they are in, for its aviso.
+  const alreadyIn = new Map<string, { person: ContactRow; accountId: string }>()
+  for (const deal of deals) {
+    if (existing.has(dealKey(deal.id))) continue
+    for (const contactId of deal.contactIds) {
+      const person = contacts.get(contactId)
+      const accountId = person && knownAccountOf(known, person)
+      if (accountId) {
+        alreadyIn.set(deal.id, { person, accountId })
+        break
+      }
+    }
+  }
+  const names = await accountNames([...alreadyIn.values()].map(({ accountId }) => accountId))
   // An admin may have renamed them: «Ganado» and «Perdido» by their kind, the open ones by name (listStages: by order).
   const wonStage = stages.find(stage => stage.kind === 'GANADA')
   const lostStage = stages.find(stage => stage.kind === 'PERDIDA')
@@ -322,27 +410,38 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   for (const deal of deals) {
     const externalKey = dealKey(deal.id)
     if (existing.has(externalKey)) {
-      summary.repetidos++
+      counts.repetidos++
       continue
+    }
+    const where = `Negocios, fila ${deal.fila}: «${deal.name}»`
+    const already = alreadyIn.get(deal.id)
+    if (already) {
+      // Nothing of it is written, and nothing of the account that is already there is touched.
+      counts.repetidos++
+      const hubspotStage = deal.stage ? `la etapa «${deal.stage}»` : 'ninguna etapa'
+      avisos.add(
+        `${where} no entra (ni sus contactos): ${contactInput(already.person, true).name} ya está en el CRM en ` +
+          `«${names.get(already.accountId) ?? 'otro negocio'}» (${already.accountId}); en HubSpot estaba en ${hubspotStage}, ajústalo a mano`,
+      )
+      continue
+    }
+    // Once the deal is in, it is «repetido»: importing again could never add a person it came in without.
+    for (const contactId of deal.contactIds) {
+      if (contacts.has(contactId)) continue
+      const badRow = badContactRows.get(contactId)
+      avisos.add(
+        badRow
+          ? `${where} entra sin el contacto ${contactId} (contactos, fila ${badRow}, con error); corrígelo antes de aplicar: después ya no se agrega`
+          : `${where} entra sin el contacto ${contactId}, que no viene en el archivo de contactos; después ya no se agrega`,
+      )
     }
     let stage: { id: string; name: string; kind?: string } | undefined = stageOf(deal.stage)
     if (!stage) {
       stage = initial
       const what = deal.stage ? `está en la etapa «${deal.stage}», que no existe en el CRM` : 'no trae etapa'
-      summary.avisos.push(`Negocios, fila ${deal.fila}: «${deal.name}» ${what}; entra en «${initial.name}»`)
+      avisos.add(`${where} ${what}; entra en «${initial.name}»`)
     }
-    const people = deal.contactIds.flatMap(contactId => {
-      const contact = contacts.get(contactId)
-      // A contact whose row has an error is already listed in `conError`.
-      if (!contact && !contactIdsInFile.has(contactId)) {
-        summary.avisos.push(`Negocios, fila ${deal.fila}: el contacto ${contactId} de «${deal.name}» no viene en el archivo de contactos`)
-      }
-      return contact ? [contact] : []
-    })
-    // A deal is «repetido» only by its key (ruling 33); someone already in the CRM is said, for the team to merge.
-    if (people.some(contact => isKnown(known, contact))) {
-      summary.avisos.push(`Negocios, fila ${deal.fila}: alguien de «${deal.name}» ya está en el CRM; entra como negocio aparte`)
-    }
+    const people = deal.contactIds.flatMap(contactId => contacts.get(contactId) ?? [])
     const data: UpsertBySourceInput['data'] = { name: deal.name, stageId: stage.id, sourceDetail: { origen: 'HubSpot', recordId: deal.id } }
     // «Ganado» without its Organization: the seller links it with «Ganar» (win() asks for one, so it is not used here).
     if (stage.kind === 'GANADA') data.wonAt = now
@@ -354,13 +453,13 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       stageName: stage.name,
       won: stage.kind === 'GANADA',
     })
-    summary.negocios++
+    counts.negocios++
   }
 
   for (const contact of alone) {
     const externalKey = contactKey(contact.id)
-    if (existing.has(externalKey) || isKnown(known, contact)) {
-      summary.repetidos++
+    if (existing.has(externalKey) || knownAccountOf(known, contact)) {
+      counts.repetidos++
       continue
     }
     records.push({
@@ -375,12 +474,11 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       stageName: initial.name,
       won: false,
     })
-    summary.archivados++
+    counts.archivados++
   }
 
-  summary.nuevos = summary.negocios + summary.archivados
-  summary.conError.sort((a, b) => a.archivo.localeCompare(b.archivo) || a.fila - b.fila)
-  return { summary, records, unreadable: false }
+  counts.nuevos = counts.negocios + counts.archivados
+  return { summary: summary(), records, unreadable: false }
 }
 
 // ── Preview and apply ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -419,6 +517,11 @@ async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, ac
  * Imports the two files: the same plan as the preview, in batches of 200 records per transaction. Idempotent by key: a
  * second run — or one at the same time — creates nothing the first one did. An unreadable file is a 422 before anything
  * is written. The answer carries the preview's counts plus what this run created (`aplicados`) and what failed.
+ *
+ * ponytail: the whole import runs inside the one HTTP request, ~4–5 sequential queries per record. Today (~1k records)
+ * that is seconds; a full 5 MB file (~25k contacts) is minutes. Nothing is lost if the client gives up — the server
+ * finishes, and importing the same files again completes whatever did not land — so for a one-time admin import that is
+ * enough. Upgrade path: a background job with progress, like the exports.
  */
 export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsCsv: string): Promise<HubspotApplied> {
   const { summary, records, unreadable } = await plan(contactsCsv, dealsCsv)
@@ -454,7 +557,7 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
     data: {
       nuevos: summary.nuevos,
       repetidos: summary.repetidos,
-      conError: summary.conError.length,
+      conError: summary.conErrorTotal,
       negocios: summary.negocios,
       archivados: summary.archivados,
       aplicados,

@@ -48,6 +48,9 @@ beforeEach(() => {
     prismaMock.crmLostReason.count,
     prismaMock.crmStage.findMany,
     prismaMock.crmLostReason.findMany,
+    prismaMock.crmStage.findFirst,
+    prismaMock.crmAccount.findMany,
+    prismaMock.crmContact.groupBy,
   ])
     fn.mockReset()
   // An admin of the team: «Administrar» on, «Ver negocios» off. Not a superadmin.
@@ -116,6 +119,35 @@ describe('importar lo de HubSpot', () => {
 
     expect(res.status).toBe(422)
     expect(res.body).toEqual({ code: 'CRM_IMPORT_ARCHIVO_INVALIDO', message: 'Falta el archivo de negocios' })
+  })
+
+  it('archivo_que_no_es_utf8_es_422', async () => {
+    // Excel re-saved it as ANSI: «José» would come in as «Jos�» without a word.
+    const res = await preview()
+      .attach('contactos', Buffer.from('Record ID,First Name\n1,José\n', 'latin1'), 'contactos.csv')
+      .attach('negocios', DEALS, 'negocios.csv')
+
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({
+      code: 'CRM_IMPORT_ARCHIVO_INVALIDO',
+      message: 'El archivo de contactos no está en UTF-8: guárdalo como «CSV UTF-8» o expórtalo de nuevo desde HubSpot',
+    })
+  })
+
+  it('un_utf8_con_un_signo_de_reemplazo_de_verdad_si_se_lee', async () => {
+    // A «�» that HubSpot already had in a name is valid UTF-8: it must not block the whole import.
+    prismaMock.crmStage.findMany.mockResolvedValue([{ id: 'cstageprs0000000000000001', name: 'Prospecto', order: 1, kind: 'ABIERTA' }])
+    prismaMock.crmLostReason.findMany.mockResolvedValue([])
+    prismaMock.crmStage.findFirst.mockResolvedValue({ id: 'cstageprs0000000000000001', name: 'Prospecto' })
+    prismaMock.crmAccount.findMany.mockResolvedValue([])
+    prismaMock.crmContact.groupBy.mockResolvedValue([])
+
+    const res = await preview()
+      .attach('contactos', Buffer.from('Record ID,First Name\n1,Jos\uFFFD\n', 'utf8'), 'contactos.csv')
+      .attach('negocios', DEALS, 'negocios.csv')
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ nuevos: 1, archivados: 1 })
   })
 
   it('sin_crm_admin_es_403', async () => {

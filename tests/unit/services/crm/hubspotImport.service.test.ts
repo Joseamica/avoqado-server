@@ -71,19 +71,26 @@ beforeEach(() => {
     fn.mockReset()
   prismaMock.crmStage.findMany.mockResolvedValue(STAGES)
   prismaMock.crmLostReason.findMany.mockResolvedValue(REASONS)
-  // The accounts this import already created, by their HubSpot key.
+  // The accounts this import already created, by their HubSpot key; or the names of accounts, by id.
   prismaMock.crmAccount.findMany.mockImplementation(async ({ where }: any) =>
-    db.accounts
-      .filter(account => account.source === where.source && where.externalKey.in.includes(account.externalKey))
-      .map(account => ({ externalKey: account.externalKey })),
+    where.id
+      ? db.accounts.filter(account => where.id.in.includes(account.id)).map(account => ({ id: account.id, name: account.name }))
+      : db.accounts
+          .filter(account => account.source === where.source && where.externalKey.in.includes(account.externalKey))
+          .map(account => ({ externalKey: account.externalKey })),
   )
-  // GROUP BY one column: each value once, whatever the number of people that share it — of accounts NOT of this import.
+  // GROUP BY one column with MIN(accountId): each value once, whatever the number of people that share it — of accounts
+  // NOT of this import.
   prismaMock.crmContact.groupBy.mockImplementation(async ({ by: [field], where }: any) => {
     const sourceOf = (contact: any) => db.accounts.find(account => account.id === contact.accountId)?.source
-    const others = db.contacts.filter(contact => sourceOf(contact) !== where.account.source.not)
-    return [...new Set(others.map(contact => contact[field]).filter(value => value && where[field].in.includes(value)))].map(value => ({
-      [field]: value,
-    }))
+    const firstAccount = new Map<string, string>()
+    for (const contact of db.contacts) {
+      const value = contact[field]
+      if (!value || !where[field].in.includes(value) || sourceOf(contact) === where.account.source.not) continue
+      const current = firstAccount.get(value)
+      if (!current || contact.accountId < current) firstAccount.set(value, contact.accountId)
+    }
+    return [...firstAccount].map(([value, accountId]) => ({ [field]: value, _min: { accountId } }))
   })
   prismaMock.crmContact.createMany.mockImplementation(async ({ data }: any) => {
     db.contacts.push(...data)
@@ -319,14 +326,94 @@ it('un_telefono_que_solo_trajo_esta_importacion_no_vuelve_repetido_a_nadie', asy
   expect(accountOf('hubspot:contact:104')).toMatchObject({ archivedAt: expect.any(Date) })
 })
 
-it('negocio_con_alguien_que_ya_esta_en_el_crm_entra_y_se_avisa', async () => {
+it('negocio_con_alguien_que_ya_esta_en_el_crm_es_repetido', async () => {
+  // Ana filled the landing before HubSpot made her a deal (ruling 36: ruling 33 as written).
   db.accounts.push({ id: 'caccountlnd0000000000001', source: 'LANDING', externalKey: 'ana@cafe.mx', name: 'Café Ana', stageId: PROSPECTO })
   db.contacts.push({ accountId: 'caccountlnd0000000000001', name: 'Ana López', email: 'ana@cafe.mx', phoneE164: null, isPrimary: true })
 
-  const preview = await previewHubspot(CONTACTS, DEALS)
-  // Ruling 33: a deal is «repetido» only by its key. The team hears about the landing account, to merge them.
-  expect(preview).toMatchObject({ negocios: 2, repetidos: 0 })
-  expect(preview.avisos).toEqual([expect.stringMatching(/fila 2.*Café Ana.*ya está en el CRM/)])
+  const aviso = /fila 2.*Café Ana.*no entra.*Ana López.*«Café Ana» \(caccountlnd0000000000001\).*Contacto Inicial/
+  // «Café Ana» is repeated; «Tienda Carla» comes in; the 6 contacts without a deal too. Importing again, the same deal is
+  // still repeated, with the same aviso — the other 7 now by their key.
+  for (const expected of [
+    { negocios: 1, repetidos: 1, archivados: 6, nuevos: 7 },
+    { negocios: 0, repetidos: 8, archivados: 0, nuevos: 0 },
+  ]) {
+    const preview = await previewHubspot(CONTACTS, DEALS)
+    expect(preview).toMatchObject(expected)
+    // It names the account that already exists and the stage HubSpot had, for the seller to carry it over by hand.
+    expect(preview.avisos).toEqual([expect.stringMatching(aviso)])
+
+    // Applying never creates the deal nor touches the landing account.
+    await applyHubspot(admin, CONTACTS, DEALS)
+    expect(accountOf('hubspot:deal:9001')).toBeUndefined()
+    expect(contactsOf('caccountlnd0000000000001')).toHaveLength(1)
+    expect(db.events.filter(event => event.accountId === 'caccountlnd0000000000001')).toHaveLength(0)
+    expect(db.accounts.find(account => account.id === 'caccountlnd0000000000001')).toEqual({
+      id: 'caccountlnd0000000000001',
+      source: 'LANDING',
+      externalKey: 'ana@cafe.mx',
+      name: 'Café Ana',
+      stageId: PROSPECTO,
+    })
+    expect(db.accounts).toHaveLength(1 + 7)
+  }
+})
+
+it('contacto_de_un_negocio_que_no_puede_entrar_se_avisa_antes_de_aplicar', async () => {
+  // Beto's row has an error and 999 is not in the file: once the deal is in, importing again cannot add them.
+  const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n102,,,,beto@x.mx,\n`
+  const deals = `${NO_DEALS}9001,Café Ana,Calificado,101;102;999\n`
+  const preview = await previewHubspot(contacts, deals)
+
+  expect(preview.conError).toEqual([{ archivo: 'contactos', fila: 3, razon: 'Sin nombre ni teléfono' }])
+  expect(preview.avisos).toEqual([
+    expect.stringMatching(/fila 2.*Café Ana.*sin el contacto 102 \(contactos, fila 3, con error\).*después ya no se agrega/),
+    expect.stringMatching(/fila 2.*Café Ana.*sin el contacto 999.*no viene en el archivo de contactos.*después ya no se agrega/),
+  ])
+})
+
+it('cabecera_de_mas_de_200_columnas_no_se_lee', async () => {
+  const header = ['Record ID', ...Array.from({ length: 200 }, (_, i) => `x${i}`)].join(',')
+  const preview = await previewHubspot(`${header}\n`, NO_DEALS)
+
+  expect(preview.conError).toEqual([
+    { archivo: 'contactos', fila: 1, razon: 'Tiene 201 columnas y el máximo es 200: en HubSpot exporta sólo las columnas de la vista' },
+  ])
+  expect(preview.nuevos).toBe(0)
+})
+
+it('listas_con_tope_de_100_y_su_total', async () => {
+  const errors = Array.from({ length: 150 }, (_, i) => `${2000 + i},,,,e${i}@x.mx,`)
+  const warned = Array.from({ length: 150 }, (_, i) => `${3000 + i},Persona ${i},,abc,,`)
+  const preview = await previewHubspot(`${CONTACTS_HEADER}${[...errors, ...warned].join('\n')}\n`, NO_DEALS)
+
+  // The first 100 of each list, in the order of the file, and the real total: nothing is cut in silence.
+  expect(preview.conError).toHaveLength(100)
+  expect(preview.conErrorTotal).toBe(150)
+  expect(preview.conError[0]).toEqual({ archivo: 'contactos', fila: 2, razon: 'Sin nombre ni teléfono' })
+  expect(preview.conError[99].fila).toBe(101)
+  expect(preview.avisos).toHaveLength(100)
+  expect(preview.avisosTotal).toBe(150)
+  // The counts are never capped.
+  expect(preview.archivados).toBe(150)
+
+  const unknown = Array.from({ length: 150 }, (_, i) => `x${i}`)
+  const wide = await previewHubspot(`${['Record ID', ...unknown].join(',')}\n`, NO_DEALS)
+  expect(wide.columnasIgnoradas.contactos).toEqual(unknown.slice(0, 100))
+  expect(wide.columnasIgnoradasTotal).toEqual({ contactos: 150, negocios: 0 })
+})
+
+it('comillas_sin_cerrar_no_se_lee_el_archivo', async () => {
+  // Papa folds every row after the open quote into one cell: 103 would vanish from the counts without a word.
+  const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n102,"Beto,Ruiz,5512345602,b@x.mx,Café\n103,Carla,Díaz,5512345603,c@x.mx,Tienda\n`
+  const preview = await previewHubspot(contacts, NO_DEALS)
+
+  expect(preview.conError).toEqual([
+    { archivo: 'contactos', fila: 3, razon: 'Tiene comillas sin cerrar: no se pudo leer nada desde esta fila' },
+  ])
+  expect(preview.nuevos).toBe(0)
+  await expect(applyHubspot(admin, contacts, NO_DEALS)).rejects.toMatchObject({ statusCode: 422, code: 'CRM_IMPORT_ARCHIVO_INVALIDO' })
+  expect(db.accounts).toHaveLength(0)
 })
 
 it('una_tanda_que_falla_no_deshace_las_anteriores_y_reimportar_completa', async () => {

@@ -155,11 +155,26 @@ export async function markActivityDone(req: Request, res: Response): Promise<voi
 
 // «Importar lo de HubSpot» (`crm:admin`). Both receive the two CSVs multer read into memory.
 
-/** The contacts and deals files as text; 422 when one is missing. */
+/**
+ * A file as text, only if it is UTF-8 (M-5). Re-saved by Excel as ANSI, «José» would decode to «Jos�» without a word; the
+ * strict decoder refuses those bytes, while a «�» HubSpot already had in a name — valid UTF-8 — still comes in.
+ */
+function utf8(buffer: Buffer, archivo: 'contactos' | 'negocios'): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+  } catch {
+    throw new ValidationError(
+      `El archivo de ${archivo} no está en UTF-8: guárdalo como «CSV UTF-8» o expórtalo de nuevo desde HubSpot`,
+      'CRM_IMPORT_ARCHIVO_INVALIDO',
+    )
+  }
+}
+
+/** The contacts and deals files as text; 422 when one is missing or is not UTF-8. */
 function hubspotCsvs(req: Request): { contactos: string; negocios: string } {
   const files = hubspotImportFilesSchema.safeParse(req.files)
   if (!files.success) throw new ValidationError(files.error.errors[0].message, 'CRM_IMPORT_ARCHIVO_INVALIDO')
-  return { contactos: files.data.contactos[0].buffer.toString('utf8'), negocios: files.data.negocios[0].buffer.toString('utf8') }
+  return { contactos: utf8(files.data.contactos[0].buffer, 'contactos'), negocios: utf8(files.data.negocios[0].buffer, 'negocios') }
 }
 
 /** POST /api/v1/crm/import/hubspot/preview — what importing would do. Writes nothing. */
