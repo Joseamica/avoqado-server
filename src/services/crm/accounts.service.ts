@@ -331,6 +331,8 @@ export interface AccountFilters {
   sinDueno?: boolean
   estancados?: boolean
   q?: string
+  /** A person with exactly this email (any capitals). Unlike `q`, it never matches by name or by phone digits. */
+  email?: string
   cursor?: string
   limit?: number
 }
@@ -387,7 +389,7 @@ function searchWhere(q: string): Prisma.CrmAccountWhereInput {
  */
 export async function accountsWhere(access: CrmAccess, filters: AccountFilters, now: Date): Promise<Prisma.CrmAccountWhereInput> {
   const and: Prisma.CrmAccountWhereInput[] = [scopeWhere(access, 'ver')]
-  if (!filters.q) and.push({ archivedAt: null })
+  if (!filters.q && !filters.email) and.push({ archivedAt: null })
   if (filters.stageId) and.push({ stageId: filters.stageId })
   if (filters.ownerStaffId) and.push({ ownerStaffId: filters.ownerStaffId })
   if (filters.sinDueno) and.push({ ownerStaffId: null })
@@ -395,6 +397,7 @@ export async function accountsWhere(access: CrmAccess, filters: AccountFilters, 
   if (filters.semaforo) and.push(LIVE, semaforoWhere(filters.semaforo, now))
   if (filters.estancados) and.push(LIVE, await staleWhere(now))
   if (filters.q) and.push(searchWhere(filters.q))
+  if (filters.email) and.push({ contacts: { some: { email: { equals: filters.email.trim().toLowerCase(), mode: 'insensitive' } } } })
   return { AND: and }
 }
 
@@ -753,8 +756,11 @@ export async function reassign(access: CrmAccess, id: string, staffId: string | 
 /**
  * Moves an account to another OPEN stage. «Ganado» and «Perdido» go through `win` and `lose`, which ask for the
  * Organization and the reason. Moving a won or lost account back to an open stage reopens it.
+ *
+ * `expectedStageId` (the MCP's «sólo avanza»): the stage the caller decided from. If the account is in another one by the
+ * time its row is locked — someone won, lost or moved it meanwhile — 409, and nothing is reopened.
  */
-export async function moveStage(access: CrmAccess, id: string, stageId: string) {
+export async function moveStage(access: CrmAccess, id: string, stageId: string, expectedStageId?: string) {
   const target = await prisma.crmStage.findUnique({ where: { id: stageId }, select: { id: true, name: true, kind: true } })
   if (!target) throw new ValidationError('Esa etapa no existe', 'CRM_STAGE_NOT_FOUND')
   if (target.kind === 'GANADA') throw new ValidationError('Para ganarlo usa «Ganar»: pide ligarlo a su cuenta de Avoqado', 'CRM_USA_GANAR')
@@ -763,6 +769,7 @@ export async function moveStage(access: CrmAccess, id: string, stageId: string) 
   const now = new Date()
   return prisma.$transaction(async tx => {
     const account = await touchEditableTx(tx, access, id, now)
+    assertExpectedStage(account.stageId, expectedStageId)
     if (account.stageId !== target.id) {
       const reopened = account.stage.kind === 'ABIERTA' ? {} : { wonAt: null, lostAt: null, lostReasonId: null, lostNote: null }
       await tx.crmAccount.update({ where: { id }, data: { stageId: target.id, stageEnteredAt: now, ...reopened } })
@@ -777,8 +784,18 @@ export async function moveStage(access: CrmAccess, id: string, stageId: string) 
   })
 }
 
-/** «Perder» asks for a reason from the list (422 without one) so the report says why accounts are lost, not just how many. */
-export async function lose(access: CrmAccess, id: string, input: { lostReasonId?: string; note?: string }) {
+/** 409 when the account is no longer in the stage the caller decided from (see `moveStage`). */
+function assertExpectedStage(current: string, expected: string | undefined) {
+  if (expected && current !== expected) {
+    throw new ConflictError('El negocio cambió de etapa mientras tanto: vuelve a leerlo antes de moverlo', 'CRM_ETAPA_CAMBIO')
+  }
+}
+
+/**
+ * «Perder» asks for a reason from the list (422 without one) so the report says why accounts are lost, not just how many.
+ * `expectedStageId`, like in `moveStage`: a business won meanwhile is not turned into a lost one.
+ */
+export async function lose(access: CrmAccess, id: string, input: { lostReasonId?: string; note?: string; expectedStageId?: string }) {
   if (!input.lostReasonId) throw new ValidationError('Elige por qué se perdió', 'CRM_FALTA_MOTIVO')
   const [reason, lostStage] = await Promise.all([
     prisma.crmLostReason.findUnique({ where: { id: input.lostReasonId }, select: { id: true, name: true, active: true } }),
@@ -790,6 +807,7 @@ export async function lose(access: CrmAccess, id: string, input: { lostReasonId?
   const note = input.note || null
   return prisma.$transaction(async tx => {
     const account = await touchEditableTx(tx, access, id, now)
+    assertExpectedStage(account.stageId, input.expectedStageId)
     await tx.crmAccount.update({
       where: { id },
       data: { stageId: lostStage.id, stageEnteredAt: now, lostReasonId: reason.id, lostNote: note, lostAt: now, wonAt: null },

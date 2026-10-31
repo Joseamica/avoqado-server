@@ -7,11 +7,14 @@
  * for. Holding `crm:*` never widens `scope.isSuperAdmin`. Free catalog only: they are NOT in `directory/catalog.ts`.
  *
  * Everything goes through the CRM services (they check the scope, lock the row and write the timeline). What is added
- * here is ruling 38: one business per person on WhatsApp, «sólo avanza», reasons resolved by name, and writes that a
- * retry of the routine does not repeat.
+ * here: one business per person on WhatsApp (ruling 38), a note only for a message the CRM has not seen (44), empty
+ * fields filled and never overwritten (45), «sólo avanza» except to «Perdido» (46), reasons resolved by name, and writes
+ * that a re-run of the routine does not repeat.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import { ForbiddenError } from '@/errors/AppError'
 import type { CrmKey } from '@/lib/permissions'
 import { ACTIVITY_TYPES } from '@/schemas/crm.schema'
 import { getCrmAccess, hasCrmKey, scopeWhere, type CrmAccess } from '@/services/crm/access.service'
@@ -25,7 +28,6 @@ import {
   listStages,
   lose,
   moveStage,
-  touchEditableTx,
   type AccountRow,
   type Pending,
 } from '@/services/crm/accounts.service'
@@ -106,24 +108,61 @@ async function conLlave(scope: McpScope, key: CrmKey, run: (access: CrmAccess) =
   }
 }
 
+type Llenable = 'name' | 'giro' | 'ventasRango'
+
+interface WhatsappInput {
+  phone: string
+  name?: string
+  giro?: string
+  ventasRango?: string
+  campaign?: string
+  ultimoMensajeAt?: Date
+}
+
+type Upsert =
+  | { ok: true; accountId: string; creado: boolean; yaExistia: boolean; reactivado: boolean; notaNueva: boolean; actualizados: Llenable[] }
+  | { ok: false; error: string; candidatos: Awaited<ReturnType<typeof findDuplicates>> }
+
 /**
- * Ruling 38. One event per business per day from WhatsApp, keyed `whatsapp:<account>:<day>`: the creation takes it, and
- * so does «Volvió a escribir» — so a retry or a second run the same day writes nothing, and a later day gets its note.
+ * Ruling 45: what the routine learned fills only what the business still lacks — the name while it is the phone (or
+ * empty), the giro and the sales range while they are empty. Never overwrites.
  */
-async function upsertWhatsapp(
-  access: CrmAccess,
-  input: { phone: string; name?: string; giro?: string; ventasRango?: string; campaign?: string },
-) {
+function vacios(row: { name: string; giro: string | null; ventasRango: string | null }, input: WhatsappInput) {
+  const isPhone = (value: string) => canonicalPhoneE164(value) === input.phone
+  const changes: Array<{ field: Llenable; from: string | null; to: string }> = []
+  if (input.name && !isPhone(input.name) && (!row.name.trim() || isPhone(row.name))) {
+    changes.push({ field: 'name', from: row.name, to: input.name })
+  }
+  if (input.giro && !row.giro?.trim()) changes.push({ field: 'giro', from: row.giro, to: input.giro })
+  if (input.ventasRango && !row.ventasRango?.trim()) changes.push({ field: 'ventasRango', from: row.ventasRango, to: input.ventasRango })
+  return changes
+}
+
+/**
+ * Rulings 38, 44 and 45, in one transaction.
+ *
+ * The note «Volvió a escribir» is keyed by the message it is about — `whatsapp:<account>:<ultimoMensajeAt to the
+ * minute>` — and the creation takes the same key, so re-reading a chat (the routine reads the last 4 days, every day)
+ * writes nothing. Only a NEW note touches the business (it restarts «Estancado») and brings it back from the archive.
+ * Without the message: its own WhatsApp business gets no note at all; one from another source gets one in its whole life
+ * (`whatsapp:<account>`). Filling the empty fields does not depend on the note and is not a touch.
+ */
+async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<Upsert> {
   const now = new Date()
-  const key = (accountId: string) => `whatsapp:${accountId}:${fecha(now, 'yyyy-MM-dd')}`
-  const campaign = input.campaign ? { campaign: input.campaign } : {}
+  const message = input.ultimoMensajeAt?.toISOString().slice(0, 16) // UTC, to the minute
+  const keyOf = (accountId: string) => (message ? `whatsapp:${accountId}:${message}` : `whatsapp:${accountId}`)
+  const extra = {
+    ...(input.campaign ? { campaign: input.campaign } : {}),
+    ...(input.ultimoMensajeAt ? { ultimoMensajeAt: input.ultimoMensajeAt.toISOString() } : {}),
+  }
 
   // The person's business: the WhatsApp one of this phone or, from any other source, the one with a person of it.
-  const whatsapp = await prisma.crmAccount.findUnique({
+  const own = await prisma.crmAccount.findUnique({
     where: { source_externalKey: { source: WHATSAPP, externalKey: input.phone } },
     select: { id: true },
   })
-  let existingId = whatsapp?.id ?? null
+  let existingId = own?.id ?? null
+  let ownKey = existingId !== null
   if (!existingId) {
     const matches = await findDuplicates(access, { phone: input.phone })
     const ids = matches.flatMap(match => ('id' in match ? [match.id] : []))
@@ -134,7 +173,7 @@ async function upsertWhatsapp(
   }
   const stageId = existingId ? null : (await getInitialStage()).id
 
-  return prisma.$transaction(async tx => {
+  return prisma.$transaction(async (tx): Promise<Upsert> => {
     let accountId = existingId
     if (!accountId && stageId) {
       const name = input.name || input.phone
@@ -156,41 +195,59 @@ async function upsertWhatsapp(
           accountId: account.id,
           kind: 'SYSTEM',
           actorStaffId: access.staffId,
-          sourceKey: key(account.id),
-          data: { event: 'CREATED', source: WHATSAPP, ...campaign },
+          sourceKey: keyOf(account.id),
+          data: { event: 'CREATED', source: WHATSAPP, ...extra },
         })
-        return { ok: true, accountId: account.id, creado: true, yaExistia: false, reactivado: false, notaNueva: false }
+        return { ok: true, accountId: account.id, creado: true, yaExistia: false, reactivado: false, notaNueva: false, actualizados: [] }
       }
-      // A call at the same instant created it: from here on it is the same as finding it.
+      // A call at the same instant created it: from here on it is the same as finding it by its own key.
       accountId = account.id
+      ownKey = true
     }
     if (!accountId) throw new Error('WhatsApp prospect: no account to write to')
 
-    // Scope check, row lock and touch (`lastTouchAt`) in one statement, like every change to a business.
-    const row = await touchEditableTx(tx, access, accountId, now)
-    // Rulings 31/33/36: an archived business comes back — not a lost one, which stays lost.
-    const reactivado = row.archivedAt !== null && row.stage.kind !== 'PERDIDA'
-    if (reactivado) {
-      await tx.crmAccount.update({ where: { id: accountId }, data: { archivedAt: null } })
-      await addEvent(tx, { accountId, kind: 'REACTIVATED', actorStaffId: access.staffId, data: { via: WHATSAPP, ...campaign } })
-    }
-    const notaNueva = await addEvent(tx, {
-      accountId,
-      kind: 'NOTE',
-      actorStaffId: access.staffId,
-      sourceKey: key(accountId),
-      data: { text: input.campaign ? `${VOLVIO} (campaña ${input.campaign}).` : `${VOLVIO}.`, via: WHATSAPP, ...campaign },
+    // Its row lock first (two calls on the same business queue here), then the edit scope — everything, for a SUPERADMIN.
+    await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${accountId} FOR UPDATE`
+    const row = await tx.crmAccount.findFirst({
+      where: { AND: [{ id: accountId }, scopeWhere(access, 'editar')] },
+      select: { name: true, giro: true, ventasRango: true, archivedAt: true, stage: { select: { kind: true } } },
     })
-    return { ok: true, accountId, creado: false, yaExistia: true, reactivado, notaNueva }
+    if (!row) throw new ForbiddenError('Sólo puedes cambiar tus negocios y los que no tienen dueño', 'CRM_NO_ES_TUYO')
+
+    // Ruling 44: the note is the gate of everything a message does.
+    const text = `${VOLVIO}${input.ultimoMensajeAt ? ` el ${fecha(input.ultimoMensajeAt)}` : ''}${input.campaign ? ` (campaña ${input.campaign})` : ''}.`
+    const notaNueva =
+      !(ownKey && !message) &&
+      (await addEvent(tx, {
+        accountId,
+        kind: 'NOTE',
+        actorStaffId: access.staffId,
+        sourceKey: keyOf(accountId),
+        data: { text, via: WHATSAPP, ...extra },
+      }))
+    // Rulings 31/33/36: an archived business comes back — not a lost one, which stays lost.
+    const reactivado = notaNueva && row.archivedAt !== null && row.stage.kind !== 'PERDIDA'
+    const changes = vacios(row, input)
+
+    const data: Prisma.CrmAccountUpdateInput = {}
+    if (notaNueva) data.lastTouchAt = now
+    if (reactivado) data.archivedAt = null
+    for (const { field, to } of changes) data[field] = to
+    if (changes.some(({ field }) => field !== 'name')) data.qualificationAvailable = true
+    if (Object.keys(data).length) await tx.crmAccount.update({ where: { id: accountId }, data })
+    if (reactivado) {
+      await addEvent(tx, { accountId, kind: 'REACTIVATED', actorStaffId: access.staffId, data: { via: WHATSAPP, ...extra } })
+    }
+    // Like the landing's qualification changes: by the system, saying where it came from.
+    if (changes.length) await addEvent(tx, { accountId, kind: 'FIELD_CHANGE', actorStaffId: null, data: { via: WHATSAPP, changes } })
+    return { ok: true, accountId, creado: false, yaExistia: true, reactivado, notaNueva, actualizados: changes.map(({ field }) => field) }
   })
 }
 
 /**
- * «Sólo avanza» (ruling 38): only to a stage with a higher order, and only an open business. «Ganado» goes through the
- * ficha (it links the Avoqado business); «Perdido» needs a reason resolved by name.
- *
- * ponytail: the order is checked before `moveStage` locks the row; a person moving the same business in that instant
- * could be moved back by this call. Recheck inside the service's transaction if the routine and the team ever collide.
+ * «Sólo avanza» (ruling 38), except to «Perdido» (spec §5.3-2, ruling 46): «Perdido» works from any open stage, whatever
+ * the orders. Everything else only to a higher order, and only an open business; «Ganado» goes through the ficha. The
+ * stage it decided from travels to the service, which answers 409 if someone changed it meanwhile — nothing reopened.
  */
 async function advance(access: CrmAccess, input: { accountId: string; stageName: string; lostReason?: string; lostNote?: string }) {
   const [stages, account] = await Promise.all([
@@ -208,15 +265,6 @@ async function advance(access: CrmAccess, input: { accountId: string; stageName:
   if (current.kind !== 'ABIERTA') {
     return { ok: false, error: `Está en «${current.name}» y ya se cerró: si hay que reabrirlo, hazlo en su ficha del SUPERADMIN.` }
   }
-  if (target.order <= current.order) {
-    return {
-      ok: false,
-      error:
-        target.id === current.id
-          ? `Ya está en «${current.name}».`
-          : `No retrocede: está en «${current.name}», después de «${target.name}».`,
-    }
-  }
 
   if (target.kind === 'PERDIDA') {
     const reasons = (await listLostReasons()).filter(reason => reason.active)
@@ -228,10 +276,20 @@ async function advance(access: CrmAccess, input: { accountId: string; stageName:
         motivos: reasons.map(r => r.name),
       }
     }
-    const row = await lose(access, account.id, { lostReasonId: reason.id, note: input.lostNote })
+    const row = await lose(access, account.id, { lostReasonId: reason.id, note: input.lostNote, expectedStageId: current.id })
     return { ok: true, negocio: negocio(row), audit: { action: 'CRM_ACCOUNT_LOST', data: { from: current.name, motivo: reason.name } } }
   }
-  const row = await moveStage(access, account.id, target.id)
+
+  if (target.order <= current.order) {
+    return {
+      ok: false,
+      error:
+        target.id === current.id
+          ? `Ya está en «${current.name}».`
+          : `No retrocede: está en «${current.name}», después de «${target.name}».`,
+    }
+  }
+  const row = await moveStage(access, account.id, target.id, current.id)
   return { ok: true, negocio: negocio(row), audit: { action: 'CRM_STAGE_MOVED', data: { from: current.name, to: target.name } } }
 }
 
@@ -255,14 +313,16 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
     },
     async ({ phone, email, q }) =>
       conLlave(scope, 'crm:ver', async access => {
-        let term = q?.trim() || null
-        if (email?.trim()) term = email.trim().toLowerCase()
+        // By phone, its canonical form; by email, the exact email (never the text search, which also matches phone digits).
+        let filters: { q: string } | { email: string } | null = q?.trim() ? { q: q.trim() } : null
+        if (email?.trim()) filters = { email: email.trim().toLowerCase() }
         if (phone) {
-          term = canonicalPhoneE164(phone)
-          if (!term) return { ok: false, error: 'Ese teléfono no es válido.' }
+          const canonical = canonicalPhoneE164(phone)
+          if (!canonical) return { ok: false, error: 'Ese teléfono no es válido.' }
+          filters = { q: canonical }
         }
-        if (!term) return { ok: false, error: 'Di el teléfono, el correo o el texto a buscar.' }
-        const { rows, nextCursor, total } = await listAccounts(access, { q: term, limit: FIND_CAP })
+        if (!filters) return { ok: false, error: 'Di el teléfono, el correo o el texto a buscar.' }
+        const { rows, nextCursor, total } = await listAccounts(access, { ...filters, limit: FIND_CAP })
         return { ok: true, total, hayMas: nextCursor !== null, negocios: rows.map(negocio) }
       }),
   )
@@ -270,9 +330,10 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
   server.tool(
     'crm_upsert_whatsapp_prospect',
     'Registra en el CRM de ventas a un prospecto que escribió por WhatsApp. Si ese teléfono ya está en el CRM (por la ' +
-      'landing, HubSpot, a mano o WhatsApp) no crea otro negocio: le deja la nota «Volvió a escribir por WhatsApp» (una por ' +
-      'día) y, si estaba archivado y no perdido, lo reactiva. Si no está, lo crea sin dueño en la primera etapa. Repetir la ' +
-      'misma llamada no duplica nada. ' +
+      'landing, HubSpot, a mano o WhatsApp) no crea otro negocio. Manda ultimoMensajeAt, la hora del último mensaje del ' +
+      'prospecto que viste: con un mensaje nuevo deja la nota «Volvió a escribir por WhatsApp», cuenta como contacto y, si ' +
+      'estaba archivado y no perdido, lo reactiva; releer el mismo chat no escribe nada. El nombre, el giro y las ventas sólo ' +
+      'se llenan si faltaban, nunca se sobrescriben. Si no está, lo crea sin dueño en la primera etapa. ' +
       SOLO,
     {
       phoneE164: z.string().min(1, 'Di el teléfono').max(40).describe('Teléfono del prospecto; sin lada se toma de México'),
@@ -280,29 +341,45 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       giro: z.string().trim().max(100).optional().describe('Giro del negocio, p. ej. cafetería'),
       ventasRango: z.string().trim().max(100).optional().describe('Cuánto vende al mes, como lo dijo'),
       campaign: z.string().trim().max(200).optional().describe('La campaña del anuncio por el que llegó'),
+      ultimoMensajeAt: z
+        .string()
+        .datetime({ offset: true, message: 'La fecha va con su zona, p. ej. 2026-11-03T10:00:00-06:00' })
+        .optional()
+        .describe('Fecha y hora con zona del último mensaje del prospecto que viste en el chat'),
     },
-    async ({ phoneE164, ...input }) =>
+    async ({ phoneE164, ultimoMensajeAt, ...input }) =>
       conLlave(scope, 'crm:editar', async access => {
         const phone = canonicalPhoneE164(phoneE164)
         if (!phone) return { ok: false, error: 'Ese teléfono no es válido.' }
-        const result = await upsertWhatsapp(access, { phone, ...input })
-        if (!('accountId' in result)) return result
-        const { notaNueva, ...answer } = result
-        if (answer.creado || answer.reactivado || notaNueva) {
-          await audit(answer.creado ? 'CRM_WHATSAPP_PROSPECT_CREATED' : 'CRM_WHATSAPP_PROSPECT_RETURNED', answer.accountId, {
-            reactivado: answer.reactivado,
+        const result = await upsertWhatsapp(access, {
+          phone,
+          ...input,
+          ultimoMensajeAt: ultimoMensajeAt ? new Date(ultimoMensajeAt) : undefined,
+        })
+        if (!result.ok) return result
+        // A re-read that changed nothing leaves no trail.
+        if (result.creado || result.notaNueva || result.actualizados.length) {
+          const action = result.creado
+            ? 'CRM_WHATSAPP_PROSPECT_CREATED'
+            : result.notaNueva
+              ? 'CRM_WHATSAPP_PROSPECT_RETURNED'
+              : 'CRM_WHATSAPP_PROSPECT_UPDATED'
+          await audit(action, result.accountId, {
+            reactivado: result.reactivado,
+            actualizados: result.actualizados,
             campaign: input.campaign ?? null,
           })
         }
-        return answer
+        return result
       }),
   )
 
   server.tool(
     'crm_advance_stage',
     'Avanza un negocio del CRM a una etapa posterior, por su nombre (p. ej. «Demo»). Nunca retrocede ni mueve un negocio ' +
-      'cerrado. «Perdido» pide el motivo, de la lista que se devuelve; para «Ganado» se usa la ficha del SUPERADMIN, que ' +
-      'liga su negocio de Avoqado. Si el nombre no coincide, devuelve las opciones. ' +
+      'cerrado. «Perdido» se puede desde cualquier etapa abierta y pide el motivo, de la lista que se devuelve; para ' +
+      '«Ganado» se usa la ficha del SUPERADMIN, que liga su negocio de Avoqado. Si el nombre no coincide, devuelve las ' +
+      'opciones. ' +
       SOLO,
     {
       accountId,
@@ -312,10 +389,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
     },
     async input =>
       conLlave(scope, 'crm:editar', async access => {
-        const result = await advance(access, input)
-        if (!('audit' in result)) return result
-        const { audit: what, ...answer } = result
-        await audit(what.action, input.accountId, what.data)
+        const { audit: what, ...answer } = await advance(access, input)
+        if (what) await audit(what.action, input.accountId, what.data)
         return answer
       }),
   )
@@ -348,7 +423,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
   server.tool(
     'crm_add_activity',
     'Agenda el siguiente paso de un negocio del CRM (llamada, WhatsApp, correo, reunión, demo o tarea) con fecha y hora; ' +
-      'queda a cargo del dueño del negocio. Si ya hay una igual pendiente, no la duplica. ' +
+      'queda a cargo del dueño del negocio o, si no tiene, de quien la agenda. Si ya hay una igual pendiente, no la duplica. ' +
       SOLO,
     {
       accountId,

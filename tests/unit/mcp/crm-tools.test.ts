@@ -220,6 +220,8 @@ describe('CRM MCP — catalogs', () => {
       // No model names and no `Modelo.campo`.
       expect(descriptions[name]).not.toMatch(/\bCrm[A-Z][a-zA-Z]+\b|\b[A-Z][a-zA-Z]+\.[a-z][a-zA-Z]+\b/)
     }
+    // A new WhatsApp prospect has no owner: the activity stays with whoever schedules it.
+    expect(descriptions.crm_add_activity).toMatch(/si no tiene, de quien la agenda/)
   })
 })
 
@@ -270,14 +272,23 @@ describe('CRM MCP — access', () => {
   })
 })
 
-// ── WhatsApp (ruling 38) ──────────────────────────────────────────────────────────────────────────────────────────────
+// ── WhatsApp (rulings 38, 44 and 45) ──────────────────────────────────────────────────────────────────────────────────
 
 describe('crm_upsert_whatsapp_prospect', () => {
   const PHONE = '+525512345678'
   const LANDING_ACC = cuid('acctlnd')
+  // The routine runs every day and re-reads the chats of the last 4 days.
+  const MON = new Date('2026-11-02T18:00:00.000Z')
+  const TUE = new Date('2026-11-03T18:00:00.000Z')
+  const THU = new Date('2026-11-05T18:00:00.000Z')
+  /** The chat's last message, as the routine saw it: Monday 09:04, and a real new one on Thursday 11:20. */
+  const MSG_1 = '2026-11-02T09:04:31-06:00'
+  const MSG_2 = '2026-11-05T11:20:00-06:00'
   let db: ReturnType<typeof installCrmInboundFake>
 
   beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+    jest.setSystemTime(MON)
     db = installCrmInboundFake(prismaMock)
     // `findDuplicates`: the accounts with a person of this phone.
     prismaMock.crmAccount.findMany.mockImplementation(async ({ where }: any) => {
@@ -285,20 +296,30 @@ describe('crm_upsert_whatsapp_prospect', () => {
       const ids = new Set(db.contacts.filter(contact => contact.phoneE164 === phone).map(contact => contact.accountId))
       return db.accounts.filter(account => ids.has(account.id)).map(account => ({ ...account, ownerStaffId: null, owner: null }))
     })
-    // `touchEditableTx`: the scoped UPDATE that locks and touches.
-    prismaMock.crmAccount.updateMany.mockImplementation(async ({ where, data }: any) => {
+    // The account read under its row lock, within the edit scope (everything, for a SUPERADMIN).
+    prismaMock.crmAccount.findFirst.mockImplementation(async ({ where }: any) => {
       const row = db.accounts.find(account => account.id === where.AND[0].id)
-      if (!row) return { count: 0 }
-      Object.assign(row, data)
-      return { count: 1 }
+      if (!row) return null
+      const kind = row.stageId === FAKE_LOST_STAGE_ID ? 'PERDIDA' : 'ABIERTA'
+      return {
+        name: row.name,
+        giro: row.giro ?? null,
+        ventasRango: row.ventasRango ?? null,
+        archivedAt: row.archivedAt ?? null,
+        stage: { kind },
+      }
     })
   })
+
+  afterEach(() => jest.useRealTimers())
 
   /** An account the CRM already has for this person, from the landing. */
   function seedLanding(over: Record<string, unknown> = {}) {
     const account = {
       id: LANDING_ACC,
       name: 'Café Ana',
+      giro: 'Cafetería',
+      ventasRango: null,
       source: 'LANDING',
       externalKey: 'ana@cafe.mx',
       stageId: FAKE_STAGE_ID,
@@ -312,14 +333,16 @@ describe('crm_upsert_whatsapp_prospect', () => {
     return account
   }
 
+  const kinds = () => db.events.map(event => event.kind)
+
   it('upsert_dos_veces_un_negocio: the same call twice leaves ONE business «Sin dueño» in the first stage and ONE event', async () => {
     const { call } = setup()
-    const input = { phoneE164: '55 1234 5678', name: 'Tacos Lupe', giro: 'Taquería', campaign: 'pos22' }
+    const input = { phoneE164: '55 1234 5678', name: 'Tacos Lupe', giro: 'Taquería', campaign: 'pos22', ultimoMensajeAt: MSG_1 }
     const first = await call('crm_upsert_whatsapp_prospect', input)
     const second = await call('crm_upsert_whatsapp_prospect', input)
 
     expect(first).toMatchObject({ ok: true, creado: true, yaExistia: false })
-    expect(second).toMatchObject({ ok: true, accountId: first.accountId, creado: false, yaExistia: true })
+    expect(second).toMatchObject({ ok: true, accountId: first.accountId, creado: false, yaExistia: true, notaNueva: false })
     expect(db.accounts).toHaveLength(1)
     expect(db.accounts[0]).toMatchObject({
       id: first.accountId,
@@ -332,10 +355,12 @@ describe('crm_upsert_whatsapp_prospect', () => {
       sourceDetail: { campaign: 'pos22' },
     })
     expect(db.contacts).toEqual([expect.objectContaining({ accountId: first.accountId, phoneE164: PHONE, isPrimary: true })])
+    // The creation takes the key of the message it came from (to the minute, UTC).
     expect(db.events).toEqual([
       expect.objectContaining({
         accountId: first.accountId,
         kind: 'SYSTEM',
+        sourceKey: `whatsapp:${first.accountId}:2026-11-02T15:04`,
         data: expect.objectContaining({ event: 'CREATED', source: 'WHATSAPP' }),
       }),
     ])
@@ -346,39 +371,183 @@ describe('crm_upsert_whatsapp_prospect', () => {
     )
   })
 
-  it('a person already in the CRM from another source: no WhatsApp business, a note, back from the archive — once', async () => {
+  it('releer_el_chat_otro_dia_no_escribe: re-reading the same chat the next day writes and touches nothing; a real new message does', async () => {
+    const { call } = setup()
+    const created = await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })
+
+    jest.setSystemTime(TUE)
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })).toMatchObject({
+      ok: true,
+      creado: false,
+      notaNueva: false,
+    })
+    expect(kinds()).toEqual(['SYSTEM'])
+    expect(db.accounts[0].lastTouchAt).toEqual(MON)
+
+    jest.setSystemTime(THU)
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_2 })).toMatchObject({
+      ok: true,
+      notaNueva: true,
+    })
+    expect(db.events[1]).toMatchObject({
+      kind: 'NOTE',
+      sourceKey: `whatsapp:${created.accountId}:2026-11-05T17:20`,
+      data: expect.objectContaining({ text: expect.stringMatching(/^Volvió a escribir por WhatsApp/) }),
+    })
+    // A real new message restarts «Estancado», like the landing does.
+    expect(db.accounts[0].lastTouchAt).toEqual(THU)
+    // And the same new message read again adds nothing.
+    await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_2 })
+    expect(kinds()).toEqual(['SYSTEM', 'NOTE'])
+    expect(auditMcpWrite).toHaveBeenCalledTimes(2)
+  })
+
+  it('without the last message, its own WhatsApp business writes and touches nothing, not even back from the archive', async () => {
+    const { call } = setup()
+    await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })
+    const archivedAt = new Date('2026-11-02T20:00:00.000Z')
+    db.accounts[0].archivedAt = archivedAt
+
+    jest.setSystemTime(TUE)
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })).toMatchObject({
+      ok: true,
+      creado: false,
+      yaExistia: true,
+      reactivado: false,
+      notaNueva: false,
+    })
+    expect(kinds()).toEqual(['SYSTEM'])
+    expect(db.accounts[0]).toMatchObject({ lastTouchAt: MON, archivedAt })
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+  })
+
+  it('a person already in the CRM from another source: no WhatsApp business; a note, the touch and back from the archive only for a new message', async () => {
     seedLanding()
     const { call } = setup()
-    const first = await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Otro nombre', campaign: 'pos22' })
-    const again = await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Otro nombre', campaign: 'pos22' })
+    const first = await call('crm_upsert_whatsapp_prospect', {
+      phoneE164: PHONE,
+      name: 'Otro nombre',
+      campaign: 'pos22',
+      ultimoMensajeAt: MSG_1,
+    })
 
-    expect(first).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: true })
-    expect(again).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: false })
+    expect(first).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: true, notaNueva: true })
     expect(db.accounts).toHaveLength(1)
-    expect(db.accounts[0]).toMatchObject({ source: 'LANDING', name: 'Café Ana', archivedAt: null })
-    expect(db.accounts[0].lastTouchAt.getTime()).toBeGreaterThan(new Date('2026-09-01T18:00:00.000Z').getTime())
+    // A real name is never overwritten.
+    expect(db.accounts[0]).toMatchObject({ source: 'LANDING', name: 'Café Ana', archivedAt: null, lastTouchAt: MON })
+    expect(db.events).toEqual([
+      expect.objectContaining({
+        accountId: LANDING_ACC,
+        kind: 'NOTE',
+        data: expect.objectContaining({ text: expect.stringMatching(/Volvió a escribir por WhatsApp.*pos22/) }),
+      }),
+      expect.objectContaining({ accountId: LANDING_ACC, kind: 'REACTIVATED', data: expect.objectContaining({ via: 'WHATSAPP' }) }),
+    ])
+
+    // Someone archives it again; the next day the routine re-reads the same chat: it stays archived and untouched.
+    const archivedAt = new Date('2026-11-02T22:00:00.000Z')
+    db.accounts[0].archivedAt = archivedAt
+    jest.setSystemTime(TUE)
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, campaign: 'pos22', ultimoMensajeAt: MSG_1 })).toMatchObject({
+      reactivado: false,
+      notaNueva: false,
+    })
+    expect(db.accounts[0]).toMatchObject({ archivedAt, lastTouchAt: MON })
     expect(db.events).toHaveLength(2)
-    expect(db.events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          accountId: LANDING_ACC,
-          kind: 'NOTE',
-          data: expect.objectContaining({ text: expect.stringMatching(/Volvió a escribir por WhatsApp.*pos22/) }),
-        }),
-        expect.objectContaining({ accountId: LANDING_ACC, kind: 'REACTIVATED', data: expect.objectContaining({ via: 'WHATSAPP' }) }),
-      ]),
-    )
     expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+  })
+
+  it('another source without the last message: one note in its whole life', async () => {
+    seedLanding()
+    const { call } = setup()
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })).toMatchObject({ notaNueva: true, reactivado: true })
+    expect(db.events[0]).toMatchObject({ kind: 'NOTE', sourceKey: `whatsapp:${LANDING_ACC}` })
+
+    jest.setSystemTime(THU)
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })).toMatchObject({ notaNueva: false, reactivado: false })
+    expect(kinds()).toEqual(['NOTE', 'REACTIVATED'])
+    expect(db.accounts[0].lastTouchAt).toEqual(MON)
   })
 
   it('a LOST account stays lost and archived: it only gets the note', async () => {
     const archivedAt = new Date('2026-09-01T18:00:00.000Z')
     seedLanding({ stageId: FAKE_LOST_STAGE_ID, archivedAt })
-    const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE })
+    const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })
 
-    expect(answer).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: false })
+    expect(answer).toMatchObject({ ok: true, accountId: LANDING_ACC, creado: false, yaExistia: true, reactivado: false, notaNueva: true })
     expect(db.accounts[0].archivedAt).toEqual(archivedAt)
-    expect(db.events.map(event => event.kind)).toEqual(['NOTE'])
+    expect(kinds()).toEqual(['NOTE'])
+  })
+
+  it('llena_lo_vacio: an existing business of any source gets only its empty fields, never overwritten, with FIELD_CHANGE', async () => {
+    // Imported from HubSpot with the phone as its name, no giro and a sales range already known.
+    seedLanding({
+      source: 'IMPORTACION',
+      externalKey: 'hs-1',
+      name: '55 1234 5678',
+      giro: null,
+      ventasRango: 'De $150 a $500 mil',
+      archivedAt: null,
+    })
+    const { call } = setup()
+    const input = { phoneE164: PHONE, name: 'Tacos Lupe', giro: 'Taquería', ventasRango: 'Menos de $150 mil', ultimoMensajeAt: MSG_1 }
+    expect(await call('crm_upsert_whatsapp_prospect', input)).toMatchObject({ ok: true, actualizados: ['name', 'giro'] })
+    expect(db.accounts[0]).toMatchObject({ name: 'Tacos Lupe', giro: 'Taquería', ventasRango: 'De $150 a $500 mil' })
+    expect(db.events).toContainEqual(
+      expect.objectContaining({
+        kind: 'FIELD_CHANGE',
+        actorStaffId: null,
+        data: {
+          via: 'WHATSAPP',
+          changes: [
+            { field: 'name', from: '55 1234 5678', to: 'Tacos Lupe' },
+            { field: 'giro', from: null, to: 'Taquería' },
+          ],
+        },
+      }),
+    )
+
+    // The same chat read again: nothing left to fill, nothing written.
+    jest.setSystemTime(TUE)
+    const events = db.events.length
+    expect(await call('crm_upsert_whatsapp_prospect', input)).toMatchObject({ actualizados: [] })
+    expect(db.events).toHaveLength(events)
+  })
+
+  it('what the routine learns days later fills its own WhatsApp business without a note and without touching it', async () => {
+    const { call } = setup()
+    await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })
+    expect(db.accounts[0].name).toBe(PHONE)
+
+    jest.setSystemTime(TUE)
+    const answer = await call('crm_upsert_whatsapp_prospect', {
+      phoneE164: PHONE,
+      name: 'Tacos Lupe',
+      giro: 'Taquería',
+      ventasRango: 'Menos de $150 mil',
+      ultimoMensajeAt: MSG_1,
+    })
+    expect(answer).toMatchObject({ notaNueva: false, actualizados: ['name', 'giro', 'ventasRango'] })
+    expect(db.accounts[0]).toMatchObject({ name: 'Tacos Lupe', giro: 'Taquería', ventasRango: 'Menos de $150 mil', lastTouchAt: MON })
+    expect(kinds()).toEqual(['SYSTEM', 'FIELD_CHANGE'])
+    expect(auditMcpWrite).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ action: 'CRM_WHATSAPP_PROSPECT_UPDATED' }))
+  })
+
+  it('the race: a call at the same instant created it first — this one reads that business and writes nothing', async () => {
+    // What the other call committed while this one waited on the insert: the business and its creation event.
+    const OTHER = cuid('acctwa')
+    db.accounts.push({ id: OTHER, name: PHONE, source: 'WHATSAPP', externalKey: PHONE, stageId: FAKE_STAGE_ID, lastTouchAt: MON })
+    db.events.push({ accountId: OTHER, kind: 'SYSTEM', sourceKey: `whatsapp:${OTHER}:2026-11-02T15:04`, data: {} })
+    // …which this call's first lookups did not see yet.
+    prismaMock.crmAccount.findUnique.mockImplementationOnce(async () => null)
+
+    const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })
+    expect(prismaMock.crmAccount.createMany).toHaveBeenCalledTimes(1)
+    expect(answer).toMatchObject({ ok: true, accountId: OTHER, creado: false, yaExistia: true, notaNueva: false })
+    expect(db.accounts).toHaveLength(1)
+    expect(db.contacts).toEqual([])
+    expect(db.events).toHaveLength(1)
+    expect(auditMcpWrite).not.toHaveBeenCalled()
   })
 
   it('a phone in two businesses is resolved, not guessed: nothing is written and both come back', async () => {
@@ -439,7 +608,8 @@ describe('crm_advance_stage', () => {
 
     const moved = await call('crm_advance_stage', { accountId: ACC, stageName: '  negociacion ' })
     expect(moved).toMatchObject({ ok: true, negocio: expect.objectContaining({ id: ACC, etapa: 'Negociación' }) })
-    expect(moveStage).toHaveBeenCalledWith(ADMIN, ACC, STAGES[4].id)
+    // The stage it saw travels with the move: if someone changed it meanwhile, the service answers 409.
+    expect(moveStage).toHaveBeenCalledWith(ADMIN, ACC, STAGES[4].id, STAGES[3].id)
     expect(auditMcpWrite).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ entity: 'CrmAccount', entityId: ACC, venueId: null }),
@@ -452,6 +622,25 @@ describe('crm_advance_stage', () => {
       ok: false,
     })
     expect(lose).not.toHaveBeenCalled()
+  })
+
+  it('perder_desde_cualquier_etapa_abierta: «Perdido» is not «advancing» — it works from an open stage with a higher order', async () => {
+    const seguimiento = { id: cuid('stage8'), name: 'Seguimiento', order: 8, kind: 'ABIERTA', staleDays: 7 }
+    ;(listStages as jest.Mock).mockResolvedValue([...STAGES, seguimiento])
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACC, stage: seguimiento })
+    const answer = await setup().call('crm_advance_stage', { accountId: ACC, stageName: 'Perdido', lostReason: 'Dijo que no' })
+    expect(answer).toMatchObject({ ok: true })
+    expect(lose).toHaveBeenCalledWith(ADMIN, ACC, expect.objectContaining({ lostReasonId: REASONS[0].id, expectedStageId: seguimiento.id }))
+  })
+
+  it('a stage that changed meanwhile comes back as ok:false with its code, nothing reopened', async () => {
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    ;(moveStage as jest.Mock).mockRejectedValueOnce(new ConflictError('El negocio cambió de etapa mientras tanto', 'CRM_ETAPA_CAMBIO'))
+    expect(await setup().call('crm_advance_stage', { accountId: ACC, stageName: 'Negociación' })).toMatchObject({
+      ok: false,
+      code: 'CRM_ETAPA_CAMBIO',
+    })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
   })
 
   it('«Ganado» is refused: it goes through the ficha, which links the Avoqado business', async () => {
@@ -470,7 +659,7 @@ describe('crm_advance_stage', () => {
     expect(lose).not.toHaveBeenCalled()
 
     expect(await call('crm_advance_stage', { accountId: ACC, stageName: 'perdido', lostReason: 'DIJO QUE NO' })).toMatchObject({ ok: true })
-    expect(lose).toHaveBeenCalledWith(ADMIN, ACC, expect.objectContaining({ lostReasonId: REASONS[0].id }))
+    expect(lose).toHaveBeenCalledWith(ADMIN, ACC, expect.objectContaining({ lostReasonId: REASONS[0].id, expectedStageId: STAGES[3].id }))
     expect(moveStage).not.toHaveBeenCalled()
   })
 
@@ -544,8 +733,9 @@ describe('crm_find_account, crm_pending and crm_pipeline_summary', () => {
     })
     expect(found.negocios[0].proximaActividad).toMatchObject({ tipo: 'LLAMADA', vence: '2026-11-03 10:00' })
 
+    // By email it is the exact email, never the fuzzy text search (which also matches phone digits).
     await call('crm_find_account', { email: ' ANA@Cafe.mx ' })
-    expect(listAccounts).toHaveBeenLastCalledWith(ADMIN, { q: 'ana@cafe.mx', limit: 20 })
+    expect(listAccounts).toHaveBeenLastCalledWith(ADMIN, { email: 'ana@cafe.mx', limit: 20 })
     await call('crm_find_account', { q: 'Tacos' })
     expect(listAccounts).toHaveBeenLastCalledWith(ADMIN, { q: 'Tacos', limit: 20 })
   })

@@ -280,6 +280,39 @@ describe('losing and winning', () => {
     // And without an Organization there is nothing to win.
     await expect(win(access(), ACCOUNT_B, {})).rejects.toMatchObject({ statusCode: 422, code: 'CRM_FALTA_ORGANIZACION' })
   })
+
+  it('etapa_esperada_cambio_409: a move or a loss that expected another stage reopens nothing', async () => {
+    seeded()
+    const demo = stage({ id: DEMO, name: 'Demo', staleDays: 5 })
+    prismaMock.crmStage.findUnique.mockResolvedValue(demo)
+    prismaMock.crmStage.findFirst.mockResolvedValue(perdido)
+    prismaMock.crmLostReason.findUnique.mockResolvedValue({ id: REASON, name: 'Precio', active: true })
+
+    // Someone won it while the routine was deciding: it expected «Prospecto», it is «Ganado» now.
+    editable(account({ stageId: GANADO, stage: ganado }))
+    await expect(moveStage(access(), ACCOUNT, DEMO, PROSPECTO)).rejects.toMatchObject({ statusCode: 409, code: 'CRM_ETAPA_CAMBIO' })
+    await expect(lose(access(), ACCOUNT, { lostReasonId: REASON, expectedStageId: PROSPECTO })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_ETAPA_CAMBIO',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+
+    // REGRESSION — without an expected stage (the screen's route) it behaves as before: moving a won account reopens it.
+    await moveStage(access(), ACCOUNT, DEMO)
+    expect(prismaMock.crmAccount.update).toHaveBeenLastCalledWith({
+      where: { id: ACCOUNT },
+      data: { stageId: DEMO, stageEnteredAt: expect.any(Date), wonAt: null, lostAt: null, lostReasonId: null, lostNote: null },
+    })
+
+    // And the stage it expected is the stage it has: it moves.
+    editable(account())
+    await moveStage(access(), ACCOUNT, DEMO, PROSPECTO)
+    expect(prismaMock.crmAccount.update).toHaveBeenLastCalledWith({
+      where: { id: ACCOUNT },
+      data: { stageId: DEMO, stageEnteredAt: expect.any(Date) },
+    })
+  })
 })
 
 describe('who sees and changes what', () => {
@@ -546,6 +579,17 @@ describe('lists', () => {
     const [row] = (await listAccounts(access({ ver: 'todos' }), {}, NOW)).rows
     expect(row).toMatchObject({ semaforo: 'gris', nextActivity: { id: 'cactivity0000000000000001', type: 'LLAMADA', title: 'Llamar' } })
     expect(prismaMock.crmActivity.findMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('correo_exacto: by email it is the person with that exact email, archived too — never the fuzzy search', async () => {
+    prismaMock.crmAccount.findMany.mockResolvedValue([])
+    prismaMock.crmAccount.count.mockResolvedValue(0)
+    await listAccounts(access({ ver: 'todos' }), { email: ' Juan1985@Cafe.mx ' }, NOW)
+    const where = prismaMock.crmAccount.findMany.mock.calls[0][0].where
+    expect(where.AND).toContainEqual({ contacts: { some: { email: { equals: 'juan1985@cafe.mx', mode: 'insensitive' } } } })
+    expect(where.AND).not.toContainEqual({ archivedAt: null })
+    // No «contains», no phone digits: «1985» does not find a phone that has it.
+    expect(JSON.stringify(where)).not.toMatch(/contains|phoneE164/)
   })
 
   it('pendientes_ordena_vencidas_hoy_sin_paso_estancados_sin_dueno', async () => {
