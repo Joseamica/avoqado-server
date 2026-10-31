@@ -114,6 +114,11 @@ export interface OrderCancelGuardOptions {
    */
   contarPagosRegistrados?: boolean
   notFoundMessage?: string
+  /**
+   * Una cuenta ya CANCELLED/DELETED responde 409 `ORDER_ALREADY_CANCELLED` en vez de volver a cancelarse (y a auditarse).
+   * El panel lo exige: su cliente HTTP reintenta solo los errores de red (Codex plan r1 #6, 30-oct). El POS no lo pide.
+   */
+  rechazarYaCancelada?: boolean
 }
 
 /** Se llama con la orden releída bajo su candado; sólo el aviso del proveedor puede cancelar un Rappi. */
@@ -133,6 +138,9 @@ export async function assertOrderCancellableUnderLock(
 ): Promise<OrdenBajoCandado> {
   const order = await lockAndReadOrderForCancel(tx, input, opciones.notFoundMessage)
   rechazarCancelacionLocalDeRappi(order)
+  if (opciones.rechazarYaCancelada && (order.status === 'CANCELLED' || order.status === 'DELETED')) {
+    throw new ConflictError('Esta cuenta ya estaba cancelada.', 'ORDER_ALREADY_CANCELLED')
+  }
 
   // 🔴 Ninguna orden CON DINERO ENCIMA se cancela — ni PAID ni PARTIAL. Con pagos hechos el camino es reembolsar y
   // después cancelar, igual que en Square.

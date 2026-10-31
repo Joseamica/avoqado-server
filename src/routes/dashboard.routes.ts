@@ -232,7 +232,7 @@ import {
   VenueIdParamsSchema as CustomerVenueIdParamsSchema,
 } from '../schemas/dashboard/customer.schema'
 import { GetPrivacyNoticeSchema, UpsertPrivacyNoticeSchema } from '../schemas/dashboard/privacyNotice.schema'
-import { SettleOrderSchema } from '../schemas/dashboard/order.schema'
+import { CancelarCuentaSinCobrarSchema, SettleOrderSchema } from '../schemas/dashboard/order.schema'
 import { UpdateShiftSchema } from '../schemas/dashboard/shift.schema'
 import {
   CreateCustomerGroupSchema,
@@ -3569,6 +3569,16 @@ router.post(
   checkPermission('orders:update'), // Same permission as updating orders
   validateRequest(SettleOrderSchema),
   orderController.settleOrder,
+)
+
+// «Cancelar orden» de Cuentas por cobrar (Amaena, 30-oct): el MISMO permiso acotado del POS (`orders:cancel-unpaid`, sólo
+// cuentas sin dinero). Las de mesa y los pedidos en línea se rechazan en el servicio (`cancelarCuentaSinCobrar`).
+router.post(
+  '/venues/:venueId/orders/:orderId/cancel',
+  authenticateTokenMiddleware,
+  validateRequest(CancelarCuentaSinCobrarSchema),
+  checkPermission('orders:cancel-unpaid'),
+  orderController.cancelarCuentaSinCobrar,
 )
 
 // ---- UPSELL (PRO): "¿Algo más?" en la pantalla del cliente y la franja del cajero ----

@@ -21,6 +21,7 @@ import {
   toCourtesyReviewPublicReply,
 } from '@/services/mobile/cortesia-pendiente.public'
 import { auditMcpWrite } from '../audit'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
@@ -83,6 +84,59 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
         if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
         throw error
       }
+    },
+  )
+
+  // «Cancelar orden» de Cuentas por cobrar, para el asistente (Amaena, 30-oct): la MISMA función que el panel
+  // (`cancelarCuentaSinCobrar`). Sin confirm sólo muestra la cuenta; el catálogo ata la confirmación a esa vista previa.
+  server.tool(
+    'cancel_unpaid_order',
+    'Cancela una cuenta abierta que no tiene NINGÚN pago y no es de mesa ni pedido en línea (por ejemplo, una cuenta por cobrar abierta por error). Pide el motivo, que queda en la bitácora. Con cualquier pago hay que reembolsar primero. Sin confirm:true sólo muestra la cuenta.',
+    {
+      venueId: z.string().describe('Venue de la cuenta (debe estar en tu scope)'),
+      orderId: z.string().describe('Id de la cuenta (el de find_order u open_orders)'),
+      reason: z.string().trim().min(3).max(300).describe('Motivo de la cancelación; queda en la bitácora'),
+      confirm: z.boolean().optional().describe('true para cancelar de verdad, sólo tras la autorización del usuario'),
+    },
+    async ({ venueId, orderId, reason, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('orders:cancel-unpaid', venueId)
+      requireWriteScopeAlways(scope, 'orders:cancel-unpaid', 'cancela una cuenta del negocio')
+      const order = await prisma.order.findFirst({
+        where: { id: orderId, venueId },
+        select: { orderNumber: true, total: true, status: true, paymentStatus: true, tableId: true, onlineOrder: { select: { id: true } } },
+      })
+      if (!order) return text({ ok: false, error: 'Esa cuenta no existe en este negocio.' })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            cuenta: order.orderNumber,
+            total: num(order.total),
+            estado: order.status,
+            cobro: order.paymentStatus,
+            motivo: reason,
+            efecto: 'La cuenta queda cancelada y sale de Cuentas por cobrar. Si tiene un pago, es de mesa o es un pedido en línea, no se cancela y se dice por qué.',
+          },
+          mensaje: 'Vuelve a llamar con confirm:true para cancelarla.',
+        })
+      }
+      try {
+        const { cancelarCuentaSinCobrar } = await import('@/services/dashboard/order.dashboard.service')
+        await cancelarCuentaSinCobrar(venueId, orderId, reason, scope.staffId)
+      } catch (error) {
+        if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
+        throw error
+      }
+      await auditMcpWrite(scope, {
+        action: 'ORDER_CANCELLED_VIA_MCP',
+        entity: 'Order',
+        entityId: orderId,
+        venueId,
+        data: { cuenta: order.orderNumber, reason },
+      })
+      return text({ ok: true, cuenta: order.orderNumber, status: 'CANCELLED' })
     },
   )
 

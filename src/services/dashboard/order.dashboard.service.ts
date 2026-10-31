@@ -834,6 +834,38 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
 }
 
 /**
+ * «Cancelar orden» del panel (Amaena, 30-oct): el negocio quita una cuenta que nunca se va a cobrar, con motivo. Es la MISMA
+ * cancelación del POS (`cancelOrderInTransaction`: candados, vales, sobres, comandas y aviso), más lo que el panel exige:
+ *   · sólo cuentas que no son de mesa (se anulan en el POS) ni pedidos en línea (tienen su «Cancelar») (Codex plan r1 #2-#4, #7);
+ *   · cualquier pago COMPLETED cuenta como dinero, como en `deleteOrder`;
+ *   · una ya cancelada responde 409 sin escribir otra vez (r1 #6);
+ *   · el motivo va sólo a la bitácora: no pisa las notas de la cuenta (r1 #5).
+ */
+export async function cancelarCuentaSinCobrar(venueId: string, orderId: string, motivo: string, staffId: string) {
+  const { cancelOrderInTransaction, publishCancelledOrder } = await import('@/services/mobile/order.mobile.service')
+  const result = await prisma.$transaction(async tx => {
+    // La mesa y el pedido en línea no cambian bajo una cancelación: se leen sin candado, antes del orden de candados del POS.
+    const order = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { id: true, tableId: true, onlineOrder: { select: { id: true } } },
+    })
+    if (!order) throw new NotFoundError('Esta cuenta no existe en este negocio.')
+    if (order.tableId) {
+      throw new BadRequestError('Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).', 'ORDER_IS_TABLE')
+    }
+    if (order.onlineOrder) {
+      throw new BadRequestError('Es un pedido en línea: cancélalo desde «Pedidos en línea».', 'ORDER_IS_ONLINE')
+    }
+    return cancelOrderInTransaction(tx, venueId, orderId, undefined, staffId, undefined, {
+      contarPagosRegistrados: true,
+      rechazarYaCancelada: true,
+      mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
+    })
+  }, ORDER_LOCK_WAIT_BUDGET)
+  await publishCancelledOrder(venueId, result, staffId, motivo)
+}
+
+/**
  * Settle a single order's pending balance (mark pay-later order as paid)
  * Used for cash/deposit payments received outside the system
  *
