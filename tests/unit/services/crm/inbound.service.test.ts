@@ -64,6 +64,8 @@ function seedEntry(over: Record<string, unknown> = {}) {
     appliedAt: null,
     accountId: null,
     lastError: null,
+    noticeSentAt: null,
+    noticeAttempts: 0,
     ...over,
   }
   db.entries.push(entry)
@@ -195,7 +197,7 @@ describe('applyEntry', () => {
           { accountId: db.accounts[0].id, name: 'Ana López', phoneE164: '+525512345678', email: EMAIL, isPrimary: true },
         ])
         expect(db.events.map(event => event.kind)).toEqual(['ENTRY_APPLIED'])
-        expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id)
+        expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id, expect.objectContaining({ name: 'Café Ana' }))
       },
     },
     {
@@ -248,7 +250,7 @@ describe('applyEntry', () => {
         expect(db.accounts).toHaveLength(1)
         expect(db.accounts[0]).toMatchObject({ giro: 'Cafetería', organizationId: null })
         expect(db.events.map(event => event.kind)).toEqual(['ENTRY_APPLIED'])
-        expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id)
+        expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id, expect.objectContaining({ name: 'Café Ana' }))
       },
     },
   ])('aplicar_cuatro_ramas: $branch', async ({ outcome, existing, check }) => {
@@ -309,9 +311,10 @@ describe('applyEntry', () => {
 
     // Owning nothing: no Organization at all, never the boss's.
     prismaMock.staff.findUnique.mockResolvedValue(null)
+    // Another phone too: the same phone would be the same person (ruling 48).
     const employee = seedEntry({
       externalKey: 'empleado@cafe.mx',
-      payload: { ...FORM, email: 'empleado@cafe.mx' },
+      payload: { ...FORM, email: 'empleado@cafe.mx', phone: '55 8888 0000' },
       signupOutcome: { organizationId: PATRON_ORG, alreadyExisted: true, yaEsCliente: false },
     })
 
@@ -384,11 +387,16 @@ describe('applyEntry', () => {
       prismaMock.crmTimelineEvent.createMany.mock.invocationCallOrder[0],
     )
 
-    // A brand-new account is nobody else's yet: no lock needed.
+    // A brand-new account is nobody else's yet: no row lock needed (only the entry's own lock, ruling 48).
     prismaMock.$queryRaw.mockClear()
-    const fresh = seedEntry({ externalKey: 'nueva@cafe.mx', payload: { ...FORM, email: 'nueva@cafe.mx' }, signupOutcome: null })
+    const fresh = seedEntry({
+      externalKey: 'nueva@cafe.mx',
+      payload: { ...FORM, email: 'nueva@cafe.mx', phone: '55 7777 0000' },
+      signupOutcome: null,
+    })
     await applyEntry(fresh.id)
-    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    const freshCalls = prismaMock.$queryRaw.mock.calls as Array<[TemplateStringsArray, ...unknown[]]>
+    expect(freshCalls.some(([sql]) => sql.join('?').includes('FOR UPDATE'))).toBe(false)
   })
 
   it.each([
@@ -406,7 +414,8 @@ describe('applyEntry', () => {
 
       expect(db.accounts).toHaveLength(1)
       expect(notifyNewProspect).toHaveBeenCalledTimes(announcements)
-      if (announcements) expect(notifyNewProspect).toHaveBeenLastCalledWith(db.accounts[0].id)
+      if (announcements)
+        expect(notifyNewProspect).toHaveBeenLastCalledWith(db.accounts[0].id, expect.objectContaining({ name: 'Café Ana' }))
       expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
     },
   )
@@ -453,7 +462,7 @@ describe('applyEntry', () => {
       expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId: null })])
       expect(eventsOf('NOTE')).toHaveLength(0)
       expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ signup: 'EXISTING_ACCOUNT', created: true })
-      expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id)
+      expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id, expect.objectContaining({ name: 'Café Ana' }))
     },
   )
 
@@ -578,7 +587,7 @@ describe('ruling 31: an entry that lands on an ARCHIVED account brings it back',
     expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ entryId: entry.id, created: false, reactivated: true })
     // Its own notice (its own email key per person), never «Nuevo prospecto», whose key may already be used.
     expect(notifyReturningProspect).toHaveBeenCalledTimes(1)
-    expect(notifyReturningProspect).toHaveBeenCalledWith(account.id, entry.id)
+    expect(notifyReturningProspect).toHaveBeenCalledWith(account.id, entry.id, expect.objectContaining({ name: 'Café Ana' }))
     expect(notifyNewProspect).not.toHaveBeenCalled()
   })
 
@@ -594,11 +603,12 @@ describe('ruling 31: an entry that lands on an ARCHIVED account brings it back',
     // Not one event more: the entry's ENTRY_APPLIED key stops the second run before it touches the account.
     expect(db.events).toEqual(before)
     expect(db.accounts[0]).toMatchObject({ id: account.id, archivedAt: null })
-    // The same notice with the same arguments, so the same email keys: Resend sends it at most once.
-    expect((notifyReturningProspect as jest.Mock).mock.calls).toEqual([
-      [account.id, entry.id],
-      [account.id, entry.id],
-    ])
+    // The same notice with the same arguments — the same email keys and the content the first run fixed: Resend sends it
+    // at most once.
+    const calls = (notifyReturningProspect as jest.Mock).mock.calls
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toEqual([account.id, entry.id, expect.objectContaining({ name: 'Café Ana' })])
+    expect(calls[1]).toEqual(calls[0])
     expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
 
     // Applied: a third run reads the entry and stops.
@@ -635,5 +645,240 @@ describe('ruling 31: an entry that lands on an ARCHIVED account brings it back',
     expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('reactivated')
     expect(notifyReturningProspect).not.toHaveBeenCalled()
     expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+})
+
+describe('ruling 48: one account per PERSON, whatever source found them first', () => {
+  const PHONE = '+525512345678'
+  const SELLER = 'cstaffsel0000000000000001'
+  /** An account of another source with its person, as WhatsApp, HubSpot or a seller left it. */
+  function seedPerson(account: Record<string, unknown>, contact: { email?: string | null; phoneE164?: string | null }) {
+    const row = seedAccount({ giro: null, ventasRango: null, sucursales: null, modulos: [], ...account })
+    db.contacts.push({
+      accountId: row.id,
+      name: 'Ana',
+      email: contact.email ?? null,
+      phoneE164: contact.phoneE164 ?? null,
+      isPrimary: true,
+    })
+    return row
+  }
+
+  it('whatsapp_luego_landing_mismo_telefono_una_ficha: the landing lands on the WhatsApp account and links it, no «Nuevo prospecto»', async () => {
+    // The routine created it from the chat; a seller took it. Now the person signs up through the landing, new email.
+    const whatsapp = seedPerson(
+      {
+        id: 'cacctwhats000000000000001',
+        source: 'WHATSAPP',
+        externalKey: PHONE,
+        ownerStaffId: SELLER,
+        lastTouchAt: new Date(Date.now() - 3 * DAY),
+      },
+      { phoneE164: PHONE },
+    )
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(1)
+    expect(db.accounts[0]).toMatchObject({ id: whatsapp.id, organizationId: ORG, ownerStaffId: SELLER, giro: 'Cafetería' })
+    expect(eventsOf('LINKED')).toEqual([expect.objectContaining({ accountId: whatsapp.id, sourceKey: `link:${whatsapp.id}:${ORG}` })])
+    expect(eventsOf('ENTRY_APPLIED')).toEqual([
+      expect.objectContaining({ accountId: whatsapp.id, data: expect.objectContaining({ created: false }) }),
+    ])
+    expect(eventsOf('FIELD_CHANGE')).toHaveLength(1)
+    // A touch: the person came back, at the moment they sent the form.
+    expect(db.accounts[0].lastTouchAt).toEqual(entry.receivedAt)
+    expect(db.contacts).toHaveLength(1)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: whatsapp.id })
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+    expect(notifyReturningProspect).not.toHaveBeenCalled()
+  })
+
+  it('archivada_de_hubspot_vuelve_por_la_landing: an archived HubSpot contact found by email comes back, with «Volvió»', async () => {
+    const hubspot = seedPerson(
+      {
+        id: 'caccthubsp000000000000001',
+        source: 'IMPORTACION',
+        externalKey: 'hubspot:contact:7',
+        archivedAt: new Date(Date.now() - 40 * DAY),
+      },
+      { email: EMAIL },
+    )
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(1)
+    expect(db.accounts[0]).toMatchObject({ id: hubspot.id, archivedAt: null })
+    expect(eventsOf('REACTIVATED')).toEqual([
+      expect.objectContaining({ accountId: hubspot.id, data: { entryId: entry.id, via: 'LANDING' } }),
+    ])
+    expect(notifyReturningProspect).toHaveBeenCalledWith(hubspot.id, entry.id, expect.any(Object))
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      case: 'the email beats the phone, even an archived one over a fresh open one',
+      people: [
+        { id: 'cacctphone000000000000001', touched: 1, archived: false, lost: false, by: 'phone' },
+        { id: 'cacctemail000000000000001', touched: 30, archived: true, lost: false, by: 'email' },
+      ],
+      winner: 'cacctemail000000000000001',
+    },
+    {
+      case: 'among phones, the open one touched most recently (a lost or archived one never wins over it)',
+      people: [
+        { id: 'cacctold00000000000000001', touched: 5, archived: false, lost: false, by: 'phone' },
+        { id: 'cacctnew00000000000000001', touched: 1, archived: false, lost: false, by: 'phone' },
+        { id: 'cacctlost0000000000000001', touched: 0, archived: false, lost: true, by: 'phone' },
+        { id: 'cacctarch0000000000000001', touched: 0, archived: true, lost: false, by: 'phone' },
+      ],
+      winner: 'cacctnew00000000000000001',
+    },
+    {
+      case: 'with none open, the one touched most recently',
+      people: [
+        { id: 'cacctarch0000000000000002', touched: 9, archived: true, lost: false, by: 'phone' },
+        { id: 'cacctlost0000000000000002', touched: 2, archived: false, lost: true, by: 'phone' },
+      ],
+      winner: 'cacctlost0000000000000002',
+    },
+  ])('varias_coincidencias_eleccion_determinista: $case', async ({ people, winner }) => {
+    for (const person of people) {
+      seedPerson(
+        {
+          id: person.id,
+          source: 'WHATSAPP',
+          externalKey: `+52550000${person.id.slice(-4)}`,
+          lastTouchAt: new Date(Date.now() - person.touched * DAY - MINUTE),
+          ...(person.archived ? { archivedAt: new Date(Date.now() - 50 * DAY) } : {}),
+          ...(person.lost ? { stageId: FAKE_LOST_STAGE_ID } : {}),
+        },
+        person.by === 'email' ? { email: EMAIL } : { phoneE164: PHONE },
+      )
+    }
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(people.length)
+    expect(eventsOf('ENTRY_APPLIED')).toEqual([expect.objectContaining({ accountId: winner })])
+    expect(db.entries[0].accountId).toBe(winner)
+  })
+
+  it('a phone match linked to ANOTHER Organization is not the person who just signed up: their new business gets its own account', async () => {
+    seedPerson(
+      { id: 'cacctother000000000000001', source: 'WHATSAPP', externalKey: PHONE, organizationId: 'corgother0000000000000001' },
+      { phoneE164: PHONE },
+    )
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(2)
+    expect(db.accounts[1]).toMatchObject({ source: 'LANDING', externalKey: EMAIL, organizationId: ORG })
+    expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[1].id, expect.any(Object))
+  })
+
+  it('takes the entry’s own lock first, so two runs of the same entry queue (T5-r2(a))', async () => {
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    const calls = prismaMock.$queryRaw.mock.calls as Array<[TemplateStringsArray, ...unknown[]]>
+    expect(calls[0][0].join('?')).toContain('pg_advisory_xact_lock(hashtext(')
+    expect(calls[0].slice(1)).toEqual([`crm:entry:${entry.id}`])
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.crmTimelineEvent.findUnique.mock.invocationCallOrder[0],
+    )
+  })
+})
+
+describe('ruling 50: an old entry never overwrites a newer one', () => {
+  const T1 = new Date(Date.now() - 3 * DAY)
+  const T2 = new Date(Date.now() - DAY)
+
+  it('una_entrada_vieja_reparada_tarde_no_pisa_lo_nuevo_ni_mueve_el_toque_a_ahora', async () => {
+    // The newer form (T2) already set the qualification; the older one (T1) failed and the sweep repairs it now.
+    seedAccount({ ventasRango: '500k-1m', giro: 'Cafetería', sucursales: 3, modulos: ['mesas'], qualifiedAt: T2, lastTouchAt: T2 })
+    const old = seedEntry({ receivedAt: T1, signupOutcome: null, payload: { ...FORM, revenue: 'menos de 100k', businessType: 'Bar' } })
+
+    await applyEntry(old.id)
+
+    expect(db.accounts[0]).toMatchObject({ ventasRango: '500k-1m', giro: 'Cafetería', qualifiedAt: T2, lastTouchAt: T2 })
+    expect(eventsOf('FIELD_CHANGE')).toHaveLength(0)
+    // Its story stays in the timeline: applied, and that it did not overwrite.
+    expect(eventsOf('ENTRY_APPLIED')).toEqual([
+      expect.objectContaining({ data: expect.objectContaining({ entryId: old.id, qualificationSkipped: true }) }),
+    ])
+    expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+  })
+
+  it('a newer entry does apply, and moves qualifiedAt and the touch to when it was sent', async () => {
+    seedAccount({ ventasRango: 'menos de 100k', qualifiedAt: T1, lastTouchAt: T1 })
+    const newer = seedEntry({ receivedAt: T2, signupOutcome: null })
+
+    await applyEntry(newer.id)
+
+    expect(db.accounts[0]).toMatchObject({ ventasRango: '500k-1m', qualifiedAt: T2, lastTouchAt: T2 })
+    expect(eventsOf('FIELD_CHANGE')).toHaveLength(1)
+  })
+
+  it('an account created from an entry carries its qualifiedAt and its touch at the moment it was sent, never «now»', async () => {
+    const late = seedEntry({ receivedAt: T1, signupOutcome: null })
+
+    await applyEntry(late.id)
+
+    expect(db.accounts[0]).toMatchObject({ qualifiedAt: T1, lastTouchAt: T1 })
+  })
+})
+
+describe('ruling 49: the notice is marked only once it reached everyone', () => {
+  it('aviso_que_sale_a_todos_marca_noticeSentAt', async () => {
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(true)
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), noticeSentAt: expect.any(Date), noticeAttempts: 0 })
+  })
+
+  it('aviso_que_falla_sube_el_contador_y_queda_pendiente', async () => {
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(false)
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), noticeSentAt: null, noticeAttempts: 1 })
+  })
+
+  it('the notice carries the content fixed at apply time, saved in ENTRY_APPLIED, so a retry repeats it word for word', async () => {
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(true)
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    const content = {
+      name: 'Café Ana',
+      giro: 'Cafetería',
+      ventasRango: '500k-1m',
+      sucursales: 3,
+      modulos: ['mesas', 'cocina', 'qr'],
+      qualificationAvailable: true,
+    }
+    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ noticeContent: content })
+    expect(notifyNewProspect).toHaveBeenCalledWith(db.accounts[0].id, content)
+  })
+
+  it('an entry with nothing to announce marks nothing (a customer)', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG, { password: 'hash' }))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: true } })
+
+    await applyEntry(entry.id)
+
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), noticeSentAt: null, noticeAttempts: 0 })
+    expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('noticeContent')
   })
 })

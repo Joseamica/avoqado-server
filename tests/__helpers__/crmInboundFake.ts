@@ -20,10 +20,15 @@ export function installCrmInboundFake(prismaMock: any) {
   let sequence = 0
   /** cuid v1 shape: 25 characters, starting with «c». */
   const nextId = (prefix: string) => `c${prefix}${String(++sequence).padStart(24 - prefix.length, '0')}`
-  /** Prisma returns `null` for a JSON column written as `DbNull`. */
+  /** Prisma returns `null` for a JSON column written as `DbNull`; `{ increment }` adds to the number already there. */
   const patch = (row: Row, data: Row) => {
-    for (const [key, value] of Object.entries(data)) row[key] = value === Prisma.DbNull || value === Prisma.JsonNull ? null : value
+    for (const [key, value] of Object.entries(data)) {
+      if (value && typeof value === 'object' && 'increment' in value) row[key] = (row[key] ?? 0) + value.increment
+      else row[key] = value === Prisma.DbNull || value === Prisma.JsonNull ? null : value
+    }
   }
+  /** An account with its stage's kind, as `select: { stage: { select: { kind } } }` returns it. */
+  const withStage = (row: Row) => ({ ...row, archivedAt: row.archivedAt ?? null, stage: { kind: STAGE_KINDS[row.stageId] ?? 'ABIERTA' } })
 
   const delegates = [
     prismaMock.crmInboundEntry.create,
@@ -33,6 +38,7 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmAccount.createMany,
     prismaMock.crmAccount.findUnique,
     prismaMock.crmAccount.findUniqueOrThrow,
+    prismaMock.crmAccount.findMany,
     prismaMock.crmAccount.update,
     prismaMock.crmContact.create,
     prismaMock.crmTimelineEvent.createMany,
@@ -55,6 +61,8 @@ export function installCrmInboundFake(prismaMock: any) {
       appliedAt: null,
       accountId: null,
       lastError: null,
+      noticeSentAt: null,
+      noticeAttempts: 0,
       ...data,
     }
     db.entries.push(row)
@@ -70,7 +78,8 @@ export function installCrmInboundFake(prismaMock: any) {
     return { ...row }
   })
   prismaMock.crmInboundEntry.updateMany.mockImplementation(async ({ where, data }: Row) => {
-    const rows = db.entries.filter(entry => entry.id === where.id)
+    // `noticeSentAt: null` in the filter: a notice already marked sent is never counted again.
+    const rows = db.entries.filter(entry => entry.id === where.id && (!('noticeSentAt' in where) || (entry.noticeSentAt ?? null) === null))
     rows.forEach(row => patch(row, data))
     return { count: rows.length }
   })
@@ -92,11 +101,34 @@ export function installCrmInboundFake(prismaMock: any) {
       : db.accounts.find(account => Object.entries(where).every(([field, value]) => account[field] === value))
     return found ? { ...found } : null
   })
-  // An account with its stage's kind, as `select: { stage: { select: { kind } } }` returns it.
   prismaMock.crmAccount.findUniqueOrThrow.mockImplementation(async ({ where }: Row) => {
     const row = db.accounts.find(account => account.id === where.id)
     if (!row) throw new Error('No CrmAccount found')
-    return { ...row, archivedAt: row.archivedAt ?? null, stage: { kind: STAGE_KINDS[row.stageId] ?? 'ABIERTA' } }
+    return withStage(row)
+  })
+  /**
+   * The landing's lookup by person (ruling 48): accounts with a contact of that exact email or phone, newest touch first,
+   * each with the contacts that matched by EMAIL (`select.contacts.where.email`). Any other `findMany` fails loudly.
+   */
+  prismaMock.crmAccount.findMany.mockImplementation(async ({ where, select, orderBy, take }: Row) => {
+    const anyOf: Row[] = where?.contacts?.some?.OR
+    if (!anyOf) throw new Error(`The CRM inbound fake does not know this crmAccount.findMany: ${JSON.stringify(where)}`)
+    const hit = (contact: Row, clause: Row) => Object.entries(clause).every(([field, value]) => (contact[field] ?? null) === value)
+    const byEmail = select?.contacts?.where?.email
+    const found = db.accounts.filter(account =>
+      db.contacts.some(contact => contact.accountId === account.id && anyOf.some(clause => hit(contact, clause))),
+    )
+    if (JSON.stringify(orderBy) !== JSON.stringify([{ lastTouchAt: 'desc' }, { id: 'desc' }])) throw new Error('Unexpected order')
+    return found
+      .sort((a, b) => (b.lastTouchAt?.getTime() ?? 0) - (a.lastTouchAt?.getTime() ?? 0) || (a.id < b.id ? 1 : -1))
+      .slice(0, take)
+      .map(account => ({
+        ...withStage(account),
+        lastTouchAt: account.lastTouchAt ?? null,
+        contacts: db.contacts
+          .filter(contact => contact.accountId === account.id && byEmail && contact.email === byEmail)
+          .map(() => ({ id: 'c' })),
+      }))
   })
   prismaMock.crmAccount.update.mockImplementation(async ({ where, data }: Row) => {
     const row = db.accounts.find(account => account.id === where.id)

@@ -4,6 +4,8 @@
  *
  * 1. `applyPending` — every entry not applied yet (a crash, an error, a signup still running), oldest first, through the
  *    same `applyEntry` the landing calls: every field of the form, one account and one set of events per entry.
+ *    `resendPendingNotices` — the notice of an applied entry that did not reach everyone (ruling 49), again with the
+ *    same keys and content, up to 5 tries within the entry's 24 h.
  * 2. `linkLandingAccounts` — a landing account still without an Organization is linked as soon as its email owns one,
  *    whatever path made the person an owner: the landing, the dashboard signup, an invitation. One LINKED event, no note.
  * 3. `backfillFromOnboarding` — every landing signup (`LANDING_SIGNUP_CREATED`) without its CRM account gets one, without
@@ -28,10 +30,12 @@ import { utcTs } from '../../utils/sqlDates'
 import { getInitialStage } from './accounts.service'
 import { notifyNewProspect } from './digest.service'
 import {
+  announceEntry,
   applyEntry,
   LANDING,
   linkTx,
   OWNED_ORGANIZATION,
+  repeatOf,
   sourceDetailOf,
   teamOrganizationId,
   upsertAccountBySource,
@@ -46,6 +50,10 @@ const CAUGHT_UP_LAG_MS = 10 * 60_000
 const ARCHIVE_AFTER_MS = 14 * DAY_MS
 /** Ruling 30b: of what the backfill creates, only a signup younger than this is announced. */
 const ANNOUNCE_WITHIN_MS = DAY_MS
+/** Ruling 49: a notice that did not reach everyone is tried this many times in all… */
+const NOTICE_MAX_ATTEMPTS = 5
+/** …and only within the entry's first 24 h: Resend's idempotency window, after which a key no longer stops a repeat. */
+const NOTICE_WINDOW_MS = DAY_MS
 
 /**
  * Real money (spec §8, Codex plan r1 #1): a charge processed in a real venue. A plan on trial or courtesy charges
@@ -56,6 +64,15 @@ const ANNOUNCE_WITHIN_MS = DAY_MS
  */
 export const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } satisfies Prisma.PaymentWhereInput
 export const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES }, demoExpiresAt: null } satisfies Prisma.VenueWhereInput
+
+/**
+ * The same two rules in raw SQL over a venue aliased `v` (ruling 51): «has it charged real money?» is a correlated
+ * `EXISTS` that stops at the first charge on `Payment(venueId, status, createdAt)`. A Prisma `payments.some` becomes
+ * `IN (SELECT "venueId" FROM "Payment" …)`, which inside an `OR` Postgres runs as a hashed subplan that reads EVERY
+ * completed payment of the platform. Only the statuses travel as binds.
+ */
+export const REAL_VENUE_SQL = Prisma.sql`v."status"::text IN (${Prisma.join(PRODUCTION_VENUE_STATUSES)}) AND v."demoExpiresAt" IS NULL`
+export const VENUE_HAS_MONEY_SQL = Prisma.sql`EXISTS (SELECT 1 FROM "Payment" p WHERE p."venueId" = v."id" AND p."status" = 'COMPLETED' AND p."amount" > 0)`
 
 type Cursor = { createdAt: Date; id: string }
 
@@ -107,6 +124,34 @@ export async function applyPending(limit = BATCH): Promise<number> {
   )
   for (const { id } of entries) await applyEntry(id)
   return entries.length
+}
+
+/**
+ * Retries the notices of applied entries that did not reach everyone (ruling 49): what each entry's ENTRY_APPLIED says
+ * it announces — a new prospect or one back from the archive, never a customer — with the same keys and the content it
+ * fixed, so a person who already got it gets nothing new. Up to 5 tries, and only within the entry's 24 h; returns how
+ * many it retried. `announceEntry` never throws and writes down how each one went.
+ *
+ * The (noticeSentAt, receivedAt) index bounds the read to the last day's pending entries, and the join is one lookup
+ * per entry on the event's unique `sourceKey`.
+ */
+export async function resendPendingNotices(limit = BATCH): Promise<number> {
+  const since = new Date(Date.now() - NOTICE_WINDOW_MS)
+  const pending = await entryRead('crm-sweep.resendPendingNotices', () =>
+    prisma.$queryRaw<Array<{ id: string; accountId: string; data: Prisma.JsonValue }>>(Prisma.sql`
+      SELECT e."id", t."accountId", t."data"
+      FROM "CrmInboundEntry" e
+      JOIN "CrmTimelineEvent" t ON t."sourceKey" = 'entry:' || e."id"
+      WHERE e."noticeSentAt" IS NULL AND e."appliedAt" IS NOT NULL AND e."noticeAttempts" < ${NOTICE_MAX_ATTEMPTS}
+        AND e."receivedAt" >= ${utcTs(since)}
+        AND t."kind" = 'ENTRY_APPLIED'
+        AND COALESCE(t."data"->>'signup', '') <> 'CUSTOMER'
+        AND ((t."data"->>'created') = 'true' OR (t."data"->>'reactivated') = 'true')
+      ORDER BY e."receivedAt" ASC, e."id" ASC
+      LIMIT ${batchOf(limit)}`),
+  )
+  for (const entry of pending) await announceEntry(entry.id, repeatOf({ accountId: entry.accountId, data: entry.data }))
+  return pending.length
 }
 
 // ── 2. Linking ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -351,14 +396,17 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
  * its event.
  */
 export async function fillFirstMoney(limit = BATCH): Promise<number> {
-  // Only the accounts whose Organization did charge: the many that never will would otherwise fill every batch.
+  // Only the accounts whose Organization did charge: the many that never will would otherwise fill every batch. Raw SQL
+  // (ruling 51): the two conditions of the partial index `CrmAccount_first_money_pending_idx` as literals, and «did it
+  // charge» as an EXISTS per venue that stops at the first charge — never a scan of every payment.
   const accounts = await entryRead('crm-sweep.fillFirstMoney', () =>
-    prisma.crmAccount.findMany({
-      where: { firstMoneyAt: null, organization: { is: { venues: { some: { ...REAL_VENUE, payments: { some: MONEY } } } } } },
-      select: { id: true, organizationId: true, createdAt: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: batchOf(limit),
-    }),
+    prisma.$queryRaw<Array<{ id: string; organizationId: string | null; createdAt: Date }>>(Prisma.sql`
+      SELECT a."id", a."organizationId", a."createdAt"
+      FROM "CrmAccount" a
+      WHERE a."firstMoneyAt" IS NULL AND a."organizationId" IS NOT NULL
+        AND EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = a."organizationId" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL})
+      ORDER BY a."createdAt" ASC, a."id" ASC
+      LIMIT ${batchOf(limit)}`),
   )
   const organizationIds = [...new Set(accounts.flatMap(account => (account.organizationId ? [account.organizationId] : [])))]
   if (!organizationIds.length) return 0
@@ -376,8 +424,7 @@ export async function fillFirstMoney(limit = BATCH): Promise<number> {
       LIMIT 1
     ) oldest
     WHERE v."organizationId" IN (${Prisma.join(organizationIds)})
-      AND v."status"::text IN (${Prisma.join(PRODUCTION_VENUE_STATUSES)})
-      AND v."demoExpiresAt" IS NULL`)
+      AND ${REAL_VENUE_SQL}`)
   const firstMoney = new Map<string, Date>()
   for (const { organizationId, createdAt } of firstByVenue) {
     const earlier = firstMoney.get(organizationId)
@@ -419,6 +466,7 @@ export async function fillFirstMoney(limit = BATCH): Promise<number> {
 
 const PASSES = [
   ['applyPending', applyPending],
+  ['resendPendingNotices', resendPendingNotices],
   ['linkLandingAccounts', linkLandingAccounts],
   ['backfillFromOnboarding', backfillFromOnboarding],
   ['fillFirstMoney', fillFirstMoney],

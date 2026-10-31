@@ -25,20 +25,30 @@ import type { NextFunction, Request, Response } from 'express'
 import { submitContact } from '@/controllers/public/landing.public.controller'
 import { getInitialStage } from '@/services/crm/accounts.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
+import { canonicalPhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `crml${Date.now()}`
 const RACE_EMAIL = `ana-${suffix}@test.mx`
 const CRASH_EMAIL = `beto-${suffix}@test.mx`
 const HOLDER_EMAIL = `carla-${suffix}@test.mx`
-const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL]
+const WHATSAPP_EMAIL = `dani-${suffix}@test.mx`
+const LATE_EMAIL = `eva-${suffix}@test.mx`
+const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL, WHATSAPP_EMAIL, LATE_EMAIL]
 /** Accounts this file creates under another source (not found by `source: LANDING`). */
 const otherAccountIds: string[] = []
+
+/**
+ * Each person of this file has a phone of their own, new on every run: the same phone is the same person for the CRM
+ * (ruling 48), so a shared one would land one test's form on another test's account.
+ */
+const PHONE_BASE = String(Date.now()).slice(-7)
+const phoneOf = (email: string) => `55${PHONE_BASE}${EMAILS.indexOf(email)}`
 
 const form = (email: string, over: Record<string, unknown> = {}) => ({
   firstName: 'Ana',
   lastName: 'Captura',
-  phone: '5512345678',
+  phone: phoneOf(email),
   email,
   companyName: `Café ${suffix}`,
   businessType: 'Cafetería',
@@ -210,6 +220,74 @@ describe('landing → CRM against Postgres', () => {
     expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
       appliedAt: expect.any(Date),
       accountId: whatsapp.id,
+    })
+  })
+
+  it('whatsapp_luego_landing_mismo_telefono_una_ficha: the real signup lands on the WhatsApp account and links it (ruling 48)', async () => {
+    // The routine created the prospect from the chat, by phone, with no email.
+    const phone = canonicalPhoneE164(phoneOf(WHATSAPP_EMAIL))
+    expect(phone).toMatch(/^\+52\d{10}$/)
+    const whatsapp = await prisma.crmAccount.create({
+      data: {
+        name: `WhatsApp ${suffix}`,
+        source: 'WHATSAPP',
+        externalKey: phone,
+        stageId: (await getInitialStage()).id,
+        lastTouchAt: new Date(Date.now() - 3 * 86_400_000),
+        contacts: { create: [{ name: 'Dani', phoneE164: phone, isPrimary: true }] },
+      },
+    })
+    otherAccountIds.push(whatsapp.id)
+
+    // Now the person signs up through the landing, with the same phone and an email the CRM has never seen.
+    expect((await submit(WHATSAPP_EMAIL)).statusCode).toBe(200)
+
+    const owner = await prisma.staff.findUniqueOrThrow({
+      where: { email: WHATSAPP_EMAIL },
+      select: { organizations: { where: { role: OrgRole.OWNER }, select: { organizationId: true }, take: 5 } },
+    })
+    expect(owner.organizations).toHaveLength(1)
+    // ONE account: no landing account of that email, and the WhatsApp one now holds the new Organization.
+    expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: WHATSAPP_EMAIL } })).toBe(0)
+    expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: whatsapp.id } })).toMatchObject({
+      organizationId: owner.organizations[0].organizationId,
+      giro: 'Cafetería',
+    })
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId: whatsapp.id, kind: 'LINKED' } })).toBe(1)
+    const entries = await prisma.crmInboundEntry.findMany({ where: { externalKey: WHATSAPP_EMAIL }, take: 5 })
+    expect(entries).toEqual([expect.objectContaining({ appliedAt: expect.any(Date), accountId: whatsapp.id })])
+    expect(await prisma.crmTimelineEvent.findUniqueOrThrow({ where: { sourceKey: `entry:${entries[0].id}` } })).toMatchObject({
+      accountId: whatsapp.id,
+    })
+  })
+
+  it('una_entrada_vieja_reparada_tarde_no_pisa_la_mas_nueva ni mueve el toque a «ahora» (ruling 50)', async () => {
+    const older = await saveLandingEntry(form(LATE_EMAIL, { revenue: 'menos de 100k', businessType: 'Bar' }))
+    const newer = await saveLandingEntry(form(LATE_EMAIL, { revenue: '500k-1m', businessType: 'Cafetería' }))
+    expect(older).not.toBeNull()
+    expect(newer).not.toBeNull()
+    const T1 = new Date(Date.now() - 2 * 3_600_000)
+    const T2 = new Date(Date.now() - 3_600_000)
+    await prisma.crmInboundEntry.update({ where: { id: older!.entryId }, data: { receivedAt: T1 } })
+    await prisma.crmInboundEntry.update({ where: { id: newer!.entryId }, data: { receivedAt: T2 } })
+
+    // The older form failed to apply; the newer one applied. Then the sweep repairs the older one.
+    await recordSignupOutcome(newer!.entryId, null)
+    await applyEntry(newer!.entryId)
+    await recordSignupOutcome(older!.entryId, null)
+    await applyEntry(older!.entryId)
+
+    const account = await prisma.crmAccount.findUniqueOrThrow({
+      where: { source_externalKey: { source: 'LANDING', externalKey: LATE_EMAIL } },
+    })
+    expect(account).toMatchObject({ ventasRango: '500k-1m', giro: 'Cafetería', qualifiedAt: T2, lastTouchAt: T2 })
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId: account.id, kind: 'FIELD_CHANGE' } })).toBe(0)
+    // Its story is in the timeline: applied, without overwriting.
+    const proof = await prisma.crmTimelineEvent.findUniqueOrThrow({ where: { sourceKey: `entry:${older!.entryId}` } })
+    expect(proof).toMatchObject({ accountId: account.id, data: expect.objectContaining({ qualificationSkipped: true }) })
+    expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: older!.entryId } })).toMatchObject({
+      appliedAt: expect.any(Date),
+      accountId: account.id,
     })
   })
 })

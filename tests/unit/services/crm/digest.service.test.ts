@@ -127,14 +127,14 @@ describe('notifyNewProspect', () => {
   it('nuevo_prospecto_no_lanza_si_falla_el_correo', async () => {
     // One send blows up, the other is refused: the notice still resolves, and says who did not get it.
     send.mockRejectedValueOnce(new Error('socket hang up')).mockResolvedValueOnce({ ok: false, transient: true, errorCode: 'rate_limit' })
-    await expect(notifyNewProspect(ACCOUNT)).resolves.toBeUndefined()
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(false)
     expect(send).toHaveBeenCalledTimes(2)
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A }))
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_B }))
 
     // Not even the database can make it throw.
     prismaMock.crmAccount.findUnique.mockRejectedValueOnce(new Error('database is down'))
-    await expect(notifyNewProspect(ACCOUNT)).resolves.toBeUndefined()
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(false)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ accountId: ACCOUNT }))
   })
 
@@ -156,6 +156,49 @@ describe('notifyNewProspect', () => {
     prismaMock.platformAccess.findMany.mockResolvedValueOnce([])
     await notifyNewProspect(ACCOUNT)
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('ruling 49: the notice says whether it reached everyone, and repeats a fixed content', () => {
+  it('aviso_dice_si_salio_a_todos: true only when every send went out', async () => {
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+
+    send.mockResolvedValueOnce({ ok: true, transient: false }).mockResolvedValueOnce({ ok: false, transient: true, errorCode: '500' })
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(false)
+
+    // Nothing to send is not a failure to retry: the account is gone, or nobody holds «Editar».
+    prismaMock.crmAccount.findUnique.mockResolvedValueOnce(null)
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    prismaMock.platformAccess.findMany.mockResolvedValueOnce([])
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+  })
+
+  it('con_contenido_fijo_no_relee_la_ficha: the saved content is what goes out, under the same keys', async () => {
+    const content = {
+      name: 'Café Ana',
+      giro: 'Bar',
+      ventasRango: 'menos de 100k',
+      sucursales: 1,
+      modulos: ['qr'],
+      qualificationAvailable: true,
+    }
+    // The account changed since (another form): the retry still sends what the first send said.
+    prismaMock.crmAccount.findUnique.mockResolvedValue({
+      id: ACCOUNT,
+      name: 'Otro nombre',
+      giro: 'Cafetería',
+      ventasRango: null,
+      sucursales: null,
+      modulos: [],
+    })
+
+    await expect(notifyNewProspect(ACCOUNT, content)).resolves.toBe(true)
+    await expect(notifyReturningProspect(ACCOUNT, 'centrylnd0000000000000009', content)).resolves.toBe(true)
+
+    expect(prismaMock.crmAccount.findUnique).not.toHaveBeenCalled()
+    expect(send.mock.calls[0][0]).toMatchObject({ subject: 'Nuevo prospecto: Café Ana', idempotencyKey: `crm-nuevo:${ACCOUNT}:${STAFF_A}` })
+    expect(send.mock.calls[0][0].text).toContain('Tipo de negocio: Bar')
+    expect(send.mock.calls[2][0]).toMatchObject({ subject: 'Volvió un prospecto: Café Ana' })
   })
 })
 
@@ -224,7 +267,7 @@ describe('notifyReturningProspect (ruling 31)', () => {
     expect(send.mock.calls[0][0].subject.length).toBeLessThanOrEqual(60)
 
     prismaMock.crmAccount.findUnique.mockRejectedValueOnce(new Error('database is down'))
-    await expect(notifyReturningProspect(ACCOUNT, ENTRY)).resolves.toBeUndefined()
+    await expect(notifyReturningProspect(ACCOUNT, ENTRY)).resolves.toBe(false)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ accountId: ACCOUNT }))
   })
 })

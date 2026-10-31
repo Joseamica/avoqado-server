@@ -3,10 +3,11 @@
  *
  * 1. `saveLandingEntry` — the FIRST thing the controller does: the raw form, cleaned, as a `CrmInboundEntry`.
  * 2. The signup (`signupFromLanding`) runs exactly as before; `recordSignupOutcome` writes down what it really returned.
- * 3. `applyEntry` applies the entry to the ONE account it belongs to — the landing account of that email or, one per
- *    Organization, the account the Organization the person owns already has — and creates it only when there is
- *    neither; the timeline event `entry:<id>` proves it was applied. It never throws, and running it again — the sweep
- *    after a crash, or both at once — changes nothing.
+ * 3. `applyEntry` applies the entry to the ONE account it belongs to — the landing account of that email, the account
+ *    the Organization the person owns already has (one per Organization), or the account of another source that already
+ *    has this person by email or phone (one per person) — and creates it only when there is none; the timeline event
+ *    `entry:<id>` proves it was applied. It never throws, and running it again — the sweep after a crash, or both at
+ *    once — changes nothing.
  *
  * Nothing here can stop the signup: every function swallows its own failure into the log, and the sweep (task 6) picks
  * up whatever was left half done.
@@ -16,12 +17,14 @@ import logger from '../../config/logger'
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { getInitialStage } from './accounts.service'
-import { notifyNewProspect, notifyReturningProspect } from './digest.service'
+import { notifyNewProspect, notifyReturningProspect, type NoticeContent } from './digest.service'
 import { addEvent } from './timeline.service'
 
 export const LANDING = 'LANDING'
 const MAX_TEXT = 500
 const MAX_LIST = 20
+// ponytail: the accounts that already have this person; past 20 (never seen) the newest-touched 20 are ranked.
+const PERSON_CANDIDATES = 20
 /** Long enough for any signup to finish: an entry younger than this without an outcome waits for the sweep. */
 const SIGNUP_GRACE_MS = 5 * 60_000
 /** Control characters and lone UTF-16 surrogates: PostgreSQL refuses `\u0000` and broken text in JSONB. */
@@ -275,11 +278,13 @@ function signupBranch(outcome: SignupOutcome | null) {
 const sameValue = (a: unknown, b: unknown) =>
   Array.isArray(a) && Array.isArray(b) ? a.length === b.length && a.every(item => b.includes(item)) : a === b
 
+const isBlank = (value: Qualification[keyof Qualification]) => value === null || (Array.isArray(value) && !value.length)
+
 /** What the form brings that the account does not have yet. A field the form left empty keeps what the account has. */
 function qualificationChanges(current: Qualification, fresh: Qualification) {
   return QUALIFICATION_FIELDS.flatMap(field => {
     const to = fresh[field]
-    if (to === null || (Array.isArray(to) && !to.length) || sameValue(current[field], to)) return []
+    if (isBlank(to) || sameValue(current[field], to)) return []
     return [{ field, from: current[field], to }]
   })
 }
@@ -321,27 +326,98 @@ const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: 
 /** What the team hears after the commit: a new prospect, one that came back from the archive (ruling 31), or nothing. */
 type Notice = 'NEW' | 'RETURNED' | null
 
+/** What applying an entry leaves to do after the commit: its notice, with the content fixed in its ENTRY_APPLIED. */
+export type AppliedEntry = { accountId: string; notice: Notice; content?: NoticeContent }
+
+/** The notice's words about the business, from an account or a form — never a phone or an email (spec §5.10). */
+const noticeContentOf = (from: Qualification & { name: string; qualificationAvailable: boolean }): NoticeContent => ({
+  name: from.name,
+  giro: from.giro,
+  ventasRango: from.ventasRango,
+  sucursales: from.sucursales,
+  modulos: from.modulos,
+  qualificationAvailable: from.qualificationAvailable,
+})
+
+/** The content an ENTRY_APPLIED kept, or undefined when it kept none (or something unreadable): then the account is read. */
+function savedNoticeContent(value: Prisma.JsonValue | undefined): NoticeContent | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const { name, giro, ventasRango, sucursales, modulos, qualificationAvailable } = value
+  const textOrNull = (field: unknown) => field === null || typeof field === 'string'
+  if (typeof name !== 'string' || !textOrNull(giro) || !textOrNull(ventasRango)) return undefined
+  if (!(sucursales === null || typeof sucursales === 'number') || !Array.isArray(modulos)) return undefined
+  return {
+    name,
+    giro: giro as string | null,
+    ventasRango: ventasRango as string | null,
+    sucursales: sucursales as number | null,
+    modulos: modulos.filter((module): module is string => typeof module === 'string'),
+    qualificationAvailable: qualificationAvailable !== false,
+  }
+}
+
 /**
- * An entry a run already applied (it died before `appliedAt`) repeats THAT run, never a fresh lookup that may now lead
- * elsewhere: its account, and its notice again if it created a prospect's account or brought one back from the archive
- * — the email's idempotency key keeps it from repeating (ruling 26). A customer is never announced.
+ * An entry a run already applied repeats THAT run, never a fresh lookup that may now lead elsewhere: its account, and its
+ * notice again if it created a prospect's account or brought one back from the archive, with the content that run fixed
+ * — the email's idempotency key keeps it from repeating (rulings 26 and 49). A customer is never announced. The sweep's
+ * notice retry reads it too.
  */
-function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }): { accountId: string; notice: Notice } {
+export function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }): AppliedEntry {
   const data: Prisma.JsonObject = previous.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
   if (data.signup === 'CUSTOMER') return { accountId: previous.accountId, notice: null }
-  return { accountId: previous.accountId, notice: data.created === true ? 'NEW' : data.reactivated === true ? 'RETURNED' : null }
+  const notice: Notice = data.created === true ? 'NEW' : data.reactivated === true ? 'RETURNED' : null
+  const content = notice ? savedNoticeContent(data.noticeContent) : undefined
+  return { accountId: previous.accountId, notice, ...(content ? { content } : {}) }
+}
+
+/**
+ * Ruling 48 — one account per PERSON, whatever source met them first: the accounts with a contact of this exact email or
+ * canonical phone (every writer stores them so; both are indexed). The email beats the phone; then the open one touched
+ * most recently; with none open, the one touched most recently; the id breaks the last tie, so the choice never
+ * depends on the run. An account linked to ANOTHER Organization than the one this person just got is somebody else's
+ * business — a shared phone — and never takes the entry.
+ */
+async function accountOfPerson(
+  tx: Prisma.TransactionClient,
+  email: string,
+  phoneE164: string | null,
+  organizationId: string | null,
+): Promise<{ id: string; organizationId: string | null } | null> {
+  const found = await tx.crmAccount.findMany({
+    where: { contacts: { some: { OR: [{ email }, ...(phoneE164 ? [{ phoneE164 }] : [])] } } },
+    select: {
+      id: true,
+      organizationId: true,
+      archivedAt: true,
+      stage: { select: { kind: true } },
+      // Non-empty when it was found by the EMAIL.
+      contacts: { where: { email }, select: { id: true }, take: 1 },
+    },
+    orderBy: [{ lastTouchAt: 'desc' }, { id: 'desc' }],
+    take: PERSON_CANDIDATES,
+  })
+  const rank = (account: (typeof found)[number]) =>
+    (account.contacts.length ? 2 : 0) + (account.stage.kind === 'ABIERTA' && !account.archivedAt ? 1 : 0)
+  // `sort` is stable: equal ranks keep the database's order — newest touch, then id.
+  const [best] = found
+    .filter(account => !organizationId || !account.organizationId || account.organizationId === organizationId)
+    .sort((a, b) => rank(b) - rank(a))
+  return best ? { id: best.id, organizationId: best.organizationId } : null
 }
 
 async function applyTx(
   tx: Prisma.TransactionClient,
-  entry: { id: string; externalKey: string },
+  entry: { id: string; externalKey: string; receivedAt: Date },
   form: LandingForm,
   outcome: SignupOutcome | null,
   organizationId: string | null,
   stageId: string,
-): Promise<{ accountId: string; notice: Notice }> {
+): Promise<AppliedEntry> {
   const sourceKey = `entry:${entry.id}`
   const applied = { accountId: true, data: true } as const
+  // Two runs of the SAME entry (the sweep and a slow request) queue here, so the second one finds the first one's
+  // ENTRY_APPLIED below instead of crossing it halfway (ruling 48, T5-r2(a)).
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`crm:entry:${entry.id}`}))::text`
   // Read before anything is looked up or created: if the person stopped owning the Organization whose account a first
   // run used, a fresh lookup would create an orphan account (empty, never announced).
   const previous = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: applied })
@@ -349,19 +425,31 @@ async function applyTx(
 
   const customer = outcome?.yaEsCliente === true
   const select = { id: true, organizationId: true } as const
-  // THE account of this entry: the landing one of this email or — one CRM account per Organization (ruling 25) — the
-  // one its Organization already has, whatever its source. Only when there is neither is one created.
+  // THE account of this entry: the landing one of this email; or — one CRM account per Organization (ruling 25) — the
+  // one its Organization already has, whatever its source; or — one per person (ruling 48) — the one of another source
+  // that already has this email or phone. Only when there is none is one created.
   let account = await tx.crmAccount.findUnique({
     where: { source_externalKey: { source: LANDING, externalKey: entry.externalKey } },
     select,
   })
   if (!account && organizationId) account = await tx.crmAccount.findUnique({ where: { organizationId }, select })
+  if (!account) account = await accountOfPerson(tx, entry.externalKey, form.contact.phoneE164, organizationId)
   let created = false
   if (!account) {
     const upserted = await upsertAccountBySource(tx, {
       source: LANDING,
       externalKey: entry.externalKey,
-      data: { name: form.name, ...form.qualification, sourceDetail: form.sourceDetail, stageId, organizationId },
+      data: {
+        name: form.name,
+        ...form.qualification,
+        sourceDetail: form.sourceDetail,
+        stageId,
+        organizationId,
+        // Its qualification and its touch are THIS form's, sent at `receivedAt` — never «now» when the sweep repairs it
+        // late (ruling 50).
+        qualifiedAt: entry.receivedAt,
+        lastTouchAt: entry.receivedAt,
+      },
       contact: form.contact,
     })
     account = upserted.account
@@ -376,64 +464,119 @@ async function applyTx(
       })
     }
   }
-  // An account that was already there is locked BEFORE its event is written: two entries of the same email queue here
-  // instead of deadlocking between the event's foreign key and the touch (ruling 26).
-  let reactivate = false
-  if (!created) {
-    await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${account.id} FOR UPDATE`
-    // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24). Read under
-    // the lock, and written into ENTRY_APPLIED below, so a re-run knows to announce it again.
-    const state = await tx.crmAccount.findUniqueOrThrow({
-      where: { id: account.id },
-      select: { archivedAt: true, stage: { select: { kind: true } } },
-    })
-    reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
-  }
-
-  // The proof the entry was applied, and the gate against a run at the same time: the second insert of this `sourceKey`
-  // (unique) adds nothing, and that run repeats the first one. One set of events per entry.
-  const firstRun = await addEvent(tx, {
-    accountId: account.id,
-    kind: 'ENTRY_APPLIED',
-    actorStaffId: null,
-    sourceKey,
-    data: { entryId: entry.id, signup: signupBranch(outcome), created, ...(reactivate ? { reactivated: true } : {}) },
-  })
-  if (!firstRun) {
+  const accountId = account.id
+  /**
+   * The proof the entry was applied, and the gate against a run at the same time: the second insert of this `sourceKey`
+   * (unique) adds nothing, and that run repeats the first one. One set of events per entry. It keeps what a re-run or
+   * the sweep's notice retry must repeat: whether it created or brought back a prospect, and the notice's content.
+   */
+  const proof = async (data: Prisma.InputJsonObject) => {
+    const firstRun = await addEvent(tx, { accountId, kind: 'ENTRY_APPLIED', actorStaffId: null, sourceKey, data })
+    if (firstRun) return null
     const winner = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: applied })
-    return winner ? repeatOf(winner) : { accountId: account.id, notice: null }
+    return winner ? repeatOf(winner) : { accountId, notice: null }
   }
+  const signup = signupBranch(outcome)
+
   if (created) {
     // A customer is not a new prospect: the note instead of «Nuevo prospecto» (ruling 23).
-    if (customer) await customerNote(tx, account.id, entry.id)
-    return { accountId: account.id, notice: customer ? null : 'NEW' }
+    const content = customer ? undefined : noticeContentOf({ name: form.name, ...form.qualification, qualificationAvailable: true })
+    const repeated = await proof({ entryId: entry.id, signup, created, ...(content ? { noticeContent: { ...content } } : {}) })
+    if (repeated) return repeated
+    if (customer) await customerNote(tx, accountId, entry.id)
+    return { accountId, notice: customer ? null : 'NEW', ...(content ? { content } : {}) }
   }
 
-  // The account was already there (its row is ours now). Coming back through the landing is a touch: «Estancado»
-  // restarts. Archived, it is back in the pipeline — in «Sin dueño» if nobody owns it.
-  const current = await tx.crmAccount.update({
-    where: { id: account.id },
-    data: { lastTouchAt: new Date(), ...(reactivate ? { archivedAt: null } : {}) },
-    select: { giro: true, ventasRango: true, sucursales: true, modulos: true, organizationId: true },
+  // An account that was already there is locked BEFORE its event is written: two entries of the same email queue here
+  // instead of deadlocking between the event's foreign key and the touch (ruling 26). Everything below reads it under the
+  // lock.
+  await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${accountId} FOR UPDATE`
+  const state = await tx.crmAccount.findUniqueOrThrow({
+    where: { id: accountId },
+    select: {
+      name: true,
+      giro: true,
+      ventasRango: true,
+      sucursales: true,
+      modulos: true,
+      qualificationAvailable: true,
+      qualifiedAt: true,
+      lastTouchAt: true,
+      organizationId: true,
+      archivedAt: true,
+      stage: { select: { kind: true } },
+    },
+  })
+  // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24).
+  const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
+  // Ruling 50: the qualification is the NEWEST form's. An older one the sweep repaired late keeps its story in the
+  // timeline and overwrites nothing. A customer's account is theirs: what they type does not overwrite it either.
+  const carries = QUALIFICATION_FIELDS.some(field => !isBlank(form.qualification[field]))
+  const newer = !state.qualifiedAt || entry.receivedAt > state.qualifiedAt
+  const qualify = !customer && carries && newer
+  const changes = qualify ? qualificationChanges(state, form.qualification) : []
+  const fields = Object.fromEntries(changes.map(({ field, to }) => [field, to])) as Partial<Qualification>
+  // Back from the archive, it is a prospect again for the team — a customer is not (rulings 23 and 27).
+  const notice: Notice = reactivate && !customer ? 'RETURNED' : null
+  const content = notice
+    ? noticeContentOf({ ...state, ...fields, qualificationAvailable: changes.length ? true : state.qualificationAvailable })
+    : undefined
+
+  const repeated = await proof({
+    entryId: entry.id,
+    signup,
+    created,
+    ...(reactivate ? { reactivated: true } : {}),
+    ...(!customer && carries && !newer ? { qualificationSkipped: true } : {}),
+    ...(content ? { noticeContent: { ...content } } : {}),
+  })
+  if (repeated) return repeated
+
+  // Coming back through the landing is a touch: «Estancado» restarts — from when the form was SENT, never earlier than
+  // the touch it already has (ruling 50). Archived, it is back in the pipeline, in «Sin dueño» if nobody owns it.
+  await tx.crmAccount.update({
+    where: { id: accountId },
+    data: {
+      lastTouchAt: state.lastTouchAt > entry.receivedAt ? state.lastTouchAt : entry.receivedAt,
+      ...(reactivate ? { archivedAt: null } : {}),
+      ...(qualify ? { qualifiedAt: entry.receivedAt } : {}),
+      ...(changes.length ? { ...fields, qualificationAvailable: true } : {}),
+    },
   })
   if (reactivate) {
-    await addEvent(tx, { accountId: account.id, kind: 'REACTIVATED', actorStaffId: null, data: { entryId: entry.id, via: LANDING } })
+    await addEvent(tx, { accountId, kind: 'REACTIVATED', actorStaffId: null, data: { entryId: entry.id, via: LANDING } })
   }
-  if (customer) {
-    // A customer's account is theirs: what they type in the form does not overwrite it.
-    await customerNote(tx, account.id, entry.id)
-  } else {
-    const changes = qualificationChanges(current, form.qualification)
-    if (changes.length) {
-      const data: Prisma.CrmAccountUpdateInput = { qualificationAvailable: true }
-      for (const { field, to } of changes) Object.assign(data, { [field]: to })
-      await tx.crmAccount.update({ where: { id: account.id }, data })
-      await addEvent(tx, { accountId: account.id, kind: 'FIELD_CHANGE', actorStaffId: null, data: { entryId: entry.id, changes } })
-    }
+  if (customer) await customerNote(tx, accountId, entry.id)
+  else if (changes.length) {
+    await addEvent(tx, { accountId, kind: 'FIELD_CHANGE', actorStaffId: null, data: { entryId: entry.id, changes } })
   }
-  if (!current.organizationId && organizationId) await linkTx(tx, account.id, organizationId)
-  // Back from the archive, it is a prospect again for the team — a customer is not (rulings 23 and 27).
-  return { accountId: account.id, notice: reactivate && !customer ? 'RETURNED' : null }
+  if (!state.organizationId && organizationId) await linkTx(tx, accountId, organizationId)
+  return { accountId, notice, ...(content ? { content } : {}) }
+}
+
+/**
+ * Sends an applied entry's notice — the same keys and the content its ENTRY_APPLIED fixed — and writes down how it went
+ * (ruling 49): `noticeSentAt` only when it reached everyone; otherwise one more try, and the sweep retries it (up to 5,
+ * within the 24 h of the entry). Never throws.
+ */
+export async function announceEntry(entryId: string, applied: AppliedEntry): Promise<void> {
+  if (!applied.notice) return
+  const sent =
+    applied.notice === 'NEW'
+      ? await notifyNewProspect(applied.accountId, applied.content)
+      : await notifyReturningProspect(applied.accountId, entryId, applied.content)
+  try {
+    await prisma.crmInboundEntry.updateMany({
+      where: { id: entryId, noticeSentAt: null },
+      data: sent ? { noticeSentAt: new Date() } : { noticeAttempts: { increment: 1 } },
+    })
+  } catch (error) {
+    logger.error('[CRM] How the entry’s notice went could not be written; the sweep may send it again (same keys)', {
+      entryId,
+      sent,
+      error: errorText(error),
+    })
+  }
 }
 
 /**
@@ -448,6 +591,10 @@ async function applyTx(
  * In every other case, failed signups included, only the Organization the person OWNS (never the primary membership
  * the signup returns, of any role); if it already has a CRM account, of any source, the entry goes to THAT account.
  * Without one, the account stays unlinked and the sweep links it when an Organization appears.
+ *
+ * The person (ruling 48): an account of another source — WhatsApp, HubSpot, by hand — that already has this email or
+ * phone takes the entry as a return (touch, reactivation, link, qualification), never a second account.
+ * The qualification (ruling 50) is the newest form's: an older entry the sweep repairs late overwrites nothing.
  *
  * With no account to apply to, one is created — «Sin dueño», in the first stage, with its primary person — and
  * announced to the team (`notifyNewProspect`), unless it is a customer's. Never throws: a failure stays on the entry
@@ -465,6 +612,7 @@ export async function applyEntry(entryId: string): Promise<void> {
         signupOutcome: true,
         signupResolvedAt: true,
         appliedAt: true,
+        noticeSentAt: true,
       },
     })
     if (!entry || entry.appliedAt) return
@@ -494,9 +642,9 @@ export async function applyEntry(entryId: string): Promise<void> {
       })
     } finally {
       // Announced even if the mark fails; and a re-run announces again what its first run created or brought back
-      // (ruling 26) — the same email keys, so the team gets each notice once.
-      if (applied.notice === 'NEW') await notifyNewProspect(applied.accountId)
-      if (applied.notice === 'RETURNED') await notifyReturningProspect(applied.accountId, entry.id)
+      // (ruling 26), unless that run's notice already reached everyone — the same email keys, so the team gets each
+      // notice once.
+      if (!entry.noticeSentAt) await announceEntry(entry.id, applied)
     }
   } catch (error) {
     const message = errorText(error)

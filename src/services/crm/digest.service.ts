@@ -182,20 +182,21 @@ Política de Privacidad: https://avoqado.io/privacy
 }
 
 /**
- * The notice: the business and how it qualified, and the way to the CRM. Never its phone or email — those stay in the
- * CRM (spec §5.10).
+ * What a notice says about the business: its name and how it qualified — never its phone or email, those stay in the CRM
+ * (spec §5.10). The landing fixes it when it applies the entry and keeps it in the entry's ENTRY_APPLIED (ruling 49): a
+ * retry sends exactly that, because Resend refuses a key reused with other content.
  */
-function prospectEmail(
-  account: {
-    name: string
-    giro: string | null
-    ventasRango: string | null
-    sucursales: number | null
-    modulos: string[]
-    qualificationAvailable?: boolean
-  },
-  notice: Notice,
-) {
+export interface NoticeContent {
+  name: string
+  giro: string | null
+  ventasRango: string | null
+  sucursales: number | null
+  modulos: string[]
+  qualificationAvailable?: boolean
+}
+
+/** The notice: the business and how it qualified, and the way to the CRM. */
+function prospectEmail(account: NoticeContent, notice: Notice) {
   const { title, nota } = NOTICES[notice]
   const name = account.name.replace(/\s+/g, ' ').trim()
   // «<title>: » plus the name stays under the 60 characters of the email standard.
@@ -218,23 +219,36 @@ function prospectEmail(
 /**
  * One notice to every person with «Editar», one email per person: Resend takes one recipient per call and refuses an
  * idempotency key reused with other content, so the key names the account AND the person — a retry or the sweep never
- * repeats it, and each seller gets theirs. Never throws: a notice that does not go out is logged.
+ * repeats it, and each seller gets theirs. With `content`, that is what goes out (a retry repeats the first send); without
+ * it, the account as it is now.
+ *
+ * Never throws. True when every email went out — or there was nothing to send: the account is gone, or nobody holds
+ * «Editar» —; false when one did not go out (logged), so the landing counts a try and the sweep retries (ruling 49).
  */
-async function notifyTeam(accountId: string, notice: Notice, keyFor: (staffId: string) => string): Promise<void> {
+async function notifyTeam(
+  accountId: string,
+  notice: Notice,
+  keyFor: (staffId: string) => string,
+  content?: NoticeContent,
+): Promise<boolean> {
   try {
-    const account = await prisma.crmAccount.findUnique({
-      where: { id: accountId },
-      select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true, qualificationAvailable: true },
-    })
-    if (!account) return
+    const account =
+      content ??
+      (await prisma.crmAccount.findUnique({
+        where: { id: accountId },
+        select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true, qualificationAvailable: true },
+      }))
+    if (!account) return true
     const recipients = await team('editar')
-    if (!recipients.length) return
+    if (!recipients.length) return true
     const email = prospectEmail(account, notice)
     const results = await Promise.allSettled(
       recipients.map(person => emailService.sendEmailWithResult({ ...email, to: person.email, idempotencyKey: keyFor(person.id) })),
     )
+    let all = true
     results.forEach((result, index) => {
       if (result.status === 'fulfilled' && result.value.ok) return
+      all = false
       logger.warn('[CRM] A prospect notice did not go out', {
         accountId,
         notice,
@@ -242,23 +256,25 @@ async function notifyTeam(accountId: string, notice: Notice, keyFor: (staffId: s
         error: result.status === 'rejected' ? errorText(result.reason) : (result.value.errorCode ?? 'not sent'),
       })
     })
+    return all
   } catch (error) {
     logger.error('[CRM] The prospect notice could not be sent', { accountId, notice, error: errorText(error) })
+    return false
   }
 }
 
-/** «Nuevo prospecto: <negocio>», keyed `crm-nuevo:<account>:<person>`. Never throws. */
-export async function notifyNewProspect(accountId: string): Promise<void> {
-  await notifyTeam(accountId, 'NEW', staffId => `crm-nuevo:${accountId}:${staffId}`)
+/** «Nuevo prospecto: <negocio>», keyed `crm-nuevo:<account>:<person>`. Never throws; true when it reached everyone. */
+export async function notifyNewProspect(accountId: string, content?: NoticeContent): Promise<boolean> {
+  return notifyTeam(accountId, 'NEW', staffId => `crm-nuevo:${accountId}:${staffId}`, content)
 }
 
 /**
  * «Volvió un prospecto: <negocio>»: an archived account that an entry of the landing brought back (ruling 31). Its own key,
  * `crm-volvio:<account>:<entry>:<person>` — the «nuevo» one may already have gone out with other content, and an account
- * can come back more than once. Never throws.
+ * can come back more than once. Never throws; true when it reached everyone.
  */
-export async function notifyReturningProspect(accountId: string, entryId: string): Promise<void> {
-  await notifyTeam(accountId, 'RETURNED', staffId => `crm-volvio:${accountId}:${entryId}:${staffId}`)
+export async function notifyReturningProspect(accountId: string, entryId: string, content?: NoticeContent): Promise<boolean> {
+  return notifyTeam(accountId, 'RETURNED', staffId => `crm-volvio:${accountId}:${entryId}:${staffId}`, content)
 }
 
 // ── The daily digest (task 7, spec §5.4, ruling 32) ───────────────────────────────────────────────────────────────────

@@ -12,18 +12,19 @@ import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
 import logger from '@/config/logger'
-import { notifyNewProspect } from '@/services/crm/digest.service'
+import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
 import { applyEntry } from '@/services/crm/inbound.service'
 import {
   applyPending,
   backfillFromOnboarding,
   fillFirstMoney,
   linkLandingAccounts,
+  resendPendingNotices,
   resetSweepCursors,
   runSweep,
 } from '@/services/crm/sweep.service'
 
-jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn() }))
+jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn(), notifyReturningProspect: jest.fn() }))
 
 type Row = Record<string, any>
 
@@ -82,12 +83,6 @@ function ordered(rows: Row[], orderBy: Row[] = []): Row[] {
   })
 }
 
-/** A venue against `{ ...scalars, payments: { some } }`. */
-function venueMatches(venue: Row | undefined, { payments, ...scalars }: Row = {}): boolean {
-  if (!venue || !matches(venue, scalars)) return false
-  return !payments || world.payments.some(payment => payment.venueId === venue.id && matches(payment, payments.some))
-}
-
 /** What a Staff `select: { organizations: <args> }` returns, reading the args the service really passes. */
 function ownedBy(staff: Row, args: Row) {
   return ordered(
@@ -110,6 +105,8 @@ function ownedBy(staff: Row, args: Row) {
  */
 function installSweepWorld() {
   world = { staff: [], organizations: [], venues: [], payments: [], logs: [] }
+  // The landing's lookup by person (ruling 48) is the inbound fake's: kept before the reset below.
+  const byPerson = prismaMock.crmAccount.findMany.getMockImplementation()
   const delegates = [
     prismaMock.crmInboundEntry.findMany,
     prismaMock.crmInboundEntry.groupBy,
@@ -135,19 +132,16 @@ function installSweepWorld() {
   prismaMock.crmInboundEntry.groupBy.mockImplementation(async ({ by: [field], where }: Row) =>
     [...new Set(db.entries.filter(entry => matches(entry, where)).map(entry => entry[field]))].map(value => ({ [field]: value })),
   )
-  prismaMock.crmAccount.findMany.mockImplementation(async ({ where: { organization, ...scalars }, orderBy, take }: Row) =>
-    ordered(
-      db.accounts.filter(account => {
-        if (!matches(account, scalars)) return false
-        if (!organization) return true
-        const venues = organization.is.venues.some
-        return world.venues.some(venue => venue.organizationId === account.organizationId && venueMatches(venue, venues))
-      }),
+  prismaMock.crmAccount.findMany.mockImplementation(async (args: Row) => {
+    if (args.where?.contacts) return byPerson!(args)
+    const { where, orderBy, take } = args
+    return ordered(
+      db.accounts.filter(account => matches(account, where)),
       orderBy,
     )
       .slice(0, take)
-      .map(account => ({ ...account })),
-  )
+      .map(account => ({ ...account }))
+  })
   prismaMock.crmAccount.updateMany.mockImplementation(async ({ where, data }: Row) => {
     const rows = db.accounts.filter(account => matches(account, where))
     rows.forEach(row => Object.assign(row, data))
@@ -177,14 +171,18 @@ function installSweepWorld() {
         return { ...organization, crmAccount: holder ? { id: holder.id } : null }
       }),
   )
-  // The raw SQL on these paths: the marks, the oldest charge of each venue and an account's row lock.
+  // The raw SQL on these paths: the marks, the accounts still without first money, the oldest charge of each venue, the
+  // notices to retry, an entry's lock and an account's row lock.
   prismaMock.$queryRaw.mockImplementation(async (first: Prisma.Sql | TemplateStringsArray, ...values: unknown[]) => {
     if (isSql(first)) {
       if (first.sql.includes('"ActivityLog"')) return marksRead(first)
+      if (first.sql.includes('FROM "CrmAccount" a')) return firstMoneyCandidatesRead(first)
       if (first.sql.includes('"Payment"')) return oldestChargesRead(first)
+      if (first.sql.includes('"CrmInboundEntry"')) return pendingNoticesRead(first)
       throw new Error(`The sweep fake does not know: ${first.sql}`)
     }
     const sql = first.join('?')
+    if (sql.includes('pg_advisory_xact_lock')) return [{ pg_advisory_xact_lock: '' }]
     if (!sql.includes('"CrmAccount"') || !sql.includes('FOR UPDATE')) throw new Error(`The sweep fake does not know: ${sql}`)
     const account = db.accounts.find(row => row.id === values[0])
     return account ? [{ id: account.id, organizationId: account.organizationId ?? null }] : []
@@ -252,6 +250,68 @@ function oldestChargesRead(query: Prisma.Sql) {
       const [oldest] = ordered(charges, [{ createdAt: 'asc' }])
       return oldest ? [{ venueId: venue.id, organizationId: venue.organizationId, createdAt: oldest.createdAt }] : []
     })
+}
+
+/**
+ * The linked accounts still without first money whose Organization has a REAL venue (a bound status, no demo date) with a
+ * real charge, in (createdAt, id) order, up to the LIMIT (the last bind).
+ */
+function firstMoneyCandidatesRead(query: Prisma.Sql) {
+  expectSql(query, [
+    'a."firstMoneyAt" IS NULL AND a."organizationId" IS NOT NULL',
+    'EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = a."organizationId"',
+    'v."demoExpiresAt" IS NULL',
+    `EXISTS (SELECT 1 FROM "Payment" p WHERE p."venueId" = v."id" AND p."status" = 'COMPLETED' AND p."amount" > 0)`,
+    'ORDER BY a."createdAt" ASC, a."id" ASC',
+    'LIMIT',
+  ])
+  const limit = query.values.at(-1) as number
+  const statuses = new Set(query.values.slice(0, -1))
+  const charged = (organizationId: string) =>
+    world.venues.some(
+      venue =>
+        venue.organizationId === organizationId &&
+        statuses.has(venue.status) &&
+        (venue.demoExpiresAt ?? null) === null &&
+        world.payments.some(payment => payment.venueId === venue.id && payment.status === 'COMPLETED' && payment.amount > 0),
+    )
+  return ordered(
+    db.accounts.filter(account => (account.firstMoneyAt ?? null) === null && account.organizationId && charged(account.organizationId)),
+    [{ createdAt: 'asc' }, { id: 'asc' }],
+  )
+    .slice(0, limit)
+    .map(account => ({ id: account.id, organizationId: account.organizationId, createdAt: account.createdAt }))
+}
+
+/** The applied entries whose notice is still pending — as their ENTRY_APPLIED says — of the last 24 h, oldest first. */
+function pendingNoticesRead(query: Prisma.Sql) {
+  expectSql(query, [
+    'JOIN "CrmTimelineEvent" t ON t."sourceKey" = \'entry:\' || e."id"',
+    'e."noticeSentAt" IS NULL AND e."appliedAt" IS NOT NULL',
+    'e."noticeAttempts" <',
+    `e."receivedAt" >= (`,
+    "AT TIME ZONE 'UTC')",
+    `t."kind" = 'ENTRY_APPLIED'`,
+    `COALESCE(t."data"->>'signup', '') <> 'CUSTOMER'`,
+    `((t."data"->>'created') = 'true' OR (t."data"->>'reactivated') = 'true')`,
+    'ORDER BY e."receivedAt" ASC, e."id" ASC',
+    'LIMIT',
+  ])
+  const [maxAttempts, since] = query.values as [number, Date]
+  const limit = query.values.at(-1) as number
+  return ordered(
+    db.entries.filter(
+      entry =>
+        (entry.noticeSentAt ?? null) === null && entry.appliedAt && (entry.noticeAttempts ?? 0) < maxAttempts && entry.receivedAt >= since,
+    ),
+    [{ receivedAt: 'asc' }, { id: 'asc' }],
+  )
+    .flatMap(entry => {
+      const event = db.events.find(row => row.sourceKey === `entry:${entry.id}` && row.kind === 'ENTRY_APPLIED')
+      if (!event || event.data.signup === 'CUSTOMER' || !(event.data.created === true || event.data.reactivated === true)) return []
+      return [{ id: entry.id, accountId: event.accountId, data: event.data }]
+    })
+    .slice(0, limit)
 }
 
 /** The raw reads the code sent, as `Prisma.Sql`. */
@@ -372,7 +432,8 @@ beforeEach(() => {
   db = installCrmInboundFake(prismaMock)
   installSweepWorld()
   resetSweepCursors()
-  ;(notifyNewProspect as jest.Mock).mockResolvedValue(undefined)
+  ;(notifyNewProspect as jest.Mock).mockReset().mockResolvedValue(undefined)
+  ;(notifyReturningProspect as jest.Mock).mockReset().mockResolvedValue(undefined)
 })
 
 describe('applyPending', () => {
@@ -858,7 +919,8 @@ describe('fillFirstMoney', () => {
     await expect(fillFirstMoney()).resolves.toBe(1)
 
     expect(prismaMock.payment.groupBy).not.toHaveBeenCalled()
-    const [read] = rawReads('Payment')
+    // The candidates' EXISTS names "Payment" too (ruling 51): this is the LATERAL read.
+    const read = rawReads('Payment').find(query => query.sql.includes('LATERAL'))!
     expect(read.sql).toMatch(
       /CROSS JOIN LATERAL \(\s*SELECT p\."createdAt" FROM "Payment" p[\s\S]*ORDER BY p\."createdAt" ASC\s+LIMIT 1\s*\)/,
     )
@@ -882,6 +944,108 @@ describe('fillFirstMoney', () => {
     seedPayment(venue.id, { createdAt: paidAt })
     await expect(fillFirstMoney()).resolves.toBe(1)
     expect(accountOf(account.id)?.firstMoneyAt).toEqual(paidAt)
+  })
+})
+
+describe('fillFirstMoney reads its candidates with a correlated EXISTS (ruling 51)', () => {
+  it('never a `payments.some` inside an OR: one EXISTS per venue on Payment(venueId, status, createdAt), and the partial index literals', async () => {
+    seedAccount({ organizationId: ORG })
+    seedPayment(seedVenue().id)
+
+    await expect(fillFirstMoney()).resolves.toBe(1)
+
+    const [candidates] = rawReads('CrmAccount')
+    // The two conditions of `CrmAccount_first_money_pending_idx`, as literals: any plan can prove the predicate.
+    expect(candidates.sql).toContain('a."firstMoneyAt" IS NULL AND a."organizationId" IS NOT NULL')
+    expect(candidates.sql).not.toMatch(/IN \(\s*SELECT/i)
+    expect(candidates.values.some(value => value instanceof Date)).toBe(false)
+    // The Prisma relation filter that turned into a hashed subplan over every payment is gone.
+    expect(prismaMock.crmAccount.findMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ firstMoneyAt: null }) }),
+    )
+  })
+})
+
+describe('resendPendingNotices (ruling 49)', () => {
+  const HOUR = 60 * MINUTE
+  const CONTENT = {
+    name: 'Café Ana',
+    giro: 'Cafetería',
+    ventasRango: '500k-1m',
+    sucursales: 3,
+    modulos: ['mesas'],
+    qualificationAvailable: true,
+  }
+
+  /** An entry applied by the landing whose notice did not reach everyone. */
+  function pendingNotice(over: Row = {}, applied: Row = { signup: 'NEW_SIGNUP', created: true, noticeContent: CONTENT }) {
+    const account = seedAccount({ id: cuid('acctntc', db.accounts.length + 1) })
+    const entry = seedEntry({
+      appliedAt: new Date(Date.now() - HOUR),
+      accountId: account.id,
+      lastError: null,
+      receivedAt: new Date(Date.now() - HOUR),
+      noticeSentAt: null,
+      noticeAttempts: 1,
+      ...over,
+    })
+    db.events.push({
+      accountId: account.id,
+      kind: 'ENTRY_APPLIED',
+      actorStaffId: null,
+      sourceKey: `entry:${entry.id}`,
+      data: { entryId: entry.id, ...applied },
+    })
+    return { account, entry }
+  }
+
+  it('aviso_pendiente_se_reintenta_con_la_misma_llave_y_el_mismo_contenido', async () => {
+    const { account, entry } = pendingNotice()
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(true)
+
+    await expect(resendPendingNotices()).resolves.toBe(1)
+
+    // The content its ENTRY_APPLIED fixed, never the account as it is now — Resend refuses a key with other content.
+    expect(notifyNewProspect).toHaveBeenCalledWith(account.id, CONTENT)
+    expect(db.entries[0]).toMatchObject({ id: entry.id, noticeSentAt: expect.any(Date) })
+
+    // Sent: the next sweep has nothing to retry.
+    await expect(resendPendingNotices()).resolves.toBe(0)
+    expect(notifyNewProspect).toHaveBeenCalledTimes(1)
+  })
+
+  it('«Volvió» is retried under its own key, with its entry', async () => {
+    const { account, entry } = pendingNotice({}, { signup: 'EXISTING_ACCOUNT', created: false, reactivated: true, noticeContent: CONTENT })
+    ;(notifyReturningProspect as jest.Mock).mockResolvedValue(true)
+
+    await resendPendingNotices()
+
+    expect(notifyReturningProspect).toHaveBeenCalledWith(account.id, entry.id, CONTENT)
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it('a failing retry counts, stops at 5 tries, and never after the 24 h of the entry (Resend’s idempotency window)', async () => {
+    pendingNotice({ noticeAttempts: 4 })
+    pendingNotice({ externalKey: 'vieja@cafe.mx', receivedAt: new Date(Date.now() - 25 * HOUR), noticeAttempts: 1 })
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(false)
+
+    await expect(resendPendingNotices()).resolves.toBe(1)
+    expect(db.entries[0]).toMatchObject({ noticeSentAt: null, noticeAttempts: 5 })
+
+    await expect(resendPendingNotices()).resolves.toBe(0)
+    expect(notifyNewProspect).toHaveBeenCalledTimes(1)
+    const [read] = rawReads('CrmInboundEntry')
+    expect(read.values[0]).toBe(5)
+  })
+
+  it('an entry with nothing to announce is never retried: a customer, or a return that brought nothing back', async () => {
+    pendingNotice({}, { signup: 'CUSTOMER', created: true })
+    pendingNotice({ externalKey: 'otra@cafe.mx' }, { signup: 'EXISTING_ACCOUNT', created: false })
+
+    await expect(resendPendingNotices()).resolves.toBe(0)
+
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+    expect(notifyReturningProspect).not.toHaveBeenCalled()
   })
 })
 
@@ -946,7 +1110,8 @@ describe('todo_con_tope_de_lote', () => {
           seedPayment(seedVenue({ organizationId }).id)
         }),
       run: fillFirstMoney,
-      limit: () => lastTake(prismaMock.crmAccount.findMany, args => args.where.firstMoneyAt === null),
+      // A raw read now (ruling 51): its LIMIT is the last bind.
+      limit: () => rawReads('CrmAccount').at(-1)?.values.at(-1),
       done: () => db.accounts.filter(account => account.firstMoneyAt).length,
     },
   ])('$pass reads one batch per pass, and the next pass goes on with the rest', async ({ seed, run, limit, done }) => {
