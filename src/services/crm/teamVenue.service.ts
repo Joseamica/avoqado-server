@@ -138,6 +138,36 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
 }
 
 /**
+ * The ficha's owner selector (ruling 13): every active member who can own accounts — holds «Ver negocios» and has a
+ * working Avoqado account — by name. Only for whoever can reassign («Editar: todos» or admin); anyone else gets `[]`, so a
+ * «propios» seller does not even learn the names of the team.
+ *
+ * ponytail: one page of 100 members; a team that grows past it needs a search box instead of a selector.
+ */
+export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId: string; name: string }>> {
+  if (!(actor.admin || actor.editar === 'todos')) return []
+  const rows = await prisma.platformAccess.findMany({
+    where: { active: true, verScope: { in: ['propios', 'todos'] } },
+    select: { staffId: true, email: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: MAX_PAGE_SIZE,
+  })
+  if (!rows.length) return []
+  // Like `listTeamMembers`: a claimed row is the person who claimed it; an unclaimed one, whoever holds the email today.
+  const claimed = rows.flatMap(row => (row.staffId ? [row.staffId] : []))
+  const unclaimed = rows.flatMap(row => (row.staffId ? [] : [row.email]))
+  const people = await prisma.staff.findMany({
+    where: { active: true, OR: [{ id: { in: claimed } }, { email: { in: unclaimed } }] },
+    select: { id: true, email: true, firstName: true, lastName: true },
+    take: rows.length,
+  })
+  return rows.flatMap(row => {
+    const person = people.find(candidate => (row.staffId ? candidate.id === row.staffId : candidate.email === row.email))
+    return person ? [{ staffId: person.id, name: `${person.firstName} ${person.lastName}`.trim() }] : []
+  })
+}
+
+/**
  * A Staff by the exact lowercase email: the same rule as login, password reset, Google and invitation acceptance (ruling
  * 16). An account stored with capitals can never log in, so it must not count as "already has an account".
  */

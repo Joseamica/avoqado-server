@@ -50,6 +50,7 @@ jest.mock('@/utils/prismaClient', () => {
     venue: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
     platformAccess: { updateMany: jest.fn() },
     crmAccount: { updateManyAndReturn: jest.fn() },
+    crmActivity: { updateMany: jest.fn() },
     crmTimelineEvent: { createMany: jest.fn() },
   }
   return {
@@ -133,6 +134,7 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
         staffAssignment: mockPrisma.staffAssignment,
         platformAccess: mockPrisma.platformAccess,
         crmAccount: mockPrisma.crmAccount,
+        crmActivity: mockPrisma.crmActivity,
         crmTimelineEvent: mockPrisma.crmTimelineEvent,
         $queryRaw: mockPrisma.$queryRaw,
       }),
@@ -380,6 +382,11 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
       where: { ownerStaffId: TARGET_STAFF_ID, stage: { kind: 'ABIERTA' } },
       data: { ownerStaffId: null },
       select: { id: true },
+    })
+    // Ruling 12: their pending activities on those accounts are left without anyone in charge, like the accounts.
+    expect(mockPrisma.crmActivity.updateMany).toHaveBeenCalledWith({
+      where: { accountId: { in: ['caccounta0000000000000001', 'caccountb0000000000000001'] }, doneAt: null },
+      data: { assigneeStaffId: null },
     })
     expect(mockPrisma.crmTimelineEvent.createMany).toHaveBeenCalledWith({
       data: ['caccounta0000000000000001', 'caccountb0000000000000001'].map(accountId => ({

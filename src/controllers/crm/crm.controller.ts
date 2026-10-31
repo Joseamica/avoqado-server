@@ -1,5 +1,7 @@
 import { Request, Response } from 'express'
-import { addTeamMember, listTeamMembers, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
+import * as accounts from '../../services/crm/accounts.service'
+import { addActivity, completeActivity } from '../../services/crm/activities.service'
+import { addTeamMember, listTeamMembers, listTeamOptions, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
 
 /**
  * GET /api/v1/crm/me — the caller's own CRM keys, so the console shows only the sections they open.
@@ -31,4 +33,119 @@ export async function updateTeam(req: Request, res: Response): Promise<void> {
 /** DELETE /api/v1/crm/team/:id */
 export async function removeTeam(req: Request, res: Response): Promise<void> {
   res.json({ data: await removeTeamMember(req.crmAccess!, req.params.id, { reasignarA: req.body.reasignarA }) })
+}
+
+/** GET /api/v1/crm/team/options — the owner selector of the ficha; `[]` for whoever cannot reassign. */
+export async function teamOptions(req: Request, res: Response): Promise<void> {
+  res.json({ data: await listTeamOptions(req.crmAccess!) })
+}
+
+// The pipeline. Every handler receives the body and query `validateRequest` already parsed, and the caller's keys.
+
+/** GET /api/v1/crm/pending — «Mis pendientes». */
+export async function pending(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.getPending(req.crmAccess!) })
+}
+
+/** GET /api/v1/crm/stages */
+export async function listStages(_req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.listStages() })
+}
+
+/** POST /api/v1/crm/stages */
+export async function createStage(req: Request, res: Response): Promise<void> {
+  res.status(201).json({ data: await accounts.createStage(req.crmAccess!, req.body) })
+}
+
+/** PATCH /api/v1/crm/stages/:id */
+export async function updateStage(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.updateStage(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** GET /api/v1/crm/lost-reasons */
+export async function listLostReasons(_req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.listLostReasons() })
+}
+
+/** POST /api/v1/crm/lost-reasons */
+export async function createLostReason(req: Request, res: Response): Promise<void> {
+  res.status(201).json({ data: await accounts.createLostReason(req.crmAccess!, req.body) })
+}
+
+/** PATCH /api/v1/crm/lost-reasons/:id */
+export async function updateLostReason(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.updateLostReason(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** GET /api/v1/crm/organizations/search?q= */
+export async function searchOrganizations(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.searchOrganizations(req.crmAccess!, String(req.query.q)) })
+}
+
+/** GET /api/v1/crm/accounts */
+export async function listAccounts(req: Request, res: Response): Promise<void> {
+  // `validateRequest(listAccountsSchema)` already turned the flags and the limit into booleans and a number.
+  const { rows, nextCursor, total } = await accounts.listAccounts(req.crmAccess!, req.query as unknown as accounts.AccountFilters)
+  res.json({ data: rows, meta: { total, nextCursor } })
+}
+
+/** POST /api/v1/crm/accounts */
+export async function createAccount(req: Request, res: Response): Promise<void> {
+  const { confirmarOtroNegocio, ...input } = req.body
+  res.status(201).json({ data: await accounts.createManual(req.crmAccess!, input, { confirmarOtroNegocio }) })
+}
+
+/** GET /api/v1/crm/accounts/:id */
+export async function getAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.getAccount(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/accounts/:id/take */
+export async function takeAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.takeAccount(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/accounts/:id/reassign */
+export async function reassignAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.reassign(req.crmAccess!, req.params.id, req.body.staffId) })
+}
+
+/** POST /api/v1/crm/accounts/:id/stage */
+export async function moveStage(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.moveStage(req.crmAccess!, req.params.id, req.body.stageId) })
+}
+
+/** POST /api/v1/crm/accounts/:id/lose */
+export async function loseAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.lose(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** POST /api/v1/crm/accounts/:id/win */
+export async function winAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.win(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** POST /api/v1/crm/accounts/:id/archive */
+export async function archiveAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.archive(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/accounts/:id/reactivate */
+export async function reactivateAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await accounts.reactivate(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/accounts/:id/notes */
+export async function addNote(req: Request, res: Response): Promise<void> {
+  res.status(201).json({ data: await accounts.addNote(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** POST /api/v1/crm/accounts/:id/activities */
+export async function createActivity(req: Request, res: Response): Promise<void> {
+  res.status(201).json({ data: await addActivity(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** POST /api/v1/crm/activities/:id/done */
+export async function markActivityDone(req: Request, res: Response): Promise<void> {
+  res.json({ data: await completeActivity(req.crmAccess!, req.params.id, req.body) })
 }

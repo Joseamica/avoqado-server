@@ -3,6 +3,8 @@
  * rules (which keys go together, who may give which key, who owns what) live in the services.
  */
 import { z } from 'zod'
+import { canonicalPhoneE164 } from '../utils/phone'
+import { EXISTING_ID_REGEX } from './common/existingId.schema'
 
 const scope = z.enum(['propios', 'todos'], { errorMap: () => ({ message: 'El alcance es «propios» o «todos»' }) }).nullable()
 const flag = z.boolean({ required_error: 'Falta una llave', invalid_type_error: 'Cada llave es sí o no' })
@@ -71,4 +73,212 @@ export const removeTeamMemberSchema = z.object({
         .nullish(),
     })
     .default({}),
+})
+
+// ── Accounts, activities and the pipeline (task 4) ────────────────────────────────────────────────────────────────────
+
+/** Where an account came from. Strings validated here, never a Postgres enum (see the comment on the CRM models). */
+export const ACCOUNT_SOURCES = ['LANDING', 'WHATSAPP', 'MANUAL', 'IMPORTACION', 'REFERIDO', 'OTRO'] as const
+/** What a seller can pick when adding one by hand; the rest arrive through their own channel. */
+export const MANUAL_SOURCES = ['MANUAL', 'REFERIDO', 'OTRO'] as const
+export const ACTIVITY_TYPES = ['LLAMADA', 'WHATSAPP', 'CORREO', 'REUNION', 'DEMO', 'TAREA'] as const
+export const SEMAFOROS = ['rojo', 'verde', 'gris', 'amarillo'] as const
+export type Semaforo = (typeof SEMAFOROS)[number]
+
+/** An id of a Staff or an Organization that already exists: not always a cuid (accepted invitations create UUIDs). */
+const existing = (message: string, missing = message) =>
+  z.string({ required_error: missing, invalid_type_error: message }).regex(EXISTING_ID_REGEX, message)
+const text = (max: number, missing: string) =>
+  z.string({ required_error: missing, invalid_type_error: missing }).trim().min(1, missing).max(max, `Máximo ${max} caracteres`)
+const optionalText = (max: number) =>
+  z.string({ invalid_type_error: 'Debe ser texto' }).trim().max(max, `Máximo ${max} caracteres`).optional()
+/** A form's empty field is a field that was not filled. */
+const blankIsAbsent = (value: unknown) => (typeof value === 'string' && value.trim() === '' ? undefined : value)
+const flagQuery = z
+  .enum(['true', 'false'], { errorMap: () => ({ message: 'Usa «true» o «false»' }) })
+  .transform(value => value === 'true')
+  .optional()
+const byId = z.object({ id: cuid })
+
+/** Any route of one account, or of one activity, by its id. */
+export const accountIdSchema = z.object({ params: byId })
+
+/** GET /crm/accounts. The page size has no upper bound here: the service caps it at 100. */
+export const listAccountsSchema = z.object({
+  query: z.object({
+    stageId: cuid.optional(),
+    ownerStaffId: existing('El id del dueño no es válido').optional(),
+    source: z.enum(ACCOUNT_SOURCES, { errorMap: () => ({ message: 'Esa fuente no existe' }) }).optional(),
+    semaforo: z.enum(SEMAFOROS, { errorMap: () => ({ message: 'El semáforo es rojo, verde, gris o amarillo' }) }).optional(),
+    sinDueno: flagQuery,
+    estancados: flagQuery,
+    q: z
+      .string({ invalid_type_error: 'La búsqueda es texto' })
+      .trim()
+      .max(100, 'Máximo 100 caracteres')
+      .optional()
+      .transform(value => value || undefined),
+    cursor: cuid.optional(),
+    limit: z.coerce
+      .number({ invalid_type_error: 'El límite es un número' })
+      .int('El límite es un número entero')
+      .min(1, 'El límite es al menos 1')
+      .optional(),
+  }),
+})
+
+const contactSchema = z.object({
+  name: text(200, 'El nombre de la persona es obligatorio'),
+  phone: z.preprocess(
+    blankIsAbsent,
+    z
+      .string({ invalid_type_error: 'El teléfono no es válido' })
+      .trim()
+      .max(30, 'El teléfono no es válido')
+      .refine(value => canonicalPhoneE164(value) !== null, 'El teléfono no es válido')
+      .optional(),
+  ),
+  email: z.preprocess(
+    blankIsAbsent,
+    z
+      .string({ invalid_type_error: 'El correo no es válido' })
+      .trim()
+      .toLowerCase()
+      .email('El correo no es válido')
+      .max(254, 'El correo es demasiado largo')
+      .optional(),
+  ),
+  role: optionalText(100),
+})
+
+/** POST /crm/accounts — «Nuevo prospecto». `confirmarOtroNegocio` = «sí, es otro negocio» after the duplicates warning. */
+export const createAccountSchema = z.object({
+  body: z.object({
+    name: text(200, 'El nombre del negocio es obligatorio'),
+    giro: optionalText(100),
+    ventasRango: optionalText(60),
+    sucursales: z
+      .number({ invalid_type_error: 'Las sucursales son un número' })
+      .int('Las sucursales son un número entero')
+      .min(0, 'Las sucursales no pueden ser negativas')
+      .max(10000, 'Máximo 10,000 sucursales')
+      .optional(),
+    source: z
+      .enum(MANUAL_SOURCES, { errorMap: () => ({ message: 'A mano, la fuente es «MANUAL», «REFERIDO» u «OTRO»' }) })
+      .default('MANUAL'),
+    referidoPor: optionalText(200),
+    contact: contactSchema.optional(),
+    confirmarOtroNegocio: z.boolean({ invalid_type_error: 'Confirmar es sí o no' }).optional(),
+  }),
+})
+
+/** POST /crm/accounts/:id/reassign. `staffId: null` leaves it «Sin dueño». */
+export const reassignAccountSchema = z.object({
+  params: byId,
+  body: z.object({
+    staffId: existing('El id de la persona no es válido', 'Di a quién se lo pasas, o null para dejarlo sin dueño').nullable(),
+  }),
+})
+
+/** POST /crm/accounts/:id/stage */
+export const moveStageSchema = z.object({
+  params: byId,
+  body: z.object({ stageId: z.string({ required_error: 'Elige la etapa' }).cuid('El id de la etapa no es válido') }),
+})
+
+/** POST /crm/accounts/:id/lose. Without a reason the service answers 422, so the screen says why. */
+export const loseAccountSchema = z.object({
+  params: byId,
+  body: z.object({ lostReasonId: cuid.optional(), note: optionalText(1000) }),
+})
+
+/** POST /crm/accounts/:id/win. Without `organizationId`, the one it is already linked to (it came from the landing). */
+export const winAccountSchema = z.object({
+  params: byId,
+  body: z.object({ organizationId: existing('El id de la cuenta de Avoqado no es válido').optional() }).default({}),
+})
+
+/** POST /crm/accounts/:id/notes */
+export const addNoteSchema = z.object({
+  params: byId,
+  body: z.object({ text: text(5000, 'Escribe la nota') }),
+})
+
+/** POST /crm/accounts/:id/activities. `dueAt` is an ISO 8601 instant with its offset (the screen sends UTC). */
+export const addActivitySchema = z.object({
+  params: byId,
+  body: z.object({
+    type: z.enum(ACTIVITY_TYPES, { errorMap: () => ({ message: 'El tipo es llamada, WhatsApp, correo, reunión, demo o tarea' }) }),
+    title: text(200, 'Escribe qué hay que hacer'),
+    dueAt: z
+      .string({ required_error: 'Di para cuándo', invalid_type_error: 'La fecha no es válida' })
+      .datetime({ offset: true, message: 'La fecha no es válida' })
+      .transform(value => new Date(value)),
+  }),
+})
+
+/** POST /crm/activities/:id/done */
+export const completeActivitySchema = z.object({
+  params: byId,
+  body: z.object({ result: optionalText(1000) }).default({}),
+})
+
+/** GET /crm/organizations/search?q= — what «Ganar» links to. */
+export const searchOrganizationsSchema = z.object({
+  query: z.object({
+    q: z
+      .string({ required_error: 'Escribe al menos 3 letras', invalid_type_error: 'Escribe al menos 3 letras' })
+      .trim()
+      .min(3, 'Escribe al menos 3 letras')
+      .max(100, 'Máximo 100 caracteres'),
+  }),
+})
+
+// Stages and lost reasons (`crm:admin`). The kind of a stage never changes, and a new one is always an open stage: there
+// is one «Ganado» and one «Perdido». Nothing is deleted in phase 1 — a stage is renamed, a reason is turned off.
+const stageName = text(60, 'El nombre de la etapa es obligatorio')
+const stageOrder = z
+  .number({ required_error: 'Falta el orden', invalid_type_error: 'El orden es un número' })
+  .int('El orden es un número entero')
+  .min(0, 'El orden empieza en 0')
+  .max(1000, 'Máximo 1000')
+const staleDays = z
+  .number({ invalid_type_error: 'Los días son un número' })
+  .int('Los días son un número entero')
+  .min(1, 'Al menos 1 día')
+  .max(365, 'Máximo 365 días')
+  .nullable()
+const somethingToChange = (body: object) => Object.keys(body).length > 0
+
+/** POST /crm/stages */
+export const createStageSchema = z.object({
+  body: z
+    .object({ name: stageName, order: stageOrder, staleDays: staleDays.optional() })
+    .strict({ message: 'Una etapa nueva siempre es abierta: lleva nombre, orden y días para «estancado»' }),
+})
+
+/** PATCH /crm/stages/:id */
+export const updateStageSchema = z.object({
+  params: byId,
+  body: z
+    .object({ name: stageName.optional(), order: stageOrder.optional(), staleDays: staleDays.optional() })
+    .strict({ message: 'Sólo se cambian el nombre, el orden y los días para «estancado»' })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+/** POST /crm/lost-reasons */
+export const createLostReasonSchema = z.object({
+  body: z.object({ name: text(100, 'El motivo es obligatorio') }).strict({ message: 'Un motivo nuevo sólo lleva su nombre' }),
+})
+
+/** PATCH /crm/lost-reasons/:id */
+export const updateLostReasonSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      name: text(100, 'El motivo es obligatorio').optional(),
+      active: z.boolean({ invalid_type_error: 'Activo es sí o no' }).optional(),
+    })
+    .strict({ message: 'Sólo se cambian el nombre y si está activo' })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
 })

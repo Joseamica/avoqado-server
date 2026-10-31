@@ -23,7 +23,14 @@ import * as teamDashboard from '@/services/dashboard/team.dashboard.service'
 import { getVenueSeatCap } from '@/services/access/seatCap.service'
 import { addTeamMemberSchema, removeTeamMemberSchema } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { addTeamMember, ensureCrmTeamVenue, listTeamMembers, removeTeamMember, updateTeamMember } from '@/services/crm/teamVenue.service'
+import {
+  addTeamMember,
+  ensureCrmTeamVenue,
+  listTeamMembers,
+  listTeamOptions,
+  removeTeamMember,
+  updateTeamMember,
+} from '@/services/crm/teamVenue.service'
 
 const ORG_ID = 'corgteam00000000000000001'
 const VENUE_ID = 'cvenuecrm0000000000000001'
@@ -585,6 +592,7 @@ describe('removeTeamMember', () => {
       staffVenue: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       staffOrganization: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       crmAccount: { updateManyAndReturn: jest.fn().mockResolvedValue(moved) },
+      crmActivity: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       crmTimelineEvent: { createMany: jest.fn().mockResolvedValue({ count: moved.length }) },
     }
   }
@@ -610,6 +618,11 @@ describe('removeTeamMember', () => {
       data: { ownerStaffId: OTHER_ID },
       select: { id: true },
     })
+    // Ruling 12: their pending activities on those accounts go with them, so the new owner's «Mis pendientes» sees them.
+    expect(tx.crmActivity.updateMany).toHaveBeenCalledWith({
+      where: { accountId: { in: [ACCOUNT_A, ACCOUNT_B] }, doneAt: null },
+      data: { assigneeStaffId: OTHER_ID },
+    })
     expect(tx.crmTimelineEvent.createMany).toHaveBeenCalledWith({
       data: [ACCOUNT_A, ACCOUNT_B].map(accountId => ({
         accountId,
@@ -623,6 +636,7 @@ describe('removeTeamMember', () => {
       prismaMock.platformAccess.update,
       prismaMock.staffVenue.updateMany,
       prismaMock.crmAccount.updateManyAndReturn,
+      prismaMock.crmActivity.updateMany,
       prismaMock.crmTimelineEvent.createMany,
     ]) {
       expect(write).not.toHaveBeenCalled()
@@ -690,6 +704,11 @@ describe('removeTeamMember', () => {
     await expect(removeTeamMember(actor(), ROW_ID, {})).resolves.toEqual({ id: ROW_ID, released: 1 })
 
     expect(tx.crmAccount.updateManyAndReturn).toHaveBeenCalledWith(expect.objectContaining({ data: { ownerStaffId: null } }))
+    // Left without anyone in charge, like their account: they show in its ficha and in the admins' daily digest.
+    expect(tx.crmActivity.updateMany).toHaveBeenCalledWith({
+      where: { accountId: { in: [ACCOUNT_A] }, doneAt: null },
+      data: { assigneeStaffId: null },
+    })
     expect(tx.crmTimelineEvent.createMany).toHaveBeenCalledWith({
       data: [
         {
@@ -778,5 +797,46 @@ describe('listTeamMembers', () => {
     // Two queries for the whole page, never one per member.
     expect(prismaMock.staff.findMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.crmAccount.groupBy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('listTeamOptions', () => {
+  it('opciones_del_equipo_solo_para_quien_reasigna', async () => {
+    // Ruling 13: a seller who edits only their own accounts cannot reassign, so they do not even get the names.
+    await expect(listTeamOptions(actor({ editar: 'propios', admin: false }))).resolves.toEqual([])
+    expect(prismaMock.platformAccess.findMany).not.toHaveBeenCalled()
+
+    // Whoever can reassign gets every active member who can own accounts (holds «Ver negocios»), with an account.
+    prismaMock.platformAccess.findMany.mockResolvedValue([
+      { staffId: SELLER_ID, email: 'carla@avoqado.io' },
+      // Not claimed yet: whoever holds the email today, the one who will claim it.
+      { staffId: null, email: 'beto@avoqado.io' },
+      // Invited and never accepted: nobody to give an account to yet.
+      { staffId: null, email: 'nadie@avoqado.io' },
+    ])
+    prismaMock.staff.findMany.mockResolvedValue([
+      { id: SELLER_ID, email: 'carla@avoqado.io', firstName: 'Carla', lastName: 'Ruiz' },
+      { id: OTHER_ID, email: 'beto@avoqado.io', firstName: 'Beto', lastName: 'Díaz' },
+    ])
+
+    await expect(listTeamOptions(actor({ editar: 'todos', admin: false }))).resolves.toEqual([
+      { staffId: SELLER_ID, name: 'Carla Ruiz' },
+      { staffId: OTHER_ID, name: 'Beto Díaz' },
+    ])
+    expect(prismaMock.platformAccess.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { active: true, verScope: { in: ['propios', 'todos'] } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 100,
+      }),
+    )
+    expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { active: true, OR: [{ id: { in: [SELLER_ID] } }, { email: { in: ['beto@avoqado.io', 'nadie@avoqado.io'] } }] },
+      }),
+    )
+
+    // An admin without «Editar: todos» reassigns from «Equipo de ventas» too.
+    await expect(listTeamOptions(actor({ editar: null, ver: null, admin: true }))).resolves.toHaveLength(2)
   })
 })
