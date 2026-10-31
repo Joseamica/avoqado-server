@@ -142,10 +142,10 @@ describe('escritores de la familia con tx (bloque 5, Tarea 2)', () => {
     const dup = await prisma.$transaction(tx =>
       checkVariantRowsAgainstDb(tx, ctx, [
         { values: ['L'], price: 100, sku: `DUP-${t()}` },
-        { values: ['XL'], price: 100, sku: 'MAL SKU' },
+        { values: ['XL'], price: 100, sku: 'MAL/SKU' },
       ]),
     )
-    expect(dup).toEqual([null, 'El SKU «MAL SKU» sólo puede llevar letras, números, guion y guion bajo.'])
+    expect(dup).toEqual([null, 'El SKU «MAL/SKU» sólo puede llevar letras sin acento, números, espacios, puntos, guion y guion bajo.'])
   })
 
   it('checkVariantRowsAgainstDb: un SKU repetido entre filas, y un código repetido entre filas que además ya es de otro producto', async () => {
