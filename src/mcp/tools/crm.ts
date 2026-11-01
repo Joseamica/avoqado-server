@@ -122,6 +122,9 @@ interface WhatsappInput {
   ultimoMensajeAt?: Date
 }
 
+/** The transaction found another business than the one the ambiguity check verified (Codex autorización H3). */
+class ChangedMeanwhile extends Error {}
+
 type Upsert =
   | { ok: true; accountId: string; creado: boolean; yaExistia: boolean; reactivado: boolean; notaNueva: boolean; actualizados: Llenable[] }
   | { ok: false; error: string; candidatos: Awaited<ReturnType<typeof findDuplicates>> }
@@ -163,103 +166,116 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
   const learnedAt = input.ultimoMensajeAt && input.ultimoMensajeAt < now ? input.ultimoMensajeAt : now
 
   // Resolve, don't guess (the MCP's rule for writes, ruling 46): without its own WhatsApp business, a phone that is in
-  // two or more businesses comes back with its candidates.
+  // two or more businesses comes back with its candidates. What this check saw is what the transaction must find.
   const own = await prisma.crmAccount.findUnique({
     where: { source_externalKey: { source: WHATSAPP, externalKey: input.phone } },
     select: { id: true },
   })
+  let verified: string | null = null
   if (!own) {
     const matches = await findDuplicates(access, { phone: input.phone })
     const ids = matches.flatMap(match => ('id' in match ? [match.id] : []))
     if (matches.length > 1 || ids.length !== matches.length) {
       return { ok: false, error: 'Ese teléfono está en varios negocios del CRM: elige uno y agrégale la nota.', candidatos: matches }
     }
+    verified = ids[0] ?? null
   }
   const stageId = (await getInitialStage()).id
 
-  return prisma.$transaction(async (tx): Promise<Upsert> => {
-    // The person's business by the resolver every writer shares (ruling 65 a): the WhatsApp one of this phone or, from any
-    // other source, the one with a person of it — locked. Created only when the CRM has nobody with this phone.
-    const name = input.name || input.phone
-    const { account, created, via } = await accountForTx(
-      tx,
-      { emails: [], phones: [input.phone], organizationId: null },
-      {
-        source: WHATSAPP,
-        externalKey: input.phone,
-        data: {
-          name,
-          giro: input.giro || null,
-          ventasRango: input.ventasRango || null,
-          sourceDetail: input.campaign ? { campaign: input.campaign } : undefined,
-          ownerStaffId: null,
-          stageId,
-          ...(input.giro || input.ventasRango ? { qualifiedAt: learnedAt } : {}),
+  try {
+    return await prisma.$transaction(async (tx): Promise<Upsert> => {
+      // The person's business by the resolver every writer shares (ruling 65 a): the WhatsApp one of this phone or, from any
+      // other source, the one with a person of it — locked. Created only when the CRM has nobody with this phone.
+      const name = input.name || input.phone
+      const { account, created, via } = await accountForTx(
+        tx,
+        { emails: [], phones: [input.phone], organizationId: null },
+        {
+          source: WHATSAPP,
+          externalKey: input.phone,
+          data: {
+            name,
+            giro: input.giro || null,
+            ventasRango: input.ventasRango || null,
+            sourceDetail: input.campaign ? { campaign: input.campaign } : undefined,
+            ownerStaffId: null,
+            stageId,
+            ...(input.giro || input.ventasRango ? { qualifiedAt: learnedAt } : {}),
+          },
+          contact: { name, phoneE164: input.phone, isPrimary: true },
         },
-        contact: { name, phoneE164: input.phone, isPrimary: true },
-      },
-    )
-    if (created) {
-      await addEvent(tx, {
-        accountId: account.id,
-        kind: 'SYSTEM',
-        actorStaffId: access.staffId,
-        sourceKey: keyOf(account.id),
-        data: { event: 'CREATED', source: WHATSAPP, ...extra },
+      )
+      // Its own WhatsApp business (by its key) is never ambiguous; anything else must be what the check verified — the one
+      // business with this phone, or none. Thrown, so a creation rolls back too.
+      if (via !== 'KEY' && (created ? verified !== null : account.id !== verified)) throw new ChangedMeanwhile()
+      if (created) {
+        await addEvent(tx, {
+          accountId: account.id,
+          kind: 'SYSTEM',
+          actorStaffId: access.staffId,
+          sourceKey: keyOf(account.id),
+          data: { event: 'CREATED', source: WHATSAPP, ...extra },
+        })
+        return { ok: true, accountId: account.id, creado: true, yaExistia: false, reactivado: false, notaNueva: false, actualizados: [] }
+      }
+      const accountId = account.id
+      const ownKey = via === 'KEY'
+
+      // Its row lock is the resolver's (two calls on the same business queue there); then the edit scope — everything, for
+      // a SUPERADMIN.
+      const row = await tx.crmAccount.findFirst({
+        where: { AND: [{ id: accountId }, scopeWhere(access, 'editar')] },
+        select: {
+          name: true,
+          giro: true,
+          ventasRango: true,
+          archivedAt: true,
+          lastTouchAt: true,
+          qualifiedAt: true,
+          stage: { select: { kind: true } },
+        },
       })
-      return { ok: true, accountId: account.id, creado: true, yaExistia: false, reactivado: false, notaNueva: false, actualizados: [] }
-    }
-    const accountId = account.id
-    const ownKey = via === 'KEY'
+      if (!row) throw new ForbiddenError('Sólo puedes cambiar tus negocios y los que no tienen dueño', 'CRM_NO_ES_TUYO')
 
-    // Its row lock is the resolver's (two calls on the same business queue there); then the edit scope — everything, for
-    // a SUPERADMIN.
-    const row = await tx.crmAccount.findFirst({
-      where: { AND: [{ id: accountId }, scopeWhere(access, 'editar')] },
-      select: {
-        name: true,
-        giro: true,
-        ventasRango: true,
-        archivedAt: true,
-        lastTouchAt: true,
-        qualifiedAt: true,
-        stage: { select: { kind: true } },
-      },
+      // Ruling 44: the note is the gate of everything a message does.
+      const text = `${VOLVIO}${input.ultimoMensajeAt ? ` el ${fecha(input.ultimoMensajeAt)}` : ''}${input.campaign ? ` (campaña ${input.campaign})` : ''}.`
+      const notaNueva =
+        !(ownKey && !message) &&
+        (await addEvent(tx, {
+          accountId,
+          kind: 'NOTE',
+          actorStaffId: access.staffId,
+          sourceKey: keyOf(accountId),
+          data: { text, via: WHATSAPP, ...extra },
+        }))
+      // Rulings 31/33/36: an archived business comes back — not a lost one, which stays lost.
+      const reactivado = notaNueva && row.archivedAt !== null && row.stage.kind !== 'PERDIDA'
+      const changes = vacios(row, input)
+
+      const data: Prisma.CrmAccountUpdateInput = {}
+      // A touch never moves back (ruling 65 e): another writer may have touched it while this call waited for the lock.
+      if (notaNueva && row.lastTouchAt < now) data.lastTouchAt = now
+      if (reactivado) data.archivedAt = null
+      for (const { field, to } of changes) data[field] = to
+      if (changes.some(({ field }) => field !== 'name')) {
+        data.qualificationAvailable = true
+        if (!row.qualifiedAt || row.qualifiedAt < learnedAt) data.qualifiedAt = learnedAt
+      }
+      if (Object.keys(data).length) await tx.crmAccount.update({ where: { id: accountId }, data })
+      if (reactivado) {
+        await addEvent(tx, { accountId, kind: 'REACTIVATED', actorStaffId: access.staffId, data: { via: WHATSAPP, ...extra } })
+      }
+      // Like the landing's qualification changes: by the system, saying where it came from.
+      if (changes.length) await addEvent(tx, { accountId, kind: 'FIELD_CHANGE', actorStaffId: null, data: { via: WHATSAPP, changes } })
+      return { ok: true, accountId, creado: false, yaExistia: true, reactivado, notaNueva, actualizados: changes.map(({ field }) => field) }
     })
-    if (!row) throw new ForbiddenError('Sólo puedes cambiar tus negocios y los que no tienen dueño', 'CRM_NO_ES_TUYO')
-
-    // Ruling 44: the note is the gate of everything a message does.
-    const text = `${VOLVIO}${input.ultimoMensajeAt ? ` el ${fecha(input.ultimoMensajeAt)}` : ''}${input.campaign ? ` (campaña ${input.campaign})` : ''}.`
-    const notaNueva =
-      !(ownKey && !message) &&
-      (await addEvent(tx, {
-        accountId,
-        kind: 'NOTE',
-        actorStaffId: access.staffId,
-        sourceKey: keyOf(accountId),
-        data: { text, via: WHATSAPP, ...extra },
-      }))
-    // Rulings 31/33/36: an archived business comes back — not a lost one, which stays lost.
-    const reactivado = notaNueva && row.archivedAt !== null && row.stage.kind !== 'PERDIDA'
-    const changes = vacios(row, input)
-
-    const data: Prisma.CrmAccountUpdateInput = {}
-    // A touch never moves back (ruling 65 e): another writer may have touched it while this call waited for the lock.
-    if (notaNueva && row.lastTouchAt < now) data.lastTouchAt = now
-    if (reactivado) data.archivedAt = null
-    for (const { field, to } of changes) data[field] = to
-    if (changes.some(({ field }) => field !== 'name')) {
-      data.qualificationAvailable = true
-      if (!row.qualifiedAt || row.qualifiedAt < learnedAt) data.qualifiedAt = learnedAt
-    }
-    if (Object.keys(data).length) await tx.crmAccount.update({ where: { id: accountId }, data })
-    if (reactivado) {
-      await addEvent(tx, { accountId, kind: 'REACTIVATED', actorStaffId: access.staffId, data: { via: WHATSAPP, ...extra } })
-    }
-    // Like the landing's qualification changes: by the system, saying where it came from.
-    if (changes.length) await addEvent(tx, { accountId, kind: 'FIELD_CHANGE', actorStaffId: null, data: { via: WHATSAPP, changes } })
-    return { ok: true, accountId, creado: false, yaExistia: true, reactivado, notaNueva, actualizados: changes.map(({ field }) => field) }
-  })
+  } catch (error) {
+    if (!(error instanceof ChangedMeanwhile)) throw error
+    // Another business with this phone appeared between the check and the lock (Codex autorización H3): nothing was
+    // written, and the routine chooses — never a silent switch to the newest one.
+    const candidatos = await findDuplicates(access, { phone: input.phone })
+    return { ok: false, error: 'Ese teléfono cambió de negocio mientras se registraba: elige uno y agrégale la nota.', candidatos }
+  }
 }
 
 /**

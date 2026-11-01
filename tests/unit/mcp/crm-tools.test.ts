@@ -578,6 +578,33 @@ describe('crm_upsert_whatsapp_prospect', () => {
     expect(auditMcpWrite).not.toHaveBeenCalled()
   })
 
+  it('otro_negocio_aparece_entre_la_revision_y_el_candado (Codex autorización H3): nothing is written, the candidates come back', async () => {
+    // The check sees ONE business with this phone…
+    seedLanding({ archivedAt: null })
+    // …and before the transaction locks it, a seller creates another one with the same (shared) phone, touched later.
+    const plain = prismaMock.$transaction.getMockImplementation()!
+    prismaMock.$transaction.mockImplementationOnce(async (callback: (tx: unknown) => unknown) => {
+      db.accounts.push({
+        id: cuid('acctman'),
+        name: 'Tienda Ana',
+        source: 'MANUAL',
+        externalKey: null,
+        stageId: FAKE_STAGE_ID,
+        lastTouchAt: TUE,
+      })
+      db.contacts.push({ id: cuid('contman'), accountId: cuid('acctman'), name: 'Ana', phoneE164: PHONE })
+      return plain(callback)
+    })
+
+    const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, giro: 'Taquería', ultimoMensajeAt: MSG_1 })
+
+    expect(answer).toMatchObject({ ok: false, candidatos: expect.arrayContaining([expect.objectContaining({ id: LANDING_ACC })]) })
+    expect(answer.candidatos).toHaveLength(2)
+    expect(db.events).toEqual([])
+    expect(db.accounts.find(account => account.id === cuid('acctman'))).not.toHaveProperty('giro')
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
   it('a phone in two businesses is resolved, not guessed: nothing is written and both come back', async () => {
     seedLanding({ archivedAt: null })
     db.accounts.push({ id: cuid('acctman'), name: 'Tienda Ana', source: 'MANUAL', externalKey: null, stageId: FAKE_STAGE_ID })
