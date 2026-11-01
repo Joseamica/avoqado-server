@@ -189,13 +189,14 @@ export function sinSaldoAFavorPorque(payment: CobroParaDevolver): string | null 
   return null
 }
 
+/** El rechazo de «Sólo saldo a favor» al devolver a la tarjeta (código STORE_CREDIT_ONLY). */
+export const MENSAJE_SOLO_SALDO =
+  'Este negocio devuelve sólo como saldo a favor. Usa Reembolso → Saldo a favor, o marca que es por defecto o cobro por error.'
+
 /**
  * «Sólo saldo a favor» (spec §5.5, Codex plan r2 h6): las excepciones que dejan abrir la devolución en la terminal con el interruptor
  * prendido (LFPC art. 92: defecto, cobro por error, cobro fraudulento, cuenta cancelada).
  */
-export const MENSAJE_SOLO_SALDO =
-  'Este negocio devuelve sólo como saldo a favor. Usa Reembolso → Saldo a favor, o marca que es por defecto o cobro por error.'
-
 export const EXCEPCIONES_DE_SOLO_SALDO: ReadonlySet<string> = new Set([
   'DEFECTIVE',
   'ACCIDENTAL_CHARGE',

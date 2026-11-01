@@ -1,9 +1,10 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import AppError, { NotFoundError } from '@/errors/AppError'
+import AppError from '@/errors/AppError'
 import { updateVenueSettings } from '@/services/dashboard/venueSettings.dashboard.service'
 import { cambiarTelefonoDeSaldoAFavor } from '@/services/giftCards/giftCardCuenta.service'
-import { esSobreDeSaldoAFavor } from '@/services/giftCards/giftCardLedger'
+import { sobresDeSaldoAFavorEntre } from '@/services/giftCards/giftCardLedger'
+import { telefonoDeTarjeta } from '@/services/giftCards/giftCardEntrega'
 import { storeCreditDeClientes } from '@/services/storeCredit/customerStoreCreditBalance'
 import { storeCreditAvailable } from '@/services/storeCredit/storeCreditTender'
 import prisma from '@/utils/prismaClient'
@@ -16,6 +17,9 @@ const venueInput = z
   .string({ required_error: 'Indica la sucursal', invalid_type_error: 'La sucursal debe ser texto' })
   .min(1, 'Indica la sucursal')
   .describe('Identificador de una sucursal a la que tienes acceso')
+
+/** El mismo texto que el servicio de S8a (`giftCardLedger.ts`, STORE_CREDIT_PHONE_NOT_ALLOWED): un código, un mensaje. */
+const MENSAJE_PHONE_NOT_ALLOWED = 'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».'
 
 /** Saldo a favor (spec 2026-10-30): ajuste «Sólo saldo a favor», saldo de un cliente y teléfono con que se gasta. Sólo modo libre. */
 export function registerStoreCreditTools(server: McpServer, scope: McpScope): void {
@@ -53,12 +57,16 @@ export function registerStoreCreditTools(server: McpServer, scope: McpScope): vo
       requireWriteScopeAlways(scope, 'venues:update', 'cambia el ajuste «Sólo saldo a favor»')
       guard.requirePermission('venues:update', venueId)
       if (!confirm) {
-        const actual = (await readSetting(venueId)).storeCreditOnly
+        const { storeCreditOnly: actual, disponible } = await readSetting(venueId)
+        const aviso =
+          storeCreditOnly && !disponible
+            ? ' ⚠️ Este servidor todavía no puede dar saldo a favor (faltan las llaves de tarjetas de regalo): prenderlo bloquearía la devolución a la tarjeta sin dar otra salida. Pide a Avoqado que lo active antes.'
+            : ''
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: { actual, nuevo: storeCreditOnly },
-          message: `«Sólo saldo a favor»: ${actual ? 'Prendido' : 'Apagado'} → ${storeCreditOnly ? 'Prendido' : 'Apagado'}. Confirma con el operador antes de guardar.`,
+          preview: { actual, nuevo: storeCreditOnly, disponible },
+          message: `«Sólo saldo a favor»: ${actual ? 'Prendido' : 'Apagado'} → ${storeCreditOnly ? 'Prendido' : 'Apagado'}.${aviso} Confirma con el operador antes de guardar.`,
         })
       }
       // El servicio compartido registra al actor y los valores de antes y después.
@@ -69,7 +77,7 @@ export function registerStoreCreditTools(server: McpServer, scope: McpScope): vo
 
   server.tool(
     'get_customer_store_credit',
-    'Consulta el saldo a favor de UN cliente de la sucursal: storeCredit = { balanceCents (centavos), phoneLast4 (últimos 4 del teléfono con que se gasta), giftCardId, blocked (true si el saldo está congelado) } o null si nunca tuvo saldo a favor; saldo = el mismo importe en pesos. Es la misma lectura de la ficha del cliente. No devuelve el código ni el teléfono completo, y el saldo a favor nunca se paga en efectivo. Requiere permiso para consultar clientes. Sólo lectura.',
+    'Consulta el saldo a favor de UN cliente de la sucursal: storeCredit = { balanceCents (centavos: la suma de sus saldos ACTIVOS), phoneLast4 (últimos 4 del teléfono con que se gasta) y giftCardId (del saldo activo más viejo), blocked: true sólo cuando NO hay ningún saldo activo y el que existe está congelado (entonces balanceCents es 0: lo congelado no se cuenta) } o null si no tiene ningún saldo activo ni congelado (también cuando ya lo gastó o venció); saldo = el mismo importe en pesos. Es la misma lectura de la ficha del cliente. No devuelve el código ni el teléfono completo, y el saldo a favor nunca se paga en efectivo. Requiere permiso para consultar clientes. Sólo lectura.',
     {
       venueId: venueInput,
       customerId: z
@@ -81,7 +89,7 @@ export function registerStoreCreditTools(server: McpServer, scope: McpScope): vo
       const base = guard.venueFilter(venueId)
       guard.requirePermission('customers:read', venueId)
       const customer = await prisma.customer.findFirst({ where: { ...base, id: customerId }, select: { id: true } })
-      if (!customer) throw new NotFoundError('No se encontró el cliente')
+      if (!customer) return text({ ok: false, code: 'CUSTOMER_NOT_FOUND', error: 'No se encontró el cliente de esta sucursal.' })
       const storeCredit = (await storeCreditDeClientes(prisma, venueId, [customerId])).get(customerId) ?? null
       return text({ venueId, customerId, storeCredit, saldo: (storeCredit?.balanceCents ?? 0) / 100 })
     },
@@ -125,25 +133,39 @@ export function registerStoreCreditTools(server: McpServer, scope: McpScope): vo
         where: { ...base, id: giftCardId, status: { in: ['ACTIVE', 'BLOCKED'] } },
         select: { id: true, status: true, recipientPhone: true },
       })
-      if (!card) throw new NotFoundError('No se encontró el saldo a favor')
-      if (!(await esSobreDeSaldoAFavor(prisma as never, card.id))) {
+      if (!card) return text({ ok: false, code: 'STORE_CREDIT_NOT_FOUND', error: 'No se encontró ese saldo a favor en esta sucursal.' })
+      if (!(await sobresDeSaldoAFavorEntre(prisma, venueId, [card.id])).has(card.id)) {
+        return text({ ok: false, code: 'STORE_CREDIT_PHONE_NOT_ALLOWED', error: MENSAJE_PHONE_NOT_ALLOWED })
+      }
+      // Mismas reglas que el servicio, para no emitir un token que de todos modos va a fallar al confirmar.
+      const nuevo = telefonoDeTarjeta(phone.trim())
+      if (!nuevo) return text({ ok: false, code: 'GIFT_CARD_PHONE_INVALID', error: 'El teléfono no es válido.' })
+      const actual = telefonoDeTarjeta(card.recipientPhone)?.slice(-4) ?? null
+      if (expectedPhoneLast4 !== undefined && expectedPhoneLast4 !== actual) {
         return text({
           ok: false,
-          code: 'STORE_CREDIT_PHONE_NOT_ALLOWED',
-          error: 'Esta tarjeta no es un saldo a favor: su destino se cambia desde Tarjetas de regalo.',
+          code: 'STORE_CREDIT_PHONE_OUTDATED',
+          error: actual
+            ? `El teléfono de este saldo ya cambió: ahora termina en ${actual}. Revísalo y vuelve a intentarlo.`
+            : 'El teléfono de este saldo ya cambió. Revísalo y vuelve a intentarlo.',
         })
       }
-      const actual = (card.recipientPhone ?? '').slice(-4) || null
+      if (telefonoDeTarjeta(card.recipientPhone) === nuevo) {
+        return text({
+          ok: true,
+          giftCardId,
+          phoneLast4: nuevo.slice(-4),
+          sinCambios: true,
+          message: 'Ese ya es el teléfono de este saldo: no hay nada que cambiar.',
+        })
+      }
       return text({
         ok: false,
         requiresConfirmation: true,
-        preview: {
-          giftCardId: card.id,
-          estado: card.status,
-          telefonoActualUltimos4: actual,
-          telefonoNuevoUltimos4: phone.replace(/\D/g, '').slice(-4),
-        },
-        message: `Vas a cambiar el teléfono con que se gasta este saldo a favor: ahora termina en ${actual ?? '(sin teléfono)'} y pasará a terminar en ${phone.replace(/\D/g, '').slice(-4)}. No manda la página ni el código ni mueve el saldo. Confirma con el operador antes de continuar${expectedPhoneLast4 ? '' : '; para no pisar un cambio más nuevo, repite la llamada con expectedPhoneLast4 igual a ' + (actual ?? 'vacío')}.`,
+        // expectedPhoneLast4 en la raíz: el catálogo lo ata al token, así la confirmación compara contra el teléfono que se VIO.
+        ...(actual ? { expectedPhoneLast4: actual } : {}),
+        preview: { giftCardId: card.id, estado: card.status, telefonoActualUltimos4: actual, telefonoNuevoUltimos4: nuevo.slice(-4) },
+        message: `Vas a cambiar el teléfono con que se gasta este saldo a favor: ahora termina en ${actual ?? '(sin teléfono)'} y pasará a terminar en ${nuevo.slice(-4)}. No manda la página ni el código ni mueve el saldo. Confirma con el operador antes de continuar.`,
       })
     },
   )

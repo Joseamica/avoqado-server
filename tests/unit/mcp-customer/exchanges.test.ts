@@ -466,6 +466,48 @@ describe('dashboard exchange MCP additions', () => {
     expect(JSON.stringify(result)).not.toMatch(/Cents/)
     expect(mockDashboardDetail).toHaveBeenCalledWith({ venueId, exchangeId: 'exchange' })
   })
+  it('S9 I1: muestra el saldo a favor abonado en pesos (y null cuando no hubo)', async () => {
+    const base = {
+      id: 'exchange',
+      createdAt: new Date('2026-10-26T18:00:00Z'),
+      status: 'COMPLETED',
+      applied: true,
+      returnedCents: 30000,
+      takenCents: 10000,
+      differenceCents: -20000,
+      returned: [],
+      taken: [],
+      paymentIds: [],
+      reviewedAt: null,
+    }
+    mockDashboardDetail.mockResolvedValueOnce({
+      ...base,
+      settlement: {
+        kind: 'REFUND',
+        method: 'STORE_CREDIT',
+        amountCents: 20000,
+        storeCredit: {
+          customerId: 'c1',
+          customerName: 'Ana',
+          amountCents: 20000,
+          newBalanceCents: 35050,
+          phoneLast4: '1111',
+          phoneMismatch: true,
+        },
+      },
+    })
+    const r = await tool(scope, 'get_exchange').call({ exchangeId: 'exchange' })
+    expect(r.liquidacion.saldoAFavor).toEqual({
+      clienteId: 'c1',
+      cliente: 'Ana',
+      abonado: 200,
+      saldoNuevo: 350.5,
+      telefonoUltimos4: '1111',
+      telefonoNoCoincide: true,
+    })
+    mockDashboardDetail.mockResolvedValueOnce({ ...base, settlement: { kind: 'REFUND', method: 'CASH', amountCents: 20000 } })
+    expect((await tool(scope, 'get_exchange').call({ exchangeId: 'exchange' })).liquidacion.saldoAFavor).toBeNull()
+  })
   it('requires payment read permission and propagates detail 404', async () => {
     await expect(tool(settingsReader, 'get_exchange').call({ exchangeId: 'exchange' })).rejects.toThrow('payments:read')
     expect(mockDashboardDetail).not.toHaveBeenCalled()

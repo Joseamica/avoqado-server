@@ -21,7 +21,7 @@ jest.mock('@/services/dashboard/venueSettings.dashboard.service', () => ({
   updateVenueSettings: (...a: unknown[]) => mockSettingsUpdate(...a),
 }))
 jest.mock('@/services/giftCards/giftCardCuenta.service', () => ({ cambiarTelefonoDeSaldoAFavor: (...a: unknown[]) => mockPhone(...a) }))
-jest.mock('@/services/giftCards/giftCardLedger', () => ({ esSobreDeSaldoAFavor: (...a: unknown[]) => mockEsSobre(...a) }))
+jest.mock('@/services/giftCards/giftCardLedger', () => ({ sobresDeSaldoAFavorEntre: (...a: unknown[]) => mockEsSobre(...a) }))
 jest.mock('@/services/storeCredit/customerStoreCreditBalance', () => ({ storeCreditDeClientes: (...a: unknown[]) => mockBalances(...a) }))
 jest.mock('@/services/storeCredit/storeCreditTender', () => ({ storeCreditAvailable: () => mockAvailable() }))
 const mockSettings = jest.fn()
@@ -78,7 +78,7 @@ beforeEach(() => {
   mockSettings.mockResolvedValue({ storeCreditOnly: false })
   mockCustomer.mockResolvedValue({ id: customerId })
   mockCard.mockResolvedValue({ id: giftCardId, status: 'ACTIVE', recipientPhone: '5215512341111' })
-  mockEsSobre.mockResolvedValue(true)
+  mockEsSobre.mockResolvedValue(new Set([giftCardId]))
   mockPhone.mockResolvedValue({ phoneLast4: '9999' })
   mockSettingsUpdate.mockResolvedValue({})
 })
@@ -122,6 +122,13 @@ describe('set_store_credit_only (venues:update, confirmación firmada)', () => {
     expect((await call('set_store_credit_only', args)).isError).toBe(true)
     expect(mockSettingsUpdate).not.toHaveBeenCalled()
   })
+  it('avisa en la vista previa cuando el servidor no puede dar saldo (sin llaves)', async () => {
+    mockAvailable.mockReturnValue(false)
+    await abrir(scopeCon(TODOS))
+    const p = await call('set_store_credit_only', args)
+    expect(p.preview.disponible).toBe(false)
+    expect(p.message).toContain('todavía no puede dar saldo a favor')
+  })
   it('confirm:true sin token NO escribe; la vista previa tampoco', async () => {
     await abrir(scopeCon(TODOS))
     expect(await call('set_store_credit_only', { ...args, confirm: true })).toMatchObject({ needsInput: true, field: 'confirmationToken' })
@@ -164,7 +171,10 @@ describe('get_customer_store_credit (customers:read)', () => {
   it('un cliente de otra sucursal no se lee', async () => {
     mockCustomer.mockResolvedValue(null)
     await abrir(scopeCon(['customers:read']))
-    expect((await call('get_customer_store_credit', { venueId, customerId })).isError).toBe(true)
+    expect(await call('get_customer_store_credit', { venueId, customerId })).toMatchObject({ ok: false, code: 'CUSTOMER_NOT_FOUND' })
+    expect(mockCustomer).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ venueId: { in: [venueId] }, id: customerId }) }),
+    )
     expect(mockBalances).not.toHaveBeenCalled()
   })
   it('devuelve la forma de la ficha del cliente (S8c) y el saldo en pesos', async () => {
@@ -218,9 +228,11 @@ describe('change_store_credit_phone (giftCards:manage, confirmación firmada)', 
     expect(mockPhone).toHaveBeenCalledWith(venueId, giftCardId, { telefono: '5512349999', staffId, expectedPhoneLast4: '1111' })
   })
   it('una tarjeta vendida (no es saldo a favor) responde STORE_CREDIT_PHONE_NOT_ALLOWED desde la vista previa', async () => {
-    mockEsSobre.mockResolvedValue(false)
+    mockEsSobre.mockResolvedValue(new Set())
     await abrir(scopeCon(TODOS))
-    expect(await call('change_store_credit_phone', args)).toMatchObject({ ok: false, code: 'STORE_CREDIT_PHONE_NOT_ALLOWED' })
+    const r = await call('change_store_credit_phone', args)
+    expect(r).toMatchObject({ ok: false, code: 'STORE_CREDIT_PHONE_NOT_ALLOWED' })
+    expect(r.error).toBe('Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».') // el mismo texto del servicio
     expect(mockPhone).not.toHaveBeenCalled()
   })
   it('si el servicio la rechaza al confirmar (código) el código viaja', async () => {
@@ -228,6 +240,40 @@ describe('change_store_credit_phone (giftCards:manage, confirmación firmada)', 
     const { final } = await confirmar()
     mockPhone.mockRejectedValue(new GiftCardError('STORE_CREDIT_PHONE_NOT_ALLOWED', 'Esta tarjeta no es un saldo a favor.', 409))
     expect(await final()).toMatchObject({ ok: false, code: 'STORE_CREDIT_PHONE_NOT_ALLOWED' })
+  })
+  it('un teléfono inválido no recibe token; el mismo teléfono no pide confirmación', async () => {
+    await abrir(scopeCon(TODOS))
+    expect(await call('change_store_credit_phone', { ...args, phone: '1234567' })).toMatchObject({
+      ok: false,
+      code: 'GIFT_CARD_PHONE_INVALID',
+    })
+    expect(await call('change_store_credit_phone', { ...args, phone: '5512341111' })).toMatchObject({ ok: true, sinCambios: true })
+    expect(mockPhone).not.toHaveBeenCalled()
+  })
+  it('S9 I2: la vista previa sin esperado devuelve el actual y la confirmación lo lleva atado al servicio', async () => {
+    await abrir(scopeCon(TODOS))
+    const { preview, final } = await confirmar()
+    expect(preview.expectedPhoneLast4).toBe('1111')
+    expect(preview.confirmationArguments.expectedPhoneLast4).toBe('1111')
+    await final()
+    expect(mockPhone).toHaveBeenCalledWith(venueId, giftCardId, expect.objectContaining({ expectedPhoneLast4: '1111' }))
+  })
+  it('S9 I2: la vista previa con un esperado que ya no coincide responde OUTDATED de una vez, sin token ni escritura', async () => {
+    await abrir(scopeCon(TODOS))
+    const r = await call('change_store_credit_phone', { ...args, expectedPhoneLast4: '0000' })
+    expect(r).toMatchObject({ ok: false, code: 'STORE_CREDIT_PHONE_OUTDATED' })
+    expect(r.confirmationToken).toBeUndefined()
+    expect(mockPhone).not.toHaveBeenCalled()
+  })
+  it('S9 I2: confirmar con un token cuyo esperado ya no coincide da 409 y no escribe', async () => {
+    await abrir(scopeCon(TODOS))
+    const { final } = await confirmar()
+    mockPhone.mockRejectedValue(
+      new AppError('El teléfono de este saldo ya cambió: ahora termina en 2222.', 409, true, 'STORE_CREDIT_PHONE_OUTDATED'),
+    )
+    const r = await final()
+    expect(r).toMatchObject({ ok: false, code: 'STORE_CREDIT_PHONE_OUTDATED' })
+    expect(mockPhone).toHaveBeenCalledWith(venueId, giftCardId, expect.objectContaining({ expectedPhoneLast4: '1111' }))
   })
   it('un expectedPhoneLast4 viejo responde STORE_CREDIT_PHONE_OUTDATED', async () => {
     await abrir(scopeCon(TODOS))
@@ -240,7 +286,10 @@ describe('change_store_credit_phone (giftCards:manage, confirmación firmada)', 
   it('una tarjeta de otra sucursal no se toca', async () => {
     mockCard.mockResolvedValue(null)
     await abrir(scopeCon(TODOS))
-    expect((await call('change_store_credit_phone', args)).isError).toBe(true)
+    expect(await call('change_store_credit_phone', args)).toMatchObject({ ok: false, code: 'STORE_CREDIT_NOT_FOUND' })
+    expect(mockCard).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ venueId: { in: [venueId] }, id: giftCardId }) }),
+    )
     expect(mockPhone).not.toHaveBeenCalled()
   })
 })

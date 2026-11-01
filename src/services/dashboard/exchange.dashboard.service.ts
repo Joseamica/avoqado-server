@@ -136,7 +136,13 @@ export async function getExchangeForDashboard({ venueId, exchangeId }: { venueId
     takenCents: takenAmount.mul(100).toNumber(),
     returned: lines?.returned ?? [],
     taken: lines?.taken ?? [],
-    settlement: { kind: settlementKind, method: settlementMethod, amountCents: Math.abs(summary.differenceCents) },
+    settlement: {
+      kind: settlementKind,
+      method: settlementMethod,
+      amountCents: Math.abs(summary.differenceCents),
+      // Saldo a favor (S5/S9): a quién y cuánto se abonó, leído del `result` ya guardado (opcional; sin saldo, el campo no existe).
+      ...(result?.settlement?.storeCredit ? { storeCredit: result.settlement.storeCredit } : {}),
+    },
     expectedChargeCents: result?.expectedCents ?? null,
     chargedCents: result?.chargedSaleCents ?? null,
     chargePaymentCount: result?.chargePaymentCount ?? null,

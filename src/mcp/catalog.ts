@@ -585,6 +585,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedStampsRequired',
             // Cortesía pendiente: ligar la cabecera y todas las líneas que se vieron, en pesos.
             'expectedCourtesySnapshot',
+            // Saldo a favor (`change_store_credit_phone`): el teléfono se cambia sobre los últimos 4 que el operador VIO.
+            'expectedPhoneLast4',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

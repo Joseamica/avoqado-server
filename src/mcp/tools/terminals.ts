@@ -8,7 +8,8 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
-import { EXCEPCIONES_DE_SOLO_SALDO, MENSAJE_SOLO_SALDO, resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
+import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
+import { exigirQueNoRijaSoloSaldoEnTerminal } from '@/services/storeCredit/soloSaldoEnTerminal'
 import AppError from '@/errors/AppError'
 import { exigirCancelacionParaDevolverEnTerminal } from '@/services/giftCards/giftCardCancel.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
@@ -930,9 +931,12 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       }
 
       // «Sólo saldo a favor»: la vista previa evalúa la MISMA regla que el servicio al confirmar (con código, no sólo texto).
-      if (!EXCEPCIONES_DE_SOLO_SALDO.has(storeCreditOnlyException ?? '')) {
-        const ajustes = await prisma.venueSettings.findUnique({ where: { venueId }, select: { storeCreditOnly: true } })
-        if (ajustes?.storeCreditOnly) return text({ ok: false, code: 'STORE_CREDIT_ONLY', error: MENSAJE_SOLO_SALDO })
+      try {
+        await exigirQueNoRijaSoloSaldoEnTerminal(venueId, storeCreditOnlyException)
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'STORE_CREDIT_ONLY')
+          return text({ ok: false, code: error.code, error: error.message })
+        throw error
       }
 
       const targetIdentity = terminalId.trim()
@@ -979,10 +983,18 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: { paymentId, terminalId, maxRefundable: target.remainingRefundableCents / 100, reason: reason ?? null },
-          message: `Esto ABRIRÁ en la terminal ${terminalId} la devolución de hasta $${
-            target.remainingRefundableCents / 100
-          }. Nadie devuelve nada hasta que una persona lo confirme en el aparato. Vuelve a llamar con confirm:true para mandarlo.`,
+          preview: {
+            paymentId,
+            terminalId,
+            maxRefundable: target.remainingRefundableCents / 100,
+            reason: reason ?? null,
+            excepcionSoloSaldo: storeCreditOnlyException ?? null,
+          },
+          message: `Esto ABRIRÁ en la terminal ${terminalId} la devolución de hasta $${target.remainingRefundableCents / 100}.${
+            storeCreditOnlyException
+              ? ` Se invoca la excepción ${storeCreditOnlyException} de «Sólo saldo a favor»: la devolución sale a la tarjeta y no como saldo a favor.`
+              : ''
+          } Nadie devuelve nada hasta que una persona lo confirme en el aparato. Vuelve a llamar con confirm:true para mandarlo.`,
         })
       }
 

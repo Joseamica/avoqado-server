@@ -521,6 +521,13 @@ describe('S9 (I1 de S4): refund_card_on_terminal y «Sólo saldo a favor»', () 
     expect(body).toEqual({ ok: false, code: 'STORE_CREDIT_ONLY', error: 'Este negocio devuelve sólo como saldo a favor.' })
   })
 
+  it('la vista previa dice qué excepción se invoca', async () => {
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ storeCreditOnly: true })
+    const body = parseBody(await captureRefundHandler()({ ...base, storeCreditOnlyException: 'DEFECTIVE' }))
+    expect(body).toMatchObject({ requiresConfirmation: true, preview: { excepcionSoloSaldo: 'DEFECTIVE' } })
+    expect(body.message).toContain('DEFECTIVE')
+  })
+
   it('con el interruptor apagado la vista previa sigue como siempre', async () => {
     ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ storeCreditOnly: false })
     expect(parseBody(await captureRefundHandler()(base))).toMatchObject({ ok: false, requiresConfirmation: true })
