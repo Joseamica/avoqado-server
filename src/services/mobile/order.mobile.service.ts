@@ -86,6 +86,7 @@ import {
   assertNoLiveTerminalCharge,
   assertOrderCancellableUnderLock,
   avisarOrdenCancelada,
+  devolverCanjesDeVentaAnuladaEnTx,
   rechazarCancelacionLocalDeRappi,
   type OrderCancelGuardOptions,
 } from '../shared/orderCancelGuard'
@@ -6574,6 +6575,8 @@ export async function cancelOrderInTransaction(
   // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
   const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
   const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
+  // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+  await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },

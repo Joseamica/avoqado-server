@@ -184,6 +184,75 @@ export async function assertOrderCancellableUnderLock(
   return order
 }
 
+/** Lo que una anulación le devolvió al cliente. */
+export interface CanjesDevueltos {
+  pointsRefunded: number
+  stampRewardsReturned: string[]
+  /** Filas de canje que salieron de la venta (también las que ya no tenían qué devolver). */
+  filasQuitadas: number
+}
+
+/** Página de canjes: una venta real trae uno o dos; se recorre hasta agotarlos (Codex r2 #3: no hay tope por venta). */
+const PAGINA_DE_CANJES = 100
+
+/**
+ * 🔴 LEALTAD (pizarrón hz:a8104ac8:D1, 31-oct). Una venta que se anula SIN cobrar le devuelve al cliente lo que canjeó en ella
+ * —su premio de sellos y sus puntos— haciendo con cada canje EXACTAMENTE lo que hace «quitar el descuento»
+ * (`removeOrderDiscountInTransaction`): devuelve, revierte el renglón, devuelve el impuesto, BORRA la fila y recalcula. Antes la
+ * venta quedaba CANCELLED con el premio REDEEMED y los puntos gastados, sin salida desde el mostrador.
+ *
+ * Borrar la fila no es un detalle (Codex r1): con el premio de vuelta y su descuento todavía en la venta, el cliente se quedaba
+ * con los dos si después alguien quitaba el descuento (segunda devolución), si se reintentaba la creación o si un cobro tardío
+ * revivía la venta (`reabrirSiRecibeDinero`). Sin la fila, la venta revivida se calcula sin ese descuento y muestra el saldo.
+ * Idempotente por la misma razón: una segunda llamada ya no encuentra la fila.
+ *
+ * Va dentro de la transacción del que anula, con la orden YA bloqueada (Order → Customer/StampReward, el orden de siempre).
+ * Los descuentos que no son canje se quedan como historia de la venta anulada.
+ */
+export async function devolverCanjesDeVentaAnuladaEnTx(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
+): Promise<CanjesDevueltos> {
+  const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 }
+  const quitadas: string[] = []
+  // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
+  for (;;) {
+    // Canje = puntos (`loyaltyTransactionId`) o premio de sellos (`StampReward.orderDiscountId`, columna sin relación de Prisma).
+    const canjes = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT od.id FROM "OrderDiscount" od
+      WHERE od."orderId" = ${input.orderId}
+        AND (od."loyaltyTransactionId" IS NOT NULL
+             OR EXISTS (SELECT 1 FROM "StampReward" sr WHERE sr."orderDiscountId" = od.id AND sr."venueId" = ${input.venueId}))
+      ORDER BY od.id
+      LIMIT ${PAGINA_DE_CANJES}`
+    if (canjes.length === 0) break
+    // Import dinámico: order.mobile.service importa este módulo.
+    const { removeOrderDiscountInTransaction } = await import('../mobile/order.mobile.service')
+    for (const fila of canjes) {
+      const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined)
+      devuelto.pointsRefunded += r.refund?.pointsRefunded ?? 0
+      if (r.stampRefund) devuelto.stampRewardsReturned.push(r.stampRefund.rewardId)
+      quitadas.push(fila.id)
+    }
+    if (canjes.length < PAGINA_DE_CANJES) break
+  }
+  devuelto.filasQuitadas = quitadas.length
+  if (quitadas.length === 0) return devuelto
+  // La bitácora va en la MISMA transacción (como `reabrirSiRecibeDinero`): si la anulación se revierte, también su rastro.
+  await tx.activityLog.create({
+    data: {
+      action: 'ORDER_CANCEL_LOYALTY_RETURNED',
+      entity: 'Order',
+      entityId: input.orderId,
+      venueId: input.venueId,
+      staffId: input.staffId ?? null,
+      data: { camino: input.camino, orderDiscountIds: quitadas, ...devuelto },
+    },
+  })
+  logger.info('🎁 [Anular] la venta anulada le devolvió al cliente sus canjes', { ...input, ...devuelto })
+  return devuelto
+}
+
 /**
  * El aviso en tiempo real que `cancelOrder` ya emitía (auditoría Fable 11-sep, P3-7): `ORDER_UPDATED` con el estado
  * nuevo, DESPUÉS del commit, para que las pantallas abiertas (POS, TPV, dashboard) no sigan mostrando una cuenta viva
