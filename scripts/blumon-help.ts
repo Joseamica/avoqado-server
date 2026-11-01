@@ -18,13 +18,7 @@ console.log(`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   npm run blumon:auth
-    Authenticate Blumon master credentials (OAuth 2.0)
-    Similar to: stripe login
-
-    Example:
-      $ npm run blumon:auth
-      ✓ Master merchant authenticated successfully
-      ✓ Access token expires in: 23h 59m
+    ⛔ Desactivado (1-nov-2026): ya no se entra al portal de Blumon con la cuenta maestra.
 
 
 🛒 CHECKOUT SESSIONS
@@ -151,7 +145,7 @@ console.log(`
 💡 TIPS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  1. Always run 'npm run blumon:auth' first to set up OAuth credentials
+  1. 'npm run blumon:auth' está desactivado desde el 1-nov-2026 (ya no se entra al portal con la cuenta maestra)
 
   2. Use 'npm run blumon:mock' during development to avoid API limits
 
@@ -177,8 +171,7 @@ console.log(`
   # 1. Start the server
   npm run dev
 
-  # 2. Authenticate (in another terminal)
-  npm run blumon:auth
+  # 2. (blumon:auth está desactivado desde el 1-nov-2026)
 
   # 3. Create a test session
   npm run blumon:session

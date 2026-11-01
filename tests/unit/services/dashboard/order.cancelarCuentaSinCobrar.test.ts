@@ -60,6 +60,8 @@ beforeEach(() => {
   prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
   prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
     const sql = Array.isArray(query) ? query.join(' ') : ''
+    // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
+    if (sql.includes('"OrderDiscount"')) return []
     if (sql.includes('FROM "Venue"')) return [{ id: VENUE }]
     if (sql.includes('FROM "Order"')) return [{ id: ORDER }]
     if (sql.includes('pg_advisory_xact_lock')) return []

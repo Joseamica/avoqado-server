@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Lealtad: anular una venta sin cobrar le devuelve al cliente su premio de sellos y sus puntos canjeados, por cualquier camino (POS, «Cerrar sin cobrar» y «Eliminar» del panel, editar el estado, anular todo en la terminal, vales, rechazar/vencer/cancelar un pedido en línea, MCP y la cola sin red). Hace con cada canje lo mismo que «quitar el descuento»: el descuento sale de la venta, así que un reintento, un «quitar descuento» tardío o un cobro capturado que la reviva nunca regalan el beneficio dos veces. Una venta anulada ya no acepta canjes nuevos, y la limpieza automática anula (en vez de borrar) una venta vacía que traía canjes. Nueva entrada de bitácora `ORDER_CANCEL_LOYALTY_RETURNED`. Sin migraciones.
+
 - MCP `log_waste` (registrar merma): la huella de la vista previa ahora la firma el servidor y vence a los 10 minutos. Antes era un sha256 de datos que el cliente conoce y un asistente podía confirmar una merma sin enseñarle la vista previa al operador. El contrato no cambia: se confirma con `confirmationPayload` tal cual.
 
 - Cobros POS → TPV: cancelar consulta de inmediato la evidencia de esa solicitud, también al reconectar con una cancelación pendiente, sin repetir la autorización ni esperar al vigía. Los avisos muestran la antigüedad real y sólo se emiten si el vigía ganó la transición a resultado desconocido.

@@ -9,7 +9,12 @@ jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
   armarComandasTrasCommit: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/kds/kitchenDisplayStations', () => ({ __esModule: true, debeMarcarCocina: jest.fn() }))
-jest.mock('@/services/shared/orderCancelGuard', () => ({ __esModule: true, findLiveTerminalCharge: jest.fn() }))
+// hz:a8104ac8:D1: devolver los canjes al anular se prueba con la base en anularDevuelveCanjes.integration.test.ts.
+jest.mock('@/services/shared/orderCancelGuard', () => ({
+  __esModule: true,
+  findLiveTerminalCharge: jest.fn(),
+  devolverCanjesDeVentaAnuladaEnTx: jest.fn(async () => ({ pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 })),
+}))
 jest.mock('@/services/mobile/order.mobile.service', () => ({ __esModule: true, cancelOrder: jest.fn() }))
 jest.mock('@/services/online-ordering/notifications.service', () => ({
   __esModule: true,

@@ -67,7 +67,10 @@ jest.mock('@/utils/prismaClient', () => {
     // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
     staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
-    $queryRaw: jest.fn(async () => [{ id: 'order-sc' }]),
+    // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en esta venta de prueba.
+    $queryRaw: jest.fn(async (q: { raw?: readonly string[] }) =>
+      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-sc' }],
+    ),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },

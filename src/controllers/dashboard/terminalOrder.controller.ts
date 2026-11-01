@@ -153,7 +153,7 @@ export async function getOrderHandler(req: Request, res: Response, next: NextFun
  */
 export async function uploadProofHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    const { id } = req.params
+    const { venueId, id } = req.params
     const file = (req as any).file as Express.Multer.File | undefined
     if (!file) {
       res.status(400).json({ success: false, error: 'No file uploaded (field name: proof)' })
@@ -162,6 +162,7 @@ export async function uploadProofHandler(req: Request, res: Response, next: Next
 
     const updated = await uploadSpeiProof({
       orderId: id,
+      venueId,
       file: {
         buffer: file.buffer,
         mimetype: file.mimetype,
