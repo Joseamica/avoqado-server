@@ -14,20 +14,37 @@ const archivos = (dir: string): string[] =>
     return e.isDirectory() ? archivos(p) : p.endsWith('.ts') ? [p] : []
   })
 
-const CREA = /\binvitation\.create(Many)?\(/
+const CREA = /\binvitation\.create(Many|ManyAndReturn)?\(/
 const creadores = archivos(SRC).filter(f => CREA.test(fs.readFileSync(f, 'utf8')))
+
+/** Inicio de la función de nivel superior que contiene `pos` (exportada o no, declarada o flecha). */
+const INICIO_DE_FUNCION = /^(export )?(async )?function \w+|^(export )?const \w+ = (async )?\(/gm
+function inicioDeSuFuncion(fuente: string, pos: number): number {
+  let inicio = 0
+  for (const m of fuente.matchAll(INICIO_DE_FUNCION)) if (m.index! < pos) inicio = m.index!
+  return inicio
+}
+/** Una salida temprana real: `if (esCorreoDemo(...))` o `if (correoDemo)` seguida de `throw` o `continue` (Codex r2). */
+const SALIDA_POR_CORREO_DEMO =
+  /if \((esCorreoDemo\([^)]*\)|correoDemo)\)\s*(\{\s*)?(\/\/[^\n]*\n\s*)*(logger\.\w+\([^\n]*\)\s*)?(throw|continue)\b/
 
 it('encuentra los caminos que crean invitaciones (si baja de 3, la búsqueda se rompió)', () => {
   expect(creadores.length).toBeGreaterThanOrEqual(3)
 })
 
-it.each(creadores.map(f => path.relative(SRC, f)))('🔴 %s revisa el correo demo antes de crear la invitación', archivo => {
-  const fuente = fs.readFileSync(path.join(SRC, archivo), 'utf8')
-  const primeraCreacion = fuente.search(/\binvitation\.create(Many)?\(/)
-  const revision = fuente.indexOf('esCorreoDemo(')
-  expect(revision).toBeGreaterThan(-1)
-  expect(revision).toBeLessThan(primeraCreacion)
+const sitios = creadores.flatMap(f => {
+  const fuente = fs.readFileSync(f, 'utf8')
+  return [...fuente.matchAll(new RegExp(CREA.source, 'g'))].map(m => ({ archivo: path.relative(SRC, f), pos: m.index! }))
 })
+
+it.each(sitios.map(s => [`${s.archivo} @${s.pos}`, s] as const))(
+  '🔴 %s: su función sale antes de crear la invitación si el correo es demo',
+  (_nombre, { archivo, pos }) => {
+    const fuente = fs.readFileSync(path.join(SRC, archivo), 'utf8')
+    const tramo = fuente.slice(inicioDeSuFuncion(fuente, pos), pos)
+    expect(tramo).toMatch(SALIDA_POR_CORREO_DEMO)
+  },
+)
 
 it('🔴 aceptar, el camino de toda invitación, también lo revisa', () => {
   const fuente = fs.readFileSync(path.join(SRC, 'services/invitation.service.ts'), 'utf8')

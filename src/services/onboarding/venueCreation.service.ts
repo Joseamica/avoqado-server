@@ -709,7 +709,7 @@ export async function enablePremiumFeatures(
  * @param venueName - Venue name for email
  * @param organizationName - Organization name for email
  */
-async function processTeamInvites(
+export async function processTeamInvites(
   venueId: string,
   organizationId: string,
   inviterStaffId: string,
