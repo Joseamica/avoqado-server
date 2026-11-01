@@ -460,6 +460,13 @@ describe('who sees and changes what', () => {
       data: [{ accountId: NEW_ACCOUNT, kind: 'SYSTEM', actorStaffId: SELLER, data: { event: 'CREATED', source: 'MANUAL' } }],
       skipDuplicates: true,
     })
+
+    // What the seller qualified is newer than any landing form still pending for this person (ruling 65 e).
+    prismaMock.crmAccount.create.mockClear()
+    await createManual(access(), { ...input, giro: 'Cafetería' }, { confirmarOtroNegocio: true })
+    expect(prismaMock.crmAccount.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ giro: 'Cafetería', qualifiedAt: expect.any(Date) }) }),
+    )
   })
 
   it('reasignar_sin_todos_ni_admin_403', async () => {
