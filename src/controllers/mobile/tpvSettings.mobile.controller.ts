@@ -152,7 +152,17 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
 
     // Menú del aparato: qué categorías/menús muestra su cuadrícula. Sólo los POS_*; una TPV_* siempre recibe null/null.
     const menuFilter =
-      deviceTerminal && POS_TERMINAL_TYPES.includes(deviceTerminal.type) ? await resolveDeviceMenuFilter(venueId, deviceTerminal.id) : TODO
+      deviceTerminal && POS_TERMINAL_TYPES.includes(deviceTerminal.type)
+        ? await resolveDeviceMenuFilter(venueId, deviceTerminal.id).catch(error => {
+            // Campo opcional (esconder categorías): un fallo no puede tumbar el arranque de la app. null = «todo».
+            logger.warn('Failed to resolve device menu filter for mobile venue settings — returning everything', {
+              venueId,
+              terminalId: deviceTerminal.id,
+              error,
+            })
+            return TODO
+          })
+        : TODO
 
     // 3. If there is an active terminal, get its merged settings
     let settings: TpvSettings | null = null

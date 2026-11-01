@@ -790,6 +790,18 @@ describe('getVenueTpvSettings (mobile) — Menú del aparato', () => {
     expect(res.__json.data.deviceTerminal).toMatchObject({ visibleCategoryIds: null, visibleMenuIds: null })
   })
 
+  it('si la regla falla, /settings responde 200 con null en los dos y deja un aviso', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue(posRow('POS_ANDROID'))
+    resolveDeviceMenuFilterMock.mockRejectedValueOnce(new Error('bd caída'))
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+    await getVenueTpvSettings(makeReq('device-pos'), res, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(res.__json.success).toBe(true)
+    expect(res.__json.data.deviceTerminal).toMatchObject({ visibleCategoryIds: null, visibleMenuIds: null })
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId, terminalId: 'terminal-pos' }))
+  })
+
   it('sin X-Device-ID no hay deviceTerminal, como hoy', async () => {
     prismaMock.terminal.findMany.mockResolvedValue(posRow('POS_ANDROID'))
     const res = makeRes()
