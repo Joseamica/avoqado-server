@@ -1069,8 +1069,9 @@ async function seedHistory(
         paymentStatus: PaymentStatus.PAID,
         subtotal,
         taxAmount,
-        total,
-        // Como una venta real: la propina también en la orden y lo pagado con ella (si no, el vigilante de dinero suena).
+        // Como una venta real del TPV: total y pagado = productos + propina, y la propina también en la orden (si no, el
+        // vigilante de dinero suena y el detalle del panel no suma). El cobro conserva `amount` sin propina.
+        total: +(total + tipAmount).toFixed(2),
         tipAmount,
         paidAmount: +(total + tipAmount).toFixed(2),
         contratoDePrecio: 'IVA_INCLUIDO',
