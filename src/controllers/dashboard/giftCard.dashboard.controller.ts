@@ -187,7 +187,13 @@ export async function resend(req: Request, res: Response) {
  */
 export async function storeCreditPhone(req: Request, res: Response) {
   const { venueId, giftCardId } = req.params
-  const { phoneLast4 } = await cambiarTelefonoDeSaldoAFavor(venueId, giftCardId, { telefono: req.body.phone, staffId: staffDe(req) })
+  const { phone, expectedPhoneLast4 } = req.body as { phone: string; expectedPhoneLast4?: string }
+  const { phoneLast4 } = await cambiarTelefonoDeSaldoAFavor(venueId, giftCardId, {
+    telefono: phone,
+    staffId: staffDe(req),
+    expectedPhoneLast4,
+    ...origenDe(req),
+  })
   res.json({ success: true, data: { giftCardId, phoneLast4 } })
 }
 

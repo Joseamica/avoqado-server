@@ -86,7 +86,13 @@ export async function registrarSalidaDelSecreto(
 }
 
 /** RF3: los rechazos de reenviar o cambiar el destino que dejan `GIFT_CARD_RESEND_DENIED` (la guardada sale como ALREADY_USED). */
-const RECHAZOS_DE_REENVIO = new Set(['GIFT_CARD_NOT_DELIVERABLE', 'GIFT_CARD_ALREADY_USED', 'GIFT_CARD_USE_CHANGE_DESTINATION'])
+const RECHAZOS_DE_REENVIO = new Set([
+  'GIFT_CARD_NOT_DELIVERABLE',
+  'GIFT_CARD_ALREADY_USED',
+  'GIFT_CARD_USE_CHANGE_DESTINATION',
+  // S8a: reenviar o cambiar el destino de un saldo a favor (sacaría un código al portador): el intento queda a la vista.
+  'STORE_CREDIT_CARD_NOT_ELIGIBLE',
+])
 
 /**
  * UNA traducción de resultado o rechazo de un reenvío a bitácora, para el POS y el panel (S7): `GIFT_CARD_RESENT`,

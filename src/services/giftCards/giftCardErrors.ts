@@ -52,9 +52,12 @@ export type GiftCardErrorCode =
   | 'STORE_CREDIT_CARD_BLOCKED'
   | 'STORE_CREDIT_CUSTOMER_REQUIRED'
   | 'STORE_CREDIT_CUSTOMER_PHONE_REQUIRED'
-  // S8a: un sobre de saldo a favor no se reenvía, no cambia de destino ni enseña su código (serían un código al portador), y el
-  // teléfono del saldo sólo se cambia en un sobre de saldo a favor.
+  // S8a: un sobre de saldo a favor no se reenvía, no cambia de destino ni enseña su código (serían un código al portador).
   | 'STORE_CREDIT_CARD_NOT_ELIGIBLE'
+  // S8a: el teléfono del saldo sólo se cambia en un sobre de saldo a favor; y, con `expectedPhoneLast4`, sólo si sigue siendo el que vio
+  // el gerente (una petición vieja que llega tarde no regresa el teléfono anterior).
+  | 'STORE_CREDIT_PHONE_NOT_ALLOWED'
+  | 'STORE_CREDIT_PHONE_OUTDATED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {

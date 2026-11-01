@@ -904,6 +904,19 @@ export async function esSobreDeSaldoAFavor(tx: Tx, giftCardId: string): Promise<
   return fila?.es === true
 }
 
+/**
+ * Cuáles de estos sobres del negocio son de saldo a favor, en UNA consulta con EL predicado (una página del panel o del MCP: ≤100 ids,
+ * sin una consulta por renglón). Sin ids no consulta.
+ */
+export async function sobresDeSaldoAFavorEntre(db: Tx, venueId: string, ids: string[]): Promise<Set<string>> {
+  const unicos = [...new Set(ids)]
+  if (unicos.length === 0) return new Set()
+  const filas = await db.$queryRaw<Array<{ id: string }>>`
+    SELECT g.id FROM "GiftCard" g
+    WHERE g."venueId" = ${venueId} AND g.id IN (${Prisma.join(unicos)}) AND ${esSobreDeSaldoAFavorSql('g')}`
+  return new Set(filas.map(f => f.id))
+}
+
 export interface SobrePreparado {
   venueId: string
   customerId: string
@@ -1130,11 +1143,21 @@ const telefonoEnmascarado = (telefono: string | null) =>
  *    que una prueba firmada para el número viejo deja de servir sola;
  *  - en la MISMA transacción se consumen los retos vivos del número viejo (un código ya mandado ahí no sirve) y se escribe la bitácora
  *    `STORE_CREDIT_PHONE_CHANGED` con los dos teléfonos enmascarados.
- * Todo rechazo va antes de escribir. El mismo teléfono no escribe nada (repetir el cambio es seguro). Sirve ACTIVE o BLOCKED.
+ * Todo rechazo va antes de escribir. El mismo teléfono no escribe nada (repetir el cambio es seguro). Sirve ACTIVE o BLOCKED. Con
+ * `expectedPhoneLast4`, compara y cambia: una petición A→B que llega después de B→C responde 409 `STORE_CREDIT_PHONE_OUTDATED`.
  */
 export async function cambiarTelefonoDeSaldoAFavorEnTx(
   tx: Tx,
-  p: { venueId: string; giftCardId: string; telefono: string; staffId: string },
+  p: {
+    venueId: string
+    giftCardId: string
+    telefono: string
+    staffId: string
+    /** Comparar y cambiar: los últimos 4 del teléfono que el gerente VIO. Si ya es otro, 409 sin escribir (una petición vieja tarde). */
+    expectedPhoneLast4?: string
+    ipAddress?: string
+    userAgent?: string
+  },
 ): Promise<{ phoneLast4: string }> {
   const nuevo = telefonoDeTarjeta(typeof p.telefono === 'string' ? p.telefono.trim() : null)
   if (!nuevo) throw new BadRequestError('El teléfono no es válido.', 'GIFT_CARD_PHONE_INVALID')
@@ -1142,14 +1165,26 @@ export async function cambiarTelefonoDeSaldoAFavorEnTx(
   if (!card || card.venueId !== p.venueId || (card.status !== 'ACTIVE' && card.status !== 'BLOCKED')) throw noEncontrada()
   if (!(await esSobreDeSaldoAFavor(tx, card.id))) {
     throw new GiftCardError(
-      'STORE_CREDIT_CARD_NOT_ELIGIBLE',
+      'STORE_CREDIT_PHONE_NOT_ALLOWED',
       'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».',
       409,
     )
   }
   const viejo = telefonoDeTarjeta(card.recipientPhone)
   const phoneLast4 = nuevo.slice(-4)
+  // Primero «ya quedó»: la MISMA petición repetida (su esperado ya no es el actual) responde éxito sin otra bitácora.
   if (viejo === nuevo) return { phoneLast4 }
+  const actualLast4 = viejo?.slice(-4) ?? null
+  if (p.expectedPhoneLast4 !== undefined && p.expectedPhoneLast4 !== actualLast4) {
+    throw new GiftCardError(
+      'STORE_CREDIT_PHONE_OUTDATED',
+      actualLast4
+        ? `El teléfono de este saldo ya cambió: ahora termina en ${actualLast4}. Revísalo y vuelve a intentarlo.`
+        : 'El teléfono de este saldo ya cambió. Revísalo y vuelve a intentarlo.',
+      409,
+      { phoneLast4: actualLast4 },
+    )
+  }
 
   const r = await tx.giftCard.updateMany({ where: { id: card.id, venueId: p.venueId }, data: { recipientPhone: nuevo } })
   if (r.count !== 1) throw noEncontrada()
@@ -1167,6 +1202,8 @@ export async function cambiarTelefonoDeSaldoAFavorEnTx(
       entity: 'GiftCard',
       entityId: card.id,
       data: { telefonoAnterior: telefonoEnmascarado(viejo), telefonoNuevo: telefonoEnmascarado(nuevo) },
+      ipAddress: p.ipAddress ?? null,
+      userAgent: p.userAgent ?? null,
     },
   })
   return { phoneLast4 }

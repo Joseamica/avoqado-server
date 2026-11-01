@@ -30,6 +30,7 @@ import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal
 import { SIN_VENTA, bloqueosVigentes, estadoDeCancelacionDeVenta, type CancelacionDeVenta } from './giftCardCancel.service'
 import { enmascararDestino, textoDeFalloDeEntrega } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
+import { sobresDeSaldoAFavorEntre } from './giftCardLedger'
 import { isGiftCardTenderKind } from './giftCardTender'
 import {
   WHERE_COBRO_ES_SALDO_DE_REGALO,
@@ -94,6 +95,11 @@ export interface GiftCardRow {
   source: string
   customer: { id: string; name: string } | null
   order: { id: string; orderNumber: string } | null
+  /**
+   * S8a (aditivo): `null` en una tarjeta vendida; en un sobre de saldo a favor (`esSobreDeSaldoAFavorSql`), de quién es. El panel enseña
+   * «Saldo a favor de {cliente}» en vez de la entrega y no ofrece Reenviar, Cambiar destino ni Mostrar código (el servidor los rechaza).
+   */
+  storeCredit: { customerId: string; customerName: string } | null
 }
 
 /**
@@ -256,7 +262,8 @@ const FILA_SELECT = Prisma.validator<Prisma.GiftCardSelect>()({
 })
 type FilaDb = Prisma.GiftCardGetPayload<{ select: typeof FILA_SELECT }>
 
-function aFila(t: FilaDb, clientes: Map<string, string>): GiftCardRow {
+function aFila(t: FilaDb, clientes: Map<string, string>, deSaldo: Set<string>): GiftCardRow {
+  const cliente = t.customerId ? { id: t.customerId, name: clientes.get(t.customerId) ?? '(sin nombre)' } : null
   return {
     id: t.id,
     last4: t.codeLast4,
@@ -274,8 +281,9 @@ function aFila(t: FilaDb, clientes: Map<string, string>): GiftCardRow {
     recipientName: t.recipientName,
     purchaserName: t.purchaserName,
     source: t.source,
-    customer: t.customerId ? { id: t.customerId, name: clientes.get(t.customerId) ?? '(sin nombre)' } : null,
+    customer: cliente,
     order: t.orderItem ? { id: t.orderItem.orderId, orderNumber: t.orderItem.order.orderNumber } : null,
+    storeCredit: cliente && deSaldo.has(t.id) ? { customerId: cliente.id, customerName: cliente.name } : null,
   }
 }
 
@@ -369,12 +377,20 @@ export async function listGiftCards(venueId: string, q: ListGiftCardsQuery, ahor
       take: pageSize,
     }),
   ])
-  const nombres = await nombresDeClientes(
-    venueId,
-    filas.map(f => f.customerId),
-  )
+  // S8a: cuáles son saldo a favor, en UNA consulta para toda la página (sin una por renglón).
+  const [nombres, deSaldo] = await Promise.all([
+    nombresDeClientes(
+      venueId,
+      filas.map(f => f.customerId),
+    ),
+    sobresDeSaldoAFavorEntre(
+      prisma,
+      venueId,
+      filas.map(f => f.id),
+    ),
+  ])
   return {
-    items: filas.map(f => aFila(f, nombres)),
+    items: filas.map(f => aFila(f, nombres, deSaldo)),
     page,
     pageSize,
     total: agregado._count._all,
@@ -460,7 +476,10 @@ export async function getGiftCardDetail(
       })
     : []
   const nombresStaff = new Map(staff.map(s => [s.id, nombreDe(s)]))
-  const clientes = await nombresDeClientes(venueId, [tarjeta.customerId])
+  const [clientes, deSaldo] = await Promise.all([
+    nombresDeClientes(venueId, [tarjeta.customerId]),
+    sobresDeSaldoAFavorEntre(prisma, venueId, [tarjeta.id]),
+  ])
   const vivo = tarjeta.status === GiftCardStatus.ACTIVE || tarjeta.status === GiftCardStatus.BLOCKED
   // Decisión 1 del coordinador: la misma regla que `iniciarCancelacionDeVenta` (B2), leída sin candados.
   const cancel: CancelacionDeVenta = tarjeta.orderItem ? await estadoDeCancelacionDeVenta(venueId, tarjeta.orderItem.orderId) : SIN_VENTA
@@ -481,7 +500,7 @@ export async function getGiftCardDetail(
     : null
 
   return {
-    ...aFila(tarjeta, clientes),
+    ...aFila(tarjeta, clientes, deSaldo),
     validityMonths: tarjeta.validityMonths,
     termsVersion: tarjeta.termsVersion,
     message: tarjeta.message,

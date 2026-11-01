@@ -453,12 +453,9 @@ export async function cambiarDestinoDeTarjeta(
 export async function cambiarTelefonoDeSaldoAFavor(
   venueId: string,
   giftCardId: string,
-  p: { telefono: string; staffId: string },
+  p: { telefono: string; staffId: string; expectedPhoneLast4?: string; ipAddress?: string; userAgent?: string },
 ): Promise<{ phoneLast4: string }> {
-  return prisma.$transaction(
-    tx => cambiarTelefonoDeSaldoAFavorEnTx(tx, { venueId, giftCardId, telefono: p.telefono, staffId: p.staffId }),
-    ORDER_LOCK_WAIT_BUDGET,
-  )
+  return prisma.$transaction(tx => cambiarTelefonoDeSaldoAFavorEnTx(tx, { venueId, giftCardId, ...p }), ORDER_LOCK_WAIT_BUDGET)
 }
 
 // ─── Mostrar el código (Q42, Q102) ───

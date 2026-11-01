@@ -90,6 +90,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.customer.findMany.mockResolvedValue([])
   prismaMock.staff.findMany.mockResolvedValue([])
+  // S8a: la lista y el detalle preguntan, en una consulta por página, cuáles son saldo a favor (aquí, ninguna).
+  prismaMock.$queryRaw.mockResolvedValue([])
 })
 
 describe('tope de página (lo impone el servidor)', () => {
@@ -140,6 +142,8 @@ describe('lista', () => {
       source: 'POS',
       customer: null,
       order: { id: 'o1', orderNumber: 'ORD-1' },
+      // S8a (aditivo): no es saldo a favor.
+      storeCredit: null,
     })
   })
 
@@ -449,14 +453,17 @@ describe('detalle con su libreta', () => {
 
 describe('resumen del periodo', () => {
   it('cifras de la libreta en pesos exactos, con los días del negocio', async () => {
-    prismaMock.giftCardActivity.groupBy.mockResolvedValue([
-      { type: 'ACTIVATE', _sum: { amount: D('3000') }, _count: { _all: 3 } },
-      { type: 'REDEEM', _sum: { amount: D('300.10') }, _count: { _all: 2 } },
-      { type: 'REDEEM_REVERSAL', _sum: { amount: D('100.20') }, _count: { _all: 1 } },
-      { type: 'DEACTIVATE', _sum: { amount: D('500') }, _count: { _all: 1 } },
-      { type: 'ADJUST_INCREMENT', _sum: { amount: D('50') }, _count: { _all: 1 } },
-      { type: 'ADJUST_DECREMENT', _sum: { amount: D('20.5') }, _count: { _all: 1 } },
-    ])
+    // S8a: el primer groupBy es el de siempre (sin abonos de saldo); el segundo, sólo los abonos (aquí, ninguno).
+    prismaMock.giftCardActivity.groupBy
+      .mockResolvedValueOnce([
+        { type: 'ACTIVATE', _sum: { amount: D('3000') }, _count: { _all: 3 } },
+        { type: 'REDEEM', _sum: { amount: D('300.10') }, _count: { _all: 2 } },
+        { type: 'REDEEM_REVERSAL', _sum: { amount: D('100.20') }, _count: { _all: 1 } },
+        { type: 'DEACTIVATE', _sum: { amount: D('500') }, _count: { _all: 1 } },
+        { type: 'ADJUST_INCREMENT', _sum: { amount: D('50') }, _count: { _all: 1 } },
+        { type: 'ADJUST_DECREMENT', _sum: { amount: D('20.5') }, _count: { _all: 1 } },
+      ])
+      .mockResolvedValueOnce([])
     prismaMock.giftCard.aggregate
       .mockResolvedValueOnce({ _sum: { balance: D('2100.30') }, _count: { _all: 4 } })
       .mockResolvedValueOnce({ _sum: { balance: D('250') } })
@@ -484,7 +491,14 @@ describe('resumen del periodo', () => {
       redeemed: { movements: 2, amount: 300.1, reversed: 100.2, net: 199.9 },
       cancelled: { cards: 1, amount: 500 },
       adjustments: { increments: 50, decrements: 20.5, net: 29.5 },
+      storeCredit: { cards: 0, movements: 0, amount: 0 },
       liveBalance: { cards: 4, amount: 2100.3, expiredAmount: 250 },
+    })
+    expect(prismaMock.giftCardActivity.groupBy.mock.calls[1][0].where).toEqual({
+      venueId: 'v1',
+      createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lte: new Date('2026-10-15T05:59:59.999Z') },
+      type: { in: ['ACTIVATE', 'ADJUST_INCREMENT'] },
+      refundPaymentId: { not: null },
     })
     expect(prismaMock.giftCard.aggregate.mock.calls[0][0].where).toEqual({
       venueId: 'v1',

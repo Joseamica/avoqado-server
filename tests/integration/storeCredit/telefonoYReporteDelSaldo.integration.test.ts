@@ -51,7 +51,7 @@ import {
   type QuienPregunta,
 } from '@/services/giftCards/giftCardCuenta.service'
 import { PROPOSITO_TELEFONO_DE_TARJETA, pedirCodigoDeTelefono, verificarCodigoDeTelefono } from '@/services/giftCards/giftCardPhone.service'
-import { getGiftCardSummary } from '@/services/giftCards/giftCardReports.service'
+import { getGiftCardDetail, getGiftCardSummary, listGiftCards } from '@/services/giftCards/giftCardReports.service'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
 import { payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
@@ -72,6 +72,7 @@ let staffId: string
 let gerente: QuienPregunta
 let saldoId: string
 let regaladaId: string
+let anaId: string
 let n = 0
 
 const llave = (que: string) => `${SUF}-${que}-${(n += 1)}`.slice(-60)
@@ -144,8 +145,11 @@ beforeAll(async () => {
 
   // El saldo a favor de Ana: nace con un Cambio ($300), se recarga con un Reembolso ($150) y un gerente lo ajusta (+$40, es ajuste).
   const ana = await prisma.customer.create({ data: { venueId, firstName: 'Ana', lastName: 'López', phone: '55 1234 0081' } })
+  anaId = ana.id
   saldoId = (await abonar(ana.id, 300, 'CAMBIO')).giftCardId
   await abonar(ana.id, 150, 'REEMBOLSO')
+  // La regalada queda guardada en la cartera de Ana: también tiene cliente y NO es saldo a favor.
+  await prisma.giftCard.update({ where: { id: regaladaId }, data: { customerId: ana.id } })
   await prisma.$transaction(tx =>
     operarSobreDeGerenteEnTx(tx, {
       venueId,
@@ -178,6 +182,14 @@ describe('S8a · saldo a favor contra Postgres', () => {
     expect(r.adjustments).toEqual({ increments: 40, decrements: 0, net: 40 })
     // Lo que se debe hoy sí incluye el saldo a favor: el negocio se lo debe a la clienta.
     expect(r.liveBalance).toMatchObject({ cards: 2, amount: 1490 })
+  })
+
+  it('el detalle y la lista del panel dicen cuál es saldo a favor (con su clienta); la regalada guardada no', async () => {
+    const ana = { customerId: anaId, customerName: 'Ana López' }
+    expect((await getGiftCardDetail(venueId, saldoId, {})).storeCredit).toEqual(ana)
+    expect((await getGiftCardDetail(venueId, regaladaId, {})).storeCredit).toBeNull()
+    const pagina = await listGiftCards(venueId, {})
+    expect(Object.fromEntries(pagina.items.map(i => [i.id, i.storeCredit]))).toEqual({ [saldoId]: ana, [regaladaId]: null })
   })
 
   it('el predicado frena reenviar y mostrar el código del sobre de saldo; la regalada no se frena', async () => {
@@ -214,9 +226,15 @@ describe('S8a · saldo a favor contra Postgres', () => {
     })
     mockEnviarCodigo.mockClear()
 
-    await expect(cambiarTelefonoDeSaldoAFavor(venueId, saldoId, { telefono: '55 9876 0082', staffId })).resolves.toEqual({
-      phoneLast4: '0082',
-    })
+    // Comparar y cambiar: con un esperado que ya no es el actual, nada cambia (409); con el bueno, cambia.
+    await expect(
+      cambiarTelefonoDeSaldoAFavor(venueId, saldoId, { telefono: '55 9876 0082', staffId, expectedPhoneLast4: '9999' }),
+    ).rejects.toMatchObject({ code: 'STORE_CREDIT_PHONE_OUTDATED', statusCode: 409, details: { phoneLast4: '0081' } })
+    expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: saldoId } })).recipientPhone).toBe(VIEJO)
+    const cambio = { telefono: '55 9876 0082', staffId, expectedPhoneLast4: '0081', ipAddress: '10.0.0.7', userAgent: 'panel' }
+    await expect(cambiarTelefonoDeSaldoAFavor(venueId, saldoId, cambio)).resolves.toEqual({ phoneLast4: '0082' })
+    // La MISMA petición repetida: éxito, sin otra bitácora (se revisa abajo: una sola).
+    await expect(cambiarTelefonoDeSaldoAFavor(venueId, saldoId, cambio)).resolves.toEqual({ phoneLast4: '0082' })
     // Sin mandar nada y sin tocar la entrega; la bitácora quedó con los teléfonos enmascarados.
     expect(mockEnviarCodigo).not.toHaveBeenCalled()
     expect(
@@ -224,7 +242,12 @@ describe('S8a · saldo a favor contra Postgres', () => {
     ).toEqual({ recipientPhone: NUEVO, deliveryStatus: 'SENT' })
     const bitacora = await prisma.activityLog.findMany({ where: { venueId, entityId: saldoId, action: 'STORE_CREDIT_PHONE_CHANGED' } })
     expect(bitacora).toHaveLength(1)
-    expect(bitacora[0]).toMatchObject({ staffId, data: { telefonoAnterior: '55•••••081', telefonoNuevo: '55•••••082' } })
+    expect(bitacora[0]).toMatchObject({
+      staffId,
+      ipAddress: '10.0.0.7',
+      userAgent: 'panel',
+      data: { telefonoAnterior: '55•••••081', telefonoNuevo: '55•••••082' },
+    })
 
     // El código pedido con el viejo ya no verifica.
     await expect(verificarCodigoDeTelefono(venueId, { phone: VIEJO, code: '246810', deviceId: APARATO })).rejects.toMatchObject({

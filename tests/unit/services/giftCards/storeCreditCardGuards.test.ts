@@ -20,7 +20,9 @@ import { cambiarDestinoDeTarjeta, reenviarTarjeta, revelarCodigo, type QuienPreg
 import { cambiarTelefonoDeSaldoAFavorEnTx, esSobreDeSaldoAFavorSql, lockGiftCardsForUpdate } from '@/services/giftCards/giftCardLedger'
 import { pedirCodigoDeTelefono, verificarCodigoDeTelefono } from '@/services/giftCards/giftCardPhone.service'
 import { resolverPrueba } from '@/services/giftCards/giftCardProof'
-import { getGiftCardSummary } from '@/services/giftCards/giftCardReports.service'
+import { auditarReenvio } from '@/services/giftCards/giftCardSurface.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { getGiftCardSummary, listGiftCards } from '@/services/giftCards/giftCardReports.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'cvenue0000000000000000001'
@@ -223,6 +225,18 @@ describe('un sobre de saldo a favor no se reenvía, no cambia de destino ni ense
     expect(pregunta.slice(1)).toContain(SOBRE)
   })
 
+  it('el rechazo de reenviar un saldo a favor deja GIFT_CARD_RESEND_DENIED en la bitácora (el intento queda a la vista)', async () => {
+    const rechazo: any = await acciones.reenviar().catch(e => e)
+    auditarReenvio({ venueId: VENUE, staffId: GERENTE.staffId, giftCardId: SOBRE, operationKey: 'reenvia-0001', ruta: 'r', rechazo })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GIFT_CARD_RESEND_DENIED',
+        entityId: SOBRE,
+        data: expect.objectContaining({ code: 'STORE_CREDIT_CARD_NOT_ELIGIBLE' }),
+      }),
+    )
+  })
+
   it('una tarjeta regalada (no es saldo a favor) sí enseña su código: el bloqueo es sólo del saldo a favor', async () => {
     esDeSaldo = false
     sobre = nuevoSobre({ customerId: null })
@@ -317,6 +331,8 @@ describe('cambiarTelefonoDeSaldoAFavorEnTx: el gerente cambia el teléfono con q
         entity: 'GiftCard',
         entityId: SOBRE,
         data: { telefonoAnterior: '55•••••678', telefonoNuevo: '55•••••432' },
+        ipAddress: null,
+        userAgent: null,
       },
     })
     // Nunca el teléfono completo en la bitácora.
@@ -342,10 +358,58 @@ describe('cambiarTelefonoDeSaldoAFavorEnTx: el gerente cambia el teléfono con q
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   }
 
-  it('una tarjeta regalada (no es saldo a favor) → STORE_CREDIT_CARD_NOT_ELIGIBLE, sin escribir', async () => {
+  it('una tarjeta regalada (no es saldo a favor) → STORE_CREDIT_PHONE_NOT_ALLOWED (su propio código), sin escribir', async () => {
     esDeSaldo = false
-    await expect(cambiarTelefono(NUEVO)).rejects.toMatchObject({ code: 'STORE_CREDIT_CARD_NOT_ELIGIBLE', statusCode: 409 })
+    await expect(cambiarTelefono(NUEVO)).rejects.toMatchObject({ code: 'STORE_CREDIT_PHONE_NOT_ALLOWED', statusCode: 409 })
     sinEscribir()
+  })
+
+  it('la bitácora lleva el origen de la petición (ip y aparato), como las demás auditorías del panel', async () => {
+    await cambiarTelefonoDeSaldoAFavorEnTx(prismaMock, {
+      venueId: VENUE,
+      giftCardId: SOBRE,
+      telefono: NUEVO,
+      staffId: GERENTE.staffId,
+      ipAddress: '10.0.0.7',
+      userAgent: 'Mozilla/5.0 panel',
+    })
+    expect(prismaMock.activityLog.create.mock.calls[0][0].data).toMatchObject({ ipAddress: '10.0.0.7', userAgent: 'Mozilla/5.0 panel' })
+  })
+
+  describe('comparar y cambiar (expectedPhoneLast4)', () => {
+    const conEsperado = (telefono: string, expectedPhoneLast4: string) =>
+      cambiarTelefonoDeSaldoAFavorEnTx(prismaMock, {
+        venueId: VENUE,
+        giftCardId: SOBRE,
+        telefono,
+        staffId: GERENTE.staffId,
+        expectedPhoneLast4,
+      })
+    const OTRO = '+525511112222'
+
+    it('si coincide con el teléfono actual, cambia', async () => {
+      await expect(conEsperado(NUEVO, '5678')).resolves.toEqual({ phoneLast4: '5432' })
+      expect(sobre!.recipientPhone).toBe(NUEVO)
+    })
+
+    it('🔴 una petición A→B que llega DESPUÉS de B→C no regresa B: 409 STORE_CREDIT_PHONE_OUTDATED sin escribir nada', async () => {
+      await conEsperado(NUEVO, '5678') // A→B
+      await conEsperado(OTRO, '5432') // B→C
+      jest.clearAllMocks()
+      armarBase()
+      const error: any = await conEsperado(NUEVO, '5678').catch(e => e) // la A→B vieja, tarde
+      expect(error).toMatchObject({ code: 'STORE_CREDIT_PHONE_OUTDATED', statusCode: 409, details: { phoneLast4: '2222' } })
+      expect(error.message).toBe('El teléfono de este saldo ya cambió: ahora termina en 2222. Revísalo y vuelve a intentarlo.')
+      expect(sobre!.recipientPhone).toBe(OTRO)
+      sinEscribir()
+    })
+
+    it('la MISMA petición repetida con el teléfono ya puesto responde éxito, sin una segunda bitácora', async () => {
+      await expect(conEsperado(NUEVO, '5678')).resolves.toEqual({ phoneLast4: '5432' })
+      await expect(conEsperado(NUEVO, '5678')).resolves.toEqual({ phoneLast4: '5432' })
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.giftCard.updateMany).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('un teléfono que no se entiende → 400 GIFT_CARD_PHONE_INVALID antes de tomar el candado', async () => {
@@ -365,7 +429,61 @@ describe('cambiarTelefonoDeSaldoAFavorEnTx: el gerente cambia el teléfono con q
   })
 })
 
-// ─── 3. El resumen del periodo ───
+// ─── 3. La lista y el detalle del panel dicen cuál es saldo a favor ───
+
+describe('la lista del panel marca el saldo a favor (storeCredit) con UNA consulta por página', () => {
+  const fila = (id: string, customerId: string | null) => ({
+    id,
+    codeLast4: 'K7QZ',
+    status: 'ACTIVE',
+    initialAmount: new Prisma.Decimal(300),
+    balance: new Prisma.Decimal(300),
+    createdAt: new Date('2026-10-10T18:00:00.000Z'),
+    activatedAt: new Date('2026-10-10T18:00:00.000Z'),
+    expiresAt: null,
+    deliveryChannel: 'WHATSAPP',
+    deliveryStatus: 'SENT',
+    deliveredAt: null,
+    deliveryErrorCode: null,
+    recipientName: 'Ana',
+    purchaserName: null,
+    source: 'POS',
+    customerId,
+    orderItem: null,
+  })
+
+  it('el sobre de saldo sale con su clienta; la regalada guardada (también con cliente) y la vendida, con null', async () => {
+    prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { balance: new Prisma.Decimal(900) } } as any)
+    prismaMock.giftCard.findMany.mockResolvedValue([fila('saldo', 'ana'), fila('regalada', 'ana'), fila('vendida', null)] as any)
+    prismaMock.customer.findMany.mockResolvedValue([{ id: 'ana', firstName: 'Ana', lastName: 'López' }] as any)
+    prismaMock.$queryRaw.mockReset().mockResolvedValue([{ id: 'saldo' }] as any)
+
+    const r = await listGiftCards(VENUE, {})
+    expect(r.items.map(i => [i.id, i.storeCredit])).toEqual([
+      ['saldo', { customerId: 'ana', customerName: 'Ana López' }],
+      ['regalada', null],
+      ['vendida', null],
+    ])
+    // Una sola consulta para toda la página, con EL predicado, dentro del negocio y con todos los ids de la página.
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    const [plantilla, ...valores] = prismaMock.$queryRaw.mock.calls[0] as any[]
+    expect(textoDe(plantilla)).toContain('FROM "GiftCard" g')
+    expect(valores).toContain(VENUE)
+    expect(valores.some(v => v?.sql === esSobreDeSaldoAFavorSql('g').sql)).toBe(true)
+    expect(JSON.stringify(valores)).toEqual(expect.stringContaining('"saldo"'))
+    expect(JSON.stringify(valores)).toEqual(expect.stringContaining('"vendida"'))
+  })
+
+  it('una página vacía no consulta el predicado', async () => {
+    prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { balance: null } } as any)
+    prismaMock.giftCard.findMany.mockResolvedValue([])
+    prismaMock.$queryRaw.mockReset()
+    expect((await listGiftCards(VENUE, {})).items).toEqual([])
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+  })
+})
+
+// ─── 4. El resumen del periodo ───
 
 type Mov = {
   giftCardId: string
