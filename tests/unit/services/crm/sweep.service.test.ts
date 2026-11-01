@@ -1027,6 +1027,23 @@ describe('backfillFromOnboarding', () => {
     expect(prismaMock.activityLog.findMany).not.toHaveBeenCalled()
   })
 
+  it('fallo_transitorio_no_queda_detras_del_cursor (Codex exhaustiva #11): the next pass, without a restart, retries it', async () => {
+    seedOrganization()
+    seedOrganization({ id: OTHER_ORG, name: 'Taller Beto' })
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
+    seedSignup(seedStaff('beto@taller.mx', {}, OTHER_ORG).id, OTHER_ORG, { createdAt: new Date(Date.now() - 2 * DAY) })
+    // The first mark's transaction fails once (a blip); the database is back at once.
+    prismaMock.$transaction.mockImplementationOnce(async () => {
+      throw new Error('connection reset')
+    })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+    expect(db.accounts.map(account => account.externalKey)).toEqual(['beto@taller.mx'])
+
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+    expect(db.accounts.map(account => account.externalKey).sort()).toEqual([EMAIL, 'beto@taller.mx'])
+  })
+
   it('a mark that commits late with an earlier time is still read: the cursor waits ten minutes behind «now» (M-3)', async () => {
     seedOrganization()
     seedOrganization({ id: OTHER_ORG, name: 'Taller Beto' })

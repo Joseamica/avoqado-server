@@ -337,12 +337,14 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
   )
   // A full page: the next pass goes on after it. A short one reached the end, and the cursor stays at the EARLIER of the
   // last mark read and ten minutes ago (M-3): a signup whose transaction started before can still commit its mark in
-  // between, and reading those minutes again costs a few rows of the index, each skipped once it has its account. A
-  // signup that failed is retried after a restart.
+  // between, and reading those minutes again costs a few rows of the index, each skipped once it has its account.
   const lastRead = signups.length ? cursorOf(signups[signups.length - 1]) : from
   const caughtUp: Cursor = { createdAt: new Date(startedAt - CAUGHT_UP_LAG_MS), id: '' }
-  cursors.backfill = signups.length === size || (lastRead && lastRead.createdAt < caughtUp.createdAt) ? lastRead : caughtUp
-  if (!signups.length) return 0
+  const next = signups.length === size || (lastRead && lastRead.createdAt < caughtUp.createdAt) ? lastRead : caughtUp
+  if (!signups.length) {
+    cursors.backfill = next
+    return 0
+  }
 
   const rows = signups.map(signup => {
     const data = asObject(signup.data)
@@ -368,7 +370,8 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
   const pending = new Set(waiting.map(entry => entry.externalKey))
 
   let created = 0
-  for (const { signup, data, organizationId, email } of rows) {
+  let firstFailed = -1
+  for (const [index, { signup, data, organizationId, email }] of rows.entries()) {
     const organization = organizationId ? organizationOf.get(organizationId) : undefined
     if (!email || !signup.active || !organization || organization.crmAccount || pending.has(email)) continue
     const phone = signup.phone || organization.phone
@@ -419,13 +422,19 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
       // After the commit, and never throws: a notice that does not go out is logged, and its email key keeps it single.
       if (age < ANNOUNCE_WITHIN_MS) await notifyNewProspect(accountId)
     } catch (error) {
-      logger.error('[CRM] An old landing signup could not get its CRM account; a restart retries it', {
+      if (firstFailed < 0) firstFailed = index
+      logger.error('[CRM] An old landing signup could not get its CRM account; the next sweep retries it', {
         activityLogId: signup.id,
         organizationId: organization.id,
         error: errorText(error),
       })
     }
   }
+  // Ruling 65 (f, Codex exhaustiva #11): walking past a mark is not resolving it. The cursor never passes one that
+  // failed: the next pass reads it again — and the ones after it, each skipped once it has its account.
+  // ponytail: a mark that ALWAYS fails holds the cursor; each pass still does the 200 marks from it, but a signup further
+  // ahead waits. Keep failed marks in a retry set of their own (by id) if that ever happens.
+  cursors.backfill = firstFailed < 0 ? next : firstFailed === 0 ? from : cursorOf(signups[firstFailed - 1])
   return created
 }
 
