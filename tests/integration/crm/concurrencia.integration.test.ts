@@ -10,8 +10,9 @@
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/concurrencia.integration.test.ts --ci
  */
 import type { CrmAccess } from '@/services/crm/access.service'
-import { moveStage, takeAccount } from '@/services/crm/accounts.service'
+import { getPending, moveStage, takeAccount } from '@/services/crm/accounts.service'
 import { completeActivity } from '@/services/crm/activities.service'
+import { updateTeamMember } from '@/services/crm/teamVenue.service'
 import { addEvent } from '@/services/crm/timeline.service'
 import prisma from '@/utils/prismaClient'
 
@@ -40,6 +41,7 @@ describe('CRM: two sellers on the same account at once', () => {
   let beto: string | undefined
   const stageIds: string[] = []
   const accountIds: string[] = []
+  const accessIds: string[] = []
 
   beforeAll(async () => {
     ana = (await prisma.staff.create({ data: { email: `ana-${suffix}@test.mx`, firstName: 'Ana', lastName: 'Concurrencia' } })).id
@@ -59,6 +61,7 @@ describe('CRM: two sellers on the same account at once', () => {
     // Deleting the accounts cascades to their activities and timeline events.
     if (accountIds.length) await prisma.crmAccount.deleteMany({ where: { id: { in: accountIds } } })
     if (stageIds.length) await prisma.crmStage.deleteMany({ where: { id: { in: stageIds } } })
+    if (accessIds.length) await prisma.platformAccess.deleteMany({ where: { id: { in: accessIds } } })
     const people = [ana, beto].filter((id): id is string => !!id)
     if (people.length) await prisma.staff.deleteMany({ where: { id: { in: people } } })
   })
@@ -134,5 +137,58 @@ describe('CRM: two sellers on the same account at once', () => {
 
     expect(written.filter(Boolean)).toHaveLength(1)
     expect(await prisma.crmTimelineEvent.count({ where: { sourceKey: event.sourceKey } })).toBe(1)
+  })
+
+  it('dos_admins_cambian_llaves_a_la_vez_uno_gana (ruling 60)', async () => {
+    // Carla, a default seller. Both admins opened her keys at the same time and saw the same thing.
+    const carla = await prisma.platformAccess.create({
+      data: { email: `carla-${suffix}@test.mx`, verScope: 'propios', editarScope: 'propios', contactar: true, createdById: ana! },
+    })
+    accessIds.push(carla.id)
+    const seen = {
+      ver: 'propios',
+      editar: 'propios',
+      contactar: true,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+    } as const
+    const admin = (staffId: string): CrmAccess => ({ ...seller(staffId), campanas: true, exportar: true, ventas: true, admin: true })
+
+    const { fulfilled, rejected } = settle(
+      await Promise.allSettled([
+        updateTeamMember(admin(ana!), carla.id, { ...seen, ventas: true }, seen),
+        updateTeamMember(admin(beto!), carla.id, { ...seen, exportar: true }, seen),
+      ]),
+    )
+
+    // One lands; the other one learns her keys changed, instead of silently undoing the first.
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]).toMatchObject({ statusCode: 409, code: 'CRM_LLAVES_CAMBIARON' })
+    const stored = await prisma.platformAccess.findUniqueOrThrow({ where: { id: carla.id } })
+    expect([stored.ventas, stored.exportar].sort()).toEqual([false, true])
+  })
+
+  it('mi_actividad_es_la_mia_aunque_otro_tenga_la_mas_temprana (ruling 61)', async () => {
+    // Nobody owns it yet: Beto scheduled the earliest call; Ana owes two (and finished an even older one).
+    const id = await newAccount()
+    const ago = (days: number) => new Date(Date.now() - days * 86_400_000)
+    const activity = (title: string, assigneeStaffId: string, dueAt: Date, doneAt: Date | null = null) =>
+      prisma.crmActivity.create({ data: { accountId: id, type: 'LLAMADA', title, dueAt, assigneeStaffId, doneAt } })
+    const betos = await activity('De Beto', beto!, ago(3))
+    await activity('Ya hecha', ana!, ago(4), ago(4))
+    const anas = await activity('Primera de Ana', ana!, ago(2))
+    await activity('Segunda de Ana', ana!, ago(1))
+    await prisma.crmAccount.update({ where: { id }, data: { nextActivityAt: betos.dueAt } })
+
+    const pending = await getPending(seller(ana!), new Date())
+
+    const row = pending.vencidas.rows.find(r => r.id === id)
+    expect(row).toMatchObject({
+      nextActivity: { id: betos.id },
+      miActividad: { id: anas.id, type: 'LLAMADA', title: 'Primera de Ana', dueAt: anas.dueAt },
+    })
   })
 })

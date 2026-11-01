@@ -51,6 +51,9 @@ beforeEach(() => {
     prismaMock.crmStage.findFirst,
     prismaMock.crmAccount.findMany,
     prismaMock.crmContact.groupBy,
+    prismaMock.platformAccess.findFirst,
+    prismaMock.platformAccess.update,
+    prismaMock.platformAccess.updateManyAndReturn,
   ])
     fn.mockReset()
   // An admin of the team: «Administrar» on, «Ver negocios» off. Not a superadmin.
@@ -270,5 +273,43 @@ describe('reagendar (ruling 55)', () => {
     })
     const invalid = await request(appWithErrors).post('/crm/activities/cactivity0000000000000001/reschedule').send({ dueAt: 'el viernes' })
     expect(invalid.status).toBe(400)
+  })
+})
+
+describe('cambiar llaves con expectedKeys (ruling 60)', () => {
+  // A JSON body and the error handler: `appWithErrors` has no body parser of its own.
+  const jsonApp = express().use(express.json()).use(appWithErrors)
+
+  it('patch_team_lleva_expectedKeys_hasta_el_servicio_y_responde_409', async () => {
+    // Carla, as stored: a default seller. The screen saw her with «Mandar correo» off, but someone turned it on since.
+    const carla = {
+      id: 'caccessrw0000000000000001',
+      email: 'carla@avoqado.io',
+      staffId: 'cstaffsel0000000000000001',
+      verScope: 'propios',
+      editarScope: 'propios',
+      contactar: true,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      active: true,
+    }
+    prismaMock.platformAccess.findFirst.mockResolvedValue(carla)
+    const keys = { ver: 'propios', editar: 'propios', contactar: false, campanas: false, exportar: false, ventas: false, admin: false }
+
+    const stale = await request(jsonApp)
+      .patch(`/crm/team/${carla.id}`)
+      .send({ keys, expectedKeys: { ...keys, contactar: false } })
+    expect(stale.status).toBe(409)
+    expect(stale.body).toEqual({ code: 'CRM_LLAVES_CAMBIARON', message: 'Alguien más cambió sus llaves' })
+    expect(prismaMock.platformAccess.updateManyAndReturn).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+
+    // Without `expectedKeys`, as today: the change is written.
+    prismaMock.platformAccess.update.mockImplementation(async ({ data }: any) => ({ ...carla, ...data }))
+    const asToday = await request(jsonApp).patch(`/crm/team/${carla.id}`).send({ keys })
+    expect(asToday.status).toBe(200)
+    expect(asToday.body.data.keys).toMatchObject({ contactar: false })
   })
 })

@@ -21,7 +21,7 @@ jest.mock('@/services/dashboard/venueRoleConfig.dashboard.service', () => ({
 
 import * as teamDashboard from '@/services/dashboard/team.dashboard.service'
 import { getVenueSeatCap } from '@/services/access/seatCap.service'
-import { addTeamMemberSchema, removeTeamMemberSchema } from '@/schemas/crm.schema'
+import { addTeamMemberSchema, removeTeamMemberSchema, updateTeamMemberSchema } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
 import {
   addTeamMember,
@@ -142,6 +142,7 @@ const configured = () => [
   prismaMock.platformAccess.count,
   prismaMock.platformAccess.upsert,
   prismaMock.platformAccess.update,
+  prismaMock.platformAccess.updateManyAndReturn,
   prismaMock.staff.findUnique,
   prismaMock.staff.findFirst,
   prismaMock.staff.findMany,
@@ -573,6 +574,75 @@ describe('who may give which key', () => {
 
     // «Campañas masivas» and «Administrar» stand alone: the marketing profile needs no «Ver negocios».
     await expect(addTeamMember(actor(), newMember({ keys: keys({ ...noVer, campanas: true }) }))).resolves.toBeDefined()
+  })
+})
+
+/**
+ * Ruling 60: the screen sends the keys it SAW (`expectedKeys`). Two admins editing Carla at once must not have the second
+ * silently undo the first: if her keys changed since the screen read them, nothing is written and the 409 says so.
+ */
+describe('expectedKeys: lo viejo no pisa lo nuevo (ruling 60)', () => {
+  it('llaves_cambiaron_409_sin_escribir', async () => {
+    // The screen opened with «Ver ventas» off; meanwhile another admin turned it on.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ ventas: true }))
+
+    await expect(updateTeamMember(actor(), ROW_ID, keys({ contactar: false }), keys())).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_LLAVES_CAMBIARON',
+      message: 'Alguien más cambió sus llaves',
+    })
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.updateManyAndReturn).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('compara_las_llaves_efectivas_y_escribe_con_cas', async () => {
+    // Stored without «Ver negocios», her «Mandar correo» never worked: the screen showed it OFF, and that is what it sends.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ verScope: null, editarScope: null, contactar: true }))
+    prismaMock.platformAccess.updateManyAndReturn.mockImplementation(async ({ data }: any) => [storedRow({ ...data })])
+
+    const updated = await updateTeamMember(actor(), ROW_ID, keys(), keys({ ver: null, editar: null, contactar: false }))
+
+    expect(updated.keys).toEqual(expect.objectContaining({ ver: 'propios', contactar: true }))
+    // The write is the compare-and-set: it only lands on the row exactly as it was read.
+    expect(prismaMock.platformAccess.updateManyAndReturn).toHaveBeenCalledWith({
+      where: {
+        id: ROW_ID,
+        active: true,
+        verScope: null,
+        editarScope: null,
+        contactar: true,
+        campanas: false,
+        exportar: false,
+        ventas: false,
+        admin: false,
+      },
+      data: expect.objectContaining({ verScope: 'propios', editarScope: 'propios', contactar: true }),
+    })
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_TEAM_MEMBER_KEYS_UPDATED', entityId: ROW_ID }))
+  })
+
+  it('otro_admin_gana_entre_la_lectura_y_la_escritura_409', async () => {
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
+    // Same keys at the read, different ones at the write: the UPDATE matches no row.
+    prismaMock.platformAccess.updateManyAndReturn.mockResolvedValue([])
+
+    await expect(updateTeamMember(actor(), ROW_ID, keys({ contactar: false }), keys())).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_LLAVES_CAMBIARON',
+    })
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('el_esquema_acepta_expectedKeys_opcional_con_la_forma_de_keys', () => {
+    const params = { id: ROW_ID }
+    expect(
+      updateTeamMemberSchema.parse({ params, body: { keys: keys(), expectedKeys: keys({ ventas: true }) } }).body.expectedKeys,
+    ).toEqual(keys({ ventas: true }))
+    expect(updateTeamMemberSchema.parse({ params, body: { keys: keys() } }).body.expectedKeys).toBeUndefined()
+    // All seven, like `keys`: half a set cannot be compared.
+    expect(updateTeamMemberSchema.safeParse({ params, body: { keys: keys(), expectedKeys: { ver: 'propios' } } }).success).toBe(false)
   })
 })
 

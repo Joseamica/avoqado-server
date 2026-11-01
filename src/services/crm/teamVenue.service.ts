@@ -8,7 +8,7 @@
  * the founder's test one), the sellers could read its organization screens. `CrmTeam` says which ones they are.
  */
 import { InvitationStatus, Prisma, StaffRole, VenueStatus, VerificationStatus } from '@prisma/client'
-import { ForbiddenError, InternalServerError, NotFoundError, ValidationError } from '../../errors/AppError'
+import { ConflictError, ForbiddenError, InternalServerError, NotFoundError, ValidationError } from '../../errors/AppError'
 import { CRM_KEY_LABELS, type CrmKey } from '../../lib/permissions'
 import type { CrmKeysInput } from '../../schemas/crm.schema'
 import prisma from '../../utils/prismaClient'
@@ -249,14 +249,41 @@ export async function addTeamMember(actor: CrmAccess, input: { email: string; fi
   return { id: row.id, email, keys: effectiveKeys(row), invited, invitationEmailSent: false, inviteLink: sent.inviteLink }
 }
 
-/** Changes the keys of someone on the team. */
-export async function updateTeamMember(actor: CrmAccess, id: string, keys: CrmKeysInput) {
+const keysChanged = () => new ConflictError('Alguien más cambió sus llaves', 'CRM_LLAVES_CAMBIARON')
+
+/**
+ * Changes the keys of someone on the team. `expectedKeys` (ruling 60) are the keys the screen saw: if her EFFECTIVE keys
+ * are not those any more, or change between this read and the write (the UPDATE is a compare-and-set on the columns as
+ * read), nothing is written and the 409 says so. Without them, as before.
+ */
+export async function updateTeamMember(actor: CrmAccess, id: string, keys: CrmKeysInput, expectedKeys?: CrmKeysInput) {
   const row = await prisma.platformAccess.findFirst({ where: { id, active: true } })
   if (!row) throw new NotFoundError('Esa persona no está en el equipo de ventas', 'CRM_TEAM_MEMBER_NOT_FOUND')
+  const current = effectiveKeys(row)
+  if (expectedKeys && (Object.keys(KEY_OF) as Array<keyof CrmKeys>).some(field => current[field] !== expectedKeys[field]))
+    throw keysChanged()
   assertKeysGoTogether(keys)
   assertCanGive(actor, row, keys)
 
-  const updated = await prisma.platformAccess.update({ where: { id }, data: keyColumns(keys) })
+  const updated = expectedKeys
+    ? (
+        await prisma.platformAccess.updateManyAndReturn({
+          where: {
+            id,
+            active: true,
+            verScope: row.verScope,
+            editarScope: row.editarScope,
+            contactar: row.contactar,
+            campanas: row.campanas,
+            exportar: row.exportar,
+            ventas: row.ventas,
+            admin: row.admin,
+          },
+          data: keyColumns(keys),
+        })
+      )[0]
+    : await prisma.platformAccess.update({ where: { id }, data: keyColumns(keys) })
+  if (!updated) throw keysChanged()
   void logAction({
     staffId: actor.staffId,
     venueId: null,

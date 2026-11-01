@@ -429,9 +429,24 @@ export async function listAccounts(access: CrmAccess, filters: AccountFilters = 
   }
 }
 
+/** The pending activity of mine that put an account in «Vencidas» or «Hoy» (ruling 61). */
+export type MiActividad = Pick<NextActivity, 'id' | 'type' | 'title' | 'dueAt'>
+
 export interface PendingSection {
-  rows: AccountRow[]
+  /** `miActividad` only in «Vencidas» and «Hoy»: `nextActivity` can be someone else's, on an account nobody owns yet. */
+  rows: Array<AccountRow & { miActividad?: MiActividad | null }>
   total: number
+}
+
+/** My first pending activity on each account — by due date, then id — in ONE query (≤ 100 ids: two sections of 50). */
+async function myFirstActivities(staffId: string, accountIds: string[]): Promise<Map<string, MiActividad>> {
+  if (!accountIds.length) return new Map()
+  const found = await prisma.$queryRaw<Array<MiActividad & { accountId: string }>>`
+    SELECT DISTINCT ON ("accountId") "id", "accountId", "type", "title", "dueAt"
+    FROM "CrmActivity"
+    WHERE "accountId" = ANY(${accountIds}::text[]) AND "assigneeStaffId" = ${staffId} AND "doneAt" IS NULL
+    ORDER BY "accountId", "dueAt", "id"`
+  return new Map(found.map(({ accountId, ...activity }) => [accountId, activity]))
 }
 
 export type Pending = Record<'vencidas' | 'hoy' | 'sinSiguientePaso' | 'estancados' | 'nuevosSinDueno', PendingSection>
@@ -478,9 +493,23 @@ export async function getPending(access: CrmAccess, now = new Date()): Promise<P
   )
   // An account can sit in two sections (no next step AND stale): its row is built once, with one activities query.
   const unique = new Map(found.flatMap(({ accounts }) => accounts.map(account => [account.id, account] as const)))
-  const rows = new Map((await toRows(prisma, [...unique.values()], now)).map(row => [row.id, row]))
+  const owes = (key: keyof Pending) => key === 'vencidas' || key === 'hoy'
+  const owed = new Set(found.flatMap(({ key, accounts }) => (owes(key) ? accounts.map(account => account.id) : [])))
+  const [rows, mineFirst] = await Promise.all([
+    toRows(prisma, [...unique.values()], now).then(built => new Map(built.map(row => [row.id, row]))),
+    myFirstActivities(me, [...owed]),
+  ])
   const pending = {} as Pending
-  for (const { key, accounts, total } of found) pending[key] = { rows: accounts.flatMap(account => rows.get(account.id) ?? []), total }
+  for (const { key, accounts, total } of found) {
+    pending[key] = {
+      rows: accounts.flatMap(account => {
+        const row = rows.get(account.id)
+        // A copy: the same row can also sit in a section that owes nothing.
+        return !row ? [] : owes(key) ? [{ ...row, miActividad: mineFirst.get(account.id) ?? null }] : [row]
+      }),
+      total,
+    }
+  }
   return pending
 }
 

@@ -666,6 +666,7 @@ describe('lists', () => {
     prismaMock.crmStage.findMany.mockResolvedValue([{ id: PROSPECTO, staleDays: 2 }])
     prismaMock.crmAccount.findMany.mockResolvedValue([account()])
     prismaMock.crmAccount.count.mockResolvedValue(3)
+    prismaMock.$queryRaw.mockResolvedValue([])
 
     const pending = await getPending(access(), NOW)
 
@@ -728,6 +729,61 @@ describe('lists', () => {
     expect(prismaMock.crmAccount.count.mock.calls.map(([args]: [Prisma.CrmAccountCountArgs]) => args.where)).toEqual(
       calls.map(call => call.where),
     )
+  })
+
+  it('vencidas_y_hoy_dicen_cual_de_mis_actividades_las_puso_ahi (ruling 61)', async () => {
+    seeded()
+    prismaMock.crmStage.findMany.mockResolvedValue([{ id: PROSPECTO, staleDays: 2 }])
+    // Nobody owns it yet: Beto scheduled the earliest call (that is `nextActivity`), mine comes after his.
+    const shared = account({ id: ACCOUNT, ownerStaffId: null, owner: null, nextActivityAt: daysAgo(3) })
+    const today = account({ id: ACCOUNT_B, nextActivityAt: NOW })
+    const lost = account({ id: NEW_ACCOUNT, nextActivityAt: NOW })
+    prismaMock.crmAccount.findMany
+      .mockResolvedValueOnce([shared]) // vencidas
+      .mockResolvedValueOnce([today, lost]) // hoy
+      .mockResolvedValueOnce([]) // sinSiguientePaso
+      .mockResolvedValueOnce([today]) // estancados: the same row object, in a section that does not owe anything
+      .mockResolvedValueOnce([]) // nuevosSinDueno
+    prismaMock.crmAccount.count.mockResolvedValue(1)
+    prismaMock.crmActivity.findMany.mockResolvedValue([
+      {
+        id: 'cactbeto00000000000000001',
+        accountId: ACCOUNT,
+        type: 'LLAMADA',
+        title: 'Llamada de Beto',
+        dueAt: daysAgo(3),
+        assigneeStaffId: OTHER,
+      },
+    ])
+    const mineOverdue = { id: 'cactmine00000000000000001', type: 'WHATSAPP', title: 'Mandar precios', dueAt: daysAgo(1) }
+    const mineToday = { id: 'cactmine00000000000000002', type: 'LLAMADA', title: 'Llamar hoy', dueAt: NOW }
+    // `lost` has none: its activity was completed between the two reads.
+    prismaMock.$queryRaw.mockResolvedValue([
+      { ...mineOverdue, accountId: ACCOUNT },
+      { ...mineToday, accountId: ACCOUNT_B },
+    ])
+
+    const pending = await getPending(access(), NOW)
+
+    expect(pending.vencidas.rows[0]).toMatchObject({
+      id: ACCOUNT,
+      miActividad: mineOverdue,
+      nextActivity: { id: 'cactbeto00000000000000001' },
+    })
+    expect(pending.hoy.rows).toEqual([
+      expect.objectContaining({ id: ACCOUNT_B, miActividad: mineToday }),
+      expect.objectContaining({ id: NEW_ACCOUNT, miActividad: null }),
+    ])
+    expect(pending.estancados.rows[0]).not.toHaveProperty('miActividad')
+
+    // ONE query for both sections: the first pending activity of mine per account, by due date then id.
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0]
+    const sql = (strings as string[]).join('?').replace(/\s+/g, ' ')
+    expect(sql).toContain('SELECT DISTINCT ON ("accountId")')
+    expect(sql).toContain('"assigneeStaffId" = ? AND "doneAt" IS NULL')
+    expect(sql).toContain('ORDER BY "accountId", "dueAt", "id"')
+    expect(values).toEqual([[ACCOUNT, ACCOUNT_B, NEW_ACCOUNT], SELLER])
   })
 
   it('buscar_org_maximo_10_solo_nombre_y_ciudad', async () => {

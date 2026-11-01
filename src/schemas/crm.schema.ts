@@ -51,10 +51,10 @@ export const addTeamMemberSchema = z.object({
   }),
 })
 
-/** PATCH /crm/team/:id */
+/** PATCH /crm/team/:id — `expectedKeys`: the keys the screen saw (ruling 60); if they changed since, nothing is written. */
 export const updateTeamMemberSchema = z.object({
   params: z.object({ id: cuid }),
-  body: z.object({ keys: crmKeysSchema }),
+  body: z.object({ keys: crmKeysSchema, expectedKeys: crmKeysSchema.optional() }),
 })
 
 /**

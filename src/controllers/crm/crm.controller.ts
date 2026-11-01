@@ -33,7 +33,7 @@ export async function addTeam(req: Request, res: Response): Promise<void> {
 
 /** PATCH /api/v1/crm/team/:id */
 export async function updateTeam(req: Request, res: Response): Promise<void> {
-  res.json({ data: await updateTeamMember(req.crmAccess!, req.params.id, req.body.keys) })
+  res.json({ data: await updateTeamMember(req.crmAccess!, req.params.id, req.body.keys, req.body.expectedKeys) })
 }
 
 /** DELETE /api/v1/crm/team/:id */
