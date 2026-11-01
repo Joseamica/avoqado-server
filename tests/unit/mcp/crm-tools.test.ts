@@ -765,6 +765,22 @@ describe('crm_find_account, crm_pending and crm_pipeline_summary', () => {
     })
   })
 
+  it('in «Vencidas» and «Hoy» it says which activity is mine (ruling 61); other sections do not carry it', async () => {
+    const empty = { rows: [], total: 0 }
+    const mine = { id: cuid('mine'), type: 'DEMO', title: 'Demo', dueAt: new Date('2026-11-03T18:00:00.000Z') }
+    ;(getPending as jest.Mock).mockResolvedValue({
+      vencidas: { rows: [{ ...ROW, miActividad: mine }], total: 1 },
+      hoy: { rows: [{ ...ROW, miActividad: null }], total: 1 },
+      sinSiguientePaso: empty,
+      estancados: { rows: [ROW], total: 1 },
+      nuevosSinDueno: empty,
+    })
+    const answer = await setup().call('crm_pending')
+    expect(answer.vencidas.negocios[0].miActividad).toEqual({ tipo: 'DEMO', titulo: 'Demo', vence: '2026-11-03 12:00' })
+    expect(answer.hoy.negocios[0].miActividad).toBeNull()
+    expect(answer.estancados.negocios[0]).not.toHaveProperty('miActividad')
+  })
+
   it('the pipeline summary is the reports of the current Mexico City month', async () => {
     jest.useFakeTimers({ now: new Date('2026-11-01T05:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
     try {

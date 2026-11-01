@@ -29,6 +29,7 @@ import {
   lose,
   moveStage,
   type AccountRow,
+  type MiActividad,
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
@@ -69,8 +70,9 @@ function porNombre<T extends { name: string }>(items: T[], name: string | undefi
   return matches.length === 1 ? matches[0] : null
 }
 
-/** One business as the routine reads it. */
-function negocio(row: AccountRow) {
+/** One business as the routine reads it. In «Vencidas» and «Hoy» it also says which activity is the caller's (ruling 61). */
+function negocio(row: AccountRow & { miActividad?: MiActividad | null }) {
+  const mine = row.miActividad
   return {
     id: row.id,
     nombre: row.name,
@@ -85,6 +87,7 @@ function negocio(row: AccountRow) {
       : null,
     yaCobro: row.firstMoneyAt !== null,
     archivado: row.archivedAt !== null,
+    ...(mine === undefined ? {} : { miActividad: mine && { tipo: mine.type, titulo: mine.title, vence: fecha(mine.dueAt) } }),
   }
 }
 
