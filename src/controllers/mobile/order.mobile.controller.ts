@@ -10,6 +10,7 @@ import { NextFunction, Request, Response } from 'express'
 import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import logger from '../../config/logger'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
+import { liberarLlaveDePagarDespues } from '../../services/mobile/pagarDespuesLlave'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
 import { BadRequestError, ForbiddenError, UnauthorizedError } from '@/errors/AppError'
 import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
@@ -353,6 +354,23 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
     })
   } catch (error) {
     logger.error('Error in createOrder controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * D9: «cerrar la llave» de una «Pagar después» que el SERVIDOR rechazó al reenviarse. 200 `{ released: true }` si la cuenta no
+ * existe (y ya no podrá crearse), o `{ released: false, order }` si existe. Ver `services/mobile/pagarDespuesLlave.ts`.
+ *
+ * @route POST /api/v1/mobile/venues/:venueId/orders/by-external-id/:externalId/release
+ */
+export const releaseOrderKey = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, externalId } = req.params
+    const resultado = await liberarLlaveDePagarDespues(venueId, externalId, req.authContext?.userId ?? null)
+    res.status(200).json({ success: true, ...resultado })
+  } catch (error) {
+    logger.error('Error in releaseOrderKey controller:', error)
     next(error)
   }
 }

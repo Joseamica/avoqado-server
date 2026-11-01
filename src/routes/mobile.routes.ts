@@ -87,6 +87,7 @@ import * as switchUserMobileController from '../controllers/mobile/switch-user.m
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
+import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mobile.schema'
 import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
@@ -781,6 +782,18 @@ router.get('/venues/:venueId/orders', authenticateTokenMiddleware, checkPermissi
  *         description: Order not found
  */
 router.get('/venues/:venueId/orders/:orderId', authenticateTokenMiddleware, checkPermission('orders:read'), orderMobileController.getOrder)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/orders/by-external-id/:externalId/release
+ * D9: el POS cierra la llave de una «Pagar después» rechazada al reenviarse, antes de devolver la venta a «Carritos guardados».
+ * `orders:read`, como leer la cuenta: un empleado al que le quitaron `orders:create` también recupera su venta.
+ */
+router.post(
+  '/venues/:venueId/orders/by-external-id/:externalId/release',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  orderMobileController.releaseOrderKey,
+)
 
 /**
  * Aceptar o rechazar un pedido de una app de delivery, desde el punto de venta.
@@ -1902,6 +1915,16 @@ router.post(
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
   paymentMobileController.recordFastPayment,
+)
+
+/** GET exact cash evidence for recovery; absence never creates a replacement payment. */
+router.get(
+  '/venues/:venueId/payments/by-key/:idempotencyKey',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('payments:read'),
+  validateRequest(cashPaymentByKeyParamsSchema),
+  paymentMobileController.getCashPaymentByKey,
 )
 
 // BAJO-2 (full-testing, 15-oct-2026): el body se valida (un `customerId` numérico respondía 500). El schema nombra TODOS los

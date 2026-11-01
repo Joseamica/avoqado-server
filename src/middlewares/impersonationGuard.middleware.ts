@@ -78,7 +78,9 @@ export async function enforceImpersonationRules(req: Request): Promise<Impersona
   }
 
   const method = req.method.toUpperCase()
-  const path = req.originalUrl.split('?')[0]
+  // Lowercased: Express routes case-insensitively, so `/api/v1/Superadmin/...` reaches the superadmin
+  // router. Both lists below are lowercase.
+  const path = req.originalUrl.split('?')[0].toLowerCase()
 
   // Endpoints needed to manage the impersonation session itself always pass.
   if (IMPERSONATION_CONTROL_PATHS.includes(path)) {

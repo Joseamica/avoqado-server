@@ -1215,6 +1215,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': 1,
   'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': 1,
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': 1,
+  // «Cancelar orden» del panel (30-oct): abre la transacción y le pasa el tx a `cancelOrderInTransaction` (el núcleo del POS).
+  'src/services/dashboard/order.dashboard.service.ts#cancelarCuentaSinCobrar': 1,
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': 1,
   'src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent': 1,

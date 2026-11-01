@@ -102,9 +102,11 @@ describe('create_modifier_group', () => {
   it('la entrada rechaza un SKU que la API HTTP también rechaza', () => {
     const schema = z.object(shapes.get('create_modifier_group')!)
     const base = { venueId: 'v1', name: 'Extras' }
-    expect(schema.safeParse({ ...base, options: [{ name: 'Shot', sku: 'P 000672' }] }).success).toBe(false)
+    expect(schema.safeParse({ ...base, options: [{ name: 'Shot', sku: 'P/000672' }] }).success).toBe(false)
     expect(schema.safeParse({ ...base, options: [{ name: 'Shot', sku: 'X'.repeat(65) }] }).success).toBe(false)
     expect(schema.safeParse({ ...base, options: [{ name: 'Shot', sku: 'P000672' }] }).success).toBe(true)
+    // D3 (30-oct): espacio y punto entran, como en la API HTTP (códigos de otros POS).
+    expect(schema.safeParse({ ...base, options: [{ name: 'Shot', sku: 'P 000.672' }] }).success).toBe(true)
   })
 
   // Paridad con la API HTTP: las mismas entradas pasan por los dos esquemas. Si alguien quita el `.trim()` o cambia el
@@ -127,16 +129,20 @@ describe('create_modifier_group', () => {
         : { valido: false, sku: undefined, mensajes: r.error.issues.map(i => i.message) }
     }
 
-    for (const entrada of ['P 1', ' P000672 ', 'X'.repeat(65), 'Ñ1']) {
+    for (const entrada of ['P/1', 'P 1', ' P000672 ', 'X'.repeat(65), 'Ñ1']) {
       const [m, h] = [porMcp(entrada), porHttp(entrada)]
       expect([entrada, m.valido, m.sku]).toEqual([entrada, h.valido, h.sku])
     }
     expect(porMcp(' P000672 ')).toMatchObject({ valido: true, sku: 'P000672' })
 
     // El agente lee el mismo texto que el dashboard, no un «Invalid» pelón.
-    for (const entrada of ['P 1', 'Ñ1']) {
-      expect(porMcp(entrada).mensajes).toEqual(['El SKU sólo admite letras, números, guion y guion bajo'])
-      expect(porHttp(entrada).mensajes).toEqual(['El SKU sólo admite letras, números, guion y guion bajo'])
+    for (const entrada of ['P/1', 'Ñ1']) {
+      expect(porMcp(entrada).mensajes).toEqual([
+        'El SKU sólo puede llevar letras sin acento, números, espacios, puntos, guion y guion bajo',
+      ])
+      expect(porHttp(entrada).mensajes).toEqual([
+        'El SKU sólo puede llevar letras sin acento, números, espacios, puntos, guion y guion bajo',
+      ])
     }
 
     // En blanco NO hay paridad, a propósito (decisión de la Task 5): el MCP lo rechaza —un agente puede omitir el campo y

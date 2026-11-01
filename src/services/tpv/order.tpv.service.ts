@@ -30,7 +30,7 @@ import {
 } from '../shared/discount.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
-import { assertNoLiveTerminalCharge, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
+import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
@@ -62,6 +62,7 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { rechazarLlaveDePagarDespues } from '../mobile/pagarDespuesLlave'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -381,6 +382,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
   )
 
   rechazarLlaveDeCambio(input.externalId)
+  rechazarLlaveDePagarDespues(input.externalId)
   if (input.externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: {
@@ -1003,6 +1005,7 @@ export async function createOrderWithItems(
   // no crear otra (que en free-cart significaba segunda deducción de stock).
   const externalId = input.externalId?.trim() || null
   rechazarLlaveDeCambio(externalId)
+  rechazarLlaveDePagarDespues(externalId)
   if (externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },
@@ -3074,16 +3077,18 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         throw new NotFoundError('Order not found')
       }
       // Fetch order with version check
-      const order = await tx.order.findUnique({
-        where: { id: orderId, venueId },
-        include: {
-          items: {
-            include: {
-              product: true,
+      const leerOrden = () =>
+        tx.order.findUnique({
+          where: { id: orderId, venueId },
+          include: {
+            items: {
+              include: {
+                product: true,
+              },
             },
           },
-        },
-      })
+        })
+      let order = await leerOrden()
 
       if (!order) {
         throw new NotFoundError('Order not found')
@@ -3117,6 +3122,15 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
 
       if (!staff) {
         throw new NotFoundError('Staff member not found')
+      }
+
+      // 🔴 LEALTAD (hz:a8104ac8:D1): anular TODOS los renglones es anular la venta. Su premio de sellos y sus puntos canjeados
+      // vuelven al cliente ANTES de los cálculos de abajo (como al quitar el descuento: la fila del canje se borra y la orden se
+      // recalcula), y la orden se relee: esos cálculos y el CAS de versión van con la orden SIN las filas del canje.
+      if (order.items.every(item => input.itemIds.includes(item.id))) {
+        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: input.staffId, camino: 'voidItems' })
+        order = await leerOrden()
+        if (!order) throw new NotFoundError('Order not found')
       }
 
       // Find items to void

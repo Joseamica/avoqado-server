@@ -157,6 +157,7 @@ const prismaMock: any = {
   area: createMockModel(),
   order: createMockModel(),
   orderItem: createMockModel(),
+  orderKeyRelease: createMockModel(), // D9: llaves de «Pagar después» cerradas
   // 🔴 Sin esta entrada, `awardLoyaltyForPaidOrder` (services/shared/loyaltyOnPaidOrder.ts:84)
   // revienta con "Cannot read properties of undefined (reading 'findMany')", entra por su
   // catch y guarda `loyaltyLastError` — o sea que el camino de lealtad del cobro en efectivo
@@ -375,6 +376,7 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  terminalOrder: createMockModel(),
   tpvCommandQueue: createMockModel(),
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega
   fulfillmentArea: createMockModel(),

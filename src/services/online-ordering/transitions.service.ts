@@ -4,7 +4,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
-import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
+import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
 import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
@@ -173,6 +173,11 @@ async function casTransition(a: {
         return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
       }
 
+      // 🔴 LEALTAD (hz:a8104ac8:D1): rechazar, vencer o cancelar el pedido anula su venta, y sus canjes vuelven al cliente como al
+      // quitar el descuento. Después de ganar el CAS de la fila y antes de escribir la Order: si la Order no se escribe,
+      // `OrderNotWritten` revierte también esta devolución (Codex r2).
+      if (rule.cancels)
+        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
       const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
       const written = await tx.order.updateMany({
         where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },

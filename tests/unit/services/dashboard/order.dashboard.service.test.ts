@@ -160,7 +160,9 @@ describe('order.dashboard.service — deleteOrder guard de pagos', () => {
   // bajo el candado (`findUnique`) y la consulta del cobro de terminal vivo (`terminalPaymentRequest.findFirst`).
   const arrange = (order: Record<string, unknown>, completedPayments = 0) => {
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }] as any)
+    // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en estas órdenes de prueba.
+    prismaMock.$queryRaw.mockImplementation((async (q: { raw?: readonly string[] }) =>
+      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-1' }]) as any)
     prismaMock.order.findFirst.mockResolvedValue(order as any)
     prismaMock.order.findUnique.mockResolvedValue(order as any)
     // No legacy or tracked kitchen tickets exist in these payment-guard fixtures.

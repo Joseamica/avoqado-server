@@ -163,6 +163,25 @@ export async function deleteOrder(req: Request<{ venueId: string; orderId: strin
  * POST /api/dashboard/:venueId/orders/:orderId/settle
  * Settle a single order's pending balance (mark pay-later order as paid)
  */
+/**
+ * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/cancel
+ * «Cancelar orden» de Cuentas por cobrar: una cuenta sin cobrar que no es de mesa, con motivo (`cancelarCuentaSinCobrar`).
+ */
+export async function cancelarCuentaSinCobrar(
+  req: Request<{ venueId: string; orderId: string }, {}, { reason: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId, orderId } = req.params
+    const { userId } = (req as any).authContext
+    await orderDashboardService.cancelarCuentaSinCobrar(venueId, orderId, req.body.reason, userId)
+    res.status(200).json({ success: true })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function settleOrder(
   req: Request<{ venueId: string; orderId: string }, {}, { notes?: string }>,
   res: Response,

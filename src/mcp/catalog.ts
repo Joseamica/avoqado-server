@@ -12,6 +12,7 @@ import { directoryInputSchema } from './directory/input'
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   review_pending_courtesy: 'write',
+  cancel_unpaid_order: 'write',
   venue_administration: 'read',
   update_venue_business_profile: 'write',
   update_venue_organization: 'write',
@@ -222,6 +223,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_payment_effects: 'read',
   list_payment_links: 'read',
   list_payments: 'read',
+  get_cash_payment_by_key: 'read',
   list_prices: 'read',
   list_print_stations: 'read',
   list_printers: 'read',

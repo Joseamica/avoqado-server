@@ -20,6 +20,7 @@ import AppError from '@/errors/AppError'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
+import { getCashPaymentByKey } from '@/services/mobile/order.mobile.service'
 
 // Maps the tool's friendly reasons to the service's RefundReason values.
 const REFUND_REASON_MAP: Record<string, RefundReason> = {
@@ -202,6 +203,45 @@ export function costoPendienteDe(processorData: unknown): boolean {
 
 export function registerPaymentTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'get_cash_payment_by_key',
+    'Read the recorded cash payment for an exact payment reference in a venue you can access. Returns null when no completed eligible payment is found. Amounts and current remaining balance are in pesos. This lookup does not collect money or create a receipt.',
+    {
+      venueId: z.string().describe('Venue whose payment to read (must be in your scope)'),
+      idempotencyKey: z
+        .string({ invalid_type_error: 'El folio del cobro debe ser un texto' })
+        .min(1, 'El folio del cobro es requerido')
+        .max(64, 'El folio del cobro admite hasta 64 caracteres')
+        .describe('Exact original payment reference'),
+    },
+    async ({ venueId, idempotencyKey }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:read', venueId)
+      const proof = await getCashPaymentByKey(venueId, idempotencyKey)
+      if (!proof) return text({ ok: true, payment: null })
+      const { amountCents, tipCents, cashRetainedCents, remainingBalanceCents, deliveryCashAllocation, ...identity } = proof
+      return text({
+        ok: true,
+        payment: {
+          ...identity,
+          amount: amountCents / 100,
+          tipAmount: tipCents / 100,
+          cashRetained: cashRetainedCents / 100,
+          remainingBalance: remainingBalanceCents / 100,
+          ...(deliveryCashAllocation
+            ? {
+                deliveryCashAllocation: {
+                  sale: deliveryCashAllocation.saleCents / 100,
+                  tip: deliveryCashAllocation.tipCents / 100,
+                  thirdParty: deliveryCashAllocation.thirdPartyCents / 100,
+                },
+              }
+            : {}),
+        },
+      })
+    },
+  )
 
   server.tool(
     'list_payments',

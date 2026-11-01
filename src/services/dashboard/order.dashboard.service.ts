@@ -31,7 +31,12 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
-import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import {
+  MENSAJE_CUENTA_DE_MESA,
+  assertOrderCancellableUnderLock,
+  avisarOrdenCancelada,
+  devolverCanjesDeVentaAnuladaEnTx,
+} from '../shared/orderCancelGuard'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -722,6 +727,8 @@ export async function updateOrder(
       // estar en camino.
       const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
       valesSoltados = await soltarValesAlCancelarLaVenta(client, { venueId, orderId })
+      // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+      await devolverCanjesDeVentaAnuladaEnTx(client, { venueId, orderId, staffId: opciones.staffId, camino: 'updateOrder' })
     }
     const updatedOrder = await escribir(client)
     // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.
@@ -795,6 +802,8 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
       // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
       const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
       valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
+      // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+      await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'deleteOrder' })
       const cancelada = await tx.order.update({
         where: { id: orderId },
         // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.
@@ -831,6 +840,45 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
   await avisarOrdenCancelada(cancelledOrder.venueId, cancelledOrder.id, 'CANCELLED')
 
   return cancelledOrder
+}
+
+/**
+ * «Cancelar orden» del panel (Amaena, 30-oct): el negocio quita una cuenta que nunca se va a cobrar, con motivo. Es la MISMA
+ * cancelación del POS (`cancelOrderInTransaction`: candados, vales, sobres, comandas y aviso), más lo que el panel exige:
+ *   · sólo cuentas que no son de mesa (se anulan en el POS) ni pedidos en línea (tienen su «Cancelar») (Codex plan r1 #2-#4, #7);
+ *   · cualquier pago COMPLETED cuenta como dinero, como en `deleteOrder`;
+ *   · una ya cancelada responde 409 sin escribir otra vez (r1 #6);
+ *   · el motivo va sólo a la bitácora: no pisa las notas de la cuenta (r1 #5).
+ */
+export async function cancelarCuentaSinCobrar(
+  venueId: string,
+  orderId: string,
+  motivo: string,
+  staffId: string,
+  /** La procedencia MCP (`mcpProvenance`): la ÚNICA entrada de bitácora dice qué app la hizo (Codex código r2 #2). */
+  datosDeBitacora?: Record<string, unknown>,
+) {
+  const { cancelOrderInTransaction, publishCancelledOrder } = await import('@/services/mobile/order.mobile.service')
+  const result = await prisma.$transaction(async tx => {
+    // La mesa y el pedido en línea no cambian bajo una cancelación: se leen sin candado, antes del orden de candados del POS.
+    const order = await tx.order.findFirst({
+      where: { id: orderId, venueId },
+      select: { id: true, tableId: true, onlineOrder: { select: { id: true } } },
+    })
+    if (!order) throw new NotFoundError('Esta cuenta no existe en este negocio.')
+    // La mesa se vuelve a revisar bajo el candado (`rechazarCuentaDeMesa`): ésta sólo evita tomar candados de más.
+    if (order.tableId) throw new BadRequestError(MENSAJE_CUENTA_DE_MESA, 'ORDER_IS_TABLE')
+    if (order.onlineOrder) {
+      throw new BadRequestError('Es un pedido en línea: cancélalo desde «Pedidos en línea».', 'ORDER_IS_ONLINE')
+    }
+    return cancelOrderInTransaction(tx, venueId, orderId, undefined, staffId, undefined, {
+      contarPagosRegistrados: true,
+      rechazarYaCancelada: true,
+      rechazarCuentaDeMesa: true,
+      mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
+    })
+  }, ORDER_LOCK_WAIT_BUDGET)
+  await publishCancelledOrder(venueId, result, staffId, motivo, datosDeBitacora)
 }
 
 /**

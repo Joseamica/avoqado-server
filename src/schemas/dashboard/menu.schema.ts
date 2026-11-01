@@ -6,7 +6,19 @@ import { isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from '../../services/da
 // Common patterns and constants
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
-export const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
+/**
+ * SKU: letras sin acento (las dos cajas), números, guion, guion bajo, punto y espacio entre caracteres (nunca en las
+ * orillas). Espacio y punto entraron el 30-oct (D3) porque los códigos de otros POS los traen (MyBusiness: «Q. AHUMADO»,
+ * «LALA1.5»). La Ñ y los acentos siguen fuera: no caben en el Code 128/39 del vale de caja externa.
+ * 🔴 Quien GENERA un SKU (variantes, el MCP al derivarlo del nombre, Shopify) usa su propia regla, más estricta: cambiar
+ * ésta no debe cambiar los códigos que ellos producen.
+ */
+export const SKU_REGEX = /^[A-Za-z0-9._-](?:[A-Za-z0-9 ._-]*[A-Za-z0-9._-])?$/
+/** El mismo texto en la API, el MCP y las variantes: la validación lo enseña tal cual al usuario. */
+export const SKU_FORMAT_MESSAGE = 'El SKU sólo puede llevar letras sin acento, números, espacios, puntos, guion y guion bajo'
+/** Para una fila concreta (variantes): «El SKU «X» sólo puede llevar …». */
+export const skuFormatMessageFor = (sku: string) =>
+  `El SKU «${sku}» sólo puede llevar letras sin acento, números, espacios, puntos, guion y guion bajo.`
 /** Longest gtin (barcode) the product schemas accept: GTIN-14. The Shopify loader drops longer ones before importing. */
 export const GTIN_MAX_LENGTH = 14
 
@@ -24,7 +36,7 @@ export const satUnitKeySchema = z
 /** Máximo del SKU de un extra; el MCP (Task 5) usa el mismo. */
 export const MODIFIER_SKU_MAX = 64
 /** Formato del SKU de un extra: el MCP muestra el mismo texto que la API (el agente no ve un «Invalid» pelón). */
-export const MODIFIER_SKU_FORMAT_MESSAGE = 'El SKU sólo admite letras, números, guion y guion bajo'
+export const MODIFIER_SKU_FORMAT_MESSAGE = SKU_FORMAT_MESSAGE
 
 // SKU de un extra: el código con el que el OTRO POS (caja externa) lo tiene dado de alta.
 // Mismo formato que el del producto; vacío = sin SKU. Mensajes en español: los ve el usuario.
@@ -127,7 +139,7 @@ export const createProductSchema = z.object({
 export const ProductSchema = z.object({
   id: z.string().cuid(),
   venueId: z.string().cuid(),
-  sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
+  sku: z.string().regex(SKU_REGEX, SKU_FORMAT_MESSAGE),
   gtin: z.string().max(GTIN_MAX_LENGTH).nullable().optional(),
   name: z.string().min(1, 'Name is required').max(255),
   description: z.string().nullable().optional(),
@@ -162,7 +174,7 @@ export const ProductSchema = z.object({
 
 // Base object — shared between Create and Update (allows .partial())
 export const ProductBodyBase = z.object({
-  sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
+  sku: z.string().trim().regex(SKU_REGEX, SKU_FORMAT_MESSAGE),
   gtin: z.string().max(GTIN_MAX_LENGTH).optional().nullable(),
   name: z.string().min(1, 'Name is required').max(255),
   description: z.string().optional().nullable(),

@@ -4,6 +4,7 @@ import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type E
 import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
 import { ExchangeError } from '../exchanges/exchangeErrors'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { candadoDeLaLlave, rechazarSiLaLlaveSeCerroEnTx } from './pagarDespuesLlave'
 import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -71,7 +72,7 @@ import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
-import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
+import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { esChoqueDelUnico, turnoAbiertoDelNegocio, type UnicoParcial } from '../shared/turnoDeCaja'
 import {
   bloquearVentaParaLiga,
@@ -86,7 +87,9 @@ import {
   assertNoLiveTerminalCharge,
   assertOrderCancellableUnderLock,
   avisarOrdenCancelada,
+  devolverCanjesDeVentaAnuladaEnTx,
   rechazarCancelacionLocalDeRappi,
+  type OrderCancelGuardOptions,
 } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
@@ -1141,7 +1144,10 @@ export async function buildOrderItemsData(
       const baseAjustadaCents = lineaAjustadaCents + Math.round(modifierTotal * 100) * item.quantity
       lineDiscount = calculateDiscountCents(appliedDiscount, baseAjustadaCents) / 100
     } else if (appliedDiscount) {
-      lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)
+      // «El centavo» (30-oct): también sin ajuste, el monto en centavos enteros como las apps ($21.35 al 10 %: 2.14, no 2.13);
+      // en pesos flotantes una venta sin red de tres renglones así quedaba PARCIAL. El mínimo de compra se sigue exigiendo.
+      calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
+      lineDiscount = calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100
     }
     const discountAmount = ajuste > 0 ? roundPesos(ajuste + lineDiscount) : lineDiscount
     itemDiscountTotal += discountAmount
@@ -1190,7 +1196,9 @@ export async function buildOrderItemsData(
     if (appliedDiscount) {
       validateDiscountScopeForItem(appliedDiscount, { productId: null, categoryId: null })
     }
-    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
+    // «El centavo» (30-oct): en centavos enteros como las apps; el mínimo de compra se sigue exigiendo.
+    if (appliedDiscount) calculateDiscountPesos(appliedDiscount, itemTotal)
+    const lineDiscount = appliedDiscount ? calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100 : 0
     itemDiscountTotal += lineDiscount
 
     return {
@@ -1457,14 +1465,14 @@ export async function crearVentaDeMostradorEnTx(
   // re-verificación: un reintento que llega mientras el primer intento sigue en vuelo espera aquí y sale con ESA orden,
   // nunca con un 409 por un precio que ya se aceptó. Así un 409 de abajo queda acreditado: no había venta con esta llave.
   if (externalId) {
-    await tx.$queryRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:order-mobile-external:v1:${venueId}:${externalId}`}, 0))::text`,
-    )
+    await tx.$queryRaw(candadoDeLaLlave(venueId, externalId))
     const existente = await tx.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },
       include: createdOrderInclude,
     })
     if (existente) return { existente }
+    // D9: si el POS ya devolvió esta venta a «Carritos guardados» (cerró su llave), la cuenta no nace.
+    await rechazarSiLaLlaveSeCerroEnTx(tx, venueId, externalId)
   }
 
   // 🔴 buildOrderItemsData lanza 'At least one item is required' con lista
@@ -2440,8 +2448,11 @@ export async function applyOrderDiscountInTransaction(
   const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
-  const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
-  const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
+  // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope
+  // de $10 descontaba $30). En el reparto sólo viaja el de un %: el recálculo re-deriva los % y conserva el importe de un fijo.
+  const topeDelCatalogo = discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
+  const tope = discount.type === 'PERCENTAGE' ? topeDelCatalogo : null
+  const amount = Math.min(rawAmount, topeDelCatalogo ?? Infinity, remainingDiscountable)
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
@@ -3553,6 +3564,87 @@ function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | num
 /** Lo que se quedó en la caja por ESE cobro: venta + propina + lo cobrado por cuenta de terceros (Rappi 2b), en centavos. */
 function retenidoDelCobro(pago: { amount: unknown; tipAmount: unknown; thirdPartyCashAmount?: unknown }): number {
   return pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)) + pesosToCents(Number(pago.thirdPartyCashAmount ?? 0))
+}
+
+/** Evidence only: retrying a read must never run a payment responder's receipt/table/customer effects. */
+export async function getCashPaymentByKey(venueId: string, idempotencyKey: string) {
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 64) {
+    throw new BadRequestError('El folio del cobro debe tener entre 1 y 64 caracteres')
+  }
+  const payment = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+    select: {
+      ...TENDER_SEMANTICS_SELECT,
+      id: true,
+      venueId: true,
+      idempotencyKey: true,
+      orderId: true,
+      type: true,
+      status: true,
+      tenderRevision: true,
+      amount: true,
+      tipAmount: true,
+      thirdPartyCashAmount: true,
+      splitType: true,
+      order: { select: { id: true, venueId: true, externalId: true } },
+    },
+  })
+  if (
+    !payment ||
+    payment.venueId !== venueId ||
+    payment.idempotencyKey !== idempotencyKey ||
+    payment.status !== 'COMPLETED' ||
+    (payment.type !== 'REGULAR' && payment.type !== 'FAST') ||
+    payment.method !== 'CASH' ||
+    !paymentCountsAsDrawerCash(payment) ||
+    payment.order?.venueId !== venueId ||
+    payment.order.id !== payment.orderId
+  ) {
+    return null
+  }
+  // Rappi freezes its channel tender on a pure-cash payment; its persisted allocation is the proof, not today's catalog.
+  if (payment.tenderTypeId != null) {
+    if (
+      payment.type !== 'REGULAR' ||
+      payment.fundsFlow !== PaymentFundsFlow.CASH_DRAWER ||
+      payment.thirdPartyCashAmount == null ||
+      !payment.tenderTypeId.trim() ||
+      typeof payment.tenderRevision !== 'number' ||
+      !Number.isInteger(payment.tenderRevision) ||
+      payment.tenderRevision < 1
+    )
+      return null
+  } else if (payment.tenderRevision != null) return null
+  const snapshot = await readOrderBalanceSnapshot(venueId, payment.orderId)
+  if (snapshot.remainingBalanceCents == null || snapshot.orderPaymentStatus == null) return null
+  return {
+    idempotencyKey: payment.idempotencyKey,
+    venueId: payment.venueId,
+    paymentId: payment.id,
+    orderId: payment.orderId,
+    orderExternalId: payment.order.externalId,
+    type: payment.type,
+    status: payment.status,
+    method: payment.method,
+    fundsFlow: payment.fundsFlow,
+    tenderTypeId: payment.tenderTypeId,
+    tenderRevision: payment.tenderRevision,
+    amountCents: pesosToCents(Number(payment.amount)),
+    tipCents: pesosToCents(Number(payment.tipAmount)),
+    cashRetainedCents: retenidoDelCobro(payment),
+    splitType: payment.splitType,
+    ...(payment.thirdPartyCashAmount != null
+      ? {
+          deliveryCashAllocation: {
+            saleCents: pesosToCents(Number(payment.amount)),
+            tipCents: pesosToCents(Number(payment.tipAmount)),
+            thirdPartyCents: pesosToCents(Number(payment.thirdPartyCashAmount)),
+          },
+        }
+      : {}),
+    remainingBalanceCents: snapshot.remainingBalanceCents,
+    orderPaymentStatus: snapshot.orderPaymentStatus,
+  }
 }
 
 /**
@@ -6475,6 +6567,8 @@ export async function cancelOrderInTransaction(
   performedBy?: string,
   /** Huella del reducer offline: corre DENTRO de la transacción de la cancelación (plan 2026-10-13-sync-retoma-por-llave). */
   dentroDeLaTx?: (tx: Prisma.TransactionClient, cancelada: { orderId: string }) => Promise<void>,
+  /** Lo que el panel exige además (`cancelarCuentaSinCobrar`): pagos registrados y «ya cancelada». El POS no lo pasa. */
+  opcionesDeGuardia?: OrderCancelGuardOptions,
 ) {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
@@ -6486,10 +6580,12 @@ export async function cancelOrderInTransaction(
     throw error
   }
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
-  await assertOrderCancellableUnderLock(tx, { venueId, orderId })
+  await assertOrderCancellableUnderLock(tx, { venueId, orderId }, opcionesDeGuardia)
   // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
   const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
   const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
+  // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+  await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'cancelOrder' })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
@@ -6520,6 +6616,8 @@ export async function publishCancelledOrder(
   result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
   staffId?: string,
   reason?: string,
+  /** Datos extra de la entrada de bitácora (la procedencia MCP de «Cancelar orden»); nunca pisan el motivo. */
+  datosDeBitacora?: Record<string, unknown>,
 ): Promise<void> {
   const { orderId, table } = result
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
@@ -6548,7 +6646,14 @@ export async function publishCancelledOrder(
     }
   }
   const { logAction } = await import('../dashboard/activity-log.service')
-  void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
+  void logAction({
+    action: 'ORDER_CANCELLED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { ...datosDeBitacora, reason: reason ?? null },
+  })
   // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
   const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
   auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
