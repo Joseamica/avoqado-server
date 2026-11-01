@@ -1366,7 +1366,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       }))
       // Saldo a favor (S8b): sus dos patas —la devolución a saldo y lo gastado de un sobre— son VENTA con su método (OTHER). El filtro
       // de arriba deja fuera todo medio de sistema; sin esto la barra no cuadraba con «Total de ventas» el día de la devolución.
-      if (tarjetas.storeCreditCount > 0) {
+      // 🔴 Importe y conteo por separado (S10 r2, Codex r2 P2-b): un cobro mixto cuenta en su parte mayor, así que el saldo a favor
+      // puede tener importe y conteo 0 (lo gastado es la parte menor y no hubo abono en el periodo). Igual que la fila GIFT_CARD de abajo.
+      if (tarjetas.storeCreditCount > 0 || tarjetas.storeCreditNet !== 0) {
         const otro = ventasPorMetodo.find(m => m.method === 'OTHER')
         if (otro) {
           otro.amount = round2(otro.amount + tarjetas.storeCreditNet)

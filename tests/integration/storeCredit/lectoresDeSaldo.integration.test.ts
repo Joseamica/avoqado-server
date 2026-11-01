@@ -123,7 +123,14 @@ beforeAll(async () => {
   await seedDefaultMappings(s.venueId, { staffId: s.staffId })
 })
 
+/** S10 r2 (familia B): un negocio aparte, para que sus cobros no se mezclen con el caso de arriba. */
+let s2: Seed | undefined
+
 afterAll(async () => {
+  if (s2) {
+    await prisma.transactionCost.deleteMany({ where: { payment: { venueId: s2.venueId } } })
+    await s2.cleanup().catch(error => console.warn('lectoresDeSaldo: la limpieza del segundo negocio no terminó', String(error)))
+  }
   if (s) {
     await prisma.journalEntry.deleteMany({ where: { organizationId: s.organizationId, rfc } }).catch(() => undefined)
     await prisma.accountMapping.deleteMany({ where: { organizationId: s.organizationId, rfc } }).catch(() => undefined)
@@ -230,5 +237,63 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
     expect(r.pendientesDeRevision).toBe(conLaMarca)
     // La venta de la tarjeta, el canje, la devolución parcial y la devolución a saldo.
     expect(conLaMarca).toBe(4)
+  })
+})
+
+describe('🔴 S10 r2 (familia B, Codex r2 P2-b): el saldo a favor es la parte MENOR de un cobro y no hubo abono en el periodo', () => {
+  it('ayer se abonaron $200; hoy UN cobro de $500 mezcla $300 de una tarjeta vendida y esos $200: la barra de ventas suma los $500', async () => {
+    s2 = await seedClothingSale()
+    await prisma.venue.update({ where: { id: s2.venueId }, data: { timezone: TZ } })
+    await prisma.customer.update({
+      where: { id: s2.customer.id },
+      data: { phone: `55${String(10_000_000 + ((process.pid * 89 + Date.now()) % 89_999_999)).padStart(8, '0')}` },
+    })
+    await prepararMediosDeSaldoAFavor(s2.venueId)
+    const aSaldo = await issueRefund({
+      venueId: s2.venueId,
+      staffId: s2.staffId,
+      paymentId: s2.payments[0].id,
+      amount: 20000,
+      reason: 'RETURNED_GOODS',
+      aSaldoAFavor: { customerId: s2.customer.id, abonar: abonarSaldo(s2.staffId) },
+    })
+    // «Ayer»: la venta original y su devolución a saldo quedan fuera del periodo (hoy no hay ningún abono a saldo).
+    const ayer = new Date(Date.now() - 2 * 86_400_000)
+    await prisma.payment.updateMany({ where: { id: { in: [s2.payments[0].id, aSaldo.refundId] } }, data: { createdAt: ayer } })
+    const regalada = await sembrarVentaDeTarjetas({
+      venueId: s2.venueId,
+      organizationId: s2.organizationId,
+      staffId: s2.staffId,
+      montos: [300],
+      metodo: 'CASH',
+    })
+    await sembrarCanje({
+      venueId: s2.venueId,
+      staffId: s2.staffId,
+      giftCardIds: [regalada.giftCardIds[0], aSaldo.abono!.giftCardId],
+      total: 500,
+      conSaldo: 500,
+    })
+
+    const inicio = new Date(Date.now() - 3_600_000)
+    const fin = new Date(Date.now() + 3_600_000)
+    // La consulta ya lo separa bien: el conteo es de la parte mayor (la tarjeta vendida) y el importe del saldo a favor sí está.
+    expect(await computeGiftCardFigures(s2.venueId, inicio, fin)).toMatchObject({
+      balancePaid: 300,
+      balanceCount: 1,
+      storeCreditNet: 200,
+      storeCreditCount: 0,
+    })
+    const r = await getSalesSummary(s2.venueId, {
+      startDate: inicio.toISOString(),
+      endDate: fin.toISOString(),
+      groupBy: 'paymentMethod',
+      timezone: TZ,
+    })
+    // El importe y el conteo van por separado: los $200 salen en OTHER aunque el cobro cuente en GIFT_CARD.
+    expect(r.salesByPaymentMethod?.find(m => m.method === 'GIFT_CARD')).toMatchObject({ amount: 300, count: 1 })
+    expect(r.salesByPaymentMethod?.find(m => m.method === 'OTHER')).toMatchObject({ amount: 200, count: 0 })
+    expect(r.salesByPaymentMethod?.reduce((suma, m) => suma + m.amount, 0)).toBe(500)
+    expect(r.salesByPaymentMethod?.reduce((cobros, m) => cobros + m.count, 0)).toBe(1)
   })
 })
