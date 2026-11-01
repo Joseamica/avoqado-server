@@ -130,8 +130,9 @@ export function corteDeAlerta(now: Date): string {
  * 🔴 Excluir por slug NO basta: la org de pruebas del founder ("Grupo Avoqado Prime") tiene 4 venues
  * y sólo UNO trae "demo" en el slug. `Avoqado Full` (147 órdenes) se colaba y aportaba 89 de los 92
  * falsos positivos de sobrepago del 2026-08-04. Se filtra por ORGANIZACIÓN, no por nombre de venue.
+ * Y por ESTADO: los negocios demo de prospectos (`LIVE_DEMO`) se llaman normal y se recrean cada noche (1-nov).
  */
-const REAL_VENUES = `v.slug NOT LIKE '%demo%' AND v.name NOT LIKE 'Live Demo%'
+const REAL_VENUES = `v.slug NOT LIKE '%demo%' AND v.name NOT LIKE 'Live Demo%' AND v.status::text <> 'LIVE_DEMO'
         AND NOT EXISTS (SELECT 1 FROM "Organization" org WHERE org.id = v."organizationId" AND org.name = 'Grupo Avoqado Prime')`
 
 /**
