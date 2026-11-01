@@ -2,6 +2,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { resolveDeviceMenuFilter, visiblesDe, TODO, DEVICE_MENUS_CODE } from '@/services/devices/deviceMenus.service'
+import { listMenus } from '@/services/mobile/menu.mobile.service'
 
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
 const tieneProMock = venueHasFeatureAccess as jest.Mock
@@ -36,8 +37,13 @@ describe('visiblesDe (pura)', () => {
     )
     expect(r).toEqual({ visibleCategoryIds: ['c1', 'c1a', 'c2'], visibleMenuIds: ['m1', 'm2'] })
   })
-  it('sin categorías activas es TODO', () => {
-    expect(visiblesDe(['m1'], [{ menuId: 'm1', categoryId: 'c1' }], [])).toEqual(TODO)
+  it('sin categorías asignadas es TODO', () => {
+    expect(visiblesDe(['m1'], [{ menuId: 'm2', categoryId: 'c1' }], [cat('c1')])).toEqual(TODO)
+  })
+  it('Ruling 15: una directa apagada sí va (como en Mesas), pero lo que cuelga de ella no se suma', () => {
+    // c2 está apagada (no viene en las activas); c2a, activa, cuelga de ella
+    const r = visiblesDe(['m1'], [{ menuId: 'm1', categoryId: 'c2' }], [cat('c1'), cat('c2a', 'c2')])
+    expect(r).toEqual({ visibleCategoryIds: ['c2'], visibleMenuIds: ['m1'] })
   })
 })
 
@@ -85,8 +91,8 @@ describe('resolveDeviceMenuFilter', () => {
     expect((await resolveDeviceMenuFilter(V, T)).visibleCategoryIds).toEqual(['c1', 'c2', 'c3'])
   })
 
-  it('quitaCategoriasInactivas', async () => {
-    // c2 está inactiva: no viene en la lista de activas, así que no entra ni arrastra lo que cuelga de ella
+  it('conservaLasDirectasApagadas, sin sumar lo que cuelga de ellas (Ruling 15, igual que Mesas)', async () => {
+    // c2 está apagada: no viene en la lista de activas. Va porque el menú la trae directo; c3 (activa, hija de c2) no se suma.
     prepara({
       filas: ['m1'],
       asignaciones: [
@@ -95,11 +101,16 @@ describe('resolveDeviceMenuFilter', () => {
       ],
       categorias: [cat('c1'), cat('c3', 'c2')],
     })
-    expect((await resolveDeviceMenuFilter(V, T)).visibleCategoryIds).toEqual(['c1'])
+    expect((await resolveDeviceMenuFilter(V, T)).visibleCategoryIds).toEqual(['c1', 'c2'])
   })
 
-  it('menuSinCategoriasActivasEsTodo', async () => {
+  it('unMenuSoloConUnaApagadaLaEntrega: la app decide si tiene productos', async () => {
     prepara({ filas: ['m1'], asignaciones: [['m1', 'c2']], categorias: [cat('c1')] })
+    expect(await resolveDeviceMenuFilter(V, T)).toEqual({ visibleCategoryIds: ['c2'], visibleMenuIds: ['m1'] })
+  })
+
+  it('menuSinCategoriasEsTodo', async () => {
+    prepara({ filas: ['m1'], asignaciones: [], categorias: [cat('c1')] })
     expect(await resolveDeviceMenuFilter(V, T)).toEqual(TODO)
   })
 
@@ -148,5 +159,46 @@ describe('resolveDeviceMenuFilter', () => {
       categorias: [cat('c9'), cat('c1')],
     })
     expect(await resolveDeviceMenuFilter(V, T)).toEqual({ visibleCategoryIds: ['c1', 'c9'], visibleMenuIds: ['m1', 'm2'] })
+  })
+})
+
+describe('Cobrar (/settings) y Mesas (/menus) dan las mismas categorías para el mismo aparato (Ruling 15, Codex r3 #1)', () => {
+  beforeEach(() => tieneProMock.mockReset().mockResolvedValue(true))
+
+  it('un menú con A encendida y B apagada: /settings trae lo mismo que categoryIds de ese menú en Mesas', async () => {
+    // A (encendida) con su hija A1; B (apagada) con su hija B1, encendida: B va por directa, B1 no se suma en ninguno de los dos.
+    const activas = [cat('A'), cat('A1', 'A'), cat('B1', 'B')]
+    prepara({
+      filas: ['m1'],
+      asignaciones: [
+        ['m1', 'A'],
+        ['m1', 'B'],
+      ],
+      categorias: activas,
+    })
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    prismaMock.menu.findMany.mockResolvedValue([
+      {
+        id: 'm1',
+        name: 'Barra',
+        description: null,
+        isDefault: true,
+        availableFrom: null,
+        availableUntil: null,
+        availableDays: [],
+        startDate: null,
+        endDate: null,
+        categories: [
+          { categoryId: 'A', displayOrder: 0 },
+          { categoryId: 'B', displayOrder: 1 },
+        ],
+      },
+    ] as any)
+
+    const cobrar = await resolveDeviceMenuFilter(V, T)
+    const mesas = (await listMenus(V)).menus.find(m => m.id === 'm1')!
+
+    expect(cobrar.visibleCategoryIds).toEqual([...mesas.categoryIds].sort())
+    expect(cobrar.visibleCategoryIds).toEqual(['A', 'A1', 'B'])
   })
 })

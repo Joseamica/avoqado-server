@@ -30,8 +30,9 @@ const aparato = (id: string, menus: Array<[string, string]> = [], extra: Record<
 })
 
 /**
- * Catálogo de prueba: c1 (3 productos), c2 (2), c2a hija de c2 (1), c3 (0 productos), cX apagada (4: no cuenta).
- * «Todos» ve c1, c2, c2a = 3 categorías y 6 productos.
+ * Catálogo de prueba: c1 (3 productos), c2 (2), c2a hija de c2 (1), c3 (0 productos), cX apagada (4).
+ * «Todos» es lo que pinta la cuadrícula sin filtro: los productos activos y sus categorías, encendidas o apagadas (Ruling 15):
+ * c1, c2, c2a y cX = 4 categorías y 10 productos.
  */
 function catalogo(opts: { aparatos: any[]; total?: number; asignaciones?: Array<[string, string]> }) {
   prismaMock.terminal.findMany.mockResolvedValue(opts.aparatos)
@@ -53,7 +54,7 @@ function catalogo(opts: { aparatos: any[]; total?: number; asignaciones?: Array<
   )
 }
 
-const TODOS = { categories: 3, products: 6 }
+const TODOS = { categories: 4, products: 10 }
 
 /** Hoy ninguna app aplica el menú del aparato (versión mínima null); aquí se finge que ANDROID 2.25.20 ya lo aplica. */
 const versionesOriginales = { ...DEVICE_MENUS_MIN_APP_VERSION }
@@ -130,12 +131,12 @@ describe('listDeviceMenus', () => {
     expect(r.terminals[0].menus).toEqual([{ id: 'mV', name: 'Vacío' }]) // la elección sigue a la vista
   })
 
-  it('un menú sin categorías activas junto a otro que sí tiene no es error: cuenta lo del otro', async () => {
+  it('una categoría apagada que el menú trae directo cuenta, con sus productos (Ruling 15: la cuadrícula la pinta, como Mesas)', async () => {
     catalogo({
       aparatos: [
         aparato('t1', [
           ['mA', 'Comida'],
-          ['mZ', 'Sin nada'],
+          ['mZ', 'Apagada'],
         ]),
       ],
       asignaciones: [
@@ -145,7 +146,59 @@ describe('listDeviceMenus', () => {
     })
     androidYaLoAplica()
     const r = await listDeviceMenus(V, 1, 50)
-    expect(r.terminals[0].sees).toEqual({ categories: 1, products: 3 })
+    expect(r.terminals[0].sees).toEqual({ categories: 2, products: 7 })
+  })
+
+  it('«Todos» cuenta una categoría apagada con productos: la API de productos y la cuadrícula no miran si está encendida', async () => {
+    catalogo({ aparatos: [aparato('t1')] })
+    const r = await listDeviceMenus(V, 1, 50)
+    // cX está apagada (no viene en las activas) y sus 4 productos cuentan.
+    expect(r.everything).toEqual({ categories: 4, products: 10 })
+    expect(r.terminals[0].sees).toEqual(r.everything)
+  })
+
+  it('una subcategoría APAGADA no se suma al menú de su padre (sólo se suman las activas, como en Mesas)', async () => {
+    catalogo({ aparatos: [aparato('t1', [['mB', 'Bebidas']])], asignaciones: [['mB', 'c2']] })
+    prismaMock.product.groupBy.mockResolvedValue([
+      { categoryId: 'c2', _count: 2 },
+      { categoryId: 'c2a', _count: 1 },
+      { categoryId: 'c2z', _count: 5 }, // apagada, hija de c2: no viene en las activas
+    ] as any)
+    androidYaLoAplica()
+    const r = await listDeviceMenus(V, 1, 50)
+    expect(r.terminals[0].sees).toEqual({ categories: 2, products: 3 })
+    expect(r.everything).toEqual({ categories: 3, products: 8 })
+  })
+
+  it('el conteo de un aparato no depende de sus vecinos de página (Codex r3 #3): si la página pasa el tope, cada uno se cuenta solo', async () => {
+    // A: un menú de una categoría. B: 50 menús que juntos pasan las 5000 asignaciones del tope.
+    const deB = Array.from({ length: 50 }, (_, i) => `mB${i}`)
+    const filas = [
+      { menuId: 'mA', categoryId: 'c1' },
+      ...deB.flatMap(menuId => Array.from({ length: 101 }, (_, j) => ({ menuId, categoryId: `cB${j}` }))),
+    ]
+    const aparatoA = aparato('tA', [['mA', 'Comida']])
+    const aparatoB = aparato(
+      'tB',
+      deB.map(m => [m, m] as [string, string]),
+    )
+    catalogo({ aparatos: [aparatoA, aparatoB] })
+    prismaMock.menuCategoryAssignment.findMany.mockImplementation(((args: any) =>
+      Promise.resolve(filas.filter(f => args.where.menuId.in.includes(f.menuId)).slice(0, args.take))) as any)
+    androidYaLoAplica()
+
+    const pagina = await listDeviceMenus(V, 1, 50)
+    expect(pagina.terminals[0]).toMatchObject({ id: 'tA', sees: { categories: 1, products: 3 } })
+    // B solo también pasa el tope: muestra todo, con aviso.
+    expect(pagina.terminals[1]).toMatchObject({ id: 'tB', sees: TODOS })
+
+    // El PUT de A (que relee sólo su fila) da lo mismo que la página.
+    prismaMock.terminal.findFirst.mockResolvedValue({ id: 'tA', name: 'Caja tA' } as any)
+    prismaMock.menu.findMany.mockResolvedValue([{ id: 'mA', name: 'Comida' }] as any)
+    prismaMock.terminalMenu.findMany.mockResolvedValue([{ menu: { id: 'mA', name: 'Comida' } }] as any)
+    prismaMock.terminal.findMany.mockResolvedValue([aparatoA] as any)
+    const put = await setTerminalMenus(V, 'tA', ['mA'], 'staff')
+    expect(put.sees).toEqual(pagina.terminals[0].sees)
   })
 
   it('listarTraeNombresDeLosMenusElegidos y sólo los del negocio, activos y para aparatos', async () => {
@@ -234,6 +287,11 @@ describe('listDeviceMenuOptions', () => {
       expect.objectContaining({ where: { venueId: V, active: true, appliesToDevices: true } }),
     )
     expect(r).toEqual({ menus: [{ id: 'mA', name: 'Comida', appliesToOnline: true, categoryCount: 4 }], total: 1, page: 1, pageSize: 100 })
+  })
+
+  it('categoryCount cuenta todas las categorías del menú, también las apagadas: el aparato las pinta (Ruling 15)', async () => {
+    await listDeviceMenuOptions(V, { page: 1, pageSize: 100 })
+    expect(prismaMock.menu.findMany.mock.calls[0][0].select._count).toEqual({ select: { categories: true } })
   })
 
   it('opcionesBuscaPorNombre, sin importar mayúsculas', async () => {

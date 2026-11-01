@@ -30,8 +30,10 @@ export type DeviceMenuFilter =
 export const TODO: DeviceMenuFilter = { visibleCategoryIds: null, visibleMenuIds: null }
 
 /**
- * Cuenta pura: las categorías de `menuIds` (de `asignaciones`) más sus subcategorías activas, ordenadas.
- * `categorias` ya viene filtrada a las ACTIVAS. Si no queda ninguna → `TODO`.
+ * Cuenta pura (Ruling 15: la regla que de verdad pinta el aparato): las categorías DIRECTAS de `menuIds` (de `asignaciones`),
+ * encendidas o apagadas, más las subcategorías ACTIVAS que cuelgan de ellas, ordenadas. Es la unión de los `categoryIds` que
+ * Mesas (`listMenus`) da para esos menús: la cuadrícula nunca miró `MenuCategory.active`. `categorias` ya viene filtrada a las
+ * ACTIVAS (sólo lo que se SUMA sale de ahí). Sin ninguna asignada → `TODO`.
  */
 export function visiblesDe(
   menuIds: ReadonlyArray<string>,
@@ -39,8 +41,8 @@ export function visiblesDe(
   categorias: ReadonlyArray<{ id: string; parentId: string | null }>,
 ): DeviceMenuFilter {
   const menus = new Set(menuIds)
-  const asignadas = asignaciones.filter(a => menus.has(a.menuId)).map(a => a.categoryId)
-  const visibles = conDescendientes(asignadas, categorias)
+  const directas = asignaciones.filter(a => menus.has(a.menuId)).map(a => a.categoryId)
+  const visibles = new Set([...directas, ...conDescendientes(directas, categorias)])
   if (visibles.size === 0) return TODO
   return { visibleCategoryIds: [...visibles].sort(), visibleMenuIds: [...menus].sort() }
 }
@@ -84,6 +86,17 @@ export async function resolveDeviceMenuFilter(venueId: string, terminalId: strin
 
   const menuIds = filas.map(f => f.menuId)
   const [asignaciones, categorias] = await Promise.all([leerAsignaciones(menuIds), leerCategoriasActivasDelNegocio(venueId)])
+  return filtroDelAparato(venueId, terminalId, menuIds, asignaciones, categorias)
+}
+
+/** La regla con sus topes: pasado uno, el aparato muestra todo. La usan `/settings` y el conteo del panel. */
+function filtroDelAparato(
+  venueId: string,
+  terminalId: string,
+  menuIds: ReadonlyArray<string>,
+  asignaciones: ReadonlyArray<{ menuId: string; categoryId: string }>,
+  categorias: ReadonlyArray<{ id: string; parentId: string | null }>,
+): DeviceMenuFilter {
   if (asignaciones.length > MAX_ASIGNACIONES || categorias.length > MAX_CATEGORIAS) {
     // Nunca se recorta en silencio: el aparato muestra todo y se deja constancia.
     logger.warn('[DeviceMenus] tope pasado: el aparato muestra todo el catálogo', {
@@ -202,7 +215,7 @@ function leerAparatos(venueId: string, where: Prisma.TerminalWhereInput, skip: n
 }
 type Aparato = Awaited<ReturnType<typeof leerAparatos>>[number]
 
-/** Un solo conteo de productos activos por categoría para toda la página: nada de consultas por aparato. */
+/** Un solo conteo de productos activos por categoría para toda la página. Es lo que entrega la API de productos de las apps. */
 function contarProductosPorCategoria(venueId: string) {
   return prisma.product.groupBy({ by: ['categoryId'], where: { venueId, active: true, deletedAt: null }, _count: true })
 }
@@ -243,27 +256,32 @@ async function armarFilas(
     return { categories, products }
   }
 
-  // Pasado un tope, la regla le da «todo» al aparato (resolveDeviceMenuFilter): aquí también.
-  // ponytail: el tope de asignaciones se mide sobre la unión de la página, no por aparato; con más de 5000 asignaciones entre
-  // los menús elegidos de una página, un aparato con pocas también cuenta «todo». Contar por aparato si algún negocio llega.
-  const pasado = categorias.length > MAX_CATEGORIAS || asignaciones.length > MAX_ASIGNACIONES
-  if (pasado) {
-    logger.warn('[DeviceMenus] tope pasado al contar la página: los aparatos cuentan todo el catálogo', {
+  // «Todos» = lo que pinta la cuadrícula sin filtro: los productos activos y sus categorías, encendidas o apagadas (Ruling 15).
+  const everything = contar(productosDe.keys())
+
+  // Si la unión de la página pasa el tope, cada aparato se cuenta con su propia lectura, como en `/settings`: su conteo no
+  // depende de sus vecinos de página (Codex r3 #3).
+  // ponytail: hasta `pageSize` lecturas, una tras otra, sólo cuando la página pasa las 5000 asignaciones.
+  const paginaPasada = asignaciones.length > MAX_ASIGNACIONES
+  // El tope de categorías es del negocio, no del aparato: pasado, todos cuentan «todo» y se avisa una sola vez.
+  const sinArbol = categorias.length > MAX_CATEGORIAS
+  if (sinArbol && menuIds.length) {
+    logger.warn('[DeviceMenus] tope de categorías pasado al contar la página: los aparatos cuentan todo el catálogo', {
       venueId,
-      asignaciones: asignaciones.length,
       categorias: categorias.length,
     })
   }
-  // ponytail: con más de 2000 categorías activas, «Todos» cuenta también las apagadas (no se leyeron todas).
-  const everything = contar(categorias.length > MAX_CATEGORIAS ? productosDe.keys() : categorias.map(c => c.id))
-
-  const filas = aparatos.map(a => {
+  const filas: DeviceMenusTerminalRow[] = []
+  for (const a of aparatos) {
     const menus = a.menus.map(m => m.menu)
     let filtrado: DeviceMenusCounts | null = null
-    if (menus.length && conPro && !pasado) {
-      const { visibleCategoryIds } = visiblesDe(
-        menus.map(m => m.id),
-        asignaciones,
+    if (menus.length && conPro && !sinArbol) {
+      const ids = menus.map(m => m.id)
+      const { visibleCategoryIds } = filtroDelAparato(
+        venueId,
+        a.id,
+        ids,
+        paginaPasada ? await leerAsignaciones(ids) : asignaciones,
         categorias,
       )
       const suyo = visibleCategoryIds ? contar(visibleCategoryIds) : null
@@ -272,7 +290,7 @@ async function armarFilas(
     }
     // La pantalla no promete lo que el aparato todavía no hace: con la app vieja, `sees` es todo (Ruling 11).
     const needsAppUpdate = !appliesDeviceMenus(a.type, a.version)
-    return {
+    filas.push({
       id: a.id,
       name: a.name,
       type: a.type,
@@ -283,8 +301,8 @@ async function armarFilas(
       menus,
       sees: needsAppUpdate ? everything : (filtrado ?? everything),
       seesAfterUpdate: needsAppUpdate ? filtrado : null,
-    }
-  })
+    })
+  }
   return { everything, filas }
 }
 
@@ -311,13 +329,8 @@ export async function listDeviceMenuOptions(
   const [menus, total] = await Promise.all([
     prisma.menu.findMany({
       where,
-      // Sólo las categorías encendidas: es lo que el aparato puede pintar.
-      select: {
-        id: true,
-        name: true,
-        appliesToOnline: true,
-        _count: { select: { categories: { where: { category: { active: true } } } } },
-      },
+      // Todas las categorías del menú, también las apagadas: el aparato las pinta (Ruling 15).
+      select: { id: true, name: true, appliesToOnline: true, _count: { select: { categories: true } } },
       orderBy: ORDEN_DE_MESAS,
       skip: p.skip,
       take: p.pageSize,

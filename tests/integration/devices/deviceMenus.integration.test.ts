@@ -53,11 +53,11 @@ const put = (terminalId: string, menuIds: string[]) =>
     .send({ menuIds })
 const get = (path: string) => request(server).get(api(path)).set('Authorization', `Bearer ${token}`)
 
-/** El cuerpo REAL de `/settings` para la caja (el controlador, sin HTTP), como en pollAndSettingsAgree. */
-async function settingsDeLaCaja() {
+/** El cuerpo REAL de `/settings` para un aparato (el controlador, sin HTTP), como en pollAndSettingsAgree. */
+async function settingsDeLaCaja(deviceUid = DEVICE) {
   let body: any
   const res: any = { status: () => res, json: (b: unknown) => ((body = b), res) }
-  await getVenueTpvSettings({ params: { venueId }, headers: { 'x-device-id': DEVICE } } as any, res, (e: unknown) => {
+  await getVenueTpvSettings({ params: { venueId }, headers: { 'x-device-id': deviceUid } } as any, res, (e: unknown) => {
     throw e
   })
   return body.data.deviceTerminal
@@ -373,4 +373,82 @@ it('la base no deja un menú sin uso: las dos casillas apagadas violan el CHECK 
     .catch((e: Error) => e)
   expect(error?.message).toMatch(/23514/)
   expect(error?.message).toMatch(/Menu_appliesTo_alguno_check/)
+})
+
+it('Ruling 15 (Codex r3 #1 y #2): una categoría apagada que el menú trae directo sale igual en Cobrar y en Mesas, y «Todos» la cuenta', async () => {
+  await darPro()
+  const antes = (await get('/tpvs/menus')).body.everything
+
+  const categoria = async (name: string, active: boolean, productos: number) => {
+    const id = (await prisma.menuCategory.create({ data: { venueId, name, slug: `${name}-${suffix}`.toLowerCase(), active } })).id
+    for (let i = 0; i < productos; i++) {
+      await prisma.product.create({
+        data: { venueId, categoryId: id, name: `P ${name} ${i}`, sku: `SKU-${name}-${suffix}-${i}`, price: 10 },
+      })
+    }
+    return id
+  }
+  const encendida = await categoria('Encendida', true, 2)
+  const apagada = await categoria('Apagada', false, 3)
+  const menuMixto = (
+    await prisma.menu.create({
+      data: { venueId, name: 'Barra', categories: { create: [{ categoryId: encendida }, { categoryId: apagada, displayOrder: 1 }] } },
+    })
+  ).id
+
+  const guardado = await put(caja, [menuMixto])
+  expect(guardado.status).toBe(200)
+  expect(guardado.body.seesAfterUpdate).toEqual({ categories: 2, products: 5 })
+
+  // Cobrar (/settings) y Mesas (/menus) dan las MISMAS categorías para este aparato.
+  const cobrar = await settingsDeLaCaja()
+  const mesas = await request(server).get(`/api/v1/mobile/venues/${venueId}/menus`).set('Authorization', `Bearer ${token}`)
+  expect(mesas.status).toBe(200)
+  const delMenu = mesas.body.data.menus.find((m: any) => m.id === menuMixto).categoryIds
+  expect(cobrar.visibleCategoryIds).toEqual([...delMenu].sort())
+  expect(cobrar.visibleCategoryIds).toEqual([encendida, apagada].sort())
+
+  // «Todos» cuenta la apagada con sus productos: la API de productos de las apps la entrega.
+  const lista = await get('/tpvs/menus')
+  expect(lista.body.everything).toEqual({ categories: antes.categories + 2, products: antes.products + 5 })
+  const opciones = await get('/tpvs/menus/options?search=Barra')
+  expect(opciones.body.menus).toEqual([expect.objectContaining({ id: menuMixto, categoryCount: 2 })])
+})
+
+it('Codex r3 #3: el conteo de un aparato no depende de sus vecinos de página (la unión pasa el tope de 5000 asignaciones)', async () => {
+  await darPro()
+  const uidA = `dev-a-${suffix}`
+  const aparatoA = (await prisma.terminal.create({ data: { venueId, name: 'A sola', type: 'POS_ANDROID', deviceUid: uidA } })).id
+  const aparatoB = (await prisma.terminal.create({ data: { venueId, name: 'B muchas', type: 'POS_ANDROID' } })).id
+
+  const sola = (await prisma.menuCategory.create({ data: { venueId, name: 'Sola', slug: `sola-${suffix}` } })).id
+  await prisma.product.create({ data: { venueId, categoryId: sola, name: 'P Sola', sku: `SKU-sola-${suffix}`, price: 10 } })
+  const menuA = (await prisma.menu.create({ data: { venueId, name: 'Menú de A', categories: { create: { categoryId: sola } } } })).id
+
+  // B: 50 menús × 101 categorías = 5050 asignaciones (pasa las 5000 del tope por sí solo).
+  await prisma.menuCategory.createMany({
+    data: Array.from({ length: 101 }, (_, j) => ({ venueId, name: `Muchas ${j}`, slug: `muchas-${j}-${suffix}` })),
+  })
+  const muchas = await prisma.menuCategory.findMany({
+    where: { venueId, slug: { startsWith: 'muchas-' } },
+    select: { id: true },
+    take: 101,
+  })
+  const menusDeB: string[] = []
+  for (let i = 0; i < 50; i++) menusDeB.push((await prisma.menu.create({ data: { venueId, name: `Menú B ${i}` } })).id)
+  await prisma.menuCategoryAssignment.createMany({
+    data: menusDeB.flatMap(menuId => muchas.map(c => ({ menuId, categoryId: c.id }))),
+  })
+
+  const deA = await put(aparatoA, [menuA])
+  expect(deA.status).toBe(200)
+  expect((await put(aparatoB, menusDeB)).status).toBe(200)
+  // Ruling 11: con la versión mínima en null, lo filtrado viaja en seesAfterUpdate.
+  expect(deA.body.seesAfterUpdate).toEqual({ categories: 1, products: 1 })
+
+  const lista = await get('/tpvs/menus')
+  const fila = (id: string) => lista.body.terminals.find((t: any) => t.id === id)
+  expect(fila(aparatoA).seesAfterUpdate).toEqual(deA.body.seesAfterUpdate)
+  expect(fila(aparatoB).seesAfterUpdate).toBeNull() // B solo pasa el tope: muestra todo
+  expect(await settingsDeLaCaja(uidA)).toMatchObject({ visibleCategoryIds: [sola], visibleMenuIds: [menuA] })
 })
