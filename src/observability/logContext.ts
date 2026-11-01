@@ -1,5 +1,6 @@
-import winston from 'winston'
+import winston, { type Logform } from 'winston'
 import { getContext } from './executionContext'
+import { isDemoVenue } from './venueNames'
 
 /**
  * Injects the active execution context into every log record.
@@ -18,7 +19,20 @@ import { getContext } from './executionContext'
  * mocks `@/config/logger` globally (tests/__helpers__/setup.ts) to keep logs quiet, which
  * would hide anything exported from there.
  */
-export const contextFormat = winston.format(info => {
+export const contextFormat = winston.format(info => marcarSiEsDemo(conContexto(info)))
+
+/**
+ * Una línea de un negocio demo (`LIVE_DEMO`) sale «🧪 DEMO ·» y con `demo: true`, la escriba quien la escriba: así sus
+ * alertas no se confunden con las de un negocio real (founder, 1-nov). El negocio es el del emisor o, si no trae, el del
+ * contexto (ya mezclados). No cambia la gravedad.
+ */
+function marcarSiEsDemo(info: Logform.TransformableInfo): Logform.TransformableInfo {
+  if (!isDemoVenue(info.venueId as string | undefined, info.venueName as string | undefined)) return info
+  const yaLoDice = typeof info.message === 'string' && /demo|🧪/i.test(info.message)
+  return { ...info, demo: true, ...(typeof info.message === 'string' && !yaLoDice ? { message: `🧪 DEMO · ${info.message}` } : {}) }
+}
+
+function conContexto(info: Logform.TransformableInfo): Logform.TransformableInfo {
   const ctx = getContext()
   if (!ctx) return info
 
@@ -34,4 +48,4 @@ export const contextFormat = winston.format(info => {
   if (ctx.terminalSerial) injected.terminalSerial = ctx.terminalSerial
 
   return { ...injected, ...info }
-})
+}

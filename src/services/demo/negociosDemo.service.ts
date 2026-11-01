@@ -41,6 +41,7 @@ import { deleteVenueDataTx, DELETION_TIMEOUT_MS } from '@/services/cleanup/liveD
 import { conNegocio, DOMINIO_DEMO, olvidarNegocioDemo } from './candadoDemo'
 
 import { generateSlug } from '@/utils/slugify'
+import { marcarNegocioDemo } from '@/observability/venueNames'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { seedDefaultMappings, getMappings } from '@/services/fiscal/accountMapping.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
@@ -458,6 +459,7 @@ async function recrearNegocio(bp: VenueBlueprint, organizationId: string, usuari
 
   for (const v of anteriores) olvidarNegocioDemo(v.id)
   olvidarNegocioDemo(venue.id)
+  marcarNegocioDemo(venue.id) // el registro lo marca «🧪 DEMO» desde su primera línea
   logger.info(`   🏗️  Negocio demo listo: ${venue.id} (slug ${venue.slug})`)
   return venue.id
 }
