@@ -31,20 +31,22 @@ export type ExtendedCardType = TransactionCardType | 'CASH'
  */
 
 /**
- * La comisión de UN cobro: su costo (cargo + cuota fija) si lo tiene; si no, y sólo si lo procesó Avoqado, la que trae el propio
- * `Payment` (Codex r4 H1: el cobro de Stripe de pedidos en línea y las ligas no tienen costo y su comisión de Avoqado vive en
- * `feeAmount`). El resto sin costo es 0 como siempre (Codex r5: SoftRestaurant y los demos traen un `feeAmount` que no se cobró).
- * Misma regla que `SQL_COMISION_DEL_COBRO` del reporte de ventas. Las devoluciones la traen negativa.
+ * La comisión de UN cobro: su costo (cargo + cuota fija) si lo tiene; si no, y sólo si es un cobro en línea de Avoqado (`fundsFlow =
+ * AVOQADO_PROCESSED`, o un comercio en línea de antes de `fundsFlow`, Codex r6), la que trae el propio `Payment` (Codex r4 H1: Stripe
+ * de pedidos en línea, ligas, Checkout y Mercado Pago no tienen costo y su comisión vive en `feeAmount`). El resto sin costo es 0 como
+ * siempre (Codex r5: SoftRestaurant y los demos traen un `feeAmount` que no se cobró). Misma regla que `SQL_COMISION_DEL_COBRO` del
+ * reporte de ventas. Las devoluciones la traen negativa.
  */
 function comisionDelCobro(payment: {
   feeAmount?: Prisma.Decimal | number | null
   fundsFlow?: string | null
+  ecommerceMerchantId?: string | null
   transactionCost: { venueChargeAmount: Prisma.Decimal | number; venueFixedFee: Prisma.Decimal | number | null } | null
 }): number {
   if (payment.transactionCost) {
     return Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee ?? 0)
   }
-  return payment.fundsFlow === 'AVOQADO_PROCESSED' ? Number(payment.feeAmount ?? 0) : 0
+  return payment.fundsFlow === 'AVOQADO_PROCESSED' || payment.ecommerceMerchantId ? Number(payment.feeAmount ?? 0) : 0
 }
 
 export interface AvailableBalanceSummary {
@@ -214,6 +216,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
         amount: true,
         tipAmount: true,
         feeAmount: true,
+        ecommerceMerchantId: true,
         createdAt: true,
         merchantAccountId: true,
         ...TENDER_SEMANTICS_SELECT,
@@ -605,6 +608,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
         amount: true,
         tipAmount: true,
         feeAmount: true,
+        ecommerceMerchantId: true,
         fundsFlow: true,
         createdAt: true,
         merchantAccountId: true,

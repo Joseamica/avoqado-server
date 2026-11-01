@@ -219,12 +219,13 @@ export type PaymentMethodFilter = 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER'
 
 /**
  * La comisión de UN cobro (alias `p` para Payment y `tc` para su TransactionCost, 1:1): su costo (cargo + cuota fija) si lo tiene; si no,
- * y sólo si lo procesó Avoqado (`fundsFlow = AVOQADO_PROCESSED`), la que trae el propio `Payment`: el cobro de Stripe de pedidos en línea
- * y las ligas no tienen costo y su comisión de Avoqado vive en `feeAmount` (Codex r4 H1); su devolución copia el `fundsFlow` y la trae
- * negativa. El resto sin costo publica 0 como siempre: el importador de SoftRestaurant y las semillas demo calculan un `feeAmount` para
- * cualquier método, efectivo incluido, que no es una comisión cobrada (Codex r5). El de terminal sin costo todavía trae 0.
+ * y sólo si es un cobro en línea de Avoqado, la que trae el propio `Payment` (Codex r4 H1): el de Stripe de pedidos en línea, las ligas,
+ * Checkout y Mercado Pago no tienen costo y su comisión vive en `feeAmount`. «En línea de Avoqado» = `fundsFlow = AVOQADO_PROCESSED` (lo
+ * nuevo, y la devolución que lo copia y trae la comisión devuelta en negativo) o un comercio en línea (`ecommerceMerchantId`: lo de antes
+ * de `fundsFlow`, Codex r6). El resto sin costo publica 0 como siempre: el importador de SoftRestaurant y el efectivo de los demos guardan
+ * un `feeAmount` que no se cobró (Codex r5). El de terminal sin costo todavía trae 0.
  */
-const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN p."fundsFlow" = 'AVOQADO_PROCESSED' THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
+const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN p."fundsFlow" = 'AVOQADO_PROCESSED' OR p."ecommerceMerchantId" IS NOT NULL THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
 
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
 
@@ -2136,7 +2137,7 @@ async function calculateTimePeriodMetrics(
     for (const key of legacyPeriodMap.keys()) {
       if (!seen.has(key)) legacyOnly.push(new Date(Number(key))) // epoch-ms key → Date for formatPeriod
     }
-    periodsToProcess = [...nativePeriods, ...legacyOnly]
+    periodsToProcess = [...nativePeriods, ...legacyOnly].sort((a, b) => Number(a) - Number(b)) // Codex r6: los legacy, en su lugar
   }
 
   // Un byPeriod vacío deja la gráfica del POS en "Sin datos para este periodo"

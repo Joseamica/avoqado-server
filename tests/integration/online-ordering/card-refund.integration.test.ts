@@ -22,7 +22,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
-import { getAvailableBalance } from '@/services/dashboard/availableBalance.dashboard.service'
+import { getAvailableBalance, getSettlementTimeline } from '@/services/dashboard/availableBalance.dashboard.service'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -164,6 +164,11 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       barras: Number(porDia.reduce((t, p) => t + Number(p.metrics?.platformFees ?? 0), 0).toFixed(2)),
       desglose: Number((porMetodo.byPaymentMethodDetailed ?? []).reduce((t, b) => t + b.platformFees, 0).toFixed(2)),
       saldo: Number((await getAvailableBalance(venueId!)).totalFees.toFixed(2)),
+      linea: Number(
+        (await getSettlementTimeline(venueId!, { from: new Date(rango.startDate), to: new Date(rango.endDate) }))
+          .reduce((t, e) => t + e.fees, 0)
+          .toFixed(2),
+      ),
     }
   }
   const mas = (a: Record<string, number>, d: number) =>
@@ -372,24 +377,50 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
   it('Codex r5 (deuda 5): un cobro sin costo que NO procesó Avoqado (importado de SoftRestaurant, demo) no publica su feeAmount como comisión', async () => {
     const { orderId } = await capturedOrder()
     const antes = await comisiones()
-    // Como lo escribe el importador de SoftRestaurant y las semillas demo: comisión calculada para cualquier método y sin `fundsFlow`.
+    // Como lo escribe el importador de SoftRestaurant y las semillas demo: comisión calculada para cualquier método, sin `fundsFlow` ni
+    // comercio en línea. Con tarjeta también: el saldo y la línea de tiempo cuentan las tarjetas sin `fundsFlow` (histórico).
+    for (const method of ['CASH', 'CREDIT_CARD'] as const) {
+      await prisma.payment.create({
+        data: {
+          venueId: venueId!,
+          orderId,
+          amount: new Prisma.Decimal(250),
+          tipAmount: new Prisma.Decimal(0),
+          feePercentage: new Prisma.Decimal(0.025),
+          feeAmount: new Prisma.Decimal(6.25),
+          netAmount: new Prisma.Decimal(243.75),
+          method,
+          status: 'COMPLETED',
+          type: 'REGULAR',
+          splitType: 'FULLPAYMENT',
+          source: 'POS',
+        },
+      })
+    }
+    expect(await comisiones()).toEqual(antes)
+  })
+
+  it('Codex r6: el cobro viejo de una liga de pago (comercio en línea, sin `fundsFlow`) sí publica su comisión real', async () => {
+    const { orderId, charge } = await capturedOrder()
+    const antes = await comisiones()
     await prisma.payment.create({
       data: {
         venueId: venueId!,
         orderId,
+        ecommerceMerchantId: charge.ecommerceMerchantId,
         amount: new Prisma.Decimal(250),
         tipAmount: new Prisma.Decimal(0),
-        feePercentage: new Prisma.Decimal(0.025),
-        feeAmount: new Prisma.Decimal(6.25),
-        netAmount: new Prisma.Decimal(243.75),
-        method: 'CASH',
+        feePercentage: new Prisma.Decimal(0.0116),
+        feeAmount: new Prisma.Decimal(2.9),
+        netAmount: new Prisma.Decimal(247.1),
+        method: 'CREDIT_CARD',
         status: 'COMPLETED',
         type: 'REGULAR',
         splitType: 'FULLPAYMENT',
-        source: 'POS',
+        source: 'WEB',
       },
     })
-    expect(await comisiones()).toEqual(antes)
+    expect(await comisiones()).toEqual(mas(antes, 2.9))
   })
 
   it('parcial dos veces hasta el total: Σ feeAmount de los REFUND = −comisión del cobro; la tercera → 400 sin Stripe', async () => {
