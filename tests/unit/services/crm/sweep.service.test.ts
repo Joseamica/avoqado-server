@@ -1237,6 +1237,34 @@ describe('fillFirstMoney', () => {
   })
 })
 
+describe('a new link starts the first money over (ruling 65 g)', () => {
+  it('reenlazar_reinicia_el_primer_cobro (Codex exhaustiva #13): the new Organization never inherits the old one’s charge', async () => {
+    // Linked to ORG, which charged; its first money is set.
+    const account = seedLandingAccount({ organizationId: ORG, firstMoneyAt: new Date(Date.now() - 20 * DAY), firstMoneySource: 'PAGO' })
+    // ORG is deleted (`SetNull` unlinks the account) and the person opens another business, which never charged.
+    Object.assign(accountOf(account.id) as Row, { organizationId: null })
+    seedOrganization({ id: OTHER_ORG, name: 'Café Ana 2' })
+    const venue = seedVenue({ organizationId: OTHER_ORG })
+    seedStaff(EMAIL, {}, OTHER_ORG)
+
+    await expect(linkLandingAccounts()).resolves.toBe(1)
+
+    expect(accountOf(account.id)).toMatchObject({ organizationId: OTHER_ORG, firstMoneyAt: null, firstMoneySource: null })
+    expect(systemEvents('FIRST_MONEY_RESET')).toEqual([
+      expect.objectContaining({
+        accountId: account.id,
+        actorStaffId: null,
+        data: expect.objectContaining({ previousSource: 'PAGO', organizationId: OTHER_ORG }),
+      }),
+    ])
+    // Nothing to fill until the new business charges for real; then its own date.
+    await expect(fillFirstMoney()).resolves.toBe(0)
+    const charge = seedPayment(venue.id, { createdAt: new Date() })
+    await expect(fillFirstMoney()).resolves.toBe(1)
+    expect(accountOf(account.id)).toMatchObject({ firstMoneyAt: charge.createdAt, firstMoneySource: 'PAGO' })
+  })
+})
+
 describe('fillFirstMoney reads its candidates with a correlated EXISTS (ruling 51)', () => {
   it('never a `payments.some` inside an OR: one EXISTS per venue on Payment(venueId, status, createdAt), and the partial index literals', async () => {
     seedAccount({ organizationId: ORG })

@@ -872,6 +872,37 @@ export async function lose(access: CrmAccess, id: string, input: { lostReasonId?
 const orgTaken = () => new ConflictError('Esa cuenta de Avoqado ya está ligada a otro negocio del CRM', 'CRM_ORG_YA_LIGADA')
 
 /**
+ * A new link starts the first money over (ruling 65 g, Codex exhaustiva #13): the date and its source were the
+ * Organization's the account had before (deleted, so `SetNull` unlinked it), never the new one's. They are cleared —
+ * `fillFirstMoney` computes them again for the new Organization — and the old fact stays in the timeline. Every link
+ * calls it after setting the new Organization: the sweep, the landing and the backfill (`linkTx`) and «Ganar».
+ */
+export async function resetFirstMoneyTx(
+  tx: Prisma.TransactionClient,
+  accountId: string,
+  organizationId: string,
+  actorStaffId: string | null,
+): Promise<void> {
+  const before = await tx.crmAccount.findUniqueOrThrow({
+    where: { id: accountId },
+    select: { firstMoneyAt: true, firstMoneySource: true },
+  })
+  if (!before.firstMoneyAt) return
+  await tx.crmAccount.update({ where: { id: accountId }, data: { firstMoneyAt: null, firstMoneySource: null } })
+  await addEvent(tx, {
+    accountId,
+    kind: 'SYSTEM',
+    actorStaffId,
+    data: {
+      event: 'FIRST_MONEY_RESET',
+      previousAt: before.firstMoneyAt.toISOString(),
+      previousSource: before.firstMoneySource,
+      organizationId,
+    },
+  })
+}
+
+/**
  * «Ganar» links the account to its real Organization — one CRM account per Organization — and closes it as «Ganado».
  * Without `organizationId`, the one it is already linked to (it came from the landing). The sales team's own
  * organization is never anybody's client. An account nobody owns is won by whoever wins it (I-3, like Pipedrive: who
@@ -931,6 +962,7 @@ export async function win(access: CrmAccess, id: string, input: { organizationId
         })
       }
       if (linking) {
+        await resetFirstMoneyTx(tx, id, organizationId, access.staffId)
         await addEvent(tx, { accountId: id, kind: 'LINKED', actorStaffId: access.staffId, data: { organizationId, organizationName } })
       }
       await addEvent(tx, {

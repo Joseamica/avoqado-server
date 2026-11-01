@@ -284,6 +284,35 @@ describe('losing and winning', () => {
     await expect(win(access(), ACCOUNT_B, {})).rejects.toMatchObject({ statusCode: 422, code: 'CRM_FALTA_ORGANIZACION' })
   })
 
+  it('ganar_reinicia_el_primer_cobro_de_la_organizacion_anterior (Codex exhaustiva #13, ruling 65 g)', async () => {
+    seeded()
+    prismaMock.crmStage.findFirst.mockResolvedValue(ganado)
+    // Its Organization was deleted (`SetNull`): unlinked, but still with the old one's first money.
+    const old = new Date('2026-09-01T18:00:00.000Z')
+    editable(account({ id: ACCOUNT_B, organizationId: null, firstMoneyAt: old, firstMoneySource: 'PAGO' }))
+    prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Café Tlalpan SA de CV' })
+    prismaMock.crmTeam.findUnique.mockResolvedValue({ organizationId: TEAM_ORG })
+    prismaMock.crmAccount.findUnique.mockResolvedValue(null)
+
+    await win(access(), ACCOUNT_B, { organizationId: ORG })
+
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT_B },
+      data: { firstMoneyAt: null, firstMoneySource: null },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          accountId: ACCOUNT_B,
+          kind: 'SYSTEM',
+          actorStaffId: SELLER,
+          data: { event: 'FIRST_MONEY_RESET', previousAt: old.toISOString(), previousSource: 'PAGO', organizationId: ORG },
+        },
+      ],
+      skipDuplicates: true,
+    })
+  })
+
   it('ganar_sin_dueno_queda_a_nombre_de_quien_gana (I-3, ruling 52): one owner per sale, like Pipedrive', async () => {
     seeded()
     prismaMock.crmStage.findFirst.mockResolvedValue(ganado)

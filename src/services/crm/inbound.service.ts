@@ -16,7 +16,7 @@ import { OrgRole, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
-import { getInitialStage } from './accounts.service'
+import { getInitialStage, resetFirstMoneyTx } from './accounts.service'
 import { notifyNewProspect, notifyReturningProspect, type NoticeContent } from './digest.service'
 import { addEvent } from './timeline.service'
 
@@ -453,6 +453,7 @@ export async function linkTx(tx: Prisma.TransactionClient, accountId: string, or
     return false
   }
   await tx.crmAccount.update({ where: { id: accountId }, data: { organizationId } })
+  await resetFirstMoneyTx(tx, accountId, organizationId, null)
   // The same key as the sweep's link (task 6), one per account AND Organization: whoever gets there first writes it, and a
   // re-link after its Organization was deleted (`SetNull`) still leaves its own event (spec §5.10, M-4 of T6's review).
   await addEvent(tx, {
