@@ -224,6 +224,25 @@ describe('el Cambio con saldo a favor · Postgres real', () => {
       const aSaldo = await createExchange(s.input(cambioMasBarato(s, {}, linea('SIZE'))))
       expect(aSaldo.exchange.settlement.storeCredit).toMatchObject({ amountCents: 20000, newBalanceCents: 20000 })
     })
+
+    it('🔴 D-1: sin las llaves el interruptor no restringe (no se puede dar saldo): un Cambio en efectivo sin Defecto pasa', async () => {
+      const s = await seed()
+      await prisma.venueSettings.upsert({
+        where: { venueId: s.venueId },
+        update: { storeCreditOnly: true },
+        create: { venueId: s.venueId, storeCreditOnly: true },
+      })
+      const llave = process.env.GIFT_CARD_HMAC_KEY
+      delete process.env.GIFT_CARD_HMAC_KEY
+      try {
+        const { exchange } = await createExchange(
+          s.input(cambioMasBarato(s, { method: 'CASH', customerId: undefined, cashDrawerSessionId: s.drawer.id })),
+        )
+        expect(exchange.settlement).toMatchObject({ method: 'CASH', amountCents: 20000 })
+      } finally {
+        process.env.GIFT_CARD_HMAC_KEY = llave
+      }
+    })
   })
 
   describe('crédito de cambio con raíz en tarjeta bancaria', () => {

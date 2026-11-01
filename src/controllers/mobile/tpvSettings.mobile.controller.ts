@@ -21,6 +21,7 @@ import { assertSettingsConfigurable, resolveConfigurableSettings } from '../../s
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { effectiveExchangesEnabled } from '../../services/exchanges/exchangeRules'
 import { storeCreditAvailable } from '../../services/storeCredit/storeCreditTender'
+import { soloSaldoEfectivo } from '../../services/storeCredit/soloSaldoEfectivo'
 import type { UpdateDisplayModeInput, UpdateTerminalSettingsInput } from '../../schemas/mobile/tpvSettings.mobile.schema'
 import {
   DisplayModeRequestError,
@@ -221,7 +222,8 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         exchangesEnabled: effectiveExchangesEnabled(venueSettings?.exchangesEnabled, venue?.type),
         // Saldo a favor (spec 2026-10-30 §5.1). Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo ignora; uno nuevo sin
         // el campo cae a false. `storeCreditOnly` es de VENUE; `storeCreditAvailable` = el SERVIDOR sabe dar saldo (las dos llaves).
-        storeCreditOnly: venueSettings?.storeCreditOnly ?? false,
+        // D-1: el valor EFECTIVO (el que hace cumplir el SERVIDOR): sin llaves no restringe, así la app no esconde el efectivo.
+        storeCreditOnly: soloSaldoEfectivo(venueSettings?.storeCreditOnly),
         storeCreditAvailable: storeCreditAvailable(),
         // Encabezado y diseño del ticket (aditivo y opcional, mismo contrato que `plan`):
         // un POS viejo los ignora. `receiptInfo` conserva EXACTAMENTE sus campos de siempre

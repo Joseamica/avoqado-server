@@ -215,6 +215,20 @@ describe('requestRefundOnTerminal — «Sólo saldo a favor»', () => {
     expect(prismaMock.venueSettings.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1' } }))
   })
 
+  it('🔴 D-1: sin las llaves el interruptor no restringe: sin excepción, la devolución en terminal se emite', async () => {
+    soloSaldo()
+    ackWith('opened')
+    const llave = process.env.GIFT_CARD_HMAC_KEY
+    delete process.env.GIFT_CARD_HMAC_KEY
+    try {
+      const result = await terminalPaymentService.requestRefundOnTerminal(baseRequest())
+      expect(result.status).toBe('opened')
+      expect(emit).toHaveBeenCalledTimes(1)
+    } finally {
+      process.env.GIFT_CARD_HMAC_KEY = llave
+    }
+  })
+
   it('una excepción desconocida cuenta como ausente', async () => {
     soloSaldo()
     await expect(

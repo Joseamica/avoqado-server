@@ -321,6 +321,13 @@ describe('«Sólo saldo a favor»', () => {
     })
   })
 
+  it('🔴 D-1: sin llaves y con storeCreditOnly=true, una devolución de mercancía en efectivo pasa (sin llaves no hay saldo que dar)', async () => {
+    soloSaldo()
+    delete process.env.GIFT_CARD_HMAC_KEY
+    await expect(issuePosRefund(pedir({ refundMethod: 'CASH', customerId: undefined }))).resolves.toMatchObject({ refundId: REFUND })
+    expect(issueRefundMock).toHaveBeenCalledWith(expect.objectContaining({ refundMethod: 'CASH' }))
+  })
+
   it('… + defective acepta CASH', async () => {
     soloSaldo()
     await issuePosRefund(pedir({ refundMethod: 'CASH', customerId: undefined, defective: true }))

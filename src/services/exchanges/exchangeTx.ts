@@ -25,6 +25,7 @@ import { raizYaDevuelta, respaldoVigenteDeLaRaiz } from '../storeCredit/respaldo
 import { resolveStoreCreditTenderInTx, storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { saldosAFavorDeReembolsos } from '../storeCredit/saldoAbonado'
 import { rechazarSiLaTerminalEstaDevolviendo } from '../storeCredit/terminalRefundMarker'
+import { soloSaldoEfectivo } from '../storeCredit/soloSaldoEfectivo'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { validateStaffVenue } from '@/utils/staff-venue.util'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
@@ -370,7 +371,8 @@ export async function prepareExchangeInTx(
   const soloSaldo =
     calc.kind === 'PAYOUT' &&
     rigeSoloSaldoAFavor(
-      (await tx.venueSettings.findUnique({ where: { venueId }, select: { storeCreditOnly: true } }))?.storeCreditOnly ?? false,
+      // D-1: el valor EFECTIVO (sin llaves no hay saldo que dar y el interruptor no restringe).
+      soloSaldoEfectivo((await tx.venueSettings.findUnique({ where: { venueId }, select: { storeCreditOnly: true } }))?.storeCreditOnly),
       body.returned.map(r => r.reason),
     )
   const chains = new Map<string, ChainRefundResolution>()

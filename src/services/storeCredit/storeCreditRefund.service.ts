@@ -22,6 +22,7 @@ import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from './storeCredit
 import { saldosAFavorDeReembolsos, type StoreCreditDelReembolso } from './saldoAbonado'
 import { rechazarSiLaTerminalEstaDevolviendo } from './terminalRefundMarker'
 import { comoRechazoDeSaldo } from './rechazoDeSaldo'
+import { soloSaldoEfectivo } from './soloSaldoEfectivo'
 
 // La forma y su lector viven en `saldoAbonado.ts` (sin dependencias del núcleo del reembolso: el Cambio también la lee); se re-exportan
 // para los lectores de siempre (la lista y el detalle de transacciones del POS).
@@ -128,7 +129,7 @@ async function reembolsoDelPos(
     const ajustes = await tx.venueSettings.findUnique({ where: { venueId: input.venueId }, select: { storeCreditOnly: true } })
     if (
       soloSaldoLoImpide({
-        storeCreditOnly: ajustes?.storeCreditOnly ?? false,
+        storeCreditOnly: soloSaldoEfectivo(ajustes?.storeCreditOnly), // D-1: sin llaves no restringe
         reason: input.reason,
         defective,
         refundMethod,

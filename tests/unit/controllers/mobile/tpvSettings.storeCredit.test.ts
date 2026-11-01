@@ -42,6 +42,13 @@ describe('tpvSettings: saldo a favor (campos nuevos y opcionales para el POS)', 
     )
   })
 
+  it('🔴 D-1: prendido pero SIN llaves, la app recibe el valor EFECTIVO (false): no filtra opciones por un saldo que no se puede dar', async () => {
+    delete process.env.GIFT_CARD_CODE_KEY
+    delete process.env.GIFT_CARD_HMAC_KEY
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ storeCreditOnly: true })
+    expect((await settings()).data).toMatchObject({ storeCreditOnly: false, storeCreditAvailable: false })
+  })
+
   it('sin fila de ajustes y sin llaves: storeCreditOnly false y storeCreditAvailable false (nada se rompe)', async () => {
     delete process.env.GIFT_CARD_CODE_KEY
     delete process.env.GIFT_CARD_HMAC_KEY
