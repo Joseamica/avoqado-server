@@ -678,7 +678,7 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         id: 'KITCHEN_DISPLAY',
         featureCode: 'KITCHEN_DISPLAY',
         name: 'Pantalla de cocina',
-        description: 'Las comandas llegan a una pantalla en cada estación de la cocina, también sin internet.',
+        description: 'Las comandas llegan a una pantalla en cada estación de la cocina.',
         category: 'sell',
         minimumTier: 'PRO',
         offering: 'CONFIGURABLE',

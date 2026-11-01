@@ -31,14 +31,21 @@ import { compileHybridPublication } from '../../../../src/services/launchCampaig
 import { PLAN_CATCH_UP_CODES } from '../../../../src/services/launchCampaigns/hybridPlanCatchUp'
 
 const db = prisma as any
-const TERMS = { currency: 'MXN', interval: 'MONTHLY', price: 999, taxIncluded: true, promotionCycles: null, renewal: { kind: 'SAME_PRICE' } } as const
+const TERMS = {
+  currency: 'MXN',
+  interval: 'MONTHLY',
+  price: 999,
+  taxIncluded: true,
+  promotionCycles: null,
+  renewal: { kind: 'SAME_PRICE' },
+} as const
 
 const CASOS = [
   {
     codigo: 'KITCHEN_DISPLAY',
     category: 'sell',
     names: { es: 'Pantalla de cocina', en: 'Kitchen display', fr: 'Écran de cuisine' },
-    description: 'Las comandas llegan a una pantalla en cada estación de la cocina, también sin internet.',
+    description: 'Las comandas llegan a una pantalla en cada estación de la cocina.',
   },
   {
     codigo: 'CUSTOMER_DISPLAY_PROMOS',
