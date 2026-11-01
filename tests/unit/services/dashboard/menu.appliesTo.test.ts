@@ -17,6 +17,7 @@
 import { MenuType } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { CreateMenuSchema, UpdateMenuSchema, type CreateMenuDto } from '@/schemas/dashboard/menu.schema'
 import { cloneMenu, createMenu, MENU_SIN_USO_MESSAGE, updateMenu } from '@/services/dashboard/menu.dashboard.service'
 
@@ -166,6 +167,42 @@ describe('updateMenu — «¿Dónde se usa?»', () => {
     await expect(updateMenu(VENUE_ID, MENU_ID, { appliesToDevices: true, appliesToOnline: false })).resolves.toBeDefined()
 
     expect(prismaMock.menu.update.mock.calls[0][0].data).toEqual({ appliesToDevices: true, appliesToOnline: false })
+  })
+
+  describe('la bitácora MENU_UPDATED', () => {
+    const ultimoRegistro = () => (logAction as jest.Mock).mock.calls.at(-1)?.[0]
+
+    it('cambiar una casilla registra antes y después de las dos (la tienda en línea cambia su horario)', async () => {
+      await updateMenu(VENUE_ID, MENU_ID, { appliesToOnline: false })
+
+      expect(ultimoRegistro()).toMatchObject({
+        action: 'MENU_UPDATED',
+        entityId: MENU_ID,
+        data: {
+          name: 'Desayunos',
+          antes: { appliesToDevices: true, appliesToOnline: true },
+          despues: { appliesToDevices: true, appliesToOnline: false },
+        },
+      })
+    })
+
+    it('también con categoryIds (la edición en transacción)', async () => {
+      prismaMock.menu.findUniqueOrThrow.mockResolvedValue(menuGuardado({ appliesToDevices: false }))
+
+      await updateMenu(VENUE_ID, MENU_ID, { appliesToDevices: false, categoryIds: ['cat-1'] })
+
+      expect(ultimoRegistro().data).toEqual({
+        name: 'Desayunos',
+        antes: { appliesToDevices: true, appliesToOnline: true },
+        despues: { appliesToDevices: false, appliesToOnline: true },
+      })
+    })
+
+    it('sin cambio de casillas sólo registra el nombre, como antes', async () => {
+      await updateMenu(VENUE_ID, MENU_ID, { name: 'Desayunos', appliesToDevices: true, appliesToOnline: true })
+
+      expect(ultimoRegistro().data).toEqual({ name: 'Desayunos' })
+    })
   })
 
   describe('la caché de la carta en línea', () => {

@@ -114,8 +114,10 @@ export interface DeviceMenusTerminalRow {
   needsAppUpdate: boolean
   /** Los menús elegidos, con su nombre; `[]` = «Todos los menús». */
   menus: Array<{ id: string; name: string }>
-  /** Lo que pinta su cuadrícula: categorías visibles con algún producto activo, y esos productos. */
+  /** Lo que pinta su cuadrícula HOY: categorías visibles con algún producto activo, y esos productos. Con la app vieja, todo. */
   sees: DeviceMenusCounts
+  /** Lo que pintará al actualizar la app: sólo con `needsAppUpdate` y una elección que filtra; si no, `null` (Ruling 11). */
+  seesAfterUpdate: DeviceMenusCounts | null
 }
 
 export interface DeviceMenusPage {
@@ -136,6 +138,21 @@ export interface DeviceMenuOption {
 
 export interface DeviceMenuOptionsPage {
   menus: DeviceMenuOption[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface VenueMenuUsage {
+  id: string
+  name: string
+  active: boolean
+  appliesToDevices: boolean
+  appliesToOnline: boolean
+}
+
+export interface VenueMenuUsagePage {
+  menus: VenueMenuUsage[]
   total: number
   page: number
   pageSize: number
@@ -242,7 +259,7 @@ async function armarFilas(
 
   const filas = aparatos.map(a => {
     const menus = a.menus.map(m => m.menu)
-    let sees = everything
+    let filtrado: DeviceMenusCounts | null = null
     if (menus.length && conPro && !pasado) {
       const { visibleCategoryIds } = visiblesDe(
         menus.map(m => m.id),
@@ -251,8 +268,10 @@ async function armarFilas(
       )
       const suyo = visibleCategoryIds ? contar(visibleCategoryIds) : null
       // Si ninguna categoría visible tiene productos, el aparato muestra todo (Codex r1 #5).
-      if (suyo && suyo.categories > 0) sees = suyo
+      if (suyo && suyo.categories > 0) filtrado = suyo
     }
+    // La pantalla no promete lo que el aparato todavía no hace: con la app vieja, `sees` es todo (Ruling 11).
+    const needsAppUpdate = !appliesDeviceMenus(a.type, a.version)
     return {
       id: a.id,
       name: a.name,
@@ -260,9 +279,10 @@ async function armarFilas(
       model: a.model,
       version: a.version,
       areaName: a.fulfillmentArea?.name ?? null,
-      needsAppUpdate: !appliesDeviceMenus(a.type, a.version),
+      needsAppUpdate,
       menus,
-      sees,
+      sees: needsAppUpdate ? everything : (filtrado ?? everything),
+      seesAfterUpdate: needsAppUpdate ? filtrado : null,
     }
   })
   return { everything, filas }
@@ -313,15 +333,37 @@ export async function listDeviceMenuOptions(
 }
 
 /**
+ * Todos los menús del negocio, encendidos y apagados, con dónde se usa cada uno. Es la única lista de menús del MCP: sin ella,
+ * un menú que dejó de ser «Aparatos» no se podría volver a encontrar.
+ */
+export async function listVenueMenuUsage(venueId: string, page: number): Promise<VenueMenuUsagePage> {
+  const p = pagina(page, DEVICE_MENUS_MAX_PAGE_SIZE)
+  const where: Prisma.MenuWhereInput = { venueId }
+  const [menus, total] = await Promise.all([
+    prisma.menu.findMany({
+      where,
+      select: { id: true, name: true, active: true, appliesToDevices: true, appliesToOnline: true },
+      orderBy: ORDEN_DE_MESAS,
+      skip: p.skip,
+      take: p.pageSize,
+    }),
+    prisma.menu.count({ where }),
+  ])
+  return { menus, total, page: p.page, pageSize: p.pageSize }
+}
+
+/**
  * Guarda qué menús muestra un aparato POS. `[]` = «Todos los menús». Reemplaza la elección completa.
  * 404 `TERMINAL_NOT_FOUND` si el aparato no es del negocio o no es POS_*; 400 `MENU_NO_DISPONIBLE` si algún menú no es del
- * negocio, está apagado o no es para aparatos. El plan (Pro) lo revisa la ruta.
+ * negocio, está apagado o no es para aparatos. El plan (Pro) lo revisa la ruta. `provenance` (la del MCP) va en la misma fila de
+ * bitácora: quien llama no deja otra.
  */
 export async function setTerminalMenus(
   venueId: string,
   terminalId: string,
   menuIds: string[],
   actorStaffId: string | null,
+  provenance?: Record<string, string>,
 ): Promise<DeviceMenusTerminalRow> {
   const ids = [...new Set(menuIds)]
   if (ids.length > MAX_MENUS_POR_APARATO) {
@@ -361,10 +403,12 @@ export async function setTerminalMenus(
       action: 'TERMINAL_MENUS_UPDATED',
       entity: 'Terminal',
       entityId: terminalId,
-      data: { terminalName: aparato.name, antes, despues },
+      data: { terminalName: aparato.name, antes, despues, ...provenance },
     })
   }
 
   const { filas } = await armarFilas(venueId, await leerAparatos(venueId, { id: terminalId, venueId }, 0, 1))
+  // Borrado entre el guardado y la relectura: un 404 claro, no un 200 sin cuerpo.
+  if (!filas[0]) throw new NotFoundError('Ese aparato ya no existe en este negocio.', 'TERMINAL_NOT_FOUND')
   return filas[0]
 }

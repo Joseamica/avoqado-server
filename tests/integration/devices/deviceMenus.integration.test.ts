@@ -1,7 +1,8 @@
 /**
  * Menú del aparato (Task A8) — contra Postgres REAL y la app REAL por supertest: la página del DASHBOARD («Qué muestra cada
  * aparato») guarda y lista, el candado Pro del PUT, y que las filas de `TerminalMenu` se van solas (cascada) al borrar el menú
- * o el aparato y al reemplazar el menú con una importación. Además, el CHECK de la base: un menú no puede quedar sin uso.
+ * o el aparato y al reemplazar el menú con una importación. Además, el CHECK de la base: un menú no puede quedar sin uso; nada
+ * del otro negocio se cuela (guardar, listar); y `set_device_menus` del MCP deja UNA fila de bitácora con su procedencia.
  *
  * Corre en la nube (base desechable): ./scripts/avq-verify.sh avoqado-server npx jest --selectProjects integration
  *   --testPathPattern "devices/deviceMenus" --ci
@@ -15,6 +16,9 @@ import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
 import { getVenueTpvSettings } from '@/controllers/mobile/tpvSettings.mobile.controller'
+import { registerDeviceMenuTools } from '@/mcp/tools/deviceMenus'
+import type { McpScope } from '@/mcp/scope'
+import { conectarPorElCatalogo } from '@tests/__helpers__/mcp-por-el-catalogo'
 import { importMenu } from '@/services/dashboard/menu.dashboard.service'
 import { resolveDeviceMenuFilter, TODO } from '@/services/devices/deviceMenus.service'
 
@@ -34,6 +38,12 @@ let catBebidas: string
 let menuComida: string
 let menuBebidas: string
 let menuWeb: string // sólo tienda en línea
+let menuApagado: string
+// El otro negocio: su aparato y su menú nunca se cuelan.
+let otraOrgId: string
+let otroVenueId: string
+let otraCaja: string
+let menuAjeno: string
 
 const api = (path: string) => `/api/v1/dashboard/venues/${venueId}${path}`
 const put = (terminalId: string, menuIds: string[]) =>
@@ -101,6 +111,30 @@ beforeAll(async () => {
   menuComida = await menu('Comida', catComida)
   menuBebidas = await menu('Bebidas', catBebidas)
   menuWeb = await menu('Web', catComida, false)
+  menuApagado = (
+    await prisma.menu.create({ data: { venueId, name: 'Apagado', active: false, categories: { create: { categoryId: catComida } } } })
+  ).id
+
+  otraOrgId = (
+    await prisma.organization.create({ data: { name: `Otra ${suffix}`, email: `otra-${suffix}@example.test`, phone: '5500000001' } })
+  ).id
+  otroVenueId = (
+    await prisma.venue.create({
+      data: {
+        organizationId: otraOrgId,
+        name: `Otro ${suffix}`,
+        slug: `otro-${suffix}`,
+        status: 'ACTIVE',
+        timezone: 'America/Mexico_City',
+      },
+    })
+  ).id
+  otraCaja = (await prisma.terminal.create({ data: { venueId: otroVenueId, name: 'Caja ajena', type: 'POS_ANDROID', status: 'ACTIVE' } }))
+    .id
+  const catAjena = (await prisma.menuCategory.create({ data: { venueId: otroVenueId, name: 'Ajena', slug: `ajena-${suffix}` } })).id
+  menuAjeno = (
+    await prisma.menu.create({ data: { venueId: otroVenueId, name: 'Ajeno', categories: { create: { categoryId: catAjena } } } })
+  ).id
 })
 
 afterAll(async () => {
@@ -118,6 +152,13 @@ afterAll(async () => {
     }
     if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
     if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
+    if (otroVenueId) {
+      await prisma.terminal.deleteMany({ where: { venueId: otroVenueId } })
+      await prisma.menu.deleteMany({ where: { venueId: otroVenueId } })
+      await prisma.menuCategory.deleteMany({ where: { venueId: otroVenueId } })
+      await prisma.venue.deleteMany({ where: { id: otroVenueId } })
+    }
+    if (otraOrgId) await prisma.organization.deleteMany({ where: { id: otraOrgId } })
   } finally {
     await new Promise<void>(listo => server.close(() => listo()))
   }
@@ -135,13 +176,15 @@ it('PUT con Pro guarda y GET lo enseña', async () => {
 
   const res = await put(caja, [menuComida])
   expect(res.status).toBe(200)
+  // La app de hoy todavía no aplica la elección: `sees` es lo que muestra hoy (todo) y lo filtrado va en `seesAfterUpdate`.
   expect(res.body).toMatchObject({
     id: caja,
     name: 'Caja',
     type: 'POS_ANDROID',
     needsAppUpdate: true,
     menus: [{ id: menuComida, name: 'Comida' }],
-    sees: { categories: 1, products: 2 },
+    sees: { categories: 2, products: 3 },
+    seesAfterUpdate: { categories: 1, products: 2 },
   })
 
   const lista = await get('/tpvs/menus')
@@ -149,7 +192,11 @@ it('PUT con Pro guarda y GET lo enseña', async () => {
   expect(lista.body).toMatchObject({ everything: { categories: 2, products: 3 }, total: 1, page: 1, pageSize: 50 })
   // Sólo los POS: la PAX no sale
   expect(lista.body.terminals.map((t: any) => t.id)).toEqual([caja])
-  expect(lista.body.terminals[0]).toMatchObject({ menus: [{ id: menuComida, name: 'Comida' }], sees: { categories: 1, products: 2 } })
+  expect(lista.body.terminals[0]).toMatchObject({
+    menus: [{ id: menuComida, name: 'Comida' }],
+    sees: { categories: 2, products: 3 },
+    seesAfterUpdate: { categories: 1, products: 2 },
+  })
 
   // logAction va sin esperar (fuera de la transacción): se le da hasta 5 s de margen.
   const buscarLog = () => prisma.activityLog.findFirst({ where: { venueId, action: 'TERMINAL_MENUS_UPDATED', entityId: caja } })
@@ -207,6 +254,95 @@ it('borrar el aparato borra sus filas', async () => {
   await prisma.terminal.delete({ where: { id: otra } })
 
   expect(await prisma.terminalMenu.count({ where: { terminalId: otra } })).toBe(0)
+})
+
+it('nada del otro negocio: su menú no se guarda, su aparato no se toca y la lista no lo enseña', async () => {
+  await darPro()
+
+  const menuDelOtro = await put(caja, [menuAjeno])
+  expect(menuDelOtro.status).toBe(400)
+  expect(menuDelOtro.body.code).toBe('MENU_NO_DISPONIBLE')
+
+  const aparatoDelOtro = await put(otraCaja, [])
+  expect(aparatoDelOtro.status).toBe(404)
+  expect(aparatoDelOtro.body.code).toBe('TERMINAL_NOT_FOUND')
+  expect(await prisma.terminal.findUnique({ where: { id: otraCaja }, select: { venueId: true } })).toEqual({ venueId: otroVenueId })
+
+  // Una fila vieja hacia el menú del otro negocio (un aparato que cambió de sucursal) no se enseña ni cuenta.
+  expect((await put(caja, [menuComida])).status).toBe(200)
+  await prisma.terminalMenu.create({ data: { terminalId: caja, menuId: menuAjeno } })
+  const lista = await get('/tpvs/menus')
+  expect(lista.body.terminals.map((t: any) => t.id)).toEqual([caja])
+  expect(lista.body.terminals[0].menus).toEqual([{ id: menuComida, name: 'Comida' }])
+  const opciones = await get('/tpvs/menus/options')
+  expect(opciones.body.menus.map((m: any) => m.id)).not.toContain(menuAjeno)
+  const todo = JSON.stringify([lista.body, opciones.body])
+  for (const delOtro of [otraCaja, menuAjeno, 'Ajeno', 'Caja ajena']) expect(todo).not.toContain(delOtro)
+})
+
+it('set_device_menus del MCP: la vista previa sólo enseña lo del negocio y cada cambio deja UNA fila con la procedencia del MCP', async () => {
+  await darPro()
+  // Hoy: Comida, más dos filas que la regla no usa (un menú del otro negocio y uno apagado).
+  await prisma.terminalMenu.deleteMany({ where: { terminalId: caja } })
+  await prisma.terminalMenu.createMany({
+    data: [menuComida, menuAjeno, menuApagado].map(menuId => ({ terminalId: caja, menuId })),
+  })
+
+  const scope = {
+    staffId,
+    activeOrg: orgId,
+    allowedVenueIds: [venueId],
+    scopes: ['mcp:read', 'mcp:write'],
+    perVenueAccess: new Map([[venueId, { role: 'OWNER', corePermissions: ['*:*'], isSuperAdmin: false }]]),
+  } as unknown as McpScope
+  const mcp = await conectarPorElCatalogo(server => registerDeviceMenuTools(server, scope), scope)
+  const args = { venueId, terminalIds: [caja], menuIds: [] }
+  const confirmar = async () => {
+    const vista = await mcp.call('set_device_menus', args)
+    return {
+      vista,
+      resultado: await mcp.call('set_device_menus', {
+        ...vista.confirmationArguments,
+        confirm: true,
+        confirmationToken: vista.confirmationToken,
+      }),
+    }
+  }
+  const filasDelMcp = () =>
+    prisma.activityLog.findMany({
+      where: { venueId, action: 'TERMINAL_MENUS_UPDATED', entityId: caja, data: { path: ['source'], equals: 'customer-mcp' } },
+      select: { staffId: true, data: true },
+      take: 10,
+    })
+
+  try {
+    const primero = await confirmar()
+    expect(primero.vista.preview).toEqual([{ id: caja, device: 'Caja', current: 'Comida', new: 'Todos los menús' }])
+    expect(primero.resultado).toMatchObject({ ok: true, updated: [{ id: caja, name: 'Caja' }] })
+
+    // logAction va sin esperar: hasta 5 s de margen.
+    let filas = await filasDelMcp()
+    for (let i = 0; i < 50 && filas.length === 0; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      filas = await filasDelMcp()
+    }
+    await new Promise(r => setTimeout(r, 500)) // por si llegara una segunda
+    filas = await filasDelMcp()
+    expect(filas).toEqual([
+      {
+        staffId,
+        data: { terminalName: 'Caja', antes: [{ id: menuComida, name: 'Comida' }], despues: [], source: 'customer-mcp' },
+      },
+    ])
+
+    // Guardar otra vez lo mismo no deja ninguna fila nueva.
+    const segundo = await confirmar()
+    expect(segundo.resultado).toMatchObject({ ok: true })
+    await new Promise(r => setTimeout(r, 1000))
+    expect(await filasDelMcp()).toHaveLength(1)
+  } finally {
+    await mcp.close()
+  }
 })
 
 it('la importación en modo replace deja a los aparatos en Todos', async () => {

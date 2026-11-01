@@ -9,6 +9,7 @@ import {
   POS_TERMINAL_TYPES,
   listDeviceMenuOptions,
   listDeviceMenus,
+  listVenueMenuUsage,
   setTerminalMenus,
 } from '@/services/devices/deviceMenus.service'
 import { MENU_SIN_USO_MESSAGE, updateMenu } from '@/services/dashboard/menu.dashboard.service'
@@ -17,7 +18,7 @@ import type { McpScope } from '../scope'
 import { ScopeError, createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
-import { auditMcpWrite } from '../audit'
+import { auditMcpWrite, mcpProvenance } from '../audit'
 
 /* Free mode only (`/mcp`): none of these is in the certified directory catalog. */
 
@@ -41,22 +42,30 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_device_menus',
-    'Which menus each point-of-sale device of a venue shows ("Qué muestra cada aparato"): per device the chosen menus (none chosen = all menus) and how many categories and products its sales grid shows, plus what "all menus" shows and the menus that can be chosen. Devices come 50 per page and the selectable menus 100 per page, each with its total so you can ask for the next page (page, menuPage); menuSearch filters the menus by name. Reading is open on every plan. Requires tpv:read.',
+    'Which menus each point-of-sale device of a venue shows ("Qué muestra cada aparato"): per device the chosen menus (none chosen = all menus), how many categories and products are in what the device\'s sales grid shows today (sees) and, when its app still needs an update to apply the choice, what it will show after updating the app (seesAfterUpdate; otherwise null), plus what "all menus" shows and the menus that can be chosen. It also lists every menu of the venue, on and off, with where each one is used (allMenus: on devices and/or on the online store), the ids to use with set_menu_usage. Devices come 50 per page, the selectable menus and allMenus 100 per page, each with its total so you can ask for the next page (page, menuPage, allMenusPage); menuSearch filters the selectable menus by name. Reading is open on every plan. Requires tpv:read.',
     {
       venueId: existingId().describe('Venue (must be in your scope)'),
       page: z.number().int().min(1).max(10_000).optional().describe('Device page, 50 per page (default 1)'),
       menuSearch: z.string().max(120).optional().describe('Filter the selectable menus by name'),
       menuPage: z.number().int().min(1).max(10_000).optional().describe('Selectable-menu page, 100 per page (default 1)'),
+      allMenusPage: z
+        .number()
+        .int()
+        .min(1)
+        .max(10_000)
+        .optional()
+        .describe('Page of every menu of the venue (allMenus), 100 per page (default 1)'),
     },
-    async ({ venueId, page, menuSearch, menuPage }) => {
+    async ({ venueId, page, menuSearch, menuPage, allMenusPage }) => {
       try {
         guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
         guard.requirePermission('tpv:read', venueId)
-        const [devices, options] = await Promise.all([
+        const [devices, options, allMenus] = await Promise.all([
           listDeviceMenus(venueId, page ?? 1, DEVICE_PAGE_SIZE),
           listDeviceMenuOptions(venueId, { search: menuSearch, page: menuPage ?? 1, pageSize: MENU_PAGE_SIZE }),
+          listVenueMenuUsage(venueId, allMenusPage ?? 1),
         ])
-        return text({ ok: true, ...devices, menuOptions: options })
+        return text({ ok: true, ...devices, menuOptions: options, allMenus })
       } catch (err) {
         return operatorError(err)
       }
@@ -84,7 +93,16 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
         const idsMenus = [...new Set(menuIds)]
         const aparatos = await prisma.terminal.findMany({
           where: { id: { in: idsAparatos }, venueId, type: { in: POS_TERMINAL_TYPES } },
-          select: { id: true, name: true, menus: { select: { menu: { select: { name: true } } }, take: 50 } },
+          select: {
+            id: true,
+            name: true,
+            // Como la regla: una fila hacia un menú de otro negocio (el aparato cambió de sucursal), apagado o sólo en línea no cuenta.
+            menus: {
+              where: { menu: { venueId, active: true, appliesToDevices: true } },
+              select: { menu: { select: { name: true } } },
+              take: 50,
+            },
+          },
           orderBy: [{ name: 'asc' }, { id: 'asc' }],
           take: 20,
         })
@@ -111,7 +129,7 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
             ok: false,
             requiresConfirmation: true,
             expectedSourceFingerprint: fingerprint,
-            preview: aparatos.map(a => ({ device: a.name, current: lista(a.menus.map(m => m.menu.name)), new: nuevo })),
+            preview: aparatos.map(a => ({ id: a.id, device: a.name, current: lista(a.menus.map(m => m.menu.name)), new: nuevo })),
             message: `Esto cambiará lo que muestran ${aparatos.length} aparato(s): quedarán con «${nuevo}». Confirma con el operador; luego vuelve a llamar con confirm:true.`,
           })
         }
@@ -122,10 +140,12 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
             question: 'Los aparatos o menús elegidos cambiaron desde la vista previa. Pide la vista previa otra vez y confirma.',
           })
 
+        // Sin `auditMcpWrite`: el servicio deja UNA fila por aparato (sólo si cambió), con la procedencia del MCP.
+        const procedencia = await mcpProvenance(scope)
         const saved: Array<{ id: string; name: string }> = []
         for (const [i, a] of aparatos.entries()) {
           try {
-            await setTerminalMenus(venueId, a.id, idsMenus, scope.staffId)
+            await setTerminalMenus(venueId, a.id, idsMenus, scope.staffId, procedencia)
           } catch (err) {
             // Parcial: cada aparato va en su propia transacción. Se dice qué quedó, qué falló y qué falta (reintentar es idempotente).
             const known = err instanceof ScopeError || (err instanceof AppError && err.isOperational)
@@ -143,13 +163,6 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
             })
           }
           saved.push({ id: a.id, name: a.name })
-          await auditMcpWrite(scope, {
-            action: 'TERMINAL_MENUS_UPDATED',
-            entity: 'Terminal',
-            entityId: a.id,
-            venueId,
-            data: { terminalName: a.name, antes: a.menus.map(m => m.menu.name), despues: menus.map(m => m.name) },
-          })
         }
         return text({
           ok: true,
@@ -167,7 +180,7 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
     'Choose where a menu is used ("¿Dónde se usa?"): on devices (point-of-sale apps), on the online store, or both; at least one must stay on (to not use a menu anywhere, turn the menu off instead). Pass only the boxes to change. By DEFAULT it only PREVIEWS (current → new): show it to the user and, after their OK, call again with confirm:true and the confirmation arguments the preview returns. This WRITES — requires menu:update; available on every plan.',
     {
       venueId: existingId().describe('Venue (must be in your scope)'),
-      menuId: existingId().describe('Menu to change (id from list_menu or list_device_menus)'),
+      menuId: existingId().describe('Menu to change (id from allMenus in list_device_menus, which lists every menu, on and off)'),
       appliesToDevices: z.boolean().optional().describe('true = shown on devices (Aparatos)'),
       appliesToOnline: z.boolean().optional().describe('true = sold on the online store (Tienda en línea)'),
       expectedSourceFingerprint: z.string().max(128).optional().describe('Exact fingerprint returned by the preview'),

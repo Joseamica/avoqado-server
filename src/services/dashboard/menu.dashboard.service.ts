@@ -663,13 +663,20 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
 
   // «¿Dónde se usa?»: lo que llega se combina con lo guardado y sólo se rechaza el par resultante. Si el PATCH no menciona las
   // casillas (p. ej. `{ active: false }`) ni se revisan ni se tocan.
-  let cambioUnaCasilla = false
+  // Si cambió una casilla, la bitácora guarda las dos antes y después: «Tienda en línea» cambia lo que vende la tienda.
+  let cambioDeUso: Record<'antes' | 'despues', { appliesToDevices: boolean; appliesToOnline: boolean }> | null = null
   if (data.appliesToDevices !== undefined || data.appliesToOnline !== undefined) {
     const appliesToDevices = data.appliesToDevices ?? menu.appliesToDevices
     const appliesToOnline = data.appliesToOnline ?? menu.appliesToOnline
     assertMenuConUso(appliesToDevices, appliesToOnline)
-    cambioUnaCasilla = appliesToDevices !== menu.appliesToDevices || appliesToOnline !== menu.appliesToOnline
+    if (appliesToDevices !== menu.appliesToDevices || appliesToOnline !== menu.appliesToOnline) {
+      cambioDeUso = {
+        antes: { appliesToDevices: menu.appliesToDevices, appliesToOnline: menu.appliesToOnline },
+        despues: { appliesToDevices, appliesToOnline },
+      }
+    }
   }
+  const cambioUnaCasilla = cambioDeUso !== null
 
   const updateData: Prisma.MenuUpdateInput = {}
 
@@ -739,7 +746,13 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
     // vuelo podría volver a guardar la carta vieja).
     if (cambioUnaCasilla) clearPublicMenuCache(venueId)
 
-    logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name } })
+    logAction({
+      venueId,
+      action: 'MENU_UPDATED',
+      entity: 'Menu',
+      entityId: updatedMenu.id,
+      data: { name: updatedMenu.name, ...cambioDeUso },
+    })
 
     return updatedMenu
   }
@@ -764,7 +777,7 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
   // Misma regla que arriba: sólo si cambió una casilla, y ya escrito el cambio.
   if (cambioUnaCasilla) clearPublicMenuCache(venueId)
 
-  logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name } })
+  logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name, ...cambioDeUso } })
 
   return updatedMenu
 }

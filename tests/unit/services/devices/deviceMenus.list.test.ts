@@ -1,7 +1,14 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { listDeviceMenus, listDeviceMenuOptions, setTerminalMenus, POS_TERMINAL_TYPES } from '@/services/devices/deviceMenus.service'
+import {
+  listDeviceMenus,
+  listDeviceMenuOptions,
+  listVenueMenuUsage,
+  setTerminalMenus,
+  POS_TERMINAL_TYPES,
+} from '@/services/devices/deviceMenus.service'
+import { DEVICE_MENUS_MIN_APP_VERSION } from '@/services/devices/deviceMenusAppVersion'
 
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
 const tieneProMock = venueHasFeatureAccess as jest.Mock
@@ -48,6 +55,11 @@ function catalogo(opts: { aparatos: any[]; total?: number; asignaciones?: Array<
 
 const TODOS = { categories: 3, products: 6 }
 
+/** Hoy ninguna app aplica el menú del aparato (versión mínima null); aquí se finge que ANDROID 2.25.20 ya lo aplica. */
+const versionesOriginales = { ...DEVICE_MENUS_MIN_APP_VERSION }
+const androidYaLoAplica = () => (DEVICE_MENUS_MIN_APP_VERSION.POS_ANDROID = '2.25.20')
+afterEach(() => Object.assign(DEVICE_MENUS_MIN_APP_VERSION, versionesOriginales))
+
 describe('listDeviceMenus', () => {
   beforeEach(() => tieneProMock.mockReset().mockResolvedValue(true))
 
@@ -59,11 +71,12 @@ describe('listDeviceMenus', () => {
         ['mB', 'c3'],
       ],
     })
+    androidYaLoAplica()
     const r = await listDeviceMenus(V, 1, 50)
     expect(r.everything).toEqual(TODOS)
-    expect(r.terminals[0]).toMatchObject({ id: 't1', menus: [], sees: TODOS })
+    expect(r.terminals[0]).toMatchObject({ id: 't1', menus: [], sees: TODOS, seesAfterUpdate: null })
     // c2 (2) + su hija c2a (1); c3 no tiene productos y no cuenta como categoría que se ve
-    expect(r.terminals[1]).toMatchObject({ id: 't2', sees: { categories: 2, products: 3 } })
+    expect(r.terminals[1]).toMatchObject({ id: 't2', needsAppUpdate: false, sees: { categories: 2, products: 3 }, seesAfterUpdate: null })
     // una sola lectura de conteos para toda la página, sin consultas por aparato
     expect(prismaMock.product.groupBy).toHaveBeenCalledTimes(1)
     expect(prismaMock.product.groupBy).toHaveBeenCalledWith({
@@ -75,10 +88,45 @@ describe('listDeviceMenus', () => {
     expect(prismaMock.menuCategory.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: V, active: true } }))
   })
 
+  it('seesEsLoQueMuestraHoy: con la app vieja ve todo, y lo filtrado va en seesAfterUpdate (Ruling 11)', async () => {
+    catalogo({ aparatos: [aparato('t1', [['mB', 'Bebidas']])], asignaciones: [['mB', 'c2']] })
+    const r = await listDeviceMenus(V, 1, 50)
+    expect(r.terminals[0]).toMatchObject({
+      needsAppUpdate: true,
+      menus: [{ id: 'mB', name: 'Bebidas' }],
+      sees: TODOS,
+      seesAfterUpdate: { categories: 2, products: 3 },
+    })
+  })
+
+  it('con la app vieja y sin elección, seesAfterUpdate es null', async () => {
+    catalogo({ aparatos: [aparato('t1')] })
+    const r = await listDeviceMenus(V, 1, 50)
+    expect(r.terminals[0]).toMatchObject({ needsAppUpdate: true, sees: TODOS, seesAfterUpdate: null })
+  })
+
+  it('dos aparatos con menús distintos en la misma página: cada uno cuenta sólo los suyos', async () => {
+    androidYaLoAplica()
+    catalogo({
+      aparatos: [aparato('t1', [['mA', 'Comida']]), aparato('t2', [['mB', 'Bebidas']])],
+      asignaciones: [
+        ['mA', 'c1'],
+        ['mB', 'c2'],
+      ],
+    })
+    const r = await listDeviceMenus(V, 1, 50)
+    expect(r.terminals[0]).toMatchObject({ id: 't1', menus: [{ id: 'mA', name: 'Comida' }], sees: { categories: 1, products: 3 } })
+    expect(r.terminals[1]).toMatchObject({ id: 't2', menus: [{ id: 'mB', name: 'Bebidas' }], sees: { categories: 2, products: 3 } })
+    // Las asignaciones de los dos menús se leen juntas, una sola vez.
+    expect(prismaMock.menuCategoryAssignment.findMany).toHaveBeenCalledTimes(1)
+  })
+
   it('listarCuentaComoTodoSiSuSeleccionNoTieneProductos: el aparato muestra todo', async () => {
+    androidYaLoAplica()
     catalogo({ aparatos: [aparato('t1', [['mV', 'Vacío']])], asignaciones: [['mV', 'c3']] })
     const r = await listDeviceMenus(V, 1, 50)
     expect(r.terminals[0].sees).toEqual(TODOS)
+    expect(r.terminals[0].seesAfterUpdate).toBeNull()
     expect(r.terminals[0].menus).toEqual([{ id: 'mV', name: 'Vacío' }]) // la elección sigue a la vista
   })
 
@@ -95,6 +143,7 @@ describe('listDeviceMenus', () => {
         ['mZ', 'cX'],
       ],
     })
+    androidYaLoAplica()
     const r = await listDeviceMenus(V, 1, 50)
     expect(r.terminals[0].sees).toEqual({ categories: 1, products: 3 })
   })
@@ -125,7 +174,7 @@ describe('listDeviceMenus', () => {
     tieneProMock.mockResolvedValue(false)
     catalogo({ aparatos: [aparato('t1', [['mB', 'Bebidas']])], asignaciones: [['mB', 'c2']] })
     const r = await listDeviceMenus(V, 1, 50)
-    expect(r.terminals[0]).toMatchObject({ menus: [{ id: 'mB', name: 'Bebidas' }], sees: TODOS })
+    expect(r.terminals[0]).toMatchObject({ menus: [{ id: 'mB', name: 'Bebidas' }], sees: TODOS, seesAfterUpdate: null })
     expect(tieneProMock).toHaveBeenCalledWith(V, 'DEVICE_MENUS')
   })
 
@@ -168,6 +217,7 @@ describe('listDeviceMenus', () => {
       needsAppUpdate: true, // ninguna app lo aplica todavía (versión mínima null)
       menus: [],
       sees: TODOS,
+      seesAfterUpdate: null,
     })
   })
 })
@@ -242,7 +292,19 @@ describe('setTerminalMenus', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     expect(prismaMock.$executeRaw).toHaveBeenCalledTimes(1) // el candado del aparato
     expect(prismaMock.terminalMenu.createMany).toHaveBeenCalledWith({ data: [{ terminalId: T, menuId: 'mB' }] })
-    expect(fila).toMatchObject({ id: T, menus: [{ id: 'mB', name: 'Bebidas' }], sees: { categories: 2, products: 3 } })
+    // La fila del PUT sigue la misma regla que la lista: con la app vieja ve todo hoy.
+    expect(fila).toMatchObject({
+      id: T,
+      menus: [{ id: 'mB', name: 'Bebidas' }],
+      sees: TODOS,
+      seesAfterUpdate: { categories: 2, products: 3 },
+    })
+  })
+
+  it('si el aparato se borra antes de releerlo: 404 TERMINAL_NOT_FOUND, nunca una respuesta vacía', async () => {
+    prismaMock.menu.findMany.mockResolvedValue([{ id: 'mB', name: 'Bebidas' }])
+    prismaMock.terminal.findMany.mockResolvedValue([])
+    await expect(setTerminalMenus(V, T, ['mB'], STAFF)).rejects.toMatchObject({ statusCode: 404, code: 'TERMINAL_NOT_FOUND' })
   })
 
   it.each([['guardarRechazaMenuDeOtroNegocio'], ['guardarRechazaMenuApagado'], ['guardarRechazaMenuSoloEnLinea']])(
@@ -291,9 +353,53 @@ describe('setTerminalMenus', () => {
     })
   })
 
+  it('con la procedencia del MCP deja UNA fila con esa procedencia', async () => {
+    prismaMock.menu.findMany.mockResolvedValue([{ id: 'mB', name: 'Bebidas' }])
+    await setTerminalMenus(V, T, ['mB'], STAFF, { source: 'customer-mcp', mcpClientId: 'app-1' })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
+    expect(logActionMock.mock.calls[0][0].data).toEqual({
+      terminalName: 'Caja 1',
+      antes: [{ id: 'mA', name: 'Comida' }],
+      despues: [{ id: 'mB', name: 'Bebidas' }],
+      source: 'customer-mcp',
+      mcpClientId: 'app-1',
+    })
+  })
+
   it('guardar lo mismo que ya tenía no deja registro', async () => {
     prismaMock.menu.findMany.mockResolvedValue([{ id: 'mA', name: 'Comida' }])
     await setTerminalMenus(V, T, ['mA'], STAFF)
     expect(logActionMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('listVenueMenuUsage (todos los menús del negocio y dónde se usa cada uno)', () => {
+  beforeEach(() => {
+    prismaMock.menu.findMany.mockResolvedValue([{ id: 'mW', name: 'Web', active: false, appliesToDevices: false, appliesToOnline: true }])
+    prismaMock.menu.count.mockResolvedValue(130)
+  })
+
+  it('lee todos los menús del negocio (encendidos y apagados), en el orden de Mesas y con su total', async () => {
+    const r = await listVenueMenuUsage(V, 1)
+    expect(prismaMock.menu.findMany).toHaveBeenCalledWith({
+      where: { venueId: V },
+      select: { id: true, name: true, active: true, appliesToDevices: true, appliesToOnline: true },
+      orderBy: ORDEN_DE_MESAS,
+      skip: 0,
+      take: 100,
+    })
+    expect(prismaMock.menu.count).toHaveBeenCalledWith({ where: { venueId: V } })
+    expect(r).toEqual({
+      menus: [{ id: 'mW', name: 'Web', active: false, appliesToDevices: false, appliesToOnline: true }],
+      total: 130,
+      page: 1,
+      pageSize: 100,
+    })
+  })
+
+  it('pagina de 100 en 100', async () => {
+    const r = await listVenueMenuUsage(V, 2)
+    expect(prismaMock.menu.findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 100, take: 100 }))
+    expect(r).toMatchObject({ page: 2, pageSize: 100, total: 130 })
   })
 })
