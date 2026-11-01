@@ -20,6 +20,7 @@ import { bloqueosVigentes, estadoDeCancelacionDeVenta } from '@/services/giftCar
 import {
   WHERE_COBRO_ES_SALDO_DE_REGALO,
   WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+  WHERE_DEVOLUCION_A_SALDO_A_FAVOR,
   WHERE_ORDEN_DE_TARJETAS,
   WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE,
 } from '@/services/giftCards/giftCardMarks'
@@ -628,9 +629,10 @@ describe('pendientes de revisión contable', () => {
     const args = prismaMock.payment.findMany.mock.calls[0][0]
     expect(args.where).toEqual({ ...dias, AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE] })
     expect(prismaMock.payment.count.mock.calls[0][0].where).toEqual(args.where)
+    // S8b: los totales «con saldo» también traen la devolución a saldo a favor (reverso de saldo).
     expect(prismaMock.payment.groupBy.mock.calls[0][0].where).toEqual({
       ...dias,
-      AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, WHERE_COBRO_ES_SALDO_DE_REGALO],
+      AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, WHERE_DEVOLUCION_A_SALDO_A_FAVOR] }],
     })
     expect(prismaMock.payment.groupBy.mock.calls[1][0].where).toEqual({
       ...dias,

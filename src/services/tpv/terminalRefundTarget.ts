@@ -153,6 +153,9 @@ export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean 
   if (payment.tenderSystemKind === TenderSystemKind.GIFT_CARD) return false
   // Cambio de producto (spec 2026-10-20 §6.7): lo pagado con crédito de cambio sale por el medio de su cobro RAÍZ, nunca por uno escogido.
   if (payment.tenderSystemKind === TenderSystemKind.EXCHANGE_CREDIT) return false
+  // Saldo a favor (spec 2026-10-30; S8b): lo que es de saldo a favor sólo regresa a saldo a favor, nunca efectivo, transferencia ni tarjeta.
+  // Ese medio sólo vive en la fila de una devolución a saldo: sin esto, el detalle la ofrecía para «Devolver con».
+  if (payment.tenderSystemKind === TenderSystemKind.STORE_CREDIT) return false
   if (CARD_METHODS.has(payment.method) || METODOS_DE_PROCESADOR.has(payment.method)) return false
   if (payment.tenderSatFormaPago && FORMAS_SAT_DE_TARJETA.has(payment.tenderSatFormaPago)) return false
   if (/^tarjeta/i.test(payment.externalSource ?? '')) return false

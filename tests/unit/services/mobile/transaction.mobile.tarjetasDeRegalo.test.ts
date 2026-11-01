@@ -53,6 +53,22 @@ describe('getTransactionDetail · tarjeta de regalo', () => {
     expect(detalle).toMatchObject({ canChooseRefundMethod: true, refundToGiftCardBalance: false })
   })
 
+  it('🔴 la devolución a saldo a favor no ofrece «Devolver con» (S8b; lo de saldo a favor sólo regresa a saldo a favor)', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(
+      cobro({
+        id: 'ref_saldo',
+        type: 'REFUND',
+        amount: -200,
+        tenderTypeId: 'tender-sc',
+        tenderLabel: 'Saldo a favor',
+        tenderSatFormaPago: '17',
+        tenderType: { systemKind: 'STORE_CREDIT' },
+      }),
+    )
+    const detalle = await getTransactionDetail('venue_1', 'ref_saldo')
+    expect(detalle).toMatchObject({ canChooseRefundMethod: false, refundToGiftCardBalance: false })
+  })
+
   it('el select pide la marca del tender', async () => {
     prismaMock.payment.findFirst.mockResolvedValue(cobro())
     await getTransactionDetail('venue_1', 'pay_gc')

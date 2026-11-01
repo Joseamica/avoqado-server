@@ -556,7 +556,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
-          error: 'Lo pagado con tarjeta de regalo sólo regresa al saldo de la tarjeta; quita refundMethod para devolverlo al saldo.',
+          error:
+            'Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo; quita refundMethod para devolverlo ahí.',
         })
       }
       // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).
@@ -609,7 +610,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
                 ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
                 : '') +
               ' Vuelve a llamar con confirm:true para ejecutar.' +
-              (esSaldoDeRegalo ? ' Regresa al saldo de la tarjeta de regalo del cliente.' : ''),
+              (esSaldoDeRegalo ? ' Regresa al saldo de donde se pagó (tarjeta de regalo o saldo a favor del cliente).' : ''),
           })
         }
 

@@ -112,12 +112,15 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
     const rechazo = parse(await call({ ...base, refundMethod: 'CASH', confirm: true }))
     expect(rechazo).toMatchObject({ ok: false, code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    // S8b: el medio de tarjetas también lo usa el gasto de un saldo a favor; el texto nombra los dos (regresa a ESE saldo).
+    expect(rechazo.error).toMatch(/saldo a favor/)
     expect(mockIssue).not.toHaveBeenCalled()
 
     mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
     const vista = parse(await call(base))
     expect(vista.requiresConfirmation).toBe(true)
     expect(vista.preview.regresaAlSaldoDeRegalo).toBe(true)
+    expect(vista.message).toMatch(/saldo a favor/)
     expect(mockPaymentFindFirst.mock.calls[1][0].select.tenderType).toEqual({ select: { systemKind: true } })
   })
 

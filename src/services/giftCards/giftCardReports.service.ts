@@ -27,6 +27,7 @@ import { getVenueTimezone } from '@/services/dashboard/commission/commission-uti
 import { clampPage } from '@/services/dashboard/listSummary.shared'
 import { csvField } from '@/services/dashboard/export.helpers'
 import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal/autoPosting.service'
+import { esDevolucionASaldoAFavor } from '@/services/fiscal/fiscalScope'
 import { SIN_VENTA, bloqueosVigentes, estadoDeCancelacionDeVenta, type CancelacionDeVenta } from './giftCardCancel.service'
 import { enmascararDestino, textoDeFalloDeEntrega } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
@@ -35,6 +36,7 @@ import { isGiftCardTenderKind } from './giftCardTender'
 import {
   WHERE_COBRO_ES_SALDO_DE_REGALO,
   WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+  WHERE_DEVOLUCION_A_SALDO_A_FAVOR,
   WHERE_ORDEN_DE_TARJETAS,
   WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE,
 } from './giftCardMarks'
@@ -686,6 +688,9 @@ const PENDIENTE_SELECT = Prisma.validator<Prisma.PaymentSelect>()({
 })
 
 function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string | null } | null }): PendingAccountingKind {
+  // Saldo a favor (S8b): la devolución abonada al sobre de la clienta regresa la venta a un SALDO, igual que el reverso de un canje (la
+  // misma póliza: devolución contra el saldo que se le debe). No es la cancelación de una venta de tarjetas.
+  if (esDevolucionASaldoAFavor(p)) return 'REVERSO_DE_SALDO'
   const conSaldo = isGiftCardTenderKind(p.tenderType?.systemKind)
   const devolucion = p.type === 'REFUND'
   if (conSaldo) return devolucion ? 'REVERSO_DE_SALDO' : 'COBRO_CON_SALDO'
@@ -694,7 +699,7 @@ function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string
 
 /** B4: el canje no lleva póliza de ingreso, pero el costo de su mercancía sí entra a la póliza de costo de ventas (`generateCogsPolicyForVenue`). */
 export const AVISO_PENDIENTES_CONTABLES =
-  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente.'
+  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente. En una devolución a saldo a favor falta la devolución de la venta y el saldo que se le debe a la clienta.'
 
 /**
  * Los pagos que la contabilidad automática NO postea en la fase 1 (B4): la venta de tarjetas (y su cancelación) y el cobro
@@ -717,7 +722,8 @@ export async function listPendingAccountingReview(venueId: string, q: ListPendin
     AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, ...marcas],
   })
   const where = delPeriodo(WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE)
-  const conSaldo = delPeriodo(WHERE_COBRO_ES_SALDO_DE_REGALO)
+  // S8b: los totales «con saldo» también traen la devolución a saldo a favor (su clase es REVERSO_DE_SALDO, como en `claseDe`).
+  const conSaldo = delPeriodo({ OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, WHERE_DEVOLUCION_A_SALDO_A_FAVOR] })
   const ventaDeTarjetas = delPeriodo({ order: WHERE_ORDEN_DE_TARJETAS }, WHERE_COBRO_NO_ES_SALDO_DE_REGALO)
   const [total, filas, gruposSaldo, gruposVenta] = await Promise.all([
     prisma.payment.count({ where }),

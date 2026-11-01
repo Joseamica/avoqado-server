@@ -69,8 +69,9 @@ export interface GenerateResult {
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
   /**
-   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta y lo pagado con saldo—, porque su
-   * póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta, lo pagado con saldo y la devolución a
+   * saldo a favor—, porque su póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con
+   * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
    */
   pendientesDeRevision: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
@@ -205,7 +206,8 @@ export const WHERE_PAGO_CONTABILIZABLE = {
 } satisfies Prisma.PaymentWhereInput
 
 /**
- * ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+ * ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo) o una devolución a saldo a favor? Mismo criterio que
+ * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE` (la lista del contador; S8b la alineó).
  * Saldo a favor (spec 2026-10-30 §5.3): la devolución a saldo también, porque `buildRefundLines` la llevaría contra el banco
  * (BANK_RECEIPT) y el dinero nunca salió de ahí; su póliza (pasivo del sobre) es la fase 2 de la contabilidad de tarjetas.
  */

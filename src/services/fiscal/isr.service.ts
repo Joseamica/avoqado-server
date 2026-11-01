@@ -131,6 +131,7 @@ export interface IsrProvisionalResult {
    * Tarjetas de regalo (B4 r1, fase 1; dictamen §3): el ISR se causa al COBRAR, pero la base (el estado de resultados) deja fuera la venta
    * de tarjetas e incluye lo pagado con saldo. La base NO se recalcula: estos importes sin IVA, sobre el mismo tramo que la base (el mes en
    * RESICO, el ejercicio hasta el mes en GENERAL) y netos de devoluciones, dicen la diferencia para que el contador la ajuste. 0 sin tarjetas.
+   * Lo pagado con un sobre de SALDO A FAVOR no entra (spec 2026-10-30 §5.3, S8b): es venta normal y la base ya está bien.
    */
   tarjetasCobradasNoIncluidasCents: number
   pagadoConSaldoIncluidoCents: number

@@ -12,6 +12,7 @@ import {
   sqlOrdenSinTarjetasTexto,
   WHERE_COBRO_ES_SALDO_DE_REGALO,
   WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+  WHERE_DEVOLUCION_A_SALDO_A_FAVOR,
   WHERE_ORDEN_DE_TARJETAS,
   WHERE_ORDEN_SIN_TARJETAS,
   WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE,
@@ -61,9 +62,11 @@ describe('marcas para consultas de Prisma', () => {
     })
   })
 
-  it('pendiente de revisión contable = cobro con saldo O cualquier cobro de una cuenta de tarjetas', () => {
+  it('pendiente de revisión contable = cobro con saldo O devolución a saldo a favor O cualquier cobro de una cuenta de tarjetas', () => {
+    // S8b: la devolución a saldo a favor también (el autoposteo ya la saltaba, S3): la misma regla que `esPendienteDeRevisionContable`.
+    expect(WHERE_DEVOLUCION_A_SALDO_A_FAVOR).toEqual({ type: 'REFUND', tenderType: { is: { systemKind: 'STORE_CREDIT' } } })
     expect(WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE).toEqual({
-      OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_DE_TARJETAS }],
+      OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, WHERE_DEVOLUCION_A_SALDO_A_FAVOR, { order: WHERE_ORDEN_DE_TARJETAS }],
     })
   })
 })
