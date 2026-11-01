@@ -5448,22 +5448,38 @@ router.put(
 
 // ---------------------------------------------------------------------------
 // TPV Shop — TerminalOrder endpoints (Plan 1 · Tasks 9 + 10)
+// 🔴 checkPermission valida que :venueId sea tuyo (D1, 31-oct): sin él, cualquier staff de cualquier
+// negocio leía y creaba pedidos ajenos. Mismos permisos que el dashboard: la pantalla de Aparatos pide
+// `tpv:read` y el botón de comprar `tpv:create`; subir el comprobante es parte de comprar.
 // ---------------------------------------------------------------------------
 router.post(
   '/venues/:venueId/tpv-orders',
   authenticateTokenMiddleware,
+  checkPermission('tpv:create'),
   validateRequest(createTerminalOrderSchema),
   terminalOrderController.createOrderHandler,
 )
-router.get('/venues/:venueId/tpv-orders', authenticateTokenMiddleware, terminalOrderController.listOrdersHandler)
-router.get('/venues/:venueId/tpv-orders/:id', authenticateTokenMiddleware, terminalOrderController.getOrderHandler)
+router.get(
+  '/venues/:venueId/tpv-orders',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  terminalOrderController.listOrdersHandler,
+)
+router.get(
+  '/venues/:venueId/tpv-orders/:id',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  terminalOrderController.getOrderHandler,
+)
 
 // SPEI proof upload (Plan 2 · Task 8) — multipart, field name `proof`.
 // Reuses the existing `documentUpload` multer instance (memoryStorage, 10MB,
-// PDF/JPG/PNG) defined above.
+// PDF/JPG/PNG) defined above. The permission runs BEFORE multer so a stranger
+// never gets a 10MB body buffered.
 router.post(
   '/venues/:venueId/tpv-orders/:id/upload-proof',
   authenticateTokenMiddleware,
+  checkPermission('tpv:create'),
   preserveContext(documentUpload.single('proof')),
   terminalOrderController.uploadProofHandler,
 )

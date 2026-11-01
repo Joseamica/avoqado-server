@@ -42,6 +42,8 @@ export interface AssignSerialsInput {
 
 export interface UploadSpeiProofInput {
   orderId: string
+  /** Venue of the route: an order of another venue is "not found" (D1). */
+  venueId: string
   file: {
     buffer: Buffer
     mimetype: string
