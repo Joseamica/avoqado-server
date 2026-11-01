@@ -23,6 +23,7 @@ import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashbo
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
 import { getAvailableBalance, getSettlementTimeline } from '@/services/dashboard/availableBalance.dashboard.service'
+import { getEarningsSummary, getEarningsTimeSeries } from '@/services/superadmin/earnings.service'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -421,6 +422,28 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       },
     })
     expect(await comisiones()).toEqual(mas(antes, 2.9))
+  })
+
+  it('D1: «Ganancias» del SUPERADMIN ve la comisión del pedido con tarjeta y la resta cuando Stripe la devuelve', async () => {
+    const rango = { startDate: new Date(Date.now() - 86_400_000), endDate: new Date(Date.now() + 86_400_000) }
+    const ganancias = async (ecommerceMerchantId?: string) => {
+      const r = await getEarningsSummary(rango, { venueId: venueId! })
+      const serie = await getEarningsTimeSeries(rango, 'daily', { venueId: venueId! })
+      return {
+        total: r.totals.onlineFees,
+        negocio: r.byVenue.find(v => v.venueId === venueId)?.onlineFees ?? 0,
+        canal: r.byChannel.filter(c => c.ecommerceMerchantId === ecommerceMerchantId).reduce((t, c) => t + c.fees, 0),
+        serie: Number(serie.reduce((t, p) => t + p.onlineFees, 0).toFixed(2)),
+      }
+    }
+    // Todos los cargos de esta prueba usan el mismo comercio en línea; se lee del primer pedido antes de medir.
+    const ecommerceMerchantId = (await prisma.ecommerceMerchant.findFirstOrThrow({ where: { venueId: venueId! } })).id
+    const antes = await ganancias(ecommerceMerchantId)
+    const { orderId, charge } = await capturedOrder()
+    expect(charge.ecommerceMerchantId).toBe(ecommerceMerchantId)
+    expect(await ganancias(ecommerceMerchantId)).toEqual(mas(antes, 2.9))
+    await pedir(orderId)
+    expect(await ganancias(ecommerceMerchantId)).toEqual(antes)
   })
 
   it('parcial dos veces hasta el total: Σ feeAmount de los REFUND = −comisión del cobro; la tercera → 400 sin Stripe', async () => {
