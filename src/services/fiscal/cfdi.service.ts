@@ -2089,6 +2089,9 @@ const METODOS_SIN_COMERCIO = new Set<string>(['CASH', 'BANK_TRANSFER', 'CREDIT_C
 export const MOTIVO_TARJETA_DE_REGALO =
   'Esta venta es de tarjetas de regalo: no se factura al venderla. Se factura cuando el cliente usa el saldo para pagar su compra.'
 
+/** Codex r4 H3 (pedidos en línea): una cuenta cancelada no es venta, aunque traiga un cobro que el negocio debe devolver. */
+export const MOTIVO_VENTA_CANCELADA = 'Esta venta está cancelada: no se factura. Si se cobró, primero se devuelve el dinero al cliente.'
+
 export interface LoadOrderForCfdiOpts {
   /**
    * `true` cuando la factura la emite el PERSONAL a propósito (Pedidos → Facturar, o una sustitución).
@@ -2126,6 +2129,7 @@ export async function loadOrderForCfdiFromDb(
       // Candados de la rama mixta (plan 3): cómo se cobró el precio y si la venta está liquidada.
       contratoDePrecio: true,
       paymentStatus: true,
+      status: true,
       // B3a: las filas de descuento con su reparto (una página y una de más; ver filasDeDescuentoCompletas).
       orderDiscounts: DESCUENTOS_PARA_CONCEPTOS,
       venue: {
@@ -2410,6 +2414,10 @@ export async function loadOrderForCfdiFromDb(
   // B3 r1 (fix 3): `some` (falla cerrada): una cuenta mezclada (A5 no la deja nacer) tampoco se factura.
   if (order.items.some(it => !!it.giftCardId)) {
     unsupportedReasons.splice(0, unsupportedReasons.length, MOTIVO_TARJETA_DE_REGALO)
+  }
+  // Codex r4 H3: la cuenta cancelada (o borrada) tampoco, con su motivo propio para el ticket, el portal y el panel.
+  if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+    unsupportedReasons.splice(0, unsupportedReasons.length, MOTIVO_VENTA_CANCELADA)
   }
 
   // El documento que se mandaría al PAC tiene que cuadrar con lo cobrado. Se declara AQUÍ (y no sólo en

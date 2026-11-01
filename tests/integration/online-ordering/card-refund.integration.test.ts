@@ -150,6 +150,25 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
   const refundsOf = (orderId: string) =>
     prisma.payment.findMany({ where: { orderId, type: 'REFUND' }, include: { transaction: true }, orderBy: { createdAt: 'asc' }, take: 10 })
 
+  /**
+   * Codex r4 H1: la comisión que publican el reporte de ventas (cabecera, barras y desglose por tarjeta) y el saldo disponible. El cobro
+   * de Stripe no tiene `TransactionCost`: su comisión vive en el `Payment` (`feeAmount`), y publicarla como $0 mentía.
+   */
+  const comisiones = async () => {
+    const rango = { startDate: new Date(Date.now() - 86_400_000).toISOString(), endDate: new Date(Date.now() + 86_400_000).toISOString() }
+    const resumen = (await getSalesSummary(venueId!, { ...rango, reportType: 'summary' })).summary
+    const porDia = (await getSalesSummary(venueId!, { ...rango, reportType: 'days' })).byPeriod ?? []
+    const porMetodo = await getSalesSummary(venueId!, { ...rango, reportType: 'summary', groupBy: 'paymentMethod' })
+    return {
+      cabecera: Number(resumen.platformFees.toFixed(2)),
+      barras: Number(porDia.reduce((t, p) => t + Number(p.metrics?.platformFees ?? 0), 0).toFixed(2)),
+      desglose: Number((porMetodo.byPaymentMethodDetailed ?? []).reduce((t, b) => t + b.platformFees, 0).toFixed(2)),
+      saldo: Number((await getAvailableBalance(venueId!)).totalFees.toFixed(2)),
+    }
+  }
+  const mas = (a: Record<string, number>, d: number) =>
+    Object.fromEntries(Object.entries(a).map(([k, v]) => [k, Number((v + d).toFixed(2))]))
+
   beforeAll(async () => {
     orgId = (
       await prisma.organization.create({
@@ -296,7 +315,10 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
   })
 
   it('total: un renglón REFUND con la comisión devuelta, sin VenueTransaction (como su cobro), el saldo cuadra y la bitácora', async () => {
+    const comisionAntes = await comisiones()
     const { orderId, charge } = await capturedOrder()
+    // Codex r4 H1: la comisión de Avoqado ($2.90) se ve en el reporte, las barras, el desglose por tarjeta y el saldo.
+    expect(await comisiones()).toEqual(mas(comisionAntes, 2.9))
     const saldoAntes = await getAvailableBalance(venueId!)
     const r = await pedir(orderId)
     expect(r).toMatchObject({ status: 'RECORDED', replay: false })
@@ -319,6 +341,8 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     const saldoDespues = await getAvailableBalance(venueId!)
     expect(saldoDespues.availableNow).toBeCloseTo(saldoAntes.availableNow, 2)
     expect(saldoDespues.pendingSettlement).toBeCloseTo(saldoAntes.pendingSettlement - 250, 2)
+    // …y la que Stripe devolvió con el reembolso total la regresa a donde estaba.
+    expect(await comisiones()).toEqual(comisionAntes)
     expect(ledger.idempotencyKey).toBe(`oocr_${r.cardRefundId}`)
     const row = await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })
     expect(row).toMatchObject({ status: 'RECORDED', feeRefundedCents: 290, refundPaymentId: ledger.id })
@@ -565,6 +589,14 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     }
     const antes = await reporte()
     const saldoAntes = await getAvailableBalance(venueId!)
+    const filtrado = async () => ({
+      resumen: (await getSalesSummary(venueId!, { ...rango, reportType: 'summary', paymentMethod: 'CARD' })).summary.refunds,
+      porDia: ((await getSalesSummary(venueId!, { ...rango, reportType: 'days', paymentMethod: 'CARD' })).byPeriod ?? []).reduce(
+        (t, p) => t + Number(p.metrics?.refunds ?? 0),
+        0,
+      ),
+    })
+    const filtradoAntes = await filtrado()
 
     const r = await pedir(orderId)
     expect(r).toMatchObject({ status: 'RECORDED', replay: false })
@@ -577,6 +609,9 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(refundSpy).toHaveBeenCalledTimes(1)
     expect(refundSpy.mock.calls[0][1]).toMatchObject({ refundApplicationFee: false })
     expect(await reporte()).toEqual(antes)
+    // Codex r4 H5: la vista filtrada por «Tarjeta» es de movimientos: la devolución que sí salió se ve (el arreglo #1 sólo aplica a
+    // las ventas netas, que bajo filtro no se calculan).
+    expect(await filtrado()).toEqual(mas(filtradoAntes, 250))
     expect(await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })).toMatchObject({ feeRefundedCents: 0 })
   })
 

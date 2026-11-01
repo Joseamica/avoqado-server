@@ -30,6 +30,20 @@ export type ExtendedCardType = TransactionCardType | 'CASH'
  * - Project future balance based on historical patterns
  */
 
+/**
+ * La comisión de UN cobro: su costo (cargo + cuota fija) si lo tiene; si no, la que trae el propio `Payment` (Codex r4 H1: el cobro de
+ * Stripe de pedidos en línea y las ligas no tienen costo y su comisión de Avoqado vive en `feeAmount`; el de terminal sin costo trae 0).
+ * Misma regla que `SQL_COMISION_DEL_COBRO` del reporte de ventas. Las devoluciones la traen negativa.
+ */
+function comisionDelCobro(payment: {
+  feeAmount?: Prisma.Decimal | number | null
+  transactionCost: { venueChargeAmount: Prisma.Decimal | number; venueFixedFee: Prisma.Decimal | number | null } | null
+}): number {
+  return payment.transactionCost
+    ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee ?? 0)
+    : Number(payment.feeAmount ?? 0)
+}
+
 export interface AvailableBalanceSummary {
   totalSales: number
   totalFees: number
@@ -196,6 +210,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
         id: true,
         amount: true,
         tipAmount: true,
+        feeAmount: true,
         createdAt: true,
         merchantAccountId: true,
         ...TENDER_SEMANTICS_SELECT,
@@ -237,14 +252,13 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
 
     for (const payment of cardPayments) {
       const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
-      const fees = payment.transactionCost
-        ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
-        : 0
+      const fees = comisionDelCobro(payment)
       const netAmount = amount - fees
 
       if (!payment.transactionCost) {
         uncostedCount += 1
-        uncostedAmount += amount
+        // Codex r4 H1: neto de la comisión conocida (`feeAmount`), para que siga valiendo Σ byCardType + uncosted ≈ disponible + pendiente.
+        uncostedAmount += netAmount
       }
 
       totalSales += amount
@@ -587,6 +601,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
         id: true,
         amount: true,
         tipAmount: true,
+        feeAmount: true,
         createdAt: true,
         merchantAccountId: true,
         method: true,
@@ -626,9 +641,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
         payment.method === PaymentMethod.CASH ? 'CASH' : (payment.transactionCost?.transactionType ?? TransactionCardType.OTHER)
       const groupKey = `${dateKey}::${cardType}`
       const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
-      const fees = payment.transactionCost
-        ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
-        : 0
+      const fees = comisionDelCobro(payment)
       const netAmount = amount - fees
 
       if (!timelineMap.has(groupKey)) {

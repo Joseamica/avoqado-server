@@ -487,9 +487,11 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
 
     acc.inflowCents += toCents(g._sum.amount) // devoluciones ya vienen negativas
     acc.tipCents += toCents(g._sum.tipAmount) // propina con signo (las devoluciones traen propina negativa)
-    if (g.type === PaymentType.REFUND) continue // no suma conteo ni comisión
-    acc.count += g._count._all
+    // Codex r4 H2 (pedidos): la devolución trae la comisión devuelta en negativo (Stripe la regresa con el reembolso; el costo negativo
+    // de la terminal también la proyecta así): resta, como en las pólizas. Sin esto, «Bancos y cajas» seguía cobrando los $2.90.
     feesCents += toCents(g._sum.feeAmount)
+    if (g.type === PaymentType.REFUND) continue // no suma conteo
+    acc.count += g._count._all
   }
 
   const accounts = [...buckets.values()].sort((a, b) => b.inflowCents - a.inflowCents)

@@ -19,7 +19,8 @@ jest.mock('../../../../src/config/logger', () => ({
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
-import { MOTIVO_TARJETA_DE_REGALO, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
+import { MOTIVO_TARJETA_DE_REGALO, MOTIVO_VENTA_CANCELADA, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
+import { ventanaFiscal } from '../../../../src/services/fiscal/cfdiGlobal.service'
 import { mapFormaPago } from '../../../../src/services/fiscal/satCatalog'
 
 const D = (n: number) => new Prisma.Decimal(n)
@@ -261,5 +262,33 @@ describe('loadOrderForCfdiFromDb · tarjetas de regalo', () => {
     const select = orderMock.mock.calls[0][0].select
     expect(select.payments.select.tenderType).toEqual({ select: { systemKind: true } })
     expect(select.items.select.giftCardId).toBe(true)
+  })
+})
+
+describe('Codex r4 H3 (pedidos en línea): una venta cancelada no se factura', () => {
+  const cobroConTarjeta = [
+    { method: 'CREDIT_CARD', merchantAccountId: null, ecommerceMerchantId: 'em1', amount: D(116), type: 'REGULAR', tenderType: null },
+  ]
+  beforeEach(() => cfgMock.mockResolvedValue({ facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: emisor }))
+
+  it.each(['CANCELLED', 'DELETED'])(
+    '🔴 cuenta %s con un cobro de tarjeta que el negocio debe devolver → un único motivo, sin autofactura',
+    async status => {
+      orderMock.mockResolvedValue(cuenta({ status, paymentStatus: 'PAID', payments: cobroConTarjeta }))
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle?.unsupportedReasons).toEqual([MOTIVO_VENTA_CANCELADA])
+    },
+  )
+
+  it('regresión: la misma cuenta COMPLETED se factura como siempre', async () => {
+    orderMock.mockResolvedValue(cuenta({ status: 'COMPLETED', paymentStatus: 'PAID', payments: cobroConTarjeta }))
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle).not.toBeNull()
+    expect(bundle!.unsupportedReasons).toBeUndefined()
+  })
+
+  it('🔴 la factura global no admite cuentas canceladas ni borradas (como el ISR y el IVA, que ya las excluyen)', () => {
+    const w = ventanaFiscal('v1', { periodStart: new Date('2026-10-01T06:00:00Z'), periodEnd: new Date('2026-11-01T06:00:00Z') })
+    expect(w).toMatchObject({ venueId: 'v1', paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } })
   })
 })
