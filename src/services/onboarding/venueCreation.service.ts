@@ -30,6 +30,7 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { utmLegible } from './atribucionLegible'
+import { esCorreoDemo } from '@/services/demo/candadoDemo'
 import {
   assertLegacyCatalogGovernanceForVenue,
   resolveLegacyCatalogActor,
@@ -747,6 +748,12 @@ async function processTeamInvites(
       // Validate role
       if (!Object.values(StaffRole).includes(invite.role as StaffRole)) {
         logger.warn(`⚠️  Invalid role ${invite.role} for ${normalizedEmail}, skipping`)
+        continue
+      }
+
+      // hz:f26b3afc:D4: un usuario demo tiene contraseña pública; aquí la membresía nace antes de aceptar (Codex r1).
+      if (esCorreoDemo(normalizedEmail)) {
+        logger.warn(`⚠️  ${normalizedEmail} es un usuario de demostración, no se invita`)
         continue
       }
 
