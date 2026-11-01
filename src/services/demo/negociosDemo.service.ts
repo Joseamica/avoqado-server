@@ -1051,6 +1051,7 @@ async function seedHistory(
     const taxAmount = 0
     const total = +subtotal.toFixed(2)
 
+    const tipAmount = Math.random() < 0.25 ? Math.round(total * 0.1) : 0
     const hasCustomer = Math.random() < 0.7 && customers.length > 0
     const customer = hasCustomer ? customers[Math.floor(Math.random() * customers.length)] : null
 
@@ -1068,7 +1069,11 @@ async function seedHistory(
         paymentStatus: PaymentStatus.PAID,
         subtotal,
         taxAmount,
-        total,
+        // Como una venta real del TPV: total y pagado = productos + propina, y la propina también en la orden (si no, el
+        // vigilante de dinero suena y el detalle del panel no suma). El cobro conserva `amount` sin propina.
+        total: +(total + tipAmount).toFixed(2),
+        tipAmount,
+        paidAmount: +(total + tipAmount).toFixed(2),
         contratoDePrecio: 'IVA_INCLUIDO',
         createdById: staffId,
         servedById: staffId,
@@ -1099,7 +1104,6 @@ async function seedHistory(
     // Payment method mix: 55% card, 15% debit, 30% cash.
     const r = Math.random()
     const method = r < 0.55 ? PaymentMethod.CREDIT_CARD : r < 0.7 ? PaymentMethod.DEBIT_CARD : PaymentMethod.CASH
-    const tipAmount = Math.random() < 0.25 ? Math.round(total * 0.1) : 0
 
     // Card/debit payments route through the EcommerceMerchant channel (so the
     // order is CFDI-invoiceable: loadOrderForCfdi resolves the emisor via the

@@ -275,3 +275,61 @@ describe('el descuento de cuenta es su propia fila, con su reparto', () => {
     expect(db.descuentosDe(creada.id)).toEqual([])
   })
 })
+
+// Deuda del 30-oct (revisión de D13): en una mesa el tope del catálogo (`maxDiscountAmount`) sólo topaba los %. Un fijo o una
+// cortesía con tope descontaban de más. El tope vale para CUALQUIER tipo, como `calculateDiscountPesos` y el motor; el recálculo
+// conserva el importe de un fijo, así que basta topar al aplicarlo.
+describe('el tope del catálogo vale para cualquier tipo de descuento de cuenta en la mesa', () => {
+  const conDescuento = (d: Fila) => {
+    const db = baseEnMemoria()
+    prismaMock.discount.findFirst.mockImplementation(async ({ where }: any) =>
+      where.id === d.id && where.venueId === VENUE ? { venueId: VENUE, scope: 'ORDER', active: true, maxDiscountAmount: null, ...d } : null,
+    )
+    return db
+  }
+
+  it('🔴 fijo de $30 con tope de $10 sobre $100 → descuenta $10', async () => {
+    const db = conDescuento({ id: 'fijo-30-tope-10', name: '$30 tope 10', type: 'FIXED_AMOUNT', value: 30, maxDiscountAmount: 10 })
+    const creada = await createOrderWithItems(VENUE, venta())
+    const aplicado = await applyOrderDiscount(VENUE, creada.id, 'fijo-30-tope-10', 'staff-1')
+    expect(aplicado.amount).toBe(10)
+    expect(db.orden(creada.id).discountAmount).toBe(10)
+  })
+
+  it('🔴 tope de 0 → no descuenta nada', async () => {
+    const db = conDescuento({ id: 'fijo-tope-0', name: '$30 tope 0', type: 'FIXED_AMOUNT', value: 30, maxDiscountAmount: 0 })
+    const creada = await createOrderWithItems(VENUE, venta())
+    const aplicado = await applyOrderDiscount(VENUE, creada.id, 'fijo-tope-0', 'staff-1')
+    expect(aplicado.amount).toBe(0)
+    expect(db.orden(creada.id).discountAmount).toBe(0)
+  })
+
+  it('fijo sin tope descuenta su valor (regresión)', async () => {
+    conDescuento({ id: 'fijo-30', name: '$30', type: 'FIXED_AMOUNT', value: 30 })
+    const creada = await createOrderWithItems(VENUE, venta())
+    expect((await applyOrderDiscount(VENUE, creada.id, 'fijo-30', 'staff-1')).amount).toBe(30)
+  })
+
+  it('fijo con tope mayor que su valor descuenta su valor (regresión)', async () => {
+    conDescuento({ id: 'fijo-30-tope-50', name: '$30 tope 50', type: 'FIXED_AMOUNT', value: 30, maxDiscountAmount: 50 })
+    const creada = await createOrderWithItems(VENUE, venta())
+    expect((await applyOrderDiscount(VENUE, creada.id, 'fijo-30-tope-50', 'staff-1')).amount).toBe(30)
+  })
+
+  it('% con tope sigue topado y su tope viaja en el reparto (regresión R6)', async () => {
+    const db = conDescuento({ id: 'pct-50-tope-10', name: '50% tope 10', type: 'PERCENTAGE', value: 50, maxDiscountAmount: 10 })
+    const creada = await createOrderWithItems(VENUE, venta())
+    expect((await applyOrderDiscount(VENUE, creada.id, 'pct-50-tope-10', 'staff-1')).amount).toBe(10)
+    const [fila] = db.descuentosDe(creada.id)
+    expect(fila.reparto).toMatchObject({ tope: 10 })
+  })
+
+  it('el fijo topado NO lleva tope en el reparto: el recálculo conserva su importe', async () => {
+    const db = conDescuento({ id: 'fijo-30-tope-10b', name: '$30 tope 10', type: 'FIXED_AMOUNT', value: 30, maxDiscountAmount: 10 })
+    const creada = await createOrderWithItems(VENUE, venta())
+    await applyOrderDiscount(VENUE, creada.id, 'fijo-30-tope-10b', 'staff-1')
+    const [fila] = db.descuentosDe(creada.id)
+    expect(fila.amount).toBe(10)
+    expect(fila.reparto?.tope).toBeUndefined()
+  })
+})

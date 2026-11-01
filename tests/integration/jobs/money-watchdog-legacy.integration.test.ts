@@ -7,7 +7,8 @@ import { buildWatchdogSql } from '@/jobs/money-integrity-watchdog.job'
 const tables = {
   Organization: 'id text, name text',
   // `timezone`: la decisión B (22-oct) lee la zona del negocio para saber si se acabó su día. NULL = la zona de default.
-  Venue: 'id text, name text, slug text, "organizationId" text, timezone text',
+  // `status`: los negocios demo (`LIVE_DEMO`) no entran al vigilante (1-nov). Default ACTIVE = un negocio real.
+  Venue: `id text, name text, slug text, "organizationId" text, timezone text, status text NOT NULL DEFAULT 'ACTIVE'`,
   Order: `id text, "venueId" text, "orderNumber" text, source text, "originSystem" text,
     status text, "paymentStatus" text, subtotal numeric, "discountAmount" numeric,
     "serviceChargeAmount" numeric, "taxAmount" numeric, "tipAmount" numeric,
@@ -255,5 +256,13 @@ describe.each(['UTC', 'America/Mexico_City'])('historical watchdog SQL under %s'
     await payment({ status: 'REFUNDED', origin: 'POS_SOFTRESTAURANT', tip: 500 })
     await payment()
     expect(await checks()).toContain('PROPINA NO CUADRA')
+  })
+
+  it('🔴 un negocio demo (LIVE_DEMO) con la MISMA propina descuadrada no suena, aunque se llame normal (1-nov)', async () => {
+    await client.query(`UPDATE pg_temp."Venue" SET status = 'LIVE_DEMO', name = 'Café Tostado', slug = 'cafe-tostado'`)
+    await seedOrder({ status: 'CANCELLED', origin: 'POS_SOFTRESTAURANT', tip: 500, tracked: false })
+    await payment({ status: 'REFUNDED', origin: 'POS_SOFTRESTAURANT', tip: 500 })
+    await payment()
+    expect(await checks()).toEqual([])
   })
 })
