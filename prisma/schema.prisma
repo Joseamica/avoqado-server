@@ -1818,8 +1818,15 @@ model Menu {
   availableUntil String? // "15:00"
   availableDays  String[] // ["MON", "TUE"]
 
+  // Menú del aparato (31-oct-2026): «¿Dónde se usa?». Nacen las dos en true. Al menos una debe quedar en true: la base lo
+  // impone con el CHECK "Menu_appliesTo_alguno_check" (migración 20261031120000). Prisma no declara CHECKs pero los
+  // conserva: NO lo quites al regenerar el esquema. Para no usar el menú en ningún lado se apaga (active=false).
+  appliesToDevices Boolean @default(true) // «Aparatos»: los aparatos lo pueden mostrar y Mesas lo ofrece
+  appliesToOnline  Boolean @default(true) // «Tienda en línea»: vende sus categorías en el horario de este menú
+
   // Relations
   categories MenuCategoryAssignment[]
+  terminals  TerminalMenu[] // Menú del aparato: aparatos que lo eligieron (un aparato sin filas muestra «Todos los menús»)
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -1843,6 +1850,22 @@ model MenuCategoryAssignment {
   @@unique([menuId, categoryId])
   @@index([menuId])
   @@index([categoryId])
+}
+
+// Menú del aparato (31-oct-2026): qué menús muestra cada aparato POS (POS_ANDROID / POS_IOS / POS_DESKTOP).
+// Un aparato SIN filas aquí muestra «Todos los menús» (el default de siempre); con filas, la unión de sus menús.
+// Una fila por (aparato, menú). Si se borra el aparato o el menú, su fila se va con él (CASCADE).
+model TerminalMenu {
+  id         String   @id @default(cuid())
+  terminalId String
+  terminal   Terminal @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  menuId     String
+  menu       Menu     @relation(fields: [menuId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([terminalId, menuId])
+  @@index([menuId])
 }
 
 // ==========================================
@@ -5769,6 +5792,9 @@ model Terminal {
   // Observability relations
   logs          TerminalLog[]
   healthMetrics TerminalHealth[]
+
+  // Menú del aparato: los menús que muestra este aparato POS. Sin filas = «Todos los menús».
+  menus TerminalMenu[]
 
   // TPV Messaging
   messageDeliveries TpvMessageDelivery[]

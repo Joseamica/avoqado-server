@@ -56,6 +56,7 @@ import {
   optionValuesCapacity,
 } from '../product-variants/groupWriterTx'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 import { ETIQUETA_DE_IVA, TRATAMIENTOS_OFRECIDOS_V1 } from '../fiscal/ivaTratamiento'
 import {
@@ -546,7 +547,24 @@ export async function reorderMenuCategories(venueId: string, reorderData: Reorde
 // MENU SERVICES
 // ==========================================
 
+/**
+ * «¿Dónde se usa?» (Menú del aparato): un menú se usa en Aparatos, en la Tienda en línea o en los dos, nunca en ninguno. Para
+ * no usarlo en ningún lado se apaga (`active: false`). Texto fijo, igual en ANDROID, iOS y DASHBOARD: no lo cambies aquí solo.
+ */
+export const MENU_SIN_USO_MESSAGE =
+  'Elige al menos un lugar donde se usa el menú (Aparatos o Tienda en línea). Para no usarlo en ningún lado, apágalo.'
+
+/** La regla vive aquí y no en el esquema: al editar hay que combinar lo que llega con lo guardado. La base la refuerza con un CHECK. */
+function assertMenuConUso(appliesToDevices: boolean, appliesToOnline: boolean): void {
+  if (!appliesToDevices && !appliesToOnline) throw new BadRequestError(MENU_SIN_USO_MESSAGE, 'MENU_SIN_USO')
+}
+
 export async function createMenu(venueId: string, data: CreateMenuDto): Promise<Menu> {
+  // «¿Dónde se usa?»: nacen las dos en true. Es `??` y no `||`: un false mandado se respeta.
+  const appliesToDevices = data.appliesToDevices ?? true
+  const appliesToOnline = data.appliesToOnline ?? true
+  assertMenuConUso(appliesToDevices, appliesToOnline)
+
   const createData: Prisma.MenuCreateInput = {
     venue: { connect: { id: venueId } },
     name: data.name,
@@ -560,6 +578,8 @@ export async function createMenu(venueId: string, data: CreateMenuDto): Promise<
     availableFrom: data.availableFrom,
     availableUntil: data.availableUntil,
     availableDays: data.availableDays ?? [],
+    appliesToDevices,
+    appliesToOnline,
   }
 
   // Handle category assignments if provided
@@ -632,7 +652,8 @@ export async function getMenuById(venueId: string, menuId: string): Promise<Menu
   return menu
 }
 
-export async function updateMenu(venueId: string, menuId: string, data: UpdateMenuDto): Promise<Menu> {
+/** `actorStaffId`: quién edita, para que `MENU_UPDATED` (que trae el cambio de «¿Dónde se usa?») no quede anónimo. */
+export async function updateMenu(venueId: string, menuId: string, data: UpdateMenuDto, actorStaffId?: string | null): Promise<Menu> {
   const menu = await prisma.menu.findUnique({
     where: { id: menuId, venueId },
   })
@@ -640,6 +661,23 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
   if (!menu) {
     throw new NotFoundError(`Menu with ID ${menuId} not found in venue ${venueId}.`)
   }
+
+  // «¿Dónde se usa?»: lo que llega se combina con lo guardado y sólo se rechaza el par resultante. Si el PATCH no menciona las
+  // casillas (p. ej. `{ active: false }`) ni se revisan ni se tocan.
+  // Si cambió una casilla, la bitácora guarda las dos antes y después: «Tienda en línea» cambia lo que vende la tienda.
+  let cambioDeUso: Record<'antes' | 'despues', { appliesToDevices: boolean; appliesToOnline: boolean }> | null = null
+  if (data.appliesToDevices !== undefined || data.appliesToOnline !== undefined) {
+    const appliesToDevices = data.appliesToDevices ?? menu.appliesToDevices
+    const appliesToOnline = data.appliesToOnline ?? menu.appliesToOnline
+    assertMenuConUso(appliesToDevices, appliesToOnline)
+    if (appliesToDevices !== menu.appliesToDevices || appliesToOnline !== menu.appliesToOnline) {
+      cambioDeUso = {
+        antes: { appliesToDevices: menu.appliesToDevices, appliesToOnline: menu.appliesToOnline },
+        despues: { appliesToDevices, appliesToOnline },
+      }
+    }
+  }
+  const cambioUnaCasilla = cambioDeUso !== null
 
   const updateData: Prisma.MenuUpdateInput = {}
 
@@ -655,6 +693,8 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
   if (data.availableFrom !== undefined) updateData.availableFrom = data.availableFrom
   if (data.availableUntil !== undefined) updateData.availableUntil = data.availableUntil
   if (data.availableDays !== undefined) updateData.availableDays = data.availableDays
+  if (data.appliesToDevices !== undefined) updateData.appliesToDevices = data.appliesToDevices
+  if (data.appliesToOnline !== undefined) updateData.appliesToOnline = data.appliesToOnline
 
   // Update category assignments if categoryIds is provided
   if (data.categoryIds) {
@@ -703,7 +743,18 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
       })
     })
 
-    logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name } })
+    // La carta en línea vive en una caché de memoria: si cambió una casilla se limpia YA escrito el cambio (antes, una lectura en
+    // vuelo podría volver a guardar la carta vieja).
+    if (cambioUnaCasilla) clearPublicMenuCache(venueId)
+
+    logAction({
+      staffId: actorStaffId,
+      venueId,
+      action: 'MENU_UPDATED',
+      entity: 'Menu',
+      entityId: updatedMenu.id,
+      data: { name: updatedMenu.name, ...cambioDeUso },
+    })
 
     return updatedMenu
   }
@@ -725,7 +776,17 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
     },
   })
 
-  logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name } })
+  // Misma regla que arriba: sólo si cambió una casilla, y ya escrito el cambio.
+  if (cambioUnaCasilla) clearPublicMenuCache(venueId)
+
+  logAction({
+    staffId: actorStaffId,
+    venueId,
+    action: 'MENU_UPDATED',
+    entity: 'Menu',
+    entityId: updatedMenu.id,
+    data: { name: updatedMenu.name, ...cambioDeUso },
+  })
 
   return updatedMenu
 }
@@ -797,6 +858,9 @@ export async function cloneMenu(venueId: string, menuId: string, data: CloneMenu
       availableFrom: originalMenu.availableFrom,
       availableUntil: originalMenu.availableUntil,
       availableDays: originalMenu.availableDays,
+      // «¿Dónde se usa?»: el clon se usa donde se usaba el original.
+      appliesToDevices: originalMenu.appliesToDevices,
+      appliesToOnline: originalMenu.appliesToOnline,
     },
   })
 

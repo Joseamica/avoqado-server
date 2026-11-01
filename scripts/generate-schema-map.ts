@@ -575,6 +575,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Terminal: 'Terminals / TPV Fleet',
   TerminalHealth: 'Terminals / TPV Fleet',
   TerminalLog: 'Terminals / TPV Fleet',
+  TerminalMenu: 'Terminals / TPV Fleet',
   TerminalOrder: 'Terminals / TPV Fleet',
   TerminalPaymentRequest: 'Terminals / TPV Fleet',
   TerminalPaymentAttemptLink: 'Terminals / TPV Fleet',

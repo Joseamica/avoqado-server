@@ -460,7 +460,7 @@ export async function updateMenuHandler(
     }
     await checkVenueAccess(orgId, venueId, req.authContext?.role || '')
 
-    const updatedMenu = await menuCategoryService.updateMenu(venueId, menuId, req.body)
+    const updatedMenu = await menuCategoryService.updateMenu(venueId, menuId, req.body, req.authContext?.userId)
     res.status(200).json(updatedMenu)
   } catch (error) {
     next(error)

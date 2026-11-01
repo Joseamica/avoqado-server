@@ -376,6 +376,10 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  // Menú del aparato (31-oct-2026): la regla de qué menús muestra un aparato lee `terminalMenu.findMany`, y los fixtures POS de
+  // `settingsEnvelope.test.ts` la llaman sin saberlo. Este mock es una LISTA FIJA: sin esta entrada revientan con «Cannot read
+  // properties of undefined (reading 'findMany')» en vez de fallar por su aserción. Su default (`[]`) va más abajo.
+  terminalMenu: createMockModel(),
   terminalOrder: createMockModel(),
   tpvCommandQueue: createMockModel(),
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega
@@ -658,6 +662,10 @@ prismaMock.printStation.findFirst.mockResolvedValue(null)
 prismaMock.printStation.findMany.mockResolvedValue([])
 prismaMock.printer.findMany.mockResolvedValue([])
 prismaMock.printGateway.findUnique.mockResolvedValue(null)
+// Menú del aparato (31-oct-2026): un aparato sin filas en `TerminalMenu` muestra «Todos los menús» (la regla entrega `null`). Casi
+// ninguna prueba elige menús: por default ninguna fila, para que los fixtures POS que llaman a la regla sin saberlo
+// (`settingsEnvelope.test.ts`) no tengan que mockearla.
+prismaMock.terminalMenu.findMany.mockResolvedValue([])
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

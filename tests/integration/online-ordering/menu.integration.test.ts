@@ -5,6 +5,7 @@
  * sentencia de la carta recorra vínculos u opciones de OTRO negocio (un `COUNT` de relación de Prisma se compila como un
  * agregado de toda la tabla metido en un JOIN). Se capturan las sentencias de Prisma y se corre `EXPLAIN ANALYZE` de cada una.
  * Con `EXPLAIN_CARTA=1` imprime los planes.
+ * A3: y que la consulta de los horarios de los menús sólo lea los marcados «Tienda en línea» (`Menu.appliesToOnline`).
  */
 import type { PrismaClient } from '@prisma/client'
 
@@ -200,5 +201,91 @@ describe('Carta pública contra Postgres (integration, real DB)', () => {
       agregadosEnUnJoin: leidas.filter(s => /JOIN \(SELECT/.test(s.query)).map(s => s.query.slice(0, 160)),
       excesos,
     }).toEqual({ sinLimitNiIn: [], agregadosEnUnJoin: [], excesos: [] })
+  })
+
+  /**
+   * A3 («¿Dónde se usa?»): la tienda en línea sólo lee los menús con su casilla «Tienda en línea». Un menú sólo de aparatos NO
+   * restringe ni abre una categoría, y una categoría que sólo está en menús de aparatos se vende como una sin menús.
+   * Negocio propio (la hora de la carta importa aquí y los otros dos casos leen la hora real); el miércoles 14-oct-2026,
+   * en America/Mexico_City (UTC-6 todo el año).
+   */
+  describe('menús «Sólo aparatos» (A3): la tienda en línea no los usa', () => {
+    const A_LAS_7_30 = new Date('2026-10-14T13:30:00.000Z')
+    const A_LAS_13 = new Date('2026-10-14T19:00:00.000Z') // dentro de «Comida» (12 a 18)
+    const A_LAS_20 = new Date('2026-10-15T02:00:00.000Z') // fuera de «Comida»
+    let tiendaId: string | undefined
+    let bebidasId: string | undefined
+    let cafesId: string | undefined
+
+    /** La carta pública a esa hora. Se guarda 60 s por negocio: cada hora se lee de nuevo. */
+    const cartaA = async (ahora: Date) => {
+      clearPublicMenuCache(tiendaId)
+      return getPublicMenu(tiendaId!, ahora)
+    }
+
+    beforeAll(async () => {
+      const tienda = await prisma.venue.create({
+        data: { name: 'ITEST Carta menús', slug: `itest-carta-menus-${RUN}`, organizationId: orgId!, timezone: 'America/Mexico_City' },
+      })
+      tiendaId = tienda.id
+      const v = tienda.id
+      const categoria = (name: string, slug: string, displayOrder: number) =>
+        prisma.menuCategory.create({ data: { venueId: v, name, slug: `${slug}-menus-${RUN}`, displayOrder } })
+      const bebidas = await categoria('Bebidas', 'bebidas', 1)
+      const cafes = await categoria('Cafés', 'cafes', 2)
+      const postres = await categoria('Postres', 'postres', 3) // no está en ningún menú
+      bebidasId = bebidas.id
+      cafesId = cafes.id
+      const platillo = (name: string, categoryId: string) =>
+        prisma.product.create({ data: { venueId: v, name, sku: `${name}-menus-${RUN}`, price: 30, categoryId, availableOnline: true } })
+      await platillo('Agua', bebidas.id)
+      await platillo('Café americano', cafes.id)
+      await platillo('Flan', postres.id)
+
+      const menu = (name: string, o: Record<string, unknown> = {}) => prisma.menu.create({ data: { venueId: v, name, ...o } })
+      const comida = await menu('Comida', { availableFrom: '12:00', availableUntil: '18:00' }) // «Aparatos» y «Tienda en línea» (el default)
+      const barra = await menu('Barra', { appliesToOnline: false }) // «Sólo aparatos», sin horario
+      const mananas = await menu('Mañanas de aparato', { appliesToOnline: false, availableFrom: '07:00', availableUntil: '11:00' })
+      await prisma.menuCategoryAssignment.createMany({
+        data: [
+          { menuId: comida.id, categoryId: bebidas.id },
+          { menuId: barra.id, categoryId: bebidas.id },
+          { menuId: mananas.id, categoryId: cafes.id },
+        ],
+      })
+    })
+
+    afterAll(async () => {
+      // Limpieza acotada: sin id NO se borra nada (una limpieza sin filtro vaciaría tablas enteras).
+      if (!tiendaId) return
+      const v = { venueId: tiendaId }
+      await prisma.menuCategoryAssignment.deleteMany({ where: { menu: v } })
+      await prisma.menu.deleteMany({ where: v })
+      await prisma.product.deleteMany({ where: v })
+      await prisma.menuCategory.deleteMany({ where: v })
+      await prisma.venue.deleteMany({ where: { id: tiendaId } })
+    })
+
+    it('Barra sólo de aparatos no abre el horario de Comida en la carta', async () => {
+      // La premisa: «Barra» SÍ está asignada a Bebidas en la base; la tienda no la lee porque su casilla «Tienda en línea» está apagada.
+      expect(
+        await prisma.menuCategoryAssignment.count({ where: { categoryId: bebidasId, menu: { name: 'Barra', appliesToOnline: false } } }),
+      ).toBe(1)
+      expect((await cartaA(A_LAS_20)).categories.map(c => c.name)).toEqual(['Cafés', 'Postres']) // fuera de 12 a 18: Bebidas sigue fuera
+      expect((await cartaA(A_LAS_13)).categories.map(c => c.name)).toEqual(['Bebidas', 'Cafés', 'Postres']) // dentro, sale como siempre
+    })
+
+    it('una categoría sólo en menús de aparatos se sigue vendiendo como hoy', async () => {
+      // La premisa: «Cafés» SÍ está en un menú activo de aparatos, y su horario (7 a 11) no cubre las 13:00 ni las 20:00.
+      expect(
+        await prisma.menuCategoryAssignment.count({ where: { categoryId: cafesId, menu: { active: true, appliesToOnline: false } } }),
+      ).toBe(1)
+      for (const hora of [A_LAS_7_30, A_LAS_13, A_LAS_20]) {
+        const carta = await cartaA(hora)
+        expect(carta.categories.map(c => c.name)).toContain('Cafés') // igual que «Postres», que no tiene menús
+        expect(carta.categories.find(c => c.name === 'Cafés')?.products.map(p => p.name)).toEqual(['Café americano'])
+        expect(carta.categories.map(c => c.name)).toContain('Postres')
+      }
+    })
   })
 })
