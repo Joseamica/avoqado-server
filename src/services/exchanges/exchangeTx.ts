@@ -138,6 +138,8 @@ export async function chainRefundSemanticsInTx(
  * S10 (I1): las puertas que pueden cambiar entre el envío y el reenvío —los cambios prendidos, las ventas de la sucursal, la persona
  * activa y, con saldo a favor, las llaves y la marca de la terminal— van DESPUÉS de reconocer la llave, bajo su candado: una repetición
  * (la primera petición todavía en curso) contesta lo que la primera escribió, nunca un rechazo que la primera ya no vio.
+ * 🔴 Todo con `tx` (S10 r2): una consulta con el cliente global aquí pide una segunda conexión mientras el Cambio retiene la suya, y con
+ * tantos Cambios a la vez como conexiones se traban todos (`tests/unit/architecture/transaccionSinClienteGlobal.test.ts`).
  */
 async function puertasTrasLaLlaveEnTx(
   tx: Prisma.TransactionClient,
@@ -156,7 +158,7 @@ async function puertasTrasLaLlaveEnTx(
       422,
     )
   await assertVenueSalesEnabled(p.venueId, tx)
-  await validateStaffVenue(p.actorStaffId, p.venueId)
+  await validateStaffVenue(p.actorStaffId, p.venueId, undefined, tx)
   if (!aSaldo) return
   if (!storeCreditAvailable()) throw new AppError('Pide a Avoqado que active el saldo a favor.', 422, true, 'STORE_CREDIT_UNAVAILABLE')
   // S7: la terminal está devolviendo un cobro de esta venta (o la raíz de uno pagado con crédito) al banco → 409 sin escribir.

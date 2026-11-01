@@ -12,8 +12,6 @@ jest.mock('@/services/mobile/order.mobile.service', () => ({
   cancelOrderInTransaction: jest.fn(),
   publishCancelledOrder: jest.fn(),
 }))
-jest.mock('@/services/venueSalesGuard', () => ({ assertVenueSalesEnabled: jest.fn(async () => undefined) }))
-jest.mock('@/utils/staff-venue.util', () => ({ validateStaffVenue: jest.fn(async () => undefined) }))
 jest.mock('@/services/storeCredit/storeCreditTender', () => ({
   ...jest.requireActual('@/services/storeCredit/storeCreditTender'),
   prepararMediosDeSaldoAFavor: (...a: unknown[]) => mockPreparar(...a),
@@ -371,7 +369,7 @@ describe('createExchange con STORE_CREDIT: afuera sólo lo que no cambia entre e
 })
 
 describe('prepareExchangeInTx (S10, I1): lo que cambia entre el envío y el reenvío se mira DESPUÉS de la llave, bajo su candado', () => {
-  const mock = prismaMock as any
+  const global = prismaMock as any
   const cuerpo = (settlement: Partial<CreateExchangeBody['settlement']> = {}): CreateExchangeBody => ({
     idempotencyKey: 'llave-del-cambio-2',
     originalPaymentId: 'pay-1',
@@ -389,56 +387,118 @@ describe('prepareExchangeInTx (S10, I1): lo que cambia entre el envío y el reen
     requestHash: 'huella-1',
     originalOrderId: 'order-1',
   })
+  /**
+   * La transacción del Cambio, aparte del cliente global (S10 r2, familia A): cada consulta de la transacción va por ELLA. Con el
+   * cliente global, cada Cambio ocupa una conexión y pide otra: con 18 a la vez se traban todos.
+   */
+  const transaccion = () => ({
+    $queryRaw: jest.fn(async () => []),
+    giftCard: { findFirst: jest.fn(async () => null) },
+    exchange: { findUnique: jest.fn(async () => null) },
+    venue: {
+      findUnique: jest.fn(async () => ({
+        id: 'v1',
+        name: 'Tienda',
+        salesEnabled: true,
+        type: 'CLOTHING',
+        settings: { exchangesEnabled: true },
+      })),
+    },
+    staffVenue: { findFirst: jest.fn(async () => ({ staffId: 'staff-1' })), findMany: jest.fn(async () => []) },
+    payment: { count: jest.fn(async () => 0) },
+    exchangeCreditLink: { count: jest.fn(async () => 0) },
+  })
+  let tx: ReturnType<typeof transaccion>
   const ahora = Date.now()
   beforeEach(() => {
     mockDisponible.mockReturnValue(true)
-    mock.giftCard.findFirst.mockResolvedValue(null)
-    mock.exchange.findUnique.mockResolvedValue(null)
-    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: true } })
-    mock.payment.count.mockResolvedValue(0)
-    mock.exchangeCreditLink.count.mockResolvedValue(0)
+    tx = transaccion()
   })
   afterEach(() => {
     const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora + 4 * 60_000)
     expect(hayDevolucionEnTerminal('pay-3')).toBe(false)
     reloj.mockRestore()
   })
+  const preparar = (b?: CreateExchangeBody) => prepareExchangeInTx(tx as never, entrada(b))
 
   it('una repetición (la primera ya escribió) contesta lo escrito aunque hoy falten las llaves, esté la marca o se hayan apagado los cambios', async () => {
     mockDisponible.mockReturnValue(false)
     marcarDevolucionEnTerminal('pay-3')
-    mock.payment.count.mockResolvedValue(1)
-    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: false } })
-    mock.exchange.findUnique.mockResolvedValue({ requestHash: 'huella-1', result: { id: 'ex-1' }, resultRevision: 3 })
+    tx.payment.count.mockResolvedValue(1)
+    tx.venue.findUnique.mockResolvedValue({
+      id: 'v1',
+      name: 'Tienda',
+      salesEnabled: true,
+      type: 'CLOTHING',
+      settings: { exchangesEnabled: false },
+    })
+    tx.exchange.findUnique.mockResolvedValue({ requestHash: 'huella-1', result: { id: 'ex-1' }, resultRevision: 3 } as never)
 
-    await expect(prepareExchangeInTx(mock, entrada())).resolves.toEqual({ replay: { id: 'ex-1' }, resultRevision: 3 })
-    expect(mock.venue.findUnique).not.toHaveBeenCalled()
-    expect(mock.payment.count).not.toHaveBeenCalled()
+    await expect(preparar()).resolves.toEqual({ replay: { id: 'ex-1' }, resultRevision: 3 })
+    expect(tx.venue.findUnique).not.toHaveBeenCalled()
+    expect(tx.staffVenue.findFirst).not.toHaveBeenCalled()
+    expect(tx.payment.count).not.toHaveBeenCalled()
+  })
+
+  it('🔴 S10 r2 (familia A): la venta de la sucursal y la persona activa se leen con la TRANSACCIÓN, nunca con el cliente global', async () => {
+    mockDisponible.mockReturnValue(false) // se detiene justo después de las puertas
+    await expect(preparar()).rejects.toMatchObject({ code: 'STORE_CREDIT_UNAVAILABLE' })
+
+    expect(tx.staffVenue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId: 'staff-1', venueId: 'v1', active: true } }),
+    )
+    expect(tx.venue.findUnique).toHaveBeenCalledTimes(2) // cambios prendidos + ventas de la sucursal
+    expect(global.staffVenue.findFirst).not.toHaveBeenCalled()
+    expect(global.venue.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('una persona ya inactiva en la sucursal se rechaza después de la llave (400, como siempre)', async () => {
+    tx.staffVenue.findFirst.mockResolvedValue(null as never)
+    await expect(preparar(cuerpo({ method: 'CASH', customerId: undefined }))).rejects.toMatchObject({ statusCode: 400 })
+    expect(tx.exchange.findUnique).toHaveBeenCalled()
   })
 
   it('sin las llaves → STORE_CREDIT_UNAVAILABLE (422), después de leer la llave', async () => {
     mockDisponible.mockReturnValue(false)
-    await expect(prepareExchangeInTx(mock, entrada())).rejects.toMatchObject({ statusCode: 422, code: 'STORE_CREDIT_UNAVAILABLE' })
-    expect(mock.exchange.findUnique).toHaveBeenCalled()
+    await expect(preparar()).rejects.toMatchObject({ statusCode: 422, code: 'STORE_CREDIT_UNAVAILABLE' })
+    expect(tx.exchange.findUnique).toHaveBeenCalled()
   })
 
   it('con la terminal devolviendo un cobro de la venta → 409 STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS, con la transacción', async () => {
     marcarDevolucionEnTerminal('pay-3')
-    mock.payment.count.mockResolvedValue(1)
-    await expect(prepareExchangeInTx(mock, entrada())).rejects.toMatchObject({
-      statusCode: 409,
-      code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS',
-    })
-    // Los cobros de la venta original entre los marcados.
-    expect(mock.payment.count).toHaveBeenCalledWith({ where: { venueId: 'v1', orderId: 'order-1', id: { in: ['pay-3'] } } })
+    tx.payment.count.mockResolvedValue(1)
+    await expect(preparar()).rejects.toMatchObject({ statusCode: 409, code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS' })
+    // Los cobros de la venta original entre los marcados, contados con la transacción.
+    expect(tx.payment.count).toHaveBeenCalledWith({ where: { venueId: 'v1', orderId: 'order-1', id: { in: ['pay-3'] } } })
+    expect(global.payment.count).not.toHaveBeenCalled()
   })
 
   it('con los cambios apagados → EXCHANGES_DISABLED (422), después de leer la llave', async () => {
-    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: false } })
-    await expect(prepareExchangeInTx(mock, entrada(cuerpo({ method: 'CASH', customerId: undefined })))).rejects.toMatchObject({
+    tx.venue.findUnique.mockResolvedValue({
+      id: 'v1',
+      name: 'Tienda',
+      salesEnabled: true,
+      type: 'CLOTHING',
+      settings: { exchangesEnabled: false },
+    })
+    await expect(preparar(cuerpo({ method: 'CASH', customerId: undefined }))).rejects.toMatchObject({
       statusCode: 422,
       code: 'EXCHANGES_DISABLED',
     })
-    expect(mock.exchange.findUnique).toHaveBeenCalled()
+    expect(tx.exchange.findUnique).toHaveBeenCalled()
+  })
+
+  it('con la sucursal sin ventas → VENUE_SALES_DISABLED (403), leído con la transacción', async () => {
+    tx.venue.findUnique.mockResolvedValue({
+      id: 'v1',
+      name: 'Tienda',
+      salesEnabled: false,
+      type: 'CLOTHING',
+      settings: { exchangesEnabled: true },
+    })
+    await expect(preparar(cuerpo({ method: 'CASH', customerId: undefined }))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'VENUE_SALES_DISABLED',
+    })
   })
 })
