@@ -1,9 +1,9 @@
 /**
- * «Importar lo de HubSpot», una sola vez (spec 2026-10-30 §5.3.4; rulings 4, 28, 30, 33 and 36).
+ * «Importar lo de HubSpot», una sola vez (spec 2026-10-30 §5.3.4; rulings 4, 28, 30, 33, 36 and 65).
  *
  * Specific to HubSpot's export, not a general column mapper: a contacts file and a deals file, their headers read
  * without case or accents and with a few aliases (ruling 4). Every record enters with its key — `hubspot:deal:<id>` or
- * `hubspot:contact:<id>` — through `upsertAccountBySource`, so importing the same files twice, one after the other or
+ * `hubspot:contact:<id>` — through `accountForTx`, so importing the same files twice, one after the other or
  * both at once, never duplicates an account.
  *
  * - A deal enters «Sin dueño», with its stage by name and its associated contacts inside (the first one, primary).
@@ -11,9 +11,14 @@
  *   «Dijo que no». Nothing is linked to an Organization: only the landing links by itself (ruling 28).
  * - A contact without a deal enters ARCHIVED and «Sin dueño» (ruling 30): out of the pipeline and the digest, found by a
  *   search.
- * - «Repetido» (rulings 33 and 36): its key is already in the CRM, or the email or phone of the contact — of any of a
- *   deal's contacts — already is (it came through the landing or by hand). It is counted, nothing of it is written and
- *   nothing of what is there is touched; a repeated deal's aviso names the account and the stage it had in HubSpot.
+ * - «Repetido» (rulings 33, 36 and 65): its key is already in the CRM, or the email or phone of the contact — of any of
+ *   a deal's contacts — already is, from any source (the landing, by hand, WhatsApp, an earlier import), or an earlier
+ *   record of these same files brings it. It is counted, nothing of it is written and nothing of what is there is
+ *   touched; a repeated deal's aviso names the account (or the record) and the stage it had in HubSpot. Writing asks
+ *   again, through the resolver every writer shares (`accountForTx`): a person another path created meanwhile is
+ *   «repetido» too, never a second account.
+ * - A person comes in through the same incorporation as everywhere (`addPersonTx`): two contact ids of the same email or
+ *   phone, or the same id twice, never give two contacts; every distinct phone of the recognized columns comes in.
  *
  * A file that cannot be read — empty, wider than 2000 columns, with an unclosed quote, missing a column the import needs,
  * or not UTF-8 (the controller decodes it) — is refused whole, before anything is written. The preview writes nothing and lists the first 100
@@ -29,7 +34,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import type { CrmAccess } from './access.service'
 import { getInitialStage, listLostReasons, listStages } from './accounts.service'
-import { cleanText, upsertAccountBySource, type UpsertBySourceInput } from './inbound.service'
+import { accountForTx, addPersonTx, cleanText, type UpsertBySourceInput } from './inbound.service'
 import { addEvent } from './timeline.service'
 
 const IMPORTACION = 'IMPORTACION'
@@ -112,7 +117,8 @@ export interface HubspotApplied extends HubspotPreview {
 /** Headers and stage names compare without case, accents or extra spaces. */
 const normalize = (text: string) => text.normalize('NFD').replace(/\p{M}/gu, '').replace(/\s+/g, ' ').trim().toLowerCase()
 
-type Values<F extends string> = Partial<Record<F, string>>
+/** Every distinct non-empty value of a field, in the order of its columns: «Phone Number» and «Mobile Phone Number» both. */
+type Values<F extends string> = Partial<Record<F, string[]>>
 
 /** A row of the file, read — or the reason it could not be. In the order of the file. */
 type CsvRow<F extends string> = { fila: number; values: Values<F> } | { fila: number; razon: string }
@@ -172,7 +178,9 @@ function readCsv<F extends string>(csv: string, archivo: Archivo, columns: Recor
     line.forEach((cell, column) => {
       const field = fieldAt[column]
       const text = cleanText(cell)
-      if (field && text && !values[field]) values[field] = text
+      if (!field || !text) return
+      const kept = (values[field] ??= [])
+      if (!kept.includes(text)) kept.push(text)
     })
     rows.push({ fila, values })
   })
@@ -198,7 +206,8 @@ interface ContactRow {
   id: string
   person: string | null
   company: string | null
-  phoneE164: string | null
+  /** Every distinct valid phone of the row (ruling 65 d), canonical; the first one is the main one. */
+  phones: string[]
   email: string | null
 }
 
@@ -207,21 +216,27 @@ type ContactInput = NonNullable<UpsertBySourceInput['contact']>
 interface PlannedAccount {
   externalKey: string
   data: UpsertBySourceInput['data']
-  /** The first one is the primary person. */
+  /** The first one is the primary person; a person's other phones follow as people of their own. */
   contacts: ContactInput[]
   stageName: string
   won: boolean
+  /** A deal's line for an aviso — `Negocios, fila N: «nombre»` and its HubSpot stage — if it turns out «repetido». */
+  deal?: { where: string; hubspotStage: string }
 }
 
 const dealKey = (id: string) => `hubspot:deal:${id}`
 const contactKey = (id: string) => `hubspot:contact:${id}`
 
-const contactInput = (contact: ContactRow, isPrimary: boolean): ContactInput => ({
-  name: contact.person || contact.company || contact.phoneE164 || '',
-  phoneE164: contact.phoneE164,
-  email: contact.email,
-  isPrimary,
-})
+const nameOf = (contact: ContactRow) => contact.person || contact.company || contact.phones[0] || ''
+
+/** A row's people: its main contact, then one for each of its other phones (the incorporation never repeats them). */
+const peopleOf = (contact: ContactRow, isPrimary: boolean): ContactInput[] => [
+  { name: nameOf(contact), phoneE164: contact.phones[0] ?? null, email: contact.email, isPrimary },
+  ...contact.phones.slice(1).map(phoneE164 => ({ name: nameOf(contact), phoneE164, email: contact.email, isPrimary: false })),
+]
+
+/** What identifies a row's person: its email and every phone. An email has an «@» and an E.164 phone never does. */
+const identityOf = (contact: ContactRow) => [...(contact.email ? [contact.email] : []), ...contact.phones]
 
 function chunksOf<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = []
@@ -246,40 +261,37 @@ async function existingKeys(keys: string[]): Promise<Set<string>> {
 }
 
 /**
- * The emails and phones a person who came in some OTHER way — the landing, by hand — already has (ruling 33). Never
- * this import's own: after a crash, a contact sharing a phone with a deal the first run already wrote would otherwise
- * turn «repetido» and never come in. One set for both: an email has an «@» and an E.164 phone never does. GROUP BY
- * gives each value once, however many people share it; every CRM writer stores emails in lowercase (the landing,
- * «Nuevo prospecto», this import), so the exact match uses the index.
+ * The emails and phones a person already in the CRM has (rulings 33 and 65), from ANY source — the landing, by hand,
+ * WhatsApp, an earlier run of this import: one person, one account, however they arrived. One set for both: an email
+ * has an «@» and an E.164 phone never does. GROUP BY gives each value once, however many people share it; every CRM
+ * writer stores emails in lowercase (the landing, «Nuevo prospecto», this import), so the exact match uses the index.
  */
 async function knownEmailsAndPhones(contacts: ContactRow[]): Promise<Map<string, string>> {
   const emails = [...new Set(contacts.flatMap(contact => (contact.email ? [contact.email] : [])))]
-  const phones = [...new Set(contacts.flatMap(contact => (contact.phoneE164 ? [contact.phoneE164] : [])))]
-  const notImported = { source: { not: IMPORTACION } }
+  const phones = [...new Set(contacts.flatMap(contact => contact.phones))]
   // Each email or phone → ONE account that has it (the smallest id: the same answer on every run).
   const found = new Map<string, string>()
   for (const chunk of chunksOf(emails, LOOKUP_CHUNK)) {
-    const rows = await prisma.crmContact.groupBy({
-      by: ['email'],
-      where: { email: { in: chunk }, account: notImported },
-      _min: { accountId: true },
-    })
+    const rows = await prisma.crmContact.groupBy({ by: ['email'], where: { email: { in: chunk } }, _min: { accountId: true } })
     for (const { email, _min } of rows) if (email && _min.accountId) found.set(email, _min.accountId)
   }
   for (const chunk of chunksOf(phones, LOOKUP_CHUNK)) {
-    const rows = await prisma.crmContact.groupBy({
-      by: ['phoneE164'],
-      where: { phoneE164: { in: chunk }, account: notImported },
-      _min: { accountId: true },
-    })
+    const rows = await prisma.crmContact.groupBy({ by: ['phoneE164'], where: { phoneE164: { in: chunk } }, _min: { accountId: true } })
     for (const { phoneE164, _min } of rows) if (phoneE164 && _min.accountId) found.set(phoneE164, _min.accountId)
   }
   return found
 }
 
-/** The account someone already in the CRM is in, if they are. */
-const knownAccountOf = (known: Map<string, string>, contact: ContactRow) =>
-  (contact.email && known.get(contact.email)) || (contact.phoneE164 && known.get(contact.phoneE164)) || null
+/** The first of these people's values a map knows, and what it says: the account they are in, or the record that brings them. */
+function firstKnown<T>(known: Map<string, T>, people: ContactRow[]): { person: ContactRow; value: T } | null {
+  for (const person of people) {
+    for (const key of identityOf(person)) {
+      const value = known.get(key)
+      if (value !== undefined) return { person, value }
+    }
+  }
+  return null
+}
 
 /** The names of the accounts the avisos point to (only deals of someone already in the CRM: a handful). */
 async function accountNames(ids: string[]): Promise<Map<string, string>> {
@@ -295,6 +307,12 @@ async function accountNames(ids: string[]): Promise<Map<string, string>> {
   }
   return names
 }
+
+/** A repeated deal's aviso (ruling 36): who is already there, where, and the stage HubSpot had, for the seller to carry over. */
+const repeatedDeal = (where: string, person: ContactRow, place: string, hubspotStage: string) =>
+  `${where} no entra (ni sus contactos): ${nameOf(person)} ya ${place}; en HubSpot estaba en ${hubspotStage}, ajústalo a mano`
+
+const stageText = (stage: string) => (stage ? `la etapa «${stage}»` : 'ninguna etapa')
 
 /** What the two files would do to the CRM now, and the accounts to create. Reads; never writes. */
 async function plan(contactsCsv: string, dealsCsv: string) {
@@ -328,7 +346,7 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       continue
     }
     const { fila, values } = row
-    const id = values.id
+    const id = values.id?.[0]
     if (!id) {
       errors.add({ archivo: 'contactos', fila, razon: 'Sin Record ID' })
       continue
@@ -338,16 +356,21 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       continue
     }
     contactIdsInFile.add(id)
-    const person = [values.firstName, values.lastName].filter(Boolean).join(' ') || null
-    const company = values.company ?? null
-    const phoneE164 = values.phone ? canonicalPhoneE164(values.phone) : null
-    if (!person && !company && !phoneE164) {
+    const person = [values.firstName?.[0], values.lastName?.[0]].filter(Boolean).join(' ') || null
+    const company = values.company?.[0] ?? null
+    // Every phone of the recognized columns (ruling 65 d): «Phone Number» and «Mobile Phone Number» are both the person's.
+    const rawPhones = values.phone ?? []
+    const phones = [...new Set(rawPhones.flatMap(raw => canonicalPhoneE164(raw) ?? []))]
+    if (!person && !company && !phones.length) {
       errors.add({ archivo: 'contactos', fila, razon: 'Sin nombre ni teléfono' })
       badContactRows.set(id, fila)
       continue
     }
-    if (values.phone && !phoneE164) avisos.add(`Contactos, fila ${fila}: el teléfono «${values.phone}» no es válido; entra sin teléfono`)
-    contacts.set(id, { id, person, company, phoneE164, email: values.email?.toLowerCase() ?? null })
+    for (const raw of rawPhones) {
+      if (canonicalPhoneE164(raw)) continue
+      avisos.add(`Contactos, fila ${fila}: el teléfono «${raw}» no es válido; entra sin ${phones.length ? 'ese ' : ''}teléfono`)
+    }
+    contacts.set(id, { id, person, company, phones, email: values.email?.[0]?.toLowerCase() ?? null })
   }
 
   // Deals. Their contacts — named by ANY deal row, even one with an error — never get an account of their own: when the
@@ -361,13 +384,15 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       continue
     }
     const { fila, values } = row
-    const contactIds = (values.contactIds ?? '').split(/[;,\s]+/).filter(Boolean)
+    // The same id twice («1;1») is one person (Codex exhaustiva #8).
+    const contactIds = [...new Set((values.contactIds ?? []).flatMap(cell => cell.split(/[;,\s]+/)).filter(Boolean))]
     for (const contactId of contactIds) inDeals.add(contactId)
-    const id = values.id
+    const id = values.id?.[0]
+    const name = values.name?.[0]
     if (!id) errors.add({ archivo: 'negocios', fila, razon: 'Sin Record ID' })
     else if (dealIds.has(id)) errors.add({ archivo: 'negocios', fila, razon: `El Record ID ${id} se repite en el archivo` })
-    else if (!values.name) errors.add({ archivo: 'negocios', fila, razon: 'Sin nombre del negocio' })
-    else deals.push({ fila, id, name: values.name, stage: values.stage ?? '', contactIds })
+    else if (!name) errors.add({ archivo: 'negocios', fila, razon: 'Sin nombre del negocio' })
+    else deals.push({ fila, id, name, stage: values.stage?.[0] ?? '', contactIds })
     if (id) dealIds.add(id)
   }
   const alone = [...contacts.values()].filter(contact => !inDeals.has(contact.id))
@@ -385,14 +410,11 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   const alreadyIn = new Map<string, { person: ContactRow; accountId: string }>()
   for (const deal of deals) {
     if (existing.has(dealKey(deal.id))) continue
-    for (const contactId of deal.contactIds) {
-      const person = contacts.get(contactId)
-      const accountId = person && knownAccountOf(known, person)
-      if (accountId) {
-        alreadyIn.set(deal.id, { person, accountId })
-        break
-      }
-    }
+    const hit = firstKnown(
+      known,
+      deal.contactIds.flatMap(contactId => contacts.get(contactId) ?? []),
+    )
+    if (hit) alreadyIn.set(deal.id, { person: hit.person, accountId: hit.value })
   }
   const names = await accountNames([...alreadyIn.values()].map(({ accountId }) => accountId))
   // An admin may have renamed them: «Ganado» and «Perdido» by their kind, the open ones by name (listStages: by order).
@@ -407,6 +429,11 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       (WON_STAGES.includes(wanted) ? wonStage : LOST_STAGES.includes(wanted) ? lostStage : undefined)
     )
   }
+  // Ruling 65 (a) within these files: who an earlier record already brings — one person, one account in one import too.
+  const claimed = new Map<string, string>()
+  const claim = (people: ContactRow[], name: string) => {
+    for (const key of people.flatMap(identityOf)) if (!claimed.has(key)) claimed.set(key, name)
+  }
   // Ruling 28: everything comes in with today's date.
   const now = new Date()
 
@@ -417,15 +444,19 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       continue
     }
     const where = `Negocios, fila ${deal.fila}: «${deal.name}»`
+    const people = deal.contactIds.flatMap(contactId => contacts.get(contactId) ?? [])
     const already = alreadyIn.get(deal.id)
     if (already) {
       // Nothing of it is written, and nothing of the account that is already there is touched.
       counts.repetidos++
-      const hubspotStage = deal.stage ? `la etapa «${deal.stage}»` : 'ninguna etapa'
-      avisos.add(
-        `${where} no entra (ni sus contactos): ${contactInput(already.person, true).name} ya está en el CRM en ` +
-          `«${names.get(already.accountId) ?? 'otro negocio'}» (${already.accountId}); en HubSpot estaba en ${hubspotStage}, ajústalo a mano`,
-      )
+      const place = `está en el CRM en «${names.get(already.accountId) ?? 'otro negocio'}» (${already.accountId})`
+      avisos.add(repeatedDeal(where, already.person, place, stageText(deal.stage)))
+      continue
+    }
+    const sameFile = firstKnown(claimed, people)
+    if (sameFile) {
+      counts.repetidos++
+      avisos.add(repeatedDeal(where, sameFile.person, `viene en «${sameFile.value}» de este mismo archivo`, stageText(deal.stage)))
       continue
     }
     // Once the deal is in, it is «repetido»: importing again could never add a person it came in without.
@@ -444,7 +475,6 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       const what = deal.stage ? `está en la etapa «${deal.stage}», que no existe en el CRM` : 'no trae etapa'
       avisos.add(`${where} ${what}; entra en «${initial.name}»`)
     }
-    const people = deal.contactIds.flatMap(contactId => contacts.get(contactId) ?? [])
     const data: UpsertBySourceInput['data'] = { name: deal.name, stageId: stage.id, sourceDetail: { origen: 'HubSpot', recordId: deal.id } }
     // «Ganado» without its Organization: the seller links it with «Ganar» (win() asks for one, so it is not used here).
     if (stage.kind === 'GANADA') data.wonAt = now
@@ -452,31 +482,34 @@ async function plan(contactsCsv: string, dealsCsv: string) {
     records.push({
       externalKey,
       data,
-      contacts: people.map((contact, index) => contactInput(contact, index === 0)),
+      contacts: people.flatMap((contact, index) => peopleOf(contact, index === 0)),
       stageName: stage.name,
       won: stage.kind === 'GANADA',
+      deal: { where, hubspotStage: stageText(deal.stage) },
     })
+    claim(people, deal.name)
     counts.negocios++
   }
 
   for (const contact of alone) {
     const externalKey = contactKey(contact.id)
-    if (existing.has(externalKey) || knownAccountOf(known, contact)) {
+    if (existing.has(externalKey) || firstKnown(known, [contact]) || firstKnown(claimed, [contact])) {
       counts.repetidos++
       continue
     }
     records.push({
       externalKey,
       data: {
-        name: contact.company || contact.person || contact.phoneE164 || '',
+        name: contact.company || contact.person || contact.phones[0] || '',
         stageId: initial.id,
         archivedAt: now,
         sourceDetail: { origen: 'HubSpot', recordId: contact.id },
       },
-      contacts: [contactInput(contact, true)],
+      contacts: peopleOf(contact, true),
       stageName: initial.name,
       won: false,
     })
+    claim([contact], contact.company || contact.person || contact.phones[0] || '')
     counts.archivados++
   }
 
@@ -491,20 +524,29 @@ export async function previewHubspot(contactsCsv: string, dealsCsv: string): Pro
   return (await plan(contactsCsv, dealsCsv)).summary
 }
 
+/** What writing one record did: created it, found its key already imported, or found its person already in the CRM. */
+type Written = { created: true } | { created: false; repeatedIn: string | null }
+
 /**
- * Creates ONE account, unless its key already has one — another import got there first, or an earlier run of this one
- * — and then writes nothing else. Its people and its events go in only with the account.
+ * Creates ONE account, unless the CRM already has it — its key (another import got there first, or an earlier run of
+ * this one) or one of its people, asked again here through the resolver every writer shares (ruling 65 a): the landing,
+ * WhatsApp or another record may have brought that person since the plan was read. Then nothing is written. Its people
+ * go in only with the account, each through the same incorporation as everywhere (`addPersonTx`), never twice.
  */
-async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, actorStaffId: string): Promise<boolean> {
+async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, actorStaffId: string): Promise<Written> {
   const [primary, ...others] = record.contacts
-  const { account, created } = await upsertAccountBySource(tx, {
-    source: IMPORTACION,
-    externalKey: record.externalKey,
-    data: record.data,
-    contact: primary,
-  })
-  if (!created) return false
-  if (others.length) await tx.crmContact.createMany({ data: others.map(contact => ({ ...contact, accountId: account.id })) })
+  const values = (pick: (contact: ContactInput) => string | null | undefined) => [
+    ...new Set(record.contacts.flatMap(contact => pick(contact) ?? [])),
+  ]
+  const { account, created, via } = await accountForTx(
+    tx,
+    { emails: values(contact => contact.email), phones: values(contact => contact.phoneE164), organizationId: null },
+    { source: IMPORTACION, externalKey: record.externalKey, data: record.data, contact: primary },
+  )
+  if (!created) return { created: false, repeatedIn: via === 'KEY' ? null : account.id }
+  for (const contact of others) {
+    await addPersonTx(tx, account.id, { name: contact.name, email: contact.email ?? null, phoneE164: contact.phoneE164 ?? null })
+  }
   await addEvent(tx, {
     accountId: account.id,
     kind: 'SYSTEM',
@@ -513,15 +555,16 @@ async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, ac
     data: { event: 'CREATED', source: IMPORTACION, via: IMPORTACION, externalKey: record.externalKey, stage: record.stageName },
   })
   if (record.won) await addEvent(tx, { accountId: account.id, kind: 'NOTE', actorStaffId: null, data: { text: WON_NOTE } })
-  return true
+  return { created: true }
 }
 
 /**
- * Imports the two files: the same plan as the preview, in batches of 200 records per transaction. Idempotent by key: a
- * second run — or one at the same time — creates nothing the first one did. An unreadable file is a 422 before anything
- * is written. The answer carries the preview's counts plus what this run created (`aplicados`) and what failed.
+ * Imports the two files: the same plan as the preview, in batches of 200 records per transaction. Idempotent by key and
+ * by person: a second run — or one at the same time — creates nothing the first one did. An unreadable file is a 422
+ * before anything is written. The answer carries the preview's counts plus what this run created (`aplicados`) and what
+ * failed; a deal whose person reached the CRM between the plan and the write adds its aviso (ruling 36).
  *
- * ponytail: the whole import runs inside the one HTTP request, ~4–5 sequential queries per record. Today (~1k records)
+ * ponytail: the whole import runs inside the one HTTP request, ~6–8 sequential queries per record. Today (~1k records)
  * that is seconds; a full 5 MB file (~25k contacts) is minutes. Nothing is lost if the client gives up — the server
  * finishes, and importing the same files again completes whatever did not land — so for a one-time admin import that is
  * enough. Upgrade path: a background job with progress, like the exports.
@@ -535,13 +578,18 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
 
   let aplicados = 0
   let fallaron = 0
+  const repeatedDeals: Array<{ deal: NonNullable<PlannedAccount['deal']>; accountId: string }> = []
   for (const batch of chunksOf(records, BATCH)) {
     try {
-      aplicados += await prisma.$transaction(async tx => {
-        let created = 0
-        for (const record of batch) if (await createTx(tx, record, actor.staffId)) created++
-        return created
+      const written = await prisma.$transaction(async tx => {
+        const results: Array<{ record: PlannedAccount; result: Written }> = []
+        for (const record of batch) results.push({ record, result: await createTx(tx, record, actor.staffId) })
+        return results
       }, BATCH_TX)
+      for (const { record, result } of written) {
+        if (result.created) aplicados++
+        else if (result.repeatedIn && record.deal) repeatedDeals.push({ deal: record.deal, accountId: result.repeatedIn })
+      }
     } catch (error) {
       fallaron += batch.length
       logger.error('[CRM] A batch of the HubSpot import failed; importing the same files again completes it', {
@@ -551,6 +599,11 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
       })
     }
   }
+  const names = await accountNames(repeatedDeals.map(({ accountId }) => accountId))
+  const lateAvisos = repeatedDeals.map(
+    ({ deal, accountId }) =>
+      `${deal.where} no entra (ni sus contactos): alguien de él llegó al CRM mientras se importaba, en «${names.get(accountId) ?? 'otro negocio'}» (${accountId}); en HubSpot estaba en ${deal.hubspotStage}, ajústalo a mano`,
+  )
 
   void logAction({
     staffId: actor.staffId,
@@ -567,5 +620,11 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
       fallaron,
     },
   })
-  return { ...summary, aplicados, fallaron }
+  return {
+    ...summary,
+    avisos: [...summary.avisos, ...lateAvisos].slice(0, LIST_CAP),
+    avisosTotal: summary.avisosTotal + lateAvisos.length,
+    aplicados,
+    fallaron,
+  }
 }

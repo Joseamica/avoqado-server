@@ -79,14 +79,15 @@ beforeEach(() => {
           .filter(account => account.source === where.source && where.externalKey.in.includes(account.externalKey))
           .map(account => ({ externalKey: account.externalKey })),
   )
-  // GROUP BY one column with MIN(accountId): each value once, whatever the number of people that share it — of accounts
-  // NOT of this import.
+  // GROUP BY one column with MIN(accountId): each value once, whatever the number of people that share it — of any
+  // account (ruling 65), or of the sources an `account.source.not` leaves.
   prismaMock.crmContact.groupBy.mockImplementation(async ({ by: [field], where }: any) => {
     const sourceOf = (contact: any) => db.accounts.find(account => account.id === contact.accountId)?.source
     const firstAccount = new Map<string, string>()
     for (const contact of db.contacts) {
       const value = contact[field]
-      if (!value || !where[field].in.includes(value) || sourceOf(contact) === where.account.source.not) continue
+      if (!value || !where[field].in.includes(value)) continue
+      if (where.account && sourceOf(contact) === where.account.source.not) continue
       const current = firstAccount.get(value)
       if (!current || contact.accountId < current) firstAccount.set(value, contact.accountId)
     }
@@ -313,17 +314,92 @@ it('repetido_si_su_correo_o_telefono_ya_esta_en_el_crm', async () => {
   expect(db.events.filter(event => event.accountId === 'caccountlnd0000000000001')).toHaveLength(0)
 })
 
-it('un_telefono_que_solo_trajo_esta_importacion_no_vuelve_repetido_a_nadie', async () => {
-  // Ana (in «Café Ana») and Dani (no deal) share the business's phone. A first run that died after writing the deal…
+it('un_contacto_con_el_telefono_de_un_negocio_es_la_misma_persona, en una corrida y tras una caída (ruling 65)', async () => {
+  // Ana (in «Café Ana») and Dani (no deal) share the business's phone: for the CRM, the same person — one account.
   const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n104,Dani,Soto,5512345601,dani@x.mx,Café Ana\n`
   const deals = `${NO_DEALS}9001,Café Ana,Demo,101\n`
-  await applyHubspot(admin, `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n`, deals)
 
-  // …and the next run still brings Dani in, exactly as one clean run would have.
-  const preview = await previewHubspot(contacts, deals)
-  expect(preview).toMatchObject({ nuevos: 1, repetidos: 1, archivados: 1, negocios: 0 })
+  // One clean run: Dani is «repetido» of the deal that comes in with her phone.
+  expect(await previewHubspot(contacts, deals)).toMatchObject({ nuevos: 1, negocios: 1, archivados: 0, repetidos: 1 })
+
+  // A first run that died after writing the deal, and the next run: the same answer, by the CRM this time.
+  await applyHubspot(admin, `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n`, deals)
+  expect(await previewHubspot(contacts, deals)).toMatchObject({ nuevos: 0, repetidos: 2 })
   await applyHubspot(admin, contacts, deals)
-  expect(accountOf('hubspot:contact:104')).toMatchObject({ archivedAt: expect.any(Date) })
+  expect(db.accounts.map(account => account.externalKey)).toEqual(['hubspot:deal:9001'])
+})
+
+it('persona_importada_sola_y_luego_su_negocio_no_da_dos_fichas (Codex exhaustiva #7)', async () => {
+  const ana = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n`
+  await applyHubspot(admin, ana, NO_DEALS)
+  const archived = accountOf('hubspot:contact:101')!
+
+  // Later, her business: «repetido» of the account she already has, with its aviso.
+  const applied = await applyHubspot(admin, ana, `${NO_DEALS}9001,Café Ana,Demo,101\n`)
+
+  expect(applied).toMatchObject({ nuevos: 0, repetidos: 1, aplicados: 0 })
+  expect(applied.avisos).toEqual([expect.stringMatching(new RegExp(`Café Ana.*no entra.*Ana López.*\\(${archived.id}\\).*Demo`))])
+  expect(db.accounts).toHaveLength(1)
+})
+
+it('dos_negocios_de_la_misma_persona_en_una_importacion_dan_una_ficha (Codex exhaustiva #7)', async () => {
+  const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n102,Ana,L.,5512345699,ana@cafe.mx,Café Ana 2\n`
+  const deals = `${NO_DEALS}9001,Café Ana,Contacto Inicial,101\n9003,Café Ana 2,Calificado,102\n`
+
+  const preview = await previewHubspot(contacts, deals)
+  expect(preview).toMatchObject({ nuevos: 1, negocios: 1, repetidos: 1 })
+  expect(preview.avisos).toEqual([expect.stringMatching(/Café Ana 2.*no entra.*viene en «Café Ana» de este mismo archivo.*Calificado/)])
+
+  await applyHubspot(admin, contacts, deals)
+  expect(db.accounts.map(account => account.externalKey)).toEqual(['hubspot:deal:9001'])
+})
+
+it('alguien_que_llega_por_otro_camino_mientras_se_importa_no_da_otra_ficha (Codex exhaustiva #7)', async () => {
+  // The plan reads an empty CRM; before the first batch writes, Ana fills the landing form.
+  const plain = prismaMock.$transaction.getMockImplementation()!
+  prismaMock.$transaction.mockImplementationOnce(async (callback: (tx: unknown) => unknown, options: unknown) => {
+    db.accounts.push({
+      id: 'caccountlnd0000000000001',
+      source: 'LANDING',
+      externalKey: 'ana@cafe.mx',
+      name: 'Café Ana',
+      stageId: PROSPECTO,
+    })
+    db.contacts.push({ id: 'ccontactlnd000000000001', accountId: 'caccountlnd0000000000001', name: 'Ana', email: 'ana@cafe.mx' })
+    return plain(callback, options)
+  })
+
+  const applied = await applyHubspot(admin, CONTACTS, DEALS)
+
+  expect(applied).toMatchObject({ nuevos: 8, aplicados: 7 })
+  expect(accountOf('hubspot:deal:9001')).toBeUndefined()
+  expect(applied.avisos).toContainEqual(
+    expect.stringMatching(/Café Ana.*mientras se importaba.*caccountlnd0000000000001.*Contacto Inicial/),
+  )
+  // Nothing of the deal lands on the landing account.
+  expect(contactsOf('caccountlnd0000000000001')).toHaveLength(1)
+  expect(db.events.filter(event => event.accountId === 'caccountlnd0000000000001')).toHaveLength(0)
+})
+
+it('ids_asociados_repetidos_o_de_la_misma_persona_no_duplican_contactos (Codex exhaustiva #8)', async () => {
+  const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n102,Ana,López,5512345601,Ana@Cafe.mx,Café Ana\n`
+  await applyHubspot(admin, contacts, `${NO_DEALS}9001,Café Ana,Demo,101;101;102\n`)
+
+  expect(contactsOf(accountOf('hubspot:deal:9001')!.id)).toEqual([
+    expect.objectContaining({ email: 'ana@cafe.mx', phoneE164: '+525512345601', isPrimary: true }),
+  ])
+})
+
+it('dos_telefonos_reconocidos_entran_los_dos (Codex exhaustiva #9)', async () => {
+  const header = 'Record ID,First Name,Last Name,Phone Number,Mobile Phone Number,Email\n'
+  await applyHubspot(admin, `${header}101,Ana,López,5512345601,5598765432,ana@cafe.mx\n`, NO_DEALS)
+
+  expect(contactsOf(accountOf('hubspot:contact:101')!.id)).toEqual([
+    expect.objectContaining({ email: 'ana@cafe.mx', phoneE164: '+525512345601', isPrimary: true }),
+    expect.objectContaining({ email: null, phoneE164: '+525598765432', isPrimary: false }),
+  ])
+  // A WhatsApp from the second phone is the same person: importing it again is «repetido».
+  expect(await previewHubspot(`${header}201,Ana,,5598765432,,\n`, NO_DEALS)).toMatchObject({ nuevos: 0, repetidos: 1 })
 })
 
 it('negocio_con_alguien_que_ya_esta_en_el_crm_es_repetido', async () => {
