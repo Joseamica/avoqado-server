@@ -355,6 +355,7 @@ describe('uploadSpeiProof', () => {
     await expect(
       uploadSpeiProof({
         orderId: 'ord_1',
+        venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
       }),
     ).rejects.toThrow(/not a SPEI order/i)
@@ -371,6 +372,7 @@ describe('uploadSpeiProof', () => {
     await expect(
       uploadSpeiProof({
         orderId: 'ord_1',
+        venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
       }),
     ).rejects.toThrow(/already paid/i)
@@ -387,6 +389,7 @@ describe('uploadSpeiProof', () => {
     await expect(
       uploadSpeiProof({
         orderId: 'ord_1',
+        venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'huge.pdf', size: 11 * 1024 * 1024 },
       }),
     ).rejects.toThrow(/too large|10/i)
@@ -403,6 +406,7 @@ describe('uploadSpeiProof', () => {
     await expect(
       uploadSpeiProof({
         orderId: 'ord_1',
+        venueId: 'v',
         file: { buffer: Buffer.from('x'), mimetype: 'application/zip', originalname: 'r.zip', size: 100 },
       }),
     ).rejects.toThrow(/file type|mimetype/i)
@@ -424,6 +428,7 @@ describe('uploadSpeiProof', () => {
 
     await uploadSpeiProof({
       orderId: 'ord_1',
+      venueId: 'v',
       file: { buffer: Buffer.from('hello'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
     })
 
@@ -435,6 +440,24 @@ describe('uploadSpeiProof', () => {
     expect(updateCall.data.speiProofUploadedAt).toBeInstanceOf(Date)
     expect(updateCall.data.speiApprovalToken).toBeTruthy()
     expect(updateCall.data.speiTokenExpiresAt).toBeInstanceOf(Date)
+  })
+  it('treats an order of another venue as not found (no upload, no write)', async () => {
+    ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({
+      id: 'ord_1',
+      orderNumber: 'AVO-0001',
+      venueId: 'otro-venue',
+      paymentMethod: 'SPEI',
+      paymentStatus: 'AWAITING_PROOF',
+    })
+    await expect(
+      uploadSpeiProof({
+        orderId: 'ord_1',
+        venueId: 'v',
+        file: { buffer: Buffer.from('x'), mimetype: 'application/pdf', originalname: 'r.pdf', size: 100 },
+      }),
+    ).rejects.toThrow(/order not found/i)
+    expect(uploadFileMock).not.toHaveBeenCalled()
+    expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
   })
 })
 

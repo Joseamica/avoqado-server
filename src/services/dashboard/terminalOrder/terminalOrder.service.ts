@@ -265,7 +265,8 @@ const ALLOWED_PROOF_MIME = new Set(['application/pdf', 'image/png', 'image/jpeg'
 
 export async function uploadSpeiProof(input: UploadSpeiProofInput) {
   const order = await prisma.terminalOrder.findUnique({ where: { id: input.orderId } })
-  if (!order) throw new Error('Order not found')
+  // Same answer for "missing" and "another venue's": no existence oracle across tenants.
+  if (!order || order.venueId !== input.venueId) throw new Error('Order not found')
   if (order.paymentMethod !== 'SPEI') {
     throw new Error('This is not a SPEI order')
   }

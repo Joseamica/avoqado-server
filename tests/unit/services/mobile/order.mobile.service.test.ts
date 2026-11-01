@@ -1078,6 +1078,8 @@ describe('cancelOrder — guard against live terminal charges', () => {
     prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
     prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
       const sql = Array.isArray(query) ? query.join(' ') : ''
+      // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
+      if (sql.includes('"OrderDiscount"')) return []
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       if (sql.includes('pg_advisory_xact_lock')) return []
@@ -1341,6 +1343,8 @@ describe('cancelOrder — libera la mesa aunque la cuenta sea el último hijo de
         : query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)
           ? query.strings.join(' ')
           : ''
+      // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
+      if (sql.includes('"OrderDiscount"')) return []
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"'))
         return rows()

@@ -57,10 +57,13 @@ type Clase =
   | { clase: 'EXENTA'; motivo: string; marcadores: string[] }
 
 const PROTEGIDA_POR_EL_GUARD = ['assertOrderCancellableUnderLock']
+/** 🔴 LEALTAD (hz:a8104ac8:D1): anular una venta que pudo traer canjes le devuelve al cliente su premio de sellos y sus puntos. */
+const DEVUELVE_CANJES = 'devolverCanjesDeVentaAnuladaEnTx'
+const PROTEGIDA_Y_DEVUELVE = [...PROTEGIDA_POR_EL_GUARD, DEVUELVE_CANJES]
 const VERDAD_EXTERNA_VIGILADA = ['lockExistingOrderForPayment', 'findLiveTerminalCharge']
 
 const INVENTARIO: Record<string, Clase> = {
-  'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
+  'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
   // Tarjetas de regalo (spec § 5.4.4): regresar el saldo y cancelar. Candado de topología (comandas → Order → mesas) +
   // cobro de terminal vivo; el guardia general no se relaja: este camino exige que TODOS los pagos sean de saldo.
   'services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': {
@@ -74,8 +77,8 @@ const INVENTARIO: Record<string, Clase> = {
     clase: 'PROTEGIDA',
     marcadores: ['findLiveTerminalCharge(tx', 'if (vivo)', "status: { notIn: ['CANCELLED', 'DELETED'] }", 'version: { increment: 1 }'],
   },
-  'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
-  'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
+  'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
+  'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_Y_DEVUELVE },
   // Fusión: candado de LAS DOS órdenes en una sentencia + cobro vivo del ORIGEN.
   'services/mobile/order.mobile.service.ts#mergeOrdersInTransaction': {
     clase: 'PROTEGIDA',
@@ -84,7 +87,14 @@ const INVENTARIO: Record<string, Clase> = {
   // Anular: candado + relectura con CAS de versión + G2 (cualquier anulación con cobro vivo).
   'services/tpv/order.tpv.service.ts#voidItems': {
     clase: 'PROTEGIDA',
-    marcadores: ['lockExistingOrderForPayment', 'tx.order.findUnique', 'assertNoLiveTerminalCharge'],
+    marcadores: ['lockExistingOrderForPayment', 'tx.order.findUnique', 'assertNoLiveTerminalCharge', DEVUELVE_CANJES],
+  },
+  // hz:a8104ac8:D1 (Codex r2 #2): una venta vacía y abandonada que traía canjes no se borra: se devuelven y se ANULA (borrada, un
+  // reintento de su creación la volvería a crear y quemaría otra vez el premio). Bajo el candado de la orden y con la MISMA regla
+  // de abandonada releída: sin renglones, sin pagos y sin cobro de terminal. Es un método de clase: el detector lo ve a nivel de módulo.
+  'jobs/abandoned-orders-cleanup.job.ts#(nivel de módulo)': {
+    clase: 'PROTEGIDA',
+    marcadores: ['lockExistingOrderForPayment', 'abandonada(thresholdDate)', DEVUELVE_CANJES, 'canjes.filasQuitadas > 0'],
   },
   'services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': { clase: 'VERDAD_EXTERNA', marcadores: VERDAD_EXTERNA_VIGILADA },
   'services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': {
@@ -96,11 +106,15 @@ const INVENTARIO: Record<string, Clase> = {
 /** Escritores con el estado en una VARIABLE (el regex no los ve): se vigilan por nombre. */
 const ESCRITORES_CON_ESTADO_VARIABLE: Record<string, string[]> = {
   // El PUT del dashboard escribe `status` del cuerpo: a CANCELLED/DELETED va por la cancelación protegida.
-  'services/dashboard/order.dashboard.service.ts#updateOrder': PROTEGIDA_POR_EL_GUARD,
+  'services/dashboard/order.dashboard.service.ts#updateOrder': PROTEGIDA_Y_DEVUELVE,
   // Pedidos en línea (plan 1a, R1/R2/R22): rechazar, vencer y cancelar el comensal escriben el estado de la regla de la
   // transición bajo el candado de la orden, sin dinero y sin cobro de terminal vivo. Cancelar por personal usa
   // `cancelOrderInTransaction` (PROTEGIDA arriba); las cancelaciones de otras vías se sincronizan al leer.
-  'services/online-ordering/transitions.service.ts#casTransition': ['lockExistingOrderForPayment', 'findLiveTerminalCharge'],
+  'services/online-ordering/transitions.service.ts#casTransition': [
+    'lockExistingOrderForPayment',
+    'findLiveTerminalCharge',
+    DEVUELVE_CANJES,
+  ],
 }
 
 describe('Inventario de escritores que cancelan una orden (§C.6)', () => {

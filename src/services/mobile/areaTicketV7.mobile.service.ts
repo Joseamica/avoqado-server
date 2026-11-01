@@ -54,7 +54,7 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 // pagado y cuánto falta" para los cuatro caminos de cobro.
 import { claseDeEstado, computeOrderBalance, esVentaCerrada, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import { assertOrderCancellableUnderLock, avisarOrdenCancelada, devolverCanjesDeVentaAnuladaEnTx } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import { buildOrderItemsData, CreateOrderItemInput, type CreateOrderInput } from './order.mobile.service'
 
@@ -1874,6 +1874,8 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
       await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE "venueId" = ${venueId} AND "checkoutSessionId" = ${fresh.id} ORDER BY id FOR UPDATE`
       if (fresh.orderId) {
         await assertOrderCancellableUnderLock(tx, { venueId, orderId: fresh.orderId })
+        // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId: fresh.orderId, staffId, camino: 'cancelAreaTicketCheckout' })
         const cancelacion = await tx.order.updateMany({
           where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
           data: { status: 'CANCELLED', version: { increment: 1 } },
