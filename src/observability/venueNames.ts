@@ -43,6 +43,13 @@ const names = new Map<string, string>()
  * formateador del registro los marca «🧪 DEMO» para que sus alertas no se confundan con las de un negocio real (1-nov).
  */
 let demoIds = new Set<string>()
+/**
+ * Los usuarios demo (correo `@demo.avoqado.io`): lo que hace su sesión es actividad de un demo, porque el candado sólo los
+ * deja tocar su propio negocio. Es la única sesión que marca: el negocio del token puede no ser el de la línea (Codex r2).
+ * Mismo dominio que `DOMINIO_DEMO` de `candadoDemo.ts` (importarlo de ahí haría un ciclo; una prueba los ata).
+ */
+export const DOMINIO_DE_USUARIOS_DEMO = 'demo.avoqado.io'
+let demoUserIds = new Set<string>()
 /** When the last load STARTED: a failed load also waits its turn, so an outage is not a query storm. */
 let lastLoadAt = Number.NEGATIVE_INFINITY
 /** The load in flight, so N concurrent requests cause ONE query. */
@@ -71,6 +78,11 @@ export function isDemoVenue(venueId?: string | null): boolean {
   if (!venueId) return false
   getVenueName(venueId)
   return demoIds.has(venueId)
+}
+
+/** ¿Es un usuario demo? Síncrono y nunca truena; se recarga junto con los negocios. */
+export function isDemoUser(userId?: string | null): boolean {
+  return !!userId && demoUserIds.has(userId)
 }
 
 /** La semilla demo avisa el negocio que acaba de crear: el registro lo marca desde su primera línea, sin esperar la recarga. */
@@ -110,6 +122,7 @@ function loadAllVenueNames(): Promise<number> {
 }
 
 async function queryAllVenueNames(): Promise<number> {
+  await queryDemoUsers()
   try {
     const venues = await prisma.venue.findMany({ select: { id: true, name: true, status: true } })
     const demo = new Set<string>()
@@ -128,10 +141,25 @@ async function queryAllVenueNames(): Promise<number> {
   }
 }
 
+/** Aparte y con su propio `catch`: si falla, los nombres se cargan igual. ponytail: tope 1000, hoy son ~20 (6 giros). */
+async function queryDemoUsers(): Promise<void> {
+  try {
+    const usuarios = await prisma.staff.findMany({
+      where: { email: { endsWith: `@${DOMINIO_DE_USUARIOS_DEMO}` } },
+      select: { id: true },
+      take: 1000,
+    })
+    if (Array.isArray(usuarios)) demoUserIds = new Set(usuarios.map(u => u.id))
+  } catch {
+    // Igual que los nombres: un fallo deja lo último que se supo.
+  }
+}
+
 /** Test seam: the cache is process-wide state, so each test needs a clean one. */
 export function __resetVenueNameCacheForTests(): void {
   names.clear()
   demoIds = new Set()
+  demoUserIds = new Set()
   lastLoadAt = Number.NEGATIVE_INFINITY
   loading = null
 }

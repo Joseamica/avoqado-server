@@ -1,6 +1,6 @@
 import winston, { type Logform } from 'winston'
 import { getContext, type ExecutionContext } from './executionContext'
-import { isDemoVenue } from './venueNames'
+import { isDemoUser, isDemoVenue } from './venueNames'
 
 /**
  * Injects the active execution context into every log record.
@@ -21,23 +21,23 @@ import { isDemoVenue } from './venueNames'
  */
 export const contextFormat = winston.format(info => {
   const ctx = getContext()
-  return isDemoVenue(negocioDeLaLinea(info, ctx)) ? marcarDemo(conContexto(info, ctx)) : conContexto(info, ctx)
+  const conCtx = conContexto(info, ctx)
+  return esActividadDeUnDemo(ctx) ? marcarDemo(conCtx) : conCtx
 })
 
 /**
- * De qué negocio ES la línea, para saber si es demo: el que da el emisor; si no, el que fijó el job (`conNegocio`); si no,
- * el de la sesión, salvo de un SUPERADMIN, cuya sesión puede estar en un demo mientras revisa otro negocio (Codex r1).
- * Nunca por nombre: un negocio real puede llamarse igual.
+ * ¿La línea la generó un demo? Sólo con certeza: un job que fijó un negocio demo (`conNegocio`) o la sesión de un usuario
+ * demo, que el candado sólo deja tocar su propio negocio. NO por el negocio del token ni por un id en los campos: un
+ * SUPERADMIN o una persona con un token viejo del demo pueden estar operando otro negocio, y el registro copia ese id
+ * (Codex r1 y r2). NO por nombre: un negocio real puede llamarse igual.
  */
-function negocioDeLaLinea(info: Logform.TransformableInfo, ctx: ExecutionContext | undefined): string | undefined {
-  if (typeof info.venueId === 'string') return info.venueId
-  return ctx?.negocioFijado ?? (ctx?.role === 'SUPERADMIN' ? undefined : ctx?.venueId)
+function esActividadDeUnDemo(ctx: ExecutionContext | undefined): boolean {
+  if (!ctx) return false
+  if (ctx.negocioFijado) return isDemoVenue(ctx.negocioFijado)
+  return isDemoUser(ctx.userId)
 }
 
-/**
- * Una línea de un negocio demo (`LIVE_DEMO`) sale «🧪 DEMO ·» y con `demo: true`: así sus alertas no se confunden con las
- * de un negocio real (founder, 1-nov). No cambia la gravedad.
- */
+/** «🧪 DEMO ·» y `demo: true`: las alertas de un demo no se confunden con las de un negocio real (founder, 1-nov). No cambia la gravedad. */
 function marcarDemo(info: Logform.TransformableInfo): Logform.TransformableInfo {
   const yaLoDice = typeof info.message === 'string' && /demo|🧪/i.test(info.message)
   return { ...info, demo: true, ...(typeof info.message === 'string' && !yaLoDice ? { message: `🧪 DEMO · ${info.message}` } : {}) }
