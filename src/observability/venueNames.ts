@@ -43,8 +43,6 @@ const names = new Map<string, string>()
  * formateador del registro los marca «🧪 DEMO» para que sus alertas no se confundan con las de un negocio real (1-nov).
  */
 let demoIds = new Set<string>()
-/** Nombres que SÓLO usan negocios demo: un emisor que da el nombre sin el id también se marca, sin adivinar. */
-let demoNames = new Set<string>()
 /** When the last load STARTED: a failed load also waits its turn, so an outage is not a query storm. */
 let lastLoadAt = Number.NEGATIVE_INFINITY
 /** The load in flight, so N concurrent requests cause ONE query. */
@@ -65,13 +63,14 @@ export function getVenueName(venueId: string | undefined | null): string | undef
   return name
 }
 
-/** ¿Es de un negocio demo? Por id (el que manda) o, si no hay id, por un nombre que sólo usan demos. Síncrono, nunca truena. */
-export function isDemoVenue(venueId?: string | null, venueName?: string | null): boolean {
-  if (venueId) {
-    getVenueName(venueId) // un id desconocido programa la recarga, como cualquier línea con negocio
-    return demoIds.has(venueId)
-  }
-  return !!venueName && demoNames.has(venueName)
+/**
+ * ¿Es un negocio demo? Sólo por id: un nombre puede repetirlo un negocio real (Codex r1). Síncrono y nunca truena; un id
+ * desconocido programa la recarga, como cualquier línea con negocio.
+ */
+export function isDemoVenue(venueId?: string | null): boolean {
+  if (!venueId) return false
+  getVenueName(venueId)
+  return demoIds.has(venueId)
 }
 
 /** La semilla demo avisa el negocio que acaba de crear: el registro lo marca desde su primera línea, sin esperar la recarga. */
@@ -114,20 +113,14 @@ async function queryAllVenueNames(): Promise<number> {
   try {
     const venues = await prisma.venue.findMany({ select: { id: true, name: true, status: true } })
     const demo = new Set<string>()
-    const nombresDemo = new Set<string>()
-    const nombresReales = new Set<string>()
     for (const venue of venues) {
       if (venue.name) names.set(venue.id, venue.name)
-      if (venue.status === 'LIVE_DEMO') {
-        demo.add(venue.id)
-        if (venue.name) nombresDemo.add(venue.name)
-      } else if (venue.name) nombresReales.add(venue.name)
+      if (venue.status === 'LIVE_DEMO') demo.add(venue.id)
     }
     // Lo marcado por la semilla después de que salió esta consulta no viene en ella: se conserva.
     const vistos = new Set(venues.map(v => v.id))
     for (const id of demoIds) if (!vistos.has(id)) demo.add(id)
     demoIds = demo
-    demoNames = new Set([...nombresDemo].filter(n => !nombresReales.has(n)))
     return venues.length
   } catch {
     // Deliberately silent — see the module docstring. Logs fall back to the raw venueId.
@@ -139,7 +132,6 @@ async function queryAllVenueNames(): Promise<number> {
 export function __resetVenueNameCacheForTests(): void {
   names.clear()
   demoIds = new Set()
-  demoNames = new Set()
   lastLoadAt = Number.NEGATIVE_INFINITY
   loading = null
 }

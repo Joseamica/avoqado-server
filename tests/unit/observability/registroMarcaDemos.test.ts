@@ -2,8 +2,8 @@
  * Los 6 negocios demo de prospectos se llaman normal («Café Tostado», «Lunaria Boutique») y escriben en el mismo registro
  * que los negocios reales. El founder (1-nov): «cuidado con las alertas de los demos, que no se confundan con productivas».
  * El inventario de Codex encontró 26 tipos de aviso que un demo puede disparar (sobrepago, comanda atorada, tarjeta de regalo
- * no entregada, caja cerrada sola…). En vez de tocar cada emisor, el formateador del registro marca «🧪 DEMO ·» y
- * `demo: true` toda línea de un negocio `LIVE_DEMO`, venga del contexto o de los campos del emisor.
+ * no entregada, caja cerrada sola…). El formateador del registro marca «🧪 DEMO ·» y `demo: true` toda línea de un negocio
+ * `LIVE_DEMO`: por el id del emisor, por el negocio que fija un job o por la sesión (nunca la de un SUPERADMIN, nunca por nombre).
  */
 import type { Logform } from 'winston'
 import prisma from '@/utils/prismaClient'
@@ -27,7 +27,6 @@ beforeEach(async () => {
     { id: DEMO, name: 'Café Tostado', status: 'LIVE_DEMO' },
     { id: REAL, name: 'Testarudo Cafe', status: 'ACTIVE' },
     { id: 'cdemo000000000000000000bb', name: 'Lunaria Boutique', status: 'LIVE_DEMO' },
-    { id: 'creal000000000000000000bb', name: 'Lunaria Boutique', status: 'ACTIVE' },
   ])
   await primeVenueNames()
 })
@@ -46,14 +45,24 @@ it('🔴 también cuando el emisor pasa el negocio en sus campos y no hay contex
   expect(r.message).toBe('🧪 DEMO · Caja cerrada automáticamente')
 })
 
-it('🔴 y cuando sólo trae el NOMBRE, si ese nombre sólo lo usa un demo', () => {
-  expect(apply({ level: 'error', message: '🚨 PROPINA NO CUADRA', venueName: 'Café Tostado' }).demo).toBe(true)
+it('🔴 sólo el NOMBRE no basta: un negocio real puede llamarse igual que un demo (Codex r1)', () => {
+  for (const venueName of ['Café Tostado', 'Lunaria Boutique']) {
+    const r = apply({ level: 'error', message: '🚨 sobrepago', venueName })
+    expect(r.demo).toBeUndefined()
+    expect(r.message).toBe('🚨 sobrepago')
+  }
 })
 
-it('un nombre que también usa un negocio REAL no se marca (no se adivina)', () => {
-  const r = apply({ level: 'error', message: '🚨 sobrepago', venueName: 'Lunaria Boutique' })
-  expect(r.demo).toBeUndefined()
-  expect(r.message).toBe('🚨 sobrepago')
+it('🔴 la sesión de un SUPERADMIN que está en un demo no marca lo que hace en otro negocio (Codex r1)', () => {
+  runWithContext({ ...ctx(DEMO, 'Café Tostado'), role: 'SUPERADMIN' }, () => {
+    expect(apply({ level: 'error', message: 'Error al aprobar el KYC de Testarudo' }).demo).toBeUndefined()
+  })
+})
+
+it('pero lo que un job fija para un negocio demo sí se marca, aunque corra con sesión de SUPERADMIN', () => {
+  runWithContext({ ...ctx(DEMO, 'Café Tostado'), role: 'SUPERADMIN', negocioFijado: DEMO }, () => {
+    expect(apply({ level: 'error', message: '❌ [CLEANUP] Could not delete abandoned order CAFE-0012' }).demo).toBe(true)
+  })
 })
 
 it('regresión: una línea de un negocio real no cambia', () => {
@@ -81,5 +90,14 @@ it('no se marca dos veces un mensaje que ya dice que es demo', () => {
 it('🔴 el negocio que crea el reinicio de las 3:00 se marca desde su primera línea, sin esperar la recarga', () => {
   const NUEVO = 'cnuevo00000000000000000aa'
   marcarNegocioDemo(NUEVO)
+  runWithContext({ ...ctx(NUEVO, 'Café Tostado'), negocioFijado: NUEVO }, () => {
+    expect(apply({ level: 'error', message: 'x' }).demo).toBe(true)
+  })
+})
+
+it('lo marcado por la semilla no lo borra una recarga que ya había salido antes de crearlo', async () => {
+  const NUEVO = 'cnuevo00000000000000000bb'
+  marcarNegocioDemo(NUEVO)
+  await primeVenueNames() // la consulta simulada no trae el negocio nuevo
   expect(apply({ level: 'error', message: 'x', venueId: NUEVO }).demo).toBe(true)
 })

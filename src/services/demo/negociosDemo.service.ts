@@ -460,7 +460,7 @@ async function recrearNegocio(bp: VenueBlueprint, organizationId: string, usuari
   for (const v of anteriores) olvidarNegocioDemo(v.id)
   olvidarNegocioDemo(venue.id)
   marcarNegocioDemo(venue.id) // el registro lo marca «🧪 DEMO» desde su primera línea
-  logger.info(`   🏗️  Negocio demo listo: ${venue.id} (slug ${venue.slug})`)
+  logger.info(`   🏗️  Negocio demo listo: ${venue.id} (slug ${venue.slug})`, { venueId: venue.id })
   return venue.id
 }
 

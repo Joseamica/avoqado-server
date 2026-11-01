@@ -1,5 +1,5 @@
 import winston, { type Logform } from 'winston'
-import { getContext } from './executionContext'
+import { getContext, type ExecutionContext } from './executionContext'
 import { isDemoVenue } from './venueNames'
 
 /**
@@ -19,21 +19,31 @@ import { isDemoVenue } from './venueNames'
  * mocks `@/config/logger` globally (tests/__helpers__/setup.ts) to keep logs quiet, which
  * would hide anything exported from there.
  */
-export const contextFormat = winston.format(info => marcarSiEsDemo(conContexto(info)))
+export const contextFormat = winston.format(info => {
+  const ctx = getContext()
+  return isDemoVenue(negocioDeLaLinea(info, ctx)) ? marcarDemo(conContexto(info, ctx)) : conContexto(info, ctx)
+})
 
 /**
- * Una línea de un negocio demo (`LIVE_DEMO`) sale «🧪 DEMO ·» y con `demo: true`, la escriba quien la escriba: así sus
- * alertas no se confunden con las de un negocio real (founder, 1-nov). El negocio es el del emisor o, si no trae, el del
- * contexto (ya mezclados). No cambia la gravedad.
+ * De qué negocio ES la línea, para saber si es demo: el que da el emisor; si no, el que fijó el job (`conNegocio`); si no,
+ * el de la sesión, salvo de un SUPERADMIN, cuya sesión puede estar en un demo mientras revisa otro negocio (Codex r1).
+ * Nunca por nombre: un negocio real puede llamarse igual.
  */
-function marcarSiEsDemo(info: Logform.TransformableInfo): Logform.TransformableInfo {
-  if (!isDemoVenue(info.venueId as string | undefined, info.venueName as string | undefined)) return info
+function negocioDeLaLinea(info: Logform.TransformableInfo, ctx: ExecutionContext | undefined): string | undefined {
+  if (typeof info.venueId === 'string') return info.venueId
+  return ctx?.negocioFijado ?? (ctx?.role === 'SUPERADMIN' ? undefined : ctx?.venueId)
+}
+
+/**
+ * Una línea de un negocio demo (`LIVE_DEMO`) sale «🧪 DEMO ·» y con `demo: true`: así sus alertas no se confunden con las
+ * de un negocio real (founder, 1-nov). No cambia la gravedad.
+ */
+function marcarDemo(info: Logform.TransformableInfo): Logform.TransformableInfo {
   const yaLoDice = typeof info.message === 'string' && /demo|🧪/i.test(info.message)
   return { ...info, demo: true, ...(typeof info.message === 'string' && !yaLoDice ? { message: `🧪 DEMO · ${info.message}` } : {}) }
 }
 
-function conContexto(info: Logform.TransformableInfo): Logform.TransformableInfo {
-  const ctx = getContext()
+function conContexto(info: Logform.TransformableInfo, ctx: ExecutionContext | undefined): Logform.TransformableInfo {
   if (!ctx) return info
 
   const injected: Record<string, unknown> = {

@@ -537,7 +537,7 @@ export class NightlyUpsellRulesJob {
               // Un venue que truena NO tumba la corrida. Si no, un solo local con
               // datos raros deja a todos los demás sin propuestas y nadie lo nota.
               result.errors++
-              logger.error(`🛒 [UPSELL] Falló el venue ${venue.name} (${venue.id})`, { error })
+              logger.error(`🛒 [UPSELL] Falló el venue ${venue.name} (${venue.id})`, { venueId: venue.id, error })
             }
           }),
         )
