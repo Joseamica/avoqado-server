@@ -176,7 +176,9 @@ describe('/settings — la huella', () => {
     await getVenueTpvSettings(req('dev-1'), r, jest.fn() as NextFunction)
     const cubiertos = new Set(Object.keys(SETTINGS_DEVICE_SELECT))
     for (const campo of Object.keys(r.body.data.deviceTerminal)) {
-      if (campo === 'id' || campo === 'configurableSettings') continue
+      // visible*: derivados de TerminalMenu/Menu/MenuCategory; llegan con el refresco periódico de 5 min de las apps, no con la
+      // huella (plan 2026-10-31, ajuste 1).
+      if (campo === 'id' || campo === 'configurableSettings' || campo === 'visibleCategoryIds' || campo === 'visibleMenuIds') continue
       expect(cubiertos.has(campo)).toBe(true)
     }
     expect(cubiertos.has('type')).toBe(true) // configurableSettings sale del tipo
