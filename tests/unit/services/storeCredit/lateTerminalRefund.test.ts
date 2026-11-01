@@ -16,7 +16,7 @@ jest.mock('@/services/storeCredit/storeCreditTender', () => ({
   prepararMediosDeSaldoAFavor: jest.fn().mockResolvedValue(undefined),
 }))
 
-import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { issueRefund, type IssueRefundInput } from '@/services/dashboard/refund.dashboard.service'
 import { prepararMediosDeSaldoAFavor } from '@/services/storeCredit/storeCreditTender'
 import { issuePosRefund, type PosRefundInput } from '@/services/storeCredit/storeCreditRefund.service'
 import { hayDevolucionEnTerminal, marcarDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
@@ -112,8 +112,8 @@ describe('con la marca viva, el saldo a favor de ese cobro se rechaza', () => {
     ...over,
   })
 
+  const resultado = { refundId: 'r1', originalPaymentId: 'cobro-con-marca', amount: 150, remainingRefundable: 0 }
   beforeEach(() => {
-    prismaMock.payment.findUnique.mockResolvedValue(null)
     prismaMock.payment.findFirst.mockResolvedValue({
       method: 'CREDIT_CARD',
       source: 'TPV',
@@ -125,11 +125,15 @@ describe('con la marca viva, el saldo a favor de ese cobro se rechaza', () => {
       tenderType: null,
     })
     prismaMock.exchangeCreditLink.count.mockResolvedValue(0)
-    issueRefundMock.mockResolvedValue({ refundId: 'r1', originalPaymentId: 'cobro-con-marca', amount: 150, remainingRefundable: 0 })
+    // El núcleo corre `reglasBajoCandado` con el cobro bloqueado y DESPUÉS de reconocer la llave (S10, I1); aquí con la base de prueba.
+    issueRefundMock.mockImplementation(async (input: IssueRefundInput) => {
+      await input.reglasBajoCandado?.(prismaMock as never, { original: { tenderSystemKind: null } } as never)
+      return resultado
+    })
     prismaMock.giftCardActivity.findMany.mockResolvedValue([])
   })
 
-  it('el Reembolso a saldo responde 409 STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS y no escribe nada', async () => {
+  it('el Reembolso a saldo responde 409 STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS desde el núcleo (bajo el candado, tras la llave) y no escribe nada', async () => {
     marcarDevolucionEnTerminal('cobro-con-marca')
 
     await expect(issuePosRefund(pedir())).rejects.toMatchObject({
@@ -137,8 +141,9 @@ describe('con la marca viva, el saldo a favor de ese cobro se rechaza', () => {
       code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS',
       message: expect.stringContaining('La terminal está devolviendo este cobro'),
     })
-    expect(prepararMock).not.toHaveBeenCalled()
-    expect(issueRefundMock).not.toHaveBeenCalled()
+    // S10 (I1): ya no rechaza afuera con una lectura sin candado; la regla la corre el núcleo, y su transacción no escribe nada.
+    expect(issueRefundMock).toHaveBeenCalledTimes(1)
+    expect(issueRefundMock.mock.calls[0][0].reglasBajoCandado).toEqual(expect.any(Function))
   })
 
   it('también si la terminal está devolviendo la RAÍZ de un crédito de cambio', async () => {
@@ -148,11 +153,11 @@ describe('con la marca viva, el saldo a favor de ese cobro se rechaza', () => {
     await expect(issuePosRefund(pedir({ paymentId: CREDITO }))).rejects.toMatchObject({
       code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS',
     })
-    // La raíz se busca entre los cobros marcados, por el vínculo del crédito (acotado por las marcas, no por la historia).
+    // La raíz se busca entre los cobros marcados, por el vínculo del crédito (acotado por las marcas, no por la historia), con la
+    // transacción del núcleo.
     expect(prismaMock.exchangeCreditLink.count).toHaveBeenCalledWith({
       where: { venueId: VENUE, originPaymentId: { in: expect.arrayContaining([RAIZ]) }, creditPaymentId: CREDITO },
     })
-    expect(issueRefundMock).not.toHaveBeenCalled()
   })
 
   it('sin marca de ese cobro pasa igual que hoy', async () => {
@@ -160,6 +165,7 @@ describe('con la marca viva, el saldo a favor de ese cobro se rechaza', () => {
 
     await issuePosRefund(pedir({ paymentId: 'cobro-sin-marca' }))
     expect(issueRefundMock).toHaveBeenCalledTimes(1)
+    expect(prepararMock).toHaveBeenCalledWith(VENUE)
   })
 
   it('regresión: devolver como se pagó (sin saldo a favor) no mira la marca', async () => {
@@ -169,11 +175,11 @@ describe('con la marca viva, el saldo a favor de ese cobro se rechaza', () => {
     expect(issueRefundMock).toHaveBeenCalledTimes(1)
   })
 
-  it('una repetición por llave se contesta como se escribió, aunque la marca esté viva', async () => {
+  it('una repetición por llave se contesta como se escribió, aunque la marca esté viva: afuera no hay nada que la rechace', async () => {
     marcarDevolucionEnTerminal('cobro-repetido')
-    prismaMock.payment.findUnique.mockResolvedValue({ id: 'r1' })
+    issueRefundMock.mockResolvedValue(resultado) // el núcleo reconoce la llave bajo el candado: contesta lo escrito, sin reglas
 
-    await issuePosRefund(pedir({ paymentId: 'cobro-repetido' }))
+    await expect(issuePosRefund(pedir({ paymentId: 'cobro-repetido' }))).resolves.toMatchObject({ refundId: 'r1' })
     expect(issueRefundMock).toHaveBeenCalledTimes(1)
   })
 })

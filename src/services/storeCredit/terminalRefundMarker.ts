@@ -9,6 +9,7 @@
  * menú de la terminal, sin el POS), el registro tardío la anota y congela el saldo (`exchangeTerminalRefund.ts`).
  * ponytail: memoria del proceso (una sola instancia, `.claude/rules/una-sola-instancia.md` punto 14); con 2 pods va a una tabla.
  */
+import type { Prisma } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 
@@ -36,17 +37,23 @@ export function hayDevolucionEnTerminal(paymentId: string): boolean {
  * Rechaza (409, sin escribir) si la terminal está devolviendo el cobro —o la RAÍZ de un crédito de cambio, de donde salió su dinero—.
  * `paymentId` para el Reembolso; `orderId` para el Cambio (sus cobros pagan la diferencia). Sin marcas vivas, ni una consulta; con
  * marcas, dos conteos acotados por ellas.
+ * 🔴 S10 (I1): se llama DENTRO de la transacción de dinero, bajo su candado y DESPUÉS de reconocer la llave (`db` = esa transacción):
+ * una repetición contesta lo que la primera escribió, nunca este 409 mientras la primera todavía puede abonar.
  */
-export async function rechazarSiLaTerminalEstaDevolviendo(venueId: string, de: { paymentId: string } | { orderId: string }): Promise<void> {
+export async function rechazarSiLaTerminalEstaDevolviendo(
+  venueId: string,
+  de: { paymentId: string } | { orderId: string },
+  db: Pick<Prisma.TransactionClient, 'payment' | 'exchangeCreditLink'> = prisma,
+): Promise<void> {
   const marcados = marcadosVivos()
   if (marcados.length === 0) return
   const directo =
     'paymentId' in de
       ? marcados.includes(de.paymentId)
-      : (await prisma.payment.count({ where: { venueId, orderId: de.orderId, id: { in: marcados } } })) > 0
+      : (await db.payment.count({ where: { venueId, orderId: de.orderId, id: { in: marcados } } })) > 0
   const porLaRaiz =
     !directo &&
-    (await prisma.exchangeCreditLink.count({
+    (await db.exchangeCreditLink.count({
       where: {
         venueId,
         originPaymentId: { in: marcados },

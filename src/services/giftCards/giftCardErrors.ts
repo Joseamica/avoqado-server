@@ -47,7 +47,10 @@ export type GiftCardErrorCode =
   // limitador de ruta (`gift-card-lookup-rate-limit.middleware.ts`), no un `GiftCardError`.
   | 'GIFT_CARD_RESEND_RATE_LIMITED'
   // Saldo a favor (spec 2026-10-30-saldo-a-favor §5.2, aditivos). 🔴 Todo código `STORE_CREDIT_` es un 4xx SIN escritura: las apps
-  // borran lo pendiente con cualquier código de ese prefijo (`esRechazoDefinitivoDeSaldo`), así que nunca se lanza tras escribir.
+  // borran lo pendiente con cualquier código de ese prefijo (`esRechazoDefinitivoDeSaldo`), así que nunca se lanza tras escribir, y lo
+  // que cambia entre el envío y el reenvío se mira después de reconocer la llave (S10, I1). Al revés también (S10, I2): con destino
+  // saldo a favor, el Reembolso del POS y el Cambio sacan todo otro 4xx como `STORE_CREDIT_REJECTED` (`comoRechazoDeSaldo`, con el
+  // código de siempre en `details.originalCode`), salvo IDEMPOTENCY_KEY_REUSED y 401/403/408/429.
   | 'STORE_CREDIT_OVER_CAP'
   | 'STORE_CREDIT_CARD_BLOCKED'
   | 'STORE_CREDIT_CUSTOMER_REQUIRED'

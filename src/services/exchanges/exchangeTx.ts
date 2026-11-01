@@ -24,6 +24,9 @@ import { tomarCandadoPrimerSobreSiHaceFaltaEnTx } from '../storeCredit/primerSob
 import { raizYaDevuelta, respaldoVigenteDeLaRaiz } from '../storeCredit/respaldoDeLaRaiz'
 import { resolveStoreCreditTenderInTx, storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { saldosAFavorDeReembolsos } from '../storeCredit/saldoAbonado'
+import { rechazarSiLaTerminalEstaDevolviendo } from '../storeCredit/terminalRefundMarker'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { validateStaffVenue } from '@/utils/staff-venue.util'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { loadSaleForExchange, MAX_EXCHANGE_SALE_PAYMENTS } from './exchangeSale'
 import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
@@ -31,6 +34,7 @@ import { calculateExchange, pieceValuesCents, splitItemsAcrossRefundRows, type R
 import {
   allocateAcrossPayments,
   effectiveExchangeCapacity,
+  effectiveExchangesEnabled,
   lineBlockReason,
   modesForExchangeCredit,
   payoutModesFor,
@@ -130,6 +134,35 @@ export async function chainRefundSemanticsInTx(
   return resolveChainRefund(link, root, destino)
 }
 
+/**
+ * S10 (I1): las puertas que pueden cambiar entre el envío y el reenvío —los cambios prendidos, las ventas de la sucursal, la persona
+ * activa y, con saldo a favor, las llaves y la marca de la terminal— van DESPUÉS de reconocer la llave, bajo su candado: una repetición
+ * (la primera petición todavía en curso) contesta lo que la primera escribió, nunca un rechazo que la primera ya no vio.
+ */
+async function puertasTrasLaLlaveEnTx(
+  tx: Prisma.TransactionClient,
+  p: { venueId: string; actorStaffId: string; originalOrderId: string },
+  aSaldo: boolean,
+): Promise<void> {
+  const venue = await tx.venue.findUnique({
+    where: { id: p.venueId },
+    select: { type: true, settings: { select: { exchangesEnabled: true } } },
+  })
+  if (!venue) throw new NotFoundError('No se encontró la sucursal.')
+  if (!effectiveExchangesEnabled(venue.settings?.exchangesEnabled, venue.type))
+    throw new ExchangeError(
+      'EXCHANGES_DISABLED',
+      'Los cambios de producto están apagados en esta sucursal. Actívalos en el panel: Configuración › Devoluciones y cambios.',
+      422,
+    )
+  await assertVenueSalesEnabled(p.venueId, tx)
+  await validateStaffVenue(p.actorStaffId, p.venueId)
+  if (!aSaldo) return
+  if (!storeCreditAvailable()) throw new AppError('Pide a Avoqado que active el saldo a favor.', 422, true, 'STORE_CREDIT_UNAVAILABLE')
+  // S7: la terminal está devolviendo un cobro de esta venta (o la raíz de uno pagado con crédito) al banco → 409 sin escribir.
+  await rechazarSiLaTerminalEstaDevolviendo(p.venueId, { orderId: p.originalOrderId }, tx)
+}
+
 /** La llave decide antes que el estado vigente de la venta: repetir algo ya hecho nunca devuelve dos piezas. */
 export async function prepareExchangeInTx(
   tx: Prisma.TransactionClient,
@@ -148,6 +181,7 @@ export async function prepareExchangeInTx(
     if (!existing.result) throw new Error('EXCHANGE_RESULT_MISSING')
     return { replay: existing.result as unknown as ExchangeResponse, resultRevision: existing.resultRevision }
   }
+  await puertasTrasLaLlaveEnTx(tx, { venueId, actorStaffId, originalOrderId }, aSaldo)
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: originalOrderId }))) throw new NotFoundError('No se encontró la venta.')
   const accountingAt = await exchangeAccountingAt(tx, venueId, [originalOrderId])
   const sale = await loadSaleForExchange(tx, venueId, originalOrderId)

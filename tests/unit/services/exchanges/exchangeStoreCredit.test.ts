@@ -35,6 +35,8 @@ import {
 import { resolveChainRefund, type ChainRefundRoot } from '@/services/exchanges/exchangeChainRefund'
 import { createExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
 import { createExchange, type CreateExchangeBody } from '@/services/exchanges/exchange.service'
+import { prepareExchangeInTx } from '@/services/exchanges/exchangeTx'
+import { ExchangeError } from '@/services/exchanges/exchangeErrors'
 import { hayDevolucionEnTerminal, marcarDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
 
 const money = (over: Partial<MoneyShape> = {}): MoneyShape => ({
@@ -226,7 +228,7 @@ describe('el cuerpo del Cambio (createExchangeSchema)', () => {
   })
 })
 
-describe('createExchange con STORE_CREDIT: las puertas antes de la transacción', () => {
+describe('createExchange con STORE_CREDIT: afuera sólo lo que no cambia entre el envío y el reenvío', () => {
   const mock = prismaMock as any
   const body = (settlement: Partial<CreateExchangeBody['settlement']> = {}): CreateExchangeBody => ({
     idempotencyKey: 'llave-del-cambio-1',
@@ -238,6 +240,13 @@ describe('createExchange con STORE_CREDIT: las puertas antes de la transacción'
     deviceId: 'caja-1',
     createdAtLocal: '2026-10-31T12:00:00-06:00',
   })
+  const huella = (b: CreateExchangeBody) =>
+    (jest.requireActual('@/utils/operationHash') as typeof import('@/utils/operationHash')).operationHash({
+      venueId: 'v1',
+      ...b,
+      idempotencyKey: undefined,
+      isOfflineReplay: undefined,
+    })
   beforeEach(() => {
     mockExecute.mockReset()
     mockPreparar.mockReset()
@@ -255,13 +264,29 @@ describe('createExchange con STORE_CREDIT: las puertas antes de la transacción'
     expect(mockExecute).not.toHaveBeenCalled()
   })
 
-  it('sin las llaves → STORE_CREDIT_UNAVAILABLE (422), sin abrir la transacción', async () => {
+  it('S10 (I1): sin las llaves NO rechaza afuera ni prepara medios: la regla la corre la transacción, después de la llave', async () => {
     mockDisponible.mockReturnValue(false)
-    await expect(createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })).rejects.toMatchObject({
-      statusCode: 422,
-      code: 'STORE_CREDIT_UNAVAILABLE',
-    })
-    expect(mockExecute).not.toHaveBeenCalled()
+    mockExecute.mockResolvedValue({ reserved: { id: 'ex-1' } })
+    await createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })
+    expect(mockPreparar).not.toHaveBeenCalled()
+    expect(mockExecute).toHaveBeenCalledTimes(1)
+  })
+
+  it('S10 (I1): con la terminal devolviendo un cobro de la venta, ni los cambios apagados, rechaza afuera: va a la transacción', async () => {
+    const ahora = Date.now()
+    marcarDevolucionEnTerminal('pay-2')
+    mock.payment.count.mockResolvedValue(1)
+    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: false } })
+    mockExecute.mockResolvedValue({ reserved: { id: 'ex-1' } })
+    try {
+      await createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })
+      expect(mockExecute).toHaveBeenCalledTimes(1)
+      expect(mock.payment.count).not.toHaveBeenCalled()
+    } finally {
+      const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora + 4 * 60_000)
+      expect(hayDevolucionEnTerminal('pay-2')).toBe(false)
+      reloj.mockRestore()
+    }
   })
 
   it('prepara los medios con el cliente global ANTES de la transacción del Cambio', async () => {
@@ -278,10 +303,9 @@ describe('createExchange con STORE_CREDIT: las puertas antes de la transacción'
 
   it('una repetición por llave responde lo escrito antes de las puertas (aunque hoy falten las llaves)', async () => {
     mockDisponible.mockReturnValue(false)
-    const { operationHash } = jest.requireActual('@/utils/operationHash') as typeof import('@/utils/operationHash')
     const b = body()
     mock.exchange.findUnique.mockResolvedValue({
-      requestHash: operationHash({ venueId: 'v1', ...b, idempotencyKey: undefined, isOfflineReplay: undefined }),
+      requestHash: huella(b),
       result: { id: 'ex-1', status: 'COMPLETED', paymentIds: [], settlement: { storeCredit: { amountCents: 20000 } } },
       resultRevision: 1,
     })
@@ -301,26 +325,120 @@ describe('createExchange con STORE_CREDIT: las puertas antes de la transacción'
     expect(mockExecute).toHaveBeenCalled()
   })
 
-  // S7 (spec §5.5, opción 1): la terminal devuelve al banco ANTES de avisar. Mientras vive la marca de un cobro de la venta (3 min), el
-  // Cambio no da saldo a favor de ella.
-  it('con la terminal devolviendo un cobro de la venta → 409 STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS, sin preparar medios ni abrir la transacción', async () => {
-    const ahora = Date.now()
-    marcarDevolucionEnTerminal('pay-2')
-    mock.payment.count.mockResolvedValue(1)
-    try {
+  describe('I2 (S10): con saldo a favor, todo 4xx sin prefijo sale como STORE_CREDIT_REJECTED', () => {
+    it('un rechazo de la transacción (la diferencia cambió) conserva status, mensaje y datos, con su código en details', async () => {
+      mockExecute.mockRejectedValue(
+        new ExchangeError('EXCHANGE_DIFFERENCE_CHANGED', 'La diferencia cambió.', 409, { differenceCents: -10000 }),
+      )
       await expect(createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })).rejects.toMatchObject({
         statusCode: 409,
-        code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS',
+        code: 'STORE_CREDIT_REJECTED',
+        message: 'La diferencia cambió.',
+        details: { originalCode: 'EXCHANGE_DIFFERENCE_CHANGED', differenceCents: -10000 },
       })
-      // Los cobros de la venta original entre los marcados (pay-2 es el segundo cobro de esa venta).
-      expect(mock.payment.count).toHaveBeenCalledWith({ where: { venueId: 'v1', orderId: 'order-1', id: { in: ['pay-2'] } } })
-      expect(mockPreparar).not.toHaveBeenCalled()
-      expect(mockExecute).not.toHaveBeenCalled()
-    } finally {
-      // La marca es memoria del módulo: se deja vencida para no tocar a las pruebas que siguen.
-      const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora + 4 * 60_000)
-      expect(hayDevolucionEnTerminal('pay-2')).toBe(false)
-      reloj.mockRestore()
-    }
+    })
+
+    it('EXCHANGE_CHAIN_GIFT_CARD_PENDING y ACTOR_MISMATCH (de antes de la transacción) también', async () => {
+      mockExecute.mockRejectedValue(new ExchangeError('EXCHANGE_CHAIN_GIFT_CARD_PENDING', 'Viene de una tarjeta de regalo.', 422))
+      await expect(createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })).rejects.toMatchObject({
+        statusCode: 422,
+        code: 'STORE_CREDIT_REJECTED',
+        details: { originalCode: 'EXCHANGE_CHAIN_GIFT_CARD_PENDING' },
+      })
+      await expect(createExchange({ venueId: 'v1', actorStaffId: 'otra-persona', body: body() })).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'STORE_CREDIT_REJECTED',
+        details: { originalCode: 'ACTOR_MISMATCH' },
+      })
+    })
+
+    it('IDEMPOTENCY_KEY_REUSED no se envuelve: la llave es de otra operación y lo pendiente no se borra', async () => {
+      mock.exchange.findUnique.mockResolvedValue({ requestHash: 'otra', result: {}, resultRevision: 1 })
+      await expect(createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'IDEMPOTENCY_KEY_REUSED',
+      })
+    })
+
+    it('regresión: sin saldo a favor, el mismo rechazo sale exactamente como hoy', async () => {
+      const error = new ExchangeError('EXCHANGE_DIFFERENCE_CHANGED', 'La diferencia cambió.', 409)
+      mockExecute.mockRejectedValue(error)
+      await expect(
+        createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body({ method: 'CASH', customerId: undefined }) }),
+      ).rejects.toBe(error)
+    })
+  })
+})
+
+describe('prepareExchangeInTx (S10, I1): lo que cambia entre el envío y el reenvío se mira DESPUÉS de la llave, bajo su candado', () => {
+  const mock = prismaMock as any
+  const cuerpo = (settlement: Partial<CreateExchangeBody['settlement']> = {}): CreateExchangeBody => ({
+    idempotencyKey: 'llave-del-cambio-2',
+    originalPaymentId: 'pay-1',
+    returned: [{ orderItemId: 'item-1', quantity: 1, restock: true, reason: 'SIZE' }],
+    taken: [{ productId: 'prod-1', quantity: 1 }],
+    settlement: { kind: 'PAYOUT', method: 'STORE_CREDIT', expectedDifferenceCents: -20000, customerId: 'cust-1', ...settlement },
+    staffId: 'staff-1',
+    deviceId: 'caja-1',
+    createdAtLocal: '2026-10-31T12:00:00-06:00',
+  })
+  const entrada = (b = cuerpo()) => ({
+    venueId: 'v1',
+    actorStaffId: 'staff-1',
+    body: b,
+    requestHash: 'huella-1',
+    originalOrderId: 'order-1',
+  })
+  const ahora = Date.now()
+  beforeEach(() => {
+    mockDisponible.mockReturnValue(true)
+    mock.giftCard.findFirst.mockResolvedValue(null)
+    mock.exchange.findUnique.mockResolvedValue(null)
+    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: true } })
+    mock.payment.count.mockResolvedValue(0)
+    mock.exchangeCreditLink.count.mockResolvedValue(0)
+  })
+  afterEach(() => {
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora + 4 * 60_000)
+    expect(hayDevolucionEnTerminal('pay-3')).toBe(false)
+    reloj.mockRestore()
+  })
+
+  it('una repetición (la primera ya escribió) contesta lo escrito aunque hoy falten las llaves, esté la marca o se hayan apagado los cambios', async () => {
+    mockDisponible.mockReturnValue(false)
+    marcarDevolucionEnTerminal('pay-3')
+    mock.payment.count.mockResolvedValue(1)
+    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: false } })
+    mock.exchange.findUnique.mockResolvedValue({ requestHash: 'huella-1', result: { id: 'ex-1' }, resultRevision: 3 })
+
+    await expect(prepareExchangeInTx(mock, entrada())).resolves.toEqual({ replay: { id: 'ex-1' }, resultRevision: 3 })
+    expect(mock.venue.findUnique).not.toHaveBeenCalled()
+    expect(mock.payment.count).not.toHaveBeenCalled()
+  })
+
+  it('sin las llaves → STORE_CREDIT_UNAVAILABLE (422), después de leer la llave', async () => {
+    mockDisponible.mockReturnValue(false)
+    await expect(prepareExchangeInTx(mock, entrada())).rejects.toMatchObject({ statusCode: 422, code: 'STORE_CREDIT_UNAVAILABLE' })
+    expect(mock.exchange.findUnique).toHaveBeenCalled()
+  })
+
+  it('con la terminal devolviendo un cobro de la venta → 409 STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS, con la transacción', async () => {
+    marcarDevolucionEnTerminal('pay-3')
+    mock.payment.count.mockResolvedValue(1)
+    await expect(prepareExchangeInTx(mock, entrada())).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS',
+    })
+    // Los cobros de la venta original entre los marcados.
+    expect(mock.payment.count).toHaveBeenCalledWith({ where: { venueId: 'v1', orderId: 'order-1', id: { in: ['pay-3'] } } })
+  })
+
+  it('con los cambios apagados → EXCHANGES_DISABLED (422), después de leer la llave', async () => {
+    mock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING', settings: { exchangesEnabled: false } })
+    await expect(prepareExchangeInTx(mock, entrada(cuerpo({ method: 'CASH', customerId: undefined })))).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'EXCHANGES_DISABLED',
+    })
+    expect(mock.exchange.findUnique).toHaveBeenCalled()
   })
 })

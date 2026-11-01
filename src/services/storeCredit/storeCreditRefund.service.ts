@@ -4,14 +4,16 @@
  * - `refundMethod: 'STORE_CREDIT'` abona lo devuelto al sobre de la clienta elegida (mamá → hija), en la MISMA transacción que la
  *   devolución (`issueRefund` con `aSaldoAFavor`); llave obligatoria;
  * - «Sólo saldo a favor»: con devolución de mercancía u «Otro» y sin defecto, sólo sale como saldo o a su mismo sobre;
- * - una repetición por llave (la app murió tras el commit, reenvía otra cajera) se reconoce ANTES de cualquier regla y responde lo mismo.
- * 🔴 Todo rechazo `STORE_CREDIT_` es un 4xx SIN escritura: las apps borran lo pendiente con ese prefijo.
+ * - una repetición por llave (la app murió tras el commit, reenvía otra cajera) se reconoce bajo el candado del cobro ANTES de toda regla
+ *   que pueda cambiar entre el envío y el reenvío, y responde lo mismo (S10, I1: `reglasBajoCandado`).
+ * 🔴 Todo rechazo `STORE_CREDIT_` es un 4xx SIN escritura: las apps borran lo pendiente con ese prefijo. Y con destino saldo a favor,
+ * todo rechazo del servicio lo trae (S10, I2: `comoRechazoDeSaldo`).
  */
 import { Prisma } from '@prisma/client'
 import AppError, { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import * as refundDashboardService from '../dashboard/refund.dashboard.service'
-import type { IssueRefundInput, IssueRefundResult } from '../dashboard/refund.dashboard.service'
+import type { CobroBloqueado, IssueRefundInput, IssueRefundResult } from '../dashboard/refund.dashboard.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { abonarSaldoAFavorEnTx } from '../giftCards/giftCardLedger'
 import { GiftCardError } from '../giftCards/giftCardErrors'
@@ -19,6 +21,7 @@ import { sinSaldoAFavorPorque, type CobroParaDevolver, type DevolverCon } from '
 import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from './storeCreditTender'
 import { saldosAFavorDeReembolsos, type StoreCreditDelReembolso } from './saldoAbonado'
 import { rechazarSiLaTerminalEstaDevolviendo } from './terminalRefundMarker'
+import { comoRechazoDeSaldo } from './rechazoDeSaldo'
 
 // La forma y su lector viven en `saldoAbonado.ts` (sin dependencias del núcleo del reembolso: el Cambio también la lee); se re-exportan
 // para los lectores de siempre (la lista y el detalle de transacciones del POS).
@@ -78,6 +81,17 @@ const cobroParaDevolver = (venueId: string, paymentId: string) =>
 export async function issuePosRefund(
   input: PosRefundInput,
 ): Promise<Omit<IssueRefundResult, 'abono'> & { storeCredit?: StoreCreditDelReembolso }> {
+  try {
+    return await reembolsoDelPos(input)
+  } catch (error) {
+    // S10 (I2): con destino saldo a favor, todo rechazo sale con el prefijo `STORE_CREDIT_`; lo demás, exactamente como hoy.
+    throw input.refundMethod === 'STORE_CREDIT' ? comoRechazoDeSaldo(error) : error
+  }
+}
+
+async function reembolsoDelPos(
+  input: PosRefundInput,
+): Promise<Omit<IssueRefundResult, 'abono'> & { storeCredit?: StoreCreditDelReembolso }> {
   const { refundMethod, customerId, defective, ...base } = input
   const aSaldo = refundMethod === 'STORE_CREDIT'
   if (aSaldo && !input.idempotencyKey) {
@@ -90,30 +104,35 @@ export async function issuePosRefund(
     throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'Elige a quién se le abona el saldo a favor.', 400)
   }
 
-  // 🔴 Lo ya escrito con esta llave se contesta como se escribió, ANTES de las reglas: si entre el envío y el reenvío se apagaron las
-  // llaves o se prendió «sólo saldo», un rechazo `STORE_CREDIT_` haría que la app borrara un reembolso que SÍ existe.
-  const yaEscrito = input.idempotencyKey
-    ? await prisma.payment.findUnique({
-        where: { venueId_idempotencyKey: { venueId: input.venueId, idempotencyKey: input.idempotencyKey } },
-        select: { id: true },
-      })
-    : null
+  // 🔴 S10 (I1): afuera, sin candado, sólo lo que NO cambia entre el envío y el reenvío: la petición y el medio del cobro (un cobro no
+  // cambia de medio). Lo que sí cambia —las llaves, la marca de la terminal, «Sólo saldo a favor»— lo mira el núcleo con el cobro
+  // bloqueado y DESPUÉS de reconocer la llave (`reglasBajoCandado`): una repetición siempre contesta lo escrito, nunca un rechazo
+  // `STORE_CREDIT_` mientras la primera petición todavía espera el candado y luego abona.
+  if (aSaldo) {
+    const cobro = await cobroParaDevolver(input.venueId, input.paymentId)
+    const motivo = cobro ? sinSaldoAFavorPorque({ ...cobro, tenderSystemKind: cobro.tenderType?.systemKind ?? null }) : null
+    if (motivo) throw new AppError(motivo, 422, true, 'STORE_CREDIT_NOT_ALLOWED')
+    // Con el cliente global y FUERA de la transacción de dinero (S1): un P2002 adentro la abortaría entera. Sin llaves no hace falta
+    // (el núcleo rechaza con STORE_CREDIT_UNAVAILABLE); un medio oculto que queda sin usar no hace daño (spec §5.1).
+    if (storeCreditAvailable()) await prepararMediosDeSaldoAFavor(input.venueId)
+  }
 
-  if (!yaEscrito) {
-    const restringido = !defective && MOTIVOS_DE_SOLO_SALDO.has(input.reason) && !aSaldo
-    const ajustes = restringido
-      ? await prisma.venueSettings.findUnique({ where: { venueId: input.venueId }, select: { storeCreditOnly: true } })
-      : null
-    // El cobro sólo se lee si hace falta (a saldo, o «sólo saldo» prendido); no cambia de medio, así que leerlo aquí es seguro.
-    const cobro = aSaldo || ajustes?.storeCreditOnly ? await cobroParaDevolver(input.venueId, input.paymentId) : null
-    const tenderSystemKind = cobro?.tenderType?.systemKind ?? null
+  const reglasBajoCandado = async (tx: Prisma.TransactionClient, cobro: CobroBloqueado): Promise<void> => {
+    if (aSaldo) {
+      if (!storeCreditAvailable()) throw new AppError(SIN_LLAVES, 422, true, 'STORE_CREDIT_UNAVAILABLE')
+      // S7: la terminal está devolviendo este cobro (o la raíz de su crédito) al banco → 409 sin escribir.
+      await rechazarSiLaTerminalEstaDevolviendo(input.venueId, { paymentId: input.paymentId }, tx)
+      return
+    }
+    if (defective || !MOTIVOS_DE_SOLO_SALDO.has(input.reason)) return
+    const ajustes = await tx.venueSettings.findUnique({ where: { venueId: input.venueId }, select: { storeCreditOnly: true } })
     if (
       soloSaldoLoImpide({
         storeCreditOnly: ajustes?.storeCreditOnly ?? false,
         reason: input.reason,
         defective,
         refundMethod,
-        pagadoConSaldo: tenderSystemKind === 'GIFT_CARD',
+        pagadoConSaldo: cobro.original.tenderSystemKind === 'GIFT_CARD',
       })
     ) {
       throw new BadRequestError(
@@ -121,29 +140,23 @@ export async function issuePosRefund(
         'STORE_CREDIT_ONLY',
       )
     }
-    if (aSaldo) {
-      if (!storeCreditAvailable()) throw new AppError(SIN_LLAVES, 422, true, 'STORE_CREDIT_UNAVAILABLE')
-      const motivo = cobro ? sinSaldoAFavorPorque({ ...cobro, tenderSystemKind }) : null
-      if (motivo) throw new AppError(motivo, 422, true, 'STORE_CREDIT_NOT_ALLOWED')
-      // S7: la terminal está devolviendo este cobro (o la raíz de su crédito) al banco → 409 sin escribir.
-      await rechazarSiLaTerminalEstaDevolviendo(input.venueId, { paymentId: input.paymentId })
-      // Con el cliente global y FUERA de la transacción de dinero (S1): un P2002 adentro la abortaría entera.
-      await prepararMediosDeSaldoAFavor(input.venueId)
-    }
   }
 
   const { abono, ...result } = await refundDashboardService.issueRefund({
     ...base,
+    reglasBajoCandado,
     ...(refundMethod === 'STORE_CREDIT'
       ? {
           aSaldoAFavor: {
             customerId: customerId!,
             abonar: async (tx, refundPaymentId, preparado, fila) => {
+              // Con sesión siempre hay quien abona; sin ella se cae la transacción en vez de escribir un id vacío en la libreta.
+              if (!input.staffId) throw new Error('Reembolso a saldo a favor sin la persona de la sesión')
               const venta = await tx.order.findFirst({ where: { id: fila.orderId, venueId: input.venueId }, select: { orderNumber: true } })
               return abonarSaldoAFavorEnTx(tx, {
                 preparado,
                 monto: new Prisma.Decimal(fila.montoCents).div(100),
-                staffId: input.staffId ?? '',
+                staffId: input.staffId,
                 origen: { orderId: fila.orderId, refundPaymentId },
                 folio: venta?.orderNumber ?? refundPaymentId.slice(-6),
                 tipo: 'REEMBOLSO',

@@ -130,6 +130,12 @@ export interface IssueRefundInput {
    * fuera de la transacción (`prepararMediosDeSaldoAFavor`).
    */
   aSaldoAFavor?: { customerId: string; abonar: AbonarSaldoAFavor }
+  /**
+   * S10 (I1): las reglas que pueden cambiar entre el envío y el reenvío (la marca de la terminal, «Sólo saldo a favor», las llaves).
+   * Corren con el cobro ya bloqueado y DESPUÉS de reconocer la llave: una repetición siempre contesta lo escrito, nunca un rechazo
+   * que la primera petición —todavía esperando el candado— ya no vio. Lanzar aquí no escribe nada. No entra en la huella (es función).
+   */
+  reglasBajoCandado?: (tx: Prisma.TransactionClient, cobro: CobroBloqueado) => Promise<void>
 }
 
 export interface IssueRefundResult {
@@ -153,7 +159,11 @@ export type AbonarSaldoAFavor = (
   fila: { orderId: string; montoCents: number },
 ) => Promise<AbonoDeSaldoAFavor>
 
-/** Todo código `STORE_CREDIT_` es un 4xx sin escritura: las apps lo toman como rechazo definitivo. */
+/**
+ * Todo código `STORE_CREDIT_` es un 4xx sin escritura: las apps lo toman como rechazo definitivo. Al revés también vale para el POS
+ * (S10, I2): con destino saldo a favor, `issuePosRefund` y `createExchange` sacan todo 4xx sin ese prefijo como `STORE_CREDIT_REJECTED`
+ * (`comoRechazoDeSaldo`), salvo IDEMPOTENCY_KEY_REUSED y 401/403/408/429.
+ */
 function destinoEnConflicto(): BadRequestError {
   return new BadRequestError(
     'Un reembolso a saldo a favor no admite escoger otro medio para devolver.',
@@ -1081,6 +1091,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // Same original-payment lock as every refund channel: the second caller sees the first commit.
       const replayResult = await existingAttempt(tx)
       if (replayResult) return { replayResult }
+      // S10 (I1): lo que cambia entre el envío y el reenvío, ya con el cobro bloqueado y la llave reconocida.
+      await input.reglasBajoCandado?.(tx, cobro)
       const esCreditoDeCambio = isExchangeCreditTenderKind(cobro.original.tenderSystemKind)
       if (esCreditoDeCambio && input.refundMethod)
         throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')

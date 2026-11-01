@@ -26,7 +26,9 @@ jest.mock('@/services/giftCards/giftCardLedger', () => ({
 }))
 
 import { Prisma } from '@prisma/client'
-import { issueRefund, type AbonarSaldoAFavor } from '@/services/dashboard/refund.dashboard.service'
+import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
+import { ExchangeError } from '@/services/exchanges/exchangeErrors'
+import { issueRefund, type AbonarSaldoAFavor, type IssueRefundInput } from '@/services/dashboard/refund.dashboard.service'
 import { prepararMediosDeSaldoAFavor } from '@/services/storeCredit/storeCreditTender'
 import { abonarSaldoAFavorEnTx, type SobrePreparado } from '@/services/giftCards/giftCardLedger'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -38,6 +40,7 @@ import {
   type PosRefundInput,
 } from '@/services/storeCredit/storeCreditRefund.service'
 import { getTransactionDetail, getTransactions } from '@/services/mobile/transaction.mobile.service'
+import { hayDevolucionEnTerminal, marcarDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'cmvixy2n100006kwa5fvmb7r7'
@@ -85,6 +88,17 @@ const movimiento = (over: { phone?: string | null; recipientPhone?: string; amou
 
 const resultadoDelNucleo = { refundId: REFUND, originalPaymentId: PAGO, amount: 150, remainingRefundable: 150, status: 'COMPLETED' }
 
+/** El medio del cobro como lo ve el núcleo BAJO su candado (lo único que leen las reglas de `reglasBajoCandado`). */
+let medioDelCobro: string | null = null
+/**
+ * El núcleo (`issueRefund`) corre `reglasBajoCandado` con el cobro ya bloqueado y DESPUÉS de reconocer la llave; aquí, con la base de
+ * prueba como transacción. Una repetición (`mockResolvedValue` a secas) no las corre: contesta lo escrito.
+ */
+const nucleo = (resultado: object) => async (input: IssueRefundInput) => {
+  await input.reglasBajoCandado?.(prismaMock as never, { original: { tenderSystemKind: medioDelCobro } } as never)
+  return resultado
+}
+
 const pedir = (over: Partial<PosRefundInput> = {}): PosRefundInput => ({
   venueId: VENUE,
   paymentId: PAGO,
@@ -97,6 +111,13 @@ const pedir = (over: Partial<PosRefundInput> = {}): PosRefundInput => ({
   ...over,
 })
 
+/** La marca es memoria del módulo: se deja vencida para no tocar a las pruebas que siguen. */
+function olvidarLaMarca(paymentId: string) {
+  const reloj = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 4 * 60_000)
+  expect(hayDevolucionEnTerminal(paymentId)).toBe(false)
+  reloj.mockRestore()
+}
+
 const guardadas = { code: process.env.GIFT_CARD_CODE_KEY, hmac: process.env.GIFT_CARD_HMAC_KEY }
 afterEach(() => {
   process.env.GIFT_CARD_CODE_KEY = guardadas.code
@@ -104,11 +125,12 @@ afterEach(() => {
 })
 
 beforeEach(() => {
+  medioDelCobro = null
   prismaMock.payment.findFirst.mockResolvedValue(cobro())
   prismaMock.payment.findUnique.mockResolvedValue(null)
   prismaMock.venueSettings.findUnique.mockResolvedValue(null)
   prismaMock.giftCardActivity.findMany.mockResolvedValue([movimiento()])
-  issueRefundMock.mockResolvedValue({ ...resultadoDelNucleo, abono: { giftCardId: SOBRE } })
+  issueRefundMock.mockImplementation(nucleo({ ...resultadoDelNucleo, abono: { giftCardId: SOBRE } }))
 })
 
 describe('Reembolso del POS a saldo a favor', () => {
@@ -168,18 +190,20 @@ describe('Reembolso del POS a saldo a favor', () => {
     })
   })
 
-  it('crédito de cambio con raíz en tarjeta bancaria se devuelve a saldo (lo decide el núcleo con la raíz); con raíz en tarjeta de regalo sigue bloqueado y no escribe', async () => {
+  it('crédito de cambio con raíz en tarjeta bancaria se devuelve a saldo (lo decide el núcleo con la raíz); con raíz en tarjeta de regalo sigue bloqueado, no escribe y sale como STORE_CREDIT_REJECTED (I2)', async () => {
     prismaMock.payment.findFirst.mockResolvedValue(cobro({ method: 'OTHER', tenderType: { systemKind: 'EXCHANGE_CREDIT' } }))
     await issuePosRefund(pedir())
     expect(issueRefundMock.mock.calls[0][0].aSaldoAFavor).toEqual({ customerId: HIJA, abonar: expect.any(Function) })
     ;(logAction as jest.Mock).mockClear()
 
-    const bloqueo = Object.assign(new Error('Este crédito viene de una tarjeta de regalo.'), {
-      statusCode: 422,
-      code: 'EXCHANGE_CHAIN_GIFT_CARD_PENDING',
-    })
+    const bloqueo = new ExchangeError('EXCHANGE_CHAIN_GIFT_CARD_PENDING', 'Este crédito viene de una tarjeta de regalo.', 422)
     issueRefundMock.mockRejectedValueOnce(bloqueo)
-    await expect(issuePosRefund(pedir())).rejects.toBe(bloqueo)
+    await expect(issuePosRefund(pedir())).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'STORE_CREDIT_REJECTED',
+      message: 'Este crédito viene de una tarjeta de regalo.',
+      details: { originalCode: 'EXCHANGE_CHAIN_GIFT_CARD_PENDING' },
+    })
     expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_TO_STORE_CREDIT' }))
   })
 
@@ -206,7 +230,7 @@ describe('Reembolso del POS a saldo a favor', () => {
     expect(issueRefundMock).not.toHaveBeenCalled()
   })
 
-  it('sin llaves de tarjetas responde STORE_CREDIT_UNAVAILABLE (422) y no escribe', async () => {
+  it('sin llaves de tarjetas responde STORE_CREDIT_UNAVAILABLE (422) bajo el candado, sin preparar medios ni escribir', async () => {
     delete process.env.GIFT_CARD_HMAC_KEY
 
     await expect(issuePosRefund(pedir())).rejects.toMatchObject({
@@ -215,7 +239,8 @@ describe('Reembolso del POS a saldo a favor', () => {
       message: 'Pide a Avoqado que active el saldo a favor.',
     })
     expect(prepararMock).not.toHaveBeenCalled()
-    expect(issueRefundMock).not.toHaveBeenCalled()
+    // S10 (I1): la regla corre DENTRO del núcleo, después de reconocer la llave (una repetición contestaría lo escrito).
+    expect(issueRefundMock).toHaveBeenCalledTimes(1)
     expect(opcionDeSaldoAFavor({ ...cobro(), tenderSystemKind: null })).toEqual({
       available: false,
       reason: 'Pide a Avoqado que active el saldo a favor.',
@@ -277,14 +302,16 @@ describe('Reembolso del POS a saldo a favor', () => {
 describe('«Sólo saldo a favor»', () => {
   const soloSaldo = () => prismaMock.venueSettings.findUnique.mockResolvedValue({ storeCreditOnly: true })
 
-  it('sólo saldo a favor + RETURNED_GOODS rechaza CASH con 400 y razón, sin escribir', async () => {
+  it('sólo saldo a favor + RETURNED_GOODS rechaza CASH con 400 y razón, bajo el candado y después de reconocer la llave', async () => {
     soloSaldo()
     await expect(issuePosRefund(pedir({ refundMethod: 'CASH', customerId: undefined }))).rejects.toMatchObject({
       statusCode: 400,
       code: 'STORE_CREDIT_ONLY',
       message: expect.stringContaining('Este negocio devuelve sólo como saldo a favor'),
     })
-    expect(issueRefundMock).not.toHaveBeenCalled()
+    // S10 (I1): ya no se rechaza afuera, con una lectura sin candado: la regla la corre el núcleo (`reglasBajoCandado`).
+    expect(issueRefundMock).toHaveBeenCalledTimes(1)
+    expect(issueRefundMock.mock.calls[0][0].reglasBajoCandado).toEqual(expect.any(Function))
   })
 
   it('… + OTHER sin medio (una app vieja, «como se pagó») también se rechaza', async () => {
@@ -308,6 +335,7 @@ describe('«Sólo saldo a favor»', () => {
 
   it('… + pagado con saldo deja regresar al mismo sobre', async () => {
     soloSaldo()
+    medioDelCobro = 'GIFT_CARD'
     prismaMock.payment.findFirst.mockResolvedValue(cobro(SALDO_DE_REGALO))
     await issuePosRefund(pedir({ refundMethod: undefined, customerId: undefined }))
     expect(issueRefundMock).toHaveBeenCalledTimes(1)
@@ -339,26 +367,85 @@ describe('«Sólo saldo a favor»', () => {
   })
 })
 
+describe('I2 (S10): con destino saldo a favor, todo 4xx del servicio sin prefijo sale como STORE_CREDIT_REJECTED', () => {
+  const NO_ALCANZA = 'No se puede devolver $200.00: de este cobro sólo quedan $100.00 por devolver.'
+
+  it('«No se puede devolver $X» (otra caja devolvió parte entre la pantalla y el envío): mismo 400 y mensaje, el código original en details', async () => {
+    issueRefundMock.mockRejectedValueOnce(new BadRequestError(NO_ALCANZA))
+    await expect(issuePosRefund(pedir({ amount: 20000 }))).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'STORE_CREDIT_REJECTED',
+      message: NO_ALCANZA,
+      details: { originalCode: null },
+    })
+  })
+
+  it('conserva los datos del rechazo original junto al código', async () => {
+    issueRefundMock.mockRejectedValueOnce(new AppError('Ya no está.', 409, true, 'REFUND_AUTHORITY_UNAVAILABLE', { orderId: ORDER }))
+    await expect(issuePosRefund(pedir())).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'STORE_CREDIT_REJECTED',
+      details: { originalCode: 'REFUND_AUTHORITY_UNAVAILABLE', orderId: ORDER },
+    })
+  })
+
+  it.each([
+    [
+      'IDEMPOTENCY_KEY_REUSED (la llave es de otra operación: lo pendiente no se borra)',
+      new ConflictError('Ya es de otra.', 'IDEMPOTENCY_KEY_REUSED'),
+    ],
+    ['un código STORE_CREDIT_ ya definitivo', new AppError('Tope.', 422, true, 'STORE_CREDIT_OVER_CAP')],
+    ['un 5xx (transitorio)', new AppError('Se cayó.', 503, true, 'DB_DOWN')],
+    ['un 403', new AppError('Sin permiso.', 403, true)],
+    ['un error que no es AppError', new Error('crudo')],
+  ])('no envuelve %s', async (_n, error) => {
+    issueRefundMock.mockRejectedValueOnce(error)
+    await expect(issuePosRefund(pedir())).rejects.toBe(error)
+  })
+
+  it('regresión: un reembolso que NO es a saldo a favor sale exactamente como hoy (las apps viejas no ven el código nuevo)', async () => {
+    const error = new BadRequestError(NO_ALCANZA)
+    issueRefundMock.mockRejectedValueOnce(error)
+    await expect(issuePosRefund(pedir({ refundMethod: 'CASH', customerId: undefined, reason: 'ACCIDENTAL_CHARGE' }))).rejects.toBe(error)
+  })
+})
+
+describe('minor 12: sin la cajera de la sesión no se escribe un id vacío en la libreta', () => {
+  it('el abono lanza (la transacción se cae) en vez de escribir staffId vacío', async () => {
+    await issuePosRefund(pedir({ staffId: undefined }))
+    const abonar = issueRefundMock.mock.calls[0][0].aSaldoAFavor.abonar as AbonarSaldoAFavor
+    const tx = { order: { findFirst: jest.fn().mockResolvedValue({ orderNumber: 'ORD-77' }) } } as never
+
+    await expect(
+      abonar(tx, REFUND, { venueId: VENUE, customerId: HIJA } as SobrePreparado, { orderId: ORDER, montoCents: 15000 }),
+    ).rejects.toThrow()
+    expect(abonarMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('🔴 la app muere tras el commit y reenvía OTRA cajera con la misma llave', () => {
-  it('la repetición se reconoce ANTES de las reglas (aunque se hayan apagado las llaves o prendido «sólo saldo») y responde el mismo storeCredit', async () => {
-    prismaMock.payment.findUnique.mockResolvedValue({ id: REFUND })
+  it('S10 (I1): nada de lo que cambia entre el envío y el reenvío rechaza ANTES del núcleo (llaves apagadas, «sólo saldo» prendido, la marca de la terminal): la repetición la reconoce el núcleo bajo el candado y responde el mismo storeCredit', async () => {
     prismaMock.venueSettings.findUnique.mockResolvedValue({ storeCreditOnly: true })
     delete process.env.GIFT_CARD_CODE_KEY
-    issueRefundMock.mockResolvedValue(resultadoDelNucleo) // la repetición no trae abono
+    marcarDevolucionEnTerminal(PAGO)
+    issueRefundMock.mockResolvedValue(resultadoDelNucleo) // el núcleo reconoce la llave: contesta lo escrito, sin abono y sin reglas
+    try {
+      const r = await issuePosRefund(pedir({ staffId: CAJERA_B }))
 
-    const r = await issuePosRefund(pedir({ staffId: CAJERA_B }))
-
-    expect(prepararMock).not.toHaveBeenCalled()
-    expect(issueRefundMock).toHaveBeenCalledTimes(1)
-    expect(r.refundId).toBe(REFUND)
-    expect(r.storeCredit).toEqual({
-      customerId: HIJA,
-      customerName: 'Hija Prueba',
-      amountCents: 15000,
-      newBalanceCents: 35000,
-      phoneLast4: '5678',
-      phoneMismatch: false,
-    })
+      expect(prepararMock).not.toHaveBeenCalled() // sin llaves no hay medios que preparar
+      expect(issueRefundMock).toHaveBeenCalledTimes(1)
+      expect(r.refundId).toBe(REFUND)
+      expect(r.storeCredit).toEqual({
+        customerId: HIJA,
+        customerName: 'Hija Prueba',
+        amountCents: 15000,
+        newBalanceCents: 35000,
+        phoneLast4: '5678',
+        phoneMismatch: false,
+      })
+    } finally {
+      olvidarLaMarca(PAGO)
+    }
   })
 
   describe('la huella de la llave (núcleo real)', () => {
