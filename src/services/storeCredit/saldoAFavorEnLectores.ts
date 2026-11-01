@@ -11,9 +11,8 @@
  * filtro del medio `STORE_CREDIT` (vistas de dinero: la devolución a saldo no sacó dinero de la caja ni del banco).
  */
 import { PaymentType, Prisma } from '@prisma/client'
-import { esSobreDeSaldoAFavorSql } from '../giftCards/giftCardLedger'
+import { ALIAS_SQL, esSobreDeSaldoAFavorSql } from '../giftCards/giftCardLedger'
 
-const ALIAS_SQL = /^[A-Za-z_][A-Za-z0-9_]*$/
 function aliasCitado(alias: string): string {
   if (!ALIAS_SQL.test(alias)) throw new Error(`Alias SQL inválido: ${alias}`)
   return `"${alias}"`
@@ -64,10 +63,13 @@ export function sqlNoEsDelMedioSaldoAFavor(aliasDelCobro: string): Prisma.Sql {
 
 /**
  * La parte de `netCents` (con signo) que NO salió de un sobre de saldo a favor, en proporción a lo canjeado: venta + propina, que es lo
- * que descuentan los REDEEM. Sin saldo a favor, `netCents` tal cual.
+ * que descuentan los REDEEM. Sin saldo a favor, `netCents` tal cual. Se redondea la MAGNITUD de la parte de saldo a favor y lo demás es
+ * el resto: las dos partes suman exacto la fila, y una venta y su devolución completa se cancelan al centavo (`Math.round` con signo
+ * llevaba el .5 hacia arriba en las dos y dejaba −1 centavo, con su aviso al contador).
  */
 export function sinLaParteDeSaldoAFavor(netCents: number, canjeadoCents: number, saldoAFavorCents: number): number {
   const total = Math.abs(canjeadoCents)
   if (saldoAFavorCents <= 0 || total === 0) return netCents
-  return netCents - Math.round(netCents * Math.min(1, saldoAFavorCents / total))
+  const deSaldoAFavor = Math.sign(netCents) * Math.round(Math.abs(netCents) * Math.min(1, saldoAFavorCents / total))
+  return netCents - deSaldoAFavor
 }

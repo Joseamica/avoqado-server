@@ -135,7 +135,10 @@ export interface IsrProvisionalResult {
    */
   tarjetasCobradasNoIncluidasCents: number
   pagadoConSaldoIncluidoCents: number
-  /** El aviso para el contador; sólo cuando alguno de los dos importes no es 0. */
+  /**
+   * El aviso para el contador; sólo cuando alguno de los dos importes no es 0. En GENERAL lleva además, al final, el de las devoluciones
+   * a saldo a favor del tramo (`avisoDeSaldoAFavor`, S8b): el mismo texto de avisos, sin campo nuevo.
+   */
   avisoTarjetasDeRegalo?: string
 }
 
@@ -157,6 +160,18 @@ function avisoDeTarjetas(regime: IsrRegime, cobradasNoIncluidasCents: number, pa
       ? `sí resta ${pesosMx(-pagadoConSaldoIncluidoCents)} de devoluciones de lo pagado con saldo de tarjetas`
       : `sí incluye ${pesosMx(pagadoConSaldoIncluidoCents)} pagado con saldo de tarjetas`
   return `El ISR estimado ${cargas} y ${saldo}; tu contador debe ajustarlo con el reporte de tarjetas.`
+}
+
+/**
+ * Saldo a favor (S8b ronda 1; ruling del controlador e investigación docs/audit/2026-10-30-saldo-a-favor/isr-devolucion-a-saldo.md): la
+ * devolución a saldo resta en su mes (diseño de hoy, correcto para persona moral y RESICO: el SAT resta los CFDI de egreso en su
+ * prellenado). La persona física con actividad empresarial a flujo de efectivo (LISR 105 fr. I, «efectivamente erogadas») podría no
+ * restarla hasta que la clienta gaste el saldo: se le avisa al contador. De los dos regímenes de `IsrRegime`, ése es GENERAL; RESICO no
+ * lleva el aviso. `undefined` sin devoluciones a saldo en el tramo.
+ */
+function avisoDeSaldoAFavor(regime: IsrRegime, devueltoASaldoSinIvaCents: number): string | undefined {
+  if (regime !== 'GENERAL' || devueltoASaldoSinIvaCents <= 0) return undefined
+  return `El ISR estimado resta ${pesosMx(devueltoASaldoSinIvaCents)} de devoluciones que se dieron como saldo a favor en lo que va del ejercicio; si tributas por flujo de efectivo, tu contador puede restarlas hasta que tu cliente gaste ese saldo.`
 }
 
 /**
@@ -216,7 +231,7 @@ async function ingresosPorMes(
   quien: { venueName: string },
   /** ⭐ RESICO usa las tarjetas sólo del mes pedido: los meses anteriores no las leen (quedan en 0). GENERAL las usa todas. */
   tarjetasSoloDelMes: boolean,
-): Promise<Array<{ netCents: number; sales: number } & TarjetasEnElIsr>> {
+): Promise<Array<MesDelIsr>> {
   const { year, month, to } = monthRange(period)
   return conFotoDeReporte(
     {
@@ -227,15 +242,19 @@ async function ingresosPorMes(
       mensajeDeTiempo: MENSAJE_MES_NO_CALCULADO,
     },
     async tx => {
-      const meses: Array<{ netCents: number; sales: number } & TarjetasEnElIsr> = []
+      const meses: MesDelIsr[] = []
       for (let m = 1; m <= month; m++) {
         const rango = monthRange(`${year}-${String(m).padStart(2, '0')}`)
         let netCents = 0
         let sales = 0
         let cargasCents = 0
         let pagadoConSaldoSinIvaCents = 0
+        let devueltoASaldoSinIvaCents = 0
         for (const v of venues) {
-          const r = await estadoDeResultadosEnFoto(tx, v, { from: rango.from, to: rango.to }, LIMITES_DEL_REPORTE)
+          // S8b: lo que la base restó por devoluciones a saldo a favor, en la MISMA lectura (para el aviso de GENERAL).
+          const r = await estadoDeResultadosEnFoto(tx, v, { from: rango.from, to: rango.to }, LIMITES_DEL_REPORTE, cents => {
+            devueltoASaldoSinIvaCents += cents
+          })
           // Sin el campo (Ruling 4b-R9) la base gravable, que con todo al 16 % es la misma cifra.
           netCents += r.fiscalRevenue.ingresosSinIvaCents ?? r.fiscalRevenue.taxableBaseCents
           sales += r.metrics.salesCount
@@ -245,12 +264,13 @@ async function ingresosPorMes(
           cargasCents += t.cargasCents
           pagadoConSaldoSinIvaCents += t.pagadoConSaldoSinIvaCents
         }
-        meses.push({ netCents, sales, cargasCents, pagadoConSaldoSinIvaCents })
+        meses.push({ netCents, sales, cargasCents, pagadoConSaldoSinIvaCents, devueltoASaldoSinIvaCents })
       }
       return meses
     },
   )
 }
+type MesDelIsr = { netCents: number; sales: number; devueltoASaldoSinIvaCents: number } & TarjetasEnElIsr
 const sumaDeIngresos = (meses: Array<{ netCents: number }>) => meses.reduce((s, x) => s + x.netCents, 0)
 
 /** Σ base deducible de gastos PAGADOS (cash-basis) del RFC en [year-01, period]. */
@@ -358,7 +378,15 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
   const tramo = regime === 'RESICO' ? [mes] : meses
   base.tarjetasCobradasNoIncluidasCents = tramo.reduce((s, x) => s + x.cargasCents, 0)
   base.pagadoConSaldoIncluidoCents = tramo.reduce((s, x) => s + x.pagadoConSaldoSinIvaCents, 0)
-  const aviso = avisoDeTarjetas(regime, base.tarjetasCobradasNoIncluidasCents, base.pagadoConSaldoIncluidoCents)
+  const aviso = [
+    avisoDeTarjetas(regime, base.tarjetasCobradasNoIncluidasCents, base.pagadoConSaldoIncluidoCents),
+    avisoDeSaldoAFavor(
+      regime,
+      tramo.reduce((s, x) => s + x.devueltoASaldoSinIvaCents, 0),
+    ),
+  ]
+    .filter(Boolean)
+    .join(' ')
   if (aviso) base.avisoTarjetasDeRegalo = aviso
 
   if (regime === 'RESICO') {

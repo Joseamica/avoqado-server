@@ -138,7 +138,10 @@ export interface GiftCardFigures {
    * saldo a favor menos lo que regresó a él. Es VENTA normal (método OTHER), nunca «pagado con saldo» de tarjetas vendidas.
    */
   storeCreditNet: number
-  /** Filas que aportan a `storeCreditNet`. */
+  /**
+   * Cuántas filas cuentan en OTHER: cada devolución a saldo y cada fila con el medio de tarjetas cuya parte MAYOR es de saldo a favor.
+   * Un cobro mixto cuenta UNA sola vez, en su parte mayor (empate: la tarjeta vendida, `balanceCount`); los importes sí se reparten.
+   */
   storeCreditCount: number
 }
 
@@ -794,7 +797,8 @@ export async function computeGiftCardFigures(
     >`
       SELECT
         COALESCE(SUM(p.amount + p."tipAmount" - sf.monto) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND'), 0)::text AS amount,
-        (COUNT(*) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND' AND p.amount + p."tipAmount" > sf.monto))::int AS count,
+        (COUNT(*) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND' AND p.amount + p."tipAmount" > sf.monto
+          AND p.amount + p."tipAmount" - sf.monto >= sf.monto))::int AS count,
         COALESCE(SUM(ROUND(p."tipAmount" * (p.amount + p."tipAmount" - sf.monto) / NULLIF(p.amount + p."tipAmount", 0), 2))
           FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND'), 0)::text AS tips,
         COALESCE(SUM(ABS(p.amount + p."tipAmount") - sf.monto) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type = 'REFUND'), 0)::text AS reversals,
@@ -802,7 +806,7 @@ export async function computeGiftCardFigures(
           WHEN t."systemKind" = 'STORE_CREDIT' THEN p.amount + p."tipAmount"
           WHEN p.type = 'REFUND' THEN -sf.monto
           ELSE sf.monto END), 0)::text AS "storeCreditNet",
-        (COUNT(*) FILTER (WHERE t."systemKind" = 'STORE_CREDIT' OR sf.monto > 0))::int AS "storeCreditCount"
+        (COUNT(*) FILTER (WHERE t."systemKind" = 'STORE_CREDIT' OR sf.monto > ABS(p.amount + p."tipAmount") - sf.monto))::int AS "storeCreditCount"
       FROM "Payment" p
       JOIN "VenueTenderType" t ON t."venueId" = p."venueId" AND t.id = p."tenderTypeId"
       CROSS JOIN LATERAL (SELECT ${montoSaldoAFavorSql('p')} AS monto) sf

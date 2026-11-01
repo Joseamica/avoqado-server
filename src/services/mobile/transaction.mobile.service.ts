@@ -19,6 +19,7 @@ import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/termina
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { exchangeDetailFields } from '../exchanges/exchangeDetail'
 import { opcionDeSaldoAFavor, saldosAFavorDeReembolsos } from '../storeCredit/storeCreditRefund.service'
+import { esDevolucionASaldoAFavor, esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -127,7 +128,7 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
   // Saldo a favor (spec §5.5, Codex plan r1 h9): la reimpresión del REFUND dice a quién se abonó. Una consulta, acotada por la página.
   const saldos = await saldosAFavorDeReembolsos(
     venueId,
-    payments.filter(p => p.tenderType?.systemKind === 'STORE_CREDIT').map(p => p.id),
+    payments.filter(p => esMedioDeSaldoAFavor(p.tenderType?.systemKind)).map(p => p.id),
   )
 
   return {
@@ -253,10 +254,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
 
   const { fields, itemExtras } = await exchangeDetailFields(prisma, venueId, paymentId)
   const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
-  const saldo =
-    payment.type === 'REFUND' && cobroParaDevolver.tenderSystemKind === 'STORE_CREDIT'
-      ? (await saldosAFavorDeReembolsos(venueId, [payment.id])).get(payment.id)
-      : undefined
+  const saldo = esDevolucionASaldoAFavor(payment) ? (await saldosAFavorDeReembolsos(venueId, [payment.id])).get(payment.id) : undefined
 
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
   // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).

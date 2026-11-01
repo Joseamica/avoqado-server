@@ -885,7 +885,8 @@ export async function desactivarSobresPendientesDeCuentaEnTx(
 
 // ─── Saldo a favor (spec 2026-10-30-saldo-a-favor §5.2; tarea S2, la revisa TARJETAS) ────────────────────────────────────────
 
-const ALIAS_SQL = /^[A-Za-z_][A-Za-z0-9_]*$/
+/** Un alias de SQL crudo: sólo letras, dígitos y guion bajo. Lo comparten los fragmentos del saldo a favor (también los de S8b). */
+export const ALIAS_SQL = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
  * 🔴 EL predicado del saldo a favor: un sobre lo es si su ACTIVATE trae `refundPaymentId` (nació de una devolución). `customerId` NO

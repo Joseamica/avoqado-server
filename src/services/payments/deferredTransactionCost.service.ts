@@ -28,6 +28,7 @@ import { paymentIsAvoqadoSettled, TENDER_SEMANTICS_SELECT } from '../shared/tend
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
 import { esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
+import { sqlNoEsDelMedioSaldoAFavor } from '../storeCredit/saldoAFavorEnLectores'
 
 export const COSTO_PENDIENTE_PLAZO_MS = 2 * 60 * 60 * 1000
 /** Codex R4 (P3): presupuesto de reembolsos por ejecución, configurable (las pruebas cortan en la 2ª página con 10 por página). */
@@ -625,7 +626,7 @@ function sqlReembolsosConTrabajoPendiente(
       AND r."type" = 'REFUND'
       AND r."processorData"->>'originalPaymentId' = ${originalPaymentId}
       AND ${sqlPaymentIsNotExchangeCredit('r')}
-      AND NOT EXISTS (SELECT 1 FROM "VenueTenderType" sc_t WHERE sc_t."venueId" = r."venueId" AND sc_t.id = r."tenderTypeId" AND sc_t."systemKind" = 'STORE_CREDIT')
+      AND ${sqlNoEsDelMedioSaldoAFavor('r')}
       AND (
         tc."id" IS NULL
         OR vt."id" IS NULL

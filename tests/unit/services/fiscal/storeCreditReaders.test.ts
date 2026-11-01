@@ -22,7 +22,7 @@ jest.mock('@/services/fiscal/librosDeOrdenes', () => ({
 import { prismaMock } from '@tests/__helpers__/setup'
 import { recorrerLibros } from '@/services/fiscal/librosDeOrdenes'
 import { tarjetasDeRegaloEnFoto } from '@/services/fiscal/tarjetasDeRegaloEnElIsr'
-import { LIMITES_DEL_REPORTE } from '@/services/dashboard/accounting.dashboard.service'
+import { LIMITES_DEL_REPORTE, estadoDeResultadosEnFoto } from '@/services/dashboard/accounting.dashboard.service'
 import { computeGiftCardFigures } from '@/services/dashboard/sales-summary.dashboard.service'
 import { listPendingAccountingReview } from '@/services/giftCards/giftCardReports.service'
 import { WHERE_DEVOLUCION_A_SALDO_A_FAVOR, WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE } from '@/services/giftCards/giftCardMarks'
@@ -171,6 +171,19 @@ describe('ISR · tarjetas de regalo en el estimado (tarjetasDeRegaloEnFoto)', ()
     expect(r).toEqual({ cargasCents: 0, pagadoConSaldoSinIvaCents: 0 })
   })
 
+  it('🔴 una venta mixta 50/50 y su devolución completa en el mismo periodo dan 0 (redondeo simétrico: sin aviso de un centavo)', async () => {
+    // $200 = $100 de saldo a favor + $100 de tarjeta vendida; sin IVA 17,241 (impar), así que la mitad es 8,620.5. Redondear con signo
+    // dejaba la venta en 8,620 y su devolución en −8,621: «sí resta $0.01 de devoluciones…» sin que nada hubiera pasado.
+    const r = await fotoDelIsr(
+      [
+        { id: 'p5', type: 'REGULAR', amountCents: 20000, netCents: 17241 },
+        { id: 'r5', type: 'REFUND', amountCents: -20000, netCents: -17241 },
+      ],
+      { p5: 10000, r5: 10000 },
+    ).correr()
+    expect(r).toEqual({ cargasCents: 0, pagadoConSaldoSinIvaCents: 0 })
+  })
+
   it('con propina, la parte de saldo a favor se mide sobre lo canjeado (venta + propina)', async () => {
     // $500 + $50 de propina canjeados: $220 del sobre de saldo a favor = 40 % ⇒ queda el 60 % de la venta sin IVA.
     const r = await fotoDelIsr([{ ...COBRO_MIXTO, tipCents: 5000 }], { p1: 22000 }).correr()
@@ -200,6 +213,50 @@ describe('ISR · tarjetas de regalo en el estimado (tarjetasDeRegaloEnFoto)', ()
     expect(cien.consultas).toEqual(diez.consultas)
     expect(r10.pagadoConSaldoSinIvaCents).toBe(10 * (8621 - Math.round(8621 / 2)))
     expect(r100.pagadoConSaldoSinIvaCents).toBe(100 * (8621 - Math.round(8621 / 2)))
+  })
+})
+
+// ── Estado de resultados: lo que el ISR resta por devoluciones a saldo (para su aviso) ───────────────────────────────────
+
+describe('estado de resultados · el gancho de devoluciones a saldo a favor (aviso del ISR)', () => {
+  const T0 = new Date('2026-10-15T18:00:00.000Z')
+  const parte = (netCents: number) => ({ netCents, taxCents: 0, taxByRate: {}, porTratamiento: {}, aproximada: false })
+  const devolucion = (id: string, systemKind: string | null, originalMethod: string, createdAt = T0) => ({
+    id,
+    orderId: 'o1',
+    createdAt,
+    type: 'REFUND',
+    amountCents: -20000,
+    tipCents: 0,
+    method: 'OTHER',
+    incluirEnContabilidad: undefined,
+    ...(systemKind ? { tenderSystemKind: systemKind } : {}),
+    processorData: { originalMethod },
+  })
+
+  it('🔴 avisa la parte sin IVA de cada devolución a saldo a favor del periodo y en el alcance fiscal, con la MISMA regla única; nada más', async () => {
+    const tx = {
+      fiscalEmisor: { findFirst: jest.fn(async () => ({ includeCashInAccounting: false })) },
+      $queryRaw: jest.fn(async () => [{ orderId: 'o1' }]),
+    }
+    mRecorrer.mockImplementation(async (_tx: unknown, _p: unknown, alMovimiento: (m: unknown, parte: unknown) => void) => {
+      alMovimiento(devolucion('a-saldo-tarjeta', 'STORE_CREDIT', 'CREDIT_CARD'), parte(-17241)) // ✓ en el alcance
+      alMovimiento(devolucion('a-saldo-efectivo', 'STORE_CREDIT', 'CASH'), parte(-8621)) // el efectivo está fuera de los libros
+      alMovimiento(devolucion('al-saldo-de-regalo', 'GIFT_CARD', 'OTHER'), parte(-4310)) // no es saldo a favor
+      alMovimiento(devolucion('de-otro-mes', 'STORE_CREDIT', 'CREDIT_CARD', new Date('2026-09-15T18:00:00.000Z')), parte(-999))
+      return { consultas: 1, filas: 4 }
+    })
+    const alDevolverASaldo = jest.fn()
+    const r = await estadoDeResultadosEnFoto(
+      tx as unknown as Prisma.TransactionClient,
+      { id: 'v1', name: 'IQ', timezone: 'America/Mexico_City' },
+      { from: '2026-10-01', to: '2026-10-31' },
+      LIMITES_DEL_REPORTE,
+      alDevolverASaldo,
+    )
+    expect(alDevolverASaldo.mock.calls).toEqual([[17241]])
+    // La base fiscal sí la restó (S3): el aviso dice exactamente lo que la base restó.
+    expect(r.fiscalRevenue.ingresosSinIvaCents).toBe(-17241 - 4310)
   })
 })
 
@@ -243,21 +300,54 @@ describe('resumen de ventas · computeGiftCardFigures', () => {
     expect(sql).toMatch(/t\."systemKind" IN \('GIFT_CARD', 'STORE_CREDIT'\)/)
   })
 
-  it('🔴 el número de consultas del resumen de ventas no crece con el número de movimientos (10 y 100)', async () => {
-    // Agregados en la base: 10 o 100 cobros con saldo son la MISMA fila de sumas y las mismas tres consultas.
-    const leidas = () =>
-      prismaMock.$queryRaw.mock.calls.length +
-      prismaMock.payment.findMany.mock.calls.length +
-      prismaMock.giftCardActivity.findMany.mock.calls.length
-    responder({ amount: '1000', count: 10, tips: '0', reversals: '0', storeCreditNet: '500', storeCreditCount: 10 })
-    await computeGiftCardFigures('v1', INICIO, FIN)
-    const con10 = leidas()
-    jest.clearAllMocks()
-    responder({ amount: '10000', count: 100, tips: '0', reversals: '0', storeCreditNet: '5000', storeCreditCount: 100 })
-    const f = await computeGiftCardFigures('v1', INICIO, FIN)
-    expect(leidas()).toBe(con10)
-    expect(con10).toBe(3)
-    expect(f).toMatchObject({ balancePaid: 10000, storeCreditNet: 5000, storeCreditCount: 100 })
+  describe('consultas', () => {
+    afterEach(() => {
+      // Lo que esta prueba sembró en el cliente global no se queda para las siguientes.
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.payment.findMany.mockReset().mockResolvedValue([])
+      prismaMock.giftCardActivity.findMany.mockReset().mockResolvedValue([])
+    })
+
+    /** Todas las llamadas a todo el cliente (cada modelo y cada `$queryRaw`): una lectura por fila se notaría aquí. */
+    const consultasHechas = () => {
+      let n = 0
+      for (const v of Object.values(prismaMock as Record<string, unknown>)) {
+        if (jest.isMockFunction(v)) n += v.mock.calls.length
+        else if (v && typeof v === 'object')
+          for (const f of Object.values(v as Record<string, unknown>)) if (jest.isMockFunction(f)) n += f.mock.calls.length
+      }
+      return n
+    }
+
+    /**
+     * Una base falsa con N cobros con saldo: toda lectura por fila ve N filas (la lista de cobros, sus canjes, la clasificación por
+     * fila), así que un N+1 haría N consultas más. Los tres agregados contestan una sola fila, como Postgres.
+     */
+    const sembrar = (n: number) => {
+      const cobros = Array.from({ length: n }, (_, i) => ({ id: `p${i}`, type: 'REGULAR', amount: D(100), tipAmount: D(0) }))
+      prismaMock.payment.findMany.mockResolvedValue(cobros)
+      prismaMock.giftCardActivity.findMany.mockResolvedValue(cobros.map(c => ({ paymentId: c.id, giftCardId: 'g', amount: D(50) })))
+      prismaMock.$queryRaw.mockImplementation(async (...call: unknown[]) => {
+        const sql = sqlDe(call)
+        if (sql.includes('"storeCreditNet"'))
+          return [{ amount: String(50 * n), count: n, tips: '0', reversals: '0', storeCreditNet: String(50 * n), storeCreditCount: 0 }]
+        if (sql.includes('FROM "OrderItem" oi')) return [{ amount: '0', count: 0 }]
+        if (sql.includes('SUM(ABS(p.amount))')) return [{ amount: '0' }]
+        return cobros.map(c => ({ id: c.id, cents: 5000 }))
+      })
+    }
+
+    it('🔴 el número de consultas del resumen de ventas no crece con el número de movimientos (10 y 100), contado en todo el cliente', async () => {
+      sembrar(10)
+      await computeGiftCardFigures('v1', INICIO, FIN)
+      const con10 = consultasHechas()
+      jest.clearAllMocks()
+      sembrar(100)
+      const f = await computeGiftCardFigures('v1', INICIO, FIN)
+      expect(consultasHechas()).toBe(con10)
+      expect(con10).toBe(3)
+      expect(f).toMatchObject({ balancePaid: 5000, storeCreditNet: 5000 })
+    })
   })
 })
 

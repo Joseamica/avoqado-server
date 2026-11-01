@@ -7,7 +7,7 @@ import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { sumarDesglose, type DesgloseDeCobro, type DesglosePorTratamiento } from '../fiscal/ivaMath'
 import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
-import { paymentInFiscalScope, metodoParaAlcanceFiscal } from '../fiscal/fiscalScope'
+import { esDevolucionASaldoAFavor, paymentInFiscalScope, metodoParaAlcanceFiscal } from '../fiscal/fiscalScope'
 import { computePeriodCogsCents } from '../fiscal/cogs.service'
 import { MAX_ORDENES_POR_REPORTE, recorrerLibros, sqlDeOrdenesDelPeriodo, type MovimientoLeido } from '../fiscal/librosDeOrdenes'
 import type { ParteDelLibro } from '../fiscal/libroDeLaOrden'
@@ -232,6 +232,12 @@ export async function estadoDeResultadosEnFoto(
   venue: { id: string; name: string; timezone: string | null },
   filters: IncomeStatementFilters,
   limites: LimitesDelReporte = LIMITES_DEL_REPORTE,
+  /**
+   * Saldo a favor (S8b, ronda 1): quien lo pide (el ISR, para su aviso) recibe la parte sin IVA que la base FISCAL restó por cada
+   * devolución a saldo a favor del periodo, con la regla única `esDevolucionASaldoAFavor`. La misma lectura, sin consultas nuevas; la
+   * respuesta no cambia.
+   */
+  alDevolverASaldoAFavor?: (sinIvaCents: number) => void,
 ): Promise<IncomeStatement> {
   const venueId = venue.id
   const timezone = venue.timezone || 'America/Mexico_City'
@@ -303,6 +309,7 @@ export async function estadoDeResultadosEnFoto(
         fis.refunds += magnitudeCents
         sumar(fis, parte, 1)
         if (cuentaComoAproximado) fis.aproximados += 1
+        if (alDevolverASaldoAFavor && esDevolucionASaldoAFavor(m)) alDevolverASaldoAFavor(-parte.netCents)
       }
       refundCount += 1
       return

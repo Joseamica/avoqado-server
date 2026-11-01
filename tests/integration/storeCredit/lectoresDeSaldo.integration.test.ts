@@ -165,8 +165,11 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
         net.set(m.id, parte.netCents)
       }),
     )
-    const sinSaldo = (id: string, canjeadoCents: number, saldoCents: number) =>
-      net.get(id)! - Math.round(net.get(id)! * (saldoCents / canjeadoCents))
+    // Se redondea la MAGNITUD (una venta y su devolución completa se cancelan exacto).
+    const sinSaldo = (id: string, canjeadoCents: number, saldoCents: number) => {
+      const n = net.get(id)!
+      return n - Math.sign(n) * Math.round(Math.abs(n) * (saldoCents / canjeadoCents))
+    }
     expect(r.cargasCents).toBe(0)
     expect(r.pagadoConSaldoSinIvaCents).toBe(
       sinSaldo(pagoMixto.id, 50000, 20000) + sinSaldo(devolucionParcialId, 10000, parcialASaldoCents),
@@ -177,6 +180,9 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
     const inicio = new Date(Date.now() - 86_400_000)
     const fin = new Date(Date.now() + 86_400_000)
     const f = await computeGiftCardFigures(s.venueId, inicio, fin)
+    // Cada cobro cuenta UNA vez, en su parte mayor (empate: la tarjeta vendida). El cobro mixto ($300 de tarjeta, $200 de saldo a
+    // favor) cuenta en GIFT_CARD y no en OTHER; la devolución parcial cuenta en OTHER sólo si regresó mayormente al sobre de saldo.
+    const parcialEnOtro = 2 * parcialASaldoCents > 10000 ? 1 : 0
     expect(f).toMatchObject({
       balancePaid: 300,
       balanceCount: 1,
@@ -184,7 +190,7 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
       balanceReversals: (10000 - parcialASaldoCents) / 100,
       // −$200 de la devolución a saldo, +$200 del canje, − lo que regresó al sobre en la devolución parcial.
       storeCreditNet: -parcialASaldoCents / 100,
-      storeCreditCount: 2 + (parcialASaldoCents > 0 ? 1 : 0),
+      storeCreditCount: 1 + parcialEnOtro,
     })
 
     const r = await getSalesSummary(s.venueId, {
@@ -199,8 +205,13 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
     expect(r.byPaymentMethod?.find(m => m.method === 'OTHER')).toBeUndefined()
     // Ventas: las dos patas con su método, para que la barra cuadre con las ventas del periodo.
     const otro = r.salesByPaymentMethod?.find(m => m.method === 'OTHER')
-    expect(otro).toMatchObject({ amount: -parcialASaldoCents / 100, count: 2 + (parcialASaldoCents > 0 ? 1 : 0) })
-    expect(r.salesByPaymentMethod?.find(m => m.method === 'GIFT_CARD')?.amount).toBe(r.summary.paidWithGiftCardBalance)
+    expect(otro).toMatchObject({ amount: -parcialASaldoCents / 100, count: 1 + parcialEnOtro })
+    expect(r.salesByPaymentMethod?.find(m => m.method === 'GIFT_CARD')).toMatchObject({
+      amount: r.summary.paidWithGiftCardBalance,
+      count: 1,
+    })
+    // La barra no infla los cobros: la venta en efectivo, el cobro mixto, la devolución a saldo y (si aplica) la parcial, una vez cada uno.
+    expect(r.salesByPaymentMethod?.reduce((n, m) => n + m.count, 0)).toBe(3 + parcialEnOtro)
   })
 
   it('🔴 lista del contador: la devolución a saldo es un reverso de saldo, y la lista y el autoposteo dicen lo mismo', async () => {
