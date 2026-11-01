@@ -6,8 +6,10 @@ import { assertOrderingPlan } from '@/middlewares/requirePublicVenueFeatureStric
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
+import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
+import { findCardMerchant } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
@@ -21,8 +23,12 @@ function fail(res: Response, error: any, fallback: string) {
   // Nombre y pila SÓLO al log del servidor (para diagnosticar un 5xx en producción); al comensal, el texto genérico.
   if (status >= 500) logger.error('[OnlineOrdering] error público', { error: error?.message, name: error?.name, stack: error?.stack })
   // Un 5xx no expone su código interno (p. ej. el de Prisma). Excepción explícita: «no pudimos verificar el plan» (503 nuestro,
-  // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar.
-  const expose = status < 500 || (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE')
+  // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar. Igual «no pudimos abrir la página de
+  // pago» (502 nuestro, fase 2): el reintento con la misma llave recupera la sesión.
+  const expose =
+    status < 500 ||
+    (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE') ||
+    (status === 502 && error?.code === 'CARD_PROVIDER_UNAVAILABLE')
   return res.status(status).json({
     success: false,
     code: expose ? error?.code : undefined,
@@ -58,6 +64,13 @@ export async function getInfo(req: Request, res: Response) {
         },
       }),
     ])
+    // Fase 2: la tienda sólo anuncia tarjeta si el switch está prendido Y el comercio puede cobrar hoy.
+    const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, venue.id)) !== null
+    // Sin ningún medio de pago vivo (pagar al recoger apagado y la tarjeta ya no cobra) la tienda no puede recibir pedidos: no se
+    // anuncia OPEN. Se calcula aquí y no en `getAcceptingStatus` (esa lectura está en el camino caliente de crear pedidos).
+    const noPaymentMode = state.status === 'OPEN' && !state.config.acceptsPayAtPickup && !cardOnline
+    const status = noPaymentMode ? 'PAUSED' : state.status
+    const reason = noPaymentMode ? 'NO_PAYMENT_MODE' : state.reason
     return res.json({
       success: true,
       data: {
@@ -70,8 +83,8 @@ export async function getInfo(req: Request, res: Response) {
           // Tienda rediseñada (aditivo): la misma `Venue.heroImageUrl` de la página de reservas; sin foto, null.
           heroImageUrl: row?.heroImageUrl ?? null,
         },
-        status: state.status,
-        reason: state.reason,
+        status,
+        reason,
         // S2: la pausa de 15/30/60 min de la bandeja y la del gerente comparten `reason`; la hora sólo se anuncia en la primera
         // (la del gerente no termina sola) y mientras siga vigente. La tienda dice «Volvemos a recibir pedidos a las HH:MM».
         pausedUntil:
@@ -83,7 +96,7 @@ export async function getInfo(req: Request, res: Response) {
             ? state.config.pausedUntil
             : null,
         hours: state.config.hours,
-        paymentModes: { payAtPickup: state.config.acceptsPayAtPickup },
+        paymentModes: { payAtPickup: state.config.acceptsPayAtPickup, cardOnline },
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
         acceptTimeoutMinutes: ACCEPT_TIMEOUT_MINUTES,
@@ -132,12 +145,33 @@ export async function postOrder(req: Request, res: Response) {
 
     const body = req.body as {
       items: any[]
-      paymentMode: 'PAY_AT_PICKUP'
+      paymentMode: 'PAY_AT_PICKUP' | 'CARD_ONLINE'
       expectedTotal: string
       customer: { name: string; phone: string; email?: string }
       note?: string
       whatsappConsent?: boolean
     }
+    // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
+    const opts = { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) }
+
+    // Fase 2: con tarjeta no se pide OTP (la tarjeta apartada respalda el pedido): borrador + página de pago de Stripe.
+    if (body.paymentMode === 'CARD_ONLINE') {
+      const draft = await createCardOnlineDraft(
+        {
+          venueId: venue.id,
+          venueSlug: venue.slug,
+          idempotencyKey: key,
+          items: body.items,
+          expectedTotal: body.expectedTotal,
+          customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+          note: body.note ?? null,
+          whatsappConsent: body.whatsappConsent === true,
+        },
+        opts,
+      )
+      return res.status(draft.replay ? 200 : 201).json({ success: true, data: draft })
+    }
+
     // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. El servicio
     // exige que el teléfono del pedido sea ése; sin sesión responde 401 PHONE_VERIFICATION_REQUIRED.
     const auth = (req as any).customerAuth as CustomerAuthContext | null
@@ -147,7 +181,7 @@ export async function postOrder(req: Request, res: Response) {
         venueId: venue.id,
         idempotencyKey: key,
         items: body.items,
-        paymentMode: body.paymentMode,
+        paymentMode: 'PAY_AT_PICKUP',
         expectedTotal: body.expectedTotal,
         customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
         customerId: auth?.customerId ?? null,
@@ -155,8 +189,7 @@ export async function postOrder(req: Request, res: Response) {
         note: body.note ?? null,
         whatsappConsent: body.whatsappConsent === true,
       },
-      // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
-      { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) },
+      opts,
     )
     return res.status(result.replay ? 200 : 201).json({ success: true, data: result })
   } catch (error) {
@@ -201,6 +234,13 @@ export async function postCancel(req: Request, res: Response) {
     }
     if (r.outcome === 'NOT_FOUND') {
       return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    }
+    if (r.outcome === 'CONFIRMING_PAYMENT') {
+      return res.status(409).json({
+        success: false,
+        code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
+        error: 'Confirmando el pago con el banco. Espera unos segundos.',
+      })
     }
     // Un desenlace que cancelar no debería dar (p. ej. PAYMENT_REQUIRED) es un 500, nunca «no encontramos ese pedido».
     throw new Error(`Desenlace inesperado al cancelar un pedido en línea: ${r.outcome}`)

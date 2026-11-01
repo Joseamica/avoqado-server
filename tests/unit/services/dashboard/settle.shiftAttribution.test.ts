@@ -187,6 +187,8 @@ describe('settleOrder — turno y señal atómica', () => {
       const staged = { payments: [...committed.payments], audits: [...committed.audits] }
       const tx = {
         $queryRaw: jest.fn().mockResolvedValue([]),
+        // Pedidos en línea fase 2 (T8): la guarda de tarjeta lee el pedido en línea de la cuenta; aquí no hay ninguno.
+        onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
         order: {
           findFirst: jest.fn().mockResolvedValue({
             id: 'order-1',
@@ -246,6 +248,8 @@ describe('settleOrder — turno y señal atómica', () => {
       const staged = { payments: [...committed.payments], audits: [...committed.audits] }
       const tx = {
         $queryRaw: jest.fn().mockResolvedValue([]),
+        // Pedidos en línea fase 2 (T8): la guarda de tarjeta lee el pedido en línea de la cuenta; aquí no hay ninguno.
+        onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
         order: {
           findFirst: jest.fn().mockResolvedValue({
             id: 'order-1',
@@ -370,6 +374,7 @@ describe('settleCustomerBalance — un claim por cada Payment ganador', () => {
         if (name === 'single' && orderId === 'order-b') singleHasB.resolve()
         return []
       }),
+      onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
       order: {
         findFirst: jest.fn(async ({ where }: any) => fresh(where.id)),
         updateMany: jest.fn(async ({ where }: any) => {

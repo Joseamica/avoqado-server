@@ -116,6 +116,18 @@ const INVENTORY: Record<string, InventoryDecision> = {
     lane: 'demoSeed',
     reason: 'synthetic onboarding data',
   },
+  // Pedidos en línea fase 2 (T6): el cobro de la tarjeta apartada lo hace Stripe al aceptar, sin cajero (como las ligas de pago).
+  'src/services/online-ordering/card/capture.service.ts#finishCapture#create': {
+    decision: 'exclude',
+    lane: 'onlineOrderCardCapture',
+    reason: 'online processor capture without cashier',
+  },
+  // r2 R1: la liberación encuentra el cobro que el negocio hizo a mano en su Stripe y lo registra (sin cajero, como la captura).
+  'src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease#create': {
+    decision: 'exclude',
+    lane: 'onlineOrderCardCapture',
+    reason: 'online processor capture without cashier',
+  },
   'src/services/demo/negociosDemo.service.ts#seedHistory#create': {
     decision: 'exclude',
     lane: 'negociosDemo',

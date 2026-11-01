@@ -41,6 +41,7 @@ import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderPro
 import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
 import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
+import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -2287,6 +2288,8 @@ export async function updateOrderDetailsInTransaction(
   opciones: OpcionesDeDetalleDeCuenta = {},
 ) {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // Pedidos en línea fase 2: los comensales mueven los cargos automáticos; un pedido de tarjeta sin cobrar tiene un total fijo.
+  if (input.covers != null) await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
@@ -2404,6 +2407,8 @@ export async function applyOrderDiscountInTransaction(
   // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
   // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true, originSystem: true },
@@ -2513,6 +2518,8 @@ export async function removeOrderDiscountInTransaction(
   // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
   // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
@@ -2632,6 +2639,8 @@ export async function splitOrderItemsInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -2826,6 +2835,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -3011,6 +3022,9 @@ export async function mergeOrdersInTransaction(
     }
     throw error
   }
+  // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
@@ -3916,6 +3930,9 @@ export async function registrarAbonoEnTx(
     await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey, soloCobroCompletado: true })
   }
   if (ctx.rechazoDelPersonal) throw ctx.rechazoDelPersonal
+  // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se cobra en caja (efectivo, registro manual, saldo, ni la cola
+  // sin red: su 409 la deja REJECTED). Bajo el candado de la Order, antes de escribir nada. Pagar al recoger no cambia.
+  await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
 
   // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
   // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya

@@ -378,4 +378,94 @@ describe('settings.service', () => {
     })
     expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
   })
+
+  describe('fase 2: switch de tarjeta (acceptsCardOnline)', () => {
+    const MERCHANT = {
+      id: 'em1',
+      active: true,
+      chargesEnabled: true,
+      providerCredentials: { connectAccountId: 'acct_1' },
+      provider: { code: 'STRIPE_CONNECT' },
+    }
+    const AVISO_TARJETA = 'Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.'
+
+    it('prender sin comercio Stripe cobrable es 400 CARD_PAYMENT_NOT_ACCEPTED, no guarda ni audita', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([{ ...MERCHANT, chargesEnabled: false }] as any)
+      await expect(updateSettings('v1', { acceptsCardOnline: true }, 'staff1')).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'CARD_PAYMENT_NOT_ACCEPTED',
+        message: AVISO_TARJETA,
+      })
+      expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('prender con comercio cobrable guarda y audita ONLINE_ORDERING_CARD_TOGGLED { from, to }', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([MERCHANT] as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      const out = await updateSettings('v1', { acceptsCardOnline: true }, 'staff1')
+      expect(out.acceptsCardOnline).toBe(true)
+      expect((prismaMock.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({ acceptsCardOnline: true })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          staffId: 'staff1',
+          venueId: 'v1',
+          action: 'ONLINE_ORDERING_CARD_TOGGLED',
+          entity: 'OnlineOrderingSettings',
+          data: { from: false, to: true },
+        }),
+      )
+    })
+
+    it('apagar audita from:true,to:false y no consulta el comercio', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
+      await updateSettings('v1', { acceptsCardOnline: false }, 'staff1')
+      expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ONLINE_ORDERING_CARD_TOGGLED', data: { from: true, to: false } }),
+      )
+    })
+
+    it('repetir el mismo valor (el panel manda el formulario entero) no consulta el comercio ni escribe CARD_TOGGLED', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      await updateSettings('v1', { acceptsCardOnline: true, minOrderAmount: 60 }, 'staff1')
+      expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
+      const actions = (logAction as jest.Mock).mock.calls.map(c => c[0].action)
+      expect(actions).toEqual(['ONLINE_ORDERING_SETTINGS_UPDATED'])
+    })
+
+    it('con tarjeta prendida se puede quitar pagar al recoger (la tarjeta cuenta como medio de pago)', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: true, acceptsPayAtPickup: false }) as any)
+      await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 'staff1')).resolves.toMatchObject({ acceptsPayAtPickup: false })
+    })
+
+    it('encendida con pagar al recoger apagado y tarjeta prendida: se permite', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+        row({ enabled: false, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
+      )
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(
+        row({ enabled: true, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
+      )
+      await expect(updateSettings('v1', { enabled: true }, 'staff1')).resolves.toMatchObject({ enabled: true, acceptsPayAtPickup: false })
+    })
+
+    it('encender con los dos medios apagados es 400 NO_PAYMENT_MODE y no escribe', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+        row({ enabled: false, acceptsPayAtPickup: false, acceptsCardOnline: false }) as any,
+      )
+      await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({ statusCode: 400, code: 'NO_PAYMENT_MODE' })
+      expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    })
+
+    it('getSettings devuelve acceptsCardOnline; sin fila es false', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      await expect(getSettings('v1')).resolves.toMatchObject({ acceptsCardOnline: true })
+      expect(DEFAULT_CONFIG.acceptsCardOnline).toBe(false)
+    })
+  })
 })

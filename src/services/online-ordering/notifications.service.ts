@@ -10,7 +10,7 @@ const DEFAULT_STOREFRONT_BASE_URL = 'https://pedidos.avoqado.io'
 let warnedDefaultStorefrontBase = false
 
 /** Sin diagonal final. Si falta la variable se usa el dominio propuesto en el spec (aún por confirmar) y se avisa UNA vez por proceso. */
-const storefrontBase = (): string => {
+export const storefrontBase = (): string => {
   const configured = process.env.ORDERING_STOREFRONT_BASE_URL?.trim()
   if (configured) return configured.replace(/\/+$/, '')
   if (!warnedDefaultStorefrontBase) {

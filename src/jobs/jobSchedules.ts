@@ -71,6 +71,9 @@ export const DATABASE_JOB_SCHEDULES = {
   // (:08/:38 watchdog de pagos, :11/:41 conciliador de Blumon, :13/:43 AngelPay); lectura barata por índice
   // (status, acceptDeadlineAt).
   onlineOrderAcceptanceExpiry: '10,40 * * * * *',
+  // Pedidos en línea con tarjeta (fase 2): termina cobros, liberaciones y borradores en duda. Cada minuto en el segundo :00,
+  // libre (ningún otro job de cada minuto lo usa); lectura por el índice (status, updatedAt), tope por estado.
+  onlineOrderCardReconciler: '0 * * * * *',
   // Tarjetas de regalo (B7): revisión nocturna — saldo contra libreta, cuentas pagadas con sobres sin activar (las activa), cobros con
   // saldo sin canje, reversos faltantes, cancelaciones atoradas, dinero sin sobres vivos y cuentas en $0 abiertas. Diario a las
   // 03:37:27 (CDMX): segundo :27 libre, lejos de deliveryConnectIntentCleanup (04:17:31) y shopifyReconcile (06:14:45).

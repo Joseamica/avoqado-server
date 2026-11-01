@@ -62,6 +62,7 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
 import { rechazarLlaveDePagarDespues } from '../mobile/pagarDespuesLlave'
 
 /**
@@ -122,7 +123,9 @@ export async function getOrders(
     // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
     thirdPartyCashDue: null,
     // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
-    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO],
+    // Pedidos en línea fase 2 (Codex r2 #1): un pedido pagado con tarjeta en línea no se le ofrece a la terminal para cobrarlo
+    // (sí los de pagar al recoger y las cuentas sin pedido en línea).
+    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO, { onlineOrder: { isNot: { paymentMode: 'CARD_ONLINE' } } }],
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list
@@ -301,6 +304,9 @@ export async function getOrder(
   if (!order) {
     throw new NotFoundError('Order not found')
   }
+  // Pedidos en línea fase 2 (Codex r2 #1): la terminal no empieza un cobro local de un pedido pagado con tarjeta en línea. Esta es la
+  // lectura con la que cobra (también en las versiones viejas): 409, sin cambiar la forma de la respuesta de las demás cuentas.
+  await assertNotCardOnlineOrderInTx(prisma, { venueId, orderId })
 
   // 🐛 DEBUG: Log raw Prisma response to see if modifiers are included
   logger.info(`🔍 [GET ORDER] Order ${orderId} - Items count: ${order.items.length}`)
@@ -1558,6 +1564,8 @@ export async function addItemsToOrder(
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
       // Fetch order with version check
       const order = await tx.order.findUnique({
         where: { id: orderId, venueId },
@@ -2504,6 +2512,8 @@ export async function removeOrderItem(
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
       // Fetch order with version check
       const order = await tx.order.findUnique({
         where: { id: orderId, venueId },
@@ -2779,6 +2789,8 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
       // Fetch order
       const order = await tx.order.findUnique({
         where: { id: orderId, venueId },
@@ -3076,6 +3088,8 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
       // Fetch order with version check
       const leerOrden = () =>
         tx.order.findUnique({
@@ -3496,6 +3510,8 @@ export async function applyDiscount(
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
       // Fetch order with version check
       const order = await tx.order.findUnique({
         where: { id: orderId, venueId },
@@ -4369,6 +4385,8 @@ export async function addSerializedItemToOrder(
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
       }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
       // Get the order with optimistic locking check
       const order = await tx.order.findUnique({
         where: { id: orderId, venueId },

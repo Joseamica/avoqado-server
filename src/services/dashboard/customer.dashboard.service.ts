@@ -11,13 +11,14 @@ import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.serv
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
-import { CustomerApprovalStatus, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
+import { CustomerApprovalStatus, OnlineOrderPaymentMode, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import { esRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
+import { assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
 import { lockOrdersForUpdate } from '../shared/tableOrderLock'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -841,6 +842,9 @@ export async function settleCustomerBalance(
             ...CUENTA_NO_CANCELADA,
             // Un cobro con tarjeta que falló no es fiado: «Liquidar todo» lo marcaría pagado en efectivo sin que nadie pagara.
             ...NO_ES_COBRO_DEL_MOMENTO,
+            // Pedidos en línea fase 2 (Codex r1 C1): uno pagado con tarjeta en línea tampoco, aunque la TPV le haya ligado un
+            // cliente: su dinero ya está en Stripe. `NOT` + `is` también deja pasar las cuentas sin pedido en línea.
+            NOT: [{ onlineOrder: { is: { paymentMode: OnlineOrderPaymentMode.CARD_ONLINE } } }],
           },
         },
         include: {
@@ -926,6 +930,8 @@ export async function settleCustomerBalance(
       if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue
       // Rappi 2b (T7): el barrido no liquida un pedido de Rappi en efectivo (no sabe repartir venta, propina y lo de Rappi).
       if (esRappiEnEfectivo(fresh)) continue
+      // Pedidos en línea fase 2 (Codex r1 C1): la selección ya los excluye; bajo el candado, la guarda de siempre (T8).
+      await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
 
       const paidAgg = await tx.payment.aggregate({
         where: { orderId, venueId, status: 'COMPLETED' },

@@ -8,6 +8,7 @@ const mockPaymentFindFirst = jest.fn()
 const mockIssue = jest.fn()
 const mockAudit = jest.fn()
 const mockChain = jest.fn()
+const mockOnlineOrderFindFirst = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -29,6 +30,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...(a as [])), findMany: jest.fn(), groupBy: jest.fn() },
+    onlineOrder: { findFirst: (...a: unknown[]) => mockOnlineOrderFindFirst(...(a as [])) },
     venue: { findUnique: jest.fn() },
   },
 }))
@@ -353,4 +355,45 @@ it('no ejecuta dinero sin una llave estable de reintento', async () => {
   )
   expect(out).toMatchObject({ needsInput: true, field: 'idempotencyKey' })
   expect(mockIssue).not.toHaveBeenCalled()
+})
+
+// F3 (revisión final, pedidos en línea fase 2): el cobro de Stripe de un pedido en línea con tarjeta se devuelve con su propia
+// herramienta; issue_refund lo dice desde la vista previa y en el 409, en vez de dejar al agente en un callejón.
+describe('issue_refund sobre el cobro de tarjeta de un pedido en línea', () => {
+  const cobroDeStripe = {
+    ...completedPayment,
+    method: 'CREDIT_CARD',
+    source: 'WEB',
+    fundsFlow: 'AVOQADO_PROCESSED',
+    orderId: 'ord1',
+    processorId: 'pi_1',
+  }
+  beforeEach(() => {
+    mockOnlineOrderFindFirst.mockResolvedValue({
+      paymentMode: 'CARD_ONLINE',
+      charge: { id: 'ch1', status: 'CAPTURED', paymentIntentId: 'pi_1' },
+    })
+  })
+
+  it('la vista previa ya dice qué herramienta usar (online_order_card_refund) y no ofrece confirmar', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(cobroDeStripe)
+    const out = parse(await call(base))
+    expect(out).toMatchObject({ ok: false, code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS', useInstead: 'online_order_card_refund' })
+    expect(out.error).toContain('online_order_card_refund')
+    expect(out.requiresConfirmation).toBeUndefined()
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('si el 409 llega del servicio al confirmar, también dice qué herramienta usar', async () => {
+    mockOnlineOrderFindFirst.mockResolvedValue(null)
+    mockPaymentFindFirst.mockResolvedValueOnce(cobroDeStripe)
+    mockIssue.mockRejectedValueOnce(
+      new ConflictError(
+        'Devuelve este pago desde Pedidos en línea para que regrese a la tarjeta del cliente.',
+        'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS',
+      ),
+    )
+    const out = parse(await call({ ...base, confirm: true }))
+    expect(out).toMatchObject({ ok: false, code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS', useInstead: 'online_order_card_refund' })
+  })
 })

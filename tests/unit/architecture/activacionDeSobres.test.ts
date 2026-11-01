@@ -52,6 +52,7 @@ const SITIOS: Array<[string, string, string]> = [
   ['services/dashboard/paymentLink.service.ts', 'completeCharge', 'createSalePostingInTx('],
   ['services/dashboard/paymentLink.service.ts', 'finalizeMercadoPagoCheckout', 'createSalePostingInTx('],
   ['services/delivery-channels/core/deliveryOrderIngestion.service.ts', 'ingestDeliveryOrder', 'createSalePostingInTx('],
+  ['services/online-ordering/card/capture.service.ts', 'finishCapture', 'createSalePostingInTx('],
 ]
 
 /**

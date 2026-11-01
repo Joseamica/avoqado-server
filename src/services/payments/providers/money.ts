@@ -57,3 +57,13 @@ export function calculateApplicationFeeWithVAT(stripeAmountCents: number, feeBps
   if (vatRateBps === 0) return netFee
   return Math.round((netFee * (10000 + vatRateBps)) / 10000)
 }
+
+/**
+ * Stripe charge bounds (MXN cents), tunable by env. Defaults: $10 min, $50,000 max per transaction.
+ */
+export function getStripeChargeBoundsCents(): { min: number; max: number } {
+  return {
+    min: Number(process.env.STRIPE_MIN_CHARGE_MXN_CENTS ?? 1000),
+    max: Number(process.env.STRIPE_MAX_CHARGE_MXN_CENTS ?? 5000000),
+  }
+}

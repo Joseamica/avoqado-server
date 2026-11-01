@@ -17,6 +17,7 @@ import { chainRefundSemanticsInTx } from '@/services/exchanges/exchangeTx'
 import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import AppError from '@/errors/AppError'
+import { assertCardRefundGoesThroughOnlineOrders } from '@/services/online-ordering/card/guards'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
@@ -528,6 +529,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           status: true,
           type: true,
           createdAt: true,
+          orderId: true,
+          processorId: true,
           order: { select: { orderNumber: true } },
           tenderType: { select: { systemKind: true } },
         },
@@ -568,6 +571,15 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, error: 'Este cobro sólo se devuelve por el mismo medio con que se pagó.' })
       }
       try {
+        // Pedidos en línea fase 2 (F3): el cobro de Stripe de un pedido con tarjeta se devuelve a la tarjeta con su herramienta;
+        // se dice desde la vista previa (el servicio lo vuelve a revisar bajo su candado).
+        if (payment.orderId && payment.processorId) {
+          await assertCardRefundGoesThroughOnlineOrders(prisma, {
+            venueId,
+            paymentId,
+            payment: { orderId: payment.orderId, processorId: payment.processorId },
+          })
+        }
         const chain = isExchangeCreditTenderKind(cobroParaDevolver.tenderSystemKind)
           ? await chainRefundSemanticsInTx(prisma, venueId, paymentId)
           : null
@@ -646,6 +658,16 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           },
         })
       } catch (err) {
+        if (err instanceof AppError && err.code === 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS') {
+          return text({
+            ok: false,
+            code: err.code,
+            error:
+              "Este cobro es de un pedido en línea pagado con tarjeta al pedir: no se reembolsa por aquí. Usa la herramienta 'online_order_card_refund' con el orderId del pedido, que regresa el dinero a la tarjeta del cliente.",
+            useInstead: 'online_order_card_refund',
+            ...(payment.orderId ? { orderId: payment.orderId } : {}),
+          })
+        }
         // Tarjetas de regalo (B1 r1): el `code` y los `details` de un rechazo de negocio viajan al agente, para que distinga
         // `GIFT_CARD_CANCEL_NOT_STARTED` de `SOBRE_DESACTIVADO` (y cualquier otro AppError) sin leer el texto.
         return text({

@@ -7,6 +7,7 @@ import {
   ventaYaCobradaBajoCandado,
 } from '@/services/shared/ligaDeClienteEnVenta'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
+import { assertNotCardOnlineOrderInTx } from '@/services/online-ordering/card/guards'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 // services/dashboard/order.dashboard.service.ts
 
@@ -977,6 +978,8 @@ export async function settleOrder(
     if (!fresh) return null
     // Rappi 2b (T7): liquidar crea un efectivo NUEVO sin propina ni lo de Rappi ⇒ 409 antes de escribir.
     rechazarAccionDeCobroSobreRappiEnEfectivo(fresh)
+    // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se «liquida» en efectivo.
+    await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
     // 🔴 Founder 3-oct / Codex r13 #3: «liquidar» crea en este momento un efectivo a nombre del negocio: es un cobro NUEVO. Sobre una
     // cancelada o borrada ⇒ 400 con el texto del founder, dentro de la transacción y bajo el candado: nada se escribe. (No hay llave
     // que resolver: la liquidación no la recibe.)

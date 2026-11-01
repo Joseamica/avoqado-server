@@ -1,4 +1,4 @@
-import { OnlineOrderStatus, type OnlineOrderPaymentMode } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus } from '@prisma/client'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -51,7 +51,22 @@ export const MENU_CACHE_MAX_VENUES = 500
 /** Estados de `Order` que cuentan como «cuenta abierta» (folio sin repetir y desde dónde una transición mueve la `Order`). */
 export const OPEN_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] as const
 /**
- * M-2: modos de pago que ya llegan COBRADOS al aceptar (fase 2: tarjeta en línea). Vacío en 1a: entregar exige la cuenta pagada
- * para todo modo que no esté aquí (falla cerrado).
+ * M-2: modos de pago que ya llegan COBRADOS al aceptar (fase 2: tarjeta en línea, se captura al aceptar). Entregar exige la cuenta
+ * pagada para todo modo que no esté aquí (falla cerrado).
  */
-export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = []
+export const PREPAID_MODES: readonly OnlineOrderPaymentMode[] = [OnlineOrderPaymentMode.CARD_ONLINE]
+/**
+ * Fase 2: los borradores de tarjeta con su sesión de pago vigente. Cuentan para los topes (por teléfono y por negocio) y para la
+ * saturación de la tienda, junto con los pedidos por aceptar; uno vencido ya no cuenta.
+ */
+export const liveCardDraftsWhere = (venueId: string, now: Date) => ({
+  venueId,
+  status: OnlineOrderChargeStatus.PENDING_AUTH,
+  checkoutExpiresAt: { gt: now },
+})
+/** Fase 2: minutos que vive la sesión de pago con tarjeta antes de darse por abandonada. */
+export const CARD_CHECKOUT_TTL_MINUTES = 30
+/** Fase 2: un cargo atorado (p. ej. `CAPTURING`) más de estos minutos levanta alerta en el conciliador. */
+export const CARD_STUCK_ALERT_MINUTES = 15
+/** Fase 2: cargos por pasada del conciliador; lo que sobre lo toma la siguiente. */
+export const CARD_RECONCILE_BATCH = 50

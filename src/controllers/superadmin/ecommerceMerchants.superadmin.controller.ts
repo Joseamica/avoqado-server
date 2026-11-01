@@ -85,7 +85,7 @@ export async function deleteEcommerceMerchant(req: Request, res: Response) {
       where: { id },
       include: {
         _count: {
-          select: { checkoutSessions: true, paymentLinks: true, payments: true, reservations: true },
+          select: { checkoutSessions: true, paymentLinks: true, payments: true, reservations: true, onlineOrderCharges: true },
         },
       },
     })
@@ -99,6 +99,8 @@ export async function deleteEcommerceMerchant(req: Request, res: Response) {
     if (c.checkoutSessions > 0) blockers.push(`${c.checkoutSessions} sesión(es) de checkout`)
     if (c.paymentLinks > 0) blockers.push(`${c.paymentLinks} link(s) de pago`)
     if (c.reservations > 0) blockers.push(`${c.reservations} reservación(es)`)
+    // Pedidos en línea fase 2 (M1): `OnlineOrderCharge.ecommerceMerchantId` es Restrict; sin esto el borrado era un 500.
+    if (c.onlineOrderCharges > 0) blockers.push(`${c.onlineOrderCharges} cobro(s) de pedidos en línea`)
     if (blockers.length > 0) {
       res.status(400).json({
         success: false,
