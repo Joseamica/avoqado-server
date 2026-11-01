@@ -59,6 +59,9 @@ let world: { staff: Row[]; organizations: Row[]; venues: Row[]; payments: Row[];
 function matches(row: Row, where: Row = {}): boolean {
   return Object.entries(where).every(([field, filter]) => {
     if (field === 'OR') return (filter as Row[]).some(branch => matches(row, branch))
+    if (field === 'AND') return (filter as Row[]).every(branch => matches(row, branch))
+    // An account's `inboundEntries: { some }`: one of the entries applied to it matches.
+    if (field === 'inboundEntries') return db.entries.some(entry => entry.accountId === row.id && matches(entry, (filter as Row).some))
     const value = row[field] ?? null
     if (filter === null) return value === null
     if (filter instanceof Date) return value instanceof Date && value.getTime() === filter.getTime()
@@ -135,16 +138,11 @@ function installSweepWorld() {
   )
   prismaMock.crmAccount.findMany.mockImplementation(async (args: Row) => {
     if (args.where?.contacts) return byPerson!(args)
-    const {
-      where: { inboundEntries, ...where },
-      select,
-      orderBy,
-      take,
-    } = args
-    // The late link (ruling 57): accounts that took an entry matching `inboundEntries.some`, with those entries' emails.
+    const { where, select, orderBy, take } = args
+    // The late link (rulings 57 and 65): its filter, with `inboundEntries.some` among its branches.
     const entriesOf = (account: Row, filter: Row) => db.entries.filter(entry => entry.accountId === account.id && matches(entry, filter))
     return ordered(
-      db.accounts.filter(account => matches(account, where) && (!inboundEntries || entriesOf(account, inboundEntries.some).length > 0)),
+      db.accounts.filter(account => matches(account, where)),
       orderBy,
     )
       .slice(0, take)
@@ -217,12 +215,14 @@ function expectSql(query: Prisma.Sql, pieces: string[]) {
 
 /**
  * The late link's evidence (rulings 57 and 65): for each bound account, the newest email of its applied landing entries
- * whose person, active, owns an Organization (their first OWNER membership) that is not the bound sales team's.
+ * — and of its key, for a LANDING account — whose person, active, owns an Organization (their first OWNER membership) that is not the bound sales team's.
  */
 function ownedByEvidenceRead(query: Prisma.Sql) {
   expectSql(query, [
     'SELECT DISTINCT ON (ev."accountId") ev."accountId", o."organizationId"',
     `e."source" = 'LANDING' AND e."appliedAt" IS NOT NULL`,
+    `UNION ALL`,
+    `a."source" = 'LANDING' AND a."externalKey" IS NOT NULL`,
     'JOIN "Staff" s ON s."email" = ev."email" AND s."active" = true',
     `so."role" = 'OWNER' AND so."isActive" = true`,
     'ORDER BY so."isPrimary" DESC, so."joinedAt" ASC, so."id" ASC',
@@ -234,8 +234,10 @@ function ownedByEvidenceRead(query: Prisma.Sql) {
   const owner = { where: { role: 'OWNER', isActive: true }, orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }], take: 1 }
   return db.accounts.flatMap(account => {
     if (!ids.has(account.id)) return []
+    const key =
+      account.source === 'LANDING' && account.externalKey ? [{ externalKey: account.externalKey, receivedAt: account.createdAt }] : []
     const evidence = ordered(
-      db.entries.filter(entry => entry.accountId === account.id && entry.source === 'LANDING' && entry.appliedAt),
+      [...db.entries.filter(entry => entry.accountId === account.id && entry.source === 'LANDING' && entry.appliedAt), ...key],
       [{ receivedAt: 'desc' }, { externalKey: 'asc' }],
     )
     for (const { externalKey } of evidence) {
@@ -744,7 +746,10 @@ describe('linkLandingAccounts', () => {
     // Only APPLIED landing entries count: a pending one gives nothing to link from.
     expect(prismaMock.crmAccount.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ organizationId: null, inboundEntries: { some: { source: 'LANDING', appliedAt: { not: null } } } }),
+        where: expect.objectContaining({
+          organizationId: null,
+          AND: [{ OR: [{ source: 'LANDING' }, { inboundEntries: { some: { source: 'LANDING', appliedAt: { not: null } } } }] }],
+        }),
       }),
     )
   })
@@ -773,6 +778,19 @@ describe('linkLandingAccounts', () => {
 
     expect(accountOf(account.id)?.organizationId).toBe(ORG)
     expect(eventsOf('LINKED')).toEqual([expect.objectContaining({ accountId: account.id, sourceKey: `link:${account.id}:${ORG}` })])
+  })
+
+  it('enlace_de_ficha_creada_por_la_carga_inicial (Codex exhaustiva #3): a LANDING account with no entry still links by its key', async () => {
+    // The backfill created it, linked, without any entry. Its Organization is deleted (`SetNull`) and the person opens
+    // another one from the dashboard.
+    const account = seedAccount({ organizationId: null })
+    seedOrganization({ id: OTHER_ORG, name: 'Café Ana 2' })
+    seedStaff(EMAIL, {}, OTHER_ORG)
+
+    await expect(linkLandingAccounts()).resolves.toBe(1)
+
+    expect(accountOf(account.id)?.organizationId).toBe(OTHER_ORG)
+    expect(eventsOf('LINKED')).toEqual([expect.objectContaining({ accountId: account.id, sourceKey: `link:${account.id}:${OTHER_ORG}` })])
   })
 
   it('a re-link after its Organization was deleted leaves its own LINKED event (M-4)', async () => {
@@ -1304,7 +1322,7 @@ describe('todo_con_tope_de_lote', () => {
           seedStaff(email, {}, organizationId)
         }),
       run: linkLandingAccounts,
-      limit: () => lastTake(prismaMock.crmAccount.findMany, args => !!args.where.inboundEntries),
+      limit: () => lastTake(prismaMock.crmAccount.findMany, args => !!args.where.AND),
       done: () => db.accounts.filter(account => account.organizationId).length,
     },
     {

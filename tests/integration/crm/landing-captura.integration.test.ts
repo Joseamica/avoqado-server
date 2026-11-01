@@ -36,7 +36,11 @@ const HOLDER_EMAIL = `carla-${suffix}@test.mx`
 const WHATSAPP_EMAIL = `dani-${suffix}@test.mx`
 const LATE_EMAIL = `eva-${suffix}@test.mx`
 const LINK_EMAIL = `fer-${suffix}@test.mx`
-const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL, WHATSAPP_EMAIL, LATE_EMAIL, LINK_EMAIL]
+/** The person whose LANDING account the backfill created without an entry (Codex exhaustiva #3). */
+const KEY_EMAIL = `gil-${suffix}@test.mx`
+/** The emails of six forms on one account; only the first one (the oldest) ever owns a business (Codex r3, R3-1). */
+const RESENT_EMAILS = [1, 2, 3, 4, 5, 6].map(n => `reenvio${n}-${suffix}@test.mx`)
+const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL, WHATSAPP_EMAIL, LATE_EMAIL, LINK_EMAIL, KEY_EMAIL, ...RESENT_EMAILS]
 /** Accounts this file creates under another source (not found by `source: LANDING`). */
 const otherAccountIds: string[] = []
 
@@ -302,6 +306,45 @@ describe('landing → CRM against Postgres', () => {
 
     expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: whatsapp.id } })).toMatchObject({ organizationId: organization.id })
     expect(await prisma.crmTimelineEvent.count({ where: { accountId: whatsapp.id, kind: 'LINKED' } })).toBe(1)
+  })
+
+  it('enlace_tardio_lee_todos_los_correos_y_la_llave (Codex r3 R3-1 y exhaustiva #3): the SQL of the evidence, against Postgres', async () => {
+    const stageId = (await getInitialStage()).id
+    // A LANDING account the backfill created: its key is the email, and no entry ever reached it.
+    const byKey = await prisma.crmAccount.create({
+      data: { name: `Llave ${suffix}`, source: 'LANDING', externalKey: KEY_EMAIL, stageId },
+    })
+    // A WhatsApp account that took six forms of six emails, the oldest first.
+    const resent = await prisma.crmAccount.create({
+      data: { name: `Reenvíos ${suffix}`, source: 'WHATSAPP', externalKey: `+52${String(Date.now()).slice(-10)}`, stageId },
+    })
+    otherAccountIds.push(resent.id)
+    for (const [n, email] of RESENT_EMAILS.entries()) {
+      const at = new Date(Date.now() - (10 - n) * 3_600_000)
+      await prisma.crmInboundEntry.create({
+        data: { source: 'LANDING', externalKey: email, payload: { email }, receivedAt: at, appliedAt: at, accountId: resent.id },
+      })
+    }
+    // Only the key's person and the oldest form's person open a business.
+    const { organization: keyOrganization } = await ownerOfAnOrganization(KEY_EMAIL)
+    const { organization: resentOrganization } = await ownerOfAnOrganization(RESENT_EMAILS[0])
+    await prisma.staff.create({ data: { email: RESENT_EMAILS[5], firstName: 'Seis', lastName: 'Sin negocio' } })
+
+    resetSweepCursors()
+    for (let pass = 0; pass < 10; pass++) {
+      await linkLandingAccounts()
+      const [a, b] = await Promise.all([
+        prisma.crmAccount.findUniqueOrThrow({ where: { id: byKey.id } }),
+        prisma.crmAccount.findUniqueOrThrow({ where: { id: resent.id } }),
+      ])
+      if (a.organizationId && b.organizationId) break
+    }
+
+    expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: byKey.id } })).toMatchObject({ organizationId: keyOrganization.id })
+    expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: resent.id } })).toMatchObject({
+      organizationId: resentOrganization.id,
+    })
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId: { in: [byKey.id, resent.id] }, kind: 'LINKED' } })).toBe(2)
   })
 
   it('una_entrada_vieja_reparada_tarde_no_pisa_la_mas_nueva ni mueve el toque a «ahora» (ruling 50)', async () => {

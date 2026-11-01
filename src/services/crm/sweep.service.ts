@@ -6,10 +6,10 @@
  *    same `applyEntry` the landing calls: every field of the form, one account and one set of events per entry.
  *    `resendPendingNotices` — the notice of an applied entry that did not reach everyone (ruling 49), again with the
  *    same keys and content, up to 5 tries within the entry's 24 h, an hour more apart each time (ruling 59).
- * 2. `linkLandingAccounts` — an account that took a landing entry and is still without an Organization — whatever its
- *    source: the landing may have reused a WhatsApp or HubSpot account (rulings 48 and 57) — is linked as soon as the
- *    entry's email owns one, whatever path made the person an owner: the landing, the dashboard signup, an invitation.
- *    One LINKED event, no note.
+ * 2. `linkLandingAccounts` — a LANDING account, or one that took a landing entry — whatever its source: the landing may
+ *    have reused a WhatsApp or HubSpot account (rulings 48 and 57) — still without an Organization is linked as soon as
+ *    one of its emails owns one, whatever path made the person an owner: the landing, the dashboard signup, an
+ *    invitation. One LINKED event, no note.
  * 3. `backfillFromOnboarding` — every landing signup (`LANDING_SIGNUP_CREATED`) without its CRM account gets one, without
  *    the form's qualification, which old signups never kept — or, when the person is already in the CRM by email or
  *    phone, that account (ruling 59).
@@ -58,8 +58,13 @@ const ANNOUNCE_WITHIN_MS = DAY_MS
 const NOTICE_MAX_ATTEMPTS = 5
 /** …and only within the entry's first 24 h: Resend's idempotency window, after which a key no longer stops a repeat. */
 const NOTICE_WINDOW_MS = DAY_MS
-/** What the late link starts from (ruling 57): a landing entry that was applied to an account. */
-const APPLIED_LANDING = { source: LANDING, appliedAt: { not: null } } satisfies Prisma.CrmInboundEntryWhereInput
+/**
+ * What the late link starts from (rulings 57 and 65 c): a LANDING account — its key is the person's email, also when the
+ * backfill created it without an entry — or an account of any source that took a landing entry.
+ */
+const LINK_EVIDENCE = {
+  OR: [{ source: LANDING }, { inboundEntries: { some: { source: LANDING, appliedAt: { not: null } } } }],
+} satisfies Prisma.CrmAccountWhereInput
 
 /**
  * Real money (spec §8, Codex plan r1 #1): a charge processed in a real venue. A plan on trial or courtesy charges
@@ -169,11 +174,12 @@ export async function resendPendingNotices(limit = BATCH): Promise<number> {
 // ── 2. Linking ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The Organization each account of a page can be linked to (rulings 57 and 65): among ALL the emails that are evidence
- * of its person — every landing entry applied to it, whatever the account's source — the newest one whose person,
- * active, OWNS an Organization that is not the sales team's (`OWNED_ORGANIZATION`, written in SQL). Searched in the
- * database before anything is cut, so an account that took many forms never hides the email that owns its business
- * (Codex r3, R3-1). One read per page; at most one row per account.
+ * The Organization each account of a page can be linked to (rulings 57 and 65 c): among ALL the emails that are evidence
+ * of its person — every landing entry applied to it, whatever the account's source, and the key of a LANDING account,
+ * which the backfill creates without any entry (Codex exhaustiva #3) — the newest one whose person, active, OWNS an
+ * Organization that is not the sales team's (`OWNED_ORGANIZATION`, written in SQL). Searched in the database before
+ * anything is cut, so an account that took many forms never hides the email that owns its business (Codex r3, R3-1).
+ * One read per page; at most one row per account.
  */
 async function ownedByEvidence(accountIds: string[], team: string | null): Promise<Map<string, string>> {
   if (!accountIds.length) return new Map()
@@ -183,6 +189,10 @@ async function ownedByEvidence(accountIds: string[], team: string | null): Promi
       SELECT e."accountId", e."externalKey" AS "email", e."receivedAt" AS "at"
       FROM "CrmInboundEntry" e
       WHERE e."accountId" IN (${Prisma.join(accountIds)}) AND e."source" = 'LANDING' AND e."appliedAt" IS NOT NULL
+      UNION ALL
+      SELECT a."id", a."externalKey", a."createdAt"
+      FROM "CrmAccount" a
+      WHERE a."id" IN (${Prisma.join(accountIds)}) AND a."source" = 'LANDING' AND a."externalKey" IS NOT NULL
     ) ev
     JOIN "Staff" s ON s."email" = ev."email" AND s."active" = true
     CROSS JOIN LATERAL (
@@ -197,8 +207,8 @@ async function ownedByEvidence(accountIds: string[], team: string | null): Promi
 }
 
 /**
- * Links the accounts that took a landing entry and are still without an Organization — LANDING ones, or one of another
- * source the landing reused (rulings 48 and 57) — to the one an email of theirs owns now, by the same rule as the entry
+ * Links the accounts still without an Organization that are LANDING ones or took a landing entry — one of another source
+ * the landing reused (rulings 48 and 57) — to the one an email of theirs owns now, by the same rule as the entry
  * (`OWNED_ORGANIZATION`, the login's exact email), never the sales team's own nor one another account holds; returns how
  * many it linked. Every email the account has evidence of counts, newest first (`ownedByEvidence`). A page per pass:
  * the cursor walks every such account, so the ones that will never link (their person owns nothing) never keep a newer
@@ -210,7 +220,7 @@ export async function linkLandingAccounts(limit = BATCH): Promise<number> {
   const from = cursors.link
   const accounts = await entryRead('crm-sweep.linkLandingAccounts', () =>
     prisma.crmAccount.findMany({
-      where: { organizationId: null, inboundEntries: { some: APPLIED_LANDING }, ...(from ? after(from) : {}) },
+      where: { organizationId: null, AND: [LINK_EVIDENCE, ...(from ? [after(from)] : [])] },
       select: { id: true, createdAt: true },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: size,
