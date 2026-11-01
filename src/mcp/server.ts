@@ -41,6 +41,7 @@ import { registerGiftCardTools } from './tools/giftCards'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
 import { registerExchangeTools } from './tools/exchanges'
+import { registerStoreCreditTools } from './tools/storeCredit'
 import { registerUpsellTools } from './tools/upsell'
 import { registerPromotionTools } from './tools/promotions'
 import { registerServiceChargeTools } from './tools/service-charges'
@@ -140,6 +141,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
   registerExchangeTools(server, scope) // Exchange reads, review and settings: free mode only, outside the certified catalog.
+  registerStoreCreditTools(server, scope) // Saldo a favor: ajuste, saldo del cliente y teléfono. Sólo modo libre; no entra al catálogo certificado.
   registerUpsellTools(server, scope)
   registerPromotionTools(server, scope)
   registerServiceChargeTools(server, scope)

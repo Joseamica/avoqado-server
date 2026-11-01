@@ -53,7 +53,7 @@ import AppError, {
   TerminalUnavailableError,
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
-import { EXCEPCIONES_DE_SOLO_SALDO, resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { EXCEPCIONES_DE_SOLO_SALDO, MENSAJE_SOLO_SALDO, resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
@@ -5957,12 +5957,7 @@ class TerminalPaymentService {
     if (!EXCEPCIONES_DE_SOLO_SALDO.has(request.storeCreditOnlyException ?? '')) {
       const ajustes = await prisma.venueSettings.findUnique({ where: { venueId }, select: { storeCreditOnly: true } })
       if (ajustes?.storeCreditOnly) {
-        throw new AppError(
-          'Este negocio devuelve sólo como saldo a favor. Usa Reembolso → Saldo a favor, o marca que es por defecto o cobro por error.',
-          422,
-          true,
-          'STORE_CREDIT_ONLY',
-        )
+        throw new AppError(MENSAJE_SOLO_SALDO, 422, true, 'STORE_CREDIT_ONLY')
       }
     }
 

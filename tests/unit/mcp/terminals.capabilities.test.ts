@@ -5,6 +5,7 @@ import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { exigirCancelacionParaDevolverEnTerminal } from '@/services/giftCards/giftCardCancel.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
+import AppError from '@/errors/AppError'
 
 jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: {
@@ -482,5 +483,46 @@ describe('🔴 A2 del cierre (r1): refund_card_on_terminal y las ventas de tarje
       await captureRefundHandler()({ venueId: 'venue-1', paymentId: 'payment-1', terminalId: 'device-row-1', confirm: true }),
     )
     expect(body).toEqual({ ok: false, code: 'GIFT_CARD_CANCEL_NOT_STARTED', error: SIN_INICIAR.message })
+  })
+})
+
+describe('S9 (I1 de S4): refund_card_on_terminal y «Sólo saldo a favor»', () => {
+  const requestRefundOnTerminal = terminalPaymentService.requestRefundOnTerminal as jest.Mock
+  const base = { venueId: 'venue-1', paymentId: 'payment-1', terminalId: 'device-row-1' }
+
+  beforeEach(() => {
+    ;(exigirCancelacionParaDevolverEnTerminal as jest.Mock).mockReset().mockResolvedValue(undefined)
+    prismaMock.payment.findFirst.mockResolvedValue({ ...eligibleCardPayment(), orderId: 'order-1' })
+    prismaMock.terminal.findFirst.mockResolvedValue(targetDevice(TerminalType.TPV_ANDROID))
+    requestRefundOnTerminal.mockReset().mockResolvedValue({ status: 'opened', requestId: 'refund-request-1' })
+  })
+
+  it('con «sólo saldo» prendido y sin excepción, la vista previa rechaza con el code STORE_CREDIT_ONLY y no abre nada', async () => {
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ storeCreditOnly: true })
+    const body = parseBody(await captureRefundHandler()(base))
+    expect(body).toMatchObject({ ok: false, code: 'STORE_CREDIT_ONLY' })
+    expect(body.error).toContain('sólo como saldo a favor')
+    expect(requestRefundOnTerminal).not.toHaveBeenCalled()
+  })
+
+  it('con DEFECTIVE la devolución se abre y la excepción viaja al servicio', async () => {
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ storeCreditOnly: true })
+    const body = parseBody(await captureRefundHandler()({ ...base, storeCreditOnlyException: 'DEFECTIVE', confirm: true }))
+    expect(body).toMatchObject({ ok: true, status: 'opened' })
+    expect(requestRefundOnTerminal).toHaveBeenCalledWith(expect.objectContaining({ storeCreditOnlyException: 'DEFECTIVE' }))
+  })
+
+  it('si el rechazo llega al confirmar (cambió el ajuste), el code STORE_CREDIT_ONLY también viaja', async () => {
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue(null)
+    requestRefundOnTerminal.mockRejectedValue(
+      new AppError('Este negocio devuelve sólo como saldo a favor.', 422, true, 'STORE_CREDIT_ONLY'),
+    )
+    const body = parseBody(await captureRefundHandler()({ ...base, confirm: true }))
+    expect(body).toEqual({ ok: false, code: 'STORE_CREDIT_ONLY', error: 'Este negocio devuelve sólo como saldo a favor.' })
+  })
+
+  it('con el interruptor apagado la vista previa sigue como siempre', async () => {
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ storeCreditOnly: false })
+    expect(parseBody(await captureRefundHandler()(base))).toMatchObject({ ok: false, requiresConfirmation: true })
   })
 })
