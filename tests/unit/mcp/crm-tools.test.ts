@@ -21,6 +21,7 @@ import { auditMcpWrite } from '@/mcp/audit'
 import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, listAccounts, listLostReasons, listStages, lose, moveStage } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
+import { applyEntry } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
@@ -559,6 +560,40 @@ describe('crm_upsert_whatsapp_prospect', () => {
     jest.setSystemTime(THU)
     await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ventasRango: 'Menos de $150 mil', ultimoMensajeAt: MSG_2 })
     expect(db.accounts[0]).toMatchObject({ ventasRango: 'Menos de $150 mil', qualifiedAt: new Date(MSG_2) })
+  })
+
+  it('un_formulario_viejo_reparado_despues_no_pisa_lo_que_sello_whatsapp (M4, ruling 70): the stamp works across writers', async () => {
+    // WhatsApp learns the giro on Monday 09:04 and stamps it.
+    await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, giro: 'Taquería', ultimoMensajeAt: MSG_1 })
+    const [business] = db.accounts
+    // A landing form sent the day before by the same person (same phone) failed to apply; the sweep repairs it now.
+    const old = {
+      id: cuid('entryvieja'),
+      source: 'LANDING',
+      externalKey: 'ana@cafe.mx',
+      payload: { firstName: 'Ana', phone: '55 1234 5678', email: 'ana@cafe.mx', businessType: 'Bar', revenue: 'menos de 100k' },
+      receivedAt: new Date(new Date(MSG_1).getTime() - 86_400_000),
+      signupOutcome: null,
+      signupResolvedAt: new Date(new Date(MSG_1).getTime() - 86_400_000),
+      appliedAt: null,
+      accountId: null,
+      lastError: 'connection reset',
+      noticeSentAt: null,
+      noticeAttempts: 0,
+    }
+    db.entries.push(old)
+
+    await applyEntry(old.id)
+
+    // Applied to the same business, its story in the timeline — and what WhatsApp learned stays.
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: business.id })
+    expect(db.accounts).toEqual([
+      expect.objectContaining({ id: business.id, giro: 'Taquería', ventasRango: null, qualifiedAt: new Date(MSG_1) }),
+    ])
+    expect(db.events).toContainEqual(
+      expect.objectContaining({ kind: 'ENTRY_APPLIED', data: expect.objectContaining({ qualificationSkipped: true }) }),
+    )
+    expect(db.events.filter(event => event.kind === 'FIELD_CHANGE')).toEqual([])
   })
 
   it('the race: a call at the same instant created it first — this one reads that business and writes nothing', async () => {
