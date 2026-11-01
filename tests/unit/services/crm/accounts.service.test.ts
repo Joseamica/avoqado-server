@@ -161,13 +161,16 @@ describe('traffic light and «Estancado»', () => {
     expect(estancadoDias({ lastTouchAt: daysAgo(30), archivedAt: daysAgo(1) }, contacto, NOW)).toBeNull()
     expect(estancadoDias({ lastTouchAt: daysAgo(30) }, { kind: 'ABIERTA', staleDays: null }, NOW)).toBeNull()
 
-    // A note is a touch: the same UPDATE that locks the row moves `lastTouchAt`.
+    // A note is a touch: the UPDATE that locks the row checks the scope, and the next one moves `lastTouchAt` — only
+    // forward, never back (ruling 65 e).
     editable()
     await addNote(access(), ACCOUNT, { text: 'Tiene 2 consultorios' })
-    expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
+    expect(prismaMock.crmAccount.updateMany).toHaveBeenNthCalledWith(1, {
       where: { AND: [{ id: ACCOUNT }, MINE_OR_UNOWNED] },
-      data: { lastTouchAt: expect.any(Date) },
+      data: { updatedAt: expect.any(Date) },
     })
+    const [[lock], [touch]] = prismaMock.crmAccount.updateMany.mock.calls
+    expect(touch).toEqual({ where: { id: ACCOUNT, lastTouchAt: { lt: lock.data.updatedAt } }, data: { lastTouchAt: lock.data.updatedAt } })
     expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
       data: [{ accountId: ACCOUNT, kind: 'NOTE', actorStaffId: SELLER, data: { text: 'Tiene 2 consultorios' } }],
       skipDuplicates: true,
@@ -366,7 +369,7 @@ describe('who sees and changes what', () => {
     await expect(moveStage(access(), ACCOUNT, DEMO)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_ACCOUNT_NOT_FOUND' })
     expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
       where: { AND: [{ id: ACCOUNT }, MINE_OR_UNOWNED] },
-      data: { lastTouchAt: expect.any(Date) },
+      data: { updatedAt: expect.any(Date) },
     })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
     expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()

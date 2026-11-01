@@ -92,7 +92,7 @@ describe('activities', () => {
     // Scheduling is a touch (the UPDATE that locks the row), and the account's next step is its earliest pending one.
     expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
       where: { AND: [{ id: ACCOUNT }, {}] },
-      data: { lastTouchAt: expect.any(Date) },
+      data: { updatedAt: expect.any(Date) },
     })
     expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({ where: { id: ACCOUNT }, data: { nextActivityAt: TOMORROW } })
     // M-2: scheduling is a change too (spec §5.10). The activity does not keep who created it, so the timeline does.
@@ -257,7 +257,7 @@ describe('reagendar (ruling 55)', () => {
     )
     expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
       where: { AND: [{ id: ACCOUNT }, MINE_OR_UNOWNED] },
-      data: { lastTouchAt: expect.any(Date) },
+      data: { updatedAt: expect.any(Date) },
     })
     // Only while still pending: a compare-and-set, like «Hecha».
     expect(prismaMock.crmActivity.updateMany).toHaveBeenCalledWith({ where: { id: ACTIVITY, doneAt: null }, data: { dueAt: NEXT_WEEK } })

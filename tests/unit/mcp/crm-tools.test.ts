@@ -310,6 +310,8 @@ describe('crm_upsert_whatsapp_prospect', () => {
         giro: row.giro ?? null,
         ventasRango: row.ventasRango ?? null,
         archivedAt: row.archivedAt ?? null,
+        lastTouchAt: row.lastTouchAt ?? null,
+        qualifiedAt: row.qualifiedAt ?? null,
         stage: { kind },
       }
     })
@@ -535,6 +537,28 @@ describe('crm_upsert_whatsapp_prospect', () => {
     expect(db.accounts[0]).toMatchObject({ name: 'Tacos Lupe', giro: 'Taquería', ventasRango: 'Menos de $150 mil', lastTouchAt: MON })
     expect(kinds()).toEqual(['SYSTEM', 'FIELD_CHANGE'])
     expect(auditMcpWrite).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ action: 'CRM_WHATSAPP_PROSPECT_UPDATED' }))
+  })
+
+  it('un_toque_nunca_retrocede (Codex exhaustiva #10 B): a touch someone made while this call waited for the lock stays', async () => {
+    // A landing form touched the business on Tuesday; this call took «now» on Monday before it got the lock.
+    seedLanding({ archivedAt: null, lastTouchAt: TUE })
+
+    expect(await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })).toMatchObject({
+      notaNueva: true,
+    })
+    expect(db.accounts[0].lastTouchAt).toEqual(TUE)
+  })
+
+  it('lo_que_aprende_whatsapp_sella_qualifiedAt (Codex exhaustiva #10 A): an older form repaired later does not overwrite it', async () => {
+    const { call } = setup()
+    await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, giro: 'Taquería', ultimoMensajeAt: MSG_1 })
+    // Created with what the chat said, stamped with when it said it.
+    expect(db.accounts[0]).toMatchObject({ giro: 'Taquería', qualifiedAt: new Date(MSG_1) })
+
+    // Filling an empty field later stamps the later message; an earlier stamp is never moved back.
+    jest.setSystemTime(THU)
+    await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ventasRango: 'Menos de $150 mil', ultimoMensajeAt: MSG_2 })
+    expect(db.accounts[0]).toMatchObject({ ventasRango: 'Menos de $150 mil', qualifiedAt: new Date(MSG_2) })
   })
 
   it('the race: a call at the same instant created it first — this one reads that business and writes nothing', async () => {

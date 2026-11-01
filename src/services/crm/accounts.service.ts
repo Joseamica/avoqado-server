@@ -302,17 +302,27 @@ async function rowTx(db: Db, id: string, now: Date): Promise<AccountRow> {
 const accountNotFound = () => new NotFoundError('No encontramos ese negocio', 'CRM_ACCOUNT_NOT_FOUND')
 
 /**
- * The first statement of every change to an account: checks the scope, takes the row's lock and touches it — at once.
- * 404 when the caller cannot even see it (a «propios» seller never learns someone else's account exists); 403 when
- * they see it but may not change it.
+ * A touch that never moves «Estancado» back (ruling 65 e, Codex exhaustiva #10): `lastTouchAt` becomes the later of the
+ * one it has and this one. A writer that took its «now» before waiting for the row's lock — while another writer
+ * touched it later — leaves the later touch. The caller holds the row's lock.
+ */
+export function touchNoEarlierTx(tx: Prisma.TransactionClient, id: string, at: Date) {
+  return tx.crmAccount.updateMany({ where: { id, lastTouchAt: { lt: at } }, data: { lastTouchAt: at } })
+}
+
+/**
+ * The first statements of every change to an account: checks the scope and takes the row's lock — at once — then
+ * touches it (`touchNoEarlierTx`). 404 when the caller cannot even see it (a «propios» seller never learns someone
+ * else's account exists); 403 when they see it but may not change it.
  */
 async function touchTx(tx: Prisma.TransactionClient, access: CrmAccess, id: string, scope: Prisma.CrmAccountWhereInput, now: Date) {
-  const { count } = await tx.crmAccount.updateMany({ where: { AND: [{ id }, scope] }, data: { lastTouchAt: now } })
+  const { count } = await tx.crmAccount.updateMany({ where: { AND: [{ id }, scope] }, data: { updatedAt: now } })
   if (count === 0) {
     const visible = await tx.crmAccount.findFirst({ where: { AND: [{ id }, scopeWhere(access, 'ver')] }, select: { id: true } })
     if (visible) throw new ForbiddenError('Sólo puedes cambiar tus negocios y los que no tienen dueño', 'CRM_NO_ES_TUYO')
     throw accountNotFound()
   }
+  await touchNoEarlierTx(tx, id, now)
   return tx.crmAccount.findUniqueOrThrow({ where: { id }, select: ROW_SELECT })
 }
 
@@ -680,6 +690,8 @@ export async function createManual(access: CrmAccess, input: ManualAccountInput,
         giro: input.giro || null,
         ventasRango: input.ventasRango || null,
         sucursales: input.sucursales ?? null,
+        // A seller's qualification is newer than any landing form still pending for this person (ruling 65 e).
+        ...(input.giro || input.ventasRango || input.sucursales != null ? { qualifiedAt: now } : {}),
         source,
         referidoPor: input.referidoPor || null,
         ownerStaffId: access.staffId,
@@ -704,7 +716,7 @@ export async function takeAccount(access: CrmAccess, id: string) {
   return prisma.$transaction(async tx => {
     const { count } = await tx.crmAccount.updateMany({
       where: { AND: [{ id, ownerStaffId: null }, scopeWhere(access, 'editar')] },
-      data: { ownerStaffId: access.staffId, lastTouchAt: now },
+      data: { ownerStaffId: access.staffId },
     })
     if (count === 0) {
       const current = await tx.crmAccount.findUnique({ where: { id }, select: { ownerStaffId: true } })
@@ -712,6 +724,7 @@ export async function takeAccount(access: CrmAccess, id: string) {
       if (current.ownerStaffId !== access.staffId) throw new ConflictError('Alguien más ya lo tomó', 'CRM_YA_TIENE_DUENO')
       return rowTx(tx, id, now)
     }
+    await touchNoEarlierTx(tx, id, now)
     await movePendingActivitiesTx(tx, [id], access.staffId)
     const reason: OwnerChangeReason = 'TAKEN'
     await addEvent(tx, {

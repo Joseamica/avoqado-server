@@ -10,7 +10,7 @@
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/concurrencia.integration.test.ts --ci
  */
 import type { CrmAccess } from '@/services/crm/access.service'
-import { getPending, moveStage, takeAccount } from '@/services/crm/accounts.service'
+import { addNote, getPending, moveStage, takeAccount } from '@/services/crm/accounts.service'
 import { completeActivity } from '@/services/crm/activities.service'
 import { updateTeamMember } from '@/services/crm/teamVenue.service'
 import { addEvent } from '@/services/crm/timeline.service'
@@ -126,6 +126,32 @@ describe('CRM: two sellers on the same account at once', () => {
     expect(first).toBeDefined()
     expect(second.fromStageId).toBe(first.toStageId)
     expect((await prisma.crmAccount.findUniqueOrThrow({ where: { id } })).stageId).toBe(second.toStageId)
+  })
+
+  it('un_toque_nunca_retrocede (ruling 65 e, Codex exhaustiva #10): a note that waited for the lock leaves the later touch', async () => {
+    const id = await newAccount({ ownerStaffId: ana })
+    // Another writer holds the row and touches it later than the note will (a landing form, in the real world).
+    const later = new Date(Date.now() + 60_000)
+    let release!: () => void
+    const released = new Promise<void>(resolve => (release = resolve))
+    let locked!: () => void
+    const isLocked = new Promise<void>(resolve => (locked = resolve))
+    const holder = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${id} FOR UPDATE`
+      await tx.crmAccount.update({ where: { id }, data: { lastTouchAt: later } })
+      locked()
+      await released
+    })
+    await isLocked
+
+    // The note takes its «now» and then waits for that lock.
+    const note = addNote(seller(ana!), id, { text: 'Llamé' })
+    await new Promise(resolve => setTimeout(resolve, 300))
+    release()
+    await holder
+    await note
+
+    expect((await prisma.crmAccount.findUniqueOrThrow({ where: { id } })).lastTouchAt).toEqual(later)
   })
 
   it('mismo_sourceKey_no_duplica', async () => {

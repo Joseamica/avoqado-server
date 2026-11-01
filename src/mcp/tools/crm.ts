@@ -158,6 +158,9 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
     ...(input.campaign ? { campaign: input.campaign } : {}),
     ...(input.ultimoMensajeAt ? { ultimoMensajeAt: input.ultimoMensajeAt.toISOString() } : {}),
   }
+  // When what it fills was said (ruling 65 e): the message the routine read, never later than now. Like a landing form's
+  // `receivedAt`, it stamps `qualifiedAt`, so an older form the sweep repairs late does not overwrite it.
+  const learnedAt = input.ultimoMensajeAt && input.ultimoMensajeAt < now ? input.ultimoMensajeAt : now
 
   // Resolve, don't guess (the MCP's rule for writes, ruling 46): without its own WhatsApp business, a phone that is in
   // two or more businesses comes back with its candidates.
@@ -191,6 +194,7 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
           sourceDetail: input.campaign ? { campaign: input.campaign } : undefined,
           ownerStaffId: null,
           stageId,
+          ...(input.giro || input.ventasRango ? { qualifiedAt: learnedAt } : {}),
         },
         contact: { name, phoneE164: input.phone, isPrimary: true },
       },
@@ -212,7 +216,15 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
     // a SUPERADMIN.
     const row = await tx.crmAccount.findFirst({
       where: { AND: [{ id: accountId }, scopeWhere(access, 'editar')] },
-      select: { name: true, giro: true, ventasRango: true, archivedAt: true, stage: { select: { kind: true } } },
+      select: {
+        name: true,
+        giro: true,
+        ventasRango: true,
+        archivedAt: true,
+        lastTouchAt: true,
+        qualifiedAt: true,
+        stage: { select: { kind: true } },
+      },
     })
     if (!row) throw new ForbiddenError('Sólo puedes cambiar tus negocios y los que no tienen dueño', 'CRM_NO_ES_TUYO')
 
@@ -232,10 +244,14 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
     const changes = vacios(row, input)
 
     const data: Prisma.CrmAccountUpdateInput = {}
-    if (notaNueva) data.lastTouchAt = now
+    // A touch never moves back (ruling 65 e): another writer may have touched it while this call waited for the lock.
+    if (notaNueva && row.lastTouchAt < now) data.lastTouchAt = now
     if (reactivado) data.archivedAt = null
     for (const { field, to } of changes) data[field] = to
-    if (changes.some(({ field }) => field !== 'name')) data.qualificationAvailable = true
+    if (changes.some(({ field }) => field !== 'name')) {
+      data.qualificationAvailable = true
+      if (!row.qualifiedAt || row.qualifiedAt < learnedAt) data.qualifiedAt = learnedAt
+    }
     if (Object.keys(data).length) await tx.crmAccount.update({ where: { id: accountId }, data })
     if (reactivado) {
       await addEvent(tx, { accountId, kind: 'REACTIVATED', actorStaffId: access.staffId, data: { via: WHATSAPP, ...extra } })
