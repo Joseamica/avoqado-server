@@ -187,16 +187,22 @@ async function porPaginas<T extends { id: string }>(
 
 /**
  * D1 (pedidos en línea fase 2): el cobro con tarjeta de un pedido en línea no crea `CheckoutSession` (nace en `OnlineOrderCharge` + su
- * `Payment`), así que Ganancias no lo veía. Sus filas: los `Payment` COMPLETED de la cuenta de un pedido con cargo de tarjeta —el cobro
- * (`feeAmount` = la comisión de Avoqado que Stripe sí cobró) y sus devoluciones (`feeAmount` negativo = la comisión que Stripe regresó;
- * la devolución por otro medio trae 0)—. Volumen y transacciones cuentan sólo los cobros, como `CheckoutSession`.
+ * `Payment`), así que Ganancias no lo veía. Sus filas: el `Payment` COMPLETED del cargo (`feeAmount` = la comisión de Avoqado que Stripe
+ * sí cobró) y sus devoluciones a la tarjeta (`feeAmount` negativo = la comisión que Stripe regresó). Volumen y transacciones cuentan sólo
+ * el cobro, como `CheckoutSession`.
  * Sumar en SQL es exacto aquí: es una suma de pesos ya guardados, no el motor no lineal de `computeRevenueSplit`.
  */
 const SQL_COBROS_DE_PEDIDOS_CON_TARJETA = Prisma.sql`
   "Payment" p
   JOIN "OnlineOrder" oo ON oo."orderId" = p."orderId"
   JOIN "OnlineOrderCharge" c ON c."onlineOrderId" = oo.id`
-const SQL_COBRO_O_DEVOLUCION = Prisma.sql`p.status = 'COMPLETED' AND p.type IN ('REGULAR', 'REFUND')`
+// Sólo el cobro DEL CARGO (su `processorId` es el PaymentIntent, como lo escribe la captura) y las devoluciones a la tarjeta de ese cargo
+// (`OnlineOrderCardRefund.refundPaymentId`). Codex r7: otro cobro de la misma cuenta —el de terminal que la captura registra como cobro
+// doble— no es dinero en línea: su margen ya lo cuenta la parte de terminales.
+const SQL_COBRO_O_DEVOLUCION = Prisma.sql`p.status = 'COMPLETED' AND (
+    (p.type = 'REGULAR' AND p."processorId" = c."paymentIntentId")
+    OR (p.type = 'REFUND' AND EXISTS (SELECT 1 FROM "OnlineOrderCardRefund" r WHERE r."refundPaymentId" = p.id AND r."chargeId" = c.id))
+  )`
 
 const TX_INCLUDE = {
   payment: { select: { venue: { select: { id: true, name: true } } } },
