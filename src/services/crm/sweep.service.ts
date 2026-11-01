@@ -37,6 +37,7 @@ import {
   addPersonTx,
   announceEntry,
   applyEntry,
+  IdentityConflictError,
   LANDING,
   linkTx,
   repeatOf,
@@ -456,6 +457,16 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
       // After the commit, and never throws: how it went stays on its entry, and the sweep retries what did not go out.
       if (done.entryId) await announceEntry(done.entryId, { accountId: done.accountId, notice: 'NEW', content })
     } catch (error) {
+      // The person's landing account belongs to another business (Codex autorización H1): nothing to create or write
+      // here, and nothing to retry — not a failure that holds the cursor.
+      if (error instanceof IdentityConflictError) {
+        logger.warn('[CRM] Old landing signup skipped: its landing account is linked to another Organization', {
+          activityLogId: signup.id,
+          organizationId: organization.id,
+          error: errorText(error),
+        })
+        continue
+      }
       if (firstFailed < 0) firstFailed = index
       logger.error('[CRM] An old landing signup could not get its CRM account; the next sweep retries it', {
         activityLogId: signup.id,

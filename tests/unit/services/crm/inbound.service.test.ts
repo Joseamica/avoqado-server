@@ -1098,6 +1098,26 @@ describe('ruling 65: one identity resolver for every writer (Codex exhaustiva #4
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: holder.id, lastError: null })
   })
 
+  it.each([
+    { case: 'un «Ganar» la liga a otro negocio mientras el formulario espera el candado', race: true },
+    { case: 'ya estaba ligada a otro negocio', race: false },
+  ])('la_llave_ligada_a_otro_negocio_no_recibe_la_entrada (Codex autorización H1): $case', async ({ race }) => {
+    const landing = seedAccount({ id: id('acctland', 1), organizationId: race ? null : OTHER_ORG })
+    if (race)
+      onLock(landing.id, () => Object.assign(db.accounts.find(account => account.id === landing.id)!, { organizationId: OTHER_ORG }))
+    // The person just created ORG with this form.
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    // Nothing applied and nothing written to somebody else's business: the entry waits, with its error.
+    expect(db.entries[0]).toMatchObject({ appliedAt: null, lastError: expect.stringContaining('another Organization') })
+    expect(db.accounts).toEqual([expect.objectContaining({ id: landing.id, organizationId: OTHER_ORG, giro: 'Restaurante' })])
+    expect(db.contacts).toEqual([])
+    expect(db.events).toEqual([])
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
   it('choque_de_organizacion_al_crear_devuelve_al_titular (#6): no second, unlinked account', async () => {
     const holder = { id: id('acctwon', 1), name: 'Café Ana', source: 'MANUAL', externalKey: null, stageId: FAKE_STAGE_ID }
     // A «Ganar» links another account to the person's new Organization between the lookup and the insert.

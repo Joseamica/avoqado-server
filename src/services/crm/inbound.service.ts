@@ -197,10 +197,25 @@ async function candidateTx(tx: Prisma.TransactionClient, who: Identity): Promise
 }
 
 /**
+ * The account of this person's own source key belongs, under its lock, to ANOTHER business than the one they own (a
+ * seller won it for someone else). Nothing may be written there, and the key is unique, so no second account can take
+ * it: the caller writes nothing (Codex autorización H1). The landing leaves its entry unapplied; the backfill skips the
+ * signup.
+ */
+export class IdentityConflictError extends Error {
+  constructor(accountId: string, organizationId: string) {
+    super(`The CRM account ${accountId} of this person's key belongs to another Organization (${organizationId}); nothing applied`)
+    this.name = 'IdentityConflictError'
+  }
+}
+
+/**
  * THE identity resolver every writer shares (ruling 65 a): the account of this person (`candidateTx`), returned LOCKED
  * (`FOR UPDATE`, the order every writer locks in) and checked again under the lock — still there, still the holder of
  * its Organization, still compatible with this person's — before anything writes contacts or fields. What changed in
- * between (deleted, or linked elsewhere by a «Ganar») is resolved again. Null when the CRM does not have this person.
+ * between (deleted, or linked elsewhere by a «Ganar») is resolved again; the account of the person's own key, which
+ * nothing else can replace, linked to another business is an `IdentityConflictError`. Null when the CRM does not have
+ * this person.
  */
 export async function resolveAccountTx(tx: Prisma.TransactionClient, who: Identity): Promise<ResolvedAccount | null> {
   for (let tries = 0; tries < RESOLVE_TRIES; tries++) {
@@ -209,10 +224,9 @@ export async function resolveAccountTx(tx: Prisma.TransactionClient, who: Identi
     const [locked] = await tx.$queryRaw<Array<{ id: string; organizationId: string | null }>>`
       SELECT "id", "organizationId" FROM "CrmAccount" WHERE "id" = ${candidate.id} FOR UPDATE`
     if (!locked) continue
-    const still =
-      candidate.via === 'ORGANIZATION'
-        ? locked.organizationId === who.organizationId
-        : candidate.via === 'KEY' || !who.organizationId || !locked.organizationId || locked.organizationId === who.organizationId
+    const compatible = !who.organizationId || !locked.organizationId || locked.organizationId === who.organizationId
+    if (candidate.via === 'KEY' && !compatible) throw new IdentityConflictError(locked.id, locked.organizationId!)
+    const still = candidate.via === 'ORGANIZATION' ? locked.organizationId === who.organizationId : compatible
     if (still) return { id: locked.id, organizationId: locked.organizationId, via: candidate.via }
   }
   throw new Error('The CRM account of this person kept changing while it was being resolved; the caller retries it')

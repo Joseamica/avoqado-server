@@ -46,6 +46,7 @@ const ORG_FIRST_EMAIL = `hugo-${suffix}@test.mx`
 const RANK_EMAIL = `iris-${suffix}@test.mx`
 const CLASH_EMAIL = `juan-${suffix}@test.mx`
 const WIN_RACE_EMAIL = `karla-${suffix}@test.mx`
+const KEY_TAKEN_EMAIL = `luis-${suffix}@test.mx`
 const EMAILS = [
   RACE_EMAIL,
   CRASH_EMAIL,
@@ -59,7 +60,10 @@ const EMAILS = [
   RANK_EMAIL,
   CLASH_EMAIL,
   WIN_RACE_EMAIL,
+  KEY_TAKEN_EMAIL,
 ]
+/** Organizations this file creates that no person of it owns. */
+const otherOrganizationIds: string[] = []
 /** Accounts this file creates under another source (not found by `source: LANDING`). */
 const otherAccountIds: string[] = []
 
@@ -134,6 +138,7 @@ describe('landing → CRM against Postgres', () => {
     }
     // Their OnboardingProgress goes with them (cascade).
     if (organizationIds.length) await prisma.organization.deleteMany({ where: { id: { in: organizationIds } } })
+    if (otherOrganizationIds.length) await prisma.organization.deleteMany({ where: { id: { in: otherOrganizationIds } } })
   })
 
   it('dos_formularios_mismo_correo_una_ficha_ligada', async () => {
@@ -462,6 +467,50 @@ describe('landing → CRM against Postgres', () => {
 
       expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({ accountId: byEmail.id })
       expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: RANK_EMAIL } })).toBe(0)
+    })
+
+    it('la_llave_que_un_ganar_liga_a_otro_negocio_no_recibe_la_entrada (Codex autorización H1): checked under the lock', async () => {
+      const stageId = (await getInitialStage()).id
+      const landing = await prisma.crmAccount.create({
+        data: { name: `Llave tomada ${suffix}`, source: 'LANDING', externalKey: KEY_TAKEN_EMAIL, stageId },
+      })
+      const { organization } = await ownerOfAnOrganization(KEY_TAKEN_EMAIL)
+      const other = await prisma.organization.create({
+        data: { name: `Otro negocio ${suffix}`, email: `otro-${suffix}@test.mx`, phone: '5500000001' },
+      })
+      otherOrganizationIds.push(other.id)
+      const entry = await saveLandingEntry(form(KEY_TAKEN_EMAIL))
+      await recordSignupOutcome(entry!.entryId, { organizationId: organization.id, alreadyExisted: true, yaEsCliente: false })
+
+      // A seller wins that landing account for another business, holding its row while the form waits for the lock.
+      let release!: () => void
+      const released = new Promise<void>(resolve => (release = resolve))
+      let locked!: () => void
+      const isLocked = new Promise<void>(resolve => (locked = resolve))
+      const seller = prisma.$transaction(async tx => {
+        await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${landing.id} FOR UPDATE`
+        await tx.crmAccount.update({ where: { id: landing.id }, data: { organizationId: other.id } })
+        locked()
+        await released
+      })
+      await isLocked
+      const applying = applyEntry(entry!.entryId)
+      await new Promise(resolve => setTimeout(resolve, 300))
+      release()
+      await seller
+      await applying
+
+      // Nothing of the person or the form lands on the other business; the entry waits with its error.
+      expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
+        appliedAt: null,
+        lastError: expect.stringContaining('another Organization'),
+      })
+      expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: landing.id } })).toMatchObject({
+        organizationId: other.id,
+        giro: null,
+      })
+      expect(await prisma.crmContact.count({ where: { accountId: landing.id } })).toBe(0)
+      expect(await prisma.crmTimelineEvent.count({ where: { accountId: landing.id } })).toBe(0)
     })
 
     it('crear_con_una_organizacion_ocupada_devuelve_al_titular (Codex exhaustiva #6): never a second, unlinked account', async () => {

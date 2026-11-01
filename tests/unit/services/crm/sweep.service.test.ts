@@ -1030,6 +1030,27 @@ describe('backfillFromOnboarding', () => {
     expect(notifyNewProspect).not.toHaveBeenCalled()
   })
 
+  it('llave_landing_ligada_a_otro_negocio_se_salta_sin_retener_el_cursor (Codex autorización H1)', async () => {
+    // The person's landing account belongs to another business; their signup created ORG. And another person's signup.
+    const theirs = seedAccount({ organizationId: OTHER_ORG })
+    seedOrganization()
+    seedOrganization({ id: cuid('org', 3), name: 'Taller Beto' })
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
+    seedSignup(seedStaff('beto@taller.mx', {}, cuid('org', 3)).id, cuid('org', 3), { createdAt: new Date(Date.now() - 2 * DAY) })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+
+    // Nothing written to the other business, and it is not a failure: no error, and the next pass does not read it again.
+    expect(accountOf(theirs.id)).toMatchObject({ organizationId: OTHER_ORG })
+    expect(db.contacts.filter(contact => contact.accountId === theirs.id)).toEqual([])
+    expect(db.accounts.map(account => account.externalKey).sort()).toEqual([EMAIL, 'beto@taller.mx'])
+    expect(logger.error).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('another Organization'), expect.anything())
+    ;(logger.warn as jest.Mock).mockClear()
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('another Organization'), expect.anything())
+  })
+
   it('la_marca_de_una_persona_borrada_no_crea_nada (I-2)', async () => {
     // The platform's deletion anonymizes and keeps the row (`staffDeletion.service.ts`): inactive, struck-out email, no
     // phone. Its mark still points at it.
