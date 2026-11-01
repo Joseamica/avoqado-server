@@ -337,8 +337,15 @@ describe('Task 5r — la terminal usa la misma definición de «lo ya devuelto»
     expect(args.where).toMatchObject({ venueId: VENUE, type: 'REFUND' })
     expect(args.where.processorData).toEqual({ path: ['originalPaymentId'], equals: 'pay-orig' })
     // El `select` es lo que hace imposible recortar `tipAmount` sin que TypeScript lo vea.
-    // `processorData`: la marca del Cambio (`exchange.role`), para el tope del banco tras un cambio (exchangeTerminalRefund.ts).
-    expect(args.select).toEqual({ amount: true, tipAmount: true, status: true, processorData: true })
+    // `processorData`: la marca del Cambio (`exchange.role`), y `tenderType`: el medio STORE_CREDIT; los dos para el tope del banco
+    // tras un cambio o un saldo a favor (exchangeTerminalRefund.ts).
+    expect(args.select).toEqual({
+      amount: true,
+      tipAmount: true,
+      status: true,
+      processorData: true,
+      tenderType: { select: { systemKind: true } },
+    })
     expect(args.take).toBe(1_001)
   })
 

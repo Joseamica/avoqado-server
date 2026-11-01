@@ -54,6 +54,7 @@ import AppError, {
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
 import { EXCEPCIONES_DE_SOLO_SALDO, resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -6025,6 +6026,9 @@ class TerminalPaymentService {
         createdAt: new Date(),
       })
 
+      // S7 (spec saldo a favor §5.5): la terminal devolverá al banco ANTES de avisar. Mientras tanto (3 min), el saldo a favor de este
+      // cobro se rechaza (`terminalRefundMarker.ts`); lo que se cuele igual lo congela el registro tardío.
+      marcarDevolucionEnTerminal(paymentId)
       io.to(socketId).emit('terminal:refund_request', {
         requestId,
         terminalId,

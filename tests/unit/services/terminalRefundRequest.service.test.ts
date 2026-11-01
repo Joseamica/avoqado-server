@@ -13,6 +13,7 @@ import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { BadRequestError, TerminalBusyError } from '@/errors/AppError'
+import { hayDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -247,5 +248,42 @@ describe('requestRefundOnTerminal — «Sólo saldo a favor»', () => {
 
     await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest())).rejects.toBeInstanceOf(BadRequestError)
     expect(emit).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * S7 (spec 2026-10-30-saldo-a-favor §5.5, opción 1): abrir la devolución no aparta el importe y la terminal devuelve al banco ANTES de
+ * avisar. Al emitir el comando queda una marca en memoria (3 min) y, mientras vive, el saldo a favor de ese cobro se rechaza.
+ */
+describe('requestRefundOnTerminal — la marca «la terminal está devolviendo este cobro»', () => {
+  beforeEach(() => prismaMock.venueSettings.findUnique.mockResolvedValue(null))
+
+  it('al emitir el comando deja la marca del cobro', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, id: 'pay-marca' })
+    ackWith('opened')
+
+    await terminalPaymentService.requestRefundOnTerminal(baseRequest({ paymentId: 'pay-marca' }))
+
+    expect(emit).toHaveBeenCalledTimes(1)
+    expect(hayDevolucionEnTerminal('pay-marca')).toBe(true)
+  })
+
+  it('si «sólo saldo» la rechaza antes de emitir, no deja marca', async () => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ storeCreditOnly: true })
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, id: 'pay-sin-marca' })
+
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest({ paymentId: 'pay-sin-marca' }))).rejects.toMatchObject({
+      code: 'STORE_CREDIT_ONLY',
+    })
+    expect(hayDevolucionEnTerminal('pay-sin-marca')).toBe(false)
+  })
+
+  it('un cobro no elegible tampoco deja marca', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, id: 'pay-efectivo', method: 'CASH' })
+
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest({ paymentId: 'pay-efectivo' }))).rejects.toBeInstanceOf(
+      BadRequestError,
+    )
+    expect(hayDevolucionEnTerminal('pay-efectivo')).toBe(false)
   })
 })

@@ -582,6 +582,11 @@
       "loops": 0,
       "reason": "Saldo a favor (S2): el mismo candado «primer-sobre», sólo mientras la sucursal no tiene sobres activados; el llamador lo toma como PRIMERA sentencia de su transacción."
     },
+    "src/services/exchanges/exchangeTerminalRefund.ts#sobresDeSaldoDelCobroEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S7): la unión completa de los sobres que recibieron saldo del cobro, id ASC, en UNA llamada; recordRefund la hace tras apartar la Order y el Payment y ANTES de reclamar el turno (Order → Payment → sobres → Shift, como el cobro con saldo). El BLOCK de después (operarSobreDeGerenteEnTx) reentra en sobres ya poseídos. Prueba en Postgres: devolucionTardiaDeTerminal.integration.test.ts (los dos órdenes contra un cobro con ese saldo)."
+    },
     "src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,

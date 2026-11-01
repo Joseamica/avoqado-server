@@ -18,6 +18,7 @@ import { GiftCardError } from '../giftCards/giftCardErrors'
 import { sinSaldoAFavorPorque, type CobroParaDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
 import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from './storeCreditTender'
 import { saldosAFavorDeReembolsos, type StoreCreditDelReembolso } from './saldoAbonado'
+import { rechazarSiLaTerminalEstaDevolviendo } from './terminalRefundMarker'
 
 // La forma y su lector viven en `saldoAbonado.ts` (sin dependencias del núcleo del reembolso: el Cambio también la lee); se re-exportan
 // para los lectores de siempre (la lista y el detalle de transacciones del POS).
@@ -124,6 +125,8 @@ export async function issuePosRefund(
       if (!storeCreditAvailable()) throw new AppError(SIN_LLAVES, 422, true, 'STORE_CREDIT_UNAVAILABLE')
       const motivo = cobro ? sinSaldoAFavorPorque({ ...cobro, tenderSystemKind }) : null
       if (motivo) throw new AppError(motivo, 422, true, 'STORE_CREDIT_NOT_ALLOWED')
+      // S7: la terminal está devolviendo este cobro (o la raíz de su crédito) al banco → 409 sin escribir.
+      await rechazarSiLaTerminalEstaDevolviendo(input.venueId, { paymentId: input.paymentId })
       // Con el cliente global y FUERA de la transacción de dinero (S1): un P2002 adentro la abortaría entera.
       await prepararMediosDeSaldoAFavor(input.venueId)
     }

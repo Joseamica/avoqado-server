@@ -45,7 +45,15 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
-import { centavosQueUsaronLosCambios, laTerminalYaDevolvio, mandarCambiosARevisarEnTx } from '../exchanges/exchangeTerminalRefund'
+import {
+  avisarYCongelarSaldoDuplicadoEnTx,
+  centavosQueNoPasaronPorElBanco,
+  centavosQueUsaronLosCambios,
+  duplicadoCents,
+  laTerminalYaDevolvio,
+  mandarCambiosARevisarEnTx,
+  sobresDeSaldoDelCobroEnTx,
+} from '../exchanges/exchangeTerminalRefund'
 import { anotarRegresoDeLaVentaEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
 import { applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 
@@ -448,19 +456,23 @@ export async function recordRefund(
   const alreadyRefunded = yaDevueltoCentsPrevuelo / 100
   const remainingRefundable = remainingRefundableCents / 100
 
-  // Cambio de producto (rM1, decisión «A»): con tarjeta, el tope es lo que el BANCO todavía tiene; lo que un cambio usó sin pasar
-  // por el banco se lee sólo en este caso raro (el bloque bloqueado es quien decide).
-  const usadoPorCambiosPrevuelo =
+  // Cambio de producto (rM1, decisión «A») y saldo a favor (S7): con tarjeta, el tope es lo que el BANCO todavía tiene; lo que un
+  // cambio o un saldo a favor usó sin pasar por el banco se lee sólo en este caso raro (el bloque bloqueado es quien decide).
+  const noPasoPorElBancoPrevuelo =
     esteReembolsoCentsPrevuelo > remainingRefundableCents && laTerminalYaDevolvio(originalPayment)
-      ? centavosQueUsaronLosCambios(
+      ? centavosQueNoPasaronPorElBanco(
           await prisma.payment.findMany({
-            where: { venueId, type: PaymentType.REFUND, processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId } },
-            select: { amount: true, tipAmount: true, status: true, processorData: true },
+            where: {
+              venueId,
+              type: PaymentType.REFUND,
+              processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
+            },
+            select: { amount: true, tipAmount: true, status: true, processorData: true, tenderType: { select: { systemKind: true } } },
             take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
           }),
         )
       : 0
-  if (esteReembolsoCentsPrevuelo > remainingRefundableCents + usadoPorCambiosPrevuelo) {
+  if (esteReembolsoCentsPrevuelo > remainingRefundableCents + noPasoPorElBancoPrevuelo) {
     logger.error('Refund amount exceeds remaining refundable', {
       originalPaymentId: refundData.originalPaymentId,
       requestedRefund: refundAmountInPesos,
@@ -690,7 +702,7 @@ export async function recordRefund(
           type: PaymentType.REFUND,
           processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
         },
-        select: { amount: true, tipAmount: true, status: true, processorData: true },
+        select: { amount: true, tipAmount: true, status: true, processorData: true, tenderType: { select: { systemKind: true } } },
         take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
       })
 
@@ -734,13 +746,18 @@ export async function recordRefund(
       const lockedTotalCents = Math.round(Number(locked.amount) * 100) + Math.round(Number(locked.tipAmount ?? 0) * 100)
       const lockedRemainingCents = lockedTotalCents - lockedAlreadyRefundedCents
       const lockedRemaining = lockedRemainingCents / 100
-      // Cambio de producto (rM1, decisión «A»): el SDK ya devolvió. Si un cambio usó este cobro sin pasar por el banco, se anota
-      // hasta lo que el banco todavía tiene y el cambio va a revisar (`exchangeTerminalRefund.ts`).
-      const usadoPorCambios = laTerminalYaDevolvio(locked) ? centavosQueUsaronLosCambios(filasDeReembolso) : 0
-      if (esteReembolsoCents > lockedRemainingCents + usadoPorCambios) {
+      // Cambio de producto (rM1, decisión «A») y saldo a favor (S7): el SDK ya devolvió. Si un cambio o un saldo a favor usó este
+      // cobro sin pasar por el banco, se anota hasta lo que el banco todavía tiene; el cambio va a revisar y el saldo se congela con
+      // su anomalía (`exchangeTerminalRefund.ts`).
+      const noPasoPorElBanco = laTerminalYaDevolvio(locked) ? centavosQueNoPasaronPorElBanco(filasDeReembolso) : 0
+      if (esteReembolsoCents > lockedRemainingCents + noPasoPorElBanco) {
         throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
       }
-      const anotadaTrasUnCambio = esteReembolsoCents > lockedRemainingCents
+      const anotadaDeMas = esteReembolsoCents > lockedRemainingCents
+      const anotadaTrasUnCambio = anotadaDeMas && centavosQueUsaronLosCambios(filasDeReembolso) > 0
+      // S7: los sobres que recibieron saldo de este cobro se apartan AQUÍ, antes del turno (Order → Payment → sobres → Shift, como el
+      // cobro con saldo). Sólo con exceso: sin él no hay nada duplicado.
+      const saldoDelCobro = anotadaDeMas ? await sobresDeSaldoDelCobroEnTx(tx, { venueId, paymentId: locked.id }) : null
 
       // ═══════════════════════════════════════════════════════════════════════
       // Turno del NEGOCIO: observar → reclamar OPEN o conciliar post-corte
@@ -1081,6 +1098,22 @@ export async function recordRefund(
           refundPaymentId: refundPayment.id,
           refundCents: esteReembolsoCents,
           staffId: userId ?? null,
+        })
+      // S7 (opción 1): el saldo a favor de este cobro quedó duplicado con lo que devolvió el banco → anomalía y sobres congelados.
+      if (saldoDelCobro)
+        await avisarYCongelarSaldoDuplicadoEnTx(tx, {
+          venueId,
+          originalPaymentId: locked.id,
+          refundPaymentId: refundPayment.id,
+          refundCents: esteReembolsoCents,
+          duplicadoCents: duplicadoCents({
+            totalCents: lockedTotalCents,
+            devueltoAntesCents: lockedAlreadyRefundedCents,
+            esteCents: esteReembolsoCents,
+          }),
+          folio: originalPayment.order?.orderNumber ?? locked.id.slice(-6),
+          staffId: userId,
+          saldo: saldoDelCobro,
         })
 
       // «Regresa lo que salió menos lo que ya regresó» (28-oct): si con esta devolución la venta queda toda devuelta, lo que vuelve

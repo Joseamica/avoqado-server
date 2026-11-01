@@ -30,6 +30,7 @@ import { effectiveExchangesEnabled } from './exchangeRules'
 import { ExchangeError } from './exchangeErrors'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from '../storeCredit/storeCreditTender'
+import { rechazarSiLaTerminalEstaDevolviendo } from '../storeCredit/terminalRefundMarker'
 import type { ExchangeTxOutcome } from './exchangeTx'
 
 export interface CreateExchangeBody {
@@ -206,20 +207,22 @@ export async function createExchange(input: {
     )
   await assertVenueSalesEnabled(venueId)
   await validateStaffVenue(actorStaffId, venueId)
+  const original = await prisma.payment.findFirst({
+    where: { id: body.originalPaymentId, venueId, OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    select: { orderId: true },
+  })
+  if (!original?.orderId) throw new NotFoundError('No se encontró el cobro en esta sucursal.')
   // Saldo a favor (spec 2026-10-30 §5.4): después de reconocer la repetición, como el Reembolso del POS. Todo rechazo `STORE_CREDIT_` es
   // un 4xx sin escritura.
   if (body.settlement.method === 'STORE_CREDIT') {
     if (!body.settlement.customerId)
       throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'Elige a quién se le abona el saldo a favor.', 400)
     if (!storeCreditAvailable()) throw new AppError('Pide a Avoqado que active el saldo a favor.', 422, true, 'STORE_CREDIT_UNAVAILABLE')
+    // S7: la terminal está devolviendo un cobro de esta venta (o la raíz de uno pagado con crédito) al banco → 409 sin escribir.
+    await rechazarSiLaTerminalEstaDevolviendo(venueId, { orderId: original.orderId })
     // Con el cliente global y FUERA de la transacción del Cambio (S1): un P2002 adentro la abortaría entera.
     await prepararMediosDeSaldoAFavor(venueId)
   }
-  const original = await prisma.payment.findFirst({
-    where: { id: body.originalPaymentId, venueId, OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-    select: { orderId: true },
-  })
-  if (!original?.orderId) throw new NotFoundError('No se encontró el cobro en esta sucursal.')
   let outcome: Awaited<ReturnType<typeof executeExchangeInTransaction>>
   try {
     outcome = await executeExchangeInTransaction({ ...input, requestHash, originalOrderId: original.orderId })

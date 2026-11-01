@@ -21,6 +21,8 @@ export type GiftCardAnomalyCheck =
   | 'PAID_WITH_DEACTIVATED'
   // Revisión nocturna (B7): un reembolso dejó la cuenta en $0 y no se cerró (había un cobro de terminal vivo que después falló).
   | 'OPEN_AT_ZERO_WITH_PENDING'
+  // Saldo a favor (S7, opción 1): la terminal devolvió al banco un cobro que ya tenía saldo a favor; los sobres quedan congelados.
+  | 'STORE_CREDIT_DOUBLE_REFUND'
 
 export async function recordGiftCardAnomaly(
   db: Prisma.TransactionClient | PrismaClient,

@@ -35,6 +35,7 @@ import {
 import { resolveChainRefund, type ChainRefundRoot } from '@/services/exchanges/exchangeChainRefund'
 import { createExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
 import { createExchange, type CreateExchangeBody } from '@/services/exchanges/exchange.service'
+import { hayDevolucionEnTerminal, marcarDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
 
 const money = (over: Partial<MoneyShape> = {}): MoneyShape => ({
   method: 'CASH',
@@ -298,5 +299,28 @@ describe('createExchange con STORE_CREDIT: las puertas antes de la transacción'
     })
     expect(mockPreparar).not.toHaveBeenCalled()
     expect(mockExecute).toHaveBeenCalled()
+  })
+
+  // S7 (spec §5.5, opción 1): la terminal devuelve al banco ANTES de avisar. Mientras vive la marca de un cobro de la venta (3 min), el
+  // Cambio no da saldo a favor de ella.
+  it('con la terminal devolviendo un cobro de la venta → 409 STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS, sin preparar medios ni abrir la transacción', async () => {
+    const ahora = Date.now()
+    marcarDevolucionEnTerminal('pay-2')
+    mock.payment.count.mockResolvedValue(1)
+    try {
+      await expect(createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'STORE_CREDIT_TERMINAL_REFUND_IN_PROGRESS',
+      })
+      // Los cobros de la venta original entre los marcados (pay-2 es el segundo cobro de esa venta).
+      expect(mock.payment.count).toHaveBeenCalledWith({ where: { venueId: 'v1', orderId: 'order-1', id: { in: ['pay-2'] } } })
+      expect(mockPreparar).not.toHaveBeenCalled()
+      expect(mockExecute).not.toHaveBeenCalled()
+    } finally {
+      // La marca es memoria del módulo: se deja vencida para no tocar a las pruebas que siguen.
+      const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora + 4 * 60_000)
+      expect(hayDevolucionEnTerminal('pay-2')).toBe(false)
+      reloj.mockRestore()
+    }
   })
 })
