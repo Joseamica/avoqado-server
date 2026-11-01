@@ -336,18 +336,20 @@ describe('createExchange con STORE_CREDIT: afuera sólo lo que no cambia entre e
       })
     })
 
-    it('EXCHANGE_CHAIN_GIFT_CARD_PENDING y ACTOR_MISMATCH (de antes de la transacción) también', async () => {
+    it('EXCHANGE_CHAIN_GIFT_CARD_PENDING también', async () => {
       mockExecute.mockRejectedValue(new ExchangeError('EXCHANGE_CHAIN_GIFT_CARD_PENDING', 'Viene de una tarjeta de regalo.', 422))
       await expect(createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: body() })).rejects.toMatchObject({
         statusCode: 422,
         code: 'STORE_CREDIT_REJECTED',
         details: { originalCode: 'EXCHANGE_CHAIN_GIFT_CARD_PENDING' },
       })
-      await expect(createExchange({ venueId: 'v1', actorStaffId: 'otra-persona', body: body() })).rejects.toMatchObject({
-        statusCode: 400,
-        code: 'STORE_CREDIT_REJECTED',
-        details: { originalCode: 'ACTOR_MISMATCH' },
-      })
+    })
+
+    it('🔴 ACTOR_MISMATCH NO se envuelve: se revisa ANTES de reconocer la llave, así que puede salir aunque un envío anterior con esa llave sí haya escrito (lo pendiente no se borra)', async () => {
+      const error = await createExchange({ venueId: 'v1', actorStaffId: 'otra-persona', body: body() }).catch(e => e)
+      expect(error).toMatchObject({ statusCode: 400, code: 'ACTOR_MISMATCH' })
+      expect(error.details?.originalCode).toBeUndefined()
+      expect(mock.exchange.findUnique).not.toHaveBeenCalled() // ni siquiera llegó a mirar la llave
     })
 
     it('IDEMPOTENCY_KEY_REUSED no se envuelve: la llave es de otra operación y lo pendiente no se borra', async () => {

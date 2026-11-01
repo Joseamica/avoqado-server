@@ -50,7 +50,7 @@ export type GiftCardErrorCode =
   // borran lo pendiente con cualquier código de ese prefijo (`esRechazoDefinitivoDeSaldo`), así que nunca se lanza tras escribir, y lo
   // que cambia entre el envío y el reenvío se mira después de reconocer la llave (S10, I1). Al revés también (S10, I2): con destino
   // saldo a favor, el Reembolso del POS y el Cambio sacan todo otro 4xx como `STORE_CREDIT_REJECTED` (`comoRechazoDeSaldo`, con el
-  // código de siempre en `details.originalCode`), salvo IDEMPOTENCY_KEY_REUSED y 401/403/408/429.
+  // código de siempre en `details.originalCode`), salvo IDEMPOTENCY_KEY_REUSED, ACTOR_MISMATCH y 401/403/408/429.
   | 'STORE_CREDIT_OVER_CAP'
   | 'STORE_CREDIT_CARD_BLOCKED'
   | 'STORE_CREDIT_CUSTOMER_REQUIRED'
