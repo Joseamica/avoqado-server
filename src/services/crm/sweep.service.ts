@@ -39,7 +39,6 @@ import {
   applyEntry,
   LANDING,
   linkTx,
-  PERSON_CONTACTS,
   repeatOf,
   sourceDetailOf,
   teamOrganizationId,
@@ -378,11 +377,8 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
         const known = await accountOfPerson(tx, email, person.phoneE164, organization.id)
         if (known) {
           await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${known.id} FOR UPDATE`
-          const current = await tx.crmAccount.findUniqueOrThrow({
-            where: { id: known.id },
-            select: { organizationId: true, contacts: PERSON_CONTACTS },
-          })
-          await addPersonTx(tx, known.id, current.contacts, person)
+          const current = await tx.crmAccount.findUniqueOrThrow({ where: { id: known.id }, select: { organizationId: true } })
+          await addPersonTx(tx, known.id, person)
           if (!current.organizationId) await linkTx(tx, known.id, organization.id)
           return null
         }

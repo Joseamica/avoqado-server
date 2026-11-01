@@ -928,6 +928,35 @@ describe('backfillFromOnboarding', () => {
     expect(eventsOf('LINKED')).toHaveLength(1)
   })
 
+  it('carga_inicial_no_duplica_al_contacto_51 (Codex r3 R3-2): the person found past the first 50 contacts is not added again', async () => {
+    const imported = seedAccount({ source: 'IMPORTACION', externalKey: 'hubspot:deal:51', organizationId: null })
+    for (let n = 1; n <= 50; n++) {
+      db.contacts.push({
+        id: cuid('cont', n),
+        accountId: imported.id,
+        name: `P${n}`,
+        email: `p${n}@cafe.mx`,
+        phoneE164: null,
+        isPrimary: n === 1,
+      })
+    }
+    db.contacts.push({
+      id: cuid('cont', 51),
+      accountId: imported.id,
+      name: 'Ana',
+      email: EMAIL,
+      phoneE164: '+525512345678',
+      isPrimary: false,
+    })
+    seedOrganization()
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+
+    expect(db.accounts).toEqual([expect.objectContaining({ id: imported.id, organizationId: ORG })])
+    expect(db.contacts).toHaveLength(51)
+  })
+
   it('la_marca_de_una_persona_borrada_no_crea_nada (I-2)', async () => {
     // The platform's deletion anonymizes and keeps the row (`staffDeletion.service.ts`): inactive, struck-out email, no
     // phone. Its mark still points at it.

@@ -25,8 +25,6 @@ const MAX_TEXT = 500
 const MAX_LIST = 20
 // ponytail: the accounts that already have this person; past 20 (never seen) the newest-touched 20 are ranked.
 const PERSON_CANDIDATES = 20
-// ponytail: the people of an account read when an entry or a signup lands on it; the ficha shows the same 50.
-const ACCOUNT_CONTACTS = 50
 /** Long enough for any signup to finish: an entry younger than this without an outcome waits for the sweep. */
 const SIGNUP_GRACE_MS = 5 * 60_000
 /** Control characters and lone UTF-16 surrogates: PostgreSQL refuses `\u0000` and broken text in JSONB. */
@@ -407,52 +405,56 @@ export async function accountOfPerson(
   return best ? { id: best.id, organizationId: best.organizationId } : null
 }
 
-/** An account's people, as `addPersonTx` needs them. */
-export const PERSON_CONTACTS = {
-  select: { id: true, email: true, phoneE164: true },
-  orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  take: ACCOUNT_CONTACTS,
-} satisfies Prisma.CrmAccount$contactsArgs
-
-type PersonContact = { id: string; email: string | null; phoneE164: string | null }
 type Person = { name: string; email: string | null; phoneE164: string | null }
 
-/** Whether the account still lacks this person's email or phone (ruling 57). */
-export const lacksPerson = (contacts: PersonContact[], person: Person) =>
-  (!!person.email && !contacts.some(contact => contact.email === person.email)) ||
-  (!!person.phoneE164 && !contacts.some(contact => contact.phoneE164 === person.phoneE164))
+/** What incorporating a person would write: fill in the contact that has half of them, a new contact, or nothing. */
+export type PersonGap = { update: string; data: { email: string } | { phoneE164: string } } | { create: Prisma.CrmContactCreateManyInput }
 
 /**
- * Ruling 57: the account that takes someone's entry — or signup — keeps their email and phone, or nothing would find it
- * by them later (the sweep's late link reads the entry; a seller searches by email). Never a second contact with the same
- * email or phone: the contact that already has one of them and lacks the other gets it (WhatsApp's phone-only person
- * gets the landing's email); otherwise a new contact, primary only on an account that had none. The caller holds the
- * account's row lock. True when it wrote.
+ * Ruling 57, asked to the database (ruling 65 b, Codex r3 R3-2): what the account still lacks of this person — never
+ * read from a page of its contacts, so a person who is its 51st contact is not added again. The contact that already
+ * has their phone and no email gets the email (WhatsApp's phone-only person gets the landing's), and the other way
+ * around; otherwise a new contact with whatever is missing, primary only on an account that had none. A person with
+ * neither email nor phone (a HubSpot contact with only a name) is nobody the CRM can find again: a contact of their own.
+ * Reads only; null when nothing is missing.
  */
-export async function addPersonTx(tx: Prisma.TransactionClient, accountId: string, contacts: PersonContact[], person: Person) {
-  const missingEmail = !!person.email && !contacts.some(contact => contact.email === person.email)
-  const missingPhone = !!person.phoneE164 && !contacts.some(contact => contact.phoneE164 === person.phoneE164)
-  if (!missingEmail && !missingPhone) return false
-  const half = contacts.find(contact =>
-    missingEmail
-      ? !missingPhone && contact.phoneE164 === person.phoneE164 && !contact.email
-      : contact.email === person.email && !contact.phoneE164,
-  )
-  if (half) {
-    await tx.crmContact.update({ where: { id: half.id }, data: missingEmail ? { email: person.email } : { phoneE164: person.phoneE164 } })
-  } else {
-    await tx.crmContact.create({
-      data: {
-        accountId,
-        name: person.name,
-        email: missingEmail ? person.email : null,
-        phoneE164: missingPhone ? person.phoneE164 : null,
-        isPrimary: contacts.length === 0,
-      },
-      select: { id: true },
-    })
+export async function personGapTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<PersonGap | null> {
+  const has = (where: Prisma.CrmContactWhereInput) =>
+    tx.crmContact.findFirst({ where: { accountId, ...where }, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+  const { email, phoneE164 } = person
+  const missingEmail = !!email && !(await has({ email }))
+  const missingPhone = !!phoneE164 && !(await has({ phoneE164 }))
+  if ((email || phoneE164) && !missingEmail && !missingPhone) return null
+  if (missingEmail && !missingPhone && phoneE164) {
+    const half = await has({ phoneE164, email: null })
+    if (half) return { update: half.id, data: { email: email! } }
   }
-  return true
+  if (missingPhone && !missingEmail && email) {
+    const half = await has({ email, phoneE164: null })
+    if (half) return { update: half.id, data: { phoneE164: phoneE164! } }
+  }
+  const isPrimary = !(await has({}))
+  return {
+    create: { accountId, name: person.name, email: missingEmail ? email : null, phoneE164: missingPhone ? phoneE164 : null, isPrimary },
+  }
+}
+
+/** Writes what `personGapTx` found missing. */
+export async function writePersonGapTx(tx: Prisma.TransactionClient, gap: PersonGap): Promise<void> {
+  if ('update' in gap) await tx.crmContact.update({ where: { id: gap.update }, data: gap.data, select: { id: true } })
+  else await tx.crmContact.create({ data: gap.create, select: { id: true } })
+}
+
+/**
+ * THE incorporation of a person into an account (ruling 65 b), the one every writer uses — landing, backfill, MCP and the
+ * HubSpot import: the account that takes someone keeps their email and phone, or nothing would find it by them later,
+ * and never a second contact with the same email or phone. The caller holds the account's row lock (or just created
+ * it). True when it wrote.
+ */
+export async function addPersonTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<boolean> {
+  const gap = await personGapTx(tx, accountId, person)
+  if (gap) await writePersonGapTx(tx, gap)
+  return gap !== null
 }
 
 async function applyTx(
@@ -555,11 +557,10 @@ async function applyTx(
       organizationId: true,
       archivedAt: true,
       stage: { select: { kind: true } },
-      contacts: PERSON_CONTACTS,
     },
   })
   // Ruling 57: the account keeps this person's email and phone (an account of another source may lack them).
-  const addsPerson = lacksPerson(state.contacts, form.contact)
+  const personGap = await personGapTx(tx, accountId, form.contact)
   // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24).
   const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
   // Ruling 50: the qualification is the NEWEST form's. An older one the sweep repaired late keeps its story in the
@@ -581,11 +582,11 @@ async function applyTx(
     created,
     ...(reactivate ? { reactivated: true } : {}),
     ...(!customer && carries && !newer ? { qualificationSkipped: true } : {}),
-    ...(addsPerson ? { contactAdded: true } : {}),
+    ...(personGap ? { contactAdded: true } : {}),
     ...(content ? { noticeContent: { ...content } } : {}),
   })
   if (repeated) return repeated
-  if (addsPerson) await addPersonTx(tx, accountId, state.contacts, form.contact)
+  if (personGap) await writePersonGapTx(tx, personGap)
 
   // Coming back through the landing is a touch: «Estancado» restarts — from when the form was SENT, never earlier than
   // the touch it already has (ruling 50). Archived, it is back in the pipeline, in «Sin dueño» if nobody owns it.

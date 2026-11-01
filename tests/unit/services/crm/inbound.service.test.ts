@@ -937,6 +937,23 @@ describe('ruling 57 (a): the account that takes the entry keeps the person’s e
     expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('contactAdded')
   })
 
+  it('contacto_51_no_se_duplica (Codex r3 R3-2): a person who is the 51st contact of an imported account is not added again', async () => {
+    const imported = seedAccount({ id: 'caccthubsp000000000000051', source: 'IMPORTACION', externalKey: 'hubspot:deal:51' })
+    for (let n = 1; n <= 50; n++)
+      contactOf(imported.id, { name: `Persona ${n}`, email: `p${n}@cafe.mx`, phoneE164: null, isPrimary: n === 1 })
+    contactOf(imported.id, { name: 'Ana', email: EMAIL, phoneE164: PHONE, isPrimary: false })
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+    await applyEntry(seedEntry({ signupOutcome: null }).id)
+
+    expect(db.accounts).toHaveLength(1)
+    expect(db.entries.map(row => row.accountId)).toEqual([imported.id, imported.id])
+    expect(db.contacts).toHaveLength(51)
+    expect(prismaMock.crmContact.create).not.toHaveBeenCalled()
+    expect(eventsOf('ENTRY_APPLIED').map(event => event.data.contactAdded)).toEqual([undefined, undefined])
+  })
+
   it('a person found by another way (its Organization) with neither gets a new contact with both, not the primary one', async () => {
     const holder = seedAccount({ id: 'cacctholdr000000000000001', source: 'MANUAL', externalKey: null, organizationId: ORG })
     contactOf(holder.id, { name: 'Socio', email: 'socio@cafe.mx', phoneE164: '+525599990000' })

@@ -42,6 +42,7 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmAccount.update,
     prismaMock.crmContact.create,
     prismaMock.crmContact.update,
+    prismaMock.crmContact.findFirst,
     prismaMock.crmTimelineEvent.createMany,
     prismaMock.crmTimelineEvent.findUnique,
     prismaMock.staff.findUnique,
@@ -102,13 +103,14 @@ export function installCrmInboundFake(prismaMock: any) {
       : db.accounts.find(account => Object.entries(where).every(([field, value]) => account[field] === value))
     return found ? { ...found } : null
   })
-  // With `select.contacts`, its people too (id, email, phone), oldest first.
+  // With `select.contacts`, its people too (id, email, phone), oldest first — only as many as it asks for.
   prismaMock.crmAccount.findUniqueOrThrow.mockImplementation(async ({ where, select }: Row) => {
     const row = db.accounts.find(account => account.id === where.id)
     if (!row) throw new Error('No CrmAccount found')
     if (!select?.contacts) return withStage(row)
     const contacts = db.contacts
       .filter(contact => contact.accountId === row.id)
+      .slice(0, select.contacts.take ?? Infinity)
       .map(contact => ({ id: contact.id, email: contact.email ?? null, phoneE164: contact.phoneE164 ?? null }))
     return { ...withStage(row), contacts }
   })
@@ -146,6 +148,11 @@ export function installCrmInboundFake(prismaMock: any) {
     const id = nextId('cont')
     db.contacts.push({ id, ...data })
     return { id }
+  })
+  /** The first person of an account matching exact values — `null` meaning «has none» — oldest first, as Postgres does. */
+  prismaMock.crmContact.findFirst.mockImplementation(async ({ where }: Row) => {
+    const found = db.contacts.find(contact => Object.entries(where).every(([field, value]) => (contact[field] ?? null) === value))
+    return found ? { id: found.id } : null
   })
   prismaMock.crmContact.update.mockImplementation(async ({ where, data }: Row) => {
     const row = db.contacts.find(contact => contact.id === where.id)
