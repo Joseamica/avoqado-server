@@ -22,6 +22,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { getAvailableBalance } from '@/services/dashboard/availableBalance.dashboard.service'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -294,8 +295,9 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
   })
 
-  it('total: un renglón REFUND con la comisión devuelta, en el Payment y en su VenueTransaction, y la bitácora', async () => {
+  it('total: un renglón REFUND con la comisión devuelta, sin VenueTransaction (como su cobro), el saldo cuadra y la bitácora', async () => {
     const { orderId, charge } = await capturedOrder()
+    const saldoAntes = await getAvailableBalance(venueId!)
     const r = await pedir(orderId)
     expect(r).toMatchObject({ status: 'RECORDED', replay: false })
     expect(refundSpy).toHaveBeenCalledTimes(1)
@@ -311,8 +313,12 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(ledger.amount.toFixed(2)).toBe('-250.00')
     expect(ledger.feeAmount.toFixed(2)).toBe('-2.90')
     expect(ledger.netAmount.toFixed(2)).toBe('-247.10')
-    expect(ledger.transaction!.feeAmount.toFixed(2)).toBe('-2.90')
-    expect(ledger.transaction!.netAmount.toFixed(2)).toBe('-247.10')
+    // Codex r3 #2: el cobro de Stripe no tiene VenueTransaction (su saldo es «pendiente»), así que su devolución tampoco: una fila
+    // SETTLED restaba de «Disponible» lo que nunca entró ahí y dejaba el cobro en «Pendiente» para siempre.
+    expect(ledger.transaction).toBeNull()
+    const saldoDespues = await getAvailableBalance(venueId!)
+    expect(saldoDespues.availableNow).toBeCloseTo(saldoAntes.availableNow, 2)
+    expect(saldoDespues.pendingSettlement).toBeCloseTo(saldoAntes.pendingSettlement - 250, 2)
     expect(ledger.idempotencyKey).toBe(`oocr_${r.cardRefundId}`)
     const row = await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })
     expect(row).toMatchObject({ status: 'RECORDED', feeRefundedCents: 290, refundPaymentId: ledger.id })
@@ -558,11 +564,16 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       }
     }
     const antes = await reporte()
+    const saldoAntes = await getAvailableBalance(venueId!)
 
     const r = await pedir(orderId)
     expect(r).toMatchObject({ status: 'RECORDED', replay: false })
     const [ledger] = await refundsOf(orderId)
     expect(ledger.amount.toFixed(2)).toBe('-250.00')
+    // Codex r3 #2: «Disponible» no baja por dinero que nunca estuvo ahí; lo cobrado y lo devuelto se anulan en «Pendiente».
+    const saldoDespues = await getAvailableBalance(venueId!)
+    expect(saldoDespues.availableNow).toBeCloseTo(saldoAntes.availableNow, 2)
+    expect(saldoDespues.pendingSettlement).toBeCloseTo(saldoAntes.pendingSettlement - 250, 2)
     expect(refundSpy).toHaveBeenCalledTimes(1)
     expect(refundSpy.mock.calls[0][1]).toMatchObject({ refundApplicationFee: false })
     expect(await reporte()).toEqual(antes)

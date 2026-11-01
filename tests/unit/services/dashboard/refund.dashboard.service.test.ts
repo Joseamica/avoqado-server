@@ -75,6 +75,8 @@ describe('refund.dashboard.service', () => {
     ;(prismaMock.activityLog.findFirst as jest.Mock).mockResolvedValue(null)
     prismaMock.activityLog.create.mockResolvedValue({ id: 'audit-post-close-1' })
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+    // El cobro original de estas pruebas es de terminal: tiene su VenueTransaction (la devolución la espeja; Codex r3 #2 de pedidos).
+    prismaMock.venueTransaction.findUnique.mockResolvedValue({ id: 'vtx-original' } as any)
     prismaMock.payment.update.mockResolvedValue({ id: 'payment-original' })
     // El prismaMock compartido no declara los modelos del cajón. Se agregan aquí
     // (mismo patrón que `refund.mobile.service.test.ts`) para no tocar un helper
@@ -686,6 +688,23 @@ describe('refund.dashboard.service', () => {
         expect.objectContaining({ data: expect.objectContaining({ type: 'REFUND' }) }),
       )
       expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_CREATED' }))
+    })
+
+    it('Codex r3 #2 (pedidos): un cobro sin VenueTransaction (Stripe, liga de pago) → su devolución tampoco crea una', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+      prismaMock.venueTransaction.findUnique.mockResolvedValue(null)
+
+      await reembolsar()
+
+      expect(prismaMock.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ type: PaymentType.REFUND, amount: new Decimal(-150) }) }),
+      )
+      expect(prismaMock.venueTransaction.findUnique).toHaveBeenCalledWith({
+        where: { paymentId: 'payment-original' },
+        select: { id: true },
+      })
+      expect(prismaMock.venueTransaction.create).not.toHaveBeenCalled()
     })
 
     it('🔴 sigue respetando el límite de lo que queda por devolver (candado contra doble reembolso)', async () => {
@@ -1340,7 +1359,7 @@ describe('refund.dashboard.service', () => {
             }),
           },
           venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
-          venueTransaction: { create: jest.fn() },
+          venueTransaction: { create: jest.fn(), findUnique: jest.fn().mockResolvedValue({ id: 'vtx-original' }) },
           // Tarjetas de regalo (B1): el gancho pregunta si la cuenta es de tarjetas y la marca del tender; aquí no lo es.
           orderItem: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
           venueTenderType: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -1393,7 +1412,7 @@ describe('refund.dashboard.service', () => {
             }),
           },
           venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
-          venueTransaction: { create: jest.fn() },
+          venueTransaction: { create: jest.fn(), findUnique: jest.fn().mockResolvedValue({ id: 'vtx-original' }) },
           // Tarjetas de regalo (B1): el gancho pregunta si la cuenta es de tarjetas y la marca del tender; aquí no lo es.
           orderItem: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
           venueTenderType: { findFirst: jest.fn().mockResolvedValue(null) },

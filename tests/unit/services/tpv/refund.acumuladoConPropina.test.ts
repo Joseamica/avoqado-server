@@ -80,7 +80,10 @@ function armar(processorData: Record<string, unknown>, filas: Array<Record<strin
     update: jest.fn().mockResolvedValue({}),
     updateMany: jest.fn().mockResolvedValue({ count: 0 }),
   }
-  ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
+  ;(prismaMock as any).venueTransaction = {
+    create: jest.fn().mockResolvedValue({}),
+    findUnique: jest.fn().mockResolvedValue({ id: 'vtx-original' }),
+  }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   // El ÚNICO `$queryRaw` de este camino sigue siendo el `SELECT … FOR UPDATE` del cobro:
   // las filas de reembolso se leen con `findMany`, arriba.
@@ -138,7 +141,10 @@ function armarDosFotos(pdVieja: Record<string, unknown>, pdBloqueada: Record<str
     update: jest.fn().mockResolvedValue({}),
     updateMany: jest.fn().mockResolvedValue({ count: 0 }),
   }
-  ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
+  ;(prismaMock as any).venueTransaction = {
+    create: jest.fn().mockResolvedValue({}),
+    findUnique: jest.fn().mockResolvedValue({ id: 'vtx-original' }),
+  }
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([fotoBloqueada])
 }
@@ -565,7 +571,10 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
       update: jest.fn().mockResolvedValue({ id: 'pay-orig' }),
     }
     ;(prismaMock as any).shift = { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn().mockResolvedValue({ count: 0 }) }
-    ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
+    ;(prismaMock as any).venueTransaction = {
+      create: jest.fn().mockResolvedValue({}),
+      findUnique: jest.fn().mockResolvedValue({ id: 'vtx-original' }),
+    }
     ;(prismaMock as any).cashDrawerSession = { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn(), update: jest.fn() }
     ;(prismaMock as any).cashDrawerEvent = { createMany: jest.fn() }
     ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))

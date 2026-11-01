@@ -950,18 +950,27 @@ export async function writeRefundInTx(
     data: { processorData: updatedProcessorData as any },
   })
 
-  // Venue transaction for financial tracking
-  await tx.venueTransaction.create({
-    data: {
-      venueId: input.venueId,
-      paymentId: refundPayment.id,
-      type: 'REFUND',
-      grossAmount: centsToDecimal(-refundCents),
-      feeAmount: feeRefundCents > 0 ? centsToDecimal(-feeRefundCents) : new Prisma.Decimal(0),
-      netAmount: centsToDecimal(-(refundCents - feeRefundCents)),
-      status: 'SETTLED',
-    },
-  })
+  // Venue transaction for financial tracking — sólo si el cobro original tiene la suya (Codex r3 #2 de pedidos fase 2). Un cobro
+  // sin VenueTransaction (Stripe de pedidos en línea, ligas de pago) vive en «Pendiente» del saldo; una devolución SETTLED restaba de
+  // «Disponible» lo que nunca entró ahí y dejaba el cobro en «Pendiente» para siempre. Sin fila, la devolución cae en el mismo lado
+  // que su cobro y se anulan. El costo diferido no la extraña: un cobro con costo siempre tiene VenueTransaction (R6 i).
+  // El crédito de un cambio sí la lleva siempre: no revierte al original, se netea con el cobro de crédito de la venta nueva.
+  const netaConElCobroDeCredito = input.exchangeMark?.role === EXCHANGE_REFUND_ROLE.CREDIT
+  const movimientoDelOriginal =
+    netaConElCobroDeCredito || (await tx.venueTransaction.findUnique({ where: { paymentId: original.id }, select: { id: true } }))
+  if (movimientoDelOriginal) {
+    await tx.venueTransaction.create({
+      data: {
+        venueId: input.venueId,
+        paymentId: refundPayment.id,
+        type: 'REFUND',
+        grossAmount: centsToDecimal(-refundCents),
+        feeAmount: feeRefundCents > 0 ? centsToDecimal(-feeRefundCents) : new Prisma.Decimal(0),
+        netAmount: centsToDecimal(-(refundCents - feeRefundCents)),
+        status: 'SETTLED',
+      },
+    })
+  }
 
   // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
   // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.

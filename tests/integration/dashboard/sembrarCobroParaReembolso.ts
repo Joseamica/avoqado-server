@@ -130,6 +130,19 @@ export async function sembrarCobro(input: CobroInput) {
         : {}),
     },
   })
+  // Como el cobro de la terminal (`payment.tpv.service`): su VenueTransaction nace con él, y la devolución la espeja (Codex r3 #2 de
+  // pedidos fase 2). Efectivo y tipo de pago ajeno no los deposita Avoqado: SETTLED.
+  await prisma.venueTransaction.create({
+    data: {
+      venueId: input.venueId,
+      paymentId: pago.id,
+      type: 'PAYMENT',
+      grossAmount: pesos(input.saleCents + tip),
+      feeAmount: new Prisma.Decimal(0),
+      netAmount: pesos(input.saleCents + tip),
+      status: 'SETTLED',
+    },
+  })
   return { pago, order, tender, items }
 }
 
