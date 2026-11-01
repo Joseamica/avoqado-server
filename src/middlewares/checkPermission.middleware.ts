@@ -7,6 +7,7 @@ import { enrichContext, getContext } from '@/observability/executionContext'
 import { getVenueName } from '@/observability/venueNames'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/services/mobile/permission-override.mobile.service'
+import { esDemoReiniciadoEnLaApp, RESPUESTA_DEMO_REINICIADO } from '@/services/demo/candadoDemo'
 
 /** Métodos que no cambian nada: un rebote aquí no dejó daño que auditar. */
 const METODOS_DE_LECTURA = new Set(['GET', 'HEAD', 'OPTIONS'])
@@ -417,6 +418,7 @@ export const checkPermission = (requiredPermission: string) => {
           logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
         }
 
+        if (await esDemoReiniciadoEnLaApp(req, venueId)) return res.status(401).json(RESPUESTA_DEMO_REINICIADO)
         return res.status(403).json({
           error: 'Forbidden',
           message: 'No access to this venue',
@@ -601,6 +603,7 @@ export const checkAnyPermission = (requiredPermissions: string[]) => {
       })
 
       if (!userRole) {
+        if (await esDemoReiniciadoEnLaApp(req, venueId)) return res.status(401).json(RESPUESTA_DEMO_REINICIADO)
         return res.status(403).json({
           error: 'Forbidden',
           message: 'No access to this venue',
@@ -697,6 +700,7 @@ export const checkAllPermissions = (requiredPermissions: string[]) => {
       })
 
       if (!userRole) {
+        if (await esDemoReiniciadoEnLaApp(req, venueId)) return res.status(401).json(RESPUESTA_DEMO_REINICIADO)
         return res.status(403).json({
           error: 'Forbidden',
           message: 'No access to this venue',

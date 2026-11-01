@@ -1,4 +1,5 @@
 import { prismaMock } from '@tests/__helpers__/setup'
+import { ConflictError } from '@/errors/AppError'
 
 jest.mock('@/config/logger', () => ({
   __esModule: true,
@@ -42,6 +43,7 @@ describe('Fase 5 · deshacer el check-in', () => {
       order: { findMany: jest.fn().mockResolvedValue([]) },
       venue: { findUniqueOrThrow: jest.fn().mockResolvedValue({ organizationId: 'org-1' }) },
       activityLog: { create: jest.fn().mockResolvedValue({}) },
+      reservationNoShowCorrection: { findUnique: jest.fn().mockResolvedValue(null) },
     }
   })
 
@@ -94,6 +96,33 @@ describe('Fase 5 · deshacer el check-in', () => {
 
     expect(res.outcome).toBe('ALREADY_UNDONE')
     expect(tx.reservation.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 D4 · el CAS también exige que NO haya corrección (aunque la corrección haya llegado después del chequeo)', async () => {
+    const { undoCheckIn } = await import('@/services/reservation/checkIn.service')
+
+    await undoCheckIn(tx, cmd())
+
+    expect(tx.reservation.updateMany.mock.calls[0][0].where).toEqual({
+      id: 'res-1',
+      venueId: 'venue-1',
+      status: 'CHECKED_IN',
+      noShowCorrection: { is: null },
+    })
+  })
+
+  it('🔴 D4 · una llegada que corrigió un «No asistió» no se deshace (la clase se devolvería dos veces)', async () => {
+    tx.reservationNoShowCorrection.findUnique.mockResolvedValue({ id: 'corr-1', resolvedAt: new Date() })
+    const { undoCheckIn, CHECK_IN_UNDO_NOT_APPLICABLE } = await import('@/services/reservation/checkIn.service')
+
+    const err = await undoCheckIn(tx, cmd()).catch(e => e)
+
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err.code).toBe(CHECK_IN_UNDO_NOT_APPLICABLE)
+    expect(err.message).toBe('Esta llegada corrigió un “No asistió”; no se puede deshacer el check-in.')
+    expect(tx.reservationNoShowCorrection.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { reservationId: 'res-1' } }))
+    expect(tx.reservation.updateMany).not.toHaveBeenCalled()
+    expect(tx.activityLog.create).not.toHaveBeenCalled()
   })
 
   it('🔴 no revive una reserva cancelada', async () => {

@@ -123,14 +123,20 @@ jobs:
         # 4 procesos en vez de 1 (24 → ~8 min, mismas pruebas; medido el 14-oct). Cada proceso usa su propia copia de la
         # base desechable (`<nombre>_<n>`, la crea TEMPLATE después de migrar; tests/__helpers__/base-por-proceso.ts la
         # elige con CI_DB_POR_PROCESO=1), así dos archivos nunca se pisan los datos. Mismo filtro que `npm run test:integration`.
+        # Las PESADAS (un Cambio con el tope de 50 ventas y 50 pagos dentro de UNA transacción de 15 s) corren después y
+        # solas: con los otros 3 procesos sobre el mismo Postgres la misma prueba tardó de 2.7 a 26.7 s y se pasó del
+        # tope el 29-oct (run 40996059064). Solas miden el tope de producción sin el ruido de los vecinos.
         run: |
           npm run migrate:deploy:bounded
           for w in 1 2 3 4; do
             docker exec "${{ job.services.postgres.id }}" psql -U postgres -v ON_ERROR_STOP=1 \
               -c "CREATE DATABASE avoqado_h1a_test_20260808_$w TEMPLATE avoqado_h1a_test_20260808"
           done
+          PESADAS='tests/integration/exchanges/exchange(R7|Batch)\.integration\.test\.ts$'
           CI_DB_POR_PROCESO=1 npx jest --selectProjects=integration --maxWorkers=4 --detectOpenHandles=false --workerIdleMemoryLimit=2GB \
-            --testPathIgnorePatterns='tests/integration/master-catalog/h1a-migration(?:-(?:lock-safety|replay))?\.integration\.test\.ts$'
+            --testPathIgnorePatterns='tests/integration/master-catalog/h1a-migration(?:-(?:lock-safety|replay))?\.integration\.test\.ts$' \
+            --testPathIgnorePatterns="$PESADAS"
+          npx jest --selectProjects=integration --runInBand --detectOpenHandles=false "$PESADAS"
         env:
           ACCESS_TOKEN_SECRET: test-access-token-secret
           REFRESH_TOKEN_SECRET: test-refresh-token-secret

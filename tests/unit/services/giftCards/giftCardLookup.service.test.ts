@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
-import { generateGiftCardCode } from '@/services/giftCards/giftCardCode'
-import { lookupGiftCardsByCode, reiniciarLimiteDeConsultasParaPruebas } from '@/services/giftCards/giftCardLookup.service'
+import { generateGiftCardCode, generateOpaqueToken } from '@/services/giftCards/giftCardCode'
+import { lookupGiftCards, lookupGiftCardsByCode, reiniciarLimiteDeConsultasParaPruebas } from '@/services/giftCards/giftCardLookup.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
@@ -170,5 +170,56 @@ describe('lookupGiftCardsByCode — límite con peticiones simultáneas (r1)', (
     const error = await lookupGiftCardsByCode(VENUE, codigo.normalized, origen(maximo)).catch(e => e)
     expect(error).toMatchObject({ statusCode: 429, code: 'GIFT_CARD_LOOKUP_RATE_LIMITED', details: { retryAfter: 600, limite } })
     expect(error.message).toContain(texto)
+  })
+})
+
+/** 1b S2 (Q7): la liga de la tarjeta (`pageToken`) también consulta, dentro del negocio y con el MISMO contador de fallos. */
+describe('lookupGiftCards por la liga (PAGE_TOKEN)', () => {
+  const liga = generateOpaqueToken()
+
+  it('busca por pageToken dentro del negocio', async () => {
+    prismaMock.giftCard.findFirst.mockResolvedValue(sobre())
+    const porLiga = await lookupGiftCards(VENUE, { pageToken: liga }, { deviceId: 'dev-1' })
+    expect(prismaMock.giftCard.findFirst).toHaveBeenCalledWith({ where: { venueId: VENUE, pageToken: liga }, select: SELECT })
+    // Misma forma de respuesta que por código.
+    expect(porLiga).toEqual(await lookupGiftCardsByCode(VENUE, codigo.normalized, { deviceId: 'dev-1' }))
+  })
+
+  it('un pageToken inexistente es el mismo 404 que un código inexistente', async () => {
+    const porLiga = await lookupGiftCards(VENUE, { pageToken: liga }, { deviceId: 'dev-1' }).catch(e => e)
+    const porCodigo = await lookupGiftCards(VENUE, { code: codigo.normalized }, { deviceId: 'dev-1' }).catch(e => e)
+    expect(porLiga).toMatchObject({ code: 'GIFT_CARD_NOT_FOUND', statusCode: 404 })
+    expect([porLiga.code, porLiga.statusCode, porLiga.message]).toEqual([porCodigo.code, porCodigo.statusCode, porCodigo.message])
+  })
+
+  it('una liga mal formada (sin esquema de por medio) es el mismo 404, sin consultar la base, y cuenta como fallo', async () => {
+    for (let i = 0; i < 20; i++) {
+      await expect(lookupGiftCards(VENUE, { pageToken: 'corto' }, { deviceId: 'dev-1' })).rejects.toMatchObject({ statusCode: 404 })
+    }
+    expect(prismaMock.giftCard.findFirst).not.toHaveBeenCalled()
+    await expect(lookupGiftCards(VENUE, { pageToken: liga }, { deviceId: 'dev-1' })).rejects.toMatchObject({ statusCode: 429 })
+  })
+
+  it('PAGE_TOKEN comparte el contador de fallos con CODE: 20 códigos inexistentes y luego una liga ⇒ 429 APARATO', async () => {
+    for (let i = 0; i < 20; i++) await lookupGiftCards(VENUE, { code: codigo.normalized }, { deviceId: 'D' }).catch(() => undefined)
+    await expect(lookupGiftCards(VENUE, { pageToken: liga }, { deviceId: 'D' })).rejects.toMatchObject({
+      statusCode: 429,
+      code: 'GIFT_CARD_LOOKUP_RATE_LIMITED',
+      details: { limite: 'APARATO' },
+    })
+  })
+
+  it('PAGE_TOKEN comparte el contador de fallos con CODE: 20 ligas inexistentes y luego un código ⇒ 429 APARATO', async () => {
+    for (let i = 0; i < 20; i++) await lookupGiftCards(VENUE, { pageToken: liga }, { deviceId: 'D' }).catch(() => undefined)
+    await expect(lookupGiftCards(VENUE, { code: codigo.normalized }, { deviceId: 'D' })).rejects.toMatchObject({
+      statusCode: 429,
+      code: 'GIFT_CARD_LOOKUP_RATE_LIMITED',
+      details: { limite: 'APARATO' },
+    })
+  })
+
+  it('un pageToken que existe no gasta el contador', async () => {
+    prismaMock.giftCard.findFirst.mockResolvedValue(sobre())
+    for (let i = 0; i < 30; i++) await expect(lookupGiftCards(VENUE, { pageToken: liga }, { deviceId: 'D' })).resolves.toBeDefined()
   })
 })

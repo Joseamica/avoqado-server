@@ -1,8 +1,10 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { omitirPorDemo } from './demo/candadoDemo'
 import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
+import { escapeHtml } from '../controllers/public/publicHtml'
 import { isValidIANATimezone } from '../utils/sanitizeTimezone'
 import type { PriceSelection } from './launchCampaigns/publicPriceList.service'
 import { formatMoney } from './shared/receiptLayout/format'
@@ -110,7 +112,13 @@ interface ReceiptEmailData {
     quantity: number
     price: number
     totalPrice: number
-    modifiers?: Array<{ name: string; price: number }>
+    modifiers?: Array<{ name: string; price?: number }>
+    /** D1, de una copia del ticket: el resumen impreso del peso, la nota, el área del vale, «Cortesía» y la pieza de un combo. */
+    peso?: string
+    nota?: string
+    area?: string
+    cortesia?: boolean
+    pieza?: boolean
   }>
   // Totals
   subtotal?: number
@@ -413,6 +421,8 @@ class EmailService {
     if (!isDeliverableRecipient(options.to, 'emailService.sendEmail', { subject: options.subject })) {
       return false
     }
+    // Negocios demo (capa 2): ni el negocio demo ni sus usuarios @demo.avoqado.io reciben correo de verdad.
+    if (await omitirPorDemo('correo', options.to)) return false
 
     try {
       // Build email payload - Resend requires at least html or text
@@ -482,6 +492,9 @@ class EmailService {
     if (!isDeliverableRecipient(options.to, 'emailService.sendEmailWithResult', { subject: options.subject })) {
       return { ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' }
     }
+    const motivoDemo = await omitirPorDemo('correo', options.to)
+    // `sin confirmar` (la base no contestó) se reintenta; un demo de verdad nunca se manda.
+    if (motivoDemo) return { ok: false, transient: motivoDemo === 'sin confirmar', errorCode: 'NEGOCIO_DEMO' }
 
     try {
       // Mismo payload que `sendEmail` — ver ahí el porqué de cada pieza. `from` y `tags` son
@@ -557,11 +570,15 @@ class EmailService {
               item => `
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 12px 0; font-size: 15px; color: #000;">
-            ${item.name}
-            ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${m.name}`).join(', ')}</span>` : ''}
+            ${item.pieza ? `&nbsp;&nbsp;${item.quantity}x ` : ''}${escapeHtml(String(item.name ?? ''))}
+            ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${escapeHtml(String(m.name ?? ''))}`).join(', ')}</span>` : ''}
+            ${[item.peso, item.area, item.nota && `Nota: ${item.nota}`]
+              .filter(Boolean)
+              .map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`)
+              .join('')}
           </td>
-          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">x${item.quantity}</td>
-          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(item.totalPrice)}</td>
+          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">${item.pieza ? '' : `x${item.quantity}`}</td>
+          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${item.pieza ? '' : item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}</td>
         </tr>
         `,
             )
@@ -571,7 +588,21 @@ class EmailService {
     // Build items text for plain text version
     const itemsText =
       data.items && data.items.length > 0
-        ? data.items.map(item => `  ${item.name} x${item.quantity} - ${formatCurrency(item.totalPrice)}`).join('\n')
+        ? data.items
+            .map(item => {
+              // D1 (Codex código r1 #2): el texto plano dice lo mismo que el HTML (modificadores, peso, área y nota).
+              const renglon = item.pieza
+                ? `    ${item.quantity}x ${item.name}`
+                : `  ${item.name} x${item.quantity} - ${item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}`
+              const extras = [
+                ...(item.modifiers ?? []).map(m => `+ ${m.name}`),
+                item.peso,
+                item.area,
+                item.nota && `Nota: ${item.nota}`,
+              ].filter(Boolean)
+              return [renglon, ...extras.map(x => `      ${x}`)].join('\n')
+            })
+            .join('\n')
         : ''
 
     const html = `
@@ -3728,6 +3759,114 @@ Aviso de privacidad: https://avoqado.io/privacy`
     return this.sendEmail({ to: email, subject, html, text })
   }
 
+  /**
+   * Tarjetas de regalo 1b (S3, Q4): le lleva su tarjeta a quien la RECIBE. Mismo contenido que el WhatsApp: la liga de su
+   * página y el folio, NUNCA el código (E8: el código sólo se ve en la página). El lector no es el negocio ni Avoqado: el
+   * asunto nombra al negocio y nosotros sólo aparecemos en el pie (como `sendWalletPassEmail`).
+   *
+   * Devuelve el detalle (`sendEmailWithResult`): la entrega necesita el `resendId` (Q105, el rebote se cruza por él) y saber
+   * si el fallo es transitorio. `idempotencyKey` la arma la entrega (`llaveDeCorreo`, Q46).
+   */
+  async sendGiftCardDeliveryEmail(
+    email: string,
+    d: { negocio: string; monto: string; deParteDe: string; para: string | null; folio: string; url: string },
+    idempotencyKey: string,
+  ): Promise<EmailSendResult> {
+    const esc = escapeHtmlForReferralEmail
+    const subject = `Tu tarjeta de regalo de ${d.negocio}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const saludo = d.para ? `Hola ${d.para}:` : 'Hola:'
+    // Dictamen legal § 6 (LFPDPPP art. 16 fr. II y 17): quien la recibe no dio sus datos; se le avisa en versión simplificada.
+    const privacidad = `${d.negocio} usa tu nombre y tu correo sólo para entregarte esta tarjeta y avisarte de su saldo. Su aviso de privacidad y los términos están en la liga.`
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Recibiste una tarjeta de regalo de ${esc(d.negocio)}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
+      ${esc(saludo)} toca &laquo;Ver mi tarjeta&raquo; para ver tu c&oacute;digo y tu saldo.
+    </p>
+
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">Monto</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${esc(d.monto)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">De parte de</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${esc(d.deParteDe)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666;">Folio</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000;">${esc(d.folio)}</td>
+      </tr>
+    </table>
+
+    <div style="margin: 0 0 32px 0;">
+      <a href="${esc(d.url)}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Ver mi tarjeta
+      </a>
+    </div>
+
+    <p style="margin: 0 0 24px 0; font-size: 13px; color: #666;">
+      ${esc(privacidad)}
+    </p>
+
+    <div style="padding-top: 8px; border-top: 1px solid #e5e7eb;">
+      <div style="margin: 16px 0;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque ${esc(d.deParteDe)} te regal&oacute; una tarjeta de ${esc(d.negocio)}.
+      </p>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="https://avoqado.io/privacy" style="color: #666; text-decoration: underline;">Aviso de privacidad</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Recibiste una tarjeta de regalo de ${d.negocio}
+
+${saludo} abre la liga para ver tu código y tu saldo.
+
+Monto: ${d.monto}
+De parte de: ${d.deParteDe}
+Folio: ${d.folio}
+
+Ver mi tarjeta: ${d.url}
+
+${privacidad}
+
+---
+Recibiste este correo porque ${d.deParteDe} te regaló una tarjeta de ${d.negocio}.
+Servicios Tecnologicos Avo S.A. de C.V.
+Aviso de privacidad: https://avoqado.io/privacy`
+
+    return this.sendEmailWithResult({ to: email, subject, html, text, idempotencyKey })
+  }
+
   async sendReservationRescheduledEmail(email: string, data: ReservationRescheduledEmailData): Promise<boolean> {
     const subject = `Tu reservacion en ${data.venueName} cambio de horario`
     const logoUrl = 'https://avoqado.io/isotipo.svg'
@@ -4740,8 +4879,7 @@ Equipo de Avoqado`
    */
   async sendPriceSelectionEmail(to: string, data: PriceSelectionEmailData): Promise<boolean> {
     const esc = escapeHtmlForReferralEmail
-    const money = (totalCents: number) =>
-      new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalCents / 100)
+    const money = (totalCents: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalCents / 100)
     const { selection } = data
     // One line: the name travels in the subject, where a newline must never open a header.
     const who = (data.nombre || data.telefono || 'Un prospecto').replace(/\s+/g, ' ').trim()
@@ -4764,7 +4902,10 @@ Equipo de Avoqado`
     const optionRows = selection.options.map(o => {
       const extras = o.extras.length ? ` <span style="color: #666;">+ ${o.extras.map(id => esc(nameOf(id))).join(', ')}</span>` : ''
       const label = `${optionLabel(o.kind)}${extras}`
-      return row(o === selection.best ? `<strong>${label}</strong>` : label, o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents))
+      return row(
+        o === selection.best ? `<strong>${label}</strong>` : label,
+        o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents),
+      )
     })
     const advice =
       selection.best.kind === 'SUELTO'
@@ -5196,6 +5337,7 @@ export async function sendReferralWelcomeEmail(input: SendReferralWelcomeEmailIn
   if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
+  if (await omitirPorDemo('correo de referidos', input.to)) return false
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,
@@ -5282,6 +5424,7 @@ export async function sendReferralTierUpEmail(input: SendReferralTierUpEmailInpu
   if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
+  if (await omitirPorDemo('correo de referidos', input.to)) return false
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,

@@ -18,16 +18,21 @@ import type { EmailUnsubscribeCategory } from '../../utils/unsubscribeToken'
 // email streams get a one-click unsubscribe.
 const CATEGORY_TYPES: Record<EmailUnsubscribeCategory, NotificationType[]> = {
   INVENTORY: [NotificationType.LOW_INVENTORY],
+  // D4: el resumen de «No asistió» por clase y los avisos que piden a una persona.
+  RESERVATIONS: [NotificationType.RESERVATION_NO_SHOW_SUMMARY, NotificationType.RESERVATION_NEEDS_REVIEW],
 }
 
 // Default channels a type has when no preference row exists yet (mirrors the
 // dashboard defaults). Used to compute "what's left after removing EMAIL".
 const DEFAULT_CHANNELS: Partial<Record<NotificationType, NotificationChannel[]>> = {
   [NotificationType.LOW_INVENTORY]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+  [NotificationType.RESERVATION_NO_SHOW_SUMMARY]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+  [NotificationType.RESERVATION_NEEDS_REVIEW]: [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
 }
 
 export const CATEGORY_LABELS: Record<EmailUnsubscribeCategory, string> = {
   INVENTORY: 'alertas de inventario',
+  RESERVATIONS: 'avisos de reservaciones',
 }
 
 export interface UnsubscribeContext {

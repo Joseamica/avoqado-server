@@ -22,6 +22,11 @@ jest.mock('@/config/logger', () => ({
 }))
 jest.mock('@/services/superadmin/marketing.superadmin.service', () => ({ handleResendWebhook: jest.fn() }))
 jest.mock('@/services/marketing/campaignWebhook.service', () => ({ procesarAvisoDeResend: jest.fn() }))
+// 1b S3 (Q105): el rebote de un correo de tarjeta se marca antes de los dos carriles; aquí no es de ninguna tarjeta.
+jest.mock('@/services/giftCards/giftCardDelivery.service', () => ({
+  FALLO_FINAL_DE_CORREO: jest.requireActual('@/services/giftCards/giftCardDelivery.service').FALLO_FINAL_DE_CORREO,
+  marcarEntregaFallidaPorMensaje: jest.fn().mockResolvedValue(false),
+}))
 
 import { Webhook } from 'svix'
 import { handleResendWebhook as handler, resendWebhookHealthCheck } from '@/controllers/webhooks/resend.webhook.controller'

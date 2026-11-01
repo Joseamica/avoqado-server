@@ -25,7 +25,9 @@ import { topePorOperacion } from '@/services/giftCards/giftCardLimits'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import {
   auditarTarjetas,
+  CAPACIDADES_DEL_POS,
   estadoDeVentaDeTarjetas,
+  negocioHaActivadoTarjetas,
   negocioTieneTarjetas,
   operarSobreDeGerente,
 } from '@/services/giftCards/giftCardSurface.service'
@@ -72,6 +74,23 @@ describe('¿el negocio tiene tarjetas? (decisión 1 del coordinador)', () => {
     expect(prismaMock.$queryRaw.mock.calls[0][1]).toBe('v1')
     prismaMock.$queryRaw.mockResolvedValueOnce([{ existe: false }])
     await expect(negocioTieneTarjetas('v1')).resolves.toBe(false)
+  })
+})
+
+describe('¿el negocio ya ACTIVÓ alguna tarjeta? (1b S1: `tieneTarjetas` de los ajustes del POS)', () => {
+  it('UNA consulta EXISTS acotada al negocio y a activatedAt no nulo: una tarjeta sólo PENDING no cuenta', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ existe: false }])
+    await expect(negocioHaActivadoTarjetas('v1')).resolves.toBe(false)
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    const sql = (prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
+    expect(sql).toMatch(/SELECT EXISTS \(SELECT 1 FROM "GiftCard" WHERE "venueId" = \? AND "activatedAt" IS NOT NULL\) AS existe/)
+    expect(prismaMock.$queryRaw.mock.calls[0][1]).toBe('v1')
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ existe: true }])
+    await expect(negocioHaActivadoTarjetas('v1')).resolves.toBe(true)
+  })
+
+  it('las capacidades que este servidor anuncia al POS', () => {
+    expect(CAPACIDADES_DEL_POS).toEqual(['ENTREGA', 'PAGE_TOKEN', 'TELEFONO'])
   })
 })
 

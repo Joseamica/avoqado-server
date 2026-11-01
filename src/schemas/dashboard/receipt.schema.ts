@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { LineasDelTicket } from '../../services/shared/lineasDelTicket'
 
 // Standardized Receipt Data Snapshot Schema
 export const ReceiptDataSnapshotSchema = z.object({
@@ -90,6 +91,8 @@ export const ReceiptDataSnapshotSchema = z.object({
     })
     .nullable()
     .optional(),
+  // D1 «fotocopia del ticket»: los renglones que imprimió el cobro de esta parte (ya cuadraron al guardarse en el pago).
+  lineasDelTicket: z.custom<LineasDelTicket>().optional(),
 })
 
 export type ReceiptDataSnapshot = z.infer<typeof ReceiptDataSnapshotSchema>

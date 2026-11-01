@@ -9,6 +9,7 @@ import { getVenueName } from '../observability/venueNames'
 import { settleExchangeCharge, cancelExchange } from '../services/exchanges/exchange.service'
 import { sqlPaymentIsNotExchangeCredit } from '../services/exchanges/exchangeMarks'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { conNegocio } from '../services/demo/candadoDemo'
 
 type Lane = 'PENDING_PAYMENT' | 'CANCELLED'
 type Candidate = { id: string; venueId: string; createdAt: Date }
@@ -96,16 +97,21 @@ export class ExchangeCardSettlementJob {
           if (Date.now() - startedAt >= 20_000) break
           // ponytail: sin contador de intentos; un cierre que falla siempre se reintenta cada 30 s y grita 🚨 — agregar backoff si pasa
           try {
-            const result = await settleExchangeCharge({ venueId: candidate.venueId, exchangeId: candidate.id, actorStaffId: null })
+            // Con el negocio de la fila en el contexto (candado demo, capa 3).
+            const result = await conNegocio(candidate.venueId, () =>
+              settleExchangeCharge({ venueId: candidate.venueId, exchangeId: candidate.id, actorStaffId: null }),
+            )
             if (result.outcome === 'SETTLED') totals.settled++
             if (result.outcome === 'REVIEW') totals.reviewed++
             if (result.outcome === 'NOT_CHARGED') {
-              const exchange = await cancelExchange({
-                venueId: candidate.venueId,
-                exchangeId: candidate.id,
-                actorStaffId: null,
-                origin: 'SWEEP',
-              })
+              const exchange = await conNegocio(candidate.venueId, () =>
+                cancelExchange({
+                  venueId: candidate.venueId,
+                  exchangeId: candidate.id,
+                  actorStaffId: null,
+                  origin: 'SWEEP',
+                }),
+              )
               if (exchange.status === 'CANCELLED') totals.released++
             }
           } catch (error) {

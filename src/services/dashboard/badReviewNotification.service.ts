@@ -13,6 +13,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { sendVenueNotification } from './notification.dashboard.service'
 import { filterDeliverableRecipients } from '../../utils/undeliverableEmail'
+import { omitirPorDemo } from '../demo/candadoDemo'
 
 /**
  * Context data for bad review notification
@@ -518,6 +519,8 @@ Review ID: ${data.reviewId}
       logger.warn('📧 No deliverable recipients for bad review email', { reviewId: data.reviewId })
       return false
     }
+
+    if (await omitirPorDemo('correo de calificación baja', recipients)) return false
 
     logger.info(`📧 Sending bad review email to ${recipients.length} recipients`)
 

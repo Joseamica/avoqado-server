@@ -3,6 +3,18 @@ import { productosDelSnapshot } from '../../../../src/services/shared/productosD
 // D8 (26-oct): el recibo de la terminal guarda los productos en `items`, fuera de `order`; el correo del recibo y el HTML
 // legado sólo leían `order.items` y salían sin productos (Codex D8 r1 #3).
 describe('productosDelSnapshot', () => {
+  it('D1 fotocopia: con la copia del ticket mandan sus renglones, con o sin «parcial»', () => {
+    const lineasDelTicket = {
+      lineas: [{ nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000, nota: 'sin azúcar' }],
+      subtotalCents: 3000,
+      descuentoCents: 300,
+    }
+    const esperado = [{ name: 'Café', quantity: 1, price: 30, totalPrice: 30, weightKg: null, nota: 'sin azúcar', modifiers: [] }]
+    const items = [{ productName: 'Agua', quantity: 1, unitPrice: 20, total: 20 }]
+    expect(productosDelSnapshot({ items, ticketTotals: { parcial: true, subtotal: 27 }, lineasDelTicket })).toEqual(esperado)
+    expect(productosDelSnapshot({ items, ticketTotals: { subtotal: 27 }, lineasDelTicket })).toEqual(esperado)
+  })
+
   it('recibo de la terminal: traduce `items` al formato del correo y del HTML', () => {
     expect(
       productosDelSnapshot({

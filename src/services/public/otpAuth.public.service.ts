@@ -12,6 +12,12 @@ import { activateCustomerAccount } from '@/services/public/customerBookingAccess
 import { ponerNombreSiFalta, splitName } from '@/services/customer/customerName'
 
 const TTL_MS = 10 * 60 * 1000
+/**
+ * 1b S5 (Q5): `OtpChallenge.purpose`. Este servicio es el inicio de sesión del cliente (y el de pedidos en línea, que nace con el
+ * mismo default): cuenta, invalida y busca SÓLO sus retos. La caja (teléfono + código de tarjetas de regalo) usa los suyos
+ * (`GIFT_CARD_PHONE`, `giftCardPhone.service.ts`): ninguno de los dos toca los del otro.
+ */
+const PROPOSITO = 'CUSTOMER_LOGIN'
 
 // 🔴 Los dos pasos del reto usan ESTA función: si pedir y verificar normalizaran distinto, el reto no se encontraría.
 // Sin dígitos no hay teléfono: con '' `resolveIdentity` caería al camino del correo con `email: undefined`, y Prisma ignora un
@@ -35,13 +41,17 @@ export async function requestOtp(args: {
   // Fase 0.B: todo se acota al venue. Un mismo teléfono puede tener retos vivos en dos
   // estudios distintos sin que uno invalide o rate-limite al otro.
   const venueId = args.venueId
-  const last30s = await prisma.otpChallenge.count({ where: { venueId, destination, createdAt: { gt: new Date(now - 30_000) } } })
+  const last30s = await prisma.otpChallenge.count({
+    where: { venueId, destination, purpose: PROPOSITO, createdAt: { gt: new Date(now - 30_000) } },
+  })
   if (last30s > 0) throw new BadRequestError('Espera un momento antes de pedir otro código.')
-  const lastHour = await prisma.otpChallenge.count({ where: { venueId, destination, createdAt: { gt: new Date(now - 3_600_000) } } })
+  const lastHour = await prisma.otpChallenge.count({
+    where: { venueId, destination, purpose: PROPOSITO, createdAt: { gt: new Date(now - 3_600_000) } },
+  })
   if (lastHour >= 5) throw new BadRequestError('Demasiados códigos solicitados. Intenta más tarde.')
 
   await prisma.otpChallenge.updateMany({
-    where: { venueId, destination, channel: args.channel, consumedAt: null },
+    where: { venueId, destination, channel: args.channel, purpose: PROPOSITO, consumedAt: null },
     data: { consumedAt: new Date() },
   })
 
@@ -94,12 +104,13 @@ export async function verifyOtp(args: {
   // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
   // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
   const challenge = await prisma.otpChallenge.findFirst({
-    where: { venueId: args.venueId, destination, channel: args.channel, consumedAt: null },
+    where: { venueId: args.venueId, destination, channel: args.channel, purpose: PROPOSITO, consumedAt: null },
     orderBy: { createdAt: 'desc' },
   })
   if (!challenge || challenge.expiresAt.getTime() <= Date.now()) throw new BadRequestError('El código expiró. Pide uno nuevo.')
   // 🔴 El intento se aparta en la base ANTES de comparar (auditoría 2026-10-01): escribir `attempts + 1` sobre lo leído aquí
-  // dejaba que varias verificaciones simultáneas probaran más de `maxAttempts` códigos.
+  // dejaba que varias verificaciones simultáneas probaran más de `maxAttempts` códigos. Este CAS y el de consumo de abajo tienen
+  // una COPIA en `giftCardPhone.service.ts` (`verificarCodigoDeTelefono`, la caja): si cambias uno, revisa el otro.
   const apartado =
     challenge.attempts < challenge.maxAttempts &&
     (

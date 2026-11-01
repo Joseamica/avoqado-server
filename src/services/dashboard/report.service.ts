@@ -4,6 +4,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { lineRevenueSql, lineUnitsSql } from './lineRevenue'
 import { utcTs } from '../../utils/sqlDates'
 import { getWasteBreakdown, getWasteTotals, wasteLedgerSql } from '../shared/inventoryWasteRead.service'
+import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * 🔴 These queries were WRITTEN IN snake_case (`o.venue_id`, `rmm.raw_material_id`,
@@ -100,6 +101,7 @@ export async function getPMIXReport(
       AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
       AND oi."removedAt" IS NULL
+      AND ${sqlOrdenSinTarjetas('o.id')} -- la venta de tarjetas no es mercancía: no infla el total ni los porcentajes
   `
 
   const totalQuantity = Number(totals[0]?.total_quantity || 0)
@@ -466,6 +468,7 @@ export async function getCostVarianceReport(venueId: string, startDate: Date, en
       AND o."createdAt" >= ${utcTs(startDate)}
       AND o."createdAt" <= ${utcTs(endDate)}
       AND o.status = 'COMPLETED'
+      AND ${sqlOrdenSinTarjetas('o.id')}
   `
 
   // Calculate actual costs from ingredient movements

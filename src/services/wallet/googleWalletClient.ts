@@ -1,6 +1,8 @@
 import { google, walletobjects_v1 } from 'googleapis'
 import { env } from '../../config/env'
 import logger from '../../config/logger'
+import { ForbiddenError } from '../../errors/AppError'
+import { omitirPorDemo } from '../demo/candadoDemo'
 
 /**
  * La credencial de Google Wallet y el cliente de la API.
@@ -63,8 +65,18 @@ let cliente: walletobjects_v1.Walletobjects | null = null
 /**
  * El cliente autenticado. Se memoiza: `GoogleAuth` renueva el token solo, y crear uno
  * por llamada agregaría un viaje de red a cada sello.
+ *
+ * Pide el negocio a propósito: un negocio demo no crea ni actualiza nada en la cuenta de Google Wallet de Avoqado
+ * (candado de negocios demo; Codex r4, 2). Obligatorio para que una llamada nueva no se lo salte.
  */
-export async function walletClient(): Promise<walletobjects_v1.Walletobjects> {
+export async function walletClient(venueId: string): Promise<walletobjects_v1.Walletobjects> {
+  const motivo = await omitirPorDemo('Google Wallet', null, venueId)
+  if (motivo === 'sin confirmar') throw new Error('No se pudo confirmar el negocio: Google Wallet no se tocó')
+  if (motivo)
+    throw new ForbiddenError(
+      'En el negocio de demostración no se crean tarjetas de Google Wallet. En tu cuenta de Avoqado sí funciona.',
+      'NEGOCIO_DEMO',
+    )
   if (cliente) return cliente
   const creds = googleWalletCredentials()
   if (!creds)

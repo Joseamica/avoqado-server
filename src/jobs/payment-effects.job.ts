@@ -7,6 +7,7 @@ import {
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { conNegocio } from '../services/demo/candadoDemo'
 
 type PaymentEffectsJobDependencies = {
   now: () => Date
@@ -53,7 +54,8 @@ export class PaymentEffectsJob {
       const claims = await this.dependencies.claim({ now: this.dependencies.now(), limit: 25 })
       for (const claim of claims) {
         try {
-          if (await this.dependencies.apply(claim)) applied++
+          // Cada efecto corre con el negocio de su pago en el contexto (candado demo, capa 3): un aviso de un negocio demo no sale.
+          if (await conNegocio(claim.venueId, () => this.dependencies.apply(claim))) applied++
           else skipped++
         } catch (error) {
           failed++

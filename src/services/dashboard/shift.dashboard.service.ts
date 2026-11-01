@@ -8,7 +8,7 @@ import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
-import { esCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
 
 interface ShiftFilters {
@@ -472,7 +472,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
-  const ordenesDeVenta = orders.filter(order => !esCuentaDeTarjetas(order.items))
+  const ordenesDeVenta = orders.filter(order => !tieneRenglonDeTarjeta(order.items))
 
   // ============================================================
   // Calculate Staff Breakdown (sales per employee)

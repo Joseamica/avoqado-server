@@ -22,6 +22,9 @@ function sobre(over: Partial<LockedGiftCard> = {}): LockedGiftCard {
     id: 'gc-1',
     venueId: VENUE,
     codeHash: 'hash-del-codigo-gc-1',
+    pageToken: 'liga-del-sobre-gc-1-0000000000',
+    recipientPhone: null,
+    deliveryChannel: 'PRINTED',
     status: 'ACTIVE',
     balance: D(1000),
     initialAmount: D(1000),
@@ -85,6 +88,10 @@ describe('lockGiftCardsForUpdate', () => {
     expect(sql).not.toMatch(/ORDER BY[^]*"expiresAt"/)
     // r1 (A-1): la huella vigente del código viaja en la fila bloqueada.
     expect(sql).toContain('"codeHash"')
+    // 1b S2: la liga vigente (PAGE_TOKEN se compara bajo el candado) y el destino (S5, la prueba por teléfono) también.
+    expect(sql).toContain('"pageToken"')
+    expect(sql).toContain('"recipientPhone"')
+    expect(sql).toMatch(/"deliveryChannel"::text AS "deliveryChannel"/)
   })
 
   it('⭐ devuelve los sobres en el orden de consumo (vencen antes → activados antes → id), ordenados en memoria', async () => {

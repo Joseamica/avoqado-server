@@ -65,10 +65,23 @@ calla.** **El #7 pierde pedidos sin un solo error entre servidores con bases dis
    puede vivir en la misma base cuya caída la produjo. Mientras sea memoria del proceso, además, un reinicio la pierde (residual
    declarado, gemelo del `evidenciaSinGuardar` de la terminal). El reingreso pendiente vive en el mismo sitio: con 2 pods cada
    uno reintenta lo que recibió (el `eventId` lo vuelve idempotente), y un reinicio con la base aún caída lo pierde.
-9. **Sondeo de Rappi por tienda → prendido en UN solo pod** (`RAPPI_ORDER_POLL_ENABLED`), o su pasada bajo un candado advisory de
-   Postgres. El P2002 de `dedupKey` evita el doble registro sólo dentro de la MISMA base, y no frena el ritmo: dos pods sondeando
-   le piden a Rappi el doble de lo que permite.
-10. **Pasada del job de menú y horario → candado advisory de Postgres** (`delivery-menu-sync.job.ts`, `enCurso`). Con 2 pods dos pasadas
+9. **Avisos tempranos de fallo de entrega de tarjetas → tabla** (`src/services/giftCards/giftCardFallosTempranos.ts`). El
+   `failed` de Meta o el rebote de Resend que llega antes de que la entrega guarde su id se anota 10 min en memoria; con 2
+   pods, el aviso cae en uno y la entrega guarda en otro, y la tarjeta se queda «Enviada» sin haber llegado. Se migra a una
+   tabla (messageId, codigo, recibidoEn) con la misma caducidad. El reclamo de la entrega ya vive en la fila y no cambia.
+10. 🔴 **Sellos de rechazo del cobro con saldo → tabla** (`src/services/giftCards/giftCardPayKey.ts:27`, Q91; mueve DINERO). Un
+    rechazo definitivo de una llave queda sellado 10 min en la memoria del pod que rechazó. Con 2 pods, el mismo envío de esa llave
+    cae en el otro, se vuelve a evaluar y puede cobrar con saldo después de que la caja ya cobró con otro medio: justo lo que Q91
+    evita. Se migra a una tabla (venueId, llave, error, venceEn) leída y escrita bajo el candado de la llave.
+11. **Límite de reenvíos de una tarjeta de regalo** (`giftCardResendRateLimiter`,
+    `src/middlewares/gift-card-lookup-rate-limit.middleware.ts`): 5 por hora por tarjeta, en memoria. Con 2 pods cada uno cuenta
+    los suyos y la misma tarjeta puede recibir el doble de WhatsApps o correos (costo y calificación del número de WhatsApp). Va con
+    los limitadores del punto 2, cuidando que el descuento de las repeticiones y los rechazos (`skipFailedRequests`) también llegue
+    al almacén compartido.
+12. **Sondeo de Rappi por tienda → prendido en UN solo pod** (`RAPPI_ORDER_POLL_ENABLED`), o su pasada bajo un candado advisory de
+    Postgres. El P2002 de `dedupKey` evita el doble registro sólo dentro de la MISMA base, y no frena el ritmo: dos pods sondeando
+    le piden a Rappi el doble de lo que permite.
+13. **Pasada del job de menú y horario → candado advisory de Postgres** (`delivery-menu-sync.job.ts`, `enCurso`). Con 2 pods dos pasadas
     pueden planear el horario de la tienda desde lecturas distintas. La memoria de avisos de `hoursSync.service.ts` (fila 9 de la
     tabla) no requiere migración: sólo repite un 🚨.
 

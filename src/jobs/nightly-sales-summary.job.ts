@@ -169,8 +169,9 @@ export class NightlySalesSummaryJob {
           prisma.venue.findMany({
             where: {
               ...(specificVenueId ? { id: specificVenueId } : {}),
+              // Sin LIVE_DEMO: los negocios demo no mandan correos a nadie (candado demo, capa 3).
               status: {
-                in: [VenueStatus.ACTIVE, VenueStatus.TRIAL, VenueStatus.LIVE_DEMO],
+                in: [VenueStatus.ACTIVE, VenueStatus.TRIAL],
               },
             },
             select: {

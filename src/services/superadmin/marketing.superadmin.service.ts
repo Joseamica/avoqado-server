@@ -15,6 +15,7 @@ import logger from '@/config/logger'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { classifyUndeliverable, isDeliverableRecipient } from '@/utils/undeliverableEmail'
 import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
+import { omitirPorDemo } from '../demo/candadoDemo'
 
 // Initialize Resend
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -657,6 +658,14 @@ export async function processPendingDeliveries() {
             where: { id: delivery.id },
             data: { status: DeliveryStatus.FAILED },
           })
+          continue
+        }
+
+        // Negocios demo (capa 2): ni los usuarios @demo.avoqado.io ni el personal de un negocio demo reciben campañas de Avoqado.
+        const motivoDemo = await omitirPorDemo('campaña de Avoqado', delivery.recipientEmail, delivery.venueId)
+        if (motivoDemo === 'sin confirmar') continue // sigue PENDING: se reintenta en la siguiente pasada
+        if (motivoDemo) {
+          await prisma.campaignDelivery.update({ where: { id: delivery.id }, data: { status: DeliveryStatus.FAILED } })
           continue
         }
 

@@ -35,11 +35,15 @@ jest.mock('@/config/logger', () => ({
   default: { warn: jest.fn() },
 }))
 
+const mockOmitir = jest.fn()
+jest.mock('@/services/demo/candadoDemo', () => ({ omitirPorDemo: (...a: unknown[]) => mockOmitir(...a) }))
+
 import { sendSilentPush } from '@/services/wallet/apnsClient'
 
 describe('APNS wallet client', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockOmitir.mockResolvedValue(null)
     mockRequest.removeAllListeners()
     mockClient.removeAllListeners()
 
@@ -63,12 +67,19 @@ describe('APNS wallet client', () => {
 
   it('consume el body de error para resolver la promesa y reconocer un dispositivo eliminado', async () => {
     const result = await Promise.race([
-      sendSilentPush('device-token'),
+      sendSilentPush('device-token', 'venue-real'),
       new Promise<'TIMEOUT'>(resolve => setTimeout(() => resolve('TIMEOUT'), 30)),
     ])
 
     expect(result).toEqual({ ok: false, gone: true, status: 410 })
     expect(mockRequest.resume).toHaveBeenCalledTimes(1)
     expect(mockClient.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 negocio demo: no se conecta a Apple (Codex r6, 4)', async () => {
+    mockOmitir.mockResolvedValue('negocio demo')
+    expect(await sendSilentPush('device-token', 'venue-demo')).toEqual({ ok: false })
+    expect(mockOmitir).toHaveBeenCalledWith('aviso de Apple Wallet', null, 'venue-demo')
+    expect(mockConnect).not.toHaveBeenCalled()
   })
 })

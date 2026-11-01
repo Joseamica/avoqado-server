@@ -12,6 +12,7 @@ import { directoryInputSchema } from './directory/input'
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   review_pending_courtesy: 'write',
+  cancel_unpaid_order: 'write',
   venue_administration: 'read',
   update_venue_business_profile: 'write',
   update_venue_organization: 'write',
@@ -214,6 +215,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_payment_effects: 'read',
   list_payment_links: 'read',
   list_payments: 'read',
+  get_cash_payment_by_key: 'read',
   list_prices: 'read',
   list_print_stations: 'read',
   list_printers: 'read',
@@ -425,6 +427,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   top_products: 'read',
   trial_balance: 'read',
   undo_check_in: 'write',
+  undo_no_show: 'write',
   update_customer_display_design: 'write',
   update_fixed_asset: 'write',
   update_gift_card_settings: 'write',
@@ -523,6 +526,12 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
         if (!granted())
           throw new ScopeError(
             `Esta conexión requiere autorizar ${readOnly ? 'mcp:read' : 'mcp:write'}. Vuelve a conectar con ese permiso.`,
+          )
+        // Negocios demo (candado, capa 4): si todos los negocios de la conexión son demo, el asistente sólo consulta;
+        // así el MCP no se vuelve una puerta trasera para lo que el panel y la app tienen bloqueado.
+        if (!readOnly && !scope.isSuperAdmin && scope.soloNegociosDemo)
+          throw new ScopeError(
+            'En el negocio de demostración, el asistente sólo puede consultar. En tu cuenta de Avoqado también puede hacer cambios.',
           )
         if (!needsPreview) return structureToolResult(await run(...args))
         const { confirmationToken, ...input } = args[0]

@@ -39,6 +39,14 @@ describe('POST …/kiosk/reservations/:reservationId/check-in — cuerpo', () =>
     expect(kioskCheckInReservation).not.toHaveBeenCalled()
   })
 
+  it('D4: la corrección del «No asistió» viaja tal cual en la respuesta (campo nuevo y opcional)', async () => {
+    const out = { reservationId: 'r1', orderId: null, correction: { id: 'c1', pending: ['CLASS_UNPAID'] } }
+    ;(kioskCheckInReservation as jest.Mock).mockResolvedValueOnce(out)
+    const { res, err } = await call({ closesAt: '2026-10-28T19:20:00.000Z', msBeforeClose: 15 * 60_000 })
+    expect(err).toBeUndefined()
+    expect(res.json).toHaveBeenCalledWith(out)
+  })
+
   it('cuerpo vacío = toque en vivo; con los dos = toque guardado sin red', async () => {
     await call({})
     expect(kioskCheckInReservation).toHaveBeenLastCalledWith(expect.objectContaining({ reservationId: 'r1', tapped: undefined }))

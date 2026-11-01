@@ -20,6 +20,7 @@ import { isLiveSlotHold } from './appointmentStaffAssignment.service'
 import { AsignacionDto, asignacionesVigentes } from './rh/asignaciones.service'
 import { hoyDeLaSede } from './rh/vigencias'
 import { fechaComoDbDate } from './staffPay/periodos'
+import { WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
 
 interface TeamMember {
   id: string
@@ -204,6 +205,7 @@ export async function getTeamMembers(
       venueId,
       createdById: { in: staffIds },
       status: 'COMPLETED',
+      ...WHERE_ORDEN_SIN_TARJETAS, // S0.1c: la cuenta de tarjetas no es venta del empleado
     },
     _sum: {
       total: true,
@@ -318,6 +320,7 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
       venueId,
       createdById: staffVenue.staffId,
       status: 'COMPLETED',
+      ...WHERE_ORDEN_SIN_TARJETAS, // S0.1c: igual que la lista
     },
     _sum: {
       total: true,

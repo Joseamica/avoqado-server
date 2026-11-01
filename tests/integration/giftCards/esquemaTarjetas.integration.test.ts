@@ -201,6 +201,36 @@ describe('tarjetas de regalo · garantías del esquema', () => {
     expect((await prisma.organization.findUniqueOrThrow({ where: { id: orgId } })).ivaMixtoAlgunaVez).toBe(true)
   })
 
+  it('1b S1 · GiftCard trae las columnas de entrega con sus defaults', async () => {
+    const s = await sobre({ status: 'PENDING', balance: new Prisma.Decimal(0), deliveryChannel: 'WHATSAPP' })
+    expect(s).toMatchObject({
+      deliveryAttempts: 0,
+      deliveryNextAttemptAt: null,
+      deliveryClaimedAt: null,
+      deliveryErrorCode: null,
+      deliveryMessageId: null,
+      deliveryOperationKey: null,
+      ventaHuella: null,
+    })
+  })
+
+  it('1b S1 · OtpChallenge.purpose nace CUSTOMER_LOGIN', async () => {
+    const reto = await prisma.otpChallenge.create({
+      data: {
+        venueId,
+        channel: 'whatsapp',
+        destination: '+525500000000',
+        codeHash: `${SUF}-otp`,
+        expiresAt: new Date(Date.now() + 600_000),
+      },
+    })
+    try {
+      expect(reto.purpose).toBe('CUSTOMER_LOGIN')
+    } finally {
+      await prisma.otpChallenge.delete({ where: { id: reto.id } })
+    }
+  })
+
   it('el tender de sistema «Tarjeta de regalo» es uno por negocio; los tenders normales (systemKind nulo) no chocan', async () => {
     const base = { venueId, baseMethod: 'OTHER' as const, isSystem: true, showOnPos: false }
     await prisma.venueTenderType.create({ data: { ...base, name: 'Regalo A', normalizedName: `${SUF}-a`, systemKind: 'GIFT_CARD' } })

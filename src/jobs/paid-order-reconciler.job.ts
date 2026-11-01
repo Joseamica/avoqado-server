@@ -18,6 +18,7 @@ import { findSesionesDeValesAtoradas, reconcileOrderFromPayments, retomarCobroDe
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { conNegocio } from '../services/demo/candadoDemo'
 
 /**
  * Fase 0 del turno de caja del negocio: NINGUNA orden cobrada se queda «abierta».
@@ -236,7 +237,8 @@ export class PaidOrderReconcilerJob {
           // 🔴 R10-3: una venta de vales cuyo cobro capturado no se pudo finalizar se cierra por SU sesión (consume el inventario y
           // corre una vez cupones, referido, lealtad y comanda con el empleado del cobro), no sólo de estado. Si tampoco ahora se puede
           // (p. ej. sigue sin existencia), se cierra de estado como siempre; su sesión queda en conciliación y un reenvío la recupera.
-          const vale = await this.d.retomarVale(c.venueId, c.id, now).catch(error => {
+          // Con el negocio de la venta en el contexto (candado demo, capa 3).
+          const vale = await conNegocio(c.venueId, () => this.d.retomarVale(c.venueId, c.id, now)).catch(error => {
             logger.warn('🧾 [paid-order-reconciler] no se pudo retomar el cobro del vale; se cierra sólo de estado', {
               orderId: c.id,
               venueId: c.venueId,
@@ -264,7 +266,8 @@ export class PaidOrderReconcilerJob {
             })
             continue
           }
-          const { written } = await this.d.reconcile(c.id)
+          // Con el negocio de la venta en el contexto (candado demo, capa 3).
+          const { written } = await conNegocio(c.venueId, () => this.d.reconcile(c.id))
           if (!written) {
             // T8-R3: the order changed under its lock twice and nothing was written; it is a candidate again next tick.
             result.notWritten += 1

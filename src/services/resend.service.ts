@@ -42,9 +42,28 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { omitirPorDemo } from './demo/candadoDemo'
 
 // Initialize Resend only if API key is available (skip in tests/dev without email)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
+
+type EnvioResend = Resend['emails']['send']
+
+/**
+ * Todo envío de este archivo pasa por aquí: candado de los negocios demo (capa 2). Si se omite, contesta como envío
+ * hecho y sin `error`, para que quien llama no lo registre como falla ni dispare alertas (el candado ya dejó su log).
+ */
+const enviarCorreo: EnvioResend = async (payload, options) => {
+  const motivo = await omitirPorDemo('correo', payload.to)
+  if (motivo === 'sin confirmar') {
+    // La base no contestó: no se manda, y quien llama lo ve como una falla normal del envío.
+    return { data: null, error: { name: 'application_error', message: 'No se pudo confirmar el negocio' } } as Awaited<
+      ReturnType<EnvioResend>
+    >
+  }
+  if (motivo) return { data: { id: 'negocio-demo' }, error: null } as Awaited<ReturnType<EnvioResend>>
+  return resend!.emails.send(payload, options)
+}
 
 // Email configuration
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
@@ -258,7 +277,7 @@ ${isOnboarding ? '' : `\nRevisar el KYC: ${dashboardUrl}\n`}
 ---
 Servicios Tecnologicos Avo S.A. de C.V.`
 
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to: ONBOARDING_EMAIL,
       subject,
@@ -421,7 +440,7 @@ Venue ID: ${data.venueId}
     // Send email to all recipients
     const results = await Promise.allSettled(
       data.recipients.map(email =>
-        resend.emails.send({
+        enviarCorreo({
           from: FROM_EMAIL,
           to: email,
           subject: `🆕 Nueva solicitud KYC: ${data.venueName}`,
@@ -742,7 +761,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
 
   try {
     logger.info(`📧 Sending new-venue digest to ${ONBOARDING_EMAIL} for ${data.venueName} (${data.venueId})`)
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to: ONBOARDING_EMAIL,
       // No emoji in subject — per EMAIL_STANDARDS rules + better deliverability.
@@ -854,7 +873,7 @@ export async function sendPlanActivatedNotice(data: PlanActivatedNoticeData): Pr
 </html>`
 
   try {
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to: ONBOARDING_EMAIL,
       subject: `Activó su plan ${data.planName}: ${data.venueName}`,
@@ -947,7 +966,7 @@ export async function sendDirectSignupNotice(data: DirectSignupNoticeData): Prom
 </body>
 </html>`
   try {
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to: ONBOARDING_EMAIL,
       subject: `Nuevo registro directo: ${data.email}`,
@@ -1124,7 +1143,7 @@ export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): P
 
   try {
     logger.info(`📧 Sending onboarding welcome to ${data.ownerEmail} for ${data.venueName}`)
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to: data.ownerEmail,
       // Reply-to so when the owner hits "Reply" it lands in the team inbox
@@ -1150,6 +1169,10 @@ export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): P
 
 /**
  * Send generic notification email (used by notification.service.ts)
+ *
+ * `opts.unsubscribeUrl` (D4): baja en un clic sin iniciar sesión — liga «Dejar de recibir estos correos» en el pie y en el
+ * texto, más `List-Unsubscribe` + `List-Unsubscribe-Post` (RFC 8058), igual que `sendLowStockDigestEmail`. Sin `opts` la
+ * salida es idéntica byte a byte a la de antes (fijado en tests/unit/services/resend.notificationEmail.test.ts).
  */
 export async function sendNotificationEmail(
   to: string,
@@ -1158,7 +1181,9 @@ export async function sendNotificationEmail(
   message: string,
   actionUrl?: string,
   actionLabel?: string,
+  opts?: { unsubscribeUrl?: string },
 ): Promise<boolean> {
+  const unsubscribeUrl = opts?.unsubscribeUrl
   if (!resend) {
     logger.warn('📧 Resend not configured - skipping notification email')
     return false
@@ -1213,7 +1238,12 @@ export async function sendNotificationEmail(
             <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 32px 0 20px;">
 
             <img src="https://avoqado.io/isotipo.svg" width="24" height="24" alt="Avoqado" style="display: block; margin-bottom: 12px; opacity: 0.5;">
-            <p style="font-size: 12px; color: #666666; margin: 0;">Servicios Tecnologicos Avo S.A. de C.V.</p>
+            <p style="font-size: 12px; color: #666666; margin: 0;">Servicios Tecnologicos Avo S.A. de C.V.</p>${
+              unsubscribeUrl
+                ? `
+            <p style="font-size: 12px; color: #666666; margin: 8px 0 0;"><a href="${unsubscribeUrl}" style="color: #666666; text-decoration: underline;">Dejar de recibir estos correos</a></p>`
+                : ''
+            }
           </div>
         </body>
       </html>
@@ -1227,15 +1257,21 @@ ${message}
 ${actionUrl ? `${actionLabel || 'Ver más'}: ${actionUrl}` : ''}
 
 ---
-Este correo fue enviado por Avoqado
+Este correo fue enviado por Avoqado${unsubscribeUrl ? `\nDejar de recibir estos correos: ${unsubscribeUrl}` : ''}
     `
 
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to,
       subject,
       html,
       text,
+      ...(unsubscribeUrl && {
+        headers: {
+          'List-Unsubscribe': `<${unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
+      }),
     })
 
     if (result.error) {
@@ -1492,7 +1528,7 @@ Email automático de Avoqado Platform
     // Send email to all recipients
     const results = await Promise.allSettled(
       recipients.map(email =>
-        resend.emails.send({
+        enviarCorreo({
           from: FROM_EMAIL,
           to: email,
           subject: `[Avoqado] Nueva Alta de Comercio - ${data.venueName} (${entityTypeDisplay})`,
@@ -1750,7 +1786,7 @@ Comunícate con ${data.venueName} para obtener más información sobre sus prác
     logger.info(`📧 Sending Purchase Order email for ${data.orderNumber}`)
     logger.info(`📧 To: ${data.supplierEmail}, Cc: ${data.staffEmail}, Reply-To: ${data.staffEmail}`)
 
-    const result = await resend.emails.send({
+    const result = await enviarCorreo({
       from: FROM_EMAIL,
       to: data.supplierEmail,
       cc: data.staffEmail,

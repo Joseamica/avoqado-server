@@ -21,6 +21,7 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 const mockAttach = jest.fn((_req: any, res: any) => res.status(200).json({ success: true }))
 const mockAttachLatest = jest.fn((_req: any, res: any) => res.status(200).json({ success: true }))
 jest.mock('@/controllers/mobile/payment.mobile.controller', () => ({
+  getCashPaymentByKey: jest.fn(),
   recordFastPayment: jest.fn(),
   getPaymentLoyalty: jest.fn(),
   attachCustomerToPayment: (req: any, res: any) => mockAttach(req, res),

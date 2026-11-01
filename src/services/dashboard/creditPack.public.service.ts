@@ -11,7 +11,7 @@
 
 import Stripe from 'stripe'
 import { nanoid } from 'nanoid'
-import { Prisma, CreditPurchaseStatus } from '@prisma/client'
+import { Prisma, CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
@@ -680,7 +680,12 @@ export async function checkRedemptionEligibility(venueId: string, customerId: st
  * Returns `{ creditsRefunded: N, policyApplied: '...' }` for the caller to surface to the
  * customer. Does nothing if the reservation never used credits.
  *
- * Safe to call outside a transaction — internal updates are atomic per row.
+ * `onlyIfReservationStatus` (D4): the refund is a side effect of a status change that already
+ * committed (e.g. NO_SHOW). Inside the refund transaction the reservation row is locked
+ * (`FOR UPDATE`) and, if it is no longer in that status (someone corrected it meanwhile), nothing
+ * is written and `skipped: 'STATUS_CHANGED'` is returned. Omitted ⇒ no status check (cancellation).
+ *
+ * Safe to call outside a transaction — all writes run in one transaction.
  */
 export async function refundCreditsForReservation(args: {
   venueId: string
@@ -692,8 +697,9 @@ export async function refundCreditsForReservation(args: {
     creditLateRefundPercent: number
   }
   reasonPrefix?: string
-}): Promise<{ creditsRefunded: number; policyApplied: string }> {
-  const { venueId, reservationId, startsAt, policy, reasonPrefix } = args
+  onlyIfReservationStatus?: ReservationStatus
+}): Promise<{ creditsRefunded: number; policyApplied: string; skipped?: 'STATUS_CHANGED' }> {
+  const { venueId, reservationId, startsAt, policy, reasonPrefix, onlyIfReservationStatus } = args
 
   // Find the original REDEEM transaction(s) for this reservation.
   // We sum their negative quantities to know how many credits were spent on it.
@@ -735,17 +741,23 @@ export async function refundCreditsForReservation(args: {
   // Refund proportionally per redeem transaction (rounded down — never refund more than spent).
   // For a single REDEEM with quantity=-3 and refundPercent=50 → refund 1 (floor of 1.5).
   let totalRefunded = 0
-  for (const tx of redeems) {
-    const refundQty = Math.floor((Math.abs(tx.quantity) * refundPercent) / 100)
-    if (refundQty <= 0) continue
-    if (!tx.creditItemBalanceId) continue
+  const statusChanged = await prisma.$transaction(async db => {
+    if (onlyIfReservationStatus) {
+      // Same row lock any status change takes: a correction either committed before (we see it) or waits for us.
+      const rows = await db.$queryRaw<{ status: ReservationStatus }[]>`
+        SELECT status FROM "Reservation" WHERE id = ${reservationId} AND "venueId" = ${venueId} FOR UPDATE`
+      if (rows[0]?.status !== onlyIfReservationStatus) return true
+    }
+    for (const tx of redeems) {
+      const refundQty = Math.floor((Math.abs(tx.quantity) * refundPercent) / 100)
+      if (refundQty <= 0) continue
+      if (!tx.creditItemBalanceId) continue
 
-    await prisma.$transaction([
-      prisma.creditItemBalance.update({
+      await db.creditItemBalance.update({
         where: { id: tx.creditItemBalanceId },
         data: { remainingQuantity: { increment: refundQty } },
-      }),
-      prisma.creditTransaction.create({
+      })
+      await db.creditTransaction.create({
         data: {
           venueId,
           customerId: tx.customerId,
@@ -756,14 +768,22 @@ export async function refundCreditsForReservation(args: {
           reservationId,
           reason: `${reasonPrefix ?? 'Cancellation refund'} — policy: ${policyApplied}`,
         },
-      }),
+      })
       // If the purchase was marked EXHAUSTED but now has balance again, restore ACTIVE.
-      prisma.creditPackPurchase.updateMany({
+      await db.creditPackPurchase.updateMany({
         where: { id: tx.creditPackPurchaseId, status: CreditPurchaseStatus.EXHAUSTED },
         data: { status: CreditPurchaseStatus.ACTIVE },
-      }),
-    ])
-    totalRefunded += refundQty
+      })
+      totalRefunded += refundQty
+    }
+    return false
+  })
+
+  if (statusChanged) {
+    logger.info(
+      `💸 [CREDIT REFUND] Skipped — reservation=${reservationId} is no longer ${onlyIfReservationStatus} (corrected before the refund ran)`,
+    )
+    return { creditsRefunded: 0, policyApplied, skipped: 'STATUS_CHANGED' }
   }
 
   logger.info(`💸 [CREDIT REFUND] reservation=${reservationId} refunded=${totalRefunded}/${totalSpent} policy=${policyApplied}`)

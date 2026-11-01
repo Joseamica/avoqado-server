@@ -67,6 +67,8 @@ export class ReservationReminderJob {
               status: { in: ['CONFIRMED', 'PENDING'] },
               startsAt: { gt: now, lt: horizon },
               venue: {
+                // Sin LIVE_DEMO: el cliente que un prospecto agende en el demo no recibe recordatorios (candado demo, capa 3).
+                status: { not: 'LIVE_DEMO' },
                 reservationSettings: {
                   remindersEnabled: true,
                 },

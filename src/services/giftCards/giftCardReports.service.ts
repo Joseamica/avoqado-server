@@ -9,7 +9,15 @@
  * Dinero: PESOS (`number` con 2 decimales) en todo lo que sale. Fechas: días del negocio (`YYYY-MM-DD` en su zona).
  * 🔴 El código de la tarjeta NUNCA sale de aquí: sólo sus últimos 4.
  */
-import { GiftCardStatus, Prisma, type GiftCardActivityType, type GiftCardReason, type PaymentType } from '@prisma/client'
+import {
+  GiftCardStatus,
+  Prisma,
+  type GiftCardActivityType,
+  type GiftCardDeliveryChannel,
+  type GiftCardDeliveryStatus,
+  type GiftCardReason,
+  type PaymentType,
+} from '@prisma/client'
 import type { Response } from 'express'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
@@ -20,6 +28,7 @@ import { clampPage } from '@/services/dashboard/listSummary.shared'
 import { csvField } from '@/services/dashboard/export.helpers'
 import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal/autoPosting.service'
 import { SIN_VENTA, bloqueosVigentes, estadoDeCancelacionDeVenta, type CancelacionDeVenta } from './giftCardCancel.service'
+import { enmascararDestino, textoDeFalloDeEntrega } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
 import { isGiftCardTenderKind } from './giftCardTender'
 import {
@@ -75,11 +84,30 @@ export interface GiftCardRow {
   expiresAt: string | null
   deliveryChannel: string
   deliveryStatus: string
+  /** 1b S-10 (aditivo): cuándo el proveedor aceptó el envío; `null` si no se ha enviado. */
+  deliveredAt: string | null
+  /** 1b S-7 + S-10 (aditivo): el CÓDIGO del último fallo de la entrega (el panel traduce por él) y su texto en español. */
+  deliveryErrorCode: string | null
+  deliveryError: string | null
   recipientName: string | null
   purchaserName: string | null
   source: string
   customer: { id: string; name: string } | null
   order: { id: string; orderNumber: string } | null
+}
+
+/**
+ * 1b S-7 + P-1: cómo va la entrega de la tarjeta en el detalle del panel. `destino` va ENMASCARADO (nunca el teléfono o el correo
+ * completos); en `PRINTED` y `HANDED_TO_BUYER` el estado se queda `PENDING` (S-8) y no hay destino.
+ */
+export interface GiftCardEntrega {
+  channel: GiftCardDeliveryChannel
+  status: GiftCardDeliveryStatus
+  deliveredAt: string | null
+  errorCode: string | null
+  error: string | null
+  destino: string | null
+  intentos: number
 }
 
 export interface GiftCardActivityRow {
@@ -103,7 +131,6 @@ export interface GiftCardDetail extends GiftCardRow {
   recipientPhone: string | null
   recipientEmail: string | null
   purchaserContact: string | null
-  deliveredAt: string | null
   deactivatedAt: string | null
   /** Se usó alguna vez (un `REDEEM` en su libreta): ya no se puede cancelar su venta ni reponer su código. */
   hasRedeem: boolean
@@ -125,6 +152,8 @@ export interface GiftCardDetail extends GiftCardRow {
    * la libreta paginada. `null` si la tarjeta no está BLOCKED. El panel decide con esto el motivo que enseña.
    */
   currentBlock: { reason: GiftCardReason | null; note: string | null; at: string } | null
+  /** 1b S7 (aditivo): la entrega, con el destino enmascarado. */
+  entrega: GiftCardEntrega
   activities: { items: GiftCardActivityRow[]; nextCursor: string | null; total: number }
 }
 
@@ -212,6 +241,8 @@ const FILA_SELECT = Prisma.validator<Prisma.GiftCardSelect>()({
   expiresAt: true,
   deliveryChannel: true,
   deliveryStatus: true,
+  deliveredAt: true,
+  deliveryErrorCode: true,
   recipientName: true,
   purchaserName: true,
   source: true,
@@ -232,6 +263,9 @@ function aFila(t: FilaDb, clientes: Map<string, string>): GiftCardRow {
     expiresAt: iso(t.expiresAt),
     deliveryChannel: t.deliveryChannel,
     deliveryStatus: t.deliveryStatus,
+    deliveredAt: iso(t.deliveredAt),
+    deliveryErrorCode: t.deliveryErrorCode ?? null,
+    deliveryError: textoDeFalloDeEntrega(t.deliveryErrorCode ?? null),
     recipientName: t.recipientName,
     purchaserName: t.purchaserName,
     source: t.source,
@@ -389,8 +423,8 @@ export async function getGiftCardDetail(
       recipientPhone: true,
       recipientEmail: true,
       purchaserContact: true,
-      deliveredAt: true,
       deactivatedAt: true,
+      deliveryAttempts: true,
     },
   })
   if (!tarjeta) throw new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio.', 404)
@@ -449,13 +483,21 @@ export async function getGiftCardDetail(
     recipientPhone: tarjeta.recipientPhone,
     recipientEmail: tarjeta.recipientEmail,
     purchaserContact: tarjeta.purchaserContact,
-    deliveredAt: iso(tarjeta.deliveredAt),
     deactivatedAt: iso(tarjeta.deactivatedAt),
     hasRedeem: usos > 0,
     canReplaceCode: tarjeta.customerId === null && usos === 0 && vivo,
     cancel,
     sale,
     currentBlock,
+    entrega: {
+      channel: tarjeta.deliveryChannel,
+      status: tarjeta.deliveryStatus,
+      deliveredAt: iso(tarjeta.deliveredAt),
+      errorCode: tarjeta.deliveryErrorCode ?? null,
+      error: textoDeFalloDeEntrega(tarjeta.deliveryErrorCode ?? null),
+      destino: enmascararDestino(tarjeta),
+      intentos: tarjeta.deliveryAttempts,
+    },
     activities: {
       items: pagina.map(a => ({
         id: a.id,

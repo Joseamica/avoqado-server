@@ -14,6 +14,7 @@ import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 import { totalesDelComprobante } from '../shared/ticketTotals'
+import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { exchangeDetailFields } from '../exchanges/exchangeDetail'
@@ -94,6 +95,8 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         maskedPan: true,
         referenceNumber: true,
         createdAt: true,
+        // 1b Q28: qué cobro es saldo de tarjeta de regalo.
+        tenderType: { select: { systemKind: true } },
         order: {
           select: {
             orderNumber: true,
@@ -136,6 +139,8 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
       orderType: p.order?.type ?? null,
       tableNumber: p.order?.table?.number ?? null,
+      // Aditivo (1b Q28): las apps lo nombran «Tarjeta de regalo».
+      esSaldoDeTarjeta: isGiftCardTenderKind(p.tenderType?.systemKind),
     })),
     meta: {
       total,
@@ -324,6 +329,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve
     // a leer `amount`/`tipAmount` (que siguen aquí arriba, vivos, como siempre).
     ticketTotals: totalesDelTicket,
+    // D1 «fotocopia del ticket», aditivo y APARTE de ticketTotals (las apps viejas no la ven): los renglones que imprimió el cobro de
+    // esta parte. La reimpresión los pinta en vez de «Pago parcial». Sin copia, la llave no existe.
+    lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {

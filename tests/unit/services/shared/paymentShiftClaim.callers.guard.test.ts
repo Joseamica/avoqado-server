@@ -128,6 +128,11 @@ const INVENTORY: Record<string, InventoryDecision> = {
     lane: 'onlineOrderCardCapture',
     reason: 'online processor capture without cashier',
   },
+  'src/services/demo/negociosDemo.service.ts#seedHistory#create': {
+    decision: 'exclude',
+    lane: 'negociosDemo',
+    reason: 'pagos sintéticos de los negocios demo de ventas, con fecha inventada; sin cajón ni turno',
+  },
   'src/services/pos-sync/posSyncOrder.service.ts#processPaymentsForOrder#create': {
     decision: 'include',
     lane: 'posSyncOrder',

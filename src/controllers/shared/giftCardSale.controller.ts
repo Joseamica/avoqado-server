@@ -7,13 +7,18 @@
 import type { Request, Response } from 'express'
 import { getGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
 import { iniciarCancelacionDeVenta, liberarCancelacionDeVenta } from '@/services/giftCards/giftCardCancel.service'
-import { estadoDeVentaDeTarjetas } from '@/services/giftCards/giftCardSurface.service'
+import { CAPACIDADES_DEL_POS, estadoDeVentaDeTarjetas, negocioHaActivadoTarjetas } from '@/services/giftCards/giftCardSurface.service'
 import { staffDe } from '@/utils/giftCardRequest'
 
+/** 1b S1: `capacidades` y `tieneTarjetas` son aditivos; lo de la 1a no cambia. */
 export async function getSettings(req: Request, res: Response) {
   const { venueId } = req.params
-  const [settings, sale] = await Promise.all([getGiftCardSettings(venueId), estadoDeVentaDeTarjetas(venueId)])
-  res.json({ success: true, data: { ...settings, sale } })
+  const [settings, sale, tieneTarjetas] = await Promise.all([
+    getGiftCardSettings(venueId),
+    estadoDeVentaDeTarjetas(venueId),
+    negocioHaActivadoTarjetas(venueId),
+  ])
+  res.json({ success: true, data: { ...settings, sale, capacidades: [...CAPACIDADES_DEL_POS], tieneTarjetas } })
 }
 
 export async function cancelSale(req: Request, res: Response) {

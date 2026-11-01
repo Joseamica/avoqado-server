@@ -7,7 +7,7 @@
  *  - Jerarquía de candados: Order → Payment (si aplica) → GiftCard → Shift. Un reverso bloquea los sobres ANTES de
  *    `writeRefundInTx` (que reclama el turno): ver `sobresDelCanje`.
  */
-import { Prisma, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
+import { Prisma, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
 import { addDays, addMonths } from 'date-fns'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -33,6 +33,11 @@ export interface LockedGiftCard {
   venueId: string
   /** r1 (A-1): la huella VIGENTE del código, leída bajo el candado; el cobro la compara con la prueba presentada. */
   codeHash: string
+  /** 1b S2: la liga VIGENTE (reponer el código la cambia); el cobro con PAGE_TOKEN la compara bajo el candado. */
+  pageToken: string
+  /** 1b S5: el destino vigente; la prueba por teléfono lo compara bajo el candado. */
+  recipientPhone: string | null
+  deliveryChannel: GiftCardDeliveryChannel
   status: GiftCardStatus
   balance: Prisma.Decimal
   initialAmount: Prisma.Decimal
@@ -45,7 +50,8 @@ export interface LockedGiftCard {
 export type OperacionDeGerente =
   | { tipo: 'AJUSTE'; direccion: 'INCREMENT' | 'DECREMENT'; amount: Prisma.Decimal; reason: GiftCardReason; note?: string }
   | { tipo: 'BLOQUEAR' | 'DESBLOQUEAR'; reason: GiftCardReason; note?: string }
-  | { tipo: 'REEMPLAZAR_CODIGO'; reason: 'LOST_CARD'; note?: string }
+  // 1b S4 (P-3): el cambio de destino repone con CUSTOMER_REQUEST y su nota fija.
+  | { tipo: 'REEMPLAZAR_CODIGO'; reason: 'LOST_CARD' | 'CUSTOMER_REQUEST'; note?: string }
 
 function esUsable(c: { status: GiftCardStatus; expiresAt: Date | null }, ahora: Date): boolean {
   return c.status === 'ACTIVE' && (c.expiresAt === null || c.expiresAt.getTime() > ahora.getTime())
@@ -86,6 +92,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
       id: string
       venueId: string
       codeHash: string
+      pageToken: string
+      recipientPhone: string | null
+      deliveryChannel: string
       status: string
       balance: Prisma.Decimal
       initialAmount: Prisma.Decimal
@@ -95,7 +104,8 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
       customerId: string | null
     }>
   >`
-    SELECT id, "venueId", "codeHash", status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
+    SELECT id, "venueId", "codeHash", "pageToken", "recipientPhone", "deliveryChannel"::text AS "deliveryChannel",
+      status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
     FROM "GiftCard"
     WHERE id IN (${Prisma.join(unicos)})
     ORDER BY id ASC
@@ -104,6 +114,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
     id: f.id,
     venueId: f.venueId,
     codeHash: f.codeHash,
+    pageToken: f.pageToken,
+    recipientPhone: f.recipientPhone,
+    deliveryChannel: f.deliveryChannel as GiftCardDeliveryChannel,
     status: f.status as GiftCardStatus,
     balance: new Prisma.Decimal(f.balance),
     initialAmount: new Prisma.Decimal(f.initialAmount),
@@ -343,6 +356,8 @@ export async function canjearSobresEnTx(
     cards: LockedGiftCard[]
     staffId?: string | null
     deviceId?: string | null
+    /** S2b (Q58): sólo `pay-new-order` la pasa — la huella del cuerpo, con la que su reintento por la llave se reconoce. */
+    operationHash?: string
   },
 ): Promise<Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }>> {
   if (!p.amount.greaterThan(0) || p.amount.decimalPlaces() > 2) {
@@ -394,6 +409,7 @@ export async function canjearSobresEnTx(
         orderId: p.orderId,
         staffId: p.staffId ?? null,
         deviceId: p.deviceId ?? null,
+        ...(p.operationHash ? { operationHash: p.operationHash } : {}),
       },
     })
     resultado.push({ giftCardId: card.id, amount: toma, balanceAfter })

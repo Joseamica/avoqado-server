@@ -3,6 +3,7 @@ import { getWhatsappAdminAlertEmail } from '@/config/whatsappCloud'
 import { normalizePhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
 
+import { marcarEntregaFallidaPorMensaje } from './giftCards/giftCardDelivery.service'
 import { handleActivationCommand } from './venueChatActivation.service'
 import { maybeSendVenueReplyEmail } from './venueChatEmail.service'
 import { sendServiceMessage, WhatsappCloudApiError } from './whatsapp.service'
@@ -75,6 +76,9 @@ async function processMessagesChange(change: CloudApiChange) {
   for (const s of statuses) {
     logger.info('WhatsApp status event', { wamid: s.id, status: s.status })
     // v1: log only, do not persist. Per spec §Status events.
+    // Tarjetas de regalo (1b S3, Q2/Q103): Meta no pudo entregar ESE mensaje ⇒ la tarjeta pasa a «No se entregó». Si truena,
+    // el error sube y el controlador responde 500: Meta reintenta y el CAS lo vuelve idempotente.
+    if (s.status === 'failed') await marcarEntregaFallidaPorMensaje(s.id)
   }
 
   const messages = change.value.messages ?? []

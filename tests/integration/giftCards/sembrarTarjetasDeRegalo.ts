@@ -7,7 +7,7 @@
  * (`crearNegocioDePrueba`). 🔴 Nunca `setupTestData()`: su `teardownTestData()` borra por NOMBRE («Test Restaurant») en TODA la base,
  * y un sobre que se queda (FK `GiftCard_venueId_fkey`) le revienta la limpieza a cualquier otra suite que la use (medido en B1).
  */
-import { Prisma, type Payment } from '@prisma/client'
+import { Prisma, type GiftCardDeliveryChannel, type Payment } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
@@ -27,14 +27,14 @@ export async function pidDe(tx: Prisma.TransactionClient): Promise<number> {
 /**
  * Espera a que OTRA sesión esté detenida por un candado que sostiene `pidQueTiene` (la prueba de que la segunda transacción de verdad
  * esperó, no la suerte de un `setTimeout`). Se filtra por `pg_blocking_pids`, así la espera de otra prueba o de otro agente en la misma
- * base nunca la satisface. Lanza si nadie llega a esperar en ~5 s.
+ * base nunca la satisface. Devuelve el proceso que espera. Lanza si nadie llega a esperar en ~5 s.
  */
-export async function esperarAQueAlguienEspereA(pidQueTiene: number): Promise<void> {
+export async function esperarAQueAlguienEspereA(pidQueTiene: number): Promise<number> {
   for (let i = 0; i < 200; i++) {
-    const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
-      SELECT count(*)::bigint AS n FROM pg_stat_activity
-      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid))`
-    if (Number(fila.n) > 0) return
+    const [fila] = await prisma.$queryRaw<Array<{ pid: number }>>`
+      SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid)) LIMIT 1`
+    if (fila) return fila.pid
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   throw new Error(`Nadie llegó a esperar el candado que sostiene el proceso ${pidQueTiene}`)
@@ -71,8 +71,23 @@ export async function limpiarNegocioDePrueba(venueId: string): Promise<void> {
   await prisma.order.deleteMany({ where: { venueId } })
 }
 
+/** 1b S3: a quién y por dónde se entrega cada sobre. Sin esto, «se entregó en mano» (HANDED_TO_BUYER), como en la 1a. */
+export interface EntregaSembrada {
+  deliveryChannel: GiftCardDeliveryChannel
+  recipientPhone?: string
+  recipientEmail?: string
+  recipientName?: string
+  purchaserName?: string
+}
+
 /** Un sobre PENDING por monto, cada uno con su renglón en la cuenta (R11: productId nulo, NO_OBJETO, cantidad 1). */
-async function crearSobresPendientes(p: { venueId: string; organizationId: string; orderId: string; montos: number[] }): Promise<string[]> {
+async function crearSobresPendientes(p: {
+  venueId: string
+  organizationId: string
+  orderId: string
+  montos: number[]
+  entrega?: EntregaSembrada
+}): Promise<string[]> {
   const giftCardIds: string[] = []
   for (const monto of p.montos) {
     const codigo = generateGiftCardCode()
@@ -89,6 +104,10 @@ async function crearSobresPendientes(p: { venueId: string; organizationId: strin
         status: 'PENDING',
         termsVersion: '2026-10-14',
         deliveryChannel: 'HANDED_TO_BUYER',
+        ...p.entrega,
+        // Cierre A (C3): con entrega, la sembrada es una venta de la 1b, y sólo ésas se entregan solas (la 1b siempre deja su
+        // huella; el valor da igual). Para una como las de la 1a, la prueba la pone en null.
+        ...(p.entrega ? { ventaHuella: `siembra-1b-${p.orderId}` } : {}),
       },
     })
     await prisma.orderItem.create({
@@ -127,6 +146,8 @@ export async function sembrarVentaDeTarjetas(p: {
   cobros?: number[]
   /** Fecha del cobro (regla del mismo día). Default: ahora. */
   cobradaEn?: Date
+  /** 1b S3: el canal y el destino de la entrega de cada sobre. */
+  entrega?: EntregaSembrada
 }): Promise<VentaDeTarjetasSembrada> {
   const total = p.montos.reduce((s, m) => s + m, 0)
   const cuando = p.cobradaEn ?? new Date()
@@ -155,6 +176,7 @@ export async function sembrarVentaDeTarjetas(p: {
     organizationId: p.organizationId,
     orderId: order.id,
     montos: p.montos,
+    entrega: p.entrega,
   })
   const pagos: Payment[] = []
   for (const monto of p.cobros ?? [total]) {

@@ -458,6 +458,9 @@ describe('paridad órdenes: summary.total === prisma.order.count({ where: buildO
     ['búsqueda numérica con centavos 99.9', { ...RANGE, search: '99.9' }],
     ['búsqueda numérica exacta 100.5', { ...RANGE, search: '100.5' }],
     ['búsqueda por cliente (carla)', { ...RANGE, search: 'carla' }],
+    ['búsqueda por nombre completo (Carla Ortiz, D2)', { ...RANGE, search: 'Carla Ortiz' }],
+    ['búsqueda por nombre completo al revés (ortiz carla)', { ...RANGE, search: '  ortiz   carla ' }],
+    ['búsqueda por nombre completo sin resultados (carla nadie)', { ...RANGE, search: 'carla nadie' }],
     ['búsqueda por teléfono del cliente', { ...RANGE, search: suffix.slice(-6) }],
     ['búsqueda sin resultados', { ...RANGE, search: 'zzz-nadie' }],
     ['búsqueda con comodín (%)', { ...RANGE, search: '%' }],
@@ -480,6 +483,18 @@ describe('paridad órdenes: summary.total === prisma.order.count({ where: buildO
       .sort()
     expect(idsSql).toEqual(idsPrisma)
     expect(summary.filteredGroups).toEqual(summary.groups)
+  })
+})
+
+// D2 (28-oct): «Carla Ortiz» no cabe entero ni en el nombre ni en el apellido; antes no encontraba nada.
+describe('búsqueda por nombre completo del cliente (D2)', () => {
+  it('«Carla Ortiz» y «ortiz carla» encuentran las mismas ventas que «carla»', async () => {
+    const porNombre = await prisma.order.count({ where: buildOrdersWhereClause(venueId, { ...RANGE, search: 'carla' }) })
+    expect(porNombre).toBeGreaterThan(0)
+    for (const search of ['Carla Ortiz', 'ortiz carla']) {
+      expect(await prisma.order.count({ where: buildOrdersWhereClause(venueId, { ...RANGE, search }) })).toBe(porNombre)
+      expect((await getOrdersSummary(venueId, { ...RANGE, search })).total).toBe(porNombre)
+    }
   })
 })
 

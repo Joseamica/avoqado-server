@@ -326,7 +326,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
       'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
       'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
-      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
@@ -369,7 +369,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/tpv/order.tpv.service.ts#compItems',
       'src/services/tpv/order.tpv.service.ts#removeOrderItem',
       'src/services/tpv/order.tpv.service.ts#voidItems',
-      'src/services/wallet/redeemStampReward.service.ts#redeemStampReward',
+      'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx',
     ],
     proof: proof(
       REPARTO,
@@ -492,7 +492,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceChargesInTransaction',
       'src/services/promotions/promotion.service.ts#applyPromotionInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
-      'src/services/wallet/redeemStampReward.service.ts#redeemStampReward',
+      'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx',
     ],
     proof: T4('applyOrderDiscount'),
   },
@@ -531,13 +531,15 @@ const WRITERS: Record<string, Writer> = {
     lock: LOCK,
     proof: T4('redeemPointsToOrder'),
   },
-  'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
+  'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
   'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': {
     class: 'PRIVATE_CREATION',
     creates: ['.order.create('],
     note: 'La orden, sus piezas y los espejos de rebaja nacen en la misma transacción del cambio.',
   },
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  // Tarjetas 1b S2b: el cuerpo de la transacción de `createOrderWithItems` se extrajo SIN cambiarlo (lo abren `createOrderWithItems`
+  // y `payGiftCardOnNewOrder`, éste con el cobro con saldo en la MISMA transacción, Q58).
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     class: 'PRIVATE_CREATION',
     creates: ['.order.create('],
     note: 'T4-R1: promotions and the reaffirmed money run inside the transaction that creates the order (no reader sees it without its combo)',
@@ -766,6 +768,10 @@ const WRITERS: Record<string, Writer> = {
     class: 'EXCLUDED',
     reason: 'synthetic onboarding orders created with their lines; never a live sale',
   },
+  'src/services/demo/negociosDemo.service.ts#seedHistory': {
+    class: 'EXCLUDED',
+    reason: 'synthetic orders of the sales-demo venues, created with their lines; never a live sale',
+  },
   // develop f97a82b1 (28-sep): the delete moved to runOnce and now rereads the rule under the canonical Order lock.
   'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce': {
     class: 'EXCLUDED',
@@ -815,7 +821,7 @@ const OPTIONAL_TX: Array<{ callee: string; txIndex: number; lockedCallers: strin
     callee: 'applyPromotionToOrder',
     txIndex: 1,
     lockedCallers: [
-      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
     ],
   },
@@ -1085,8 +1091,9 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
     const sweep = codeOf('src/jobs/exchange-card-settlement.job.ts#ExchangeCardSettlementJob.run')
     // The sweep owns no transaction: each candidate waits on the settle/cancel opener's ORDER_LOCK_WAIT_BUDGET.
     expect(sweep).not.toContain('$transaction(')
-    expect(sweep).toContain('await settleExchangeCharge(')
-    expect(sweep).toContain('await cancelExchange(')
+    // Negocios demo (candado, capa 3): la llamada va dentro del negocio de la fila.
+    expect(sweep).toMatch(/await conNegocio\(candidate\.venueId, \(\) =>\s*settleExchangeCharge\(/)
+    expect(sweep).toMatch(/await conNegocio\(candidate\.venueId, \(\) =>\s*cancelExchange\(/)
     expect(codeOf('src/services/exchanges/exchange.service.ts#settleExchangeCharge')).toContain('await executeExchangeInTransaction(')
   })
 
@@ -1232,6 +1239,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': 1,
   'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': 1,
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': 1,
+  // «Cancelar orden» del panel (30-oct): abre la transacción y le pasa el tx a `cancelOrderInTransaction` (el núcleo del POS).
+  'src/services/dashboard/order.dashboard.service.ts#cancelarCuentaSinCobrar': 1,
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': 1,
   'src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent': 1,
@@ -1239,6 +1248,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#payCashOrder': 1,
   // Tarjetas de regalo (A8): el cobro con saldo abre su tx y el núcleo toma la Order; regresar el saldo toma la topología.
   'src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder': 1,
+  // Tarjetas 1b S2b (Q58): crear la cuenta de mostrador y cobrarla con saldo abren UNA transacción (llave → cuenta → premio → cobro).
+  'src/services/mobile/order.mobile.service.ts#payGiftCardOnNewOrder': 1,
   'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
@@ -1434,7 +1445,7 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
   const EXENTOS = new Set([
     'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
     'src/services/tpv/order.tpv.service.ts#createOrderWithItems',
-    'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+    'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
     'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
     // B2c T5: el vale nace en Avoqado (`openAreaTicket`): nunca es importado.
     'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',

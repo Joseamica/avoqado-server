@@ -17,9 +17,21 @@ jest.mock('@/services/access/basePlan.service', () => ({
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
 }))
 
+import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
-import { applyOrderDiscount, cancelOrder } from '@/services/mobile/order.mobile.service'
+import {
+  applyOrderDiscount,
+  cancelOrder,
+  createOrderWithItems,
+  getOrder,
+  listOrders,
+  payGiftCardBalanceOnOrder,
+  returnGiftBalanceAndCancelOrder,
+} from '@/services/mobile/order.mobile.service'
+import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
+import { leerSiEsCuentaDeTarjetas } from '@/services/giftCards/giftCardMarks'
 import { deleteOrder, updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
 
@@ -133,5 +145,158 @@ describe('cuenta de tarjetas · Postgres real', () => {
         ['DEACTIVATE', 'SALE_CANCELLED', true],
       ],
     })
+  })
+})
+
+/**
+ * 1b S4 (S-1, Q27, Q28, Q47, Q49, A3): lo que el POS lee en sus órdenes para decidir, sin mirar el texto del renglón: si es una
+ * cuenta de tarjetas, cuántos cobros con saldo vivos tiene, qué pago es saldo de tarjeta y si es de mesa.
+ */
+describe('1b S4 · las órdenes del POS dicen lo de tarjetas', () => {
+  const D = (v: number) => new Prisma.Decimal(v)
+  let k = 0
+  const folio = (p: string) => `${SUF}-${p}-${++k}`
+
+  async function mercancia(p: { total: number; tableId?: string; conTarjeta?: string }) {
+    return (
+      await prisma.order.create({
+        data: {
+          venueId,
+          orderNumber: folio('m'),
+          contratoDePrecio: 'IVA_INCLUIDO',
+          subtotal: D(p.total),
+          taxAmount: D(0),
+          total: D(p.total),
+          remainingBalance: D(p.total),
+          status: 'CONFIRMED',
+          paymentStatus: 'PENDING',
+          tableId: p.tableId ?? null,
+          items: {
+            create: [
+              { productName: 'Blusa', quantity: 1, unitPrice: D(p.total), taxAmount: D(0), total: D(p.total) },
+              ...(p.conTarjeta
+                ? [
+                    {
+                      productName: 'Tarjeta de regalo',
+                      quantity: 1,
+                      unitPrice: D(0),
+                      taxAmount: D(0),
+                      total: D(0),
+                      giftCardId: p.conTarjeta,
+                    },
+                  ]
+                : []),
+            ],
+          },
+        },
+      })
+    ).id
+  }
+
+  /** Un sobre ACTIVE con su ACTIVATE y su liga (la prueba de posesión del cobro). */
+  async function tarjetaActiva(monto: number) {
+    const c = generateGiftCardCode()
+    const pageToken = generateOpaqueToken()
+    const t = await prisma.giftCard.create({
+      data: {
+        venueId,
+        organizationId: orgId,
+        codeHash: hashGiftCardCode(c.normalized),
+        codeEnc: encryptGiftCardCode(c.normalized),
+        codeLast4: c.last4,
+        pageToken,
+        initialAmount: D(monto),
+        balance: D(monto),
+        status: 'ACTIVE',
+        activatedAt: new Date(),
+        termsVersion: '2026-10-14',
+        deliveryChannel: 'PRINTED',
+      },
+    })
+    await prisma.giftCardActivity.create({
+      data: { giftCardId: t.id, venueId, type: 'ACTIVATE', amount: D(monto), balanceAfter: D(monto) },
+    })
+    return { id: t.id, pageToken }
+  }
+
+  async function cobrarConSaldo(orderId: string, monto: number) {
+    const { pageToken } = await tarjetaActiva(1000)
+    return payGiftCardBalanceOnOrder(venueId, orderId, {
+      idempotencyKey: folio('saldo')
+        .replace(/[^A-Za-z0-9_-]/g, '')
+        .slice(-64),
+      proof: { kind: 'PAGE_TOKEN', pageToken },
+      amount: D(monto),
+      tip: D(0),
+      staffId,
+      deviceId: 'caja-s4',
+    })
+  }
+
+  const enLista = async (ids: string[]) => {
+    const { data } = await listOrders(venueId, { page: 1, pageSize: 100 })
+    return ids.map(id => data.find(o => o.id === id))
+  }
+
+  beforeAll(async () => {
+    await ensureGiftCardTender(prisma, venueId)
+  })
+
+  it('S-1: la lista y el detalle dicen esCuentaDeTarjetas: true en la cuenta de tarjetas y false en la de mercancía', async () => {
+    const tarjetas = (await venta(`${SUF}-s4a`, [500])).orderId
+    const blusa = await mercancia({ total: 500 })
+    expect((await enLista([tarjetas, blusa])).map(o => o?.esCuentaDeTarjetas)).toEqual([true, false])
+    expect((await getOrder(venueId, tarjetas)).esCuentaDeTarjetas).toBe(true)
+    expect((await getOrder(venueId, blusa)).esCuentaDeTarjetas).toBe(false)
+  })
+
+  it('Q27/Q28: un cobro con saldo vivo ⇒ cobrosConSaldo: 1 y su pago esSaldoDeTarjeta; tras «regresar el saldo y cancelar» ⇒ 0', async () => {
+    const orderId = await mercancia({ total: 500 })
+    await cobrarConSaldo(orderId, 200)
+    const detalle = await getOrder(venueId, orderId)
+    expect(detalle.cobrosConSaldo).toBe(1)
+    expect(detalle.payments.map(p => p.esSaldoDeTarjeta)).toEqual([true])
+
+    await returnGiftBalanceAndCancelOrder(venueId, orderId, { staffId, operationKey: folio('regresa') })
+    expect((await getOrder(venueId, orderId)).cobrosConSaldo).toBe(0)
+  })
+
+  it('Codex r11: la lista trae cobrosConSaldo: 1 para la cuenta con un cobro con saldo y 0 para la que no tiene', async () => {
+    const conSaldo = await mercancia({ total: 500 })
+    await cobrarConSaldo(conSaldo, 150)
+    const sinSaldo = await mercancia({ total: 500 })
+    expect((await enLista([conSaldo, sinSaldo])).map(o => o?.cobrosConSaldo)).toEqual([1, 0])
+  })
+
+  it('Q49: una cuenta con mesa ⇒ esDeMesa: true en la lista y el detalle; una de mostrador DINE_IN sin mesa ⇒ false', async () => {
+    const mesa = await prisma.table.create({ data: { venueId, number: folio('t'), capacity: 4, qrCode: folio('qr') } })
+    const deMesa = await mercancia({ total: 500, tableId: mesa.id })
+    const mostrador = await createOrderWithItems(venueId, {
+      staffId,
+      orderType: 'DINE_IN',
+      items: [{ name: 'Blusa', quantity: 1, unitPrice: 50000 }],
+    } as any)
+    expect((await enLista([deMesa, mostrador.id])).map(o => o?.esDeMesa)).toEqual([true, false])
+    expect([(await getOrder(venueId, deMesa)).esDeMesa, (await getOrder(venueId, mostrador.id)).esDeMesa]).toEqual([true, false])
+  })
+
+  it('Q47 (vecindad): createOrderWithItems dos veces con el mismo externalId ⇒ la misma cuenta', async () => {
+    const externalId = folio('q47')
+    const pedido = { staffId, externalId, orderType: 'TAKEOUT', items: [{ name: 'Blusa', quantity: 1, unitPrice: 50000 }] } as any
+    const a = await createOrderWithItems(venueId, pedido)
+    const b = await createOrderWithItems(venueId, pedido)
+    expect(b.id).toBe(a.id)
+    expect(await prisma.order.count({ where: { venueId, externalId } })).toBe(1)
+  })
+
+  it('A3: leerSiEsCuentaDeTarjetas (con la constante compartida) sigue dando true en la de tarjetas y false en la mixta y en la de mercancía', async () => {
+    const tarjetas = await venta(`${SUF}-s4b`, [500])
+    const mixta = await mercancia({ total: 500, conTarjeta: (await tarjetaActiva(100)).id })
+    const blusa = await mercancia({ total: 500 })
+    expect([
+      await leerSiEsCuentaDeTarjetas(prisma, tarjetas.orderId),
+      await leerSiEsCuentaDeTarjetas(prisma, mixta),
+      await leerSiEsCuentaDeTarjetas(prisma, blusa),
+    ]).toEqual([true, false, false])
   })
 })
