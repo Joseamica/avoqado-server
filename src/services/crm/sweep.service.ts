@@ -39,7 +39,6 @@ import {
   applyEntry,
   LANDING,
   linkTx,
-  OWNED_ORGANIZATION,
   PERSON_CONTACTS,
   repeatOf,
   sourceDetailOf,
@@ -60,9 +59,6 @@ const ANNOUNCE_WITHIN_MS = DAY_MS
 const NOTICE_MAX_ATTEMPTS = 5
 /** …and only within the entry's first 24 h: Resend's idempotency window, after which a key no longer stops a repeat. */
 const NOTICE_WINDOW_MS = DAY_MS
-// ponytail: the newest landing emails of one account the late link tries; an account reused by more people than this is
-// left to «Ganar».
-const LINK_EMAILS_PER_ACCOUNT = 5
 /** What the late link starts from (ruling 57): a landing entry that was applied to an account. */
 const APPLIED_LANDING = { source: LANDING, appliedAt: { not: null } } satisfies Prisma.CrmInboundEntryWhereInput
 
@@ -174,13 +170,41 @@ export async function resendPendingNotices(limit = BATCH): Promise<number> {
 // ── 2. Linking ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
+ * The Organization each account of a page can be linked to (rulings 57 and 65): among ALL the emails that are evidence
+ * of its person — every landing entry applied to it, whatever the account's source — the newest one whose person,
+ * active, OWNS an Organization that is not the sales team's (`OWNED_ORGANIZATION`, written in SQL). Searched in the
+ * database before anything is cut, so an account that took many forms never hides the email that owns its business
+ * (Codex r3, R3-1). One read per page; at most one row per account.
+ */
+async function ownedByEvidence(accountIds: string[], team: string | null): Promise<Map<string, string>> {
+  if (!accountIds.length) return new Map()
+  const rows = await prisma.$queryRaw<Array<{ accountId: string; organizationId: string }>>(Prisma.sql`
+    SELECT DISTINCT ON (ev."accountId") ev."accountId", o."organizationId"
+    FROM (
+      SELECT e."accountId", e."externalKey" AS "email", e."receivedAt" AS "at"
+      FROM "CrmInboundEntry" e
+      WHERE e."accountId" IN (${Prisma.join(accountIds)}) AND e."source" = 'LANDING' AND e."appliedAt" IS NOT NULL
+    ) ev
+    JOIN "Staff" s ON s."email" = ev."email" AND s."active" = true
+    CROSS JOIN LATERAL (
+      SELECT so."organizationId" FROM "StaffOrganization" so
+      WHERE so."staffId" = s."id" AND so."role" = 'OWNER' AND so."isActive" = true
+      ORDER BY so."isPrimary" DESC, so."joinedAt" ASC, so."id" ASC
+      LIMIT 1
+    ) o
+    ${team ? Prisma.sql`WHERE o."organizationId" <> ${team}` : Prisma.empty}
+    ORDER BY ev."accountId", ev."at" DESC, ev."email" ASC`)
+  return new Map(rows.map(row => [row.accountId, row.organizationId]))
+}
+
+/**
  * Links the accounts that took a landing entry and are still without an Organization — LANDING ones, or one of another
- * source the landing reused (rulings 48 and 57) — to the one the entry's email owns now, by the same rule as the entry
+ * source the landing reused (rulings 48 and 57) — to the one an email of theirs owns now, by the same rule as the entry
  * (`OWNED_ORGANIZATION`, the login's exact email), never the sales team's own nor one another account holds; returns how
- * many it linked. The emails are the account's newest applied entries'; the first that owns an Organization wins. A
- * page per pass: the cursor walks every such account, so the ones that will never link (their person owns nothing) never
- * keep a newer one waiting. An account no landing entry reached (WhatsApp, HubSpot, by hand) is never linked here: a
- * phone is not enough to name a business (spec §5.3); «Ganar» links it.
+ * many it linked. Every email the account has evidence of counts, newest first (`ownedByEvidence`). A page per pass:
+ * the cursor walks every such account, so the ones that will never link (their person owns nothing) never keep a newer
+ * one waiting. An account no landing entry reached (WhatsApp, HubSpot, by hand) is never linked here: a phone is not
+ * enough to name a business (spec §5.3); «Ganar» links it.
  */
 export async function linkLandingAccounts(limit = BATCH): Promise<number> {
   const size = batchOf(limit)
@@ -188,39 +212,19 @@ export async function linkLandingAccounts(limit = BATCH): Promise<number> {
   const accounts = await entryRead('crm-sweep.linkLandingAccounts', () =>
     prisma.crmAccount.findMany({
       where: { organizationId: null, inboundEntries: { some: APPLIED_LANDING }, ...(from ? after(from) : {}) },
-      select: {
-        id: true,
-        createdAt: true,
-        inboundEntries: {
-          where: APPLIED_LANDING,
-          select: { externalKey: true },
-          orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
-          take: LINK_EMAILS_PER_ACCOUNT,
-        },
-      },
+      select: { id: true, createdAt: true },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: size,
     }),
   )
   // A full page: the next pass goes on after it. A short one reached the end: the next pass starts over.
   cursors.link = accounts.length === size ? cursorOf(accounts[accounts.length - 1]) : null
-  const emails = [...new Set(accounts.flatMap(account => account.inboundEntries.map(entry => entry.externalKey).filter(Boolean)))]
-  if (!emails.length) return 0
+  if (!accounts.length) return 0
 
-  // Who owns what, for the whole page in one read.
-  const [owners, team] = await Promise.all([
-    prisma.staff.findMany({
-      where: { email: { in: emails }, active: true },
-      select: { email: true, organizations: OWNED_ORGANIZATION },
-      take: emails.length,
-    }),
-    teamOrganizationId(),
-  ])
-  const owned = new Map<string, string>()
-  for (const { email, organizations } of owners) {
-    const organizationId = organizations[0]?.organization.id
-    if (organizationId && organizationId !== team) owned.set(email, organizationId)
-  }
+  const owned = await ownedByEvidence(
+    accounts.map(account => account.id),
+    await teamOrganizationId(),
+  )
   // The Organizations another account already holds (one CRM account per Organization), in one read: they are skipped
   // before any transaction and said once per account and process (M-1). Otherwise every pass would take the lock and
   // warn again, for good.
@@ -236,7 +240,7 @@ export async function linkLandingAccounts(limit = BATCH): Promise<number> {
 
   let linked = 0
   for (const account of accounts) {
-    const organizationId = account.inboundEntries.map(entry => owned.get(entry.externalKey)).find(Boolean)
+    const organizationId = owned.get(account.id)
     if (!organizationId) continue
     const holder = heldBy.get(organizationId)
     if (holder) {

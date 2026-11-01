@@ -188,6 +188,7 @@ function installSweepWorld() {
   // notices to retry, an entry's lock and an account's row lock.
   prismaMock.$queryRaw.mockImplementation(async (first: Prisma.Sql | TemplateStringsArray, ...values: unknown[]) => {
     if (isSql(first)) {
+      if (first.sql.includes('"StaffOrganization"')) return ownedByEvidenceRead(first)
       if (first.sql.includes('"ActivityLog"')) return marksRead(first)
       if (first.sql.includes('FROM "CrmAccount" a')) return firstMoneyCandidatesRead(first)
       if (first.sql.includes('"Payment"')) return oldestChargesRead(first)
@@ -212,6 +213,38 @@ const isSql = (value: unknown): value is Prisma.Sql =>
 /** The text of a raw read must hold these, or the fake would answer for a query the code no longer sends. */
 function expectSql(query: Prisma.Sql, pieces: string[]) {
   for (const piece of pieces) if (!query.sql.includes(piece)) throw new Error(`The sweep fake expected «${piece}» in: ${query.sql}`)
+}
+
+/**
+ * The late link's evidence (rulings 57 and 65): for each bound account, the newest email of its applied landing entries
+ * whose person, active, owns an Organization (their first OWNER membership) that is not the bound sales team's.
+ */
+function ownedByEvidenceRead(query: Prisma.Sql) {
+  expectSql(query, [
+    'SELECT DISTINCT ON (ev."accountId") ev."accountId", o."organizationId"',
+    `e."source" = 'LANDING' AND e."appliedAt" IS NOT NULL`,
+    'JOIN "Staff" s ON s."email" = ev."email" AND s."active" = true',
+    `so."role" = 'OWNER' AND so."isActive" = true`,
+    'ORDER BY so."isPrimary" DESC, so."joinedAt" ASC, so."id" ASC',
+    'ORDER BY ev."accountId", ev."at" DESC, ev."email" ASC',
+  ])
+  const withTeam = query.sql.includes('o."organizationId" <>')
+  const team = withTeam ? (query.values.at(-1) as string) : null
+  const ids = new Set(withTeam ? query.values.slice(0, -1) : query.values)
+  const owner = { where: { role: 'OWNER', isActive: true }, orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }], take: 1 }
+  return db.accounts.flatMap(account => {
+    if (!ids.has(account.id)) return []
+    const evidence = ordered(
+      db.entries.filter(entry => entry.accountId === account.id && entry.source === 'LANDING' && entry.appliedAt),
+      [{ receivedAt: 'desc' }, { externalKey: 'asc' }],
+    )
+    for (const { externalKey } of evidence) {
+      const staff = world.staff.find(person => person.email === externalKey && person.active)
+      const organizationId = staff && ownedBy(staff, owner)[0]?.organization.id
+      if (organizationId && organizationId !== team) return [{ accountId: account.id, organizationId }]
+    }
+    return []
+  })
 }
 
 /** The landing marks after the cursor (if any), in (createdAt, id) order, with their person's fields. */
@@ -587,7 +620,7 @@ describe('linkLandingAccounts', () => {
     // The row is locked BEFORE its `link:` key goes in (the note for task 6): the sweep and an entry of the same email
     // queue on it instead of deadlocking.
     const calls = prismaMock.$queryRaw.mock.calls as Array<[TemplateStringsArray, ...unknown[]]>
-    const lock = calls.findIndex(([sql]) => sql.join('?').includes('FOR UPDATE'))
+    const lock = calls.findIndex(([sql]) => !isSql(sql) && sql.join('?').includes('FOR UPDATE'))
     expect(lock).toBeGreaterThanOrEqual(0)
     expect(calls[lock].slice(1)).toEqual([account.id])
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[lock]).toBeLessThan(
@@ -603,7 +636,13 @@ describe('linkLandingAccounts', () => {
     const raced = seedLandingAccount({ externalKey: 'beto@taller.mx' })
     seedOrganization({ id: OTHER_ORG, name: 'Taller Beto' })
     seedStaff('beto@taller.mx', {}, OTHER_ORG)
-    prismaMock.$queryRaw.mockResolvedValueOnce([{ id: raced.id, organizationId: cuid('orgwon', 1) }])
+    // Its row lock answers what the winner committed; every other read goes on as before.
+    const answer = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (first: Prisma.Sql | TemplateStringsArray, ...values: unknown[]) =>
+      !isSql(first) && first.join('?').includes('FOR UPDATE') && values[0] === raced.id
+        ? [{ id: raced.id, organizationId: cuid('orgwon', 1) }]
+        : answer(first, ...values),
+    )
     await expect(linkLandingAccounts()).resolves.toBe(0)
     expect(accountOf(raced.id)?.organizationId).toBeNull()
     expect(eventsOf('LINKED')).toHaveLength(1)
@@ -708,6 +747,32 @@ describe('linkLandingAccounts', () => {
         where: expect.objectContaining({ organizationId: null, inboundEntries: { some: { source: 'LANDING', appliedAt: { not: null } } } }),
       }),
     )
+  })
+
+  it.each([
+    { case: 'el correo original y cinco reenvíos de otro', emails: [EMAIL, ...Array(5).fill('otra@cafe.mx')] },
+    { case: 'seis correos distintos', emails: [EMAIL, 'b@cafe.mx', 'c@cafe.mx', 'd@cafe.mx', 'e@cafe.mx', 'f@cafe.mx'] },
+  ])('enlace_con_reenvios_busca_todos_los_correos (Codex r3 R3-1): $case', async ({ emails }) => {
+    // The account took the person's first form (email A) and then five more; only A ever owns a business.
+    const account = seedAccount({ createdAt: new Date(Date.now() - 9 * DAY) })
+    emails.forEach((email, n) =>
+      seedEntry({
+        externalKey: email,
+        accountId: account.id,
+        appliedAt: new Date(Date.now() - (8 - n) * DAY),
+        receivedAt: new Date(Date.now() - (8 - n) * DAY),
+        lastError: null,
+        signupOutcome: null,
+      }),
+    )
+    seedOrganization()
+    seedStaff(EMAIL, {}, ORG)
+    for (const email of new Set(emails.slice(1))) seedStaff(email)
+
+    await expect(linkLandingAccounts()).resolves.toBe(1)
+
+    expect(accountOf(account.id)?.organizationId).toBe(ORG)
+    expect(eventsOf('LINKED')).toEqual([expect.objectContaining({ accountId: account.id, sourceKey: `link:${account.id}:${ORG}` })])
   })
 
   it('a re-link after its Organization was deleted leaves its own LINKED event (M-4)', async () => {
