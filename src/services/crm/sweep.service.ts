@@ -457,10 +457,10 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
       // After the commit, and never throws: how it went stays on its entry, and the sweep retries what did not go out.
       if (done.entryId) await announceEntry(done.entryId, { accountId: done.accountId, notice: 'NEW', content })
     } catch (error) {
-      // The person's landing account belongs to another business (Codex autorización H1): nothing to create or write
-      // here, and nothing to retry — not a failure that holds the cursor.
+      // Even the account of this signup's own Organization belongs to another business (rulings 70 and 71): nothing to
+      // create or write here, and no retry changes it — not a failure that holds the cursor.
       if (error instanceof IdentityConflictError) {
-        logger.warn('[CRM] Old landing signup skipped: its landing account is linked to another Organization', {
+        logger.warn('[CRM] Old landing signup skipped: the accounts of this person are linked to another Organization', {
           activityLogId: signup.id,
           organizationId: organization.id,
           error: errorText(error),

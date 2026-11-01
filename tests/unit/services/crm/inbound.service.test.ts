@@ -1099,23 +1099,66 @@ describe('ruling 65: one identity resolver for every writer (Codex exhaustiva #4
   })
 
   it.each([
+    { case: 'ya estaba ligada a su primer negocio', race: false },
     { case: 'un «Ganar» la liga a otro negocio mientras el formulario espera el candado', race: true },
-    { case: 'ya estaba ligada a otro negocio', race: false },
-  ])('la_llave_ligada_a_otro_negocio_no_recibe_la_entrada (Codex autorización H1): $case', async ({ race }) => {
+  ])('segundo_negocio_va_a_una_ficha_propia (ruling 71; Codex autorización H1): $case', async ({ race }) => {
     const landing = seedAccount({ id: id('acctland', 1), organizationId: race ? null : OTHER_ORG })
     if (race)
       onLock(landing.id, () => Object.assign(db.accounts.find(account => account.id === landing.id)!, { organizationId: OTHER_ORG }))
-    // The person just created ORG with this form.
+    // The person just created ORG, another business, with this form.
     const entry = seedEntry()
 
     await applyEntry(entry.id)
 
-    // Nothing applied and nothing written to somebody else's business: the entry waits, with its error.
-    expect(db.entries[0]).toMatchObject({ appliedAt: null, lastError: expect.stringContaining('another Organization') })
-    expect(db.accounts).toEqual([expect.objectContaining({ id: landing.id, organizationId: OTHER_ORG, giro: 'Restaurante' })])
+    // A new account for ORG — its key is the email with ORG's id — with the person, linked, applied and announced once.
+    const mine = db.accounts.find(account => account.id !== landing.id)!
+    expect(mine).toMatchObject({ source: 'LANDING', externalKey: `${EMAIL}|${ORG}`, organizationId: ORG, giro: 'Cafetería' })
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: mine.id, email: EMAIL, phoneE164: PHONE, isPrimary: true })])
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: mine.id, lastError: null })
+    expect(notifyNewProspect).toHaveBeenCalledTimes(1)
+    expect(notifyNewProspect).toHaveBeenCalledWith(mine.id, expect.objectContaining({ name: 'Café Ana' }))
+    // Nothing written to the other business.
+    expect(db.accounts.find(account => account.id === landing.id)).toMatchObject({ organizationId: OTHER_ORG, giro: 'Restaurante' })
+    expect(db.events.filter(event => event.accountId === landing.id)).toEqual([])
+
+    // The same entry again changes nothing; another form of the same person for ORG lands on that same account.
+    await applyEntry(entry.id)
+    const again = seedEntry()
+    await applyEntry(again.id)
+    expect(db.accounts).toHaveLength(2)
+    expect(db.entries.map(row => row.accountId)).toEqual([mine.id, mine.id])
+    expect(notifyNewProspect).toHaveBeenCalledTimes(1)
+  })
+
+  it('sin_organizacion_la_llave_recibe_la_entrada_como_siempre (ruling 71)', async () => {
+    const landing = seedAccount({ id: id('acctland', 1), organizationId: OTHER_ORG })
+    // The signup failed and the person owns nothing: no business of their own to send it to.
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(1)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: landing.id })
+  })
+
+  it('conflicto_que_ningun_reintento_resuelve_se_cierra_y_se_dice_una_vez (ruling 71)', async () => {
+    // Even the account of ORG's own key belongs to a third business (ORG was deleted and that account won elsewhere).
+    seedAccount({ id: id('acctland', 1), organizationId: OTHER_ORG })
+    seedAccount({ id: id('acctland', 2), externalKey: `${EMAIL}|${ORG}`, organizationId: 'corgthird0000000000000001' })
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+    await applyEntry(entry.id)
+
+    // Closed without an account: the sweep never takes it again. Nothing written anywhere, and said once.
+    expect(db.entries[0]).toMatchObject({
+      appliedAt: expect.any(Date),
+      accountId: null,
+      lastError: expect.stringContaining('another Organization'),
+    })
     expect(db.contacts).toEqual([])
     expect(db.events).toEqual([])
-    expect(notifyNewProspect).not.toHaveBeenCalled()
+    expect((logger.error as jest.Mock).mock.calls.filter(([text]) => String(text).includes('closed without one'))).toHaveLength(1)
   })
 
   it('choque_de_organizacion_al_crear_devuelve_al_titular (#6): no second, unlinked account', async () => {

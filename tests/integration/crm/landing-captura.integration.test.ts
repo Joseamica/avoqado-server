@@ -47,6 +47,8 @@ const RANK_EMAIL = `iris-${suffix}@test.mx`
 const CLASH_EMAIL = `juan-${suffix}@test.mx`
 const WIN_RACE_EMAIL = `karla-${suffix}@test.mx`
 const KEY_TAKEN_EMAIL = `luis-${suffix}@test.mx`
+/** A customer of business X who opens business Y through the landing (ruling 71). */
+const SECOND_BUSINESS_EMAIL = `mara-${suffix}@test.mx`
 const EMAILS = [
   RACE_EMAIL,
   CRASH_EMAIL,
@@ -61,6 +63,7 @@ const EMAILS = [
   CLASH_EMAIL,
   WIN_RACE_EMAIL,
   KEY_TAKEN_EMAIL,
+  SECOND_BUSINESS_EMAIL,
 ]
 /** Organizations this file creates that no person of it owns. */
 const otherOrganizationIds: string[] = []
@@ -136,6 +139,8 @@ describe('landing → CRM against Postgres', () => {
       await prisma.staffOrganization.deleteMany({ where: { staffId: { in: staffIds } } })
       await prisma.staff.deleteMany({ where: { id: { in: staffIds } } })
     }
+    // The accounts of a person's second business (ruling 71) are keyed `<email>|<organization>`: deleted by that business.
+    if (organizationIds.length) await prisma.crmAccount.deleteMany({ where: { organizationId: { in: organizationIds } } })
     // Their OnboardingProgress goes with them (cascade).
     if (organizationIds.length) await prisma.organization.deleteMany({ where: { id: { in: organizationIds } } })
     if (otherOrganizationIds.length) await prisma.organization.deleteMany({ where: { id: { in: otherOrganizationIds } } })
@@ -469,7 +474,7 @@ describe('landing → CRM against Postgres', () => {
       expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: RANK_EMAIL } })).toBe(0)
     })
 
-    it('la_llave_que_un_ganar_liga_a_otro_negocio_no_recibe_la_entrada (Codex autorización H1): checked under the lock', async () => {
+    it('la_llave_que_un_ganar_liga_a_otro_negocio_no_recibe_la_entrada (H1, ruling 71): checked under the lock', async () => {
       const stageId = (await getInitialStage()).id
       const landing = await prisma.crmAccount.create({
         data: { name: `Llave tomada ${suffix}`, source: 'LANDING', externalKey: KEY_TAKEN_EMAIL, stageId },
@@ -500,10 +505,15 @@ describe('landing → CRM against Postgres', () => {
       await seller
       await applying
 
-      // Nothing of the person or the form lands on the other business; the entry waits with its error.
+      // Nothing of the person or the form lands on the other business: the person's own business gets its own account.
+      const mine = await prisma.crmAccount.findUniqueOrThrow({
+        where: { source_externalKey: { source: 'LANDING', externalKey: `${KEY_TAKEN_EMAIL}|${organization.id}` } },
+      })
+      expect(mine).toMatchObject({ organizationId: organization.id, giro: 'Cafetería' })
       expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
-        appliedAt: null,
-        lastError: expect.stringContaining('another Organization'),
+        appliedAt: expect.any(Date),
+        accountId: mine.id,
+        lastError: null,
       })
       expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: landing.id } })).toMatchObject({
         organizationId: other.id,
@@ -511,6 +521,49 @@ describe('landing → CRM against Postgres', () => {
       })
       expect(await prisma.crmContact.count({ where: { accountId: landing.id } })).toBe(0)
       expect(await prisma.crmTimelineEvent.count({ where: { accountId: landing.id } })).toBe(0)
+    })
+
+    it('segundo_negocio_tiene_su_propia_ficha (ruling 71): applied once, linked to the new business, never retried', async () => {
+      const stageId = (await getInitialStage()).id
+      // The customer's landing account belongs to business X; now they own business Y and fill the landing for it.
+      const x = await prisma.organization.create({
+        data: { name: `Negocio X ${suffix}`, email: `x-${suffix}@test.mx`, phone: '5500000002' },
+      })
+      otherOrganizationIds.push(x.id)
+      const first = await prisma.crmAccount.create({
+        data: { name: `Primer negocio ${suffix}`, source: 'LANDING', externalKey: SECOND_BUSINESS_EMAIL, stageId, organizationId: x.id },
+      })
+      const { organization: y } = await ownerOfAnOrganization(SECOND_BUSINESS_EMAIL)
+
+      const entry = await saveLandingEntry(form(SECOND_BUSINESS_EMAIL))
+      await recordSignupOutcome(entry!.entryId, { organizationId: y.id, alreadyExisted: true, yaEsCliente: false })
+      await applyEntry(entry!.entryId)
+
+      const second = await prisma.crmAccount.findUniqueOrThrow({
+        where: { source_externalKey: { source: 'LANDING', externalKey: `${SECOND_BUSINESS_EMAIL}|${y.id}` } },
+      })
+      expect(second).toMatchObject({ organizationId: y.id, giro: 'Cafetería' })
+      expect(await prisma.crmContact.findMany({ where: { accountId: second.id }, take: 5 })).toEqual([
+        expect.objectContaining({ email: SECOND_BUSINESS_EMAIL, isPrimary: true }),
+      ])
+      // Applied: the sweep never takes it again.
+      expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
+        appliedAt: expect.any(Date),
+        accountId: second.id,
+        lastError: null,
+      })
+      // Business X's account is left as it was.
+      expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ organizationId: x.id, giro: null })
+      expect(await prisma.crmTimelineEvent.count({ where: { accountId: first.id } })).toBe(0)
+
+      // The same entry again, and another form for Y: still the same two accounts.
+      await applyEntry(entry!.entryId)
+      const again = await saveLandingEntry(form(SECOND_BUSINESS_EMAIL))
+      await recordSignupOutcome(again!.entryId, { organizationId: y.id, alreadyExisted: true, yaEsCliente: false })
+      await applyEntry(again!.entryId)
+      expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: again!.entryId } })).toMatchObject({ accountId: second.id })
+      expect(await prisma.crmAccount.count({ where: { OR: [{ id: first.id }, { organizationId: y.id }] } })).toBe(2)
+      expect(await prisma.crmTimelineEvent.count({ where: { sourceKey: `entry:${entry!.entryId}` } })).toBe(1)
     })
 
     it('crear_con_una_organizacion_ocupada_devuelve_al_titular (Codex exhaustiva #6): never a second, unlinked account', async () => {

@@ -1030,20 +1030,39 @@ describe('backfillFromOnboarding', () => {
     expect(notifyNewProspect).not.toHaveBeenCalled()
   })
 
-  it('llave_landing_ligada_a_otro_negocio_se_salta_sin_retener_el_cursor (Codex autorización H1)', async () => {
-    // The person's landing account belongs to another business; their signup created ORG. And another person's signup.
+  it('segundo_negocio_en_la_carga_inicial_tiene_su_propia_ficha (ruling 71; Codex autorización H1)', async () => {
+    // The person's landing account belongs to their first business; their signup created ORG. And another person's signup.
     const theirs = seedAccount({ organizationId: OTHER_ORG })
     seedOrganization()
     seedOrganization({ id: cuid('org', 3), name: 'Taller Beto' })
     seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
     seedSignup(seedStaff('beto@taller.mx', {}, cuid('org', 3)).id, cuid('org', 3), { createdAt: new Date(Date.now() - 2 * DAY) })
 
-    await expect(backfillFromOnboarding()).resolves.toBe(1)
+    await expect(backfillFromOnboarding()).resolves.toBe(2)
 
-    // Nothing written to the other business, and it is not a failure: no error, and the next pass does not read it again.
+    // ORG gets its own account, keyed by the email and ORG's id, with the person; nothing written to the other business.
+    expect(db.accounts.find(account => account.organizationId === ORG)).toMatchObject({ source: 'LANDING', externalKey: `${EMAIL}|${ORG}` })
     expect(accountOf(theirs.id)).toMatchObject({ organizationId: OTHER_ORG })
     expect(db.contacts.filter(contact => contact.accountId === theirs.id)).toEqual([])
-    expect(db.accounts.map(account => account.externalKey).sort()).toEqual([EMAIL, 'beto@taller.mx'])
+    expect(logger.error).not.toHaveBeenCalled()
+
+    // From the start again: ORG has its account now, nothing new.
+    resetSweepCursors()
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+    expect(db.accounts).toHaveLength(3)
+  })
+
+  it('conflicto_permanente_en_la_carga_inicial_se_salta_sin_retener_el_cursor (ruling 71)', async () => {
+    // Even the account of ORG's own key belongs to a third business: nothing to write, and not a failure.
+    seedAccount({ organizationId: OTHER_ORG })
+    seedAccount({ externalKey: `${EMAIL}|${ORG}`, organizationId: cuid('orgthird', 1) })
+    seedOrganization()
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+
+    expect(db.accounts).toHaveLength(2)
+    expect(db.contacts).toEqual([])
     expect(logger.error).not.toHaveBeenCalled()
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('another Organization'), expect.anything())
     ;(logger.warn as jest.Mock).mockClear()

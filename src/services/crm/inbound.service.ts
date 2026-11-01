@@ -198,9 +198,10 @@ async function candidateTx(tx: Prisma.TransactionClient, who: Identity): Promise
 
 /**
  * The account of this person's own source key belongs, under its lock, to ANOTHER business than the one they own (a
- * seller won it for someone else). Nothing may be written there, and the key is unique, so no second account can take
- * it: the caller writes nothing (Codex autorización H1). The landing leaves its entry unapplied; the backfill skips the
- * signup.
+ * seller won it for someone else, or it is their first business). Nothing may be written there (Codex autorización H1).
+ * `accountForTx` answers it with the account of the person's own Organization (ruling 71); it only gets past that when
+ * even that account belongs to another business — a conflict no retry can solve: the landing marks its entry done
+ * without an account and logs it once, the backfill skips the signup.
  */
 export class IdentityConflictError extends Error {
   constructor(accountId: string, organizationId: string) {
@@ -233,21 +234,43 @@ export async function resolveAccountTx(tx: Prisma.TransactionClient, who: Identi
 }
 
 /**
+ * The key of a person's account for ONE of their businesses (ruling 71): their source key — the landing's email — with
+ * that Organization's id. Deterministic, so a retry finds the same account; (source, externalKey) stays unique.
+ */
+export const organizationKey = (externalKey: string, organizationId: string) => `${externalKey}|${organizationId}`
+
+/**
  * The account of a person, or a new one (ruling 65 a): resolved first (`resolveAccountTx`, its source key being the one
  * it would be created under); created only when the CRM has nobody, with `upsertAccountBySource`. A writer that creates
  * it — or takes its Organization — at the same instant makes the insert a no-op, and the person is resolved again,
  * under the lock. `via` is null for an account this call created.
+ *
+ * Ruling 71 — a second business: when the person's own key belongs to ANOTHER Organization than the one this entry
+ * brings (a customer of X opening Y), the entry goes to the account of ITS Organization: the one that holds it, or a new
+ * one under `organizationKey` and linked to it — never to X's, never a retry forever. Without an Organization there is no
+ * conflict: the key's account takes it as always.
  */
 export async function accountForTx(
   tx: Prisma.TransactionClient,
   who: Omit<Identity, 'key'>,
   create: UpsertBySourceInput,
 ): Promise<{ account: { id: string; organizationId: string | null }; created: boolean; via: FoundVia | null }> {
-  const identity: Identity = { ...who, key: { source: create.source, externalKey: create.externalKey } }
+  let input = create
+  let identity: Identity = { ...who, key: { source: create.source, externalKey: create.externalKey } }
   for (let tries = 0; tries < RESOLVE_TRIES; tries++) {
-    const found = await resolveAccountTx(tx, identity)
+    let found: ResolvedAccount | null
+    try {
+      found = await resolveAccountTx(tx, identity)
+    } catch (error) {
+      if (!(error instanceof IdentityConflictError) || !who.organizationId || input !== create) throw error
+      const externalKey = organizationKey(create.externalKey, who.organizationId)
+      input = { ...create, externalKey, data: { ...create.data, organizationId: who.organizationId } }
+      // Only this business: its holder or its own key — the person's other accounts belong to their other businesses.
+      identity = { emails: [], phones: [], organizationId: who.organizationId, key: { source: create.source, externalKey } }
+      continue
+    }
     if (found) return { account: { id: found.id, organizationId: found.organizationId }, created: false, via: found.via }
-    const upserted = await upsertAccountBySource(tx, create)
+    const upserted = await upsertAccountBySource(tx, input)
     if (upserted.created) return { ...upserted, via: null }
   }
   throw new Error('The CRM account of this person kept changing while it was being created; the caller retries it')
@@ -760,9 +783,20 @@ export async function applyEntry(entryId: string): Promise<void> {
     }
   } catch (error) {
     const message = errorText(error)
-    logger.error('[CRM] The landing entry could not be applied; the sweep retries it', { entryId, error: message })
+    // Ruling 71: even the account of the entry's own Organization belongs to another business. No retry changes that:
+    // the entry is closed without an account — never retried forever — and said once, here.
+    const permanent = error instanceof IdentityConflictError
+    logger.error(
+      permanent
+        ? '[CRM] The landing entry cannot be applied: the accounts of this person belong to other businesses; closed without one'
+        : '[CRM] The landing entry could not be applied; the sweep retries it',
+      { entryId, error: message },
+    )
     try {
-      await prisma.crmInboundEntry.updateMany({ where: { id: entryId }, data: { lastError: message.slice(0, MAX_TEXT) } })
+      await prisma.crmInboundEntry.updateMany({
+        where: { id: entryId },
+        data: { lastError: message.slice(0, MAX_TEXT), ...(permanent ? { appliedAt: new Date() } : {}) },
+      })
     } catch {
       // The log above already has it.
     }
