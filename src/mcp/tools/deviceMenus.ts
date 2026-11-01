@@ -123,8 +123,25 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
           })
 
         const saved: Array<{ id: string; name: string }> = []
-        for (const a of aparatos) {
-          await setTerminalMenus(venueId, a.id, idsMenus, scope.staffId)
+        for (const [i, a] of aparatos.entries()) {
+          try {
+            await setTerminalMenus(venueId, a.id, idsMenus, scope.staffId)
+          } catch (err) {
+            // Parcial: cada aparato va en su propia transacción. Se dice qué quedó, qué falló y qué falta (reintentar es idempotente).
+            const known = err instanceof ScopeError || (err instanceof AppError && err.isOperational)
+            return text({
+              ok: false,
+              updated: saved,
+              failed: {
+                id: a.id,
+                name: a.name,
+                error: known ? err.message : 'Error interno al guardar este aparato.',
+                ...(err instanceof AppError && err.isOperational && err.code ? { code: err.code } : {}),
+              },
+              remaining: aparatos.slice(i + 1).map(r => ({ id: r.id, name: r.name })),
+              message: `Se guardaron ${saved.length} aparato(s), falló «${a.name}» y faltan ${aparatos.length - i - 1}. Se puede volver a intentar con el que falló y los que faltan (repetir es seguro: reemplaza la elección completa).`,
+            })
+          }
           saved.push({ id: a.id, name: a.name })
           await auditMcpWrite(scope, {
             action: 'TERMINAL_MENUS_UPDATED',

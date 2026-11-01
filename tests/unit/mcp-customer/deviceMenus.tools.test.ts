@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { configureToolCatalog } from '@/mcp/catalog'
 import { registerDeviceMenuTools } from '@/mcp/tools/deviceMenus'
+import { BadRequestError } from '@/errors/AppError'
 import type { McpScope } from '@/mcp/scope'
 
 const mockGate = jest.fn()
@@ -156,6 +157,35 @@ describe('set_device_menus', () => {
       expect.anything(),
       expect.objectContaining({ action: 'TERMINAL_MENUS_UPDATED', entityId: T1, venueId: V1 }),
     )
+  })
+
+  it('si falla el segundo aparato dice cuáles se guardaron, cuál falló y cuáles faltan', async () => {
+    const T2 = 'cterminal0000000000000002'
+    const T3 = 'cterminal0000000000000003'
+    mockTerminals.mockResolvedValue([
+      { id: T1, name: 'Caja 1', menus: [] },
+      { id: T2, name: 'Caja 2', menus: [] },
+      { id: T3, name: 'Caja 3', menus: [] },
+    ])
+    mockSet.mockResolvedValueOnce({}).mockRejectedValueOnce(new BadRequestError('Ese menú no existe', 'MENU_NO_DISPONIBLE'))
+    const r = await confirmar('set_device_menus', { venueId: V1, terminalIds: [T1, T2, T3], menuIds: [M1] })
+    expect(r).toMatchObject({
+      ok: false,
+      updated: [{ id: T1, name: 'Caja 1' }],
+      failed: { id: T2, name: 'Caja 2', error: 'Ese menú no existe', code: 'MENU_NO_DISPONIBLE' },
+      remaining: [{ id: T3, name: 'Caja 3' }],
+    })
+    expect(r.message).toMatch(/volver a intentar/)
+    expect(mockSet).toHaveBeenCalledTimes(2)
+    expect(mockAudit).toHaveBeenCalledTimes(1)
+  })
+
+  it('un fallo no operacional del aparato no filtra internos', async () => {
+    mockSet.mockRejectedValueOnce(new Error('connection to prisma.terminalMenu refused'))
+    const r = await confirmar('set_device_menus', { venueId: V1, terminalIds: [T1], menuIds: [M1] })
+    expect(r.ok).toBe(false)
+    expect(r.failed.id).toBe(T1)
+    expect(JSON.stringify(r)).not.toMatch(/prisma|terminalMenu/)
   })
 
   it('un menú apagado o no disponible se rechaza con MENU_NO_DISPONIBLE', async () => {
