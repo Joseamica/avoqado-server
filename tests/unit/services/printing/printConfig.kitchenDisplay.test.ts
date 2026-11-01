@@ -41,7 +41,7 @@ it('con Pro, la estación con pantalla llega marcada; una apagada o inactiva no'
     ['barra', false],
     ['vieja', false],
   ])
-  expect(c.kitchenDisplayOpenToClients).toBe(false)
+  expect(c.kitchenDisplayOpenToClients).toBe(true) // puerta abierta por el founder el 1-nov
 })
 
 it('sin Pro, la casilla sigue en la base pero la caja la ve apagada — y la versión cambia para que refresque', async () => {
