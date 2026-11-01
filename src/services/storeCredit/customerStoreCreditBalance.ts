@@ -1,8 +1,7 @@
 /**
  * El saldo a favor en la ficha del cliente (spec 2026-10-30-saldo-a-favor, tarea S8c). Sólo lectura, sin candado: es para mostrar.
  *  - `balanceCents` = suma de los sobres ACTIVE de la sucursal (una tarjeta regalada guardada no es sobre: `esSobreDeSaldoAFavorSql`).
- *  - `giftCardId` / `phoneLast4` = los del sobre que recibiría el siguiente abono: el vivo más viejo, el mismo orden que
- *    `prepararSobreDeSaldoAFavorEnTx`.
+ *  - `giftCardId` / `phoneLast4` = los del ACTIVE más viejo (createdAt, id); si no hay ACTIVE, los del BLOCKED más viejo.
  *  - Sólo hay sobres congelados (BLOCKED): saldo 0 y `blocked: true`. Sin sobres: `null`.
  */
 import { Prisma } from '@prisma/client'
@@ -34,20 +33,21 @@ export async function storeCreditDeClientes(
       AND ${esSobreDeSaldoAFavorSql('g')}
     ORDER BY g."createdAt" ASC, g.id ASC
     LIMIT ${TOPE_DE_SOBRES}`)
+  // Los ACTIVE mandan: tienen el dinero y su teléfono es el que gasta. Sólo si no hay ninguno, el BLOCKED más viejo (saldo 0).
   for (const r of rows) {
     const actual = out.get(r.customerId)
-    const centavos = r.status === 'ACTIVE' ? Math.round(Number(r.balance) * 100) : 0
+    const activo = r.status === 'ACTIVE'
+    const centavos = activo ? Math.round(Number(r.balance) * 100) : 0
+    const ficha = { phoneLast4: (r.recipientPhone ?? '').slice(-4), giftCardId: r.id }
     if (!actual) {
-      out.set(r.customerId, {
-        balanceCents: centavos,
-        phoneLast4: (r.recipientPhone ?? '').slice(-4),
-        giftCardId: r.id,
-        ...(r.status === 'BLOCKED' ? { blocked: true as const } : {}),
-      })
-    } else {
+      out.set(r.customerId, { balanceCents: centavos, ...ficha, ...(activo ? {} : { blocked: true as const }) })
+    } else if (activo) {
       actual.balanceCents += centavos
-      // Si el primero estaba congelado y hay otro ACTIVE, el cliente ya tiene saldo usable: no se marca congelado.
-      if (centavos > 0) delete actual.blocked
+      if (actual.blocked) {
+        // El primer ACTIVE (el más viejo, por el orden) reemplaza al congelado que se vio antes.
+        delete actual.blocked
+        Object.assign(actual, ficha)
+      }
     }
   }
   return out

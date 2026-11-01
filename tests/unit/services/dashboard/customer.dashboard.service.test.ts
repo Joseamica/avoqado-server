@@ -33,9 +33,10 @@ jest.mock('@/services/customer/consent.service', () => ({
 }))
 
 // S8c: el saldo a favor tiene su propia prueba (customerStoreCreditBalance); aquí no cuenta como consulta cruda de la lista.
+const storeCreditDeClientesMock = jest.fn()
 jest.mock('@/services/storeCredit/customerStoreCreditBalance', () => ({
   __esModule: true,
-  storeCreditDeClientes: jest.fn(async (_db: unknown, _venueId: string, ids: string[]) => new Map(ids.map(id => [id, null]))),
+  storeCreditDeClientes: (...a: unknown[]) => storeCreditDeClientesMock(...a),
 }))
 
 // Helper to create mock customer
@@ -65,6 +66,11 @@ const createMockCustomer = (overrides: Record<string, any> = {}) => ({
 })
 
 describe('Customer Dashboard Service', () => {
+  beforeEach(() => {
+    storeCreditDeClientesMock.mockReset()
+    storeCreditDeClientesMock.mockImplementation(async (_db: unknown, _venueId: string, ids: string[]) => new Map(ids.map(id => [id, null])))
+  })
+
   beforeEach(() => {
     jest.clearAllMocks()
     // Sin colas «Once» sobrantes de `$queryRaw` entre pruebas (ids de la búsqueda, el agregado de saldos de H6, métricas).
@@ -122,6 +128,18 @@ describe('Customer Dashboard Service', () => {
 
       // Verify $transaction was called (tag filter logic is tested by integration tests)
       expect(prismaMock.$transaction).toHaveBeenCalled()
+    })
+
+    it('S8c: adjunta storeCredit a cada fila (el saldo del lector o null), con el venue y los ids de la página', async () => {
+      const ficha = { balanceCents: 35000, phoneLast4: '5678', giftCardId: 'g1' }
+      storeCreditDeClientesMock.mockResolvedValue(new Map([['c1', ficha]]))
+      prismaMock.$transaction.mockResolvedValue([[createMockCustomer({ id: 'c1' }), createMockCustomer({ id: 'c2' })], 2] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([] as any)
+
+      const r = await getCustomers('venue-123')
+
+      expect(storeCreditDeClientesMock).toHaveBeenCalledWith(expect.anything(), 'venue-123', ['c1', 'c2'])
+      expect(r.data.map(c => c.storeCredit)).toEqual([ficha, null])
     })
 
     it('should enforce multi-tenant isolation (venueId filter)', async () => {
@@ -328,6 +346,15 @@ describe('Customer Dashboard Service', () => {
   })
 
   describe('getCustomerById', () => {
+    it('S8c: adjunta storeCredit a la ficha (y null si no tiene sobre)', async () => {
+      const ficha = { balanceCents: 35000, phoneLast4: '5678', giftCardId: 'g1' }
+      prismaMock.customer.findFirst.mockResolvedValue({ ...createMockCustomer(), orders: [], loyaltyTransactions: [] } as any)
+      storeCreditDeClientesMock.mockResolvedValueOnce(new Map([['customer-123', ficha]]))
+      expect((await getCustomerById('venue-123', 'customer-123')).storeCredit).toEqual(ficha)
+      expect(storeCreditDeClientesMock).toHaveBeenCalledWith(expect.anything(), 'venue-123', ['customer-123'])
+      expect((await getCustomerById('venue-123', 'customer-123')).storeCredit).toBeNull()
+    })
+
     it('should return customer with orders and loyalty transactions', async () => {
       const mockCustomer = {
         ...createMockCustomer(),
