@@ -32,6 +32,12 @@ jest.mock('@/services/customer/consent.service', () => ({
   revokeMarketingConsent: (...a: unknown[]) => revokeConsentMock(...a),
 }))
 
+// S8c: el saldo a favor tiene su propia prueba (customerStoreCreditBalance); aquí no cuenta como consulta cruda de la lista.
+jest.mock('@/services/storeCredit/customerStoreCreditBalance', () => ({
+  __esModule: true,
+  storeCreditDeClientes: jest.fn(async (_db: unknown, _venueId: string, ids: string[]) => new Map(ids.map(id => [id, null]))),
+}))
+
 // Helper to create mock customer
 const createMockCustomer = (overrides: Record<string, any> = {}) => ({
   id: 'customer-123',
