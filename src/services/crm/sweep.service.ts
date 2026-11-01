@@ -535,8 +535,10 @@ export async function fillFirstMoney(limit = BATCH): Promise<number> {
     const source = at < account.createdAt ? 'ANTERIOR_AL_CRM' : 'PAGO'
     try {
       const wrote = await prisma.$transaction(async tx => {
+        // Still empty AND still linked to the Organization the date was read for: a re-link in between (with its reset,
+        // ruling 65 g) never gets the old Organization's charge (Codex autorización H2).
         const { count } = await tx.crmAccount.updateMany({
-          where: { id: account.id, firstMoneyAt: null },
+          where: { id: account.id, firstMoneyAt: null, organizationId: account.organizationId },
           data: { firstMoneyAt: at, firstMoneySource: source },
         })
         if (count === 0) return false

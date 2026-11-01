@@ -1286,6 +1286,24 @@ describe('a new link starts the first money over (ruling 65 g)', () => {
   })
 })
 
+describe('fillFirstMoney writes only for the Organization it read (Codex autorización H2)', () => {
+  it('un_barrido_que_leyo_antes_del_reenlace_no_repone_el_cobro_viejo', async () => {
+    const account = seedAccount({ organizationId: ORG })
+    seedPayment(seedVenue().id)
+    // Between the read and the write, ORG is deleted and the account is linked to OTHER_ORG, which never charged.
+    const plain = prismaMock.$transaction.getMockImplementation()!
+    prismaMock.$transaction.mockImplementationOnce(async (callback: (tx: unknown) => unknown) => {
+      Object.assign(accountOf(account.id) as Row, { organizationId: OTHER_ORG })
+      return plain(callback)
+    })
+
+    await expect(fillFirstMoney()).resolves.toBe(0)
+
+    expect(accountOf(account.id)).toMatchObject({ organizationId: OTHER_ORG, firstMoneyAt: null })
+    expect(systemEvents('FIRST_MONEY')).toEqual([])
+  })
+})
+
 describe('fillFirstMoney reads its candidates with a correlated EXISTS (ruling 51)', () => {
   it('never a `payments.some` inside an OR: one EXISTS per venue on Payment(venueId, status, createdAt), and the partial index literals', async () => {
     seedAccount({ organizationId: ORG })
