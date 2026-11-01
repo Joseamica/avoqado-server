@@ -6,6 +6,7 @@ import logger from '../../../config/logger'
 import { v4 as uuidv4 } from 'uuid'
 import { LogLevel } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
+import { sameTerminalSerial } from '../../../utils/terminalSerial'
 
 /**
  * Per-terminal debounce for heartbeat DB writes.
@@ -25,6 +26,67 @@ import prisma from '../../../utils/prismaClient'
  */
 const HEARTBEAT_WRITE_DEBOUNCE_MS = 30_000
 const lastHeartbeatWriteAt = new Map<string, number>()
+
+const NOT_THIS_TERMINAL = 'Identidad de terminal inválida'
+
+/**
+ * 🔴 D2 (31-oct): who may send `tpv:log` / `tpv:heartbeat`, and for which venue.
+ *
+ * Both events used to trust `payload.terminalId` and `payload.venueId` from ANY authenticated socket: a
+ * dashboard session of venue A could write logs, health rows and the payment-routing slot of venue B's
+ * terminals. Now the socket must BE the terminal — the serial the server signed into its JWT at PIN login
+ * (`auth.tpv.service.ts`), compared with `sameTerminalSerial` exactly like the command ACKs — and the venue
+ * is the SESSION's, never the payload's. Every TPV since v1.6.0 sends `deviceInfoManager.getSerialNumber()`
+ * as `terminalId`, and every live TPV token carries the signed serial (stamped since 24-feb; tokens last 30
+ * days). A mismatch is ignored with a warning, never a disconnect: a heartbeat lost is telemetry, while a
+ * noisy rejection of the fleet would blind the monitoring.
+ *
+ * Returns the venue to write for, or null when the event must be ignored.
+ */
+function sessionVenueForTerminalEvent(
+  socket: AuthenticatedSocket,
+  event: 'tpv:log' | 'tpv:heartbeat',
+  claimedTerminalId: string,
+  claimedVenueId: string,
+): string | null {
+  const signedSerial = socket.authContext?.terminalSerialNumber
+  const sessionVenueId = socket.authContext?.venueId
+  if (!signedSerial || !sessionVenueId || !sameTerminalSerial(signedSerial, claimedTerminalId)) {
+    logger.warn(`📡 [${event}] Ignored: the socket is not this terminal`, {
+      socketId: socket.id,
+      claimedTerminalId,
+      claimedVenueId,
+      sessionVenueId,
+      hasSignedSerial: !!signedSerial,
+    })
+    return null
+  }
+  if (claimedVenueId !== sessionVenueId) {
+    // A stale venue in the app (e.g. the terminal moved and the app kept its old context): the session wins.
+    logger.warn(`📡 [${event}] Payload venue differs from the session venue; using the session venue`, {
+      socketId: socket.id,
+      claimedTerminalId,
+      claimedVenueId,
+      sessionVenueId,
+    })
+  }
+  return sessionVenueId
+}
+
+/** The heartbeat's original serial/id lookup, now scoped to one venue. */
+function findTerminalInVenue(venueId: string, claimedTerminalId: string) {
+  return prisma.terminal.findFirst({
+    where: {
+      venueId,
+      OR: [
+        { id: claimedTerminalId },
+        { serialNumber: { equals: claimedTerminalId, mode: 'insensitive' } },
+        { serialNumber: { equals: `AVQD-${claimedTerminalId}`, mode: 'insensitive' } },
+      ],
+    },
+    select: { id: true, venueId: true },
+  })
+}
 
 /**
  * Observability Controller
@@ -93,22 +155,25 @@ export class ObservabilityController {
         throw new Error(`Invalid log level: ${payload.level}`)
       }
 
-      // Resolve terminalId: TPV may send serialNumber instead of CUID
-      let resolvedTerminalId = payload.terminalId
-      if (!payload.terminalId.startsWith('c')) {
-        // Looks like a serialNumber (e.g., "AVQD-2841548625"), resolve to CUID
-        const terminal = await prisma.terminal.findFirst({
-          where: { serialNumber: { equals: payload.terminalId, mode: 'insensitive' } },
-          select: { id: true },
-        })
-        if (terminal) resolvedTerminalId = terminal.id
+      const venueId = sessionVenueForTerminalEvent(socket, 'tpv:log', payload.terminalId, payload.venueId)
+      if (!venueId) {
+        if (callback) callback({ success: false, error: NOT_THIS_TERMINAL })
+        return
+      }
+
+      // Resolve the serial the TPV sends (e.g. "AVQD-2841548625") to the Terminal CUID, INSIDE the session venue.
+      const terminal = await findTerminalInVenue(venueId, payload.terminalId)
+      if (!terminal) {
+        logger.warn(`📡 [tpv:log] Terminal not found in the session venue: ${payload.terminalId}`, { socketId: socket.id, venueId })
+        if (callback) callback({ success: false, error: `Terminal not found: ${payload.terminalId}` })
+        return
       }
 
       // Store log in database
       const terminalLog = await prisma.terminalLog.create({
         data: {
-          venueId: payload.venueId,
-          terminalId: resolvedTerminalId,
+          venueId,
+          terminalId: terminal.id,
           level,
           tag: payload.tag,
           message: payload.message,
@@ -121,7 +186,7 @@ export class ObservabilityController {
       // Broadcast to dashboard (venue room)
       // Dashboard subscribers can see logs in real-time
       if (this.broadcastingService) {
-        this.broadcastingService.broadcastToVenue(payload.venueId, SocketEventType.TERMINAL_LOG, {
+        this.broadcastingService.broadcastToVenue(venueId, SocketEventType.TERMINAL_LOG, {
           id: terminalLog.id,
           terminalId: payload.terminalId,
           level,
@@ -224,20 +289,17 @@ export class ObservabilityController {
         throw new Error('Missing required fields in heartbeat payload')
       }
 
+      const venueId = sessionVenueForTerminalEvent(socket, 'tpv:heartbeat', payload.terminalId, payload.venueId)
+      if (!venueId) {
+        if (callback) callback({ success: false, error: NOT_THIS_TERMINAL })
+        return
+      }
+
       const { health } = payload
 
-      // Resolve serial number → database CUID
+      // Resolve serial number → database CUID, INSIDE the session venue (it used to search every venue).
       // TPV sends device serial (e.g. "AVQD-2840744192") but DB expects Terminal.id (CUID)
-      const terminal = await prisma.terminal.findFirst({
-        where: {
-          OR: [
-            { id: payload.terminalId },
-            { serialNumber: { equals: payload.terminalId, mode: 'insensitive' } },
-            { serialNumber: { equals: `AVQD-${payload.terminalId}`, mode: 'insensitive' } },
-          ],
-        },
-        select: { id: true, venueId: true },
-      })
+      const terminal = await findTerminalInVenue(venueId, payload.terminalId)
 
       if (!terminal) {
         logger.warn(`📡 [Heartbeat] Terminal not found: ${payload.terminalId}`)
@@ -252,7 +314,7 @@ export class ObservabilityController {
       // Register terminal in registry (for Socket.IO payment routing).
       // ALWAYS runs — even for debounced heartbeats below — so a reconnected
       // socket's id is always published for routing (payments are unaffected).
-      terminalRegistry.register(payload.terminalId, socket.id, payload.venueId)
+      terminalRegistry.register(payload.terminalId, socket.id, venueId)
 
       // Debounce DB writes per terminal (server clock) to survive reconnect-flush
       // bursts; see the note at the top of this file. Done AFTER register() so it
@@ -270,12 +332,12 @@ export class ObservabilityController {
       // Store health metrics + sync denormalized columns on Terminal in ONE
       // transaction. The org dashboard sorts by Terminal.latestHealthScore;
       // these MUST stay in sync with the latest TerminalHealth row.
-      logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${payload.venueId})`)
+      logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${venueId})`)
       const now = new Date()
       const [terminalHealth] = await prisma.$transaction([
         prisma.terminalHealth.create({
           data: {
-            venueId: payload.venueId,
+            venueId,
             terminalId: resolvedTerminalId,
             healthScore: payload.healthScore,
 
@@ -328,7 +390,7 @@ export class ObservabilityController {
 
       // Broadcast health status to dashboard
       if (this.broadcastingService) {
-        this.broadcastingService.broadcastToVenue(payload.venueId, SocketEventType.TERMINAL_HEARTBEAT, {
+        this.broadcastingService.broadcastToVenue(venueId, SocketEventType.TERMINAL_HEARTBEAT, {
           id: terminalHealth.id,
           terminalId: payload.terminalId,
           healthScore: payload.healthScore,
