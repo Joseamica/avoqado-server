@@ -11,6 +11,7 @@ import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganiz
 import { logAction } from './dashboard/activity-log.service'
 import { assertCanAddSeatsBulk } from './access/seatCap.service'
 import { motivoContrasenaInvalida } from '../utils/contrasenaNueva'
+import { esCorreoDemo } from './demo/candadoDemo'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -192,6 +193,12 @@ export async function acceptInvitation(
       // Check if invitation is expired
       if (new Date() > invitation.expiresAt) {
         throw new AppError('La invitación ha expirado', 410)
+      }
+
+      // hz:f26b3afc:D4: la contraseña de los usuarios demo es pública (PDF para prospectos). Una invitación a uno de esos
+      // correos dejaría a cualquiera entrar a este negocio con ella. Aceptar es el único camino de toda invitación.
+      if (esCorreoDemo(invitation.email)) {
+        throw new AppError('Los usuarios de demostración no pueden unirse a un negocio.', 403)
       }
 
       // Enforce PIN requirement if set by inviter
