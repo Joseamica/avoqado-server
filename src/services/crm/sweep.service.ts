@@ -33,7 +33,7 @@ import { utcTs } from '../../utils/sqlDates'
 import { getInitialStage } from './accounts.service'
 import { notifyNewProspect } from './digest.service'
 import {
-  accountOfPerson,
+  accountForTx,
   addPersonTx,
   announceEntry,
   applyEntry,
@@ -42,7 +42,6 @@ import {
   repeatOf,
   sourceDetailOf,
   teamOrganizationId,
-  upsertAccountBySource,
 } from './inbound.service'
 import { addEvent } from './timeline.service'
 
@@ -382,46 +381,38 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
     }
     try {
       const accountId = await prisma.$transaction(async tx => {
-        // Ruling 59, the family of ruling 48: a person the CRM already has by email or phone (WhatsApp, HubSpot, by hand)
-        // keeps that ONE account — linked to this Organization, with this email and phone — and nothing is announced.
-        const known = await accountOfPerson(tx, email, person.phoneE164, organization.id)
-        if (known) {
-          await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${known.id} FOR UPDATE`
-          const current = await tx.crmAccount.findUniqueOrThrow({ where: { id: known.id }, select: { organizationId: true } })
-          await addPersonTx(tx, known.id, person)
-          if (!current.organizationId) await linkTx(tx, known.id, organization.id)
+        // The resolver every writer shares (ruling 65 a): this Organization's account, the landing one of this email, or —
+        // ruling 59, the family of ruling 48 — a person the CRM already has by email or phone (WhatsApp, HubSpot, by hand).
+        // That ONE account keeps this email and phone and is linked to this Organization; nothing is announced.
+        const { account, created: isNew } = await accountForTx(
+          tx,
+          { emails: [email], phones: person.phoneE164 ? [person.phoneE164] : [], organizationId: organization.id },
+          {
+            source: LANDING,
+            externalKey: email,
+            data: {
+              name: organization.name,
+              stageId: stage.id,
+              organizationId: organization.id,
+              qualificationAvailable: false,
+              sourceDetail: sourceDetailOf(data),
+              ...(archived ? { archivedAt: new Date(startedAt) } : {}),
+            },
+            contact: { ...person, isPrimary: true },
+          },
+        )
+        if (!isNew) {
+          await addPersonTx(tx, account.id, person)
+          if (!account.organizationId) await linkTx(tx, account.id, organization.id)
           return null
         }
-        const upserted = await upsertAccountBySource(tx, {
-          source: LANDING,
-          externalKey: email,
-          data: {
-            name: organization.name,
-            stageId: stage.id,
-            organizationId: organization.id,
-            qualificationAvailable: false,
-            sourceDetail: sourceDetailOf(data),
-            ...(archived ? { archivedAt: new Date(startedAt) } : {}),
-          },
-          contact: { ...person, isPrimary: true },
-        })
-        // Its landing account already existed (linked somewhere else, or waiting for the link pass).
-        if (!upserted.created) return null
-        if (upserted.account.organizationId !== organization.id) {
-          // ponytail: the Organization got its CRM account (a «Ganar») in the instant between the read and this insert;
-          // the duplicate is the team's to merge, as in `applyTx`.
-          logger.warn('[CRM] Old landing signup created unlinked: its Organization got a CRM account meanwhile', {
-            accountId: upserted.account.id,
-            organizationId: organization.id,
-          })
-        }
         await addEvent(tx, {
-          accountId: upserted.account.id,
+          accountId: account.id,
           kind: 'SYSTEM',
           actorStaffId: null,
           data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString(), archived },
         })
-        return upserted.account.id
+        return account.id
       })
       if (!accountId) continue
       created++

@@ -33,7 +33,7 @@ import {
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
-import { upsertAccountBySource } from '@/services/crm/inbound.service'
+import { accountForTx } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
 import { addEvent } from '@/services/crm/timeline.service'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone, venueStartOfDay } from '@/utils/datetime'
@@ -159,28 +159,29 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
     ...(input.ultimoMensajeAt ? { ultimoMensajeAt: input.ultimoMensajeAt.toISOString() } : {}),
   }
 
-  // The person's business: the WhatsApp one of this phone or, from any other source, the one with a person of it.
+  // Resolve, don't guess (the MCP's rule for writes, ruling 46): without its own WhatsApp business, a phone that is in
+  // two or more businesses comes back with its candidates.
   const own = await prisma.crmAccount.findUnique({
     where: { source_externalKey: { source: WHATSAPP, externalKey: input.phone } },
     select: { id: true },
   })
-  let existingId = own?.id ?? null
-  let ownKey = existingId !== null
-  if (!existingId) {
+  if (!own) {
     const matches = await findDuplicates(access, { phone: input.phone })
     const ids = matches.flatMap(match => ('id' in match ? [match.id] : []))
     if (matches.length > 1 || ids.length !== matches.length) {
       return { ok: false, error: 'Ese teléfono está en varios negocios del CRM: elige uno y agrégale la nota.', candidatos: matches }
     }
-    existingId = ids[0] ?? null
   }
-  const stageId = existingId ? null : (await getInitialStage()).id
+  const stageId = (await getInitialStage()).id
 
   return prisma.$transaction(async (tx): Promise<Upsert> => {
-    let accountId = existingId
-    if (!accountId && stageId) {
-      const name = input.name || input.phone
-      const { account, created } = await upsertAccountBySource(tx, {
+    // The person's business by the resolver every writer shares (ruling 65 a): the WhatsApp one of this phone or, from any
+    // other source, the one with a person of it — locked. Created only when the CRM has nobody with this phone.
+    const name = input.name || input.phone
+    const { account, created, via } = await accountForTx(
+      tx,
+      { emails: [], phones: [input.phone], organizationId: null },
+      {
         source: WHATSAPP,
         externalKey: input.phone,
         data: {
@@ -192,25 +193,23 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
           stageId,
         },
         contact: { name, phoneE164: input.phone, isPrimary: true },
+      },
+    )
+    if (created) {
+      await addEvent(tx, {
+        accountId: account.id,
+        kind: 'SYSTEM',
+        actorStaffId: access.staffId,
+        sourceKey: keyOf(account.id),
+        data: { event: 'CREATED', source: WHATSAPP, ...extra },
       })
-      if (created) {
-        await addEvent(tx, {
-          accountId: account.id,
-          kind: 'SYSTEM',
-          actorStaffId: access.staffId,
-          sourceKey: keyOf(account.id),
-          data: { event: 'CREATED', source: WHATSAPP, ...extra },
-        })
-        return { ok: true, accountId: account.id, creado: true, yaExistia: false, reactivado: false, notaNueva: false, actualizados: [] }
-      }
-      // A call at the same instant created it: from here on it is the same as finding it by its own key.
-      accountId = account.id
-      ownKey = true
+      return { ok: true, accountId: account.id, creado: true, yaExistia: false, reactivado: false, notaNueva: false, actualizados: [] }
     }
-    if (!accountId) throw new Error('WhatsApp prospect: no account to write to')
+    const accountId = account.id
+    const ownKey = via === 'KEY'
 
-    // Its row lock first (two calls on the same business queue here), then the edit scope — everything, for a SUPERADMIN.
-    await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${accountId} FOR UPDATE`
+    // Its row lock is the resolver's (two calls on the same business queue there); then the edit scope — everything, for
+    // a SUPERADMIN.
     const row = await tx.crmAccount.findFirst({
       where: { AND: [{ id: accountId }, scopeWhere(access, 'editar')] },
       select: { name: true, giro: true, ventasRango: true, archivedAt: true, stage: { select: { kind: true } } },

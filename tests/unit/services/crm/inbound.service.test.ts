@@ -966,3 +966,153 @@ describe('ruling 57 (a): the account that takes the entry keeps the person’s e
     expect(db.contacts[1]).toMatchObject({ accountId: holder.id, name: 'Ana López', email: EMAIL, phoneE164: PHONE, isPrimary: false })
   })
 })
+
+describe('ruling 65: one identity resolver for every writer (Codex exhaustiva #4, #5 and #6)', () => {
+  const PHONE = '+525512345678'
+  let afterThis: (() => void) | null = null
+  afterEach(() => {
+    afterThis?.()
+    afterThis = null
+  })
+  const OTHER_ORG = 'corgother0000000000000001'
+  const id = (prefix: string, n: number) => `c${prefix}${String(n).padStart(24 - prefix.length, '0')}`
+  /** An account of another source with one person, as WhatsApp, HubSpot or a seller left it. */
+  function seedPerson(account: Record<string, unknown>, contact: { email?: string | null; phoneE164?: string | null }) {
+    const row = seedAccount({ source: 'WHATSAPP', giro: null, ventasRango: null, sucursales: null, modulos: [], ...account })
+    db.contacts.push({
+      id: id('cont', db.contacts.length + 1),
+      accountId: row.id,
+      name: 'Ana',
+      email: contact.email ?? null,
+      phoneE164: contact.phoneE164 ?? null,
+      isPrimary: true,
+    })
+    return row
+  }
+  /** Runs `then` the first time the code locks this account's row: what another writer commits in that instant. */
+  function onLock(accountId: string, then: () => void) {
+    const answer = prismaMock.$queryRaw.getMockImplementation()
+    let done = false
+    prismaMock.$queryRaw.mockImplementation(async (first: TemplateStringsArray, ...values: unknown[]) => {
+      if (!done && Array.isArray(first) && first.join('?').includes('FOR UPDATE') && values[0] === accountId) {
+        done = true
+        then()
+      }
+      return answer ? answer(first, ...values) : []
+    })
+  }
+
+  it.each([
+    { case: 'veinte por teléfono más recientes y el correo exacto en el puesto 21', linked: null },
+    { case: 'veinte por teléfono ligadas a otros negocios y la correcta en el puesto 21', linked: OTHER_ORG },
+  ])('la_coincidencia_correcta_no_se_pierde_por_el_limite (#4): $case', async ({ linked }) => {
+    for (let n = 1; n <= 20; n++) {
+      seedPerson(
+        {
+          id: id('acctphone', n),
+          externalKey: `+5255000000${String(n).padStart(2, '0')}`,
+          organizationId: linked ? id('orgother', n) : null,
+          lastTouchAt: new Date(Date.now() - n * MINUTE),
+        },
+        { phoneE164: PHONE },
+      )
+    }
+    // The 21st: the oldest touch. By email in the first case; by phone and still unlinked in the second.
+    const right = seedPerson(
+      { id: id('acctright', 1), externalKey: '+525500009999', lastTouchAt: new Date(Date.now() - 30 * DAY) },
+      linked ? { phoneE164: PHONE } : { email: EMAIL },
+    )
+    const entry = seedEntry({ signupOutcome: linked ? NEW_SIGNUP : null })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(21)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: right.id })
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it('la_organizacion_gana_a_la_llave_landing (#5): the business a seller linked takes the entry, not the unlinked landing account', async () => {
+    const landing = seedAccount({ id: id('acctland', 1), organizationId: null, lastTouchAt: new Date(Date.now() - DAY) })
+    const won = seedPerson({ id: id('acctwon', 1), externalKey: '+525599990000', organizationId: ORG }, { phoneE164: '+525599990000' })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    const entry = seedEntry({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false } })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(2)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: won.id })
+    expect(eventsOf('ENTRY_APPLIED')).toEqual([expect.objectContaining({ accountId: won.id })])
+    // The landing account is left as it was: nothing merged, nothing written.
+    expect(db.accounts.find(account => account.id === landing.id)).toMatchObject({ organizationId: null, giro: 'Restaurante' })
+    expect(db.events.filter(event => event.accountId === landing.id)).toHaveLength(0)
+  })
+
+  it('linked_elsewhere_before_the_lock (#5): a candidate a «Ganar» links to another business meanwhile is resolved again', async () => {
+    const shared = seedPerson({ id: id('acctshare', 1), externalKey: PHONE }, { phoneE164: PHONE })
+    onLock(shared.id, () => Object.assign(db.accounts.find(account => account.id === shared.id)!, { organizationId: OTHER_ORG }))
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    // Nothing of the person or the form lands on somebody else's business: their new one gets its own account.
+    expect(db.accounts).toHaveLength(2)
+    const mine = db.accounts.find(account => account.id !== shared.id)!
+    expect(mine).toMatchObject({ source: 'LANDING', externalKey: EMAIL, organizationId: ORG })
+    expect(db.entries[0].accountId).toBe(mine.id)
+    expect(db.contacts.filter(contact => contact.accountId === shared.id)).toEqual([expect.objectContaining({ email: null })])
+    expect(db.accounts.find(account => account.id === shared.id)).toMatchObject({ giro: null })
+  })
+
+  it('a_holder_that_appears_before_the_link_is_not_a_resolved_entry (#5): the entry fails, and its retry lands on the holder', async () => {
+    const phoneOnly = seedPerson({ id: id('acctphone', 1), externalKey: PHONE }, { phoneE164: PHONE })
+    const holder = { id: id('acctwon', 1), name: 'Café Ana', source: 'MANUAL', externalKey: null, stageId: FAKE_STAGE_ID }
+    onLock(phoneOnly.id, () => db.accounts.push({ ...holder, organizationId: ORG }))
+    // A transaction that fails leaves nothing behind, like Postgres (only for this test).
+    const plain = prismaMock.$transaction.getMockImplementation()
+    afterThis = () => prismaMock.$transaction.mockImplementation(plain)
+    prismaMock.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) => {
+      const before = { contacts: db.contacts.map(contact => ({ ...contact })), events: db.events.length }
+      const accounts = db.accounts.map(account => ({ ...account }))
+      try {
+        return await callback(prismaMock)
+      } catch (error) {
+        db.contacts.splice(0, db.contacts.length, ...before.contacts)
+        db.events.length = before.events
+        const holderNow = db.accounts.find(account => account.id === holder.id)
+        db.accounts.splice(
+          0,
+          db.accounts.length,
+          ...accounts.filter(account => account.id !== holder.id),
+          ...(holderNow ? [holderNow] : []),
+        )
+        throw error
+      }
+    })
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+    expect(db.entries[0]).toMatchObject({ appliedAt: null, lastError: expect.stringContaining('meanwhile') })
+    expect(db.accounts.find(account => account.id === phoneOnly.id)).toMatchObject({ organizationId: null })
+
+    await applyEntry(entry.id)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: holder.id, lastError: null })
+  })
+
+  it('choque_de_organizacion_al_crear_devuelve_al_titular (#6): no second, unlinked account', async () => {
+    const holder = { id: id('acctwon', 1), name: 'Café Ana', source: 'MANUAL', externalKey: null, stageId: FAKE_STAGE_ID }
+    // A «Ganar» links another account to the person's new Organization between the lookup and the insert.
+    const insert = prismaMock.crmAccount.createMany.getMockImplementation()!
+    prismaMock.crmAccount.createMany.mockImplementationOnce(async (args: unknown) => {
+      db.accounts.push({ ...holder, organizationId: ORG })
+      return insert(args)
+    })
+    const entry = seedEntry()
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toEqual([expect.objectContaining({ id: holder.id, organizationId: ORG })])
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: holder.id })
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: holder.id, email: EMAIL, phoneE164: PHONE })])
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('unlinked'), expect.anything())
+  })
+})

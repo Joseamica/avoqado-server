@@ -296,8 +296,12 @@ describe('crm_upsert_whatsapp_prospect', () => {
       const ids = new Set(db.contacts.filter(contact => contact.phoneE164 === phone).map(contact => contact.accountId))
       return db.accounts.filter(account => ids.has(account.id)).map(account => ({ ...account, ownerStaffId: null, owner: null }))
     })
-    // The account read under its row lock, within the edit scope (everything, for a SUPERADMIN).
-    prismaMock.crmAccount.findFirst.mockImplementation(async ({ where }: any) => {
+    // The account read under its row lock, within the edit scope (everything, for a SUPERADMIN). The resolver's lookup by
+    // person (ruling 65) stays the in-memory CRM's.
+    const byPerson = prismaMock.crmAccount.findFirst.getMockImplementation()!
+    prismaMock.crmAccount.findFirst.mockImplementation(async (args: any) => {
+      if (args.where.contacts) return byPerson(args)
+      const { where } = args
       const row = db.accounts.find(account => account.id === where.AND[0].id)
       if (!row) return null
       const kind = row.stageId === FAKE_LOST_STAGE_ID ? 'PERDIDA' : 'ABIERTA'
@@ -538,8 +542,8 @@ describe('crm_upsert_whatsapp_prospect', () => {
     const OTHER = cuid('acctwa')
     db.accounts.push({ id: OTHER, name: PHONE, source: 'WHATSAPP', externalKey: PHONE, stageId: FAKE_STAGE_ID, lastTouchAt: MON })
     db.events.push({ accountId: OTHER, kind: 'SYSTEM', sourceKey: `whatsapp:${OTHER}:2026-11-02T15:04`, data: {} })
-    // …which this call's first lookups did not see yet.
-    prismaMock.crmAccount.findUnique.mockImplementationOnce(async () => null)
+    // …which this call's first lookups did not see yet: the check before the transaction and the resolver's inside it.
+    prismaMock.crmAccount.findUnique.mockImplementationOnce(async () => null).mockImplementationOnce(async () => null)
 
     const answer = await setup().call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, ultimoMensajeAt: MSG_1 })
     expect(prismaMock.crmAccount.createMany).toHaveBeenCalledTimes(1)

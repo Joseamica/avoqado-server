@@ -23,8 +23,9 @@ jest.mock('@/services/integrations/hubspot.client', () => ({
 import { OrgRole } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 import { submitContact } from '@/controllers/public/landing.public.controller'
-import { getInitialStage } from '@/services/crm/accounts.service'
-import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
+import type { CrmAccess } from '@/services/crm/access.service'
+import { getInitialStage, win } from '@/services/crm/accounts.service'
+import { applyEntry, recordSignupOutcome, saveLandingEntry, upsertAccountBySource } from '@/services/crm/inbound.service'
 import { linkLandingAccounts, resetSweepCursors } from '@/services/crm/sweep.service'
 import { canonicalPhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
@@ -40,7 +41,25 @@ const LINK_EMAIL = `fer-${suffix}@test.mx`
 const KEY_EMAIL = `gil-${suffix}@test.mx`
 /** The emails of six forms on one account; only the first one (the oldest) ever owns a business (Codex r3, R3-1). */
 const RESENT_EMAILS = [1, 2, 3, 4, 5, 6].map(n => `reenvio${n}-${suffix}@test.mx`)
-const EMAILS = [RACE_EMAIL, CRASH_EMAIL, HOLDER_EMAIL, WHATSAPP_EMAIL, LATE_EMAIL, LINK_EMAIL, KEY_EMAIL, ...RESENT_EMAILS]
+/** Ruling 65: the resolver every writer shares (Codex exhaustiva #4, #5 and #6). */
+const ORG_FIRST_EMAIL = `hugo-${suffix}@test.mx`
+const RANK_EMAIL = `iris-${suffix}@test.mx`
+const CLASH_EMAIL = `juan-${suffix}@test.mx`
+const WIN_RACE_EMAIL = `karla-${suffix}@test.mx`
+const EMAILS = [
+  RACE_EMAIL,
+  CRASH_EMAIL,
+  HOLDER_EMAIL,
+  WHATSAPP_EMAIL,
+  LATE_EMAIL,
+  LINK_EMAIL,
+  KEY_EMAIL,
+  ...RESENT_EMAILS,
+  ORG_FIRST_EMAIL,
+  RANK_EMAIL,
+  CLASH_EMAIL,
+  WIN_RACE_EMAIL,
+]
 /** Accounts this file creates under another source (not found by `source: LANDING`). */
 const otherAccountIds: string[] = []
 
@@ -374,6 +393,132 @@ describe('landing → CRM against Postgres', () => {
     expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: older!.entryId } })).toMatchObject({
       appliedAt: expect.any(Date),
       accountId: account.id,
+    })
+  })
+
+  describe('ruling 65: one identity resolver for every writer', () => {
+    it('la_organizacion_gana_a_la_llave_landing (Codex exhaustiva #5): the business a seller linked takes the entry', async () => {
+      const stageId = (await getInitialStage()).id
+      // The person's old landing account, never linked; then a seller won their business through WhatsApp.
+      const landing = await prisma.crmAccount.create({
+        data: { name: `Vieja ${suffix}`, source: 'LANDING', externalKey: ORG_FIRST_EMAIL, stageId },
+      })
+      const { organization } = await ownerOfAnOrganization(ORG_FIRST_EMAIL)
+      const won = await prisma.crmAccount.create({
+        data: {
+          name: `Ganada ${suffix}`,
+          source: 'WHATSAPP',
+          externalKey: `wa-${suffix}-ganada`,
+          stageId,
+          organizationId: organization.id,
+        },
+      })
+      otherAccountIds.push(won.id)
+
+      const entry = await saveLandingEntry(form(ORG_FIRST_EMAIL))
+      await recordSignupOutcome(entry!.entryId, { organizationId: organization.id, alreadyExisted: true, yaEsCliente: false })
+      await applyEntry(entry!.entryId)
+
+      expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
+        appliedAt: expect.any(Date),
+        accountId: won.id,
+      })
+      // The landing account is left as it was: nothing merged, nothing written.
+      expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: landing.id } })).toMatchObject({ organizationId: null, giro: null })
+      expect(await prisma.crmTimelineEvent.count({ where: { accountId: landing.id } })).toBe(0)
+    })
+
+    it('el_correo_gana_aunque_veinte_cuentas_compartan_el_telefono (Codex exhaustiva #4): ranked in the query, not after a cut', async () => {
+      const stageId = (await getInitialStage()).id
+      const phone = canonicalPhoneE164(phoneOf(RANK_EMAIL))!
+      // Twenty accounts with the person's phone, all touched more recently than the one with their exact email.
+      for (let n = 0; n < 20; n++) {
+        const shared = await prisma.crmAccount.create({
+          data: {
+            name: `Teléfono ${suffix} ${n}`,
+            source: 'WHATSAPP',
+            externalKey: `wa-${suffix}-rank-${n}`,
+            stageId,
+            lastTouchAt: new Date(Date.now() - n * 60_000),
+            contacts: { create: [{ name: 'Iris', phoneE164: phone }] },
+          },
+        })
+        otherAccountIds.push(shared.id)
+      }
+      const byEmail = await prisma.crmAccount.create({
+        data: {
+          name: `Correo ${suffix}`,
+          source: 'MANUAL',
+          stageId,
+          lastTouchAt: new Date(Date.now() - 30 * 86_400_000),
+          contacts: { create: [{ name: 'Iris', email: RANK_EMAIL }] },
+        },
+      })
+      otherAccountIds.push(byEmail.id)
+
+      const entry = await saveLandingEntry(form(RANK_EMAIL))
+      await recordSignupOutcome(entry!.entryId, null)
+      await applyEntry(entry!.entryId)
+
+      expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({ accountId: byEmail.id })
+      expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: RANK_EMAIL } })).toBe(0)
+    })
+
+    it('crear_con_una_organizacion_ocupada_devuelve_al_titular (Codex exhaustiva #6): never a second, unlinked account', async () => {
+      const stageId = (await getInitialStage()).id
+      const { organization } = await ownerOfAnOrganization(CLASH_EMAIL)
+      const holder = await prisma.crmAccount.create({
+        data: { name: `Titular ${suffix}`, source: 'MANUAL', stageId, organizationId: organization.id },
+      })
+      otherAccountIds.push(holder.id)
+
+      const result = await prisma.$transaction(tx =>
+        upsertAccountBySource(tx, {
+          source: 'LANDING',
+          externalKey: CLASH_EMAIL,
+          data: { name: `Nueva ${suffix}`, stageId, organizationId: organization.id },
+          contact: { name: 'Juan', email: CLASH_EMAIL, isPrimary: true },
+        }),
+      )
+
+      expect(result).toEqual({ account: { id: holder.id, organizationId: organization.id }, created: false })
+      expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: CLASH_EMAIL } })).toBe(0)
+      expect(await prisma.crmContact.count({ where: { accountId: holder.id } })).toBe(0)
+    })
+
+    it('ganar_y_la_landing_a_la_vez_no_dejan_ficha_huerfana (Codex exhaustiva #5 y #6): one account holds the business', async () => {
+      const stageId = (await getInitialStage()).id
+      const { staff, organization } = await ownerOfAnOrganization(WIN_RACE_EMAIL)
+      // A seller's prospect for that business, still unlinked; the owner fills the form while the seller wins it.
+      const prospect = await prisma.crmAccount.create({ data: { name: `Prospecto ${suffix}`, source: 'MANUAL', stageId } })
+      otherAccountIds.push(prospect.id)
+      const entry = await saveLandingEntry(form(WIN_RACE_EMAIL))
+      await recordSignupOutcome(entry!.entryId, { organizationId: organization.id, alreadyExisted: true, yaEsCliente: false })
+      const seller: CrmAccess = {
+        staffId: staff.id,
+        isSuperadmin: false,
+        ver: 'todos',
+        editar: 'todos',
+        contactar: true,
+        campanas: false,
+        exportar: false,
+        ventas: false,
+        admin: false,
+      }
+
+      await Promise.allSettled([win(seller, prospect.id, { organizationId: organization.id }), applyEntry(entry!.entryId)])
+      // The sweep retries an entry that lost the race.
+      await applyEntry(entry!.entryId)
+
+      // Whoever won, ONE account holds the business, the entry is on it, and no landing account of the person is left
+      // without it.
+      const holders = await prisma.crmAccount.findMany({ where: { organizationId: organization.id }, take: 5 })
+      expect(holders).toHaveLength(1)
+      expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entry!.entryId } })).toMatchObject({
+        appliedAt: expect.any(Date),
+        accountId: holders[0].id,
+      })
+      expect(await prisma.crmAccount.count({ where: { source: 'LANDING', externalKey: WIN_RACE_EMAIL, organizationId: null } })).toBe(0)
     })
   })
 })

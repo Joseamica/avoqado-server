@@ -109,8 +109,6 @@ function ownedBy(staff: Row, args: Row) {
  */
 function installSweepWorld() {
   world = { staff: [], organizations: [], venues: [], payments: [], logs: [] }
-  // The landing's lookup by person (ruling 48) is the inbound fake's: kept before the reset below.
-  const byPerson = prismaMock.crmAccount.findMany.getMockImplementation()
   const delegates = [
     prismaMock.crmInboundEntry.findMany,
     prismaMock.crmInboundEntry.groupBy,
@@ -137,7 +135,6 @@ function installSweepWorld() {
     [...new Set(db.entries.filter(entry => matches(entry, where)).map(entry => entry[field]))].map(value => ({ [field]: value })),
   )
   prismaMock.crmAccount.findMany.mockImplementation(async (args: Row) => {
-    if (args.where?.contacts) return byPerson!(args)
     const { where, select, orderBy, take } = args
     // The late link (rulings 57 and 65): its filter, with `inboundEntries.some` among its branches.
     const entriesOf = (account: Row, filter: Row) => db.entries.filter(entry => entry.accountId === account.id && matches(entry, filter))
@@ -973,6 +970,24 @@ describe('backfillFromOnboarding', () => {
 
     expect(db.accounts).toEqual([expect.objectContaining({ id: imported.id, organizationId: ORG })])
     expect(db.contacts).toHaveLength(51)
+  })
+
+  it('choque_de_organizacion_en_la_carga_inicial_devuelve_al_titular (Codex exhaustiva #6): no unlinked duplicate', async () => {
+    seedOrganization()
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
+    // A «Ganar» links another account to that Organization between the read and the insert.
+    const holder = { id: cuid('acctwon', 1), name: 'Café Ana', source: 'MANUAL', externalKey: null, stageId: FAKE_STAGE_ID }
+    const insert = prismaMock.crmAccount.createMany.getMockImplementation()!
+    prismaMock.crmAccount.createMany.mockImplementationOnce(async (args: unknown) => {
+      db.accounts.push({ ...holder, organizationId: ORG, createdAt: new Date() })
+      return insert(args)
+    })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+
+    expect(db.accounts).toEqual([expect.objectContaining({ id: holder.id, organizationId: ORG })])
+    expect(db.contacts).toEqual([expect.objectContaining({ accountId: holder.id, email: EMAIL })])
+    expect(notifyNewProspect).not.toHaveBeenCalled()
   })
 
   it('la_marca_de_una_persona_borrada_no_crea_nada (I-2)', async () => {

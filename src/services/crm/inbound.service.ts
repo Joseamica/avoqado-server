@@ -3,11 +3,11 @@
  *
  * 1. `saveLandingEntry` — the FIRST thing the controller does: the raw form, cleaned, as a `CrmInboundEntry`.
  * 2. The signup (`signupFromLanding`) runs exactly as before; `recordSignupOutcome` writes down what it really returned.
- * 3. `applyEntry` applies the entry to the ONE account it belongs to — the landing account of that email, the account
- *    the Organization the person owns already has (one per Organization), or the account of another source that already
- *    has this person by email or phone (one per person) — and creates it only when there is none; the timeline event
- *    `entry:<id>` proves it was applied. It never throws, and running it again — the sweep after a crash, or both at
- *    once — changes nothing.
+ * 3. `applyEntry` applies the entry to the ONE account it belongs to — the account the Organization the person owns
+ *    already has (one per Organization), the landing account of that email, or the account of another source that
+ *    already has this person by email or phone (one per person), all by `accountForTx`, the resolver every writer
+ *    shares (ruling 65) — and creates it only when there is none; the timeline event `entry:<id>` proves it was
+ *    applied. It never throws, and running it again — the sweep after a crash, or both at once — changes nothing.
  *
  * Nothing here can stop the signup: every function swallows its own failure into the log, and the sweep (task 6) picks
  * up whatever was left half done.
@@ -23,8 +23,6 @@ import { addEvent } from './timeline.service'
 export const LANDING = 'LANDING'
 const MAX_TEXT = 500
 const MAX_LIST = 20
-// ponytail: the accounts that already have this person; past 20 (never seen) the newest-touched 20 are ranked.
-const PERSON_CANDIDATES = 20
 /** Long enough for any signup to finish: an entry younger than this without an outcome waits for the sweep. */
 const SIGNUP_GRACE_MS = 5 * 60_000
 /** Control characters and lone UTF-16 surrogates: PostgreSQL refuses `\u0000` and broken text in JSONB. */
@@ -105,7 +103,7 @@ export async function recordSignupOutcome(entryId: string, outcome: SignupOutcom
   }
 }
 
-// ── 2. The account of an entry key (shared with the HubSpot import and WhatsApp) ─────────────────────────────────────
+// ── 2. Who a person is: THE account and its people (landing, backfill, MCP and the HubSpot import) ───────────────────
 
 export interface UpsertBySourceInput {
   source: string
@@ -117,34 +115,180 @@ export interface UpsertBySourceInput {
 }
 
 /**
- * Finds or creates THE account of an entry key — (source, externalKey) is unique — inside the caller's transaction:
- * the landing by email, the HubSpot import by its id (task 8), WhatsApp by phone (task 10).
+ * Creates THE account of an entry key — (source, externalKey) is unique — inside the caller's transaction, or returns
+ * the one already there: the landing by email, the HubSpot import by its id (task 8), WhatsApp by phone (task 10).
  *
  * `INSERT … ON CONFLICT DO NOTHING` (`skipDuplicates`) instead of upsert-and-retry-on-P2002: a unique violation aborts
  * the whole Postgres transaction, so a retry inside it could never run. Two callers at once: the second insert waits
- * for the first to commit, inserts nothing, and both read the same row.
+ * for the first to commit, inserts nothing, and both read the same row. A clash on the OTHER unique key — the
+ * Organization already has its account — returns that account, never a second one without it (Codex exhaustiva #6).
+ * Writers go through `accountForTx`, which looks for the person first and resolves again after a clash.
  */
 export async function upsertAccountBySource(
   tx: Prisma.TransactionClient,
   input: UpsertBySourceInput,
 ): Promise<{ account: { id: string; organizationId: string | null }; created: boolean }> {
-  const { source, externalKey, contact } = input
-  const insert = async (data: UpsertBySourceInput['data']) =>
-    (await tx.crmAccount.createMany({ data: [{ ...data, source, externalKey }], skipDuplicates: true })).count === 1
-  const find = () =>
-    tx.crmAccount.findUnique({ where: { source_externalKey: { source, externalKey } }, select: { id: true, organizationId: true } })
-
-  let created = await insert(input.data)
-  let account = await find()
-  if (!account && input.data.organizationId) {
-    // DO NOTHING also skipped a clash on the OTHER unique key: that Organization already has its CRM account. Retried
-    // once without it — the account is created unlinked, and the caller sees `organizationId: null`.
-    created = await insert({ ...input.data, organizationId: null })
-    account = await find()
-  }
+  const { source, externalKey, contact, data } = input
+  const select = { id: true, organizationId: true } as const
+  const created = (await tx.crmAccount.createMany({ data: [{ ...data, source, externalKey }], skipDuplicates: true })).count === 1
+  let account = await tx.crmAccount.findUnique({ where: { source_externalKey: { source, externalKey } }, select })
+  if (!account && data.organizationId) account = await tx.crmAccount.findUnique({ where: { organizationId: data.organizationId }, select })
   if (!account) throw new Error(`The ${source} account was neither created nor found`)
   if (created && contact) await tx.crmContact.create({ data: { ...contact, accountId: account.id }, select: { id: true } })
   return { account, created }
+}
+
+/** Who an entry, a signup, an import row or a WhatsApp message is about (ruling 65 a). */
+export interface Identity {
+  /** The account of this source key: the landing's email, WhatsApp's phone, HubSpot's id. */
+  key?: { source: string; externalKey: string }
+  /** Exact emails (every writer stores them in lowercase) and canonical phones: one person's, or a HubSpot deal's people. */
+  emails: string[]
+  phones: string[]
+  /** The Organization this person owns, or just created; null when none or unknown. */
+  organizationId: string | null
+}
+
+/** How the account was found: its Organization, its source key, or one of its people by email or by phone. */
+export type FoundVia = 'ORGANIZATION' | 'KEY' | 'EMAIL' | 'PHONE'
+export type ResolvedAccount = { id: string; organizationId: string | null; via: FoundVia }
+
+/** A resolution that keeps changing under it (a «Ganar» per try) gives up; the caller's transaction fails and is retried. */
+const RESOLVE_TRIES = 3
+
+/**
+ * The account that already IS this person, by precedence (rulings 25, 48 and 65 a): the one its Organization holds (one
+ * per Organization) — before its landing key, so an unlinked landing account never keeps the entry away from the
+ * business a seller already linked (Codex exhaustiva #5); its source key; then a person of it with this email, before
+ * one with this phone. Among people, the open one first (in the pipeline, not archived), then the newest touch, then the
+ * id — each rule a `findFirst` with its order, so nothing is cut before it is ranked (Codex exhaustiva #4). An account
+ * linked to ANOTHER Organization than the one this person owns is somebody else's business (a shared phone) and is never
+ * a candidate. Phones are never unique and nothing is merged: two businesses may share a contact.
+ */
+async function candidateTx(tx: Prisma.TransactionClient, who: Identity): Promise<{ id: string; via: FoundVia } | null> {
+  const select = { id: true } as const
+  if (who.organizationId) {
+    const holder = await tx.crmAccount.findUnique({ where: { organizationId: who.organizationId }, select })
+    if (holder) return { id: holder.id, via: 'ORGANIZATION' }
+  }
+  if (who.key) {
+    const own = await tx.crmAccount.findUnique({ where: { source_externalKey: who.key }, select })
+    if (own) return { id: own.id, via: 'KEY' }
+  }
+  const compatible: Prisma.CrmAccountWhereInput = who.organizationId
+    ? { OR: [{ organizationId: null }, { organizationId: who.organizationId }] }
+    : {}
+  const people: Array<[FoundVia, Prisma.CrmContactWhereInput | null]> = [
+    ['EMAIL', who.emails.length ? { email: { in: who.emails } } : null],
+    ['PHONE', who.phones.length ? { phoneE164: { in: who.phones } } : null],
+  ]
+  for (const [via, contact] of people) {
+    if (!contact) continue
+    for (const state of [{ archivedAt: null, stage: { kind: 'ABIERTA' } }, {}] satisfies Prisma.CrmAccountWhereInput[]) {
+      const found = await tx.crmAccount.findFirst({
+        where: { contacts: { some: contact }, ...compatible, ...state },
+        select,
+        orderBy: [{ lastTouchAt: 'desc' }, { id: 'desc' }],
+      })
+      if (found) return { id: found.id, via }
+    }
+  }
+  return null
+}
+
+/**
+ * THE identity resolver every writer shares (ruling 65 a): the account of this person (`candidateTx`), returned LOCKED
+ * (`FOR UPDATE`, the order every writer locks in) and checked again under the lock — still there, still the holder of
+ * its Organization, still compatible with this person's — before anything writes contacts or fields. What changed in
+ * between (deleted, or linked elsewhere by a «Ganar») is resolved again. Null when the CRM does not have this person.
+ */
+export async function resolveAccountTx(tx: Prisma.TransactionClient, who: Identity): Promise<ResolvedAccount | null> {
+  for (let tries = 0; tries < RESOLVE_TRIES; tries++) {
+    const candidate = await candidateTx(tx, who)
+    if (!candidate) return null
+    const [locked] = await tx.$queryRaw<Array<{ id: string; organizationId: string | null }>>`
+      SELECT "id", "organizationId" FROM "CrmAccount" WHERE "id" = ${candidate.id} FOR UPDATE`
+    if (!locked) continue
+    const still =
+      candidate.via === 'ORGANIZATION'
+        ? locked.organizationId === who.organizationId
+        : candidate.via === 'KEY' || !who.organizationId || !locked.organizationId || locked.organizationId === who.organizationId
+    if (still) return { id: locked.id, organizationId: locked.organizationId, via: candidate.via }
+  }
+  throw new Error('The CRM account of this person kept changing while it was being resolved; the caller retries it')
+}
+
+/**
+ * The account of a person, or a new one (ruling 65 a): resolved first (`resolveAccountTx`, its source key being the one
+ * it would be created under); created only when the CRM has nobody, with `upsertAccountBySource`. A writer that creates
+ * it — or takes its Organization — at the same instant makes the insert a no-op, and the person is resolved again,
+ * under the lock. `via` is null for an account this call created.
+ */
+export async function accountForTx(
+  tx: Prisma.TransactionClient,
+  who: Omit<Identity, 'key'>,
+  create: UpsertBySourceInput,
+): Promise<{ account: { id: string; organizationId: string | null }; created: boolean; via: FoundVia | null }> {
+  const identity: Identity = { ...who, key: { source: create.source, externalKey: create.externalKey } }
+  for (let tries = 0; tries < RESOLVE_TRIES; tries++) {
+    const found = await resolveAccountTx(tx, identity)
+    if (found) return { account: { id: found.id, organizationId: found.organizationId }, created: false, via: found.via }
+    const upserted = await upsertAccountBySource(tx, create)
+    if (upserted.created) return { ...upserted, via: null }
+  }
+  throw new Error('The CRM account of this person kept changing while it was being created; the caller retries it')
+}
+
+type Person = { name: string; email: string | null; phoneE164: string | null }
+
+/** What incorporating a person would write: fill in the contact that has half of them, a new contact, or nothing. */
+export type PersonGap = { update: string; data: { email: string } | { phoneE164: string } } | { create: Prisma.CrmContactCreateManyInput }
+
+/**
+ * Ruling 57, asked to the database (ruling 65 b, Codex r3 R3-2): what the account still lacks of this person — never
+ * read from a page of its contacts, so a person who is its 51st contact is not added again. The contact that already
+ * has their phone and no email gets the email (WhatsApp's phone-only person gets the landing's), and the other way
+ * around; otherwise a new contact with whatever is missing, primary only on an account that had none. A person with
+ * neither email nor phone (a HubSpot contact with only a name) is nobody the CRM can find again: a contact of their own.
+ * Reads only; null when nothing is missing.
+ */
+export async function personGapTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<PersonGap | null> {
+  const has = (where: Prisma.CrmContactWhereInput) =>
+    tx.crmContact.findFirst({ where: { accountId, ...where }, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+  const { email, phoneE164 } = person
+  const missingEmail = !!email && !(await has({ email }))
+  const missingPhone = !!phoneE164 && !(await has({ phoneE164 }))
+  if ((email || phoneE164) && !missingEmail && !missingPhone) return null
+  if (missingEmail && !missingPhone && phoneE164) {
+    const half = await has({ phoneE164, email: null })
+    if (half) return { update: half.id, data: { email: email! } }
+  }
+  if (missingPhone && !missingEmail && email) {
+    const half = await has({ email, phoneE164: null })
+    if (half) return { update: half.id, data: { phoneE164: phoneE164! } }
+  }
+  const isPrimary = !(await has({}))
+  return {
+    create: { accountId, name: person.name, email: missingEmail ? email : null, phoneE164: missingPhone ? phoneE164 : null, isPrimary },
+  }
+}
+
+/** Writes what `personGapTx` found missing. */
+export async function writePersonGapTx(tx: Prisma.TransactionClient, gap: PersonGap): Promise<void> {
+  if ('update' in gap) await tx.crmContact.update({ where: { id: gap.update }, data: gap.data, select: { id: true } })
+  else await tx.crmContact.create({ data: gap.create, select: { id: true } })
+}
+
+/**
+ * THE incorporation of a person into an account (ruling 65 b), the one every writer uses — landing, backfill, MCP and the
+ * HubSpot import: the account that takes someone keeps their email and phone, or nothing would find it by them later,
+ * and never a second contact with the same email or phone. The caller holds the account's row lock (or just created
+ * it). True when it wrote.
+ */
+export async function addPersonTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<boolean> {
+  const gap = await personGapTx(tx, accountId, person)
+  if (gap) await writePersonGapTx(tx, gap)
+  return gap !== null
 }
 
 // ── 3. Applying an entry ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -290,21 +434,22 @@ function qualificationChanges(current: Qualification, fresh: Qualification) {
 }
 
 /**
- * Links an account that has no Organization yet, unless another account already holds it (one per Organization); true
- * when it did. 🔴 The caller holds the account's row lock and knows it is still unlinked: `applyTx` and the sweep's link
- * (task 6) both take it before calling, so the LINKED key goes in with the row already theirs.
+ * Links an account that has no Organization yet; true when it did, false when the Organization is gone. 🔴 The caller
+ * holds the account's row lock and knows it is still unlinked: `applyTx`, the backfill (through the resolver) and the
+ * sweep's link (task 6) take it before calling, so the LINKED key goes in with the row already theirs.
+ *
+ * One CRM account per Organization: if another account took it after the caller resolved the person (a «Ganar» in that
+ * instant), it THROWS — the caller's transaction rolls back and is retried, and the retry finds that account. A conflict
+ * never ends as an entry applied to an account left unlinked (Codex exhaustiva #5).
  */
 export async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizationId: string): Promise<boolean> {
   const [holder, organization] = await Promise.all([
     tx.crmAccount.findUnique({ where: { organizationId }, select: { id: true } }),
     tx.organization.findUnique({ where: { id: organizationId }, select: { name: true } }),
   ])
-  if (holder || !organization) {
-    logger.warn('[CRM] Landing account left unlinked: its Organization is gone or already has a CRM account', {
-      accountId,
-      organizationId,
-      heldBy: holder?.id ?? null,
-    })
+  if (holder) throw new Error(`The Organization ${organizationId} got its CRM account (${holder.id}) meanwhile; retried`)
+  if (!organization) {
+    logger.warn('[CRM] Account left unlinked: its Organization is gone', { accountId, organizationId })
     return false
   }
   await tx.crmAccount.update({ where: { id: accountId }, data: { organizationId } })
@@ -370,93 +515,6 @@ export function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }
   return { accountId: previous.accountId, notice, ...(content ? { content } : {}) }
 }
 
-/**
- * Ruling 48 — one account per PERSON, whatever source met them first: the accounts with a contact of this exact email or
- * canonical phone (every writer stores them so; both are indexed). The email beats the phone; then the open one touched
- * most recently; with none open, the one touched most recently; the id breaks the last tie, so the choice never
- * depends on the run. An account linked to ANOTHER Organization than the one this person just got is somebody else's
- * business — a shared phone — and never takes the entry.
- */
-export async function accountOfPerson(
-  tx: Prisma.TransactionClient,
-  email: string,
-  phoneE164: string | null,
-  organizationId: string | null,
-): Promise<{ id: string; organizationId: string | null } | null> {
-  const found = await tx.crmAccount.findMany({
-    where: { contacts: { some: { OR: [{ email }, ...(phoneE164 ? [{ phoneE164 }] : [])] } } },
-    select: {
-      id: true,
-      organizationId: true,
-      archivedAt: true,
-      stage: { select: { kind: true } },
-      // Non-empty when it was found by the EMAIL.
-      contacts: { where: { email }, select: { id: true }, take: 1 },
-    },
-    orderBy: [{ lastTouchAt: 'desc' }, { id: 'desc' }],
-    take: PERSON_CANDIDATES,
-  })
-  const rank = (account: (typeof found)[number]) =>
-    (account.contacts.length ? 2 : 0) + (account.stage.kind === 'ABIERTA' && !account.archivedAt ? 1 : 0)
-  // `sort` is stable: equal ranks keep the database's order — newest touch, then id.
-  const [best] = found
-    .filter(account => !organizationId || !account.organizationId || account.organizationId === organizationId)
-    .sort((a, b) => rank(b) - rank(a))
-  return best ? { id: best.id, organizationId: best.organizationId } : null
-}
-
-type Person = { name: string; email: string | null; phoneE164: string | null }
-
-/** What incorporating a person would write: fill in the contact that has half of them, a new contact, or nothing. */
-export type PersonGap = { update: string; data: { email: string } | { phoneE164: string } } | { create: Prisma.CrmContactCreateManyInput }
-
-/**
- * Ruling 57, asked to the database (ruling 65 b, Codex r3 R3-2): what the account still lacks of this person — never
- * read from a page of its contacts, so a person who is its 51st contact is not added again. The contact that already
- * has their phone and no email gets the email (WhatsApp's phone-only person gets the landing's), and the other way
- * around; otherwise a new contact with whatever is missing, primary only on an account that had none. A person with
- * neither email nor phone (a HubSpot contact with only a name) is nobody the CRM can find again: a contact of their own.
- * Reads only; null when nothing is missing.
- */
-export async function personGapTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<PersonGap | null> {
-  const has = (where: Prisma.CrmContactWhereInput) =>
-    tx.crmContact.findFirst({ where: { accountId, ...where }, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
-  const { email, phoneE164 } = person
-  const missingEmail = !!email && !(await has({ email }))
-  const missingPhone = !!phoneE164 && !(await has({ phoneE164 }))
-  if ((email || phoneE164) && !missingEmail && !missingPhone) return null
-  if (missingEmail && !missingPhone && phoneE164) {
-    const half = await has({ phoneE164, email: null })
-    if (half) return { update: half.id, data: { email: email! } }
-  }
-  if (missingPhone && !missingEmail && email) {
-    const half = await has({ email, phoneE164: null })
-    if (half) return { update: half.id, data: { phoneE164: phoneE164! } }
-  }
-  const isPrimary = !(await has({}))
-  return {
-    create: { accountId, name: person.name, email: missingEmail ? email : null, phoneE164: missingPhone ? phoneE164 : null, isPrimary },
-  }
-}
-
-/** Writes what `personGapTx` found missing. */
-export async function writePersonGapTx(tx: Prisma.TransactionClient, gap: PersonGap): Promise<void> {
-  if ('update' in gap) await tx.crmContact.update({ where: { id: gap.update }, data: gap.data, select: { id: true } })
-  else await tx.crmContact.create({ data: gap.create, select: { id: true } })
-}
-
-/**
- * THE incorporation of a person into an account (ruling 65 b), the one every writer uses — landing, backfill, MCP and the
- * HubSpot import: the account that takes someone keeps their email and phone, or nothing would find it by them later,
- * and never a second contact with the same email or phone. The caller holds the account's row lock (or just created
- * it). True when it wrote.
- */
-export async function addPersonTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<boolean> {
-  const gap = await personGapTx(tx, accountId, person)
-  if (gap) await writePersonGapTx(tx, gap)
-  return gap !== null
-}
-
 async function applyTx(
   tx: Prisma.TransactionClient,
   entry: { id: string; externalKey: string; receivedAt: Date },
@@ -476,19 +534,14 @@ async function applyTx(
   if (previous) return repeatOf(previous)
 
   const customer = outcome?.yaEsCliente === true
-  const select = { id: true, organizationId: true } as const
-  // THE account of this entry: the landing one of this email; or — one CRM account per Organization (ruling 25) — the
-  // one its Organization already has, whatever its source; or — one per person (ruling 48) — the one of another source
-  // that already has this email or phone. Only when there is none is one created.
-  let account = await tx.crmAccount.findUnique({
-    where: { source_externalKey: { source: LANDING, externalKey: entry.externalKey } },
-    select,
-  })
-  if (!account && organizationId) account = await tx.crmAccount.findUnique({ where: { organizationId }, select })
-  if (!account) account = await accountOfPerson(tx, entry.externalKey, form.contact.phoneE164, organizationId)
-  let created = false
-  if (!account) {
-    const upserted = await upsertAccountBySource(tx, {
+  // THE account of this entry, by the resolver every writer shares (ruling 65 a): the one its Organization already holds,
+  // whatever its source (ruling 25); the landing one of this email; or — one per person (ruling 48) — the one of another
+  // source that already has this email or phone. Returned locked and checked again under the lock. Only when there is
+  // none is one created.
+  const { account, created } = await accountForTx(
+    tx,
+    { emails: [entry.externalKey], phones: form.contact.phoneE164 ? [form.contact.phoneE164] : [], organizationId },
+    {
       source: LANDING,
       externalKey: entry.externalKey,
       data: {
@@ -503,19 +556,8 @@ async function applyTx(
         lastTouchAt: entry.receivedAt,
       },
       contact: form.contact,
-    })
-    account = upserted.account
-    created = upserted.created
-    // ponytail: only if an Organization gets its CRM account between the lookup above and this insert (a «Ganar» in the
-    // same instant): the account is created unlinked — and announced, unless it is a customer's — and the sweep's link
-    // logs it.
-    if (created && organizationId && account.organizationId !== organizationId) {
-      logger.warn('[CRM] New landing account created unlinked: its Organization already has a CRM account', {
-        accountId: account.id,
-        organizationId,
-      })
-    }
-  }
+    },
+  )
   const accountId = account.id
   /**
    * The proof the entry was applied, and the gate against a run at the same time: the second insert of this `sourceKey`
@@ -539,10 +581,9 @@ async function applyTx(
     return { accountId, notice: customer ? null : 'NEW', ...(content ? { content } : {}) }
   }
 
-  // An account that was already there is locked BEFORE its event is written: two entries of the same email queue here
-  // instead of deadlocking between the event's foreign key and the touch (ruling 26). Everything below reads it under the
-  // lock.
-  await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${accountId} FOR UPDATE`
+  // An account that was already there was locked by the resolver BEFORE its event is written: two entries of the same
+  // person queue there instead of deadlocking between the event's foreign key and the touch (ruling 26). Everything
+  // below reads it under the lock.
   const state = await tx.crmAccount.findUniqueOrThrow({
     where: { id: accountId },
     select: {
