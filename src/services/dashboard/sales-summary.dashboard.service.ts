@@ -219,10 +219,12 @@ export type PaymentMethodFilter = 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER'
 
 /**
  * La comisión de UN cobro (alias `p` para Payment y `tc` para su TransactionCost, 1:1): su costo (cargo + cuota fija) si lo tiene; si no,
- * la que trae el propio `Payment` (Codex r4 H1: el cobro de Stripe de pedidos en línea y las ligas no tienen costo, y su comisión de Avoqado
- * vive en `feeAmount`; el de terminal sin costo todavía trae 0). Las devoluciones la traen negativa: la comisión devuelta resta.
+ * y sólo si lo procesó Avoqado (`fundsFlow = AVOQADO_PROCESSED`), la que trae el propio `Payment`: el cobro de Stripe de pedidos en línea
+ * y las ligas no tienen costo y su comisión de Avoqado vive en `feeAmount` (Codex r4 H1); su devolución copia el `fundsFlow` y la trae
+ * negativa. El resto sin costo publica 0 como siempre: el importador de SoftRestaurant y las semillas demo calculan un `feeAmount` para
+ * cualquier método, efectivo incluido, que no es una comisión cobrada (Codex r5). El de terminal sin costo todavía trae 0.
  */
-const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NULL THEN COALESCE(p."feeAmount", 0) ELSE COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) END`
+const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN p."fundsFlow" = 'AVOQADO_PROCESSED' THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
 
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
 
@@ -2123,8 +2125,13 @@ async function calculateTimePeriodMetrics(
   if (allPeriods.length > 0) {
     periodsToProcess = allPeriods
   } else {
-    const nativePeriods = isFiltered ? paymentMetrics.map(p => p.period) : orderMetrics.map(o => o.period)
-    const seen = new Set(nativePeriods.map(p => String(Number(p))))
+    // Codex r5 (H1): también los periodos que sólo traen cobros, devoluciones o comisión (una devolución otro día sin pedidos nuevos):
+    // antes la barra se descartaba y la gráfica no sumaba la cabecera. Por clave, en orden de tiempo.
+    const porClave = new Map<string, Date | number>()
+    for (const filas of [isFiltered ? [] : orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics])
+      for (const f of filas) if (!porClave.has(String(Number(f.period)))) porClave.set(String(Number(f.period)), f.period)
+    const nativePeriods = [...porClave.entries()].sort(([a], [b]) => Number(a) - Number(b)).map(([, period]) => period)
+    const seen = new Set(porClave.keys())
     const legacyOnly: Array<Date | number> = []
     for (const key of legacyPeriodMap.keys()) {
       if (!seen.has(key)) legacyOnly.push(new Date(Number(key))) // epoch-ms key → Date for formatPeriod

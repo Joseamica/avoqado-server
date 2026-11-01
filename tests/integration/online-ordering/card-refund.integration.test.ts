@@ -340,13 +340,56 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(ledger.transaction).toBeNull()
     const saldoDespues = await getAvailableBalance(venueId!)
     expect(saldoDespues.availableNow).toBeCloseTo(saldoAntes.availableNow, 2)
-    expect(saldoDespues.pendingSettlement).toBeCloseTo(saldoAntes.pendingSettlement - 250, 2)
+    // Codex r4 H1: el cobro estaba en «Pendiente» neto de su comisión ($247.10) y la devolución resta lo mismo: se anulan.
+    expect(saldoDespues.pendingSettlement).toBeCloseTo(saldoAntes.pendingSettlement - 247.1, 2)
     // …y la que Stripe devolvió con el reembolso total la regresa a donde estaba.
     expect(await comisiones()).toEqual(comisionAntes)
     expect(ledger.idempotencyKey).toBe(`oocr_${r.cardRefundId}`)
     const row = await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })
     expect(row).toMatchObject({ status: 'RECORDED', feeRefundedCents: 290, refundPaymentId: ledger.id })
     expect(logged('ONLINE_ORDER_CARD_REFUNDED', r.cardRefundId)).toBe(1)
+  })
+
+  it('Codex r5: un día con sólo la devolución (sin pedidos nuevos) sale en las barras con su devolución y la comisión que regresó', async () => {
+    const { orderId } = await capturedOrder()
+    await pedir(orderId)
+    const [ledger] = await refundsOf(orderId)
+    const otroDia = new Date(Date.now() + 3 * 86_400_000)
+    await prisma.payment.update({ where: { id: ledger.id }, data: { createdAt: otroDia } })
+    const rango = {
+      startDate: new Date(otroDia.getTime() - 6 * 3_600_000).toISOString(),
+      endDate: new Date(otroDia.getTime() + 6 * 3_600_000).toISOString(),
+    }
+    const resumen = (await getSalesSummary(venueId!, { ...rango, reportType: 'summary' })).summary
+    const porDia = (await getSalesSummary(venueId!, { ...rango, reportType: 'days' })).byPeriod ?? []
+    const suma = (k: 'platformFees' | 'refunds') => Number(porDia.reduce((t, p) => t + Number(p.metrics?.[k] ?? 0), 0).toFixed(2))
+    expect(resumen.platformFees).toBeCloseTo(-2.9, 2)
+    expect(suma('platformFees')).toBe(-2.9)
+    expect(resumen.refunds).toBeCloseTo(250, 2)
+    expect(suma('refunds')).toBe(250)
+  })
+
+  it('Codex r5 (deuda 5): un cobro sin costo que NO procesó Avoqado (importado de SoftRestaurant, demo) no publica su feeAmount como comisión', async () => {
+    const { orderId } = await capturedOrder()
+    const antes = await comisiones()
+    // Como lo escribe el importador de SoftRestaurant y las semillas demo: comisión calculada para cualquier método y sin `fundsFlow`.
+    await prisma.payment.create({
+      data: {
+        venueId: venueId!,
+        orderId,
+        amount: new Prisma.Decimal(250),
+        tipAmount: new Prisma.Decimal(0),
+        feePercentage: new Prisma.Decimal(0.025),
+        feeAmount: new Prisma.Decimal(6.25),
+        netAmount: new Prisma.Decimal(243.75),
+        method: 'CASH',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        splitType: 'FULLPAYMENT',
+        source: 'POS',
+      },
+    })
+    expect(await comisiones()).toEqual(antes)
   })
 
   it('parcial dos veces hasta el total: Σ feeAmount de los REFUND = −comisión del cobro; la tercera → 400 sin Stripe', async () => {
