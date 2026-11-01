@@ -173,13 +173,13 @@ export interface VenueMenuUsagePage {
 
 export const MENU_NO_DISPONIBLE_MESSAGE = 'Ese menú no existe, está apagado o no es para aparatos.'
 
-/** El orden de Mesas (`listMenus` del POS): el default primero, luego `displayOrder`, nombre e id. */
-const ORDEN_DE_MESAS: Prisma.MenuOrderByWithRelationInput[] = [
-  { isDefault: 'desc' },
-  { displayOrder: 'asc' },
-  { name: 'asc' },
-  { id: 'asc' },
-]
+/**
+ * El orden de Mesas (`listMenus` del POS): el default primero, luego `displayOrder`, nombre e id. Las consultas paginadas
+ * escriben el `id` final a la vista (`[...ORDEN_DE_MESAS_SIN_ID, { id: 'asc' }]`): así lo exige
+ * tests/unit/services/pagination-stability.guard.test.ts, que no lee dentro de constantes.
+ */
+const ORDEN_DE_MESAS_SIN_ID: Prisma.MenuOrderByWithRelationInput[] = [{ isDefault: 'desc' }, { displayOrder: 'asc' }, { name: 'asc' }]
+const ORDEN_DE_MESAS: Prisma.MenuOrderByWithRelationInput[] = [...ORDEN_DE_MESAS_SIN_ID, { id: 'asc' }]
 
 /** Un menú que un aparato puede mostrar: del negocio, encendido y marcado «Aparatos». */
 const menuParaAparatos = (venueId: string): Prisma.MenuWhereInput => ({ venueId, active: true, appliesToDevices: true })
@@ -331,7 +331,7 @@ export async function listDeviceMenuOptions(
       where,
       // Todas las categorías del menú, también las apagadas: el aparato las pinta (Ruling 15).
       select: { id: true, name: true, appliesToOnline: true, _count: { select: { categories: true } } },
-      orderBy: ORDEN_DE_MESAS,
+      orderBy: [...ORDEN_DE_MESAS_SIN_ID, { id: 'asc' }],
       skip: p.skip,
       take: p.pageSize,
     }),
@@ -356,7 +356,7 @@ export async function listVenueMenuUsage(venueId: string, page: number): Promise
     prisma.menu.findMany({
       where,
       select: { id: true, name: true, active: true, appliesToDevices: true, appliesToOnline: true },
-      orderBy: ORDEN_DE_MESAS,
+      orderBy: [...ORDEN_DE_MESAS_SIN_ID, { id: 'asc' }],
       skip: p.skip,
       take: p.pageSize,
     }),
