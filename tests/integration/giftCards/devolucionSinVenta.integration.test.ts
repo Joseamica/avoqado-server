@@ -25,7 +25,7 @@ import {
 jest.setTimeout(60000)
 
 const TEXTO_409 =
-  'En un negocio que vende tarjetas de regalo, la devolución se hace desde su venta, para que el saldo de una tarjeta nunca se devuelva en efectivo.'
+  'En un negocio con tarjetas de regalo o saldo a favor, la devolución se hace desde su venta, para que ese saldo nunca se devuelva en efectivo.'
 
 describe('Task 3 · la devolución sin venta en negocios con tarjetas', () => {
   const negocios: string[] = []

@@ -941,7 +941,7 @@ export async function prepararSobreDeSaldoAFavorEnTx(tx: Tx, p: { venueId: strin
     select: { firstName: true, lastName: true, phone: true },
   })
   if (!cliente) {
-    throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'No encontramos a esa clienta en este negocio. Elígela otra vez.', 400)
+    throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'No encontramos a ese cliente en este negocio. Elígelo otra vez.', 400)
   }
   const [vivo] = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT g.id FROM "GiftCard" g
@@ -959,15 +959,20 @@ export async function prepararSobreDeSaldoAFavorEnTx(tx: Tx, p: { venueId: strin
   }
 }
 
-/** Sin mínimo de $100 (eso es para vender); sí el tope por sobre, contando lo que sus canjes aún pueden regresar. No se parte. */
+/**
+ * Sin mínimo de $100 (eso es para vender); sí el tope por sobre, contando lo que sus canjes aún pueden regresar. No se parte. El texto
+ * es el del spec §4 («pasaría de $10,000. Devuelve {sobrante} de otra forma o elige a otra persona.»).
+ */
 function rechazarSiPasaDelTope(total: Prisma.Decimal, reversibles: Prisma.Decimal, nombre: string): void {
   if (!total.greaterThan(MAXIMO_POR_SOBRE)) return
   const sobrante = total.minus(MAXIMO_POR_SOBRE)
+  const tope = formatoPesos(MAXIMO_POR_SOBRE).replace(/\.00$/, '')
+  const salida = `Devuelve ${formatoPesos(sobrante)} de otra forma o elige a otra persona.`
   throw new GiftCardError(
     'STORE_CREDIT_OVER_CAP',
     reversibles.isZero()
-      ? `Con este saldo a favor la tarjeta de ${nombre} pasaría de ${formatoPesos(MAXIMO_POR_SOBRE)}, el máximo por tarjeta: sobran ${formatoPesos(sobrante)}.`
-      : `Con este saldo a favor la tarjeta de ${nombre} podría pasar de ${formatoPesos(MAXIMO_POR_SOBRE)}, el máximo por tarjeta: ${formatoPesos(reversibles)} de sus compras todavía pueden regresar a su saldo con un reembolso. Sobran ${formatoPesos(sobrante)}.`,
+      ? `El saldo a favor de ${nombre} pasaría de ${tope}. ${salida}`
+      : `El saldo a favor de ${nombre} podría pasar de ${tope}: ${formatoPesos(reversibles)} de sus compras todavía pueden regresar a su saldo con un reembolso. ${salida}`,
     422,
     { sobrante: sobrante.toNumber() },
   )
@@ -1136,6 +1141,13 @@ export async function abonarSaldoAFavorEnTx(
 const telefonoEnmascarado = (telefono: string | null) =>
   enmascararDestino({ deliveryChannel: 'WHATSAPP', recipientPhone: telefono, recipientEmail: null })
 
+/** Una regla, un texto: la libreta y la vista previa del MCP (`change_store_credit_phone`) dicen lo mismo (S10, minor 11). */
+export const MENSAJE_TELEFONO_NO_PERMITIDO = 'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».'
+export const mensajeTelefonoDesactualizado = (actualLast4: string | null): string =>
+  actualLast4
+    ? `El teléfono de este saldo ya cambió: ahora termina en ${actualLast4}. Revísalo y vuelve a intentarlo.`
+    : 'El teléfono de este saldo ya cambió. Revísalo y vuelve a intentarlo.'
+
 /**
  * El teléfono con que se GASTA un sobre de saldo a favor (spec 2026-10-30 §5.2, TARJETAS 30-oct; tarea S8a). Sólo un gerente
  * (`giftCards:manage`, lo exige la ruta) y nunca manda la página ni el código: serían un código al portador. No es «Cambiar destino»
@@ -1165,11 +1177,7 @@ export async function cambiarTelefonoDeSaldoAFavorEnTx(
   const [card] = await lockGiftCardsForUpdate(tx, [p.giftCardId])
   if (!card || card.venueId !== p.venueId || (card.status !== 'ACTIVE' && card.status !== 'BLOCKED')) throw noEncontrada()
   if (!(await esSobreDeSaldoAFavor(tx, card.id))) {
-    throw new GiftCardError(
-      'STORE_CREDIT_PHONE_NOT_ALLOWED',
-      'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».',
-      409,
-    )
+    throw new GiftCardError('STORE_CREDIT_PHONE_NOT_ALLOWED', MENSAJE_TELEFONO_NO_PERMITIDO, 409)
   }
   const viejo = telefonoDeTarjeta(card.recipientPhone)
   const phoneLast4 = nuevo.slice(-4)
@@ -1177,14 +1185,7 @@ export async function cambiarTelefonoDeSaldoAFavorEnTx(
   if (viejo === nuevo) return { phoneLast4 }
   const actualLast4 = viejo?.slice(-4) ?? null
   if (p.expectedPhoneLast4 !== undefined && p.expectedPhoneLast4 !== actualLast4) {
-    throw new GiftCardError(
-      'STORE_CREDIT_PHONE_OUTDATED',
-      actualLast4
-        ? `El teléfono de este saldo ya cambió: ahora termina en ${actualLast4}. Revísalo y vuelve a intentarlo.`
-        : 'El teléfono de este saldo ya cambió. Revísalo y vuelve a intentarlo.',
-      409,
-      { phoneLast4: actualLast4 },
-    )
+    throw new GiftCardError('STORE_CREDIT_PHONE_OUTDATED', mensajeTelefonoDesactualizado(actualLast4), 409, { phoneLast4: actualLast4 })
   }
 
   const r = await tx.giftCard.updateMany({ where: { id: card.id, venueId: p.venueId }, data: { recipientPhone: nuevo } })

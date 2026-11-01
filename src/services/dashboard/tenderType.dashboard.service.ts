@@ -305,7 +305,7 @@ export async function updateTenderType(
   // Saldo a favor (spec 2026-10-30 §5.3; S8b): el destino de las devoluciones a saldo, con su propio texto (no el de tarjetas).
   if (esMedioDeSaldoAFavor(existing.systemKind)) {
     throw new BadRequestError(
-      'El tipo de pago «Saldo a favor» lo administra Avoqado: no se puede editar ni apagar. Sólo lo usan las devoluciones que se abonan al saldo de una clienta.',
+      'El tipo de pago «Saldo a favor» lo administra Avoqado: no se puede editar ni apagar. Sólo lo usan las devoluciones que se abonan al saldo de un cliente.',
       'STORE_CREDIT_TENDER_NOT_ALLOWED',
     )
   }
@@ -452,7 +452,7 @@ export async function resolveTenderForCharge(
   // Saldo a favor (S8b): el medio STORE_CREDIT sólo es el destino de una devolución; la clienta gasta su saldo con «Pagar con saldo».
   if (esMedioDeSaldoAFavor(tender.systemKind)) {
     throw new BadRequestError(
-      'El saldo a favor no es un tipo de pago: la clienta lo gasta con «Pagar con saldo» y el código que le llega a su teléfono.',
+      'El saldo a favor no es un tipo de pago: el cliente lo gasta con «Pagar con saldo» y el código que le llega a su teléfono.',
       'STORE_CREDIT_TENDER_NOT_ALLOWED',
     )
   }

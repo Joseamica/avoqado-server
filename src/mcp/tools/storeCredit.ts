@@ -3,7 +3,7 @@ import { z } from 'zod'
 import AppError from '@/errors/AppError'
 import { updateVenueSettings } from '@/services/dashboard/venueSettings.dashboard.service'
 import { cambiarTelefonoDeSaldoAFavor } from '@/services/giftCards/giftCardCuenta.service'
-import { sobresDeSaldoAFavorEntre } from '@/services/giftCards/giftCardLedger'
+import { MENSAJE_TELEFONO_NO_PERMITIDO, mensajeTelefonoDesactualizado, sobresDeSaldoAFavorEntre } from '@/services/giftCards/giftCardLedger'
 import { telefonoDeTarjeta } from '@/services/giftCards/giftCardEntrega'
 import { storeCreditDeClientes } from '@/services/storeCredit/customerStoreCreditBalance'
 import { storeCreditAvailable } from '@/services/storeCredit/storeCreditTender'
@@ -17,9 +17,6 @@ const venueInput = z
   .string({ required_error: 'Indica la sucursal', invalid_type_error: 'La sucursal debe ser texto' })
   .min(1, 'Indica la sucursal')
   .describe('Identificador de una sucursal a la que tienes acceso')
-
-/** El mismo texto que el servicio de S8a (`giftCardLedger.ts`, STORE_CREDIT_PHONE_NOT_ALLOWED): un código, un mensaje. */
-const MENSAJE_PHONE_NOT_ALLOWED = 'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».'
 
 /** Saldo a favor (spec 2026-10-30): ajuste «Sólo saldo a favor», saldo de un cliente y teléfono con que se gasta. Sólo modo libre. */
 export function registerStoreCreditTools(server: McpServer, scope: McpScope): void {
@@ -135,20 +132,14 @@ export function registerStoreCreditTools(server: McpServer, scope: McpScope): vo
       })
       if (!card) return text({ ok: false, code: 'STORE_CREDIT_NOT_FOUND', error: 'No se encontró ese saldo a favor en esta sucursal.' })
       if (!(await sobresDeSaldoAFavorEntre(prisma, venueId, [card.id])).has(card.id)) {
-        return text({ ok: false, code: 'STORE_CREDIT_PHONE_NOT_ALLOWED', error: MENSAJE_PHONE_NOT_ALLOWED })
+        return text({ ok: false, code: 'STORE_CREDIT_PHONE_NOT_ALLOWED', error: MENSAJE_TELEFONO_NO_PERMITIDO })
       }
       // Mismas reglas que el servicio, para no emitir un token que de todos modos va a fallar al confirmar.
       const nuevo = telefonoDeTarjeta(phone.trim())
       if (!nuevo) return text({ ok: false, code: 'GIFT_CARD_PHONE_INVALID', error: 'El teléfono no es válido.' })
       const actual = telefonoDeTarjeta(card.recipientPhone)?.slice(-4) ?? null
       if (expectedPhoneLast4 !== undefined && expectedPhoneLast4 !== actual) {
-        return text({
-          ok: false,
-          code: 'STORE_CREDIT_PHONE_OUTDATED',
-          error: actual
-            ? `El teléfono de este saldo ya cambió: ahora termina en ${actual}. Revísalo y vuelve a intentarlo.`
-            : 'El teléfono de este saldo ya cambió. Revísalo y vuelve a intentarlo.',
-        })
+        return text({ ok: false, code: 'STORE_CREDIT_PHONE_OUTDATED', error: mensajeTelefonoDesactualizado(actual) })
       }
       if (telefonoDeTarjeta(card.recipientPhone) === nuevo) {
         return text({

@@ -263,7 +263,7 @@ async function hayUnSobreActivadoEn(db: Pick<typeof prisma, 'giftCard'>, venueId
 function devolucionSinVentaBloqueada(): GiftCardError {
   return new GiftCardError(
     'GIFT_CARD_UNLINKED_REFUND_BLOCKED',
-    'En un negocio que vende tarjetas de regalo, la devolución se hace desde su venta, para que el saldo de una tarjeta nunca se devuelva en efectivo.',
+    'En un negocio con tarjetas de regalo o saldo a favor, la devolución se hace desde su venta, para que ese saldo nunca se devuelva en efectivo.',
     409,
   )
 }

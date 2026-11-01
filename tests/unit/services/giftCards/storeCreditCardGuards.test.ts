@@ -209,7 +209,7 @@ describe('un sobre de saldo a favor no se reenvía, no cambia de destino ni ense
   it.each(Object.keys(acciones))('%s → STORE_CREDIT_CARD_NOT_ELIGIBLE, sin tocar nada ni enseñar nada', async accion => {
     const error: any = await acciones[accion]().catch(e => e)
     expect(error).toMatchObject(NO_ELEGIBLE)
-    expect(error.message).toMatch(/^Este saldo se usa con el teléfono de la clienta/)
+    expect(error.message).toMatch(/^Este saldo se usa con el teléfono del cliente/)
     // Nada se escribe: ni la entrega, ni el destino, ni el código, ni el renglón de la salida del secreto.
     expect(prismaMock.giftCard.update).not.toHaveBeenCalled()
     expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()

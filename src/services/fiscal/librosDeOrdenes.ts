@@ -19,6 +19,7 @@ import { abrirLibro, type Libro, type MovimientoDelLibro, type ParteDelLibro } f
 import { mezclaDeLaOrden, type CuentaDeMezcla, type RenglonDeMezcla } from './mezclaDeOrden'
 import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
 import { esDevolucionASaldoAFavor } from './fiscalScope'
+import { sqlNoEsDelMedioSaldoAFavor } from '../storeCredit/saldoAFavorEnLectores'
 
 export const PAGINA_DE_LIBROS = 1000
 /** Fallo del controlador (ronda 6): lo más que puede tener un periodo; con una de más, REPORT_TOO_LARGE («elige un rango más corto»). */
@@ -167,16 +168,17 @@ export const sqlDelConteo = (venueId: string, orderIds: string[], hasta: Date) =
  * `amount` (números), en su orden. Un campo de otro tipo llega como null, que el libro trata igual que hoy.
  * Saldo a favor (spec 2026-10-30 §5.3): `incluirOrigen` es el interruptor `includeInAccounting` del comercio del cobro de ORIGEN (la
  * raíz de la cadena o el cobro devuelto, `sqlOrigenEconomico`); la devolución a saldo no lleva comercio y su alcance es el de ese cobro.
- * No viaja en el processorData: el cargador lo usa sólo para esas devoluciones.
+ * No viaja en el processorData: el cargador lo usa sólo para esas devoluciones, así que sólo para ellas se calcula (minor 13 de S10: un
+ * CASE por el medio de la fila, el mismo predicado de las vistas de dinero; las demás reciben NULL sin la subconsulta).
  */
 export const sqlDeLasDevoluciones = (venueId: string, ids: string[]) => Prisma.sql`
   SELECT p.id,
-    (SELECT coalesce(mfc."includeInAccounting", efc."includeInAccounting")
+    CASE WHEN ${sqlNoEsDelMedioSaldoAFavor('p')} THEN NULL ELSE (SELECT coalesce(mfc."includeInAccounting", efc."includeInAccounting")
       FROM "Payment" origen
       LEFT JOIN "MerchantFiscalConfig" mfc ON mfc."merchantAccountId" = origen."merchantAccountId"
       LEFT JOIN "MerchantFiscalConfig" efc ON efc."ecommerceMerchantId" = origen."ecommerceMerchantId"
       WHERE origen.id = COALESCE(p."processorData" ->> 'rootPaymentId', p."processorData" ->> 'originalPaymentId')
-        AND origen."venueId" = p."venueId") AS "incluirOrigen",
+        AND origen."venueId" = p."venueId") END AS "incluirOrigen",
     CASE WHEN jsonb_typeof(p."processorData" -> 'provenance') = 'string' THEN left(p."processorData" ->> 'provenance', 64) END AS provenance,
     CASE WHEN jsonb_typeof(p."processorData" -> 'originalMethod') = 'string' THEN left(p."processorData" ->> 'originalMethod', 64) END AS "originalMethod",
     p."processorData" -> 'fiscalByRateCents' AS "fiscalByRateCents",

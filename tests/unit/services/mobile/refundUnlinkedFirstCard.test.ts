@@ -71,7 +71,13 @@ describe('createRefund (móvil) — el candado «primer-sobre» de la devolució
   it('con un sobre ya activado se rechaza GIFT_CARD_UNLINKED_REFUND_BLOCKED y no se escribe nada', async () => {
     prismaMock.giftCard.findFirst.mockResolvedValue({ id: 'sobre-1' } as any)
 
-    await expect(devolver()).rejects.toMatchObject({ code: 'GIFT_CARD_UNLINKED_REFUND_BLOCKED', statusCode: 409 })
+    await expect(devolver()).rejects.toMatchObject({
+      code: 'GIFT_CARD_UNLINKED_REFUND_BLOCKED',
+      statusCode: 409,
+      // S10 (minor 3): también explica bien la causa en un negocio que sólo dio saldo a favor (no vende tarjetas).
+      message:
+        'En un negocio con tarjetas de regalo o saldo a favor, la devolución se hace desde su venta, para que ese saldo nunca se devuelva en efectivo.',
+    })
 
     expect(prismaMock.order.create).not.toHaveBeenCalled()
     expect(prismaMock.payment.create).not.toHaveBeenCalled()

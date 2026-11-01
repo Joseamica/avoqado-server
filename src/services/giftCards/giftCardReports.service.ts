@@ -699,7 +699,7 @@ function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string
 
 /** B4: el canje no lleva póliza de ingreso, pero el costo de su mercancía sí entra a la póliza de costo de ventas (`generateCogsPolicyForVenue`). */
 export const AVISO_PENDIENTES_CONTABLES =
-  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente. En una devolución a saldo a favor falta la devolución de la venta y el saldo que se le debe a la clienta.'
+  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente. En una devolución a saldo a favor falta la devolución de la venta y el saldo que se le debe al cliente.'
 
 /**
  * Los pagos que la contabilidad automática NO postea en la fase 1 (B4): la venta de tarjetas (y su cancelación) y el cobro

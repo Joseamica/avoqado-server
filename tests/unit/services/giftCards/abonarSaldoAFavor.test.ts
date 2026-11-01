@@ -257,7 +257,13 @@ describe('abonarSaldoAFavorEnTx', () => {
 
   it('si pasaría de 10000 lanza STORE_CREDIT_OVER_CAP con el sobrante y no parte el abono', async () => {
     base({ sobreDeSaldo: sobre({ balance: D(9800) }) })
-    await expect(abonar(500)).rejects.toMatchObject({ code: 'STORE_CREDIT_OVER_CAP', statusCode: 422, details: { sobrante: 300 } })
+    await expect(abonar(500)).rejects.toMatchObject({
+      code: 'STORE_CREDIT_OVER_CAP',
+      statusCode: 422,
+      details: { sobrante: 300 },
+      // El texto del spec §4, tal cual.
+      message: 'El saldo a favor de Ana López pasaría de $10,000. Devuelve $300.00 de otra forma o elige a otra persona.',
+    })
     expect(prismaMock.giftCard.updateMany).not.toHaveBeenCalled()
     expect(prismaMock.giftCardActivity.create).not.toHaveBeenCalled()
   })
@@ -272,7 +278,12 @@ describe('abonarSaldoAFavorEnTx', () => {
     base({ sobreDeSaldo: sobre({ balance: D(5000), initialAmount: D(10000) }) })
     prismaMock.giftCardActivity.groupBy.mockResolvedValue([{ type: 'REDEEM', _sum: { amount: D(5000) } }] as any)
 
-    await expect(abonar(5000)).rejects.toMatchObject({ code: 'STORE_CREDIT_OVER_CAP', details: { sobrante: 5000 } })
+    await expect(abonar(5000)).rejects.toMatchObject({
+      code: 'STORE_CREDIT_OVER_CAP',
+      details: { sobrante: 5000 },
+      message:
+        'El saldo a favor de Ana López podría pasar de $10,000: $5,000.00 de sus compras todavía pueden regresar a su saldo con un reembolso. Devuelve $5,000.00 de otra forma o elige a otra persona.',
+    })
     // La misma cuenta que el ajuste de gerente (giftCardLedger.ts, r1 F7): REDEEM − REDEEM_REVERSAL del sobre.
     expect(prismaMock.giftCardActivity.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({

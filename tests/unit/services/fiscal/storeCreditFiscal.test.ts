@@ -245,6 +245,10 @@ describe('estado de resultados con el cargador de libros real', () => {
     const sql = (tx.$queryRaw.mock.calls.map(c => c[0] as Prisma.Sql).find(s => s.sql.includes('WITH ORDINALITY')) as Prisma.Sql).sql
     expect(sql).toContain(`COALESCE(p."processorData" ->> 'rootPaymentId', p."processorData" ->> 'originalPaymentId')`)
     expect(sql).toContain('"MerchantFiscalConfig"')
+    // Minor 13 (S10): la subconsulta correlacionada sólo se calcula para las devoluciones a saldo a favor (CASE por el medio).
+    expect(sql).toMatch(
+      /CASE WHEN NOT EXISTS \(SELECT 1 FROM "VenueTenderType" sc_t [^)]*'STORE_CREDIT'\) THEN NULL ELSE \(SELECT coalesce\(mfc\."includeInAccounting"/,
+    )
     // Las demás devoluciones siguen con el interruptor de su propia fila.
     expect(vistos.find(m => m.id === 'p1')).not.toHaveProperty('incluirOrigen')
   })

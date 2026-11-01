@@ -121,7 +121,7 @@ const revelarNoPermitido = () =>
 const sobreDeSaldoNoElegible = () =>
   new GiftCardError(
     'STORE_CREDIT_CARD_NOT_ELIGIBLE',
-    'Este saldo se usa con el teléfono de la clienta: no se reenvía ni se enseña su código.',
+    'Este saldo se usa con el teléfono del cliente: no se reenvía ni se enseña su código.',
     409,
   )
 

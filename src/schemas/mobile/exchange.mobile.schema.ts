@@ -134,7 +134,7 @@ export const createExchangeSchema = z.object({
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['settlement', 'customerId'],
-          message: 'La clienta del saldo a favor sólo se indica al devolver con saldo a favor.',
+          message: 'El cliente del saldo a favor sólo se indica al devolver con saldo a favor.',
         })
       }
       if (cashFromNonCash !== undefined && (kind !== 'PAYOUT' || method !== 'CASH')) {
