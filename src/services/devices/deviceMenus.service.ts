@@ -5,15 +5,20 @@
  * `visiblesDe` es la cuenta PURA (sin Prisma) para que el panel cuente por aparato con la misma regla que las apps.
  */
 
-import type { TerminalType } from '@prisma/client'
+import type { Prisma, TerminalType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { logAction } from '../dashboard/activity-log.service'
 import { conDescendientes } from '../menus/categoryTree'
+import { appliesDeviceMenus } from './deviceMenusAppVersion'
 
 export const DEVICE_MENUS_CODE = 'DEVICE_MENUS'
 export const MAX_MENUS_POR_APARATO = 50
 export const POS_TERMINAL_TYPES: TerminalType[] = ['POS_ANDROID', 'POS_IOS', 'POS_DESKTOP']
+/** Tope del servidor para las dos listas de la página (aparatos y opciones), pida lo que pida el cliente. */
+export const DEVICE_MENUS_MAX_PAGE_SIZE = 100
 
 const MAX_ASIGNACIONES = 5000
 const MAX_CATEGORIAS = 2000
@@ -90,4 +95,276 @@ export async function resolveDeviceMenuFilter(venueId: string, terminalId: strin
     return TODO
   }
   return visiblesDe(menuIds, asignaciones, categorias)
+}
+
+// ── La página del DASHBOARD «Qué muestra cada aparato» ──────────────────────────────────────────────────────────────────────
+
+export interface DeviceMenusCounts {
+  categories: number
+  products: number
+}
+
+export interface DeviceMenusTerminalRow {
+  id: string
+  name: string
+  type: TerminalType
+  model: string | null
+  version: string | null
+  areaName: string | null
+  needsAppUpdate: boolean
+  /** Los menús elegidos, con su nombre; `[]` = «Todos los menús». */
+  menus: Array<{ id: string; name: string }>
+  /** Lo que pinta su cuadrícula: categorías visibles con algún producto activo, y esos productos. */
+  sees: DeviceMenusCounts
+}
+
+export interface DeviceMenusPage {
+  /** Lo que ve un aparato en «Todos los menús». */
+  everything: DeviceMenusCounts
+  terminals: DeviceMenusTerminalRow[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface DeviceMenuOption {
+  id: string
+  name: string
+  appliesToOnline: boolean
+  categoryCount: number
+}
+
+export interface DeviceMenuOptionsPage {
+  menus: DeviceMenuOption[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export const MENU_NO_DISPONIBLE_MESSAGE = 'Ese menú no existe, está apagado o no es para aparatos.'
+
+/** El orden de Mesas (`listMenus` del POS): el default primero, luego `displayOrder`, nombre e id. */
+const ORDEN_DE_MESAS: Prisma.MenuOrderByWithRelationInput[] = [
+  { isDefault: 'desc' },
+  { displayOrder: 'asc' },
+  { name: 'asc' },
+  { id: 'asc' },
+]
+
+/** Un menú que un aparato puede mostrar: del negocio, encendido y marcado «Aparatos». */
+const menuParaAparatos = (venueId: string): Prisma.MenuWhereInput => ({ venueId, active: true, appliesToDevices: true })
+
+const pagina = (page: number, pageSize: number) => {
+  const take = Math.min(Math.max(Math.trunc(pageSize) || 1, 1), DEVICE_MENUS_MAX_PAGE_SIZE)
+  const p = Math.max(Math.trunc(page) || 1, 1)
+  return { page: p, pageSize: take, skip: (p - 1) * take }
+}
+
+function leerAparatos(venueId: string, where: Prisma.TerminalWhereInput, skip: number, take: number) {
+  return prisma.terminal.findMany({
+    where,
+    select: {
+      id: true,
+      name: true,
+      type: true,
+      model: true,
+      version: true,
+      fulfillmentArea: { select: { name: true } },
+      // Una fila hacia un menú de otro negocio, apagado o sólo en línea no se enseña: la regla tampoco la usa.
+      menus: {
+        where: { menu: menuParaAparatos(venueId) },
+        select: { menu: { select: { id: true, name: true } } },
+        orderBy: ORDEN_DE_MESAS.map(o => ({ menu: o })),
+        take: MAX_MENUS_POR_APARATO,
+      },
+    },
+    orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    skip,
+    take,
+  })
+}
+type Aparato = Awaited<ReturnType<typeof leerAparatos>>[number]
+
+/** Un solo conteo de productos activos por categoría para toda la página: nada de consultas por aparato. */
+function contarProductosPorCategoria(venueId: string) {
+  return prisma.product.groupBy({ by: ['categoryId'], where: { venueId, active: true, deletedAt: null }, _count: true })
+}
+
+function leerMenusParaAparatos(venueId: string, menuIds: string[]) {
+  return prisma.menu.findMany({
+    where: { id: { in: menuIds }, ...menuParaAparatos(venueId) },
+    select: { id: true, name: true },
+    orderBy: ORDEN_DE_MESAS,
+    take: MAX_MENUS_POR_APARATO,
+  })
+}
+
+/** Arma las filas con la MISMA regla que entrega `/settings` (`visiblesDe`), sumando en memoria. */
+async function armarFilas(
+  venueId: string,
+  aparatos: Aparato[],
+): Promise<{ everything: DeviceMenusCounts; filas: DeviceMenusTerminalRow[] }> {
+  const menuIds = [...new Set(aparatos.flatMap(a => a.menus.map(m => m.menu.id)))]
+  const [porCategoria, categorias, asignaciones, conPro] = await Promise.all([
+    contarProductosPorCategoria(venueId),
+    leerCategoriasActivasDelNegocio(venueId),
+    menuIds.length ? leerAsignaciones(menuIds) : Promise.resolve([]),
+    menuIds.length ? venueHasFeatureAccess(venueId, DEVICE_MENUS_CODE) : Promise.resolve(false),
+  ])
+
+  const productosDe = new Map(porCategoria.map(g => [g.categoryId, g._count]))
+  const contar = (ids: Iterable<string>): DeviceMenusCounts => {
+    let categories = 0
+    let products = 0
+    for (const id of ids) {
+      const n = productosDe.get(id) ?? 0
+      if (n > 0) {
+        categories++
+        products += n
+      }
+    }
+    return { categories, products }
+  }
+
+  // Pasado un tope, la regla le da «todo» al aparato (resolveDeviceMenuFilter): aquí también.
+  // ponytail: el tope de asignaciones se mide sobre la unión de la página, no por aparato; con más de 5000 asignaciones entre
+  // los menús elegidos de una página, un aparato con pocas también cuenta «todo». Contar por aparato si algún negocio llega.
+  const pasado = categorias.length > MAX_CATEGORIAS || asignaciones.length > MAX_ASIGNACIONES
+  if (pasado) {
+    logger.warn('[DeviceMenus] tope pasado al contar la página: los aparatos cuentan todo el catálogo', {
+      venueId,
+      asignaciones: asignaciones.length,
+      categorias: categorias.length,
+    })
+  }
+  // ponytail: con más de 2000 categorías activas, «Todos» cuenta también las apagadas (no se leyeron todas).
+  const everything = contar(categorias.length > MAX_CATEGORIAS ? productosDe.keys() : categorias.map(c => c.id))
+
+  const filas = aparatos.map(a => {
+    const menus = a.menus.map(m => m.menu)
+    let sees = everything
+    if (menus.length && conPro && !pasado) {
+      const { visibleCategoryIds } = visiblesDe(
+        menus.map(m => m.id),
+        asignaciones,
+        categorias,
+      )
+      const suyo = visibleCategoryIds ? contar(visibleCategoryIds) : null
+      // Si ninguna categoría visible tiene productos, el aparato muestra todo (Codex r1 #5).
+      if (suyo && suyo.categories > 0) sees = suyo
+    }
+    return {
+      id: a.id,
+      name: a.name,
+      type: a.type,
+      model: a.model,
+      version: a.version,
+      areaName: a.fulfillmentArea?.name ?? null,
+      needsAppUpdate: !appliesDeviceMenus(a.type, a.version),
+      menus,
+      sees,
+    }
+  })
+  return { everything, filas }
+}
+
+/** Los aparatos POS (no retirados) del negocio, por nombre, con lo que ve cada uno. */
+export async function listDeviceMenus(venueId: string, page: number, pageSize: number): Promise<DeviceMenusPage> {
+  const p = pagina(page, pageSize)
+  const where: Prisma.TerminalWhereInput = { venueId, type: { in: POS_TERMINAL_TYPES }, status: { not: 'RETIRED' } }
+  const [aparatos, total] = await Promise.all([leerAparatos(venueId, where, p.skip, p.pageSize), prisma.terminal.count({ where })])
+  const { everything, filas } = await armarFilas(venueId, aparatos)
+  return { everything, terminals: filas, total, page: p.page, pageSize: p.pageSize }
+}
+
+/** Opciones del selector: los menús encendidos y para aparatos, en el orden de Mesas. No baja el catálogo. */
+export async function listDeviceMenuOptions(
+  venueId: string,
+  opts: { search?: string; page: number; pageSize: number },
+): Promise<DeviceMenuOptionsPage> {
+  const p = pagina(opts.page, opts.pageSize)
+  const nombre = opts.search?.trim()
+  const where: Prisma.MenuWhereInput = {
+    ...menuParaAparatos(venueId),
+    ...(nombre ? { name: { contains: nombre, mode: 'insensitive' } } : {}),
+  }
+  const [menus, total] = await Promise.all([
+    prisma.menu.findMany({
+      where,
+      // Sólo las categorías encendidas: es lo que el aparato puede pintar.
+      select: {
+        id: true,
+        name: true,
+        appliesToOnline: true,
+        _count: { select: { categories: { where: { category: { active: true } } } } },
+      },
+      orderBy: ORDEN_DE_MESAS,
+      skip: p.skip,
+      take: p.pageSize,
+    }),
+    prisma.menu.count({ where }),
+  ])
+  return {
+    menus: menus.map(m => ({ id: m.id, name: m.name, appliesToOnline: m.appliesToOnline, categoryCount: m._count.categories })),
+    total,
+    page: p.page,
+    pageSize: p.pageSize,
+  }
+}
+
+/**
+ * Guarda qué menús muestra un aparato POS. `[]` = «Todos los menús». Reemplaza la elección completa.
+ * 404 `TERMINAL_NOT_FOUND` si el aparato no es del negocio o no es POS_*; 400 `MENU_NO_DISPONIBLE` si algún menú no es del
+ * negocio, está apagado o no es para aparatos. El plan (Pro) lo revisa la ruta.
+ */
+export async function setTerminalMenus(
+  venueId: string,
+  terminalId: string,
+  menuIds: string[],
+  actorStaffId: string | null,
+): Promise<DeviceMenusTerminalRow> {
+  const ids = [...new Set(menuIds)]
+  if (ids.length > MAX_MENUS_POR_APARATO) {
+    throw new BadRequestError(`Un aparato puede mostrar hasta ${MAX_MENUS_POR_APARATO} menús.`, 'DEMASIADOS_MENUS')
+  }
+
+  const aparato = await prisma.terminal.findFirst({
+    where: { id: terminalId, venueId, type: { in: POS_TERMINAL_TYPES } },
+    select: { id: true, name: true },
+  })
+  if (!aparato) throw new NotFoundError('Ese aparato no existe en este negocio o no es un punto de venta.', 'TERMINAL_NOT_FOUND')
+
+  const despues = ids.length ? await leerMenusParaAparatos(venueId, ids) : []
+  if (despues.length !== ids.length) throw new BadRequestError(MENU_NO_DISPONIBLE_MESSAGE, 'MENU_NO_DISPONIBLE')
+
+  const antes = await prisma.$transaction(async tx => {
+    // Dos guardados del mismo aparato a la vez (dos pestañas) chocarían en la llave única: se forman en fila. NO KEY: no frena
+    // una venta del aparato que inserta una orden o un pago con llave foránea a él.
+    await tx.$executeRaw`SELECT 1 FROM "Terminal" WHERE "id" = ${terminalId} FOR NO KEY UPDATE`
+    const previas = await tx.terminalMenu.findMany({
+      where: { terminalId, menu: menuParaAparatos(venueId) },
+      select: { menu: { select: { id: true, name: true } } },
+      orderBy: ORDEN_DE_MESAS.map(o => ({ menu: o })),
+      take: MAX_MENUS_POR_APARATO,
+    })
+    // Todas las filas del aparato, también las que apuntan a menús apagados o de otro negocio: la elección se reemplaza entera.
+    await tx.terminalMenu.deleteMany({ where: { terminalId } })
+    if (ids.length) await tx.terminalMenu.createMany({ data: ids.map(menuId => ({ terminalId, menuId })) })
+    return previas.map(f => f.menu)
+  })
+
+  const mismos = antes.length === despues.length && antes.every(m => ids.includes(m.id))
+  if (!mismos) {
+    void logAction({
+      staffId: actorStaffId,
+      venueId,
+      action: 'TERMINAL_MENUS_UPDATED',
+      entity: 'Terminal',
+      entityId: terminalId,
+      data: { terminalName: aparato.name, antes, despues },
+    })
+  }
+
+  const { filas } = await armarFilas(venueId, await leerAparatos(venueId, { id: terminalId, venueId }, 0, 1))
+  return filas[0]
 }
