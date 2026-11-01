@@ -123,6 +123,13 @@ Multi-org: Staff → multiple orgs via `StaffOrganization` (junction, `OrgRole` 
 Permissions: Use `checkPermission('resource:action')`, NOT `authorizeRole` (legacy, ~7 routes remain). Deep dive:
 `docs/guides/PERMISSIONS_GUIDE.md`
 
+**CRM propio (equipo de ventas de Avoqado, spec 2026-10-30):** el vendedor entra como VIEWER del venue interno «Avoqado ·
+Equipo de ventas», que vive en su **propia organización vacía**, del mismo nombre. Las dos las crea `ensureCrmTeamVenue`
+(`src/services/crm/teamVenue.service.ts`) y las fija la fila `CrmTeam` (`key = 'default'`). Lo que excluye al equipo
+(búsquedas, clientes) lee `CrmTeam`, nunca el slug ni el nombre. No va en Prime ni en otra organización con negocios: sus
+miembros leen las pantallas de esa organización. `/api/v1/crm` está **fuera** del guardia del superadmin a propósito: sólo
+lo abren las llaves `crm:*` de `PlatformAccess`, releídas en cada petición (`requireCrm`).
+
 ## Commands
 
 ```bash

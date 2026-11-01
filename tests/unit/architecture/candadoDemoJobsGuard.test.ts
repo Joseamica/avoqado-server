@@ -22,6 +22,10 @@ const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
   'campaign-sender.job.ts': 'sólo manda lo que se publicó (bloqueado en el demo, capa 1) o encoló cumpleaños (sólo negocios ACTIVE)',
   'cfdiGlobal.job.ts': 'el correo de la factura pasa por cfdiEmail.enviar, que revisa el negocio de la factura (capa 2)',
   'cfdiReconcile.job.ts': 'el correo de la factura pasa por cfdiEmail.enviar, que revisa el negocio de la factura (capa 2)',
+  'crm-daily-digest.job.ts':
+    'sólo escribe al equipo de ventas de Avoqado (quien tiene crm:ver) sus propios pendientes del CRM; nunca a personas de un negocio',
+  'crm-sweep.job.ts':
+    'sólo avisa al equipo de ventas de Avoqado (quien tiene crm:editar) de un prospecto de la landing; nunca escribe a personas de un negocio',
   'customer-approval-outbox.job.ts': 'cada fila corre con conNegocio en customerApprovalOutbox.service',
   'documentRequests.job.ts': 'avisa al equipo de Avoqado (onboarding@ y daniel@), no a personas del negocio',
   'gcal-horizon-refresh.job.ts': 'Google Calendar; conectarlo está bloqueado en el demo (capa 1)',

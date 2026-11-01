@@ -81,4 +81,13 @@ export const DATABASE_JOB_SCHEDULES = {
   // R1/R2 de la campaña 3DS: altas «esperando al banco» sin nadie en la pantalla. Cada 10 min en los minutos 3, 13, 23…
   // (lejos del :00 y del reconciliador de planes, que corre en */10) y en el segundo :34, libre entre :32 y :35.
   altasAMedioPago: '34 3-59/10 * * * *',
+  // CRM propio (tarea 6): el barrido que repara la captura de la landing, liga, carga las altas viejas y llena el primer
+  // dinero. Cada 5 min en los minutos 2, 7, 12… (lejos de los */5 del :00, :05…) y en el segundo :30, libre entre el
+  // outbox de catálogo (:29) y su watchdog (:32). De los jobs de cada 5 o 10 min, en esos minutos sólo cae
+  // `cfdiReconcile`, y en el segundo :00.
+  crmSweep: '30 2-59/5 * * * *',
+  // CRM propio (tarea 7): el aviso diario de pendientes. Cada 15 min de 8 a 11 de lunes a viernes (CDMX); el servicio sólo
+  // trabaja de 8:30 a 11:00 — la primera vuelta manda y las demás retoman lo que quedó a medias. Segundo :33, libre entre
+  // el watchdog de catálogo (:32) y las altas a medio pago (:34, cada 10 min).
+  crmDailyDigest: '33 */15 8-11 * * 1-5',
 } as const
