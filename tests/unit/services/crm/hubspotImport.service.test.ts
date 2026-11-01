@@ -467,6 +467,39 @@ it('contactos_dentro_de_su_negocio_cuenta_solo_los_de_negocios_que_entran (T15 W
   expect(await previewHubspot(shared, sharedDeals)).toMatchObject({ negocios: 1, repetidos: 1, contactosDeNegocios: 2 })
 })
 
+it('contactos_dentro_de_su_negocio_anuncia_lo_que_se_escribe (T15 ronda 1)', async () => {
+  const count = async (contacts: string, deals: string) => {
+    const preview = await previewHubspot(contacts, deals)
+    await applyHubspot(admin, contacts, deals)
+    return { announced: preview.contactosDeNegocios, written: db.contacts.length }
+  }
+  // Two ids with the same email and phone in one deal: one row.
+  expect(
+    await count(
+      `${CONTACTS_HEADER}1,Ana,López,5512345601,ana@cafe.mx,Café Ana\n2,Ana,López,5512345601,ana@cafe.mx,Café Ana\n`,
+      `${NO_DEALS}9001,Café Ana,Calificado,1;2\n`,
+    ),
+  ).toEqual({ announced: 1, written: 1 })
+})
+
+it('contactos_dentro_de_su_negocio_cuenta_un_contacto_por_telefono_extra (T15 ronda 1)', async () => {
+  const contacts = 'Record ID,First Name,Last Name,Phone Number,Mobile Phone Number,Email\n1,Ana,López,5512345601,5598765432,ana@cafe.mx\n'
+  const deals = `${NO_DEALS}9001,Café Ana,Calificado,1\n`
+  const preview = await previewHubspot(contacts, deals)
+  await applyHubspot(admin, contacts, deals)
+  expect(db.contacts).toHaveLength(2)
+  expect(preview.contactosDeNegocios).toBe(db.contacts.length)
+})
+
+it('contactos_dentro_de_su_negocio_sin_correo_ni_telefono_en_dos_negocios_cuenta_dos (T15 ronda 1)', async () => {
+  const contacts = `${CONTACTS_HEADER}1,Ana,López,,,\n`
+  const deals = `${NO_DEALS}9001,Café Ana,Calificado,1\n9002,Café Ana 2,Calificado,1\n`
+  const preview = await previewHubspot(contacts, deals)
+  await applyHubspot(admin, contacts, deals)
+  expect(preview.contactosDeNegocios).toBe(db.contacts.length)
+  expect(db.contacts).toHaveLength(2)
+})
+
 it('contactos_dentro_de_su_negocio_es_cero_al_importar_otra_vez (T15 WARN-3)', async () => {
   await applyHubspot(admin, CONTACTS, DEALS)
   expect(await previewHubspot(CONTACTS, DEALS)).toMatchObject({ nuevos: 0, repetidos: 8, contactosDeNegocios: 0 })

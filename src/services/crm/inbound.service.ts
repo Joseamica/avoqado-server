@@ -290,8 +290,20 @@ export type PersonGap = { update: string; data: { email: string } | { phoneE164:
  * Reads only; null when nothing is missing.
  */
 export async function personGapTx(tx: Prisma.TransactionClient, accountId: string, person: Person): Promise<PersonGap | null> {
-  const has = (where: Prisma.CrmContactWhereInput) =>
-    tx.crmContact.findFirst({ where: { accountId, ...where }, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+  return personGapWith(
+    where =>
+      tx.crmContact.findFirst({ where: { accountId, ...where }, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+    accountId,
+    person,
+  )
+}
+
+/** The rule of `personGapTx`, apart from where the contacts are read: `has` answers «does the account already have a contact like this?». */
+export async function personGapWith(
+  has: (where: Prisma.CrmContactWhereInput) => Promise<{ id: string } | null>,
+  accountId: string,
+  person: Person,
+): Promise<PersonGap | null> {
   const { email, phoneE164 } = person
   const missingEmail = !!email && !(await has({ email }))
   const missingPhone = !!phoneE164 && !(await has({ phoneE164 }))

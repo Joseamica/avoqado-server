@@ -34,7 +34,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import type { CrmAccess } from './access.service'
 import { getInitialStage, listLostReasons, listStages } from './accounts.service'
-import { accountForTx, addPersonTx, cleanText, type UpsertBySourceInput } from './inbound.service'
+import { accountForTx, addPersonTx, cleanText, personGapWith, type UpsertBySourceInput } from './inbound.service'
 import { addEvent } from './timeline.service'
 
 const IMPORTACION = 'IMPORTACION'
@@ -245,6 +245,27 @@ function peopleOf(contact: ContactRow, isPrimary: boolean): ContactInput[] {
   ]
 }
 
+/**
+ * How many contact rows a deal's people leave in its new account, by the same rules `createTx` writes them with: the first
+ * person is born with the account, the rest go through `personGapWith` (never a repeat, a half contact is completed) —
+ * asked to this list instead of the database. The preview must announce what is written, not the ids it read.
+ */
+async function rowsWrittenFor(contacts: ContactInput[]): Promise<number> {
+  const [primary, ...others] = contacts
+  if (!primary) return 0
+  const rows = [{ id: '0', email: primary.email ?? null, phoneE164: primary.phoneE164 ?? null }]
+  const has = async (where: Record<string, unknown>) =>
+    rows.find(row => Object.entries(where).every(([field, value]) => row[field as 'email' | 'phoneE164'] === value)) ?? null
+  for (const contact of others) {
+    const person = { name: contact.name, email: contact.email ?? null, phoneE164: contact.phoneE164 ?? null }
+    const gap = await personGapWith(has, '', person)
+    if (!gap) continue
+    if ('update' in gap) Object.assign(rows.find(row => row.id === gap.update)!, gap.data)
+    else rows.push({ id: String(rows.length), email: gap.create.email ?? null, phoneE164: gap.create.phoneE164 ?? null })
+  }
+  return rows.length
+}
+
 /** What identifies a row's person: every email and every phone. An email has an «@» and an E.164 phone never does. */
 const identityOf = (contact: ContactRow) => [...contact.emails, ...contact.phones]
 
@@ -447,8 +468,6 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   }
   // Ruling 28: everything comes in with today's date.
   const now = new Date()
-  /** The distinct people inside the deals that come in: «repetido» deals write nothing, so their people are not counted. */
-  const insideDeals = new Set<string>()
 
   for (const deal of deals) {
     const externalKey = dealKey(deal.id)
@@ -501,7 +520,8 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       deal: { where, hubspotStage: stageText(deal.stage) },
     })
     claim(people, deal.name)
-    for (const person of people) insideDeals.add(person.id)
+    // «repetido» deals write nothing, so only the deals that come in count their contacts.
+    counts.contactosDeNegocios += await rowsWrittenFor(records[records.length - 1].contacts)
     counts.negocios++
   }
 
@@ -528,7 +548,6 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   }
 
   counts.nuevos = counts.negocios + counts.archivados
-  counts.contactosDeNegocios = insideDeals.size
   return { summary: summary(), records, unreadable: false }
 }
 
