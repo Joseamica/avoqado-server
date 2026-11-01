@@ -139,8 +139,10 @@ export interface GiftCardFigures {
    */
   storeCreditNet: number
   /**
-   * Cuántas filas cuentan en OTHER: cada devolución a saldo y cada fila con el medio de tarjetas cuya parte MAYOR es de saldo a favor.
-   * Un cobro mixto cuenta UNA sola vez, en su parte mayor (empate: la tarjeta vendida, `balanceCount`); los importes sí se reparten.
+   * Cuántas filas tienen una pata de saldo a favor (cuentan en OTHER): cada devolución a saldo y cada fila con el medio de tarjetas que
+   * canjeó o regresó algo a un sobre de saldo a favor. POR PATA (S10 r3, ruling): un cobro mixto cuenta aquí y también en
+   * `balanceCount`, como el desglose por medio de pago del mercado; así «importe ≠ 0 ⇒ conteo > 0» se cumple siempre. La suma de los
+   * conteos por método es de PATAS, no de cobros: el total de cobros es `transactionCount`.
    */
   storeCreditCount: number
 }
@@ -797,8 +799,7 @@ export async function computeGiftCardFigures(
     >`
       SELECT
         COALESCE(SUM(p.amount + p."tipAmount" - sf.monto) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND'), 0)::text AS amount,
-        (COUNT(*) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND' AND p.amount + p."tipAmount" > sf.monto
-          AND p.amount + p."tipAmount" - sf.monto >= sf.monto))::int AS count,
+        (COUNT(*) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND' AND p.amount + p."tipAmount" > sf.monto))::int AS count,
         COALESCE(SUM(ROUND(p."tipAmount" * (p.amount + p."tipAmount" - sf.monto) / NULLIF(p.amount + p."tipAmount", 0), 2))
           FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND'), 0)::text AS tips,
         COALESCE(SUM(ABS(p.amount + p."tipAmount") - sf.monto) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type = 'REFUND'), 0)::text AS reversals,
@@ -806,7 +807,7 @@ export async function computeGiftCardFigures(
           WHEN t."systemKind" = 'STORE_CREDIT' THEN p.amount + p."tipAmount"
           WHEN p.type = 'REFUND' THEN -sf.monto
           ELSE sf.monto END), 0)::text AS "storeCreditNet",
-        (COUNT(*) FILTER (WHERE t."systemKind" = 'STORE_CREDIT' OR sf.monto > ABS(p.amount + p."tipAmount") - sf.monto))::int AS "storeCreditCount"
+        (COUNT(*) FILTER (WHERE t."systemKind" = 'STORE_CREDIT' OR sf.monto > 0))::int AS "storeCreditCount"
       FROM "Payment" p
       JOIN "VenueTenderType" t ON t."venueId" = p."venueId" AND t.id = p."tenderTypeId"
       CROSS JOIN LATERAL (SELECT ${montoSaldoAFavorSql('p')} AS monto) sf
@@ -1366,8 +1367,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       }))
       // Saldo a favor (S8b): sus dos patas —la devolución a saldo y lo gastado de un sobre— son VENTA con su método (OTHER). El filtro
       // de arriba deja fuera todo medio de sistema; sin esto la barra no cuadraba con «Total de ventas» el día de la devolución.
-      // 🔴 Importe y conteo por separado (S10 r2, Codex r2 P2-b): un cobro mixto cuenta en su parte mayor, así que el saldo a favor
-      // puede tener importe y conteo 0 (lo gastado es la parte menor y no hubo abono en el periodo). Igual que la fila GIFT_CARD de abajo.
+      // Importe y conteo, cada uno por su lado (S10 r2 y r3): la fila sale si hubo alguna pata de saldo a favor (conteo, por pata) o
+      // si su neto no es 0; así la compuerta es correcta por sí misma aunque el conteo cambie de regla.
       if (tarjetas.storeCreditCount > 0 || tarjetas.storeCreditNet !== 0) {
         const otro = ventasPorMetodo.find(m => m.method === 'OTHER')
         if (otro) {
@@ -1378,7 +1379,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       salesByPaymentMethod = withPercentages([
         ...ventasPorMetodo,
         ...byPaymentMethod.filter(m => m.method === 'QR_LEGACY'),
-        ...(tarjetas.balanceCount > 0 || saldo !== 0
+        // S10 r3: sale con cualquier movimiento de tarjetas vendidas —conteo, bruto o reverso—, aunque el neto sea 0 (gastado y devuelto).
+        ...(tarjetas.balanceCount > 0 || tarjetas.balancePaid !== 0 || tarjetas.balanceReversals !== 0
           ? [{ method: 'GIFT_CARD', amount: saldo, count: tarjetas.balanceCount, percentage: 0 }]
           : []),
       ])
@@ -1712,9 +1714,10 @@ export function flattenSalesSummaryForExport(
     }
     // Tarjetas de regalo (Q100), igual que «Métodos de pago» del panel (B5/M2, `SalesSummary.tsx` `lineaDeSaldo`): los métodos son
     // DINERO; el saldo va aparte, BRUTO y sin porcentaje, y lo que regresó al saldo se dice en su propia fila. Sin sobres ni saldo
-    // en el rango no sale ninguna de las dos, con la misma condición que el panel.
+    // en el rango no sale ninguna de las dos. S10 r3 (Codex r3): la compuerta mira el bruto y el reverso, no el neto: gastado y devuelto
+    // completo deja el neto en 0 y los dos movimientos tienen que verse.
     const saldo = report.giftCardBalanceBreakdown
-    if (saldo && (saldo.count > 0 || (s.paidWithGiftCardBalance ?? 0) !== 0)) {
+    if (saldo && (saldo.count > 0 || saldo.amount !== 0 || saldo.refunds !== 0)) {
       rows.push({
         section: 'paymentMethods',
         label: 'Saldo de tarjeta de regalo',

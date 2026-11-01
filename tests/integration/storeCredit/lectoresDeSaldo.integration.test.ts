@@ -187,9 +187,9 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
     const inicio = new Date(Date.now() - 86_400_000)
     const fin = new Date(Date.now() + 86_400_000)
     const f = await computeGiftCardFigures(s.venueId, inicio, fin)
-    // Cada cobro cuenta UNA vez, en su parte mayor (empate: la tarjeta vendida). El cobro mixto ($300 de tarjeta, $200 de saldo a
-    // favor) cuenta en GIFT_CARD y no en OTHER; la devolución parcial cuenta en OTHER sólo si regresó mayormente al sobre de saldo.
-    const parcialEnOtro = 2 * parcialASaldoCents > 10000 ? 1 : 0
+    // S10 r3: POR PATA. El cobro mixto ($300 de tarjeta, $200 de saldo a favor) cuenta en GIFT_CARD Y en OTHER; la devolución a saldo
+    // cuenta en OTHER; la devolución parcial cuenta en OTHER si algo regresó al sobre de saldo (los reversos de tarjeta van aparte).
+    const parcialEnOtro = parcialASaldoCents > 0 ? 1 : 0
     expect(f).toMatchObject({
       balancePaid: 300,
       balanceCount: 1,
@@ -197,7 +197,7 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
       balanceReversals: (10000 - parcialASaldoCents) / 100,
       // −$200 de la devolución a saldo, +$200 del canje, − lo que regresó al sobre en la devolución parcial.
       storeCreditNet: -parcialASaldoCents / 100,
-      storeCreditCount: 1 + parcialEnOtro,
+      storeCreditCount: 2 + parcialEnOtro,
     })
 
     const r = await getSalesSummary(s.venueId, {
@@ -212,13 +212,14 @@ describe('S8b · los lectores del saldo a favor · Postgres real', () => {
     expect(r.byPaymentMethod?.find(m => m.method === 'OTHER')).toBeUndefined()
     // Ventas: las dos patas con su método, para que la barra cuadre con las ventas del periodo.
     const otro = r.salesByPaymentMethod?.find(m => m.method === 'OTHER')
-    expect(otro).toMatchObject({ amount: -parcialASaldoCents / 100, count: 1 + parcialEnOtro })
+    expect(otro).toMatchObject({ amount: -parcialASaldoCents / 100, count: 2 + parcialEnOtro })
     expect(r.salesByPaymentMethod?.find(m => m.method === 'GIFT_CARD')).toMatchObject({
       amount: r.summary.paidWithGiftCardBalance,
       count: 1,
     })
-    // La barra no infla los cobros: la venta en efectivo, el cobro mixto, la devolución a saldo y (si aplica) la parcial, una vez cada uno.
-    expect(r.salesByPaymentMethod?.reduce((n, m) => n + m.count, 0)).toBe(3 + parcialEnOtro)
+    // S10 r3: la suma de los conteos de la barra es de PATAS, no de cobros: la venta en efectivo (1), el cobro mixto en sus dos medios
+    // (2), la devolución a saldo (1) y, si algo regresó al sobre de saldo, la parcial (1). El total de COBROS es `transactionCount`.
+    expect(r.salesByPaymentMethod?.reduce((n, m) => n + m.count, 0)).toBe(4 + parcialEnOtro)
   })
 
   it('🔴 lista del contador: la devolución a saldo es un reverso de saldo, y la lista y el autoposteo dicen lo mismo', async () => {
@@ -277,12 +278,12 @@ describe('🔴 S10 r2 (familia B, Codex r2 P2-b): el saldo a favor es la parte M
 
     const inicio = new Date(Date.now() - 3_600_000)
     const fin = new Date(Date.now() + 3_600_000)
-    // La consulta ya lo separa bien: el conteo es de la parte mayor (la tarjeta vendida) y el importe del saldo a favor sí está.
+    // Por pata (S10 r3): el cobro cuenta en la tarjeta vendida y en el saldo a favor; cada importe con el suyo.
     expect(await computeGiftCardFigures(s2.venueId, inicio, fin)).toMatchObject({
       balancePaid: 300,
       balanceCount: 1,
       storeCreditNet: 200,
-      storeCreditCount: 0,
+      storeCreditCount: 1,
     })
     const r = await getSalesSummary(s2.venueId, {
       startDate: inicio.toISOString(),
@@ -290,10 +291,12 @@ describe('🔴 S10 r2 (familia B, Codex r2 P2-b): el saldo a favor es la parte M
       groupBy: 'paymentMethod',
       timezone: TZ,
     })
-    // El importe y el conteo van por separado: los $200 salen en OTHER aunque el cobro cuente en GIFT_CARD.
+    // Los $200 salen en OTHER con su pata; el cobro cuenta en los dos medios (la suma de conteos es de patas: 2 para 1 cobro).
     expect(r.salesByPaymentMethod?.find(m => m.method === 'GIFT_CARD')).toMatchObject({ amount: 300, count: 1 })
-    expect(r.salesByPaymentMethod?.find(m => m.method === 'OTHER')).toMatchObject({ amount: 200, count: 0 })
+    expect(r.salesByPaymentMethod?.find(m => m.method === 'OTHER')).toMatchObject({ amount: 200, count: 1 })
     expect(r.salesByPaymentMethod?.reduce((suma, m) => suma + m.amount, 0)).toBe(500)
-    expect(r.salesByPaymentMethod?.reduce((cobros, m) => cobros + m.count, 0)).toBe(1)
+    expect(r.salesByPaymentMethod?.reduce((patas, m) => patas + m.count, 0)).toBe(2)
+    // El total de COBROS no suma conteos por método: es su propia cuenta (sin la venta de la tarjeta, como las ventas brutas).
+    expect(r.summary.transactionCount).toBe(1)
   })
 })
