@@ -32,7 +32,12 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
-import { MENSAJE_CUENTA_DE_MESA, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import {
+  MENSAJE_CUENTA_DE_MESA,
+  assertOrderCancellableUnderLock,
+  avisarOrdenCancelada,
+  devolverCanjesDeVentaAnuladaEnTx,
+} from '../shared/orderCancelGuard'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -723,6 +728,8 @@ export async function updateOrder(
       // estar en camino.
       const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
       valesSoltados = await soltarValesAlCancelarLaVenta(client, { venueId, orderId })
+      // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+      await devolverCanjesDeVentaAnuladaEnTx(client, { venueId, orderId, staffId: opciones.staffId, camino: 'updateOrder' })
     }
     const updatedOrder = await escribir(client)
     // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.
@@ -796,6 +803,8 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
       // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
       const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
       valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
+      // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+      await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId, staffId: performedBy, camino: 'deleteOrder' })
       const cancelada = await tx.order.update({
         where: { id: orderId },
         // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.

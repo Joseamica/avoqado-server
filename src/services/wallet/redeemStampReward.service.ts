@@ -116,10 +116,16 @@ export async function canjearPremioEnTx(
       paymentStatus: true,
       paidAmount: true,
       originSystem: true,
+      status: true,
     },
   })
 
   if (!order) throw new NotFoundError('Orden no encontrada')
+  // 🔴 LEALTAD (hz:a8104ac8:D1, Codex r1 #2): anular una venta le devuelve al cliente su premio; repetir la creación de esa venta
+  // (misma `externalId`) no puede volver a quemarlo. Una venta anulada es final (founder 3-oct, «como Square y Toast»).
+  if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+    throw new BadRequestError('Esta venta está cancelada: el premio no se aplica.')
+  }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
