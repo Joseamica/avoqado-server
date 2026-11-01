@@ -7,6 +7,8 @@
  *   2. La función en los contratos de plan PRO y PREMIUM vivos (`addPlanFeatureToLivePlanContracts`): una publicación de
  *      plan congela su composición y una función nueva no llega sola a los contratos que ya existen.
  *
+ * También pone al día los contratos vivos con KITCHEN_DISPLAY y CUSTOMER_DISPLAY_PROMOS (sin fila `Feature`; ver CODIGOS_SIN_FILA).
+ *
  * Idempotente. Una fila `Feature` que ya existe NO se modifica (ni precio ni nombre). Si existe pero está APAGADA, se reporta y
  * se deja así —alguien pudo apagarla a propósito—: sólo `--reactivar` la enciende, y sólo toca `active`. Los contratos que ya
  * la tienen no se vuelven a tocar.
@@ -29,6 +31,13 @@
  * escribió nada (faltó confirmar) o falta volver a correrlo (ofertas por republicar o compras de plan en curso).
  */
 export const CODIGO = 'DEVICE_MENUS'
+/**
+ * D4 (31-oct): Pro desde antes y sin entrada en el catálogo hasta ahora; entran a la oferta de plan y a la puesta al día de los
+ * contratos vivos. SIN fila `Feature` nueva: su acceso lo decide el código (`venueHasFeatureAccess`), el tablero de precios sale
+ * del catálogo, y ninguna de las dos tuvo fila en producción por diseño (basePlan.service: «sin venta suelta ni fila Feature»).
+ */
+export const CODIGOS_SIN_FILA = ['KITCHEN_DISPLAY', 'CUSTOMER_DISPLAY_PROMOS'] as const
+const CODIGOS_DE_PLAN = [CODIGO, ...CODIGOS_SIN_FILA] as const
 
 export interface OpcionesDeSiembra {
   apply: boolean
@@ -103,13 +112,15 @@ export async function sembrarFuncionMenuDelAparato(
   )
 
   // Las negativas, ANTES de escribir nada: una NegativaDeSiembra significa «no se escribió nada». Se corre desde el árbol que ya
-  // trae la función (catálogo, planes Pro y Premium, lista de puesta al día); si no, la puesta al día revienta DESPUÉS de crear la fila.
-  if (!FEATURE_CATALOG.some(f => f.featureCode === CODIGO))
-    throw new NegativaDeSiembra(`${CODIGO} no está en el catálogo: corre esto desde el árbol que ya trae ${CODIGO} en FEATURE_CATALOG.`)
-  if (!(PLAN_CATCH_UP_CODES as readonly string[]).includes(CODIGO) || !elPlanConcede('PRO', CODIGO) || !elPlanConcede('PREMIUM', CODIGO))
-    throw new NegativaDeSiembra(
-      `${CODIGO} no es una función de plan en este árbol (lista de puesta al día y planes Pro y Premium): corre esto desde el árbol que ya la trae.`,
-    )
+  // trae las funciones (catálogo, planes Pro y Premium, lista de puesta al día); si no, la puesta al día revienta DESPUÉS de crear la fila.
+  for (const codigo of CODIGOS_DE_PLAN) {
+    if (!FEATURE_CATALOG.some(f => f.featureCode === codigo))
+      throw new NegativaDeSiembra(`${codigo} no está en el catálogo: corre esto desde el árbol que ya trae ${codigo} en FEATURE_CATALOG.`)
+    if (!(PLAN_CATCH_UP_CODES as readonly string[]).includes(codigo) || !elPlanConcede('PRO', codigo) || !elPlanConcede('PREMIUM', codigo))
+      throw new NegativaDeSiembra(
+        `${codigo} no es una función de plan en este árbol (lista de puesta al día y planes Pro y Premium): corre esto desde el árbol que ya la trae.`,
+      )
+  }
 
   // 1. La fila Feature. Una que ya existe nunca se modifica, salvo `active` y sólo con --reactivar.
   const existente = await prisma.feature.findUnique({ where: { code: CODIGO }, select: { active: true } })
@@ -131,9 +142,26 @@ export async function sembrarFuncionMenuDelAparato(
   log(`Feature ${CODIGO}: ${MENSAJE_FEATURE[feature](opciones.apply)}`)
   log(`Precio de lista: no se crea ninguno (${CODIGO} va incluida en Pro y Premium, no se vende suelta).`)
 
-  // 2. Los contratos de plan vivos (una publicación de plan congela su composición).
-  const contracts = opciones.apply ? await addPlanFeatureToLivePlanContracts(CODIGO) : null
-  const porRepublicar = contracts ? contracts.staleCampaigns : await staleCampaigns(CODIGO)
+  // 2. Los contratos de plan vivos (una publicación de plan congela su composición), un código tras otro.
+  type Puesta = Awaited<ReturnType<typeof addPlanFeatureToLivePlanContracts>>
+  let contracts = null as Puesta | null
+  let porRepublicar: Array<{ id: string; code: string }> = []
+  for (const codigo of CODIGOS_DE_PLAN) {
+    if (opciones.apply) {
+      const r = await addPlanFeatureToLivePlanContracts(codigo)
+      contracts = contracts
+        ? {
+            ...contracts,
+            contracts: contracts.contracts + r.contracts,
+            grants: contracts.grants + r.grants,
+            skippedContracts: [...contracts.skippedContracts, ...r.skippedContracts.map(x => ({ ...x, reason: `${codigo}: ${x.reason}` }))],
+            // las compras en curso son las mismas en cada corrida: se cuentan una vez
+          }
+        : { ...r, skippedContracts: r.skippedContracts.map(x => ({ ...x, reason: `${codigo}: ${x.reason}` })) }
+      porRepublicar.push(...r.staleCampaigns)
+    } else porRepublicar.push(...(await staleCampaigns(codigo)))
+  }
+  porRepublicar = [...new Map(porRepublicar.map(c => [c.id, c])).values()]
   if (contracts) {
     log(
       `Contratos de plan puestos al día: ${contracts.contracts} · accesos de periodo creados: ${contracts.grants} · saltados: ${contracts.skippedContracts.length}`,
@@ -150,7 +178,7 @@ export async function sembrarFuncionMenuDelAparato(
   }
   if (porRepublicar.length)
     log(
-      `Ofertas de plan sin ${CODIGO} (republícalas y vuelve a correr esto): ${porRepublicar.map(c => c.code).join(', ')}. ` +
+      `Ofertas de plan sin alguna de ${CODIGOS_DE_PLAN.join(', ')} (republícalas y vuelve a correr esto): ${porRepublicar.map(c => c.code).join(', ')}. ` +
         'Las listas L_PLAN_* con scripts/seed-plan-list-prices.ts --apply; una promoción, en superadmin.',
     )
 

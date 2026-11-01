@@ -38,6 +38,7 @@ import { elPlanConcede } from '@/services/access/basePlan.service'
 import { addPlanFeatureToLivePlanContracts, staleCampaigns } from '@/services/launchCampaigns/hybridPlanCatchUp'
 import {
   CODIGO,
+  CODIGOS_SIN_FILA,
   NegativaDeSiembra,
   codigoDeSalida,
   sembrarFuncionMenuDelAparato,
@@ -47,7 +48,8 @@ import {
 const db = prisma as any
 // El catálogo REAL por default: si alguien quita DEVICE_MENUS del catálogo, el camino feliz de abajo se niega.
 const CATALOGO_REAL = jest.requireActual('@/config/featureCatalog').FEATURE_CATALOG as ReadonlyArray<{ featureCode: string | null }>
-const CODIGOS_DE_PUESTA_AL_DIA = ['SERVICE_PAY', 'GIFT_CARDS', 'DEVICE_MENUS']
+const CODIGOS_DEL_SCRIPT = [CODIGO, ...CODIGOS_SIN_FILA]
+const CODIGOS_DE_PUESTA_AL_DIA = ['SERVICE_PAY', 'GIFT_CARDS', ...CODIGOS_DEL_SCRIPT]
 const BASE = 'avoqado_siembra_test'
 const URL_DE_PRUEBA = `postgresql://u:SECRETO@localhost:5432/${BASE}`
 const CONFIRMADO = { apply: true, confirmHost: 'localhost', confirmDb: BASE }
@@ -111,26 +113,37 @@ describe('las negativas salen ANTES de escribir («no se escribió NADA»)', () 
     nadaSeEscribio()
   })
 
-  it.each([
-    [
-      'el árbol desde el que corre no trae DEVICE_MENUS en el catálogo',
-      () => (mockEstado.catalogo = CATALOGO_REAL.filter(f => f.featureCode !== CODIGO)),
-      /no está en el catálogo/,
-    ],
-    [
-      'el árbol no la trae en la lista de puesta al día',
-      () => (mockEstado.codigosDePuestaAlDia = ['SERVICE_PAY', 'GIFT_CARDS']),
-      /no es una función de plan/,
-    ],
-    ['Premium no la concede', () => jest.mocked(elPlanConcede).mockImplementation(tier => tier !== 'PREMIUM'), /no es una función de plan/],
-    ['Pro no la concede', () => jest.mocked(elPlanConcede).mockImplementation(tier => tier !== 'PRO'), /no es una función de plan/],
-  ])('con --apply confirmado, si %s → NegativaDeSiembra y la fila Feature NO se escribe', async (_caso, preparar, mensaje) => {
-    preparar()
-    const error = await sembrarFuncionMenuDelAparato(CONFIRMADO, log).catch(e => e)
-    expect(error).toBeInstanceOf(NegativaDeSiembra)
-    expect(error.message).toMatch(mensaje)
-    expect(db.feature.findUnique).not.toHaveBeenCalled()
-    nadaSeEscribio()
+  describe.each(CODIGOS_DEL_SCRIPT)('%s', codigo => {
+    it.each([
+      [
+        'el árbol desde el que corre no la trae en el catálogo',
+        () => (mockEstado.catalogo = CATALOGO_REAL.filter(f => f.featureCode !== codigo)),
+        /no está en el catálogo/,
+      ],
+      [
+        'el árbol no la trae en la lista de puesta al día',
+        () => (mockEstado.codigosDePuestaAlDia = CODIGOS_DE_PUESTA_AL_DIA.filter(c => c !== codigo)),
+        /no es una función de plan/,
+      ],
+      [
+        'Premium no la concede',
+        () => jest.mocked(elPlanConcede).mockImplementation((tier, c) => !(tier === 'PREMIUM' && c === codigo)),
+        /no es una función de plan/,
+      ],
+      [
+        'Pro no la concede',
+        () => jest.mocked(elPlanConcede).mockImplementation((tier, c) => !(tier === 'PRO' && c === codigo)),
+        /no es una función de plan/,
+      ],
+    ])('con --apply confirmado, si %s → NegativaDeSiembra y NADA se escribe', async (_caso, preparar, mensaje) => {
+      preparar()
+      const error = await sembrarFuncionMenuDelAparato(CONFIRMADO, log).catch(e => e)
+      expect(error).toBeInstanceOf(NegativaDeSiembra)
+      expect(error.message).toMatch(mensaje)
+      expect(error.message).toContain(codigo)
+      expect(db.feature.findUnique).not.toHaveBeenCalled()
+      nadaSeEscribio()
+    })
   })
 })
 
@@ -142,7 +155,7 @@ describe('simulación (sin --apply): lee, reporta y NO escribe', () => {
     expect(lineas[0]).toContain(BASE)
     expect(lineas[0]).toContain('SIMULACIÓN')
     expect(lineas.join('\n')).not.toContain('SECRETO')
-    expect(staleCampaigns).toHaveBeenCalledWith(CODIGO)
+    for (const c of CODIGOS_DEL_SCRIPT) expect(staleCampaigns).toHaveBeenCalledWith(c)
     nadaSeEscribio()
   })
 
@@ -174,8 +187,10 @@ describe('--apply confirmado', () => {
     expect(create).not.toHaveProperty('stripeProductId')
     expect(create).not.toHaveProperty('stripePriceId')
     expect(db.feature.update).not.toHaveBeenCalled()
-    expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledTimes(1)
-    expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledWith(CODIGO)
+    expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledTimes(3)
+    for (const c of CODIGOS_DEL_SCRIPT) expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledWith(c)
+    // KITCHEN_DISPLAY y CUSTOMER_DISPLAY_PROMOS no llevan fila Feature: la única fila es la de DEVICE_MENUS.
+    expect(db.feature.findUnique).toHaveBeenCalledTimes(1)
     expect(lineas.join('\n')).not.toContain('SECRETO')
   })
 
@@ -185,7 +200,7 @@ describe('--apply confirmado', () => {
     expect(r.feature).toBe('EXISTS')
     expect(db.feature.upsert).not.toHaveBeenCalled()
     expect(db.feature.update).not.toHaveBeenCalled()
-    expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledWith(CODIGO)
+    for (const c of CODIGOS_DEL_SCRIPT) expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledWith(c)
   })
 
   it('🔴 una fila APAGADA no se reactiva en silencio: se reporta y se deja (los contratos se ponen al día igual)', async () => {
@@ -195,7 +210,7 @@ describe('--apply confirmado', () => {
     expect(db.feature.upsert).not.toHaveBeenCalled()
     expect(db.feature.update).not.toHaveBeenCalled()
     expect(lineas.find(l => l.includes('Feature'))).toMatch(/APAGADA.*--reactivar/)
-    expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledWith(CODIGO)
+    for (const c of CODIGOS_DEL_SCRIPT) expect(addPlanFeatureToLivePlanContracts).toHaveBeenCalledWith(c)
   })
 
   it('con --reactivar enciende la fila apagada tocando SÓLO `active` (ni precio ni nombre)', async () => {
@@ -225,7 +240,7 @@ describe('--apply confirmado', () => {
   })
 
   it('reporta lo que dejó la puesta al día de los contratos y las ofertas por republicar', async () => {
-    jest.mocked(addPlanFeatureToLivePlanContracts).mockResolvedValue({
+    jest.mocked(addPlanFeatureToLivePlanContracts).mockResolvedValueOnce({
       contracts: 2,
       grants: 3,
       skippedContracts: [{ contractId: 'k1', reason: 'SELECTION_BOUNDARY_FULL' }],
@@ -236,12 +251,12 @@ describe('--apply confirmado', () => {
     expect(r.contracts).toEqual({
       contracts: 2,
       grants: 3,
-      skippedContracts: [{ contractId: 'k1', reason: 'SELECTION_BOUNDARY_FULL' }],
+      skippedContracts: [{ contractId: 'k1', reason: `${CODIGO}: SELECTION_BOUNDARY_FULL` }],
       inFlightPurchases: [{ status: 'PENDING', purchases: 1 }],
     })
     expect(r.staleCampaigns).toEqual([{ id: 'c1', code: 'L_PLAN_PRO' }])
     expect(lineas.join('\n')).toContain('Contratos de plan puestos al día: 2 · accesos de periodo creados: 3 · saltados: 1')
-    expect(lineas.join('\n')).toContain('saltado k1: SELECTION_BOUNDARY_FULL')
+    expect(lineas.join('\n')).toContain('saltado k1: DEVICE_MENUS: SELECTION_BOUNDARY_FULL')
     expect(lineas.join('\n')).toContain('PENDING: 1')
     expect(lineas.join('\n')).toContain('L_PLAN_PRO')
     expect(staleCampaigns).not.toHaveBeenCalled() // con --apply las ofertas por republicar salen del resultado de la puesta al día
@@ -249,11 +264,11 @@ describe('--apply confirmado', () => {
 
   it('imprime el motivo de los primeros 20 contratos saltados y cuenta el resto (el código de salida 1 tiene que poder leerse)', async () => {
     const saltados = Array.from({ length: 25 }, (_, i) => ({ contractId: `k${i}`, reason: `MOTIVO_${i}` }))
-    jest.mocked(addPlanFeatureToLivePlanContracts).mockResolvedValue({ ...SIN_CONTRATOS, skippedContracts: saltados } as never)
+    jest.mocked(addPlanFeatureToLivePlanContracts).mockResolvedValueOnce({ ...SIN_CONTRATOS, skippedContracts: saltados } as never)
     const r = await sembrarFuncionMenuDelAparato(CONFIRMADO, log)
     expect(r.contracts?.skippedContracts).toHaveLength(25)
     expect(lineas.filter(l => l.startsWith('  saltado '))).toHaveLength(20)
-    expect(lineas.join('\n')).toContain('saltado k19: MOTIVO_19')
+    expect(lineas.join('\n')).toContain('saltado k19: DEVICE_MENUS: MOTIVO_19')
     expect(lineas.join('\n')).not.toContain('MOTIVO_20')
     expect(lineas.join('\n')).toContain('…y 5 más')
   })
