@@ -155,7 +155,7 @@ describe('limpieza de órdenes abandonadas', () => {
 
     const resultado = await new AbandonedOrdersCleanupJob({ lote: 1 }).cleanupNow()
 
-    expect(resultado).toEqual({ selected: 1, deleted: 1, kept: 0, failed: 0 })
+    expect(resultado).toEqual({ selected: 1, deleted: 1, cancelled: 0, kept: 0, failed: 0 })
     expect(await existe(siguiente)).toBe(false)
     expect(await existe(protegida)).toBe(true)
   })
@@ -185,7 +185,7 @@ describe('limpieza de órdenes abandonadas', () => {
     // La limpieza tuvo que esperar al cobro (si no esperó, la prueba no ejercitó la carrera).
     expect(Date.now() - inicio).toBeGreaterThanOrEqual(1000)
     // La eligió y la conservó la RELECTURA, no un error tragado.
-    expect(resultado).toEqual({ selected: 1, deleted: 0, kept: 1, failed: 0 })
+    expect(resultado).toEqual({ selected: 1, deleted: 0, cancelled: 0, kept: 1, failed: 0 })
     expect(await existe(id)).toBe(true)
     expect(await prisma.payment.count({ where: { orderId: id } })).toBe(1)
   })
@@ -207,7 +207,7 @@ describe('limpieza de órdenes abandonadas', () => {
     const resultado = await new AbandonedOrdersCleanupJob({ lote: 1 }).cleanupNow()
     await renglon
 
-    expect(resultado).toEqual({ selected: 1, deleted: 0, kept: 1, failed: 0 })
+    expect(resultado).toEqual({ selected: 1, deleted: 0, cancelled: 0, kept: 1, failed: 0 })
     expect(await existe(id)).toBe(true)
     expect(await prisma.orderItem.count({ where: { orderId: id } })).toBe(1)
   })

@@ -64,7 +64,8 @@ const order = () => ({
 })
 function db() {
   return {
-    $queryRaw: jest.fn(async () => [{ id: 'order' }]),
+    // hz:a8104ac8:D1: la búsqueda de canjes de lealtad (`"OrderDiscount"`) no encuentra ninguno en esta orden de prueba.
+    $queryRaw: jest.fn(async (q: { raw?: readonly string[] }) => (q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order' }])),
     order: {
       findUnique: jest.fn(async () => order()),
       findUniqueOrThrow: jest.fn(async () => order()),
