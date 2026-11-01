@@ -402,6 +402,18 @@ it('dos_telefonos_reconocidos_entran_los_dos (Codex exhaustiva #9)', async () =>
   expect(await previewHubspot(`${header}201,Ana,,5598765432,,\n`, NO_DEALS)).toMatchObject({ nuevos: 0, repetidos: 1 })
 })
 
+it('dos_correos_reconocidos_entran_los_dos (ruling 70, M6 de la re-revisión)', async () => {
+  const header = 'Record ID,First Name,Last Name,Email,Correo\n'
+  await applyHubspot(admin, `${header}101,Ana,López,ana@cafe.mx,Ana.Personal@Gmail.com\n`, NO_DEALS)
+
+  expect(contactsOf(accountOf('hubspot:contact:101')!.id)).toEqual([
+    expect.objectContaining({ email: 'ana@cafe.mx', phoneE164: null, isPrimary: true }),
+    expect.objectContaining({ email: 'ana.personal@gmail.com', phoneE164: null, isPrimary: false }),
+  ])
+  // Someone who writes from the second email is the same person: importing them again is «repetido».
+  expect(await previewHubspot(`${header}201,Ana,,,ana.personal@gmail.com\n`, NO_DEALS)).toMatchObject({ nuevos: 0, repetidos: 1 })
+})
+
 it('negocio_con_alguien_que_ya_esta_en_el_crm_es_repetido', async () => {
   // Ana filled the landing before HubSpot made her a deal (ruling 36: ruling 33 as written).
   db.accounts.push({ id: 'caccountlnd0000000000001', source: 'LANDING', externalKey: 'ana@cafe.mx', name: 'Café Ana', stageId: PROSPECTO })

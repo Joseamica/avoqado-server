@@ -208,7 +208,8 @@ interface ContactRow {
   company: string | null
   /** Every distinct valid phone of the row (ruling 65 d), canonical; the first one is the main one. */
   phones: string[]
-  email: string | null
+  /** Every distinct email of the recognized columns, in lowercase (ruling 70, M6); the first one is the main one. */
+  emails: string[]
 }
 
 type ContactInput = NonNullable<UpsertBySourceInput['contact']>
@@ -229,14 +230,23 @@ const contactKey = (id: string) => `hubspot:contact:${id}`
 
 const nameOf = (contact: ContactRow) => contact.person || contact.company || contact.phones[0] || ''
 
-/** A row's people: its main contact, then one for each of its other phones (the incorporation never repeats them). */
-const peopleOf = (contact: ContactRow, isPrimary: boolean): ContactInput[] => [
-  { name: nameOf(contact), phoneE164: contact.phones[0] ?? null, email: contact.email, isPrimary },
-  ...contact.phones.slice(1).map(phoneE164 => ({ name: nameOf(contact), phoneE164, email: contact.email, isPrimary: false })),
-]
+/**
+ * A row's people: its main contact (first email, first phone), then one for each of its other phones and emails — the
+ * incorporation never repeats what is already there, so each extra one lands once.
+ */
+function peopleOf(contact: ContactRow, isPrimary: boolean): ContactInput[] {
+  const name = nameOf(contact)
+  const [email = null, ...otherEmails] = contact.emails
+  const [phoneE164 = null, ...otherPhones] = contact.phones
+  return [
+    { name, phoneE164, email, isPrimary },
+    ...otherPhones.map(phone => ({ name, phoneE164: phone, email, isPrimary: false })),
+    ...otherEmails.map(other => ({ name, phoneE164, email: other, isPrimary: false })),
+  ]
+}
 
-/** What identifies a row's person: its email and every phone. An email has an «@» and an E.164 phone never does. */
-const identityOf = (contact: ContactRow) => [...(contact.email ? [contact.email] : []), ...contact.phones]
+/** What identifies a row's person: every email and every phone. An email has an «@» and an E.164 phone never does. */
+const identityOf = (contact: ContactRow) => [...contact.emails, ...contact.phones]
 
 function chunksOf<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = []
@@ -267,7 +277,7 @@ async function existingKeys(keys: string[]): Promise<Set<string>> {
  * writer stores emails in lowercase (the landing, «Nuevo prospecto», this import), so the exact match uses the index.
  */
 async function knownEmailsAndPhones(contacts: ContactRow[]): Promise<Map<string, string>> {
-  const emails = [...new Set(contacts.flatMap(contact => (contact.email ? [contact.email] : [])))]
+  const emails = [...new Set(contacts.flatMap(contact => contact.emails))]
   const phones = [...new Set(contacts.flatMap(contact => contact.phones))]
   // Each email or phone → ONE account that has it (the smallest id: the same answer on every run).
   const found = new Map<string, string>()
@@ -370,7 +380,9 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       if (canonicalPhoneE164(raw)) continue
       avisos.add(`Contactos, fila ${fila}: el teléfono «${raw}» no es válido; entra sin ${phones.length ? 'ese ' : ''}teléfono`)
     }
-    contacts.set(id, { id, person, company, phones, email: values.email?.[0]?.toLowerCase() ?? null })
+    // Every email of the recognized columns, like the phones (ruling 70, M6).
+    const emails = [...new Set((values.email ?? []).map(email => email.toLowerCase()))]
+    contacts.set(id, { id, person, company, phones, emails })
   }
 
   // Deals. Their contacts — named by ANY deal row, even one with an error — never get an account of their own: when the
