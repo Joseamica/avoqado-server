@@ -31,7 +31,7 @@ import prisma from '../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import { utcTs } from '../../utils/sqlDates'
 import { getInitialStage } from './accounts.service'
-import { notifyNewProspect } from './digest.service'
+import type { NoticeContent } from './digest.service'
 import {
   accountForTx,
   addPersonTx,
@@ -53,6 +53,8 @@ const CAUGHT_UP_LAG_MS = 10 * 60_000
 const ARCHIVE_AFTER_MS = 14 * DAY_MS
 /** Ruling 30b: of what the backfill creates, only a signup younger than this is announced. */
 const ANNOUNCE_WITHIN_MS = DAY_MS
+/** The source of the entry that keeps a backfilled account's notice (ruling 65 f): never a landing form. */
+const BACKFILL = 'CARGA_INICIAL'
 /** Ruling 49: a notice that did not reach everyone is tried this many times in all… */
 const NOTICE_MAX_ATTEMPTS = 5
 /** …and only within the entry's first 24 h: Resend's idempotency window, after which a key no longer stops a repeat. */
@@ -307,7 +309,8 @@ type SignupMark = {
  *
  * By the signup's age when it is loaded (rulings 30 and 30b): older than 14 days, archived — found by a search, out of
  * the pipeline and of the daily digest —; younger, open and «Sin dueño»; and only one younger than 24 h is announced
- * with «Nuevo prospecto»: today's signup whose entry was never saved, which nothing else announces.
+ * with «Nuevo prospecto»: today's signup whose entry was never saved, which nothing else announces. That notice is kept
+ * with the account, as an applied entry of its own (`CARGA_INICIAL`), so `resendPendingNotices` recovers it (ruling 65 f).
  *
  * Nothing is created for a signup whose person was deleted (the platform anonymizes and keeps the row, inactive: I-2) or
  * is gone, whose Organization already has its account (of any source) or no longer exists, or whose entry is still
@@ -383,7 +386,16 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
       phoneE164: phone ? canonicalPhoneE164(phone) : null,
     }
     try {
-      const accountId = await prisma.$transaction(async tx => {
+      const announce = age < ANNOUNCE_WITHIN_MS
+      const content: NoticeContent = {
+        name: organization.name,
+        giro: null,
+        ventasRango: null,
+        sucursales: null,
+        modulos: [],
+        qualificationAvailable: false,
+      }
+      const done = await prisma.$transaction(async tx => {
         // The resolver every writer shares (ruling 65 a): this Organization's account, the landing one of this email, or —
         // ruling 59, the family of ruling 48 — a person the CRM already has by email or phone (WhatsApp, HubSpot, by hand).
         // That ONE account keeps this email and phone and is linked to this Organization; nothing is announced.
@@ -415,12 +427,34 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
           actorStaffId: null,
           data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString(), archived },
         })
-        return account.id
+        if (!announce) return { accountId: account.id, entryId: null }
+        // Ruling 65 (f, Codex exhaustiva #12): its notice is kept with the account, in the same transaction — an applied
+        // entry with its ENTRY_APPLIED, as the landing leaves it — so `resendPendingNotices` recovers it, with the same
+        // email key and content, if the send fails or the process dies before it. Its 24 h count from the signup.
+        const entry = await tx.crmInboundEntry.create({
+          data: {
+            source: BACKFILL,
+            externalKey: email,
+            payload: { activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString() },
+            receivedAt: signup.createdAt,
+            appliedAt: new Date(),
+            accountId: account.id,
+          },
+          select: { id: true },
+        })
+        await addEvent(tx, {
+          accountId: account.id,
+          kind: 'ENTRY_APPLIED',
+          actorStaffId: null,
+          sourceKey: `entry:${entry.id}`,
+          data: { entryId: entry.id, signup: BACKFILL, created: true, noticeContent: { ...content } },
+        })
+        return { accountId: account.id, entryId: entry.id }
       })
-      if (!accountId) continue
+      if (!done) continue
       created++
-      // After the commit, and never throws: a notice that does not go out is logged, and its email key keeps it single.
-      if (age < ANNOUNCE_WITHIN_MS) await notifyNewProspect(accountId)
+      // After the commit, and never throws: how it went stays on its entry, and the sweep retries what did not go out.
+      if (done.entryId) await announceEntry(done.entryId, { accountId: done.accountId, notice: 'NEW', content })
     } catch (error) {
       if (firstFailed < 0) firstFailed = index
       logger.error('[CRM] An old landing signup could not get its CRM account; the next sweep retries it', {

@@ -909,10 +909,50 @@ describe('backfillFromOnboarding', () => {
       expect(account).not.toHaveProperty('ownerStaffId')
       expect(systemEvents('CREATED_FROM_SIGNUP').find(event => event.accountId === account?.id)?.data.archived).toBe(archived)
     }
-    // Only the signup of today is a new prospect: its entry was never saved, so this is its only notice.
+    // Only the signup of today is a new prospect: its entry was never saved, so this is its only notice — with the content
+    // its recoverable entry keeps (ruling 65 f).
     expect((notifyNewProspect as jest.Mock).mock.calls).toEqual(
-      signups.filter(({ announced }) => announced).map(({ email }) => [db.accounts.find(row => row.externalKey === email)?.id]),
+      signups
+        .filter(({ announced }) => announced)
+        .map(({ email }) => [
+          db.accounts.find(row => row.externalKey === email)?.id,
+          expect.objectContaining({ name: email, qualificationAvailable: false }),
+        ]),
     )
+  })
+
+  it('aviso_de_la_carga_inicial_se_recupera (Codex exhaustiva #12): a notice that did not go out is retried with its key', async () => {
+    seedOrganization()
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 2 * 60 * MINUTE) })
+    // Resend is down when the backfill creates today's account.
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(false)
+
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+    const [account] = db.accounts
+    const entry = db.entries.find(row => row.source === 'CARGA_INICIAL')
+    expect(entry).toMatchObject({
+      externalKey: EMAIL,
+      accountId: account.id,
+      appliedAt: expect.any(Date),
+      noticeSentAt: null,
+      noticeAttempts: 1,
+    })
+    expect(eventsOf('ENTRY_APPLIED')).toEqual([
+      expect.objectContaining({ accountId: account.id, sourceKey: `entry:${entry!.id}`, data: expect.objectContaining({ created: true }) }),
+    ])
+
+    // Resend is back: the sweep's retry sends the same notice, with the same content.
+    ;(notifyNewProspect as jest.Mock).mockResolvedValue(true)
+    await expect(resendPendingNotices()).resolves.toBe(1)
+    expect(notifyNewProspect).toHaveBeenLastCalledWith(account.id, expect.objectContaining({ name: 'Café Ana S.A.' }))
+    expect(entry!.noticeSentAt).toEqual(expect.any(Date))
+
+    // A restart walks the marks again: nothing is created and nothing is announced again.
+    resetSweepCursors()
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+    await expect(resendPendingNotices()).resolves.toBe(0)
+    expect(notifyNewProspect).toHaveBeenCalledTimes(2)
+    expect(db.accounts).toHaveLength(1)
   })
 
   it('backfill_reusa_la_ficha_de_la_persona (ruling 59): a signup whose person is already in the CRM by phone gets no second account', async () => {
