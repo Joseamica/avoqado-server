@@ -379,6 +379,7 @@ const prismaMock: any = {
   // `settingsEnvelope.test.ts` la llaman sin saberlo. Este mock es una LISTA FIJA: sin esta entrada revientan con «Cannot read
   // properties of undefined (reading 'findMany')» en vez de fallar por su aserción. Su default (`[]`) va más abajo.
   terminalMenu: createMockModel(),
+  terminalOrder: createMockModel(),
   tpvCommandQueue: createMockModel(),
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega
   fulfillmentArea: createMockModel(),
