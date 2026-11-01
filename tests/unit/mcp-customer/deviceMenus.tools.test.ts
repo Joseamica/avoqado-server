@@ -294,7 +294,8 @@ describe('set_menu_usage', () => {
     expect(mockUpdateMenu).not.toHaveBeenCalled()
     const r = await confirmar('set_menu_usage', { venueId: V1, menuId: M1, appliesToOnline: false })
     expect(r.ok).toBe(true)
-    expect(mockUpdateMenu).toHaveBeenCalledWith(V1, M1, { appliesToDevices: true, appliesToOnline: false })
+    // Con quien edita (Codex r3 #6): MENU_UPDATED del servicio ya no queda anónimo.
+    expect(mockUpdateMenu).toHaveBeenCalledWith(V1, M1, { appliesToDevices: true, appliesToOnline: false }, 'owner')
     expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'MENU_USAGE_UPDATED', entityId: M1 }))
   })
 

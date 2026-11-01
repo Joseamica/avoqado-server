@@ -198,6 +198,22 @@ describe('updateMenu — «¿Dónde se usa?»', () => {
       })
     })
 
+    it('lleva a quien editó (Codex r3 #6): el cambio de «¿Dónde se usa?» ya no queda anónimo', async () => {
+      await updateMenu(VENUE_ID, MENU_ID, { appliesToOnline: false }, 'staff-1')
+      expect(ultimoRegistro()).toMatchObject({ staffId: 'staff-1', action: 'MENU_UPDATED' })
+    })
+
+    it('también lleva a quien editó en la edición con categoryIds', async () => {
+      prismaMock.menu.findUniqueOrThrow.mockResolvedValue(menuGuardado())
+      await updateMenu(VENUE_ID, MENU_ID, { categoryIds: ['cat-1'] }, 'staff-1')
+      expect(ultimoRegistro()).toMatchObject({ staffId: 'staff-1', action: 'MENU_UPDATED' })
+    })
+
+    it('sin actor (quien llama no lo pasa) sigue registrando, sin staffId', async () => {
+      await updateMenu(VENUE_ID, MENU_ID, { name: 'Desayunos' })
+      expect(ultimoRegistro().staffId ?? null).toBeNull()
+    })
+
     it('sin cambio de casillas sólo registra el nombre, como antes', async () => {
       await updateMenu(VENUE_ID, MENU_ID, { name: 'Desayunos', appliesToDevices: true, appliesToOnline: true })
 

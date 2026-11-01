@@ -240,7 +240,7 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
             question: 'El menú o lo elegido cambió desde la vista previa. Pide la vista previa otra vez y confirma.',
           })
 
-        await updateMenu(venueId, menuId, { appliesToDevices: devices, appliesToOnline: online })
+        await updateMenu(venueId, menuId, { appliesToDevices: devices, appliesToOnline: online }, scope.staffId)
         await auditMcpWrite(scope, {
           action: 'MENU_USAGE_UPDATED',
           entity: 'Menu',

@@ -652,7 +652,8 @@ export async function getMenuById(venueId: string, menuId: string): Promise<Menu
   return menu
 }
 
-export async function updateMenu(venueId: string, menuId: string, data: UpdateMenuDto): Promise<Menu> {
+/** `actorStaffId`: quién edita, para que `MENU_UPDATED` (que trae el cambio de «¿Dónde se usa?») no quede anónimo. */
+export async function updateMenu(venueId: string, menuId: string, data: UpdateMenuDto, actorStaffId?: string | null): Promise<Menu> {
   const menu = await prisma.menu.findUnique({
     where: { id: menuId, venueId },
   })
@@ -747,6 +748,7 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
     if (cambioUnaCasilla) clearPublicMenuCache(venueId)
 
     logAction({
+      staffId: actorStaffId,
       venueId,
       action: 'MENU_UPDATED',
       entity: 'Menu',
@@ -777,7 +779,14 @@ export async function updateMenu(venueId: string, menuId: string, data: UpdateMe
   // Misma regla que arriba: sólo si cambió una casilla, y ya escrito el cambio.
   if (cambioUnaCasilla) clearPublicMenuCache(venueId)
 
-  logAction({ venueId, action: 'MENU_UPDATED', entity: 'Menu', entityId: updatedMenu.id, data: { name: updatedMenu.name, ...cambioDeUso } })
+  logAction({
+    staffId: actorStaffId,
+    venueId,
+    action: 'MENU_UPDATED',
+    entity: 'Menu',
+    entityId: updatedMenu.id,
+    data: { name: updatedMenu.name, ...cambioDeUso },
+  })
 
   return updatedMenu
 }
