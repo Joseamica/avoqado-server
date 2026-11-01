@@ -70,6 +70,16 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     return details.slice(desde, hasta === -1 ? undefined : hasta)
   }
 
+  it('🔴 los negocios demo (estado LIVE_DEMO) no entran a NINGUNA regla, se llamen como se llamen (1-nov)', () => {
+    // Los 6 demos de prospectos («cafe-tostado», «lunaria-boutique»…) no traen «demo» en el nombre ni en el enlace, y
+    // se recrean cada noche: «PROPINA NO CUADRA» sonaba ~12 veces al día por ellos. Se excluyen por su estado.
+    for (const sql of [counts, details]) {
+      const porNombre = sql.split("v.name NOT LIKE 'Live Demo%'").length - 1
+      expect(porNombre).toBeGreaterThan(0)
+      expect(sql.split(`v.status::text <> 'LIVE_DEMO'`).length - 1).toBe(porNombre)
+    }
+  })
+
   it('🔴 la propina sólo se juzga cuando la orden tiene al menos un cobro', () => {
     const propinaSql = regla('PROPINA NO CUADRA')
     // Un JOIN (no LEFT JOIN) contra el agregado de pagos: sin filas de Payment, la orden no entra.

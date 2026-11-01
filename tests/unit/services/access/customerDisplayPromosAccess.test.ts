@@ -62,9 +62,9 @@ describe('pantalla del cliente — promos en reposo: espejo de tiers (F0-A)', ()
     expect(elPlanConcede('PRO', CODIGO)).toBe(true)
   })
 
-  it('🔴 no está en FEATURE_CATALOG todavía', () => {
-    // Decisión del founder: sin catálogo ni fila Feature hasta F3; F3 voltea esta aserción.
-    expect(FEATURE_CATALOG.some(e => e.featureCode === CODIGO)).toBe(false)
+  it('🔴 está en FEATURE_CATALOG (D4, 31-oct): sin la entrada una oferta de plan nueva no la traía', () => {
+    // Antes: sin catálogo hasta F3. El founder lo cerró el 31-oct; la fila Feature sigue sin existir. Ver kitchenDisplayPlanCatalog.test.ts.
+    expect(FEATURE_CATALOG.some(e => e.featureCode === CODIGO)).toBe(true)
   })
 
   it('un negocio PRO la tiene', async () => {

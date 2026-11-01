@@ -4,6 +4,7 @@ import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type E
 import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
 import { ExchangeError } from '../exchanges/exchangeErrors'
 import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { candadoDeLaLlave, rechazarSiLaLlaveSeCerroEnTx } from './pagarDespuesLlave'
 import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -40,6 +41,7 @@ import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderPro
 import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
 import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
+import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -1143,7 +1145,10 @@ export async function buildOrderItemsData(
       const baseAjustadaCents = lineaAjustadaCents + Math.round(modifierTotal * 100) * item.quantity
       lineDiscount = calculateDiscountCents(appliedDiscount, baseAjustadaCents) / 100
     } else if (appliedDiscount) {
-      lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)
+      // «El centavo» (30-oct): también sin ajuste, el monto en centavos enteros como las apps ($21.35 al 10 %: 2.14, no 2.13);
+      // en pesos flotantes una venta sin red de tres renglones así quedaba PARCIAL. El mínimo de compra se sigue exigiendo.
+      calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
+      lineDiscount = calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100
     }
     const discountAmount = ajuste > 0 ? roundPesos(ajuste + lineDiscount) : lineDiscount
     itemDiscountTotal += discountAmount
@@ -1192,7 +1197,9 @@ export async function buildOrderItemsData(
     if (appliedDiscount) {
       validateDiscountScopeForItem(appliedDiscount, { productId: null, categoryId: null })
     }
-    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
+    // «El centavo» (30-oct): en centavos enteros como las apps; el mínimo de compra se sigue exigiendo.
+    if (appliedDiscount) calculateDiscountPesos(appliedDiscount, itemTotal)
+    const lineDiscount = appliedDiscount ? calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100 : 0
     itemDiscountTotal += lineDiscount
 
     return {
@@ -1459,14 +1466,14 @@ export async function crearVentaDeMostradorEnTx(
   // re-verificación: un reintento que llega mientras el primer intento sigue en vuelo espera aquí y sale con ESA orden,
   // nunca con un 409 por un precio que ya se aceptó. Así un 409 de abajo queda acreditado: no había venta con esta llave.
   if (externalId) {
-    await tx.$queryRaw(
-      Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:order-mobile-external:v1:${venueId}:${externalId}`}, 0))::text`,
-    )
+    await tx.$queryRaw(candadoDeLaLlave(venueId, externalId))
     const existente = await tx.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },
       include: createdOrderInclude,
     })
     if (existente) return { existente }
+    // D9: si el POS ya devolvió esta venta a «Carritos guardados» (cerró su llave), la cuenta no nace.
+    await rechazarSiLaLlaveSeCerroEnTx(tx, venueId, externalId)
   }
 
   // 🔴 buildOrderItemsData lanza 'At least one item is required' con lista
@@ -2281,6 +2288,8 @@ export async function updateOrderDetailsInTransaction(
   opciones: OpcionesDeDetalleDeCuenta = {},
 ) {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // Pedidos en línea fase 2: los comensales mueven los cargos automáticos; un pedido de tarjeta sin cobrar tiene un total fijo.
+  if (input.covers != null) await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const charges: AutomaticServiceChargeCapture = { createdIds: [], deletedIds: [], recalculatedIds: [] }
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
@@ -2398,6 +2407,8 @@ export async function applyOrderDiscountInTransaction(
   // 🔴 Candado de la orden (Plan3b) ANTES de leer: estado, subtotal, descuentos ya aplicados y la regla del catálogo
   // se leen bajo él, y la fila del descuento y los totales se escriben en la MISMA transacción.
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true, originSystem: true },
@@ -2442,8 +2453,11 @@ export async function applyOrderDiscountInTransaction(
   const rawAmount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
   // R6 (founder, 2-oct): el tope del catálogo vale al aplicar y, viajando en el reparto, al recalcular. Hoy el móvil lo
   // ignoraba. Un tope que no es nulo cuenta, incluido 0 (Codex r1), igual que el cupón y el motor.
-  const tope = discount.type === 'PERCENTAGE' && discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
-  const amount = Math.min(rawAmount, tope ?? Infinity, remainingDiscountable)
+  // Deuda 30-oct: el tope topa el importe de CUALQUIER tipo, como `calculateDiscountPesos` y el motor (un fijo de $30 con tope
+  // de $10 descontaba $30). En el reparto sólo viaja el de un %: el recálculo re-deriva los % y conserva el importe de un fijo.
+  const topeDelCatalogo = discount.maxDiscountAmount != null ? Number(discount.maxDiscountAmount) : null
+  const tope = discount.type === 'PERCENTAGE' ? topeDelCatalogo : null
+  const amount = Math.min(rawAmount, topeDelCatalogo ?? Infinity, remainingDiscountable)
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
@@ -2504,6 +2518,8 @@ export async function removeOrderDiscountInTransaction(
   // 🔴 Candado de la orden (Plan3b) antes que el cliente y el premio (Order → Customer/StampReward): se releen la orden
   // y la fila del descuento bajo él, y devoluciones + borrado + totales van en la misma transacción.
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: { id: true, paymentStatus: true, paidAmount: true, discountAmount: true, originSystem: true },
@@ -2623,6 +2639,8 @@ export async function splitOrderItemsInTransaction(
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -2817,6 +2835,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
     if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
     throw error
   }
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -3002,6 +3022,9 @@ export async function mergeOrdersInTransaction(
     }
     throw error
   }
+  // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
@@ -3907,6 +3930,9 @@ export async function registrarAbonoEnTx(
     await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey, soloCobroCompletado: true })
   }
   if (ctx.rechazoDelPersonal) throw ctx.rechazoDelPersonal
+  // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se cobra en caja (efectivo, registro manual, saldo, ni la cola
+  // sin red: su 409 la deja REJECTED). Bajo el candado de la Order, antes de escribir nada. Pagar al recoger no cambia.
+  await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
 
   // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
   // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya

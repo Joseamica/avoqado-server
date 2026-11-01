@@ -71,8 +71,8 @@ beforeEach(() => {
 })
 
 describe('puesta al día de una función de plan en los contratos vivos', () => {
-  it('la lista cerrada trae las dos funciones que entraron tarde al plan', () => {
-    expect(PLAN_CATCH_UP_CODES).toEqual(['SERVICE_PAY', 'GIFT_CARDS'])
+  it('la lista cerrada trae las cinco funciones que entraron tarde al plan', () => {
+    expect(PLAN_CATCH_UP_CODES).toEqual(['SERVICE_PAY', 'GIFT_CARDS', 'DEVICE_MENUS', 'KITCHEN_DISPLAY', 'CUSTOMER_DISPLAY_PROMOS'])
   })
 
   it('GIFT_CARDS entra a la selección que leen las renovaciones, al acceso del periodo pagado y a la bitácora', async () => {

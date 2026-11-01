@@ -571,6 +571,8 @@ describe('🔴 ninguna llave foránea bloqueante queda sin atender', () => {
   const INALCANZABLES_EN_UN_DEMO: Record<string, string> = {
     AngelPayUserAccount: 'cuenta de cobro de AngelPay: activar cobros está cerrado en un demo',
     CapabilityGrant: 'funciones contratadas: plan y funciones sueltas cerrados en un demo (LIVE_DEMO no paga plan)',
+    CrmTeam:
+      'el equipo de ventas de Avoqado: ensureCrmTeamVenue lo crea una sola vez, en su propia organización interna (venue ACTIVE, nunca un demo); si una limpieza llegara a su venue, la llave RESTRICT la frena sin borrar nada',
     DocumentRequestVenueLink: 'solicitud de documentos (KYC): cerrada en un demo',
     HybridContract: 'facturación híbrida: cerrada en un demo, y sus tablas son inmutables a propósito',
     HybridPaymentPeriod: 'facturación híbrida: cerrada en un demo, y sus tablas son inmutables a propósito',

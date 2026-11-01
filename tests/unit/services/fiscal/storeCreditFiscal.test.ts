@@ -263,7 +263,8 @@ describe('la nota de crédito', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       payment: { create, update: jest.fn(), findFirst: jest.fn() },
-      venueTransaction: { create: jest.fn() },
+      // develop (pedidos fase 2): la devolución sólo lleva su movimiento si el cobro original tiene el suyo.
+      venueTransaction: { findUnique: jest.fn().mockResolvedValue({ id: 'cmviy09ma0009mywab26u6rlw' }), create: jest.fn() },
     }
     ;(prepararSobreDeSaldoAFavorEnTx as jest.Mock).mockResolvedValue({ venueId: 'v1', customerId: 'c1', sobre: null })
     const bloqueado = {

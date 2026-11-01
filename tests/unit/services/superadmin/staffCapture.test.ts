@@ -48,6 +48,10 @@ jest.mock('@/utils/prismaClient', () => {
     googleCalendarConnection: { deleteMany: jest.fn() },
     staffAssignment: { deleteMany: jest.fn() },
     venue: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
+    platformAccess: { updateMany: jest.fn() },
+    crmAccount: { updateManyAndReturn: jest.fn() },
+    crmActivity: { updateMany: jest.fn() },
+    crmTimelineEvent: { createMany: jest.fn() },
   }
   return {
     __esModule: true,
@@ -128,10 +132,16 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
         googleOAuthSession: mockPrisma.googleOAuthSession,
         googleCalendarConnection: mockPrisma.googleCalendarConnection,
         staffAssignment: mockPrisma.staffAssignment,
+        platformAccess: mockPrisma.platformAccess,
+        crmAccount: mockPrisma.crmAccount,
+        crmActivity: mockPrisma.crmActivity,
+        crmTimelineEvent: mockPrisma.crmTimelineEvent,
         $queryRaw: mockPrisma.$queryRaw,
       }),
     )
     ;(bcrypt.hash as jest.Mock).mockResolvedValue('hashed-pw')
+    // The person owns no open CRM account unless a test says so.
+    mockPrisma.crmAccount.updateManyAndReturn.mockResolvedValue([])
   })
 
   // ===========================================================================
@@ -337,6 +347,64 @@ describe('staff.superadmin.service — ActivityLog capture + performedBy actor',
     expect(provenanceQuery.text).toMatch(/EXISTS \(SELECT 1 FROM "InventoryWasteReport" WHERE "reportedByStaffId" = \$\d+\)/)
   })
 
+  // CRM (rulings 6 and 10): the keys die with the person, so whoever gets this email next starts with none.
+  it('correo_reciclado_no_hereda_llaves', async () => {
+    mockPrisma.$queryRaw.mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'Target@Example.com' }]).mockResolvedValueOnce([])
+    mockPrisma.staff.delete.mockResolvedValue({})
+
+    await deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)
+
+    // By the email as PlatformAccess stores it (lowercase) and by the Staff that claimed the row (it may hold an older one).
+    expect(mockPrisma.platformAccess.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ email: 'target@example.com' }, { staffId: TARGET_STAFF_ID }] },
+      data: { active: false },
+    })
+    expect(mockPrisma.platformAccess.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPrisma.staff.delete.mock.invocationCallOrder[0],
+    )
+  })
+
+  it('borrar_staff_revoca_llaves_y_suelta_negocios', async () => {
+    mockPrisma.$queryRaw
+      .mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }])
+      .mockResolvedValueOnce([{ hasProvenance: true }])
+    mockPrisma.crmAccount.updateManyAndReturn.mockResolvedValue([{ id: 'caccounta0000000000000001' }, { id: 'caccountb0000000000000001' }])
+    mockPrisma.staff.update.mockResolvedValue({})
+
+    await expect(deleteStaff(TARGET_STAFF_ID, ACTOR_ID, ACTOR_ID)).resolves.toEqual({ success: true, retainedForAudit: true })
+
+    expect(mockPrisma.platformAccess.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ email: 'target@example.com' }, { staffId: TARGET_STAFF_ID }] },
+      data: { active: false },
+    })
+    // Their open accounts go back to «Sin dueño», each with its OWNER_CHANGE event; won and lost ones keep their owner.
+    expect(mockPrisma.crmAccount.updateManyAndReturn).toHaveBeenCalledWith({
+      where: { ownerStaffId: TARGET_STAFF_ID, stage: { kind: 'ABIERTA' } },
+      data: { ownerStaffId: null },
+      select: { id: true },
+    })
+    // Ruling 12: their pending activities on those accounts are left without anyone in charge, like the accounts.
+    expect(mockPrisma.crmActivity.updateMany).toHaveBeenCalledWith({
+      where: { accountId: { in: ['caccounta0000000000000001', 'caccountb0000000000000001'] }, doneAt: null },
+      data: { assigneeStaffId: null },
+    })
+    expect(mockPrisma.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: ['caccounta0000000000000001', 'caccountb0000000000000001'].map(accountId => ({
+        accountId,
+        kind: 'OWNER_CHANGE',
+        actorStaffId: null,
+        data: { fromStaffId: TARGET_STAFF_ID, toStaffId: null, reason: 'STAFF_DELETED' },
+      })),
+    })
+    // CRM history is provenance: whoever owned, did or was given something there is anonymized, never hard-deleted.
+    const provenanceQuery = (mockPrisma.$queryRaw.mock.calls[1][0] as { text: string }).text
+    expect(provenanceQuery).toMatch(/EXISTS \(SELECT 1 FROM "CrmAccount" WHERE "ownerStaffId" = \$\d+\)/)
+    expect(provenanceQuery).toMatch(/EXISTS \(SELECT 1 FROM "CrmActivity" WHERE "assigneeStaffId" = \$\d+ OR "doneById" = \$\d+\)/)
+    expect(provenanceQuery).toMatch(/EXISTS \(SELECT 1 FROM "CrmTimelineEvent" WHERE "actorStaffId" = \$\d+\)/)
+    expect(provenanceQuery).toMatch(/EXISTS \(SELECT 1 FROM "PlatformAccess" WHERE "createdById" = \$\d+\)/)
+    expect(mockPrisma.staff.delete).not.toHaveBeenCalled()
+  })
+
   it('does not reach anonymization when retained credential revocation fails in the transaction', async () => {
     mockPrisma.$queryRaw
       .mockResolvedValueOnce([{ id: TARGET_STAFF_ID, email: 'target@example.com' }])
@@ -468,6 +536,7 @@ describe('Staff offboarding credential inventory drift', () => {
     ['GoogleOAuthSession', 'authUserId', 'googleOAuthSession.deleteMany'],
     ['GoogleOAuthSession', 'staffId', 'googleOAuthSession.deleteMany'],
     ['GoogleCalendarConnection', 'staffId', 'googleCalendarConnection.deleteMany'],
+    ['PlatformAccess', 'staffId', 'platformAccess.updateMany'],
   ])('keeps schema authority %s.%s in the transactional cleanup inventory', (model, actorField, cleanupCall) => {
     const modelSource = schema.match(new RegExp(`model ${model} \\{([\\s\\S]*?)\\n\\}`))?.[1]
     expect(modelSource).toBeDefined()

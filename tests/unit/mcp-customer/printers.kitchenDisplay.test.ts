@@ -14,6 +14,12 @@ const mockWriteScope = jest.fn()
 const mockListKds = jest.fn()
 const mockCountKds = jest.fn()
 const AVISO = 'La pantalla de cocina todavía no está lista para clientes.'
+let mockAbierta = false
+jest.mock('@/services/kds/kitchenDisplayRelease', () => ({
+  get PANTALLA_ABIERTA_A_CLIENTES() {
+    return mockAbierta
+  },
+}))
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -194,5 +200,44 @@ describe('list_print_stations routing summary', () => {
     expect(r.hasDefault).toBe(true)
     expect(r.unroutedCategories).toBe(0)
     expect(r.stations[0].id).toBe('s1')
+  })
+})
+
+describe('con la puerta abierta (founder, 1-nov)', () => {
+  let clienteAbierta: ReturnType<typeof registrar>
+  beforeEach(() => {
+    mockAbierta = true
+    clienteAbierta = registrar({ ...base, isSuperAdmin: false } as McpScope)
+  })
+  afterEach(() => {
+    mockAbierta = false
+  })
+
+  it('un dueño la PRENDE con confirm: escribe y audita, sin el aviso de «todavía no está lista»', async () => {
+    const r = parse(
+      await clienteAbierta('set_print_station_kitchen_display', { venueId: 'v1', stationId: 's1', enabled: true, confirm: true }),
+    )
+    expect(r.ok).toBe(true)
+    expect(r.aviso).toBeUndefined()
+    expect(mockSet).toHaveBeenCalledWith('v1', 's1', true, 's1')
+    expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'PRINT_STATION_KITCHEN_DISPLAY_SET' }))
+  })
+
+  it('sin Pro, el rechazo del servicio se explica y no escribe ni audita', async () => {
+    mockSet.mockRejectedValueOnce(
+      new ForbiddenError('La pantalla de cocina es del plan Pro. Mejora tu plan para prenderla.', 'KITCHEN_DISPLAY_REQUIRES_PRO'),
+    )
+    const r = parse(
+      await clienteAbierta('set_print_station_kitchen_display', { venueId: 'v1', stationId: 's1', enabled: true, confirm: true }),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain('plan Pro')
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('list_print_stations ya no avisa que no está lista', async () => {
+    mockList.mockResolvedValue([{ ...estacion, hasKitchenDisplay: true }])
+    const r = parse(await clienteAbierta('list_print_stations', { venueId: 'v1' }))
+    expect(r.pantallaDeCocina).toBeUndefined()
   })
 })

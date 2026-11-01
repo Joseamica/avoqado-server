@@ -20,8 +20,11 @@ import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
 import {
   createOnlineOrder,
+  fromQuoteSnapshot,
   getTrackingByToken,
   onlineOrderRequestHash,
+  toQuoteSnapshot,
+  writeOnlineOrderInTx,
   type CreateOnlineOrderOptions,
 } from '@/services/online-ordering/order.service'
 
@@ -110,6 +113,7 @@ beforeEach(() => {
   prismaMock.order.findUnique.mockResolvedValue(null)
   prismaMock.order.findFirst.mockResolvedValue(null)
   prismaMock.onlineOrder.count.mockResolvedValue(0)
+  prismaMock.onlineOrderCharge.count.mockResolvedValue(0) // borradores de tarjeta vigentes (fase 2)
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   prismaMock.order.create.mockResolvedValue({ id: 'ord1', orderNumber: 'WABCD' } as any)
   prismaMock.onlineOrder.create.mockImplementation(async (a: any) => ({ id: 'oo1', ...a.data }) as any)
@@ -215,6 +219,20 @@ describe('createOnlineOrder', () => {
   it('la misma llave de OTRO cliente es 409 IDEMPOTENCY_KEY_CONFLICT y no entrega el token (R8)', async () => {
     prismaMock.order.findUnique.mockResolvedValue(existing({ customerId: 'otro-cliente' }) as any)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+  })
+
+  it('Codex r2 #5: una llave que ya tiene borrador de TARJETA es 409 IDEMPOTENCY_KEY_CONFLICT (final) y no crea nada', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValueOnce({ id: 'ch1' } as any)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_CONFLICT',
+      final: true,
+    })
+    expect(prismaMock.onlineOrderCharge.findUnique).toHaveBeenCalledWith({
+      where: { venueId_idempotencyKey: { venueId: 'v1', idempotencyKey: KEY } },
+      select: { id: true },
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
   const PEDIDO_DISTINTO = {
@@ -390,6 +408,23 @@ describe('createOnlineOrder', () => {
     expect(where.order.customerPhone).toBe(PHONE)
   })
 
+  it('fase 2: el tope por teléfono suma los borradores de TARJETA vigentes (un vencido no cuenta)', async () => {
+    prismaMock.onlineOrderCharge.count.mockResolvedValueOnce(3)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'TOO_MANY_PENDING_ORDERS' })
+    expect(prismaMock.onlineOrderCharge.count).toHaveBeenCalledWith({
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW }, customerPhone: PHONE },
+    })
+  })
+
+  it('fase 2: el tope del negocio suma pedidos por aceptar y borradores de tarjeta vigentes', async () => {
+    prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(20)
+    prismaMock.onlineOrderCharge.count.mockResolvedValueOnce(0).mockResolvedValueOnce(10)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+    expect(prismaMock.onlineOrderCharge.count).toHaveBeenLastCalledWith({
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW } },
+    })
+  })
+
   it('el tope del negocio se repite dentro del candado: 409 ORDERING_PAUSED por saturación', async () => {
     prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(30)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
@@ -428,6 +463,7 @@ describe('createOnlineOrder', () => {
       },
       customer: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() }, // S3: el nombre se completa en la misma transacción
       idempotencyRequest: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() }, // Codex r3
+      onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) }, // Codex r2 #5 y topes
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
 
@@ -583,6 +619,7 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
       $executeRaw: jest.fn().mockResolvedValue(0),
       order: { findUnique: jest.fn().mockResolvedValue(null) },
       idempotencyRequest: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
+      onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null) }, // Codex r2 #5
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_CLOSED' })
@@ -938,5 +975,44 @@ describe('S3: el cliente que nace de un pedido conserva su nombre', () => {
     prismaMock.onlineOrder.count.mockResolvedValueOnce(3)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'TOO_MANY_PENDING_ORDERS' })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('el armado de la cuenta se comparte (fase 2: la tarjeta crea la cuenta al autorizarse)', () => {
+  it('writeOnlineOrderInTx arma la misma cuenta que createOnlineOrder', async () => {
+    await createOnlineOrder(input(), PUEDE_CREAR)
+    const order = (prismaMock.order.create.mock.calls[0][0] as any).data
+    const online = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+    prismaMock.order.create.mockClear()
+    prismaMock.onlineOrder.create.mockClear()
+
+    const r = await writeOnlineOrderInTx(prismaMock, {
+      venueId: 'v1',
+      externalId: `web:${KEY}`,
+      orderNumber: order.orderNumber,
+      quote: toQuoteSnapshot(QUOTE_OK as any),
+      customer: { name: 'María G.', phone: PHONE, email: null },
+      customerId: 'cust1',
+      note: null,
+      paymentMode: 'CARD_ONLINE',
+      trackingToken: online.trackingToken,
+      requestHash: online.requestHash,
+      acceptDeadlineAt: online.acceptDeadlineAt,
+      whatsappConsent: true,
+    })
+
+    expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1' })
+    // Codex r1 C1: la de tarjeta, además, nace cobro del momento (nunca fiado).
+    expect((prismaMock.order.create.mock.calls[0][0] as any).data).toEqual({ ...order, payLater: false })
+    expect((prismaMock.onlineOrder.create.mock.calls[0][0] as any).data).toEqual({ ...online, paymentMode: 'CARD_ONLINE' })
+  })
+
+  it('QuoteSnapshot es JSON y va y vuelve con los mismos valores (los Decimal como texto)', () => {
+    const q = { ...QUOTE_OK, subtotal: D('206.005'), lines: [{ ...QUOTE_OK.lines[0], unitPrice: D('93.0000001') }] }
+    const snap = toQuoteSnapshot(q as any)
+    expect(JSON.parse(JSON.stringify(snap))).toEqual(snap)
+    expect(snap.subtotal).toBe('206.005')
+    expect(snap.lines[0].unitPrice).toBe('93.0000001')
+    expect(fromQuoteSnapshot(snap)).toEqual({ subtotal: q.subtotal, total: q.total, lines: q.lines })
   })
 })

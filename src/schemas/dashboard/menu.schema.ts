@@ -86,6 +86,10 @@ export const CreateMenuSchema = z.object({
     availableUntil: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
     availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).optional(),
     categoryIds: z.array(existingId('El ID de la categoría no es válido')).optional(), // Categories to assign to menu
+    // «¿Dónde se usa?» (Menú del aparato). Sólo la forma: el true por default y la regla de «al menos una» (MENU_SIN_USO) son del
+    // servicio, porque al editar dependen de lo guardado.
+    appliesToDevices: z.boolean({ invalid_type_error: 'Aparatos debe ser verdadero o falso' }).optional(),
+    appliesToOnline: z.boolean({ invalid_type_error: 'Tienda en línea debe ser verdadero o falso' }).optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),

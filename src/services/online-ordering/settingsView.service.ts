@@ -1,4 +1,6 @@
 import { getAcceptingStatus, storeView } from './presence.service'
+import prisma from '@/utils/prismaClient'
+import { cardMerchantStatus } from './card/merchant'
 import { getSettings, storeRequirements } from './settings.service'
 
 /**
@@ -11,12 +13,18 @@ import { getSettings, storeRequirements } from './settings.service'
  */
 export async function settingsView(venueId: string, preloaded?: Awaited<ReturnType<typeof getSettings>>) {
   const settings = preloaded ?? (await getSettings(venueId))
-  const [state, requirements] = await Promise.all([getAcceptingStatus(venueId, new Date(), settings), storeRequirements(venueId)])
+  const [state, requirements, merchantStatus] = await Promise.all([
+    getAcceptingStatus(venueId, new Date(), settings),
+    storeRequirements(venueId),
+    cardMerchantStatus(prisma, venueId),
+  ])
   const { lastInboxPollAt, ...config } = settings
   return {
     ...config,
     lastInboxPollAt: lastInboxPollAt ? lastInboxPollAt.toISOString() : null,
     store: storeView(state),
     requirements,
+    // Fase 2: el switch y el estado de la cuenta Stripe (el panel explica por qué no se puede prender).
+    card: { enabled: !!settings.acceptsCardOnline, merchantStatus },
   }
 }

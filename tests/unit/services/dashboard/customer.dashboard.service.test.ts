@@ -1141,6 +1141,26 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
     expect(args.include.orderAssociations.where.order).toMatchObject({ status: { notIn: ['CANCELLED', 'DELETED'] } })
   })
 
+  // Codex r1 C1 (pedidos en línea fase 2): un pedido pagado con tarjeta en línea al que la TPV le ligó un cliente no es fiado.
+  it('🔴 las candidatas a liquidar excluyen pedidos en línea pagados con tarjeta', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    const args = prismaMock.customer.findFirst.mock.calls[0][0] as any
+    expect(args.include.orderAssociations.where.order.NOT).toEqual([{ onlineOrder: { is: { paymentMode: 'CARD_ONLINE' } } }])
+  })
+
+  it('🔴 bajo el candado, un pedido de tarjeta en línea → 409 ONLINE_ORDER_PAID_BY_CARD sin escribir nada', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce({ paymentMode: 'CARD_ONLINE', charge: { id: 'ch-1', status: 'AUTHORIZED' } })
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+
+    await expect(settleCustomerBalance('venue-1', CLIENTE)).rejects.toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_PAID_BY_CARD' })
+
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
   it('🔴 una cuenta que se canceló después de leer al cliente no se liquida: ni pago ni PAID', async () => {
     // El CAS es la decisión atómica: la cuenta del fixture ya está CANCELLED, así que sólo se libra si el
     // CAS la excluye por estado.

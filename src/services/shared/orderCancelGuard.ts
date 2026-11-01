@@ -4,6 +4,7 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
 import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
+import { findCardOnlineOrderInTx } from '../online-ordering/card/guards'
 
 /**
  * Diseño §C.6 (11-sep): TODA ruta que cancela o anula una orden tiene que hacerlo bajo el MISMO candado de `Order` que
@@ -27,6 +28,8 @@ const MENSAJE_COBRO_VIVO =
   'Hay un cobro en curso en la terminal para esta orden. Cancela o espera el resultado del cobro antes de cancelar la orden.'
 
 type GuardTx = Pick<Prisma.TransactionClient, '$queryRaw' | 'order' | 'payment' | 'terminalPaymentRequest'>
+/** La cancelación además mira (y suelta) la tarjeta apartada de un pedido en línea. */
+type CancelGuardTx = GuardTx & Pick<Prisma.TransactionClient, 'onlineOrder' | 'onlineOrderCharge'>
 
 export interface OrdenBajoCandado {
   id: string
@@ -142,7 +145,7 @@ export function rechazarCancelacionLocalDeRappi(order: { source: string; posRawD
  * Devuelve la fila releída bajo el candado; la escritura de la cancelación va inmediatamente después, en la misma tx.
  */
 export async function assertOrderCancellableUnderLock(
-  tx: GuardTx,
+  tx: CancelGuardTx,
   input: { venueId: string; orderId: string },
   opciones: OrderCancelGuardOptions = {},
 ): Promise<OrdenBajoCandado> {
@@ -181,6 +184,19 @@ export async function assertOrderCancellableUnderLock(
   }
 
   await assertNoLiveTerminalCharge(tx, input)
+
+  // Pedidos en línea fase 2 (Codex r1 #1): mientras el banco cobra la tarjeta, nadie cancela; con la tarjeta apartada, la
+  // cancelación la suelta en esta MISMA transacción (`RELEASING`) y el conciliador la libera con Stripe.
+  const card = await findCardOnlineOrderInTx(tx, input)
+  if (card?.charge?.status === 'CAPTURING') {
+    throw new ConflictError(
+      'Confirmando el pago con tarjeta de este pedido. Intenta en unos segundos.',
+      'ONLINE_ORDER_CONFIRMING_PAYMENT',
+    )
+  }
+  if (card?.charge?.status === 'AUTHORIZED') {
+    await tx.onlineOrderCharge.updateMany({ where: { id: card.charge.id, status: 'AUTHORIZED' }, data: { status: 'RELEASING' } })
+  }
   return order
 }
 

@@ -38,6 +38,13 @@ jest.mock('@/services/customer-display/posPollFingerprints', () => ({
   collectPollFingerprints: (...a: unknown[]) => collectPollFingerprintsMock(...a),
 }))
 
+// La regla del «Menú del aparato» se simula (su prueba vive en deviceMenus.service.test.ts); las constantes y TODO son las reales.
+const resolveDeviceMenuFilterMock = jest.fn(async (..._a: unknown[]) => ({ visibleCategoryIds: null, visibleMenuIds: null }) as unknown)
+jest.mock('@/services/devices/deviceMenus.service', () => ({
+  ...jest.requireActual('@/services/devices/deviceMenus.service'),
+  resolveDeviceMenuFilter: (...a: unknown[]) => resolveDeviceMenuFilterMock(...a),
+}))
+
 jest.mock('@/services/display-mode-request.service', () => {
   const actual = jest.requireActual('@/services/display-mode-request.service')
   return {
@@ -216,6 +223,8 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
       fulfillmentAreaId: null,
       // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
       configurableSettings: [],
+      visibleCategoryIds: null,
+      visibleMenuIds: null,
     })
     expect(res.__json.data.terminals[0]).not.toHaveProperty('deviceUid')
     expect(res.__json.data.terminals[0]).not.toHaveProperty('defaultWorkspace')
@@ -268,6 +277,8 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
       fulfillmentAreaId: 'area-cremeria',
       // Sin `type` en la fila simulada no hay tipo de aparato que resolver ⇒ ningún ajuste.
       configurableSettings: [],
+      visibleCategoryIds: null,
+      visibleMenuIds: null,
     })
   })
 
@@ -733,5 +744,69 @@ describe('getVenueTpvSettings (mobile) — qué ajustes puede cambiar ESTE apara
     expect(res.__json.data.deviceTerminal.configurableSettings).toEqual(
       expect.arrayContaining(['showReviewScreen', 'showTipScreen', 'kioskModeEnabled', 'requirePinLogin']),
     )
+  })
+})
+
+describe('getVenueTpvSettings (mobile) — Menú del aparato', () => {
+  const posRow = (type: string) =>
+    [
+      {
+        id: 'terminal-pos',
+        name: 'Caja',
+        status: 'ACTIVE',
+        type,
+        deviceUid: 'device-pos',
+        defaultWorkspace: 'STANDARD_POS',
+        canIssueAreaTickets: false,
+        canCheckoutAreaTickets: true,
+        canDeliverAreaTickets: false,
+        fulfillmentAreaId: null,
+        config: {},
+        configOverrides: {},
+      },
+    ] as any
+
+  beforeEach(() => {
+    resolveDeviceMenuFilterMock.mockClear()
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    mockedGetTpvSettings.mockResolvedValue({} as Awaited<ReturnType<typeof getTpvSettings>>)
+  })
+
+  it('el aparato POS recibe su filtro', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue(posRow('POS_ANDROID'))
+    resolveDeviceMenuFilterMock.mockResolvedValue({ visibleCategoryIds: ['c1', 'c2'], visibleMenuIds: ['m1'] })
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-pos'), res, jest.fn() as NextFunction)
+    expect(resolveDeviceMenuFilterMock).toHaveBeenCalledWith(venueId, 'terminal-pos')
+    expect(res.__json.data.deviceTerminal).toMatchObject({ visibleCategoryIds: ['c1', 'c2'], visibleMenuIds: ['m1'] })
+  })
+
+  it('una TPV recibe null en los dos y no se resuelve la regla', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue(posRow('TPV_ANDROID'))
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-pos'), res, jest.fn() as NextFunction)
+    expect(resolveDeviceMenuFilterMock).not.toHaveBeenCalled()
+    expect(res.__json.data.deviceTerminal).toMatchObject({ visibleCategoryIds: null, visibleMenuIds: null })
+  })
+
+  it('si la regla falla, /settings responde 200 con null en los dos y deja un aviso', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue(posRow('POS_ANDROID'))
+    resolveDeviceMenuFilterMock.mockRejectedValueOnce(new Error('bd caída'))
+    const res = makeRes()
+    const next = jest.fn() as NextFunction
+    await getVenueTpvSettings(makeReq('device-pos'), res, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(res.__json.success).toBe(true)
+    expect(res.__json.data.deviceTerminal).toMatchObject({ visibleCategoryIds: null, visibleMenuIds: null })
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ venueId, terminalId: 'terminal-pos' }))
+  })
+
+  it('sin X-Device-ID no hay deviceTerminal, como hoy', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue(posRow('POS_ANDROID'))
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
+    expect(resolveDeviceMenuFilterMock).not.toHaveBeenCalled()
+    expect(res.__json.data.deviceTerminal).toBeNull()
   })
 })

@@ -10,7 +10,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as venueService from '@/services/dashboard/venue.dashboard.service'
 import * as menuCategoryService from '@/services/dashboard/menu.dashboard.service'
-import { getMenusHandler, listMenuCategoriesHandler } from '@/controllers/dashboard/menu.dashboard.controller'
+import { getMenusHandler, listMenuCategoriesHandler, updateMenuHandler } from '@/controllers/dashboard/menu.dashboard.controller'
 
 jest.mock('@/services/dashboard/venue.dashboard.service')
 jest.mock('@/services/dashboard/menu.dashboard.service')
@@ -71,5 +71,22 @@ describe('menu controller — chequeo de venue barato', () => {
 
     expect(next).toHaveBeenCalledWith(boom)
     expect(menuCategoryService.getMenus).not.toHaveBeenCalled()
+  })
+})
+
+describe('updateMenuHandler (Codex r3 #6)', () => {
+  it('le pasa al servicio quién edita (authContext.userId) para que MENU_UPDATED no quede anónimo', async () => {
+    jest.mocked(menuCategoryService.updateMenu).mockResolvedValue({ id: 'menu-1' } as never)
+    const req = {
+      params: { venueId: 'venue-1', menuId: 'menu-1' },
+      body: { appliesToOnline: false },
+      authContext: { orgId: 'org-1', role: 'OWNER', userId: 'staff-1' },
+    } as unknown as Request<{ venueId: string; menuId: string }>
+    const next = jest.fn() as NextFunction
+
+    await updateMenuHandler(req as never, makeRes(), next)
+
+    expect(menuCategoryService.updateMenu).toHaveBeenCalledWith('venue-1', 'menu-1', { appliesToOnline: false }, 'staff-1')
+    expect(next).not.toHaveBeenCalled()
   })
 })

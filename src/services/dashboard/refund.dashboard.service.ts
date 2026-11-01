@@ -21,6 +21,7 @@ import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '.
 import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverEnDinero } from '../tpv/terminalRefundTarget'
+import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import {
   MENSAJE_SALDO_SOLO_A_SALDO,
@@ -136,6 +137,21 @@ export interface IssueRefundInput {
    * que la primera petición —todavía esperando el candado— ya no vio. Lanzar aquí no escribe nada. No entra en la huella (es función).
    */
   reglasBajoCandado?: (tx: Prisma.TransactionClient, cobro: CobroBloqueado) => Promise<void>
+  /**
+   * Pedidos en línea fase 2: sólo lo pone el reembolso de Pedidos en línea (que devuelve a la tarjeta con Stripe). Sin él, el cobro de
+   * Stripe de un pedido con tarjeta no se devuelve por aquí (409 `ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS`).
+   */
+  viaOnlineOrders?: true
+  /**
+   * Pedidos en línea fase 2 (T10): la comisión de Avoqado que Stripe devolvió con ESTA devolución, en centavos (leída de Stripe).
+   * El REFUND y su `VenueTransaction` nacen con `feeAmount = −comisión` y `netAmount = −(monto − comisión)`. Ausente = fee 0.
+   */
+  platformFeeRefundCents?: number
+  /**
+   * Pedidos en línea fase 2 (T10 fix r1): la devolución a la tarjeta que se está anotando. Su monto ya está reservado contra el
+   * cobro de Stripe (ver `bloquearCobroParaReembolso`); sin esto la devolución se rechazaría a sí misma.
+   */
+  excludeCardRefundId?: string
 }
 
 export interface IssueRefundResult {
@@ -184,6 +200,8 @@ interface LockedPaymentRow {
   shiftId: string | null
   merchantAccountId: string | null
   processorData: Prisma.JsonValue | null
+  /** T10 fix r1: el PaymentIntent de Stripe (u otra referencia del procesador); con él se ven las devoluciones a tarjeta en curso. */
+  processorId: string | null
   // Proyección de `tenderSemantics`: la ÚNICA autoridad sobre "¿este dinero estaba
   // en el cajón?". Se leen del pago ORIGINAL: el reembolso hereda su método salvo que el
   // cajero escoja con qué devolver (`devolverCon`), y aun entonces deciden si puede escoger.
@@ -392,6 +410,8 @@ export interface CobroBloqueado {
   refundedSalesCents: number
   refundedTipsCents: number
   unclassifiedPriorRefundCents: number
+  /** T10 fix r1: lo apartado por devoluciones a tarjeta de pedidos en línea que Stripe aún no confirma (sin renglón todavía). */
+  reservedByCardRefundsCents: number
   remainingBeforeCents: number
 }
 
@@ -402,7 +422,7 @@ export interface CobroBloqueado {
  */
 export async function bloquearCobroParaReembolso(
   tx: Prisma.TransactionClient,
-  input: { venueId: string; paymentId: string; expectedOrderId: string | null },
+  input: { venueId: string; paymentId: string; expectedOrderId: string | null; excludeCardRefundId?: string },
 ): Promise<CobroBloqueado> {
   if (input.expectedOrderId) {
     const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, {
@@ -426,6 +446,7 @@ export async function bloquearCobroParaReembolso(
       "shiftId",
       "merchantAccountId",
       "processorData",
+      "processorId",
       "fundsFlow",
       "externalSource",
       "tenderTypeId",
@@ -492,6 +513,16 @@ export async function bloquearCobroParaReembolso(
   const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(existingRefunds)
   const unclassifiedPriorRefundCents = Math.max(0, alreadyRefundedCents - (refundedSalesCents + refundedTipsCents))
   const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
+  // T10 fix r1: una devolución a la tarjeta en curso (Stripe PENDING puede durar días) ya apartó su monto aunque no tenga renglón;
+  // sin restarla, un «Cambio» o cualquier otro reembolso se lo come, Stripe devuelve después y `issueRefund` rechaza: el cliente
+  // recibiría las dos. Bajo el MISMO candado del cobro, que es el que toma la devolución a la tarjeta al nacer.
+  const reservedByCardRefundsCents = original.processorId
+    ? await centavosApartadosPorDevolucionesATarjeta(tx, {
+        venueId: input.venueId,
+        paymentIntentId: original.processorId,
+        excludeCardRefundId: input.excludeCardRefundId,
+      })
+    : 0
 
   // Tarjetas de regalo (B1): la marca del tender de sistema viaja con el cobro bloqueado. Se lee aparte y NO como JOIN en el
   // `FOR UPDATE` (bloquearía también la fila del tender, que comparten todos los cobros del negocio). Sin tender, ninguna consulta.
@@ -511,8 +542,45 @@ export async function bloquearCobroParaReembolso(
     refundedSalesCents,
     refundedTipsCents,
     unclassifiedPriorRefundCents,
-    remainingBeforeCents: Math.max(0, totalOriginalCents - alreadyRefundedCents),
+    reservedByCardRefundsCents,
+    remainingBeforeCents: Math.max(0, totalOriginalCents - alreadyRefundedCents - reservedByCardRefundsCents),
   }
+}
+
+/** Estados de una devolución a la tarjeta que todavía pueden no tener renglón REFUND (espejo de `refund.service.ts`). */
+const DEVOLUCION_A_TARJETA_SIN_RENGLON = ['REQUESTED', 'SENDING', 'PENDING', 'SUCCEEDED'] as const
+
+/**
+ * Lo apartado por las devoluciones a la tarjeta de ese PaymentIntent que todavía no tienen su renglón en el libro (no existe el
+ * `Payment` con la llave `oocr_<id>`; una SUCCEEDED que ya lo escribió lo cuenta `alreadyRefundedCents`). Un cargo real trae un
+ * puñado: tope 50.
+ */
+async function centavosApartadosPorDevolucionesATarjeta(
+  tx: Prisma.TransactionClient,
+  i: { venueId: string; paymentIntentId: string; excludeCardRefundId?: string },
+): Promise<number> {
+  const filas = await tx.onlineOrderCardRefund.findMany({
+    where: {
+      venueId: i.venueId,
+      status: { in: [...DEVOLUCION_A_TARJETA_SIN_RENGLON] },
+      charge: { paymentIntentId: i.paymentIntentId },
+      ...(i.excludeCardRefundId ? { id: { not: i.excludeCardRefundId } } : {}),
+    },
+    select: { id: true, amountCents: true },
+    take: 50,
+  })
+  if (filas.length === 0) return 0
+  const llaves = filas.map(f => `oocr_${f.id}`)
+  const conRenglon = new Set(
+    (
+      await tx.payment.findMany({
+        where: { venueId: i.venueId, idempotencyKey: { in: llaves } },
+        select: { idempotencyKey: true },
+        take: llaves.length,
+      })
+    ).map(p => p.idempotencyKey),
+  )
+  return filas.filter(f => !conRenglon.has(`oocr_${f.id}`)).reduce((suma, f) => suma + f.amountCents, 0)
 }
 
 /**
@@ -586,6 +654,8 @@ interface WriteRefundBase {
   moneyAs?: RefundMoneySemantics
   /** La fila no abre la obligación de costo negativo del cobro: no regresó dinero por el procesador (el crédito de un cambio). */
   skipNegativeCostObligation?: boolean
+  /** Pedidos en línea fase 2 (T10): comisión de la plataforma devuelta por Stripe, en centavos (ver `IssueRefundInput`). */
+  platformFeeRefundCents?: number
   /**
    * La marca del cambio, que la fila lleva en `processorData.exchange`. El gemelo del crédito (`CREDIT`) lleva la raíz SÓLO aquí.
    * Cualquier otro papel con `moneyAs` y `rootPaymentId` sale del dinero de esa raíz: la fila la nombra también en
@@ -660,6 +730,10 @@ export async function writeRefundInTx(
   // El saldo a favor ya ES la respuesta a «¿con qué salió el dinero?».
   if (input.aSaldoAFavor && (input.moneyAs || input.devolverCon)) throw destinoEnConflicto()
   const refundCents = input.salesRefundCents + input.tipRefundCents
+  const feeRefundCents = input.platformFeeRefundCents ?? 0
+  if (!esCantidadNoNegativaEnCentavos(feeRefundCents) || feeRefundCents > refundCents) {
+    throw new BadRequestError('La comisión devuelta debe ser un entero de centavos entre cero y el monto devuelto')
+  }
   // La única fila de $0 es el gemelo del crédito de un cambio de piezas que cobraron $0: el ancla de las cantidades devueltas y
   // del regreso al inventario. Cualquier otro reembolso de $0 se rechaza como siempre.
   const esAnclaDelCredito = input.exchangeMark?.role === EXCHANGE_REFUND_ROLE.CREDIT && input.moneyAs !== undefined
@@ -774,8 +848,8 @@ export async function writeRefundInTx(
       // Negative amount/tip so that sum(refunds) mirrors the original split.
       amount: centsToDecimal(-input.salesRefundCents),
       tipAmount: centsToDecimal(-input.tipRefundCents),
-      netAmount: centsToDecimal(-refundCents),
-      feeAmount: new Prisma.Decimal(0),
+      netAmount: centsToDecimal(-(refundCents - feeRefundCents)),
+      feeAmount: feeRefundCents > 0 ? centsToDecimal(-feeRefundCents) : new Prisma.Decimal(0),
       feePercentage: 0,
 
       method: dada ? dada.method : ((devolverCon ?? original.method) as PaymentMethod),
@@ -951,18 +1025,27 @@ export async function writeRefundInTx(
     data: { processorData: updatedProcessorData as any },
   })
 
-  // Venue transaction for financial tracking
-  await tx.venueTransaction.create({
-    data: {
-      venueId: input.venueId,
-      paymentId: refundPayment.id,
-      type: 'REFUND',
-      grossAmount: centsToDecimal(-refundCents),
-      feeAmount: new Prisma.Decimal(0),
-      netAmount: centsToDecimal(-refundCents),
-      status: 'SETTLED',
-    },
-  })
+  // Venue transaction for financial tracking — sólo si el cobro original tiene la suya (Codex r3 #2 de pedidos fase 2). Un cobro
+  // sin VenueTransaction (Stripe de pedidos en línea, ligas de pago) vive en «Pendiente» del saldo; una devolución SETTLED restaba de
+  // «Disponible» lo que nunca entró ahí y dejaba el cobro en «Pendiente» para siempre. Sin fila, la devolución cae en el mismo lado
+  // que su cobro y se anulan. El costo diferido no la extraña: un cobro con costo siempre tiene VenueTransaction (R6 i).
+  // El crédito de un cambio sí la lleva siempre: no revierte al original, se netea con el cobro de crédito de la venta nueva.
+  const netaConElCobroDeCredito = input.exchangeMark?.role === EXCHANGE_REFUND_ROLE.CREDIT
+  const movimientoDelOriginal =
+    netaConElCobroDeCredito || (await tx.venueTransaction.findUnique({ where: { paymentId: original.id }, select: { id: true } }))
+  if (movimientoDelOriginal) {
+    await tx.venueTransaction.create({
+      data: {
+        venueId: input.venueId,
+        paymentId: refundPayment.id,
+        type: 'REFUND',
+        grossAmount: centsToDecimal(-refundCents),
+        feeAmount: feeRefundCents > 0 ? centsToDecimal(-feeRefundCents) : new Prisma.Decimal(0),
+        netAmount: centsToDecimal(-(refundCents - feeRefundCents)),
+        status: 'SETTLED',
+      },
+    })
+  }
 
   // El decremento del turno YA ocurrió arriba: el claim ES el decremento, y sellar el `Payment`
   // después es lo que garantiza que nunca haya un REFUND en un turno al que no se le restó.
@@ -1056,7 +1139,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // fila Payment se vuelve a leer y valida bajo FOR UPDATE dentro de la tx.
   const originalOrder = await prisma.payment.findFirst({
     where: { id: input.paymentId, venueId: input.venueId },
-    select: { orderId: true, order: { select: { updatedAt: true } } },
+    select: { orderId: true, processorId: true, order: { select: { updatedAt: true } } },
   })
   if (!originalOrder) throw new NotFoundError('Payment not found')
   // Saldo a favor desde un crédito de cambio: su raíz se aparta ANTES que el cobro con crédito (Payments por id; el crédito nace después
@@ -1087,12 +1170,21 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         venueId: input.venueId,
         paymentId: input.paymentId,
         expectedOrderId: originalOrder.orderId,
+        // M3: sólo la devolución a la tarjeta de Pedidos en línea se excluye a sí misma; nadie más se salta lo que ella apartó.
+        excludeCardRefundId: input.viaOnlineOrders ? input.excludeCardRefundId : undefined,
       })
       // Same original-payment lock as every refund channel: the second caller sees the first commit.
       const replayResult = await existingAttempt(tx)
       if (replayResult) return { replayResult }
       // S10 (I1): lo que cambia entre el envío y el reenvío, ya con el cobro bloqueado y la llave reconocida.
       await input.reglasBajoCandado?.(tx, cobro)
+      // Pedidos en línea fase 2: bajo el candado del cobro, el de Stripe de un pedido con tarjeta sólo sale por Pedidos en línea.
+      await assertCardRefundGoesThroughOnlineOrders(tx, {
+        venueId: input.venueId,
+        paymentId: input.paymentId,
+        viaOnlineOrders: input.viaOnlineOrders,
+        payment: { orderId: originalOrder.orderId, processorId: originalOrder.processorId ?? null },
+      })
       const esCreditoDeCambio = isExchangeCreditTenderKind(cobro.original.tenderSystemKind)
       if (esCreditoDeCambio && input.refundMethod)
         throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
@@ -1422,9 +1514,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
             }
           : {}),
         tenderCommission: 'NONE',
-        shift: 'CLAIM_LIVE',
+        // T10: la devolución de un pedido en línea no le resta al turno vivo (el cobro de Stripe nunca entró a uno).
+        shift: input.viaOnlineOrders ? 'INHERIT_ORIGINAL' : 'CLAIM_LIVE',
         provenance: 'MANUAL',
         bloqueado: cobro,
+        ...(input.platformFeeRefundCents !== undefined ? { platformFeeRefundCents: input.platformFeeRefundCents } : {}),
         devolverCon: devolverConEfectivo(original, input.refundMethod),
         ...(saldo ? { aSaldoAFavor: saldo } : {}),
         // Con saldo a favor, la cadena sólo da la raíz (el origen fiscal); el dinero no sale con la semántica de la raíz.

@@ -190,6 +190,11 @@
       "loops": 0,
       "reason": "C06: executeExchangeInTransaction owns ORDER_LOCK_WAIT_BUDGET. Advisory then Venue KEY SHARE and all new/original/ancestor Orders by createdAt DESC/id DESC; credit/root/charge Payments once by id ASC before snapshots and Shift. finishExchangeInTx inherits these locks; the sweep delegates here, never opens a transaction. PostgreSQL exchangeCardLockOrder covers CHAIN/direct refunds and terminal registration."
     },
+    "src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund": {
+      "count": 1,
+      "loops": 0,
+      "reason": "T10: el cobro de Stripe del pedido (un Payment por id de PaymentIntent) DESPUÉS de su Order (lockExistingOrderForPayment), igual que issueRefund; nunca en bucle."
+    },
     "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
       "count": 1,
       "loops": 0,
@@ -752,7 +757,7 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
-    "src/services/online-ordering/transitions.service.ts#casTransition#lockExistingOrderForPayment": {
+    "src/services/online-ordering/transitions.service.ts#casTransitionInTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
@@ -1166,6 +1171,46 @@
       "count": 1,
       "loops": 0,
       "reason": "Una Order por operación: abre su transacción y la toma primero, antes de leer sus Payments."
+    },
+    "src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/capture.service.ts#finishCapture#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment del cobro hecho a mano; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes de la devolución, del Payment y de la caja; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Reentra la MISMA Order ya poseída y toma su Payment de Stripe (Order → Payment, el orden de issueRefund)."
+    },
+    "src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes de la devolución, del Payment y de la caja; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta antes de la CashDrawerSession abierta (postPayOutInTx); el cierre de caja y createEventUnderSessionLock sólo toman la sesión, nunca una Order."
+    },
+    "src/services/online-ordering/card/refund.service.ts#reviewLate#reverseRecordedRefund": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una devolución por llamada, fuera de toda transacción (advanceCardRefund nunca corre con una abierta); la reversa abre la suya: Order → Payment."
     },
     "src/services/giftCards/giftCardCuenta.service.ts#bloquearVigente#lockGiftCardsForUpdate": {
       "count": 1,

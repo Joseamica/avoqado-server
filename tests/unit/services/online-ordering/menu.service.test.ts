@@ -104,6 +104,37 @@ function carta(cats: any[]) {
   }) as any)
 }
 
+/** Un menú tal como está guardado: su negocio, si está activo, las dos casillas de «¿Dónde se usa?» (nacen en true) y su horario. */
+const menuGuardado = (o: Record<string, unknown> = {}) => ({
+  venueId: 'v1',
+  active: true,
+  appliesToDevices: true,
+  appliesToOnline: true,
+  ...MENU_SIEMPRE,
+  ...o,
+})
+const SOLO_APARATOS = { appliesToDevices: true, appliesToOnline: false } // «Sólo aparatos»
+const SOLO_TIENDA_EN_LINEA = { appliesToDevices: false, appliesToOnline: true } // «Sólo tienda en línea»
+
+/**
+ * Las asignaciones menú↔categoría como las resuelve Postgres: la consulta se EVALÚA contra estas filas (su `where` sobre el menú, su
+ * orden, su `take` y su `select`). Una asignación que el `where` excluye no llega a la tienda; así se prueba lo que la consulta deja
+ * fuera y no lo que un mock devuelve a ciegas.
+ */
+function asignaciones(filas: Array<{ categoryId: string; menu: Record<string, unknown> }>) {
+  prismaMock.menuCategoryAssignment.findMany.mockImplementation((async (a: any) => {
+    const filtrosDelMenu = Object.entries(a.where.menu)
+    return filas
+      .filter(f => a.where.categoryId.in.includes(f.categoryId) && filtrosDelMenu.every(([campo, valor]) => f.menu[campo] === valor))
+      .sort((x, y) => (x.categoryId < y.categoryId ? -1 : x.categoryId > y.categoryId ? 1 : 0))
+      .slice(0, a.take)
+      .map(f => ({
+        categoryId: f.categoryId,
+        menu: Object.fromEntries(Object.keys(a.select.menu.select).map(campo => [campo, f.menu[campo]])),
+      }))
+  }) as any)
+}
+
 beforeEach(() => {
   clearPublicMenuCache()
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
@@ -389,13 +420,13 @@ describe('P1-09: presupuesto GLOBAL de la carta (400 platillos · 2,000 vínculo
 })
 
 describe('loadCategoryVisibility (H4)', () => {
-  it('lee las asignaciones SÓLO de las categorías dadas, de menús activos del negocio, con tope + 1', async () => {
+  it('lee las asignaciones SÓLO de las categorías dadas, de menús activos del negocio marcados «Tienda en línea», con tope + 1', async () => {
     await loadCategoryVisibility('v1', NOW, [
       { id: 'a', ...SIN_HORARIO },
       { id: 'b', ...SIN_HORARIO },
     ])
     const args = prismaMock.menuCategoryAssignment.findMany.mock.calls[0][0] as any
-    expect(args.where).toEqual({ categoryId: { in: ['a', 'b'] }, menu: { venueId: 'v1', active: true } })
+    expect(args.where).toEqual({ categoryId: { in: ['a', 'b'] }, menu: { venueId: 'v1', active: true, appliesToOnline: true } })
     expect(args.orderBy).toEqual([{ categoryId: 'asc' }, { id: 'asc' }])
     expect(args.take).toBe(2 * MAX_MENUS + 1)
   })
@@ -413,6 +444,73 @@ describe('loadCategoryVisibility (H4)', () => {
     expect(visible('a')).toBe(true) // leída completa antes del recorte
     expect(visible('b')).toBe(false) // pudo quedar a medias
     expect(logger.warn).toHaveBeenCalled()
+  })
+})
+
+describe('A3: la tienda en línea sólo usa los menús «Tienda en línea»', () => {
+  // Hora de pared del negocio (America/Mexico_City, UTC-6 todo el año): el miércoles 14-oct-2026.
+  const A_LAS_7_30 = new Date('2026-10-14T13:30:00.000Z')
+  const A_LAS_13 = new Date('2026-10-14T19:00:00.000Z')
+  const A_LAS_18_30 = new Date('2026-10-15T00:30:00.000Z')
+  const A_LAS_20 = new Date('2026-10-15T02:00:00.000Z')
+  const A_LAS_23_30 = new Date('2026-10-15T05:30:00.000Z')
+  const COMIDA = menuGuardado({ availableFrom: '12:00', availableUntil: '18:00' }) // aparatos y tienda en línea, de 12 a 18
+  const BARRA = menuGuardado(SOLO_APARATOS) // sólo aparatos, sin horario (todo el día)
+  const MANANAS_DE_APARATOS = menuGuardado({ ...SOLO_APARATOS, availableFrom: '07:00', availableUntil: '11:00' })
+  const bebidas = { id: 'bebidas', ...SIN_HORARIO }
+  const cafes = { id: 'cafes', ...SIN_HORARIO }
+  /** Cuántas asignaciones devolvió la base en cada lectura (con su `where` ya aplicado). */
+  const filasLeidas = async () =>
+    (await Promise.all(prismaMock.menuCategoryAssignment.findMany.mock.results.map((r: { value: Promise<unknown[]> }) => r.value))).map(
+      filas => filas.length,
+    )
+
+  it('barraSoloDeAparatosNoAbreElHorarioEnLinea: Bebidas está en «Comida» (en línea, 12 a 18) y en «Barra» (sólo aparatos): a las 20:00 sigue fuera', async () => {
+    asignaciones([
+      { categoryId: 'bebidas', menu: COMIDA },
+      { categoryId: 'bebidas', menu: BARRA },
+    ])
+    expect((await loadCategoryVisibility('v1', A_LAS_20, [bebidas]))('bebidas')).toBe(false) // «Barra», que dura todo el día, no la abre
+    expect((await loadCategoryVisibility('v1', A_LAS_13, [bebidas]))('bebidas')).toBe(true) // «Comida» sigue mandando en su horario
+    expect(await filasLeidas()).toEqual([1, 1]) // la asignación de «Barra» no llega: la consulta la excluye
+  })
+
+  it('categoriaSoloEnMenusDeAparatosSeVendeComoHoy: sin filas en línea, la categoría se trata como una sin menús, aunque su menú de aparatos tenga horario', async () => {
+    const postres = { id: 'postres', ...SIN_HORARIO } // no está en ningún menú
+    asignaciones([{ categoryId: 'cafes', menu: MANANAS_DE_APARATOS }]) // «Cafés» sólo está en un menú de aparatos, de 7 a 11
+    for (const hora of [A_LAS_7_30, A_LAS_13, A_LAS_20]) {
+      const visible = await loadCategoryVisibility('v1', hora, [cafes, postres])
+      expect(visible('cafes')).toBe(true) // su menú de aparatos ni la restringe: 13:00 y 20:00 caen fuera de 7 a 11
+      expect(visible('postres')).toBe(true) // igual que la que no tiene menús
+    }
+    expect(await filasLeidas()).toEqual([0, 0, 0]) // sin filas en línea
+  })
+
+  it('la carta: a las 20:00 «Barra» no abre Bebidas, y la categoría que sólo está en un menú de aparatos se vende a cualquier hora', async () => {
+    carta([
+      category('bebidas', [product('p-agua', { categoryId: 'bebidas' })]),
+      category('cafes', [product('p-cafe', { categoryId: 'cafes' })]),
+    ])
+    asignaciones([
+      { categoryId: 'bebidas', menu: COMIDA },
+      { categoryId: 'bebidas', menu: BARRA },
+      { categoryId: 'cafes', menu: MANANAS_DE_APARATOS },
+    ])
+    expect((await loadVisibleMenu('v1', A_LAS_20)).categories.map(c => c.id)).toEqual(['cafes'])
+    expect((await loadVisibleMenu('v1', A_LAS_13)).categories.map(c => c.id)).toEqual(['bebidas', 'cafes'])
+  })
+
+  it('regresión: entre los menús «Tienda en línea» manda la unión de sus horarios, tengan o no «Aparatos»; «Barra» ni abre ni cierra', async () => {
+    asignaciones([
+      { categoryId: 'bebidas', menu: COMIDA },
+      { categoryId: 'bebidas', menu: menuGuardado({ ...SOLO_TIENDA_EN_LINEA, availableFrom: '19:00', availableUntil: '23:00' }) }, // «Cena»
+      { categoryId: 'bebidas', menu: BARRA },
+    ])
+    const sale = async (hora: Date) => (await loadCategoryVisibility('v1', hora, [bebidas]))('bebidas')
+    expect(await sale(A_LAS_13)).toBe(true) // «Comida»
+    expect(await sale(A_LAS_18_30)).toBe(false) // entre «Comida» y «Cena»: «Barra» no la abre
+    expect(await sale(A_LAS_20)).toBe(true) // «Cena», aunque no sea de aparatos
+    expect(await sale(A_LAS_23_30)).toBe(false) // después de «Cena»
   })
 })
 

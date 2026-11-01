@@ -275,7 +275,7 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'P4 + P13: recorta lo dirigido a lo anulado y recalcula como borrar',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { origen: 'CERO', nota: 'la cuenta nace vacía, sin descuento' },
-  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
     origen: 'CERO',
     nota: 'pedido en línea: la orden nace sin descuento (la tienda no aplica descuentos en la v1)',
   },
@@ -574,7 +574,7 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: 'venta serializada: orden nueva de un solo renglón',
   },
-  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
     clase: 'CREACION',
     nota: 'pedido en línea: orden, renglones y extras nuevos en la misma transacción, sin filas de descuento',
   },

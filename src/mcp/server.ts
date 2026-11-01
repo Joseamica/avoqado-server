@@ -57,6 +57,7 @@ import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
 import { registerProductVariantTools } from './tools/productVariants'
+import { registerDeviceMenuTools } from './tools/deviceMenus'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
 import { registerPaymentLinkTools } from './tools/paymentLinks'
@@ -74,6 +75,7 @@ import { registerActivityLogTools } from './tools/activity-log'
 import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
 import { registerDocumentRequestTools } from './tools/documentRequests'
+import { registerCrmTools } from './tools/crm'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPassIntegrationTools } from './tools/passIntegrations'
@@ -158,6 +160,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
   registerProductVariantTools(server, scope) // free mode only: not in the certified directory
+  registerDeviceMenuTools(server, scope) // free mode only: not in the certified directory
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)
   registerPaymentLinkTools(server, scope)
@@ -175,6 +178,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   // de clientes para fijar que aquí no aparecen.
   if (scope.isSuperAdmin) registerLaunchCampaignTools(server, scope)
   if (scope.isSuperAdmin) registerDocumentRequestTools(server, scope)
+  // El CRM de ventas de Avoqado (rutina seguimiento-prospectos). Tener llaves crm:* NO amplía isSuperAdmin.
+  if (scope.isSuperAdmin) registerCrmTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPassIntegrationTools(server, scope)
   registerShopifyTools(server, scope)

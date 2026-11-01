@@ -194,7 +194,10 @@ export function toVisibleProduct(p: OnlineProductRow): VisibleProduct {
 /**
  * ¿Qué categorías se pueden pedir AHORA? Igual que el POS (`appliesNow`), con dos reglas (H4, r2):
  * 1. el horario PROPIO de la categoría (desde/hasta/días) tiene que aplicar en la hora de pared del venue;
- * 2. si la categoría está en menús activos, alguno tiene que aplicar; si no está en ninguno, no restringe.
+ * 2. si la categoría está en menús activos de la «Tienda en línea», alguno tiene que aplicar; si no está en ninguno, no restringe.
+ * A3: un menú sin «Tienda en línea» (`appliesToOnline`) no existe para la tienda: la consulta lo deja fuera, así que ni restringe ni abre
+ * una categoría. Una categoría que sólo está en menús de aparatos llega sin filas y se trata igual que una sin menús (no se esconde:
+ * qué se vende en línea lo decide `availableOnline`, no los menús).
  * Las asignaciones menú↔categoría se leen SÓLO para las categorías dadas (la carta: ≤ MAX_MENU_CATEGORIES; el cotizador:
  * ≤ MAX_CART_LINES), con `tope + 1`. Si aun así sobran, la categoría que no se pudo evaluar completa NO se ofrece: nunca
  * «sin restricción». Una categoría que no se dio, tampoco.
@@ -212,7 +215,7 @@ export async function loadCategoryVisibility(
   const [venue, rows] = await Promise.all([
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
     prisma.menuCategoryAssignment.findMany({
-      where: { categoryId: { in: ids }, menu: { venueId, active: true } },
+      where: { categoryId: { in: ids }, menu: { venueId, active: true, appliesToOnline: true } },
       orderBy: [{ categoryId: 'asc' }, { id: 'asc' }],
       take: tope + 1,
       select: {

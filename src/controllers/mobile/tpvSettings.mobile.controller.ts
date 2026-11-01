@@ -19,6 +19,7 @@ import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.
 import { TpvSettings, getTpvSettings, updateTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
 import { assertSettingsConfigurable, resolveConfigurableSettings } from '../../services/device-capabilities.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import { POS_TERMINAL_TYPES, TODO, resolveDeviceMenuFilter } from '../../services/devices/deviceMenus.service'
 import { effectiveExchangesEnabled } from '../../services/exchanges/exchangeRules'
 import { storeCreditAvailable } from '../../services/storeCredit/storeCreditTender'
 import { soloSaldoEfectivo } from '../../services/storeCredit/soloSaldoEfectivo'
@@ -157,6 +158,20 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       : null
     const activeTerminal = deviceTerminal ?? terminals.find(t => t.status === TerminalStatus.ACTIVE) ?? null
 
+    // Menú del aparato: qué categorías/menús muestra su cuadrícula. Sólo los POS_*; una TPV_* siempre recibe null/null.
+    const menuFilter =
+      deviceTerminal && POS_TERMINAL_TYPES.includes(deviceTerminal.type)
+        ? await resolveDeviceMenuFilter(venueId, deviceTerminal.id).catch(error => {
+            // Campo opcional (esconder categorías): un fallo no puede tumbar el arranque de la app. null = «todo».
+            logger.warn('Failed to resolve device menu filter for mobile venue settings — returning everything', {
+              venueId,
+              terminalId: deviceTerminal.id,
+              error,
+            })
+            return TODO
+          })
+        : TODO
+
     // 3. If there is an active terminal, get its merged settings
     let settings: TpvSettings | null = null
     if (activeTerminal) {
@@ -205,6 +220,9 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
               // aparato gane o pierda un ajuste, no hay que recompilar ni publicar un APK.
               // Aditivo y opcional (mismo contrato que `plan`): un POS viejo lo ignora.
               configurableSettings: resolveConfigurableSettings(deviceTerminal.type),
+              // Aditivos y opcionales: null = «todo» (las apps tratan [] igual que null).
+              visibleCategoryIds: menuFilter.visibleCategoryIds,
+              visibleMenuIds: menuFilter.visibleMenuIds,
             }
           : null,
         ...(plan ? { plan } : {}),

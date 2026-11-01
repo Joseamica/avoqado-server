@@ -161,6 +161,13 @@ model Organization {
   // Conector Shopify (spec 2026-10-07)
   shopifyStores ShopifyStore[]
 
+  /// CRM propio (spec 2026-10-30): el negocio del CRM ligado a esta organización, si lo hay (a lo más uno).
+  crmAccount      CrmAccount?
+  /// CRM propio: sólo en la organización del equipo de ventas de Avoqado.
+  crmTeam         CrmTeam?
+  /// CRM propio (ruling 39): marcada como interna o de pruebas, nunca sale en «Clientes».
+  crmHiddenClient CrmHiddenClient?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -186,6 +193,7 @@ model Zone {
 model Venue {
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
+  onlineOrderCharges     OnlineOrderCharge[]
   documentRequestLinks DocumentRequestVenueLink[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
@@ -727,6 +735,9 @@ model Venue {
 
   // Conector Shopify (spec 2026-10-07): una sucursal ↔ una ubicación de Shopify
   shopifyLocationLink ShopifyLocationLink?
+
+  // CRM propio: sólo en el venue del equipo de ventas de Avoqado
+  crmTeam CrmTeam?
 
   @@unique([id, organizationId])
   @@index([organizationId])
@@ -1312,6 +1323,9 @@ model Staff {
   supplierItemCodes   SupplierItemCode[]
   wasteReports        InventoryWasteReport[]
 
+  /// CRM propio (spec 2026-10-30): negocios del CRM de los que esta persona es dueña.
+  crmAccountsOwned CrmAccount[] @relation("CrmAccountOwner")
+
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
 }
@@ -1810,8 +1824,15 @@ model Menu {
   availableUntil String? // "15:00"
   availableDays  String[] // ["MON", "TUE"]
 
+  // Menú del aparato (31-oct-2026): «¿Dónde se usa?». Nacen las dos en true. Al menos una debe quedar en true: la base lo
+  // impone con el CHECK "Menu_appliesTo_alguno_check" (migración 20261031120000). Prisma no declara CHECKs pero los
+  // conserva: NO lo quites al regenerar el esquema. Para no usar el menú en ningún lado se apaga (active=false).
+  appliesToDevices Boolean @default(true) // «Aparatos»: los aparatos lo pueden mostrar y Mesas lo ofrece
+  appliesToOnline  Boolean @default(true) // «Tienda en línea»: vende sus categorías en el horario de este menú
+
   // Relations
   categories MenuCategoryAssignment[]
+  terminals  TerminalMenu[] // Menú del aparato: aparatos que lo eligieron (un aparato sin filas muestra «Todos los menús»)
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -1835,6 +1856,22 @@ model MenuCategoryAssignment {
   @@unique([menuId, categoryId])
   @@index([menuId])
   @@index([categoryId])
+}
+
+// Menú del aparato (31-oct-2026): qué menús muestra cada aparato POS (POS_ANDROID / POS_IOS / POS_DESKTOP).
+// Un aparato SIN filas aquí muestra «Todos los menús» (el default de siempre); con filas, la unión de sus menús.
+// Una fila por (aparato, menú). Si se borra el aparato o el menú, su fila se va con él (CASCADE).
+model TerminalMenu {
+  id         String   @id @default(cuid())
+  terminalId String
+  terminal   Terminal @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  menuId     String
+  menu       Menu     @relation(fields: [menuId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([terminalId, menuId])
+  @@index([menuId])
 }
 
 // ==========================================
@@ -4004,6 +4041,20 @@ enum PromoterLocationSource {
   CLOCK_OUT
 }
 
+/// D9 (31-oct-2026): llave de «Pagar después» (`pay-later:<uuid>`) que el POS devolvió a «Carritos guardados» tras un rechazo del
+/// reenvío. `crearVentaDeMostradorEnTx` la rechaza (409 ORDER_KEY_RELEASED) bajo el mismo candado con que se cerró
+/// (`services/mobile/pagarDespuesLlave.ts`): una creación en vuelo ya no puede aparecer después. Sin FK a Venue a propósito: sólo
+/// guarda un hecho, y una sucursal borrada no la usa nadie.
+model OrderKeyRelease {
+  id         String   @id @default(cuid())
+  venueId    String
+  externalId String
+  staffId    String?
+  createdAt  DateTime @default(now())
+
+  @@unique([venueId, externalId])
+}
+
 model Order {
   onlineOrder    OnlineOrder?
   paymentEffects PaymentEffect[]
@@ -5748,6 +5799,9 @@ model Terminal {
   logs          TerminalLog[]
   healthMetrics TerminalHealth[]
 
+  // Menú del aparato: los menús que muestra este aparato POS. Sin filas = «Todos los menús».
+  menus TerminalMenu[]
+
   // TPV Messaging
   messageDeliveries TpvMessageDelivery[]
   messageResponses  TpvMessageResponse[]
@@ -6561,6 +6615,7 @@ model EcommerceMerchant {
   paymentLinks     PaymentLink[]
   payments         Payment[]
   reservations     Reservation[]     @relation("ReservationEcommerceMerchant")
+  onlineOrderCharges OnlineOrderCharge[]
 
   // Facturación CFDI 4.0
   fiscalConfig MerchantFiscalConfig?
@@ -20318,6 +20373,7 @@ enum OnlineOrderStatus {
 
 enum OnlineOrderPaymentMode {
   PAY_AT_PICKUP
+  CARD_ONLINE // fase 2: tarjeta apartada al pedir y cobrada al aceptar
 }
 
 enum OnlineOrderRejectReason {
@@ -20325,6 +20381,19 @@ enum OnlineOrderRejectReason {
   CLOSED
   TOO_BUSY
   OTHER
+  PAYMENT_FAILED // fase 2: la tarjeta no se pudo cobrar al aceptar
+}
+
+/// Ciclo de vida del cargo con tarjeta de un pedido en línea (fase 2): apartar al pedir, cobrar al aceptar, liberar al rechazar o vencer.
+enum OnlineOrderChargeStatus {
+  PENDING_AUTH // sesión de pago creada, el comensal aún no autoriza
+  AUTHORIZED // tarjeta apartada (capture_method=manual)
+  CAPTURING // cobrando al aceptar
+  CAPTURED
+  CAPTURE_FAILED
+  RELEASING // liberando el apartado
+  RELEASED
+  ABANDONED // el comensal nunca autorizó
 }
 
 /// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
@@ -20337,6 +20406,8 @@ model OnlineOrderingSettings {
   minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
   defaultPrepMinutes Int       @default(15)
   acceptsPayAtPickup Boolean   @default(true)
+  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Apagado por default.
+  acceptsCardOnline  Boolean   @default(false)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
@@ -20386,6 +20457,9 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
+  /// Fase 2: el cargo con tarjeta de este pedido (nulo si paga al recoger).
+  charge OnlineOrderCharge?
+
   /// Quién imprime la comanda (mismo mecanismo de reclamo con TTL que la pantalla de cocina).
   printClaimedAt DateTime?
   printClaimedBy String?
@@ -20398,6 +20472,149 @@ model OnlineOrder {
   @@index([venueId, createdAt])
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
+}
+
+/// Cargo con tarjeta de un pedido en línea (fase 2). Nace ANTES que el pedido (al abrir la sesión de pago), por eso
+/// `onlineOrderId` es nulo hasta que la tarjeta queda apartada y se crea el pedido.
+model OnlineOrderCharge {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  onlineOrderId String?      @unique
+  onlineOrder   OnlineOrder? @relation(fields: [onlineOrderId], references: [id], onDelete: SetNull)
+
+  ecommerceMerchantId String
+  ecommerceMerchant   EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
+
+  /// Idempotencia de «crear pedido»: única por negocio.
+  idempotencyKey String
+  /// Capacidad de seguimiento (mismo token que tendrá el pedido).
+  trackingToken  String @unique
+  customerPhone  String
+  /// El carrito/solicitud con que se abrió la sesión, y su huella sha256 para la repetición idempotente.
+  request        Json
+  requestHash    String
+
+  checkoutSessionId String?  @unique
+  checkoutUrl       String?
+  checkoutExpiresAt DateTime
+  paymentIntentId   String?  @unique
+
+  amount              Decimal @db.Decimal(10, 2)
+  platformFeeBps      Int
+  applicationFeeCents Int
+
+  status         OnlineOrderChargeStatus @default(PENDING_AUTH)
+  authorizedAt   DateTime?
+  /// Límite en que vence el apartado de la tarjeta (se debe cobrar o liberar antes).
+  captureBefore  DateTime?
+  capturedAt     DateTime?
+  capturedAmount Decimal?                @db.Decimal(10, 2)
+  releasedAt     DateTime?
+
+  /// `{ connectAccountId, sandboxMode, providerCode }` copiado al crear: la cuenta Stripe del cargo no cambia aunque el comercio
+  /// cambie sus credenciales después.
+  merchantSnapshot Json
+  /// Intento de sesión de pago (se incrementa si se abre una nueva sesión para el mismo cargo).
+  checkoutAttempt  Int     @default(1)
+  lastError        String?
+  attempts         Int     @default(0)
+  /// El conciliador lo vio por primera vez en duda (`CAPTURING`/`RELEASING`): de aquí se cuentan los 15 min de la alerta
+  /// (`updatedAt` no sirve: cada pasada y cada reintento lo tocan).
+  inDoubtSince     DateTime?
+  /// Ya se alertó 🚨 este episodio (una sola vez); se borra al salir de él.
+  stuckAlertedAt   DateTime?
+
+  /// Fase 2 (T10): las devoluciones a la tarjeta de este cargo.
+  cardRefunds OnlineOrderCardRefund[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, idempotencyKey])
+  @@index([status, updatedAt])
+  @@index([venueId, status, customerPhone])
+}
+
+/// Fase 2 (T10): estados de una devolución a la tarjeta de un pedido en línea. Sólo avanzan; cada escritura es CAS.
+enum OnlineOrderCardRefundStatus {
+  REQUESTED // la fila existe; nadie ha hablado con Stripe
+  SENDING // alguien ganó el envío; sin `stripeRefundId` es DESCONOCIDO (se busca por metadata, nunca se da por fallido)
+  PENDING // Stripe la tiene, sin desenlace
+  SUCCEEDED // Stripe la devolvió; falta el renglón REFUND del libro
+  RECORDED // el renglón REFUND existe (`refundPaymentId`); se sigue revisando hasta 30 días por un fallo tardío
+  FAILED // Stripe dijo que falló antes de anotarla: ningún renglón
+  CANCELED // Stripe la canceló antes de anotarla: ningún renglón
+  REVERSED // ya anotada, Stripe pasó a failed/canceled: el dinero regresó a la cuenta del negocio y se le debe al cliente
+  RESOLVED // el negocio le pagó al cliente por otro medio (efectivo o transferencia)
+}
+
+/// Fase 2 (T10): una devolución a la tarjeta de un pedido en línea. Stripe es la fuente de verdad; el renglón REFUND del libro
+/// nace sólo con `succeeded` (por `issueRefund`, llave `oocr_<id>`) y nunca se edita.
+model OnlineOrderCardRefund {
+  id       String            @id @default(cuid())
+  venueId  String
+  chargeId String
+  charge   OnlineOrderCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+
+  /// La llave idempotente del cliente (única por cargo).
+  key         String
+  amountCents Int
+  /// `RefundReason` de `refund.dashboard.service` (validado en la frontera).
+  reason      String
+  staffId     String
+  note        String?
+  /// sha256 de importe + motivo + nota: la misma llave con otra solicitud es 409.
+  requestHash String
+
+  stripeRefundId   String?                     @unique
+  status           OnlineOrderCardRefundStatus @default(REQUESTED)
+  /// El `Payment` REFUND del libro.
+  refundPaymentId  String?                     @unique
+  /// La comisión de Avoqado que Stripe devolvió con ESTA devolución (leída de Stripe, no calculada).
+  feeRefundedCents Int?
+  /// La reversa del sello de la venta ya quedó hecha (Codex r6: la de `issueRefund` no es durable).
+  stampReversedAt  DateTime?
+  nextCheckAt      DateTime                    @default(now())
+  lastError        String?
+  /// Ya se alertó 🚨 que sigue SENDING sin id (una sola vez).
+  alertedAt        DateTime?
+  /// El último envío a Stripe (el primero y cada re-envío de un SENDING que Stripe confirma que no tiene).
+  lastSentAt       DateTime?
+  /// Cuándo nació el renglón del libro: de aquí se cuenta la revisión tardía (1 h … 30 días).
+  recordedAt       DateTime?
+
+  reversal OnlineOrderCardRefundReversal?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([chargeId, key])
+  @@index([status, nextCheckAt])
+}
+
+/// Fase 2 (T10): sólo se agrega. Una devolución ya anotada que Stripe reportó fallida/cancelada después, y cómo la resolvió el negocio.
+model OnlineOrderCardRefundReversal {
+  id             String                @id @default(cuid())
+  venueId        String
+  cardRefundId   String                @unique
+  cardRefund     OnlineOrderCardRefund @relation(fields: [cardRefundId], references: [id], onDelete: Restrict)
+  stripeRefundId String                @unique
+  amountCents    Int
+  feeCents       Int
+  failureReason  String?
+  detectedAt     DateTime
+
+  /// Sólo `CASH` | `BANK_TRANSFER`.
+  resolvedMethod    PaymentMethod?
+  resolvedByStaffId String?
+  resolvedAt        DateTime?
+  resolvedNote      String?
+  /// El `CashDrawerEvent` PAY_OUT, si se resolvió en efectivo.
+  cashDrawerEventId String?
+
+  @@index([venueId, resolvedAt])
 }
 
 /// Platform onboarding invitations; deliberately independent of a venue.
@@ -20526,4 +20743,249 @@ model DocumentRequestVenueLink {
   @@index([requestId, linkedAt, id])
   @@index([submissionId])
   @@index([actorId])
+}
+
+// ==========================================
+// CRM PROPIO — el equipo de ventas de Avoqado (spec docs/superpowers/specs/2026-10-30-crm-propio-design.md)
+// Tablas de PLATAFORMA, no de un venue: las usa el equipo de ventas por /api/v1/crm con sus llaves «sólo CRM».
+// Tipos, fuentes y estados son String validados con zod, NUNCA enums de Postgres: un servidor con un cliente de
+// Prisma anterior (el del 3000, o producción a media publicación) revienta al leer un valor de enum que no conoce;
+// un texto nuevo no rompe a nadie.
+// ==========================================
+
+/// Las llaves «sólo CRM» de una persona, por su correo. Una fila por persona.
+model PlatformAccess {
+  id          String   @id @default(cuid())
+  email       String   @unique // siempre en minúsculas
+  // The ONE Staff that holds this row, claimed on first use by a verified person with this email: a recycled or
+  // changed email never inherits the keys. Plain id like the other CRM actor columns (no FK).
+  staffId     String?  @unique
+  verScope    String? // 'propios' | 'todos' | null (sin crm:ver)
+  editarScope String? // 'propios' | 'todos' | null (sin crm:editar)
+  contactar   Boolean  @default(false)
+  campanas    Boolean  @default(false)
+  exportar    Boolean  @default(false)
+  ventas      Boolean  @default(false)
+  admin       Boolean  @default(false)
+  active      Boolean  @default(true)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// El equipo de ventas: SU organización (vacía, sólo para él) y el venue donde inicia sesión el vendedor. Una sola fila
+/// (`key = 'default'`), creada por `ensureCrmTeamVenue`. Lo que excluye al equipo (búsquedas, clientes) lee esta fila,
+/// nunca un slug ni un nombre.
+model CrmTeam {
+  id             String       @id @default(cuid())
+  key            String       @unique @default("default")
+  // Restrict: borrar la organización o el venue del equipo falla a la vista, en vez de dejar esta fila apuntando a nada.
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueId        String       @unique
+  venue          Venue        @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  createdAt      DateTime     @default(now())
+}
+
+/// Una organización que no es cliente aunque cumpla la regla (ruling 39): Prime y cualquier organización interna o de
+/// pruebas. Se marca y se quita desde «Clientes» con la llave `crm:admin`; quién lo hizo queda en `ActivityLog`.
+model CrmHiddenClient {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+}
+
+/// Un negocio del CRM: va de prospecto a cliente en UN solo registro y se liga a su Organization.
+/// Abierto, ganado o perdido se deduce del `kind` de su etapa; no se guarda dos veces.
+model CrmAccount {
+  id          String   @id @default(cuid())
+  name        String
+  giro        String?
+  ventasRango String?
+  sucursales  Int?
+  modulos     String[] @default([])
+
+  // Fuente: LANDING | WHATSAPP | MANUAL | IMPORTACION | REFERIDO | OTRO. La identidad de entrada es fuente + llave
+  // externa (landing: correo normalizado; WhatsApp: teléfono E.164; HubSpot: su id); a mano va sin llave.
+  source       String
+  externalKey  String?
+  sourceDetail Json? // UTM, campaña o texto prellenado
+  referidoPor  String?
+
+  ownerStaffId   String? // null = «Sin dueño»
+  owner          Staff?   @relation("CrmAccountOwner", fields: [ownerStaffId], references: [id], onDelete: SetNull)
+  stageId        String
+  stage          CrmStage @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  stageEnteredAt DateTime @default(now())
+
+  lastTouchAt    DateTime  @default(now())
+  nextActivityAt DateTime?
+
+  lostReasonId String?
+  lostReason   CrmLostReason? @relation(fields: [lostReasonId], references: [id], onDelete: Restrict)
+  lostNote     String?
+  wonAt        DateTime?
+  lostAt       DateTime?
+  archivedAt   DateTime? // fuera del embudo, de los avisos y de los reportes; se encuentra al buscar
+
+  // Cliente: un negocio del CRM por Organization. SetNull: borrar una organización nunca falla por el CRM.
+  organizationId   String?       @unique
+  organization     Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  firstMoneyAt     DateTime?
+  firstMoneySource String? // 'PAGO' | 'ANTERIOR_AL_CRM'
+
+  consentMarketing     Boolean   @default(false)
+  consentAt            DateTime?
+  consentSource        String?
+  consentNoticeVersion String?
+
+  // false = se creó desde un alta vieja, sin los datos del formulario (giro, ventas, sucursales).
+  qualificationAvailable Boolean   @default(true)
+  // Cuándo se recibió la entrada de la landing que fijó la calificación (ruling 50): una entrada más vieja que el barrido
+  // reparó tarde no pisa lo que dijo una más nueva. null = ninguna entrada de la landing la ha fijado.
+  qualifiedAt            DateTime?
+
+  contacts       CrmContact[]
+  activities     CrmActivity[]
+  timelineEvents CrmTimelineEvent[]
+  inboundEntries CrmInboundEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([source, externalKey])
+  @@index([ownerStaffId, stageId])
+  @@index([nextActivityAt])
+  @@index([source, organizationId])
+  @@index([wonAt]) // reportes: ganados del rango
+  @@index([lostAt]) // reportes: perdidos del rango
+  // 🔴 ÍNDICE PARCIAL MANTENIDO A MANO — Prisma no tiene `where:` en `@@index`, así que no se ve aquí y vive sólo en el SQL
+  // de la migración `20261031024450_crm_propio` (ruling 51):
+  //
+  //   CREATE INDEX "CrmAccount_first_money_pending_idx" ON "CrmAccount"("createdAt", "id")
+  //     WHERE "firstMoneyAt" IS NULL AND "organizationId" IS NOT NULL;
+  //
+  // Lo lee el barrido del primer dinero (`fillFirstMoney`) cada 5 minutos, con esas dos condiciones escritas como literales.
+}
+
+/// Una persona de un negocio del CRM. El teléfono y el correo AVISAN de duplicados pero no son únicos: el mismo
+/// dueño puede tener dos negocios, y un índice único tumbaría escrituras legítimas.
+model CrmContact {
+  id        String     @id @default(cuid())
+  accountId String
+  account   CrmAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name      String
+  phoneE164 String?
+  email     String?
+  role      String?
+  isPrimary Boolean    @default(false)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([accountId])
+  @@index([phoneE164])
+  @@index([email])
+}
+
+/// Etapa del embudo. kind: ABIERTA | GANADA | PERDIDA (no cambia). staleDays: días sin toque para «Estancado · N días».
+model CrmStage {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  order     Int
+  kind      String
+  staleDays Int?
+  accounts  CrmAccount[]
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}
+
+/// Motivo de pérdida. No se borra: se desactiva.
+model CrmLostReason {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  active    Boolean      @default(true)
+  accounts  CrmAccount[]
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}
+
+/// Actividad con responsable y fecha (llamada, WhatsApp, correo, reunión, demo, tarea). Hecha = doneAt + doneById.
+model CrmActivity {
+  id              String     @id @default(cuid())
+  accountId       String
+  account         CrmAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type            String
+  title           String
+  dueAt           DateTime
+  // Pending ones follow their account to its new owner; null = nobody in charge (the account was left «Sin dueño»).
+  assigneeStaffId String?
+  doneAt          DateTime?
+  doneById        String?
+  result          String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([assigneeStaffId, doneAt, dueAt])
+  @@index([accountId])
+  @@index([doneById]) // deleting a person (and every expired demo) asks whether they did any activity
+  @@index([doneAt]) // reportes: actividades hechas del rango
+}
+
+/// Línea de tiempo de un negocio: sólo se agrega, nunca se edita. sourceKey (único) deja que el barrido no repita.
+model CrmTimelineEvent {
+  id           String     @id @default(cuid())
+  accountId    String
+  account      CrmAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  kind         String
+  actorStaffId String? // null = el sistema
+  data         Json
+  sourceKey    String?    @unique
+  createdAt    DateTime   @default(now())
+
+  @@index([accountId, createdAt])
+  @@index([actorStaffId]) // same question for the timeline, the table that grows the most
+}
+
+/// El registro CRUDO y durable de cada entrada (por ahora, la landing): se escribe ANTES de procesarla.
+model CrmInboundEntry {
+  id               String      @id @default(cuid())
+  source           String
+  externalKey      String
+  payload          Json
+  receivedAt       DateTime    @default(now())
+  // { organizationId: string | null, alreadyExisted: boolean, yaEsCliente: boolean }, o null si el alta falló.
+  signupOutcome    Json?
+  signupResolvedAt DateTime?
+  appliedAt        DateTime?
+  accountId        String?
+  account          CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  lastError        String?
+  // El aviso «Nuevo prospecto» / «Volvió un prospecto» de esta entrada (ruling 49): se marca sólo cuando salió a TODOS;
+  // si no, sube el contador y el barrido lo reintenta con las mismas llaves, hasta 5 veces y dentro de las 24 h de la
+  // entrada. Una entrada que no anuncia nada (un cliente, un reingreso sin reactivar) se queda en null y el barrido la
+  // salta por su ENTRY_APPLIED.
+  noticeSentAt     DateTime?
+  noticeAttempts   Int         @default(0)
+
+  @@index([appliedAt])
+  @@index([accountId]) // deleting an account sets it null here: without it, every delete scans the table
+  @@index([noticeSentAt, receivedAt]) // el barrido sólo lee los avisos pendientes de las últimas 24 h
+}
+
+/// El aviso diario de cada persona: se APARTA antes de mandarlo (la llave única impide mandarlo dos veces) y guarda el
+/// contenido para reintentar igual.
+model CrmDigestSend {
+  id         String   @id @default(cuid())
+  staffId    String
+  day        String // YYYY-MM-DD en hora de Ciudad de México
+  status     String // APARTADO | ENVIADO | FALLO
+  attempts   Int      @default(0)
+  kind       String // DIARIO
+  reservedAt DateTime @default(now())
+  content    Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([staffId, day, kind])
 }

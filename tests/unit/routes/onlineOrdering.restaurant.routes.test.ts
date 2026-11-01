@@ -71,6 +71,9 @@ jest.mock('@/controllers/dashboard/onlineOrdering.dashboard.controller', () => {
     setMenuAvailabilityHandler: respond,
     getMenuCategoriesHandler: respond,
     listMenuProductsHandler: respond,
+    listCardRefundsHandler: respond,
+    refundCardHandler: respond,
+    resolveCardRefundHandler: respond,
   }
 })
 
@@ -183,6 +186,38 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
     expect(capa.route.stack[capa.route.stack.length - 1].handle).toBe(mobileCtrl.pause)
   })
 
+  it('T10: devolver a la tarjeta y «Devolver por otro medio» exigen payments:refund; verlas, payments:read; ninguna con plan', async () => {
+    const casos: Array<['get' | 'post', string, string, string]> = [
+      ['get', 'orders/ord1/card-refunds', 'payments:read', 'cardRefundsListSchema'],
+      ['post', 'orders/ord1/card-refund', 'payments:refund', 'cardRefundSchema'],
+      ['post', 'orders/ord1/card-refund/cr1/resolve', 'payments:refund', 'cardRefundResolveSchema'],
+    ]
+    for (const [method, path, perm, schema] of casos) {
+      const r = await request(app)[method](`${P}/${path}`)
+      expect({ path, ...r.body }).toEqual({ path, perms: [perm], plans: [], schemas: [schema] })
+    }
+  })
+
+  it('T10: sin payments:refund ⇒ 403 al devolver y al resolver (aunque pueda ver y mover pedidos)', async () => {
+    for (const path of ['orders/ord1/card-refund', 'orders/ord1/card-refund/cr1/resolve']) {
+      const sin = await request(app).post(`${P}/${path}`).set('x-test-permisos', 'orders:read,orders:update,payments:read')
+      expect({ path, status: sin.status }).toEqual({ path, status: 403 })
+      const con = await request(app).post(`${P}/${path}`).set('x-test-permisos', 'payments:refund')
+      expect({ path, status: con.status }).toEqual({ path, status: 200 })
+    }
+  })
+
+  it('F2: «Devolver por otro medio» en EFECTIVO exige payments:refund-to-cash (como el POS); por transferencia, payments:refund', async () => {
+    const resolver = (method: string, permisos: string) =>
+      request(app).post(`${P}/orders/ord1/card-refund/cr1/resolve`).set('x-test-permisos', permisos).send({ method })
+    // Un cajero (puede reembolsar, no sacar efectivo del cajón por un cobro de tarjeta) → 403 en efectivo, 200 en transferencia.
+    expect((await resolver('CASH', 'payments:refund')).status).toBe(403)
+    expect((await resolver('CASH', 'payments:refund')).body).toMatchObject({ required: 'payments:refund-to-cash' })
+    expect((await resolver('BANK_TRANSFER', 'payments:refund')).status).toBe(200)
+    expect((await resolver('CASH', 'payments:refund-to-cash')).status).toBe(200)
+    expect((await resolver('CASH', 'payments:refund-to-cash')).body).toMatchObject({ perms: ['payments:refund-to-cash'] })
+  })
+
   it('1b: pausar desde el panel con SÓLO online-orders:pause ⇒ 200; sin él ⇒ 403', async () => {
     expect((await request(app).post(`${P}/pause`).set('x-test-permisos', 'online-orders:pause')).status).toBe(200)
     expect((await request(app).post(`${P}/pause`).set('x-test-permisos', 'orders:read,orders:update')).status).toBe(403)
@@ -233,6 +268,7 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     prismaMock.venue.findUnique.mockResolvedValue(VENUE as any)
     prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(AVISO as any)
     prismaMock.onlineOrder.count.mockResolvedValue(0)
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([]) // fase 2: settingsView.card lee el comercio Stripe
   })
 
   it('GET trae el estado de la tienda (mismo cálculo que /info) con sus pausas, y los requisitos; lee los ajustes UNA vez', async () => {

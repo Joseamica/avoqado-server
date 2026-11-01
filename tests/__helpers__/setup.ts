@@ -157,6 +157,7 @@ const prismaMock: any = {
   area: createMockModel(),
   order: createMockModel(),
   orderItem: createMockModel(),
+  orderKeyRelease: createMockModel(), // D9: llaves de «Pagar después» cerradas
   // 🔴 Sin esta entrada, `awardLoyaltyForPaidOrder` (services/shared/loyaltyOnPaidOrder.ts:84)
   // revienta con "Cannot read properties of undefined (reading 'findMany')", entra por su
   // catch y guarda `loyaltyLastError` — o sea que el camino de lealtad del cobro en efectivo
@@ -375,6 +376,10 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  // Menú del aparato (31-oct-2026): la regla de qué menús muestra un aparato lee `terminalMenu.findMany`, y los fixtures POS de
+  // `settingsEnvelope.test.ts` la llaman sin saberlo. Este mock es una LISTA FIJA: sin esta entrada revientan con «Cannot read
+  // properties of undefined (reading 'findMany')» en vez de fallar por su aserción. Su default (`[]`) va más abajo.
+  terminalMenu: createMockModel(),
   terminalOrder: createMockModel(),
   tpvCommandQueue: createMockModel(),
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega
@@ -524,10 +529,29 @@ const prismaMock: any = {
   // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
   onlineOrderingSettings: createMockModel(),
   onlineOrder: createMockModel(),
+  // Fase 2 (tarjeta en línea): el cargo del pedido. Por omisión no hay cargo (pagar al recoger), así la máquina de estados se
+  // comporta igual que en 1a.
+  onlineOrderCharge: { ...createMockModel(), findUnique: jest.fn().mockResolvedValue(null) },
+  // T10 fix r1: el candado compartido del reembolso las lee cuando el cobro trae `processorId`; por default, ninguna.
+  onlineOrderCardRefund: { ...createMockModel(), findMany: jest.fn().mockResolvedValue([]) },
+  onlineOrderCardRefundReversal: createMockModel(),
   // Product exchange (block A): this mock is a FIXED list. Without these two entries any test that touches the new models
   // dies with «Cannot read properties of undefined» instead of failing on its assertion.
   exchange: createMockModel(),
   exchangeCreditLink: createMockModel(),
+  // CRM propio (spec 2026-10-30): same FIXED-list rule — without these entries a test touching the CRM models dies with
+  // «Cannot read properties of undefined» instead of failing on its assertion.
+  platformAccess: createMockModel(),
+  crmTeam: createMockModel(),
+  crmHiddenClient: createMockModel(),
+  crmAccount: createMockModel(),
+  crmContact: createMockModel(),
+  crmStage: createMockModel(),
+  crmLostReason: createMockModel(),
+  crmActivity: createMockModel(),
+  crmTimelineEvent: createMockModel(),
+  crmInboundEntry: createMockModel(),
+  crmDigestSend: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
@@ -638,6 +662,10 @@ prismaMock.printStation.findFirst.mockResolvedValue(null)
 prismaMock.printStation.findMany.mockResolvedValue([])
 prismaMock.printer.findMany.mockResolvedValue([])
 prismaMock.printGateway.findUnique.mockResolvedValue(null)
+// Menú del aparato (31-oct-2026): un aparato sin filas en `TerminalMenu` muestra «Todos los menús» (la regla entrega `null`). Casi
+// ninguna prueba elige menús: por default ninguna fila, para que los fixtures POS que llaman a la regla sin saberlo
+// (`settingsEnvelope.test.ts`) no tengan que mockearla.
+prismaMock.terminalMenu.findMany.mockResolvedValue([])
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

@@ -1,4 +1,4 @@
-import { OnlineOrderStatus, Prisma, type OnlineOrderPaymentMode } from '@prisma/client'
+import { OnlineOrderStatus, Prisma, type OnlineOrderChargeStatus, type OnlineOrderPaymentMode } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
@@ -25,6 +25,16 @@ export interface InboxOrder {
   total: number
   remaining: number
   paymentStatus: string
+  /** Fase 2: `AUTHORIZED` (tarjeta apartada, falta aceptar), `CONFIRMING` (cobrando) o `null` (al recoger, ya cobrado o sin cargo vivo). */
+  cardStatus: 'AUTHORIZED' | 'CONFIRMING' | null
+  /** Fase 2 (MCP): el cobro con tarjeta en PESOS (nunca centavos), con su estado real; `null` si el pedido no tiene cargo. */
+  card: {
+    status: OnlineOrderChargeStatus
+    amount: number
+    capturedAmount: number | null
+    authorizedAt: string | null
+    capturedAt: string | null
+  } | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -56,6 +66,8 @@ const SELECT = {
   printClaimedAt: true,
   printedAt: true,
   createdAt: true,
+  // Fase 2: el cargo con tarjeta (1:1), en el mismo select: sin consulta extra por renglón.
+  charge: { select: { status: true, amount: true, capturedAmount: true, authorizedAt: true, capturedAt: true } },
   order: {
     select: {
       id: true,
@@ -106,6 +118,16 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
     total: money(r.order.total),
     remaining: money(r.order.remainingBalance),
     paymentStatus: r.order.paymentStatus,
+    cardStatus: r.charge?.status === 'AUTHORIZED' ? 'AUTHORIZED' : r.charge?.status === 'CAPTURING' ? 'CONFIRMING' : null,
+    card: r.charge
+      ? {
+          status: r.charge.status,
+          amount: money(r.charge.amount),
+          capturedAmount: r.charge.capturedAmount ? money(r.charge.capturedAmount) : null,
+          authorizedAt: r.charge.authorizedAt ? r.charge.authorizedAt.toISOString() : null,
+          capturedAt: r.charge.capturedAt ? r.charge.capturedAt.toISOString() : null,
+        }
+      : null,
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,

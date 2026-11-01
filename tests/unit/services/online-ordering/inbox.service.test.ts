@@ -271,3 +271,106 @@ describe('listInbox', () => {
     expect(prismaMock.onlineOrder.findMany).not.toHaveBeenCalled() // ni bandeja ni sincronizaciones
   })
 })
+
+const cargo = (status: string, o: Record<string, unknown> = {}) => ({
+  status,
+  amount: new Prisma.Decimal('186.00'),
+  capturedAmount: null,
+  authorizedAt: new Date('2026-10-14T18:20:00.000Z'),
+  capturedAt: null,
+  ...o,
+})
+
+describe('fase 2: cardStatus en la bandeja', () => {
+  const unaSola = (o: any) =>
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : [o])) as any)
+
+  it('un cargo AUTHORIZED sale cardStatus AUTHORIZED y uno CAPTURING sale CONFIRMING', async () => {
+    unaSola(row('A', 'PENDING_ACCEPTANCE', { paymentMode: 'CARD_ONLINE', charge: cargo('AUTHORIZED') }))
+    expect((await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]).toMatchObject({
+      paymentMode: 'CARD_ONLINE',
+      cardStatus: 'AUTHORIZED',
+    })
+    unaSola(row('A', 'PENDING_ACCEPTANCE', { paymentMode: 'CARD_ONLINE', charge: cargo('CAPTURING') }))
+    expect((await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0].cardStatus).toBe('CONFIRMING')
+  })
+
+  it.each(['PENDING_AUTH', 'CAPTURED', 'CAPTURE_FAILED', 'RELEASING', 'RELEASED', 'ABANDONED'])(
+    'un cargo %s sale cardStatus null',
+    async status => {
+      unaSola(row('A', 'ACCEPTED', { paymentMode: 'CARD_ONLINE', charge: cargo(status) }))
+      expect((await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0].cardStatus).toBeNull()
+    },
+  )
+
+  it('el cargo viaja en el MISMO select de la bandeja (relación 1:1 acotada, sin consulta extra por renglón)', async () => {
+    await listInbox({ venueId: 'v1', now: NOW })
+    const lista = prismaMock.onlineOrder.findMany.mock.calls.map((c: unknown[]) => c[0] as any).find((a: any) => !esSincronizacion(a))
+    expect(lista.select.charge).toEqual({
+      select: { status: true, amount: true, capturedAmount: true, authorizedAt: true, capturedAt: true },
+    })
+  })
+
+  it('un pedido al recoger no cambia: conserva TODAS sus llaves y sólo suma cardStatus y card: null', async () => {
+    const LLAVES_ANTES = [
+      'orderId',
+      'onlineOrderId',
+      'orderNumber',
+      'status',
+      'paymentMode',
+      'customerName',
+      'customerPhone',
+      'note',
+      'createdAt',
+      'acceptDeadlineAt',
+      'estimatedReadyAt',
+      'total',
+      'remaining',
+      'paymentStatus',
+      'needsPrint',
+      'items',
+    ]
+    unaSola(row('A', 'PENDING_ACCEPTANCE')) // sin `charge`: paga al recoger
+    const o = (await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]
+    for (const k of LLAVES_ANTES) expect(o).toHaveProperty(k)
+    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card'].sort())
+    expect(o.cardStatus).toBeNull()
+    expect(o.card).toBeNull()
+    expect(o.paymentMode).toBe('PAY_AT_PICKUP')
+  })
+
+  it('getInboxOrder también lleva cardStatus', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(
+      row('A', 'ACCEPTED', { paymentMode: 'CARD_ONLINE', charge: cargo('AUTHORIZED') }) as any,
+    )
+    expect((await getInboxOrder({ venueId: 'v1', orderId: 'ord-A', now: NOW }))?.cardStatus).toBe('AUTHORIZED')
+  })
+
+  it('MCP: el cobro sale en PESOS (number), no en centavos, con sus fechas ISO; lo no cobrado aún va null', async () => {
+    unaSola(row('A', 'PENDING_ACCEPTANCE', { paymentMode: 'CARD_ONLINE', charge: cargo('AUTHORIZED') }))
+    expect((await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0].card).toEqual({
+      status: 'AUTHORIZED',
+      amount: 186,
+      capturedAmount: null,
+      authorizedAt: '2026-10-14T18:20:00.000Z',
+      capturedAt: null,
+    })
+  })
+
+  it('un cargo ya cobrado sale con capturedAmount y capturedAt (lo cobrado puede ser menor que lo apartado)', async () => {
+    unaSola(
+      row('A', 'ACCEPTED', {
+        paymentMode: 'CARD_ONLINE',
+        charge: cargo('CAPTURED', { capturedAmount: new Prisma.Decimal('150.50'), capturedAt: new Date('2026-10-14T18:25:00.000Z') }),
+      }),
+    )
+    const o = (await listInbox({ venueId: 'v1', filter: 'active', now: NOW })).orders[0]
+    expect(o.cardStatus).toBeNull()
+    expect(o.card).toMatchObject({ status: 'CAPTURED', amount: 186, capturedAmount: 150.5, capturedAt: '2026-10-14T18:25:00.000Z' })
+  })
+
+  it('getInboxOrder (el detalle) también lleva card', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row('A', 'ACCEPTED', { paymentMode: 'CARD_ONLINE', charge: cargo('AUTHORIZED') }) as any)
+    expect((await getInboxOrder({ venueId: 'v1', orderId: 'ord-A', now: NOW }))?.card).toMatchObject({ status: 'AUTHORIZED', amount: 186 })
+  })
+})

@@ -57,6 +57,12 @@ import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
 import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTerminal'
 import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
+import {
+  cardOnlineOrderError,
+  isCardOnlineOrderInTx,
+  MENSAJE_PAGADO_CON_TARJETA,
+  ONLINE_ORDER_PAID_BY_CARD,
+} from './online-ordering/card/guards'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
@@ -1205,6 +1211,8 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_NOT_FOUND'
   /** Rappi 2b: pedido de Rappi en efectivo (lo cobra el repartidor; se registra con «Cobrar» en efectivo). */
   | 'REJECTED_ORDER_RAPPI_CASH'
+  /** Pedidos en línea fase 2: el pedido ya se pagó (o apartó) con tarjeta en línea. */
+  | 'REJECTED_ORDER_PAID_BY_CARD'
   | 'REJECTED_EXCHANGE_CHARGE_MISMATCH'
   | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
 
@@ -1296,6 +1304,8 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
       )
     case 'REJECTED_ORDER_RAPPI_CASH':
       return new ConflictError(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
+    case 'REJECTED_ORDER_PAID_BY_CARD':
+      return new ConflictError(mensaje(MENSAJE_PAGADO_CON_TARJETA), ONLINE_ORDER_PAID_BY_CARD, details)
     case 'REJECTED_ORDER_PAID':
       return new OrderAlreadyPaidError(mensaje('La cuenta ya está pagada por completo. Actualiza la lista de órdenes.'), details)
     case 'REJECTED_ORDER_NOT_FOUND':
@@ -1776,6 +1786,10 @@ class TerminalPaymentService {
             'REJECTED_ORDER_RAPPI_CASH',
             new ConflictError(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
           )
+        }
+        // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se manda a cobrar a la terminal. Mismo lock, sin dinero movido.
+        if (await isCardOnlineOrderInTx(tx, { venueId, orderId: request.orderId })) {
+          return rechazar('REJECTED_ORDER_PAID_BY_CARD', cardOnlineOrderError(detalles))
         }
         const exchange = await tx.exchange.findUnique({
           where: { newOrderId: request.orderId, venueId },

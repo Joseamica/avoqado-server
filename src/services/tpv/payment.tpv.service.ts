@@ -378,6 +378,7 @@ import {
   ventaDeLaColaEnTx,
   entradaDelClaim,
 } from '../shared/paymentShiftClaim'
+import { avisarCobroDobleSobrePedidoConTarjeta } from '../online-ordering/card/guards'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { asegurarAvisoDeVentaApartada, enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
 import { COSTO_PENDIENTE_PLAZO_MS, asegurarCostoSincrono } from '../payments/deferredTransactionCost.service'
@@ -4527,6 +4528,17 @@ export async function recordOrderPayment(
     elapsedMs: elapsedMs(),
   })
   logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
+  // Pedidos en línea fase 2: el dinero ya se movió y se registra; si el pedido de tarjeta ya estaba cobrado, el cliente pagó dos
+  // veces (🚨 + bitácora para que el negocio devuelva uno). Después del commit, sin esperar (la TPV abandona a los 10 s); nunca lanza.
+  if (payment.status === 'COMPLETED') {
+    void avisarCobroDobleSobrePedidoConTarjeta(prisma, {
+      venueId,
+      orderId: activeOrder.id,
+      paymentId: payment.id,
+      staffId: payment.processedById ?? null,
+      source: 'TPV',
+    })
+  }
 
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).
   // Ver `services/shared/cashDrawerPosting.ts`: decide con `tenderSemantics` si el

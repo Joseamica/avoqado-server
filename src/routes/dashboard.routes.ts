@@ -96,6 +96,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as deviceMenusController from '../controllers/dashboard/deviceMenus.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
 import { soloElDuenoBorraDeFabrica } from '../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
@@ -177,6 +178,7 @@ import {
 } from '../schemas/dashboard/settlementIncident.schema'
 import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
 import { updateTerminalTpvSettingsSchema, updateTpvSchema } from '../schemas/dashboard/tpv.schema'
+import { ListDeviceMenuOptionsSchema, ListDeviceMenusSchema, SetTerminalMenusSchema } from '../schemas/dashboard/deviceMenus.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -4859,6 +4861,59 @@ router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
  */
 router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
 
+// Menú del aparato («Qué muestra cada aparato»). Las dos GET son estáticas y van ANTES de cualquier `tpvs/:algo`; sin candado
+// de plan (la página enseña el candado), sólo `tpv:read`.
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/menus:
+ *   get:
+ *     tags: [Terminals]
+ *     summary: Qué muestra cada aparato POS (sus menús y lo que ve su cuadrícula)
+ *     description: |
+ *       Aparatos POS_* no retirados, por nombre, con los menús elegidos (`[]` = «Todos los menús») y lo que ve su cuadrícula
+ *       (`sees`); `everything` es lo que ve «Todos». `pageSize` se topa en 100.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+ *       - { in: query, name: pageSize, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+ *     responses:
+ *       200: { description: '{ everything, terminals, total, page, pageSize }' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/tpvs/menus',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  validateRequest(ListDeviceMenusSchema),
+  deviceMenusController.listDeviceMenusHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/menus/options:
+ *   get:
+ *     tags: [Terminals]
+ *     summary: Menús que se pueden elegir para un aparato (encendidos y «Aparatos»), en el orden de Mesas
+ *     description: No usa GET /menus (pide menu:read y baja el catálogo completo). `search` por nombre, sin importar mayúsculas.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: query, name: search, schema: { type: string, maxLength: 100 } }
+ *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+ *       - { in: query, name: pageSize, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+ *     responses:
+ *       200: { description: '{ menus: [{ id, name, appliesToOnline, categoryCount }], total, page, pageSize }' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/tpvs/menus/options',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  validateRequest(ListDeviceMenuOptionsSchema),
+  deviceMenusController.listDeviceMenuOptionsHandler,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/tpvs/{deviceId}/sessions:
@@ -5036,6 +5091,40 @@ router.put(
   checkPermission('tpv:update'),
   validateRequest(updateTpvSchema),
   tpvController.updateTpv,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}/menus:
+ *   put:
+ *     tags: [Terminals]
+ *     summary: Elegir qué menús muestra un aparato POS (`[]` = «Todos los menús»)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: path, name: tpvId, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [menuIds]
+ *             properties:
+ *               menuIds: { type: array, maxItems: 50, items: { type: string } }
+ *     responses:
+ *       200: { description: 'La fila del aparato (misma forma que terminals[i] de GET tpvs/menus)' }
+ *       400: { description: 'MENU_NO_DISPONIBLE: «Ese menú no existe, está apagado o no es para aparatos.»' }
+ *       403: { description: 'Sin tpv:update o sin el plan Pro (DEVICE_MENUS)' }
+ *       404: { description: 'TERMINAL_NOT_FOUND: no es del negocio o no es un aparato POS' }
+ */
+router.put(
+  '/venues/:venueId/tpv/:tpvId/menus',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  checkFeatureAccess('DEVICE_MENUS'),
+  validateRequest(SetTerminalMenusSchema),
+  deviceMenusController.setTerminalMenusHandler,
 )
 
 /**

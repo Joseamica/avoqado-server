@@ -185,6 +185,25 @@ async function porPaginas<T extends { id: string }>(
   }
 }
 
+/**
+ * D1 (pedidos en línea fase 2): el cobro con tarjeta de un pedido en línea no crea `CheckoutSession` (nace en `OnlineOrderCharge` + su
+ * `Payment`), así que Ganancias no lo veía. Sus filas: el `Payment` COMPLETED del cargo (`feeAmount` = la comisión de Avoqado que Stripe
+ * sí cobró) y sus devoluciones a la tarjeta (`feeAmount` negativo = la comisión que Stripe regresó). Volumen y transacciones cuentan sólo
+ * el cobro, como `CheckoutSession`.
+ * Sumar en SQL es exacto aquí: es una suma de pesos ya guardados, no el motor no lineal de `computeRevenueSplit`.
+ */
+const SQL_COBROS_DE_PEDIDOS_CON_TARJETA = Prisma.sql`
+  "Payment" p
+  JOIN "OnlineOrder" oo ON oo."orderId" = p."orderId"
+  JOIN "OnlineOrderCharge" c ON c."onlineOrderId" = oo.id`
+// Sólo el cobro DEL CARGO (su `processorId` es el PaymentIntent, como lo escribe la captura) y las devoluciones a la tarjeta de ese cargo
+// (`OnlineOrderCardRefund.refundPaymentId`). Codex r7: otro cobro de la misma cuenta —el de terminal que la captura registra como cobro
+// doble— no es dinero en línea: su margen ya lo cuenta la parte de terminales.
+const SQL_COBRO_O_DEVOLUCION = Prisma.sql`p.status = 'COMPLETED' AND (
+    (p.type = 'REGULAR' AND p."processorId" = c."paymentIntentId")
+    OR (p.type = 'REFUND' AND EXISTS (SELECT 1 FROM "OnlineOrderCardRefund" r WHERE r."refundPaymentId" = p.id AND r."chargeId" = c.id))
+  )`
+
 const TX_INCLUDE = {
   payment: { select: { venue: { select: { id: true, name: true } } } },
   merchantAccount: {
@@ -276,6 +295,58 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
     onlineVolume = Number(oTotals._sum.amount) || 0
     onlineTxns = oTotals._count
     channelRows = cr
+
+    // D1: los pedidos en línea con tarjeta, por negocio y canal (comisión en pesos, ya neta de lo que Stripe regresó).
+    const pedidosVenueClause = filter?.venueId ? Prisma.sql`AND p."venueId" = ${filter.venueId}` : Prisma.empty
+    const pedidos = await prisma.$queryRaw<
+      Array<{
+        venueId: string
+        venueName: string
+        ecommerceMerchantId: string
+        channelName: string | null
+        businessName: string | null
+        providerCode: string
+        fees: unknown
+        volume: unknown
+        transactions: bigint
+      }>
+    >(Prisma.sql`
+      SELECT v.id AS "venueId", v.name AS "venueName", em.id AS "ecommerceMerchantId", em."channelName", em."businessName",
+             pp.code AS "providerCode",
+             COALESCE(SUM(p."feeAmount"), 0) AS fees,
+             COALESCE(SUM(p.amount) FILTER (WHERE p.type = 'REGULAR'), 0) AS volume,
+             COUNT(*) FILTER (WHERE p.type = 'REGULAR') AS transactions
+      FROM ${SQL_COBROS_DE_PEDIDOS_CON_TARJETA}
+      JOIN "EcommerceMerchant" em ON em.id = c."ecommerceMerchantId"
+      JOIN "PaymentProvider" pp ON pp.id = em."providerId"
+      JOIN "Venue" v ON v.id = p."venueId"
+      WHERE ${SQL_COBRO_O_DEVOLUCION}
+        AND p."createdAt" >= ${utcTs(startDate)} AND p."createdAt" <= ${utcTs(endDate)} ${pedidosVenueClause}
+      GROUP BY v.id, v.name, em.id, em."channelName", em."businessName", pp.code
+    `)
+    for (const fila of pedidos ?? []) {
+      const fees = Number(fila.fees) // ya en pesos (Payment.feeAmount), no en centavos
+      const volume = Number(fila.volume)
+      const transactions = Number(fila.transactions)
+      onlineFees += fees
+      onlineVolume += volume
+      onlineTxns += transactions
+      onlineByVenue.push({
+        venueId: fila.venueId,
+        venueName: fila.venueName,
+        fees: BigInt(Math.round(fees * 100)),
+        volume,
+        transactions: BigInt(transactions),
+      })
+      const canal = channelRows.find(c => c.ecommerceMerchantId === fila.ecommerceMerchantId)
+      if (canal) {
+        canal.fees = BigInt(canal.fees) + BigInt(Math.round(fees * 100))
+        canal.volume = Number(canal.volume) + volume
+        canal.transactions = BigInt(canal.transactions) + BigInt(transactions)
+      } else {
+        channelRows.push({ ...fila, fees: BigInt(Math.round(fees * 100)), volume, transactions: BigInt(transactions) })
+      }
+    }
   }
 
   const venueMap = new Map<string, VenueEarnings>()
@@ -526,6 +597,23 @@ export async function getEarningsTimeSeries(
         p.net += fees
       },
     )
+
+    // D1: los pedidos en línea con tarjeta, sumados por la misma cubeta UTC que `bucketKey` (lunes para la semana).
+    const formato = granularity === 'monthly' ? 'YYYY-MM' : 'YYYY-MM-DD'
+    const corte = granularity === 'monthly' ? 'month' : granularity === 'weekly' ? 'week' : 'day'
+    const pedidosVenueClause = filter?.venueId ? Prisma.sql`AND p."venueId" = ${filter.venueId}` : Prisma.empty
+    const pedidos = await prisma.$queryRaw<Array<{ bucket: string; fees: unknown }>>(Prisma.sql`
+      SELECT to_char(date_trunc(${corte}, p."createdAt"), ${formato}) AS bucket, COALESCE(SUM(p."feeAmount"), 0) AS fees
+      FROM ${SQL_COBROS_DE_PEDIDOS_CON_TARJETA}
+      WHERE ${SQL_COBRO_O_DEVOLUCION}
+        AND p."createdAt" >= ${utcTs(startDate)} AND p."createdAt" <= ${utcTs(endDate)} ${pedidosVenueClause}
+      GROUP BY 1
+    `)
+    for (const fila of pedidos ?? []) {
+      const p = at(fila.bucket)
+      p.onlineFees += Number(fila.fees)
+      p.net += Number(fila.fees)
+    }
   }
 
   return Array.from(map.values())

@@ -129,6 +129,10 @@ const DOMAINS: Domain[] = [
     name: 'System: Audit, Webhooks & Platform',
     description: 'Cross-cutting plumbing: audit log, webhook subscriptions, partner API keys, global settings.',
   },
+  {
+    name: 'CRM (equipo de ventas de Avoqado)',
+    description: 'Platform-level CRM for Avoqado’s own sales team: CRM-only keys, accounts, contacts, pipeline, activities.',
+  },
 ]
 
 /**
@@ -328,11 +332,15 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
 
   // 9. Orders, KDS & Cash
   Order: 'Orders, KDS & Cash',
+  OrderKeyRelease: 'Orders, KDS & Cash',
   Exchange: 'Orders, KDS & Cash',
   ExchangeCreditLink: 'Orders, KDS & Cash',
   OrderItem: 'Orders, KDS & Cash',
   OnlineOrderingSettings: 'Orders, KDS & Cash',
   OnlineOrder: 'Orders, KDS & Cash',
+  OnlineOrderCharge: 'Orders, KDS & Cash',
+  OnlineOrderCardRefund: 'Orders, KDS & Cash',
+  OnlineOrderCardRefundReversal: 'Orders, KDS & Cash',
   OrderItemModifier: 'Orders, KDS & Cash',
   OrderAction: 'Orders, KDS & Cash',
   OrderDiscount: 'Orders, KDS & Cash',
@@ -567,6 +575,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Terminal: 'Terminals / TPV Fleet',
   TerminalHealth: 'Terminals / TPV Fleet',
   TerminalLog: 'Terminals / TPV Fleet',
+  TerminalMenu: 'Terminals / TPV Fleet',
   TerminalOrder: 'Terminals / TPV Fleet',
   TerminalPaymentRequest: 'Terminals / TPV Fleet',
   TerminalPaymentAttemptLink: 'Terminals / TPV Fleet',
@@ -641,6 +650,19 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   WebhookSubscription: 'System: Audit, Webhooks & Platform',
   PartnerAPIKey: 'System: Audit, Webhooks & Platform',
   PlatformSettings: 'System: Audit, Webhooks & Platform',
+
+  // 22. CRM (equipo de ventas de Avoqado) — spec 2026-10-30
+  PlatformAccess: 'CRM (equipo de ventas de Avoqado)',
+  CrmTeam: 'CRM (equipo de ventas de Avoqado)',
+  CrmHiddenClient: 'CRM (equipo de ventas de Avoqado)',
+  CrmAccount: 'CRM (equipo de ventas de Avoqado)',
+  CrmContact: 'CRM (equipo de ventas de Avoqado)',
+  CrmStage: 'CRM (equipo de ventas de Avoqado)',
+  CrmLostReason: 'CRM (equipo de ventas de Avoqado)',
+  CrmActivity: 'CRM (equipo de ventas de Avoqado)',
+  CrmTimelineEvent: 'CRM (equipo de ventas de Avoqado)',
+  CrmInboundEntry: 'CRM (equipo de ventas de Avoqado)',
+  CrmDigestSend: 'CRM (equipo de ventas de Avoqado)',
 }
 
 // ---------------------------------------------------------------------------

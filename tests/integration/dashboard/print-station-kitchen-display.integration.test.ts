@@ -2,6 +2,9 @@
  * Casilla «Se atiende con pantalla de cocina» por estación (spec 2026-09-24 §4, etapa 1).
  */
 jest.mock('@/mcp/scope', () => ({ isActiveSuperAdmin: jest.fn(async (id: string) => id === 'super-1') }))
+// La puerta se abrió el 1-nov; aquí se cierra a propósito para seguir probando el camino «sólo Avoqado prende» por si se
+// vuelve a cerrar. Con la puerta abierta: tests/unit/services/dashboard/setKitchenDisplay.release.test.ts.
+jest.mock('@/services/kds/kitchenDisplayRelease', () => ({ PANTALLA_ABIERTA_A_CLIENTES: false }))
 import prisma from '@/utils/prismaClient'
 import { setKitchenDisplay } from '@/services/dashboard/printStation.dashboard.service'
 import { ForbiddenError, NotFoundError } from '@/errors/AppError'

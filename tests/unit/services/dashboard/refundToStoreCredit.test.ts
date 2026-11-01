@@ -399,6 +399,7 @@ describe('writeRefundInTx con aSaldoAFavor', () => {
     refundedSalesCents: 0,
     refundedTipsCents: 0,
     unclassifiedPriorRefundCents: 0,
+    reservedByCardRefundsCents: 0,
     remainingBeforeCents: 50000,
   })
   const abonar = jest.fn(async () => abonoHecho(100))

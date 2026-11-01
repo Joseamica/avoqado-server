@@ -9,7 +9,8 @@
 
 import { processIntents, requiredPermissionForIntent } from '@/services/mobile/sync.mobile.service'
 import prisma from '@/utils/prismaClient'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
+import { cardOnlineOrderError } from '@/services/online-ordering/card/guards'
 import { MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
@@ -586,6 +587,23 @@ describe('sync.mobile.service processIntents', () => {
       ownerId: 'staff-otro',
       ownerName: 'otro mesero',
     })
+  })
+
+  // Pedidos en línea fase 2 (T8): el 409 de las guardas de tarjeta es un rechazo de NEGOCIO permanente, nunca RETRY.
+  it('la cola sin red PAY_CASH sobre un pedido de tarjeta queda REJECTED ONLINE_ORDER_PAID_BY_CARD, no RETRY', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValueOnce(cardOnlineOrderError())
+    const acks = await processIntents(baseParams([{ id: 'i-card', type: 'PAY_CASH', payload: { orderId: 'order-web', amountCents: 25000 } }]))
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'ONLINE_ORDER_PAID_BY_CARD' })
+  })
+
+  it('la cola sin red APPLY_DISCOUNT sobre un pedido de tarjeta sin cobrar queda REJECTED, no RETRY', async () => {
+    ;(orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Este pedido se pagó con tarjeta en línea por un total fijo; no se puede modificar.', 'ONLINE_ORDER_PAID_BY_CARD'),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i-card-d', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-web', discountId: 'disc-1' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'ONLINE_ORDER_PAID_BY_CARD' })
   })
 
   it('🔴 R5-1: el cobro de la llave desapareció antes de que payCashOrder lo releyera ⇒ REJECTED TABLE_OWNED_BY_OTHER (no se crea otro)', async () => {
