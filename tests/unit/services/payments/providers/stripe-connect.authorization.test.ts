@@ -104,6 +104,7 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
         captureBefore: new Date(1730000000 * 1000),
         card: { brand: 'visa', last4: '4242', funding: 'debit' },
         paymentMethodType: 'card',
+        applicationFeeCents: 0,
       })
     })
 
@@ -132,6 +133,13 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
       expect(mockStripe.paymentIntents.retrieve).toHaveBeenCalledWith('pi_1', { expand: ['latest_charge'] }, { stripeAccount: 'acct_x' })
       expect(state.sessionStatus).toBeNull()
       expect(state.piStatus).toBe('requires_capture')
+    })
+
+    it('Codex r3 #3: lee la comisión que Stripe SÍ cobró (application_fee_amount); un cobro a mano sin comisión da 0', async () => {
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce({ ...piBase, status: 'succeeded', application_fee_amount: 290 })
+      expect((await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).applicationFeeCents).toBe(290)
+      mockStripe.paymentIntents.retrieve.mockResolvedValueOnce({ ...piBase, status: 'succeeded', application_fee_amount: null })
+      expect((await provider.getAuthorization(merchant as any, { paymentIntentId: 'pi_1' })).applicationFeeCents).toBe(0)
     })
   })
 

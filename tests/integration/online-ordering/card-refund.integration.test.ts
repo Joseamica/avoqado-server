@@ -21,6 +21,7 @@ import { advanceCardRefund, refundCardOnlineOrder, resolveReversedCardRefund } f
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -237,8 +238,9 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
           amount: p.amount,
           status: nextRefundStatus,
         })
-        // Stripe devuelve la comisión en proporción (290 de 25,000).
-        feeRefunded.set(p.paymentIntentId, (feeRefunded.get(p.paymentIntentId) ?? 0) + Math.round((290 * p.amount) / 25_000))
+        // Stripe devuelve la comisión en proporción (290 de 25,000), sólo si se pidió (Codex r3 #3: un cobro a mano no la trae).
+        if (p.refundApplicationFee)
+          feeRefunded.set(p.paymentIntentId, (feeRefunded.get(p.paymentIntentId) ?? 0) + Math.round((290 * p.amount) / 25_000))
       }
       return stripeRefunds.get(p.idempotencyKey)!
     })
@@ -527,6 +529,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
         captureBefore: null,
         card: { brand: 'visa', last4: '4242', funding: 'credit' },
         paymentMethodType: 'card',
+        applicationFeeCents: 0, // Codex r3 #3: el dueño capturó en su Stripe: sin comisión de la plataforma
       })
       await expect(rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'OTHER' })).resolves.toMatchObject({
         outcome: 'OK',
@@ -538,11 +541,32 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).toMatchObject({ status: 'CAPTURED' })
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
 
+    // Codex r3 #3: el cobro se anota con la comisión que Stripe sí cobró (ninguna), no con la congelada del borrador.
+    const [cobro] = await prisma.payment.findMany({ where: { orderId, type: 'REGULAR' }, take: 2 })
+    expect(cobro.feeAmount.toFixed(2)).toBe('0.00')
+    expect(cobro.netAmount.toFixed(2)).toBe('250.00')
+
+    // Codex r3 #1: la venta cancelada no se suma al reporte, así que su devolución tampoco se resta (antes: ventas netas −$250).
+    const rango = { startDate: new Date(Date.now() - 86_400_000).toISOString(), endDate: new Date(Date.now() + 86_400_000).toISOString() }
+    const reporte = async () => {
+      const resumen = (await getSalesSummary(venueId!, { ...rango, reportType: 'summary' })).summary
+      const porDia = (await getSalesSummary(venueId!, { ...rango, reportType: 'days' })).byPeriod ?? []
+      return {
+        refunds: resumen.refunds,
+        netSales: resumen.netSales,
+        refundsPorDia: porDia.reduce((t, p) => t + Number(p.metrics?.refunds ?? 0), 0),
+      }
+    }
+    const antes = await reporte()
+
     const r = await pedir(orderId)
     expect(r).toMatchObject({ status: 'RECORDED', replay: false })
     const [ledger] = await refundsOf(orderId)
     expect(ledger.amount.toFixed(2)).toBe('-250.00')
     expect(refundSpy).toHaveBeenCalledTimes(1)
+    expect(refundSpy.mock.calls[0][1]).toMatchObject({ refundApplicationFee: false })
+    expect(await reporte()).toEqual(antes)
+    expect(await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })).toMatchObject({ feeRefundedCents: 0 })
   })
 
   it('Codex r1 C2: un refund.failed de OTRA cuenta (o de otro modo) con nuestra metadata → anomalía, sin releer Stripe ni escribir', async () => {

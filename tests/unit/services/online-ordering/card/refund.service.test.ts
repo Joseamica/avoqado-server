@@ -276,6 +276,15 @@ beforeEach(() => {
 })
 
 describe('refundCardOnlineOrder', () => {
+  it('Codex r3 #3: un cobro hecho a mano en Stripe sin comisión NO pide devolver una comisión que no existe', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue({ id: 'pay1', feeAmount: new Prisma.Decimal('0.00') } as any)
+    getApplicationFeeRefundedCents.mockResolvedValue(0)
+    const r = await pedir()
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(refund.mock.calls[0][1]).toMatchObject({ paymentIntentId: 'pi_1', amount: 25_000, refundApplicationFee: false })
+    expect(r).toMatchObject({ status: 'RECORDED' })
+  })
+
   it('reembolso total: Stripe con refund_application_fee y metadata con cardRefundId; un renglón REFUND con la comisión devuelta', async () => {
     const r = await pedir()
     expect(r).toMatchObject({ status: 'RECORDED', cardRefundStatus: 'RECORDED', replay: false })

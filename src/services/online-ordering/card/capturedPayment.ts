@@ -10,14 +10,18 @@ import type { AuthorizationState } from '@/services/payments/providers/provider.
 /** Clave idempotente de la captura; también es la llave del `Payment` de tarjeta del pedido (uno por pedido). */
 export const captureKey = (orderId: string) => `online-order:${orderId}:capture`
 
-/** Los datos del `Payment` de tarjeta: lo cobrado, la comisión congelada del cargo (Codex r1 #8) y débito/crédito de Stripe. */
+/**
+ * Los datos del `Payment` de tarjeta: lo cobrado, la comisión y débito/crédito de Stripe. La comisión es la que Stripe dice que cobró
+ * (Codex r3 #3: si el dueño capturó a mano en su Stripe no hay comisión, y anotar la congelada inventaba $2.90 y un neto falso); sin
+ * ese dato, la congelada del cargo (Codex r1 #8), que es la que manda la captura de Avoqado.
+ */
 export function cardPaymentData(
   charge: Pick<OnlineOrderCharge, 'venueId' | 'ecommerceMerchantId' | 'applicationFeeCents' | 'paymentIntentId'>,
   state: AuthorizationState,
   orderId: string,
   capturedAmount: Prisma.Decimal,
 ): Prisma.PaymentUncheckedCreateInput {
-  const feeAmount = new Prisma.Decimal(charge.applicationFeeCents).div(100)
+  const feeAmount = new Prisma.Decimal(state.applicationFeeCents ?? charge.applicationFeeCents).div(100)
   const netAmount = Prisma.Decimal.max(capturedAmount.sub(feeAmount), 0)
   const feePercentage = capturedAmount.gt(0) ? feeAmount.div(capturedAmount).toDecimalPlaces(4) : new Prisma.Decimal(0)
   const sat = metodoDeStripe(state.paymentMethodType)

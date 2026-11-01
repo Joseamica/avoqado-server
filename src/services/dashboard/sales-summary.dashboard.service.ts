@@ -1042,7 +1042,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ...paymentLevelFilter,
       // Tarjetas de regalo: la cancelación de una venta de tarjetas no es devolución de mercancía (resta de «tarjetas cargadas»).
       // El REFUND de un cobro con saldo SÍ se queda: devuelve mercancía.
-      order: WHERE_ORDEN_SIN_TARJETAS,
+      // Codex r3 #1 (pedidos en línea): la devolución de una cuenta que NO cuenta como venta (cancelada o borrada) tampoco se
+      // resta, igual que su venta no se suma arriba. Sin esto, devolver un pedido rechazado que el negocio había cobrado a mano en
+      // su Stripe dejaba las ventas netas en −$250.
+      order: { ...WHERE_ORDEN_SIN_TARJETAS, status: { notIn: ['CANCELLED', 'DELETED'] } },
     },
     _sum: {
       amount: true,
@@ -1926,6 +1929,8 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" <= $3::timestamp
       AND type = 'REFUND'
       AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
+      -- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta.
+      AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = "Payment"."orderId" AND o.status IN ('CANCELLED', 'DELETED'))
       ${merchantPaymentClause}
       ${paymentSqlClause}
     GROUP BY ${groupByExpression}

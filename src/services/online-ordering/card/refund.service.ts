@@ -190,12 +190,17 @@ async function send(cur: Cur, now: Date): Promise<void> {
 /** El envío a Stripe de una fila ya `SENDING`, con la MISMA clave siempre (Stripe repite o crea exactamente una). */
 async function callStripeRefund(cur: Cur, now: Date): Promise<void> {
   const { orderId, paymentIntentId, merchant } = await chargeOf(cur.row)
+  // Codex r3 #3: un cobro hecho a mano en Stripe no trae comisión de la plataforma; no se pide devolver una que no existe.
+  const cobro = await prisma.payment.findFirst({
+    where: { venueId: cur.row.venueId, orderId, processorId: paymentIntentId, type: PaymentType.REGULAR },
+    select: { feeAmount: true },
+  })
   let result
   try {
     result = await getProvider(merchant).refund(merchant, {
       paymentIntentId,
       amount: cur.row.amountCents,
-      refundApplicationFee: true,
+      refundApplicationFee: !cobro?.feeAmount || new Prisma.Decimal(cobro.feeAmount).gt(0),
       idempotencyKey: `online-order:${orderId}:refund:${cur.row.id}`,
       metadata: { type: 'online_order_refund', cardRefundId: cur.row.id, orderId, venueId: cur.row.venueId },
     })

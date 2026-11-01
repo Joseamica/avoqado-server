@@ -601,6 +601,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
           }
         : null,
       paymentMethodType: details?.type ?? null,
+      applicationFeeCents: pi?.application_fee_amount ?? 0,
     }
   }
 

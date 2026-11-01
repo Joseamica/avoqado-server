@@ -149,6 +149,9 @@ export interface AuthorizationState {
   captureBefore: Date | null
   card: { brand: string | null; last4: string | null; funding: 'credit' | 'debit' | 'prepaid' | 'unknown' | null } | null
   paymentMethodType: string | null
+  /** Codex r3 #3: la comisión de la plataforma que Stripe SÍ cobró (`application_fee_amount`); 0 si el cobro no la trae (p. ej. el
+   *  dueño capturó a mano en su Stripe). Opcional: un lector que no la sabe deja la congelada del cargo. */
+  applicationFeeCents?: number
 }
 
 export interface CaptureParams {
