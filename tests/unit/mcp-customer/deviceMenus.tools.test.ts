@@ -201,6 +201,46 @@ describe('set_device_menus', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  it('con la app ya al día dice que AHORA muestran el menú (Codex r3 #4)', async () => {
+    mockSet.mockResolvedValue({ needsAppUpdate: false, sees: { categories: 2, products: 5 }, seesAfterUpdate: null })
+    const r = await confirmar('set_device_menus', args)
+    expect(r).toMatchObject({
+      ok: true,
+      updated: [{ id: T1, name: 'Caja 1', needsAppUpdate: false, sees: { categories: 2, products: 5 } }],
+    })
+    expect(r.message).toBe('Listo: 1 aparato(s) ahora muestran «Cremería».')
+  })
+
+  it('con la app que necesita actualizarse dice que quedó GUARDADA, que hoy sigue mostrando todo y lo que mostrará al actualizar (Codex r3 #4)', async () => {
+    mockSet.mockResolvedValue({
+      needsAppUpdate: true,
+      sees: { categories: 9, products: 40 },
+      seesAfterUpdate: { categories: 2, products: 5 },
+    })
+    const r = await confirmar('set_device_menus', args)
+    expect(r.ok).toBe(true)
+    expect(r.updated).toEqual([
+      {
+        id: T1,
+        name: 'Caja 1',
+        needsAppUpdate: true,
+        sees: { categories: 9, products: 40 },
+        seesAfterUpdate: { categories: 2, products: 5 },
+      },
+    ])
+    expect(r.message).not.toMatch(/ahora muestran/)
+    expect(r.message).toMatch(/guardad/i)
+    expect(r.message).toMatch(/todo el catálogo/)
+    expect(r.message).toMatch(/actualizar la app/)
+    expect(r.message).toMatch(/«Caja 1».*2 categorías y 5 productos/)
+  })
+
+  it('volver a «Todos los menús» con la app vieja sí es inmediato: ya mostraba todo', async () => {
+    mockSet.mockResolvedValue({ needsAppUpdate: true, sees: { categories: 9, products: 40 }, seesAfterUpdate: null })
+    const r = await confirmar('set_device_menus', { venueId: V1, terminalIds: [T1], menuIds: [] })
+    expect(r.message).toBe('Listo: 1 aparato(s) ahora muestran «Todos los menús».')
+  })
+
   it('si falla el segundo aparato dice cuáles se guardaron, cuál falló y cuáles faltan', async () => {
     const T2 = 'cterminal0000000000000002'
     const T3 = 'cterminal0000000000000003'

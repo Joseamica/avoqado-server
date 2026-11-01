@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import AppError from '@/errors/AppError'
 import { existingId } from '@/schemas/common/existingId.schema'
 import {
+  type DeviceMenusTerminalRow,
   DEVICE_MENUS_CODE,
   MENU_NO_DISPONIBLE_MESSAGE,
   POS_TERMINAL_TYPES,
@@ -74,7 +75,7 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'set_device_menus',
-    'Choose which menus up to 20 point-of-sale devices of a venue show in their sales grid (it only hides items from the grid; search and barcode still reach the whole catalog). It REPLACES each device\'s choice; an empty menuIds list means "all menus". Only active menus that are used on devices can be chosen (see list_device_menus). By DEFAULT it only PREVIEWS the change per device (current → new): show it to the user and, after their OK, call again with confirm:true and the confirmation arguments the preview returns. This WRITES — requires tpv:update and a plan that includes it.',
+    'Choose which menus up to 20 point-of-sale devices of a venue show in their sales grid (it only hides items from the grid; search and barcode still reach the whole catalog). It REPLACES each device\'s choice; an empty menuIds list means "all menus". Only active menus that are used on devices can be chosen (see list_device_menus). On a device whose app still needs an update (needsAppUpdate in the result) the choice is saved but the device keeps showing the whole catalog until its app is updated; seesAfterUpdate says what it will show then. By DEFAULT it only PREVIEWS the change per device (current → new): show it to the user and, after their OK, call again with confirm:true and the confirmation arguments the preview returns. This WRITES — requires tpv:update and a plan that includes it.',
     {
       venueId: existingId().describe('Venue (must be in your scope)'),
       terminalIds: z.array(existingId()).min(1).max(20).describe('Devices to change (ids from list_device_menus)'),
@@ -142,10 +143,13 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
 
         // Sin `auditMcpWrite`: el servicio deja UNA fila por aparato (sólo si cambió), con la procedencia del MCP.
         const procedencia = await mcpProvenance(scope)
-        const saved: Array<{ id: string; name: string }> = []
+        const saved: Array<
+          { id: string; name: string } & Partial<Pick<DeviceMenusTerminalRow, 'needsAppUpdate' | 'sees' | 'seesAfterUpdate'>>
+        > = []
         for (const [i, a] of aparatos.entries()) {
+          let fila: DeviceMenusTerminalRow
           try {
-            await setTerminalMenus(venueId, a.id, idsMenus, scope.staffId, procedencia)
+            fila = await setTerminalMenus(venueId, a.id, idsMenus, scope.staffId, procedencia)
           } catch (err) {
             // Parcial: cada aparato va en su propia transacción. Se dice qué quedó, qué falló y qué falta (reintentar es idempotente).
             const known = err instanceof ScopeError || (err instanceof AppError && err.isOperational)
@@ -162,12 +166,31 @@ export function registerDeviceMenuTools(server: McpServer, scope: McpScope) {
               message: `Se guardaron ${saved.length} aparato(s), falló «${a.name}» y faltan ${aparatos.length - i - 1}. Se puede volver a intentar con el que falló y los que faltan (repetir es seguro: reemplaza la elección completa).`,
             })
           }
-          saved.push({ id: a.id, name: a.name })
+          saved.push({
+            id: a.id,
+            name: a.name,
+            needsAppUpdate: fila.needsAppUpdate,
+            sees: fila.sees,
+            seesAfterUpdate: fila.seesAfterUpdate,
+          })
         }
+        const nuevo = lista(menus.map(m => m.name))
+        // Una app que todavía no aplica la elección la guarda, pero sigue mostrando todo (Ruling 11): no se dice «ahora muestran».
+        // Volver a «Todos los menús» sí es inmediato: ya mostraba todo.
+        const pendientes = idsMenus.length ? saved.filter(f => f.needsAppUpdate) : []
+        if (!pendientes.length)
+          return text({ ok: true, updated: saved, message: `Listo: ${saved.length} aparato(s) ahora muestran «${nuevo}».` })
+        const detalle = pendientes
+          .map(f =>
+            f.seesAfterUpdate
+              ? `«${f.name}» mostrará ${f.seesAfterUpdate.categories} categorías y ${f.seesAfterUpdate.products} productos`
+              : `«${f.name}»`,
+          )
+          .join('; ')
         return text({
           ok: true,
           updated: saved,
-          message: `Listo: ${saved.length} aparato(s) ahora muestran «${lista(menus.map(m => m.name))}».`,
+          message: `Elección guardada: ${saved.length} aparato(s) quedan con «${nuevo}». En ${pendientes.length} de ellos la app necesita actualizarse: hoy siguen mostrando todo el catálogo y lo aplicarán al actualizar la app (${detalle}).`,
         })
       } catch (err) {
         return operatorError(err)
