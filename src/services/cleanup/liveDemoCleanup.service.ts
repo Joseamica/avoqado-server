@@ -527,6 +527,11 @@ export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<
   // una relación así — es el tercer defecto idéntico en tres meses, y siempre se descubrió por el
   // cron fallando cada hora en producción.
   await borrar(tx.consentEvent.deleteMany({ where: { venueId } })) // → PrivacyNoticeVersion
+  // Pedidos en línea con tarjeta: la reversa → su devolución → el cargo (Restrict al comercio); las dos primeras no tienen relación
+  // con el venue, así que el cascade nunca las alcanza.
+  await borrar(tx.onlineOrderCardRefundReversal.deleteMany({ where: { venueId } })) // → OnlineOrderCardRefund
+  await borrar(tx.onlineOrderCardRefund.deleteMany({ where: { venueId } })) // → OnlineOrderCharge
+  await borrar(tx.onlineOrderCharge.deleteMany({ where: { venueId } })) // → EcommerceMerchant
   await borrar(tx.paymentLink.deleteMany({ where: { venueId } })) // → EcommerceMerchant
   await borrar(tx.serializedItem.deleteMany({ where: { venueId } })) // → ItemCategory
   await borrar(tx.referralRewardGrant.deleteMany({ where: { venueId } })) // → ReferralTierReward

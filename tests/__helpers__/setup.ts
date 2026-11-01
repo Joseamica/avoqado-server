@@ -529,6 +529,12 @@ const prismaMock: any = {
   // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
   onlineOrderingSettings: createMockModel(),
   onlineOrder: createMockModel(),
+  // Fase 2 (tarjeta en línea): el cargo del pedido. Por omisión no hay cargo (pagar al recoger), así la máquina de estados se
+  // comporta igual que en 1a.
+  onlineOrderCharge: { ...createMockModel(), findUnique: jest.fn().mockResolvedValue(null) },
+  // T10 fix r1: el candado compartido del reembolso las lee cuando el cobro trae `processorId`; por default, ninguna.
+  onlineOrderCardRefund: { ...createMockModel(), findMany: jest.fn().mockResolvedValue([]) },
+  onlineOrderCardRefundReversal: createMockModel(),
   // Product exchange (block A): this mock is a FIXED list. Without these two entries any test that touches the new models
   // dies with «Cannot read properties of undefined» instead of failing on its assertion.
   exchange: createMockModel(),

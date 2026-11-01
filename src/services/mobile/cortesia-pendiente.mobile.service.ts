@@ -9,6 +9,7 @@ import { IMPERSONATION_ERROR_CODES } from '../../types/impersonation'
 import { esSuperadminReal } from '../access/rolVigente'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { aCentavos } from '../shared/repartoDescuento'
 import { compOrderItemInTransaction } from './comp-item.mobile.service'
@@ -329,6 +330,8 @@ export async function revisarCortesiaPendiente(
 
   return prisma.$transaction(async tx => {
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: resolved.id }))) throw new NotFoundError('Orden original no encontrada')
+    // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+    await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: resolved.id })
     const order = await tx.order.findUnique({ where: { id: resolved.id, venueId, externalId: input.externalId }, select: orderSelect })
     if (!order) throw new NotFoundError('Orden original no encontrada')
     const { snapshot, items } = await readSnapshot(tx, order)

@@ -216,6 +216,17 @@ export interface SalesSummaryResponse {
 export type ReportType = 'summary' | 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum'
 
 export type PaymentMethodFilter = 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER'
+
+/**
+ * La comisión de UN cobro (alias `p` para Payment y `tc` para su TransactionCost, 1:1): su costo (cargo + cuota fija) si lo tiene; si no,
+ * y sólo si es un cobro en línea de Avoqado, la que trae el propio `Payment` (Codex r4 H1): el de Stripe de pedidos en línea, las ligas,
+ * Checkout y Mercado Pago no tienen costo y su comisión vive en `feeAmount`. «En línea de Avoqado» = `fundsFlow = AVOQADO_PROCESSED` (lo
+ * nuevo, y la devolución que lo copia y trae la comisión devuelta en negativo) o un comercio en línea (`ecommerceMerchantId`: lo de antes
+ * de `fundsFlow`, Codex r6). El resto sin costo publica 0 como siempre: el importador de SoftRestaurant y el efectivo de los demos guardan
+ * un `feeAmount` que no se cobró (Codex r5). El de terminal sin costo todavía trae 0.
+ */
+const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN p."fundsFlow" = 'AVOQADO_PROCESSED' OR p."ecommerceMerchantId" IS NOT NULL THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
+
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
 
 export interface SalesSummaryFilters {
@@ -1042,7 +1053,11 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ...paymentLevelFilter,
       // Tarjetas de regalo: la cancelación de una venta de tarjetas no es devolución de mercancía (resta de «tarjetas cargadas»).
       // El REFUND de un cobro con saldo SÍ se queda: devuelve mercancía.
-      order: WHERE_ORDEN_SIN_TARJETAS,
+      // Codex r3 #1 (pedidos en línea): la devolución de una cuenta que NO cuenta como venta (cancelada o borrada) tampoco se
+      // resta, igual que su venta no se suma arriba. Sin esto, devolver un pedido rechazado que el negocio había cobrado a mano en
+      // su Stripe dejaba las ventas netas en −$250. Codex r4 H5: sólo sin filtro de método; filtrada, la vista es de movimientos
+      // (ventas netas nulas, cobrado = suma con signo) y la devolución que sí salió se ve.
+      order: isFiltered ? WHERE_ORDEN_SIN_TARJETAS : { ...WHERE_ORDEN_SIN_TARJETAS, status: { notIn: ['CANCELLED', 'DELETED'] } },
     },
     _sum: {
       amount: true,
@@ -1092,13 +1107,16 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // never user-supplied strings, so it is safe to concatenate.
   const platformFeesSqlClause = buildPaymentSqlClause(paymentMethod, cardType, 'p')
   const platformFeesMerchantClause = merchantAccountId ? ' AND p."merchantAccountId" = $4' : ''
+  // Codex r4 H1: un cobro sin TransactionCost (Stripe de pedidos en línea, ligas) trae su comisión en `Payment.feeAmount`; las filas de
+  // costo de siempre se conservan todas (cualquier estado del pago), y sólo se agregan los cobros COMPLETED sin costo.
   const platformFeesQuery = `
-    SELECT COALESCE(SUM(COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0)), 0)::float AS sum_fee
-    FROM "TransactionCost" tc
-    JOIN "Payment" p ON p.id = tc."paymentId"
+    SELECT COALESCE(SUM(${SQL_COMISION_DEL_COBRO}), 0)::float AS sum_fee
+    FROM "Payment" p
+    LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
     WHERE p."venueId" = $1
       AND p."createdAt" >= ${utcTsParam(2)}
       AND p."createdAt" <= ${utcTsParam(3)}
+      AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
       ${platformFeesMerchantClause}
       ${platformFeesSqlClause}
   `
@@ -1390,7 +1408,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
                COUNT(*)::int AS "count",
                COALESCE(SUM(p."amount"), 0)::text AS "amount",
                COALESCE(SUM(p."tipAmount"), 0)::text AS "tips",
-               COALESCE(SUM(tc."venueChargeAmount" + COALESCE(tc."venueFixedFee", 0)), 0)::text AS "fees"
+               COALESCE(SUM(${Prisma.raw(SQL_COMISION_DEL_COBRO)}), 0)::text AS "fees"
         FROM "Payment" p
         LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         WHERE p."venueId" = ${venueId}
@@ -1926,6 +1944,12 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" <= $3::timestamp
       AND type = 'REFUND'
       AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
+      ${
+        isFiltered
+          ? ''
+          : `-- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta (r4 H5: sin filtro).
+      AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = "Payment"."orderId" AND o.status IN ('CANCELLED', 'DELETED'))`
+      }
       ${merchantPaymentClause}
       ${paymentSqlClause}
     GROUP BY ${groupByExpression}
@@ -1955,15 +1979,17 @@ async function calculateTimePeriodMetrics(
   // VenueTransaction.feeAmount is not currently synced from TransactionCost.
   const platformFeesGroupBy = groupByExpression.replace(/"createdAt"/g, 'p."createdAt"')
   const platformFeesOrderBy = orderByExpression.replace(/"createdAt"/g, 'p."createdAt"')
+  // Codex r4 H1 y A2: la misma comisión que la cabecera (costo con su cuota fija, o `Payment.feeAmount` del cobro sin costo).
   const platformFeesQuery = `
     SELECT
       ${platformFeesGroupBy} as period,
-      COALESCE(SUM(tc."venueChargeAmount"), 0) as platform_fees
-    FROM "TransactionCost" tc
-    JOIN "Payment" p ON p.id = tc."paymentId"
+      COALESCE(SUM(${SQL_COMISION_DEL_COBRO}), 0) as platform_fees
+    FROM "Payment" p
+    LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
     WHERE p."venueId" = $1
       AND p."createdAt" >= $2::timestamp
       AND p."createdAt" <= $3::timestamp
+      AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
       ${merchantPlatformClause}
       ${paymentSqlClauseWithPrefix}
     GROUP BY ${platformFeesGroupBy}
@@ -2100,13 +2126,18 @@ async function calculateTimePeriodMetrics(
   if (allPeriods.length > 0) {
     periodsToProcess = allPeriods
   } else {
-    const nativePeriods = isFiltered ? paymentMetrics.map(p => p.period) : orderMetrics.map(o => o.period)
-    const seen = new Set(nativePeriods.map(p => String(Number(p))))
+    // Codex r5 (H1): también los periodos que sólo traen cobros, devoluciones o comisión (una devolución otro día sin pedidos nuevos):
+    // antes la barra se descartaba y la gráfica no sumaba la cabecera. Por clave, en orden de tiempo.
+    const porClave = new Map<string, Date | number>()
+    for (const filas of [isFiltered ? [] : orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics])
+      for (const f of filas) if (!porClave.has(String(Number(f.period)))) porClave.set(String(Number(f.period)), f.period)
+    const nativePeriods = [...porClave.entries()].sort(([a], [b]) => Number(a) - Number(b)).map(([, period]) => period)
+    const seen = new Set(porClave.keys())
     const legacyOnly: Array<Date | number> = []
     for (const key of legacyPeriodMap.keys()) {
       if (!seen.has(key)) legacyOnly.push(new Date(Number(key))) // epoch-ms key → Date for formatPeriod
     }
-    periodsToProcess = [...nativePeriods, ...legacyOnly]
+    periodsToProcess = [...nativePeriods, ...legacyOnly].sort((a, b) => Number(a) - Number(b)) // Codex r6: los legacy, en su lugar
   }
 
   // Un byPeriod vacío deja la gráfica del POS en "Sin datos para este periodo"

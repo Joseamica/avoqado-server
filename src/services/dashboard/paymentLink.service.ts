@@ -18,7 +18,7 @@ import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { isEcommerceMerchantChargeable } from '@/services/payments/ecommerceCapability'
-import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
+import { calculateApplicationFeeWithVAT, getStripeChargeBoundsCents, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import emailService from '@/services/email.service'
 import { generateDigitalReceipt } from '@/services/tpv/digitalReceipt.tpv.service'
@@ -49,16 +49,6 @@ import {
 } from '@/services/dashboard/paymentLinkDiscount'
 import { filaDeDescuentoDeLiga } from '@/services/shared/discount.service'
 import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
-
-// Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
-// module for what is functionally a pair of env-tunable constants. Defaults
-// pick safe values: $10 min, $50,000 max per transaction.
-function getStripeChargeBounds() {
-  return {
-    min: Number(process.env.STRIPE_MIN_CHARGE_MXN_CENTS ?? 1000),
-    max: Number(process.env.STRIPE_MAX_CHARGE_MXN_CENTS ?? 5000000),
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BUNDLE VALIDATION (shared by create + update)
@@ -1668,7 +1658,7 @@ export async function createStripePaymentIntentForPaymentLink(
   }
 
   // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
-  const bounds = getStripeChargeBounds()
+  const bounds = getStripeChargeBoundsCents()
   const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
   const tipAmount = cobro.propina
   const chargeAmount = cobro.total
@@ -2682,7 +2672,7 @@ export async function createStripeCheckoutForPaymentLink(
   }
 
   // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
-  const bounds = getStripeChargeBounds()
+  const bounds = getStripeChargeBoundsCents()
   const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
   const tipAmount = cobro.propina
   const chargeAmount = cobro.total

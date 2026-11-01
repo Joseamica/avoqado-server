@@ -4,6 +4,7 @@ import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 import { isValidOrderingHours } from './hours'
+import { findCardMerchant } from './card/merchant'
 import type { FloorPauseMinutes, OnlineOrderingConfig, OnlineOrderingSettingsPatch } from './types'
 
 export const DEFAULT_CONFIG: OnlineOrderingConfig = {
@@ -11,6 +12,7 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   minOrderAmount: 0,
   defaultPrepMinutes: 15,
   acceptsPayAtPickup: true,
+  acceptsCardOnline: false,
   manualPause: false,
   pausedUntil: null,
   hours: null,
@@ -22,6 +24,7 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingConfig & { last
     minOrderAmount: Number(row.minOrderAmount),
     defaultPrepMinutes: row.defaultPrepMinutes,
     acceptsPayAtPickup: row.acceptsPayAtPickup,
+    acceptsCardOnline: row.acceptsCardOnline,
     manualPause: row.manualPause,
     pausedUntil: row.pausedUntil ? row.pausedUntil.toISOString() : null,
     hours: (row.hours as unknown as HorarioSemanal | null) ?? null,
@@ -110,7 +113,7 @@ export async function updateSettings(
   patch: OnlineOrderingSettingsPatch,
   actorStaffId: string | null,
 ): Promise<OnlineOrderingConfig & { lastInboxPollAt: Date | null }> {
-  const { row, preloadHours } = await prisma.$transaction(async tx => {
+  const { row, preloadHours, cardFrom } = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-ordering-settings:' + venueId}))`
 
     const existing = await tx.onlineOrderingSettings.findUnique({ where: { venueId } })
@@ -119,8 +122,13 @@ export async function updateSettings(
     // decide sobre el estado leído bajo el candado; los requisitos son datos del negocio (fuera de este candado) pero se leen con
     // el `tx` (r5: nunca el cliente raíz aquí dentro) y si falta algo la transacción se deshace sin escribir.
     if (!current.enabled && patch.enabled === true) await assertStoreRequirements(venueId, tx)
+    // Fase 2: sólo al PASAR de apagada a prendida se exige una cuenta Stripe que cobre hoy (el panel manda el formulario entero:
+    // repetir `true` con la cuenta caída no debe bloquear otros cambios). Se lee con el `tx`, como los requisitos de arriba.
+    if (!current.acceptsCardOnline && patch.acceptsCardOnline === true && !(await findCardMerchant(tx, venueId))) {
+      throw new BadRequestError('Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.', 'CARD_PAYMENT_NOT_ACCEPTED')
+    }
     const merged = { ...current, ...patch }
-    if (merged.enabled && !merged.acceptsPayAtPickup) {
+    if (merged.enabled && !merged.acceptsPayAtPickup && !merged.acceptsCardOnline) {
       throw new BadRequestError('Activa al menos un medio de pago para recibir pedidos.', 'NO_PAYMENT_MODE')
     }
 
@@ -129,6 +137,7 @@ export async function updateSettings(
     if (patch.minOrderAmount !== undefined) data.minOrderAmount = patch.minOrderAmount
     if (patch.defaultPrepMinutes !== undefined) data.defaultPrepMinutes = patch.defaultPrepMinutes
     if (patch.acceptsPayAtPickup !== undefined) data.acceptsPayAtPickup = patch.acceptsPayAtPickup
+    if (patch.acceptsCardOnline !== undefined) data.acceptsCardOnline = patch.acceptsCardOnline
     if (patch.manualPause !== undefined) data.manualPause = patch.manualPause
     if (patch.pausedUntil !== undefined) data.pausedUntil = patch.pausedUntil ? new Date(patch.pausedUntil) : null
     if (patch.hours !== undefined) data.hours = patch.hours === null ? Prisma.DbNull : (patch.hours as unknown as Prisma.InputJsonValue)
@@ -147,7 +156,7 @@ export async function updateSettings(
       create: { ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput), venueId, ...(preloadHours ? { hours: preloadHours } : {}) },
       update: data,
     })
-    return { row, preloadHours }
+    return { row, preloadHours, cardFrom: current.acceptsCardOnline }
   })
 
   void logAction({
@@ -162,6 +171,17 @@ export async function updateSettings(
       ...(preloadHours ? { horarioPrecargadoDeReservas: true } : {}),
     },
   })
+
+  if (row.acceptsCardOnline !== cardFrom) {
+    void logAction({
+      staffId: actorStaffId,
+      venueId,
+      action: 'ONLINE_ORDERING_CARD_TOGGLED',
+      entity: 'OnlineOrderingSettings',
+      entityId: row.id,
+      data: { from: cardFrom, to: row.acceptsCardOnline },
+    })
+  }
 
   return rowToConfig(row)
 }

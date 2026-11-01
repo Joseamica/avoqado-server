@@ -244,6 +244,7 @@ const RECONCILE = 'tests/integration/payments/reconcileFromPayments.atomic.integ
 const PAYMENT_GUARD = 'tests/unit/services/shared/paymentShiftClaim.callers.guard.test.ts'
 const REPARTO = 'tests/integration/payments/repartoDescuento.integration.test.ts'
 const ONLINE = 'tests/integration/online-ordering/lifecycle.integration.test.ts'
+const CARD = 'tests/integration/online-ordering/card.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
 const LOCK = ['lockExistingOrderForPayment(']
@@ -702,7 +703,7 @@ const WRITERS: Record<string, Writer> = {
     note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
   },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
-  'src/services/online-ordering/transitions.service.ts#casTransition': {
+  'src/services/online-ordering/transitions.service.ts#casTransitionInTx': {
     class: 'LOCKED',
     lock: LOCK,
     proof: proof(
@@ -710,6 +711,29 @@ const WRITERS: Record<string, Writer> = {
       'casTransition',
       'el cobro real deja la orden cobrada y aceptar, listo y entregar no la reabren',
       'vencer o rechazar un pedido ya cobrado no cancela la venta, y aceptarlo sigue posible',
+    ),
+  },
+  // Pedidos en línea fase 2 (T6): la captura de la tarjeta marca la cuenta PAID y la acepta bajo el candado de la orden, tras releerla.
+  'src/services/online-ordering/card/capture.service.ts#finishCapture': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: proof(
+      CARD,
+      'acceptOnlineOrder',
+      'aceptar captura una vez y deja la cuenta pagada y aceptada',
+      'doble aceptar en paralelo captura una sola vez',
+    ),
+  },
+  // r2 R1: la liberación que encuentra el cobro hecho a mano en Stripe registra el Payment y deja la cuenta PAID (sin reabrirla ni
+  // aceptarla) bajo el candado de la orden; el CAS del cargo RELEASING → CAPTURED decide al único que escribe.
+  'src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: proof(
+      CARD,
+      'rejectOnlineOrder',
+      'r2 R1: rechazar un pedido cuya tarjeta ya se cobró a mano → registra el cobro (CAPTURED, un Payment), anomalía y alerta UNA vez',
+      'r2 R1: dos liberaciones a la vez del mismo cargo cobrado a mano → un solo Payment, una anomalía, una alerta',
     ),
   },
   // ── Fiscal sealing: runs inside the capture/cancel transaction that already holds the Order ──
@@ -927,7 +951,7 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
-  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
     class: 'PRIVATE_CREATION',
     why: 'online order: new Order, lines and modifiers in one admission transaction',
     markers: NEW_ORDER,
@@ -1237,6 +1261,15 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
   // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
   'src/services/online-ordering/transitions.service.ts#casTransition': 1,
+  // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
+  'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
+  'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
+  // r2 R1: registrar el cobro hecho a mano que encontró la liberación, con la Order.
+  'src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease': 1,
+  // Fase 2 (T10): decidir la devolución a la tarjeta, la reversa de un fallo tardío y «Devolver por otro medio», cada una con la Order.
+  'src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder': 1,
+  'src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund': 1,
+  'src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund': 1,
   // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,

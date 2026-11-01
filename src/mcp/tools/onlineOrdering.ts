@@ -1,12 +1,17 @@
+import { createHash } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import AppError, { BadRequestError } from '@/errors/AppError'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from '../confirmation'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
@@ -73,11 +78,17 @@ function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
       }
     case 'NOT_FOUND':
       return { ok: false, error: 'Ese pedido no existe en este negocio.' }
+    case 'CONFIRMING_PAYMENT':
+      return { ok: false, error: 'Confirmando el pago con el banco; vuelve a consultar en unos segundos.' }
     default:
       // Un resultado desconocido es un error del servidor, nunca un «no existe» que engañe al dueño.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
   }
 }
+
+/** Fase 2: el switch del pago con tarjeta se muestra como lo dice el panel: «Aceptar pago con tarjeta: no → sí». */
+const sino = (v: unknown) => (v ? 'sí' : 'no')
+const CARD_TOGGLE_LABEL = 'Aceptar pago con tarjeta'
 
 /**
  * Pedidos en línea del negocio (la tienda web del restaurante). 🔴 Responder un pedido y pausar avisan al comensal o cambian
@@ -89,7 +100,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró.',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos).',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
@@ -154,6 +165,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
+      const tarjeta = order.paymentMode === 'CARD_ONLINE'
       if (!confirm) {
         // M-13: la vista previa dice lo que se le va a avisar al comensal: los minutos al aceptar, el motivo al rechazar.
         const minutos = action === 'ACCEPT' ? (estimatedMinutes ?? (await getSettings(venueId)).defaultPrepMinutes) : null
@@ -169,9 +181,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             ...(action === 'ACCEPT' ? { minutos } : {}),
             ...(action === 'REJECT' ? { motivo: reason, nota: note || null } : {}),
             efecto:
-              action === 'ACCEPT'
+              (action === 'ACCEPT'
                 ? `El pedido pasa a preparación y se le avisa al comensal que estará listo en unos ${minutos} minutos.`
-                : EFFECT[action],
+                : EFFECT[action]) +
+              // Fase 2: aceptar mueve dinero (se cobra lo apartado) y rechazar lo libera: la vista previa lo dice.
+              (tarjeta && action === 'ACCEPT'
+                ? ` Se cobra la tarjeta apartada${order.card ? ` ($${order.card.amount.toFixed(2)})` : ''}.`
+                : tarjeta && action === 'REJECT'
+                  ? ' El dinero apartado en la tarjeta se libera.'
+                  : ''),
           },
           mensaje: 'Vuelve a llamar con confirm:true para aplicarlo.',
         })
@@ -189,6 +207,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
                 ? await markOnlineOrderDelivered({ venueId, orderId, staffId })
                 : await cancelOnlineOrderByStaff({ venueId, orderId, staffId })
 
+      // Fase 2: aceptar un pedido con tarjeta que no se pudo cobrar lo deja RECHAZADO (y libera lo apartado): el servicio lo
+      // contesta como STALE + REJECTED y aquí se dice con todas sus letras.
+      if (action === 'ACCEPT' && tarjeta && result.outcome === 'STALE' && result.status === 'REJECTED') {
+        return text({
+          ok: false,
+          status: result.status,
+          error: 'No se pudo cobrar la tarjeta; el pedido se rechazó y el dinero apartado se liberó.',
+        })
+      }
       if (result.outcome !== 'OK') return text(fallo(result))
       // A12: ya estaba entregado (se entregó solo entre la vista previa y la confirmación): éxito sin otra bitácora.
       if (result.unchanged) {
@@ -214,14 +241,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado).',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar.',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
       // Lo mismo que `GET /settings` del panel (un solo armador): los ajustes se leen una vez y el estado sale del mismo cálculo.
-      const { lastInboxPollAt, store, requirements, ...ajustes } = await settingsView(venueId)
-      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements })
+      // `card` (fase 2) sale aparte, explícito: no se cuela dentro de `ajustes`.
+      const { lastInboxPollAt, store, requirements, card, ...ajustes } = await settingsView(venueId)
+      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements, card })
     },
   )
 
@@ -248,7 +276,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_configure',
-    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
+    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; pide tener la cuenta de Stripe conectada) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
     {
       venueId: z.string().describe('Venue (debe estar en tu scope)'),
       changes: settingsPatchBody.optional().describe('Ajustes a cambiar, con las mismas reglas que el panel'),
@@ -272,7 +300,12 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       const actual = current as Record<string, unknown>
       const diff = Object.entries(changes ?? {})
         .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor))
-        .map(([campo, a]) => ({ campo, de: actual[campo], a }))
+        .map(([campo, a]) => ({
+          campo,
+          de: actual[campo],
+          a,
+          ...(campo === 'acceptsCardOnline' ? { resumen: `${CARD_TOGGLE_LABEL}: ${sino(actual[campo])} → ${sino(a)}` } : {}),
+        }))
       if (diff.length === 0 && !availability) return text({ ok: true, sinCambios: true, ajustes: current })
 
       if (!confirm) {
@@ -284,7 +317,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
-      const actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
+      let actualizados: Awaited<ReturnType<typeof updateSettings>> | null = null
+      try {
+        actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
+      } catch (e) {
+        // Fase 2: sin cuenta de Stripe lista, el servicio rechaza prender la tarjeta (nada se escribió): se dice claro, sin error.
+        if (e instanceof BadRequestError && e.code === 'CARD_PAYMENT_NOT_ACCEPTED') {
+          return text({ ok: false, code: 'CARD_PAYMENT_NOT_ACCEPTED', error: e.message })
+        }
+        throw e
+      }
       const ajustes = actualizados ?? current
       const platillos = availability ? await setOnlineAvailability({ venueId, ...availability, actorStaffId: scope.staffId }) : null
       await auditMcpWrite(scope, {
@@ -296,8 +338,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       })
       // Lo que quedó: el estado de la tienda y qué le falta para encenderla, del mismo armador que el panel (después de auditar:
       // un fallo al leerlo no deja el cambio sin bitácora).
-      const { store, requirements } = await settingsView(venueId, actualizados ?? settings)
-      return text({ ok: true, ajustes, store, requirements, platillosActualizados: platillos?.updated ?? 0 })
+      const { store, requirements, card } = await settingsView(venueId, actualizados ?? settings)
+      return text({ ok: true, ajustes, store, requirements, card, platillosActualizados: platillos?.updated ?? 0 })
     },
   )
 
@@ -339,6 +381,167 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         data: { minutes },
       })
       return text({ ok: true, ...r })
+    },
+  )
+
+  // ── Fase 2 (F3, «MCP en sync»): devolver a la tarjeta y «Devolver por otro medio», con los MISMOS servicios del panel ──
+
+  server.tool(
+    'online_order_card_refunds',
+    'Devoluciones a la tarjeta de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió.',
+    {
+      venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
+      orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
+    },
+    async ({ venueId, orderId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:read', venueId)
+      const filas = await listCardRefunds(venueId, orderId)
+      // Pesos 1:1 como número (el servicio del panel los da como texto con dos decimales).
+      const devoluciones = filas.map(f => ({
+        ...f,
+        amount: Number(f.amount),
+        feeRefunded: f.feeRefunded == null ? null : Number(f.feeRefunded),
+      }))
+      return text({ ok: true, devoluciones })
+    },
+  )
+
+  server.tool(
+    'online_order_card_refund',
+    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Dos pasos: sin confirm:true sólo muestra la vista previa y un confirmationToken; para devolver, repite los mismos datos con confirm:true y ese confirmationToken (vale 10 minutos). Repetir la confirmación con el mismo token no devuelve dos veces. Pide permiso para reembolsar.',
+    {
+      venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
+      orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
+      amount: z.number().positive().finite().multipleOf(0.01).max(9_999_999.99).describe('Monto a devolver en PESOS, por ejemplo 120.50'),
+      reason: z
+        .enum(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'])
+        .describe('Motivo de la devolución'),
+      note: z.string().trim().max(200).optional().describe('Nota para la bitácora'),
+      confirm: z.boolean().optional().describe('true para devolver de verdad (con el confirmationToken de la vista previa)'),
+      confirmationToken: z.string().optional().describe('El confirmationToken que dio la vista previa'),
+    },
+    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:refund', venueId)
+      requireWriteScopeAlways(scope, 'payments:refund', 'devuelve dinero a la tarjeta del cliente')
+      const monto = new Prisma.Decimal(amount).toDecimalPlaces(2)
+      const nota = note || null
+      const binding = { venueId, orderId, amount: monto.toFixed(2), reason, note: nota }
+
+      if (!confirm) {
+        const order = await getInboxOrder({ venueId, orderId })
+        if (!order) return text({ ok: false, error: 'Ese pedido no existe en este negocio.' })
+        if (order.paymentMode !== 'CARD_ONLINE' || order.card?.status !== 'CAPTURED') {
+          return text({ ok: false, error: 'Este pedido no se cobró con tarjeta en línea; no hay nada que devolver a la tarjeta.' })
+        }
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            pedido: order.orderNumber,
+            cliente: order.customerName,
+            cobrado: order.card.capturedAmount,
+            devolver: Number(monto.toFixed(2)),
+            motivo: reason,
+            nota,
+            efecto: `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.`,
+          },
+          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', binding),
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true y el confirmationToken.',
+        })
+      }
+
+      if (!validConfirmation(confirmationToken, scope, 'online_order_card_refund', binding)) {
+        return text({
+          ok: false,
+          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo o nota). Pide una vista previa nueva y confírmala tal cual.`,
+        })
+      }
+      // La llave sale de la confirmación: repetir ESTA confirmación es la misma devolución; una vista previa nueva, otra.
+      const idempotencyKey = `mcp_${createHash('sha256').update(confirmationToken!).digest('hex').slice(0, 40)}`
+      try {
+        const r = await refundCardOnlineOrder({
+          venueId,
+          orderId,
+          amount: monto,
+          reason,
+          staffId: scope.staffId,
+          idempotencyKey,
+          note: nota,
+        })
+        await auditMcpWrite(scope, {
+          action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP',
+          entity: 'OnlineOrderCardRefund',
+          entityId: r.cardRefundId,
+          venueId,
+          data: { orderId, amount: monto.toFixed(2), reason, note: nota, status: r.status, replay: r.replay },
+        })
+        return text({ ok: true, ...r })
+      } catch (err) {
+        if (!(err instanceof AppError)) throw err
+        return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+      }
+    },
+  )
+
+  server.tool(
+    'online_order_card_refund_resolve',
+    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio ya le devolvió ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia. Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
+    {
+      venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
+      orderId: z.string().describe('Id del pedido'),
+      refundId: z.string().describe('Id de la devolución (de online_order_card_refunds)'),
+      method: z.enum(['CASH', 'BANK_TRANSFER']).describe('CASH = efectivo de la caja abierta · BANK_TRANSFER = transferencia'),
+      note: z.string().trim().max(200).optional().describe('Nota para la bitácora'),
+      confirm: z.boolean().optional().describe('true para registrarlo de verdad'),
+    },
+    async ({ venueId, orderId, refundId, method, note, confirm }) => {
+      guard.venueFilter(venueId)
+      // F2: sacar efectivo del cajón por un cobro de tarjeta pide su propio permiso (como el panel y el POS).
+      const permiso = method === 'CASH' ? 'payments:refund-to-cash' : 'payments:refund'
+      guard.requirePermission(permiso, venueId)
+      requireWriteScopeAlways(scope, permiso, 'registra la devolución de dinero al cliente por otro medio')
+      const nota = note || null
+
+      if (!confirm) {
+        const fila = (await listCardRefunds(venueId, orderId)).find(f => f.id === refundId)
+        if (!fila || fila.status !== 'REVERSED' || fila.reversal?.resolvedAt) {
+          return text({ ok: false, error: 'Esta devolución no está pendiente de pagarse por otro medio.' })
+        }
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            devolucion: fila.id,
+            monto: Number(fila.amount),
+            metodo: method,
+            nota,
+            efecto:
+              method === 'CASH'
+                ? `Salen $${fila.amount} en efectivo de la caja abierta para devolvérselos al cliente.`
+                : `Queda registrado que le devolviste $${fila.amount} al cliente por transferencia.`,
+          },
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const r = await resolveReversedCardRefund({ venueId, orderId, cardRefundId: refundId, method, staffId: scope.staffId, note: nota })
+        if (!r.replay) {
+          await auditMcpWrite(scope, {
+            action: 'ONLINE_ORDER_CARD_REFUND_RESOLVED_VIA_MCP',
+            entity: 'OnlineOrderCardRefund',
+            entityId: refundId,
+            venueId,
+            data: { orderId, method, note: nota },
+          })
+        }
+        return text({ ok: true, ...r })
+      } catch (err) {
+        if (!(err instanceof AppError)) throw err
+        return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+      }
     },
   )
 }

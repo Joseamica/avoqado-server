@@ -193,6 +193,7 @@ model Zone {
 model Venue {
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
+  onlineOrderCharges     OnlineOrderCharge[]
   documentRequestLinks DocumentRequestVenueLink[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
@@ -6608,6 +6609,7 @@ model EcommerceMerchant {
   paymentLinks     PaymentLink[]
   payments         Payment[]
   reservations     Reservation[]     @relation("ReservationEcommerceMerchant")
+  onlineOrderCharges OnlineOrderCharge[]
 
   // Facturación CFDI 4.0
   fiscalConfig MerchantFiscalConfig?
@@ -20361,6 +20363,7 @@ enum OnlineOrderStatus {
 
 enum OnlineOrderPaymentMode {
   PAY_AT_PICKUP
+  CARD_ONLINE // fase 2: tarjeta apartada al pedir y cobrada al aceptar
 }
 
 enum OnlineOrderRejectReason {
@@ -20368,6 +20371,19 @@ enum OnlineOrderRejectReason {
   CLOSED
   TOO_BUSY
   OTHER
+  PAYMENT_FAILED // fase 2: la tarjeta no se pudo cobrar al aceptar
+}
+
+/// Ciclo de vida del cargo con tarjeta de un pedido en línea (fase 2): apartar al pedir, cobrar al aceptar, liberar al rechazar o vencer.
+enum OnlineOrderChargeStatus {
+  PENDING_AUTH // sesión de pago creada, el comensal aún no autoriza
+  AUTHORIZED // tarjeta apartada (capture_method=manual)
+  CAPTURING // cobrando al aceptar
+  CAPTURED
+  CAPTURE_FAILED
+  RELEASING // liberando el apartado
+  RELEASED
+  ABANDONED // el comensal nunca autorizó
 }
 
 /// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
@@ -20380,6 +20396,8 @@ model OnlineOrderingSettings {
   minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
   defaultPrepMinutes Int       @default(15)
   acceptsPayAtPickup Boolean   @default(true)
+  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Apagado por default.
+  acceptsCardOnline  Boolean   @default(false)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
@@ -20429,6 +20447,9 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
+  /// Fase 2: el cargo con tarjeta de este pedido (nulo si paga al recoger).
+  charge OnlineOrderCharge?
+
   /// Quién imprime la comanda (mismo mecanismo de reclamo con TTL que la pantalla de cocina).
   printClaimedAt DateTime?
   printClaimedBy String?
@@ -20441,6 +20462,149 @@ model OnlineOrder {
   @@index([venueId, createdAt])
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
+}
+
+/// Cargo con tarjeta de un pedido en línea (fase 2). Nace ANTES que el pedido (al abrir la sesión de pago), por eso
+/// `onlineOrderId` es nulo hasta que la tarjeta queda apartada y se crea el pedido.
+model OnlineOrderCharge {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  onlineOrderId String?      @unique
+  onlineOrder   OnlineOrder? @relation(fields: [onlineOrderId], references: [id], onDelete: SetNull)
+
+  ecommerceMerchantId String
+  ecommerceMerchant   EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
+
+  /// Idempotencia de «crear pedido»: única por negocio.
+  idempotencyKey String
+  /// Capacidad de seguimiento (mismo token que tendrá el pedido).
+  trackingToken  String @unique
+  customerPhone  String
+  /// El carrito/solicitud con que se abrió la sesión, y su huella sha256 para la repetición idempotente.
+  request        Json
+  requestHash    String
+
+  checkoutSessionId String?  @unique
+  checkoutUrl       String?
+  checkoutExpiresAt DateTime
+  paymentIntentId   String?  @unique
+
+  amount              Decimal @db.Decimal(10, 2)
+  platformFeeBps      Int
+  applicationFeeCents Int
+
+  status         OnlineOrderChargeStatus @default(PENDING_AUTH)
+  authorizedAt   DateTime?
+  /// Límite en que vence el apartado de la tarjeta (se debe cobrar o liberar antes).
+  captureBefore  DateTime?
+  capturedAt     DateTime?
+  capturedAmount Decimal?                @db.Decimal(10, 2)
+  releasedAt     DateTime?
+
+  /// `{ connectAccountId, sandboxMode, providerCode }` copiado al crear: la cuenta Stripe del cargo no cambia aunque el comercio
+  /// cambie sus credenciales después.
+  merchantSnapshot Json
+  /// Intento de sesión de pago (se incrementa si se abre una nueva sesión para el mismo cargo).
+  checkoutAttempt  Int     @default(1)
+  lastError        String?
+  attempts         Int     @default(0)
+  /// El conciliador lo vio por primera vez en duda (`CAPTURING`/`RELEASING`): de aquí se cuentan los 15 min de la alerta
+  /// (`updatedAt` no sirve: cada pasada y cada reintento lo tocan).
+  inDoubtSince     DateTime?
+  /// Ya se alertó 🚨 este episodio (una sola vez); se borra al salir de él.
+  stuckAlertedAt   DateTime?
+
+  /// Fase 2 (T10): las devoluciones a la tarjeta de este cargo.
+  cardRefunds OnlineOrderCardRefund[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, idempotencyKey])
+  @@index([status, updatedAt])
+  @@index([venueId, status, customerPhone])
+}
+
+/// Fase 2 (T10): estados de una devolución a la tarjeta de un pedido en línea. Sólo avanzan; cada escritura es CAS.
+enum OnlineOrderCardRefundStatus {
+  REQUESTED // la fila existe; nadie ha hablado con Stripe
+  SENDING // alguien ganó el envío; sin `stripeRefundId` es DESCONOCIDO (se busca por metadata, nunca se da por fallido)
+  PENDING // Stripe la tiene, sin desenlace
+  SUCCEEDED // Stripe la devolvió; falta el renglón REFUND del libro
+  RECORDED // el renglón REFUND existe (`refundPaymentId`); se sigue revisando hasta 30 días por un fallo tardío
+  FAILED // Stripe dijo que falló antes de anotarla: ningún renglón
+  CANCELED // Stripe la canceló antes de anotarla: ningún renglón
+  REVERSED // ya anotada, Stripe pasó a failed/canceled: el dinero regresó a la cuenta del negocio y se le debe al cliente
+  RESOLVED // el negocio le pagó al cliente por otro medio (efectivo o transferencia)
+}
+
+/// Fase 2 (T10): una devolución a la tarjeta de un pedido en línea. Stripe es la fuente de verdad; el renglón REFUND del libro
+/// nace sólo con `succeeded` (por `issueRefund`, llave `oocr_<id>`) y nunca se edita.
+model OnlineOrderCardRefund {
+  id       String            @id @default(cuid())
+  venueId  String
+  chargeId String
+  charge   OnlineOrderCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+
+  /// La llave idempotente del cliente (única por cargo).
+  key         String
+  amountCents Int
+  /// `RefundReason` de `refund.dashboard.service` (validado en la frontera).
+  reason      String
+  staffId     String
+  note        String?
+  /// sha256 de importe + motivo + nota: la misma llave con otra solicitud es 409.
+  requestHash String
+
+  stripeRefundId   String?                     @unique
+  status           OnlineOrderCardRefundStatus @default(REQUESTED)
+  /// El `Payment` REFUND del libro.
+  refundPaymentId  String?                     @unique
+  /// La comisión de Avoqado que Stripe devolvió con ESTA devolución (leída de Stripe, no calculada).
+  feeRefundedCents Int?
+  /// La reversa del sello de la venta ya quedó hecha (Codex r6: la de `issueRefund` no es durable).
+  stampReversedAt  DateTime?
+  nextCheckAt      DateTime                    @default(now())
+  lastError        String?
+  /// Ya se alertó 🚨 que sigue SENDING sin id (una sola vez).
+  alertedAt        DateTime?
+  /// El último envío a Stripe (el primero y cada re-envío de un SENDING que Stripe confirma que no tiene).
+  lastSentAt       DateTime?
+  /// Cuándo nació el renglón del libro: de aquí se cuenta la revisión tardía (1 h … 30 días).
+  recordedAt       DateTime?
+
+  reversal OnlineOrderCardRefundReversal?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([chargeId, key])
+  @@index([status, nextCheckAt])
+}
+
+/// Fase 2 (T10): sólo se agrega. Una devolución ya anotada que Stripe reportó fallida/cancelada después, y cómo la resolvió el negocio.
+model OnlineOrderCardRefundReversal {
+  id             String                @id @default(cuid())
+  venueId        String
+  cardRefundId   String                @unique
+  cardRefund     OnlineOrderCardRefund @relation(fields: [cardRefundId], references: [id], onDelete: Restrict)
+  stripeRefundId String                @unique
+  amountCents    Int
+  feeCents       Int
+  failureReason  String?
+  detectedAt     DateTime
+
+  /// Sólo `CASH` | `BANK_TRANSFER`.
+  resolvedMethod    PaymentMethod?
+  resolvedByStaffId String?
+  resolvedAt        DateTime?
+  resolvedNote      String?
+  /// El `CashDrawerEvent` PAY_OUT, si se resolvió en efectivo.
+  cashDrawerEventId String?
+
+  @@index([venueId, resolvedAt])
 }
 
 /// Platform onboarding invitations; deliberately independent of a venue.

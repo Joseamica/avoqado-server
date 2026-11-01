@@ -91,6 +91,18 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
     clase: 'ORDEN PROPIA',
     marcadores: [['finalizeVenueCheckout', PROPIA]],
   },
+  // Fase 2 (T6): el cobro de la tarjeta sólo se registra si la aceptación gana bajo el mismo candado; una cuenta cancelada no se
+  // acepta (R2), así que se revierte todo y el cargo queda en duda para el conciliador.
+  'services/online-ordering/card/capture.service.ts#finishCapture': {
+    clase: 'RECHAZA (la aceptación bajo el candado revierte el cobro)',
+    marcadores: [['finishCapture', 'throw new CaptureNotAccepted(`ACCEPT_${r.r}`)']],
+  },
+  // r2 R1 (founder: no devolver solo): Stripe YA cobró a mano una tarjeta cuyo pedido se rechazó, venció o canceló. Se registra el
+  // cobro sobre la cuenta tal como está (no la reabre) y queda MoneyAnomaly + alerta para devolverlo a la tarjeta.
+  'services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease': {
+    clase: 'VERDAD EXTERNA (cobrado a mano en Stripe; queda como esté, con anomalía)',
+    marcadores: [['recordCapturedOutsideOnRelease', "category: 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE'"]],
+  },
   'services/onboarding/demoSeed.service.ts#seedOrders': { clase: 'ORDEN PROPIA (demo)', marcadores: [] },
   'services/demo/negociosDemo.service.ts#seedHistory': { clase: 'ORDEN PROPIA (demo)', marcadores: [] },
   'services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder': {

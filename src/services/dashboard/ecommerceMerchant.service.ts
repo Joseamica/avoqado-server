@@ -14,7 +14,7 @@
 
 import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
-import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { generateAPIKeys } from '@/middlewares/sdk-auth.middleware'
 import { logAction } from './activity-log.service'
@@ -686,7 +686,7 @@ export async function deleteEcommerceMerchant(merchantId: string, venueId?: stri
   // payments in progress — blocking is obvious. Payment links also reference
   // the merchant and the Prisma relation is Restrict by default, so they too
   // need to be cleaned up first.
-  const [activeSessions, linkedPaymentLinks] = await Promise.all([
+  const [activeSessions, linkedPaymentLinks, onlineOrderCharges] = await Promise.all([
     prisma.checkoutSession.count({
       where: {
         ecommerceMerchantId: merchantId,
@@ -694,6 +694,8 @@ export async function deleteEcommerceMerchant(merchantId: string, venueId?: stri
       },
     }),
     prisma.paymentLink.count({ where: { ecommerceMerchantId: merchantId } }),
+    // Pedidos en línea fase 2 (M1): cada cobro con tarjeta guarda su comercio (Restrict) para capturar, liberar y devolver.
+    prisma.onlineOrderCharge.count({ where: { ecommerceMerchantId: merchantId } }),
   ])
 
   if (activeSessions > 0) {
@@ -709,6 +711,13 @@ export async function deleteEcommerceMerchant(merchantId: string, venueId?: stri
       `No se puede eliminar este canal: tiene ${linkedPaymentLinks} liga${linkedPaymentLinks === 1 ? '' : 's'} de pago asociada${
         linkedPaymentLinks === 1 ? '' : 's'
       }. Archívalas o elimínalas desde "Ligas de pago" primero.`,
+    )
+  }
+
+  if (onlineOrderCharges > 0) {
+    throw new ConflictError(
+      `No se puede eliminar este canal: tiene ${onlineOrderCharges} cobro${onlineOrderCharges === 1 ? '' : 's'} de pedidos en línea con tarjeta (se necesitan para devolverlos). Usa "Desactivar" para pausar el canal.`,
+      'ECOMMERCE_MERCHANT_HAS_ONLINE_ORDER_CHARGES',
     )
   }
 

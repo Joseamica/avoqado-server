@@ -43,6 +43,7 @@ import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconcilia
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
 import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
+import { onlineOrderCardReconcilerJob } from './jobs/online-order-card-reconciler.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { exchangeCardSettlementJob } from './jobs/exchange-card-settlement.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
@@ -179,6 +180,7 @@ const gracefulShutdown = async (signal: string) => {
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
       onlineOrderAcceptanceExpiryJob.stop()
+      onlineOrderCardReconcilerJob.stop()
       terminalPaymentWatchdogJob.stop()
       exchangeCardSettlementJob.stop()
 
@@ -529,6 +531,7 @@ const startApplication = async (retries = 3) => {
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
       onlineOrderAcceptanceExpiryJob.start()
+      onlineOrderCardReconcilerJob.start()
       terminalPaymentWatchdogJob.start()
       exchangeCardSettlementJob.start()
 

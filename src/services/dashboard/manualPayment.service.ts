@@ -20,6 +20,7 @@ import {
 } from '@/services/shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '@/services/shared/priorCompletedPayments'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
+import { assertNotCardOnlineOrderInTx } from '@/services/online-ordering/card/guards'
 import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
@@ -205,6 +206,8 @@ export async function createManualPayment(
           })
           // Rappi 2b (T7): el pago manual no sabe repartir venta, propina y lo de Rappi ⇒ 409 antes de escribir.
           if (venta) rechazarAccionDeCobroSobreRappiEnEfectivo(venta)
+          // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no recibe un pago manual (bajo el mismo candado).
+          await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: input.orderId })
           // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
           // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
           // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»). R8-1: ningún

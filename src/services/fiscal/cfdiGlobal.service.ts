@@ -2326,6 +2326,9 @@ export function ventanaFiscal(
   return {
     venueId,
     paymentStatus: 'PAID',
+    // Codex r4 H3 (pedidos en línea): una cuenta cancelada o borrada no es venta aunque traiga un cobro (la tarjeta que el negocio cobró a
+    // mano en su Stripe y debe devolver): el estado de resultados, el ISR y el IVA ya la excluyen; la global no la factura.
+    status: { notIn: ['CANCELLED', 'DELETED'] },
     AND: [
       // `venueId` en el cobro (revisión T5, Importante 1): la búsqueda entra por `Payment(venueId, status, createdAt)` y lee sólo los
       // cobros de ESTA sucursal en el periodo, no la historia entera. En producción ningún cobro tiene otra sucursal que su orden.

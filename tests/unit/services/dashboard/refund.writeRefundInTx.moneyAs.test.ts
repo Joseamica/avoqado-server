@@ -73,6 +73,7 @@ function cobroBloqueado(original: Partial<CobroBloqueado['original']> = {}): Cob
       shiftId: null,
       merchantAccountId: MERCHANT,
       processorData: {},
+      processorId: null,
       fundsFlow: 'AVOQADO_PROCESSED',
       externalSource: null,
       tenderTypeId: null,
@@ -90,6 +91,7 @@ function cobroBloqueado(original: Partial<CobroBloqueado['original']> = {}): Cob
     refundedSalesCents: 0,
     refundedTipsCents: 0,
     unclassifiedPriorRefundCents: 0,
+    reservedByCardRefundsCents: 0,
     remainingBeforeCents: 20000,
   }
 }

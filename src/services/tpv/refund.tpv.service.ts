@@ -20,6 +20,7 @@ import {
   refundAuthorityReassignmentWasRecorded,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
+import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
 import {
   acumuladoPersistido,
   ajustarRepartoAComponentesRestantes,
@@ -545,6 +546,13 @@ export async function recordRefund(
         const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: originalPayment.orderId })
         if (!orderStillBelongsToVenue) throw authorityUnavailable()
       }
+      // Pedidos en línea fase 2: el cobro de Stripe de un pedido con tarjeta no lo devolvió la terminal (no puede): se devuelve desde
+      // Pedidos en línea. Otro cobro de esa cuenta (uno tardío de la TPV) sigue aquí como siempre. Bajo el candado de la Order.
+      await assertCardRefundGoesThroughOnlineOrders(tx, {
+        venueId,
+        paymentId: originalPayment.id,
+        payment: { orderId: originalPayment.orderId, processorId: originalPayment.processorId ?? null },
+      })
       // 🔒 Row-lock the original payment for the duration of this tx so
       // concurrent refund attempts cannot both pass the "remaining refundable"
       // check with stale data and each create their own refund (D8 race).
