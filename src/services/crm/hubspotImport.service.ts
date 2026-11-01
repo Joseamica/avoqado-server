@@ -408,7 +408,6 @@ async function plan(contactsCsv: string, dealsCsv: string) {
     if (id) dealIds.add(id)
   }
   const alone = [...contacts.values()].filter(contact => !inDeals.has(contact.id))
-  counts.contactosDeNegocios = contacts.size - alone.length
 
   const [stages, reasons, initial, existing, known] = await Promise.all([
     listStages(),
@@ -448,6 +447,8 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   }
   // Ruling 28: everything comes in with today's date.
   const now = new Date()
+  /** The distinct people inside the deals that come in: «repetido» deals write nothing, so their people are not counted. */
+  const insideDeals = new Set<string>()
 
   for (const deal of deals) {
     const externalKey = dealKey(deal.id)
@@ -500,6 +501,7 @@ async function plan(contactsCsv: string, dealsCsv: string) {
       deal: { where, hubspotStage: stageText(deal.stage) },
     })
     claim(people, deal.name)
+    for (const person of people) insideDeals.add(person.id)
     counts.negocios++
   }
 
@@ -526,6 +528,7 @@ async function plan(contactsCsv: string, dealsCsv: string) {
   }
 
   counts.nuevos = counts.negocios + counts.archivados
+  counts.contactosDeNegocios = insideDeals.size
   return { summary: summary(), records, unreadable: false }
 }
 

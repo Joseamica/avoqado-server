@@ -447,6 +447,31 @@ it('negocio_con_alguien_que_ya_esta_en_el_crm_es_repetido', async () => {
   }
 })
 
+it('contactos_dentro_de_su_negocio_cuenta_solo_los_de_negocios_que_entran (T15 WARN-3)', async () => {
+  // «Café Ana» (Ana + Beto) comes in; «Tienda Carla» is repeated because Carla is already in the CRM: her contact writes nothing.
+  db.accounts.push({ id: 'caccountlnd0000000000002', source: 'LANDING', externalKey: 'carla@x.mx', name: 'Carla', stageId: PROSPECTO })
+  db.contacts.push({ accountId: 'caccountlnd0000000000002', name: 'Carla', email: 'carla@x.mx', phoneE164: null, isPrimary: true })
+  const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n102,Beto,Ruiz,5512345602,beto@cafe.mx,Café Ana\n103,Carla,Paz,5512345603,carla@x.mx,Tienda Carla\n`
+  const deals = `${NO_DEALS}9001,Café Ana,Calificado,101;102\n9002,Tienda Carla,Calificado,103\n`
+  expect(await previewHubspot(contacts, deals)).toMatchObject({
+    negocios: 1,
+    repetidos: 1,
+    archivados: 0,
+    nuevos: 1,
+    contactosDeNegocios: 2,
+  })
+
+  // Two deals of the same file sharing a person: the second is «repetido» (sameFile) and only the first one's people count.
+  const shared = `${CONTACTS_HEADER}201,Ana,López,5512345601,ana@cafe.mx,Café Ana\n202,Ana,L.,5512345699,ana@cafe.mx,Café Ana 2\n203,Dani,Gil,5512345603,dani@x.mx,Café Ana\n`
+  const sharedDeals = `${NO_DEALS}9001,Café Ana,Calificado,201;203\n9003,Café Ana 2,Calificado,202\n`
+  expect(await previewHubspot(shared, sharedDeals)).toMatchObject({ negocios: 1, repetidos: 1, contactosDeNegocios: 2 })
+})
+
+it('contactos_dentro_de_su_negocio_es_cero_al_importar_otra_vez (T15 WARN-3)', async () => {
+  await applyHubspot(admin, CONTACTS, DEALS)
+  expect(await previewHubspot(CONTACTS, DEALS)).toMatchObject({ nuevos: 0, repetidos: 8, contactosDeNegocios: 0 })
+})
+
 it('contacto_de_un_negocio_que_no_puede_entrar_se_avisa_antes_de_aplicar', async () => {
   // Beto's row has an error and 999 is not in the file: once the deal is in, importing again cannot add them.
   const contacts = `${CONTACTS_HEADER}101,Ana,López,5512345601,ana@cafe.mx,Café Ana\n102,,,,beto@x.mx,\n`
