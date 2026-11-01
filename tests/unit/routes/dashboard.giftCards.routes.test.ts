@@ -80,6 +80,8 @@ const CASOS: Array<[string, string, Record<string, unknown> | undefined, string,
     'giftCards:manage',
     'resend',
   ],
+  // S8a: el teléfono con que se gasta un sobre de saldo a favor, de gerente.
+  ['post', `${B}/gc1/store-credit-phone`, { phone: '5598765432' }, 'giftCards:manage', 'storeCreditPhone'],
 ]
 
 beforeEach(() => {
@@ -205,6 +207,9 @@ describe('rutas del dashboard de tarjetas de regalo', () => {
       /El correo no es válido/,
     ],
     ['post', `${B}/gc1/resend`, { operationKey: 'corta' }, /al menos 8 caracteres/],
+    ['post', `${B}/gc1/store-credit-phone`, {}, /Falta el teléfono/],
+    ['post', `${B}/gc1/store-credit-phone`, { phone: '55 9876' }, /10 dígitos/],
+    ['post', `${B}/gc1/store-credit-phone`, { phone: '5598765432', deliveryChannel: 'WHATSAPP' }, /Hay un campo que no se esperaba/],
     ['get', `${B}/summary?from=01-10-2026&to=2026-10-14`, undefined, /AAAA-MM-DD/],
     ['get', `${B}?status=FOO`, undefined, /Estado no reconocido: FOO/],
   ])('%s %s con un cuerpo malo → 400 en español, antes del permiso', async (metodo, url, cuerpo, texto) => {

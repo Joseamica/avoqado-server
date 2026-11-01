@@ -22,7 +22,13 @@ import { estadoDeCancelacionDeVenta, mismoDiaDelVenue, type CancelacionDeVenta }
 import { decryptGiftCardCode, formatGiftCardCode } from './giftCardCode'
 import { enmascararDestino, telefonoDeTarjeta, textoDeFalloDeEntrega, urlDeLaPagina } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
-import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, type LockedGiftCard } from './giftCardLedger'
+import {
+  cambiarTelefonoDeSaldoAFavorEnTx,
+  esSobreDeSaldoAFavor,
+  lockGiftCardsForUpdate,
+  operarSobreDeGerenteEnTx,
+  type LockedGiftCard,
+} from './giftCardLedger'
 import { MAX_SOBRES_POR_CUENTA } from './giftCardLimits'
 import { WHERE_RENGLON_DE_TARJETA, esCuentaDeTarjetasSeleccionada } from './giftCardMarks'
 import { registrarSalidaDelSecreto, type AuditoriaDeTarjetas } from './giftCardSurface.service'
@@ -111,6 +117,13 @@ const ventaNoEncontrada = () =>
 const tarjetaNoEncontrada = () => new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio.', 404)
 const revelarNoPermitido = () =>
   new GiftCardError('GIFT_CARD_REVEAL_NOT_ALLOWED', 'Volver a imprimir o enseñar el código otro día lo hace un gerente.', 403)
+/** S8a: el saldo a favor se gasta con el teléfono de la clienta; mandar la página o enseñar el código daría un código al portador. */
+const sobreDeSaldoNoElegible = () =>
+  new GiftCardError(
+    'STORE_CREDIT_CARD_NOT_ELIGIBLE',
+    'Este saldo se usa con el teléfono de la clienta: no se reenvía ni se enseña su código.',
+    409,
+  )
 
 /** S-11: la fecha en la zona del negocio, sin hora. */
 const venceEl = (expiresAt: Date | null, timezone: string) => (expiresAt ? formatInTimeZone(expiresAt, timezone, 'yyyy-MM-dd') : null)
@@ -255,10 +268,14 @@ export function leerNuevoDestino(b: {
   throw new BadRequestError('Para cambiar el destino elige WhatsApp o correo', 'GIFT_CARD_DESTINATION_CHANNEL_INVALID')
 }
 
-/** S-4: sólo una tarjeta ACTIVE y vigente admite reenviar, cambiar el destino o mostrar el código. Bajo el candado del sobre. */
+/**
+ * S-4: sólo una tarjeta ACTIVE y vigente admite reenviar, cambiar el destino o mostrar el código. Bajo el candado del sobre. S8a: un
+ * sobre de saldo a favor (EL predicado, `esSobreDeSaldoAFavor`) no admite ninguna de las tres, en cualquier estado.
+ */
 async function bloquearVigente(tx: Tx, venueId: string, giftCardId: string, ahora: Date): Promise<LockedGiftCard> {
   const [card] = await lockGiftCardsForUpdate(tx, [giftCardId])
   if (!card || card.venueId !== venueId || card.status === 'DEACTIVATED') throw tarjetaNoEncontrada()
+  if (await esSobreDeSaldoAFavor(tx, card.id)) throw sobreDeSaldoNoElegible()
   if (card.status === 'PENDING') {
     throw new GiftCardError('GIFT_CARD_SALE_NOT_PAID', 'Esta tarjeta todavía no se cobra: se envía sola al quedar pagada.', 409)
   }
@@ -425,6 +442,23 @@ export async function cambiarDestinoDeTarjeta(
       destinoNuevo: enmascararDestino(nuevo),
     }
   }, ORDER_LOCK_WAIT_BUDGET)
+}
+
+// ─── El teléfono de un saldo a favor (S8a) ───
+
+/**
+ * `POST …/gift-cards/:giftCardId/store-credit-phone` del panel: el gerente (la ruta exige `giftCards:manage`) cambia el teléfono con
+ * que se gasta un sobre de saldo a favor. Su propia transacción, que sólo aparta ese sobre; la bitácora va dentro (la libreta).
+ */
+export async function cambiarTelefonoDeSaldoAFavor(
+  venueId: string,
+  giftCardId: string,
+  p: { telefono: string; staffId: string },
+): Promise<{ phoneLast4: string }> {
+  return prisma.$transaction(
+    tx => cambiarTelefonoDeSaldoAFavorEnTx(tx, { venueId, giftCardId, telefono: p.telefono, staffId: p.staffId }),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 }
 
 // ─── Mostrar el código (Q42, Q102) ───

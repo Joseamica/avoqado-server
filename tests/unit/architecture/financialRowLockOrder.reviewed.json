@@ -60,6 +60,11 @@
       "loops": 0,
       "reason": "Saldo a favor (S2): sin FOR UPDATE propio; se inventaría para que cada llamador quede registrado. Toma el candado consultivo por clienta y aparta UN sobre (su sobre de saldo) con lockGiftCardsForUpdate; va DESPUÉS de Order/Payments y ANTES del turno (Order → Payments → clienta + sobre → Shift)."
     },
+    "src/services/giftCards/giftCardLedger.ts#cambiarTelefonoDeSaldoAFavorEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S8a): sin FOR UPDATE propio; se inventaría para que cada llamador quede registrado. Aparta UN sobre (lockGiftCardsForUpdate) antes de leer o escribir nada; sin Order, Payment ni turno."
+    },
     "src/services/mobile/areaTicketV7.mobile.service.ts#lockAreaTicketCheckoutHierarchy": {
       "count": 1,
       "loops": 0,
@@ -576,6 +581,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Saldo a favor (S2): UN sobre (el de saldo a favor de la clienta) bajo su candado consultivo por clienta; se llama tras apartar Order y Payments y antes de reclamar el turno, como el gasto con saldo (order.mobile.service.ts:5589)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#cambiarTelefonoDeSaldoAFavorEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S8a): el teléfono con que se gasta UN sobre, bajo su candado (la prueba por teléfono se juzga bajo ese mismo candado, así que no se cruza con un canje). Después sólo escribe ese sobre, los retos de teléfono (OtpChallenge) y la bitácora: ningún candado de Order, Payment ni turno."
     },
     "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreSiHaceFaltaEnTx#tomarCandadoPrimerSobreEnTx": {
       "count": 1,
@@ -1166,6 +1176,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Tarjetas 1b Q42: los sobres de UNA cuenta en una sola llamada; la Order sólo se LEE (sin candado). Transacción que sólo aparta sobres (GiftCard) por id ASC, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#cambiarTelefonoDeSaldoAFavor#cambiarTelefonoDeSaldoAFavorEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S8a, panel): su propia transacción, que sólo aparta UN sobre (GiftCard) por id, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
     },
     "src/services/mobile/order.mobile.service.ts#montoDeLaVentaNuevaEnTx#lockExistingOrderForPayment": {
       "count": 1,

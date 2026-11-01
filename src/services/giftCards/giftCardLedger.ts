@@ -21,7 +21,7 @@ import {
   generateOpaqueToken,
   hashGiftCardCode,
 } from './giftCardCode'
-import { telefonoDeTarjeta } from './giftCardEntrega'
+import { PROPOSITO_TELEFONO_DE_TARJETA, enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, MAXIMO_POR_SOBRE, formatoPesos } from './giftCardLimits'
 import { TERMINOS_VIGENTES } from './giftCardTerms'
@@ -890,7 +890,8 @@ const ALIAS_SQL = /^[A-Za-z_][A-Za-z0-9_]*$/
 /**
  * 🔴 EL predicado del saldo a favor: un sobre lo es si su ACTIVATE trae `refundPaymentId` (nació de una devolución). `customerId` NO
  * basta: también significa «tarjeta regalada guardada en la cartera» (`operarSobreDeGerenteEnTx`, `giftCardCuenta.service.ts:74`).
- * `alias` es el de `"GiftCard"` en la consulta de quien lo usa (la libreta, los reportes, el bloqueo de reenvío y de «mostrar código»).
+ * `alias` es el de `"GiftCard"` en la consulta de quien lo usa (la libreta, el bloqueo de reenvío y de «mostrar código»). El resumen de
+ * reportes usa su forma por renglón (`WHERE_ABONO_DE_SALDO_A_FAVOR`, giftCardReports.service.ts): el mismo ACTIVATE con `refundPaymentId`.
  */
 export function esSobreDeSaldoAFavorSql(alias: string): Prisma.Sql {
   if (!ALIAS_SQL.test(alias)) throw new Error(`Alias SQL inválido: ${alias}`)
@@ -1115,4 +1116,58 @@ export async function abonarSaldoAFavorEnTx(
     customerId: s.customerId,
   }
   return { giftCardId: creado.id, abonado: monto, saldoNuevo: monto, telefonoDelSobre: s.telefonoCliente, telefonoNoCoincide: false }
+}
+
+/** Lo que la bitácora y el panel enseñan de un teléfono: nunca completo (`enmascararDestino`). */
+const telefonoEnmascarado = (telefono: string | null) =>
+  enmascararDestino({ deliveryChannel: 'WHATSAPP', recipientPhone: telefono, recipientEmail: null })
+
+/**
+ * El teléfono con que se GASTA un sobre de saldo a favor (spec 2026-10-30 §5.2, TARJETAS 30-oct; tarea S8a). Sólo un gerente
+ * (`giftCards:manage`, lo exige la ruta) y nunca manda la página ni el código: serían un código al portador. No es «Cambiar destino»
+ * (ése pone la entrega en PENDING y la página saldría sola). Bajo el candado del sobre, así no se cruza con un canje:
+ *  - la prueba por teléfono se juzga contra el `recipientPhone` VIGENTE bajo ese mismo candado (`giftCardProof.ts`, `vigente`), así
+ *    que una prueba firmada para el número viejo deja de servir sola;
+ *  - en la MISMA transacción se consumen los retos vivos del número viejo (un código ya mandado ahí no sirve) y se escribe la bitácora
+ *    `STORE_CREDIT_PHONE_CHANGED` con los dos teléfonos enmascarados.
+ * Todo rechazo va antes de escribir. El mismo teléfono no escribe nada (repetir el cambio es seguro). Sirve ACTIVE o BLOCKED.
+ */
+export async function cambiarTelefonoDeSaldoAFavorEnTx(
+  tx: Tx,
+  p: { venueId: string; giftCardId: string; telefono: string; staffId: string },
+): Promise<{ phoneLast4: string }> {
+  const nuevo = telefonoDeTarjeta(typeof p.telefono === 'string' ? p.telefono.trim() : null)
+  if (!nuevo) throw new BadRequestError('El teléfono no es válido.', 'GIFT_CARD_PHONE_INVALID')
+  const [card] = await lockGiftCardsForUpdate(tx, [p.giftCardId])
+  if (!card || card.venueId !== p.venueId || (card.status !== 'ACTIVE' && card.status !== 'BLOCKED')) throw noEncontrada()
+  if (!(await esSobreDeSaldoAFavor(tx, card.id))) {
+    throw new GiftCardError(
+      'STORE_CREDIT_CARD_NOT_ELIGIBLE',
+      'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».',
+      409,
+    )
+  }
+  const viejo = telefonoDeTarjeta(card.recipientPhone)
+  const phoneLast4 = nuevo.slice(-4)
+  if (viejo === nuevo) return { phoneLast4 }
+
+  const r = await tx.giftCard.updateMany({ where: { id: card.id, venueId: p.venueId }, data: { recipientPhone: nuevo } })
+  if (r.count !== 1) throw noEncontrada()
+  if (viejo) {
+    await tx.otpChallenge.updateMany({
+      where: { venueId: p.venueId, destination: viejo, purpose: PROPOSITO_TELEFONO_DE_TARJETA, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+  }
+  await tx.activityLog.create({
+    data: {
+      venueId: p.venueId,
+      staffId: p.staffId,
+      action: 'STORE_CREDIT_PHONE_CHANGED',
+      entity: 'GiftCard',
+      entityId: card.id,
+      data: { telefonoAnterior: telefonoEnmascarado(viejo), telefonoNuevo: telefonoEnmascarado(nuevo) },
+    },
+  })
+  return { phoneLast4 }
 }

@@ -168,6 +168,11 @@ export interface GiftCardSummary {
   /** Ventas canceladas en el periodo (su saldo salió de la deuda). */
   cancelled: { cards: number; amount: number }
   adjustments: { increments: number; decrements: number; net: number }
+  /**
+   * S8a (aditivo): el saldo a favor abonado en el periodo (Cambios y Reembolsos a saldo): `cards` = sobres nuevos, `movements` = sobres
+   * nuevos + recargas, `amount` = lo abonado. Esos movimientos NO cuentan en `sold` ni en `adjustments`; usarlo sí cuenta en `redeemed`.
+   */
+  storeCredit: { cards: number; movements: number; amount: number }
   /** Lo que se debe HOY (no al cierre del periodo: para eso, la antigüedad a una fecha). */
   liveBalance: { cards: number; amount: number; expiredAmount: number; asOf: string }
 }
@@ -526,17 +531,38 @@ const WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO = {
   giftCard: { activities: { none: { type: 'ACTIVATE' } } },
 } satisfies Prisma.GiftCardActivityWhereInput
 
+/**
+ * S8a (spec 2026-10-30-saldo-a-favor §5.2, TARJETAS punto 5): los ABONOS de saldo a favor, renglón por renglón. El ACTIVATE con
+ * `refundPaymentId` es justo el que hace a un sobre «de saldo a favor» (`esSobreDeSaldoAFavorSql`), así que sacarlo de «vendidas» saca
+ * esos sobres; sus recargas son los ADJUST_INCREMENT con `refundPaymentId` (`abonarSaldoAFavorEnTx`). Un ajuste de gerente nunca lo
+ * lleva (sigue en «ajustes») y los REDEEM_REVERSAL / DEACTIVATE que sí lo llevan no son abonos. Por renglón y no por sobre: así basta el
+ * índice [venueId, createdAt] de siempre, sin EXISTS por movimiento.
+ */
+const WHERE_ABONO_DE_SALDO_A_FAVOR = {
+  type: { in: ['ACTIVATE', 'ADJUST_INCREMENT'] },
+  refundPaymentId: { not: null },
+} satisfies Prisma.GiftCardActivityWhereInput
+
 export async function getGiftCardSummary(venueId: string, r: { from: string; to: string }): Promise<GiftCardSummary> {
   const timezone = await getVenueTimezone(venueId)
   const { from, to } = rangoDelNegocio(r.from, r.to, timezone)
   const ahora = new Date()
   const vivos: Prisma.GiftCardWhereInput = { venueId, status: { in: VIVOS }, balance: { gt: 0 } }
-  const [porTipo, vivo, vencido] = await Promise.all([
+  const periodo = { venueId, createdAt: { gte: from, lte: to } }
+  const [porTipo, abonos, vivo, vencido] = await Promise.all([
     prisma.giftCardActivity.groupBy({
       by: ['type'],
       // M4 (cierre): la desactivación de $0 de un sobre que nunca se activó (la cuenta se canceló sin pagar) no es una tarjeta
       // «cancelada»: nunca se vendió. Las de $0 de una tarjeta que sí se activó (se gastó completa) siguen contando.
-      where: { venueId, createdAt: { gte: from, lte: to }, NOT: WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO },
+      // S8a: los abonos de saldo a favor van en su propia línea (abajo).
+      where: { ...periodo, NOT: [WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO, WHERE_ABONO_DE_SALDO_A_FAVOR] },
+      _sum: { amount: true },
+      _count: { _all: true },
+      orderBy: { type: 'asc' },
+    }),
+    prisma.giftCardActivity.groupBy({
+      by: ['type'],
+      where: { ...periodo, ...WHERE_ABONO_DE_SALDO_A_FAVOR },
       _sum: { amount: true },
       _count: { _all: true },
       orderBy: { type: 'asc' },
@@ -544,10 +570,13 @@ export async function getGiftCardSummary(venueId: string, r: { from: string; to:
     prisma.giftCard.aggregate({ where: vivos, _sum: { balance: true }, _count: { _all: true } }),
     prisma.giftCard.aggregate({ where: { ...vivos, expiresAt: { lte: ahora } }, _sum: { balance: true } }),
   ])
-  const de = (tipo: GiftCardActivityType) => {
-    const g = porTipo.find(x => x.type === tipo)
+  const lector = (grupos: typeof porTipo) => (tipo: GiftCardActivityType) => {
+    const g = grupos.find(x => x.type === tipo)
     return { n: g?._count?._all ?? 0, monto: pesos(g?._sum?.amount ?? null) }
   }
+  const de = lector(porTipo)
+  const sobresDeSaldo = lector(abonos)('ACTIVATE')
+  const recargasDeSaldo = lector(abonos)('ADJUST_INCREMENT')
   const activadas = de('ACTIVATE')
   const usadas = de('REDEEM')
   const revertidas = de('REDEEM_REVERSAL')
@@ -562,6 +591,11 @@ export async function getGiftCardSummary(venueId: string, r: { from: string; to:
     redeemed: { movements: usadas.n, amount: usadas.monto, reversed: revertidas.monto, net: resta(usadas.monto, revertidas.monto) },
     cancelled: { cards: canceladas.n, amount: canceladas.monto },
     adjustments: { increments: suben.monto, decrements: bajan.monto, net: resta(suben.monto, bajan.monto) },
+    storeCredit: {
+      cards: sobresDeSaldo.n,
+      movements: sobresDeSaldo.n + recargasDeSaldo.n,
+      amount: suma(sobresDeSaldo.monto, recargasDeSaldo.monto),
+    },
     liveBalance: {
       cards: vivo._count._all,
       amount: pesos(vivo._sum.balance),

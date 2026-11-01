@@ -467,8 +467,12 @@ describe('resumen del periodo', () => {
         where: {
           venueId: 'v1',
           createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lte: new Date('2026-10-15T05:59:59.999Z') },
-          // M4 (cierre): sin la desactivación de $0 de un sobre que nunca se activó.
-          NOT: { type: 'DEACTIVATE', amount: { lte: 0 }, giftCard: { activities: { none: { type: 'ACTIVATE' } } } },
+          NOT: [
+            // M4 (cierre): sin la desactivación de $0 de un sobre que nunca se activó.
+            { type: 'DEACTIVATE', amount: { lte: 0 }, giftCard: { activities: { none: { type: 'ACTIVATE' } } } },
+            // S8a: sin los abonos de saldo a favor (van en su propia línea; storeCreditCardGuards.test.ts).
+            { type: { in: ['ACTIVATE', 'ADJUST_INCREMENT'] }, refundPaymentId: { not: null } },
+          ],
         },
       }),
     )
