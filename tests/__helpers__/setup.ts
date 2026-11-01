@@ -375,6 +375,7 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  terminalOrder: createMockModel(),
   tpvCommandQueue: createMockModel(),
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega
   fulfillmentArea: createMockModel(),
