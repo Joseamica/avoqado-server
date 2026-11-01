@@ -388,13 +388,36 @@ describe('I2 (S10): con destino saldo a favor, todo 4xx del servicio sin prefijo
   })
 
   it('conserva los datos del rechazo original junto al código', async () => {
-    issueRefundMock.mockRejectedValueOnce(new AppError('Ya no está.', 409, true, 'REFUND_AUTHORITY_UNAVAILABLE', { orderId: ORDER }))
+    issueRefundMock.mockRejectedValueOnce(
+      new AppError('El artículo no se puede devolver así.', 400, true, 'REFUND_ITEMS_NOT_ATTRIBUTABLE', { orderId: ORDER }),
+    )
     await expect(issuePosRefund(pedir())).rejects.toMatchObject({
-      statusCode: 409,
+      statusCode: 400,
       code: 'STORE_CREDIT_REJECTED',
-      details: { originalCode: 'REFUND_AUTHORITY_UNAVAILABLE', orderId: ORDER },
+      details: { originalCode: 'REFUND_ITEMS_NOT_ATTRIBUTABLE', orderId: ORDER },
     })
   })
+
+  // 🔴 «El dinero antes que la comodidad» (ruling): estos salen del candado de la venta ANTES de reconocer la llave dentro de la
+  // transacción. Si una petición anterior con esa llave sí escribió, decir «definitivo, nada escrito» haría que la app borrara lo
+  // pendiente y la cajera reintentara con llave NUEVA: un segundo abono. Sin envolver, lo pendiente se conserva y se reintenta con la
+  // MISMA llave (peor caso: una devolución pendiente trabada, sin dinero en riesgo).
+  it.each([
+    [
+      'REFUND_AUTHORITY_UNAVAILABLE',
+      new AppError('El cobro cambió mientras iniciaba el reembolso.', 409, true, 'REFUND_AUTHORITY_UNAVAILABLE'),
+    ],
+    ['REFUND_AUTHORITY_CHANGED', new AppError('El cobro cambió mientras iniciaba el reembolso.', 409, true, 'REFUND_AUTHORITY_CHANGED')],
+    ['ORDER_LOCK_SCOPE_TOO_LARGE', new AppError('Esta venta tiene demasiados cambios enlazados.', 409, true, 'ORDER_LOCK_SCOPE_TOO_LARGE')],
+  ])(
+    '🔴 %s (sale antes de reconocer la llave) NO se envuelve: sale con su código, para que lo pendiente se conserve',
+    async (codigo, error) => {
+      issueRefundMock.mockRejectedValueOnce(error)
+      const r = await issuePosRefund(pedir()).catch(e => e)
+      expect(r).toBe(error)
+      expect(r.code).toBe(codigo)
+    },
+  )
 
   it.each([
     [

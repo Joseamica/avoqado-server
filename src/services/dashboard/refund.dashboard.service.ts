@@ -162,7 +162,7 @@ export type AbonarSaldoAFavor = (
 /**
  * Todo código `STORE_CREDIT_` es un 4xx sin escritura: las apps lo toman como rechazo definitivo. Al revés también vale para el POS
  * (S10, I2): con destino saldo a favor, `issuePosRefund` y `createExchange` sacan todo 4xx sin ese prefijo como `STORE_CREDIT_REJECTED`
- * (`comoRechazoDeSaldo`), salvo IDEMPOTENCY_KEY_REUSED, ACTOR_MISMATCH y 401/403/408/429.
+ * (`comoRechazoDeSaldo`), salvo los que pueden salir aunque ya se haya escrito (IDEMPOTENCY_KEY_REUSED, ACTOR_MISMATCH, REFUND_AUTHORITY_*, ORDER_LOCK_SCOPE_TOO_LARGE) y 401/403/408/429.
  */
 function destinoEnConflicto(): BadRequestError {
   return new BadRequestError(
