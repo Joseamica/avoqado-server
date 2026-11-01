@@ -1,0 +1,354 @@
+/**
+ * Zod schemas for `/api/v1/crm/*` (spec 2026-10-30). Messages ALWAYS in Spanish; shape and format only — the business
+ * rules (which keys go together, who may give which key, who owns what) live in the services.
+ */
+import { z } from 'zod'
+import { canonicalPhoneE164 } from '../utils/phone'
+import { EXISTING_ID_REGEX } from './common/existingId.schema'
+
+const scope = z.enum(['propios', 'todos'], { errorMap: () => ({ message: 'El alcance es «propios» o «todos»' }) }).nullable()
+const flag = z.boolean({ required_error: 'Falta una llave', invalid_type_error: 'Cada llave es sí o no' })
+const cuid = z.string({ required_error: 'Falta el id' }).cuid('El id no es válido')
+const name = (missing: string) =>
+  z.string({ required_error: missing, invalid_type_error: missing }).trim().min(1, missing).max(100, 'Máximo 100 caracteres')
+
+/** A person's seven CRM keys, all of them every time: the screen sends the whole set, never a partial one. */
+export const crmKeysSchema = z.object(
+  { ver: scope, editar: scope, contactar: flag, campanas: flag, exportar: flag, ventas: flag, admin: flag },
+  { required_error: 'Faltan las llaves', invalid_type_error: 'Faltan las llaves' },
+)
+
+export type CrmKeysInput = z.infer<typeof crmKeysSchema>
+
+/** GET /crm/team. The page size has no upper bound here: the service caps it. */
+export const listTeamSchema = z.object({
+  query: z.object({
+    page: z.coerce
+      .number({ invalid_type_error: 'La página es un número' })
+      .int('La página es un número entero')
+      .min(1, 'La página empieza en 1')
+      .optional(),
+    pageSize: z.coerce
+      .number({ invalid_type_error: 'El tamaño de página es un número' })
+      .int('El tamaño de página es un número entero')
+      .min(1, 'El tamaño de página es al menos 1')
+      .optional(),
+  }),
+})
+
+/** POST /crm/team. The email is stored and looked up in lowercase (ruling 8). */
+export const addTeamMemberSchema = z.object({
+  body: z.object({
+    email: z
+      .string({ required_error: 'El correo es obligatorio', invalid_type_error: 'El correo es obligatorio' })
+      .trim()
+      .toLowerCase()
+      .email('El correo no es válido')
+      .max(254, 'El correo es demasiado largo'),
+    firstName: name('El nombre es obligatorio'),
+    lastName: name('El apellido es obligatorio'),
+    keys: crmKeysSchema,
+  }),
+})
+
+/** PATCH /crm/team/:id — `expectedKeys`: the keys the screen saw (ruling 60); if they changed since, nothing is written. */
+export const updateTeamMemberSchema = z.object({
+  params: z.object({ id: cuid }),
+  body: z.object({ keys: crmKeysSchema, expectedKeys: crmKeysSchema.optional() }),
+})
+
+/**
+ * DELETE /crm/team/:id — without `reasignarA`, their open accounts stay «Sin dueño». `reasignarA` is a Staff id, and not
+ * every one is a cuid (accepted invitations can create UUIDs): the service checks the person is on the team.
+ */
+export const removeTeamMemberSchema = z.object({
+  params: z.object({ id: cuid }),
+  body: z
+    .object({
+      reasignarA: z
+        .string({ invalid_type_error: 'El id de la persona no es válido' })
+        .trim()
+        .min(1, 'Falta a quién pasarle los negocios')
+        .max(100, 'El id de la persona no es válido')
+        .nullish(),
+    })
+    .default({}),
+})
+
+// ── Accounts, activities and the pipeline (task 4) ────────────────────────────────────────────────────────────────────
+
+/** Where an account came from. Strings validated here, never a Postgres enum (see the comment on the CRM models). */
+export const ACCOUNT_SOURCES = ['LANDING', 'WHATSAPP', 'MANUAL', 'IMPORTACION', 'REFERIDO', 'OTRO'] as const
+/** What a seller can pick when adding one by hand; the rest arrive through their own channel. */
+export const MANUAL_SOURCES = ['MANUAL', 'REFERIDO', 'OTRO'] as const
+export const ACTIVITY_TYPES = ['LLAMADA', 'WHATSAPP', 'CORREO', 'REUNION', 'DEMO', 'TAREA'] as const
+export const SEMAFOROS = ['rojo', 'verde', 'gris', 'amarillo'] as const
+export type Semaforo = (typeof SEMAFOROS)[number]
+
+/** An id of a Staff or an Organization that already exists: not always a cuid (accepted invitations create UUIDs). */
+const existing = (message: string, missing = message) =>
+  z.string({ required_error: missing, invalid_type_error: message }).regex(EXISTING_ID_REGEX, message)
+const text = (max: number, missing: string) =>
+  z.string({ required_error: missing, invalid_type_error: missing }).trim().min(1, missing).max(max, `Máximo ${max} caracteres`)
+const optionalText = (max: number) =>
+  z.string({ invalid_type_error: 'Debe ser texto' }).trim().max(max, `Máximo ${max} caracteres`).optional()
+/** A form's empty field is a field that was not filled. */
+const blankIsAbsent = (value: unknown) => (typeof value === 'string' && value.trim() === '' ? undefined : value)
+const flagQuery = z
+  .enum(['true', 'false'], { errorMap: () => ({ message: 'Usa «true» o «false»' }) })
+  .transform(value => value === 'true')
+  .optional()
+const byId = z.object({ id: cuid })
+
+/** Any route of one account, or of one activity, by its id. */
+export const accountIdSchema = z.object({ params: byId })
+
+/** GET /crm/accounts. The page size has no upper bound here: the service caps it at 100. */
+export const listAccountsSchema = z.object({
+  query: z.object({
+    stageId: cuid.optional(),
+    ownerStaffId: existing('El id del dueño no es válido').optional(),
+    source: z.enum(ACCOUNT_SOURCES, { errorMap: () => ({ message: 'Esa fuente no existe' }) }).optional(),
+    semaforo: z.enum(SEMAFOROS, { errorMap: () => ({ message: 'El semáforo es rojo, verde, gris o amarillo' }) }).optional(),
+    sinDueno: flagQuery,
+    estancados: flagQuery,
+    q: z
+      .string({ invalid_type_error: 'La búsqueda es texto' })
+      .trim()
+      .max(100, 'Máximo 100 caracteres')
+      .optional()
+      .transform(value => value || undefined),
+    cursor: cuid.optional(),
+    limit: z.coerce
+      .number({ invalid_type_error: 'El límite es un número' })
+      .int('El límite es un número entero')
+      .min(1, 'El límite es al menos 1')
+      .optional(),
+  }),
+})
+
+const contactSchema = z.object({
+  name: text(200, 'El nombre de la persona es obligatorio'),
+  phone: z.preprocess(
+    blankIsAbsent,
+    z
+      .string({ invalid_type_error: 'El teléfono no es válido' })
+      .trim()
+      .max(30, 'El teléfono no es válido')
+      .refine(value => canonicalPhoneE164(value) !== null, 'El teléfono no es válido')
+      .optional(),
+  ),
+  email: z.preprocess(
+    blankIsAbsent,
+    z
+      .string({ invalid_type_error: 'El correo no es válido' })
+      .trim()
+      .toLowerCase()
+      .email('El correo no es válido')
+      .max(254, 'El correo es demasiado largo')
+      .optional(),
+  ),
+  role: optionalText(100),
+})
+
+/** POST /crm/accounts — «Nuevo prospecto». `confirmarOtroNegocio` = «sí, es otro negocio» after the duplicates warning. */
+export const createAccountSchema = z.object({
+  body: z.object({
+    name: text(200, 'El nombre del negocio es obligatorio'),
+    giro: optionalText(100),
+    ventasRango: optionalText(60),
+    sucursales: z
+      .number({ invalid_type_error: 'Las sucursales son un número' })
+      .int('Las sucursales son un número entero')
+      .min(0, 'Las sucursales no pueden ser negativas')
+      .max(10000, 'Máximo 10,000 sucursales')
+      .optional(),
+    source: z
+      .enum(MANUAL_SOURCES, { errorMap: () => ({ message: 'A mano, la fuente es «MANUAL», «REFERIDO» u «OTRO»' }) })
+      .default('MANUAL'),
+    referidoPor: optionalText(200),
+    contact: contactSchema.optional(),
+    confirmarOtroNegocio: z.boolean({ invalid_type_error: 'Confirmar es sí o no' }).optional(),
+  }),
+})
+
+/** POST /crm/accounts/:id/reassign. `staffId: null` leaves it «Sin dueño». */
+export const reassignAccountSchema = z.object({
+  params: byId,
+  body: z.object({
+    staffId: existing('El id de la persona no es válido', 'Di a quién se lo pasas, o null para dejarlo sin dueño').nullable(),
+  }),
+})
+
+/** POST /crm/accounts/:id/stage */
+export const moveStageSchema = z.object({
+  params: byId,
+  body: z.object({ stageId: z.string({ required_error: 'Elige la etapa' }).cuid('El id de la etapa no es válido') }),
+})
+
+/** POST /crm/accounts/:id/lose. Without a reason the service answers 422, so the screen says why. */
+export const loseAccountSchema = z.object({
+  params: byId,
+  body: z.object({ lostReasonId: cuid.optional(), note: optionalText(1000) }),
+})
+
+/** POST /crm/accounts/:id/win. Without `organizationId`, the one it is already linked to (it came from the landing). */
+export const winAccountSchema = z.object({
+  params: byId,
+  body: z.object({ organizationId: existing('El id de la cuenta de Avoqado no es válido').optional() }).default({}),
+})
+
+/** POST /crm/accounts/:id/notes */
+export const addNoteSchema = z.object({
+  params: byId,
+  body: z.object({ text: text(5000, 'Escribe la nota') }),
+})
+
+/** An activity's moment: an ISO 8601 instant with its offset (the screen sends UTC). */
+const dueAt = z
+  .string({ required_error: 'Di para cuándo', invalid_type_error: 'La fecha no es válida' })
+  .datetime({ offset: true, message: 'La fecha no es válida' })
+  .transform(value => new Date(value))
+
+/** POST /crm/accounts/:id/activities */
+export const addActivitySchema = z.object({
+  params: byId,
+  body: z.object({
+    type: z.enum(ACTIVITY_TYPES, { errorMap: () => ({ message: 'El tipo es llamada, WhatsApp, correo, reunión, demo o tarea' }) }),
+    title: text(200, 'Escribe qué hay que hacer'),
+    dueAt,
+  }),
+})
+
+/** POST /crm/activities/:id/reschedule (ruling 55): the new moment. */
+export const rescheduleActivitySchema = z.object({
+  params: byId,
+  body: z.object({ dueAt }),
+})
+
+/** POST /crm/activities/:id/done */
+export const completeActivitySchema = z.object({
+  params: byId,
+  body: z.object({ result: optionalText(1000) }).default({}),
+})
+
+/** GET /crm/organizations/search?q= — what «Ganar» links to. */
+export const searchOrganizationsSchema = z.object({
+  query: z.object({
+    q: z
+      .string({ required_error: 'Escribe al menos 3 letras', invalid_type_error: 'Escribe al menos 3 letras' })
+      .trim()
+      .min(3, 'Escribe al menos 3 letras')
+      .max(100, 'Máximo 100 caracteres'),
+  }),
+})
+
+// Stages and lost reasons (`crm:admin`). The kind of a stage never changes, and a new one is always an open stage: there
+// is one «Ganado» and one «Perdido». Nothing is deleted in phase 1 — a stage is renamed, a reason is turned off.
+const stageName = text(60, 'El nombre de la etapa es obligatorio')
+const stageOrder = z
+  .number({ required_error: 'Falta el orden', invalid_type_error: 'El orden es un número' })
+  .int('El orden es un número entero')
+  .min(0, 'El orden empieza en 0')
+  .max(1000, 'Máximo 1000')
+const staleDays = z
+  .number({ invalid_type_error: 'Los días son un número' })
+  .int('Los días son un número entero')
+  .min(1, 'Al menos 1 día')
+  .max(365, 'Máximo 365 días')
+  .nullable()
+const somethingToChange = (body: object) => Object.keys(body).length > 0
+
+/** POST /crm/stages */
+export const createStageSchema = z.object({
+  body: z
+    .object({ name: stageName, order: stageOrder, staleDays: staleDays.optional() })
+    .strict({ message: 'Una etapa nueva siempre es abierta: lleva nombre, orden y días para «estancado»' }),
+})
+
+/** PATCH /crm/stages/:id */
+export const updateStageSchema = z.object({
+  params: byId,
+  body: z
+    .object({ name: stageName.optional(), order: stageOrder.optional(), staleDays: staleDays.optional() })
+    .strict({ message: 'Sólo se cambian el nombre, el orden y los días para «estancado»' })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+/** POST /crm/lost-reasons */
+export const createLostReasonSchema = z.object({
+  body: z.object({ name: text(100, 'El motivo es obligatorio') }).strict({ message: 'Un motivo nuevo sólo lleva su nombre' }),
+})
+
+/** PATCH /crm/lost-reasons/:id */
+export const updateLostReasonSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      name: text(100, 'El motivo es obligatorio').optional(),
+      active: z.boolean({ invalid_type_error: 'Activo es sí o no' }).optional(),
+    })
+    .strict({ message: 'Sólo se cambian el nombre y si está activo' })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+// «Importar lo de HubSpot» (`crm:admin`, plan task 8). The two CSVs arrive as multipart; multer already capped them at
+// 5 MB each and leaves them in `req.files`, which `validateRequest` does not read: the controller parses it with this.
+const hubspotFile = (label: string) =>
+  z
+    .array(z.object({ buffer: z.instanceof(Buffer) }), {
+      required_error: `Falta el archivo de ${label}`,
+      invalid_type_error: `Falta el archivo de ${label}`,
+    })
+    .min(1, `Falta el archivo de ${label}`)
+
+/** POST /crm/import/hubspot/preview y /apply: el CSV de contactos y el de negocios de la exportación de HubSpot. */
+export const hubspotImportFilesSchema = z.object(
+  { contactos: hubspotFile('contactos'), negocios: hubspotFile('negocios') },
+  {
+    required_error: 'Sube los dos archivos de HubSpot: contactos y negocios',
+    invalid_type_error: 'Sube los dos archivos de HubSpot: contactos y negocios',
+  },
+)
+
+// ── Clients, live data, reports and export (plan task 9) ──────────────────────────────────────────────────────────────
+
+const listQuery = listAccountsSchema.shape.query.shape
+
+/**
+ * GET /crm/clients. The cursor is an Organization id (not always a cuid); the service caps the page at 100. `ocultos=true`
+ * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39).
+ */
+export const listClientsSchema = z.object({
+  query: z.object({
+    q: listQuery.q,
+    cursor: existing('El cursor no es válido').optional(),
+    limit: listQuery.limit,
+    ocultos: flagQuery,
+  }),
+})
+
+/**
+ * POST /crm/clients/:organizationId/hide y /unhide, and GET /crm/clients/:organizationId/live (ruling 47) — an
+ * Organization id, not always a cuid.
+ */
+export const hideClientSchema = z.object({
+  params: z.object({ organizationId: existing('El id de la organización no es válido', 'Falta la organización') }),
+})
+
+/** A calendar day that exists: «2026-02-30» has the shape and is not one. */
+const isRealDay = (value: string) => {
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+const day = (label: string) =>
+  z
+    .string({ required_error: `Falta la fecha ${label}`, invalid_type_error: `La fecha ${label} no es válida` })
+    .regex(/^\d{4}-\d{2}-\d{2}$/, `La fecha ${label} va como AAAA-MM-DD`)
+    .refine(isRealDay, `La fecha ${label} no existe`)
+
+/** GET /crm/reports?desde=&hasta= — days on Mexico City's calendar. Their order and the one-year cap are the service's. */
+export const reportsSchema = z.object({ query: z.object({ desde: day('inicial'), hasta: day('final') }) })
+
+/** GET /crm/export.csv — the list's own filters, without its paging: the service walks the pages. */
+export const exportAccountsSchema = z.object({ query: listAccountsSchema.shape.query.omit({ cursor: true, limit: true }) })

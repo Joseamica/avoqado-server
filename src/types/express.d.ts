@@ -4,6 +4,7 @@ import { SDKContext } from '../middlewares/sdk-auth.middleware'
 import { ResolvedUserRole } from '../middlewares/checkPermission.middleware'
 import type { BoundTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
 import type { BoundTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
+import type { CrmAccess } from '../services/crm/access.service'
 
 declare global {
   namespace Express {
@@ -25,6 +26,8 @@ declare global {
       tpvCommandTarget?: BoundTpvCommandTarget
       /** Terminal de `/tpv/:tpvId/settings|reset-to-defaults|merchants`, amarrada a su venue real. */
       tpvSettingsTarget?: BoundTpvSettingsTarget
+      /** CRM keys `requireCrm` read from the database for THIS request (never from the token). */
+      crmAccess?: CrmAccess
       partnerContext?: {
         partnerId: string
         partnerName: string

@@ -1,0 +1,18 @@
+-- CRM propio, tarea 6 (Ruling 29b): la marca del alta por landing (`LANDING_SIGNUP_CREATED`, que escribe `signupFromLanding`). La carga
+-- inicial del barrido del CRM (`backfillFromOnboarding`, `sweep.service.ts`) la lee en orden (createdAt, id) desde donde se quedó; tras cada
+-- arranque del proceso empieza de cero. Sin este índice esa lectura recorre con el índice de `createdAt` toda la bitácora desde la primera
+-- marca, un rango que crece cada día. Al índice sólo entran las filas de esa acción, unas pocas al día, así que casi no le cuesta a la
+-- tabla más escrita. `schema.prisma` no cambia: los índices parciales de `ActivityLog` viven sólo en el SQL (ver el comentario del modelo).
+--
+-- ONE statement per file, on purpose (precedent: 20261013090000_activity_log_extraccion_emitida_unica). Prisma sends a migration file to
+-- Postgres as a single multi-statement batch, run inside an implicit transaction block, where CREATE INDEX CONCURRENTLY is rejected
+-- (SQLSTATE 25001). A file holding exactly one statement is not wrapped, so CONCURRENTLY works.
+--
+-- IF NOT EXISTS: an environment that already built this index by hand skips it instead of failing.
+--
+-- The query that uses it writes the action as a SQL LITERAL, never as a bind: with `"action" = $1`, a generic plan (the one a cached
+-- prepared statement settles on) cannot prove this index's predicate, and walks the `createdAt` index filtering by action instead
+-- (measured with EXPLAIN on a throwaway database).
+-- Recovery: inspect pg_index.indisvalid/indisready; if invalid, run a separate DROP INDEX CONCURRENTLY for this exact name, then retry
+-- this migration.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "ActivityLog_landing_signup_mark_idx" ON "ActivityLog"("createdAt", "id") WHERE "action" = 'LANDING_SIGNUP_CREATED';

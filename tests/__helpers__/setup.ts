@@ -535,6 +535,19 @@ const prismaMock: any = {
   // dies with «Cannot read properties of undefined» instead of failing on its assertion.
   exchange: createMockModel(),
   exchangeCreditLink: createMockModel(),
+  // CRM propio (spec 2026-10-30): same FIXED-list rule — without these entries a test touching the CRM models dies with
+  // «Cannot read properties of undefined» instead of failing on its assertion.
+  platformAccess: createMockModel(),
+  crmTeam: createMockModel(),
+  crmHiddenClient: createMockModel(),
+  crmAccount: createMockModel(),
+  crmContact: createMockModel(),
+  crmStage: createMockModel(),
+  crmLostReason: createMockModel(),
+  crmActivity: createMockModel(),
+  crmTimelineEvent: createMockModel(),
+  crmInboundEntry: createMockModel(),
+  crmDigestSend: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
