@@ -233,6 +233,13 @@ function compareVersions(a: string, b: string): number {
 const TIME_ENTRIES = Prisma.raw('"time_entries"')
 
 /** `col >= from` y, si hay tope, `col <= to` — con los binds correctos para columnas UTC. */
+/**
+ * D2 (Codex r4 A3 de pedidos en línea): a quién pertenece un movimiento en las VENTAS por persona (alias `p` del Payment y `o` de su
+ * cobro original, unido con `o."venueId" = p."venueId"`): el cobro, a quien lo hizo; la devolución, a quien hizo la venta que devuelve
+ * (NULL si fue un cobro web sin vendedor: no es de nadie). El EFECTIVO por persona no usa esto: sigue con quien entregó el dinero.
+ */
+const SQL_VENDEDOR_DEL_MOVIMIENTO = Prisma.sql`(CASE WHEN p."type" = 'REFUND' THEN o."processedById" ELSE p."processedById" END)`
+
 const rangeSql = (col: Prisma.Sql, from: Date, to?: Date): Prisma.Sql =>
   to ? Prisma.sql`${col} >= ${utcTs(from)} AND ${col} <= ${utcTs(to)}` : Prisma.sql`${col} >= ${utcTs(from)}`
 
@@ -2312,15 +2319,15 @@ class OrganizationDashboardService {
       venueIds.length === 0
         ? []
         : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
-            SELECT CASE WHEN p."type" = 'REFUND' THEN o."processedById" ELSE p."processedById" END AS "processedById",
+            SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
                    p."venueId" AS "venueId",
                    SUM(p."amount") AS "amount"
             FROM "Payment" p
-            LEFT JOIN "Payment" o ON p."type" = 'REFUND' AND o."id" = p."processorData"->>'originalPaymentId'
+            LEFT JOIN "Payment" o ON p."type" = 'REFUND' AND o."id" = p."processorData"->>'originalPaymentId' AND o."venueId" = p."venueId"
             WHERE p."venueId" IN (${Prisma.join(venueIds)})
               AND ${rangeSql(Prisma.raw('p."createdAt"'), dayStart, dayEnd)}
               AND p."status" = 'COMPLETED'
-              AND (CASE WHEN p."type" = 'REFUND' THEN o."processedById" ELSE p."processedById" END) IS NOT NULL
+              AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
             GROUP BY 1, 2
           `
 
@@ -2481,8 +2488,9 @@ class OrganizationDashboardService {
     })
 
     return {
-      // Only return staff with actual activity (check-in or sales) for the day
-      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales > 0)) as any,
+      // Only return staff with actual activity (check-in or sales) for the day. Codex r1 de D2: también con ventas NEGATIVAS (una
+      // devolución hoy de lo que vendió otro día, sin checar hoy): si no, esa devolución desaparecía del checador.
+      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0)) as any,
     }
   }
 
@@ -3404,12 +3412,13 @@ class OrganizationDashboardService {
     const salesRows = await prisma.$queryRaw<
       Array<{ staffId: string; venueId: string; localDate: string; count: number; amount: Prisma.Decimal | null }>
     >`
-      SELECT p."processedById" AS "staffId", p."venueId",
+      SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "staffId", p."venueId",
              ${venueLocalDay(Prisma.raw('p."createdAt"'))} AS "localDate",
-             COUNT(*)::int AS "count", SUM(p."amount") AS "amount"
+             (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "count", SUM(p."amount") AS "amount"
       FROM "Payment" p
       JOIN "Venue" v ON v."id" = p."venueId"
-      WHERE p."processedById" IN (${Prisma.join(staffIds)})
+      LEFT JOIN "Payment" o ON p."type" = 'REFUND' AND o."id" = p."processorData"->>'originalPaymentId' AND o."venueId" = p."venueId"
+      WHERE ${SQL_VENDEDOR_DEL_MOVIMIENTO} IN (${Prisma.join(staffIds)})
         AND p."venueId" IN (${Prisma.join(venueIds)})
         AND p."status" = 'COMPLETED'
         AND ${rangeSql(Prisma.raw('p."createdAt"'), rangeStart, rangeEnd)}
