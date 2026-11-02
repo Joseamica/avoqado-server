@@ -66,7 +66,9 @@ export const createExchangeSchema = z.object({
         settlement: z.object(
           {
             kind: z.enum(['EVEN', 'COLLECT', 'PAYOUT'], enumOptions),
-            method: z.enum(['CASH', 'CARD_TERMINAL', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE', 'TENDER'], enumOptions).nullable(),
+            method: z
+              .enum(['CASH', 'CARD_TERMINAL', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE', 'TENDER', 'STORE_CREDIT'], enumOptions)
+              .nullable(),
             expectedDifferenceCents: integerSchema,
             cashDrawerSessionId: id.nullish(),
             // La terminal se identifica por su número de serie (el que da /terminals/online), no por un cuid.
@@ -77,6 +79,9 @@ export const createExchangeSchema = z.object({
             tenderTypeId: id.nullish(),
             tenderRevision: integerSchema.nonnegative('La versión del tipo de pago no puede ser negativa.').nullish(),
             cashFromNonCash: booleanSchema.optional(),
+            // Saldo a favor (spec 2026-10-30 §5.4): a quién se le abona. Si falta con STORE_CREDIT, el servicio responde
+            // STORE_CREDIT_CUSTOMER_REQUIRED (las apps toman el prefijo como rechazo definitivo).
+            customerId: id.nullish(),
           },
           { required_error: 'Falta la liquidación del cambio.', invalid_type_error: 'La liquidación del cambio no es válida.' },
         ),
@@ -96,7 +101,7 @@ export const createExchangeSchema = z.object({
         }
         seen.add(line.orderItemId)
       }
-      const { kind, method, expectedDifferenceCents, tenderTypeId, tenderRevision, cashFromNonCash } = body.settlement
+      const { kind, method, expectedDifferenceCents, tenderTypeId, tenderRevision, cashFromNonCash, customerId } = body.settlement
       if (body.isOfflineReplay && method !== 'CARD_TERMINAL') {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -106,7 +111,7 @@ export const createExchangeSchema = z.object({
       }
       if (
         (kind === 'EVEN' && (expectedDifferenceCents !== 0 || method !== null)) ||
-        (kind === 'COLLECT' && (expectedDifferenceCents <= 0 || method === null)) ||
+        (kind === 'COLLECT' && (expectedDifferenceCents <= 0 || method === null || method === 'STORE_CREDIT')) ||
         (kind === 'PAYOUT' && (expectedDifferenceCents >= 0 || method === null || method === 'TENDER'))
       ) {
         ctx.addIssue({
@@ -123,6 +128,13 @@ export const createExchangeSchema = z.object({
           code: z.ZodIssueCode.custom,
           path: ['settlement'],
           message: 'El tipo de pago personalizado requiere su identificador y versión, y sólo se usa con TENDER.',
+        })
+      }
+      if (customerId != null && method !== 'STORE_CREDIT') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['settlement', 'customerId'],
+          message: 'El cliente del saldo a favor sólo se indica al devolver con saldo a favor.',
         })
       }
       if (cashFromNonCash !== undefined && (kind !== 'PAYOUT' || method !== 'CASH')) {

@@ -11,6 +11,9 @@
 import { formatInTimeZone } from 'date-fns-tz'
 import { es } from 'date-fns/locale'
 
+/** La versión de los términos que se congela en cada sobre nuevo (`GiftCard.termsVersion`). */
+export const TERMINOS_VIGENTES = '2026-10-14'
+
 export interface DatosDelNegocio {
   nombre: string
   direccion: string | null

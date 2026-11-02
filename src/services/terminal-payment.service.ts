@@ -54,6 +54,8 @@ import AppError, {
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
 import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { exigirQueNoRijaSoloSaldoEnTerminal } from './storeCredit/soloSaldoEnTerminal'
+import { marcarDevolucionEnTerminal } from './storeCredit/terminalRefundMarker'
 import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import {
   cardOnlineOrderError,
@@ -269,6 +271,11 @@ export interface TerminalRefundRequest {
   requestedBy: string
   requestId?: string
   reason?: string
+  /**
+   * «Sólo saldo a favor» (spec 2026-10-30-saldo-a-favor §5.5): con el interruptor prendido, la excepción que marcó la cajera
+   * (`DEFECTIVE` · `ACCIDENTAL_CHARGE` · `FRAUDULENT_CHARGE` · `CANCELLED_ORDER`). Opcional: apps viejas no lo mandan.
+   */
+  storeCreditOnlyException?: string
 }
 
 /**
@@ -5959,6 +5966,10 @@ class TerminalPaymentService {
     }
     // A2 (cierre): una venta de tarjetas de regalo pagada sólo se devuelve con su cancelación iniciada (R2), igual que en el panel.
     if (payment?.orderId) await exigirCancelacionParaDevolverEnTerminal(venueId, payment.orderId)
+    // «Sólo saldo a favor» (spec §5.5, Codex plan r2 h6): sin la excepción —apps viejas incluidas— se rechaza ANTES de mandar nada a la
+    // terminal. El registro de lo que la terminal YA devolvió (`refund.tpv.service.ts`) no pasa por aquí y nunca se rechaza por esto:
+    // el banco ya devolvió. Lo que una cajera devuelve desde el menú de la terminal, sin el POS, el interruptor no lo alcanza.
+    await exigirQueNoRijaSoloSaldoEnTerminal(venueId, request.storeCreditOnlyException)
 
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
     if (!terminalEntry) {
@@ -6020,6 +6031,9 @@ class TerminalPaymentService {
         createdAt: new Date(),
       })
 
+      // S7 (spec saldo a favor §5.5): la terminal devolverá al banco ANTES de avisar. Mientras tanto (3 min), el saldo a favor de este
+      // cobro se rechaza (`terminalRefundMarker.ts`); lo que se cuele igual lo congela el registro tardío.
+      marcarDevolucionEnTerminal(paymentId)
       io.to(socketId).emit('terminal:refund_request', {
         requestId,
         terminalId,

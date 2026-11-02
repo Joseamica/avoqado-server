@@ -9,7 +9,7 @@ import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
 import { splitPaymentIvaByOrderRates, mezclaDesdeTasas } from './ivaMath'
 import { grossByRateFromOrder, ordenParaIvaSelect, type OrdenParaIva, type RenglonParaIva } from './ivaDeOrden'
-import { paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
+import { esDevolucionASaldoAFavor, paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
@@ -69,8 +69,9 @@ export interface GenerateResult {
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
   /**
-   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta y lo pagado con saldo—, porque su
-   * póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta, lo pagado con saldo y la devolución a
+   * saldo a favor—, porque su póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con
+   * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
    */
   pendientesDeRevision: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
@@ -204,12 +205,19 @@ export const WHERE_PAGO_CONTABILIZABLE = {
   AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { order: { status: { not: OrderStatus.CANCELLED } } }],
 } satisfies Prisma.PaymentWhereInput
 
-/** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */
+/**
+ * ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo) o una devolución a saldo a favor? Mismo criterio que
+ * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE` (la lista del contador; S8b la alineó).
+ * Saldo a favor (spec 2026-10-30 §5.3): la devolución a saldo también, porque `buildRefundLines` la llevaría contra el banco
+ * (BANK_RECEIPT) y el dinero nunca salió de ahí; su póliza (pasivo del sobre) es la fase 2 de la contabilidad de tarjetas.
+ */
 export function esPendienteDeRevisionContable(p: {
+  type?: PaymentType | null
   tenderType?: { systemKind: string | null } | null
   order?: { items?: Array<{ giftCardId?: string | null }> } | null
 }): boolean {
   if (isGiftCardTenderKind(p.tenderType?.systemKind)) return true
+  if (esDevolucionASaldoAFavor(p)) return true
   return (p.order?.items ?? []).some(it => !!it.giftCardId)
 }
 

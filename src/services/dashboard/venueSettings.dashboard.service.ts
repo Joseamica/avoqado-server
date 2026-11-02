@@ -181,6 +181,8 @@ export async function updateVenueSettings(
     // fila nacería en false — el POS nunca ofrecería el PIN.
     ...(typeof updates.managerPinOverrideEnabled === 'boolean' && { managerPinOverrideEnabled: updates.managerPinOverrideEnabled }),
     ...(typeof updates.exchangesEnabled === 'boolean' && { exchangesEnabled: updates.exchangesEnabled }),
+    // «Sólo saldo a favor»: mismo caso. Un venue SIN fila toma esta rama y, sin esta línea, el primer «prender» nacía en false.
+    ...(typeof updates.storeCreditOnly === 'boolean' && { storeCreditOnly: updates.storeCreditOnly }),
     // «Sólo el dueño de la mesa»: mismo caso. Sin esta línea el primer «prender» nacía en false y el POS no lo aplicaba.
     ...(typeof updates.enforceTableOwnership === 'boolean' && { enforceTableOwnership: updates.enforceTableOwnership }),
     // Interruptor de asistencia. 53 de 68 venues locales NO tienen fila: sin estas dos

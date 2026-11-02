@@ -207,6 +207,10 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   get_exchanges_setting: 'read',
   set_exchanges_setting: 'write',
   review_exchange: 'write',
+  get_store_credit_settings: 'read',
+  set_store_credit_only: 'write',
+  get_customer_store_credit: 'read',
+  change_store_credit_phone: 'write',
   list_document_requests: 'read',
   list_venue_document_requests: 'read',
   list_document_request_venue_options: 'read',
@@ -597,6 +601,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedStampsRequired',
             // Cortesía pendiente: ligar la cabecera y todas las líneas que se vieron, en pesos.
             'expectedCourtesySnapshot',
+            // Saldo a favor (`change_store_credit_phone`): el teléfono se cambia sobre los últimos 4 que el operador VIO.
+            'expectedPhoneLast4',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

@@ -472,3 +472,61 @@ describe('B4 r1 (fix 2) · tarjetas de regalo en el ISR estimado: la diferencia,
     )
   })
 })
+
+/**
+ * S8b ronda 1 (ruling del controlador, investigación docs/audit/2026-10-30-saldo-a-favor/isr-devolucion-a-saldo.md): la devolución a saldo
+ * resta en su mes (diseño de hoy). En persona física con actividad empresarial a flujo de efectivo (LISR 105 fr. I, «efectivamente
+ * erogadas») podría no restar hasta que la clienta gaste el saldo: el estimado lo AVISA al contador, en el mismo texto de avisos. De los
+ * dos regímenes de `IsrRegime`, ese es GENERAL (RESICO no lleva el aviso: el SAT resta los CFDI de egreso en su prellenado).
+ */
+describe('S8b · aviso de devoluciones a saldo a favor (GENERAL, flujo de efectivo)', () => {
+  const mEstado = estadoDeResultadosEnFoto as jest.Mock
+  const delegar = mEstado.getMockImplementation()!
+  afterEach(() => mEstado.mockImplementation(delegar))
+  /** Cada mes avisa, por el gancho del estado de resultados, lo que su base restó de devoluciones a saldo (sin IVA). */
+  const conDevolucionesASaldo = (porMes: Record<string, number>) =>
+    mEstado.mockImplementation(
+      async (tx: unknown, v: { id: string }, f: { from: string }, l: unknown, alDevolverASaldo?: (c: number) => void) => {
+        if (porMes[f.from]) alDevolverASaldo?.(porMes[f.from])
+        return delegar(tx, v, f, l)
+      },
+    )
+  const AVISO = (monto: string) =>
+    `El ISR estimado resta ${monto} de devoluciones que se dieron como saldo a favor en lo que va del ejercicio; si tributas por flujo de efectivo, tu contador puede restarlas hasta que tu cliente gaste ese saldo.`
+
+  it('🔴 (a) GENERAL con devoluciones a saldo en el ejercicio: el aviso dice cuánto restó; la base no cambia', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    conDevolucionesASaldo({ '2026-01-01': 100_00, '2026-02-01': 50_00 })
+    const r = await getIsrProvisional('v1', '2026-02', 'GENERAL')
+    expect(r.avisoTarjetasDeRegalo).toBe(AVISO('$150.00'))
+    expect(r.ingresosAcumCents).toBe(20_000_00)
+    // Ningún campo nuevo: los importes de tarjetas siguen en 0.
+    expect([r.tarjetasCobradasNoIncluidasCents, r.pagadoConSaldoIncluidoCents]).toEqual([0, 0])
+  })
+
+  it('(a) con tarjetas de regalo también: los dos avisos, uno tras otro, en el mismo texto', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    mTarjetas.mockImplementation(async (_tx: unknown, _v: unknown, f: { from: string }) =>
+      f.from === '2026-02-01' ? { cargasCents: 300_00, pagadoConSaldoSinIvaCents: 0 } : SIN_TARJETAS,
+    )
+    conDevolucionesASaldo({ '2026-02-01': 80_00 })
+    const r = await getIsrProvisional('v1', '2026-02', 'GENERAL')
+    expect(r.avisoTarjetasDeRegalo).toBe(
+      'El ISR estimado no incluye $300.00 de tarjetas de regalo cobradas en lo que va del ejercicio y sí incluye $0.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas. ' +
+        AVISO('$80.00'),
+    )
+  })
+
+  it('🔴 (b) RESICO no lo lleva aunque haya devoluciones a saldo en el mes', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    conDevolucionesASaldo({ '2026-06-01': 100_00 })
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.avisoTarjetasDeRegalo).toBeUndefined()
+  })
+
+  it('🔴 (c) GENERAL sin devoluciones a saldo: sin aviso', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    const r = await getIsrProvisional('v1', '2026-02', 'GENERAL')
+    expect(r.avisoTarjetasDeRegalo).toBeUndefined()
+  })
+})

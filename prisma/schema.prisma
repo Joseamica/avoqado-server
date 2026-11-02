@@ -937,6 +937,12 @@ model VenueSettings {
   /// explícita del negocio. Core, sin candado de plan. Switch canónico en el dashboard; el POS sólo lo lee.
   exchangesEnabled Boolean?
 
+  /// «Sólo saldo a favor» (spec 2026-10-30-saldo-a-favor §5.1): cuando está prendido, la devolución de una venta ya cobrada de este
+  /// negocio sólo se hace como saldo a favor (nunca efectivo, transferencia ni tarjeta). El saldo a favor en sí no se prende:
+  /// está disponible en todas las sucursales y planes (decisión B); lo apagan las llaves GIFT_CARD_CODE_KEY / GIFT_CARD_HMAC_KEY.
+  /// Core, sin candado de plan. Switch canónico en el dashboard; el POS sólo lo lee.
+  storeCreditOnly Boolean @default(false)
+
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
@@ -8646,6 +8652,8 @@ enum GiftCardSource {
 enum TenderSystemKind {
   GIFT_CARD
   EXCHANGE_CREDIT
+  /// Saldo a favor (spec 2026-10-30-saldo-a-favor §5.3): el destino de una devolución cuyo importe se abona al sobre del cliente.
+  STORE_CREDIT
 }
 
 /// El sobre (un regalo). El código nunca se guarda en claro: `codeHash` (HMAC) para buscar, `codeEnc` (AES-GCM) para
@@ -19503,6 +19511,8 @@ enum ExchangeSettlementMethod {
   BANK_TRANSFER
   GIFT_CARD_BALANCE
   TENDER
+  /// La devolución del cambio se abona como saldo a favor del cliente (spec 2026-10-30-saldo-a-favor §5.4).
+  STORE_CREDIT
 }
 
 /// Cambio de talla o de producto: liga la venta original, sus devoluciones y la venta nueva (spec 2026-10-20 §6.2).

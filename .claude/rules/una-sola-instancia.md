@@ -84,6 +84,11 @@ calla.** **El #7 pierde pedidos sin un solo error entre servidores con bases dis
 13. **Pasada del job de menú y horario → candado advisory de Postgres** (`delivery-menu-sync.job.ts`, `enCurso`). Con 2 pods dos pasadas
     pueden planear el horario de la tienda desde lecturas distintas. La memoria de avisos de `hoursSync.service.ts` (fila 9 de la
     tabla) no requiere migración: sólo repite un 🚨.
+14. **Marca «la terminal está devolviendo este cobro» → tabla** (`src/services/storeCredit/terminalRefundMarker.ts`, saldo a favor S7;
+    toca DINERO). Al mandar una devolución a la terminal queda 3 min en memoria y, mientras vive, el saldo a favor de ese cobro se
+    rechaza. Con 2 pods la marca vive en el que mandó el comando y el Reembolso o el Cambio a saldo pueden caer en el otro y pasar; la
+    red de abajo sigue (el registro tardío de la terminal congela el sobre y avisa), pero la clienta podría gastar el saldo antes. Se
+    migra a una tabla (paymentId, venceEn) leída fuera de la transacción, igual que hoy. Un reinicio la pierde (residual aceptado).
 
 Excepción deliberada que NO se migra: el dedupe de `registerDevice.middleware.ts:33` es en proceso **a propósito** — meter una dependencia
 dura de Redis en el camino del cobro es peor que un dedupe imperfecto. Lee el comentario antes de "arreglarlo".

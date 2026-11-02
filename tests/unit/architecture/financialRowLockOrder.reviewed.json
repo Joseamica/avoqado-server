@@ -55,6 +55,16 @@
       "loops": 0,
       "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
     },
+    "src/services/giftCards/giftCardLedger.ts#prepararSobreDeSaldoAFavorEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): sin FOR UPDATE propio; se inventaría para que cada llamador quede registrado. Toma el candado consultivo por clienta y aparta UN sobre (su sobre de saldo) con lockGiftCardsForUpdate; va DESPUÉS de Order/Payments y ANTES del turno (Order → Payments → clienta + sobre → Shift)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#cambiarTelefonoDeSaldoAFavorEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S8a): sin FOR UPDATE propio; se inventaría para que cada llamador quede registrado. Aparta UN sobre (lockGiftCardsForUpdate) antes de leer o escribir nada; sin Order, Payment ni turno."
+    },
     "src/services/mobile/areaTicketV7.mobile.service.ts#lockAreaTicketCheckoutHierarchy": {
       "count": 1,
       "loops": 0,
@@ -84,6 +94,21 @@
       "count": 1,
       "loops": 0,
       "reason": "Una Payment de la unión global ya ordenada de candadosDelLote; NOWAIT/savepoints liberan el intento antes de retomarlo (R6)."
+    },
+    "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): candado consultivo «primer-sobre» por sucursal, sin FOR UPDATE; se inventaría para que cada llamador quede registrado. Siempre el PRIMER candado de su transacción, antes de Orders, Payments, sobres y turno («primer-sobre» → filas → turno)."
+    },
+    "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
+      "count": 0,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): la versión condicional del candado «primer-sobre» (sólo si la sucursal no tiene sobres activados), sin FOR UPDATE; se inventaría para que el Cambio y el Reembolso a saldo queden registrados al llamarla. Siempre como PRIMERA sentencia de su transacción."
+    },
+    "src/services/storeCredit/respaldoDeLaRaiz.ts#respaldoVigenteDeLaRaiz": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S3): UNA Payment, la raíz de una cadena de créditos de cambio, FOR UPDATE para medir su respaldo vigente. Sus Orders (la del crédito y su ascendencia, que trae la de la raíz) ya están poseídas; el llamador la aparta en el orden de Payments por id (antes que el cobro con crédito, que nace después que su raíz)."
     },
     "src/services/shared/cobroDelProtocolo.ts#bloquearPayments": {
       "count": 1,
@@ -383,9 +408,24 @@
       "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
     },
     "src/services/dashboard/refund.dashboard.service.ts#issueRefund#lockExistingOrderForPayment": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. S3 (saldo a favor desde un crédito de cambio): la primera es la Order del crédito con su ascendencia ANTES de apartar la raíz; bloquearCobroParaReembolso la vuelve a tomar (reentrada) y la segunda es la de la raíz, ya poseída como ascendencia."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
       "count": 1,
       "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+      "reason": "Saldo a favor (S3): la PRIMERA sentencia de la transacción del reembolso a saldo, antes de Orders, Payments, sobres y turno («primer-sobre» → filas → turno)."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund#respaldoVigenteDeLaRaiz": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Saldo a favor (S3): la raíz de un crédito de cambio. Con la pista leída fuera de la transacción y la raíz de id menor, va tras las Orders y ANTES del cobro con crédito (Payments por id); sin pista en orden, la segunda llamada la aparta tras el crédito. Nunca después de sobres ni turno."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx#prepararSobreDeSaldoAFavorEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S3): el candado por clienta y su sobre, DESPUÉS de apartar el cobro (Order → Payments) y ANTES del reclamo del turno, como el gasto con saldo; nunca en bucle."
     },
     "src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification#lockExistingOrderForPayment": {
       "count": 1,
@@ -426,6 +466,21 @@
       "count": 1,
       "loops": 1,
       "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6). R8 fija una fecha contable común; la lectura de la porción recién creada no agrega candados."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#tomarCandadoPrimerSobreSiHaceFaltaEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S5): la PRIMERA sentencia de la transacción del Cambio con STORE_CREDIT, antes de la llave avoqado:exchange:v1, Orders, Payments, sobres y turno («primer-sobre» → filas → turno), como el Reembolso a saldo (S3)."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#respaldoVigenteDeLaRaiz": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Saldo a favor (S5): la raíz de un crédito de cambio que se abona a saldo. Va DENTRO del bucle de Payments por id ASC, justo después de que bloquearCobroParaReembolso apartó esa MISMA fila (reentrada, sin fila nueva); sus Orders ya son ascendencia poseída. Nunca después de sobres ni turno."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#prepararSobreDeSaldoAFavorEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S5): el candado por clienta y su sobre, después de los Payments y ANTES de la venta nueva y de cualquier turno. Es el ÚNICO grupo de sobres del Cambio (revisión de S2, M2): con STORE_CREDIT ningún tramo PAYOUT sale de un cobro con saldo de regalo, así que bloquearSobresDelReembolsoEnTx no aparta nada; writeRefundInTx lo vuelve a pedir en la misma transacción (reentrada)."
     },
     "src/services/fiscal/cfdi.service.ts#emitirConEntrada#bloquearOrdenParaFacturar": {
       "count": 1,
@@ -526,6 +581,26 @@
       "count": 1,
       "loops": 0,
       "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#prepararSobreDeSaldoAFavorEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): UN sobre (el de saldo a favor de la clienta) bajo su candado consultivo por clienta; se llama tras apartar Order y Payments y antes de reclamar el turno, como el gasto con saldo (order.mobile.service.ts:5589)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#cambiarTelefonoDeSaldoAFavorEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S8a): el teléfono con que se gasta UN sobre, bajo su candado (la prueba por teléfono se juzga bajo ese mismo candado, así que no se cruza con un canje). Después sólo escribe ese sobre, los retos de teléfono (OtpChallenge) y la bitácora: ningún candado de Order, Payment ni turno."
+    },
+    "src/services/storeCredit/primerSobreLock.ts#tomarCandadoPrimerSobreSiHaceFaltaEnTx#tomarCandadoPrimerSobreEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S2): el mismo candado «primer-sobre», sólo mientras la sucursal no tiene sobres activados; el llamador lo toma como PRIMERA sentencia de su transacción."
+    },
+    "src/services/exchanges/exchangeTerminalRefund.ts#sobresDeSaldoDelCobroEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S7): la unión completa de los sobres que recibieron saldo del cobro, id ASC, en UNA llamada; recordRefund la hace tras apartar la Order y el Payment y ANTES de reclamar el turno (Order → Payment → sobres → Shift, como el cobro con saldo). El BLOCK de después (operarSobreDeGerenteEnTx) reentra en sobres ya poseídos. Prueba en Postgres: devolucionTardiaDeTerminal.integration.test.ts (los dos órdenes contra un cobro con ese saldo)."
     },
     "src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets#lockExistingOrderForPayment": {
       "count": 1,
@@ -666,6 +741,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/refund.mobile.service.ts#createRefund#tomarCandadoPrimerSobreEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S6): la devolución sin venta lo toma SIEMPRE como PRIMERA sentencia de su transacción, antes del turno, de Orders y de Payments («primer-sobre» → filas → turno), y repite la comprobación de sobres activados ya con él. Sin FOR UPDATE de Orders/Payments/sobres; la Order testigo es nueva, nunca en bucle."
     },
     "src/services/mobile/service-charge.mobile.service.ts#requireOpenOrder#lockExistingOrderForPayment": {
       "count": 1,
@@ -1141,6 +1221,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Tarjetas 1b Q42: los sobres de UNA cuenta en una sola llamada; la Order sólo se LEE (sin candado). Transacción que sólo aparta sobres (GiftCard) por id ASC, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#cambiarTelefonoDeSaldoAFavor#cambiarTelefonoDeSaldoAFavorEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S8a, panel): su propia transacción, que sólo aparta UN sobre (GiftCard) por id, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
     },
     "src/services/mobile/order.mobile.service.ts#montoDeLaVentaNuevaEnTx#lockExistingOrderForPayment": {
       "count": 1,

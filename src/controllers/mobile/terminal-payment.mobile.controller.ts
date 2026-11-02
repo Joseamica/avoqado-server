@@ -326,7 +326,7 @@ export async function printReceiptOnTerminal(req: Request, res: Response) {
 export async function requestRefundOnTerminal(req: Request, res: Response) {
   try {
     const { venueId, terminalId } = req.params
-    const { paymentId, requestId, reason } = req.body
+    const { paymentId, requestId, reason, storeCreditOnlyException } = req.body
     const userId = (req as any).authContext?.userId
 
     if (!terminalId || !paymentId) {
@@ -343,6 +343,7 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
       requestedBy: userId,
       requestId,
       reason,
+      storeCreditOnlyException: typeof storeCreditOnlyException === 'string' ? storeCreditOnlyException : undefined,
     })
 
     const httpStatus = result.status === 'opened' ? 200 : result.status === 'timeout' ? 504 : 422
@@ -361,6 +362,10 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
     // A2 (cierre de tarjetas 1a): una venta de tarjetas de regalo sin su cancelación iniciada (o ya usada, otro día…) responde el
     // rechazo de la regla única con su `code`; antes caía al 500 de abajo y la app no sabía que tocaba «Cancelar venta».
     if (error instanceof GiftCardError) {
+      return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
+    }
+    // «Sólo saldo a favor»: 422 STORE_CREDIT_ONLY con el texto para mostrar tal cual (las apps leen el prefijo `STORE_CREDIT_`).
+    if (error instanceof AppError && error.code?.startsWith('STORE_CREDIT_')) {
       return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
     }
 

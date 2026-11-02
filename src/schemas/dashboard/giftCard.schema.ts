@@ -175,6 +175,28 @@ export const resendSchema = z.object({
   query: z.any().optional(),
 })
 
+/**
+ * S8a: `POST …/:giftCardId/store-credit-phone` del panel. El teléfono con que se gasta un sobre de saldo a favor; el servicio lo
+ * normaliza y decide si la tarjeta es un saldo a favor. `expectedPhoneLast4` (opcional): los últimos 4 del teléfono que el panel
+ * enseñaba; si ya es otro, el servicio responde 409 sin cambiar nada.
+ */
+export const storeCreditPhoneSchema = z.object({
+  params: tarjetaParams,
+  body: z
+    .object({
+      phone: z
+        .string({ required_error: 'Falta el teléfono', invalid_type_error: 'El teléfono debe ser texto' })
+        .trim()
+        .regex(TELEFONO, 'El teléfono debe tener 10 dígitos, sin espacios (puedes anteponer +52)'),
+      expectedPhoneLast4: z
+        .string({ invalid_type_error: 'Los últimos 4 dígitos del teléfono actual deben ser texto' })
+        .regex(/^\d{4}$/, 'Los últimos 4 dígitos del teléfono actual deben ser 4 números')
+        .optional(),
+    })
+    .strict(CAMPO_DE_MAS),
+  query: z.any().optional(),
+})
+
 export const summarySchema = z.object({
   params: venueParams,
   query: z.object({ from: dia('la fecha inicial'), to: dia('la fecha final') }),

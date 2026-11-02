@@ -3730,6 +3730,9 @@ router.post(
  *
  * 🔴 UNA sola revisión por petición: el código del encargado es de un solo uso y de UN permiso. Dos revisiones
  * encadenadas gastaban el código en la primera y la segunda lo rechazaba (mesero escogiendo efectivo: sin salida).
+ *
+ * «Saldo a favor» (`STORE_CREDIT`) pide `payments:refund`, el mismo que un reembolso (spec 2026-10-30-saldo-a-favor §5.5): no sale
+ * dinero del cajón.
  */
 const revisarReembolso = checkPermission('payments:refund')
 const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')

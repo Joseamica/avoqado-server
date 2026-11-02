@@ -18,7 +18,7 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
   const guard = createGuard(scope)
   server.tool(
     'list_exchanges',
-    'Consulta los cambios de talla o producto de una sucursal: venta original, venta nueva, importe que regresa, importe que se lleva, diferencia y cómo se liquida. Incluye el importe por cobrar sólo en PENDING_PAYMENT (pendiente de pago), el identificador del cobro de la terminal y el motivo de revisión; si no corresponden, devuelve null. Montos en pesos. Filtra por fechas locales y estado, incluidos NEEDS_REVIEW (por revisar) y CANCELLED (cancelado). Incluye quién revisó, cuándo y su nota. porRevisar:true consulta sólo los que nadie ha revisado, sin límite de fechas salvo que las indiques. Sin fechas ni porRevisar consulta los últimos 7 días. Devuelve el total y siguienteOffset para recorrer todas las páginas; 25 cambios por defecto y máximo 100 por página. Requiere permiso para consultar pagos. Sólo lectura.',
+    'Consulta los cambios de talla o producto de una sucursal: venta original, venta nueva, importe que regresa, importe que se lleva, diferencia y cómo se liquida. Incluye el importe por cobrar sólo en PENDING_PAYMENT (pendiente de pago), el identificador del cobro de la terminal y el motivo de revisión; si no corresponden, devuelve null. Montos en pesos. Cómo se liquida: el medio STORE_CREDIT significa que la diferencia a favor del cliente se abonó como saldo a favor (nunca en efectivo ni a la tarjeta). Filtra por fechas locales y estado, incluidos NEEDS_REVIEW (por revisar) y CANCELLED (cancelado). Incluye quién revisó, cuándo y su nota. porRevisar:true consulta sólo los que nadie ha revisado, sin límite de fechas salvo que las indiques. Sin fechas ni porRevisar consulta los últimos 7 días. Devuelve el total y siguienteOffset para recorrer todas las páginas; 25 cambios por defecto y máximo 100 por página. Requiere permiso para consultar pagos. Sólo lectura.',
     {
       venueId: z
         .string({ required_error: 'Indica la sucursal', invalid_type_error: 'La sucursal debe ser texto' })
@@ -187,7 +187,7 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
   )
   server.tool(
     'get_exchange',
-    'Consulta un cambio de talla o producto: ventas y folios, piezas solicitadas para regresar y llevarse, valores, diferencia, liquidación y revisión. aplicado sólo es true cuando el cambio se completó; restock expresa lo solicitado y no demuestra una devolución al inventario. Incluye el total esperado y cobrado de TODOS los cargos y sus identificadores; null si no consta. Todos los importes en pesos. Requiere permiso para consultar pagos. Sólo lectura.',
+    'Consulta un cambio de talla o producto: ventas y folios, piezas solicitadas para regresar y llevarse, valores, diferencia, liquidación (medio STORE_CREDIT = abonada como saldo a favor del cliente, nunca en efectivo ni a la tarjeta; liquidacion.saldoAFavor trae cliente, lo abonado y el saldo nuevo en pesos, los últimos 4 del teléfono con que se gasta y si no coincide con el de la ficha; null si no hubo saldo a favor) y revisión. aplicado sólo es true cuando el cambio se completó; restock expresa lo solicitado y no demuestra una devolución al inventario. Incluye el total esperado y cobrado de TODOS los cargos y sus identificadores; null si no consta. Todos los importes en pesos. Requiere permiso para consultar pagos. Sólo lectura.',
     {
       venueId: venueInput,
       exchangeId: z
@@ -235,7 +235,21 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
           piezas: line.pieces?.map(p => ({ precio: p.priceCents / 100, heredadoDe: p.inheritedFromOrderItemId })) ?? [],
           newOrderItemIds: line.newOrderItemIds,
         })),
-        liquidacion: { tipo: row.settlement.kind, medio: row.settlement.method, importe: row.settlement.amountCents / 100 },
+        liquidacion: {
+          tipo: row.settlement.kind,
+          medio: row.settlement.method,
+          importe: row.settlement.amountCents / 100,
+          saldoAFavor: row.settlement.storeCredit
+            ? {
+                clienteId: row.settlement.storeCredit.customerId,
+                cliente: row.settlement.storeCredit.customerName,
+                abonado: row.settlement.storeCredit.amountCents / 100,
+                saldoNuevo: row.settlement.storeCredit.newBalanceCents / 100,
+                telefonoUltimos4: row.settlement.storeCredit.phoneLast4,
+                telefonoNoCoincide: row.settlement.storeCredit.phoneMismatch,
+              }
+            : null,
+        },
         esperado: row.expectedChargeCents === null ? null : row.expectedChargeCents / 100,
         cobrado: row.chargedCents === null ? null : row.chargedCents / 100,
         cantidadDeCobros: row.chargePaymentCount,

@@ -13,6 +13,7 @@ import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { BadRequestError, TerminalBusyError } from '@/errors/AppError'
+import { hayDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -187,5 +188,116 @@ describe('requestRefundOnTerminal — abrir la devolución en el aparato', () =>
 
   it('un ACK sin solicitud pendiente no truena ni inventa un desenlace', () => {
     expect(terminalPaymentService.handleRefundRequestResult({ requestId: 'no-existe', status: 'opened' })).toBe(false)
+  })
+})
+
+/**
+ * «Sólo saldo a favor» en la puerta de la terminal (spec 2026-10-30-saldo-a-favor §5.5, Codex plan r2 h6). Con el interruptor prendido,
+ * pedir desde el POS una devolución en la TPV exige marcar la excepción (defecto, cobro por error, fraudulento o cuenta cancelada); sin
+ * ella —apps viejas incluidas— se rechaza ANTES de mandar nada a la terminal. El registro de lo que la terminal ya devolvió
+ * (`refund.tpv.service.ts`) no pasa por aquí: lo prueba `reembolsoDelPos.integration.test.ts`.
+ */
+describe('requestRefundOnTerminal — «Sólo saldo a favor»', () => {
+  const soloSaldo = () => prismaMock.venueSettings.findUnique.mockResolvedValue({ storeCreditOnly: true })
+  // `clearAllMocks` no borra lo que una prueba dejó resuelto: cada caso parte del negocio sin el interruptor.
+  beforeEach(() => prismaMock.venueSettings.findUnique.mockResolvedValue(null))
+
+  it('🔴 con sólo saldo y sin excepción, abrir la devolución en terminal da 422 y no emite el comando', async () => {
+    soloSaldo()
+
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest())).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'STORE_CREDIT_ONLY',
+      message:
+        'Este negocio devuelve sólo como saldo a favor. Usa Reembolso → Saldo a favor, o marca que es por defecto o cobro por error.',
+    })
+    expect(emit).not.toHaveBeenCalled()
+    expect(prismaMock.venueSettings.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1' } }))
+  })
+
+  it('🔴 D-1: sin las llaves el interruptor no restringe: sin excepción, la devolución en terminal se emite', async () => {
+    soloSaldo()
+    ackWith('opened')
+    const llave = process.env.GIFT_CARD_HMAC_KEY
+    delete process.env.GIFT_CARD_HMAC_KEY
+    try {
+      const result = await terminalPaymentService.requestRefundOnTerminal(baseRequest())
+      expect(result.status).toBe('opened')
+      expect(emit).toHaveBeenCalledTimes(1)
+    } finally {
+      process.env.GIFT_CARD_HMAC_KEY = llave
+    }
+  })
+
+  it('una excepción desconocida cuenta como ausente', async () => {
+    soloSaldo()
+    await expect(
+      terminalPaymentService.requestRefundOnTerminal(baseRequest({ storeCreditOnlyException: 'PORQUE_SI' })),
+    ).rejects.toMatchObject({ code: 'STORE_CREDIT_ONLY' })
+    expect(emit).not.toHaveBeenCalled()
+  })
+
+  it.each(['DEFECTIVE', 'ACCIDENTAL_CHARGE', 'FRAUDULENT_CHARGE', 'CANCELLED_ORDER'])('con %s la emite', async excepcion => {
+    soloSaldo()
+    ackWith('opened')
+
+    const result = await terminalPaymentService.requestRefundOnTerminal(baseRequest({ storeCreditOnlyException: excepcion }))
+
+    expect(result.status).toBe('opened')
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
+
+  it('regresión: sin sólo saldo, una petición vieja sin el campo sigue igual', async () => {
+    ackWith('opened')
+
+    const result = await terminalPaymentService.requestRefundOnTerminal(baseRequest())
+
+    expect(result.status).toBe('opened')
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
+
+  it('un cobro no elegible sigue respondiendo su 400 de siempre aunque haya sólo saldo', async () => {
+    soloSaldo()
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, method: 'CASH' })
+
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest())).rejects.toBeInstanceOf(BadRequestError)
+    expect(emit).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * S7 (spec 2026-10-30-saldo-a-favor §5.5, opción 1): abrir la devolución no aparta el importe y la terminal devuelve al banco ANTES de
+ * avisar. Al emitir el comando queda una marca en memoria (3 min) y, mientras vive, el saldo a favor de ese cobro se rechaza.
+ */
+describe('requestRefundOnTerminal — la marca «la terminal está devolviendo este cobro»', () => {
+  beforeEach(() => prismaMock.venueSettings.findUnique.mockResolvedValue(null))
+
+  it('al emitir el comando deja la marca del cobro', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, id: 'pay-marca' })
+    ackWith('opened')
+
+    await terminalPaymentService.requestRefundOnTerminal(baseRequest({ paymentId: 'pay-marca' }))
+
+    expect(emit).toHaveBeenCalledTimes(1)
+    expect(hayDevolucionEnTerminal('pay-marca')).toBe(true)
+  })
+
+  it('si «sólo saldo» la rechaza antes de emitir, no deja marca', async () => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ storeCreditOnly: true })
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, id: 'pay-sin-marca' })
+
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest({ paymentId: 'pay-sin-marca' }))).rejects.toMatchObject({
+      code: 'STORE_CREDIT_ONLY',
+    })
+    expect(hayDevolucionEnTerminal('pay-sin-marca')).toBe(false)
+  })
+
+  it('un cobro no elegible tampoco deja marca', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cardPayment, id: 'pay-efectivo', method: 'CASH' })
+
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest({ paymentId: 'pay-efectivo' }))).rejects.toBeInstanceOf(
+      BadRequestError,
+    )
+    expect(hayDevolucionEnTerminal('pay-efectivo')).toBe(false)
   })
 })

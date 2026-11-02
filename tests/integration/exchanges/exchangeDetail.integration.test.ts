@@ -63,6 +63,8 @@ describe('exchange transaction detail', () => {
           ? [
               { method: 'CASH', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false },
               { method: 'BANK_TRANSFER', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false },
+              // Saldo a favor (spec 2026-10-30 §5.4): con las llaves de tarjetas, también se ofrece abonarlo al sobre.
+              { method: 'STORE_CREDIT', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false },
             ]
           : [],
       )
@@ -220,7 +222,11 @@ describe('exchange transaction detail', () => {
       chainRefundMethod: 'CASH',
       chainRefundLabel: expect.any(String),
       chainRefundBlockedCode: null,
-      payoutOptions: [{ method: 'CASH', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false }],
+      payoutOptions: [
+        { method: 'CASH', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false },
+        // …y, con saldo a favor, abonarlo al sobre (el origen fiscal sigue siendo la raíz).
+        { method: 'STORE_CREDIT', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false },
+      ],
     })
   })
 
@@ -235,7 +241,7 @@ describe('exchange transaction detail', () => {
     })
   })
 
-  it('an EC from a terminal card shows the root as unavailable with EXCHANGE_CHAIN_NEEDS_TERMINAL', async () => {
+  it('an EC from a terminal card shows the root as unavailable with EXCHANGE_CHAIN_NEEDS_TERMINAL (only store credit is offered)', async () => {
     const s = await seed({ card: true })
     const { exchange } = await createExchange(s.input())
     expect(await detail(s, exchange.paymentIds[0])).toMatchObject({
@@ -243,7 +249,7 @@ describe('exchange transaction detail', () => {
       chainRefundMethod: null,
       chainRefundBlockedCode: 'EXCHANGE_CHAIN_NEEDS_TERMINAL',
       chainRefundBlockedReason: 'PROCESSOR_ROOT',
-      payoutOptions: [],
+      payoutOptions: [{ method: 'STORE_CREDIT', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false }],
     })
   })
 
@@ -254,9 +260,10 @@ describe('exchange transaction detail', () => {
     const d = await detail(s, exchange.paymentIds[0])
     expect(d.chainRefundMethod).toBe(method)
     expect(d.payoutOptions.map(p => p.method)).not.toContain('CASH')
-    expect(d.payoutOptions).toEqual(
-      method === 'BANK_TRANSFER' ? [{ method: 'BANK_TRANSFER', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false }] : [],
-    )
+    expect(d.payoutOptions).toEqual([
+      ...(method === 'BANK_TRANSFER' ? [{ method: 'BANK_TRANSFER', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false }] : []),
+      { method: 'STORE_CREDIT', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false },
+    ])
   })
 
   it('a missing EC root link leaves the detail readable with null chain fields', async () => {
@@ -297,6 +304,8 @@ describe('exchange transaction detail', () => {
     expect((await detail(s)).payoutOptions).toEqual([
       { method: 'CASH', maxCents: 40000, maxSameCents: 40000, needsRefundToCash: false },
       { method: 'BANK_TRANSFER', maxCents: 40000, maxSameCents: 0, needsRefundToCash: false },
+      // El saldo a favor sí admite la parte con tarjeta: no le regresa a la tarjeta.
+      { method: 'STORE_CREDIT', maxCents: 100000, maxSameCents: 0, needsRefundToCash: false },
     ])
   })
 
@@ -431,7 +440,7 @@ describe('exchange transaction detail', () => {
     await expect(getTransactionDetail(other.venueId, s.payments[0].id)).rejects.toMatchObject({ statusCode: 404 })
   })
 
-  it('a processor root cannot offer cash even when its recorded method is CASH', async () => {
+  it('a processor root cannot offer cash even when its recorded method is CASH (only store credit)', async () => {
     const s = await seed({ card: true })
     const { exchange } = await createExchange(s.input())
     await prisma.payment.update({ where: { id: s.payments[0].id }, data: { method: 'CASH', source: 'POS', fundsFlow: 'CASH_DRAWER' } })
@@ -439,7 +448,7 @@ describe('exchange transaction detail', () => {
       chainRefundMethod: null,
       chainRefundBlockedCode: 'EXCHANGE_CHAIN_NEEDS_TERMINAL',
       chainRefundBlockedReason: 'PROCESSOR_ROOT',
-      payoutOptions: [],
+      payoutOptions: [{ method: 'STORE_CREDIT', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false }],
     })
   })
 
