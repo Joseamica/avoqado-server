@@ -14,8 +14,9 @@ export const isValidBackofficeNumber = (digits: string, allowNine: boolean): boo
   /^\d{10}$/.test(digits) || (allowNine && /^\d{9}$/.test(digits))
 
 export const isNewerCapture = (a: AppliedCaptureSeqs, d: CaptureDestination, deviceId: string, seq: number): boolean => {
-  const last = a[d]?.[deviceId]
-  return last === undefined || seq > last
+  const byDevice = a[d]
+  // Own-property: un captureDeviceId como "constructor" no debe leer lo heredado.
+  return !byDevice || !Object.hasOwn(byDevice, deviceId) || seq > byDevice[deviceId]
 }
 
 export const withAppliedCapture = (a: AppliedCaptureSeqs, d: CaptureDestination, deviceId: string, seq: number): AppliedCaptureSeqs => ({
@@ -41,11 +42,11 @@ export function computeNumberAlerts(s: {
   if (s.linkingDuplicate) out.push('LINKING_DUPLICATE')
   if (s.portedDuplicate) out.push('PORTED_DUPLICATE')
   // 9 dígitos sólo es normal si el back-office lo confirmó a propósito.
-  const not10 = (n: string | null, src: SaleVerificationNumberSource | null) => n !== null && n.length !== 10 && src !== 'BACKOFFICE'
+  const not10 = (n: string | null, src: SaleVerificationNumberSource | null) => n !== null && n.length === 9 && src !== 'BACKOFFICE'
   if (not10(s.linkingNumber, s.linkingNumberSource) || not10(s.portedNumber, s.portedNumberSource)) out.push('NOT_10_DIGITS')
   const has = (i: number) => !!s.photos[i]
   // Sin número pero con su foto (o venta externa): falta. Sin foto todavía, la terminal aún lo manda.
   if (s.linkingNumber === null && (has(0) || s.isExternalSale)) out.push('LINKING_MISSING')
-  if (s.isPortabilidad && s.portedNumber === null && has(0) && has(1)) out.push('PORTED_MISSING')
+  if (s.isPortabilidad && s.portedNumber === null && (has(1) || s.isExternalSale)) out.push('PORTED_MISSING')
   return out
 }
