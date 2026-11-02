@@ -1,4 +1,10 @@
-import { OnlineOrderStatus, Prisma, type OnlineOrderChargeStatus, type OnlineOrderPaymentMode } from '@prisma/client'
+import {
+  OnlineOrderStatus,
+  Prisma,
+  type OnlineOrderChargeStatus,
+  type OnlineOrderPaymentMode,
+  type OnlineOrderRejectReason,
+} from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
@@ -35,6 +41,8 @@ export interface InboxOrder {
     authorizedAt: string | null
     capturedAt: string | null
   } | null
+  /** Apps (2-nov): por qué se rechazó (`PAYMENT_FAILED` = no se pudo cobrar la tarjeta); `null` si no se rechazó. */
+  rejectReason: OnlineOrderRejectReason | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -61,6 +69,7 @@ const SELECT = {
   id: true,
   status: true,
   paymentMode: true,
+  rejectReason: true,
   acceptDeadlineAt: true,
   estimatedReadyAt: true,
   printClaimedAt: true,
@@ -128,6 +137,7 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
           capturedAt: r.charge.capturedAt ? r.charge.capturedAt.toISOString() : null,
         }
       : null,
+    rejectReason: r.rejectReason ?? null,
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,
