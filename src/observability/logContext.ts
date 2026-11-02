@@ -1,12 +1,16 @@
-import winston from 'winston'
+import winston, { type Logform } from 'winston'
 import { getContext, type ExecutionContext } from './executionContext'
+import { isDemoUser, isDemoVenue } from './venueNames'
 
 const CONTEXTO_AL_LLAMAR = Symbol('contextoAlLlamar')
 
-/** Only the fields `contextFormat` logs: internal ones (`cancellation`, `prismaBatch`) never travel with a line. */
+/**
+ * Only the fields `contextFormat` reads: internal ones (`cancellation`, `prismaBatch`) never travel with a line.
+ * `negocioFijado` decides the demo mark and is never logged.
+ */
 type FotoDelContexto = Pick<
   ExecutionContext,
-  'correlationId' | 'source' | 'entrypoint' | 'venueId' | 'venueName' | 'userId' | 'role' | 'terminalSerial'
+  'correlationId' | 'source' | 'entrypoint' | 'venueId' | 'venueName' | 'userId' | 'role' | 'terminalSerial' | 'negocioFijado'
 >
 
 const foto = ({
@@ -18,6 +22,7 @@ const foto = ({
   userId,
   role,
   terminalSerial,
+  negocioFijado,
 }: ExecutionContext): FotoDelContexto => ({
   correlationId,
   source,
@@ -27,6 +32,7 @@ const foto = ({
   userId,
   role,
   terminalSerial,
+  negocioFijado,
 })
 
 /**
@@ -71,6 +77,29 @@ export function capturarContextoAlLlamar<T extends winston.Logger>(logger: T): T
 export const contextFormat = winston.format(info => {
   const ctx: FotoDelContexto | undefined =
     CONTEXTO_AL_LLAMAR in info ? (info as Record<symbol, FotoDelContexto | undefined>)[CONTEXTO_AL_LLAMAR] : getContext()
+  const conCtx = conContexto(info, ctx)
+  return esActividadDeUnDemo(ctx) ? marcarDemo(conCtx) : conCtx
+})
+
+/**
+ * ¿La línea la generó un demo? Sólo con certeza: un job que fijó un negocio demo (`conNegocio`) o la sesión de un usuario
+ * demo, que el candado sólo deja tocar su propio negocio. NO por el negocio del token ni por un id en los campos: un
+ * SUPERADMIN o una persona con un token viejo del demo pueden estar operando otro negocio, y el registro copia ese id
+ * (Codex r1 y r2). NO por nombre: un negocio real puede llamarse igual.
+ */
+function esActividadDeUnDemo(ctx: FotoDelContexto | undefined): boolean {
+  if (!ctx) return false
+  if (ctx.negocioFijado) return isDemoVenue(ctx.negocioFijado)
+  return isDemoUser(ctx.userId)
+}
+
+/** «🧪 DEMO ·» y `demo: true`: las alertas de un demo no se confunden con las de un negocio real (founder, 1-nov). No cambia la gravedad. */
+function marcarDemo(info: Logform.TransformableInfo): Logform.TransformableInfo {
+  const yaLoDice = typeof info.message === 'string' && /demo|🧪/i.test(info.message)
+  return { ...info, demo: true, ...(typeof info.message === 'string' && !yaLoDice ? { message: `🧪 DEMO · ${info.message}` } : {}) }
+}
+
+function conContexto(info: Logform.TransformableInfo, ctx: FotoDelContexto | undefined): Logform.TransformableInfo {
   if (!ctx) return info
 
   const injected: Record<string, unknown> = {
@@ -85,4 +114,4 @@ export const contextFormat = winston.format(info => {
   if (ctx.terminalSerial) injected.terminalSerial = ctx.terminalSerial
 
   return { ...injected, ...info }
-})
+}
