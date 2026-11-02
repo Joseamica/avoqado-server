@@ -261,7 +261,9 @@ export async function reviewOrgSaleVerification(req: Request, res: Response): Pr
     res.status(200).json({ success: true, data: updated })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] review error: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    res
+      .status(error.statusCode || 500)
+      .json({ success: false, message: error.message || 'Internal server error', ...(error.code ? { code: error.code } : {}) })
   }
 }
 

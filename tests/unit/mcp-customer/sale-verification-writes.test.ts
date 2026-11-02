@@ -1,4 +1,5 @@
 import { registerSaleVerificationTools } from '../../../src/mcp/tools/saleVerifications'
+import { ForbiddenError } from '../../../src/errors/AppError'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockReview = jest.fn()
@@ -155,6 +156,30 @@ describe('reopen_sale_verification', () => {
       'o1',
       expect.objectContaining({ saleVerificationId: 'sv1', reopenedById: 's1', reason: 'documento incorrecto' }),
     )
+  })
+})
+
+const NO_APPROVE = () => new ForbiddenError('No tienes permiso para aprobar ni rechazar ventas', 'SALE_APPROVE_FORBIDDEN')
+
+describe('permiso sale-verifications:approve (lo revisa el servicio contra la tienda de la venta)', () => {
+  it('review_sale_verification: el servicio niega → error con su mensaje y nada se audita', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    mockReview.mockRejectedValue(NO_APPROVE())
+    const out = parse(await call('review_sale_verification', { saleVerificationId: 'sv1', decision: 'approve', confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toBe('No tienes permiso para aprobar ni rechazar ventas')
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+  it('edit_sale_verification con cambio de estado: el servicio niega → error con su mensaje, su código y nada se audita', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    mockEdit.mockRejectedValue(NO_APPROVE())
+    const out = parse(
+      await call('edit_sale_verification', { saleVerificationId: 'sv1', status: 'COMPLETED', reason: 'corrección', confirm: true }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.error).toBe('No tienes permiso para aprobar ni rechazar ventas')
+    expect(out.code).toBe('SALE_APPROVE_FORBIDDEN')
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 })
 
