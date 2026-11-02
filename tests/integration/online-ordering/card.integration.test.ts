@@ -26,6 +26,7 @@ import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { createOnlineOrder, getTrackingByToken, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
+import { listOrders as listMobileOrders } from '@/services/mobile/order.mobile.service'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -752,6 +753,16 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(after.status).toBe('CAPTURED')
     expect(after.capturedAmount!.toFixed(2)).toBe('250.00')
     expect(after.attempts).toBe(1)
+  })
+
+  it('S2 (clientes, Codex plan r1 #1): «Cuentas abiertas» de las apps no lista la tarjeta apartada; ya cobrada, sí', async () => {
+    const { orderId } = await authorizedOrder()
+    const ids = async (search?: string) => (await listMobileOrders(venueId!, { page: 1, pageSize: 100, search })).data.map(o => o.id)
+    const { orderNumber } = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { orderNumber: true } })
+    expect(await ids()).not.toContain(orderId)
+    expect(await ids(orderNumber)).not.toContain(orderId)
+    await accept(orderId)
+    expect(await ids()).toContain(orderId)
   })
 
   it('doble aceptar en paralelo captura una sola vez', async () => {
