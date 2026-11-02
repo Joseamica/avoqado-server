@@ -20,6 +20,8 @@ import { asegurarIdsDelNegocio } from './idsDelNegocio'
 import { startOfWeek } from 'date-fns'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { venueStartOfDay, venueStartOfMonth, DEFAULT_TIMEZONE } from '../../../utils/datetime'
+import { utcTs } from '../../../utils/sqlDates'
+import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../../shared/vendedorDelMovimiento'
 
 // ==========================================
 // TYPES
@@ -153,11 +155,18 @@ export async function ventasDeLaPersonaDesde(
   staffId: string,
   desde: Date,
 ): Promise<number> {
-  const result = await db.payment.aggregate({
-    where: { venueId, status: 'COMPLETED', createdAt: { gte: desde }, processedById: staffId },
-    _sum: { amount: true },
-  })
-  return result._sum.amount?.toNumber() || 0
+  // Una devolución cuenta para quien hizo la venta que devuelve (misma regla que el checador y el mapa de ventas por persona); la de
+  // un cobro sin vendedor no es de nadie. Antes: `processedById` del REFUND, que es quien devuelve.
+  const [fila] = await db.$queryRaw<Array<{ total: Prisma.Decimal | null }>>`
+    SELECT SUM(p."amount") AS "total"
+    FROM "Payment" p
+    ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+    WHERE p."venueId" = ${venueId}
+      AND p."status" = 'COMPLETED'
+      AND p."createdAt" >= ${utcTs(desde)}
+      AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} = ${staffId}
+  `
+  return Number(fila?.total ?? 0) || 0
 }
 
 /**
@@ -222,7 +231,9 @@ async function calculateCurrentSales(
     return count
   }
 
-  // AMOUNT: sum of payment amounts
+  // AMOUNT: sum of payment amounts. D4: la meta de UNA persona usa la regla del vendedor del movimiento (sus devoluciones, no las que
+  // operó); la del negocio suma todo como siempre.
+  if (staffId) return ventasDeLaPersonaDesde(db, venueId, staffId, startDate)
   const result = await db.payment.aggregate({
     where: whereClause,
     _sum: {
