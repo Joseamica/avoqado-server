@@ -56,7 +56,7 @@ export async function approveOrderHandler(req: Request, res: Response, next: Nex
       return
     }
 
-    const updated = await approveSpei({ orderId: id, approvedBy: 'magic-link' })
+    const updated = await approveSpei({ orderId: id, approvedBy: 'magic-link', token })
     res.json({
       success: true,
       data: { orderId: updated.id, orderNumber: updated.orderNumber },
@@ -107,7 +107,7 @@ export async function rejectOrderHandler(req: Request, res: Response, next: Next
     }
 
     const { reason } = req.body
-    const updated = await rejectSpei({ orderId: id, reason, rejectedBy: 'magic-link' })
+    const updated = await rejectSpei({ orderId: id, reason, rejectedBy: 'magic-link', token })
     res.json({
       success: true,
       data: { orderId: updated.id, orderNumber: updated.orderNumber },

@@ -55,10 +55,14 @@ export interface UploadSpeiProofInput {
 export interface ApproveSpeiInput {
   orderId: string
   approvedBy: string // email or "system" or "magic-link"
+  /** La llave de la liga que se usó: tiene que ser la VIGENTE del pedido (D1, 1-nov). */
+  token: string
 }
 
 export interface RejectSpeiInput {
   orderId: string
   reason: string
   rejectedBy: string
+  /** La llave de la liga que se usó: tiene que ser la VIGENTE del pedido (D1, 1-nov). */
+  token: string
 }
