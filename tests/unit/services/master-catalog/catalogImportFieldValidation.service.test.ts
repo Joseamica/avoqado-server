@@ -1,6 +1,6 @@
 import { appendCatalogImportStandaloneErrorLines } from '@/services/master-catalog/catalogImportFieldValidation.service'
 import type { CatalogImportRowError, CatalogImportStagedLine } from '@/services/master-catalog/catalogImport.types'
-import { expectCatalogImportEventLoopBudgetV1, startCatalogImportEventLoopProbeV1 } from './catalogImportEventLoopTestHarness'
+import { expectCatalogImportEventLoopSliceBudgetV1, startCatalogImportEventLoopProbeV1 } from './catalogImportEventLoopTestHarness'
 import { blank, context, makeHarness, number, row, text, upload, validWorkbook } from './catalogImportTestHarness'
 
 describe('catalog import field finding scheduler', () => {
@@ -33,7 +33,9 @@ describe('catalog import field finding scheduler', () => {
 
     const probe = startCatalogImportEventLoopProbeV1()
     let sliceStartedAt = performance.now()
+    let checkpointCalls = 0
     const checkpoint = async () => {
+      checkpointCalls += 1
       if (performance.now() - sliceStartedAt < 4) return
       await new Promise<void>(resolve => setImmediate(resolve))
       sliceStartedAt = performance.now()
@@ -44,7 +46,11 @@ describe('catalog import field finding scheduler', () => {
 
     // WHY: Invalid workbooks are the adversarial path; pre-existing staged
     // coordinates must not bypass the same <50 ms scheduler as valid rows.
-    expectCatalogImportEventLoopBudgetV1(samples)
+    // How often the loop actually yields depends on the CPU (twice on a fast
+    // runner), so the proof is the call count: one checkpoint per 64 of the
+    // 20k lines and 400k findings, whether or not the coordinate has a line.
+    expect(checkpointCalls).toBeGreaterThanOrEqual(Math.floor((20_000 + 400_000) / 64))
+    expectCatalogImportEventLoopSliceBudgetV1(samples)
     expect(staged).toHaveLength(20_000)
   }, 20_000)
 
