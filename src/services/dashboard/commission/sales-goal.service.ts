@@ -145,6 +145,22 @@ async function getVenueTimezone(venueId: string, db: Prisma.TransactionClient = 
 }
 
 /**
+ * D4: lo que una persona lleva vendido en una tienda desde una fecha (avance de su meta por importe), agregado en Postgres.
+ */
+export async function ventasDeLaPersonaDesde(
+  db: Prisma.TransactionClient | typeof prisma,
+  venueId: string,
+  staffId: string,
+  desde: Date,
+): Promise<number> {
+  const result = await db.payment.aggregate({
+    where: { venueId, status: 'COMPLETED', createdAt: { gte: desde }, processedById: staffId },
+    _sum: { amount: true },
+  })
+  return result._sum.amount?.toNumber() || 0
+}
+
+/**
  * Calculate current sales for a goal based on period and goal type
  * - AMOUNT: sums Payment.amount (currency total)
  * - QUANTITY: counts order items (units/products sold)

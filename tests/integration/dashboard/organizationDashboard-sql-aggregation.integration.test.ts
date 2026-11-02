@@ -29,6 +29,7 @@ import { NotFoundError } from '@/errors/AppError'
 import { organizationDashboardService as svc } from '@/services/organization-dashboard/organizationDashboard.service'
 import { venueStartOfDay } from '@/utils/datetime'
 import prisma from '@/utils/prismaClient'
+import { ventasDeLaPersonaDesde } from '@/services/dashboard/commission/sales-goal.service'
 
 const TZ = 'America/Mexico_City'
 // Martes 11-mar-2025 en la zona del venue (UTC-6 en marzo):
@@ -655,7 +656,13 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       const fila = (id: string) => (staff as Array<any>).find(r => r.id === id && r.venueId === v1)
       const mapa = (await svc.getSalesHeatmap(orgId, DIA, DIA, 'OWNER', mario)).staff
       const delMapa = (id: string) => mapa.find(r => r.staffId === id && r.venueId === v1)!.days[0]
+      // D4: el avance de la meta de venta de cada persona desde el inicio del día 11 (la venta de Mario de AYER queda fuera; su
+      // devolución de hoy, dentro).
+      const desde = new Date('2025-03-11T06:00:00.000Z') // 00:00 local del 11
       return {
+        metaAna: await ventasDeLaPersonaDesde(prisma, v1, ana, desde),
+        metaBeto: await ventasDeLaPersonaDesde(prisma, v1, beto, desde),
+        metaMario: await ventasDeLaPersonaDesde(prisma, v1, mario, desde),
         ana: fila(ana)!,
         beto: fila(beto)!,
         mario: fila(mario),
@@ -690,12 +697,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       },
       select: { id: true },
     })
-    const devolucion = (
-      original: { id: string; orderId: string },
-      processedById: string,
-      amount: number,
-      method: 'CASH' | 'CREDIT_CARD',
-    ) =>
+    const devolucion = (original: { id: string; orderId: string }, processedById: string, amount: number, method: 'CASH' | 'CREDIT_CARD') =>
       prisma.payment.create({
         data: {
           venueId: v1,
@@ -745,6 +747,10 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       expect(round2(despues.mapaAna.salesAmount)).toBe(round2(antes.mapaAna.salesAmount - 10))
       expect(round2(despues.mapaMario.salesAmount)).toBe(round2(antes.mapaMario.salesAmount - 25))
       expect(despues.mapaAna.salesCount).toBe(antes.mapaAna.salesCount)
+      // D4: la meta de venta de cada quien baja por la devolución de SU venta, no por la que operó (la web no es de nadie).
+      expect(round2(despues.metaBeto)).toBe(round2(antes.metaBeto - 30))
+      expect(round2(despues.metaAna)).toBe(round2(antes.metaAna - 10))
+      expect(round2(despues.metaMario)).toBe(round2(antes.metaMario - 25))
       expect(despues.mapaBeto.salesCount).toBe(antes.mapaBeto.salesCount)
     } finally {
       await prisma.payment.deleteMany({ where: { id: { in: [...creadas.map(c => c.id), cobroWeb.id] } } })

@@ -32,6 +32,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
+import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
 
@@ -233,13 +234,6 @@ function compareVersions(a: string, b: string): number {
 const TIME_ENTRIES = Prisma.raw('"time_entries"')
 
 /** `col >= from` y, si hay tope, `col <= to` — con los binds correctos para columnas UTC. */
-/**
- * D2 (Codex r4 A3 de pedidos en línea): a quién pertenece un movimiento en las VENTAS por persona (alias `p` del Payment y `o` de su
- * cobro original, unido con `o."venueId" = p."venueId"`): el cobro, a quien lo hizo; la devolución, a quien hizo la venta que devuelve
- * (NULL si fue un cobro web sin vendedor: no es de nadie). El EFECTIVO por persona no usa esto: sigue con quien entregó el dinero.
- */
-const SQL_VENDEDOR_DEL_MOVIMIENTO = Prisma.sql`(CASE WHEN p."type" = 'REFUND' THEN o."processedById" ELSE p."processedById" END)`
-
 const rangeSql = (col: Prisma.Sql, from: Date, to?: Date): Prisma.Sql =>
   to ? Prisma.sql`${col} >= ${utcTs(from)} AND ${col} <= ${utcTs(to)}` : Prisma.sql`${col} >= ${utcTs(from)}`
 
@@ -2323,7 +2317,7 @@ class OrganizationDashboardService {
                    p."venueId" AS "venueId",
                    SUM(p."amount") AS "amount"
             FROM "Payment" p
-            LEFT JOIN "Payment" o ON p."type" = 'REFUND' AND o."id" = p."processorData"->>'originalPaymentId' AND o."venueId" = p."venueId"
+            ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
             WHERE p."venueId" IN (${Prisma.join(venueIds)})
               AND ${rangeSql(Prisma.raw('p."createdAt"'), dayStart, dayEnd)}
               AND p."status" = 'COMPLETED'
@@ -3417,7 +3411,7 @@ class OrganizationDashboardService {
              (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "count", SUM(p."amount") AS "amount"
       FROM "Payment" p
       JOIN "Venue" v ON v."id" = p."venueId"
-      LEFT JOIN "Payment" o ON p."type" = 'REFUND' AND o."id" = p."processorData"->>'originalPaymentId' AND o."venueId" = p."venueId"
+      ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
       WHERE ${SQL_VENDEDOR_DEL_MOVIMIENTO} IN (${Prisma.join(staffIds)})
         AND p."venueId" IN (${Prisma.join(venueIds)})
         AND p."status" = 'COMPLETED'
