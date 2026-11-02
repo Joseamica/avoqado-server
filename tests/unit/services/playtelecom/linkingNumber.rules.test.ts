@@ -72,7 +72,7 @@ describe('linkingNumber.rules', () => {
     expect(computeNumberAlerts({ ...base, linkingNumber: '551234567', linkingNumberSource: 'EXTERNAL_SALE' })).toContain('NOT_10_DIGITS')
     expect(computeNumberAlerts({ ...base, linkingNumber: '5512345678', linkingNumberSource: 'EXTERNAL_SALE' })).not.toContain('NOT_10_DIGITS')
     expect(computeNumberAlerts({ ...base, linkingNumber: '' })).not.toContain('NOT_10_DIGITS')
-    expect(isNewerCapture({}, 'LINKING', 'constructor', 1)).toBe(true)
+    expect(isNewerCapture({ LINKING: {} }, 'LINKING', 'constructor', 1)).toBe(true)
     expect(computeNumberAlerts({ ...base, linkingDuplicate: true, portedDuplicate: true })).toEqual(['LINKING_DUPLICATE', 'PORTED_DUPLICATE'])
   })
 })

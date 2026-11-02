@@ -16,7 +16,7 @@ export const isValidBackofficeNumber = (digits: string, allowNine: boolean): boo
 export const isNewerCapture = (a: AppliedCaptureSeqs, d: CaptureDestination, deviceId: string, seq: number): boolean => {
   const byDevice = a[d]
   // Own-property: un captureDeviceId como "constructor" no debe leer lo heredado.
-  return !byDevice || !Object.hasOwn(byDevice, deviceId) || seq > byDevice[deviceId]
+  return !byDevice || !Object.prototype.hasOwnProperty.call(byDevice, deviceId) || seq > byDevice[deviceId]
 }
 
 export const withAppliedCapture = (a: AppliedCaptureSeqs, d: CaptureDestination, deviceId: string, seq: number): AppliedCaptureSeqs => ({
