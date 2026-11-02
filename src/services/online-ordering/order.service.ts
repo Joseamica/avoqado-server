@@ -28,6 +28,8 @@ import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
+import { chargeMerchant } from './card/merchant'
+import { getProvider } from '@/services/payments/provider-registry'
 
 export interface CreateOnlineOrderInput {
   venueId: string
@@ -645,6 +647,40 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
     if (confirmed) return confirmed
   }
   return draftTracking(token)
+}
+
+/**
+ * S5 (Codex plan r1 #5, r2 #2): el comensal regresó de Stripe sin pagar (`?pago=cancelado`). 🔴 Nunca cancela ni libera un pedido:
+ * si el token ya es pedido (otra pestaña pagó), sólo responde su seguimiento. Con un borrador que espera el pago, vence su página
+ * en la cuenta conectada de la FOTO del cargo y corre la MISMA confirmación, que relee la sesión: vencida ⇒ `ABANDONED`; completada
+ * y apartada ⇒ nace el pedido. Repetir da lo mismo. `null` si el token no es de este negocio.
+ */
+export async function abandonCardPayment(i: { venueId: string; trackingToken: string }): Promise<PublicTracking | null> {
+  const charge = await prisma.onlineOrderCharge.findFirst({
+    where: { trackingToken: i.trackingToken, venueId: i.venueId },
+    select: { id: true, status: true, lastError: true, checkoutSessionId: true, ecommerceMerchantId: true, merchantSnapshot: true },
+  })
+  if (charge?.checkoutSessionId && cardDraftTrackingStatus(charge) === 'AWAITING_PAYMENT') {
+    const merchant = chargeMerchant(charge)
+    try {
+      await getProvider(merchant).expireAuthorizationCheckout(merchant, charge.checkoutSessionId)
+    } catch (error: any) {
+      // Stripe contestó que ya no se puede (vencida o completada): la confirmación decide. Sin respuesta, la página puede seguir
+      // abierta y el comensal todavía podría pagar: no se afirma nada (el borrador sigue PENDING_AUTH) y la tienda reintenta.
+      if (error?.type !== 'StripeInvalidRequestError') {
+        logger.warn('[OnlineOrdering] no se pudo vencer la página de pago abandonada', { chargeId: charge.id, error: error?.message })
+        throw new AppError('No pudimos cerrar la página de pago. Intenta de nuevo en un momento.', 502, true, 'CARD_PROVIDER_UNAVAILABLE')
+      }
+    }
+    try {
+      await confirmCardAuthorization(charge.id)
+    } catch (error) {
+      // Igual que el seguimiento: si la confirmación truena, el borrador sigue esperando y el conciliador lo retoma.
+      logger.warn('[OnlineOrdering] el abandono no pudo confirmar la tarjeta (sigue esperando)', { chargeId: charge.id, error })
+    }
+  }
+  const tracking = (await orderTracking(i.trackingToken)) ?? (await draftTracking(i.trackingToken))
+  return tracking?.venueId === i.venueId ? tracking : null
 }
 
 /** El borrador de tarjeta (sin pedido todavía): renglones y total del carrito guardado, sin folio. */
