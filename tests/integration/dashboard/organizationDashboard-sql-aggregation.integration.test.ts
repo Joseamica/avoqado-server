@@ -652,8 +652,17 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
   it('D2: una devolución cuenta en las VENTAS de quien hizo la venta, no de quien la opera; el efectivo sigue con quien lo entregó', async () => {
     const leer = async () => {
       const { staff } = await svc.getStaffAttendance(orgId, DIA)
-      const fila = (id: string) => (staff as Array<any>).find(r => r.id === id)!
-      return { ana: fila(ana), beto: fila(beto) }
+      const fila = (id: string) => (staff as Array<any>).find(r => r.id === id && r.venueId === v1)
+      const mapa = (await svc.getSalesHeatmap(orgId, DIA, DIA, 'OWNER', mario)).staff
+      const delMapa = (id: string) => mapa.find(r => r.staffId === id && r.venueId === v1)!.days[0]
+      return {
+        ana: fila(ana)!,
+        beto: fila(beto)!,
+        mario: fila(mario),
+        mapaAna: delMapa(ana),
+        mapaBeto: delMapa(beto),
+        mapaMario: delMapa(mario),
+      }
     }
     const antes = await leer()
     const cobroDe = (processedById: string, amount: number) =>
@@ -706,10 +715,21 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
         },
         select: { id: true },
       })
+    // Codex r1 (D2): Mario vendió AYER y hoy no checa; Beto le devuelve $25 hoy.
+    const ayer = await order({
+      venueId: v1,
+      createdById: mario,
+      createdAt: new Date(NOON.getTime() - 86_400_000),
+      total: 25,
+      items: [{ productName: 'Cargador', quantity: 1, total: 25 }],
+      payments: [{ amount: 25, method: 'CREDIT_CARD', processedById: mario, createdAt: new Date(NOON.getTime() - 86_400_000) }],
+    })
+    const ventaDeMarioAyer = await prisma.payment.findFirstOrThrow({ where: { orderId: ayer.id }, select: { id: true, orderId: true } })
     const creadas = [
       await devolucion(tarjetaDeBeto, ana, 30, 'CREDIT_CARD'), // Ana devuelve $30 de la venta con tarjeta de Beto
       await devolucion(efectivoDeAna, beto, 10, 'CASH'), // Beto entrega $10 en efectivo de una venta de Ana
       await devolucion({ id: cobroWeb.id, orderId: web.id }, ana, 40, 'CREDIT_CARD'), // Ana devuelve un cobro web sin vendedor
+      await devolucion(ventaDeMarioAyer, beto, 25, 'CREDIT_CARD'),
     ]
     try {
       const despues = await leer()
@@ -717,9 +737,19 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       expect(round2(despues.ana.sales)).toBe(round2(antes.ana.sales - 10)) // su venta en efectivo; la web no es de nadie
       expect(round2(despues.beto.cashSales)).toBe(round2(antes.beto.cashSales - 10)) // el efectivo salió de las manos de Beto
       expect(round2(despues.ana.cashSales)).toBe(round2(antes.ana.cashSales))
+      // Mario no checó hoy, pero su venta se devolvió hoy: aparece con −$25 (antes la devolución desaparecía del checador).
+      expect(antes.mario).toBeUndefined()
+      expect(round2(despues.mario!.sales)).toBe(-25)
+      // El mapa de ventas por persona usa la misma regla: la devolución es de quien vendió; una devolución no cuenta como venta.
+      expect(round2(despues.mapaBeto.salesAmount)).toBe(round2(antes.mapaBeto.salesAmount - 30))
+      expect(round2(despues.mapaAna.salesAmount)).toBe(round2(antes.mapaAna.salesAmount - 10))
+      expect(round2(despues.mapaMario.salesAmount)).toBe(round2(antes.mapaMario.salesAmount - 25))
+      expect(despues.mapaAna.salesCount).toBe(antes.mapaAna.salesCount)
+      expect(despues.mapaBeto.salesCount).toBe(antes.mapaBeto.salesCount)
     } finally {
       await prisma.payment.deleteMany({ where: { id: { in: [...creadas.map(c => c.id), cobroWeb.id] } } })
-      await prisma.order.deleteMany({ where: { id: web.id } })
+      await prisma.payment.deleteMany({ where: { orderId: ayer.id } })
+      await prisma.order.deleteMany({ where: { id: { in: [web.id, ayer.id] } } })
     }
   })
 

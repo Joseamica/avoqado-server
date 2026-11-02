@@ -61,6 +61,7 @@ function consulta(args: unknown[]): { sql: string; valores: unknown[] } {
 function cobroBloqueado(original: Partial<CobroBloqueado['original']> = {}): CobroBloqueado {
   return {
     original: {
+      cardBrand: null,
       id: ORIGINAL,
       venueId: VENUE,
       status: 'COMPLETED',
