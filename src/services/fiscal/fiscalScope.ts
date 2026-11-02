@@ -41,3 +41,23 @@ export function metodoParaAlcanceFiscal(method: string | null | undefined, proce
   const original = (processorData as { originalMethod?: unknown } | null | undefined)?.originalMethod
   return typeof original === 'string' ? original : method
 }
+
+/** El medio de sistema «Saldo a favor» (spec 2026-10-30-saldo-a-favor §5.3): el DESTINO de una devolución abonada al sobre. */
+export function esMedioDeSaldoAFavor(systemKind: string | null | undefined): boolean {
+  return systemKind === 'STORE_CREDIT'
+}
+
+/**
+ * Una devolución cuyo destino es el saldo a favor de la clienta: el dinero no salió del banco ni de la caja, quedó en su sobre. Resta
+ * la venta como cualquier devolución, pero su alcance fiscal (método y comercio) es el del cobro original o de su raíz: el método va en
+ * `processorData.originalMethod` (`metodoParaAlcanceFiscal`) y el comercio lo resuelve el cargador de libros por ese cobro (la fila no
+ * lleva comercio: los lectores de banco y procesador creerían que el banco devolvió). Lo usan el autoposteo y los libros. Acepta la
+ * marca como la trae cada lector: `tenderSystemKind` (libros) o `tenderType.systemKind` (autoposteo).
+ */
+export function esDevolucionASaldoAFavor(p: {
+  type?: string | null
+  tenderSystemKind?: string | null
+  tenderType?: { systemKind?: string | null } | null
+}): boolean {
+  return p.type === 'REFUND' && esMedioDeSaldoAFavor(p.tenderSystemKind ?? p.tenderType?.systemKind)
+}

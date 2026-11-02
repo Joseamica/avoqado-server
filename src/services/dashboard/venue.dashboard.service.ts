@@ -26,6 +26,7 @@
  */
 import prisma from '../../utils/prismaClient'
 import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
+import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
@@ -120,7 +121,7 @@ export async function getVenueById(
   orgId: string,
   venueId: string,
   options?: { skipOrgCheck?: boolean },
-): Promise<Venue & { exchangesEnabledEffective: boolean }> {
+): Promise<Venue & { exchangesEnabledEffective: boolean; storeCreditOnly: boolean; storeCreditAvailable: boolean }> {
   // SUPERADMIN can access venues across organizations (skipOrgCheck = true)
   // Other roles (including OWNER) are restricted to their own organization
   const whereClause: any = { id: venueId }
@@ -151,7 +152,13 @@ export async function getVenueById(
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
-  return { ...venue, exchangesEnabledEffective: effectiveExchangesEnabled(venue.settings?.exchangesEnabled, venue.type) }
+  return {
+    ...venue,
+    exchangesEnabledEffective: effectiveExchangesEnabled(venue.settings?.exchangesEnabled, venue.type),
+    // Saldo a favor (spec 2026-10-30 §5.1): el ajuste del negocio y si el SERVIDOR sabe darlo (las dos llaves de las tarjetas).
+    storeCreditOnly: venue.settings?.storeCreditOnly ?? false,
+    storeCreditAvailable: storeCreditAvailable(),
+  }
 }
 
 /**

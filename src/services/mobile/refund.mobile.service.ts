@@ -16,6 +16,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { esCantidadPositivaEnCentavos } from '../shared/devueltoDeUnCobro'
+import { tomarCandadoPrimerSobreEnTx } from '../storeCredit/primerSobreLock'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ============================================================================
@@ -70,13 +71,9 @@ export async function createRefund(params: CreateRefundParams) {
   // `negocioTieneTarjetas` (una cuenta de tarjetas creada y nunca pagada, sobre PENDING, no bloquea devoluciones legítimas).
   // Va antes de la transacción: al rechazar no se escribe Order, Payment ni VenueTransaction. Consulta por negocio con
   // LIMIT 1 (`findFirst`), suficiente sin índice propio sobre `activatedAt`.
-  if (await prisma.giftCard.findFirst({ where: { venueId, activatedAt: { not: null } }, select: { id: true } })) {
-    throw new GiftCardError(
-      'GIFT_CARD_UNLINKED_REFUND_BLOCKED',
-      'En un negocio que vende tarjetas de regalo, la devolución se hace desde su venta, para que el saldo de una tarjeta nunca se devuelva en efectivo.',
-      409,
-    )
-  }
+  // 🔴 Esta comprobación de afuera es sólo una salida rápida: NO decide. Mientras corre, otra caja puede estar dando el PRIMER saldo
+  // a favor de la sucursal (saldo a favor, spec 2026-10-30 §5.5), que activa un sobre. La que decide se repite adentro, con el candado.
+  if (await hayUnSobreActivadoEn(prisma, venueId)) throw devolucionSinVentaBloqueada()
 
   const amountDecimal = centsToDecimal(amount) // positive (e.g., 50.00)
   const negativeAmount = new Decimal((-Number(amountDecimal)).toFixed(2)) // negative (e.g., -50.00)
@@ -86,6 +83,13 @@ export async function createRefund(params: CreateRefundParams) {
   const orderNumber = `REF-${Date.now()}`
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const { order, payment } = await prisma.$transaction(async tx => {
+    // 🔴 El candado «primer-sobre» es lo PRIMERO de la transacción (antes del turno, de Orders y de Payments) y tras él se repite la
+    // comprobación: así esta devolución no puede pasar mientras el primer saldo a favor de la sucursal se escribe y se gasta. Los
+    // que dan saldo toman este mismo candado primero, así que todos van en el mismo orden («primer-sobre» → filas → turno) y no se
+    // cruzan. Va también cuando NO hay turno (NO_SHIFT / SHIFT_NOT_OPEN): esas ramas no las frena el turno.
+    await tomarCandadoPrimerSobreEnTx(tx, venueId)
+    if (await hayUnSobreActivadoEn(tx, venueId)) throw devolucionSinVentaBloqueada()
+
     // 🔴 `claimedAt`/CLOSING es el corte. Se observa el candidato más reciente del
     // NEGOCIO dentro de esta transacción, aunque ya esté CLOSING. Sólo OPEN puede ganar
     // el CAS tenant-safe que decrementa y autoriza `shiftId`; CLOSING y claim-lost dejan
@@ -250,6 +254,19 @@ export async function createRefund(params: CreateRefundParams) {
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+/** «Alguna tarjeta activada alguna vez» en SU negocio; un sobre PENDING nunca pagado no cuenta. */
+async function hayUnSobreActivadoEn(db: Pick<typeof prisma, 'giftCard'>, venueId: string): Promise<boolean> {
+  return !!(await db.giftCard.findFirst({ where: { venueId, activatedAt: { not: null } }, select: { id: true } }))
+}
+
+function devolucionSinVentaBloqueada(): GiftCardError {
+  return new GiftCardError(
+    'GIFT_CARD_UNLINKED_REFUND_BLOCKED',
+    'En un negocio con tarjetas de regalo o saldo a favor, la devolución se hace desde su venta, para que ese saldo nunca se devuelva en efectivo.',
+    409,
+  )
+}
 
 function centsToDecimal(cents: number): Decimal {
   return new Decimal((cents / 100).toFixed(2))

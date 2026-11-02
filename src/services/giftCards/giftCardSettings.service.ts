@@ -13,9 +13,11 @@ import { assertGiftCardKeys, giftCardKeysPresent } from './giftCardCode'
 import { GiftCardError } from './giftCardErrors'
 import { MAXIMO_POR_SOBRE, MINIMO_POR_SOBRE, formatoPesos, topePorOperacion } from './giftCardLimits'
 import { ensureGiftCardTender } from './giftCardTender'
+import { TERMINOS_VIGENTES } from './giftCardTerms'
 
 export const FUNCION_TARJETAS_DE_REGALO = 'GIFT_CARDS'
-export const TERMINOS_VIGENTES = '2026-10-14'
+// Vive en `giftCardTerms` (sin Prisma) para que la libreta la use al crear un sobre de saldo a favor sin cargar este servicio.
+export { TERMINOS_VIGENTES }
 const VIGENCIAS_PERMITIDAS = new Set([12, 24, 36, 60])
 const MAX_MONTOS_SUGERIDOS = 6
 

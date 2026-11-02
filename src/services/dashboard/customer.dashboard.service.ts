@@ -7,6 +7,7 @@
  * @see CLAUDE.md - Layered Architecture section
  */
 
+import { storeCreditDeClientes, type StoreCreditDeCliente } from '../storeCredit/customerStoreCreditBalance'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -80,6 +81,8 @@ interface CustomerListItem {
   createdAt: Date
   pendingOrderCount: number // Count of pay-later orders
   pendingBalance: number // Total balance pending
+  /** S8c: saldo a favor del cliente en esta sucursal (`null` = sin sobre). Opcional para quien no lo conozca. */
+  storeCredit?: StoreCreditDeCliente | null
 }
 
 interface PaginatedCustomersResponse {
@@ -297,6 +300,13 @@ export async function getCustomers(
     for (const f of filas) saldos.set(f.customerId, { pendientes: Number(f.pendientes), saldo: Number(f.saldo) })
   }
 
+  // S8c: el saldo a favor de los clientes de ESTA página (UN agregado; campo opcional, nada se quita).
+  const saldoAFavor = await storeCreditDeClientes(
+    prisma,
+    venueId,
+    customers.map(c => c.id),
+  )
+
   // 🔴 Ruling B3: `totalCount` es SIEMPRE lo que Prisma puede paginar con este `where`. Sin tope ya es el total exacto; con la
   // búsqueda topada son las `tope` más nuevas (lo ALCANZABLE), así el dashboard —que pinta tantas páginas como
   // `totalCount`— nunca ofrece una página vacía. El exacto de la MISMA regla viaja en `totalMatches`.
@@ -313,6 +323,7 @@ export async function getCustomers(
       lastVisit: customer.lastVisitAt,
       pendingOrderCount: saldos.get(customer.id)?.pendientes ?? 0,
       pendingBalance: saldos.get(customer.id)?.saldo ?? 0,
+      storeCredit: saldoAFavor.get(customer.id) ?? null,
     })),
     meta: {
       totalCount,
@@ -360,11 +371,14 @@ export async function getCustomerById(venueId: string, customerId: string) {
     throw new NotFoundError(`Customer with ID ${customerId} not found`)
   }
 
+  const saldoAFavor = await storeCreditDeClientes(prisma, venueId, [customer.id])
+
   // Map backend field names to frontend expected names
   return {
     ...customer,
     visitCount: customer.totalVisits,
     lastVisit: customer.lastVisitAt,
+    storeCredit: saldoAFavor.get(customer.id) ?? null,
   }
 }
 

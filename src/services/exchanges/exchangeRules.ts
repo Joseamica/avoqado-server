@@ -9,7 +9,7 @@ import { categoryOfVenueType } from '../../utils/venueTypeCategory'
 import { isGiftCardTenderKind } from '../giftCards/giftCardPredicados'
 import { claseDeEstado, esVentaCerrada } from '../shared/orderBalance'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
-import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
+import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver, sinSaldoAFavorPorque } from '../tpv/terminalRefundTarget'
 import {
   assertCents,
   DELIVERY_PLATFORM_ORDER_SOURCES,
@@ -76,8 +76,11 @@ export function saleBlockReason(sale: {
   return null
 }
 
-/** Por dónde se le devuelve a la clienta la diferencia a su favor (spec §6.3). La tarjeta no está aquí: va por la terminal (§6.5). */
-export type PayoutMethod = 'CASH' | 'BANK_TRANSFER' | 'GIFT_CARD_BALANCE'
+/**
+ * Por dónde se le devuelve a la clienta la diferencia a su favor (spec §6.3). La tarjeta no está aquí: va por la terminal (§6.5).
+ * `STORE_CREDIT`: se abona a su sobre de saldo a favor (spec 2026-10-30-saldo-a-favor §5.4); las apps viejas lo descartan solas.
+ */
+export type PayoutMethod = 'CASH' | 'BANK_TRANSFER' | 'GIFT_CARD_BALANCE' | 'STORE_CREDIT'
 
 /** El historial sin reparto comprobable no aporta capacidad; el escritor repite la regla bajo su candado. */
 export function effectiveExchangeCapacity(payment: {
@@ -96,7 +99,7 @@ export type PayoutMode = 'SAME' | 'CHOSEN'
 /** Por qué medios se devuelve lo de un cobro, y en qué modo. */
 export type PayoutModes = Partial<Record<PayoutMethod, PayoutMode>>
 
-const PAYOUT_METHODS: readonly PayoutMethod[] = ['CASH', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE']
+const PAYOUT_METHODS: readonly PayoutMethod[] = ['CASH', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE', 'STORE_CREDIT']
 
 /** Lo que las reglas de devolución necesitan del cobro (incluye todo `CobroParaDevolver`). */
 export interface MoneyShape {
@@ -115,9 +118,16 @@ export interface MoneyShape {
  * donde entró»; §6.3). Un crédito de cambio no escoge nada por sí mismo (por eso da `{}`): los modos de un cobro pagado con
  * crédito salen de `modesForExchangeCreditRoot(raíz)`, nunca de `payoutModesFor(raíz)`.
  */
-export function payoutModesFor(payment: MoneyShape): PayoutModes {
+export function payoutModesFor(payment: MoneyShape, storeCredit = false): PayoutModes {
   if (isExchangeCreditTenderKind(payment.tenderSystemKind)) return {}
   if (isGiftCardTenderKind(payment.tenderSystemKind)) return { GIFT_CARD_BALANCE: 'SAME' }
+  const modes = moneyModesFor(payment)
+  // Saldo a favor (spec 2026-10-30 §5.4; `storeCredit` = las llaves de tarjetas están puestas): «Devolver con» también al sobre de la
+  // clienta, incluso lo pagado con tarjeta. Nunca un saldo a favor ni lo de una app de reparto: la misma regla que el Reembolso.
+  return storeCredit && sinSaldoAFavorPorque(payment) === null ? { ...modes, STORE_CREDIT: 'CHOSEN' } : modes
+}
+
+function moneyModesFor(payment: MoneyShape): PayoutModes {
   if (seDevuelveEnTerminal(payment)) return {}
   const choosable = sePuedeEscogerComoDevolver(payment)
   if (paymentCountsAsDrawerCash(payment)) return choosable ? { CASH: 'SAME', BANK_TRANSFER: 'CHOSEN' } : { CASH: 'SAME' }
@@ -136,6 +146,32 @@ export function modesForExchangeCreditRoot(root: MoneyShape): PayoutModes {
   const same: PayoutModes = {}
   for (const method of PAYOUT_METHODS) if (modes[method] === 'SAME') same[method] = 'SAME'
   return same
+}
+
+/**
+ * Los modos de un cobro pagado con «Crédito de cambio»: lo SAME de su raíz si la cadena se hereda (`chain`) y, con saldo a favor,
+ * abonarlo al sobre si la cadena A SALDO se hereda (`chainASaldo` = `resolveChainRefund(…, 'STORE_CREDIT')`, o `null` sin las llaves):
+ * raíz en efectivo, transferencia o tarjeta bancaria, nunca en tarjeta de regalo (spec 2026-10-30 §5.4). Una raíz con procesador sigue
+ * sin prestar su efectivo: eso lo decide `chain`, que no cambia.
+ */
+export function modesForExchangeCredit(
+  root: MoneyShape,
+  chain: { kind: 'INHERIT' | 'BLOCKED' },
+  chainASaldo: { kind: 'INHERIT' | 'BLOCKED' } | null,
+): PayoutModes {
+  const modes = chain.kind === 'INHERIT' ? modesForExchangeCreditRoot(root) : {}
+  return chainASaldo?.kind === 'INHERIT' ? { ...modes, STORE_CREDIT: 'CHOSEN' } : modes
+}
+
+/** «Sólo saldo a favor» (spec 2026-10-30 §5.4) rige en un Cambio con el interruptor prendido y ninguna pieza con motivo Defecto. */
+export function rigeSoloSaldoAFavor(storeCreditOnly: boolean, reasons: readonly string[]): boolean {
+  return storeCreditOnly && !reasons.includes('DEFECT')
+}
+
+/** Con «sólo saldo» quedan el saldo a favor y regresar al MISMO sobre lo pagado con saldo (Codex r2 h5); efectivo y transferencia, no. */
+export function soloSaldoAFavor(modes: PayoutModes): PayoutModes {
+  const { GIFT_CARD_BALANCE, STORE_CREDIT } = modes
+  return { ...(GIFT_CARD_BALANCE ? { GIFT_CARD_BALANCE } : {}), ...(STORE_CREDIT ? { STORE_CREDIT } : {}) }
 }
 
 /** Un cobro de la venta original: lo que le queda por devolver de la venta (sin propina) y sus medios de devolución. */

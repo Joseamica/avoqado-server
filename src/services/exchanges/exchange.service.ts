@@ -6,12 +6,12 @@ import type { MoneyShape } from './exchangeRules'
 import type { FilaDeReembolso } from '../shared/devueltoDeUnCobro'
 import type { ChainRefundRoot } from './exchangeChainRefund'
 import type { OrderInventoryWarning } from '../tpv/payment.tpv.service'
+import type { StoreCreditDelReembolso } from '../storeCredit/saldoAbonado'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
-import { validateStaffVenue } from '@/utils/staff-venue.util'
 import socketManager from '@/communication/sockets'
 import { SocketEventType } from '@/communication/sockets/types'
 import { executeExchangeInTransaction, cancelOrderInTransaction, publishCancelledOrder } from '../mobile/order.mobile.service'
@@ -19,14 +19,15 @@ import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/p
 import { ExchangeGenerationChanged } from './exchangeSettle'
 import { ExchangeReleaseNotDue, releaseExchangeInTx } from './exchangeCharge'
 import { OrderTableTopologyChanged } from '../shared/tableOrderLock'
-import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 import { applySalePosting, applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 import { buildInventoryWarning, mapDigitalReceiptResponse } from '../tpv/payment.tpv.service'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import { postCashSaleToDrawer, postCashRefundToDrawer } from '../shared/cashDrawerPosting'
-import { effectiveExchangesEnabled } from './exchangeRules'
 import { ExchangeError } from './exchangeErrors'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import { prepararMediosDeSaldoAFavor, storeCreditAvailable } from '../storeCredit/storeCreditTender'
+import { comoRechazoDeSaldo } from '../storeCredit/rechazoDeSaldo'
 import type { ExchangeTxOutcome } from './exchangeTx'
 
 export interface CreateExchangeBody {
@@ -49,6 +50,8 @@ export interface CreateExchangeBody {
     tenderTypeId?: string | null
     tenderRevision?: number | null
     cashFromNonCash?: boolean
+    /** Saldo a favor (`method: 'STORE_CREDIT'`): a quién se le abona; no tiene que ser la clienta de la venta. */
+    customerId?: string | null
   }
   staffId: string
   deviceId: string
@@ -150,6 +153,8 @@ export interface ExchangeResponse {
     method: ExchangeSettlementMethod | null
     amountCents: number
     sources: Array<{ originalPaymentId: string; refundPaymentId: string; method: string; amountCents: number }>
+    /** Saldo a favor: a quién y cuánto se abonó (la misma forma que el Reembolso del POS), y su saldo nuevo. */
+    storeCredit?: StoreCreditDelReembolso
   }
   lines: { returned: ExchangeReturnedLine[]; taken: ExchangeTakenLine[] }
   refundPaymentIds: string[]
@@ -165,6 +170,19 @@ export interface ExchangeResponse {
   inventoryWarning?: OrderInventoryWarning
 }
 export async function createExchange(input: {
+  venueId: string
+  actorStaffId: string
+  body: CreateExchangeBody
+}): Promise<{ exchange: ExchangeResponse; replay: boolean }> {
+  try {
+    return await crearCambio(input)
+  } catch (error) {
+    // S10 (I2): con saldo a favor, todo rechazo sale con el prefijo `STORE_CREDIT_`; lo demás, exactamente como hoy.
+    throw input.body?.settlement?.method === 'STORE_CREDIT' ? comoRechazoDeSaldo(error) : error
+  }
+}
+
+async function crearCambio(input: {
   venueId: string
   actorStaffId: string
   body: CreateExchangeBody
@@ -186,24 +204,21 @@ export async function createExchange(input: {
   }
   const replay = await readReplay()
   if (replay) return replay
-  const venue = await prisma.venue.findUnique({
-    where: { id: venueId },
-    select: { type: true, settings: { select: { exchangesEnabled: true } } },
-  })
-  if (!venue) throw new NotFoundError('No se encontró la sucursal.')
-  if (!effectiveExchangesEnabled(venue.settings?.exchangesEnabled, venue.type))
-    throw new ExchangeError(
-      'EXCHANGES_DISABLED',
-      'Los cambios de producto están apagados en esta sucursal. Actívalos en el panel: Configuración › Devoluciones y cambios.',
-      422,
-    )
-  await assertVenueSalesEnabled(venueId)
-  await validateStaffVenue(actorStaffId, venueId)
+  // 🔴 S10 (I1): afuera, sin candado, sólo lo que NO cambia entre el envío y el reenvío (la petición y el cobro). Lo que sí cambia —los
+  // cambios prendidos, las ventas de la sucursal, la persona activa, las llaves, la marca de la terminal— lo mira `prepareExchangeInTx`
+  // DESPUÉS de reconocer la llave, bajo su candado: una repetición contesta lo escrito, nunca un rechazo mientras la primera escribe.
   const original = await prisma.payment.findFirst({
     where: { id: body.originalPaymentId, venueId, OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     select: { orderId: true },
   })
   if (!original?.orderId) throw new NotFoundError('No se encontró el cobro en esta sucursal.')
+  if (body.settlement.method === 'STORE_CREDIT') {
+    if (!body.settlement.customerId)
+      throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'Elige a quién se le abona el saldo a favor.', 400)
+    // Con el cliente global y FUERA de la transacción del Cambio (S1): un P2002 adentro la abortaría entera. Sin llaves no hace falta
+    // (la transacción rechaza con STORE_CREDIT_UNAVAILABLE); un medio oculto que queda sin usar no hace daño (spec §5.1).
+    if (storeCreditAvailable()) await prepararMediosDeSaldoAFavor(venueId)
+  }
   let outcome: Awaited<ReturnType<typeof executeExchangeInTransaction>>
   try {
     outcome = await executeExchangeInTransaction({ ...input, requestHash, originalOrderId: original.orderId })

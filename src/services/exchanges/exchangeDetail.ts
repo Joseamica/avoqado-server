@@ -6,7 +6,7 @@ import { isExchangeCreditTenderKind, type LineBlockReason } from './exchangePred
 import {
   lineBlockReason,
   effectiveExchangeCapacity,
-  modesForExchangeCreditRoot,
+  modesForExchangeCredit,
   payoutModesFor,
   payoutOptionsOf,
   saleBlockReason,
@@ -16,6 +16,7 @@ import {
 import { loadSaleForExchange } from './exchangeSale'
 import type { SaleForExchange } from './exchange.service'
 import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
+import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 
 export interface ExchangeItemExtras {
   productId: string | null
@@ -190,10 +191,10 @@ export async function loadExchangeLinksForOrders(
   return result
 }
 
-function readChain(sale: SaleForExchange, id: string): ChainRefundResolution {
+function readChain(sale: SaleForExchange, id: string, destino?: 'STORE_CREDIT'): ChainRefundResolution {
   try {
     const data = sale.chainByPaymentId.get(id)
-    return resolveChainRefund(data?.link, data?.root)
+    return resolveChainRefund(data?.link, data?.root, destino)
   } catch (error) {
     if (!(error instanceof ExchangeError) || error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE') throw error
     return { kind: 'BLOCKED', error }
@@ -294,13 +295,19 @@ function fieldsForSale(
       currentListPriceCents: product && !product.deletedAt ? product.priceCents : null,
     })
   }
+  // Las mismas capacidades que el escritor, con el saldo a favor si las llaves están puestas (spec 2026-10-30 §5.4). «Sólo saldo a
+  // favor» depende de las piezas con Defecto que la cajera todavía no elige: lo aplica la app con `storeCreditOnly` y lo hace cumplir el
+  // escritor.
+  const storeCredit = storeCreditAvailable()
   const capacities: PaymentCapacity[] = []
   for (const p of sale.payments) {
     const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? readChain(sale, p.id) : null
     capacities.push({
       paymentId: p.id,
       saleRemainingCents: effectiveExchangeCapacity(p),
-      modes: chain ? (chain.kind === 'INHERIT' ? modesForExchangeCreditRoot(p.rootMoney) : {}) : payoutModesFor(p.money),
+      modes: chain
+        ? modesForExchangeCredit(p.rootMoney, chain, storeCredit ? readChain(sale, p.id, 'STORE_CREDIT') : null)
+        : payoutModesFor(p.money, storeCredit),
     })
   }
   fields.payoutOptions = payoutOptionsOf(capacities)

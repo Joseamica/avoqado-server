@@ -27,6 +27,8 @@ import { utcTs } from '@/utils/sqlDates'
 import { paymentIsAvoqadoSettled, TENDER_SEMANTICS_SELECT } from '../shared/tenderSemantics'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
+import { esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
+import { sqlNoEsDelMedioSaldoAFavor } from '../storeCredit/saldoAFavorEnLectores'
 
 export const COSTO_PENDIENTE_PLAZO_MS = 2 * 60 * 60 * 1000
 /** Codex R4 (P3): presupuesto de reembolsos por ejecución, configurable (las pruebas cortan en la 2ª página con 10 por página). */
@@ -174,6 +176,8 @@ export async function asegurarObligacionDeCostoNegativo(
     select: { tenderType: { select: { systemKind: true } } },
   })
   if (isExchangeCreditTenderKind(devolucion?.tenderType?.systemKind)) return 'SIN_OBLIGACION'
+  // Ni una devolución a saldo a favor (spec 2026-10-30 §5.3): el dinero quedó en el sobre de la clienta.
+  if (esMedioDeSaldoAFavor(devolucion?.tenderType?.systemKind)) return 'SIN_OBLIGACION'
   const efecto = await tx.paymentEffect.findFirst({
     where: { paymentId: originalPaymentId, kind: 'TRANSACTION_COST' },
     select: { id: true, status: true, payload: true },
@@ -585,7 +589,8 @@ export async function convergerCostoDeTransaccion(
  * que `proyectarComisionYNeto` (comisión = round(charge₄ + fixed₄, 2); neto = round(amount, 2) − comisión) expresada en SQL para
  * que los YA cumplidos queden fuera de la consulta (continuación durable, Codex R4 P3). Keyset sobre (createdAt, id) — el
  * corte de fecha va por `utcTs`: un `Date` crudo en `$queryRaw` llega como timestamptz y la sesión local lo corre 6 h.
- * Sin las devoluciones de crédito de cambio: no regresaron por la tarjeta, así que no llevan costo negativo.
+ * Sin las devoluciones de crédito de cambio ni las de saldo a favor: no regresaron por la tarjeta, así que no llevan costo negativo (si
+ * entraran, `createRefundTransactionCost` no les crearía costo y el cobro quedaría con trabajo pendiente para siempre).
  */
 function reembolsosConTrabajoPendiente(
   tx: Prisma.TransactionClient,
@@ -621,6 +626,7 @@ function sqlReembolsosConTrabajoPendiente(
       AND r."type" = 'REFUND'
       AND r."processorData"->>'originalPaymentId' = ${originalPaymentId}
       AND ${sqlPaymentIsNotExchangeCredit('r')}
+      AND ${sqlNoEsDelMedioSaldoAFavor('r')}
       AND (
         tc."id" IS NULL
         OR vt."id" IS NULL

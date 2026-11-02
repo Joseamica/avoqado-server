@@ -28,6 +28,7 @@ import { OrderSource, PaymentFundsFlow, PaymentMethod, Prisma, TenderSection } f
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from './activity-log.service'
+import { esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 import { parseDbDateRange } from '../../utils/datetime'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
@@ -301,6 +302,13 @@ export async function updateTenderType(
       'EXCHANGE_CREDIT_TENDER_NOT_ALLOWED',
     )
   }
+  // Saldo a favor (spec 2026-10-30 §5.3; S8b): el destino de las devoluciones a saldo, con su propio texto (no el de tarjetas).
+  if (esMedioDeSaldoAFavor(existing.systemKind)) {
+    throw new BadRequestError(
+      'El tipo de pago «Saldo a favor» lo administra Avoqado: no se puede editar ni apagar. Sólo lo usan las devoluciones que se abonan al saldo de un cliente.',
+      'STORE_CREDIT_TENDER_NOT_ALLOWED',
+    )
+  }
   // R4: un tender que administra Avoqado (systemKind) no se edita, no se apaga y no se muestra en el POS por decisión
   // del negocio: ni dinero, ni presentación, ni `active`.
   if (existing.systemKind != null) {
@@ -440,6 +448,13 @@ export async function resolveTenderForCharge(
   // aparte (`resolveExchangeCreditTenderInTx`). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.
   if (isExchangeCreditTenderKind(tender.systemKind)) {
     throw new BadRequestError('El crédito de cambio sólo lo aplica la operación de Cambio.', 'EXCHANGE_CREDIT_TENDER_NOT_ALLOWED')
+  }
+  // Saldo a favor (S8b): el medio STORE_CREDIT sólo es el destino de una devolución; la clienta gasta su saldo con «Pagar con saldo».
+  if (esMedioDeSaldoAFavor(tender.systemKind)) {
+    throw new BadRequestError(
+      'El saldo a favor no es un tipo de pago: el cliente lo gasta con «Pagar con saldo» y el código que le llega a su teléfono.',
+      'STORE_CREDIT_TENDER_NOT_ALLOWED',
+    )
   }
   // R4 / Review Focus 2: el saldo de una tarjeta de regalo sólo se cobra por «Pagar con saldo» (prueba de posesión,
   // descuento condicionado de la libreta). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.

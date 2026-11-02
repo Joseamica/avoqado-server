@@ -46,6 +46,21 @@ export type GiftCardErrorCode =
   // Cierre A (C4): el 429 del límite de reenvíos por tarjeta (`resend` y `change-destination`, POS y panel). Lo responde el
   // limitador de ruta (`gift-card-lookup-rate-limit.middleware.ts`), no un `GiftCardError`.
   | 'GIFT_CARD_RESEND_RATE_LIMITED'
+  // Saldo a favor (spec 2026-10-30-saldo-a-favor §5.2, aditivos). 🔴 Todo código `STORE_CREDIT_` es un 4xx SIN escritura: las apps
+  // borran lo pendiente con cualquier código de ese prefijo (`esRechazoDefinitivoDeSaldo`), así que nunca se lanza tras escribir, y lo
+  // que cambia entre el envío y el reenvío se mira después de reconocer la llave (S10, I1). Al revés también (S10, I2): con destino
+  // saldo a favor, el Reembolso del POS y el Cambio sacan todo otro 4xx como `STORE_CREDIT_REJECTED` (`comoRechazoDeSaldo`, con el
+  // código de siempre en `details.originalCode`), salvo los que pueden salir aunque ya se haya escrito (IDEMPOTENCY_KEY_REUSED, ACTOR_MISMATCH, REFUND_AUTHORITY_*, ORDER_LOCK_SCOPE_TOO_LARGE) y 401/403/408/429.
+  | 'STORE_CREDIT_OVER_CAP'
+  | 'STORE_CREDIT_CARD_BLOCKED'
+  | 'STORE_CREDIT_CUSTOMER_REQUIRED'
+  | 'STORE_CREDIT_CUSTOMER_PHONE_REQUIRED'
+  // S8a: un sobre de saldo a favor no se reenvía, no cambia de destino ni enseña su código (serían un código al portador).
+  | 'STORE_CREDIT_CARD_NOT_ELIGIBLE'
+  // S8a: el teléfono del saldo sólo se cambia en un sobre de saldo a favor; y, con `expectedPhoneLast4`, sólo si sigue siendo el que vio
+  // el gerente (una petición vieja que llega tarde no regresa el teléfono anterior).
+  | 'STORE_CREDIT_PHONE_NOT_ALLOWED'
+  | 'STORE_CREDIT_PHONE_OUTDATED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {

@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client'
 import logger from '../config/logger'
 import { BadRequestError } from '../errors/AppError'
 import prisma from './prismaClient'
@@ -8,8 +9,16 @@ import prisma from './prismaClient'
  * If `staffId` is omitted, `userId` is used as a fallback and is validated
  * through the same StaffVenue check. Numeric legacy staff ids are mapped to
  * active StaffVenue rows using the existing Android compatibility behavior.
+ *
+ * `db`: inside a money transaction, pass ITS client (`tx`). The global client there asks for a SECOND connection while the transaction
+ * holds its own; with as many concurrent transactions as pool connections, all of them stall (S10 r2, Codex r2 P2-a).
  */
-export async function validateStaffVenue(staffId: string | undefined, venueId: string, userId?: string): Promise<string | undefined> {
+export async function validateStaffVenue(
+  staffId: string | undefined,
+  venueId: string,
+  userId?: string,
+  db: Pick<Prisma.TransactionClient, 'staffVenue'> = prisma,
+): Promise<string | undefined> {
   let actualStaffId = staffId || userId
 
   if (!actualStaffId) {
@@ -21,7 +30,7 @@ export async function validateStaffVenue(staffId: string | undefined, venueId: s
     logger.warn('[StaffVenue] Received numeric staffId from client', { staffId: actualStaffId, venueId })
 
     try {
-      const staffVenues = await prisma.staffVenue.findMany({
+      const staffVenues = await db.staffVenue.findMany({
         where: {
           venueId,
           active: true,
@@ -57,7 +66,7 @@ export async function validateStaffVenue(staffId: string | undefined, venueId: s
     }
   }
 
-  const staffVenue = await prisma.staffVenue.findFirst({
+  const staffVenue = await db.staffVenue.findFirst({
     where: {
       staffId: actualStaffId,
       venueId,

@@ -23,12 +23,12 @@ import { utcTs } from '@/utils/sqlDates'
 import { sendOtpWhatsApp } from '@/services/whatsapp.service'
 import { conNegocio } from '@/services/demo/candadoDemo'
 import { assertGiftCardKeys } from './giftCardCode'
-import { enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
+import { PROPOSITO_TELEFONO_DE_TARJETA, enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
 import { porQueNoSirve, type GiftCardLookupResult } from './giftCardLookup.service'
 import { firmarPruebaDeTelefono } from './giftCardProof'
 
-export const PROPOSITO_TELEFONO_DE_TARJETA = 'GIFT_CARD_PHONE'
+export { PROPOSITO_TELEFONO_DE_TARJETA }
 const CANAL = 'whatsapp'
 /** Lo que vive un código (igual que el del inicio de sesión). */
 const VIDA_DEL_CODIGO_MS = 10 * 60_000

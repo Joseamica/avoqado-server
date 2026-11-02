@@ -44,6 +44,19 @@ export function normalizeNativePaymentMethods(methods?: readonly string[]): stri
   return Array.from(new Set(normalized))
 }
 
+/**
+ * D-3 (saldo a favor): el medio de sistema de la fila (`STORE_CREDIT`, `GIFT_CARD`, `EXCHANGE_CREDIT`) o null, como campo OPCIONAL
+ * `tenderSystemKind` (el mismo nombre que el detalle del Cambio, `exchangeDetail.ts`). Sin él, el panel enseñaba una devolución a saldo
+ * a favor como «Otro» (`method = OTHER`). Se lee en la MISMA consulta (este `select` en el `include`) y sólo viaja el campo plano.
+ */
+const MEDIO_DE_SISTEMA = { select: { systemKind: true } } as const
+function conMedioDeSistema<T extends { tenderType?: { systemKind: string | null } | null }>(
+  p: T,
+): Omit<T, 'tenderType'> & { tenderSystemKind: string | null } {
+  const { tenderType, ...resto } = p
+  return { ...resto, tenderSystemKind: tenderType?.systemKind ?? null }
+}
+
 export async function getPaymentsData(
   venueId: string,
   page: number,
@@ -102,6 +115,7 @@ export async function getPaymentsData(
         },
       },
       transactionCost: true,
+      tenderType: MEDIO_DE_SISTEMA,
     }
 
     // Pre-flight: if the user's method/source filter cannot possibly match any
@@ -147,7 +161,7 @@ export async function getPaymentsData(
       newRows: newPaymentsWindow.length,
     })
 
-    const merged = [...newPaymentsWindow, ...filteredLegacyRows].sort(
+    const merged = [...newPaymentsWindow.map(conMedioDeSistema), ...filteredLegacyRows].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || b.id.localeCompare(a.id),
     )
     const combinedTotal = newPaymentsTotal + legacy.total
@@ -198,6 +212,7 @@ export async function getPaymentsData(
           },
         },
         transactionCost: true, // Include profit/cost information for SUPERADMIN
+        tenderType: MEDIO_DE_SISTEMA, // D-3: sólo el medio de sistema (`tenderSystemKind`)
       },
       // Desempate por id: con el tope de 100 el cliente pagina de verdad, y dos pagos
       // con el mismo createdAt cambiaban de página entre peticiones (offset inestable).
@@ -212,7 +227,7 @@ export async function getPaymentsData(
 
   // Devolvemos el objeto con el formato esperado
   return {
-    data: payments,
+    data: payments.map(conMedioDeSistema),
     meta: {
       total,
       page,
@@ -361,6 +376,7 @@ export async function getPaymentById(venueId: string, paymentId: string) {
       },
       transactionCost: true, // Include profit/cost information
       saleVerification: true, // Pre-payment verification photos
+      tenderType: MEDIO_DE_SISTEMA, // D-3: sólo el medio de sistema (`tenderSystemKind`)
     },
   })
 
@@ -371,12 +387,13 @@ export async function getPaymentById(venueId: string, paymentId: string) {
   // C2 A-R4 (aditivo, opcional): lo que cobró cada renglón completo, con el MISMO cargador que usa el escritor de devoluciones. Se omite
   // si la venta no es atribuible (A-R3). El dashboard usa `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor.
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
-  if (!payment.order) return payment
-  const items = payment.order.items.map(it => {
+  const conMedio = conMedioDeSistema(payment)
+  if (!conMedio.order) return conMedio
+  const items = conMedio.order.items.map(it => {
     const chargedTotal = chargedTotalDe(cobrado, it.id)
     return chargedTotal === undefined ? it : { ...it, chargedTotal }
   })
-  return { ...payment, order: { ...payment.order, items } }
+  return { ...conMedio, order: { ...conMedio.order, items } }
 }
 
 /**

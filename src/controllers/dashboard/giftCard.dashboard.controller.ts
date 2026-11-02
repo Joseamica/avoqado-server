@@ -30,6 +30,7 @@ import {
 import {
   TEXTO_SIN_SECRETO,
   cambiarDestinoDeTarjeta,
+  cambiarTelefonoDeSaldoAFavor,
   leerNuevoDestino,
   reenviarTarjeta,
   type QuienPregunta,
@@ -178,6 +179,22 @@ export async function resend(req: Request, res: Response) {
     data: { giftCardId: r.giftCardId, deliveryStatus: r.deliveryStatus, repuesta: r.repuesta, ultimos4: r.ultimos4 },
   })
   if (!r.replay) patear(r.giftCardId)
+}
+
+/**
+ * S8a: `POST …/gift-cards/:giftCardId/store-credit-phone`. El gerente (la ruta exige `giftCards:manage`) cambia el teléfono con que se
+ * gasta un sobre de saldo a favor. No manda nada; la bitácora `STORE_CREDIT_PHONE_CHANGED` la escribe la libreta en su transacción.
+ */
+export async function storeCreditPhone(req: Request, res: Response) {
+  const { venueId, giftCardId } = req.params
+  const { phone, expectedPhoneLast4 } = req.body as { phone: string; expectedPhoneLast4?: string }
+  const { phoneLast4 } = await cambiarTelefonoDeSaldoAFavor(venueId, giftCardId, {
+    telefono: phone,
+    staffId: staffDe(req),
+    expectedPhoneLast4,
+    ...origenDe(req),
+  })
+  res.json({ success: true, data: { giftCardId, phoneLast4 } })
 }
 
 export async function summary(req: Request, res: Response) {

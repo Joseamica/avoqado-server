@@ -56,5 +56,12 @@ router.post(
   giftCardResendRateLimiter,
   ctrl.resend,
 )
+// S8a: el teléfono con que se gasta un sobre de saldo a favor. De gerente; no manda nada (sin el límite de reenvíos).
+router.post(
+  '/:giftCardId/store-credit-phone',
+  validateRequest(s.storeCreditPhoneSchema),
+  checkPermission('giftCards:manage'),
+  ctrl.storeCreditPhone,
+)
 
 export default router

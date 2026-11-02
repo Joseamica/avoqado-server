@@ -18,6 +18,8 @@ import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { exchangeDetailFields } from '../exchanges/exchangeDetail'
+import { opcionDeSaldoAFavor, saldosAFavorDeReembolsos } from '../storeCredit/storeCreditRefund.service'
+import { esDevolucionASaldoAFavor, esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -123,6 +125,12 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
     }),
   ])
 
+  // Saldo a favor (spec §5.5, Codex plan r1 h9): la reimpresión del REFUND dice a quién se abonó. Una consulta, acotada por la página.
+  const saldos = await saldosAFavorDeReembolsos(
+    venueId,
+    payments.filter(p => esMedioDeSaldoAFavor(p.tenderType?.systemKind)).map(p => p.id),
+  )
+
   return {
     data: payments.map(p => ({
       id: p.id,
@@ -141,6 +149,8 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       tableNumber: p.order?.table?.number ?? null,
       // Aditivo (1b Q28): las apps lo nombran «Tarjeta de regalo».
       esSaldoDeTarjeta: isGiftCardTenderKind(p.tenderType?.systemKind),
+      // Aditivo (saldo a favor): sólo en la devolución a saldo; «Devuelto con: Saldo a favor (nombre)».
+      ...reimpresionDeSaldo(saldos.get(p.id)),
     })),
     meta: {
       total,
@@ -150,6 +160,10 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
     },
   }
 }
+
+/** Lo que la reimpresión de una devolución a saldo necesita: a quién y cuánto (la destinataria, no la clienta de la venta). */
+const reimpresionDeSaldo = (s: { customerName: string; amountCents: number } | undefined) =>
+  s ? { storeCredit: { customerName: s.customerName, amountCents: s.amountCents } } : {}
 
 /** Pesos → centavos enteros (la convención del carril de reembolso). */
 const toCents = (pesos: unknown): number => Math.round(Number(pesos ?? 0) * 100)
@@ -239,6 +253,8 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   }
 
   const { fields, itemExtras } = await exchangeDetailFields(prisma, venueId, paymentId)
+  const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
+  const saldo = esDevolucionASaldoAFavor(payment) ? (await saldosAFavorDeReembolsos(venueId, [payment.id])).get(payment.id) : undefined
 
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
   // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).
@@ -321,9 +337,13 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // todo lo demás se reembolsa como el efectivo. Misma regla que acepta `refund-request` (`seDevuelveEnTerminal`).
     refundOnTerminal: seDevuelveEnTerminal(payment),
     // Aditivo (30-sep-2026): ¿el cajero puede escoger con qué devolver? Misma regla que valida el reembolso.
-    canChooseRefundMethod: sePuedeEscogerComoDevolver({ ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }),
+    canChooseRefundMethod: sePuedeEscogerComoDevolver(cobroParaDevolver),
     // Aditivo (tarjetas de regalo, 1a): la devolución de este cobro regresa al saldo de la tarjeta (las apps 1b lo dicen así).
     refundToGiftCardBalance: isGiftCardTenderKind(payment.tenderType?.systemKind),
+    // Aditivo (saldo a favor, spec §5.5): ¿la cajera puede escoger «Saldo a favor»? Si no, el POS lo pinta en gris con `reason`.
+    storeCreditOption: opcionDeSaldoAFavor(cobroParaDevolver),
+    // Aditivo: en la devolución a saldo, a quién se abonó (reimpresión del ticket).
+    ...reimpresionDeSaldo(saldo),
     tenderLabel: payment.tenderLabel ?? null,
     // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
     // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve

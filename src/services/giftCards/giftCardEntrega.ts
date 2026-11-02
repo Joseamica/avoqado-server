@@ -11,6 +11,12 @@ export function urlDeLaPagina(pageToken: string): string {
   return `${(process.env.GIFT_CARD_PAGE_BASE_URL || 'https://pay.avoqado.io').replace(/\/+$/, '')}/tarjeta/${pageToken}`
 }
 
+/**
+ * El `purpose` de los retos de «teléfono + código» en la caja (`OtpChallenge`). Vive aquí, sin Prisma, para que la libreta (cambiar el
+ * teléfono de un saldo a favor invalida sus retos) no importe `giftCardPhone.service`, que ya importa la libreta.
+ */
+export const PROPOSITO_TELEFONO_DE_TARJETA = 'GIFT_CARD_PHONE'
+
 /** Q25: LA forma con que se guarda `recipientPhone` y con que se compara en phone/* (= canonicalPhoneE164). null = no se entiende. */
 export function telefonoDeTarjeta(raw: string | null | undefined): string | null {
   return raw ? canonicalPhoneE164(raw) : null
