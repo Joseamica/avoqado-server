@@ -47,6 +47,8 @@ const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
   ItemCategory: 'categorías de artículos (inventario por número de serie): ' + CERRADO,
   SerializedItem: 'inventario por número de serie: ' + CERRADO,
   SimRegistrationRequest: 'registro de SIMs (PlayTelecom): ' + CERRADO,
+  HistoricalLinkingNumber:
+    'histórico de números de vinculación (PlayTelecom): sólo lo carga el script de Avoqado con el «sí, en prod» del founder; ninguna ruta lo escribe',
   CashOutCommissionRate: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   CashOutScheduleDay: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   PromoterBankAccount: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
