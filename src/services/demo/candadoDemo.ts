@@ -19,6 +19,7 @@ import { randomUUID } from 'crypto'
 import { VenueStatus } from '@prisma/client'
 import type { Request } from 'express'
 import logger from '@/config/logger'
+import AppError, { BadRequestError } from '@/errors/AppError'
 import { getContext, runWithContext } from '@/observability/executionContext'
 import { getVenueName } from '@/observability/venueNames'
 import prisma from '@/utils/prismaClient'
@@ -64,6 +65,34 @@ const CUID = /^c[a-z0-9]{24}$/
 
 export function esCorreoDemo(email?: string | null): boolean {
   return !!email && email.trim().toLowerCase().endsWith(`@${DOMINIO_DEMO}`)
+}
+
+/**
+ * hz:f26b3afc:D5: los triggers de la base rechazan que un usuario demo (contraseña pública) quede en un negocio real
+ * (migración `usuario_demo_solo_en_negocios_demo`) con este código; `comoErrorDeUsuarioDemo` lo traduce a un 400.
+ */
+export const USUARIO_DEMO_EN_NEGOCIO_REAL = 'USUARIO_DEMO_EN_NEGOCIO_REAL'
+export const MENSAJE_USUARIO_DEMO_EN_NEGOCIO_REAL =
+  'Los usuarios de demostración de Avoqado sólo pueden estar en su negocio demo: no se pueden agregar a un negocio real.'
+
+/**
+ * Sólo la FORMA del error de Postgres, como `esProductoConVentas`: un modelo de Prisma lo trae en el mensaje
+ * (`PostgresError { code: "P0001", … }`), SQL crudo como P2010 con el código en `meta`. Un AppError o un texto que sólo
+ * mencione el código no lo es.
+ */
+export function esUsuarioDemoEnNegocioReal(err: unknown): boolean {
+  if (!err || err instanceof AppError) return false
+  const e = err as { code?: unknown; message?: unknown; meta?: { code?: unknown; message?: unknown } }
+  if (e.code !== undefined) {
+    return e.code === 'P2010' && e.meta?.code === 'P0001' && String(e.meta?.message ?? '').includes(USUARIO_DEMO_EN_NEGOCIO_REAL)
+  }
+  const texto = String(e.message ?? '')
+  return /PostgresError \{ code: "P0001"/.test(texto) && texto.includes(USUARIO_DEMO_EN_NEGOCIO_REAL)
+}
+
+/** El rechazo de la base como el 400 que ve quien lo intentó; cualquier otro error pasa igual. */
+export function comoErrorDeUsuarioDemo<E>(err: E): E | BadRequestError {
+  return esUsuarioDemoEnNegocioReal(err) ? new BadRequestError(MENSAJE_USUARIO_DEMO_EN_NEGOCIO_REAL, USUARIO_DEMO_EN_NEGOCIO_REAL) : err
 }
 
 /** `true` si la persona es un usuario compartido de los demos. Lanza si la base no contesta. */
