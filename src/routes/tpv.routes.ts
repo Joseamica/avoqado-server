@@ -69,6 +69,7 @@ import {
   createAndAddCustomerSchema,
   createOrderWithItemsSchema,
   createProofOfSaleSchema,
+  setVerificationNumberSchema,
   createSaleVerificationSchema,
   getAvailableDiscountsSchema,
   getCryptoPaymentStatusSchema,
@@ -5969,6 +5970,58 @@ router.post(
   checkPermission('payments:create'),
   validateRequest(createProofOfSaleSchema),
   saleVerificationController.createProofOfSale,
+)
+
+/**
+ * @openapi
+ * /tpv/verification/{verificationId}/number:
+ *   post:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Corregir sólo el número de vinculación o el portado (terminal nueva)
+ *     description: |
+ *       Mismas reglas que proof-of-sale para el número (sólo PENDING o FAILED; no pisa lo del back-office; una captura
+ *       vieja del mismo aparato no pisa a una nueva). Nunca toca las fotos. Una venta FAILED vuelve a PENDING.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: verificationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [slot, number, idempotencyKey, captureSeq, captureDeviceId, capturedAt]
+ *             properties:
+ *               slot: { type: string, enum: [VINCULACION, PORTABILIDAD] }
+ *               number: { type: string, description: '9 o 10 dígitos (se quitan espacios, guiones, puntos y paréntesis)' }
+ *               idempotencyKey: { type: string }
+ *               captureSeq: { type: integer, minimum: 0 }
+ *               captureDeviceId: { type: string }
+ *               capturedAt: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: outcome APPLIED, SUPERSEDED_BY_NEWER o SALE_ALREADY_APPROVED, con linkingNumberOutcome/portedNumberOutcome
+ *       400:
+ *         description: INVALID_LINKING_NUMBER o SALE_REJECTED
+ *       404:
+ *         description: La venta no es de la organización del token
+ *       409:
+ *         description: VERIFICATION_MOVED (la venta cambió de tienda; reintentar)
+ *       422:
+ *         description: LINKING_NUMBER_DISABLED
+ */
+router.post(
+  '/verification/:verificationId/number',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(setVerificationNumberSchema),
+  saleVerificationController.setVerificationNumber,
 )
 
 /**

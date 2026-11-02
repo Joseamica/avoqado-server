@@ -1,8 +1,19 @@
 import { SaleVerificationStatus, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
+import {
+  canTerminalWriteNumber,
+  isNewerCapture,
+  isValidTerminalNumber,
+  normalizeLinkingNumber,
+  withAppliedCapture,
+  type AppliedCaptureSeqs,
+  type CaptureDestination,
+} from '../playtelecom/linkingNumber.rules'
+import { isLinkingNumberEnabledForOrg } from '../playtelecom/linkingNumber.flag'
+import { isNumberDuplicate } from '../playtelecom/linkingNumber.duplicates'
 
 // ============================================================
 // Sale Verification Service
@@ -466,171 +477,497 @@ export async function getVerificationForCorrection(
   }
 }
 
+// ============================================================
+// Proof-of-sale y número de vinculación desde la terminal (spec §5.3.2)
+// ============================================================
+
+/** Una captura de la terminal nueva (cola durable). Las terminales publicadas no la mandan. */
+export interface TerminalCapture {
+  seq: number
+  deviceId: string
+  idempotencyKey: string
+  capturedAt: Date
+}
+export type CaptureOutcome = 'APPLIED' | 'SUPERSEDED_BY_NEWER' | 'SALE_ALREADY_APPROVED'
+export type NumberOutcome = 'APPLIED' | 'UNCHANGED' | 'SUPERSEDED_BY_NEWER' | 'LOCKED_BY_BACKOFFICE' | 'DISABLED'
+export interface ProofOfSaleResult {
+  verificationId: string
+  status: SaleVerificationStatus
+  outcome?: CaptureOutcome
+  photoOutcome?: 'APPLIED' | 'SUPERSEDED_BY_NEWER'
+  linkingNumberOutcome?: NumberOutcome
+  portedNumberOutcome?: NumberOutcome
+  linkingDuplicate?: boolean
+  portedDuplicate?: boolean
+}
+
+type NumberField = 'linking' | 'ported'
+type NumberOutcomes = Partial<Record<NumberField, NumberOutcome>>
+type NumberWrite = Partial<
+  Pick<
+    Prisma.SaleVerificationUncheckedCreateInput,
+    'linkingNumber' | 'linkingNumberSource' | 'linkingNumberSetAt' | 'portedNumber' | 'portedNumberSource' | 'portedNumberSetAt'
+  >
+>
+type ProofTxResult = {
+  verification: LockedSaleVerification
+  outcome: CaptureOutcome
+  photoOutcome?: 'APPLIED' | 'SUPERSEDED_BY_NEWER'
+  outcomes: NumberOutcomes
+  postCommitLogs: Array<{ message: string; meta?: Record<string, unknown> }>
+}
+type NumberState = Pick<
+  LockedSaleVerification,
+  'id' | 'venueId' | 'linkingNumber' | 'linkingNumberSource' | 'portedNumber' | 'portedNumberSource'
+>
+
+const NUMBER_FIELDS: NumberField[] = ['linking', 'ported']
+const SALE_REJECTED_MESSAGE = 'Esta venta fue rechazada y no puede modificarse desde el TPV'
+
+/** Lo que la terminal nueva todavía puede cambiar: lo pendiente y lo que el back-office regresó («Revisar»). */
+const isTerminalWritable = (status: SaleVerificationStatus) => status === 'PENDING' || status === 'FAILED'
+const isAccepted = (o: NumberOutcome | undefined) => o === 'APPLIED' || o === 'UNCHANGED'
+
+/** 9 o 10 dígitos, quitando sólo espacios, guiones, puntos y paréntesis; lo demás es 400 (spec §5.3.2). */
+function toTerminalDigits(field: NumberField, raw: string): string {
+  const digits = normalizeLinkingNumber(raw)
+  if (!isValidTerminalNumber(digits)) {
+    throw new BadRequestError(
+      field === 'linking' ? 'El número de vinculación debe tener 9 o 10 dígitos' : 'El número portado debe tener 9 o 10 dígitos',
+      'INVALID_LINKING_NUMBER',
+    )
+  }
+  return digits
+}
+
+/** El job de SIM de evento movió la venta entre la búsqueda y el candado: la terminal reintenta y la encuentra en su tienda nueva. */
+function saleMoved(error: unknown): never {
+  if (error instanceof NotFoundError) {
+    throw new ConflictError('La venta cambió de tienda mientras se guardaba; vuelve a intentarlo', 'VERIFICATION_MOVED')
+  }
+  throw error
+}
+
+/** Escribe quien vendió (el promotor de la venta) o quien tiene StaffVenue activo en la tienda de la venta. */
+async function assertTerminalStaffCanWrite(staffId: string, saleVenueId: string, promoterId: string | null | undefined): Promise<void> {
+  if (promoterId === staffId) return
+  const staffVenue = await prisma.staffVenue.findFirst({ where: { staffId, venueId: saleVenueId, active: true }, select: { id: true } })
+  if (!staffVenue) throw new NotFoundError(`Staff ${staffId} not found in venue ${saleVenueId}`)
+}
+
+/**
+ * Coloca la foto como hoy: reemplazo por índice, ranura fija por etiqueta (Vinculacion=0, Portabilidad=1, rellenando
+ * con '') o al final. `slot` es la ranura que tocó, si fue una sola.
+ */
+function placePhotos(
+  current: string[],
+  photoUrls: string[],
+  replaceIndex: number | undefined,
+  photoLabel: 'Vinculacion' | 'Portabilidad' | undefined,
+): { photos: string[]; slot?: number } {
+  if (replaceIndex !== undefined && replaceIndex < current.length) {
+    const photos = [...current]
+    photos[replaceIndex] = photoUrls[0]
+    return { photos, slot: replaceIndex }
+  }
+  const labelIndex = photoLabel === 'Vinculacion' ? 0 : photoLabel === 'Portabilidad' ? 1 : undefined
+  if (labelIndex !== undefined) {
+    const photos = [...current]
+    while (photos.length <= labelIndex) photos.push('')
+    photos[labelIndex] = photoUrls[0]
+    return { photos, slot: labelIndex }
+  }
+  return { photos: [...current, ...photoUrls], slot: photoUrls.length === 1 ? current.length : undefined }
+}
+
+const photoDestination = (slot: number | undefined): CaptureDestination | undefined =>
+  slot === 0 ? 'PHOTO_VINCULACION' : slot === 1 ? 'PHOTO_PORTABILIDAD' : undefined
+
+/**
+ * El paso del número, bajo el candado de la venta (lo comparten proof-of-sale y la ruta del número; nunca toca fotos).
+ * La terminal sólo escribe si el campo está vacío o lo escribió ella (`…Source = TPV`), y nunca con una captura
+ * menor o igual a la mayor ya aplicada de ese aparato en ese destino. Cambiar uno que ya había deja bitácora.
+ */
+async function applyTerminalNumberInTx(
+  tx: Prisma.TransactionClient,
+  sv: NumberState,
+  applied: AppliedCaptureSeqs,
+  field: NumberField,
+  digits: string,
+  capture: TerminalCapture,
+  actor: { staffId: string; orgId: string },
+): Promise<{ outcome: NumberOutcome; applied: AppliedCaptureSeqs; data: NumberWrite }> {
+  const [before, source] = field === 'linking' ? [sv.linkingNumber, sv.linkingNumberSource] : [sv.portedNumber, sv.portedNumberSource]
+  const destination: CaptureDestination = field === 'linking' ? 'LINKING' : 'PORTED'
+  if (!canTerminalWriteNumber(source)) return { outcome: 'LOCKED_BY_BACKOFFICE', applied, data: {} }
+  if (!isNewerCapture(applied, destination, capture.deviceId, capture.seq)) return { outcome: 'SUPERSEDED_BY_NEWER', applied, data: {} }
+
+  const next = withAppliedCapture(applied, destination, capture.deviceId, capture.seq)
+  if (before === digits) return { outcome: 'UNCHANGED', applied: next, data: {} }
+
+  const valueField = field === 'linking' ? 'linkingNumber' : 'portedNumber'
+  if (before !== null) {
+    await tx.activityLog.create({
+      data: {
+        staffId: actor.staffId,
+        venueId: sv.venueId,
+        organizationId: actor.orgId,
+        action: 'SALE_VERIFICATION_NUMBER_SET',
+        entity: 'SaleVerification',
+        entityId: sv.id,
+        data: {
+          field: valueField,
+          before,
+          after: digits,
+          source: 'TPV',
+          idempotencyKey: capture.idempotencyKey,
+          capturedAt: capture.capturedAt.toISOString(),
+          captureSeq: capture.seq,
+          captureDeviceId: capture.deviceId,
+        },
+      },
+    })
+  }
+  const now = new Date()
+  const data: NumberWrite =
+    field === 'linking'
+      ? { linkingNumber: digits, linkingNumberSource: 'TPV', linkingNumberSetAt: now }
+      : { portedNumber: digits, portedNumberSource: 'TPV', portedNumberSetAt: now }
+  return { outcome: 'APPLIED', applied: next, data }
+}
+
+/** Aplica los números de proof-of-sale en orden (vinculación, portado) sobre el mismo `appliedCaptureSeqs`. */
+async function applyTerminalNumbersInTx(
+  tx: Prisma.TransactionClient,
+  sv: NumberState,
+  applied: AppliedCaptureSeqs,
+  numbers: Partial<Record<NumberField, string>>,
+  capture: TerminalCapture | undefined,
+  actor: { staffId: string; orgId: string },
+): Promise<{ outcomes: NumberOutcomes; applied: AppliedCaptureSeqs; data: NumberWrite }> {
+  const outcomes: NumberOutcomes = {}
+  const data: NumberWrite = {}
+  for (const field of NUMBER_FIELDS) {
+    const digits = numbers[field]
+    if (digits === undefined || !capture) continue
+    const r = await applyTerminalNumberInTx(tx, sv, applied, field, digits, capture, actor)
+    outcomes[field] = r.outcome
+    applied = r.applied
+    Object.assign(data, r.data)
+  }
+  return { outcomes, applied, data }
+}
+
+/** ¿El número que quedó guardado está repetido en la organización? Sólo de los números que se aceptaron. */
+async function duplicatesOf(
+  orgId: string,
+  v: { id: string; serialNumbers: string[]; linkingNumber: string | null; portedNumber: string | null },
+  outcomes: NumberOutcomes,
+): Promise<Pick<ProofOfSaleResult, 'linkingDuplicate' | 'portedDuplicate'>> {
+  const check = (field: NumberField, n: string | null) =>
+    isAccepted(outcomes[field]) && n
+      ? isNumberDuplicate(orgId, n, { verificationId: v.id, iccid: v.serialNumbers[0] })
+      : Promise.resolve(undefined)
+  const [linkingDuplicate, portedDuplicate] = await Promise.all([check('linking', v.linkingNumber), check('ported', v.portedNumber)])
+  return {
+    ...(linkingDuplicate !== undefined && { linkingDuplicate }),
+    ...(portedDuplicate !== undefined && { portedDuplicate }),
+  }
+}
+
+const numberOutcomeFields = (o: NumberOutcomes): Pick<ProofOfSaleResult, 'linkingNumberOutcome' | 'portedNumberOutcome'> => ({
+  ...(o.linking && { linkingNumberOutcome: o.linking }),
+  ...(o.ported && { portedNumberOutcome: o.ported }),
+})
+
 /**
  * Create or update proof-of-sale photo for a payment
  * Supports both:
- * - Legacy flow: create new record with COMPLETED status (old TPV versions)
- * - Non-blocking flow: find existing PENDING record, append photos, check completion
+ * - Legacy flow: create new record (old TPV versions, or a paid sale whose verification was never created)
+ * - Non-blocking flow: find existing PENDING record, place photos, check completion
  *
- * @param verificationId Optional - if provided, update existing PENDING record directly
+ * Terminales publicadas (sin `opts.capture`): exactamente lo de hoy. Terminal nueva (con `captureSeq`): sólo escribe
+ * en PENDING/FAILED, una captura vieja del mismo aparato no pisa a una nueva y el número del back-office no se toca.
+ * La venta se busca por `paymentId` dentro de la organización del token (el job de SIM de evento la mueve de tienda).
  */
 export async function createOrUpdateProofOfSale(
   venueId: string,
   paymentId: string,
   photoUrls: string[],
   staffId: string,
-  verificationId?: string,
-  replaceIndex?: number,
-  photoLabel?: 'Vinculacion' | 'Portabilidad',
-): Promise<SaleVerificationResponse> {
+  verificationId: string | undefined,
+  replaceIndex: number | undefined,
+  photoLabel: 'Vinculacion' | 'Portabilidad' | undefined,
+  opts: { orgId: string; capture?: TerminalCapture; linkingNumber?: string; portedNumber?: string },
+): Promise<ProofOfSaleResult> {
+  const { orgId, capture } = opts
   logger.info(`📸 [SALE VERIFICATION SERVICE] Creating/updating proof-of-sale for payment ${paymentId}`, {
+    tokenVenueId: venueId,
     verificationId: verificationId ?? 'none (legacy flow)',
     photosCount: photoUrls.length,
     replaceIndex: replaceIndex ?? 'none (append)',
     photoLabel: photoLabel ?? 'none',
+    ...(capture && { captureSeq: capture.seq, captureDeviceId: capture.deviceId, idempotencyKey: capture.idempotencyKey }),
   })
 
-  // Validate payment exists and belongs to venue
+  // Números: sin captureSeq no se aceptan; con el interruptor apagado se ignoran (la foto no se pierde) y se contestan DISABLED.
+  const sentNumbers = NUMBER_FIELDS.filter(f => (f === 'linking' ? opts.linkingNumber : opts.portedNumber) !== undefined)
+  if (sentNumbers.length && !capture) {
+    throw new BadRequestError('El número sólo se acepta junto con captureSeq (terminal actualizada)', 'CAPTURE_REQUIRED')
+  }
+  const numbersEnabled = sentNumbers.length > 0 && (await isLinkingNumberEnabledForOrg(orgId))
+  const numbers: Partial<Record<NumberField, string>> = {}
+  const disabled: NumberOutcomes = {}
+  for (const field of sentNumbers) {
+    if (!numbersEnabled) disabled[field] = 'DISABLED'
+    else numbers[field] = toTerminalDigits(field, (field === 'linking' ? opts.linkingNumber : opts.portedNumber)!)
+  }
+
   const payment = await prisma.payment.findFirst({
-    where: { id: paymentId, venueId },
-    include: { saleVerification: true },
+    where: { id: paymentId, venue: { organizationId: orgId } },
+    select: {
+      venueId: true,
+      processedById: true,
+      saleVerification: { select: { staffId: true } },
+      // Para la venta cobrada cuya verificación no se creó: portabilidad e ICCIDs salen de la orden.
+      order: {
+        select: { tags: true, items: { where: { serializedItem: { isNot: null } }, select: { productSku: true }, take: 50 } },
+      },
+    },
   })
 
   if (!payment) {
-    throw new NotFoundError(`Payment ${paymentId} not found in venue ${venueId}`)
+    throw new NotFoundError(`Payment ${paymentId} not found in organization ${orgId}`)
   }
 
-  // Validate staff exists
-  const staff = await prisma.staffVenue.findFirst({
-    where: { staffId, venueId },
-  })
-
-  if (!staff) {
-    throw new NotFoundError(`Staff ${staffId} not found in venue ${venueId}`)
-  }
+  const saleVenueId = payment.venueId
+  await assertTerminalStaffCanWrite(staffId, saleVenueId, payment.saleVerification?.staffId ?? payment.processedById)
 
   // Venues running serialized inventory (e.g. SIM promoters) require the
   // back-office to review EVERY sale — uploading the proof photos must NOT
   // auto-complete the verification. Restaurants without the module keep the
   // legacy auto-complete behavior (no back-office review step exists for them).
   // Config-driven per .claude/rules: never hardcode client slugs.
-  const requiresBackOfficeReview = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+  const requiresBackOfficeReview = await moduleService.isModuleEnabled(saleVenueId, MODULE_CODES.SERIALIZED_INVENTORY)
+  const actor = { staffId, orgId }
 
-  const { verification, postCommitLogs } = await prisma.$transaction(async tx => {
-    await lockPaymentAuthority(tx, venueId, paymentId)
-    const existing = await lockSaleVerificationAuthority(tx, venueId, paymentId, verificationId)
-    const logs: Array<{ message: string; meta?: Record<string, unknown> }> = []
+  const { verification, outcome, photoOutcome, outcomes, postCommitLogs } = await prisma.$transaction(
+    async (tx): Promise<ProofTxResult> => {
+      await lockPaymentAuthority(tx, saleVenueId, paymentId).catch(saleMoved)
+      const existing = await lockSaleVerificationAuthority(tx, saleVenueId, paymentId, verificationId)
+      const logs: ProofTxResult['postCommitLogs'] = []
 
-    if (existing) {
+      if (!existing) {
+        // No existing verification → legacy flow (también la venta cobrada cuya verificación no se creó).
+        // Restaurants (no review step) auto-complete; venues requiring back-office
+        // review stay PENDING until someone accepts or sends the sale back.
+        const legacyStatus: SaleVerificationStatus = requiresBackOfficeReview ? 'PENDING' : 'COMPLETED'
+        const placed = placePhotos([], photoUrls, replaceIndex, photoLabel)
+        const photoDest = photoDestination(placed.slot)
+        const seqs: AppliedCaptureSeqs = capture && photoDest ? withAppliedCapture({}, photoDest, capture.deviceId, capture.seq) : {}
+        const empty: NumberState = {
+          id: '',
+          venueId: saleVenueId,
+          linkingNumber: null,
+          linkingNumberSource: null,
+          portedNumber: null,
+          portedNumberSource: null,
+        }
+        const n = await applyTerminalNumbersInTx(tx, empty, seqs, numbers, capture, actor)
+        const created = await tx.saleVerification.create({
+          data: {
+            venueId: saleVenueId,
+            paymentId,
+            staffId: payment.processedById ?? staffId,
+            photos: placed.photos,
+            scannedProducts: [],
+            status: legacyStatus,
+            inventoryDeducted: false,
+            isPortabilidad: payment.order.tags.includes('portabilidad'),
+            serialNumbers: payment.order.items.map(i => i.productSku).filter((s): s is string => !!s),
+            ...n.data,
+            ...(capture && { appliedCaptureSeqs: n.applied as Prisma.InputJsonValue }),
+          },
+        })
+        logs.push({
+          message: `📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow), status=${legacyStatus}`,
+        })
+        return { verification: created, outcome: 'APPLIED', photoOutcome: 'APPLIED', outcomes: n.outcomes, postCommitLogs: logs }
+      }
+
       // Terminal guard: a REJECTED ("Rechazada") sale is a lost sale — the promoter
       // cannot revive it by re-uploading evidence (unlike FAILED/"Revisar"). Only an
       // admin can reopen it via the dashboard edit. Enforced server-side so it holds
       // regardless of TPV app version. (Asana 1215725049493387)
       if (existing.status === 'REJECTED') {
-        throw new BadRequestError('Esta venta fue rechazada y no puede modificarse desde el TPV')
+        throw new BadRequestError(SALE_REJECTED_MESSAGE, 'SALE_REJECTED')
       }
 
-      let updatedPhotos: string[]
+      // La terminal nueva no reabre una venta aprobada (spec §5.3.2): no cambia fotos, número ni estado.
+      if (capture && !isTerminalWritable(existing.status)) {
+        return { verification: existing, outcome: 'SALE_ALREADY_APPROVED', outcomes: {}, postCommitLogs: logs }
+      }
 
-      // Determine the target index from photoLabel (fixed slots: Vinculacion=0, Portabilidad=1)
-      const labelIndex = photoLabel === 'Vinculacion' ? 0 : photoLabel === 'Portabilidad' ? 1 : undefined
+      let applied = (existing.appliedCaptureSeqs ?? {}) as AppliedCaptureSeqs
+      const placed = placePhotos(existing.photos, photoUrls, replaceIndex, photoLabel)
+      const photoDest = photoDestination(placed.slot)
+      const photoApplied = !capture || !photoDest || isNewerCapture(applied, photoDest, capture.deviceId, capture.seq)
+      if (capture && photoDest && photoApplied) applied = withAppliedCapture(applied, photoDest, capture.deviceId, capture.seq)
 
-      if (replaceIndex !== undefined && replaceIndex < existing.photos.length) {
-        // Replace mode: swap photo at the given index
-        updatedPhotos = [...existing.photos]
-        updatedPhotos[replaceIndex] = photoUrls[0]
-        logs.push({ message: `📸 [SALE VERIFICATION SERVICE] Replacing photo at index ${replaceIndex} in verification ${existing.id}` })
-      } else if (labelIndex !== undefined) {
-        // Label-based fixed slot: place photo at the correct index regardless of upload order
-        // Pad array with empty strings if needed (e.g., portabilidad uploaded first → pad index 0)
-        updatedPhotos = [...existing.photos]
-        while (updatedPhotos.length <= labelIndex) {
-          updatedPhotos.push('')
+      const n = await applyTerminalNumbersInTx(tx, existing, applied, numbers, capture, actor)
+      const numberAccepted = Object.values(n.outcomes).some(isAccepted)
+      if (!photoApplied && !numberAccepted) {
+        return {
+          verification: existing,
+          outcome: 'SUPERSEDED_BY_NEWER',
+          photoOutcome: 'SUPERSEDED_BY_NEWER',
+          outcomes: n.outcomes,
+          postCommitLogs: logs,
         }
-        updatedPhotos[labelIndex] = photoUrls[0]
-        logs.push({
-          message: `📸 [SALE VERIFICATION SERVICE] Placing photo at fixed slot ${labelIndex} (${photoLabel}) in verification ${existing.id}`,
-        })
-      } else {
-        // Append mode (default / legacy): add new photos
-        updatedPhotos = [...existing.photos, ...photoUrls]
       }
 
-      // Count non-empty photos for completion check
-      const nonEmptyPhotos = updatedPhotos.filter(p => p !== '')
-
-      const requiredPhotos = existing.isPortabilidad ? 2 : 1
-      const isComplete = nonEmptyPhotos.length >= requiredPhotos
-
-      // Correction flow (Asana: Administración de Ventas):
-      // Once the back-office has reviewed this verification at least once
-      // (reviewedAt set), ANY re-upload must return it to the review queue
-      // (PENDING) — never auto-complete — so the back-office re-checks the
-      // corrected docs. `reviewedAt` is kept as the "has been reviewed" marker
-      // so a multi-photo correction (portabilidad) doesn't auto-complete on the
-      // second upload after the first one flipped FAILED → PENDING.
-      const wasReviewed = existing.reviewedAt !== null
       const isCorrectingRejection = existing.status === 'FAILED'
+      let status: SaleVerificationStatus = isCorrectingRejection ? 'PENDING' : existing.status
+      if (photoApplied) {
+        // Count non-empty photos for completion check
+        const nonEmptyPhotos = placed.photos.filter(p => p !== '')
+        const requiredPhotos = existing.isPortabilidad ? 2 : 1
+        const isComplete = nonEmptyPhotos.length >= requiredPhotos
 
-      // Auto-complete only when the venue has NO back-office review step.
-      // With review required (serialized inventory), a completed photo set keeps
-      // the verification PENDING so the back-office accepts or sends it back.
-      const willAutoComplete = !requiresBackOfficeReview && !wasReviewed && isComplete
+        // Correction flow (Asana: Administración de Ventas):
+        // Once the back-office has reviewed this verification at least once
+        // (reviewedAt set), ANY re-upload must return it to the review queue
+        // (PENDING) — never auto-complete — so the back-office re-checks the
+        // corrected docs. `reviewedAt` is kept as the "has been reviewed" marker
+        // so a multi-photo correction (portabilidad) doesn't auto-complete on the
+        // second upload after the first one flipped FAILED → PENDING.
+        const wasReviewed = existing.reviewedAt !== null
 
-      logs.push({
-        message: `📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`,
-        meta: {
-          totalPhotos: nonEmptyPhotos.length,
-          requiredPhotos,
-          willComplete: willAutoComplete,
-          requiresBackOfficeReview,
-          wasReviewed,
-          isCorrectingRejection,
-        },
-      })
+        // Auto-complete only when the venue has NO back-office review step.
+        // With review required (serialized inventory), a completed photo set keeps
+        // the verification PENDING so the back-office accepts or sends it back.
+        const willAutoComplete = !requiresBackOfficeReview && !wasReviewed && isComplete
+        status = willAutoComplete ? 'COMPLETED' : 'PENDING'
+
+        logs.push({
+          message: `📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`,
+          meta: {
+            slot: placed.slot ?? 'append',
+            totalPhotos: nonEmptyPhotos.length,
+            requiredPhotos,
+            willComplete: willAutoComplete,
+            requiresBackOfficeReview,
+            wasReviewed,
+            isCorrectingRejection,
+          },
+        })
+      }
 
       const updated = await tx.saleVerification.update({
-        where: { id: existing.id, paymentId, venueId },
+        where: { id: existing.id, paymentId, venueId: saleVenueId },
         data: {
-          photos: updatedPhotos,
-          status: willAutoComplete ? 'COMPLETED' : 'PENDING',
+          ...(photoApplied && { photos: placed.photos }),
+          status,
           // Clear the stale rejection verdict so the back-office sees a fresh
           // submission. Keep reviewedAt/reviewedById as the "reviewed" marker.
           ...(isCorrectingRejection && {
             rejectionReasons: [],
             reviewNotes: null,
           }),
+          ...n.data,
+          ...(capture && { appliedCaptureSeqs: n.applied as Prisma.InputJsonValue }),
         },
       })
-      return { verification: updated, postCommitLogs: logs }
-    }
-
-    // No existing verification → legacy flow.
-    // Restaurants (no review step) auto-complete; venues requiring back-office
-    // review stay PENDING until someone accepts or sends the sale back.
-    const legacyStatus: SaleVerificationStatus = requiresBackOfficeReview ? 'PENDING' : 'COMPLETED'
-    const created = await tx.saleVerification.create({
-      data: {
-        venueId,
-        paymentId,
-        staffId,
-        photos: photoUrls,
-        scannedProducts: [],
-        status: legacyStatus,
-        inventoryDeducted: false,
-      },
-    })
-    logs.push({ message: `📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow), status=${legacyStatus}` })
-    return { verification: created, postCommitLogs: logs }
-  })
+      return {
+        verification: updated,
+        outcome: 'APPLIED',
+        photoOutcome: photoApplied ? 'APPLIED' : 'SUPERSEDED_BY_NEWER',
+        outcomes: n.outcomes,
+        postCommitLogs: logs,
+      }
+    },
+  )
 
   for (const log of postCommitLogs) {
     logger.info(log.message, log.meta)
   }
 
-  logger.info(`✅ [SALE VERIFICATION SERVICE] Proof-of-sale saved: ${verification.id} (status: ${verification.status})`)
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Proof-of-sale saved: ${verification.id} (status: ${verification.status})`, {
+    ...(capture && { outcome, photoOutcome, ...outcomes }),
+  })
 
-  return mapToResponse(verification)
+  return {
+    verificationId: verification.id,
+    status: verification.status,
+    ...(capture && { outcome, ...(photoOutcome && { photoOutcome }) }),
+    ...numberOutcomeFields({ ...disabled, ...outcomes }),
+    ...(await duplicatesOf(orgId, verification, outcomes)),
+  }
+}
+
+/**
+ * POST tpv/verification/:id/number — corregir sólo el número desde la terminal (spec §5.3.2). Mismas reglas que el
+ * número de proof-of-sale; nunca toca las fotos. Una venta FAILED vuelve a PENDING para que el back-office la vea.
+ */
+export async function setNumberFromTerminal(p: {
+  orgId: string
+  staffId: string
+  verificationId: string
+  slot: 'VINCULACION' | 'PORTABILIDAD'
+  number: string
+  capture: TerminalCapture
+}): Promise<ProofOfSaleResult> {
+  const field: NumberField = p.slot === 'VINCULACION' ? 'linking' : 'ported'
+  const digits = toTerminalDigits(field, p.number)
+  if (!(await isLinkingNumberEnabledForOrg(p.orgId))) {
+    throw new ValidationError('El número de vinculación no está activo en esta organización', 'LINKING_NUMBER_DISABLED')
+  }
+
+  const found = await prisma.saleVerification.findFirst({
+    where: { id: p.verificationId, venue: { organizationId: p.orgId } },
+    select: { venueId: true, paymentId: true, staffId: true },
+  })
+  if (!found) throw new NotFoundError(`Verification ${p.verificationId} not found in organization ${p.orgId}`)
+  await assertTerminalStaffCanWrite(p.staffId, found.venueId, found.staffId)
+
+  type NumberTxResult = { verification: LockedSaleVerification; outcome: CaptureOutcome; numberOutcome?: NumberOutcome }
+  const { verification, outcome, numberOutcome } = await prisma.$transaction(async (tx): Promise<NumberTxResult> => {
+    await lockPaymentAuthority(tx, found.venueId, found.paymentId).catch(saleMoved)
+    const sv = await lockSaleVerificationAuthority(tx, found.venueId, found.paymentId, p.verificationId)
+    if (!sv) throw new NotFoundError(`Verification ${p.verificationId} not found in venue ${found.venueId}`)
+    if (sv.status === 'REJECTED') throw new BadRequestError(SALE_REJECTED_MESSAGE, 'SALE_REJECTED')
+    if (!isTerminalWritable(sv.status)) return { verification: sv, outcome: 'SALE_ALREADY_APPROVED' }
+
+    const r = await applyTerminalNumberInTx(tx, sv, (sv.appliedCaptureSeqs ?? {}) as AppliedCaptureSeqs, field, digits, p.capture, p)
+    if (!isAccepted(r.outcome)) return { verification: sv, outcome: 'SUPERSEDED_BY_NEWER', numberOutcome: r.outcome }
+
+    const reopen = sv.status === 'FAILED'
+    const updated = await tx.saleVerification.update({
+      where: { id: sv.id, paymentId: sv.paymentId, venueId: found.venueId },
+      data: {
+        ...r.data,
+        appliedCaptureSeqs: r.applied as Prisma.InputJsonValue,
+        ...(reopen && { status: 'PENDING', rejectionReasons: [], reviewNotes: null }),
+      },
+    })
+    return { verification: updated, outcome: 'APPLIED', numberOutcome: r.outcome }
+  })
+
+  const outcomes: NumberOutcomes = !numberOutcome ? {} : field === 'linking' ? { linking: numberOutcome } : { ported: numberOutcome }
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Terminal number for ${verification.id}: ${outcome}`, {
+    field,
+    numberOutcome,
+    captureSeq: p.capture.seq,
+    captureDeviceId: p.capture.deviceId,
+    idempotencyKey: p.capture.idempotencyKey,
+  })
+  return {
+    verificationId: verification.id,
+    status: verification.status,
+    outcome,
+    ...numberOutcomeFields(outcomes),
+    ...(await duplicatesOf(p.orgId, verification, outcomes)),
+  }
 }
 
 /**

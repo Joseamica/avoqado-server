@@ -867,16 +867,54 @@ export const getSaleVerificationSchema = z.object({
   }),
 })
 
+// Captura de la terminal nueva (cola durable, spec §5.3.2). El número se normaliza y valida en el servicio (9 o 10 dígitos).
+const terminalNumber = z.string().max(32, { message: 'El número es demasiado largo.' })
+const terminalCapture = {
+  idempotencyKey: z.string().min(1, { message: 'La llave de idempotencia es requerida.' }).max(128),
+  captureSeq: z.number().int({ message: 'captureSeq debe ser entero.' }).nonnegative({ message: 'captureSeq no puede ser negativo.' }),
+  captureDeviceId: z.string().min(1, { message: 'El aparato de la captura es requerido.' }).max(128),
+  capturedAt: z.string().datetime({ offset: true, message: 'La hora de la captura debe ser una fecha ISO válida.' }),
+}
+
 /** Schema for proof-of-sale photo upload (simplified verification) */
 export const createProofOfSaleSchema = z.object({
+  body: z
+    .object({
+      paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }),
+      photoUrls: z
+        .array(z.string().url({ message: 'Cada foto debe ser una URL válida.' }))
+        .min(1, { message: 'Debe proporcionar al menos una foto.' }),
+      verificationId: z.string().cuid({ message: 'El ID de verificación debe ser un CUID válido.' }).optional(),
+      replaceIndex: z.number().int().min(0).max(1).optional(), // Replace photo at this index instead of appending
+      photoLabel: z.enum(['Vinculacion', 'Portabilidad']).optional(), // Fixed slot: Vinculacion=0, Portabilidad=1
+      // Terminal nueva (todo opcional: las terminales publicadas no lo mandan y siguen como hoy).
+      linkingNumber: terminalNumber.optional(),
+      portedNumber: terminalNumber.optional(),
+      idempotencyKey: terminalCapture.idempotencyKey.optional(),
+      captureSeq: terminalCapture.captureSeq.optional(),
+      captureDeviceId: terminalCapture.captureDeviceId.optional(),
+      capturedAt: terminalCapture.capturedAt.optional(),
+    })
+    .superRefine((body, ctx) => {
+      if (body.captureSeq !== undefined && (!body.captureDeviceId || !body.idempotencyKey || !body.capturedAt)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'captureSeq viaja con captureDeviceId, idempotencyKey y capturedAt.',
+          params: { code: 'CAPTURE_REQUIRED' },
+        })
+      }
+    }),
+})
+
+/** POST tpv/verification/:verificationId/number — corregir sólo el número desde la terminal (nunca toca fotos). */
+export const setVerificationNumberSchema = z.object({
+  params: z.object({
+    verificationId: z.string().cuid({ message: 'El ID de verificación debe ser un CUID válido.' }),
+  }),
   body: z.object({
-    paymentId: z.string().cuid({ message: 'El ID del pago debe ser un CUID válido.' }),
-    photoUrls: z
-      .array(z.string().url({ message: 'Cada foto debe ser una URL válida.' }))
-      .min(1, { message: 'Debe proporcionar al menos una foto.' }),
-    verificationId: z.string().cuid({ message: 'El ID de verificación debe ser un CUID válido.' }).optional(),
-    replaceIndex: z.number().int().min(0).max(1).optional(), // Replace photo at this index instead of appending
-    photoLabel: z.enum(['Vinculacion', 'Portabilidad']).optional(), // Fixed slot: Vinculacion=0, Portabilidad=1
+    slot: z.enum(['VINCULACION', 'PORTABILIDAD'], { message: 'slot debe ser VINCULACION o PORTABILIDAD.' }),
+    number: terminalNumber.min(1, { message: 'El número es requerido.' }),
+    ...terminalCapture,
   }),
 })
 

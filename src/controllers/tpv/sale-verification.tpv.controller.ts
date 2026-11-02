@@ -39,6 +39,7 @@ export async function createSaleVerification(req: Request, res: Response): Promi
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -73,6 +74,7 @@ export async function listSaleVerifications(req: Request, res: Response): Promis
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -98,6 +100,7 @@ export async function getSaleVerification(req: Request, res: Response): Promise<
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -131,6 +134,7 @@ export async function getVerificationByPaymentId(req: Request, res: Response): P
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -163,6 +167,7 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -198,6 +203,7 @@ export async function getPendingVerifications(req: Request, res: Response): Prom
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -234,6 +240,7 @@ export async function getVerificationDetail(req: Request, res: Response): Promis
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
@@ -247,11 +254,12 @@ export async function getVerificationDetail(req: Request, res: Response): Promis
  */
 export async function createProofOfSale(req: Request, res: Response): Promise<void> {
   try {
-    const { paymentId, photoUrls, verificationId, replaceIndex, photoLabel } = req.body
+    const { paymentId, photoUrls, verificationId, replaceIndex, photoLabel, linkingNumber, portedNumber } = req.body
     const venueId = req.authContext?.venueId
     const staffId = req.authContext?.userId
+    const orgId = req.authContext?.orgId
 
-    if (!venueId || !staffId) {
+    if (!venueId || !staffId || !orgId) {
       res.status(401).json({
         success: false,
         message: 'Unauthorized - Missing authentication context',
@@ -265,7 +273,7 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
       photoLabel: photoLabel ?? 'none',
     })
 
-    const verification = await saleVerificationService.createOrUpdateProofOfSale(
+    const result = await saleVerificationService.createOrUpdateProofOfSale(
       venueId,
       paymentId,
       photoUrls,
@@ -273,19 +281,78 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
       verificationId,
       replaceIndex,
       photoLabel,
+      { orgId, capture: terminalCaptureFrom(req.body), linkingNumber, portedNumber },
     )
 
     res.status(200).json({
       success: true,
-      verificationId: verification.id,
-      status: verification.status,
       message: 'Proof-of-sale photo uploaded successfully',
+      ...result, // verificationId y status (como hoy) + los desenlaces de la terminal nueva
     })
   } catch (error: any) {
     logger.error(`[SALE VERIFICATION CONTROLLER] Error creating proof-of-sale: ${error.message}`)
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      code: error.code,
+    })
+  }
+}
+
+/** La terminal nueva se reconoce porque manda `captureSeq` (el schema exige que venga con lo demás). */
+function terminalCaptureFrom(body: {
+  captureSeq?: number
+  captureDeviceId?: string
+  idempotencyKey?: string
+  capturedAt?: string
+}): saleVerificationService.TerminalCapture | undefined {
+  if (body.captureSeq === undefined || !body.captureDeviceId || !body.idempotencyKey || !body.capturedAt) return undefined
+  return {
+    seq: body.captureSeq,
+    deviceId: body.captureDeviceId,
+    idempotencyKey: body.idempotencyKey,
+    capturedAt: new Date(body.capturedAt),
+  }
+}
+
+/**
+ * POST /tpv/verification/:verificationId/number
+ * Corregir sólo el número (sin foto) desde la terminal nueva. Mismas reglas que proof-of-sale; nunca toca fotos.
+ */
+export async function setVerificationNumber(req: Request, res: Response): Promise<void> {
+  try {
+    const staffId = req.authContext?.userId
+    const orgId = req.authContext?.orgId
+
+    if (!staffId || !orgId) {
+      res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Missing authentication context',
+      })
+      return
+    }
+
+    const { slot, number } = req.body
+    const result = await saleVerificationService.setNumberFromTerminal({
+      orgId,
+      staffId,
+      verificationId: req.params.verificationId,
+      slot,
+      number,
+      capture: terminalCaptureFrom(req.body)!,
+    })
+
+    res.status(200).json({
+      success: true,
+      message: 'Número guardado',
+      ...result,
+    })
+  } catch (error: any) {
+    logger.error(`[SALE VERIFICATION CONTROLLER] Error setting verification number: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+      code: error.code,
     })
   }
 }
