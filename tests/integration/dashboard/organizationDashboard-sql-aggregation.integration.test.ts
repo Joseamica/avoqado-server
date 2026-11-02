@@ -691,7 +691,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       select: { id: true },
     })
     const devolucion = (
-      original: { id: string; orderId: string | null },
+      original: { id: string; orderId: string },
       processedById: string,
       amount: number,
       method: 'CASH' | 'CREDIT_CARD',
@@ -699,7 +699,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       prisma.payment.create({
         data: {
           venueId: v1,
-          orderId: original.orderId ?? undefined,
+          orderId: original.orderId,
           processedById,
           createdAt: new Date(EVENING.getTime() + 10 * 60_000), // 17:40 local: fuera de toda checada
           amount: -amount,
