@@ -670,8 +670,10 @@ export async function abandonCardPayment(i: { venueId: string; trackingToken: st
   })
   if (charge?.checkoutSessionId && cardDraftTrackingStatus(charge) === 'AWAITING_PAYMENT') {
     const merchant = chargeMerchant(charge)
+    let expiredByUs = false
     try {
       await getProvider(merchant).expireAuthorizationCheckout(merchant, charge.checkoutSessionId)
+      expiredByUs = true
     } catch (error: any) {
       // Stripe contestó que ya no se puede (vencida o completada): la confirmación decide. Sin respuesta, la página puede seguir
       // abierta y el comensal todavía podría pagar: no se afirma nada (el borrador sigue PENDING_AUTH) y la tienda reintenta.
@@ -679,6 +681,14 @@ export async function abandonCardPayment(i: { venueId: string; trackingToken: st
         logger.warn('[OnlineOrdering] no se pudo vencer la página de pago abandonada', { chargeId: charge.id, error: error?.message })
         throw new AppError('No pudimos cerrar la página de pago. Intenta de nuevo en un momento.', 502, true, 'CARD_PROVIDER_UNAVAILABLE')
       }
+    }
+    if (expiredByUs) {
+      // Codex servidor r1 #1: Stripe ya la venció. Evidencia local ANTES de confirmar (CAS: sólo si sigue esperando), para que la
+      // repetición del POST (S7) no vuelva a mandar esa URL aunque la confirmación de abajo falle.
+      await prisma.onlineOrderCharge.updateMany({
+        where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
+        data: { checkoutExpiresAt: new Date() },
+      })
     }
     try {
       await confirmCardAuthorization(charge.id)

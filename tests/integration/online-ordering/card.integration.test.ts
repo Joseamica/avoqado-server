@@ -897,6 +897,32 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(voidSpy).not.toHaveBeenCalled()
   })
 
+  it('S5 fix r1 (Codex servidor r1 #1): Stripe vence la página, la confirmación falla y se repite el POST → checkoutUrl vacío, sigue PENDING_AUTH', async () => {
+    const key = nextKey()
+    const phone = nextPhone()
+    const r = await draft({ key, phone })
+    authSpy.mockRejectedValue(lost())
+    await expect(abandon(r.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', cardStatus: null })
+    expect(expireSpy).toHaveBeenCalledTimes(1)
+    expect(authSpy).toHaveBeenCalledTimes(1)
+
+    await expect(draft({ key, phone })).resolves.toMatchObject({
+      trackingToken: r.trackingToken,
+      checkoutUrl: '',
+      status: 'AWAITING_PAYMENT',
+      replay: true,
+    })
+    expect((await chargeOf(key)).status).toBe('PENDING_AUTH')
+
+    // Si Stripe dijo que no se podía vencer, no se toca el vencimiento: manda la relectura.
+    const k2 = nextKey()
+    await draft({ key: k2 })
+    const before = await chargeOf(k2)
+    expireSpy.mockRejectedValueOnce(notExpirable())
+    await abandon(before.trackingToken)
+    expect((await chargeOf(k2)).checkoutExpiresAt).toEqual(before.checkoutExpiresAt)
+  })
+
   it('S5: el token ya es un pedido (otra pestaña completó el pago) → responde el seguimiento sin cancelar, liberar ni preguntar a Stripe', async () => {
     const { charge, orderId, trackingToken } = await authorizedOrder()
     const stripeReads = authSpy.mock.calls.length
