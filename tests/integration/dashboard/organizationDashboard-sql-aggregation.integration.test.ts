@@ -649,6 +649,80 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     expect(c.breakMinutes).toBe(450)
   })
 
+  it('D2: una devolución cuenta en las VENTAS de quien hizo la venta, no de quien la opera; el efectivo sigue con quien lo entregó', async () => {
+    const leer = async () => {
+      const { staff } = await svc.getStaffAttendance(orgId, DIA)
+      const fila = (id: string) => (staff as Array<any>).find(r => r.id === id)!
+      return { ana: fila(ana), beto: fila(beto) }
+    }
+    const antes = await leer()
+    const cobroDe = (processedById: string, amount: number) =>
+      prisma.payment.findFirstOrThrow({
+        where: { venueId: v1, processedById, amount, type: { not: 'REFUND' } },
+        select: { id: true, orderId: true },
+      })
+    const tarjetaDeBeto = await cobroDe(beto, 80)
+    const efectivoDeAna = await cobroDe(ana, 150)
+    // Un cobro web sin vendedor (pedido en línea o liga de pago).
+    const web = await order({ venueId: v1, createdAt: NOON, total: 40, items: [{ productName: 'Cargador', quantity: 1, total: 40 }] })
+    const cobroWeb = await prisma.payment.create({
+      data: {
+        venueId: v1,
+        orderId: web.id,
+        amount: 40,
+        tipAmount: 0,
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        splitType: 'FULLPAYMENT',
+        feeAmount: 0,
+        netAmount: 40,
+        feePercentage: 0,
+      },
+      select: { id: true },
+    })
+    const devolucion = (
+      original: { id: string; orderId: string | null },
+      processedById: string,
+      amount: number,
+      method: 'CASH' | 'CREDIT_CARD',
+    ) =>
+      prisma.payment.create({
+        data: {
+          venueId: v1,
+          orderId: original.orderId,
+          processedById,
+          createdAt: new Date(EVENING.getTime() + 10 * 60_000), // 17:40 local: fuera de toda checada
+          amount: -amount,
+          tipAmount: 0,
+          method,
+          status: 'COMPLETED',
+          type: 'REFUND',
+          splitType: 'FULLPAYMENT',
+          feeAmount: 0,
+          netAmount: -amount,
+          feePercentage: 0,
+          processorData: { originalPaymentId: original.id },
+        },
+        select: { id: true },
+      })
+    const creadas = [
+      await devolucion(tarjetaDeBeto, ana, 30, 'CREDIT_CARD'), // Ana devuelve $30 de la venta con tarjeta de Beto
+      await devolucion(efectivoDeAna, beto, 10, 'CASH'), // Beto entrega $10 en efectivo de una venta de Ana
+      await devolucion({ id: cobroWeb.id, orderId: web.id }, ana, 40, 'CREDIT_CARD'), // Ana devuelve un cobro web sin vendedor
+    ]
+    try {
+      const despues = await leer()
+      expect(round2(despues.beto.sales)).toBe(round2(antes.beto.sales - 30)) // su venta, aunque la devolvió Ana
+      expect(round2(despues.ana.sales)).toBe(round2(antes.ana.sales - 10)) // su venta en efectivo; la web no es de nadie
+      expect(round2(despues.beto.cashSales)).toBe(round2(antes.beto.cashSales - 10)) // el efectivo salió de las manos de Beto
+      expect(round2(despues.ana.cashSales)).toBe(round2(antes.ana.cashSales))
+    } finally {
+      await prisma.payment.deleteMany({ where: { id: { in: [...creadas.map(c => c.id), cobroWeb.id] } } })
+      await prisma.order.deleteMany({ where: { id: web.id } })
+    }
+  })
+
   it('el filtro de estado deja sólo a quien sigue dentro', async () => {
     const { staff } = await svc.getStaffAttendance(orgId, DIA, undefined, 'ACTIVE')
     expect((staff as Array<any>).map(r => r.id).sort()).toEqual([beto, carla].sort())
