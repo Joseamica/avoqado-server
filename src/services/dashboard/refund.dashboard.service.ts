@@ -801,7 +801,7 @@ export async function writeRefundInTx(
       method: dada ? dada.method : ((devolverCon ?? original.method) as PaymentMethod),
       // D2: por el mismo medio, la devolución es de la MISMA tarjeta: hereda su marca (el reporte la pone en AMEX, no en «crédito»). Si el
       // dinero salió por otro medio (`devolverCon`, el crédito de un cambio) no hay tarjeta que heredar.
-      ...(mismoMedio && original.cardBrand ? { cardBrand: original.cardBrand as CardBrand } : {}),
+      cardBrand: mismoMedio && original.cardBrand ? (original.cardBrand as CardBrand) : undefined,
       // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
       // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
       // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
