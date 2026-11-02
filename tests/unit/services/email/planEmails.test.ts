@@ -235,7 +235,7 @@ describe('Subscription lifecycle plan emails', () => {
     it('locale omitted → Spanish subject (regression for legacy callers)', async () => {
       await emailService.sendSubscriptionSuspendedEmail('a@x.com', base)
       const arg = spy.mock.calls[0][0]
-      expect(arg.subject).toBe('Tu suscripcion de Plan Pro ha sido suspendida - Bar')
+      expect(arg.subject).toBe('Tu suscripción de Plan Pro ha sido suspendida - Bar')
       expect(arg.subject).not.toMatch(EMOJI_RE)
     })
   })
@@ -259,7 +259,7 @@ describe('Subscription lifecycle plan emails', () => {
     it('locale omitted → Spanish subject (regression for legacy callers)', async () => {
       await emailService.sendSubscriptionCanceledEmail('a@x.com', base)
       const arg = spy.mock.calls[0][0]
-      expect(arg.subject).toBe('Tu suscripcion de Plan Pro ha sido cancelada - Bar')
+      expect(arg.subject).toBe('Tu suscripción de Plan Pro ha sido cancelada - Bar')
       expect(arg.subject).not.toMatch(EMOJI_RE)
     })
   })
