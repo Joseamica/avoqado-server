@@ -41,7 +41,7 @@ import { deleteVenueDataTx, DELETION_TIMEOUT_MS } from '@/services/cleanup/liveD
 import { conNegocio, DOMINIO_DEMO, olvidarNegocioDemo } from './candadoDemo'
 
 import { generateSlug } from '@/utils/slugify'
-import { marcarNegocioDemo } from '@/observability/venueNames'
+import { marcarNegocioDemo, marcarUsuarioDemo } from '@/observability/venueNames'
 import { seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { seedDefaultMappings, getMappings } from '@/services/fiscal/accountMapping.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
@@ -520,6 +520,7 @@ async function asegurarUsuarioDemo(bp: VenueBlueprint, organizationId: string, p
     update: { isActive: true, role: 'MEMBER' },
     create: { staffId: staff.id, organizationId, role: 'MEMBER', isActive: true, isPrimary: true },
   })
+  marcarUsuarioDemo(staff.id) // si lo creó de nuevo, el registro lo marca «🧪 DEMO» sin esperar la recarga
   logger.info(`   👤 Usuario demo ${email} (dueño de su negocio, PIN ${PIN_DEMO})`)
   return staff.id
 }

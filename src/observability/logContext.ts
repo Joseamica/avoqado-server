@@ -82,15 +82,16 @@ export const contextFormat = winston.format(info => {
 })
 
 /**
- * ¿La línea la generó un demo? Sólo con certeza: un job que fijó un negocio demo (`conNegocio`) o la sesión de un usuario
- * demo, que el candado sólo deja tocar su propio negocio. NO por el negocio del token ni por un id en los campos: un
- * SUPERADMIN o una persona con un token viejo del demo pueden estar operando otro negocio, y el registro copia ese id
- * (Codex r1 y r2). NO por nombre: un negocio real puede llamarse igual.
+ * ¿La línea la generó un demo? Sólo con certeza: un job que fijó un negocio demo (`conNegocio`), o la sesión de un usuario
+ * demo DENTRO de un negocio demo. Las dos cosas: un SUPERADMIN puede darle a un usuario demo un negocio real (Codex r4), y
+ * un SUPERADMIN o una persona con un token viejo pueden tener abierto el demo mientras operan otro (Codex r1 y r2). NO por
+ * un id en los campos ni por nombre: un negocio real puede llamarse igual. Peor marcar un real como demo que dejar sin
+ * marca un demo (founder, 2-nov: «persona y negocio»).
  */
 function esActividadDeUnDemo(ctx: FotoDelContexto | undefined): boolean {
   if (!ctx) return false
   if (ctx.negocioFijado) return isDemoVenue(ctx.negocioFijado)
-  return isDemoUser(ctx.userId)
+  return isDemoUser(ctx.userId) && isDemoVenue(ctx.venueId)
 }
 
 /** «🧪 DEMO ·» y `demo: true`: las alertas de un demo no se confunden con las de un negocio real (founder, 1-nov). No cambia la gravedad. */

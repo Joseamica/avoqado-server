@@ -50,6 +50,8 @@ let demoIds = new Set<string>()
  */
 export const DOMINIO_DE_USUARIOS_DEMO = 'demo.avoqado.io'
 let demoUserIds = new Set<string>()
+/** Los que avisó la semilla: la recarga reemplaza `demoUserIds` y una que salió antes de crearlos no los trae (Codex r4). */
+const usuariosDeLaSemilla = new Set<string>()
 /** When the last load STARTED: a failed load also waits its turn, so an outage is not a query storm. */
 let lastLoadAt = Number.NEGATIVE_INFINITY
 /** The load in flight, so N concurrent requests cause ONE query. */
@@ -82,7 +84,12 @@ export function isDemoVenue(venueId?: string | null): boolean {
 
 /** ¿Es un usuario demo? Síncrono y nunca truena; se recarga junto con los negocios. */
 export function isDemoUser(userId?: string | null): boolean {
-  return !!userId && demoUserIds.has(userId)
+  return !!userId && (demoUserIds.has(userId) || usuariosDeLaSemilla.has(userId))
+}
+
+/** La semilla avisa el usuario demo que asegura (también si lo creó de nuevo): se marca sin esperar la recarga. */
+export function marcarUsuarioDemo(userId: string): void {
+  usuariosDeLaSemilla.add(userId)
 }
 
 /** La semilla demo avisa el negocio que acaba de crear: el registro lo marca desde su primera línea, sin esperar la recarga. */
@@ -160,6 +167,7 @@ export function __resetVenueNameCacheForTests(): void {
   names.clear()
   demoIds = new Set()
   demoUserIds = new Set()
+  usuariosDeLaSemilla.clear()
   lastLoadAt = Number.NEGATIVE_INFINITY
   loading = null
 }

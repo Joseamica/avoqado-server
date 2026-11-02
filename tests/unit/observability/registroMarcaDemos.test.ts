@@ -2,7 +2,8 @@
  * Los 6 negocios demo de prospectos se llaman normal («Café Tostado», «Lunaria Boutique») y escriben en el mismo registro
  * que los negocios reales. El founder (1-nov): «cuidado con las alertas de los demos, que no se confundan con productivas».
  * El formateador del registro marca «🧪 DEMO ·» y `demo: true` SÓLO lo que con certeza generó un demo: un job que fijó un
- * negocio demo (`conNegocio`) o la sesión de un usuario demo. Codex r1 y r2 mostraron que el negocio del token o un id en
+ * negocio demo (`conNegocio`) o la sesión de un usuario demo dentro de un negocio demo (persona Y negocio: un SUPERADMIN
+ * le puede dar a un usuario demo un negocio real, Codex r4). Codex r1 y r2 mostraron que el negocio del token o un id en
  * los campos pueden ser de OTRO negocio (un SUPERADMIN con el demo abierto, un token viejo, `Request End` que copia el id
  * del contexto) y que un nombre lo puede repetir un negocio real: ninguno de esos marca. Peor marcar un real como demo que
  * dejar sin marca un demo.
@@ -12,7 +13,15 @@ import TransportStream from 'winston-transport'
 import prisma from '@/utils/prismaClient'
 import { capturarContextoAlLlamar, contextFormat } from '@/observability/logContext'
 import { runWithContext } from '@/observability/executionContext'
-import { DOMINIO_DE_USUARIOS_DEMO, primeVenueNames, marcarNegocioDemo, __resetVenueNameCacheForTests } from '@/observability/venueNames'
+import { readFileSync } from 'fs'
+import { join } from 'path'
+import {
+  DOMINIO_DE_USUARIOS_DEMO,
+  primeVenueNames,
+  marcarNegocioDemo,
+  marcarUsuarioDemo,
+  __resetVenueNameCacheForTests,
+} from '@/observability/venueNames'
 import { DOMINIO_DEMO } from '@/services/demo/candadoDemo'
 
 const prismaMock = prisma as unknown as { venue: { findMany: jest.Mock }; staff: { findMany: jest.Mock } }
@@ -64,6 +73,20 @@ it('🔴 lo que hace la sesión de un usuario demo sale marcado', () => {
     const r = apply({ level: 'error', message: 'Error recording upsell impression' })
     expect(r.demo).toBe(true)
     expect(r.message).toBe('🧪 DEMO · Error recording upsell impression')
+  })
+})
+
+it('🔴 Codex r4 · un usuario demo con acceso a un negocio REAL (se lo dio un SUPERADMIN) NO marca lo que hace ahí', () => {
+  runWithContext(sesion(USUARIO_DEMO, REAL), () => {
+    const r = apply({ level: 'error', message: 'Error recording upsell impression' })
+    expect(r.demo).toBeUndefined()
+    expect(r.message).toBe('Error recording upsell impression')
+  })
+})
+
+it('un usuario demo sin negocio en la sesión (el login) no marca: sin el negocio no hay certeza', () => {
+  runWithContext({ correlationId: 'c', source: 'http' as const, entrypoint: 'POST /auth/login', userId: USUARIO_DEMO }, () => {
+    expect(apply({ level: 'warn', message: 'login lento' }).demo).toBeUndefined()
   })
 })
 
@@ -122,6 +145,22 @@ it('lo marcado por la semilla no lo borra una recarga que ya había salido antes
   runWithContext(job(NUEVO), () => {
     expect(apply({ level: 'error', message: 'x' }).demo).toBe(true)
   })
+})
+
+it('🔴 Codex r4 · el usuario demo que el reinicio vuelve a crear se marca desde su primera línea, y la recarga no lo borra', async () => {
+  const NUEVO = 'cusuarionuevo000000000aa'
+  marcarUsuarioDemo(NUEVO)
+  runWithContext(sesion(NUEVO, DEMO), () => expect(apply({ level: 'error', message: 'x' }).demo).toBe(true))
+  await primeVenueNames() // la consulta simulada no trae al usuario nuevo
+  runWithContext(sesion(NUEVO, DEMO), () => expect(apply({ level: 'error', message: 'x' }).demo).toBe(true))
+})
+
+it('🔴 Codex r4 · la semilla avisa al registro el usuario demo que asegura, también cuando lo crea de nuevo', () => {
+  const fuente = readFileSync(join(__dirname, '../../../src/services/demo/negociosDemo.service.ts'), 'utf8')
+  const cuerpo = fuente.slice(fuente.indexOf('async function asegurarUsuarioDemo'))
+  const fin = cuerpo.indexOf('return staff.id')
+  expect(fin).toBeGreaterThan(0)
+  expect(cuerpo.slice(0, fin)).toContain('marcarUsuarioDemo(staff.id)')
 })
 
 it('si la consulta de usuarios demo falla, los nombres se cargan igual', async () => {
