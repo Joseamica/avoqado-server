@@ -11,7 +11,7 @@
  * - Fechas: días de calendario de CDMX (`'YYYY-MM-DD'`), sólo con los helpers de `schedule.ts`. Dinero: centavos enteros.
  */
 import { BillingCustomerType, PlatformChargeFrequency, PlatformChargeInvoiceMode } from '@prisma/client'
-import type { PlatformCharge, Prisma } from '@prisma/client'
+import type { BillingTaxProfile, PlatformCharge, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -198,6 +198,31 @@ function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean): Part
   return out
 }
 
+/** A quién se le cobra: el tipo de cliente y su organización o negocio (los dos null en un cliente externo). */
+export interface CustomerRef {
+  customerType: BillingCustomerType
+  organizationId: string | null
+  venueId: string | null
+}
+
+/**
+ * El perfil fiscal es de este cliente si es del mismo tipo y de la misma organización o negocio (los dos null en un cliente externo);
+ * si no, 400 PLATFORM_CHARGE_TAX_PROFILE_MISMATCH. La misma regla vale al guardar el cobro y al facturar (`invoice.service.ts`):
+ * facturar al RFC equivocado sólo se deshace cancelando ante el SAT.
+ */
+export function assertTaxProfileOfCustomer(
+  profile: Pick<BillingTaxProfile, 'customerType' | 'organizationId' | 'venueId'>,
+  customer: CustomerRef,
+): void {
+  if (
+    profile.customerType !== customer.customerType ||
+    (profile.organizationId ?? null) !== customer.organizationId ||
+    (profile.venueId ?? null) !== customer.venueId
+  ) {
+    throw new BadRequestError('Ese perfil fiscal no es de este cliente', 'PLATFORM_CHARGE_TAX_PROFILE_MISMATCH')
+  }
+}
+
 /**
  * A quién se le cobra y con qué datos fiscales (spec §5). Va DENTRO de la transacción y con su `tx`: leer el perfil con otra
  * conexión mientras ésta espera el candado es pedir dos conexiones a la vez por una sola operación.
@@ -229,14 +254,7 @@ async function assertCustomerAndProfile(tx: Prisma.TransactionClient, state: Cha
     select: { customerType: true, organizationId: true, venueId: true },
   })
   if (!profile) throw invalid('El perfil fiscal no existe')
-  // El perfil es de este cliente si es del mismo tipo y de la misma organización o negocio (los dos null en un cliente externo).
-  if (
-    profile.customerType !== customerType ||
-    (profile.organizationId ?? null) !== organizationId ||
-    (profile.venueId ?? null) !== venueId
-  ) {
-    throw new BadRequestError('Ese perfil fiscal no es de este cliente', 'PLATFORM_CHARGE_TAX_PROFILE_MISMATCH')
-  }
+  assertTaxProfileOfCustomer(profile, state)
 }
 
 // ── Estado del cobro ────────────────────────────────────────────────────────────────────────────────────────────────────────

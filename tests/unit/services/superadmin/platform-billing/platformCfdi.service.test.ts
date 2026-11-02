@@ -8,6 +8,7 @@ jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({
   resolveFiscalProvider: jest.fn(),
 }))
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
+import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
 import {
   computePlatformCfdiTotals,
   classifyStampError,
@@ -825,6 +826,75 @@ describe('platformCfdi.service — «Por cobrar»: emitir (líneas con IVA inclu
 
       expect(prismaMock.$transaction).not.toHaveBeenCalled()
       expect(prismaMock.platformCfdi.create).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // 🔴 Fix ronda 1, punto 1 (spec §6 «Por qué así»): una falla que no sea un rechazo confirmado del PAC no prueba que el documento no
+  // haya quedado en camino. Si la fila pasara a STAMP_FAILED, el reintento inmediato preguntaría por la llave, Facturapi todavía
+  // podría no tenerla (`null`), se cerraría el intento y se timbraría con otra llave: dos CFDI por un pago.
+  describe('una falla que NO es un rechazo confirmado del PAC deja la fila ligada en STAMPING', () => {
+    const TRANSPORTE: Array<[string, Error]> = [
+      [
+        'un timeout (nuestro corte a los 30 s)',
+        Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }),
+      ],
+      ['un 502 con cuerpo HTML (el JSON no se puede leer)', new SyntaxError('Unexpected token < in JSON at position 0')],
+      ['una falla de red', new TypeError('fetch failed')],
+      ['un 502 de la puerta de enlace', new ProviderHttpError(502, null, 'Bad Gateway')],
+      ['un 503', new ProviderHttpError(503, 'service_unavailable', 'Servicio no disponible')],
+      [
+        'un 4xx con un código que no es de rechazo (409 de llave repetida)',
+        new ProviderHttpError(409, 'idempotency_conflict', 'Llave repetida'),
+      ],
+      [
+        'un código de rechazo pero con status 5xx (no es una respuesta de validación)',
+        new ProviderHttpError(500, 'invalid_request', 'Error interno'),
+      ],
+    ]
+    const RECHAZOS: Array<[number, string]> = [
+      [400, 'invalid_request'],
+      [400, 'product_key_not_found'],
+      [422, 'invoice_stamping_validation_error'],
+    ]
+    const SAT_RFC = 'El campo Rfc del receptor no se encuentra en el listado del SAT.'
+
+    it.each(TRANSPORTE)(
+      'ligada, %s: la fila SIGUE en STAMPING con su lastError y un intento más, y el error se lanza',
+      async (_nombre, falla) => {
+        armaEmision(jest.fn().mockRejectedValue(falla))
+
+        await expect(issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })).rejects.toBeInstanceOf(PlatformBillingError)
+
+        expect(lasEscrituras()).toEqual([{ lastError: falla.message, attempts: { increment: 1 } }]) // sin `status`: no pasa a STAMP_FAILED
+      },
+    )
+
+    it.each(TRANSPORTE)('REGRESIÓN: SIN ligar, %s sigue pasando la fila a STAMP_FAILED, como hoy', async (_nombre, falla) => {
+      armaEmision(jest.fn().mockRejectedValue(falla))
+
+      await expect(issuePlatformCfdi(baseInput)).rejects.toBeInstanceOf(PlatformBillingError)
+
+      expect(lasEscrituras()).toEqual([{ status: 'STAMP_FAILED', lastError: falla.message, attempts: { increment: 1 } }])
+    })
+
+    it.each(RECHAZOS)('ligada, un rechazo CONFIRMADO (%i %s) sí pasa a STAMP_FAILED: corregir un RFC no espera', async (status, code) => {
+      armaEmision(jest.fn().mockRejectedValue(new ProviderHttpError(status, code, SAT_RFC)))
+
+      await expect(issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })).rejects.toMatchObject({
+        code: 'VALIDATION',
+        field: 'rfc',
+      })
+
+      expect(lasEscrituras()).toEqual([{ status: 'STAMP_FAILED', lastError: SAT_RFC, attempts: { increment: 1 } }])
+    })
+
+    it('el error que sale conserva la guía y el mensaje crudo (sin cambios para quien lo lee)', async () => {
+      armaEmision(jest.fn().mockRejectedValue(new ProviderHttpError(502, null, 'Bad Gateway')))
+
+      await expect(issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })).rejects.toMatchObject({
+        code: 'PROVIDER',
+        message: expect.stringContaining('Bad Gateway'),
+      })
     })
   })
 })

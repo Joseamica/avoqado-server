@@ -13,6 +13,7 @@ import { Prisma, type PlatformCfdi, type PlatformEmisor } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
+import { esRechazoConfirmado } from '@/services/fiscal/providers/facturapi.provider'
 import type { CfdiItemInput, CreateInvoiceParams, PaymentComplementTax } from '@/services/fiscal/providers/fiscal-provider.interface'
 import { chargesSandbox } from '@/services/superadmin/platform-charges/sandbox'
 import { getActivePlatformEmisor, PlatformBillingError } from './platformEmisor.service'
@@ -331,9 +332,16 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
     return updated
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    // 🔴 «Por cobrar» (spec §6, «Por qué así»): una falla que NO es un rechazo confirmado del PAC (timeout, 5xx, respuesta ilegible)
+    // no prueba que el documento no haya quedado en camino. Si la fila pasara a STAMP_FAILED, el reintento inmediato preguntaría por la
+    // llave, Facturapi todavía podría no tenerla, `resolverIntento` cerraría el intento y se timbraría con otra llave: dos CFDI por un
+    // pago. Por eso, en una fila ligada, la fila SIGUE en STAMPING (con su `lastError` y un intento más): la espera de 2 min de
+    // `resolverIntento` la cubre. Sólo un rechazo confirmado pasa a STAMP_FAILED y se reintenta al momento (corregir un RFC no espera).
+    // Una fila sin ligar queda como siempre.
+    const stillInFlight = linked && !esRechazoConfirmado(err, true)
     await prisma.platformCfdi.update({
       where: { id: row.id },
-      data: { status: 'STAMP_FAILED', lastError: message, attempts: { increment: 1 } },
+      data: { ...(stillInFlight ? {} : { status: 'STAMP_FAILED' as const }), lastError: message, attempts: { increment: 1 } },
     })
     const info = classifyStampError(message)
     throw new PlatformBillingError(`Error al timbrar el CFDI: ${info.message}`, info.code, info.field)
