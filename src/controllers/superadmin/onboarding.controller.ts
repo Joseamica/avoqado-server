@@ -29,6 +29,7 @@ import { resolveInitialVenueState } from '@/utils/venueOnboarding'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
 import { addDays } from 'date-fns'
+import { esCorreoDemo } from '@/services/demo/candadoDemo'
 import crypto from 'crypto'
 import { parseLinkedWizard } from '@/services/document-requests/wizardInput'
 import {
@@ -538,6 +539,9 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
     if (payload.team?.owner) {
       try {
         const allInvites = [{ ...payload.team.owner, role: payload.team.owner.role || 'OWNER' }, ...(payload.team.additionalStaff || [])]
+        // hz:f26b3afc:D4: un usuario demo tiene contraseña pública, y este paso da la membresía ANTES de aceptar (Codex r1).
+        const correoDemo = allInvites.find(i => esCorreoDemo(i.email))
+        if (correoDemo) throw new BadRequestError(`${correoDemo.email} es un usuario de demostración: no se puede invitar a un negocio`)
 
         const org = await prisma.organization.findUnique({
           where: { id: organizationId },
