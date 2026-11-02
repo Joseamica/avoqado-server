@@ -33,6 +33,7 @@ import {
   PRODUCTO_CON_VENTAS_NO_SE_BORRA,
   esProductoConVentas,
 } from './services/dashboard/product.dashboard.service'
+import { MENSAJE_USUARIO_DEMO_EN_NEGOCIO_REAL, USUARIO_DEMO_EN_NEGOCIO_REAL, esUsuarioDemoEnNegocioReal } from './services/demo/candadoDemo'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleDirectoryMcpRequest, handleMcpRequest } from './mcp/server'
@@ -473,11 +474,20 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
     err = new ConflictError(MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA)
   }
 
+  // hz:f26b3afc:D5: la base rechaza que un usuario demo (contraseña pública) quede en un negocio real, venga del SUPERADMIN,
+  // del panel o de cualquier camino que escriba membresías: 400 con su motivo, nunca un 500 anónimo.
+  if (esUsuarioDemoEnNegocioReal(err)) {
+    err = new BadRequestError(MENSAJE_USUARIO_DEMO_EN_NEGOCIO_REAL, USUARIO_DEMO_EN_NEGOCIO_REAL)
+  }
+
   // D9 (26-oct): la cuenta o la mesa cambiaron en el mismo instante (`lockTableOrderScope`); se resuelve reintentando. Por las
   // rutas sin protocolo de operación salía 500 anónimo. 503 y no 409: las apps ya tratan un 5xx/503 como «reintenta» o lo
   // encolan, y un 409 haría rendirse a la cancelación durable de ANDROID. Sin `Retry-After` (OkHttp reenvía solo con 0).
   if (err instanceof OrderTableTopologyChanged) {
-    err = new ServiceUnavailableError('La cuenta o la mesa cambiaron en ese mismo momento. Intenta de nuevo.', 'ORDER_TABLE_TOPOLOGY_CHANGED')
+    err = new ServiceUnavailableError(
+      'La cuenta o la mesa cambiaron en ese mismo momento. Intenta de nuevo.',
+      'ORDER_TABLE_TOPOLOGY_CHANGED',
+    )
   }
 
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }
