@@ -688,6 +688,7 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
   }
   const fila = (o: Record<string, unknown> = {}) => ({
     id: 'cr1',
+    key: 'llave-1',
     status: 'RECORDED',
     amount: '100.00',
     reason: 'CANCELLED_ORDER',

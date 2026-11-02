@@ -766,6 +766,8 @@ export async function listCardRefunds(venueId: string, orderId: string) {
   })
   return rows.map(r => ({
     id: r.id,
+    /** La llave con la que nació: el panel concilia EXACTO su intento pendiente, nunca por monto ni fecha. */
+    key: r.key,
     status: r.status,
     amount: pesos(r.amountCents),
     reason: r.reason,
