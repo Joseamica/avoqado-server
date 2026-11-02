@@ -11,6 +11,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment, turnoDeLaOrdenQueNace, ventaDeLaColaEnTx } from '../shared/paymentShiftClaim'
 import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 
 interface TableStatusResponse {
   id: string
@@ -626,6 +627,8 @@ export async function moveOrderToTableInTransaction(tx: Prisma.TransactionClient
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status))
     throw new BadRequestError('La cuenta ya está cerrada — no se puede mover')
   if (order.paymentStatus === PaymentStatus.PAID) throw new BadRequestError('La cuenta ya está pagada — no se puede mover')
+  // Pedido en línea con la tarjeta apartada (sin cobrar): en una mesa se ofrecería el cobro de siempre ⇒ 409, antes de escribir.
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: order.id })
   if (order.tableId === targetTableId) throw new BadRequestError('La cuenta ya está en esa mesa')
   const destination = scope.tables.find(table => table.id === targetTableId)!
   if (destination.currentOrderId || destination.status === 'OCCUPIED')

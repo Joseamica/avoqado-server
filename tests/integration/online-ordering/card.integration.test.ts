@@ -27,6 +27,7 @@ import { createOnlineOrder, getTrackingByToken, writeOnlineOrderInTx } from '@/s
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { listOrders as listMobileOrders } from '@/services/mobile/order.mobile.service'
+import { moveOrderToTable } from '@/services/tpv/table.tpv.service'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -763,6 +764,42 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(await ids(orderNumber)).not.toContain(orderId)
     await accept(orderId)
     expect(await ids()).toContain(orderId)
+  })
+
+  it('S2 (clientes, Codex plan r2 #1): mover a una mesa la tarjeta sin cobrar → 409 y no mueve nada; pagar al recoger sí se mueve', async () => {
+    const mesa = await prisma.table.create({
+      data: { venueId: venueId!, number: `S2-${RUN}-${++seq}`, capacity: 4, qrCode: `itest-card-s2-${RUN}-${seq}` },
+    })
+    const { orderId } = await authorizedOrder()
+    await expect(moveOrderToTable(venueId!, orderId, mesa.id)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ONLINE_ORDER_PAID_BY_CARD',
+    })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).tableId).toBeNull()
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: mesa.id } })).toMatchObject({ status: 'AVAILABLE', currentOrderId: null })
+
+    // Pagar al recoger (sin cargo) sí se mueve. Se arma directo: los topes del negocio no son lo que se prueba aquí.
+    const key = nextKey()
+    await draft({ key })
+    const req = (await chargeOf(key)).request as any
+    const pickupOrder = await prisma.$transaction(tx =>
+      writeOnlineOrderInTx(tx, {
+        venueId: venueId!,
+        externalId: `web:s2-move-${RUN}-${seq}`,
+        orderNumber: `WM${seq}`,
+        quote: req.quote,
+        customer: req.customer,
+        customerId: null,
+        note: null,
+        paymentMode: 'PAY_AT_PICKUP',
+        trackingToken: `${'m'.repeat(20)}${RUN}${seq}`.slice(0, 32),
+        requestHash: `s2-move-${seq}`,
+        acceptDeadlineAt: new Date(Date.now() + 10 * MIN),
+        whatsappConsent: false,
+      }),
+    )
+    await moveOrderToTable(venueId!, pickupOrder.orderId, mesa.id)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: pickupOrder.orderId } })).tableId).toBe(mesa.id)
   })
 
   it('doble aceptar en paralelo captura una sola vez', async () => {
