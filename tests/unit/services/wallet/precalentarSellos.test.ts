@@ -21,7 +21,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as pngDecodeModule from '../../../../src/services/wallet/pngDecode'
 import { Canvas, hexToRgb } from '../../../../src/services/wallet/pngCanvas'
-import { CACHE_SELLOS_MAX, fetchDecodedPng, limpiarCacheDeSellos } from '../../../../src/services/wallet/remotePng'
+import { CACHE_SELLOS_MAX, fetchDecodedPng, limpiarCacheDeSellos, fetchPng } from '../../../../src/services/wallet/remotePng'
 import { listarSellosAPrecalentar, precalentarSellos } from '../../../../src/services/wallet/precalentarSellos'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -136,6 +136,50 @@ describe('precalentarSellos — la primera descarga tras un despliegue ya no abr
     // u1 (0 → 600) y u2 (600 → 1200) empiezan dentro del tope; u3 ya no.
     expect(abrirSello).toHaveBeenCalledTimes(2)
     expect(resultado).toMatchObject({ abiertos: 2, omitidos: 2 })
+  })
+})
+
+describe('fetchPng — una respuesta enorme no se junta en memoria', () => {
+  const MB = 1024 * 1024
+
+  function respuestaSinFin() {
+    let entregados = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(control) {
+        entregados += MB
+        control.enqueue(new Uint8Array(MB))
+      },
+    })
+    return { respuesta: new Response(body, { status: 200 }), entregados: () => entregados }
+  }
+
+  it('🔴 corta la descarga al pasar el tope, sin leer el resto (Codex, 2-nov)', async () => {
+    const { respuesta, entregados } = respuestaSinFin()
+    ;(global as any).fetch = jest.fn(async () => respuesta)
+    expect(await fetchPng('https://hostil.example/enorme.png')).toBeNull()
+    expect(entregados()).toBeLessThanOrEqual(6 * MB) // el tope son 3 MB; el stream se adelanta poco, nunca sin fin
+  })
+
+  it('si dice de entrada que es enorme, ni la empieza a leer', async () => {
+    const { respuesta, entregados } = respuestaSinFin()
+    respuesta.headers.set('content-length', String(50 * MB))
+    ;(global as any).fetch = jest.fn(async () => respuesta)
+    expect(await fetchPng('https://hostil.example/enorme.png')).toBeNull()
+    expect(entregados()).toBeLessThanOrEqual(2 * MB)
+  })
+
+  it('una imagen normal llega completa, aunque venga en pedazos', async () => {
+    const png = pngLiso('#112233')
+    const mitad = Math.floor(png.length / 2)
+    const body = new ReadableStream<Uint8Array>({
+      start(control) {
+        control.enqueue(new Uint8Array(png.subarray(0, mitad)))
+        control.enqueue(new Uint8Array(png.subarray(mitad)))
+        control.close()
+      },
+    })
+    ;(global as any).fetch = jest.fn(async () => new Response(body, { status: 200 }))
+    expect((await fetchPng('https://storage.example/sello.png'))?.equals(png)).toBe(true)
   })
 })
 

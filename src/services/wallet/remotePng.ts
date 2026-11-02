@@ -33,6 +33,35 @@ export function isPng(buffer: Buffer): boolean {
   return buffer.length > PNG_SIGNATURE.length && buffer.subarray(0, 8).equals(PNG_SIGNATURE)
 }
 
+/**
+ * El cuerpo de la respuesta, o null si pasa de MAX_BYTES. 🔴 Se corta AL LEER: el plazo de la descarga limita tiempo, no bytes, y la
+ * dirección la escribe el negocio. Juntar primero y medir después dejaba que una respuesta enorme agotara la memoria del servidor.
+ */
+async function leerConTope(response: Response): Promise<Buffer | null> {
+  const anunciado = Number(response.headers?.get('content-length'))
+  if (anunciado > MAX_BYTES) {
+    await response.body?.cancel().catch(() => undefined)
+    return null
+  }
+  if (!response.body) {
+    const entero = Buffer.from(await response.arrayBuffer())
+    return entero.length > MAX_BYTES ? null : entero
+  }
+  const lector = response.body.getReader()
+  const trozos: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await lector.read()
+    if (done) return Buffer.concat(trozos)
+    total += value.length
+    if (total > MAX_BYTES) {
+      await lector.cancel().catch(() => undefined)
+      return null
+    }
+    trozos.push(value)
+  }
+}
+
 export async function fetchPng(url: string | null | undefined): Promise<Buffer | null> {
   if (!url) return null
   // Candado de negocios demo (Codex r7, 2): en un demo la dirección la escribe cualquiera y el SERVIDOR la visitaría.
@@ -46,9 +75,9 @@ export async function fetchPng(url: string | null | undefined): Promise<Buffer |
       return null
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer())
-    if (buffer.length > MAX_BYTES) {
-      logger.warn('La imagen del pase excede el tope de tamaño', { url, bytes: buffer.length })
+    const buffer = await leerConTope(response)
+    if (!buffer) {
+      logger.warn('La imagen del pase excede el tope de tamaño', { url })
       return null
     }
     if (!isPng(buffer)) {
