@@ -7,9 +7,13 @@
 
 import { Request, Response, NextFunction } from 'express'
 import logger from '../../config/logger'
-import { initiateCryptoPayment, cancelCryptoPayment, getPaymentStatus } from '../../services/b4bit/b4bit.service'
+import {
+  initiateCryptoPayment,
+  cancelCryptoPayment,
+  getPaymentStatus,
+  getCryptoOperationForVenue,
+} from '../../services/b4bit/b4bit.service'
 import { BadRequestError } from '../../errors/AppError'
-import prisma from '../../utils/prismaClient'
 
 /**
  * POST /api/v1/tpv/venues/:venueId/crypto/initiate
@@ -29,7 +33,7 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
     // 🔴 El `shiftId` del cuerpo NO se reenvía: el turno lo resuelve el servidor por `venueId`
     // (aislamiento de tenant, 3-sep-2026). El esquema lo sigue aceptando para no romper a una app
     // que todavía lo mande, pero nadie lo lee.
-    const { amount, tip, staffId, orderId, orderNumber, deviceSerialNumber, rating } = req.body
+    const { amount, tip, staffId, orderId, orderNumber, deviceSerialNumber, rating, idempotencyKey } = req.body
 
     logger.info('🔐 TPV: Initiating crypto payment', {
       venueId,
@@ -49,22 +53,28 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
       orderNumber,
       deviceSerialNumber,
       rating,
+      idempotencyKey,
+      actorStaffId: req.authContext?.userId,
+      terminalSerialNumber: req.authContext?.terminalSerialNumber,
     })
 
     res.status(200).json({
       success: true,
-      data: {
-        requestId: result.requestId,
-        paymentId: result.paymentId,
-        paymentUrl: result.paymentUrl,
-        expiresAt: result.expiresAt,
-        expiresInSeconds: result.expiresInSeconds,
-        cryptoSymbol: result.cryptoSymbol,
-        cryptoAddress: result.cryptoAddress,
-        // En qué turno de caja quedó el cobro (`null` = el negocio no tenía ninguno abierto).
-        shiftId: result.shiftId ?? null,
-      },
-      message: 'Crypto payment initiated successfully',
+      data:
+        'operation' in result
+          ? result
+          : {
+              requestId: result.requestId,
+              paymentId: result.paymentId,
+              paymentUrl: result.paymentUrl,
+              expiresAt: result.expiresAt,
+              expiresInSeconds: result.expiresInSeconds,
+              cryptoSymbol: result.cryptoSymbol,
+              cryptoAddress: result.cryptoAddress,
+              // En qué turno de caja quedó el cobro (`null` = el negocio no tenía ninguno abierto).
+              shiftId: result.shiftId ?? null,
+            },
+      message: 'operation' in result ? 'Estado de la operación cripto' : 'Crypto payment initiated successfully',
     })
   } catch (error) {
     next(error)
@@ -78,28 +88,14 @@ export async function initiateCryptoPaymentHandler(req: Request, res: Response, 
  */
 export async function cancelCryptoPaymentHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { paymentId, requestId, reason } = req.body
+    const { paymentId, requestId } = req.body
 
-    let resolvedPaymentId = paymentId
-
-    // TPV sends requestId (B4Bit external ID), resolve to internal paymentId
-    if (!resolvedPaymentId && requestId) {
-      const payment = await prisma.payment.findFirst({
-        where: { externalId: requestId },
-        select: { id: true },
-      })
-      if (payment) {
-        resolvedPaymentId = payment.id
-      }
-    }
-
-    if (!resolvedPaymentId) {
-      throw new BadRequestError('paymentId or requestId is required')
-    }
-
-    logger.info('🚫 TPV: Cancelling crypto payment', { paymentId: resolvedPaymentId, reason })
-
-    await cancelCryptoPayment(resolvedPaymentId)
+    await cancelCryptoPayment({
+      venueId: req.params.venueId,
+      staffId: req.authContext?.userId ?? '',
+      paymentId,
+      requestId,
+    })
 
     res.status(200).json({
       success: true,
@@ -132,6 +128,17 @@ export async function getCryptoPaymentStatusHandler(req: Request, res: Response,
       success: true,
       data: status,
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function getCryptoOperationHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const serial = req.authContext?.terminalSerialNumber
+    if (!serial) throw new BadRequestError('Se requiere la terminal autenticada')
+    const result = await getCryptoOperationForVenue(req.params.venueId, req.params.idempotencyKey, serial, req.authContext?.userId)
+    res.status(200).json({ success: true, data: result })
   } catch (error) {
     next(error)
   }

@@ -458,6 +458,8 @@ export async function processIntents(params: {
   staffId: string
   deviceId: string
   intents: SyncIntentInput[]
+  /** Terminal serial from the authenticated session, never deviceId or payload. */
+  terminalSerialNumber?: string
   authorizeIntent: (intent: SyncIntentInput, requiredPermission: string) => boolean
 }): Promise<SyncIntentAck[]> {
   const { venueId, staffId, deviceId, authorizeIntent } = params
@@ -650,7 +652,16 @@ export async function processIntents(params: {
         ack = await ackDesdeHuella(venueId, intent, huellaPrevia, localRefMap)
       } else {
         const dejarHuella = marca?.retomable ? dejarHuellaCon(venueId, intent.id, turno, marca) : undefined
-        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella, authorizeIntent })
+        ack = await applyIntent({
+          venueId,
+          staffId,
+          deviceId,
+          intent,
+          localRefMap,
+          dejarHuella,
+          authorizeIntent,
+          terminalSerialNumber: params.terminalSerialNumber,
+        })
       }
     }
 
@@ -826,6 +837,7 @@ async function ackDesdeHuella(
 // ─── Reducers por tipo ───────────────────────────────────────────────────────
 
 async function applyIntent(ctx: {
+  terminalSerialNumber?: string
   venueId: string
   staffId: string
   deviceId: string
@@ -850,7 +862,7 @@ async function applyIntent(ctx: {
       case 'ADD_ITEMS':
         return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'PAY_CASH':
-        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella)
+        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella, ctx.terminalSerialNumber)
       case 'APPLY_DISCOUNT':
       case 'APPLY_SERVICE_CHARGE':
       case 'COMP_ORDER':
@@ -1348,7 +1360,34 @@ async function applyPayCash(
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
+  terminalSerialNumber?: string,
 ): Promise<SyncIntentAck> {
+  let shiftIdDeLaVenta: string | undefined
+  const declaredShift = intent.payload.shiftIdDeLaVenta
+  // Old POS payloads keep their prior treatment; only an authenticated terminal opts into this reference.
+  if (terminalSerialNumber && declaredShift !== undefined && declaredShift !== null && declaredShift !== '') {
+    if (typeof declaredShift !== 'string' || !/^c[a-z0-9]{24}$/.test(declaredShift)) {
+      return {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'INVALID_PAYLOAD',
+        message: 'PAY_CASH: el turno de la venta debe ser un cuid v1 del servidor',
+      }
+    }
+    const terminal = await prisma.terminal.findFirst({
+      where: { venueId, serialNumber: terminalSerialNumber, status: 'ACTIVE' },
+      select: { id: true },
+    })
+    const shift = terminal ? await prisma.shift.findFirst({ where: { id: declaredShift, venueId }, select: { id: true } }) : null
+    if (!shift)
+      return {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'INVALID_PAYLOAD',
+        message: 'PAY_CASH: el turno o la terminal no pertenecen a este negocio',
+      }
+    shiftIdDeLaVenta = shift.id
+  }
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
   const amountCents = Number(intent.payload.amountCents ?? NaN)
   const tipCents = Number(intent.payload.tipCents ?? 0)
@@ -1471,6 +1510,8 @@ async function applyPayCash(
     isOfflineReplay: true,
     // S3: el servicio la convierte en el turno de la venta (liga 1:1 caja↔turno).
     ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
+    ...(shiftIdDeLaVenta ? { shiftIdDeLaVenta } : {}),
+    ...(terminalSerialNumber ? { terminalSerialNumber } : {}),
     ...marcaDeMesaAjena,
     ...propiedadDeMesa,
     ...(dejarHuella

@@ -8893,6 +8893,7 @@ router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, check
  *     parameters:
  *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
  *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: view, in: query, required: false, schema: { type: string, enum: [detail, state] }, description: "state returns only id, venueId and status; the default detailed response is unchanged" }
  *     responses:
  *       200:
  *         description: The requested shift

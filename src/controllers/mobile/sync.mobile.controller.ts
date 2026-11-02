@@ -70,6 +70,7 @@ export async function syncIntents(req: Request, res: Response): Promise<void> {
       staffId,
       deviceId,
       intents,
+      terminalSerialNumber: req.authContext?.terminalSerialNumber,
       authorizeIntent: (_intent, requiredPermission) =>
         requiredPermission === 'orders:attach-customer'
           ? customerActor.canAssignHistorical === true

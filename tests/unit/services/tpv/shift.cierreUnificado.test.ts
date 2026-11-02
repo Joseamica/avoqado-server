@@ -112,6 +112,7 @@ function mundo(over: Record<string, unknown> = {}) {
   escrito = undefined
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+    tpvShiftOperation: { findFirst: jest.fn().mockResolvedValue(null) },
     shift: {
       findFirst: jest.fn(async () => abierto),
       updateMany: jest.fn(async (args: any) => {

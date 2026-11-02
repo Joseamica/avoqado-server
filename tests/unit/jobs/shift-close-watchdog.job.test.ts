@@ -23,6 +23,7 @@ function harness(counts: number[] = [1]) {
   const tx = {
     $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
     shift: { updateMany },
+    tpvShiftOperation: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
   }
   const prisma = {
     shift: {
@@ -40,6 +41,23 @@ function harness(counts: number[] = [1]) {
 }
 
 describe('shift-close-watchdog.job', () => {
+  it('clears only the abandoned claim witness in the same transaction; keeps the durable request for later conflict', async () => {
+    const h = harness()
+    await h.job.runNow()
+    expect(h.tx.tpvShiftOperation.updateMany).toHaveBeenCalledWith({
+      where: {
+        venueId: candidate.venueId,
+        shiftId: candidate.id,
+        kind: 'CLOSE',
+        state: 'PENDING',
+        resultJson: { path: ['claimedAt'], equals: candidate.updatedAt.toISOString() },
+      },
+      data: { resultJson: { claimedAt: null } },
+    })
+    const missed = harness([0])
+    await missed.job.runNow()
+    expect(missed.tx.tpvShiftOperation.updateMany).not.toHaveBeenCalled()
+  })
   it('toma el lock DB del venue antes del recovery CLOSING→OPEN', async () => {
     const h = harness()
 

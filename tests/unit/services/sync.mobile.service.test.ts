@@ -35,6 +35,8 @@ jest.mock('@/utils/prismaClient', () => ({
       deleteMany: jest.fn(),
     },
     order: { findFirst: jest.fn() },
+    terminal: { findFirst: jest.fn() },
+    shift: { findFirst: jest.fn() },
     payment: { findUnique: jest.fn() },
     orderItem: { findMany: jest.fn() },
     kdsOrder: { findFirst: jest.fn() },
@@ -578,7 +580,11 @@ describe('sync.mobile.service processIntents', () => {
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-4', status: 'COMPLETED', type: 'REGULAR' })
-    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-0-viejo', orderNumber: 'A-0', digitalReceipt: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-0-viejo',
+      orderNumber: 'A-0',
+      digitalReceipt: null,
+    })
     const acks = await processIntents(baseParams([{ id: 'i8r', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-0-viejo' } })
     expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].mesaAjena).toBeUndefined()
@@ -592,7 +598,9 @@ describe('sync.mobile.service processIntents', () => {
   // Pedidos en línea fase 2 (T8): el 409 de las guardas de tarjeta es un rechazo de NEGOCIO permanente, nunca RETRY.
   it('la cola sin red PAY_CASH sobre un pedido de tarjeta queda REJECTED ONLINE_ORDER_PAID_BY_CARD, no RETRY', async () => {
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValueOnce(cardOnlineOrderError())
-    const acks = await processIntents(baseParams([{ id: 'i-card', type: 'PAY_CASH', payload: { orderId: 'order-web', amountCents: 25000 } }]))
+    const acks = await processIntents(
+      baseParams([{ id: 'i-card', type: 'PAY_CASH', payload: { orderId: 'order-web', amountCents: 25000 } }]),
+    )
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'ONLINE_ORDER_PAID_BY_CARD' })
   })
 
@@ -2080,11 +2088,15 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
     ;(prisma.posSyncIntent.updateMany as jest.Mock).mockReset().mockResolvedValue({ count: 1 })
     ;(prisma.posSyncIntent.deleteMany as jest.Mock).mockReset().mockResolvedValue({ count: 1 })
-    ;(prisma.order.findFirst as jest.Mock).mockReset().mockResolvedValue({ id: 'order-9', orderNumber: 'ORD-9', version: 3, status: 'PENDING', total: 120 })
+    ;(prisma.order.findFirst as jest.Mock)
+      .mockReset()
+      .mockResolvedValue({ id: 'order-9', orderNumber: 'ORD-9', version: 3, status: 'PENDING', total: 120 })
     ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
     ;(prisma.payment.findUnique as jest.Mock).mockReset().mockResolvedValue(null)
-    ;(tableService.assignTable as jest.Mock).mockReset().mockResolvedValue({ order: { id: 'order-1', orderNumber: 'ORD-1', version: 1 }, isNewOrder: true })
+    ;(tableService.assignTable as jest.Mock)
+      .mockReset()
+      .mockResolvedValue({ order: { id: 'order-1', orderNumber: 'ORD-1', version: 1 }, isNewOrder: true })
     ;(orderMobileService.payCashOrder as jest.Mock).mockReset().mockResolvedValue({ paymentId: 'payment-1', amount: 5000, tipAmount: 0 })
     ;(orderMobileService.cancelOrder as jest.Mock).mockReset().mockResolvedValue(undefined)
     ;(orderTpvService.addItemsToOrder as jest.Mock).mockReset().mockResolvedValue({ version: 4, total: 120 })
@@ -2099,7 +2111,14 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
 
   it('ADD_ITEMS con promoción en el payload ORIGINAL nace NO retomable', async () => {
     await processIntents(
-      baseParams([{ id: 'i-promo', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ promotionRef: { promotionId: 'p', promotionInstanceId: 'x', selections: [] } }] } }]),
+      baseParams([
+        {
+          id: 'i-promo',
+          seq: 9,
+          type: 'ADD_ITEMS',
+          payload: { orderId: 'order-9', items: [{ promotionRef: { promotionId: 'p', promotionInstanceId: 'x', selections: [] } }] },
+        },
+      ]),
     )
     expect(prisma.posSyncIntent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ resultJson: { protocolo: 'huella-v1', retomable: false } }),
@@ -2124,7 +2143,10 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
 
   it('si el ejecutor perdió su turno, la huella lanza ReservaPerdida (revierte su transacción) y contesta lo vigente', async () => {
     ;(orderMobileService.payCashOrder as jest.Mock).mockImplementation(async (_v: string, _o: string, input: any) => {
-      await input.dentroDeLaTx({ posSyncIntent: { updateMany: jest.fn(async () => ({ count: 0 })) } }, { orderId: 'order-9', paymentId: 'p' })
+      await input.dentroDeLaTx(
+        { posSyncIntent: { updateMany: jest.fn(async () => ({ count: 0 })) } },
+        { orderId: 'order-9', paymentId: 'p' },
+      )
       return { paymentId: 'nunca' }
     })
     ;(prisma.posSyncIntent.findUnique as jest.Mock)
@@ -2134,7 +2156,9 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     const [ack] = await processIntents(baseParams([pago()]))
 
     expect(ack).toMatchObject({ status: 'ACKED', result: { paymentId: 'payment-del-otro' } })
-    expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'ACKED' }) }))
+    expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'ACKED' }) }),
+    )
   })
 
   it('OPEN_TABLE sin huella de hace 61 s se retoma: CAS sobre lo leído, se ejecuta una vez y cierra con el turno nuevo', async () => {
@@ -2142,7 +2166,9 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(fila)
     ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 9 }) // su propia seq: no la frena el fence
 
-    const [ack] = await processIntents(baseParams([{ id: 'i-open', seq: 9, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-1' } }]))
+    const [ack] = await processIntents(
+      baseParams([{ id: 'i-open', seq: 9, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-1' } }]),
+    )
 
     expect(ack).toMatchObject({ status: 'ACKED', result: expect.objectContaining({ orderId: 'order-1', localOrderId: 'local-1' }) })
     expect(prisma.posSyncIntent.updateMany).toHaveBeenNthCalledWith(1, {
@@ -2153,7 +2179,10 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     expect(tableService.assignTable).toHaveBeenCalledTimes(1)
     expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
     expect(prisma.posSyncIntent.updateMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ createdAt: turnoNuevo }), data: expect.objectContaining({ status: 'ACKED' }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ createdAt: turnoNuevo }),
+        data: expect.objectContaining({ status: 'ACKED' }),
+      }),
     )
   })
 
@@ -2163,23 +2192,34 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     )
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ orderNumber: 'ORD-A', version: 2, total: 0 })
 
-    const [ack] = await processIntents(baseParams([{ id: 'i-open', seq: 9, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-1' } }]))
+    const [ack] = await processIntents(
+      baseParams([{ id: 'i-open', seq: 9, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-1' } }]),
+    )
 
-    expect(ack).toMatchObject({ status: 'ACKED', result: { orderId: 'order-A', orderNumber: 'ORD-A', isNewOrder: true, localOrderId: 'local-1' } })
+    expect(ack).toMatchObject({
+      status: 'ACKED',
+      result: { orderId: 'order-A', orderNumber: 'ORD-A', isNewOrder: true, localOrderId: 'local-1' },
+    })
     expect(tableService.assignTable).not.toHaveBeenCalled()
   })
 
   it('ADD_ITEMS CON huella → ACK con esa cuenta sin re-ejecutar (una división pudo mover sus renglones)', async () => {
-    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('ADD_ITEMS', 'i-add', 90_000, { ...MARCA, huella: { orderId: 'order-9' } }))
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+      reserva('ADD_ITEMS', 'i-add', 90_000, { ...MARCA, huella: { orderId: 'order-9' } }),
+    )
 
-    const [ack] = await processIntents(baseParams([{ id: 'i-add', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 2 }] } }]))
+    const [ack] = await processIntents(
+      baseParams([{ id: 'i-add', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 2 }] } }]),
+    )
 
     expect(ack).toMatchObject({ status: 'ACKED', result: { orderId: 'order-9', version: 3, total: 120 } })
     expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
   })
 
   it('PAY_CASH CON huella se re-ejecuta: la salida idempotente de payCashOrder devuelve ese pago', async () => {
-    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('PAY_CASH', 'i-pay', 90_000, { ...MARCA, huella: { orderId: 'order-9', paymentId: 'payment-1' } }))
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+      reserva('PAY_CASH', 'i-pay', 90_000, { ...MARCA, huella: { orderId: 'order-9', paymentId: 'payment-1' } }),
+    )
 
     const [ack] = await processIntents(baseParams([pago()]))
 
@@ -2188,7 +2228,9 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
   })
 
   it('CANCEL_ORDER CON huella → OUTCOME_UNKNOWN (sus efectos posteriores pudieron faltar), sin volver a cancelar', async () => {
-    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('CANCEL_ORDER', 'i-cancel', 70_000, { ...MARCA, huella: { orderId: 'order-9' } }))
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+      reserva('CANCEL_ORDER', 'i-cancel', 70_000, { ...MARCA, huella: { orderId: 'order-9' } }),
+    )
 
     const [ack] = await processIntents(baseParams([{ id: 'i-cancel', seq: 9, type: 'CANCEL_ORDER', payload: { orderId: 'order-9' } }]))
 
@@ -2215,9 +2257,13 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
   })
 
   it('ADD_ITEMS marcado NO retomable (promoción en el original) no se retoma aunque el reenvío ya no la traiga', async () => {
-    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('ADD_ITEMS', 'i-add', 6 * 60_000, { protocolo: 'huella-v1', retomable: false }))
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(
+      reserva('ADD_ITEMS', 'i-add', 6 * 60_000, { protocolo: 'huella-v1', retomable: false }),
+    )
 
-    const [ack] = await processIntents(baseParams([{ id: 'i-add', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 1 }] } }]))
+    const [ack] = await processIntents(
+      baseParams([{ id: 'i-add', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 1 }] } }]),
+    )
 
     expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN' })
     expect(orderTpvService.addItemsToOrder).not.toHaveBeenCalled()
@@ -2250,7 +2296,12 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(Object.assign(new Error('timeout'), { code: 'P2028' }))
     await processIntents(baseParams([pago()]))
     expect(prisma.posSyncIntent.deleteMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({ idempotencyKey: 'i-pay', status: 'PROCESSING', createdAt: expect.any(Date), resultJson: { equals: MARCA } }),
+      where: expect.objectContaining({
+        idempotencyKey: 'i-pay',
+        status: 'PROCESSING',
+        createdAt: expect.any(Date),
+        resultJson: { equals: MARCA },
+      }),
     })
   })
 
@@ -2317,7 +2368,9 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     const conHuella = { ...MARCA, huella: { orderId: 'order-9', paymentId: 'payment-1' } }
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('PAY_CASH', 'i-pay', 6 * 60_000, conHuella))
 
-    const [ack] = await processIntents(baseParams([{ id: 'i-pay', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 1 }] } }]))
+    const [ack] = await processIntents(
+      baseParams([{ id: 'i-pay', seq: 9, type: 'ADD_ITEMS', payload: { orderId: 'order-9', items: [{ productId: 'p1', quantity: 1 }] } }]),
+    )
 
     expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'INTENT_TYPE_MISMATCH' })
     expect(prisma.posSyncIntent.updateMany).not.toHaveBeenCalled()
@@ -2340,7 +2393,11 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     const conHuella = { ...MARCA, huella: { orderId: 'order-9', paymentId: 'payment-1' } }
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('PAY_CASH', 'i-pay', 90_000, conHuella))
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
-    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-luis', servedBy: { firstName: 'Luis', lastName: 'M' } })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-luis',
+      servedBy: { firstName: 'Luis', lastName: 'M' },
+    })
     ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-9', status: 'COMPLETED', type: 'REGULAR' })
 
     const [ack] = await processIntents(baseParams([pago()]))
@@ -2355,7 +2412,11 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
 
   it('🔴 R2-6: el PAY_CASH sin pago previo en mesa ajena ya no se rechaza (es dinero capturado): se registra con la marca de la mesa ajena', async () => {
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
-    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-luis', servedBy: { firstName: 'Luis', lastName: 'M' } })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-luis',
+      servedBy: { firstName: 'Luis', lastName: 'M' },
+    })
 
     const [ack] = await processIntents(baseParams([pago()]))
 
@@ -2382,5 +2443,59 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
       ['i-add', 'ACKED'],
     ])
     expect((orderTpvService.addItemsToOrder as jest.Mock).mock.calls[0][1]).toBe('order-1')
+  })
+})
+
+describe('PAY_CASH referencia de turno TPV autenticada', () => {
+  const shiftId = 'c000000000000000000000010'
+  const input = (shift: unknown = shiftId) => [
+    { id: 'cash-s3', type: 'PAY_CASH', payload: { orderId: 'order-s3', amountCents: 5000, shiftIdDeLaVenta: shift } },
+  ]
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+    ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
+    ;(prisma.terminal.findFirst as jest.Mock).mockResolvedValue({ id: 'terminal-own' })
+    ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: shiftId })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'payment-own' })
+  })
+  it('propaga sólo el turno validado y serial autenticado al mismo payCashOrder', async () => {
+    const result = await processIntents({ ...baseParams(input()), terminalSerialNumber: 'AVQD-auth' } as any)
+    expect(result[0].status).toBe('ACKED')
+    expect(prisma.shift.findFirst).toHaveBeenCalledWith({ where: { id: shiftId, venueId: VENUE }, select: { id: true } })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-s3',
+      expect.objectContaining({ shiftIdDeLaVenta: shiftId, terminalSerialNumber: 'AVQD-auth', idempotencyKey: 'cash-s3' }),
+    )
+  })
+  it.each(['local-shift', {}, 123])('TPV nuevo rechaza formato/provisional visible antes del dinero %p', async shift => {
+    const result = await processIntents({ ...baseParams(input(shift)), terminalSerialNumber: 'AVQD-auth' } as any)
+    expect(result[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+  it('referencia ajena o inexistente no cobra sobre otro turno', async () => {
+    ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue(null)
+    const result = await processIntents({ ...baseParams(input()), terminalSerialNumber: 'AVQD-auth' } as any)
+    expect(result[0].status).toBe('REJECTED')
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+  it('sin serial autenticado ignora clave antes ignorada y conserva legacy', async () => {
+    const result = await processIntents(baseParams(input({ untrusted: true })))
+    expect(result[0].status).toBe('ACKED')
+    const args = (orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2]
+    expect(args.shiftIdDeLaVenta).toBeUndefined()
+    expect(prisma.shift.findFirst).not.toHaveBeenCalled()
+  })
+  it('serial autenticado ajeno no acredita referencia aunque deviceId/body digan otra cosa', async () => {
+    ;(prisma.terminal.findFirst as jest.Mock).mockResolvedValue(null)
+    const result = await processIntents({ ...baseParams(input()), terminalSerialNumber: 'AVQD-foreign' } as any)
+    expect(result[0].status).toBe('REJECTED')
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
   })
 })

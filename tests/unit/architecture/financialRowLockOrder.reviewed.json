@@ -8,7 +8,7 @@
     "src/services/b4bit/b4bit.service.ts#lockB4BitPaymentRow": {
       "count": 1,
       "loops": 0,
-      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+      "reason": "Un Payment por transacción. CO toma primero sesiones/vales y toda su Order/ascendencia canónica; las hojas de fase, AC y cancelación no esperan después Order, GiftCard ni sesiones. Cruces reales con CO en tpvCryptoOperation.integration.test.ts."
     },
     "src/services/dashboard/commission/commission-calculation.service.ts#createCommissionForPayment": {
       "count": 1,
@@ -1156,6 +1156,21 @@
       "count": 1,
       "loops": 0,
       "reason": "Tarjetas 1b (entrega): la pasada llama al helper sin transacción propia (autocommit); el helper sólo toma sobres con SKIP LOCKED y no retiene nada al volver."
+    },
+    "src/services/b4bit/b4bit.service.ts#initiateCryptoPayment#lockB4BitPaymentRow": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Dos transacciones independientes sobre el mismo Payment: PREPARED→SENDING y persistir READY; sólo leen/mezclan el Payment y hacen CAS, sin Order/GiftCard/sesión posterior. El POST al proveedor queda entre commits. PG prueba replay-claim y READY contra CO real con Order retenida."
+    },
+    "src/services/b4bit/b4bit.service.ts#processWebhook#lockB4BitPaymentRow": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Sólo AC: una transacción hoja Payment→metadata con watermark durable; no toma Order/GiftCard/sesiones ni Shift. CO sigue su jerarquía completa anterior. PG acredita AC con Payment mientras CO posee Order y luego preserva su confirmación."
+    },
+    "src/services/b4bit/b4bit.service.ts#cancelCryptoPayment#lockB4BitPaymentRow": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una hoja Payment→CAS de cancelación local→ActivityLog, sin Order/GiftCard/sesiones posteriores; ActivityLog no tiene FK a Order/Payment/GiftCard y aquí no se clasifica actorType. PG cruza cancelación real y CO real en ambos sentidos, preservando confirmación ganadora o revisión si ganó la cancelación."
     }
   }
 }
