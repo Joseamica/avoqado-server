@@ -21019,3 +21019,23 @@ model CrmDigestSend {
 
   @@unique([staffId, day, kind])
 }
+
+/// Cada mensaje del WhatsApp de ventas (coexistencia: el founder sigue en la app de su celular). Lo escribe SÓLO el webhook
+/// de Meta y nunca se contesta desde aquí. Entra crudo; la ficha del CRM lo liga al negocio por el teléfono al leerlo.
+model CrmWhatsappMessage {
+  id            String   @id @default(cuid())
+  wamid         String   @unique // el id de Meta: un reenvío o el historial repetido no duplican
+  phoneNumberId String // nuestro número que lo recibió o lo mandó
+  contactPhone  String // el prospecto, en E.164
+  contactName   String? // su nombre de perfil, si Meta lo mandó
+  direction     String // ENTRA | SALE
+  origin        String // MENSAJE | ECO (lo mandó el founder desde la app) | HISTORIAL
+  type          String
+  body          String? // el texto, o el pie de una foto
+  sentAt        DateTime
+  raw           Json
+  receivedAt    DateTime @default(now())
+
+  @@index([contactPhone, sentAt])
+  @@index([phoneNumberId, sentAt])
+}
