@@ -1,4 +1,7 @@
 import { prismaMock } from '@tests/__helpers__/setup'
+import logger from '@/config/logger'
+import { ConflictError } from '@/errors/AppError'
+import { issueInvoiceSchema } from '@/routes/superadmin/billing.schemas'
 
 // Mock the fiscal provider factory so we control the PAC (Facturapi) boundary.
 jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({
@@ -11,6 +14,7 @@ import {
   issuePlatformCfdi,
   cancelPlatformCfdi,
   discardFailedPlatformCfdi,
+  fetchPlatformCfdiArtifact,
   registerPlatformPayment,
   sendPlatformCfdiEmail,
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
@@ -566,5 +570,395 @@ describe('platformCfdi.service', () => {
       await expect(discardFailedPlatformCfdi('f2')).rejects.toMatchObject({ code: 'VALIDATION' })
       expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
     })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// «Por cobrar» (spec 2026-11-02-por-cobrar-superadmin §6): los cambios MÍNIMOS al servicio genérico. Es dinero y fiscal, así
+// que cada cambio nace con su prueba Y con la prueba de que el camino de «Nueva factura» (sin ligar) queda exactamente igual.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const mockLoggerError = (logger as unknown as { error: jest.Mock }).error
+
+describe('platformCfdi.service — «Por cobrar»: emitir (líneas con IVA incluido, totales de la foto, filas ligadas)', () => {
+  const baseInput = {
+    billingTaxProfileId: 'p1',
+    lines: [{ description: 'Mensualidad', satProductKey: '81161700', satUnitKey: 'E48', quantity: 1, unitPriceCents: 159900 }],
+    formaPago: '03',
+    metodoPago: 'PUE' as const,
+    idempotencyKey: 'por-cobrar:occ-1:0',
+    performedById: 'staff-1',
+  }
+  const PENDIENTE_SIN_UUID = { ...STAMPED, uuid: null, status: 'pending' as const }
+
+  /** Todo lo que `issuePlatformCfdi` lee antes de timbrar, y un `update` que devuelve la fila ya con lo escrito. */
+  function armaEmision(createInvoice: jest.Mock) {
+    prismaMock.platformCfdi.findUnique.mockResolvedValue(null) // ninguna fila previa con esa llave
+    prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE)
+    prismaMock.platformCfdi.create.mockResolvedValue({ id: 'cfdiL', status: 'STAMPING' })
+    prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'cfdiL', status: 'STAMPING', ...args.data }))
+    mockResolve.mockReturnValue({ createInvoice })
+  }
+  const datosDeLaFila = () => prismaMock.platformCfdi.create.mock.calls[0][0].data
+  const lasEscrituras = () => prismaMock.platformCfdi.update.mock.calls.map((call: any[]) => call[0].data)
+
+  describe('líneas con el IVA incluido (taxIncluded)', () => {
+    it('REGRESIÓN: sin los campos nuevos el concepto llega al proveedor con taxIncluded=false y los totales se calculan de las líneas', async () => {
+      const createInvoice = jest.fn().mockResolvedValue(STAMPED)
+      armaEmision(createInvoice)
+
+      await issuePlatformCfdi(baseInput)
+
+      expect(createInvoice.mock.calls[0][0].items[0]).toMatchObject({ unitPriceCents: 159900, taxIncluded: false, objetoImp: '02' })
+      expect(datosDeLaFila()).toMatchObject({ subtotalCents: 159900, discountCents: 0, taxCents: 25584, totalCents: 185484 })
+      expect(datosDeLaFila().platformChargeOccurrenceId).toBeUndefined() // no se liga a nada
+    })
+
+    it('taxIncluded=true llega al proveedor tal cual', async () => {
+      const createInvoice = jest.fn().mockResolvedValue({ ...STAMPED, totalCents: 49900 })
+      armaEmision(createInvoice)
+      const licencia = {
+        description: 'Licencia',
+        satProductKey: '43232611',
+        satUnitKey: 'E48',
+        quantity: 1,
+        unitPriceCents: 49900,
+        taxIncluded: true,
+      }
+
+      await issuePlatformCfdi({ ...baseInput, lines: [licencia] })
+
+      expect(createInvoice.mock.calls[0][0].items[0]).toMatchObject({ unitPriceCents: 49900, taxIncluded: true, objetoImp: '02' })
+    })
+
+    it('con `totals` se guardan ésos, no los que saldrían de las líneas (que sumarían el IVA otra vez)', async () => {
+      const createInvoice = jest.fn().mockResolvedValue({ ...STAMPED, totalCents: 49900 })
+      armaEmision(createInvoice)
+      const licencia = {
+        description: 'Licencia',
+        satProductKey: '43232611',
+        satUnitKey: 'E48',
+        quantity: 1,
+        unitPriceCents: 49900,
+        taxIncluded: true,
+      }
+
+      await issuePlatformCfdi({
+        ...baseInput,
+        lines: [licencia],
+        totals: { subtotalCents: 43017, discountCents: 0, taxCents: 6883, totalCents: 49900 },
+      })
+
+      // Calculadas de la línea como si fuera precio neto serían 49900 + 7984 = 57884.
+      expect(datosDeLaFila()).toMatchObject({ subtotalCents: 43017, discountCents: 0, taxCents: 6883, totalCents: 49900 })
+    })
+  })
+
+  describe('fila ligada a una ocurrencia (platformChargeOccurrenceId)', () => {
+    it('la fila se crea ligada a la ocurrencia', async () => {
+      const createInvoice = jest.fn().mockResolvedValue(STAMPED)
+      armaEmision(createInvoice)
+
+      await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+
+      expect(datosDeLaFila()).toMatchObject({
+        platformChargeOccurrenceId: 'occ-1',
+        status: 'STAMPING',
+        idempotencyKey: 'por-cobrar:occ-1:0',
+      })
+    })
+
+    it('si el PAC contesta pending SIN UUID: la fila se queda STAMPING con su facturapiId (no STAMPED)', async () => {
+      armaEmision(jest.fn().mockResolvedValue(PENDIENTE_SIN_UUID))
+
+      const row = await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+
+      expect(lasEscrituras()).toHaveLength(1)
+      expect(lasEscrituras()[0]).toMatchObject({ facturapiId: 'fa-inv-1' })
+      expect(lasEscrituras()[0].status).toBeUndefined()
+      expect(lasEscrituras()[0].uuid).toBeUndefined()
+      expect(row.status).toBe('STAMPING')
+      expect(row.facturapiId).toBe('fa-inv-1')
+    })
+
+    it('un PAC que dice valid pero no trae UUID tampoco se da por timbrado', async () => {
+      armaEmision(jest.fn().mockResolvedValue({ ...STAMPED, uuid: null, status: 'valid' }))
+
+      const row = await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+
+      expect(row.status).toBe('STAMPING')
+      expect(lasEscrituras()[0].status).toBeUndefined()
+    })
+
+    it('sin el timbre no manda el correo al cliente (no hay nada que entregar)', async () => {
+      const sendInvoiceByEmail = jest.fn().mockResolvedValue(undefined)
+      armaEmision(jest.fn().mockResolvedValue(PENDIENTE_SIN_UUID))
+      mockResolve.mockReturnValue({ createInvoice: jest.fn().mockResolvedValue(PENDIENTE_SIN_UUID), sendInvoiceByEmail })
+      // Si el correo se intentara, la fila estaría lista para enviarse (así la prueba no pasa en vacío).
+      prismaMock.platformCfdi.findUnique.mockImplementation(async ({ where }: any) =>
+        where.id ? { id: 'cfdiL', status: 'STAMPED', facturapiId: 'fa-inv-1', platformEmisorId: 'em1', billingTaxProfileId: 'p1' } : null,
+      )
+      prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
+
+      await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+      await new Promise(resolve => setImmediate(resolve))
+
+      expect(sendInvoiceByEmail).not.toHaveBeenCalled()
+    })
+
+    it('con el timbre SÍ manda el correo al cliente, también ligada', async () => {
+      const sendInvoiceByEmail = jest.fn().mockResolvedValue(undefined)
+      armaEmision(jest.fn().mockResolvedValue(STAMPED))
+      mockResolve.mockReturnValue({ createInvoice: jest.fn().mockResolvedValue(STAMPED), sendInvoiceByEmail })
+      prismaMock.platformCfdi.findUnique.mockImplementation(async ({ where }: any) =>
+        where.id ? { id: 'cfdiL', status: 'STAMPED', facturapiId: 'fa-inv-1', platformEmisorId: 'em1', billingTaxProfileId: 'p1' } : null,
+      )
+      prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
+
+      await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+      await new Promise(resolve => setImmediate(resolve))
+
+      expect(sendInvoiceByEmail).toHaveBeenCalledWith('fa-inv-1', 'cliente@demo.mx')
+    })
+
+    it('REGRESIÓN: SIN ligar, el mismo pending sin UUID sigue quedando STAMPED como hoy (deuda ajena, no se toca)', async () => {
+      armaEmision(jest.fn().mockResolvedValue(PENDIENTE_SIN_UUID))
+
+      const row = await issuePlatformCfdi(baseInput)
+
+      expect(lasEscrituras()[0]).toMatchObject({ status: 'STAMPED', facturapiId: 'fa-inv-1', uuid: null })
+      expect(row.status).toBe('STAMPED')
+    })
+
+    it('si el total que timbró el PAC difiere: guarda el del PAC y lo registra con logger.error', async () => {
+      armaEmision(jest.fn().mockResolvedValue({ ...STAMPED, totalCents: 185485 }))
+
+      const row = await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+
+      expect(lasEscrituras()[0]).toMatchObject({ status: 'STAMPED', totalCents: 185485 })
+      expect(row.totalCents).toBe(185485)
+      expect(mockLoggerError).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(mockLoggerError.mock.calls[0])).toMatch(/185484.*185485|185485.*185484/)
+    })
+
+    it('si el PAC contesta sin timbre Y con otro total, también guarda el del PAC', async () => {
+      armaEmision(jest.fn().mockResolvedValue({ ...PENDIENTE_SIN_UUID, totalCents: 185485 }))
+
+      await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+
+      expect(lasEscrituras()[0]).toMatchObject({ facturapiId: 'fa-inv-1', totalCents: 185485 })
+      expect(mockLoggerError).toHaveBeenCalledTimes(1)
+    })
+
+    it('si el total del PAC coincide: no toca el total ni registra nada', async () => {
+      armaEmision(jest.fn().mockResolvedValue(STAMPED)) // 185484, igual al calculado
+
+      await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1' })
+
+      expect(lasEscrituras()[0].totalCents).toBeUndefined()
+      expect(mockLoggerError).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN: SIN ligar, un total distinto del PAC no se guarda ni se registra (camino genérico igual que hoy)', async () => {
+      armaEmision(jest.fn().mockResolvedValue({ ...STAMPED, totalCents: 185485 }))
+
+      await issuePlatformCfdi(baseInput)
+
+      expect(lasEscrituras()[0].totalCents).toBeUndefined()
+      expect(mockLoggerError).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('reserveCheck (la comprobación que corre junto con la reserva de la fila)', () => {
+    it('corre en la MISMA transacción, ANTES de crear la fila STAMPING', async () => {
+      const orden: string[] = []
+      const createInvoice = jest.fn().mockResolvedValue(STAMPED)
+      armaEmision(createInvoice)
+      prismaMock.platformCfdi.create.mockImplementation(async () => {
+        orden.push('crear')
+        return { id: 'cfdiL', status: 'STAMPING' }
+      })
+      const reserveCheck = jest.fn(async (tx: unknown) => {
+        orden.push('comprobar')
+        expect(tx).toBe(prismaMock) // el tx de la transacción que abrió issuePlatformCfdi
+      })
+
+      await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1', reserveCheck })
+
+      expect(orden).toEqual(['comprobar', 'crear'])
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(createInvoice).toHaveBeenCalledTimes(1)
+    })
+
+    it('si lanza: no hay fila ni llamada al PAC, y el error sale tal cual', async () => {
+      const createInvoice = jest.fn().mockResolvedValue(STAMPED)
+      armaEmision(createInvoice)
+      const rechazo = new ConflictError('El cobro ya no está pagado', 'PLATFORM_CHARGE_NOT_PAID')
+      const reserveCheck = jest.fn().mockRejectedValue(rechazo)
+
+      await expect(issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1', reserveCheck })).rejects.toBe(rechazo)
+
+      expect(reserveCheck).toHaveBeenCalledTimes(1)
+      expect(prismaMock.platformCfdi.create).not.toHaveBeenCalled()
+      expect(prismaMock.platformCfdi.update).not.toHaveBeenCalled() // ni siquiera un STAMP_FAILED
+      expect(createInvoice).not.toHaveBeenCalled()
+    })
+
+    it('una llave que ya tiene fila regresa esa fila SIN correr la comprobación (idempotente)', async () => {
+      const createInvoice = jest.fn()
+      armaEmision(createInvoice)
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'previa', status: 'STAMPING' })
+      const reserveCheck = jest.fn()
+
+      const row = await issuePlatformCfdi({ ...baseInput, platformChargeOccurrenceId: 'occ-1', reserveCheck })
+
+      expect(row.id).toBe('previa')
+      expect(reserveCheck).not.toHaveBeenCalled()
+      expect(createInvoice).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN: sin reserveCheck no se abre ninguna transacción (la fila se crea como siempre)', async () => {
+      armaEmision(jest.fn().mockResolvedValue(STAMPED))
+
+      await issuePlatformCfdi(baseInput)
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      expect(prismaMock.platformCfdi.create).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+describe('platformCfdi.service — «Por cobrar»: descartar una factura fallida', () => {
+  it('rechaza una fila ligada a una ocurrencia: se reintenta desde «Por cobrar»', async () => {
+    prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'f3', status: 'STAMP_FAILED', platformChargeOccurrenceId: 'occ-1' })
+
+    await expect(discardFailedPlatformCfdi('f3')).rejects.toMatchObject({
+      code: 'VALIDATION',
+      message: expect.stringMatching(/Por cobrar/),
+    })
+
+    expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN: una fila fallida SIN ligar (platformChargeOccurrenceId null) se descarta como hoy', async () => {
+    const failed = {
+      id: 'f4',
+      status: 'STAMP_FAILED',
+      platformChargeOccurrenceId: null,
+      receptorRfc: 'XAXX010101000',
+      totalCents: 1,
+      venueId: null,
+    }
+    prismaMock.platformCfdi.findUnique.mockResolvedValue(failed)
+    prismaMock.platformCfdi.count.mockResolvedValue(0)
+    prismaMock.platformCfdi.delete.mockResolvedValue(failed)
+
+    await expect(discardFailedPlatformCfdi('f4')).resolves.toEqual(failed)
+
+    expect(prismaMock.platformCfdi.delete).toHaveBeenCalledWith({ where: { id: 'f4' } })
+  })
+})
+
+describe('platformCfdi.service — «Por cobrar»: modo de prueba (PLATFORM_CHARGES_SANDBOX) en cancelar, PDF, XML y correo', () => {
+  const EMISOR_DE_QA = { ...ACTIVE_EMISOR, providerKeyEnc: null } // el emisor de QA no trae llave guardada
+  const OPERACIONES: Array<[string, (id: string) => Promise<unknown>]> = [
+    ['cancelar', id => cancelPlatformCfdi(id, '02')],
+    ['bajar el PDF', id => fetchPlatformCfdiArtifact(id, 'pdf')],
+    ['bajar el XML', id => fetchPlatformCfdiArtifact(id, 'xml')],
+    ['mandar el correo', id => sendPlatformCfdiEmail(id, 'cliente@demo.mx')],
+  ]
+
+  const dadaLaFila = (ligada: boolean, emisor: Record<string, unknown> = EMISOR_DE_QA) => {
+    prismaMock.platformCfdi.findUnique.mockResolvedValue({
+      id: 'c1',
+      status: 'STAMPED',
+      facturapiId: 'fa1',
+      platformEmisorId: 'em1',
+      billingTaxProfileId: 'p1',
+      serie: 'A',
+      folio: '118',
+      platformChargeOccurrenceId: ligada ? 'occ-1' : null,
+    })
+    prismaMock.platformEmisor.findUnique.mockResolvedValue(emisor)
+    prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'c1', ...args.data }))
+    mockResolve.mockReturnValue({
+      cancelInvoice: jest.fn().mockResolvedValue({ status: 'canceled', cancelledAt: new Date() }),
+      downloadPdf: jest.fn().mockResolvedValue(Buffer.from('pdf')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('xml')),
+      sendInvoiceByEmail: jest.fn().mockResolvedValue(undefined),
+    })
+  }
+  const sandboxUsado = () => mockResolve.mock.calls[mockResolve.mock.calls.length - 1][1]
+
+  afterEach(() => {
+    delete process.env.PLATFORM_CHARGES_SANDBOX
+  })
+
+  it.each(OPERACIONES)('con la variable, %s de una fila LIGADA usa sandbox: true', async (_nombre, operacion) => {
+    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+    dadaLaFila(true)
+
+    await operacion('c1')
+
+    expect(sandboxUsado()).toEqual({ sandbox: true })
+  })
+
+  it.each(OPERACIONES)('REGRESIÓN: con la variable, %s de una fila SIN ligar sigue con sandbox: false', async (_nombre, operacion) => {
+    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+    dadaLaFila(false)
+
+    await operacion('c1')
+
+    expect(sandboxUsado()).toEqual({ sandbox: false })
+  })
+
+  it.each(OPERACIONES)('REGRESIÓN: sin la variable, %s de una fila LIGADA sigue con sandbox: false', async (_nombre, operacion) => {
+    dadaLaFila(true)
+
+    await operacion('c1')
+
+    expect(sandboxUsado()).toEqual({ sandbox: false })
+  })
+
+  it.each(OPERACIONES)(
+    'REGRESIÓN: sin la variable, %s de una fila SIN ligar sigue con sandbox: false (y con una llave guardada, sin problema)',
+    async (_nombre, operacion) => {
+      dadaLaFila(false, ACTIVE_EMISOR) // trae providerKeyEnc: la ruta de siempre no se entera de nada
+
+      await operacion('c1')
+
+      expect(sandboxUsado()).toEqual({ sandbox: false })
+    },
+  )
+
+  it.each(OPERACIONES)(
+    'con la variable y el emisor con llave guardada, %s de una fila LIGADA se niega y no habla con Facturapi',
+    async (_nombre, operacion) => {
+      process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+      dadaLaFila(true, ACTIVE_EMISOR)
+
+      await expect(operacion('c1')).rejects.toBeInstanceOf(PlatformBillingError)
+
+      expect(mockResolve).not.toHaveBeenCalled()
+    },
+  )
+})
+
+describe('issueInvoiceSchema — el formulario genérico no puede producir líneas con IVA incluido', () => {
+  it('descarta taxIncluded de una línea y conserva el resto', () => {
+    const parsed = issueInvoiceSchema.parse({
+      body: {
+        billingTaxProfileId: 'p1',
+        lines: [
+          { description: 'Licencia', satProductKey: '43232611', satUnitKey: 'E48', quantity: 1, unitPriceCents: 49900, taxIncluded: true },
+        ],
+        formaPago: '03',
+        metodoPago: 'PUE',
+      },
+    })
+
+    expect(parsed.body.lines[0]).not.toHaveProperty('taxIncluded')
+    expect(parsed.body.lines[0]).toMatchObject({ description: 'Licencia', unitPriceCents: 49900 })
   })
 })

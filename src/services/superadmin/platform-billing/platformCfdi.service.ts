@@ -9,10 +9,12 @@
  * Money is integer cents end-to-end (MXN). IVA is ADD-ON (not included), unlike
  * the Stripe subscriptions which are IVA-inclusive.
  */
-import { Prisma, type PlatformCfdi } from '@prisma/client'
+import { Prisma, type PlatformCfdi, type PlatformEmisor } from '@prisma/client'
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
 import type { CfdiItemInput, CreateInvoiceParams, PaymentComplementTax } from '@/services/fiscal/providers/fiscal-provider.interface'
+import { chargesSandbox } from '@/services/superadmin/platform-charges/sandbox'
 import { getActivePlatformEmisor, PlatformBillingError } from './platformEmisor.service'
 import type {
   IssuePlatformCfdiInput,
@@ -166,7 +168,7 @@ export function computePlatformCfdiTotals(lines: PlatformCfdiLineInput[]): Platf
   return { subtotalCents, discountCents, taxCents, totalCents: subtotalCents - discountCents + taxCents }
 }
 
-/** Map our line input to the provider's CfdiItemInput (IVA add-on). */
+/** Map our line input to the provider's CfdiItemInput (IVA add-on, unless the line says its price already carries the IVA). */
 function toCfdiItem(line: PlatformCfdiLineInput): CfdiItemInput {
   const taxed = !line.taxExempt
   return {
@@ -178,13 +180,31 @@ function toCfdiItem(line: PlatformCfdiLineInput): CfdiItemInput {
     discountCents: line.discountCents ?? 0,
     objetoImp: taxed ? '02' : '01', // 02 = sí objeto de impuesto; 01 = no objeto
     taxes: taxed ? [{ type: 'IVA', factor: 'Tasa', rate: line.taxRate ?? DEFAULT_IVA_RATE, withholding: false }] : [],
-    taxIncluded: false,
+    taxIncluded: line.taxIncluded === true,
   }
+}
+
+/**
+ * El `sandbox` con el que se habla con Facturapi sobre una fila que ya existe: el que pidió quien llama o —con
+ * `PLATFORM_CHARGES_SANDBOX=true` y SÓLO para filas ligadas a una ocurrencia de «Por cobrar»— el de ese flujo, para que el
+ * recorrido de QA sea completo. Una fila sin ligar, o sin la variable, queda EXACTAMENTE como siempre.
+ */
+function sandboxFor(
+  row: Pick<PlatformCfdi, 'platformChargeOccurrenceId'>,
+  emisor: Pick<PlatformEmisor, 'providerKeyEnc'>,
+  requested: boolean,
+): boolean {
+  return requested || (row.platformChargeOccurrenceId != null && chargesSandbox(emisor))
 }
 
 /**
  * Issue an income CFDI to a customer. Idempotent by idempotencyKey: a repeated
  * call returns the existing row instead of double-stamping.
+ *
+ * «Por cobrar» (spec 2026-11-02-por-cobrar-superadmin §6) usa tres campos opcionales que el camino de «Nueva factura» no manda:
+ * `totals` (se guardan tal cual), `reserveCheck` (corre en la transacción que crea la fila) y `platformChargeOccurrenceId`, que
+ * además liga la fila y cambia dos cosas: si el PAC contesta sin timbre la fila se queda STAMPING con su `facturapiId` (para que
+ * `resolverIntento` la termine, en vez de darla por timbrada), y si el total del PAC difiere se guarda el del PAC.
  */
 export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<PlatformCfdi> {
   if (!input.lines.length) throw new PlatformBillingError('La factura requiere al menos un concepto', 'VALIDATION')
@@ -204,38 +224,48 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
   const profile = await prisma.billingTaxProfile.findUnique({ where: { id: input.billingTaxProfileId } })
   if (!profile) throw new PlatformBillingError('Perfil fiscal del receptor no encontrado', 'NO_PROFILE')
 
-  const totals = computePlatformCfdiTotals(input.lines)
+  // «Por cobrar» manda los totales de su ocurrencia: sus líneas pueden traer el IVA incluido y el cálculo genérico lo sumaría otra vez.
+  const totals = input.totals ?? computePlatformCfdiTotals(input.lines)
   const usoCfdi = input.usoCfdi ?? profile.defaultUsoCfdi
   const serie = input.serie ?? emisor.serie
+  const linked = input.platformChargeOccurrenceId != null
+
+  const data: Prisma.PlatformCfdiUncheckedCreateInput = {
+    platformEmisorId: emisor.id,
+    billingTaxProfileId: profile.id,
+    type: 'INGRESO',
+    platformChargeOccurrenceId: input.platformChargeOccurrenceId,
+    organizationId: profile.organizationId,
+    venueId: profile.venueId,
+    receptorRfc: profile.rfc,
+    receptorNombre: profile.razonSocial,
+    receptorRegimen: profile.regimenFiscal,
+    receptorCp: profile.codigoPostal,
+    usoCfdi,
+    lines: input.lines as unknown as Prisma.InputJsonValue,
+    formaPago: input.formaPago,
+    metodoPago: input.metodoPago,
+    subtotalCents: totals.subtotalCents,
+    discountCents: totals.discountCents,
+    taxCents: totals.taxCents,
+    totalCents: totals.totalCents,
+    status: 'STAMPING',
+    serie,
+    idempotencyKey: input.idempotencyKey,
+    createdById: input.performedById,
+  }
 
   // Reserve the row first (unique idempotencyKey) so concurrent retries don't double-stamp.
   let row: PlatformCfdi
   try {
-    row = await prisma.platformCfdi.create({
-      data: {
-        platformEmisorId: emisor.id,
-        billingTaxProfileId: profile.id,
-        type: 'INGRESO',
-        organizationId: profile.organizationId,
-        venueId: profile.venueId,
-        receptorRfc: profile.rfc,
-        receptorNombre: profile.razonSocial,
-        receptorRegimen: profile.regimenFiscal,
-        receptorCp: profile.codigoPostal,
-        usoCfdi,
-        lines: input.lines as unknown as Prisma.InputJsonValue,
-        formaPago: input.formaPago,
-        metodoPago: input.metodoPago,
-        subtotalCents: totals.subtotalCents,
-        discountCents: totals.discountCents,
-        taxCents: totals.taxCents,
-        totalCents: totals.totalCents,
-        status: 'STAMPING',
-        serie,
-        idempotencyKey: input.idempotencyKey,
-        createdById: input.performedById,
-      },
-    })
+    const { reserveCheck } = input
+    row = reserveCheck
+      ? // La comprobación y la reserva son UNA transacción: lo que la comprobación vio es lo que existe cuando nace la fila.
+        await prisma.$transaction(async tx => {
+          await reserveCheck(tx)
+          return tx.platformCfdi.create({ data })
+        })
+      : await prisma.platformCfdi.create({ data })
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
       const dup = await prisma.platformCfdi.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
@@ -264,17 +294,38 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
       externalId: input.idempotencyKey, // deterministic orphan recovery
     }
     const stamped = await provider.createInvoice(params)
+
+    // «Por cobrar»: si el PAC timbró otro total que la ocurrencia, manda el del PAC (es el que vio el SAT) y queda registrado.
+    const totalDiffers = linked && stamped.totalCents !== totals.totalCents
+    if (totalDiffers) {
+      logger.error('[platform-charges] el total que timbró el PAC no es el de la ocurrencia; se guarda el del PAC', {
+        platformCfdiId: row.id,
+        platformChargeOccurrenceId: input.platformChargeOccurrenceId,
+        occurrenceTotalCents: totals.totalCents,
+        stampedTotalCents: stamped.totalCents,
+      })
+    }
+    const pacTotal = totalDiffers ? { totalCents: stamped.totalCents } : {}
+
+    // «Por cobrar»: si el PAC contestó SIN timbre (pending, o sin UUID) la fila NO se da por timbrada: se queda STAMPING con su
+    // `facturapiId` para que `resolverIntento` la termine preguntándole al PAC. El camino genérico no cambia.
+    const withoutStamp = linked && (stamped.status !== 'valid' || !stamped.uuid)
     const updated = await prisma.platformCfdi.update({
       where: { id: row.id },
-      data: {
-        status: 'STAMPED',
-        facturapiId: stamped.providerInvoiceId,
-        uuid: stamped.uuid,
-        serie: stamped.serie ?? serie,
-        folio: stamped.folio,
-        stampedAt: stamped.stampedAt,
-      },
+      data: withoutStamp
+        ? { facturapiId: stamped.providerInvoiceId, ...pacTotal }
+        : {
+            status: 'STAMPED',
+            facturapiId: stamped.providerInvoiceId,
+            uuid: stamped.uuid,
+            serie: stamped.serie ?? serie,
+            folio: stamped.folio,
+            stampedAt: stamped.stampedAt,
+            ...pacTotal,
+          },
     })
+    // Sin timbre no hay nada que entregar: el correo sale cuando `resolverIntento` adopta la factura.
+    if (withoutStamp) return updated
     // Best-effort: entregar el CFDI por correo al timbrar. No bloquea ni hace fallar la emisión.
     if (profile.email) void sendPlatformCfdiEmail(updated.id, profile.email, sandbox).catch(() => undefined)
     return updated
@@ -326,6 +377,11 @@ export async function discardFailedPlatformCfdi(id: string): Promise<PlatformCfd
   if (row.status !== 'STAMP_FAILED') {
     throw new PlatformBillingError('Solo se pueden descartar facturas que fallaron al timbrar', 'VALIDATION')
   }
+  if (row.platformChargeOccurrenceId) {
+    // «Por cobrar»: la fila es el reclamo de un intento de factura. Se confirma con Facturapi y se cierra desde «Por cobrar»; borrarla
+    // aquí a ciegas dejaría timbrar otra vez algo que el PAC pudo haber timbrado.
+    throw new PlatformBillingError('Esta factura es de un cobro de «Por cobrar»: se reintenta o se deshace desde ahí', 'VALIDATION')
+  }
   const children = await prisma.platformCfdi.count({ where: { parentPlatformCfdiId: id } })
   if (children > 0) {
     throw new PlatformBillingError('No se puede descartar; tiene complementos de pago asociados', 'VALIDATION')
@@ -349,7 +405,10 @@ export async function cancelPlatformCfdi(
   const emisor = await prisma.platformEmisor.findUnique({ where: { id: row.platformEmisorId } })
   if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
 
-  const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox })
+  const provider = resolveFiscalProvider(
+    { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
+    { sandbox: sandboxFor(row, emisor, sandbox) },
+  )
   const res = await provider.cancelInvoice({ providerInvoiceId: row.facturapiId, motivo, substituteUuid })
 
   return prisma.platformCfdi.update({
@@ -563,7 +622,10 @@ export async function sendPlatformCfdiEmail(id: string, emailOverride?: string, 
   const emisor = await prisma.platformEmisor.findUnique({ where: { id: row.platformEmisorId } })
   if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
 
-  const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox })
+  const provider = resolveFiscalProvider(
+    { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
+    { sandbox: sandboxFor(row, emisor, sandbox) },
+  )
   if (!provider.sendInvoiceByEmail) throw new PlatformBillingError('El proveedor fiscal no soporta envío por correo', 'PROVIDER')
 
   await provider.sendInvoiceByEmail(row.facturapiId, email)
@@ -583,7 +645,10 @@ export async function fetchPlatformCfdiArtifact(
   const emisor = await prisma.platformEmisor.findUnique({ where: { id: row.platformEmisorId } })
   if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
 
-  const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox })
+  const provider = resolveFiscalProvider(
+    { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
+    { sandbox: sandboxFor(row, emisor, sandbox) },
+  )
   const buffer = kind === 'pdf' ? await provider.downloadPdf(row.facturapiId) : await provider.downloadXml(row.facturapiId)
   const filename = `${row.serie ?? ''}${row.folio ?? row.id}.${kind}`
   return { buffer, filename, contentType: kind === 'pdf' ? 'application/pdf' : 'application/xml' }
