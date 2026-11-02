@@ -21003,6 +21003,17 @@ model CrmInboundEntry {
   @@index([noticeSentAt, receivedAt]) // el barrido sólo lee los avisos pendientes de las últimas 24 h
 }
 
+/// La lápida de un negocio que el superadmin ELIMINÓ del CRM (D7, founder 2-nov: «al instante, pero solo superadmin»).
+/// Una fila por cada clave con la que un escritor automático lo volvería a crear — su llave de entrada, su Organization,
+/// cada correo y cada teléfono de sus contactos — guardada como `sha256("<CLASE>:<valor>")`, NUNCA el valor. `accountForTx`
+/// la lee sólo cuando no encontró a la persona y está por crear: lo que se dijo antes de `erasedAt` ya no crea nada; lo que
+/// la persona dice DESPUÉS (una entrada nueva de la landing, un mensaje nuevo) sí. Sin relaciones a propósito: la cuenta ya
+/// no existe.
+model CrmErased {
+  keyHash  String   @id
+  erasedAt DateTime
+}
+
 /// El aviso diario de cada persona: se APARTA antes de mandarlo (la llave única impide mandarlo dos veces) y guarda el
 /// contenido para reintentar igual.
 model CrmDigestSend {
