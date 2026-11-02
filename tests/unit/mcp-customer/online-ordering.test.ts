@@ -442,24 +442,20 @@ describe('online_ordering_configure', () => {
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDERING_CONFIGURED_VIA_MCP' }))
   })
 
-  it('fase 2: sin cuenta de Stripe el servicio rechaza (CARD_PAYMENT_NOT_ACCEPTED): responde ok:false con el texto claro, sin auditar ni tocar platillos', async () => {
-    mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: false })
-    mockUpdateSettings.mockRejectedValue(
-      new BadRequestError('Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.', 'CARD_PAYMENT_NOT_ACCEPTED'),
-    )
+  const SIN_COMO_COBRAR =
+    'Sin «Pagar al recoger» la tienda sólo cobraría con tarjeta, y tu cuenta de Stripe todavía no puede cobrar: déjalo prendido o conecta tu Stripe en Ligas de pago.'
+  it('A: quitar pagar al recoger sin Stripe cobrable, el servicio rechaza (NO_PAYMENT_MODE): responde ok:false con el texto claro, sin auditar ni tocar platillos', async () => {
+    mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: true })
+    mockUpdateSettings.mockRejectedValue(new BadRequestError(SIN_COMO_COBRAR, 'NO_PAYMENT_MODE'))
     const r = parse(
       await call('online_ordering_configure', {
         venueId: 'v1',
-        changes: { acceptsCardOnline: true },
+        changes: { acceptsPayAtPickup: false },
         availability: { availableOnline: true, categoryIds: ['c1'] },
         confirm: true,
       }),
     )
-    expect(r).toEqual({
-      ok: false,
-      code: 'CARD_PAYMENT_NOT_ACCEPTED',
-      error: 'Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.',
-    })
+    expect(r).toEqual({ ok: false, code: 'NO_PAYMENT_MODE', error: SIN_COMO_COBRAR })
     expect(mockSetAvailability).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()
   })

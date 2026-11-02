@@ -276,7 +276,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_configure',
-    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; pide tener la cuenta de Stripe conectada) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
+    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; viene prendido y la tienda lo ofrece sólo con la cuenta de Stripe conectada y lista) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
     {
       venueId: z.string().describe('Venue (debe estar en tu scope)'),
       changes: settingsPatchBody.optional().describe('Ajustes a cambiar, con las mismas reglas que el panel'),
@@ -321,9 +321,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       try {
         actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
       } catch (e) {
-        // Fase 2: sin cuenta de Stripe lista, el servicio rechaza prender la tarjeta (nada se escribió): se dice claro, sin error.
-        if (e instanceof BadRequestError && e.code === 'CARD_PAYMENT_NOT_ACCEPTED') {
-          return text({ ok: false, code: 'CARD_PAYMENT_NOT_ACCEPTED', error: e.message })
+        // A (2-nov): la tienda se quedaría sin cómo cobrar (p. ej. sólo tarjeta y Stripe sin poder cobrar). Nada se escribió: se dice
+        // claro, sin error.
+        if (e instanceof BadRequestError && e.code === 'NO_PAYMENT_MODE') {
+          return text({ ok: false, code: 'NO_PAYMENT_MODE', error: e.message })
         }
         throw e
       }
