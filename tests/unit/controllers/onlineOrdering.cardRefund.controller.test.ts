@@ -38,6 +38,17 @@ describe('POST …/card-refund: lo último que vio el operador', () => {
     const { expectedLatestRefundId: _sinVista, ...sinVista } = body()
     const r = await request(app).post(URL_).set('Idempotency-Key', KEY).send(sinVista)
     expect(r.status).toBe(400)
+    expect(r.body.message).toContain('Falta la última devolución que viste')
+    expect(mockRefund).not.toHaveBeenCalled()
+  })
+
+  it.each([[123], ['']])('un valor raro (%j) → 400 en español', async vista => {
+    const r = await request(app)
+      .post(URL_)
+      .set('Idempotency-Key', KEY)
+      .send(body({ expectedLatestRefundId: vista }))
+    expect(r.status).toBe(400)
+    expect(r.body.message).toContain('La última devolución que viste')
     expect(mockRefund).not.toHaveBeenCalled()
   })
 
