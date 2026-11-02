@@ -18,6 +18,7 @@ import mercadoPagoRoutes from './mercado-pago.routes'
 import deliveryChannelsRoutes from './delivery-channels.routes'
 import crmRoutes from './crm.routes'
 import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
+import { marcarRutaDeLaTpv } from '../services/shared/importePorPeso'
 
 const router = express.Router({ mergeParams: true })
 
@@ -29,7 +30,7 @@ router.use('/dashboard', dashboardRoutes) // All dashboard routes under /api/v1/
 // sales-summary, sales-by-item) y `src/services/command-center/`. El precedente interno es
 // `generalStats.dashboard.service.ts:244,958`: donde no hay medición se devuelve 0, no se inventa.
 router.use('/organizations', organizationRoutes) // Organization-level routes for OWNER dashboard
-router.use('/tpv', tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate)
+router.use('/tpv', marcarRutaDeLaTpv, tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate); la marca: cuenta del peso
 router.use('/invitations', invitationRoutes) // All invitation routes under /api/v1/invitations
 router.use('/onboarding', onboardingRoutes) // All onboarding routes under /api/v1/onboarding
 router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/v1/superadmin
