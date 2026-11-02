@@ -348,6 +348,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OrderServiceCharge: 'Orders, KDS & Cash',
   OrderCustomer: 'Orders, KDS & Cash',
   Shift: 'Orders, KDS & Cash',
+  TpvShiftOperation: 'Orders, KDS & Cash',
   KdsOrder: 'Orders, KDS & Cash',
   KdsOrderItem: 'Orders, KDS & Cash',
   Printer: 'Orders, KDS & Cash',

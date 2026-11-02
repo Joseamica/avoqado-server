@@ -47,6 +47,7 @@ import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 import { formaGanadoraDeCobros } from './formaDePagoGanadora'
+import { importePorPesoCents, importePorPesoViejoCents } from '../shared/importePorPeso'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -955,6 +956,9 @@ export async function emitirConEntrada(
     if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
     if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
     if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
+    // D3 (Codex r5 #3 de pedidos): una venta cancelada después de entrar a la global no se saca de ella ni se factura al cliente: ni egreso
+    // ni ingreso (su dinero, si lo hubo, se devuelve; la devolución lleva su propia nota). Antes de la comprobación previa: cero efectos.
+    if (esVentaCancelada(bundle)) return { status: 'VALIDATION_FAILED', cfdi: null, reasons: [MOTIVO_VENTA_CANCELADA] }
     // La comprobación previa: con `prisma`, sin candados ni efectos (C3-11/C3-20: lo enviado ya se recuperó arriba).
     const previa = await ext.prepararPorExtraccion(prisma, params, enGlobal, bundle)
     if (previa.reasons.length) return { status: 'VALIDATION_FAILED', cfdi: null, reasons: previa.reasons }
@@ -973,6 +977,7 @@ export async function emitirConEntrada(
           if (!b) return ['La venta ya no tiene un emisor fiscal configurado.']
           if (!b.facturacionEnabled) return ['Facturación no habilitada para este comercio']
           if (params.flow === 'AUTOFACTURA_A' && !b.autofacturaEnabled) return ['Autofactura no habilitada para este comercio']
+          if (esVentaCancelada(b)) return [MOTIVO_VENTA_CANCELADA] // D3: se canceló entre la comprobación previa y la reserva
           const base = { remanentes: c.remanentes, filasD16: c.filasD16, bruto: c.bruto, porTratamiento: c.porTratamiento }
           return (await ext.prepararPorExtraccion(tx, params, enGlobal, b, base)).reasons
         },
@@ -1152,6 +1157,9 @@ export async function emitirConEntrada(
         if (cancelada) reasons.push(cancelada)
       }
     }
+    // D3 (Codex r5 #3 de pedidos): las dos ramas de extracción no leen los motivos del cargador (conservan lo congelado), pero una venta
+    // cancelada no recibe un ingreso nuevo por ningún camino: la sustituta se detiene y la original sigue viva hasta que se cancele sola.
+    if (esVentaCancelada(bundle) && !reasons.includes(MOTIVO_VENTA_CANCELADA)) reasons.push(MOTIVO_VENTA_CANCELADA)
     // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC; tras el ajuste del cargador, la suma por concepto ya no es lo cobrado a propósito.
     const documentoCents = totalSegunElPacCents(entrada.params.items.map(conceptoDesdeElPayload))
     if (
@@ -1844,10 +1852,12 @@ export function examinarRenglon(it: RenglonParaCfdi, indice: number): RenglonExa
       // (`Math.round(precio × kilos × 100)`, order.tpv.service.ts:1738 y order.mobile.service.ts:666), que con flotante puede bajar
       // donde el redondeo decimal sube. Sólo esos dos resultados se aceptan (Codex r1 #5): con ellos el concepto lleva los kilos
       // reales y el precio por kilo que explica EXACTO lo cobrado, con hasta 6 decimales (experimento de la Tarea 1). Con
-      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen.
+      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen. Desde el 1-nov el SERVIDOR móvil cobra con
+      // la cuenta de las apps (`importePorPesoCents`, round(kg × centavos)): la tercera aceptada (0.570 kg × $100.50 ⇒ $57.28).
       const cobradoCents = brutoRenglonCents - extrasEsperadosCents
-      const delEscritor = Math.round(Number(it.unitPrice) * Number(it.weightQuantity) * 100)
-      if (cobradoCents === baseCents || cobradoCents === delEscritor) {
+      const delEscritor = importePorPesoViejoCents(Number(it.unitPrice), Number(it.weightQuantity))
+      const deLasApps = importePorPesoCents(Number(it.unitPrice), Number(it.weightQuantity))
+      if (cobradoCents === baseCents || cobradoCents === delEscritor || cobradoCents === deLasApps) {
         const derivado = new Prisma.Decimal(cobradoCents)
           .div(100)
           .div(new Prisma.Decimal(String(unidades)))
@@ -2091,6 +2101,9 @@ export const MOTIVO_TARJETA_DE_REGALO =
 
 /** Codex r4 H3 (pedidos en línea): una cuenta cancelada no es venta, aunque traiga un cobro que el negocio debe devolver. */
 export const MOTIVO_VENTA_CANCELADA = 'Esta venta está cancelada: no se factura. Si se cobró, primero se devuelve el dinero al cliente.'
+/** D3: el cargador marcó la cuenta como cancelada o borrada (su motivo sustituye a los demás). */
+export const esVentaCancelada = (bundle: Pick<LoadedOrderBundle, 'unsupportedReasons'>): boolean =>
+  bundle.unsupportedReasons?.includes(MOTIVO_VENTA_CANCELADA) ?? false
 
 export interface LoadOrderForCfdiOpts {
   /**

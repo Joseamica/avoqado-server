@@ -75,6 +75,7 @@ import {
   getOrderDiscountsSchema,
   getSaleVerificationSchema,
   initiateCryptoPaymentSchema,
+  getCryptoOperationSchema,
   listSaleVerificationsSchema,
   logoutSchema,
   orderParamsSchema,
@@ -124,7 +125,7 @@ import {
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaPermissionIfPresent, checkDescuentoManualPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
@@ -725,6 +726,7 @@ router.post(
   // S9: regalar una línea (`isCortesia`) pide `orders:comp`. DESPUÉS de validar: un cuerpo mal armado sigue siendo 400 del esquema (no
   // 403), y el candado lee el cuerpo ya parseado, el mismo que recibe el controlador.
   checkCortesiaPermissionIfPresent,
+  checkDescuentoManualPermissionIfPresent,
   orderController.createOrderWithItems,
 )
 
@@ -1532,6 +1534,13 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('tpv-shifts:close'),
   shiftController.closeShift,
+)
+
+router.get(
+  '/venues/:venueId/shift-operations/:operationId',
+  authenticateTokenMiddleware,
+  checkPermission('shifts:read'),
+  shiftController.getShiftOperation,
 )
 
 /**
@@ -3292,6 +3301,14 @@ router.post(
  *       500:
  *         description: B4Bit API error
  */
+router.get(
+  '/venues/:venueId/crypto/operations/:idempotencyKey',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(getCryptoOperationSchema),
+  cryptoController.getCryptoOperationHandler,
+)
+
 router.post(
   '/venues/:venueId/crypto/initiate',
   authenticateTokenMiddleware,

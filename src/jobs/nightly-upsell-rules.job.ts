@@ -30,6 +30,7 @@ import { CronJob } from 'cron'
 import { Prisma, UpsellOrigin, UpsellRuleStatus, UpsellTriggerType } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { conNegocio } from '../services/demo/candadoDemo'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { venuesWithFeatureAccess } from '../services/access/basePlan.service'
 import { computeDedupeKey, PRODUCT_VALIDATION_SELECT } from '../services/upsell/upsell.service'
@@ -537,7 +538,7 @@ export class NightlyUpsellRulesJob {
               // Un venue que truena NO tumba la corrida. Si no, un solo local con
               // datos raros deja a todos los demás sin propuestas y nadie lo nota.
               result.errors++
-              logger.error(`🛒 [UPSELL] Falló el venue ${venue.name} (${venue.id})`, { error })
+              conNegocio(venue.id, () => logger.error(`🛒 [UPSELL] Falló el venue ${venue.name} (${venue.id})`, { error }))
             }
           }),
         )

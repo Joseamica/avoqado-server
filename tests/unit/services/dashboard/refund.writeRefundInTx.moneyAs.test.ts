@@ -61,6 +61,7 @@ function consulta(args: unknown[]): { sql: string; valores: unknown[] } {
 function cobroBloqueado(original: Partial<CobroBloqueado['original']> = {}): CobroBloqueado {
   return {
     original: {
+      cardBrand: null,
       id: ORIGINAL,
       venueId: VENUE,
       status: 'COMPLETED',
@@ -245,6 +246,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
         feeAmount: new Prisma.Decimal(0),
         feePercentage: 0,
         method: 'CASH',
+        cardBrand: undefined, // D2: sólo la devolución por el mismo medio de un cobro con marca la hereda
         tenderTypeId: undefined,
         tenderRevision: undefined,
         tenderLabel: undefined,

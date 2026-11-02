@@ -1,4 +1,5 @@
 import prisma from '@/utils/prismaClient'
+import { __resetDemoVenueIdsForTests, reemplazarNegociosDemo } from './demoVenueIds'
 
 /**
  * Resolves a venueId to the venue's NAME, so log lines say "Testarudo Cafe" instead of
@@ -91,10 +92,13 @@ function loadAllVenueNames(): Promise<number> {
 
 async function queryAllVenueNames(): Promise<number> {
   try {
-    const venues = await prisma.venue.findMany({ select: { id: true, name: true } })
+    const venues = await prisma.venue.findMany({ select: { id: true, name: true, status: true } })
+    const demo = new Set<string>()
     for (const venue of venues) {
       if (venue.name) names.set(venue.id, venue.name)
+      if (venue.status === 'LIVE_DEMO') demo.add(venue.id)
     }
+    reemplazarNegociosDemo(demo, new Set(venues.map(v => v.id)))
     return venues.length
   } catch {
     // Deliberately silent — see the module docstring. Logs fall back to the raw venueId.
@@ -105,6 +109,7 @@ async function queryAllVenueNames(): Promise<number> {
 /** Test seam: the cache is process-wide state, so each test needs a clean one. */
 export function __resetVenueNameCacheForTests(): void {
   names.clear()
+  __resetDemoVenueIdsForTests()
   lastLoadAt = Number.NEGATIVE_INFINITY
   loading = null
 }

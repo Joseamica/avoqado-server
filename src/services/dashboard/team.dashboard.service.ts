@@ -21,6 +21,7 @@ import { AsignacionDto, asignacionesVigentes } from './rh/asignaciones.service'
 import { hoyDeLaSede } from './rh/vigencias'
 import { fechaComoDbDate } from './staffPay/periodos'
 import { WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
+import { esCorreoDemo } from '../demo/candadoDemo'
 
 interface TeamMember {
   id: string
@@ -494,6 +495,10 @@ export async function inviteTeamMember(
       throw new BadRequestError('Email is required for standard invitations')
     }
     email = request.email.toLowerCase()
+    // hz:f26b3afc:D4: un usuario demo tiene contraseña pública; invitarlo abriría este negocio a cualquiera con ella.
+    if (esCorreoDemo(email)) {
+      throw new BadRequestError('Ese correo es de un usuario de demostración de Avoqado: no se puede invitar a un negocio.')
+    }
   }
 
   // Check if user already exists (for email invitations only)

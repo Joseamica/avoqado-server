@@ -1,7 +1,7 @@
 import winston from 'winston'
 import path from 'path'
 import { inspect } from 'util'
-import { contextFormat } from '../observability/logContext'
+import { capturarContextoAlLlamar, contextFormat } from '../observability/logContext'
 
 const { combine, timestamp, printf, colorize, json, splat } = winston.format
 
@@ -112,11 +112,14 @@ if (process.env.NODE_ENV !== 'production') {
   // usa la rotación básica de Winston por tamaño y cantidad de archivos.
 }
 
-const logger = winston.createLogger({
-  level: LOG_LEVEL,
-  transports,
-  exitOnError: false, // No salir en excepciones manejadas por Winston
-})
+// El contexto (negocio, usuario, correlationId) se toma al LLAMAR, no cuando un transporte atorado escribe la línea (D3).
+const logger = capturarContextoAlLlamar(
+  winston.createLogger({
+    level: LOG_LEVEL,
+    transports,
+    exitOnError: false, // No salir en excepciones manejadas por Winston
+  }),
+)
 
 // NOTE: process-level 'uncaughtException' / 'unhandledRejection' handlers are
 // intentionally NOT registered here. `src/server.ts` is the SINGLE owner of those

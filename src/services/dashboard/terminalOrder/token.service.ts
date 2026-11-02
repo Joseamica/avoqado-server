@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import jwt, { SignOptions, JwtPayload } from 'jsonwebtoken'
 
 export type TerminalOrderTokenAction = 'approve' | 'reject' | 'assign-serials'
@@ -32,7 +33,8 @@ export function signApprovalToken(input: SignTokenInput): string {
     action: input.action,
     type: 'tpv-order' as const,
   }
-  const options: SignOptions = { expiresIn }
+  // jwtid: cada emisión es otra llave, aunque sea el mismo pedido en el mismo segundo (D1, Codex r2 P2).
+  const options: SignOptions = { expiresIn, jwtid: randomUUID() }
   return jwt.sign(payload, getSecret(), options)
 }
 

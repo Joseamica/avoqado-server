@@ -306,6 +306,13 @@ async function respuestaDeReembolsoExistente(
   }
 }
 
+/** Codex r1 de D2: la veracidad de `processorData.isInternational` del cobro, la misma que lee el reporte (`IS_INTERNATIONAL_SQL`). */
+function cobroInternacional(processorData: unknown): boolean {
+  return !!processorData && typeof processorData === 'object' && !Array.isArray(processorData)
+    ? !!(processorData as Record<string, unknown>).isInternational
+    : false
+}
+
 export async function recordRefund(
   venueId: string,
   refundData: RefundRequestData,
@@ -878,6 +885,8 @@ export async function recordRefund(
           idempotencyKey: llaveIdempotencia,
           processorData: {
             originalPaymentId: refundData.originalPaymentId,
+            // Codex r1 de D2: es la misma tarjeta; si era internacional, la devolución también (el reporte la pone en su renglón).
+            ...(cobroInternacional(originalPayment.processorData) ? { isInternational: true } : {}),
             refundReason: refundData.reason,
             isPartialRefund: refundData.isPartialRefund,
             currency: refundData.currency,

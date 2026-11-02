@@ -154,6 +154,10 @@ export type B4BitCrypto = (typeof B4BitSupportedCryptos)[number]
  */
 
 export interface InitiateCryptoPaymentParams {
+  idempotencyKey?: string
+  /** Server supplied session identity; never copied from the request body. */
+  actorStaffId?: string
+  terminalSerialNumber?: string
   venueId: string
   orgId: string
   amount: number // In centavos (e.g., 5500 = $55.00 MXN)
@@ -199,5 +203,30 @@ export interface ProcessWebhookResult {
     cryptoCurrency?: string
     txHash?: string
     confirmations?: number
+  }
+}
+
+/** New recoverable contract. Provider evidence and financially recorded money are deliberately separate. */
+export interface CryptoOperationResult {
+  success: boolean
+  paymentId: string
+  orderId: string | null
+  requestId: string | null
+  paymentUrl: string | null
+  expiresAt: string | null
+  expiresInSeconds: number | null
+  cryptoSymbol?: string
+  cryptoAddress?: string
+  shiftId: string | null
+  amount: number
+  tipAmount: number
+  operation: {
+    idempotencyKey: string
+    emissionStatus: string
+    financialStatus: string
+    financialRecorded: boolean
+    providerStatus: B4BitPaymentStatus | null
+    requiresReview: boolean
+    reviewOwner: 'VENUE_MANAGER' | null
   }
 }

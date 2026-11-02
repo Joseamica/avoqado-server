@@ -115,7 +115,7 @@ import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema
 import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaPermissionIfPresent, traeDescuentoManual } from '../middlewares/cortesiaPidePermiso.middleware'
 import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
 
 const router = Router()
@@ -654,10 +654,10 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  * El permiso va ANTES del plan a propósito: a quien no puede aplicar
  * promociones no se le revela el plan del negocio.
  *
- * Una venta sin `promotionRef` no paga ninguna consulta extra y se comporta
+ * Una venta sin `promotionRef` ni rebaja manual no paga ninguna consulta extra y se comporta
  * EXACTAMENTE igual que antes.
  */
-const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFunction) => {
+const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFunction, revisarDescuentoManual = true) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : []
   const hasServiceCourse = items.some(
     (item: any) =>
@@ -666,8 +666,12 @@ const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFu
         item.promotionRef.selections.some((selection: any) => selection?.serviceCourse != null)),
   )
   const afterPromotion = () => (hasServiceCourse ? checkFeatureAccess('TABLE_SERVICE')(req, res, next) : next())
-  if (!items.some((item: any) => item?.promotionRef)) return afterPromotion()
-  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion))
+  const hasPromotion = items.some((item: any) => item?.promotionRef)
+  if (!hasPromotion && !(revisarDescuentoManual && traeDescuentoManual(req.body))) return afterPromotion()
+  // Promoción y rebaja manual comparten el permiso: una sola ficha de gerente por petición, sin consumirla dos veces.
+  return checkPermission('discounts:apply')(req, res, () =>
+    hasPromotion ? checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion) : afterPromotion(),
+  )
 }
 
 router.post(
@@ -2981,7 +2985,7 @@ router.post(
   // S9: esta ruta también honra `items[].isCortesia` (`addItemsToOrder`, lineComped/plainComped): sin el candado, la cortesía se
   // regalaba en dos pasos (crear la orden sin cortesía y luego agregar el renglón regalado).
   checkCortesiaPermissionIfPresent,
-  checkPromotionGuardsIfPresent,
+  (req, res, next) => checkPromotionGuardsIfPresent(req, res, next, false),
   orderMobileController.addItemsToOrder,
 )
 

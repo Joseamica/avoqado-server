@@ -339,6 +339,35 @@ export async function uploadSpeiProof(input: UploadSpeiProofInput) {
   return updated
 }
 
+/**
+ * La firma sola no basta: rechazar borra la llave y cada subida firma otra, así que sólo vale la del ÚLTIMO correo a
+ * ventas. Sin esto, una llave vieja (filtrada al comprador antes del 1-nov) aprobaba el comprobante nuevo (D1, Codex r1).
+ * Va DESPUÉS de revisar el estado: un segundo clic sobre un pedido ya aprobado sigue siendo un «ya avanzó» inofensivo.
+ */
+const LIGA_VIEJA = 'Esta liga ya no es la vigente: usa la del correo más reciente'
+
+function exigirLigaVigente(vigente: string | null, presentada: string) {
+  if (!vigente || vigente !== presentada) throw new Error(LIGA_VIEJA)
+}
+
+/**
+ * Lo de arriba es la vía rápida; la garantía es la ESCRITURA, que filtra por estado y llave (Codex r2 P1): una
+ * aprobación demorada no escribe encima de un rechazo y una nueva subida. Si no casó, se dice por qué: «ya avanzó»
+ * (un segundo clic, inofensivo) o liga vieja.
+ */
+async function conLigaVigente<T>(orderId: string, escribir: () => Promise<T>): Promise<T> {
+  try {
+    return await escribir()
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code !== 'P2025') throw err
+    const ahora = await prisma.terminalOrder.findUnique({ where: { id: orderId }, select: { paymentStatus: true } })
+    if (ahora && ahora.paymentStatus !== 'PROOF_UPLOADED') {
+      throw new Error(`Order is not in PROOF_UPLOADED state (current: ${ahora.paymentStatus})`)
+    }
+    throw new Error(LIGA_VIEJA)
+  }
+}
+
 export async function approveSpei(input: ApproveSpeiInput) {
   const order = await prisma.terminalOrder.findUnique({
     where: { id: input.orderId },
@@ -348,24 +377,27 @@ export async function approveSpei(input: ApproveSpeiInput) {
   if (order.paymentStatus !== 'PROOF_UPLOADED') {
     throw new Error(`Order is not in PROOF_UPLOADED state (current: ${order.paymentStatus})`)
   }
+  exigirLigaVigente(order.speiApprovalToken, input.token)
 
   const serialToken = signSerialAssignmentToken(order.id)
   const tokenExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
 
-  const updated = await prisma.terminalOrder.update({
-    where: { id: order.id },
-    data: {
-      paymentStatus: 'PAID',
-      fulfillmentStatus: 'AWAITING_SERIALS',
-      speiApprovedAt: new Date(),
-      speiApprovedBy: input.approvedBy,
-      speiApprovalToken: null,
-      speiTokenExpiresAt: null,
-      serialAssignmentToken: serialToken,
-      serialAssignmentTokenExpiresAt: tokenExpires,
-    },
-    include: { items: true },
-  })
+  const updated = await conLigaVigente(order.id, () =>
+    prisma.terminalOrder.update({
+      where: { id: order.id, paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: input.token },
+      data: {
+        paymentStatus: 'PAID',
+        fulfillmentStatus: 'AWAITING_SERIALS',
+        speiApprovedAt: new Date(),
+        speiApprovedBy: input.approvedBy,
+        speiApprovalToken: null,
+        speiTokenExpiresAt: null,
+        serialAssignmentToken: serialToken,
+        serialAssignmentTokenExpiresAt: tokenExpires,
+      },
+      include: { items: true },
+    }),
+  )
 
   // Fire emails #4 (customer payment confirmed) + #5 (sales assign serials).
   // Same emails as the Stripe webhook handler — keep behavior identical.
@@ -404,18 +436,21 @@ export async function rejectSpei(input: RejectSpeiInput) {
   if (order.paymentStatus !== 'PROOF_UPLOADED') {
     throw new Error(`Order is not in PROOF_UPLOADED state (current: ${order.paymentStatus})`)
   }
+  exigirLigaVigente(order.speiApprovalToken, input.token)
 
-  const updated = await prisma.terminalOrder.update({
-    where: { id: order.id },
-    data: {
-      paymentStatus: 'REJECTED',
-      speiRejectionReason: input.reason,
-      speiApprovedBy: input.rejectedBy,
-      speiApprovalToken: null,
-      speiTokenExpiresAt: null,
-    },
-    include: { items: true },
-  })
+  const updated = await conLigaVigente(order.id, () =>
+    prisma.terminalOrder.update({
+      where: { id: order.id, paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: input.token },
+      data: {
+        paymentStatus: 'REJECTED',
+        speiRejectionReason: input.reason,
+        speiApprovedBy: input.rejectedBy,
+        speiApprovalToken: null,
+        speiTokenExpiresAt: null,
+      },
+      include: { items: true },
+    }),
+  )
 
   // Fire customer rejection email — don't fail the rejection if email fails
   try {

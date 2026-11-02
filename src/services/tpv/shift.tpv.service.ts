@@ -1,14 +1,16 @@
 import { resolveShiftCashDrawer } from '../dashboard/shift.dashboard.service'
-import { PaymentFundsFlow, PaymentMethod, PaymentType, Prisma, Shift, ShiftStatus } from '@prisma/client'
+import { createHash } from 'crypto'
+import { PaymentFundsFlow, PaymentMethod, PaymentType, Prisma, Shift, ShiftStatus, TpvShiftOperation } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isCashReconciliationEnabled } from '../access/cashReconciliationAccess.service'
+import { getUserAccess, hasPermission as hasEffectivePermission } from '../access/access.service'
 import {
   calculateCashReconciliationFromExpected,
   normalizeCashReconciliationRequest,
@@ -17,6 +19,7 @@ import {
 } from '../shared/cashReconciliation.service'
 import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
+import type { TpvOpeningOperation } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT, WHERE_ORDEN_DE_TARJETAS, WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
@@ -1188,7 +1191,7 @@ interface ShiftCloseData {
 }
 
 export interface CashReconciliationResult {
-  outcome: CashReconciliationOutcome
+  outcome: CashReconciliationOutcome | 'CONFLICT'
   countedCash?: string
   cashDifference?: string
   /**
@@ -1218,6 +1221,15 @@ export interface ShiftCloseRequestContext {
   userAgent?: string
   /** Deterministic clock for stale-claim recovery tests; HTTP callers use the real clock. */
   now?: () => Date
+  operation?: {
+    operationId: string
+    terminalSerial: string
+    closedAtLocal?: string
+    isOfflineReplay: boolean
+    openingOperationId?: string
+    cashDrawerSessionId?: string
+    declaredStaffId?: string
+  }
   /**
    * 🔴 Este cierre lo disparó el CIERRE DE LA GAVETA (la tablet), no la PAX. Dos consecuencias, y
    * las dos son de dinero:
@@ -1235,6 +1247,229 @@ export interface ShiftCloseRequestContext {
 export interface ShiftCloseExecutionResult {
   shift: Shift
   reconciliation: CashReconciliationResult
+  operation?: CloseOperationResult
+}
+
+interface CloseOperationResult {
+  operationId: string
+  kind: 'CLOSE'
+  state: 'PENDING' | 'APPLIED' | 'CONFLICT'
+  closedAtLocal: string | null
+  submittedCountedCash: string | null
+  countApplied: boolean
+  cashDrawerSessionId: string | null
+  pairStatus: 'NONE' | 'PENDING' | 'COMPLETE' | 'UNAVAILABLE'
+}
+
+interface PreparedCloseOperation {
+  id: string
+  terminalSerial: string
+  requestHash: string
+  requestJson: Prisma.InputJsonObject
+}
+
+function closeOperationMismatch(): ConflictError {
+  return new ConflictError('La operación de caja ya existe con otro contrato.', 'SHIFT_OPERATION_CONTRACT_MISMATCH')
+}
+
+/** Only the close contract is retained: never persist authentication or arbitrary body fields. */
+function prepareCloseOperation(
+  venueId: string,
+  shiftId: string,
+  rawBody: unknown,
+  context: ShiftCloseRequestContext,
+): PreparedCloseOperation {
+  const operation = context.operation!
+  if (!/^c[a-z0-9]{24}$/.test(operation.operationId)) throw new BadRequestError('operationId debe ser un cuid v1 válido')
+  const body = rawBody && typeof rawBody === 'object' ? (rawBody as Record<string, unknown>) : {}
+  const keys = ['cashReconciliationAction', 'countedCash', 'cashDeclared', 'cardDeclared', 'vouchersDeclared', 'otherDeclared', 'notes']
+  const fields = (value: Record<string, unknown>) =>
+    Object.fromEntries(
+      keys
+        .filter(k => value[k] !== undefined)
+        .map(k => [
+          k,
+          value[k] !== null && typeof value[k] === 'object'
+            ? { invalidType: 'object', fingerprint: createHash('sha256').update(JSON.stringify(value[k])).digest('hex') }
+            : value[k],
+        ]),
+    )
+  const contract = {
+    kind: 'CLOSE',
+    venueId,
+    shiftId,
+    terminalSerial: operation.terminalSerial,
+    closedAtLocal: operation.closedAtLocal ? new Date(operation.closedAtLocal).toISOString() : null,
+    isOfflineReplay: operation.isOfflineReplay,
+    openingOperationId: operation.openingOperationId ?? null,
+    cashDrawerSessionId: operation.cashDrawerSessionId ?? null,
+    ...fields(body),
+    ...(body.closeData && typeof body.closeData === 'object' ? { closeData: fields(body.closeData as Record<string, unknown>) } : {}),
+  }
+  return {
+    id: operation.operationId,
+    terminalSerial: operation.terminalSerial,
+    requestHash: createHash('sha256').update(JSON.stringify(contract)).digest('hex'),
+    requestJson: { ...contract, declaredStaffId: operation.declaredStaffId ?? null } as Prisma.InputJsonObject,
+  }
+}
+
+function closeOperationResult(
+  row: Pick<TpvShiftOperation, 'id' | 'requestJson' | 'cashDrawerSessionId'>,
+  state: CloseOperationResult['state'],
+  countApplied = false,
+): CloseOperationResult {
+  const request = row.requestJson as Record<string, unknown>
+  return {
+    operationId: row.id,
+    kind: 'CLOSE',
+    state,
+    closedAtLocal: typeof request.closedAtLocal === 'string' ? request.closedAtLocal : null,
+    submittedCountedCash: typeof request.countedCash === 'string' ? request.countedCash : null,
+    countApplied,
+    cashDrawerSessionId: row.cashDrawerSessionId,
+    pairStatus: row.cashDrawerSessionId ? 'PENDING' : 'NONE',
+  }
+}
+
+function savedCloseResult(value: Prisma.JsonValue): ShiftCloseExecutionResult {
+  const result = JSON.parse(JSON.stringify(value)) as ShiftCloseExecutionResult
+  if (!result.shift || !result.operation || !result.reconciliation)
+    throw new InternalServerError('La operación de cierre no tiene un resultado recuperable')
+  const shift = result.shift as unknown as Record<string, unknown>
+  for (const key of ['startTime', 'endTime', 'createdAt', 'updatedAt']) if (shift[key] != null) shift[key] = new Date(shift[key] as string)
+  for (const key of [
+    'startingCash',
+    'endingCash',
+    'cashDifference',
+    'cashDeclared',
+    'cardDeclared',
+    'vouchersDeclared',
+    'otherDeclared',
+    'totalSales',
+    'totalTips',
+    'totalCashTips',
+    'totalCashPayments',
+    'totalCardPayments',
+    'totalVoucherPayments',
+    'totalOtherPayments',
+  ]) {
+    if (shift[key] != null) shift[key] = new Decimal(shift[key] as string)
+  }
+  return result
+}
+
+async function recordCloseConflict(
+  tx: Prisma.TransactionClient,
+  row: TpvShiftOperation,
+  shift: Shift,
+  actorStaffId?: string,
+): Promise<ShiftCloseExecutionResult> {
+  const result: ShiftCloseExecutionResult = {
+    shift,
+    reconciliation: { outcome: 'CONFLICT' },
+    operation: closeOperationResult(row, 'CONFLICT'),
+  }
+  const updated = await tx.tpvShiftOperation.updateMany({
+    where: { id: row.id, venueId: row.venueId, state: 'PENDING' },
+    data: { state: 'CONFLICT', resultJson: JSON.parse(JSON.stringify(result)) },
+  })
+  if (updated.count !== 1) throw shiftCloseInProgress()
+  await tx.activityLog.create({
+    data: {
+      venueId: row.venueId,
+      staffId: actorStaffId ?? row.actorStaffId,
+      action: 'TPV_SHIFT_CLOSE_CONFLICT',
+      entity: 'Shift',
+      entityId: shift.id,
+      data: {
+        operationId: row.id,
+        submittedCountedCash: result.operation!.submittedCountedCash,
+        appliedCountedCash: shift.cashDeclared?.toFixed(2) ?? null,
+        closedById: shift.closedById,
+      },
+    },
+  })
+  return result
+}
+
+/** Read the actual linked half; a CLOSED shift alone never proves a CLOSED drawer. */
+async function refreshClosePair(result: ShiftCloseExecutionResult, venueId: string): Promise<ShiftCloseExecutionResult> {
+  if (!result.operation?.cashDrawerSessionId) return result
+  const drawer = await prisma.cashDrawerSession
+    .findFirst({
+      where: { id: result.operation.cashDrawerSessionId, venueId, shiftId: result.shift.id },
+      select: { status: true },
+    })
+    .catch(error => {
+      logger.warn('[Shift Close] No se pudo consultar la mitad de gaveta ya firmada', {
+        venueId,
+        shiftId: result.shift.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    })
+  return {
+    ...result,
+    operation: { ...result.operation, pairStatus: !drawer ? 'UNAVAILABLE' : drawer.status === 'CLOSED' ? 'COMPLETE' : 'PENDING' },
+  }
+}
+
+async function requireShiftOperationAccess(actorStaffId: string | undefined, venueId: string, permission: string): Promise<void> {
+  if (!actorStaffId) throw new ForbiddenError('Se requiere una persona autorizada en este negocio')
+  const access = await getUserAccess(actorStaffId, venueId).catch(error => {
+    if (error instanceof Error && error.message === `User ${actorStaffId} has no access to venue ${venueId}`) {
+      throw new ForbiddenError('La persona ya no tiene acceso a este negocio')
+    }
+    throw error
+  })
+  // The access-service overload evaluates its already-resolved list, without re-expanding role defaults.
+  if (!hasEffectivePermission(access, permission)) throw new ForbiddenError('La persona no tiene permiso para esta operación de caja')
+}
+
+/** Exact lookup, never a current-shift or recent-history substitute. MCP callers supply venue guard instead of a terminal. */
+export async function getShiftOperationForVenue(venueId: string, operationId: string, terminalSerial?: string, actorStaffId?: string) {
+  if (actorStaffId) await requireShiftOperationAccess(actorStaffId, venueId, 'shifts:read')
+  const resolved = await prisma.$transaction(async tx => {
+    await lockShiftLifecycleForVenue(tx, venueId)
+    const row = await tx.tpvShiftOperation.findFirst({ where: { id: operationId, venueId, ...(terminalSerial ? { terminalSerial } : {}) } })
+    if (!row) throw new NotFoundError('No se encontró esta operación de caja')
+    if (row.kind !== 'CLOSE') {
+      const result = row.resultJson as Record<string, unknown> | null
+      return {
+        opening: {
+          operationId: row.id,
+          kind: row.kind,
+          state: row.state,
+          shiftId: row.shiftId,
+          cashDrawerSessionId: row.cashDrawerSessionId,
+          openingDisposition: result?.openingDisposition ?? null,
+        },
+      }
+    }
+    if (row.state !== 'PENDING') return { result: savedCloseResult(row.resultJson!) }
+    const shift = row.shiftId ? await tx.shift.findFirst({ where: { id: row.shiftId, venueId } }) : null
+    if (shift && (shift.status === 'CLOSED' || shift.endTime !== null))
+      return { result: await recordCloseConflict(tx, row, shift, actorStaffId) }
+    return { pending: closeOperationResult(row, 'PENDING') }
+  })
+  if (resolved.opening) return { operation: resolved.opening, shift: null, reconciliation: null }
+  if (resolved.pending) return { operation: resolved.pending, shift: null, reconciliation: null }
+  const result = await refreshClosePair(resolved.result!, venueId)
+  const shift = result.shift
+  return {
+    operation: result.operation!,
+    reconciliation: result.reconciliation,
+    shift: {
+      id: shift.id,
+      status: shift.status,
+      startTime: shift.startTime.toISOString(),
+      endTime: shift.endTime?.toISOString() ?? null,
+      closedById: shift.closedById,
+      cashDeclared: shift.cashDeclared?.toFixed(2) ?? null,
+      cashDifference: shift.cashDifference?.toFixed(2) ?? null,
+    },
+  }
 }
 
 /**
@@ -1245,7 +1480,17 @@ export interface ShiftCloseExecutionResult {
  * puede romperse por recibirlo (la PAX mapea `ShiftDto` con Gson, que ignora las llaves que no
  * declara). Nunca se quita ni se renombra un campo de esta respuesta.
  */
-export type ShiftConCajon = Shift & { cashDrawerSessionId: string }
+export type ShiftConCajon = Shift & {
+  cashDrawerSessionId: string
+  localId?: string | null
+  cajaCreada?: boolean
+  shiftCreado?: boolean
+  reintento?: boolean
+  openingDisposition?: 'OWN' | 'ADOPTED'
+  fondoAplicado?: string
+}
+
+export type OpenShiftOperationContext = TpvOpeningOperation & { localId: string; openedAt?: Date }
 
 /**
  * Abre el turno de caja de la terminal — la puerta de la PAX (`POST /tpv/venues/:id/shifts/open`).
@@ -1284,6 +1529,7 @@ export async function openShiftForVenue(
   startingCash: number,
   stationId?: string,
   _orgId?: string,
+  operation?: OpenShiftOperationContext,
 ): Promise<ShiftConCajon> {
   logger.info('Opening new shift for venue', {
     venueId,
@@ -1298,6 +1544,7 @@ export async function openShiftForVenue(
     startingCash: startingCash || 0,
     stationId,
     source: 'TURNO_TPV',
+    ...(operation ? { localId: operation.localId, openedAt: operation.openedAt, tpvOperation: operation } : {}),
   })
 
   // La fila COMPLETA, sin `include`: es exactamente lo que `prisma.shift.create` devolvía y lo que
@@ -1321,7 +1568,7 @@ export async function openShiftForVenue(
   // 🔴 El aviso en tiempo real sólo cuando el turno se CREÓ. Si sólo se ligó, nadie abrió nada y
   // anunciar `shift_opened` le pintaría al dashboard una apertura que no ocurrió.
   // `logAction(SHIFT_OPENED)` ya lo escribe `abrirTurnoDeCaja`, con el mismo `data` de siempre.
-  if (apertura.shiftCreado) {
+  if (apertura.shiftCreado && !apertura.reintento) {
     try {
       const broadcastingService = socketManager.getBroadcastingService()
       if (broadcastingService) {
@@ -1353,7 +1600,20 @@ export async function openShiftForVenue(
     }
   }
 
-  return { ...shift, cashDrawerSessionId: apertura.cashDrawerSessionId }
+  return {
+    ...shift,
+    cashDrawerSessionId: apertura.cashDrawerSessionId,
+    ...(operation
+      ? {
+          localId: apertura.localId,
+          cajaCreada: apertura.cajaCreada,
+          shiftCreado: apertura.shiftCreado,
+          reintento: apertura.reintento,
+          openingDisposition: apertura.openingDisposition,
+          fondoAplicado: apertura.fondoAplicado,
+        }
+      : {}),
+  }
 }
 
 type ClosableShift = Shift & {
@@ -1399,12 +1659,81 @@ async function findClosableShift(
  * Claims a shift using OPEN -> CLOSING compare-and-set. A fresh claim is never stolen;
  * a process-abandoned claim older than five minutes can be recovered with a second CAS.
  */
-async function claimShiftForClose(venueId: string, shiftId: string, now: () => Date): Promise<{ shift: ClosableShift; claimedAt: Date }> {
+async function claimShiftForClose(
+  venueId: string,
+  shiftId: string,
+  now: () => Date,
+  operation?: PreparedCloseOperation,
+  actorStaffId?: string,
+): Promise<{ shift: ClosableShift; claimedAt: Date; operationRow?: TpvShiftOperation } | { result: ShiftCloseExecutionResult }> {
   return prisma.$transaction(async tx => {
     await lockShiftLifecycleForVenue(tx, venueId)
+    let operationRow = operation ? await tx.tpvShiftOperation.findFirst({ where: { id: operation.id, venueId } }) : null
+    if (operationRow) {
+      if (
+        operationRow.kind !== 'CLOSE' ||
+        operationRow.shiftId !== shiftId ||
+        operationRow.terminalSerial !== operation!.terminalSerial ||
+        operationRow.requestHash !== operation!.requestHash
+      )
+        throw closeOperationMismatch()
+      if (operationRow.state !== 'PENDING') return { result: savedCloseResult(operationRow.resultJson!) }
+    }
     const shift = await findClosableShift(tx, venueId, shiftId)
     if (!shift) {
       throw new NotFoundError('Shift not found or does not belong to this venue')
+    }
+    if (operation) {
+      // A historic PENDING row is evidence, not an eternal lock after release/watchdog.
+      if (shift.status === ShiftStatus.CLOSING && shift.endTime === null) {
+        const owner = await tx.tpvShiftOperation.findFirst({
+          where: {
+            venueId,
+            shiftId,
+            kind: 'CLOSE',
+            state: 'PENDING',
+            resultJson: { path: ['claimedAt'], equals: shift.updatedAt.toISOString() },
+          },
+        })
+        if (owner && owner.id !== operation.id) throw shiftCloseInProgress()
+      }
+      const drawer = await tx.cashDrawerSession.findFirst({ where: { venueId, shiftId }, select: { id: true } })
+      const requestedDrawer = operation.requestJson.cashDrawerSessionId
+      if (requestedDrawer && requestedDrawer !== drawer?.id) throw closeOperationMismatch()
+      const openingId = operation.requestJson.openingOperationId
+      if (openingId) {
+        const opening = await tx.tpvShiftOperation.findFirst({
+          where: { id: String(openingId), venueId, kind: 'OPEN', shiftId, terminalSerial: operation.terminalSerial, state: 'APPLIED' },
+        })
+        if (!opening) throw closeOperationMismatch()
+      }
+      operationRow ??= await tx.tpvShiftOperation.create({
+        data: {
+          id: operation.id,
+          venueId,
+          kind: 'CLOSE',
+          terminalSerial: operation.terminalSerial,
+          actorStaffId: actorStaffId!,
+          requestJson: operation.requestJson,
+          requestHash: operation.requestHash,
+          shiftId,
+          cashDrawerSessionId: drawer?.id ?? null,
+          state: 'PENDING',
+        },
+      })
+      if (shift.endTime !== null || shift.status === ShiftStatus.CLOSED)
+        return { result: await recordCloseConflict(tx, operationRow, shift, actorStaffId) }
+    } else if (shift.status === ShiftStatus.CLOSING && shift.endTime === null) {
+      const owner = await tx.tpvShiftOperation.findFirst({
+        where: {
+          venueId,
+          shiftId,
+          kind: 'CLOSE',
+          state: 'PENDING',
+          resultJson: { path: ['claimedAt'], equals: shift.updatedAt.toISOString() },
+        },
+      })
+      if (owner) throw shiftCloseInProgress()
     }
     if (shift.endTime !== null || shift.status === ShiftStatus.CLOSED) {
       throw new BadRequestError('Shift is already closed')
@@ -1426,7 +1755,16 @@ async function claimShiftForClose(venueId: string, shiftId: string, now: () => D
         updatedAt: claimedAt,
       },
     })
-    if (claim.count === 1) return { shift, claimedAt }
+    const recordClaim = async (claimedShift: ClosableShift) => {
+      if (operationRow) {
+        await tx.tpvShiftOperation.updateMany({
+          where: { id: operationRow.id, venueId, state: 'PENDING' },
+          data: { resultJson: { claimedAt: claimedAt.toISOString() } },
+        })
+      }
+      return { shift: claimedShift, claimedAt, ...(operationRow ? { operationRow } : {}) }
+    }
+    if (claim.count === 1) return recordClaim(shift)
 
     const latest = await findClosableShift(tx, venueId, shiftId)
     if (!latest) {
@@ -1451,18 +1789,33 @@ async function claimShiftForClose(venueId: string, shiftId: string, now: () => D
           updatedAt: claimedAt,
         },
       })
-      if (recovered.count === 1) return { shift: latest, claimedAt }
+      if (recovered.count === 1) return recordClaim(latest)
     }
 
     throw shiftCloseInProgress()
   })
 }
 
-async function releaseShiftCloseClaim(venueId: string, shiftId: string, claimedAt: Date): Promise<void> {
+async function releaseShiftCloseClaim(
+  venueId: string,
+  shiftId: string,
+  claimedAt: Date,
+  operation?: PreparedCloseOperation,
+): Promise<void> {
   try {
     await prisma.$transaction(async tx => {
       await lockShiftLifecycleForVenue(tx, venueId)
-      await tx.shift.updateMany({
+      const owner = await tx.tpvShiftOperation.findFirst({
+        where: {
+          venueId,
+          shiftId,
+          kind: 'CLOSE',
+          state: 'PENDING',
+          resultJson: { path: ['claimedAt'], equals: claimedAt.toISOString() },
+        },
+      })
+      if (operation ? owner?.id !== operation.id : owner) return
+      const released = await tx.shift.updateMany({
         where: {
           id: shiftId,
           venueId,
@@ -1472,6 +1825,12 @@ async function releaseShiftCloseClaim(venueId: string, shiftId: string, claimedA
         },
         data: { status: ShiftStatus.OPEN },
       })
+      if (released.count === 1 && operation) {
+        await tx.tpvShiftOperation.updateMany({
+          where: { id: operation.id, venueId, state: 'PENDING', resultJson: { path: ['claimedAt'], equals: claimedAt.toISOString() } },
+          data: { resultJson: { claimedAt: null } },
+        })
+      }
     })
   } catch (releaseError) {
     logger.error('[Shift Close] Failed to release CLOSING claim after rollback', {
@@ -1783,10 +2142,23 @@ async function closeShiftUsingRequest(
   shiftId: string,
   request: EffectiveCloseRequest,
   context: ShiftCloseRequestContext,
+  operation?: PreparedCloseOperation,
 ): Promise<ShiftCloseExecutionResult> {
-  const { shift, claimedAt } = await claimShiftForClose(venueId, shiftId, context.now ?? (() => new Date()))
+  const claim = await claimShiftForClose(venueId, shiftId, context.now ?? (() => new Date()), operation, context.actorStaffId)
+  if ('result' in claim) return refreshClosePair(claim.result, venueId)
+  const { shift, claimedAt, operationRow } = claim
 
   try {
+    // A previous operation result wins before re-evaluating mutable venue configuration.
+    if (
+      operation &&
+      request.source === 'NEW' &&
+      request.action === 'COUNTED' &&
+      request.outcome === 'APPLIED' &&
+      !(await isCashReconciliationEnabled(venueId))
+    ) {
+      request = { ...request, outcome: 'IGNORED_DISABLED', ignoreReason: 'cash reconciliation is disabled' }
+    }
     const shiftPayments = await readShiftPaymentsForClose(venueId, shiftId, shift.startTime, claimedAt)
 
     // Los ocho totales salen de `aggregateShiftPayments` (arriba en este archivo). Vive fuera
@@ -2028,6 +2400,14 @@ async function closeShiftUsingRequest(
       endingCash: endingCash.toNumber(),
       totalSales: totalSales.toNumber(),
       totalTips: totalTips.toNumber(),
+      ...(operation
+        ? {
+            operationId: operation.id,
+            closedAtLocal: String(operation.requestJson.closedAtLocal ?? ''),
+            isOfflineReplay: String(operation.requestJson.isOfflineReplay),
+            declaredStaffId: context.operation?.declaredStaffId,
+          }
+        : {}),
     }
     if (request.countedCash) auditData.countedCash = moneyString(new Decimal(request.countedCash))
     if (cashDifference) auditData.cashDifference = moneyString(cashDifference)
@@ -2040,8 +2420,25 @@ async function closeShiftUsingRequest(
         legacy.cashDeclared != null ? new Decimal(legacy.cashDeclared).sub(totalCashPayments).toNumber() : undefined
     }
 
+    const reconciliation: CashReconciliationResult = { outcome }
+    if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash)
+      reconciliation.countedCash = moneyString(new Decimal(request.countedCash))
+    if (outcome === 'APPLIED' && cashDifference) reconciliation.cashDifference = moneyString(cashDifference)
+    const operationResult = operationRow
+      ? closeOperationResult(operationRow, 'APPLIED', outcome === 'APPLIED' && cashDeclared !== null)
+      : undefined
     const updatedShift = await prisma.$transaction(async tx => {
       await lockShiftLifecycleForVenue(tx, venueId)
+      const owner = await tx.tpvShiftOperation.findFirst({
+        where: {
+          venueId,
+          shiftId,
+          kind: 'CLOSE',
+          state: 'PENDING',
+          resultJson: { path: ['claimedAt'], equals: claimedAt.toISOString() },
+        },
+      })
+      if (operation ? owner?.id !== operation.id : owner) throw shiftCloseInProgress()
       const finalized = await tx.shift.updateMany({
         where: {
           id: shiftId,
@@ -2056,6 +2453,24 @@ async function closeShiftUsingRequest(
 
       const closedShift = await tx.shift.findUnique({ where: { id: shiftId } })
       if (!closedShift) throw new NotFoundError('Shift disappeared while closing')
+
+      if (operationRow) {
+        const stored = await tx.tpvShiftOperation.updateMany({
+          where: {
+            id: operationRow.id,
+            venueId,
+            state: 'PENDING',
+            requestHash: operation!.requestHash,
+            resultJson: { path: ['claimedAt'], equals: claimedAt.toISOString() },
+          },
+          data: {
+            state: 'APPLIED',
+            actorStaffId: context.actorStaffId!,
+            resultJson: JSON.parse(JSON.stringify({ shift: closedShift, reconciliation, operation: operationResult })),
+          },
+        })
+        if (stored.count !== 1) throw shiftCloseInProgress()
+      }
 
       await tx.activityLog.create({
         data: {
@@ -2140,13 +2555,7 @@ async function closeShiftUsingRequest(
       }
     }
 
-    const reconciliation: CashReconciliationResult = { outcome }
-    if (request.source === 'NEW' && request.action === 'COUNTED' && request.countedCash) {
-      reconciliation.countedCash = moneyString(new Decimal(request.countedCash))
-    }
-    if (outcome === 'APPLIED' && cashDifference) {
-      reconciliation.cashDifference = moneyString(cashDifference)
-    }
+    if (operationResult) return refreshClosePair({ shift: updatedShift, reconciliation, operation: operationResult }, venueId)
     // Fase 5: la PAX LEE el cajón. Se adjunta el arqueo de la caja física que cubrió el
     // turno (campo opcional; se omite si no hay caja). Es informativo — nunca puede hacer
     // fallar un cierre que ya está commiteado, por eso el try/catch.
@@ -2189,7 +2598,7 @@ async function closeShiftUsingRequest(
 
     return { shift: updatedShift, reconciliation }
   } catch (error) {
-    await releaseShiftCloseClaim(venueId, shiftId, claimedAt)
+    await releaseShiftCloseClaim(venueId, shiftId, claimedAt, operation)
     throw error
   }
 }
@@ -2251,8 +2660,15 @@ export async function closeShiftForVenueWithResult(
 ): Promise<ShiftCloseExecutionResult> {
   const normalized = normalizeCashReconciliationRequest(rawBody)
   const effective: EffectiveCloseRequest = { ...normalized }
+  let operation: PreparedCloseOperation | undefined
+  if (context.operation) {
+    operation = prepareCloseOperation(venueId, shiftId, rawBody, context)
+    const terminal = await prisma.terminal.findFirst({ where: { venueId, serialNumber: operation.terminalSerial }, select: { id: true } })
+    if (!operation.terminalSerial || !terminal) throw new ForbiddenError('Se requiere una terminal autorizada en este negocio')
+    await requireShiftOperationAccess(context.actorStaffId, venueId, 'tpv-shifts:close')
+  }
 
-  if (normalized.source === 'NEW' && normalized.action === 'COUNTED' && normalized.outcome === 'APPLIED') {
+  if (!operation && normalized.source === 'NEW' && normalized.action === 'COUNTED' && normalized.outcome === 'APPLIED') {
     const enabled = await isCashReconciliationEnabled(venueId)
     if (!enabled) {
       effective.outcome = 'IGNORED_DISABLED'
@@ -2260,5 +2676,10 @@ export async function closeShiftForVenueWithResult(
     }
   }
 
-  return closeShiftUsingRequest(venueId, shiftId, effective, context)
+  try {
+    return await closeShiftUsingRequest(venueId, shiftId, effective, context, operation)
+  } catch (error) {
+    if (operation && (error as { code?: string }).code === 'P2002') throw closeOperationMismatch()
+    throw error
+  }
 }

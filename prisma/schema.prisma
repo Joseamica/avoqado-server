@@ -3567,6 +3567,36 @@ model FloorPlanPublication {
   @@index([venueId, createdAt])
 }
 
+enum TpvShiftOperationKind {
+  OPEN
+  CLOSE
+}
+
+enum TpvShiftOperationState {
+  PENDING
+  APPLIED
+  CONFLICT
+}
+
+/// Resultado durable de un gesto de caja de la TPV, incluso al adoptar una caja existente.
+model TpvShiftOperation {
+  id                  String                 @id @default(cuid())
+  venueId             String
+  kind                TpvShiftOperationKind
+  terminalSerial      String
+  actorStaffId        String
+  requestJson         Json
+  requestHash         String
+  shiftId             String?
+  cashDrawerSessionId String?
+  state               TpvShiftOperationState  @default(PENDING)
+  resultJson          Json?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  @@index([venueId, shiftId, kind])
+}
+
 model Shift {
   id      String @id @default(cuid())
   venueId String

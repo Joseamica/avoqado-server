@@ -138,6 +138,18 @@ describe('toda orden nueva decide explícitamente si cae en el turno de caja', (
    * nuevo, que es justo el que no la vendió). Cada archivo que lo lee se clasifica aquí con la forma en que su orden lo respeta.
    */
   const RESPETAN_EL_TURNO_DE_LA_VENTA: Record<string, RegExp> = {
+    // `applyPayCash` sólo transporta la referencia tras validar formato, terminal autenticada y turno del mismo negocio.
+    // No crea orden aquí: el mismo `payCashOrder` recibe el id validado y conserva la política del turno de la venta.
+    'mobile/sync.mobile.service.ts': new RegExp(
+      [
+        String.raw`const declaredShift = intent\.payload\.shiftIdDeLaVenta[\s\S]*?if \(terminalSerialNumber && declaredShift !== undefined && declaredShift !== null && declaredShift !== ''\)`,
+        String.raw`[\s\S]*?if \(typeof declaredShift !== 'string' \|\| !/\^c\[a-z0-9\]\{24\}\$/\.test\(declaredShift\)\) \{\s*return \{[\s\S]*?status: 'REJECTED'`,
+        String.raw`[\s\S]*?const terminal = await prisma\.terminal\.findFirst\(\{\s*where: \{ venueId, serialNumber: terminalSerialNumber, status: 'ACTIVE' \}`,
+        String.raw`[\s\S]*?const shift = terminal \? await prisma\.shift\.findFirst\(\{ where: \{ id: declaredShift, venueId \}, select: \{ id: true \} \}\) : null`,
+        String.raw`\s*if \(!shift\)\s*return \{[\s\S]*?status: 'REJECTED'[\s\S]*?\}\s*shiftIdDeLaVenta = shift\.id`,
+        String.raw`[\s\S]*?await orderMobileService\.payCashOrder\(venueId, orderId, \{[\s\S]*?\.\.\.\(shiftIdDeLaVenta \? \{ shiftIdDeLaVenta \} : \{\}\)`,
+      ].join(''),
+    ),
     // `createOrderWithItems`: el turno vivo se descarta si el de la venta es OTRO turno real del negocio (Codex servidor r1 #1).
     // S3 «Efectivo sin red en el turno correcto»: la regla vive ahora en `turnoDeLaOrdenQueNace` (paymentShiftClaim.ts), compartida
     // con abrir mesa (`assignTable`), y también la alimenta la caja que capturó el POS (`ventaDeLaColaEnTx`). Cambio de forma A

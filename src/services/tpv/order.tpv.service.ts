@@ -18,6 +18,7 @@ import type { ValesSoltados } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
+import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import {
   accionDeCortesia,
   buildItemDiscountRow,
@@ -1825,7 +1826,9 @@ export async function addItemsToOrder(
         // cent (review 2026-07-19, fix #3). All downstream (total, persist, deduction)
         // uses this quantized value.
         const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
-        const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
+        // Parte 2 (1-nov): las rondas de las tablets (en línea y su cola ADD_ITEMS) con la cuenta de las apps; la TPV y iOS < 1.15.2,
+        // la vieja (`importePorPesoDeLaPeticionCents` lo decide por la petición).
+        const weightedBase = weightKg != null ? importePorPesoDeLaPeticionCents(Number(product.price), weightKg) / 100 : null
         /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
         const lineTotalFor = (qty: number) =>
           new Prisma.Decimal(weightedBase != null ? weightedBase + modifierTotal * qty : (Number(product.price) + modifierTotal) * qty)
