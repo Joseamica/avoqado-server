@@ -20,8 +20,6 @@ export function handleWhatsappVerify(req: Request, res: Response) {
 // the exact bytes Meta sent. Parse to JSON now (after middleware) and hand
 // off to the service. On any throw we return 500 so Meta retries.
 export async function handleWhatsappInbound(req: Request, res: Response) {
-  // A big body keeps its slot (gateWhatsappBody) until it is stored, even if Meta hangs up meanwhile.
-  res.locals.whatsappHandling = true
   try {
     const payload = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf-8') : '{}')
     await processWhatsappWebhook(payload)
@@ -29,7 +27,5 @@ export async function handleWhatsappInbound(req: Request, res: Response) {
   } catch (err) {
     logger.error('WhatsApp webhook processing failed', { err: (err as Error).message })
     return res.sendStatus(500)
-  } finally {
-    res.locals.releaseWhatsappBody?.()
   }
 }

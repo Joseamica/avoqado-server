@@ -23,29 +23,11 @@ export function verifyWhatsappSignature(req: Request, res: Response, next: NextF
 }
 
 const SIGNATURE_FORMAT = /^sha256=[0-9a-f]{64}$/
-const SMALL_BODY_BYTES = 100 * 1024
-let bigBodiesInFlight = 0
 
-// Runs BEFORE the POST body is read. The route accepts 20 MB (a coexistence history delivery «could describe thousands of
-// messages»), so anything without a well-formed signature leaves with 403 unread, and only ONE big, unsized or compressed
-// body (2 KB of gzip can inflate to 2 MB) is in flight at a time; the next one gets 503 and Meta retries it. Normal
-// messages are small and never wait. The controller holds the slot until it has stored everything, even if Meta hangs up
-// mid-store; when the controller never ran (aborted upload, 413, bad signature) closing the response frees it.
-// ponytail: in-process counter — fine for our single Render instance; a second instance would need a shared gate.
-export function gateWhatsappBody(req: Request, res: Response, next: NextFunction) {
+// Runs BEFORE the POST body is read (the route takes up to 5 MB for coexistence history): without a well-formed signature
+// header it leaves with 403 unread. Stateless on purpose — a concurrency counter took three audit rounds and kept leaking;
+// 5 MB is already the server-wide cap for any unsigned body (BODY_URLENCODED_LIMIT), so this route adds no new exposure.
+export function requireWhatsappSignatureHeader(req: Request, res: Response, next: NextFunction) {
   if (!SIGNATURE_FORMAT.test(req.header('X-Hub-Signature-256') ?? '')) return res.sendStatus(403)
-  const length = Number(req.header('content-length'))
-  const compressed = (req.header('content-encoding') ?? 'identity').toLowerCase() !== 'identity'
-  if (!compressed && length > 0 && length <= SMALL_BODY_BYTES) return next()
-  if (bigBodiesInFlight >= 1) return res.sendStatus(503)
-  bigBodiesInFlight++
-  let held = true
-  res.locals.releaseWhatsappBody = () => {
-    if (held) bigBodiesInFlight--
-    held = false
-  }
-  res.once('close', () => {
-    if (!res.locals.whatsappHandling) res.locals.releaseWhatsappBody()
-  })
   next()
 }

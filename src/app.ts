@@ -73,7 +73,7 @@ import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
 import { redactUrlSecrets, requestLoggerMiddleware } from './middlewares/requestLogger'
-import { gateWhatsappBody } from './middlewares/whatsappSignature.middleware'
+import { requireWhatsappSignatureHeader } from './middlewares/whatsappSignature.middleware'
 import { isJsonBodyParseError } from './utils/httpErrors'
 
 // Types (could be moved to a central types file)
@@ -174,9 +174,10 @@ app.post('/api/v1/webhooks/aggregators/:provider/:token/:kind', express.raw({ ty
 // por el `app.use('/api/v1/webhooks', requestLoggerMiddleware)` de arriba.
 app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOOK_MAX_BYTES }), handleShopifyWebhook)
 
-// WhatsApp, before the general parser below (which then skips it): a coexistence history delivery from Meta can hold
-// thousands of messages, past the default 100 KB. The gate turns away unsigned or concurrent big bodies before reading them.
-app.post('/api/v1/webhooks/whatsapp', gateWhatsappBody, express.raw({ type: 'application/json', limit: '20mb' }))
+// WhatsApp POST, before the general parser below (which then skips it): a coexistence history delivery from Meta «could
+// describe thousands of messages», past the default 100 KB. 5 MB ≈ 12k messages and matches the server-wide unsigned cap;
+// a 413 on this route in the logs means Meta sent a bigger chunk and this has to grow.
+app.post('/api/v1/webhooks/whatsapp', requireWhatsappSignatureHeader, express.raw({ type: 'application/json', limit: '5mb' }))
 
 app.use(
   '/api/v1/webhooks',

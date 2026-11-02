@@ -1,8 +1,6 @@
 import { createHmac } from 'crypto'
 
-import { EventEmitter } from 'events'
-
-import { gateWhatsappBody, verifyWhatsappSignature } from '@/middlewares/whatsappSignature.middleware'
+import { requireWhatsappSignatureHeader, verifyWhatsappSignature } from '@/middlewares/whatsappSignature.middleware'
 
 const APP_SECRET = 'test-app-secret'
 
@@ -67,72 +65,30 @@ describe('verifyWhatsappSignature', () => {
   })
 })
 
-// CRM fase 3 (Codex r1 #2): la ruta acepta avisos de historial de hasta 20 MB. Antes de leer el cuerpo, lo que no trae una
-// firma bien formada se va con 403, y sólo UN cuerpo grande a la vez se lee; el siguiente recibe 503 y Meta lo reintenta.
-describe('gateWhatsappBody', () => {
-  type Req = Parameters<typeof gateWhatsappBody>[0]
-  type Res = Parameters<typeof gateWhatsappBody>[1]
-  const FIRMA = 'sha256=' + 'a'.repeat(64)
-  const pedido = (headers: Record<string, string>) =>
-    ({ method: 'POST', header: (name: string) => headers[name.toLowerCase()] }) as unknown as Req
-  const respuesta = () => Object.assign(new EventEmitter(), { sendStatus: jest.fn(), locals: {} }) as unknown as Res & EventEmitter
-  const pasa = (req: Req, res = respuesta()) => {
+// CRM fase 3: la ruta acepta avisos de historial de hasta 5 MB. Antes de leer el cuerpo, lo que no trae una firma bien
+// formada se va con 403. Sin contador a propósito (rondas 1-3 de Codex): 5 MB ya es el tope del servidor sin firma.
+describe('requireWhatsappSignatureHeader', () => {
+  type Req = Parameters<typeof requireWhatsappSignatureHeader>[0]
+  type Res = Parameters<typeof requireWhatsappSignatureHeader>[1]
+  const pasa = (firma?: string) => {
+    const req = { header: (name: string) => (name === 'X-Hub-Signature-256' ? firma : undefined) } as unknown as Req
+    const res = { sendStatus: jest.fn() } as unknown as Res
     const next = jest.fn()
-    gateWhatsappBody(req, res, next)
-    return { res, next, status: (res.sendStatus as jest.Mock).mock.calls[0]?.[0] }
+    requireWhatsappSignatureHeader(req, res, next)
+    return { next, status: (res.sendStatus as jest.Mock).mock.calls[0]?.[0] }
   }
 
   it.each([
-    ['sin firma', {}],
-    ['firma mal formada', { 'x-hub-signature-256': 'sha256=corta' }],
-  ])('%s: 403 sin leer el cuerpo', (_caso, headers) => {
-    const { next, status } = pasa(pedido({ ...headers, 'content-length': '30000000' }))
+    ['sin firma', undefined],
+    ['firma mal formada', 'sha256=corta'],
+    ['firma en mayúsculas (Meta manda minúsculas)', 'sha256=' + 'A'.repeat(64)],
+  ])('%s: 403 sin leer el cuerpo', (_caso, firma) => {
+    const { next, status } = pasa(firma)
     expect(status).toBe(403)
     expect(next).not.toHaveBeenCalled()
   })
 
-  it('un aviso chico siempre pasa, aunque haya uno grande leyéndose', () => {
-    const grande = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
-    expect(grande.next).toHaveBeenCalled()
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '2000' })).next).toHaveBeenCalled()
-    grande.res.emit('close')
-  })
-
-  it('un segundo aviso grande (o sin tamaño) espera: 503; al cerrar el primero, vuelve a pasar', () => {
-    const primero = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
-    expect(primero.next).toHaveBeenCalled()
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA })).status).toBe(503)
-
-    primero.res.emit('close')
-    primero.res.emit('close') // un solo descuento aunque el evento se repita
-    const segundo = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
-    expect(segundo.next).toHaveBeenCalled()
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)
-    segundo.res.emit('close')
-  })
-
-  // Codex r2 #1: 2 KB comprimidos se inflan a 2 MB; el tamaño declarado no dice nada.
-  it('un aviso comprimido cuenta como grande aunque declare pocos bytes', () => {
-    const primero = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '2000', 'content-encoding': 'gzip' }))
-    expect(primero.next).toHaveBeenCalled()
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '2000', 'content-encoding': 'gzip' })).status).toBe(503)
-    primero.res.emit('close')
-  })
-
-  // Codex r2 #2: si Meta corta la conexión mientras se guarda, el cupo sigue tomado hasta que el guardado termina.
-  it('el cupo no se suelta al cortarse la conexión mientras el controlador sigue guardando', () => {
-    const primero = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
-    const res = primero.res as unknown as { locals: { whatsappHandling?: boolean; releaseWhatsappBody?: () => void } }
-    res.locals.whatsappHandling = true
-    primero.res.emit('close')
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)
-
-    res.locals.releaseWhatsappBody!()
-    res.locals.releaseWhatsappBody!() // soltarlo dos veces no regala un cupo
-    const segundo = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
-    expect(segundo.next).toHaveBeenCalled()
-    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)
-    segundo.res.emit('close')
+  it('una firma bien formada pasa (si es la buena lo decide verifyWhatsappSignature, ya con el cuerpo)', () => {
+    expect(pasa('sha256=' + 'a'.repeat(64)).next).toHaveBeenCalled()
   })
 })
