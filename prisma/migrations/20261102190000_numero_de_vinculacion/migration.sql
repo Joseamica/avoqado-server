@@ -56,20 +56,3 @@ UPDATE "PermissionSet"
 SET "permissions" = array_append("permissions", 'sale-verifications:approve')
 WHERE 'sale-verifications:review' = ANY("permissions")
   AND NOT ('sale-verifications:approve' = ANY("permissions"));
-
--- Conservar permisos: quien tenía "review" conserva "approve" (idempotente; sólo agrega).
-UPDATE "VenueRolePermission"
-SET "permissions" = array_append("permissions", 'sale-verifications:approve')
-WHERE 'sale-verifications:review' = ANY("permissions")
-  AND NOT ('sale-verifications:approve' = ANY("permissions"));
-
--- Quien tenía "review" negado, también tiene "approve" negado.
-UPDATE "VenueRolePermission"
-SET "deniedPermissions" = array_append("deniedPermissions", 'sale-verifications:approve')
-WHERE 'sale-verifications:review' = ANY("deniedPermissions")
-  AND NOT ('sale-verifications:approve' = ANY("deniedPermissions"));
-
-UPDATE "PermissionSet"
-SET "permissions" = array_append("permissions", 'sale-verifications:approve')
-WHERE 'sale-verifications:review' = ANY("permissions")
-  AND NOT ('sale-verifications:approve' = ANY("permissions"));
