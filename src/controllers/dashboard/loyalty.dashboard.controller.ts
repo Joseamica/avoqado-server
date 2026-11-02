@@ -27,6 +27,7 @@ import { fetchDecodedPng, readPngSize } from '@/services/wallet/remotePng'
 import { stampStripPng } from '@/services/wallet/stampStripPng'
 import { buildStoragePath, uploadFileToStorage } from '@/services/storage.service'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { MAX_PIXELES } from '@/services/wallet/pngDecode'
 import prisma from '@/utils/prismaClient'
 
 /**
@@ -287,6 +288,10 @@ export async function uploadCardImageHandler(req: Request, res: Response) {
     // limpio en una pantalla Retina.
     if (size.width < 96 || size.height < 96) {
       throw new BadRequestError(`El sello es muy chico (${size.width}×${size.height}). Necesita al menos 96×96, idealmente 256×256.`)
+    }
+    // Más grande no se abre al dibujar la tarjeta: mejor decirlo aquí que dejar la figura de respaldo sin explicación.
+    if (size.width * size.height > MAX_PIXELES) {
+      throw new BadRequestError(`El sello es demasiado grande (${size.width}×${size.height}). Súbelo de 5000×5000 como máximo; lo ideal es 256×256.`)
     }
     const desviacion = Math.abs(size.width - size.height) / Math.max(size.width, size.height)
     if (desviacion > 0.25) {
