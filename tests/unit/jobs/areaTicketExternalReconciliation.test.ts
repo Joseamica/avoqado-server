@@ -33,6 +33,8 @@ describe('Job de conciliación de cobros externos', () => {
     // describe para el caso "usa timezone, no UTC".
     jest.useFakeTimers().setSystemTime(new Date('2026-08-11T02:00:00.000Z'))
     prismaMock.areaTicketExternalIncident.upsert.mockResolvedValue({ id: 'incident-1' })
+    // Default: ningún vale tiene ya una incidencia ABIERTA.
+    prismaMock.areaTicketExternalIncident.findMany.mockResolvedValue([])
   })
 
   afterEach(() => {
@@ -166,6 +168,29 @@ describe('Job de conciliación de cobros externos', () => {
       }),
     )
     expect(prismaMock.areaTicketExternalIncident.upsert).not.toHaveBeenCalled()
+  })
+
+  it('una incidencia que SIGUE abierta no se reabre ni vuelve a la bitácora en cada vuelta', async () => {
+    // La Galeterie (2-nov-2026): 9 vales externos huérfanos desde el 6-oct escribían 9 filas de bitácora por hora
+    // (5,874 en total) y subían su occurrenceCount sin que nadie los hubiera resuelto nunca.
+    prismaMock.areaTicketExternalSettlement.findMany.mockResolvedValue([
+      candidateRow({ areaTicketId: 'ticket-still-open', issuedAt: new Date('2026-08-09T18:00:00.000Z'), code: '9000000014' }),
+      candidateRow({ areaTicketId: 'ticket-new', issuedAt: new Date('2026-08-09T18:00:00.000Z'), code: '9000000015' }),
+    ])
+    prismaMock.areaTicketExternalIncident.findMany.mockResolvedValue([{ areaTicketId: 'ticket-still-open' }])
+
+    await runAreaTicketExternalReconciliation()
+
+    expect(prismaMock.areaTicketExternalIncident.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { areaTicketId: { in: ['ticket-still-open', 'ticket-new'] }, kind: 'UNCONFIRMED_CHARGE', status: 'OPEN' },
+      }),
+    )
+    expect(prismaMock.areaTicketExternalIncident.upsert).toHaveBeenCalledTimes(1)
+    expect(prismaMock.areaTicketExternalIncident.upsert.mock.calls[0][0].where).toEqual({
+      areaTicketId_kind: { areaTicketId: 'ticket-new', kind: 'UNCONFIRMED_CHARGE' },
+    })
+    expect(logActionMock).toHaveBeenCalledTimes(1)
   })
 
   // --- Endurecimiento adicional: aislamiento por fila ---
