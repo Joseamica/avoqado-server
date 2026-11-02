@@ -126,6 +126,8 @@ export const cardRefundSchema = z.object({
     note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
     // F1: opcional si viene el encabezado `Idempotency-Key`; si vienen los dos deben ser iguales (lo revisa el controlador).
     idempotencyKey: cardRefundKey.optional(),
+    // La última devolución que vio el operador (`null`: ninguna). Obligatorio: sin él no se sabe sobre qué decidió.
+    expectedLatestRefundId: z.string().min(1).max(64).nullable(),
   }),
 })
 /** «Devolver por otro medio» de una devolución a la tarjeta que falló después (sólo efectivo o transferencia). */

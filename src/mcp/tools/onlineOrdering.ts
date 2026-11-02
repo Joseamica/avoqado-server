@@ -410,7 +410,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_order_card_refund',
-    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Dos pasos: sin confirm:true sólo muestra la vista previa y un confirmationToken; para devolver, repite los mismos datos con confirm:true y ese confirmationToken (vale 10 minutos). Repetir la confirmación con el mismo token no devuelve dos veces. Pide permiso para reembolsar.',
+    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Dos pasos: sin confirm:true sólo muestra la vista previa, un confirmationToken y expectedLatestRefundId; para devolver, repite los mismos datos con confirm:true, ese confirmationToken (vale 10 minutos) y ese expectedLatestRefundId. Repetir la confirmación con el mismo token no devuelve dos veces; si hubo otra devolución desde la vista previa contesta CARD_REFUND_STALE_VIEW y hay que revisarla y pedir otra vista previa. Pide permiso para reembolsar.',
     {
       venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
       orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
@@ -421,14 +421,19 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       note: z.string().trim().max(200).optional().describe('Nota para la bitácora'),
       confirm: z.boolean().optional().describe('true para devolver de verdad (con el confirmationToken de la vista previa)'),
       confirmationToken: z.string().optional().describe('El confirmationToken que dio la vista previa'),
+      expectedLatestRefundId: z
+        .string()
+        .nullable()
+        .optional()
+        .describe('Al confirmar: el expectedLatestRefundId que dio la vista previa, tal cual (la última devolución que se vio)'),
     },
-    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken }) => {
+    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken, expectedLatestRefundId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('payments:refund', venueId)
       requireWriteScopeAlways(scope, 'payments:refund', 'devuelve dinero a la tarjeta del cliente')
       const monto = new Prisma.Decimal(amount).toDecimalPlaces(2)
       const nota = note || null
-      const binding = { venueId, orderId, amount: monto.toFixed(2), reason, note: nota }
+      const datos = { venueId, orderId, amount: monto.toFixed(2), reason, note: nota }
 
       if (!confirm) {
         const order = await getInboxOrder({ venueId, orderId })
@@ -436,9 +441,12 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         if (order.paymentMode !== 'CARD_ONLINE' || order.card?.status !== 'CAPTURED') {
           return text({ ok: false, error: 'Este pedido no se cobró con tarjeta en línea; no hay nada que devolver a la tarjeta.' })
         }
+        // Lo visto lo fija el servidor al hacer la vista previa y queda atado a la firma: confirmar no puede renovarlo.
+        const vista = (await listCardRefunds(venueId, orderId))[0]?.id ?? null
         return text({
           ok: false,
           requiresConfirmation: true,
+          expectedLatestRefundId: vista,
           preview: {
             pedido: order.orderNumber,
             cliente: order.customerName,
@@ -448,15 +456,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             nota,
             efecto: `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.`,
           },
-          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', binding),
-          mensaje: 'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true y el confirmationToken.',
+          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista }),
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId.',
         })
       }
 
-      if (!validConfirmation(confirmationToken, scope, 'online_order_card_refund', binding)) {
+      const vista = expectedLatestRefundId ?? null
+      if (!validConfirmation(confirmationToken, scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista })) {
         return text({
           ok: false,
-          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo o nota). Pide una vista previa nueva y confírmala tal cual.`,
+          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo, nota o expectedLatestRefundId). Pide una vista previa nueva y confírmala tal cual.`,
         })
       }
       // La llave sale de la confirmación: repetir ESTA confirmación es la misma devolución; una vista previa nueva, otra.
@@ -470,6 +479,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           staffId: scope.staffId,
           idempotencyKey,
           note: nota,
+          expectedLatestRefundId: vista,
         })
         await auditMcpWrite(scope, {
           action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP',

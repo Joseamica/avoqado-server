@@ -588,6 +588,8 @@ export async function refundCardOnlineOrder(i: {
   staffId: string
   idempotencyKey: string
   note?: string | null
+  /** La última devolución que vio quien decide (`null`: ninguna). Se congela al ver la lista; nunca se relee para mandarla. */
+  expectedLatestRefundId: string | null
 }): Promise<{
   status: CardRefundOutcome
   cardRefundStatus: R
@@ -626,6 +628,16 @@ export async function refundCardOnlineOrder(i: {
         throw new ConflictError('La llave de idempotencia ya pertenece a otra devolución', 'IDEMPOTENCY_KEY_REUSED')
       }
       return { id: previa.id, replay: true }
+    }
+    // La protección contra devolver dos veces (Codex panel r4): dos solicitudes con la misma vista no pueden pasar las dos, sin
+    // importar el orden, la demora, las pestañas o las personas. Cuenta toda fila, también FAILED: el mismo orden que `listCardRefunds`.
+    const ultima = await tx.onlineOrderCardRefund.findFirst({
+      where: { chargeId: charge.id },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { id: true },
+    })
+    if ((ultima?.id ?? null) !== i.expectedLatestRefundId) {
+      throw new ConflictError('Hubo otra devolución de este pedido. Revisa la lista antes de devolver.', 'CARD_REFUND_STALE_VIEW')
     }
     const enCurso = await tx.onlineOrderCardRefund.findFirst({
       where: { chargeId: charge.id, status: { in: NO_LEDGER_YET } },
