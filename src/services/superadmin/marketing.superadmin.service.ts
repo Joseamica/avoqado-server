@@ -838,7 +838,10 @@ export async function handleResendWebhook(payload: ResendWebhookPayload) {
         bounceMessage: data.bounce?.message ?? null,
       })
 
-      return { handled: true, reason: 'Transactional reputation event logged' }
+      // 🔴 `handled: false` a propósito. Con `true` el controlador daba el aviso por atendido y los demás carriles (campañas a
+      // clientes del negocio, y los que vengan) no lo veían NUNCA: sus rebotes y quejas no marcaban su entrega. La supresión de
+      // la dirección ya la hizo el controlador antes de llamar a este carril (anotado en errores-despues-de-listo.md, 2-nov).
+      return { handled: false, reason: 'Reputation event without CampaignDelivery' }
     }
 
     // Not a marketing campaign email - ignore
