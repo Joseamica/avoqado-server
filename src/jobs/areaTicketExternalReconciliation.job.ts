@@ -95,6 +95,30 @@ export async function runAreaTicketExternalReconciliation(): Promise<void> {
 
   if (candidates.length === 0) return
 
+  // Una incidencia que SIGUE abierta no se toca: reabrir es sólo para las que alguien ya dio por resueltas o
+  // descartadas (ver el `@@unique` de `AreaTicketExternalIncident` en el schema). Sin esto, cada vuelta horaria subía
+  // `occurrenceCount` y escribía otra fila en la bitácora del dueño: La Galeterie, 9 vales huérfanos desde el 6-oct,
+  // 5,874 filas al 2-nov-2026.
+  const stillOpen = await retry(
+    () =>
+      prisma.areaTicketExternalIncident.findMany({
+        where: {
+          areaTicketId: { in: candidates.map(c => c.areaTicketId) },
+          kind: AreaTicketExternalIncidentKind.UNCONFIRMED_CHARGE,
+          status: AreaTicketExternalIncidentStatus.OPEN,
+        },
+        select: { areaTicketId: true },
+        take: candidates.length,
+      }),
+    {
+      retries: 2,
+      initialDelay: 1500,
+      shouldRetry: shouldRetryDbConnectionError,
+      context: 'areaTicketExternalReconciliation.findOpenIncidents',
+    },
+  )
+  const alreadyOpen = new Set(stillOpen.map(i => i.areaTicketId))
+
   // El corte depende SÓLO del timezone, no del venue — se calcula una vez por zona y se
   // reusa entre todos los venues que la comparten (casi siempre América/Ciudad de México).
   const cutoffByTimezone = new Map<string, Date>()
@@ -116,6 +140,7 @@ export async function runAreaTicketExternalReconciliation(): Promise<void> {
       // todavía no "cierra el día", nada que reclamar todavía.
       continue
     }
+    if (alreadyOpen.has(settlement.areaTicketId)) continue
 
     try {
       const now = new Date()
@@ -126,9 +151,8 @@ export async function runAreaTicketExternalReconciliation(): Promise<void> {
       }
 
       // Una fila VIVA por (vale, tipo): la primera vez es un INSERT liso (el
-      // `@@unique([areaTicketId, kind])` no encuentra fila previa); si ya existía —
-      // p.ej. la corrida anterior de este mismo job, o alguien la resolvió y volvió a
-      // quedar sin confirmar— la REABRE en vez de duplicarla.
+      // `@@unique([areaTicketId, kind])` no encuentra fila previa); si ya existía y alguien
+      // la resolvió o descartó pero el cobro sigue sin confirmar, la REABRE en vez de duplicarla.
       const incident = await prisma.areaTicketExternalIncident.upsert({
         where: { areaTicketId_kind: { areaTicketId: settlement.areaTicketId, kind: AreaTicketExternalIncidentKind.UNCONFIRMED_CHARGE } },
         create: {
