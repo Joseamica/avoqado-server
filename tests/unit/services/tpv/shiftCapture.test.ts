@@ -48,6 +48,7 @@ jest.mock('@/utils/prismaClient', () => ({
     $transaction: jest.fn(),
     // `lockShiftLifecycleForVenue` toma un advisory lock por `$queryRaw`; no devuelve filas.
     $queryRaw: jest.fn().mockResolvedValue([]),
+    tpvShiftOperation: { findFirst: jest.fn().mockResolvedValue(null) },
   },
 }))
 
@@ -275,6 +276,7 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
             findFirst: jest.fn().mockResolvedValue(makeOpenShift()),
           },
           $queryRaw: jest.fn().mockResolvedValue([]), // advisory lock del ciclo de vida del turno
+          tpvShiftOperation: { findFirst: jest.fn().mockResolvedValue(null) },
           activityLog: { create: mockTxActivityCreate },
         }),
       )

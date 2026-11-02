@@ -89,7 +89,7 @@ export class ShiftCloseWatchdogJob {
         try {
           const result = await this.dependencies.prisma.$transaction(async tx => {
             await lockShiftLifecycleForVenue(tx, candidate.venueId)
-            return tx.shift.updateMany({
+            const reopened = await tx.shift.updateMany({
               where: {
                 id: candidate.id,
                 venueId: candidate.venueId,
@@ -99,6 +99,20 @@ export class ShiftCloseWatchdogJob {
               },
               data: { status: ShiftStatus.OPEN, updatedAt: now },
             })
+            if (reopened.count === 1) {
+              // The request survives; its old witness must not own another claim at the same timestamp.
+              await tx.tpvShiftOperation.updateMany({
+                where: {
+                  venueId: candidate.venueId,
+                  shiftId: candidate.id,
+                  kind: 'CLOSE',
+                  state: 'PENDING',
+                  resultJson: { path: ['claimedAt'], equals: candidate.updatedAt.toISOString() },
+                },
+                data: { resultJson: { claimedAt: null } },
+              })
+            }
+            return reopened
           })
           if (result.count === 1) {
             reopened += 1

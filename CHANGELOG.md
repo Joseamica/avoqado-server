@@ -13,6 +13,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - MCP `log_waste` (registrar merma): la huella de la vista previa ahora la firma el servidor y vence a los 10 minutos. Antes era un sha256 de datos que el cliente conoce y un asistente podía confirmar una merma sin enseñarle la vista previa al operador. El contrato no cambia: se confirma con `confirmationPayload` tal cual.
 
+- Pruebas del importador de catálogo: el caso de hallazgos ya agrupados comprueba cada cesión esperada al event loop sin exigir tres ticks de reloj; conserva el presupuesto de 50 ms y los diagnósticos de Node sin medición de CPU.
+
+- Caja TPV: el detalle por identidad admite `view=state` con sólo id, sucursal y estado, para reconocer un cierre hecho en otro aparato sin cargar el reporte ni cambiar la respuesta anterior.
+
+- Caja TPV sin red: apertura y cierre admiten operaciones durables e idempotentes, conservan el resultado original y la identidad del turno, y exponen su recuperación en el MCP. La recuperación de una emisión cripto incierta consulta su operación antes de volver a emitir; cancelar conserva el alcance por sucursal, terminal y actor.
+
+- Descuentos manuales: crear una venta móvil y pagar una nueva cuenta de tarjeta de regalo verifican el mismo permiso `discounts:apply`, sin duplicar el consumo del código de encargado.
+
 - Cobros POS → TPV: cancelar consulta de inmediato la evidencia de esa solicitud, también al reconectar con una cancelación pendiente, sin repetir la autorización ni esperar al vigía. Los avisos muestran la antigüedad real y sólo se emiten si el vigía ganó la transición a resultado desconocido.
 
 - Anuncios: las primeras aperturas simultáneas ya no fallan por clave duplicada; conservan una sola interacción y sus fechas de apertura, cierre y CTA.

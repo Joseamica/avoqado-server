@@ -87,6 +87,7 @@ describe('closeShiftForVenueWithResult cash reconciliation', () => {
 
     tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+      tpvShiftOperation: { findFirst: jest.fn().mockResolvedValue(null) },
       shift: {
         findFirst: jest.fn(async () => shift),
         updateMany: jest.fn(async (args: any) => {
@@ -360,6 +361,7 @@ describe('closeShiftForVenueWithResult — propina en efectivo en el arqueo', ()
 
     tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+      tpvShiftOperation: { findFirst: jest.fn().mockResolvedValue(null) },
       shift: {
         findFirst: jest.fn(async () => shift),
         updateMany: jest.fn(async (args: any) => {

@@ -18,7 +18,8 @@ import crypto from 'crypto'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
-import { BadRequestError, InternalServerError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { getUserAccess, hasPermission } from '../access/access.service'
 import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
@@ -50,6 +51,7 @@ import type {
   B4BitWebhookPayload,
   InitiateCryptoPaymentParams,
   InitiateCryptoPaymentResult,
+  CryptoOperationResult,
   ProcessWebhookResult,
 } from './types'
 
@@ -260,8 +262,31 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
  * @param params Payment parameters from TPV
  * @returns Payment URL and tracking information
  */
-export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams): Promise<InitiateCryptoPaymentResult> {
-  const { venueId, amount, tip = 0, staffId, orderId, orderNumber, deviceSerialNumber, rating } = params
+export async function initiateCryptoPayment(
+  params: InitiateCryptoPaymentParams,
+): Promise<InitiateCryptoPaymentResult | CryptoOperationResult> {
+  const { venueId, amount, tip = 0, orderId, orderNumber, rating, idempotencyKey } = params
+  const durable = idempotencyKey !== undefined
+  if (durable) {
+    if (!/^c[a-z0-9]{24}$/.test(idempotencyKey)) throw new BadRequestError('La operación debe ser un cuid v1 válido')
+    await requireCryptoOperationAccess(params.actorStaffId, venueId, 'payments:create')
+    if (!params.terminalSerialNumber) throw new ForbiddenError('Se requiere la terminal autenticada')
+  }
+  const staffId = durable ? params.actorStaffId! : params.staffId
+  const deviceSerialNumber = durable ? params.terminalSerialNumber : params.deviceSerialNumber
+  const contract = {
+    version: 1,
+    venueId,
+    method: 'CRYPTOCURRENCY',
+    processor: 'B4BIT',
+    amount,
+    tip,
+    orderId: orderId ?? null,
+    orderNumber: orderNumber ?? null,
+    rating: rating ?? null,
+    terminalSerial: deviceSerialNumber ?? null,
+  }
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex')
   await assertVenueSalesEnabled(venueId)
 
   // Convert centavos to decimal (5500 centavos = $55.00 MXN)
@@ -308,119 +333,200 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       where: {
         venueId,
         serialNumber: deviceSerialNumber,
+        ...(durable ? { status: 'ACTIVE' as const } : {}),
       },
       select: { id: true },
     })
     terminalId = terminal?.id || null
   }
+  if (durable && !terminalId) throw new ForbiddenError('La terminal no pertenece a este negocio')
 
   // Create payment and order in a transaction (atomic)
-  const { payment, turnoProvisional } = await prisma.$transaction(async tx => {
-    // For crypto payments without an existing order, create a "fast order" (placeholder)
-    let orderIdToUse = orderId
-
-    // 🔴 TENANT + ESTADO. El `orderId` llegaba del cliente y se usaba TAL CUAL:
-    // el schema sólo exige que sea un CUID, así que se podía enganchar un cobro
-    // cripto a la cuenta de OTRO negocio, o a una cuenta ya cerrada. El filtro por
-    // `venueId` es lo que hace que una orden ajena simplemente no exista aquí.
-    if (orderIdToUse) {
-      const targetOrder = await tx.order.findUnique({
-        where: { id: orderIdToUse, venueId },
-        select: { id: true, status: true, paymentStatus: true, thirdPartyCashDue: true },
-      })
-
-      if (!targetOrder) {
-        throw new BadRequestError('La cuenta no existe o no pertenece a esta sucursal')
+  const { payment, turnoProvisional } = await prisma
+    .$transaction(async tx => {
+      if (durable) {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`crypto:${venueId}:${idempotencyKey}`}))`
+        const existing = await tx.payment.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } } })
+        if (existing) {
+          assertCryptoOperation(existing, deviceSerialNumber, fingerprint)
+          return { payment: existing, turnoProvisional: existing.shiftId }
+        }
       }
-      // Rappi 2b (T7): un cobro NUEVO con cripto no cobra un pedido de Rappi en efectivo (antes de crear nada).
-      rechazarAccionDeCobroSobreRappiEnEfectivo(targetOrder)
-      // Pedidos en línea fase 2: un cobro NUEVO con cripto no cobra un pedido pagado con tarjeta en línea.
-      await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: orderIdToUse })
-      if (targetOrder.paymentStatus === 'PAID') {
-        throw new BadRequestError('La cuenta ya está pagada')
+      // For crypto payments without an existing order, create a "fast order" (placeholder)
+      let orderIdToUse = orderId
+
+      // 🔴 TENANT + ESTADO. El `orderId` llegaba del cliente y se usaba TAL CUAL:
+      // el schema sólo exige que sea un CUID, así que se podía enganchar un cobro
+      // cripto a la cuenta de OTRO negocio, o a una cuenta ya cerrada. El filtro por
+      // `venueId` es lo que hace que una orden ajena simplemente no exista aquí.
+      if (orderIdToUse) {
+        const targetOrder = await tx.order.findUnique({
+          where: { id: orderIdToUse, venueId },
+          select: { id: true, status: true, paymentStatus: true, thirdPartyCashDue: true },
+        })
+
+        if (!targetOrder) {
+          throw new BadRequestError('La cuenta no existe o no pertenece a esta sucursal')
+        }
+        // Rappi 2b (T7): un cobro NUEVO con cripto no cobra un pedido de Rappi en efectivo (antes de crear nada).
+        rechazarAccionDeCobroSobreRappiEnEfectivo(targetOrder)
+        // Pedidos en línea fase 2: un cobro NUEVO con cripto no cobra un pedido pagado con tarjeta en línea.
+        await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: orderIdToUse })
+        if (targetOrder.paymentStatus === 'PAID') {
+          throw new BadRequestError('La cuenta ya está pagada')
+        }
+        if (targetOrder.status === 'CANCELLED' || targetOrder.status === 'DELETED') {
+          throw new BadRequestError('La cuenta está cancelada y no admite cobros')
+        }
       }
-      if (targetOrder.status === 'CANCELLED' || targetOrder.status === 'DELETED') {
-        throw new BadRequestError('La cuenta está cancelada y no admite cobros')
+
+      // 🔴 EL TURNO PROVISIONAL, UNA SOLA VEZ, PARA LOS DOS REGISTROS DE AQUÍ.
+      //
+      // El turno de caja es del NEGOCIO, no de la persona ni del aparato (`../shared/turnoDeCaja.ts`,
+      // decisión del founder del 2-sep-2026), y se resuelve con el cliente de la transacción. La orden
+      // testigo y el pago pendiente arrancan con el MISMO id: si cada uno lo resolviera por su cuenta,
+      // la iniciación misma podría partirse entre turnos. Al confirmar puede moverse sólo
+      // `Payment.shiftId`, porque ahí el dinero se vuelve real; `Order.shiftId` no se reescribe.
+      //
+      // `null` es un desenlace legítimo: un negocio sin turno abierto sigue vendiendo, y el cobro se
+      // registra sin turno — nunca en uno ajeno ni en uno cerrado.
+      const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
+
+      if (!orderIdToUse) {
+        // Generate order number
+        const orderNumberGenerated = orderNumber || `CRYPTO-${Date.now()}`
+
+        // Create fast order for crypto payment
+        const newOrder = await tx.order.create({
+          data: {
+            venueId,
+            shiftId: turnoDelNegocio?.id ?? null,
+            orderNumber: orderNumberGenerated,
+            type: 'TAKEOUT',
+            source: 'TPV',
+            terminalId,
+            status: 'PENDING', // Will be updated to COMPLETED when payment confirms
+            subtotal: amount / 100, // Convert centavos to decimal
+            taxAmount: 0,
+            contratoDePrecio: 'IVA_INCLUIDO',
+            total: totalAmount / 100,
+            tipAmount: tip / 100,
+            paidAmount: 0, // Will be updated when payment confirms
+            remainingBalance: totalAmount / 100,
+            paymentStatus: 'PENDING',
+            splitType: 'FULLPAYMENT',
+            createdById: staffId,
+            servedById: staffId,
+          },
+        })
+
+        orderIdToUse = newOrder.id
+        logger.info('📦 Created placeholder order for crypto payment', {
+          orderId: newOrder.id,
+          orderNumber: newOrder.orderNumber,
+        })
       }
-    }
 
-    // 🔴 EL TURNO PROVISIONAL, UNA SOLA VEZ, PARA LOS DOS REGISTROS DE AQUÍ.
-    //
-    // El turno de caja es del NEGOCIO, no de la persona ni del aparato (`../shared/turnoDeCaja.ts`,
-    // decisión del founder del 2-sep-2026), y se resuelve con el cliente de la transacción. La orden
-    // testigo y el pago pendiente arrancan con el MISMO id: si cada uno lo resolviera por su cuenta,
-    // la iniciación misma podría partirse entre turnos. Al confirmar puede moverse sólo
-    // `Payment.shiftId`, porque ahí el dinero se vuelve real; `Order.shiftId` no se reescribe.
-    //
-    // `null` es un desenlace legítimo: un negocio sin turno abierto sigue vendiendo, y el cobro se
-    // registra sin turno — nunca en uno ajeno ni en uno cerrado.
-    const turnoDelNegocio = await turnoAbiertoDelNegocio(tx, venueId)
-
-    if (!orderIdToUse) {
-      // Generate order number
-      const orderNumberGenerated = orderNumber || `CRYPTO-${Date.now()}`
-
-      // Create fast order for crypto payment
-      const newOrder = await tx.order.create({
+      // Create pending payment record
+      const newPayment = await tx.payment.create({
         data: {
+          ...(durable
+            ? {
+                id: idempotencyKey,
+                idempotencyKey,
+                processorData: { cryptoOperation: { ...contract, fingerprint, phase: 'PREPARED', declaredStaffId: params.staffId } },
+              }
+            : {}),
           venueId,
-          shiftId: turnoDelNegocio?.id ?? null,
-          orderNumber: orderNumberGenerated,
-          type: 'TAKEOUT',
-          source: 'TPV',
-          terminalId,
-          status: 'PENDING', // Will be updated to COMPLETED when payment confirms
-          subtotal: amount / 100, // Convert centavos to decimal
-          taxAmount: 0,
-          contratoDePrecio: 'IVA_INCLUIDO',
-          total: totalAmount / 100,
+          orderId: orderIdToUse,
+          amount: amount / 100, // Convert centavos to decimal
           tipAmount: tip / 100,
-          paidAmount: 0, // Will be updated when payment confirms
-          remainingBalance: totalAmount / 100,
-          paymentStatus: 'PENDING',
-          splitType: 'FULLPAYMENT',
-          createdById: staffId,
-          servedById: staffId,
+          method: PaymentMethod.CRYPTOCURRENCY,
+          status: 'PENDING',
+          source: 'TPV',
+          type: 'FAST',
+          processor: 'B4BIT',
+          processedById: staffId,
+          // El MISMO turno provisional que llevó la orden: nunca el que mandó el cliente.
+          shiftId: turnoDelNegocio?.id ?? null,
+          terminalId,
+          feePercentage: 0.0095, // B4Bit 0.95% fee
+          feeAmount: (totalAmount / 100) * 0.0095,
+          netAmount: (totalAmount / 100) * (1 - 0.0095),
+          posRawData: {
+            cryptoProvider: 'B4BIT',
+            initiatedAt: new Date().toISOString(),
+            rating,
+            deviceSerialNumber,
+          },
         },
       })
 
-      orderIdToUse = newOrder.id
-      logger.info('📦 Created placeholder order for crypto payment', {
-        orderId: newOrder.id,
-        orderNumber: newOrder.orderNumber,
-      })
-    }
-
-    // Create pending payment record
-    const newPayment = await tx.payment.create({
-      data: {
-        venueId,
-        orderId: orderIdToUse,
-        amount: amount / 100, // Convert centavos to decimal
-        tipAmount: tip / 100,
-        method: PaymentMethod.CRYPTOCURRENCY,
-        status: 'PENDING',
-        source: 'TPV',
-        type: 'FAST',
-        processor: 'B4BIT',
-        processedById: staffId,
-        // El MISMO turno provisional que llevó la orden: nunca el que mandó el cliente.
-        shiftId: turnoDelNegocio?.id ?? null,
-        terminalId,
-        feePercentage: 0.0095, // B4Bit 0.95% fee
-        feeAmount: (totalAmount / 100) * 0.0095,
-        netAmount: (totalAmount / 100) * (1 - 0.0095),
-        posRawData: {
-          cryptoProvider: 'B4BIT',
-          initiatedAt: new Date().toISOString(),
-          rating,
-          deviceSerialNumber,
-        },
-      },
+      return {
+        payment: newPayment,
+        fastOrder: orderIdToUse !== orderId ? orderIdToUse : null,
+        turnoProvisional: turnoDelNegocio?.id ?? null,
+      }
+    })
+    .catch(error => {
+      // The Order insert and the colliding Payment insert have BOTH rolled back before this catch.
+      if (durable && error?.code === 'P2002') throw new ConflictError('Esta clave ya pertenece a otra operación')
+      throw error
     })
 
-    return { payment: newPayment, fastOrder: orderIdToUse !== orderId ? orderIdToUse : null, turnoProvisional: turnoDelNegocio?.id ?? null }
-  })
+  if (durable) {
+    const ownsEmission = await prisma.$transaction(async tx => {
+      await lockB4BitPaymentRow(tx, payment.id, venueId)
+      const fresh = await tx.payment.findUnique({ where: { id: payment.id, venueId } })
+      if (!fresh) throw new NotFoundError('No se encontró esta operación')
+      const operation = assertCryptoOperation(fresh, deviceSerialNumber, fingerprint)
+      if (operation.phase !== 'PREPARED' || fresh.status !== 'PENDING') return false
+      const current = mergeB4BitProcessorData(fresh.processorData, {}).processorData
+      const transition = await tx.payment.updateMany({
+        where: { id: payment.id, venueId, status: 'PENDING', processorData: { path: ['cryptoOperation', 'phase'], equals: 'PREPARED' } },
+        data: { processorData: { ...current, cryptoOperation: { ...operation, phase: 'SENDING' } } },
+      })
+      return transition.count === 1
+    })
+    if (!ownsEmission) return getCryptoOperationForVenue(venueId, idempotencyKey!, deviceSerialNumber, params.actorStaffId)
+    try {
+      const response = await createPaymentOrder({ venueId, fiat_amount: fiatAmount, fiat_currency: 'MXN', identifier: payment.id })
+      if (
+        response.success &&
+        response.data &&
+        typeof response.data.request_id === 'string' &&
+        typeof response.data.payment_url === 'string'
+      ) {
+        await prisma.$transaction(async tx => {
+          await lockB4BitPaymentRow(tx, payment.id, venueId)
+          const fresh = await tx.payment.findUnique({ where: { id: payment.id, venueId } })
+          if (!fresh) throw new NotFoundError('No se encontró esta operación')
+          const operation = assertCryptoOperation(fresh, deviceSerialNumber, fingerprint)
+          const current = mergeB4BitProcessorData(fresh.processorData, {}).processorData
+          await tx.payment.update({
+            where: { id: payment.id, venueId },
+            data: {
+              externalId: response.data!.request_id,
+              processorId: response.data!.request_id,
+              processorData: {
+                ...current,
+                requestId: response.data!.request_id,
+                paymentUrl: response.data!.payment_url,
+                expiresAt: response.data!.expires_at,
+                cryptoSymbol: response.data!.crypto_symbol ?? null,
+                cryptoAddress: response.data!.crypto_address ?? null,
+                cryptoOperation: { ...operation, phase: 'READY' },
+              },
+            },
+          })
+        })
+      }
+    } catch {
+      // SENDING is durable uncertainty, including a lost response or failed persistence after the POST. Never repeat it.
+      logger.warn('B4Bit: operación pendiente de revisión tras envío incierto', { venueId, paymentId: payment.id })
+    }
+    return getCryptoOperationForVenue(venueId, idempotencyKey!, deviceSerialNumber, params.actorStaffId)
+  }
 
   logger.info('💾 Created pending crypto payment', { paymentId: payment.id, turnoProvisional })
 
@@ -767,18 +873,19 @@ export async function processWebhook(payload: B4BitWebhookPayload): Promise<Proc
 
     case 'AC': // Awaiting Completion - Payment detected, waiting for confirmations
       // Update processorData and emit progress event
-      await prisma.payment.update({
-        where: { id: payment.id },
-        data: {
-          processorData: {
-            ...processorData,
-            ...editedAtPatch,
-            lastStatus: 'AC',
-            cryptoAmount: crypto_amount,
-            cryptoCurrency: currency,
-            unconfirmedAt: new Date().toISOString(),
-          },
-        },
+      await prisma.$transaction(async tx => {
+        await lockB4BitPaymentRow(tx, payment.id, venueId)
+        const fresh = await tx.payment.findUnique({ where: { id: payment.id, venueId }, select: { processorData: true } })
+        if (!fresh) throw new NotFoundError('Pago no encontrado')
+        const merged = mergeB4BitProcessorData(fresh.processorData, {
+          ...editedAtPatch,
+          lastStatus: 'AC',
+          cryptoAmount: crypto_amount,
+          cryptoCurrency: currency,
+          unconfirmedAt: new Date().toISOString(),
+        })
+        if (!merged.ignoredAsOutOfOrder)
+          await tx.payment.update({ where: { id: payment.id, venueId }, data: { processorData: merged.processorData } })
       })
 
       socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_PROCESSING, {
@@ -1784,48 +1891,175 @@ export async function getPaymentStatus(
  *
  * @param paymentId Our internal payment ID
  */
-export async function cancelCryptoPayment(paymentId: string): Promise<void> {
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
-    select: { id: true, status: true, externalId: true, venueId: true, processorData: true },
-  })
+type CryptoPaymentSnapshot = Pick<
+  Prisma.PaymentGetPayload<Record<string, never>>,
+  | 'id'
+  | 'venueId'
+  | 'orderId'
+  | 'idempotencyKey'
+  | 'method'
+  | 'processor'
+  | 'status'
+  | 'externalId'
+  | 'processorData'
+  | 'shiftId'
+  | 'amount'
+  | 'tipAmount'
+>
 
-  if (!payment) {
-    throw new BadRequestError('Pago no encontrado')
+function assertCryptoOperation(payment: CryptoPaymentSnapshot, terminalSerial?: string, fingerprint?: string): Prisma.JsonObject {
+  const data = payment.processorData as Prisma.JsonObject | null
+  const operation = data?.cryptoOperation as Prisma.JsonObject | undefined
+  if (
+    payment.method !== 'CRYPTOCURRENCY' ||
+    payment.processor !== 'B4BIT' ||
+    payment.id !== payment.idempotencyKey ||
+    operation?.version !== 1 ||
+    typeof operation.fingerprint !== 'string' ||
+    !['PREPARED', 'SENDING', 'READY'].includes(String(operation.phase)) ||
+    (terminalSerial !== undefined && operation.terminalSerial !== terminalSerial) ||
+    (fingerprint !== undefined && operation.fingerprint !== fingerprint)
+  ) {
+    throw new ConflictError('Esta clave ya pertenece a otra operación')
   }
+  return operation
+}
 
-  if (payment.status !== 'PENDING') {
-    throw new BadRequestError('Solo se pueden cancelar pagos pendientes')
+/** Exact own operation; MCP supplies its venue guard and actor instead of a terminal session. GET never settles money. */
+export async function getCryptoOperationForVenue(
+  venueId: string,
+  idempotencyKey: string,
+  terminalSerial?: string,
+  actorStaffId?: string,
+): Promise<CryptoOperationResult> {
+  if (!/^c[a-z0-9]{24}$/.test(idempotencyKey)) throw new BadRequestError('La operación debe ser un cuid v1 válido')
+  await requireCryptoOperationAccess(actorStaffId, venueId, 'payments:read')
+  if (terminalSerial !== undefined) {
+    const terminal = await prisma.terminal.findFirst({
+      where: { venueId, serialNumber: terminalSerial, status: 'ACTIVE' },
+      select: { id: true },
+    })
+    if (!terminal) throw new ForbiddenError('La terminal no pertenece a este negocio')
   }
-
-  // Update status to FAILED (CANCELLED not available in TransactionStatus enum)
-  await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      status: 'FAILED',
-      processorData: {
-        ...(typeof payment.processorData === 'object' ? payment.processorData : {}),
-        cancelledAt: new Date().toISOString(),
-        cancelledBy: 'TPV_USER',
-        cancelReason: 'USER_CANCELLED',
-      },
-    },
-  })
-
-  // Emit cancellation event
-  socketManager.broadcastToVenue(payment.venueId, SocketEventType.PAYMENT_FAILED, {
-    correlationId: payment.id,
-    timestamp: new Date(),
-    venueId: payment.venueId,
+  const read = () => prisma.payment.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey } } })
+  let payment = await read()
+  if (!payment) throw new NotFoundError('No se encontró esta operación cripto')
+  assertCryptoOperation(payment, terminalSerial)
+  let providerStatus: B4BitPaymentStatus | null = null
+  if (payment.externalId) {
+    try {
+      const evidence = (await getPaymentStatus(payment.externalId, venueId)).status
+      providerStatus = ['PE', 'AC', 'CO', 'OC', 'EX'].includes(evidence) ? evidence : null
+    } catch {
+      /* An unavailable provider is unknown evidence, never a financial rejection. */
+    }
+    payment = await read()
+    if (!payment) throw new NotFoundError('No se encontró esta operación cripto')
+  }
+  const operation = assertCryptoOperation(payment, terminalSerial)
+  const data = payment.processorData as Prisma.JsonObject
+  const financialRecorded = payment.status === 'COMPLETED'
+  const requiresReview = !financialRecorded && (operation.phase === 'SENDING' || payment.status === 'FAILED' || providerStatus === 'CO')
+  return {
+    success: true,
     paymentId: payment.id,
+    orderId: payment.orderId,
+    requestId: payment.externalId ?? null,
+    paymentUrl: typeof data.paymentUrl === 'string' ? data.paymentUrl : null,
+    expiresAt: typeof data.expiresAt === 'string' ? data.expiresAt : null,
+    expiresInSeconds: typeof data.expiresAt === 'string' ? Math.max(0, Math.floor((Date.parse(data.expiresAt) - Date.now()) / 1000)) : null,
+    cryptoSymbol: typeof data.cryptoSymbol === 'string' ? data.cryptoSymbol : undefined,
+    cryptoAddress: typeof data.cryptoAddress === 'string' ? data.cryptoAddress : undefined,
+    shiftId: payment.shiftId ?? null,
+    amount: Number(payment.amount),
+    tipAmount: Number(payment.tipAmount),
+    operation: {
+      idempotencyKey,
+      emissionStatus: String(operation.phase),
+      financialStatus: payment.status,
+      financialRecorded,
+      providerStatus,
+      requiresReview,
+      reviewOwner: requiresReview ? 'VENUE_MANAGER' : null,
+    },
+  }
+}
+
+async function requireCryptoOperationAccess(staffId: string | undefined, venueId: string, permission: string): Promise<void> {
+  if (!staffId) throw new ForbiddenError('Se requiere una persona autorizada en este negocio')
+  const access = await getUserAccess(staffId, venueId).catch(error => {
+    if (error instanceof Error && error.message === `User ${staffId} has no access to venue ${venueId}`) {
+      throw new ForbiddenError('La persona ya no tiene acceso a este negocio')
+    }
+    throw error
+  })
+  if (!hasPermission(access, permission)) throw new ForbiddenError('La persona no tiene permiso para esta operación')
+}
+
+export async function cancelCryptoPayment(input: {
+  venueId: string
+  staffId: string
+  paymentId?: string
+  requestId?: string
+}): Promise<void> {
+  const { venueId, staffId, paymentId, requestId } = input
+  await requireCryptoOperationAccess(staffId, venueId, 'payments:create')
+  if (!paymentId && !requestId) throw new BadRequestError('Se requiere paymentId o requestId')
+  const cancelled = await prisma.$transaction(async tx => {
+    const payment = await tx.payment.findFirst({
+      where: {
+        venueId,
+        method: 'CRYPTOCURRENCY',
+        processor: 'B4BIT',
+        ...(paymentId ? { id: paymentId } : {}),
+        ...(requestId ? { externalId: requestId } : {}),
+      },
+      select: { id: true, method: true, processor: true },
+    })
+    if (!payment || payment.method !== 'CRYPTOCURRENCY' || payment.processor !== 'B4BIT') throw new BadRequestError('Pago no encontrado')
+    await lockB4BitPaymentRow(tx, payment.id, venueId)
+    const fresh = await tx.payment.findUnique({ where: { id: payment.id, venueId }, select: { status: true, processorData: true } })
+    if (!fresh) throw new BadRequestError('Pago no encontrado')
+    const current = mergeB4BitProcessorData(fresh.processorData, {}).processorData
+    if (fresh.status === 'FAILED' && current.cancelledBy === 'TPV_USER') return null
+    if (fresh.status !== 'PENDING') throw new BadRequestError('Solo se pueden cancelar pagos pendientes')
+    const transition = await tx.payment.updateMany({
+      where: { id: payment.id, venueId, method: 'CRYPTOCURRENCY', processor: 'B4BIT', status: 'PENDING' },
+      data: {
+        status: 'FAILED',
+        processorData: {
+          ...current,
+          cancelledAt: new Date().toISOString(),
+          cancelledBy: 'TPV_USER',
+          cancelledByStaffId: staffId,
+          cancelReason: 'USER_CANCELLED',
+        },
+      },
+    })
+    if (transition.count !== 1) return null
+    await tx.activityLog.create({
+      data: {
+        venueId,
+        staffId,
+        action: 'CRYPTO_PAYMENT_CANCELLED',
+        entity: 'Payment',
+        entityId: payment.id,
+        data: { reason: 'USER_CANCELLED', providerCancellationConfirmed: false },
+      },
+    })
+    return payment.id
+  })
+  if (!cancelled) return
+  // FAILED is a local UI cancellation, never proof that the provider did not receive money.
+  socketManager.broadcastToVenue(venueId, SocketEventType.PAYMENT_FAILED, {
+    correlationId: cancelled,
+    timestamp: new Date(),
+    venueId,
+    paymentId: cancelled,
     amount: 0,
     currency: 'MXN',
     status: 'failed',
-    metadata: {
-      method: 'CRYPTOCURRENCY',
-      reason: 'CANCELLED_BY_USER',
-    },
+    metadata: { method: 'CRYPTOCURRENCY', reason: 'CANCELLED_BY_USER' },
   })
-
-  logger.info('🚫 Crypto payment cancelled', { paymentId })
+  logger.info('🚫 Crypto payment cancelled', { paymentId: cancelled })
 }

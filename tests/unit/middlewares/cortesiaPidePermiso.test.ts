@@ -138,10 +138,16 @@ jest.mock('@/services/tpv/order.tpv.service', () => ({
   addItemsToOrder: jest.fn().mockResolvedValue({ id: 'orden-tpv', tableName: null }),
 }))
 
+jest.mock('@/controllers/mobile/giftCard.mobile.controller', () => ({
+  ...jest.requireActual('@/controllers/mobile/giftCard.mobile.controller'),
+  payNewOrder: jest.fn((_req: any, res: any) => res.status(201).json({ success: true, data: { orderId: 'orden-con-saldo' } })),
+}))
+
 import tpvRouter from '@/routes/tpv.routes'
 import mobileRouter from '@/routes/mobile.routes'
 import { createOrderWithItems as crearOrdenMobile } from '@/services/mobile/order.mobile.service'
 import { addItemsToOrder as agregarRonda, createOrderWithItems as crearOrdenTpv } from '@/services/tpv/order.tpv.service'
+import { payNewOrder as crearConSaldo } from '@/controllers/mobile/giftCard.mobile.controller'
 
 // CUIDs: los params y el cuerpo de `/tpv/with-items` los validan con `.cuid()`.
 const VENUE_ID = 'cmn3acoxt000mn227k1vdgj95'
@@ -597,5 +603,153 @@ describe('descuento de catálogo tipo COMP — también pide orders:comp', () =>
 
     mockState.role = 'MANAGER'
     expect((await postRonda(rondaMobile([{ ...normal, discountId: COMP_ID }]))).status).toBe(200)
+  })
+})
+
+for (const puerta of [
+  { nombre: 'mobile (centavos)', post: postMobile, venta: ventaMobile, crear: crearOrdenMobile, rebaja: 100 },
+  { nombre: 'tpv/with-items (pesos)', post: postTpv, venta: ventaTpv, crear: crearOrdenTpv, rebaja: 1 },
+]) {
+  describe(`${puerta.nombre} — descuento manual pide discounts:apply`, () => {
+    beforeEach(() => {
+      mockState.permissionSet = { permissions: ['orders:create'] }
+    })
+
+    it('rol propio sin permiso: 403 sin crear la venta', async () => {
+      const res = await puerta.post(puerta.venta([normal], { discount: puerta.rebaja }))
+      expect(res.status).toBe(403)
+      expect(res.body.required).toBe('discounts:apply')
+      expect(puerta.crear).not.toHaveBeenCalled()
+    })
+
+    it('permiso propio: crea y conserva el importe y sus unidades', async () => {
+      mockState.permissionSet = { permissions: ['orders:create', 'discounts:apply'] }
+      const res = await puerta.post(puerta.venta([normal], { discount: puerta.rebaja }))
+      expect(res.status).toBe(201)
+      expect(puerta.crear).toHaveBeenCalledTimes(1)
+      expect((puerta.crear as jest.Mock).mock.calls[0][1].discount).toBe(puerta.rebaja)
+    })
+
+    it.each([undefined, 0])('sin descuento positivo (%s): conserva el acceso previo', async discount => {
+      const res = await puerta.post(puerta.venta([normal], { discount }))
+      expect(res.status).toBe(201)
+      expect(puerta.crear).toHaveBeenCalledTimes(1)
+    })
+
+    it('discounts:apply no permite regalar una línea sin orders:comp', async () => {
+      mockState.permissionSet = { permissions: ['orders:create', 'discounts:apply'] }
+      const res = await puerta.post(puerta.venta([cortesia], { discount: puerta.rebaja }))
+      expect(res.status).toBe(403)
+      expect(res.body.required).toBe('orders:comp')
+      expect(puerta.crear).not.toHaveBeenCalled()
+    })
+
+    it('el PIN para discounts:apply se consume una sola vez', async () => {
+      mockState.pinEnabled = true
+      const ficha = fichaDeGerente('manual-una-vez', 'discounts:apply')
+      mockState.overrides.push(ficha)
+      const body = puerta.venta([normal], { discount: puerta.rebaja })
+      expect((await puerta.post(body, conPin(ficha.token))).status).toBe(201)
+      expect(ficha.consumedAt).not.toBeNull()
+      expect((await puerta.post(body, conPin(ficha.token))).status).toBe(403)
+      expect(puerta.crear).toHaveBeenCalledTimes(1)
+    })
+  })
+}
+
+it('mobile ignora el descuento no numérico como antes; no lo transforma en rebaja', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  const res = await postMobile(ventaMobile([normal], { discount: '100' }))
+  expect(res.status).toBe(201)
+  expect((crearOrdenMobile as jest.Mock).mock.calls[0][1].discount).toBe(0)
+})
+
+it('tpv conserva su validación de descuento no numérico', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  const res = await postTpv(ventaTpv([normal], { discount: '1' }))
+  expect(res.status).toBe(400)
+  expect(crearOrdenTpv).not.toHaveBeenCalled()
+})
+
+it('mobile: manual ignorado por descuento de catálogo no pide un permiso adicional', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  const id = 'cmn3a6xr8000kn227eg8zeh51'
+  mockState.descuentos = [{ id, venueId: VENUE_ID, type: 'PERCENTAGE' }]
+  const res = await postMobile(ventaMobile([normal], { discount: 100, orderDiscountId: id }))
+  expect(res.status).toBe(201)
+})
+
+it('tpv: discount repite el de catálogo y no es descuento manual', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  const id = 'cmn3a6xr8000kn227eg8zeh51'
+  mockState.descuentos = [{ id, venueId: VENUE_ID, type: 'PERCENTAGE' }]
+  const res = await postTpv(ventaTpv([normal], { discount: 1, orderDiscountId: id }))
+  expect(res.status).toBe(201)
+})
+
+it('mobile: negativo se clampa como antes sin pedir el permiso de rebaja', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  const res = await postMobile(ventaMobile([normal], { discount: -100 }))
+  expect(res.status).toBe(201)
+  expect((crearOrdenMobile as jest.Mock).mock.calls[0][1].discount).toBe(-100)
+})
+
+it('mobile: promoción y manual comparten un único permiso y una sola ficha', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  mockState.pinEnabled = true
+  const ficha = fichaDeGerente('promocion-y-manual', 'discounts:apply')
+  mockState.overrides = [ficha]
+  const body = ventaMobile([{ promotionRef: { promotionId: 'promo-1', promotionInstanceId: 'combo-1', selections: [] } }], {
+    discount: 100,
+  })
+  expect((await postMobile(body, conPin(ficha.token))).status).toBe(201)
+  expect(ficha.consumedAt).not.toBeNull()
+  expect(mockState.bitacora.filter(f => f.action === 'PERMISSION_OVERRIDE_USED')).toHaveLength(1)
+  expect((await postMobile(body, conPin(ficha.token))).status).toBe(403)
+  expect(crearOrdenMobile).toHaveBeenCalledTimes(1)
+})
+
+it('mobile: el 403 manual del replay sigue pasando por el aviso S7', async () => {
+  mockState.permissionSet = { permissions: ['orders:create'] }
+  const externalId = 'manual-sin-permiso-1'
+  const res = await postMobile(
+    ventaMobile([normal], { discount: 100, isOfflineReplay: true, externalId, amount: 100 }),
+    cabecera({ terminalSerialNumber: 'N86-FULLTEST' }),
+  )
+  expect(res.status).toBe(403)
+  expect(crearOrdenMobile).not.toHaveBeenCalled()
+  const fila = await esperarBitacora('VENTA_SIN_RED_REINTENTANDO')
+  expect(fila).toBeDefined()
+  expect(fila.entityId).toBe(externalId)
+  expect(fila.data.motivo).toContain('403')
+})
+
+describe('unión B2: descuento manual al crear y cobrar con saldo', () => {
+  const postConSaldo = () =>
+    request(app)
+      .post(`/mobile/venues/${VENUE_ID}/gift-cards/pay-new-order`)
+      .set(cabecera())
+      .send({
+        items: [normal],
+        discount: 100,
+        idempotencyKey: 'cobro-nueva-manual-1',
+        proof: { kind: 'CODE', code: 'K7QZ-ABCD-EFGH-JKMN-P' },
+        amount: 100,
+      })
+
+  it('pay-new-order sin discounts:apply rechaza el descuento antes del escritor', async () => {
+    mockState.permissionSet = { permissions: ['orders:create', 'giftCards:redeem'] }
+    const res = await postConSaldo()
+    expect(res.status).toBe(403)
+    expect(res.body.required).toBe('discounts:apply')
+    expect(crearConSaldo).not.toHaveBeenCalled()
+  })
+
+  it('pay-new-order con discounts:apply alcanza el escritor y conserva la rebaja', async () => {
+    mockState.permissionSet = { permissions: ['orders:create', 'giftCards:redeem', 'discounts:apply'] }
+    const res = await postConSaldo()
+    expect(res.status).toBe(201)
+    expect(crearConSaldo).toHaveBeenCalledTimes(1)
+    expect((crearConSaldo as jest.Mock).mock.calls[0][0].body.discount).toBe(100)
   })
 })

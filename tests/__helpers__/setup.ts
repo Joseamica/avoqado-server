@@ -190,6 +190,7 @@ const prismaMock: any = {
   paymentAllocation: createMockModel(),
   posCommand: createMockModel(),
   shift: createMockModel(),
+  tpvShiftOperation: createMockModel(),
   // El cajón físico: `getShiftById` lo consulta desde `resolveShiftCashDrawer`
   // (unificación de caja, fase 5). Este mock ENUMERA los modelos, así que un modelo
   // nuevo no falla donde se agregó — falla en cualquier suite vecina que llame al

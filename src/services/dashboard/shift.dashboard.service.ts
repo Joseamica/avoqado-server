@@ -349,7 +349,19 @@ const ORDEN_DEL_DETALLE = {
   },
 } satisfies Prisma.OrderSelect
 
-export async function getShiftById(venueId: string, shiftId: string, incluirEsperado = false): Promise<any | null> {
+export async function getShiftById(
+  venueId: string,
+  shiftId: string,
+  incluirEsperado = false,
+  view: 'detail' | 'state' = 'detail',
+): Promise<any | null> {
+  // La terminal sólo necesita acreditar SU caja cerrada, sin cargar el corte completo.
+  if (view === 'state') {
+    return prisma.shift.findFirst({
+      where: { id: shiftId, venueId },
+      select: { id: true, venueId: true, status: true },
+    })
+  }
   const shift = await prisma.shift.findFirst({
     where: {
       id: shiftId,

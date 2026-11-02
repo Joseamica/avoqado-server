@@ -39,6 +39,8 @@ import { registerServiceCourseTools } from './tools/serviceCourses'
 import { registerCreditPackTools } from './tools/creditPacks'
 import { registerGiftCardTools } from './tools/giftCards'
 import { registerShiftTools } from './tools/shifts'
+import { registerShiftOperationTools } from './tools/shiftOperations'
+import { registerCryptoOperationTools } from './tools/cryptoOperations'
 import { registerDiscountTools } from './tools/discounts'
 import { registerExchangeTools } from './tools/exchanges'
 import { registerUpsellTools } from './tools/upsell'
@@ -140,6 +142,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerCreditPackTools(server, scope)
   registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)
   registerShiftTools(server, scope)
+  registerShiftOperationTools(server, scope)
+  registerCryptoOperationTools(server, scope)
   registerDiscountTools(server, scope)
   registerExchangeTools(server, scope) // Exchange reads, review and settings: free mode only, outside the certified catalog.
   registerUpsellTools(server, scope)
