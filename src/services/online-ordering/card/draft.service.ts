@@ -140,9 +140,9 @@ export async function requestCardCheckout(charge: OnlineOrderCharge, now: Date, 
 
 /** El estado que daría el seguimiento: el del pedido si ya nació, si no el del borrador. */
 async function trackingStatus(charge: OnlineOrderCharge): Promise<PublicTracking['status']> {
-  if (!charge.onlineOrderId) return cardDraftTrackingStatus(charge.status)
+  if (!charge.onlineOrderId) return cardDraftTrackingStatus(charge)
   const order = await prisma.onlineOrder.findUnique({ where: { id: charge.onlineOrderId }, select: { status: true } })
-  return order?.status ?? cardDraftTrackingStatus(charge.status)
+  return order?.status ?? cardDraftTrackingStatus(charge)
 }
 
 const toResult = (charge: OnlineOrderCharge, replay: boolean, status: PublicTracking['status']): CardDraftResult => ({

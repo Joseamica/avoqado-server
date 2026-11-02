@@ -888,6 +888,37 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(voidSpy.mock.calls[1][1].idempotencyKey).toBe(`online-order:${orderId}:release`)
   })
 
+  it('S4 (clientes, Codex plan r1 #3 y r2 #3): el seguimiento no afirma «no se cobró» con el dinero en duda', async () => {
+    // Pedido rechazado cuya liberación falló: la tarjeta sigue apartada ⇒ RELEASING, no RELEASED.
+    const { orderId, trackingToken } = await authorizedOrder()
+    voidSpy.mockRejectedValue(lost())
+    await reject(orderId)
+    await expect(getTrackingByToken(trackingToken)).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
+
+    // Borrador normal: espera el pago, sin estado de tarjeta.
+    const k1 = nextKey()
+    const r1 = await draft({ key: k1 })
+    await expect(getTrackingByToken(r1.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', cardStatus: null })
+
+    // Borrador que terminó CAPTURED sin pedido (se iba a liberar y ya estaba cobrado a mano).
+    await prisma.onlineOrderCharge.update({
+      where: { id: (await chargeOf(k1)).id },
+      data: { status: 'CAPTURED', lastError: 'CAPTURED_OUTSIDE', paymentIntentId: `pi_s4_${RUN}` },
+    })
+    await expect(getTrackingByToken(r1.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'CAPTURED' })
+
+    // Borrador PENDING_AUTH cobrado fuera de Avoqado: lo mismo, y sin volver a preguntarle a Stripe.
+    const k2 = nextKey()
+    const r2 = await draft({ key: k2 })
+    await prisma.onlineOrderCharge.update({
+      where: { id: (await chargeOf(k2)).id },
+      data: { lastError: 'CAPTURED_OUTSIDE', updatedAt: new Date(Date.now() - 10_000) },
+    })
+    const stripeReads = authSpy.mock.calls.length
+    await expect(getTrackingByToken(r2.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'CAPTURED' })
+    expect(authSpy).toHaveBeenCalledTimes(stripeReads)
+  })
+
   it('un cargo RELEASING sin pedido (liberación tardía) se libera con la clave del cargo', async () => {
     const key = nextKey()
     await draft({ key })
@@ -1094,8 +1125,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       await expect(reconcile()).resolves.toMatchObject({ scanned: 0 })
       expect(await chargeById(d.id)).toMatchObject({ status: 'PENDING_AUTH' })
       expect(voidSpy).not.toHaveBeenCalled()
-      // El comensal sigue viendo «esperando el pago» (no existe un estado «en revisión»).
-      await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT' })
+      // S4 (Codex plan r2 #3): el comensal ya no ve «esperando el pago»: el pago no se completó por aquí y su tarjeta SÍ se cobró.
+      await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'CAPTURED' })
     } finally {
       errorSpy.mockRestore()
     }

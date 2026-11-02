@@ -27,7 +27,7 @@ import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
-import { confirmCardAuthorization } from './card/confirm.service'
+import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
 
 export interface CreateOnlineOrderInput {
   venueId: string
@@ -557,26 +557,36 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   }
 }
 
-/** Fase 2: el borrador de tarjeta todavía no es pedido: espera el pago, o ya no se pagó (vencido o liberado). */
-export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETED'
-export const cardDraftTrackingStatus = (status: OnlineOrderChargeStatus): CardDraftTrackingStatus =>
-  status === OnlineOrderChargeStatus.PENDING_AUTH ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
+type DraftCharge = { status: OnlineOrderChargeStatus; lastError: string | null }
+/** S4 (Codex plan r2 #3): un borrador que sigue `PENDING_AUTH` pero ya se cobró fuera de Avoqado (`capturedOutside`). */
+const draftCapturedOutside = (c: DraftCharge) => c.status === OnlineOrderChargeStatus.PENDING_AUTH && c.lastError === CAPTURED_OUTSIDE
 
-/** Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar; liberar ya decidido cuenta como liberado. */
-export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASED'
+/** Fase 2: el borrador de tarjeta todavía no es pedido: espera el pago, o ya no se pagó (vencido, liberado o cobrado fuera). */
+export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETED'
+export const cardDraftTrackingStatus = (c: DraftCharge): CardDraftTrackingStatus =>
+  c.status === OnlineOrderChargeStatus.PENDING_AUTH && !draftCapturedOutside(c) ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
+
+/**
+ * Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar. S4 (Codex plan r1 #3): `RELEASING` = la liberación
+ * aún no termina (puede fallar o resultar cobrada a mano): nunca se dice «liberada» antes de tiempo.
+ */
+export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASING' | 'RELEASED'
 const PUBLIC_CARD_STATUS: Partial<Record<OnlineOrderChargeStatus, PublicCardStatus>> = {
   AUTHORIZED: 'AUTHORIZED',
   CAPTURING: 'CONFIRMING',
   CAPTURED: 'CAPTURED',
-  RELEASING: 'RELEASED',
+  RELEASING: 'RELEASING',
   RELEASED: 'RELEASED',
 }
+/** S4: el borrador también dice la verdad de su tarjeta (p. ej. `CAPTURED` sin pedido). */
+const draftCardStatus = (c: DraftCharge): PublicCardStatus | null =>
+  draftCapturedOutside(c) ? 'CAPTURED' : (PUBLIC_CARD_STATUS[c.status] ?? null)
 
 export interface PublicTracking {
   orderNumber: string
   status: OnlineOrderStatus | CardDraftTrackingStatus
   paymentMode: OnlineOrderPaymentMode
-  /** Fase 2: estado de la tarjeta; `null` al recoger y en el borrador. */
+  /** Fase 2: estado de la tarjeta; `null` al recoger y en el borrador que espera el pago. */
   cardStatus?: PublicCardStatus | null
   venueId: string
   venueName: string
@@ -643,6 +653,7 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
     where: { trackingToken: token },
     select: {
       status: true,
+      lastError: true,
       request: true,
       amount: true,
       checkoutExpiresAt: true,
@@ -655,9 +666,9 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
   const quote = (c.request as unknown as { quote: QuoteSnapshot }).quote
   return {
     orderNumber: '', // el folio nace con el pedido
-    status: cardDraftTrackingStatus(c.status),
+    status: cardDraftTrackingStatus(c),
     paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
-    cardStatus: null,
+    cardStatus: draftCardStatus(c),
     venueId: c.venueId,
     venueName: c.venue.name,
     venueSlug: c.venue.slug,

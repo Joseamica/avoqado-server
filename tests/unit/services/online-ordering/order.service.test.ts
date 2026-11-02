@@ -924,6 +924,77 @@ describe('getTrackingByToken', () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
     await expect(getTrackingByToken('x'.repeat(32))).resolves.toBeNull()
   })
+
+  describe('S4 (Codex plan r1 #3 y r2 #3): con el dinero en duda no se afirma «no se cobró»', () => {
+    const VENUE = {
+      name: 'X',
+      slug: 'x',
+      timezone: 'America/Mexico_City',
+      address: null,
+      city: null,
+      state: null,
+      zipCode: null,
+      phone: null,
+    }
+    const draftRow = (o: Record<string, unknown>) => ({
+      id: 'ch1',
+      status: 'PENDING_AUTH',
+      lastError: null,
+      updatedAt: new Date(), // recién tocado: el seguimiento no le pregunta a Stripe
+      request: { quote: { lines: [] } },
+      amount: D('250.00'),
+      checkoutExpiresAt: NOW,
+      createdAt: NOW,
+      venueId: 'v1',
+      venue: VENUE,
+      ...o,
+    })
+    // El borrador simulado no se queda para las pruebas de crear pedido (buscan ahí la llave de tarjeta).
+    afterEach(() => prismaMock.onlineOrderCharge.findUnique.mockReset())
+    const tracking = async (o: Record<string, unknown>) => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
+      prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(draftRow(o) as any)
+      return getTrackingByToken('T'.repeat(32))
+    }
+
+    it('pedido rechazado con la liberación en curso (RELEASING) ⇒ cardStatus RELEASING, no RELEASED', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue({
+        status: 'REJECTED',
+        paymentMode: 'CARD_ONLINE',
+        acceptDeadlineAt: NOW,
+        estimatedReadyAt: null,
+        rejectReason: 'OTHER',
+        createdAt: NOW,
+        venueId: 'v1',
+        charge: { status: 'RELEASING' },
+        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', items: [], venue: VENUE },
+      } as any)
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
+    })
+
+    it('borrador normal ⇒ AWAITING_PAYMENT sin cardStatus', async () => {
+      await expect(tracking({})).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', cardStatus: null })
+    })
+
+    it('borrador que terminó CAPTURED sin pedido ⇒ PAYMENT_NOT_COMPLETED con cardStatus CAPTURED', async () => {
+      await expect(tracking({ status: 'CAPTURED', lastError: 'CAPTURED_OUTSIDE' })).resolves.toMatchObject({
+        status: 'PAYMENT_NOT_COMPLETED',
+        cardStatus: 'CAPTURED',
+      })
+    })
+
+    it('borrador PENDING_AUTH cobrado fuera (CAPTURED_OUTSIDE) ⇒ PAYMENT_NOT_COMPLETED con cardStatus CAPTURED', async () => {
+      await expect(tracking({ lastError: 'CAPTURED_OUTSIDE' })).resolves.toMatchObject({
+        status: 'PAYMENT_NOT_COMPLETED',
+        cardStatus: 'CAPTURED',
+      })
+    })
+
+    it('borrador con la liberación en curso ⇒ PAYMENT_NOT_COMPLETED con cardStatus RELEASING; vencido ⇒ sin cardStatus', async () => {
+      await expect(tracking({ status: 'RELEASING' })).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'RELEASING' })
+      await expect(tracking({ status: 'ABANDONED' })).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: null })
+    })
+  })
 })
 
 /**
