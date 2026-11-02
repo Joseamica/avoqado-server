@@ -10,7 +10,16 @@ import { operationHash } from '@/utils/operationHash'
  * and "manual" refunds entered by staff from the web dashboard.
  */
 
-import { PaymentFundsFlow, PaymentMethod, PaymentSource, PaymentType, Prisma, type PrismaClient, TransactionStatus } from '@prisma/client'
+import {
+  CardBrand,
+  PaymentFundsFlow,
+  PaymentMethod,
+  PaymentSource,
+  PaymentType,
+  Prisma,
+  type PrismaClient,
+  TransactionStatus,
+} from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -146,6 +155,14 @@ export interface IssueRefundResult {
   status: string
 }
 
+/**
+ * D2: ¿la tarjeta del cobro era internacional? Con la misma regla que el reporte de ventas (`IS_INTERNATIONAL_SQL`, la veracidad de
+ * JavaScript sobre `processorData.isInternational`), para que la devolución quede en el mismo renglón que su cobro.
+ */
+function esInternacional(processorData: Prisma.JsonValue | null): boolean {
+  return !!asRecord(processorData).isInternational
+}
+
 interface LockedPaymentRow {
   id: string
   venueId: string
@@ -161,6 +178,8 @@ interface LockedPaymentRow {
   processorData: Prisma.JsonValue | null
   /** T10 fix r1: el PaymentIntent de Stripe (u otra referencia del procesador); con él se ven las devoluciones a tarjeta en curso. */
   processorId: string | null
+  /** D2: la marca de la tarjeta (AMEX, Visa…); la devolución por el mismo medio la hereda para que el reporte la ponga en su renglón. */
+  cardBrand: string | null
   // Proyección de `tenderSemantics`: la ÚNICA autoridad sobre "¿este dinero estaba
   // en el cajón?". Se leen del pago ORIGINAL: el reembolso hereda su método salvo que el
   // cajero escoja con qué devolver (`devolverCon`), y aun entonces deciden si puede escoger.
@@ -405,6 +424,7 @@ export async function bloquearCobroParaReembolso(
       "merchantAccountId",
       "processorData",
       "processorId",
+      "cardBrand",
       "fundsFlow",
       "externalSource",
       "tenderTypeId",
@@ -760,6 +780,7 @@ export async function writeRefundInTx(
   const dada = input.moneyAs ? camposDeSemanticaDada(input.moneyAs) : null
 
   const originalProcessorData = asRecord(original.processorData)
+  const mismoMedio = !dada && !devolverCon
   const refundPayment = await tx.payment.create({
     data: {
       venueId: input.venueId,
@@ -778,6 +799,9 @@ export async function writeRefundInTx(
       feePercentage: 0,
 
       method: dada ? dada.method : ((devolverCon ?? original.method) as PaymentMethod),
+      // D2: por el mismo medio, la devolución es de la MISMA tarjeta: hereda su marca (el reporte la pone en AMEX, no en «crédito»). Si el
+      // dinero salió por otro medio (`devolverCon`, el crédito de un cambio) no hay tarjeta que heredar.
+      cardBrand: mismoMedio && original.cardBrand ? (original.cardBrand as CardBrand) : undefined,
       // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
       // `method`. Sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
       // legacy (`method === 'CASH'` = false) y el arqueo seguía exigiendo un efectivo que
@@ -862,6 +886,8 @@ export async function writeRefundInTx(
           ? { idempotencyRequestHash: input.idempotencyRequestHash, remainingAfterCents: input.remainingAfterCents }
           : {}),
         originalMethod: original.method,
+        // D2: y si la tarjeta era internacional (el reporte lo lee de aquí), también.
+        ...(mismoMedio && esInternacional(original.processorData) ? { isInternational: true } : {}),
         refundReason: input.reason,
         note: input.note ?? null,
         amountCents: refundCents,

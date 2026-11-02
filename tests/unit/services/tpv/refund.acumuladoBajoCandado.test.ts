@@ -357,3 +357,23 @@ describe('Ronda 1 — un SELECT recortado no puede volver inofensiva la guarda d
     expect(texto).toMatch(/FOR UPDATE/)
   })
 })
+
+describe('Codex r1 de D2 — la devolución de la terminal conserva la marca internacional de su cobro', () => {
+  it('cobro internacional ⇒ su devolución también (el reporte la pone en el renglón internacional)', async () => {
+    const { fotoVieja } = armarCarrera()
+    ;(prismaMock as any).payment.findFirst.mockResolvedValue({ ...fotoVieja, processorData: { isInternational: true } })
+
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
+
+    const data = (prismaMock as any).payment.create.mock.calls[0][0].data
+    expect(data.processorData).toMatchObject({ originalPaymentId: 'pay-orig', isInternational: true })
+  })
+
+  it('cobro nacional ⇒ su devolución no inventa la marca', async () => {
+    armarCarrera()
+
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
+
+    expect((prismaMock as any).payment.create.mock.calls[0][0].data.processorData).not.toHaveProperty('isInternational')
+  })
+})

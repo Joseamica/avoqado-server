@@ -29,6 +29,7 @@ import { NotFoundError } from '@/errors/AppError'
 import { organizationDashboardService as svc } from '@/services/organization-dashboard/organizationDashboard.service'
 import { venueStartOfDay } from '@/utils/datetime'
 import prisma from '@/utils/prismaClient'
+import { ventasDeLaPersonaDesde } from '@/services/dashboard/commission/sales-goal.service'
 
 const TZ = 'America/Mexico_City'
 // Martes 11-mar-2025 en la zona del venue (UTC-6 en marzo):
@@ -647,6 +648,115 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     // venta de las 00:30 del 12, porque el rango del día la excluye.
     expect(c.allTimeEntries.map((e: any) => e.cashSales)).toEqual([45, 120])
     expect(c.breakMinutes).toBe(450)
+  })
+
+  it('D2: una devolución cuenta en las VENTAS de quien hizo la venta, no de quien la opera; el efectivo sigue con quien lo entregó', async () => {
+    const leer = async () => {
+      const { staff } = await svc.getStaffAttendance(orgId, DIA)
+      const fila = (id: string) => (staff as Array<any>).find(r => r.id === id && r.venueId === v1)
+      const mapa = (await svc.getSalesHeatmap(orgId, DIA, DIA, 'OWNER', mario)).staff
+      const delMapa = (id: string) => mapa.find(r => r.staffId === id && r.venueId === v1)!.days[0]
+      // D4: el avance de la meta de venta de cada persona desde el inicio del día 11 (la venta de Mario de AYER queda fuera; su
+      // devolución de hoy, dentro).
+      const desde = new Date('2025-03-11T06:00:00.000Z') // 00:00 local del 11
+      return {
+        metaAna: await ventasDeLaPersonaDesde(prisma, v1, ana, desde),
+        metaBeto: await ventasDeLaPersonaDesde(prisma, v1, beto, desde),
+        metaMario: await ventasDeLaPersonaDesde(prisma, v1, mario, desde),
+        ana: fila(ana)!,
+        beto: fila(beto)!,
+        mario: fila(mario),
+        mapaAna: delMapa(ana),
+        mapaBeto: delMapa(beto),
+        mapaMario: delMapa(mario),
+      }
+    }
+    const antes = await leer()
+    const cobroDe = (processedById: string, amount: number) =>
+      prisma.payment.findFirstOrThrow({
+        where: { venueId: v1, processedById, amount, type: { not: 'REFUND' } },
+        select: { id: true, orderId: true },
+      })
+    const tarjetaDeBeto = await cobroDe(beto, 80)
+    const efectivoDeAna = await cobroDe(ana, 150)
+    // Un cobro web sin vendedor (pedido en línea o liga de pago).
+    const web = await order({ venueId: v1, createdAt: NOON, total: 40, items: [{ productName: 'Cargador', quantity: 1, total: 40 }] })
+    const cobroWeb = await prisma.payment.create({
+      data: {
+        venueId: v1,
+        orderId: web.id,
+        amount: 40,
+        tipAmount: 0,
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        splitType: 'FULLPAYMENT',
+        feeAmount: 0,
+        netAmount: 40,
+        feePercentage: 0,
+      },
+      select: { id: true },
+    })
+    const devolucion = (original: { id: string; orderId: string }, processedById: string, amount: number, method: 'CASH' | 'CREDIT_CARD') =>
+      prisma.payment.create({
+        data: {
+          venueId: v1,
+          orderId: original.orderId,
+          processedById,
+          createdAt: new Date(EVENING.getTime() + 10 * 60_000), // 17:40 local: fuera de toda checada
+          amount: -amount,
+          tipAmount: 0,
+          method,
+          status: 'COMPLETED',
+          type: 'REFUND',
+          splitType: 'FULLPAYMENT',
+          feeAmount: 0,
+          netAmount: -amount,
+          feePercentage: 0,
+          processorData: { originalPaymentId: original.id },
+        },
+        select: { id: true },
+      })
+    // Codex r1 (D2): Mario vendió AYER y hoy no checa; Beto le devuelve $25 hoy.
+    const ayer = await order({
+      venueId: v1,
+      createdById: mario,
+      createdAt: new Date(NOON.getTime() - 86_400_000),
+      total: 25,
+      items: [{ productName: 'Cargador', quantity: 1, total: 25 }],
+      payments: [{ amount: 25, method: 'CREDIT_CARD', processedById: mario, createdAt: new Date(NOON.getTime() - 86_400_000) }],
+    })
+    const ventaDeMarioAyer = await prisma.payment.findFirstOrThrow({ where: { orderId: ayer.id }, select: { id: true, orderId: true } })
+    const creadas = [
+      await devolucion(tarjetaDeBeto, ana, 30, 'CREDIT_CARD'), // Ana devuelve $30 de la venta con tarjeta de Beto
+      await devolucion(efectivoDeAna, beto, 10, 'CASH'), // Beto entrega $10 en efectivo de una venta de Ana
+      await devolucion({ id: cobroWeb.id, orderId: web.id }, ana, 40, 'CREDIT_CARD'), // Ana devuelve un cobro web sin vendedor
+      await devolucion(ventaDeMarioAyer, beto, 25, 'CREDIT_CARD'),
+    ]
+    try {
+      const despues = await leer()
+      expect(round2(despues.beto.sales)).toBe(round2(antes.beto.sales - 30)) // su venta, aunque la devolvió Ana
+      expect(round2(despues.ana.sales)).toBe(round2(antes.ana.sales - 10)) // su venta en efectivo; la web no es de nadie
+      expect(round2(despues.beto.cashSales)).toBe(round2(antes.beto.cashSales - 10)) // el efectivo salió de las manos de Beto
+      expect(round2(despues.ana.cashSales)).toBe(round2(antes.ana.cashSales))
+      // Mario no checó hoy, pero su venta se devolvió hoy: aparece con −$25 (antes la devolución desaparecía del checador).
+      expect(antes.mario).toBeUndefined()
+      expect(round2(despues.mario!.sales)).toBe(-25)
+      // El mapa de ventas por persona usa la misma regla: la devolución es de quien vendió; una devolución no cuenta como venta.
+      expect(round2(despues.mapaBeto.salesAmount)).toBe(round2(antes.mapaBeto.salesAmount - 30))
+      expect(round2(despues.mapaAna.salesAmount)).toBe(round2(antes.mapaAna.salesAmount - 10))
+      expect(round2(despues.mapaMario.salesAmount)).toBe(round2(antes.mapaMario.salesAmount - 25))
+      expect(despues.mapaAna.salesCount).toBe(antes.mapaAna.salesCount)
+      // D4: la meta de venta de cada quien baja por la devolución de SU venta, no por la que operó (la web no es de nadie).
+      expect(round2(despues.metaBeto)).toBe(round2(antes.metaBeto - 30))
+      expect(round2(despues.metaAna)).toBe(round2(antes.metaAna - 10))
+      expect(round2(despues.metaMario)).toBe(round2(antes.metaMario - 25))
+      expect(despues.mapaBeto.salesCount).toBe(antes.mapaBeto.salesCount)
+    } finally {
+      await prisma.payment.deleteMany({ where: { id: { in: [...creadas.map(c => c.id), cobroWeb.id] } } })
+      await prisma.payment.deleteMany({ where: { orderId: ayer.id } })
+      await prisma.order.deleteMany({ where: { id: { in: [web.id, ayer.id] } } })
+    }
   })
 
   it('el filtro de estado deja sólo a quien sigue dentro', async () => {

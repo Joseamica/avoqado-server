@@ -298,6 +298,13 @@ async function respuestaDeReembolsoExistente(
   }
 }
 
+/** Codex r1 de D2: la veracidad de `processorData.isInternational` del cobro, la misma que lee el reporte (`IS_INTERNATIONAL_SQL`). */
+function cobroInternacional(processorData: unknown): boolean {
+  return !!processorData && typeof processorData === 'object' && !Array.isArray(processorData)
+    ? !!(processorData as Record<string, unknown>).isInternational
+    : false
+}
+
 export async function recordRefund(
   venueId: string,
   refundData: RefundRequestData,
@@ -455,7 +462,11 @@ export async function recordRefund(
     esteReembolsoCentsPrevuelo > remainingRefundableCents && laTerminalYaDevolvio(originalPayment)
       ? centavosQueUsaronLosCambios(
           await prisma.payment.findMany({
-            where: { venueId, type: PaymentType.REFUND, processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId } },
+            where: {
+              venueId,
+              type: PaymentType.REFUND,
+              processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
+            },
             select: { amount: true, tipAmount: true, status: true, processorData: true },
             take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
           }),
@@ -861,6 +872,8 @@ export async function recordRefund(
           idempotencyKey: llaveIdempotencia,
           processorData: {
             originalPaymentId: refundData.originalPaymentId,
+            // Codex r1 de D2: es la misma tarjeta; si era internacional, la devolución también (el reporte la pone en su renglón).
+            ...(cobroInternacional(originalPayment.processorData) ? { isInternational: true } : {}),
             refundReason: refundData.reason,
             isPartialRefund: refundData.isPartialRefund,
             currency: refundData.currency,

@@ -690,6 +690,32 @@ describe('refund.dashboard.service', () => {
       expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_CREATED' }))
     })
 
+    it('D2: la devolución por el mismo medio hereda la marca de la tarjeta y si era internacional (el reporte la pone en AMEX)', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          pagoOriginal({ amount: 200, method: 'CREDIT_CARD', cardBrand: 'AMERICAN_EXPRESS', processorData: { isInternational: true } }),
+        ])
+        .mockResolvedValueOnce([])
+
+      await reembolsar()
+
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data as any
+      expect(data.type).toBe(PaymentType.REFUND)
+      expect(data.cardBrand).toBe('AMERICAN_EXPRESS')
+      expect(data.processorData).toMatchObject({ originalPaymentId: 'payment-original', isInternational: true })
+    })
+
+    it('D2: un cobro sin marca (efectivo) no inventa una en su devolución', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
+      ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
+
+      await reembolsar()
+
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data as any
+      expect(data.cardBrand).toBeUndefined()
+      expect(data.processorData).not.toHaveProperty('isInternational')
+    })
+
     it('Codex r3 #2 (pedidos): un cobro sin VenueTransaction (Stripe, liga de pago) → su devolución tampoco crea una', async () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([pagoOriginal({ amount: 200 })]).mockResolvedValueOnce([])
       ;(prismaMock as any).cashDrawerSession.findFirst.mockResolvedValue({ id: 'session-1' })
