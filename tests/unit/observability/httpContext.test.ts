@@ -77,6 +77,24 @@ describe('requestLoggerMiddleware — the hot path', () => {
     expect(new Set(contextAtRegistration)).toEqual(new Set([idInsideNext]))
   })
 
+  it('🔴 Parte 2 (1-nov): guarda la app que llama (plataforma y versión, recortadas) para la cuenta del renglón por peso', () => {
+    let cliente: unknown
+    const req = buildReq({ headers: { 'x-device-platform': 'IOS', 'x-app-version': '1.15.1', 'x-otro': 'x'.repeat(99) } as any })
+    requestLoggerMiddleware(req, buildRes().res, (() => {
+      cliente = getContext()?.cliente
+    }) as unknown as NextFunction)
+    expect(cliente).toEqual({ plataforma: 'IOS', version: '1.15.1' })
+
+    requestLoggerMiddleware(
+      buildReq({ headers: { 'x-app-version': ['1', '2'], 'x-device-platform': 'A'.repeat(99) } as any }),
+      buildRes().res,
+      (() => {
+        cliente = getContext()?.cliente
+      }) as unknown as NextFunction,
+    )
+    expect(cliente).toEqual({ plataforma: 'A'.repeat(32), version: undefined })
+  })
+
   it('does not leak the context after the middleware returns', () => {
     const { res } = buildRes()
     requestLoggerMiddleware(buildReq(), res, jest.fn() as unknown as NextFunction)

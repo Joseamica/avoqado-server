@@ -44,6 +44,7 @@ import { serializedInventoryService } from '@/services/serialized-inventory/seri
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
 import { buildOrderItemsData } from '@/services/mobile/order.mobile.service'
 import { createHash } from 'crypto'
+import { runWithContext } from '@/observability/executionContext'
 
 const globalDb = prisma as any
 let tx: any
@@ -226,6 +227,22 @@ describe('existing add branches keep their semantics within the transaction', ()
     if (branch === 'round') expect(data.sentToKitchenAt).toBeInstanceOf(Date)
     expect(globalDb.orderItem.create).not.toHaveBeenCalled()
     expect(globalDb.orderItem.update).not.toHaveBeenCalled()
+  })
+  it.each([
+    ['la TPV en línea: la cuenta vieja, como hoy', 'POST /api/v1/tpv/venues/:id/orders/:id/items', undefined, 57.29],
+    ['la cola de la TPV: también la vieja', 'POST /api/v1/tpv/venues/:id/sync/intents', undefined, 57.29],
+    ['una ronda de mesa de ANDROID: la de las apps', 'POST /api/v1/mobile/venues/:id/orders/:id/items', 'ANDROID', 57.28],
+    ['la cola ADD_ITEMS de las tablets: la de las apps', 'POST /api/v1/mobile/venues/:id/sync/intents', 'ANDROID', 57.28],
+    ['iOS 1.15.1 (precio truncado): la vieja', 'POST /api/v1/mobile/venues/:id/orders/:id/items', 'IOS', 57.29],
+  ])('🔴 Parte 2 (1-nov): pesada de 0.570 kg a $100.50 — %s', async (_caso, entrypoint, plataforma, esperado) => {
+    tx.product.findMany.mockResolvedValue([{ id: 'product', name: 'Product', price: new Prisma.Decimal(100.5), soldByWeight: true }])
+    const cliente = plataforma ? { plataforma, version: plataforma === 'IOS' ? '1.15.1' : '2.25.22' } : undefined
+    // La marca la pone el montaje `/tpv` del enrutador (`marcarRutaDeLaTpv`).
+    const rutaDeLaTpv = entrypoint.includes(' /api/v1/tpv/') ? (true as const) : undefined
+    await runWithContext({ correlationId: 'c', source: 'http', entrypoint, cliente, rutaDeLaTpv }, () =>
+      addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 1, weightQuantity: 0.57 } as any], 1, true),
+    )
+    expect(Number(tx.orderItem.create.mock.calls[0][0].data.total)).toBe(esperado)
   })
   it('round inventory preflight still fails open', async () => {
     ;(getProductInventoryStatus as jest.Mock).mockRejectedValueOnce(new Error('inventory unavailable'))

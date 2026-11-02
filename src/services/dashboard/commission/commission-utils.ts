@@ -34,6 +34,7 @@ import { splitPaymentIvaByOrderRates } from '../../fiscal/ivaMath'
 import { grossByRateFromOrder, ordenParaIvaSelect, tasaDelRenglon, type OrdenParaIva } from '../../fiscal/ivaDeOrden'
 import { type CobroDeLaOrden, type OtroCobro, repartir } from './repartoPorCobro'
 import { validarTasa } from './tasasDelEsquema'
+import { importePorPesoCents, importePorPesoViejoCents } from '../../shared/importePorPeso'
 
 // ============================================
 // Type Definitions
@@ -522,14 +523,46 @@ function importeDelRenglon(it: {
   quantity: number
   unitPrice: Decimal | number
   weightQuantity?: Decimal | number | null
+  total?: Decimal | number | null
+  discountAmount?: Decimal | number | null
   modifiers?: Array<{ price: Decimal | number; quantity: number }>
 }): number {
   const extras = (it.modifiers ?? []).reduce((s, m) => s + Number(m.price) * m.quantity, 0) * it.quantity
   const base =
     it.weightQuantity != null
-      ? Math.round(Number(it.unitPrice) * Number(it.weightQuantity) * 100) / 100
+      ? basePorPesoCents({ ...it, weightQuantity: it.weightQuantity }, extras) / 100
       : Number(it.unitPrice) * it.quantity
   return base + extras
+}
+
+/**
+ * El renglón por peso como lo cobró SU escritor (Parte 2, 1-nov): la cuenta vieja del SERVIDOR (ventas hasta el 1-nov, la TPV) y
+ * la de las apps (el SERVIDOR móvil desde el 1-nov) casi siempre coinciden; cuando difieren por un centavo manda la que PRUEBA lo
+ * guardado —`total − extras` (escritor normal) o `total + descuento − extras` (cortesía con total 0, promoción con total neto)—
+ * y, si nada lo prueba, la vieja. Así una venta vieja da EXACTO lo de antes y una nueva, lo cobrado.
+ */
+function basePorPesoCents(
+  it: {
+    unitPrice: Decimal | number
+    weightQuantity: Decimal | number
+    total?: Decimal | number | null
+    discountAmount?: Decimal | number | null
+  },
+  extrasPesos: number,
+): number {
+  const precio = Number(it.unitPrice)
+  const kg = Number(it.weightQuantity)
+  const vieja = importePorPesoViejoCents(precio, kg)
+  const apps = importePorPesoCents(precio, kg)
+  if (vieja === apps || it.total == null) return vieja
+  const centavos = (n: number) => Math.round(n * 100)
+  const total = centavos(Number(it.total))
+  const extras = centavos(extrasPesos)
+  for (const guardado of [total - extras, total + centavos(Number(it.discountAmount ?? 0)) - extras]) {
+    if (guardado === apps) return apps
+    if (guardado === vieja) return vieja
+  }
+  return vieja
 }
 
 /**
@@ -889,6 +922,8 @@ async function loadOrderCommissionLines(
         quantity: true,
         unitPrice: true,
         weightQuantity: true,
+        // Parte 2: el renglón por peso se lee con la cuenta que prueba lo guardado (`basePorPesoCents`).
+        total: true,
         taxAmount: true,
         discountAmount: true,
         // Final-fix I1: la tasa del renglón es la de la póliza (sello > tratamiento del producto > 16 %).
