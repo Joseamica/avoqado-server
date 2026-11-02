@@ -15,6 +15,7 @@ import { esPedidoDePlataforma, MENSAJE_ORDEN_DE_PLATAFORMA } from '../shared/ord
 import { BadRequestError } from '../../errors/AppError'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
+  assertCanApproveSale,
   PROMOTER_FEEDBACK_MIN_CHARS,
   PROMOTER_FEEDBACK_REQUIRED_MESSAGE,
   type ReviewDecision,
@@ -1472,6 +1473,11 @@ export async function editOrgSaleVerification(
     method: existing.payment?.method ?? null,
   }
   const nextStatus: SaleVerificationStatus = params.status ?? existing.status
+
+  // Decidir la venta (pasar a aprobada, por revisar o rechazada) pide `approve` en la tienda de la venta; el monto solo, no.
+  if (params.status != null && params.status !== existing.status && ['COMPLETED', 'FAILED', 'REJECTED'].includes(params.status)) {
+    await assertCanApproveSale(params.editedById, existing.venueId)
+  }
 
   // Candado "Revisar por promotor": la venta no puede quedar en FAILED sin un
   // comentario que le diga al promotor QUÉ corregir. Se satisface con el texto

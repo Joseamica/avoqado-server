@@ -261,6 +261,22 @@ async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promi
 }
 
 /**
+ * ¿Esta persona tiene el permiso EN ESTA sucursal? Para los servicios, que deciden contra la sucursal de la venta y no contra la de la
+ * ruta (la ruta de organización sólo ve la org). Misma regla que `checkPermission`: SUPERADMIN activo pasa; si no, el rol de la persona
+ * en la sucursal con su lista propia o los permisos del negocio (incluidos los negados). Sin suplantación: un servicio no la ve.
+ */
+export async function staffHasPermissionInVenue(p: { staffId: string; venueId: string; permission: string }): Promise<boolean> {
+  const superAdmin = await prisma.staffVenue.findFirst({
+    where: { staffId: p.staffId, role: StaffRole.SUPERADMIN, active: true, staff: { active: true } },
+    select: { id: true },
+  })
+  if (superAdmin) return true
+  const { role, permissionSet } = await resolveUserRoleForVenue({ userId: p.staffId, targetVenueId: p.venueId })
+  if (!role) return false
+  return evaluateRolePermission({ venueId: p.venueId, role, permissionSet, permission: p.permission })
+}
+
+/**
  * ¿Este rol, en este negocio, tiene el permiso? La evaluación de `checkPermission`, exportada tal cual (pedidos en línea, H3: el
  * latido de la bandeja exige `orders:update` efectivo). Con lista propia del empleado (`permissionSet`) se evalúa esa lista; si
  * no, el rol con los permisos personalizados del negocio (`VenueRolePermission`, también los quitados).

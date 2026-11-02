@@ -66,6 +66,11 @@ jest.mock('@/utils/prismaClient', () => {
   }
 })
 
+jest.mock('@/middlewares/checkPermission.middleware', () => ({
+  __esModule: true,
+  staffHasPermissionInVenue: jest.fn().mockResolvedValue(true),
+}))
+
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
   default: { broadcastToUser: jest.fn() },
