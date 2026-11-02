@@ -8,6 +8,7 @@ import { createHmac } from 'crypto'
 import request from 'supertest'
 
 import app from '@/app'
+import logger from '@/config/logger'
 import { sendServiceMessage } from '@/services/whatsapp.service'
 import prisma from '@/utils/prismaClient'
 
@@ -106,7 +107,17 @@ describe('POST /api/v1/webhooks/whatsapp — número de ventas', () => {
     })
 
     expect(res.status).toBe(200)
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[ADMIN ALERT] Template x PAUSED'))
     expect(sendServiceMessage).not.toHaveBeenCalled()
+  })
+
+  // Codex r2 #1: el lector de 20 MB es sólo para el POST de Meta; un GET con cuerpo sigue con el tope general de 100 KB.
+  it('un GET con un cuerpo de más de 100 KB no pasa por el lector grande', async () => {
+    const res = await request(app)
+      .get('/api/v1/webhooks/whatsapp')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ relleno: 'x'.repeat(200 * 1024) }))
+    expect(res.status).toBe(413)
   })
 
   it('un POST con firma mal formada se va con 403 antes de leerse', async () => {

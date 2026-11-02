@@ -73,18 +73,14 @@ describe('gateWhatsappBody', () => {
   type Req = Parameters<typeof gateWhatsappBody>[0]
   type Res = Parameters<typeof gateWhatsappBody>[1]
   const FIRMA = 'sha256=' + 'a'.repeat(64)
-  const pedido = (headers: Record<string, string>, method = 'POST') =>
-    ({ method, header: (name: string) => headers[name.toLowerCase()] }) as unknown as Req
-  const respuesta = () => Object.assign(new EventEmitter(), { sendStatus: jest.fn() }) as unknown as Res & EventEmitter
+  const pedido = (headers: Record<string, string>) =>
+    ({ method: 'POST', header: (name: string) => headers[name.toLowerCase()] }) as unknown as Req
+  const respuesta = () => Object.assign(new EventEmitter(), { sendStatus: jest.fn(), locals: {} }) as unknown as Res & EventEmitter
   const pasa = (req: Req, res = respuesta()) => {
     const next = jest.fn()
     gateWhatsappBody(req, res, next)
     return { res, next, status: (res.sendStatus as jest.Mock).mock.calls[0]?.[0] }
   }
-
-  it('deja pasar el saludo GET de Meta sin firma', () => {
-    expect(pasa(pedido({}, 'GET')).next).toHaveBeenCalled()
-  })
 
   it.each([
     ['sin firma', {}],
@@ -110,6 +106,30 @@ describe('gateWhatsappBody', () => {
 
     primero.res.emit('close')
     primero.res.emit('close') // un solo descuento aunque el evento se repita
+    const segundo = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
+    expect(segundo.next).toHaveBeenCalled()
+    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)
+    segundo.res.emit('close')
+  })
+
+  // Codex r2 #1: 2 KB comprimidos se inflan a 2 MB; el tamaño declarado no dice nada.
+  it('un aviso comprimido cuenta como grande aunque declare pocos bytes', () => {
+    const primero = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '2000', 'content-encoding': 'gzip' }))
+    expect(primero.next).toHaveBeenCalled()
+    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '2000', 'content-encoding': 'gzip' })).status).toBe(503)
+    primero.res.emit('close')
+  })
+
+  // Codex r2 #2: si Meta corta la conexión mientras se guarda, el cupo sigue tomado hasta que el guardado termina.
+  it('el cupo no se suelta al cortarse la conexión mientras el controlador sigue guardando', () => {
+    const primero = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
+    const res = primero.res as unknown as { locals: { whatsappHandling?: boolean; releaseWhatsappBody?: () => void } }
+    res.locals.whatsappHandling = true
+    primero.res.emit('close')
+    expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)
+
+    res.locals.releaseWhatsappBody!()
+    res.locals.releaseWhatsappBody!() // soltarlo dos veces no regala un cupo
     const segundo = pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' }))
     expect(segundo.next).toHaveBeenCalled()
     expect(pasa(pedido({ 'x-hub-signature-256': FIRMA, 'content-length': '5000000' })).status).toBe(503)

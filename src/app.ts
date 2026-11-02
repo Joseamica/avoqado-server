@@ -176,7 +176,7 @@ app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOO
 
 // WhatsApp, before the general parser below (which then skips it): a coexistence history delivery from Meta can hold
 // thousands of messages, past the default 100 KB. The gate turns away unsigned or concurrent big bodies before reading them.
-app.use('/api/v1/webhooks/whatsapp', gateWhatsappBody, express.raw({ type: 'application/json', limit: '20mb' }))
+app.post('/api/v1/webhooks/whatsapp', gateWhatsappBody, express.raw({ type: 'application/json', limit: '20mb' }))
 
 app.use(
   '/api/v1/webhooks',
