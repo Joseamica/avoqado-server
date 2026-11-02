@@ -866,13 +866,31 @@ export async function getReservations(venueId: string, filters: ReservationFilte
   }
 }
 
+/** «Ana», «Gómez» → «Ana G.» (la misma regla corta de la lista del kiosco); sin apellido, sólo el nombre. */
+function shortStaffName(first: string, last: string): string {
+  const f = first.trim()
+  const l = last.trim()
+  return l ? `${f} ${l[0].toUpperCase()}.` : f
+}
+
 export async function getReservationById(venueId: string, reservationId: string) {
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId },
-    include: RESERVATION_INCLUDE,
+    // D4: la corrección de un «No asistió». Pendiente abierto = `pending.length > 0 && resolvedAt == null`.
+    include: {
+      ...RESERVATION_INCLUDE,
+      noShowCorrection: { select: { pending: true, resolvedAt: true, source: true, createdAt: true, actorStaffId: true } },
+    },
   })
   if (!reservation) throw new NotFoundError('Reservacion no encontrada')
-  return attachServices(reservation)
+  const withServices = await attachServices(reservation)
+  if (!withServices.noShowCorrection) return { ...withServices, noShowCorrection: null }
+  // La corrección no tiene relación con Staff: UNA lectura acotada (el detalle es de una sola reserva). El kiosco no tiene autor.
+  const { actorStaffId, ...correction } = withServices.noShowCorrection
+  const actor = actorStaffId
+    ? await prisma.staff.findUnique({ where: { id: actorStaffId }, select: { firstName: true, lastName: true } })
+    : null
+  return { ...withServices, noShowCorrection: { ...correction, actorName: actor ? shortStaffName(actor.firstName, actor.lastName) : null } }
 }
 
 export async function getReservationByCancelSecret(venueId: string, cancelSecret: string) {
@@ -1112,6 +1130,9 @@ export async function completeReservation(venueId: string, reservationId: string
   return transitionReservation(venueId, reservationId, 'COMPLETED', null)
 }
 
+/** La devolución de la clase de un «No asistió» empieza con esto; «Sí llegó» (`undoNoShow.service.ts`) la busca por aquí. */
+export const NO_SHOW_REFUND_REASON_PREFIX = 'No-show refund'
+
 export async function markNoShow(venueId: string, reservationId: string, markedBy: string) {
   const updated = await transitionReservation(venueId, reservationId, 'NO_SHOW', markedBy)
 
@@ -1131,7 +1152,9 @@ export async function markNoShow(venueId: string, reservationId: string, markedB
         startsAt: updated.startsAt,
         // ALWAYS so noShow refund is full when the toggle is on
         policy: { creditRefundMode: 'ALWAYS', creditFreeRefundHoursBefore: 0, creditLateRefundPercent: 100 },
-        reasonPrefix: 'No-show refund',
+        reasonPrefix: NO_SHOW_REFUND_REASON_PREFIX,
+        // A correction («sí llegó») may land between the NO_SHOW commit and this refund: then it must not write.
+        onlyIfReservationStatus: 'NO_SHOW',
       })
     }
   } catch (err) {
@@ -1349,10 +1372,17 @@ export async function handleNoShowDepositForfeit(reservationId: string, venueId:
     const settings = await getReservationSettings(venueId)
     if (!settings.cancellation.forfeitDeposit) return
 
-    await prisma.reservation.update({
-      where: { id: reservation.id },
+    // Conditional: a correction («sí llegó») may have landed after the NO_SHOW commit; then nothing to forfeit.
+    const { count } = await prisma.reservation.updateMany({
+      where: { id: reservation.id, venueId, status: 'NO_SHOW', depositStatus: 'PAID' },
       data: { depositStatus: 'FORFEITED' },
     })
+    if (count === 0) {
+      logger.info(
+        `💰 [RESERVATION NO-SHOW] ${reservation.confirmationCode} is no longer a no-show with a paid deposit — nothing to forfeit`,
+      )
+      return
+    }
     logger.info(`💰 [RESERVATION NO-SHOW] Forfeited deposit for ${reservation.confirmationCode}`)
   } catch (error) {
     logger.error(`❌ [RESERVATION NO-SHOW] Deposit forfeit failed for reservation ${reservationId}`, error)

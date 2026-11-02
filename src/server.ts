@@ -38,11 +38,14 @@ import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
 import { deliveryLineActionReconcilerJob } from './jobs/delivery-line-action-reconciler.job'
 import { deliveryConnectIntentCleanupJob } from './jobs/delivery-connect-intent-cleanup.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
+import { rappiOrderPollJob } from './jobs/rappi-order-poll.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
 import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
+import { onlineOrderCardReconcilerJob } from './jobs/online-order-card-reconciler.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
+import { exchangeCardSettlementJob } from './jobs/exchange-card-settlement.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
 import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
@@ -63,9 +66,12 @@ import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
 import { customerApprovalOutboxJob } from './jobs/customer-approval-outbox.job'
 import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnouncements.job'
 import { announcementOutboxJob } from './jobs/announcementOutbox.job'
+import { crmDailyDigestJob } from './jobs/crm-daily-digest.job'
+import { crmSweepJob } from './jobs/crm-sweep.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { campaignSenderJob } from './jobs/campaign-sender.job'
 import { birthdaySweepJob } from './jobs/birthday-sweep.job'
+import { negociosDemoReinicioJob } from './jobs/negocios-demo-reinicio.job'
 import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
 import { gcalPruningJob } from './jobs/gcal-pruning.job'
@@ -81,11 +87,13 @@ import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
+import { cancelOrderEffectsJob } from './jobs/cancel-order-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
 import { shopifyWorkerJob } from './jobs/shopify-worker.job'
 import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
 import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
+import { giftCardDeliveryJob } from './jobs/giftCardDelivery.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
@@ -97,6 +105,7 @@ import { initializeSocketServer, shutdownSocketServer } from './communication/so
 import { initializeFirebase } from './config/firebase'
 import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
+import { precalentarSellos } from './services/wallet/precalentarSellos'
 import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
 // Import Stripe feature sync startup
 import { ensureFeaturesAreSyncedToStripe } from './startup/stripe-sync.startup'
@@ -172,7 +181,9 @@ const gracefulShutdown = async (signal: string) => {
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
       onlineOrderAcceptanceExpiryJob.stop()
+      onlineOrderCardReconcilerJob.stop()
       terminalPaymentWatchdogJob.stop()
+      exchangeCardSettlementJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
       // durable recovery loops and both must stop before Prisma disconnects.
@@ -184,11 +195,13 @@ const gracefulShutdown = async (signal: string) => {
       loyaltyReconciliationJob.stop()
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
+      cancelOrderEffectsJob.stop()
       angelpayEventWorkerJob.stop()
       aggregatorPassWorkerJob.stop()
       shopifyWorkerJob.stop()
       shopifyReconcileJob.stop()
       giftCardReconciliationJob.stop()
+      giftCardDeliveryJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       documentRequestsJob.stop()
@@ -231,6 +244,7 @@ const gracefulShutdown = async (signal: string) => {
 
       logger.info('Stopping delivery webhook reconciliation job...')
       deliveryWebhookReconciliationJob.stop()
+      rappiOrderPollJob.stop()
       deliveryMenuSyncJob.stop()
       deliverySnoozeResumeJob.stop()
       deliveryLineActionReconcilerJob.stop()
@@ -295,9 +309,13 @@ const gracefulShutdown = async (signal: string) => {
       // Fase 1A: carril de envío de campañas de correo a clientes
       campaignSenderJob.stop()
       birthdaySweepJob.stop()
+      negociosDemoReinicioJob.stop()
       // Anuncios de plataforma programados
       publishScheduledAnnouncementsJob.stop()
       announcementOutboxJob.stop()
+      // CRM propio: barrido de reparación y primer dinero, y el aviso diario de pendientes
+      crmSweepJob.stop()
+      crmDailyDigestJob.stop()
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
@@ -514,7 +532,9 @@ const startApplication = async (retries = 3) => {
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
       onlineOrderAcceptanceExpiryJob.start()
+      onlineOrderCardReconcilerJob.start()
       terminalPaymentWatchdogJob.start()
+      exchangeCardSettlementJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
       // through these no-overlap durable workers after a process restart.
@@ -533,6 +553,7 @@ const startApplication = async (retries = 3) => {
       // Etapa 3 del KDS: arma las comandas de pantalla que un proceso caído dejó con su marca.
       kitchenTicketsReconciliationJob.start()
       paymentEffectsJob.start()
+      cancelOrderEffectsJob.start()
       // S4: los eventos PENDING de AngelPay (webhook antes que el registro, vínculo tardío, caídas) los retoma un
       // worker propio con claim atómico y lease — nunca el vigía de 30 s.
       angelpayEventWorkerJob.start()
@@ -543,6 +564,8 @@ const startApplication = async (retries = 3) => {
       shopifyReconcileJob.start()
       // Tarjetas de regalo: revisión nocturna (saldo contra libreta; activa cuentas pagadas con sobres PENDING; avisa lo demás).
       giftCardReconciliationJob.start()
+      // Tarjetas de regalo 1b: la entrega por WhatsApp y correo (reclamo en la fila, reintentos a +1, +5 y +30 min).
+      giftCardDeliveryJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       documentRequestsJob.start()
@@ -608,8 +631,14 @@ const startApplication = async (retries = 3) => {
       blumonPaymentAuditJob.start()
 
       // Start delivery webhook reconciliation job (every 2min at :45s — retries
-      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
+      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED).
+      // It also starts its own Rappi lane (every 30s at :15/:45) with an in-memory lock (`rappiEnCurso`):
+      // single instance only — see .claude/rules/una-sola-instancia.md, #5.
       deliveryWebhookReconciliationJob.start()
+      // Sondeo de pedidos de Rappi por tienda (cada 45 s): la red por si se pierde un aviso NEW_ORDER. APAGADO salvo
+      // RAPPI_ORDER_POLL_ENABLED=true (start() no programa nada si no). 🔴 Prendido en UN solo servidor por integración: el GET
+      // pasa los pedidos a SENT y dos servidores se los roban — .claude/rules/una-sola-instancia.md, #7.
+      rappiOrderPollJob.start()
       deliveryMenuSyncJob.start()
       deliverySnoozeResumeJob.start()
       // KDS de Uber (spec §3.4): retiros a medias, reservas huérfanas y «listos» sin avisar — cada minuto en :52
@@ -639,10 +668,16 @@ const startApplication = async (retries = 3) => {
       // Fase 1A: carril de envío de campañas de correo a clientes (cada 5 min, segundo 7)
       campaignSenderJob.start()
       birthdaySweepJob.start()
+      // Negocios demo (LIVE_DEMO, una organización «Avoqado Demo · <giro>» por giro): cada noche a las 3:00 vuelven a nacer.
+      negociosDemoReinicioJob.start()
       // Publica los anuncios de plataforma cuya hora programada ya llegó (cada 5 min)
       publishScheduledAnnouncementsJob.start()
       // Entrega los anuncios encolados (cada 30 s)
       announcementOutboxJob.start()
+      // CRM propio: aplica las entradas de la landing pendientes, liga, carga las altas viejas y llena el primer dinero (cada 5 min)
+      crmSweepJob.start()
+      // CRM propio: «Tus pendientes de hoy» a cada vendedor (lunes a viernes, 8:30; hasta las 11:00 retoma lo que quedó a medias)
+      crmDailyDigestJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)
@@ -723,6 +758,11 @@ const startApplication = async (retries = 3) => {
       const isDevEnv = NODE_ENV === 'development'
       const maxAttempts = isDevEnv ? 10 : 1
       const retryDelayMs = 500
+
+      // Los sellos de las tarjetas de Wallet se abren AQUÍ, antes de abrir el puerto: sin esto la primera
+      // descarga tras cada despliegue congelaba el hilo 1-3 s con un cliente esperando (21-oct-2026).
+      // Nunca lanza y tiene tope de tiempo. En desarrollo no: cada recarga de tsx bajaría las imágenes.
+      if (!isDevEnv) await precalentarSellos()
 
       const listenWithRetry = (attempt = 1) => {
         // Success + error handlers are scoped to THIS attempt only — we remove

@@ -2,6 +2,63 @@ import { Prisma } from '@prisma/client'
 
 import { claimShiftForCapturedPayment, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
+describe('paymentShiftClaim — canonical lock query contract', () => {
+  it.each([{ additionalOrderIds: undefined }, { additionalOrderIds: [] }])(
+    'keeps scalar order and route venue binds without extra Orders (%j)',
+    async ({ additionalOrderIds }) => {
+      const tx = { $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1' }]) }
+      await expect(
+        lockExistingOrderForPayment(tx as never, { orderId: 'order-1', venueId: 'route-venue', additionalOrderIds }),
+      ).resolves.toBe(true)
+      const [strings, ...values] = tx.$queryRaw.mock.calls[0]
+      expect(Prisma.sql(strings, ...values).values).toEqual(['order-1', 'route-venue'])
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('adds only distinct extra seeds and rereads the whole locked scope', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue([{ id: 'order-1' }, { id: 'original' }, { id: 'ancestor' }]) }
+    await expect(
+      lockExistingOrderForPayment(tx as never, {
+        orderId: 'order-1',
+        venueId: 'route-venue',
+        additionalOrderIds: ['original', 'original', 'order-1'],
+      }),
+    ).resolves.toBe(true)
+    const [strings, ...values] = tx.$queryRaw.mock.calls[0]
+    expect(Prisma.sql(strings, ...values).values).toEqual(['order-1', 'route-venue', ['original'], 'route-venue'])
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a changed ancestor scope after acquiring the union', async () => {
+    const tx = {
+      $queryRaw: jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 'order-1' }, { id: 'original' }])
+        .mockResolvedValueOnce([{ id: 'order-1' }, { id: 'original' }, { id: 'new-ancestor' }]),
+    }
+    await expect(
+      lockExistingOrderForPayment(tx as never, {
+        orderId: 'order-1',
+        venueId: 'route-venue',
+        additionalOrderIds: ['original'],
+      }),
+    ).rejects.toMatchObject({ code: 'ORDER_LOCK_SCOPE_CHANGED' })
+  })
+
+  it('rejects oversized scopes before a reread', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue([{ id: null, scopeTooLarge: true }]) }
+    await expect(
+      lockExistingOrderForPayment(tx as never, {
+        orderId: 'order-1',
+        venueId: 'route-venue',
+        additionalOrderIds: ['original'],
+      }),
+    ).rejects.toMatchObject({ code: 'ORDER_LOCK_SCOPE_TOO_LARGE' })
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+  })
+})
+
 type Release = () => void
 
 class DeterministicRowLocks {

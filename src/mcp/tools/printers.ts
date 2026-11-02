@@ -35,7 +35,12 @@ const AVISO_PANTALLA_PARA_CLIENTES =
   'La pantalla de cocina todavía no está lista para clientes. Por ahora sólo el equipo de Avoqado puede activarla.'
 
 export function registerPrinterTools(server: McpServer, scope: McpScope): void {
-  const avisoPantalla = scope.isSuperAdmin ? KITCHEN_DISPLAY_NOT_READY_NOTICE : AVISO_PANTALLA_PARA_CLIENTES
+  // Con la puerta abierta (1-nov) no hay aviso: decir «todavía no está lista» sería falso.
+  const avisoPantalla = PANTALLA_ABIERTA_A_CLIENTES
+    ? undefined
+    : scope.isSuperAdmin
+      ? KITCHEN_DISPLAY_NOT_READY_NOTICE
+      : AVISO_PANTALLA_PARA_CLIENTES
   const guard = createGuard(scope)
 
   server.tool(

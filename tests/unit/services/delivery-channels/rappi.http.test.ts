@@ -5,15 +5,17 @@
  * token de sandbox escribió el menú EN VIVO de un restaurante— y Rappi tiene la misma
  * exposición, peor, porque las tiendas se provisionan por lote.
  */
+import { DeliveryWriteNotSentError } from '../../../../src/services/delivery-channels/core/types'
 import {
   assertTiendaEscribible,
-  crearEspaciadorDeSondeo,
+  hostDeLoginRappi,
   hostRappi,
   INTERVALO_SONDEO_MS,
   llamarRappi,
   RappiEscrituraBloqueadaError,
+  TIMEOUT_RAPPI_MS,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
-import { _resetRappiTokenCacheForTests } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
+import { _resetRappiTokenCacheForTests, getRappiToken } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
 
 function respuesta(status: number, body = '{}') {
   return { ok: status >= 200 && status < 300, status, text: async () => body } as unknown as Response
@@ -46,6 +48,32 @@ describe('hostRappi', () => {
   })
 })
 
+// T5 (20-oct): el login de Rappi se mudó al dominio nuevo; la API sigue en el clásico (`hostRappi`).
+describe('hostDeLoginRappi', () => {
+  it('🔴 sandbox: el dominio nuevo, sin importar el país', () => {
+    expect(hostDeLoginRappi('SANDBOX')).toBe('https://api.dev.rappi.com')
+    expect(hostDeLoginRappi('SANDBOX', 'MX')).toBe('https://api.dev.rappi.com')
+    expect(hostDeLoginRappi('SANDBOX', 'CO')).toBe('https://api.dev.rappi.com')
+  })
+
+  it('producción México: el publicado (api.rappi.com.mx), con o sin país explícito y sin importar mayúsculas', () => {
+    expect(hostDeLoginRappi('PRODUCTION')).toBe('https://api.rappi.com.mx')
+    expect(hostDeLoginRappi('PRODUCTION', 'MX')).toBe('https://api.rappi.com.mx')
+    expect(hostDeLoginRappi('PRODUCTION', ' mx ')).toBe('https://api.rappi.com.mx')
+  })
+
+  // Sólo México tiene el dominio nuevo verificado: caer a México mandaría el login de otro país al host equivocado.
+  it('🔴 producción con otro país LANZA (sólo México está soportado)', () => {
+    expect(() => hostDeLoginRappi('PRODUCTION', 'CO')).toThrow(/país.*"CO"/i)
+    expect(() => hostDeLoginRappi('PRODUCTION', 'XX')).toThrow(/país/i)
+  })
+
+  it('el dominio nuevo es sólo del login: la API sigue en el host clásico', () => {
+    expect(hostRappi('SANDBOX', 'MX')).toBe('https://microservices.dev.rappi.com')
+    expect(hostRappi('PRODUCTION', 'MX')).toBe('https://services.mxgrability.rappi.com')
+  })
+})
+
 describe('assertTiendaEscribible', () => {
   // ── El candado que evita repetir el incidente ─────────────────────────────────────
   it('🔴 lista VACÍA = NADA se puede escribir (la falla segura)', () => {
@@ -59,6 +87,32 @@ describe('assertTiendaEscribible', () => {
 
   it('sin id de tienda tampoco pasa: no se escribe "a ciegas"', () => {
     expect(() => assertTiendaEscribible(undefined, ['900105814'])).toThrow(RappiEscrituraBloqueadaError)
+  })
+
+  // T6 (21-oct): sin esto el controlador del KDS no la reconoce como «no se envió» y la tienda bloqueada caía en un 500.
+  it('🔴 el candado ES un «no se envió» (STORE_NOT_AUTHORIZED): la cocina lo recibe como 409, no como 500', () => {
+    let error: unknown
+    try {
+      assertTiendaEscribible('900105814', [])
+    } catch (e) {
+      error = e
+    }
+    expect(error).toBeInstanceOf(RappiEscrituraBloqueadaError)
+    expect(error).toBeInstanceOf(DeliveryWriteNotSentError)
+    expect((error as DeliveryWriteNotSentError).reason).toBe('STORE_NOT_AUTHORIZED')
+  })
+
+  it('🔴 trae el texto para la cocina: dice «Rappi», que falta habilitarla, y NO manda a «reconectar»', () => {
+    const e = new RappiEscrituraBloqueadaError('900105814')
+    expect(e.paraLaCocina).toBe('Rappi todavía no está habilitada para esta tienda; avisa a soporte de Avoqado.')
+    expect(e.paraLaCocina).not.toMatch(/reconéctala/i)
+  })
+
+  it('conserva su nombre y su `storeId` (los dos que ya se leen: provisioning y el cliente)', () => {
+    const e = new RappiEscrituraBloqueadaError('900105814')
+    expect(e.name).toBe('RappiEscrituraBloqueadaError')
+    expect(e.storeId).toBe('900105814')
+    expect(e).toBeInstanceOf(Error)
   })
 
   it('el mensaje dice QUÉ pasó y qué hacer, no sólo que falló', () => {
@@ -85,6 +139,51 @@ describe('llamarRappi', () => {
     const d = deps()
     await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })
     expect(d.fetchImpl).toHaveBeenCalled()
+  })
+
+  // Tarea 20 (M13): el GET de pedidos por tienda NO es una lectura — pasa los pedidos de READY a SENT del lado de Rappi, y
+  // quien lee primero se los lleva. Sin `cambiaEstado`, el candado lo dejaba salir a cualquier tienda por ser GET.
+  it('🔴 un GET que CAMBIA ESTADO (`cambiaEstado`) lleva el candado: tienda no autorizada ⇒ no sale a la red', async () => {
+    const d = deps({ tiendasEscribibles: ['900'] })
+    await expect(
+      llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/901/orders', storeId: '901', cambiaEstado: true }),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    await expect(
+      llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/x/orders', cambiaEstado: true }),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(d.fetchImpl).not.toHaveBeenCalled()
+  })
+
+  // Tarea 20, ronda 1 (M-2): el candado no puede depender de que el llamador se acuerde de la bandera. La RUTA de la lista de
+  // pedidos basta: por tienda (host nuevo) y la global clásica. `status/sent` y el historial de un pedido siguen siendo lecturas.
+  it.each([
+    ['/restaurants/orders/v1/stores/901/orders', '901'],
+    ['/restaurants/orders/v1/stores/901/orders/', '901'],
+    ['/restaurants/orders/v1/stores/901/orders?limit=5', '901'],
+    ['/api/v2/restaurants-integrations-public-api/orders', undefined],
+    ['/api/v2/restaurants-integrations-public-api/orders/', undefined],
+  ])('🔴 un GET a la lista de pedidos (%s) lleva el candado SIN la bandera', async (ruta, storeId) => {
+    const d = deps({ tiendasEscribibles: ['900'] })
+    await expect(llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta, storeId })).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(d.fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/api/v2/restaurants-integrations-public-api/orders/status/sent',
+    '/api/v2/restaurants-integrations-public-api/orders/570494427/events',
+    '/restaurants/orders/v1/stores/901/orders/status/sent',
+    '/orders',
+  ])('%s sigue siendo una lectura: sale sin tienda autorizada', async ruta => {
+    const d = deps()
+    await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta })
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('un GET que cambia estado SÍ sale a una tienda autorizada, como GET', async () => {
+    const d = deps({ tiendasEscribibles: ['900'] })
+    await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/900/orders', storeId: '900', cambiaEstado: true })
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1)
+    expect((d.fetchImpl as jest.Mock).mock.calls[0][1].method).toBe('GET')
   })
 
   it('manda el header `x-authorization`, no el estándar', async () => {
@@ -121,11 +220,124 @@ describe('llamarRappi', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 
+  // Tarea 13 (Codex plan r1 #4): el «listo» de Rappi cuenta llamadas (a lo más 3 por pedido) ANTES de llamar; si un 401
+  // gastara un segundo intento por dentro, una reserva serían DOS peticiones y el tope dejaría de ser cierto.
+  it('🔴 un 401 del "listo" no se reintenta por dentro: con reintentarEn401 en false invalida el token y devuelve el 401 (UNA petición)', async () => {
+    const fetchToken = jest.fn(async () => ({ access_token: 'tok-nuevo' }))
+    const getToken = (s: 'integrations') => getRappiToken(s, { fetchToken })
+    await getToken('integrations') // el token queda en caché
+    const fetchImpl = jest.fn().mockResolvedValue(respuesta(401, 'expired'))
+
+    const r = await llamarRappi(deps({ fetchImpl, getToken, tiendasEscribibles: ['900'] }), {
+      superficie: 'integrations',
+      metodo: 'POST',
+      ruta: '/orders/1/ready-for-pickup',
+      storeId: '900',
+      reintentarEn401: false,
+    })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(r).toMatchObject({ ok: false, status: 401, raw: 'expired' })
+    // Y el token SÍ se invalidó: la siguiente petición pide uno nuevo en vez de repetir el revocado.
+    expect(fetchToken).toHaveBeenCalledTimes(1)
+    await getToken('integrations')
+    expect(fetchToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('reintentarEn401 en true (o sin decirlo) conserva el reintento de siempre', async () => {
+    const fetchImpl = jest.fn().mockResolvedValueOnce(respuesta(401)).mockResolvedValueOnce(respuesta(200))
+
+    const r = await llamarRappi(deps({ fetchImpl }), { superficie: 'integrations', metodo: 'GET', ruta: '/orders', reintentarEn401: true })
+
+    expect(r.status).toBe(200)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
   it('un 400 NO se reintenta — el problema es la petición, no el token', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(respuesta(400, 'invalid transition'))
     const r = await llamarRappi(deps({ fetchImpl }), { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     expect(r).toMatchObject({ ok: false, status: 400, raw: 'invalid transition' })
+  })
+
+  // H3: sin techo, una llamada colgada sostenía la pasada de la reconciliación (y detrás de ella, los pedidos).
+  it('🔴 cada petición lleva AbortSignal.timeout(10 s), y al vencer sale como un fallo de red (lanza), no como una respuesta', async () => {
+    const real = AbortSignal.timeout.bind(AbortSignal)
+    const espia = jest.spyOn(AbortSignal, 'timeout').mockImplementation(() => real(5)) // vence ya: la prueba no espera 10 s
+    try {
+      // El fetch falla SÓLO si su señal se aborta: con una señal que nunca vence, esta prueba se queda colgada.
+      const fetchImpl = jest.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_ok, rechazar) => init.signal?.addEventListener('abort', () => rechazar(init.signal?.reason))),
+      )
+      await expect(
+        llamarRappi(deps({ fetchImpl: fetchImpl as unknown as typeof fetch }), {
+          superficie: 'integrations',
+          metodo: 'GET',
+          ruta: '/orders',
+        }),
+      ).rejects.toThrow(/timeout/i)
+      expect(espia).toHaveBeenCalledWith(10_000)
+      expect(TIMEOUT_RAPPI_MS).toBe(10_000)
+      expect(fetchImpl.mock.calls[0][1].signal).toBe(espia.mock.results[0].value)
+    } finally {
+      espia.mockRestore()
+    }
+  })
+
+  // Tarea 15: si el token no se pudo pedir, la escritura NO salió y se SABE. Como Error común, el menú se quedaba «en revisión»
+  // esperando un veredicto que nunca iba a llegar, y el «listo» gastaba una de sus 3 llamadas.
+  describe('un fallo al pedir el token cuenta como "no salió"', () => {
+    const loginCaido = () => jest.fn(async () => Promise.reject(new Error('[Rappi] login de integrations respondió 503')))
+
+    it('🔴 en una ESCRITURA lanza DeliveryWriteNotSentError(UNAVAILABLE) y no llama a la red', async () => {
+      const d = deps({ getToken: loginCaido(), tiendasEscribibles: ['900'] })
+
+      const e = await llamarRappi(d, { superficie: 'integrations', metodo: 'POST', ruta: '/menu', storeId: '900', cuerpo: {} }).catch(
+        (x: unknown) => x,
+      )
+
+      expect(e).toBeInstanceOf(DeliveryWriteNotSentError)
+      expect((e as DeliveryWriteNotSentError).reason).toBe('UNAVAILABLE')
+      expect((e as Error).message).toMatch(/no se envió nada/i)
+      expect((e as Error).message).toMatch(/503/) // la causa viaja (sin secretos: el login nunca imprime la credencial)
+      expect(e).not.toBeInstanceOf(RappiEscrituraBloqueadaError) // no es el candado: la cocina no lee «no habilitada»
+      expect(d.fetchImpl).not.toHaveBeenCalled()
+    })
+
+    it('tras un 401, si renovar el token falla, tampoco salió (Rappi contestó 401: no la procesó)', async () => {
+      const getToken = jest.fn().mockResolvedValueOnce('tok').mockRejectedValueOnce(new Error('login caído'))
+      const fetchImpl = jest.fn().mockResolvedValue(respuesta(401))
+
+      await expect(
+        llamarRappi(deps({ getToken, fetchImpl, tiendasEscribibles: ['900'] }), {
+          superficie: 'integrations',
+          metodo: 'PUT',
+          ruta: '/x',
+          storeId: '900',
+        }),
+      ).rejects.toBeInstanceOf(DeliveryWriteNotSentError)
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    })
+
+    it('en una LECTURA lanza el error de siempre (no es una escritura: nada que dar por no enviado)', async () => {
+      const e = await llamarRappi(deps({ getToken: loginCaido() }), {
+        superficie: 'integrations',
+        metodo: 'GET',
+        ruta: '/orders/1/events',
+      }).catch((x: unknown) => x)
+
+      expect(e).not.toBeInstanceOf(DeliveryWriteNotSentError)
+      expect((e as Error).message).toMatch(/503/)
+    })
+
+    it('el candado sigue saltando ANTES del token: una tienda no autorizada nunca pide token', async () => {
+      const d = deps({ getToken: loginCaido() })
+      await expect(llamarRappi(d, { superficie: 'integrations', metodo: 'POST', ruta: '/menu', storeId: '1' })).rejects.toBeInstanceOf(
+        RappiEscrituraBloqueadaError,
+      )
+      expect(d.getToken).not.toHaveBeenCalled()
+    })
   })
 
   it('una escritura AUTORIZADA sí sale, con cuerpo JSON', async () => {
@@ -137,62 +349,71 @@ describe('llamarRappi', () => {
   })
 })
 
-describe('crearEspaciadorDeSondeo', () => {
+// El espaciador viejo (`crearEspaciadorDeSondeo`) se borró en la Tarea 20: nunca tuvo llamador. El ritmo lo lleva el job del
+// sondeo (`rappi-order-poll.job.ts`) con esta misma constante.
+describe('INTERVALO_SONDEO_MS', () => {
   it('el intervalo es el que Rappi pide: 45 segundos', () => {
     expect(INTERVALO_SONDEO_MS).toBe(45_000)
   })
+})
 
-  it('la primera vuelta no espera', async () => {
-    const sleep = jest.fn(async () => {})
-    const e = crearEspaciadorDeSondeo({ now: () => 1000, sleep })
-    await e.esperarTurno('v1')
-    expect(sleep).not.toHaveBeenCalled()
+describe('llamarRappi — self-onboarding', () => {
+  const base = { ambiente: 'SANDBOX' as const, getToken: async () => 'tok-integ' }
+
+  it('manda el header del comercio además del del integrador, al host indicado', async () => {
+    const fetchImpl = jest.fn(async () => respuesta(200))
+    await llamarRappi(
+      { ...base, fetchImpl: fetchImpl as never },
+      {
+        superficie: 'integrations',
+        metodo: 'GET',
+        ruta: '/api/v2/restaurants-integrations-public-api/stores/integration-status',
+        host: 'https://api.dev.rappi.com',
+        cabecerasExtra: { 'Authorization-Partners': 'Bearer idt' },
+      },
+    )
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores/integration-status')
+    expect(init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ', 'Authorization-Partners': 'Bearer idt' })
   })
 
-  it('la segunda vuelta espera lo que falte para los 45 s', async () => {
-    const sleep = jest.fn(async () => {})
-    let t = 1000
-    const e = crearEspaciadorDeSondeo({ now: () => t, sleep })
-
-    await e.esperarTurno('v1')
-    t += 10_000
-    await e.esperarTurno('v1')
-
-    expect(sleep).toHaveBeenCalledWith(35_000)
+  it('el candado revisa CADA tienda del lote: una fuera de la lista y no sale nada', async () => {
+    const fetchImpl = jest.fn()
+    await expect(
+      llamarRappi(
+        { ...base, fetchImpl: fetchImpl as never, tiendasEscribibles: ['10'] },
+        { superficie: 'integrations', metodo: 'POST', ruta: '/x', storeIds: ['10', '11'], cuerpo: {} },
+      ),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
-  it('si ya pasaron los 45 s no espera nada', async () => {
-    const sleep = jest.fn(async () => {})
-    let t = 1000
-    const e = crearEspaciadorDeSondeo({ now: () => t, sleep })
-
-    await e.esperarTurno('v1')
-    t += 60_000
-    await e.esperarTurno('v1')
-
-    expect(sleep).not.toHaveBeenCalled()
+  it('un lote donde TODAS están autorizadas sí sale', async () => {
+    const fetchImpl = jest.fn(async () => respuesta(202))
+    await llamarRappi(
+      { ...base, fetchImpl: fetchImpl as never, tiendasEscribibles: ['10', '11'] },
+      { superficie: 'integrations', metodo: 'POST', ruta: '/x', storeIds: ['10', '11'], cuerpo: {} },
+    )
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
-  // El límite es sobre cuánto sondeamos UNA tienda, no sobre cuántas atendemos: hacer fila
-  // entre venues distintos escalaría pésimo con 50 clientes.
-  it('🔴 dos venues NO se hacen fila entre ellos', async () => {
-    const sleep = jest.fn(async () => {})
-    const e = crearEspaciadorDeSondeo({ now: () => 1000, sleep })
-
-    await e.esperarTurno('v1')
-    await e.esperarTurno('v2')
-
-    expect(sleep).not.toHaveBeenCalled()
+  // 🔴 Un lote vacío no puede ser un pase libre: `[].every(...)` es true, y por eso se exige al menos una.
+  it('🔴 un lote VACÍO de tiendas no se salta el candado', async () => {
+    const fetchImpl = jest.fn()
+    await expect(
+      llamarRappi(
+        { ...base, fetchImpl: fetchImpl as never, tiendasEscribibles: ['10'] },
+        { superficie: 'integrations', metodo: 'POST', ruta: '/x', storeIds: [], cuerpo: {} },
+      ),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
-  // 🔴 Espera, NO rechaza: perder una vuelta de sondeo es perder pedidos cuando el webhook
-  // falló — y Rappi no documenta reintentos de webhook, así que el sondeo ES la red.
-  it('🔴 espaciador, no limitador: nunca rechaza una vuelta', async () => {
-    const sleep = jest.fn(async () => {})
-    let t = 1000
-    const e = crearEspaciadorDeSondeo({ now: () => t, sleep })
-    await e.esperarTurno('v1')
-    t += 1
-    await expect(e.esperarTurno('v1')).resolves.toBeUndefined()
+  it('sin host ni cabeceras extra todo sigue igual que antes (regresión)', async () => {
+    const fetchImpl = jest.fn(async () => respuesta(200))
+    await llamarRappi({ ...base, fetchImpl: fetchImpl as never }, { superficie: 'integrations', metodo: 'GET', ruta: '/x' })
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://microservices.dev.rappi.com/x')
+    expect(Object.keys(init.headers as object)).not.toContain('Authorization-Partners')
   })
 })

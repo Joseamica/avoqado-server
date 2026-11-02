@@ -1,0 +1,705 @@
+/**
+ * S2b (Q58) contra Postgres REAL: una venta de mostrador nace y se cobra con saldo en UNA transacción (`pay-new-order`).
+ * Pasan las dos o ninguna: si el cobro falla, ni cuenta, ni premio quemado, ni descuento usado. La llave repetida (igual o con
+ * otro cuerpo, una tras otra o a la vez), lo que ve otra caja mientras el cobro espera, el premio que ya no aplica (Q60) y quién
+ * queda en la cuenta y quién en el cobro (Q76, Q110), y el precio que vio el cliente (arreglo tras S8: un precio que BAJÓ cobra lo
+ * que la venta debe; uno que SUBIÓ rechaza con 409).
+ *
+ * Correr: source ~/.claude/worktrees/tarjetas-1b/urls-tarjetas-1b.sh && TZ=UTC npx jest --selectProjects integration \
+ *   --runTestsByPath tests/integration/giftCards/cobroEnCuentaNueva.integration.test.ts --ci --runInBand
+ */
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getBroadcastingService: jest.fn(() => null), broadcastToVenue: jest.fn() },
+}))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
+  notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
+}))
+jest.mock('@/services/shared/cashDrawerPosting', () => ({
+  ...jest.requireActual('@/services/shared/cashDrawerPosting'),
+  postCashSaleToDrawer: jest.fn().mockResolvedValue(undefined),
+  postCashRefundToDrawer: jest.fn().mockResolvedValue('NOT_DRAWER_CASH'),
+}))
+jest.mock('@/services/access/basePlan.service', () => ({
+  ...jest.requireActual('@/services/access/basePlan.service'),
+  venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
+}))
+
+import { Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
+import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { lockGiftCardsForUpdate } from '@/services/giftCards/giftCardLedger'
+import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
+import { reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { listOrders, payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
+import type { CreateOrderItemInput } from '@/services/mobile/order.mobile.service'
+import { getPaymentByKey, payNewOrder } from '@/controllers/mobile/giftCard.mobile.controller'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { crearNegocioDePrueba, esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
+
+jest.setTimeout(90000)
+
+const D = (v: number) => new Prisma.Decimal(v)
+const PRESUPUESTO = { timeout: 15_000, maxWait: 5_000 }
+const SUF = `nueva-${process.pid}-${Date.now()}`
+let venueId: string
+let organizationId: string
+let staffA: string
+let staffB: string
+let staffC: string
+let clienteId: string
+let otroClienteId: string
+let descuentoId: string
+let n = 0
+
+async function personal(nombre: string): Promise<string> {
+  const id = (
+    await prisma.staff.create({ data: { email: `${SUF}-${nombre}@staff.test`, firstName: nombre, lastName: 'QA', active: true } })
+  ).id
+  await prisma.staffVenue.create({ data: { staffId: id, venueId, role: 'CASHIER', active: true } })
+  return id
+}
+
+beforeAll(async () => {
+  ;({ organizationId, venueId, staffId: staffA } = await crearNegocioDePrueba('nueva'))
+  staffB = await personal('Beto')
+  staffC = await personal('Carla')
+  await prisma.giftCardSettings.create({ data: { venueId, enabled: true, suggestedAmounts: [500, 1000, 2000] } })
+  await ensureGiftCardTender(prisma, venueId)
+  clienteId = (await prisma.customer.create({ data: { venueId, firstName: 'Ana', lastName: 'López' } })).id
+  otroClienteId = (await prisma.customer.create({ data: { venueId, firstName: 'Otro', lastName: 'Cliente' } })).id
+  descuentoId = (
+    await prisma.discount.create({ data: { venueId, name: '$100 de la blusa', type: 'FIXED_AMOUNT', value: 100, scope: 'ITEM' } })
+  ).id
+})
+
+beforeEach(() => reiniciarSellosParaPruebas())
+
+afterAll(async () => {
+  await limpiarNegocioDePrueba(venueId)
+})
+
+/** Un sobre ACTIVE con su código real y su ACTIVATE (saldo = suma de la libreta). */
+async function tarjeta(monto: number) {
+  const c = generateGiftCardCode()
+  const s = await prisma.giftCard.create({
+    data: {
+      venueId,
+      organizationId,
+      codeHash: hashGiftCardCode(c.normalized),
+      codeEnc: encryptGiftCardCode(c.normalized),
+      codeLast4: c.last4,
+      pageToken: generateOpaqueToken(),
+      initialAmount: D(monto),
+      balance: D(monto),
+      status: 'ACTIVE',
+      activatedAt: new Date(),
+      termsVersion: '2026-10-14',
+      deliveryChannel: 'PRINTED',
+    },
+  })
+  await prisma.giftCardActivity.create({ data: { giftCardId: s.id, venueId, type: 'ACTIVATE', amount: D(monto), balanceAfter: D(monto) } })
+  return { id: s.id, codigo: c.display }
+}
+
+/** Un premio de $100 PENDIENTE del cliente, en su propia cartilla (un premio por cartilla). */
+async function premio(de: string): Promise<string> {
+  n += 1
+  const cartilla = await prisma.stampCard.create({
+    data: { customerId: de, venueId, cycle: n, stampsRequired: 5, stampsEarned: 5, completedAt: new Date() },
+  })
+  return (
+    await prisma.stampReward.create({
+      data: {
+        stampCardId: cartilla.id,
+        customerId: de,
+        venueId,
+        rewardType: 'FIXED_AMOUNT',
+        rewardValue: 100,
+        rewardLabel: '$100 de premio',
+      },
+    })
+  ).id
+}
+
+const llaveNueva = (que: string) => `${SUF}-${que}`.slice(-60)
+
+/** Una blusa de $1,000 con $100 de descuento de artículo (y, si se pide, un premio de $100): la cuenta queda en $900 o $800. */
+function venta(llave: string, codigo: string, extra: Record<string, unknown> = {}) {
+  return {
+    items: [{ name: 'Blusa', quantity: 1, unitPrice: 100000, discountId: descuentoId }],
+    staffId: staffA,
+    orderType: 'TAKEOUT' as const,
+    source: 'AVOQADO_ANDROID' as const,
+    customerId: clienteId,
+    idempotencyKey: llave,
+    proof: { kind: 'CODE' as const, code: codigo },
+    amount: D(500),
+    tip: D(0),
+    deviceId: null,
+    procesadoPor: staffA,
+    ...extra,
+  }
+}
+
+const saldoDe = async (id: string) => (await prisma.giftCard.findUniqueOrThrow({ where: { id } })).balance.toFixed(2)
+const usosDelDescuento = async () => (await prisma.discount.findUniqueOrThrow({ where: { id: descuentoId } })).currentUses
+const cuentasDe = (llave: string) => prisma.order.count({ where: { venueId, externalId: `giftpay:${llave}` } })
+const estadoDelPremio = async (id: string) => (await prisma.stampReward.findUniqueOrThrow({ where: { id } })).status
+
+/**
+ * Q91 (molde de `cobroConSaldo`): espera a que OTRA sesión esté detenida en el candado de la LLAVE (`giftpay:<venue>:<llave>`, el
+ * advisory de `tomarLlaveDeCobro`) que sostiene `pidQueTiene`. Esperar la cuenta o el sobre NO cuenta. Lanza si nadie espera en ~5 s.
+ */
+async function esperarAQueAlguienEspereLaLlave(pidQueTiene: number, llave: string): Promise<void> {
+  const clave = `giftpay:${venueId}:${llave}`
+  for (let i = 0; i < 200; i++) {
+    // Un advisory de un bigint sale en pg_locks partido: la mitad alta en classid y la baja en objid, con objsubid = 1.
+    const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*)::bigint AS n FROM pg_locks l
+      WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1
+        AND l.classid::bigint = ((hashtext(${clave})::bigint >> 32) & 4294967295)
+        AND l.objid::bigint = (hashtext(${clave})::bigint & 4294967295)
+        AND ${pidQueTiene}::int = ANY(pg_blocking_pids(l.pid))`
+    if (Number(fila.n) > 0) return
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`Nadie llegó a esperar el candado de la llave ${llave} que sostiene el proceso ${pidQueTiene}`)
+}
+
+describe('pay-new-order · Postgres real', () => {
+  it.each([
+    ['saldo insuficiente', 300, false, 'GIFT_CARD_INSUFFICIENT_BALANCE'],
+    ['tarjeta bloqueada', 1000, true, 'GIFT_CARD_BLOCKED'],
+  ])('🔴 el cobro falla dentro de la transacción ⇒ ni cuenta ni premio consumido (%s)', async (_caso, monto, bloquear, code) => {
+    const t = await tarjeta(monto)
+    if (bloquear) await prisma.giftCard.update({ where: { id: t.id }, data: { status: 'BLOCKED' } })
+    const premioId = await premio(clienteId)
+    const llave = llaveNueva(`falla-${code}`)
+    const usosAntes = await usosDelDescuento()
+
+    await expect(payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { stampRewardId: premioId }))).rejects.toMatchObject({
+      code,
+      statusCode: 409,
+    })
+
+    expect(await cuentasDe(llave)).toBe(0)
+    expect(await estadoDelPremio(premioId)).toBe('PENDING')
+    expect(await usosDelDescuento()).toBe(usosAntes)
+    expect(await saldoDe(t.id)).toBe(D(monto).toFixed(2))
+    expect(await prisma.payment.count({ where: { venueId, idempotencyKey: llave } })).toBe(0)
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(0)
+  })
+
+  it('🔴 Q60: un premio que no se puede aplicar (de otro cliente) rechaza todo con 409 GIFT_CARD_STAMP_REWARD_NOT_APPLIED', async () => {
+    const t = await tarjeta(1000)
+    const ajeno = await premio(otroClienteId)
+    const llave = llaveNueva('premio-ajeno')
+    await expect(payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { stampRewardId: ajeno }))).rejects.toMatchObject({
+      code: 'GIFT_CARD_STAMP_REWARD_NOT_APPLIED',
+      statusCode: 409,
+      message: 'Ese premio ya no aplica a esta venta. Quítalo y vuelve a cobrar.',
+    })
+    expect(await cuentasDe(llave)).toBe(0)
+    expect(await estadoDelPremio(ajeno)).toBe('PENDING')
+    expect(await saldoDe(t.id)).toBe('1000.00')
+    expect(await prisma.payment.count({ where: { venueId, idempotencyKey: llave } })).toBe(0)
+  })
+
+  it('🔴 pasa ⇒ una cuenta, un cobro y lo que falta: $800 con $500 de saldo ⇒ faltan $300, el premio quemado y el descuento usado', async () => {
+    const t = await tarjeta(1000)
+    const premioId = await premio(clienteId)
+    const llave = llaveNueva('parcial')
+    const usosAntes = await usosDelDescuento()
+
+    const r = await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { stampRewardId: premioId }))
+
+    expect(r).toMatchObject({
+      replay: false,
+      amount: 500,
+      orderRemaining: 300,
+      orderPaymentStatus: 'PARTIAL',
+      redeemed: [{ giftCardId: t.id, amount: 500, balanceAfter: 500 }],
+    })
+    const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+    expect([cuenta.externalId, cuenta.total.toFixed(2), cuenta.paymentStatus, cuenta.tipAmount.toFixed(2)]).toEqual([
+      `giftpay:${llave}`,
+      '800.00',
+      'PARTIAL',
+      '0.00',
+    ])
+    expect(await estadoDelPremio(premioId)).toBe('REDEEMED')
+    expect(await usosDelDescuento()).toBe(usosAntes + 1)
+    expect(await saldoDe(t.id)).toBe('500.00')
+    expect(await prisma.payment.count({ where: { venueId, orderId: r.orderId } })).toBe(1)
+  })
+
+  /**
+   * Cierre B (al traer `develop`): D4 de `develop` quema el premio y lo liga a su descuento en UNA sola escritura, porque la segunda
+   * hacía a Postgres volver a comprobar las llaves foráneas del premio (pedía el cliente) y cerraba un círculo con la liquidación de
+   * cuentas y las métricas del cobro (Codex D3-r5 #2). Aquí el canje corre DENTRO de la transacción larga de `pay-new-order`, así que
+   * se mide en TODA esa transacción, no sólo en el canje, con `pg_stat_xact_user_tables` leído con su mismo `tx` al empezar y justo
+   * antes del commit. Se resta: esa vista trae lo que la conexión todavía no reportó, y ahí pueden ir transacciones anteriores de la
+   * misma conexión (Postgres reporta al quedar inactiva y a lo más cada 500 ms); dentro de una transacción no reporta nada.
+   */
+  it('🔴 D4 dentro de pay-new-order: en toda la transacción la fila del premio se escribe UNA sola vez, ya ligada al descuento que nace', async () => {
+    type Conteo = { relname: string; ins: bigint; upd: bigint }
+    const medir = async (tx: Prisma.TransactionClient) => {
+      const filas = await tx.$queryRaw<Conteo[]>`
+        SELECT relname::text AS relname, n_tup_ins AS ins, n_tup_upd AS upd
+        FROM pg_stat_xact_user_tables WHERE relname IN ('Order', 'StampReward')`
+      const de = (tabla: string) => filas.find(x => x.relname === tabla)
+      return { ordenesCreadas: Number(de('Order')?.ins ?? 0), escriturasDelPremio: Number(de('StampReward')?.upd ?? 0) }
+    }
+    /** Corre `fn` con el `tx` y devuelve lo que ESA transacción escribió (lo de antes, no reportado, se resta). */
+    const loQueEscribe = async (tx: Prisma.TransactionClient, fn: () => Promise<unknown>) => {
+      const antes = await medir(tx)
+      const resultado = await fn()
+      const despues = await medir(tx)
+      return {
+        resultado,
+        ordenesCreadas: despues.ordenesCreadas - antes.ordenesCreadas,
+        escriturasDelPremio: despues.escriturasDelPremio - antes.escriturasDelPremio,
+      }
+    }
+
+    // El medidor primero: dos escrituras a la fila de un premio en una transacción ⇒ 2 (así se vería el canje de antes de D4).
+    const control = await premio(clienteId)
+    const calibracion = await prisma.$transaction(tx =>
+      loQueEscribe(tx, async () => {
+        await tx.stampReward.update({ where: { id: control }, data: { rewardLabel: 'control 1' } })
+        await tx.stampReward.update({ where: { id: control }, data: { rewardLabel: 'control 2' } })
+      }),
+    )
+    expect(calibracion.escriturasDelPremio).toBe(2)
+
+    // La venta: cada transacción con el presupuesto del cobro se mide de principio a fin, con su mismo `tx`.
+    const medidas: Array<{ ordenesCreadas: number; escriturasDelPremio: number }> = []
+    const transaccionReal = prisma.$transaction.bind(prisma) as (fn: unknown, opts?: unknown) => Promise<unknown>
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, opts?: unknown) => {
+      if (typeof fn !== 'function' || opts !== ORDER_LOCK_WAIT_BUDGET) return transaccionReal(fn, opts)
+      return transaccionReal(async (tx: Prisma.TransactionClient) => {
+        const m = await loQueEscribe(tx, () => (fn as (t: Prisma.TransactionClient) => Promise<unknown>)(tx))
+        medidas.push({ ordenesCreadas: m.ordenesCreadas, escriturasDelPremio: m.escriturasDelPremio })
+        return m.resultado
+      }, opts)
+    }) as never)
+    const t = await tarjeta(1000)
+    const premioId = await premio(clienteId)
+    const llave = llaveNueva('d4-una-escritura')
+    let r: Awaited<ReturnType<typeof payGiftCardOnNewOrder>>
+    try {
+      r = await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { stampRewardId: premioId }))
+    } finally {
+      espia.mockRestore()
+    }
+
+    // La transacción de la venta (la que creó la cuenta): una sola, y en ella el premio se escribió UNA vez.
+    expect(medidas.filter(m => m.ordenesCreadas > 0)).toEqual([{ ordenesCreadas: 1, escriturasDelPremio: 1 }])
+    const quemado = await prisma.stampReward.findUniqueOrThrow({ where: { id: premioId } })
+    expect(quemado.status).toBe('REDEEMED')
+    // Esa única escritura ya trae el rastro: apunta al descuento del premio que nació en la cuenta (cuid v1).
+    expect(quemado.orderDiscountId).toMatch(/^c[a-z0-9]{24}$/)
+    const descuento = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: quemado.orderDiscountId! } })
+    expect([descuento.orderId, descuento.name, descuento.amount.toFixed(2)]).toEqual([r.orderId, '$100 de premio', '100.00'])
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).total.toFixed(2)).toBe('800.00')
+  })
+
+  it('con amount = total ⇒ PAID, con el vale de inventario de la venta y la comanda armada (como en pay-gift-card)', async () => {
+    // La comanda sólo lleva artículos del catálogo (un importe libre no se cocina): una playera de $900 y una pantalla de cocina.
+    const categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'Ropa', slug: `ropa-${SUF}` } })).id
+    const productId = (
+      await prisma.product.create({ data: { venueId, sku: `PLAY-${SUF}`, name: 'Playera', categoryId, price: new Prisma.Decimal(900) } })
+    ).id
+    const estacion = await prisma.printStation.create({ data: { venueId, name: 'Cocina', isDefault: true, hasKitchenDisplay: true } })
+    try {
+      const t = await tarjeta(1000)
+      const r = await payGiftCardOnNewOrder(
+        venueId,
+        venta(llaveNueva('completa'), t.codigo, { items: [{ productId, quantity: 1 }], amount: D(900) }),
+      )
+      expect(r).toMatchObject({ orderPaymentStatus: 'PAID', orderRemaining: 0 })
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.paymentStatus, cuenta.total.toFixed(2), cuenta.kitchenPendingAt]).toEqual(['PAID', '900.00', null])
+      // El vale de inventario de la venta existe y quedó resuelto (la playera no lleva inventario), nunca colgado en PENDING.
+      const vale = await prisma.inventoryPosting.findFirst({ where: { venueId, orderId: r.orderId, effectKind: 'SALE' } })
+      expect([vale?.status, vale?.skipReason]).toEqual(['SKIPPED', 'NO_TRACKED_ITEMS'])
+      // La comanda de pantalla, armada después del commit.
+      const renglones = await prisma.orderItem.findMany({
+        where: { orderId: r.orderId },
+        select: { id: true, sentToKitchenAt: true },
+        take: 5,
+      })
+      expect(renglones.map(x => x.sentToKitchenAt !== null)).toEqual([true])
+      expect(await prisma.kdsOrderItem.count({ where: { orderItemId: renglones[0].id } })).toBe(1)
+    } finally {
+      await prisma.printStation.update({ where: { id: estacion.id }, data: { active: false, isDefault: false } })
+    }
+  })
+
+  it('🔴 (d) misma llave y mismo cuerpo ⇒ la misma cuenta y el mismo cobro (`replay`), un solo REDEEM', async () => {
+    const t = await tarjeta(1000)
+    const llave = llaveNueva('repite')
+    const a = await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo))
+    const b = await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo))
+    expect([a.replay, b.replay]).toEqual([false, true])
+    expect([b.orderId, b.paymentId]).toEqual([a.orderId, a.paymentId])
+    expect(await cuentasDe(llave)).toBe(1)
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(1)
+    expect(await saldoDe(t.id)).toBe('500.00')
+  })
+
+  it('🔴 (d) misma llave y otro cuerpo (otro artículo) ⇒ 409 IDEMPOTENCY_KEY_REUSED, sin otra cuenta', async () => {
+    const t = await tarjeta(1000)
+    const llave = llaveNueva('otro-cuerpo')
+    await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo))
+    await expect(
+      payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { items: [{ name: 'Falda', quantity: 1, unitPrice: 100000 }] })),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', statusCode: 409 })
+    expect(await cuentasDe(llave)).toBe(1)
+    expect(await saldoDe(t.id)).toBe('500.00')
+  })
+
+  it('(d) GET …/payments/:llave ⇒ found, con su orderId', async () => {
+    const t = await tarjeta(1000)
+    const llave = llaveNueva('consulta')
+    const a = await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo))
+    let data: any
+    const res: any = { json: (b: any) => ((data = b.data), res) }
+    await getPaymentByKey({ params: { venueId, idempotencyKey: llave } } as any, res)
+    expect(data).toMatchObject({ found: true, payment: { paymentId: a.paymentId, orderId: a.orderId, orderRemaining: 400 } })
+  })
+
+  /**
+   * «A la vez», como en S2 (Q91): T sostiene el sobre, así el PRIMER envío A (el servicio real) queda detenido DENTRO de su
+   * transacción con la llave tomada y la cuenta ya creada. B, con la misma llave, entra mientras A sigue ahí y espera EL CANDADO
+   * DE LA LLAVE de A (no la cuenta ni el sobre). Al soltar T, A cobra y B sale por la llave.
+   */
+  async function aLaVez(llave: string, giftCardId: string, cuerpoA: () => Promise<unknown>, cuerpoB: () => Promise<unknown>) {
+    let avisar!: (pid: number) => void
+    const pid = new Promise<number>(resolve => (avisar = resolve))
+    let soltar!: () => void
+    const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
+    const T = prisma.$transaction(async tx => {
+      await lockGiftCardsForUpdate(tx, [giftCardId])
+      avisar(await pidDe(tx))
+      await puedeSoltar
+    }, PRESUPUESTO)
+    T.catch(() => undefined)
+    const enVuelo: Promise<unknown>[] = [T]
+    try {
+      const pidT = await pid
+      const A = cuerpoA()
+      enVuelo.push(A.catch(() => undefined))
+      const pidA = await esperarAQueAlguienEspereA(pidT) // A ya tiene la llave y la cuenta, y espera el sobre
+      const B = cuerpoB()
+      enVuelo.push(B.catch(() => undefined))
+      await esperarAQueAlguienEspereLaLlave(pidA, llave) // B espera la LLAVE de A
+      expect(await cuentasDe(llave)).toBe(0) // la cuenta de A todavía no existe afuera
+      soltar()
+      return await Promise.allSettled([A, B])
+    } finally {
+      soltar()
+      await Promise.allSettled(enVuelo)
+    }
+  }
+
+  it('🔴 (d) dos envíos A LA VEZ con la misma llave ⇒ el segundo espera la llave y devuelve el cobro del primero: una cuenta y un cobro', async () => {
+    const t = await tarjeta(1000)
+    const llave = llaveNueva('a-la-vez')
+    const [a, b] = await aLaVez(
+      llave,
+      t.id,
+      () => payGiftCardOnNewOrder(venueId, venta(llave, t.codigo)),
+      () => payGiftCardOnNewOrder(venueId, venta(llave, t.codigo)),
+    )
+    expect([a.status, b.status]).toEqual(['fulfilled', 'fulfilled'])
+    const [ra, rb] = [(a as PromiseFulfilledResult<any>).value, (b as PromiseFulfilledResult<any>).value]
+    expect([ra.replay, rb.replay]).toEqual([false, true])
+    expect([rb.orderId, rb.paymentId]).toEqual([ra.orderId, ra.paymentId])
+    expect(await cuentasDe(llave)).toBe(1)
+    expect(await prisma.payment.count({ where: { venueId, idempotencyKey: llave } })).toBe(1)
+    expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(1)
+    expect(await saldoDe(t.id)).toBe('500.00')
+  })
+
+  it('🔴 (d) dos envíos A LA VEZ con la misma llave y cuerpos distintos ⇒ el primero pasa y el segundo 409 IDEMPOTENCY_KEY_REUSED', async () => {
+    const t = await tarjeta(1000)
+    const llave = llaveNueva('a-la-vez-distintos')
+    const [a, b] = await aLaVez(
+      llave,
+      t.id,
+      () => payGiftCardOnNewOrder(venueId, venta(llave, t.codigo)),
+      () => payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { items: [{ name: 'Falda', quantity: 1, unitPrice: 100000 }] })),
+    )
+    expect(a).toMatchObject({ status: 'fulfilled', value: { replay: false } })
+    expect(b).toMatchObject({ status: 'rejected', reason: { code: 'IDEMPOTENCY_KEY_REUSED', statusCode: 409 } })
+    expect(await cuentasDe(llave)).toBe(1)
+    expect(await prisma.payment.count({ where: { venueId, idempotencyKey: llave } })).toBe(1)
+    expect(await saldoDe(t.id)).toBe('500.00')
+  })
+
+  it('🔴 (e) otra caja nunca ve una cuenta sin su cobro: mientras el cobro espera el sobre, la cuenta no existe afuera; si falla, nunca existe', async () => {
+    const t = await tarjeta(1000)
+    const llave = llaveNueva('otra-caja')
+    const antes = (await listOrders(venueId, { page: 1, pageSize: 100 })).meta.total
+    let avisar!: (pid: number) => void
+    const pid = new Promise<number>(resolve => (avisar = resolve))
+    let soltar!: () => void
+    const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
+    // Otra transacción toma el sobre y, antes de soltarlo, lo bloquea: el cobro que espera ese candado fallará al entrar.
+    const T = prisma.$transaction(async tx => {
+      await lockGiftCardsForUpdate(tx, [t.id])
+      avisar(await pidDe(tx))
+      await puedeSoltar
+      await tx.giftCard.update({ where: { id: t.id }, data: { status: 'BLOCKED' } })
+    }, PRESUPUESTO)
+    T.catch(() => undefined)
+    const enVuelo: Promise<unknown>[] = [T]
+    try {
+      const pidT = await pid
+      const A = payGiftCardOnNewOrder(venueId, venta(llave, t.codigo))
+      enVuelo.push(A.catch(() => undefined))
+      await esperarAQueAlguienEspereA(pidT) // A ya creó la cuenta en SU transacción y espera el sobre
+      expect((await listOrders(venueId, { page: 1, pageSize: 100 })).meta.total).toBe(antes)
+      expect(await prisma.order.findFirst({ where: { venueId, externalId: `giftpay:${llave}` } })).toBeNull()
+
+      soltar()
+      await expect(A).rejects.toMatchObject({ code: 'GIFT_CARD_BLOCKED' })
+      expect(await cuentasDe(llave)).toBe(0)
+      expect((await listOrders(venueId, { page: 1, pageSize: 100 })).meta.total).toBe(antes)
+    } finally {
+      soltar()
+      await Promise.allSettled(enVuelo)
+    }
+  })
+
+  describe('Q76 y Q110: la cuenta es del vendedor; el cobro, de la sesión que lo manda', () => {
+    /** `pay-new-order` desde el controller (el esquema ya convirtió los pesos) con la sesión `quien`. */
+    async function pagarComo(quien: string, body: Record<string, unknown>) {
+      let data: any
+      const res: any = { status: () => res, json: (b: any) => ((data = b.data), res) }
+      const req: any = { params: { venueId }, body, authContext: { userId: quien }, headers: {}, ip: '127.0.0.1', get: () => undefined }
+      await payNewOrder(req, res)
+      return data
+    }
+    const bitacorasDe = (paymentId: string) =>
+      (logAction as jest.Mock).mock.calls.map(([a]) => a).filter(a => a.action === 'GIFT_CARD_REDEEMED' && a.entityId === paymentId)
+    const cuerpo = (llave: string, codigo: string, extra: Record<string, unknown> = {}) => ({
+      items: [{ name: 'Blusa', quantity: 1, unitPrice: 30000 }],
+      idempotencyKey: llave,
+      proof: { kind: 'CODE', code: codigo },
+      amount: D(100),
+      tip: D(0),
+      ...extra,
+    })
+    const deAna = () => ({ iniciadoPor: staffA, iniciadoPorNombre: 'Ana' })
+
+    it('🔴 B reenvía con iniciadoPor A ⇒ el cobro y el REDEEM a nombre de B, con la nota; sin vendedor en el cuerpo, la cuenta es de B', async () => {
+      const t = await tarjeta(1000)
+      const r = await pagarComo(staffB, cuerpo(llaveNueva('q110-1'), t.codigo, deAna()))
+      expect(r.replay).toBe(false)
+      expect((await prisma.payment.findUniqueOrThrow({ where: { id: r.paymentId } })).processedById).toBe(staffB)
+      expect((await prisma.giftCardActivity.findFirstOrThrow({ where: { paymentId: r.paymentId, type: 'REDEEM' } })).staffId).toBe(staffB)
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.servedById, cuenta.createdById]).toEqual([staffB, staffB])
+      const [bitacora] = bitacorasDe(r.paymentId)
+      expect(bitacora.staffId).toBe(staffB)
+      expect(bitacora.data).toMatchObject({ iniciadoPorSegunElAparato: { iniciadoPor: staffA, iniciadoPorNombre: 'Ana' } })
+    })
+
+    it('🔴 Q76: con el vendedor C en el cuerpo, la cuenta queda de C aunque el cobro lo procese B (con iniciadoPor A)', async () => {
+      const t = await tarjeta(1000)
+      const r = await pagarComo(staffB, cuerpo(llaveNueva('q76-c'), t.codigo, { staffId: staffC, ...deAna() }))
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.servedById, cuenta.createdById]).toEqual([staffC, staffC])
+      expect((await prisma.payment.findUniqueOrThrow({ where: { id: r.paymentId } })).processedById).toBe(staffB)
+    })
+
+    it('🔴 el primer envío de A sin los campos y el reenvío de B con ellos y la misma llave ⇒ `replay: true` (no IDEMPOTENCY_KEY_REUSED)', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('q110-reenvio')
+      const a = await pagarComo(staffA, cuerpo(llave, t.codigo))
+      const b = await pagarComo(staffB, cuerpo(llave, t.codigo, deAna()))
+      expect([a.replay, b.replay, b.paymentId, b.orderId]).toEqual([false, true, a.paymentId, a.orderId])
+      expect((await prisma.payment.findUniqueOrThrow({ where: { id: a.paymentId } })).processedById).toBe(staffA)
+      expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(1)
+      // Una sola bitácora, la del cobro de A: el reintento (replay) no escribe otra.
+      expect(bitacorasDe(a.paymentId).map(x => [x.staffId, x.data.iniciadoPorSegunElAparato])).toEqual([[staffA, undefined]])
+    })
+  })
+
+  /**
+   * Arreglo tras S8 (ruling del coordinador sobre la regla del founder del 17-oct: «se cobra el precio que vio el cliente: siempre
+   * el más bajo»). La tablet con la lista vieja suma `amount` con el precio de antes; si el precio BAJÓ, la venta nace al precio
+   * nuevo y `amount` pasa de lo que debe. Sólo en `pay-new-order` y sólo con una bajada, se cobra lo que la venta debe.
+   *
+   * 🔴 Unidades, como el contrato (§ 2.4b, C4): el precio de línea que vio la tablet (`displayedUnitPrice`) va en CENTAVOS enteros
+   * (`CENTAVOS(100)` = 10000); `amount` y `tip` van en PESOS (`Prisma.Decimal`, como los deja el esquema); `priceChanges` responde
+   * en CENTAVOS; `amount`, `tipAmount`, `orderRemaining` y `redeemed[].amount` de la respuesta, en PESOS.
+   */
+  describe('precio que vio el cliente: si un precio BAJÓ, la venta nueva cobra lo que debe (arreglo tras S8)', () => {
+    const CENTAVOS = (pesos: number) => pesos * 100
+    /** Vigente $80; la tablet todavía lo muestra en $100 (BAJÓ). */
+    let bajoId: string
+    /** Vigente $100; la tablet lo muestra en $80, y nunca valió $80 (SUBIÓ, no se reconoce). */
+    let subioId: string
+
+    beforeAll(async () => {
+      const categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'Precios', slug: `precios-${SUF}` } })).id
+      bajoId = (await prisma.product.create({ data: { venueId, sku: `BAJO-${SUF}`, name: 'Bolsa', categoryId, price: D(80) } })).id
+      subioId = (await prisma.product.create({ data: { venueId, sku: `SUBIO-${SUF}`, name: 'Cinturón', categoryId, price: D(100) } })).id
+    })
+
+    /** Una línea como la manda la app: el precio que mostró la tablet en CENTAVOS y el `catalogAt` reciente de su lista. */
+    const linea = (productId: string, mostradoEnPesos: number) => ({
+      productId,
+      quantity: 1,
+      displayedUnitPrice: CENTAVOS(mostradoEnPesos),
+      catalogAt: new Date(Date.now() - 60_000).toISOString(),
+      externalId: 'linea-1',
+    })
+    /** La venta cobrada con saldo: `amount` y `tip` en PESOS. Se arma UNA vez por prueba (el replay manda el mismo cuerpo). */
+    const ventaConLinea = (llave: string, codigo: string, item: CreateOrderItemInput, amountEnPesos: number, tipEnPesos = 0) => ({
+      items: [item],
+      staffId: staffA,
+      orderType: 'TAKEOUT' as const,
+      source: 'AVOQADO_ANDROID' as const,
+      idempotencyKey: llave,
+      proof: { kind: 'CODE' as const, code: codigo },
+      amount: D(amountEnPesos),
+      tip: D(tipEnPesos),
+      deviceId: null,
+      procesadoPor: staffA,
+    })
+    const pagosDe = (llave: string) => prisma.payment.count({ where: { venueId, idempotencyKey: llave } })
+    const canjesDe = (giftCardId: string) => prisma.giftCardActivity.count({ where: { giftCardId, type: 'REDEEM' } })
+
+    it('🔴 1 · BAJÓ de $100 a $80 y la app manda amount = 100 ⇒ cobra $80: la venta PAGADA, el saldo baja $80, priceChanges y lo cobrado; el replay devuelve lo mismo y no cobra otra vez', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('bajo-de-mas')
+      const cuerpo = ventaConLinea(llave, t.codigo, linea(bajoId, 100), 100)
+
+      const r = await payGiftCardOnNewOrder(venueId, cuerpo)
+
+      expect(r).toMatchObject({
+        replay: false,
+        amount: 80, // PESOS: lo REALMENTE cobrado de la tarjeta = lo que la venta debe, no los 100 que mandó la app
+        tipAmount: 0,
+        orderRemaining: 0,
+        orderPaymentStatus: 'PAID',
+        redeemed: [{ giftCardId: t.id, amount: 80, balanceAfter: 920 }],
+        // CENTAVOS: la tablet mostró $100, se cobró a $80
+        priceChanges: [
+          { externalId: 'linea-1', productId: bajoId, productName: 'Bolsa', displayedUnitPriceCents: 10000, unitPriceCents: 8000 },
+        ],
+      })
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.externalId, cuenta.total.toFixed(2), cuenta.paymentStatus, cuenta.remainingBalance.toFixed(2)]).toEqual([
+        `giftpay:${llave}`,
+        '80.00',
+        'PAID',
+        '0.00',
+      ])
+      const pago = await prisma.payment.findUniqueOrThrow({ where: { id: r.paymentId } })
+      expect([pago.amount.toFixed(2), pago.tipAmount.toFixed(2)]).toEqual(['80.00', '0.00'])
+      expect(
+        (await prisma.giftCardActivity.findFirstOrThrow({ where: { paymentId: r.paymentId, type: 'REDEEM' } })).amount.toFixed(2),
+      ).toBe('80.00')
+      expect(await saldoDe(t.id)).toBe('920.00')
+
+      // Misma llave y MISMO cuerpo (la huella es la del cuerpo enviado, con amount = 100) ⇒ el mismo cobro, sin tocar el saldo.
+      const otraVez = await payGiftCardOnNewOrder(venueId, cuerpo)
+      expect(otraVez).toMatchObject({
+        replay: true,
+        paymentId: r.paymentId,
+        orderId: r.orderId,
+        amount: 80,
+        tipAmount: 0,
+        orderRemaining: 0,
+        orderPaymentStatus: 'PAID',
+        redeemed: [{ giftCardId: t.id, amount: 80, balanceAfter: 920 }],
+      })
+      expect(await saldoDe(t.id)).toBe('920.00')
+      expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([1, 1, 1])
+    })
+
+    it('🔴 1b · BAJÓ y con propina: amount = 100 y tip = 10 (pesos) ⇒ cobra $80 de venta y los $10 de propina intactos; el saldo baja $90', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('bajo-con-propina')
+      const r = await payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(bajoId, 100), 100, 10))
+      expect(r).toMatchObject({
+        amount: 80,
+        tipAmount: 10,
+        orderRemaining: 0,
+        orderPaymentStatus: 'PAID',
+        redeemed: [{ giftCardId: t.id, amount: 90, balanceAfter: 910 }],
+      })
+      const pago = await prisma.payment.findUniqueOrThrow({ where: { id: r.paymentId } })
+      expect([pago.amount.toFixed(2), pago.tipAmount.toFixed(2)]).toEqual(['80.00', '10.00'])
+      expect(await saldoDe(t.id)).toBe('910.00')
+    })
+
+    it('2 · BAJÓ y la app paga sólo una parte (amount = 50 < 80) ⇒ cobra $50 y la venta queda con $30 pendientes (como hoy)', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('bajo-parcial')
+      const r = await payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(bajoId, 100), 50))
+      expect(r).toMatchObject({
+        replay: false,
+        amount: 50,
+        orderRemaining: 30,
+        orderPaymentStatus: 'PARTIAL',
+        redeemed: [{ giftCardId: t.id, amount: 50, balanceAfter: 950 }],
+        priceChanges: [{ productId: bajoId, displayedUnitPriceCents: 10000, unitPriceCents: 8000 }],
+      })
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.total.toFixed(2), cuenta.paymentStatus, cuenta.remainingBalance.toFixed(2)]).toEqual(['80.00', 'PARTIAL', '30.00'])
+      expect(await saldoDe(t.id)).toBe('950.00')
+    })
+
+    it('3 · SUBIÓ de $80 a $100 ⇒ 409 ORDER_PRICE_CHANGED con details.priceChanges (en centavos); nada creado ni cobrado', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('subio')
+      await expect(payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(subioId, 80), 80))).rejects.toMatchObject({
+        code: 'ORDER_PRICE_CHANGED',
+        statusCode: 409,
+        details: { priceChanges: [{ productId: subioId, displayedUnitPriceCents: 8000, unitPriceCents: 10000 }] },
+      })
+      expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([0, 0, 0])
+      expect(await saldoDe(t.id)).toBe('1000.00')
+    })
+
+    it.each([
+      ['la tablet mostró el precio vigente ($80)', 'igual', () => linea(bajoId, 80)],
+      ['una app sin precio mostrado', 'sin-precio', () => ({ productId: bajoId, quantity: 1 })],
+    ])(
+      '🔴 4 · SIN cambio de precio y amount de más (100 sobre $80) ⇒ 422 GIFT_CARD_AMOUNT_OUT_OF_RANGE con pendiente (pesos), como hoy (%s)',
+      async (_caso, etiqueta, item) => {
+        const t = await tarjeta(1000)
+        const llave = llaveNueva(`sin-cambio-${etiqueta}`)
+        await expect(payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, item(), 100))).rejects.toMatchObject({
+          code: 'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
+          statusCode: 422,
+          message: 'Esta cuenta debe $80.00: el saldo de la tarjeta no paga de más.',
+          details: { pendiente: 80 },
+        })
+        expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([0, 0, 0])
+        expect(await saldoDe(t.id)).toBe('1000.00')
+      },
+    )
+
+    it('🔴 5 · BAJÓ y el saldo ($70) no alcanza para lo que debe ($80): como hoy cuando el saldo no alcanza ⇒ 409 GIFT_CARD_INSUFFICIENT_BALANCE «Quedan $70.00»; nada creado ni cobrado', async () => {
+      const t = await tarjeta(70)
+      const llave = llaveNueva('bajo-sin-saldo')
+      await expect(payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(bajoId, 100), 100))).rejects.toMatchObject({
+        code: 'GIFT_CARD_INSUFFICIENT_BALANCE',
+        statusCode: 409,
+        message: 'Quedan $70.00 en la tarjeta de regalo.',
+        details: { saldoDisponible: 70 },
+      })
+      expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([0, 0, 0])
+      expect(await saldoDe(t.id)).toBe('70.00')
+    })
+  })
+})

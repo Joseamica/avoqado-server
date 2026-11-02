@@ -831,10 +831,14 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.READY)
   })
 
-  it('opción 1: ACEPTADO y pagado ANTES de su hora estimada sigue en preparación; pasada la hora, se entrega solo', async () => {
+  it('22-oct: ACEPTADO pagado con comanda confirmada espera su hora; pasada la hora, se entrega solo', async () => {
     await beat()
     const antes = await pedidoListo({ ready: false })
     const despues = await pedidoListo({ ready: false })
+    for (const pedido of [antes, despues]) {
+      expect(await claimOnlineOrderPrint(venueId!, pedido.orderId, 'dev-hora')).toEqual({ claimed: true })
+      expect(await confirmOnlineOrderPrinted(venueId!, pedido.orderId, 'dev-hora')).toEqual({ ok: true })
+    }
     await pay(antes.orderId)
     await pay(despues.orderId)
     await prisma.onlineOrder.update({ where: { id: despues.onlineOrderId }, data: { estimatedReadyAt: new Date(Date.now() - 1_000) } })
@@ -842,6 +846,26 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     await listInbox({ venueId: venueId! })
     expect(await estadoDe(antes.onlineOrderId)).toBe(OnlineOrderStatus.ACCEPTED)
     expect(await estadoDe(despues.onlineOrderId)).toBe(OnlineOrderStatus.COMPLETED)
+  })
+
+  it('22-oct: pagado pasada su hora sigue imprimible antes del primer reclamo y sólo se entrega al confirmar la comanda', async () => {
+    await beat()
+    const { orderId, onlineOrderId } = await pedidoListo({ ready: false })
+    await pay(orderId)
+    await prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { estimatedReadyAt: new Date(Date.now() - 1_000) } })
+
+    await listInbox({ venueId: venueId! })
+    expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.ACCEPTED)
+    expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(0)
+    expect(await claimOnlineOrderPrint(venueId!, orderId, 'dev-comanda')).toEqual({ claimed: true })
+
+    await listInbox({ venueId: venueId! })
+    expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.ACCEPTED)
+    expect(await confirmOnlineOrderPrinted(venueId!, orderId, 'otro-aparato')).toEqual({ ok: false })
+    expect(await confirmOnlineOrderPrinted(venueId!, orderId, 'dev-comanda')).toEqual({ ok: true })
+    await listInbox({ venueId: venueId! })
+    expect(await estadoDe(onlineOrderId)).toBe(OnlineOrderStatus.COMPLETED)
+    expect(bitacora(onlineOrderId, 'ONLINE_ORDER_COLLECTED')).toHaveLength(1)
   })
 
   it('opción 1: si la cuenta está cancelada gana R2 (cancelado por el negocio), aunque diga pagada', async () => {

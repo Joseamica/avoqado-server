@@ -27,6 +27,7 @@ import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
 import { estacionDePantallaParaReparto } from '../../kds/kitchenDisplayStations'
 import { withDeliveryOrderLock } from './deliveryOrderLock'
+import { lockExistingOrderForPayment } from '../../shared/paymentShiftClaim'
 import { marcarRetirosEnComandas } from './lineRemoval.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
@@ -129,6 +130,68 @@ async function resolveProductId(
   return created.id
 }
 
+/** Rappi 2b: el renglón del envío del negocio. Un solo producto «Envío» por venue, reutilizado. */
+const NOMBRE_RENGLON_ENVIO = 'Envío'
+const SKU_RENGLON_ENVIO = 'delivery-envio'
+/**
+ * La identidad del producto «Envío» es ESTA marca, nunca el SKU (Codex código r1 #7): un producto del negocio que ya se llame
+ * `delivery-envio` (y lleve existencias) no se toma ni se toca.
+ */
+const ID_PROPIO_ENVIO = 'AVOQADO:ENVIO_DE_REPARTO'
+/** Clave SAT «Servicios de envío» y unidad «Unidad de servicio»: el envío se factura como servicio. */
+const SAT_ENVIO = { satProductKey: '78102203', satUnitKey: 'E48' }
+
+/**
+ * El producto «Envío» del venue: se busca por su marca propia; si no existe se crea inactivo, SIN inventario y con la clave SAT de
+ * servicio de envío, con el mismo gobierno de catálogo que un placeholder. Su SKU es `delivery-envio` o, si ése ya es de otro
+ * producto, uno libre derivado.
+ */
+async function resolverProductoDeEnvio(tx: Prisma.TransactionClient, venueId: string, precio: string): Promise<string> {
+  const buscar = () => tx.product.findFirst({ where: { venueId, externalId: ID_PROPIO_ENVIO }, select: { id: true } })
+  // Nace sin inventario (`trackInventory: false`); si el dueño lo activa a mano después, es decisión suya.
+  const existente = await buscar()
+  if (existente) return existente.id
+  await assertLegacyCatalogGovernanceForVenue(tx, {
+    venueId,
+    operation: 'CREATE',
+    willBeVendable: false,
+    actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
+  })
+  const creadoMientras = await buscar() // otra ingesta lo creó mientras se esperaba la cerca del venue
+  if (creadoMientras) return creadoMientras.id
+
+  let category = await tx.menuCategory.findUnique({ where: { venueId_slug: { venueId, slug: PLACEHOLDER_CATEGORY_SLUG } } })
+  if (!category) {
+    category = await tx.menuCategory.create({
+      data: { venueId, name: 'Delivery (sin mapear)', slug: PLACEHOLDER_CATEGORY_SLUG, active: false },
+    })
+  }
+  const skuOcupado = async (sku: string) => (await tx.product.count({ where: { venueId, sku } })) > 0
+  let sku = SKU_RENGLON_ENVIO
+  for (let n = 2; await skuOcupado(sku); n++) sku = `${SKU_RENGLON_ENVIO}-${n}`
+
+  const created = await tx.product.create({
+    data: {
+      venueId,
+      createdById: null,
+      sku,
+      externalId: ID_PROPIO_ENVIO,
+      name: NOMBRE_RENGLON_ENVIO,
+      price: D(precio),
+      categoryId: category.id,
+      active: false,
+      trackInventory: false,
+      ...SAT_ENVIO,
+    },
+  })
+  await writeLegacyServiceProductCreationAuditForVenue(tx, {
+    venueId,
+    productId: created.id,
+    actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
+  })
+  return created.id
+}
+
 /**
  * Convierte una NormalizedDeliveryOrder (contrato unificado, Tarea 2) en una Order real de
  * Avoqado con su Payment externo ya liquidado (Avoqado no procesó el dinero — fee 0
@@ -149,6 +212,9 @@ export async function ingestDeliveryOrder(
   /** HAY comanda, la haya creado esta pasada o una anterior. Es lo que decide si un pedido
    *  con instrucciones especiales debe cancelarse: `created` respondía otra pregunta. */
   hayComanda: boolean
+  /** La orden está CANCELLED: la trajo así el upsert, o la relectura bajo el candado de la orden la vio cancelada antes de
+   *  crear la comanda. Una cancelada no lleva comanda; sin comanda y sin `cancelada`, la comanda se perdió. */
+  cancelada: boolean
 }> {
   // 🔴 Dinero primero: un pedido cuyo reparto no cuadra NUNCA debe tocar la base — se
   // verifica ANTES de resolver el venue o abrir la transacción. Compara también contra los
@@ -160,7 +226,9 @@ export async function ingestDeliveryOrder(
   if (!venue) throw new Error(`Venue ${link.venueId} del channel link no existe`)
 
   const p = normalized.payment
-  const subtotal = D(p.saleAmount)
+  // Rappi 2b (F5): el envío del negocio es un RENGLÓN «Envío», no un cargo; la venta lo incluye.
+  const envioComoRenglon = D(p.shippingAsLine ?? '0.00')
+  const subtotal = D(p.saleAmount).plus(envioComoRenglon)
   const merchantFees = D(p.merchantFees)
   const tip = D(p.tipAmount)
   // Semántica canónica de la plataforma (decisión founder 2026-08-18, spec §6 "propina
@@ -174,7 +242,10 @@ export async function ingestDeliveryOrder(
   const descuento = D(p.discountAmount ?? '0.00')
   const total = subtotal.plus(merchantFees).minus(descuento)
   const pagadoExterno = D(p.externallyPaidSale).plus(D(p.externallyPaidTip))
-  const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip))
+  // F7: lo que el negocio cobra por cuenta de la plataforma también está «por cobrar» (sin eso la orden nacería PAID), pero no es
+  // venta ni propina: vive en `thirdPartyCashDue` y entra al cajón como PAY_IN al cobrarlo.
+  const tercerosPorCobrar = D(p.thirdPartyCashDue ?? '0.00')
+  const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip)).plus(tercerosPorCobrar)
   const paymentStatus = porCobrar.isZero() ? PaymentStatus.PAID : pagadoExterno.isZero() ? PaymentStatus.PENDING : PaymentStatus.PARTIAL
 
   // 🔴 El folio del pedido se namespacea por proveedor. `Order.externalId` es único por
@@ -272,6 +343,10 @@ export async function ingestDeliveryOrder(
           // cobrar en persona (efectivo contra entrega).
           paidAmount: pagadoExterno,
           remainingBalance: porCobrar,
+          // Rappi 2b: lo escribe SÓLO la ingesta (el upsert de una reingesta no lo toca). `cashTipDue` existe sólo en ese carril:
+          // cada cobro reescribe `tipAmount` con lo cobrado y la propina por cobrar se perdería tras un abono chico.
+          // Con tarifa de Rappi en $0 el carril sigue (Codex código r1 #2): la marca es que el normalizado TRAE el campo, no su importe.
+          ...(p.thirdPartyCashDue != null ? { thirdPartyCashDue: tercerosPorCobrar, cashTipDue: D(p.cashDueTip) } : {}),
           posRawData: normalized.raw as Prisma.InputJsonValue,
           createdAt: normalized.placedAt,
           syncedAt: new Date(),
@@ -284,7 +359,7 @@ export async function ingestDeliveryOrder(
       if (normalized.providerAccepted && !order.providerAcceptedAt) {
         await tx.order.updateMany({
           where: { id: order.id, providerAcceptedAt: null },
-          data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
+          data: { providerAcceptedAt: normalized.providerAcceptedAt ?? new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
         })
       }
 
@@ -351,6 +426,26 @@ export async function ingestDeliveryOrder(
               data: { orderItemId: createdItem.id, modifierId: null, name: m.name, quantity: m.quantity, price: D(m.price) },
             })
           }
+        }
+
+        // Rappi 2b: el envío del negocio como renglón propio. Va DESPUÉS de los platillos y fuera de `createdItems`/
+        // `renglonesCreados`: no descuenta inventario ni sale en la comanda, y su `externalId` (`…-envio`) no lo aparea por índice.
+        if (envioComoRenglon.greaterThan(0)) {
+          const envioProductId = await resolverProductoDeEnvio(tx, venue.id, envioComoRenglon.toFixed(2))
+          await tx.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: envioProductId,
+              productName: NOMBRE_RENGLON_ENVIO,
+              productSku: SKU_RENGLON_ENVIO,
+              quantity: 1,
+              unitPrice: envioComoRenglon,
+              total: envioComoRenglon,
+              taxAmount: new Prisma.Decimal(0),
+              originSystem: OriginSystem.DELIVERY_PLATFORM,
+              externalId: `${externalIdNamespaceado}-envio`,
+            },
+          })
         }
 
         // 🔴 El bug que este cambio mata: antes `Payment.amount` era `normalized.total`
@@ -585,6 +680,9 @@ export async function ingestDeliveryOrder(
     })
   }
 
+  // Lo que la relectura bajo el candado de la orden vio (abajo): `cancelada` y la orden que se devuelve dicen la verdad.
+  let canceladaBajoCandado = false
+
   if (!comandaYaExiste && !pedidoCancelado && !normalized.scheduledFor) {
     try {
       // Etapa 3 del KDS: la estación se elige ANTES de tomar el candado (una consulta menos con el pedido bloqueado).
@@ -592,11 +690,36 @@ export async function ingestDeliveryOrder(
       const estacionReparto = await estacionDePantallaParaReparto(venue.id)
       // 🔴 Bajo el candado del pedido [N-21]: si el proveedor retiró un renglón entre la venta
       // y esta comanda, `marcarRetirosEnComandas` la hace nacer con el renglón RETIRADO.
-      await withDeliveryOrderLock(order.id, async tx => {
+      // `true` sólo si la comanda nació en ESTA pasada (con la transacción del candado ya confirmada).
+      kitchenTicketCreated = await withDeliveryOrderLock(order.id, async tx => {
+        // 🔴 La comanda nunca nace de un pedido cancelado. La venta se guardó en OTRA transacción (arriba), así que entre
+        // las dos otro proceso pudo cancelarla: `cancelDeliveryOrder` la marca CANCELLED y borra sus comandas, y si la
+        // comanda se creaba después nacía VIVA sobre una orden cancelada, sin nadie que la quite (la cocina prepara comida
+        // que nadie recoge). Se toma el candado de FILA de la orden —el MISMO de `cancelDeliveryOrder` y del cobro— y se
+        // relee su estado: la cancelación o ya terminó (se ve aquí y no se crea) o espera a que esta comanda exista (y la
+        // borra). Orden de candados: el advisory del pedido (lo toma `withDeliveryOrderLock`) y luego la fila, como el
+        // resto del módulo.
+        if (!(await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: order.id }))) {
+          logger.error('[❌ DeliveryIngest] la orden ya no está en este negocio al crear la comanda: no llegó a la cocina', {
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            venueId: venue.id,
+          })
+          return false
+        }
+        const actual = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } })
+        if (actual?.status === OrderStatus.CANCELLED) {
+          canceladaBajoCandado = true
+          logger.warn('[DeliveryIngest] el pedido se canceló mientras se registraba: no se imprime comanda', {
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+          })
+          return false
+        }
         // Relectura dentro del candado: dos reprocesos simultáneos ya no imprimen dos comandas.
         if ((await tx.kdsOrder.count({ where: { orderId: order.id } })) > 0) {
           comandaYaExiste = true
-          return
+          return false
         }
         await tx.kdsOrder.create({
           data: {
@@ -637,8 +760,8 @@ export async function ingestDeliveryOrder(
           },
         })
         await marcarRetirosEnComandas(tx, order.id, venue.id)
+        return true
       })
-      kitchenTicketCreated = !comandaYaExiste
     } catch (error) {
       logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
         orderId: order.id,
@@ -649,12 +772,17 @@ export async function ingestDeliveryOrder(
     }
   }
 
+  // La orden que se devuelve (y que anuncia el socket) lleva el estado releído bajo el candado: el upsert la devolvió viva
+  // y otro proceso la canceló antes de la comanda. El procesador del canal decide con `order.status` si cancelar un pedido
+  // cuyas instrucciones no llegaron a la cocina, y sobre uno ya cancelado no hay nada que rescatar.
+  const orden: Order = canceladaBajoCandado ? { ...order, status: OrderStatus.CANCELLED } : order
+
   try {
     socketManager.broadcastToVenue(venue.id, isNew ? SocketEventType.ORDER_CREATED : SocketEventType.ORDER_UPDATED, {
       orderId: order.id,
       orderNumber: order.orderNumber,
       venueId: venue.id,
-      status: order.status,
+      status: orden.status,
       paymentStatus: order.paymentStatus,
       source: order.source,
       externalId: order.externalId,
@@ -691,6 +819,13 @@ export async function ingestDeliveryOrder(
   // cuyas instrucciones no llegaron a la cocina: la haya creado esta pasada o una anterior.
   // `created` (la orden no existía) respondía otra pregunta y desarmaba esa red de seguridad
   // en cualquier reproceso. Se conserva `kitchenTicketCreated` porque es otra cosa: si la
-  // comanda se creó AHORA.
-  return { order, created: isNew, kitchenTicketCreated, hayComanda: comandaYaExiste || kitchenTicketCreated }
+  // comanda se creó AHORA. `cancelada` (Tarea 11): sin comanda y sin cancelar, la comanda se PERDIÓ y el procesador del
+  // canal tiene que decidir qué hacer (reintentar, o cancelar si traía instrucciones), nunca cerrar como si nada.
+  return {
+    order: orden,
+    created: isNew,
+    kitchenTicketCreated,
+    hayComanda: comandaYaExiste || kitchenTicketCreated,
+    cancelada: pedidoCancelado || canceladaBajoCandado,
+  }
 }

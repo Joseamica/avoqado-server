@@ -15,6 +15,16 @@
  * intento. La atribución final del dinero se decide cuando el Payment pasa a COMPLETED; la Order
  * conserva este turno como historia de creación.
  */
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     payment: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn() },

@@ -4,11 +4,11 @@ import { elPlanConcede } from '@/services/access/basePlan.service'
 import { isTransientDbConnectionError } from '@/utils/retry'
 
 /**
- * Funciones que entraron a PRO y PREMIUM cuando ya había contratos de plan vivos: SERVICE_PAY (founder D3, 5-oct) y
- * GIFT_CARDS (founder D1, 14-oct). Lista CERRADA: poner al día un contrato escribe accesos pagados de otro, así que sólo se
- * hace con una función que el código ya concede a los dos planes.
+ * Funciones que entraron a PRO y PREMIUM cuando ya había contratos de plan vivos: SERVICE_PAY (founder D3, 5-oct),
+ * GIFT_CARDS (founder D1, 14-oct) y DEVICE_MENUS (founder, 30-oct), KITCHEN_DISPLAY y CUSTOMER_DISPLAY_PROMOS (D4, 31-oct). Lista CERRADA: poner al día un contrato escribe accesos
+ * pagados de otro, así que sólo se hace con una función que el código ya concede a los dos planes.
  */
-export const PLAN_CATCH_UP_CODES = ['SERVICE_PAY', 'GIFT_CARDS'] as const
+export const PLAN_CATCH_UP_CODES = ['SERVICE_PAY', 'GIFT_CARDS', 'DEVICE_MENUS', 'KITCHEN_DISPLAY', 'CUSTOMER_DISPLAY_PROMOS'] as const
 export type PlanCatchUpCode = (typeof PLAN_CATCH_UP_CODES)[number]
 const TIERS = ['PRO', 'PREMIUM']
 const LOTE = 100

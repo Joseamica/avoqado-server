@@ -96,7 +96,23 @@ export const lineGrossSql = (alias = 'oi'): string => aliveSql(alias, rawGrossSq
  *
  * @param alias - the `OrderItem` alias in the query (every call site uses `oi`).
  */
-export const lineRevenueSql = (alias = 'oi'): string => aliveSql(alias, `${rawGrossSql(alias)} - ${alias}."discountAmount"`)
+export const lineRevenueSql = (alias = 'oi'): string =>
+  aliveSql(alias, `${rawGrossSql(alias)} - ${alias}."discountAmount" - ${rawOrderDiscountSql(alias)}`)
+
+/**
+ * La parte del renglón en los descuentos de CUENTA (en pesos): Σ `OrderDiscount.reparto.renglones[<id del renglón>]`
+ * (centavos) de las filas de su orden que NO son espejo (CUENTA siempre trae espejo:false; las DIRIGIDO con espejo:false —motor, TPV, sellos— nunca escriben `OrderItem.discountAmount`, así que su parte sólo existe aquí). Un espejo (`espejo: true`) duplica un descuento que ya
+ * vive en `OrderItem.discountAmount`: restarlo otra vez lo contaría dos veces. Una fila sin reparto (anterior a B2,
+ * `reparto` nulo) no aporta nada por renglón, igual que antes. Subconsulta correlacionada: cada término es por fila, así
+ * que es seguro dentro de `SUM(...)` y no multiplica renglones.
+ */
+const rawOrderDiscountSql = (alias: string): string =>
+  `COALESCE((SELECT SUM((od."reparto"->'renglones'->>${alias}."id")::numeric) / 100 FROM "OrderDiscount" od
+     WHERE od."orderId" = ${alias}."orderId"
+       AND COALESCE((od."reparto"->>'espejo')::boolean, false) = false), 0)`
+
+/** Descuentos de cuenta repartidos a ESTE renglón, en pesos (0 si el renglón se quitó). Va en la columna `discounts`. */
+export const lineOrderDiscountSql = (alias = 'oi'): string => aliveSql(alias, rawOrderDiscountSql(alias))
 
 /**
  * SQL twin of `isItemLevelDiscount`: true when the line total is already net of
@@ -107,6 +123,7 @@ export const isItemLevelDiscountSql = (alias = 'oi'): string =>
   `(${alias}."discountAmount" > 0 AND ABS(${alias}."total" - ${lineBaseSql(alias)}) < 0.005)`
 
 interface LineLike {
+  id?: string
   quantity: number
   unitPrice: unknown
   discountAmount?: unknown
@@ -145,8 +162,24 @@ export function lineGross(item: LineLike): number {
  * relation is treated as "no modifiers", which is correct for a line that has
  * none and wrong for a select that forgot to ask.
  */
-export function lineRevenue(item: LineLike): number {
-  return lineGross(item) - Number(item.discountAmount ?? 0)
+export function lineRevenue(item: LineLike, orderDiscounts?: Array<{ reparto: unknown }> | null): number {
+  return lineGross(item) - Number(item.discountAmount ?? 0) - lineOrderDiscount(item, orderDiscounts)
+}
+
+/**
+ * Gemelo de `rawOrderDiscountSql`: la parte del renglón (centavos → pesos) en los descuentos de su orden que NO son
+ * espejo. 🔴 El llamador debe traer `orderDiscounts: { select: { reparto: true } }` y el `id` del renglón.
+ */
+export function lineOrderDiscount(item: Pick<LineLike, 'id'>, orderDiscounts?: Array<{ reparto: unknown }> | null): number {
+  if (!item.id || !orderDiscounts) return 0
+  let centavos = 0
+  for (const { reparto } of orderDiscounts) {
+    const r = reparto as { espejo?: boolean | null; renglones?: Record<string, unknown> } | null
+    if (!r || r.espejo === true) continue
+    const parte = r.renglones?.[item.id]
+    if (parte != null) centavos += Number(parte)
+  }
+  return centavos / 100
 }
 
 /**

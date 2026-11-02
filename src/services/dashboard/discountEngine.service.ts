@@ -16,7 +16,7 @@ import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
 import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
-import { esOrdenImportada, rechazarSiEsImportada } from '../shared/ordenImportada'
+import { esOrdenImportada, esPedidoDePlataforma, rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas, tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import {
   aCentavos,
@@ -31,6 +31,7 @@ import {
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { repartirProporcional } from '../fiscal/ivaMath'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -871,7 +872,10 @@ async function evaluateOrderDiscounts(
 async function lockDiscountOrder(tx: Prisma.TransactionClient, orderId: string, venueId?: string): Promise<string | null> {
   const tenant = venueId ?? (await tx.order.findUnique({ where: { id: orderId }, select: { venueId: true } }))?.venueId
   if (!tenant) return null
-  return (await lockExistingOrderForPayment(tx, { venueId: tenant, orderId })) ? tenant : null
+  if (!(await lockExistingOrderForPayment(tx, { venueId: tenant, orderId }))) return null
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo; ningún descuento lo toca.
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId: tenant, orderId })
+  return tenant
 }
 
 /** TPV callers (authoritative venue) keep their 404; legacy callers keep the result object they always received. */
@@ -1247,7 +1251,8 @@ export async function applyAutomaticDiscounts(
     if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discounts to a paid order')
     // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
     // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
-    if (esOrdenImportada(order)) return { applied: [], total: 0 }
+    // Rappi 2b (T10): tampoco un pedido de plataforma.
+    if (esOrdenImportada(order) || esPedidoDePlataforma(order)) return { applied: [], total: 0 }
     // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
     if (tieneRenglonDeTarjeta(order.items)) return { applied: [], total: 0 }
 

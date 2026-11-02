@@ -6,6 +6,7 @@ import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { SECTOR_ROLE_DEFAULTS } from '../../../utils/roleDisplay'
 import { categoryOfVenueType } from '../../../utils/venueTypeCategory'
 import { asegurarSedeNoMarcaBlanca } from './marcaBlanca'
+import { checaPorDefault } from './checaAsistencia'
 import { fechaComoDbDate } from '../staffPay/periodos'
 import { hoyDeLaSede } from './vigencias'
 
@@ -130,7 +131,7 @@ export async function crearPuesto(input: CrearPuestoInput): Promise<PuestoDto> {
         name,
         suggestedRole: input.suggestedRole,
         suggestedRelation: input.suggestedRelation ?? null,
-        tracksAttendanceDefault: input.tracksAttendanceDefault ?? true,
+        tracksAttendanceDefault: input.tracksAttendanceDefault ?? checaPorDefault(input.suggestedRole),
         componentKinds: input.componentKinds ?? [],
         color: input.color ?? null,
         icon: input.icon ?? null,

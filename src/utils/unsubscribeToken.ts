@@ -19,7 +19,8 @@ import { ACCESS_TOKEN_SECRET } from '../config/env'
  *   category (idempotent, reversible from the dashboard). Minimal blast radius.
  */
 
-export type EmailUnsubscribeCategory = 'INVENTORY'
+export type EmailUnsubscribeCategory = 'INVENTORY' | 'RESERVATIONS'
+const CATEGORIES: readonly EmailUnsubscribeCategory[] = ['INVENTORY', 'RESERVATIONS']
 
 interface UnsubscribePayload {
   v: 1
@@ -81,7 +82,7 @@ export function verifyUnsubscribeToken(token: string | undefined | null): Unsubs
   }
 
   if (!payload || payload.v !== 1 || payload.p !== 'unsub') return null
-  if (typeof payload.s !== 'string' || typeof payload.ve !== 'string' || payload.c !== 'INVENTORY') return null
+  if (typeof payload.s !== 'string' || typeof payload.ve !== 'string' || !CATEGORIES.includes(payload.c)) return null
 
   return { staffId: payload.s, venueId: payload.ve, category: payload.c }
 }

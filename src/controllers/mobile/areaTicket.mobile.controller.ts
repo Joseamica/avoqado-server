@@ -17,6 +17,7 @@ import { NextFunction, Request, Response } from 'express'
 
 import logger from '../../config/logger'
 import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
+import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as areaTicketService from '../../services/mobile/areaTicket.mobile.service'
 
 /**
@@ -57,6 +58,8 @@ export const openAreaTicket = async (req: Request, res: Response, next: NextFunc
       deviceUid: readDeviceUid(req) ?? '',
       staffId: readStaffId(req, req.body),
       items,
+      canCompItems: items.some((item: any) => !!item.discountId) && (await tienePermisoEnVenue(req, 'orders:comp')),
+      performedBy: req.authContext?.userId,
       customerName,
       note,
       source,
@@ -105,6 +108,8 @@ export const addAreaTicketItems = async (req: Request, res: Response, next: Next
       deviceUid: readDeviceUid(req) ?? '',
       staffId: readStaffId(req, req.body),
       items,
+      canCompItems: items.some((item: any) => !!item.discountId) && (await tienePermisoEnVenue(req, 'orders:comp')),
+      performedBy: req.authContext?.userId,
     })
 
     res.status(200).json({ success: true, ticket })

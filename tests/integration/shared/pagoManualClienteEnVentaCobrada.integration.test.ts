@@ -43,7 +43,6 @@ import { resolveScope } from '@/mcp/scope'
 import { createGuard } from '@/mcp/guard'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
 import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
 import { CODIGO_VENTA_YA_COBRADA, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
@@ -217,14 +216,21 @@ async function ventaCobradaConReembolso(): Promise<string> {
   return orderId
 }
 
-/** r11: la venta cobrada cuyo cobro se corrige en el panel ($80) o se cancela (FAILED). Sigue PAID: el panel no recalcula la venta. */
+/**
+ * r11: la venta cobrada cuyo cobro se corrigió en el panel ($80) o se canceló (FAILED). Sigue PAID: el panel no recalculaba la venta.
+ * Desde el 23-oct el panel ya no corrige ni cancela un cobro hecho («usa Reembolso»); el estado queda en datos de antes y se fabrica
+ * directo en la base.
+ */
 async function ventaCobradaConCobroCorregido(como: 'corregir' | 'cancelar'): Promise<string> {
   const { orderId, pagoId } = await ventaCobrada()
-  await updatePayment(venueId!, pagoId, como === 'corregir' ? { amount: 80 } : { status: 'FAILED' as never })
+  await prisma.payment.update({ where: { id: pagoId }, data: como === 'corregir' ? { amount: 80 } : { status: 'FAILED' } })
   const venta = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })
   expect(venta.paymentStatus).toBe('PAID')
   return orderId
 }
+
+/** El cobro corregido «como lo dejaba el panel antes del 23-oct» (sin recalcular la venta): hoy sólo existe en datos viejos. */
+const corregirElCobroComoAntes = (pagoId: string, amount: number) => prisma.payment.update({ where: { id: pagoId }, data: { amount } })
 
 /** R7-2: cuenta de $100 que NUNCA se saldó — abono de $20 del dueño y devolución de $10 de ese abono. */
 async function cuentaNuncaSaldadaConDevolucion(): Promise<string> {
@@ -579,7 +585,7 @@ describe('🔴 R8: la cadena exacta de Codex r12 — un cobro tardío de la TPV 
           staffId: dueno.staffId,
         })
       }
-      await updatePayment(venueId!, pagoId, { amount: 80 })
+      await corregirElCobroComoAntes(pagoId, 80)
       const cerrada = await cierreDe(orderId)
       expect(cerrada.paymentStatus).toBe('PAID')
 
@@ -608,7 +614,7 @@ describe('🔴 R8: la cadena exacta de Codex r12 — un cobro tardío de la TPV 
 
   it('🔴 aunque el panel le regrese el estado operativo a PENDING, el detalle del POS sin payments:create da 403: la venta sigue PAID', async () => {
     const { orderId, pagoId } = await ventaCobrada()
-    await updatePayment(venueId!, pagoId, { amount: 80 })
+    await corregirElCobroComoAntes(pagoId, 80)
     await cobroDeLaTerminal(orderId, 10)
     expect((await editarPorPanel(dueno, 'OWNER', orderId, { status: 'PENDING' })).status).toBe(200)
     const nuevo = await cliente('Nuevo')
@@ -618,7 +624,7 @@ describe('🔴 R8: la cadena exacta de Codex r12 — un cobro tardío de la TPV 
       updateOrderDetails(venueId!, orderId, { customerId: nuevo }, { puedeCambiarClienteEnVentaCobrada: false }),
     ).rejects.toMatchObject({
       statusCode: 403,
-      code: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE',
+      code: 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER',
     })
     expect(await foto(orderId, nuevo)).toEqual(antes)
   })

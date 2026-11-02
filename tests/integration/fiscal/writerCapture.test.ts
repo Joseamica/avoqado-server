@@ -44,7 +44,8 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
   !(
-    ['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname) || /^\/avoqado_[a-z0-9]+_test_/.test(database.pathname)
+    ['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname) ||
+    /^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(database.pathname)
   )
 ) {
   throw new Error('This suite requires a local disposable test database (av_db_25_iva_test, avoqado_<x>_test_…), never av-db-25.')

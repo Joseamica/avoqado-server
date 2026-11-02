@@ -10,17 +10,20 @@
  * 🔴 Una sola definición. Factura, contabilidad, ventas, turno, lealtad, comisiones y la revisión nocturna importan de aquí; una
  * copia local de la regla es cómo nacen dos cifras distintas del mismo dinero.
  */
-import { PaymentStatus, Prisma, PrismaClient, TenderSystemKind } from '@prisma/client'
+import { PaymentStatus, PaymentType, Prisma, PrismaClient, TenderSystemKind } from '@prisma/client'
+
+/** El renglón que hace de una orden una cuenta de tarjetas. La única definición: las marcas de abajo y el reclamo del turno la usan. */
+export const WHERE_RENGLON_DE_TARJETA = { giftCardId: { not: null } } satisfies Prisma.OrderItemWhereInput
 
 /** ¿La orden es una cuenta de tarjetas? Una consulta para toda venta normal; la segunda sólo si ya apareció una tarjeta. */
 export async function leerSiEsCuentaDeTarjetas(db: Prisma.TransactionClient | PrismaClient, orderId: string): Promise<boolean> {
-  const conTarjeta = await db.orderItem.findFirst({ where: { orderId, giftCardId: { not: null } }, select: { id: true } })
+  const conTarjeta = await db.orderItem.findFirst({ where: { orderId, ...WHERE_RENGLON_DE_TARJETA }, select: { id: true } })
   if (!conTarjeta) return false
   const sinTarjeta = await db.orderItem.findFirst({ where: { orderId, giftCardId: null }, select: { id: true } })
   return !sinTarjeta
 }
 
-export const WHERE_ORDEN_DE_TARJETAS = { items: { some: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
+export const WHERE_ORDEN_DE_TARJETAS = { items: { some: WHERE_RENGLON_DE_TARJETA } } satisfies Prisma.OrderWhereInput
 
 /**
  * La marca R11 COMPLETA dentro de un `select` de `Order` (⭐ B6 M2 del cierre): un renglón con tarjeta (`take: 1`) y cuántos hay SIN
@@ -28,7 +31,7 @@ export const WHERE_ORDEN_DE_TARJETAS = { items: { some: { giftCardId: { not: nul
  * `esCuentaDeTarjetasSeleccionada`.
  */
 export const SELECT_MARCA_DE_CUENTA_DE_TARJETAS = {
-  items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 },
+  items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 },
   _count: { select: { items: { where: { giftCardId: null } } } },
 } satisfies Prisma.OrderSelect
 
@@ -39,14 +42,14 @@ export function esCuentaDeTarjetasSeleccionada(
   return (orden?.items?.length ?? 0) > 0 && (orden?._count?.items ?? 0) === 0
 }
 
-export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
+export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: WHERE_RENGLON_DE_TARJETA } } satisfies Prisma.OrderWhereInput
 
 /**
  * R3 (turnos): la marca para el `select` de la orden de un cobro. Un renglón con `giftCardId` basta para saber que la cuenta es de
  * tarjetas (no se mezclan, A5). Todo `select` que alimente `aggregateShiftPayments` (también el script de reatribución) y el detalle
  * del turno del panel traen la MISMA marca.
  */
-export const ORDEN_DE_TARJETAS_SELECT = { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } as const
+export const ORDEN_DE_TARJETAS_SELECT = { items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 } } as const
 
 /**
  * Cuenta de tarjetas PAGADA: la única que «carga» tarjetas. Un abono a una venta que no se termina de pagar no carga nada (sus sobres
@@ -68,9 +71,22 @@ export const WHERE_COBRO_NO_ES_SALDO_DE_REGALO = {
   OR: [{ tenderTypeId: null }, { tenderType: { is: { systemKind: null } } }],
 } satisfies Prisma.PaymentWhereInput
 
-/** Lo que el autoposteo NO postea y el reporte del contador lista como «pendiente de revisión contable» (spec §7). */
+/**
+ * La devolución abonada a un sobre de saldo a favor (spec 2026-10-30-saldo-a-favor §5.3): la fila REFUND con el medio de sistema
+ * `STORE_CREDIT`. El gemelo en Prisma de `esDevolucionASaldoAFavor` (fiscal/fiscalScope.ts). Por la relación del tender, igual que
+ * `WHERE_COBRO_ES_SALDO_DE_REGALO`.
+ */
+export const WHERE_DEVOLUCION_A_SALDO_A_FAVOR = {
+  type: PaymentType.REFUND,
+  tenderType: { is: { systemKind: TenderSystemKind.STORE_CREDIT } },
+} satisfies Prisma.PaymentWhereInput
+
+/**
+ * Lo que el autoposteo NO postea y el reporte del contador lista como «pendiente de revisión contable» (spec §7). La MISMA regla que
+ * `esPendienteDeRevisionContable` (autoPosting.service.ts): también la devolución a saldo a favor (S8b), que el autoposteo salta desde S3.
+ */
 export const WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE = {
-  OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_DE_TARJETAS }],
+  OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, WHERE_DEVOLUCION_A_SALDO_A_FAVOR, { order: WHERE_ORDEN_DE_TARJETAS }],
 } satisfies Prisma.PaymentWhereInput
 
 /** Columnas de «id de orden» admitidas en SQL crudo. Lista cerrada: nunca texto que venga de fuera. */

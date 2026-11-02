@@ -145,6 +145,47 @@ describe('checkInReservationAndOpenOrder', () => {
     expect('orderError' in r).toBe(false)
   })
 
+  // 0.e — la cola del kiosco reenvía el toque: un reenvío nunca reabre una venta.
+  it('KIOSK ya registrada: devuelve la orden viva y NO crea otra, aunque la anterior se haya cancelado', async () => {
+    armReservation('CHECKED_IN')
+    prismaMock.order.findFirst.mockResolvedValue(null) // la orden del primer toque ya se canceló
+    ;(createOrderFromReservation as jest.Mock).mockResolvedValue({ orderId: 'ord-nueva', created: true })
+
+    const r = await checkInReservationAndOpenOrder({
+      ...cmd,
+      actor: { type: 'SERVICE', servicePrincipalId: 'kiosk' },
+      source: 'KIOSK',
+    })
+
+    expect(r).toMatchObject({ id: 'res-1', status: 'CHECKED_IN', orderId: null, orderCreated: false })
+    expect('orderError' in r).toBe(false)
+    expect(createOrderFromReservation).not.toHaveBeenCalled()
+    expect(prismaMock.order.findFirst).toHaveBeenCalledWith({
+      where: { reservationId: 'res-1', venueId: 'v1', status: { notIn: ['CANCELLED', 'DELETED'] } },
+      select: { id: true },
+    })
+  })
+
+  it('KIOSK ya registrada con orden viva ⇒ devuelve ESA orden', async () => {
+    armReservation('CHECKED_IN')
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'ord-viva' } as any)
+
+    const r = await checkInReservationAndOpenOrder({ ...cmd, actor: { type: 'SERVICE', servicePrincipalId: 'kiosk' }, source: 'KIOSK' })
+
+    expect(r).toMatchObject({ orderId: 'ord-viva', orderCreated: false })
+    expect(createOrderFromReservation).not.toHaveBeenCalled()
+  })
+
+  it('COUNTER ya registrada sigue como hoy (sí intenta abrir orden)', async () => {
+    armReservation('CHECKED_IN')
+    ;(createOrderFromReservation as jest.Mock).mockResolvedValue({ orderId: 'ord-1', created: true })
+
+    const r = await checkInReservationAndOpenOrder(cmd)
+
+    expect(createOrderFromReservation).toHaveBeenCalledTimes(1)
+    expect(r).toMatchObject({ orderId: 'ord-1', orderCreated: true })
+  })
+
   it('si el check-in puro truena (409), NO se intenta la orden', async () => {
     armReservation('NO_SHOW')
     await expect(checkInReservationAndOpenOrder(cmd)).rejects.toMatchObject({ statusCode: 409 })

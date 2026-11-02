@@ -35,7 +35,7 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
 }))
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(database.pathname)) {
+if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(database.pathname)) {
   throw new Error('Esta suite exige una base desechable local (avoqado_<tarea>_test_<fecha>).')
 }
 
@@ -107,6 +107,7 @@ afterAll(async () => {
   await prisma.areaTicket.deleteMany({ where: { venueId } })
   await prisma.areaTicketCheckoutSession.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
+  await prisma.modifierGroup.deleteMany({ where: { venueId } }) // extras e historial de extras, en cascada
   await prisma.product.deleteMany({ where: { venueId } }) // el historial se va en cascada
   await prisma.menuCategory.deleteMany({ where: { venueId } })
   await prisma.table.deleteMany({ where: { venueId } })
@@ -271,6 +272,92 @@ describe('precio que vio el cliente — la orden contra Postgres', () => {
     const lineaDeCaja = await prisma.orderItem.findFirstOrThrow({ where: { orderId: venta.order.id, productId: deCaja.id } })
     expect(Number(lineaDeCaja.unitPrice)).toBe(15)
     expect(await prisma.activityLog.count({ where: { venueId, action: 'ORDER_PREVIOUS_PRICE_HONORED', entityId: venta.order.id } })).toBe(0)
+  })
+
+  it('5. (S3) producto + extra cuyo precio subió en la ventana: el extra a lo mostrado; el reintento trae externalId por renglón', async () => {
+    const p = await producto(50)
+    const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Leches ${s}` } })
+    const avena = await prisma.modifier.create({ data: { groupId: grupo.id, name: 'Leche de avena', price: new Prisma.Decimal(10) } })
+    const catalogAt = new Date().toISOString()
+    await prisma.modifier.update({ where: { id: avena.id }, data: { price: new Prisma.Decimal(15) } })
+    const cuerpo = {
+      staffId,
+      externalId: `venta-${randomUUID()}`,
+      source: 'AVOQADO_ANDROID',
+      items: [
+        {
+          productId: p.id,
+          quantity: 2,
+          externalId: 'l1',
+          modifierIds: [avena.id],
+          displayedUnitPrice: 5000,
+          displayedModifierPrices: { [avena.id]: 1000 },
+          catalogAt,
+        },
+        { name: 'Otro importe', unitPrice: 2500, quantity: 1, externalId: 'l2' },
+      ],
+    } as any
+
+    const orden = await createOrderWithItems(venueId, cuerpo)
+
+    expect(orden.total).toBe(145) // (50 + 10) × 2 + 25
+    expect(orden).not.toHaveProperty('priceChanges')
+    expect(orden.items.map(i => i.externalId).sort()).toEqual(['l1', 'l2'])
+    const conExtra = orden.items.find(i => i.externalId === 'l1')!
+    expect(conExtra.modifiers).toEqual([expect.objectContaining({ id: avena.id, price: 10 })])
+    const guardado = await prisma.orderItemModifier.findFirstOrThrow({ where: { orderItem: { orderId: orden.id } } })
+    expect(Number(guardado.price)).toBe(10)
+    const libre = await prisma.orderItem.findFirstOrThrow({ where: { orderId: orden.id, productId: null } })
+    expect(libre.externalId).toBe('l2')
+    const rastro = await prisma.activityLog.findFirstOrThrow({
+      where: { venueId, action: 'ORDER_PREVIOUS_PRICE_HONORED', entityId: orden.id },
+    })
+    expect((rastro.data as any).lineas).toEqual([
+      expect.objectContaining({ modifierId: avena.id, extra: 'Leche de avena', precioRespetado: 10, precioActual: 15, cantidad: 2 }),
+    ])
+
+    // La respuesta se perdió: el reintento recupera la MISMA orden, con su externalId por renglón y sin cambios de precio.
+    const recuperada = await createOrderWithItems(venueId, cuerpo)
+    expect(recuperada.id).toBe(orden.id)
+    expect(recuperada.items.map(i => i.externalId).sort()).toEqual(['l1', 'l2'])
+    expect(recuperada).not.toHaveProperty('priceChanges')
+
+    await cobrar(orden.id, 14500)
+    const cobrada = await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })
+    expect(cobrada.paymentStatus).toBe('PAID')
+    expect(Number(cobrada.remainingBalance)).toBe(0)
+  })
+
+  it('5b. (S3) un precio de extra que nunca fue real: en línea 409; desde la cola, el vigente con el aviso', async () => {
+    const p = await producto(50)
+    const grupo = await prisma.modifierGroup.create({ data: { venueId, name: `Toppings ${s}` } })
+    const chispas = await prisma.modifier.create({ data: { groupId: grupo.id, name: 'Chispas', price: new Prisma.Decimal(15) } })
+    const linea = {
+      productId: p.id,
+      quantity: 1,
+      externalId: 'l1',
+      modifierIds: [chispas.id],
+      displayedUnitPrice: 5000,
+      displayedModifierPrices: { [chispas.id]: 700 },
+      catalogAt: new Date().toISOString(),
+    }
+
+    await expect(
+      createOrderWithItems(venueId, { staffId, externalId: `venta-${randomUUID()}`, source: 'AVOQADO_ANDROID', items: [linea] } as any),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_PRICE_CHANGED' })
+
+    const deLaCola = await createOrderWithItems(venueId, {
+      staffId,
+      externalId: `venta-${randomUUID()}`,
+      source: 'AVOQADO_ANDROID',
+      isOfflineReplay: true,
+      createdAtLocal: Date.now(),
+      items: [linea],
+    } as any)
+    expect(deLaCola.total).toBe(65)
+    expect(deLaCola.priceChanges).toEqual([
+      expect.objectContaining({ externalId: 'l1', modifierId: chispas.id, displayedUnitPriceCents: 700, unitPriceCents: 1500 }),
+    ])
   })
 
   it('la forma del choque se midió: la llave de la ORDEN se reconoce como carrera; la de una línea, no', async () => {

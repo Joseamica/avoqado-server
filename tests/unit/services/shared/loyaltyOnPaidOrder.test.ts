@@ -23,6 +23,9 @@ jest.mock('@/utils/prismaClient', () => ({
     orderCustomer: { findMany: jest.fn() },
     order: { updateMany: jest.fn() },
     orderItem: { findFirst: jest.fn() },
+    // Cambio de producto: por default la venta no es la nueva de un cambio ni tiene cobros con crédito de cambio.
+    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null } }) },
+    exchange: { findUnique: jest.fn().mockResolvedValue(null) },
   },
 }))
 

@@ -111,4 +111,55 @@ describe('delivery money invariants', () => {
       ).not.toThrow()
     })
   })
+  // ============================================================
+  // Rappi 2b (23-oct): envío del negocio como RENGLÓN (`shippingAsLine`) y dinero que el negocio cobra por cuenta de la
+  // plataforma (`thirdPartyCashDue`). Pedido real DEV 881655210: productos 140 + envío 35 + tarifa 10 + propina 20 = 205.
+  // ============================================================
+  describe('Rappi 2b: envío como renglón y dinero de terceros', () => {
+    const items140: NormalizedDeliveryItem[] = [
+      { externalId: '11645678', name: 'Grilled Chicken Burger', quantity: 1, unitPrice: '140.00', total: '140.00', modifiers: [] },
+    ]
+    const efectivo881655210 = {
+      currency: 'MXN' as const,
+      saleAmount: '140.00',
+      shippingAsLine: '35.00',
+      merchantFees: '0.00',
+      discountAmount: '0.00',
+      tipAmount: '20.00',
+      externallyPaidSale: '0.00',
+      externallyPaidTip: '0.00',
+      cashDueSale: '175.00',
+      cashDueTip: '20.00',
+      thirdPartyCashDue: '10.00',
+    }
+
+    it('acepta el pedido 881655210: la venta incluye el envío y los renglones cuadran contra los productos', () => {
+      expect(() => assertDeliveryMoneyInvariants(efectivo881655210, items140)).not.toThrow()
+    })
+
+    it('🔴 RECHAZA si el efectivo por cobrar no incluye el envío del renglón', () => {
+      expect(() => assertDeliveryMoneyInvariants({ ...efectivo881655210, cashDueSale: '140.00' }, items140)).toThrow(/La venta no cuadra/)
+    })
+
+    it('🔴 RECHAZA dinero de terceros negativo', () => {
+      expect(() => assertDeliveryMoneyInvariants({ ...efectivo881655210, thirdPartyCashDue: '-1.00' }, items140)).toThrow(
+        /thirdPartyCashDue.*negativo/,
+      )
+    })
+
+    it('🔴 RECHAZA dinero de terceros en un pedido que no tiene nada por cobrar en efectivo', () => {
+      const enLinea = {
+        ...efectivo881655210,
+        externallyPaidSale: '175.00',
+        externallyPaidTip: '20.00',
+        cashDueSale: '0.00',
+        cashDueTip: '0.00',
+      }
+      expect(() => assertDeliveryMoneyInvariants(enLinea, items140)).toThrow(/terceros/)
+    })
+
+    it('un reparto sin los campos nuevos (Uber, Deliverect) se valida igual que hoy', () => {
+      expect(() => assertDeliveryMoneyInvariants(base, baseItems)).not.toThrow()
+    })
+  })
 })

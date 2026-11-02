@@ -43,6 +43,8 @@ const ARCHIVOS_EXCLUIDOS = (relPath: string): string | null => {
   if (relPath.endsWith('consent.service.ts')) return 'escritor legítimo (Task 3)'
   if (relPath.startsWith(`schemas${path.sep}`)) return 'declaración Zod de forma de entrada, no escritura a Prisma'
   if (relPath.endsWith(`onboarding${path.sep}demoSeed.service.ts`)) return 'siembra de clientes sintéticos de demo — ver comentario arriba'
+  // Negocios demo de ventas: mismos clientes sintéticos y misma razón que demoSeed (nadie otorgó un consentimiento real).
+  if (relPath.endsWith(`demo${path.sep}negociosDemo.service.ts`)) return 'siembra de clientes sintéticos de los negocios demo'
   return null
 }
 

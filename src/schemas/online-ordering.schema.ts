@@ -43,6 +43,7 @@ export const settingsPatchBody = z
       .refine(v => /^\d+(\.\d{1,2})?$/.test(String(v)), 'El monto admite máximo 2 decimales'),
     defaultPrepMinutes: z.number().int('Debe ser un número entero').min(1, 'Mínimo 1 minuto').max(240, 'Máximo 240 minutos'),
     acceptsPayAtPickup: z.boolean(),
+    acceptsCardOnline: z.boolean(),
     manualPause: z.boolean(),
     // ISO 8601 en UTC (`…Z`) o con desfase (`…-06:00`): el MCP (tarea 14) comparte este esquema y puede mandar hora local.
     pausedUntil: z.string().datetime({ offset: true, message: 'Fecha inválida' }).nullable(),
@@ -102,6 +103,46 @@ export const rejectSchema = z.object({
   }),
 })
 export const pauseSchema = z.object({ params: venueParams, body: z.object({ minutes: floorPauseMinutes }) })
+/** Fase 2 (T10): devolver a la tarjeta. El monto va en PESOS (como todo el panel), con hasta dos decimales. */
+/** La llave idempotente de «Devolver a la tarjeta»: en el encabezado `Idempotency-Key` (como la TPV) o, por compatibilidad, en el cuerpo. */
+export const cardRefundKey = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{8,64}$/, 'La llave de idempotencia debe tener de 8 a 64 caracteres alfanuméricos, guiones o guiones bajos')
+export const cardRefundSchema = z.object({
+  params: orderParams,
+  body: z.object({
+    amount: z
+      .preprocess(
+        v => (typeof v === 'number' ? String(v) : v),
+        z
+          .string({ required_error: 'El monto es obligatorio', invalid_type_error: 'El monto debe ser un número en pesos' })
+          .regex(/^\d{1,7}(\.\d{1,2})?$/, 'El monto debe estar en pesos, con hasta dos decimales')
+          .refine(v => Number(v) > 0, 'El monto debe ser mayor que cero'),
+      )
+      .describe('Monto a devolver en PESOS (no centavos), como texto decimal con hasta 2 decimales: "125.50"'),
+    reason: z.enum(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'], {
+      errorMap: () => ({ message: 'Motivo inválido' }),
+    }),
+    note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
+    // F1: opcional si viene el encabezado `Idempotency-Key`; si vienen los dos deben ser iguales (lo revisa el controlador).
+    idempotencyKey: cardRefundKey.optional(),
+  }),
+})
+/** «Devolver por otro medio» de una devolución a la tarjeta que falló después (sólo efectivo o transferencia). */
+export const cardRefundResolveSchema = z.object({
+  params: orderParams.extend({ refundId: z.string().min(1, 'Devolución inválida') }),
+  body: z.object({
+    method: z.enum(['CASH', 'BANK_TRANSFER'], { errorMap: () => ({ message: 'El método debe ser efectivo o transferencia' }) }),
+    note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
+  }),
+})
+export const cardRefundsListSchema = z.object({ params: orderParams })
+/** Rappi 2b: la lista «Rappi · por cobrar» de la bandeja (sin filtros: el servidor la acota). */
+export const deliveryCashSchema = z.object({
+  params: venueParams,
+  // El `nextCursor` de la página anterior (opaco); sin él, la primera página.
+  query: z.object({ cursor: z.string().max(200, 'Cursor inválido').optional() }),
+})
 /** 1b: el «menú en línea» del panel. El cursor es el `id` del último platillo de la página anterior (`nextCursor`). */
 export const menuCategoryId = safeId('Categoría inválida')
 export const menuCursor = safeId('Cursor inválido')

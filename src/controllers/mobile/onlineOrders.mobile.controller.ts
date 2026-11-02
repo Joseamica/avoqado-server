@@ -10,6 +10,7 @@ import type { OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
+import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
 import { getAcceptingStatus, storeView, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
@@ -51,6 +52,12 @@ function reply(res: Response, r: TransitionResult) {
       })
     case 'NOT_FOUND':
       return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    case 'CONFIRMING_PAYMENT':
+      return res.status(409).json({
+        success: false,
+        code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
+        error: 'Confirmando el pago con el banco. Espera unos segundos.',
+      })
     default:
       // Un resultado que este mapa no conoce es un error del servidor (500), nunca un «no existe» que engañe a la caja.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
@@ -87,6 +94,19 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // pausa es la del gerente (`manualPause`, que no se va sola).
     const state = await getAcceptingStatus(venueId).catch(() => null)
     return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** Rappi 2b: los pedidos de plataforma que la caja cobra en efectivo (venta, propina y lo de la plataforma, en centavos). */
+export const deliveryCash = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
+    return res.json({
+      success: true,
+      data: await listDeliveryCashPending({ venueId: req.params.venueId, ...(cursor !== undefined ? { cursor } : {}) }),
+    })
   } catch (e) {
     return next(e)
   }

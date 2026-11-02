@@ -44,7 +44,16 @@ function ordenDesdeLosDatos(args: any) {
     taxAmount: data.taxAmount,
     total: data.total,
     createdAt: new Date(),
-    items: data.items.create.map((it: any, k: number) => ({ id: `oi-${k}`, ...it, modifiers: [] })),
+    items: data.items.create.map((it: any, k: number) => ({
+      id: `oi-${k}`,
+      ...it,
+      // Guardado = el precio cobrado; `modifier` = el extra VIVO (hoy a 15), como lo trae `createdOrderInclude`.
+      modifiers: (it.modifiers?.create ?? []).map((m: any, j: number) => ({
+        id: `oim-${k}-${j}`,
+        ...m,
+        modifier: { id: m.modifierId, name: m.name, price: new Decimal(15) },
+      })),
+    })),
     promotions: [],
   }
 }
@@ -315,6 +324,247 @@ describe('precio que vio el cliente — creación de mostrador', () => {
     expect(r).not.toHaveProperty('priceChanges')
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Task S3 (cobrar sin red) — el precio que vio el cliente también en los EXTRAS. Cada extra de la línea se decide solo con
+ * la misma regla (`clasificarLinea`) contra su historial (`ModifierPriceHistory`); `displayedModifierPrices` sólo cuenta si
+ * la línea trae `catalogAt`. El precio decidido va al total de la línea y al `price` guardado del extra.
+ */
+describe('Task S3 — precio visto de los extras', () => {
+  const avena = { id: 'mod-1', name: 'Leche de avena', price: new Decimal(15), sku: null }
+  const extrasCreados = (k = 0) => (lineasCreadas()[k] as any).modifiers.create as Array<{ modifierId: string; price: Decimal }>
+  const consultas = () => (prismaMock.$queryRaw as jest.Mock).mock.calls.map(c => c[0])
+  const linea = (extra: Record<string, unknown> = {}) => ({
+    productId: 'prod-1',
+    quantity: 2,
+    externalId: 'e1',
+    modifierIds: ['mod-1'],
+    displayedUnitPrice: 5000,
+    catalogAt: CAT,
+    ...extra,
+  })
+
+  beforeEach(() => prismaMock.modifier.findMany.mockResolvedValue([avena]))
+
+  it('extra que SUBIÓ tras catalogAt y fue vigente ⇒ se cobra lo mostrado (total, extra guardado, respuesta y rastro)', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ i: 0 }])
+
+    const r = await crear({ items: [linea({ displayedModifierPrices: { 'mod-1': 1000 } })] })
+
+    // Sólo el extra se busca (el producto mostró lo de hoy), y en SU historial.
+    expect(consultas()).toHaveLength(1)
+    expect(consultas()[0].text).toContain('"ModifierPriceHistory"')
+    expect(consultas()[0].values).toContain('mod-1')
+    expect(Number(extrasCreados()[0].price)).toBe(10)
+    expect(Number(lineasCreadas()[0].total)).toBe(120) // (50 + 10) × 2
+    expect(Number(datosDeLaOrden().total)).toBe(120)
+    expect(r).not.toHaveProperty('priceChanges')
+    // La respuesta dice lo COBRADO, no el precio vivo del extra (15).
+    expect(r.items[0].modifiers).toEqual([expect.objectContaining({ id: 'mod-1', price: 10 })])
+    expect(rastro()[0].data.lineas).toEqual([
+      {
+        externalId: 'e1',
+        productId: 'prod-1',
+        producto: 'Café',
+        modifierId: 'mod-1',
+        extra: 'Leche de avena',
+        cantidad: 2,
+        pesoKg: null,
+        precioRespetado: 10,
+        precioActual: 15,
+        horaDelCatalogo: CAT,
+      },
+    ])
+  })
+
+  it('producto y extra que subieron y se reconocen en la MISMA línea: los dos a lo mostrado, una consulta por historial', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ i: 0 }])
+
+    await crear({ items: [linea({ displayedUnitPrice: 4500, displayedModifierPrices: { 'mod-1': 1000 } })] })
+
+    expect(consultas().map(q => (q.text.includes('"ModifierPriceHistory"') ? 'extra' : 'producto'))).toEqual(['producto', 'extra'])
+    expect(Number(lineasCreadas()[0].unitPrice)).toBe(45)
+    expect(Number(extrasCreados()[0].price)).toBe(10)
+    expect(Number(lineasCreadas()[0].total)).toBe(110) // (45 + 10) × 2
+    expect(rastro()[0].data.lineas.map((l: any) => [l.modifierId ?? null, l.precioRespetado])).toEqual([
+      [null, 45],
+      ['mod-1', 10],
+    ])
+  })
+
+  it('extra que BAJÓ ⇒ se cobra el vigente y se avisa con su modifierId, sin consultar ni 409', async () => {
+    const r = await crear({ items: [linea({ displayedModifierPrices: { 'mod-1': 2000 } })] })
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(Number(extrasCreados()[0].price)).toBe(15)
+    expect(r.priceChanges).toEqual([
+      {
+        externalId: 'e1',
+        productId: 'prod-1',
+        productName: 'Café',
+        modifierId: 'mod-1',
+        catalogAt: CAT,
+        displayedUnitPriceCents: 2000,
+        unitPriceCents: 1500,
+      },
+    ])
+  })
+
+  it('extra mostrado no reconocido con isOfflineReplay ⇒ el vigente + priceChanges con modifierId', async () => {
+    const r = await crear({ isOfflineReplay: true, items: [linea({ displayedModifierPrices: { 'mod-1': 1000 } })] })
+
+    expect(consultas()).toHaveLength(1)
+    expect(Number(extrasCreados()[0].price)).toBe(15)
+    expect(Number(lineasCreadas()[0].total)).toBe(130)
+    expect(r.priceChanges).toEqual([
+      expect.objectContaining({ externalId: 'e1', modifierId: 'mod-1', displayedUnitPriceCents: 1000, unitPriceCents: 1500 }),
+    ])
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('extra no reconocido en línea ⇒ 409 ORDER_PRICE_CHANGED y no se crea nada', async () => {
+    await expect(crear({ items: [linea({ displayedModifierPrices: { 'mod-1': 1000 } })] })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ORDER_PRICE_CHANGED',
+      details: { priceChanges: [expect.objectContaining({ modifierId: 'mod-1', displayedUnitPriceCents: 1000, unitPriceCents: 1500 })] },
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('sin displayedModifierPrices todo como hoy: el extra a su precio, sin consultar', async () => {
+    const r = await crear({ items: [linea()] })
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(Number(extrasCreados()[0].price)).toBe(15)
+    expect(Number(lineasCreadas()[0].total)).toBe(130)
+    expect(r).not.toHaveProperty('priceChanges')
+  })
+
+  it('displayedModifierPrices sin catalogAt en la línea no cuenta: ni consulta, ni aviso, ni 409', async () => {
+    const r = await crear({
+      items: [{ productId: 'prod-1', quantity: 1, externalId: 'e1', modifierIds: ['mod-1'], displayedModifierPrices: { 'mod-1': 1000 } }],
+    })
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(Number(extrasCreados()[0].price)).toBe(15)
+    expect(r).not.toHaveProperty('priceChanges')
+  })
+
+  it.each([
+    ['un arreglo', [1000]],
+    ['un texto', '{"mod-1":1000}'],
+    ['un precio negativo', { 'mod-1': -1 }],
+    ['un precio con decimales', { 'mod-1': 10.5 }],
+  ])('displayedModifierPrices basura (%s) se ignora: como hoy, nunca truena', async (_, basura) => {
+    const r = await crear({ items: [linea({ displayedModifierPrices: basura })] })
+
+    expect(Number(extrasCreados()[0].price)).toBe(15)
+    expect(r).not.toHaveProperty('priceChanges')
+  })
+})
+
+/**
+ * Task S3 — reloj del aparato (Review Focus 1; Codex plan-r2 #9). `catalogAt` lo selló el servidor; `createdAtLocal`, el
+ * aparato. De la cola, la ventana de la línea es `[catalogAt − 60 s, min(llegada, max(horaDeLaVenta, catalogAt))]`.
+ */
+describe('Task S3 — ventana de la línea con el reloj del aparato', () => {
+  const MIN = 60_000
+  const valores = () => (prismaMock.$queryRaw as jest.Mock).mock.calls[0][0].values as unknown[]
+  const cola = (createdAtLocal: number, catalogAt: string) =>
+    crear({
+      isOfflineReplay: true,
+      createdAtLocal,
+      items: [{ productId: 'prod-1', quantity: 1, externalId: 'e1', displayedUnitPrice: 4500, catalogAt }],
+    })
+
+  it('catalogAt del servidor y createdAtLocal con reloj +5 min ⇒ reconocido', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ i: 0 }])
+    const catalogAt = new Date(Date.now() - 2 * MIN).toISOString()
+
+    const r = await cola(Date.now() - MIN + 5 * MIN, catalogAt) // vendió hace 1 min con el reloj 5 min adelantado
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(Number(lineasCreadas()[0].unitPrice)).toBe(45)
+    expect(r).not.toHaveProperty('priceChanges')
+  })
+
+  // Codex servidor r1 #5: la hora capturada cae 4 min ANTES del catálogo (reloj mal) ⇒ no dice cuándo se vendió: hasta la LLEGADA.
+  it('… con reloj ATRASADO 5 min (catálogo fresco) ⇒ reconocido, con la ventana hasta la llegada', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ i: 0 }])
+    const catalogAt = new Date(Date.now() - 30 * MIN).toISOString()
+
+    const antes = Date.now()
+    const r = await cola(Date.parse(catalogAt) + MIN - 5 * MIN, catalogAt) // vendió 1 min después de leerlo, reloj −5 min
+    const despues = Date.now()
+
+    expect(valores()).toContain(new Date(Date.parse(catalogAt) - MIN).toISOString()) // desde = catálogo − holgura
+    expect(valores()).not.toContain(catalogAt)
+    const hasta = valores()
+      .filter((v): v is string => typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v))
+      .map(Date.parse)
+    expect(hasta.some(t => t >= antes && t <= despues)).toBe(true) // hasta = la llegada
+    expect(Number(lineasCreadas()[0].unitPrice)).toBe(45)
+    expect(r).not.toHaveProperty('priceChanges')
+  })
+
+  it('🔴 catálogo de 96 h con el reloj del aparato ANTES del catálogo ⇒ no reconocido (sin consultar): el vigente y el aviso', async () => {
+    const catalogAt = new Date(Date.now() - 96 * 60 * MIN).toISOString()
+
+    const r = await cola(Date.parse(catalogAt) - 24 * 60 * MIN, catalogAt)
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(Number(lineasCreadas()[0].unitPrice)).toBe(50)
+    expect(r.priceChanges).toEqual([expect.objectContaining({ externalId: 'e1', displayedUnitPriceCents: 4500, unitPriceCents: 5000 })])
+  })
+
+  it('catalogAt posterior a la llegada ⇒ no reconocido (sin consultar): el vigente y el aviso', async () => {
+    const catalogAt = new Date(Date.now() + 30_000).toISOString()
+
+    const r = await cola(Date.now() - 10_000, catalogAt)
+
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(Number(lineasCreadas()[0].unitPrice)).toBe(50)
+    expect(r.priceChanges).toEqual([expect.objectContaining({ externalId: 'e1', displayedUnitPriceCents: 4500, unitPriceCents: 5000 })])
+  })
+})
+
+/**
+ * Task S3 (Codex plan-r4 R1) — cada renglón guarda su `externalId`, también la línea libre («Otro importe»), y la respuesta
+ * lo devuelve por renglón: la terminal correlaciona su venta guardada con lo que quedó en el servidor.
+ */
+describe('Task S3 — externalId por renglón', () => {
+  const cuerpo = {
+    externalId: 'venta-s3',
+    items: [
+      { productId: 'prod-1', quantity: 1, externalId: 'e1' },
+      { name: 'Otro importe', unitPrice: 1234, quantity: 1, externalId: 'e2' },
+    ],
+  }
+
+  it('respuesta de crear (nueva y recuperada) trae externalId en cada renglón, incluida la línea libre', async () => {
+    const nueva = await crear(cuerpo)
+
+    expect(datosDeLaOrden().items.create.map((l: any) => l.externalId ?? null)).toEqual(['e1', 'e2'])
+    expect(nueva.items.map(i => [i.productName, i.externalId])).toEqual([
+      ['Café', 'e1'],
+      ['Otro importe', 'e2'],
+    ])
+
+    // La respuesta se perdió: el reintento encuentra lo guardado.
+    prismaMock.order.findUnique.mockResolvedValue(ordenDesdeLosDatos((prismaMock.order.create as jest.Mock).mock.calls[0][0]))
+    const recuperada = await crear(cuerpo)
+
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(recuperada.items.map(i => i.externalId)).toEqual(['e1', 'e2'])
+  })
+
+  it('una línea libre con externalId basura no lo guarda (como hoy) y no truena', async () => {
+    const r = await crear({ items: [{ name: 'Otro importe', unitPrice: 100, quantity: 1, externalId: 42 as any }] })
+
+    expect(datosDeLaOrden().items.create[0]).not.toHaveProperty('externalId')
+    expect(r.items[0].externalId).toBeNull()
   })
 })
 

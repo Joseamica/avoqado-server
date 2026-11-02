@@ -33,7 +33,7 @@ import 'dotenv/config'
 import { Prisma } from '@prisma/client'
 import { PaidOrderReconcilerJob } from '../src/jobs/paid-order-reconciler.job'
 import type { SesionDeVentaCerradaPorOtroCanal } from '../src/services/mobile/areaTicketV7.mobile.service'
-import type { CandidataPagadaAbierta } from '../src/services/shared/pagadaPeroAbierta'
+import type { CandidataPagadaAbierta, PedidoDePlataformaPorCerrar } from '../src/services/shared/pagadaPeroAbierta'
 import prisma from '../src/utils/prismaClient'
 
 /**
@@ -167,6 +167,19 @@ async function imprimirSesiones(sesiones: SesionDeVentaCerradaPorOtroCanal[]): P
   console.log(`${sesiones.length} ${sesiones.length === 1 ? 'sesión' : 'sesiones'} de vales por cerrar (sólo sueltan su reserva)\n`)
 }
 
+/**
+ * Codex b1 #1 (Rappi fase 2): los pedidos de una plataforma de reparto (Uber, Rappi…) pagados y aceptados. La cuarta pasada del
+ * barrido los cierra SÓLO de estado: su dinero (total, propina, lo pagado) no se toca.
+ */
+async function imprimirPedidosDePlataforma(pedidos: PedidoDePlataformaPorCerrar[]): Promise<void> {
+  if (pedidos.length === 0) return
+  const nombres = await nombresDeNegocios(pedidos)
+  console.table(pedidos.map(p => ({ negocio: nombres.get(p.venueId) ?? p.venueId, folio: p.orderNumber, estado: p.status })))
+  console.log(
+    `${pedidos.length} ${pedidos.length === 1 ? 'pedido' : 'pedidos'} de plataforma por cerrar (sólo de estado; su dinero no se toca)\n`,
+  )
+}
+
 async function main(): Promise<void> {
   const aplicar = process.argv.includes('--apply')
   const desde = leerDesde()
@@ -189,10 +202,11 @@ async function main(): Promise<void> {
   const simulacion = await barrido.runNow({ dryRun: true, since: desde })
   await imprimirLista(simulacion.candidates)
   await imprimirSesiones(simulacion.sessionsToClose)
+  await imprimirPedidosDePlataforma(simulacion.platformToClose)
 
   if (!aplicar) {
     console.log('Simulación: no se tocó nada.')
-    if (simulacion.candidates.length > 0 || simulacion.sessionsToClose.length > 0) {
+    if (simulacion.candidates.length > 0 || simulacion.sessionsToClose.length > 0 || simulacion.platformToClose.length > 0) {
       console.log(
         `Para repararlas:  npx tsx scripts/reconciliar-pagadas-pero-abiertas.ts${desde ? ` --desde ${desde.toISOString().slice(0, 10)}` : ''} --apply --confirm-host ${host}`,
       )
@@ -202,7 +216,7 @@ async function main(): Promise<void> {
 
   const resultado = await barrido.runNow({ since: desde })
   console.log(
-    `Revisadas ${resultado.scanned} · reparadas ${resultado.reconciled} · sesiones de vales cerradas ${resultado.sessionsClosed} · fallidas ${resultado.failed}`,
+    `Revisadas ${resultado.scanned} · reparadas ${resultado.reconciled} · sesiones de vales cerradas ${resultado.sessionsClosed} · pedidos de plataforma cerrados ${resultado.platformClosed} · fallidas ${resultado.failed}`,
   )
   if (resultado.skipped > 0) {
     // El candado `running` es de ESTA instancia, recién creada, así que aquí no debería saltar nunca.
@@ -222,6 +236,7 @@ async function main(): Promise<void> {
   }
   await imprimirLista(despues.candidates)
   await imprimirSesiones(despues.sessionsToClose)
+  await imprimirPedidosDePlataforma(despues.platformToClose)
 }
 
 /**

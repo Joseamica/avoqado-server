@@ -22,6 +22,9 @@
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
+import { customerAttributionActor } from '@/middlewares/customerAttribution.middleware'
+import type { CustomerAttributionActor } from '@/services/shared/customerAttributionPolicy'
+import type { Request } from 'express'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 
@@ -38,6 +41,8 @@ const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 let orgId: string | undefined
 let venueId: string | undefined
 let n = 0
+let staffId: string
+let actor: CustomerAttributionActor
 
 beforeAll(async () => {
   orgId = (
@@ -50,6 +55,15 @@ beforeAll(async () => {
       data: { name: `itest-cruce-${sello}`, slug: `itest-cruce-${sello}`, organizationId: orgId, timezone: 'America/Mexico_City' },
     })
   ).id
+  const staff = await prisma.staff.create({
+    data: { email: `itest-cruce-${sello}-manager@test.com`, firstName: 'Manager', lastName: 'Test' },
+  })
+  staffId = staff.id
+  await prisma.staffVenue.create({ data: { staffId, venueId, role: 'MANAGER' } })
+  actor = await customerAttributionActor({
+    params: { venueId },
+    authContext: { userId: staffId, venueId, orgId, role: 'MANAGER' },
+  } as unknown as Request)
 })
 
 afterAll(async () => {
@@ -57,6 +71,8 @@ afterAll(async () => {
   if (!venueId || !orgId) return
   await prisma.order.deleteMany({ where: { venueId } }) // OrderCustomer cae en cascada
   await prisma.customer.deleteMany({ where: { venueId } })
+  await prisma.staffVenue.deleteMany({ where: { venueId } })
+  if (staffId) await prisma.staff.delete({ where: { id: staffId } })
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
   await prisma.$disconnect()
@@ -81,6 +97,20 @@ async function ventaCobradaSinCliente(): Promise<string> {
       total: 50,
       status: 'COMPLETED',
       paymentStatus: 'PAID',
+      payments: {
+        create: {
+          venueId: venueId!,
+          amount: 50,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 50,
+          method: 'CASH',
+          status: 'COMPLETED',
+          type: 'REGULAR',
+          processedById: staffId,
+          createdAt: new Date(Date.now() - 60_000),
+        },
+      },
       loyaltyEligibleAt: new Date(Date.now() - 60_000),
     },
   })
@@ -225,7 +255,7 @@ describe('🔴 cruce exacto: el cierre «sin cliente» espera el candado de la l
     try {
       const { bloqueado, resultado, ligada } = await cruzarCierreConLiga(orderId, p => {
         para = p
-        return attachCustomerToOrder(venueId!, orderId, c)
+        return attachCustomerToOrder(venueId!, orderId, c, staffId, { actor })
       })
 
       expect(bloqueado).toBe(true)

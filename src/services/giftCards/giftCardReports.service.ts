@@ -9,7 +9,15 @@
  * Dinero: PESOS (`number` con 2 decimales) en todo lo que sale. Fechas: días del negocio (`YYYY-MM-DD` en su zona).
  * 🔴 El código de la tarjeta NUNCA sale de aquí: sólo sus últimos 4.
  */
-import { GiftCardStatus, Prisma, type GiftCardActivityType, type GiftCardReason, type PaymentType } from '@prisma/client'
+import {
+  GiftCardStatus,
+  Prisma,
+  type GiftCardActivityType,
+  type GiftCardDeliveryChannel,
+  type GiftCardDeliveryStatus,
+  type GiftCardReason,
+  type PaymentType,
+} from '@prisma/client'
 import type { Response } from 'express'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
@@ -19,12 +27,16 @@ import { getVenueTimezone } from '@/services/dashboard/commission/commission-uti
 import { clampPage } from '@/services/dashboard/listSummary.shared'
 import { csvField } from '@/services/dashboard/export.helpers'
 import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal/autoPosting.service'
+import { esDevolucionASaldoAFavor } from '@/services/fiscal/fiscalScope'
 import { SIN_VENTA, bloqueosVigentes, estadoDeCancelacionDeVenta, type CancelacionDeVenta } from './giftCardCancel.service'
+import { enmascararDestino, textoDeFalloDeEntrega } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
+import { sobresDeSaldoAFavorEntre } from './giftCardLedger'
 import { isGiftCardTenderKind } from './giftCardTender'
 import {
   WHERE_COBRO_ES_SALDO_DE_REGALO,
   WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+  WHERE_DEVOLUCION_A_SALDO_A_FAVOR,
   WHERE_ORDEN_DE_TARJETAS,
   WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE,
 } from './giftCardMarks'
@@ -75,11 +87,35 @@ export interface GiftCardRow {
   expiresAt: string | null
   deliveryChannel: string
   deliveryStatus: string
+  /** 1b S-10 (aditivo): cuándo el proveedor aceptó el envío; `null` si no se ha enviado. */
+  deliveredAt: string | null
+  /** 1b S-7 + S-10 (aditivo): el CÓDIGO del último fallo de la entrega (el panel traduce por él) y su texto en español. */
+  deliveryErrorCode: string | null
+  deliveryError: string | null
   recipientName: string | null
   purchaserName: string | null
   source: string
   customer: { id: string; name: string } | null
   order: { id: string; orderNumber: string } | null
+  /**
+   * S8a (aditivo): `null` en una tarjeta vendida; en un sobre de saldo a favor (`esSobreDeSaldoAFavorSql`), de quién es. El panel enseña
+   * «Saldo a favor de {cliente}» en vez de la entrega y no ofrece Reenviar, Cambiar destino ni Mostrar código (el servidor los rechaza).
+   */
+  storeCredit: { customerId: string; customerName: string } | null
+}
+
+/**
+ * 1b S-7 + P-1: cómo va la entrega de la tarjeta en el detalle del panel. `destino` va ENMASCARADO (nunca el teléfono o el correo
+ * completos); en `PRINTED` y `HANDED_TO_BUYER` el estado se queda `PENDING` (S-8) y no hay destino.
+ */
+export interface GiftCardEntrega {
+  channel: GiftCardDeliveryChannel
+  status: GiftCardDeliveryStatus
+  deliveredAt: string | null
+  errorCode: string | null
+  error: string | null
+  destino: string | null
+  intentos: number
 }
 
 export interface GiftCardActivityRow {
@@ -103,7 +139,6 @@ export interface GiftCardDetail extends GiftCardRow {
   recipientPhone: string | null
   recipientEmail: string | null
   purchaserContact: string | null
-  deliveredAt: string | null
   deactivatedAt: string | null
   /** Se usó alguna vez (un `REDEEM` en su libreta): ya no se puede cancelar su venta ni reponer su código. */
   hasRedeem: boolean
@@ -125,6 +160,8 @@ export interface GiftCardDetail extends GiftCardRow {
    * la libreta paginada. `null` si la tarjeta no está BLOCKED. El panel decide con esto el motivo que enseña.
    */
   currentBlock: { reason: GiftCardReason | null; note: string | null; at: string } | null
+  /** 1b S7 (aditivo): la entrega, con el destino enmascarado. */
+  entrega: GiftCardEntrega
   activities: { items: GiftCardActivityRow[]; nextCursor: string | null; total: number }
 }
 
@@ -139,6 +176,11 @@ export interface GiftCardSummary {
   /** Ventas canceladas en el periodo (su saldo salió de la deuda). */
   cancelled: { cards: number; amount: number }
   adjustments: { increments: number; decrements: number; net: number }
+  /**
+   * S8a (aditivo): el saldo a favor abonado en el periodo (Cambios y Reembolsos a saldo): `cards` = sobres nuevos, `movements` = sobres
+   * nuevos + recargas, `amount` = lo abonado. Esos movimientos NO cuentan en `sold` ni en `adjustments`; usarlo sí cuenta en `redeemed`.
+   */
+  storeCredit: { cards: number; movements: number; amount: number }
   /** Lo que se debe HOY (no al cierre del periodo: para eso, la antigüedad a una fecha). */
   liveBalance: { cards: number; amount: number; expiredAmount: number; asOf: string }
 }
@@ -212,6 +254,8 @@ const FILA_SELECT = Prisma.validator<Prisma.GiftCardSelect>()({
   expiresAt: true,
   deliveryChannel: true,
   deliveryStatus: true,
+  deliveredAt: true,
+  deliveryErrorCode: true,
   recipientName: true,
   purchaserName: true,
   source: true,
@@ -220,7 +264,8 @@ const FILA_SELECT = Prisma.validator<Prisma.GiftCardSelect>()({
 })
 type FilaDb = Prisma.GiftCardGetPayload<{ select: typeof FILA_SELECT }>
 
-function aFila(t: FilaDb, clientes: Map<string, string>): GiftCardRow {
+function aFila(t: FilaDb, clientes: Map<string, string>, deSaldo: Set<string>): GiftCardRow {
+  const cliente = t.customerId ? { id: t.customerId, name: clientes.get(t.customerId) ?? '(sin nombre)' } : null
   return {
     id: t.id,
     last4: t.codeLast4,
@@ -232,11 +277,15 @@ function aFila(t: FilaDb, clientes: Map<string, string>): GiftCardRow {
     expiresAt: iso(t.expiresAt),
     deliveryChannel: t.deliveryChannel,
     deliveryStatus: t.deliveryStatus,
+    deliveredAt: iso(t.deliveredAt),
+    deliveryErrorCode: t.deliveryErrorCode ?? null,
+    deliveryError: textoDeFalloDeEntrega(t.deliveryErrorCode ?? null),
     recipientName: t.recipientName,
     purchaserName: t.purchaserName,
     source: t.source,
-    customer: t.customerId ? { id: t.customerId, name: clientes.get(t.customerId) ?? '(sin nombre)' } : null,
+    customer: cliente,
     order: t.orderItem ? { id: t.orderItem.orderId, orderNumber: t.orderItem.order.orderNumber } : null,
+    storeCredit: cliente && deSaldo.has(t.id) ? { customerId: cliente.id, customerName: cliente.name } : null,
   }
 }
 
@@ -330,12 +379,20 @@ export async function listGiftCards(venueId: string, q: ListGiftCardsQuery, ahor
       take: pageSize,
     }),
   ])
-  const nombres = await nombresDeClientes(
-    venueId,
-    filas.map(f => f.customerId),
-  )
+  // S8a: cuáles son saldo a favor, en UNA consulta para toda la página (sin una por renglón).
+  const [nombres, deSaldo] = await Promise.all([
+    nombresDeClientes(
+      venueId,
+      filas.map(f => f.customerId),
+    ),
+    sobresDeSaldoAFavorEntre(
+      prisma,
+      venueId,
+      filas.map(f => f.id),
+    ),
+  ])
   return {
-    items: filas.map(f => aFila(f, nombres)),
+    items: filas.map(f => aFila(f, nombres, deSaldo)),
     page,
     pageSize,
     total: agregado._count._all,
@@ -389,8 +446,8 @@ export async function getGiftCardDetail(
       recipientPhone: true,
       recipientEmail: true,
       purchaserContact: true,
-      deliveredAt: true,
       deactivatedAt: true,
+      deliveryAttempts: true,
     },
   })
   if (!tarjeta) throw new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio.', 404)
@@ -421,7 +478,10 @@ export async function getGiftCardDetail(
       })
     : []
   const nombresStaff = new Map(staff.map(s => [s.id, nombreDe(s)]))
-  const clientes = await nombresDeClientes(venueId, [tarjeta.customerId])
+  const [clientes, deSaldo] = await Promise.all([
+    nombresDeClientes(venueId, [tarjeta.customerId]),
+    sobresDeSaldoAFavorEntre(prisma, venueId, [tarjeta.id]),
+  ])
   const vivo = tarjeta.status === GiftCardStatus.ACTIVE || tarjeta.status === GiftCardStatus.BLOCKED
   // Decisión 1 del coordinador: la misma regla que `iniciarCancelacionDeVenta` (B2), leída sin candados.
   const cancel: CancelacionDeVenta = tarjeta.orderItem ? await estadoDeCancelacionDeVenta(venueId, tarjeta.orderItem.orderId) : SIN_VENTA
@@ -442,20 +502,28 @@ export async function getGiftCardDetail(
     : null
 
   return {
-    ...aFila(tarjeta, clientes),
+    ...aFila(tarjeta, clientes, deSaldo),
     validityMonths: tarjeta.validityMonths,
     termsVersion: tarjeta.termsVersion,
     message: tarjeta.message,
     recipientPhone: tarjeta.recipientPhone,
     recipientEmail: tarjeta.recipientEmail,
     purchaserContact: tarjeta.purchaserContact,
-    deliveredAt: iso(tarjeta.deliveredAt),
     deactivatedAt: iso(tarjeta.deactivatedAt),
     hasRedeem: usos > 0,
     canReplaceCode: tarjeta.customerId === null && usos === 0 && vivo,
     cancel,
     sale,
     currentBlock,
+    entrega: {
+      channel: tarjeta.deliveryChannel,
+      status: tarjeta.deliveryStatus,
+      deliveredAt: iso(tarjeta.deliveredAt),
+      errorCode: tarjeta.deliveryErrorCode ?? null,
+      error: textoDeFalloDeEntrega(tarjeta.deliveryErrorCode ?? null),
+      destino: enmascararDestino(tarjeta),
+      intentos: tarjeta.deliveryAttempts,
+    },
     activities: {
       items: pagina.map(a => ({
         id: a.id,
@@ -484,17 +552,38 @@ const WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO = {
   giftCard: { activities: { none: { type: 'ACTIVATE' } } },
 } satisfies Prisma.GiftCardActivityWhereInput
 
+/**
+ * S8a (spec 2026-10-30-saldo-a-favor §5.2, TARJETAS punto 5): los ABONOS de saldo a favor, renglón por renglón. El ACTIVATE con
+ * `refundPaymentId` es justo el que hace a un sobre «de saldo a favor» (`esSobreDeSaldoAFavorSql`), así que sacarlo de «vendidas» saca
+ * esos sobres; sus recargas son los ADJUST_INCREMENT con `refundPaymentId` (`abonarSaldoAFavorEnTx`). Un ajuste de gerente nunca lo
+ * lleva (sigue en «ajustes») y los REDEEM_REVERSAL / DEACTIVATE que sí lo llevan no son abonos. Por renglón y no por sobre: así basta el
+ * índice [venueId, createdAt] de siempre, sin EXISTS por movimiento.
+ */
+const WHERE_ABONO_DE_SALDO_A_FAVOR = {
+  type: { in: ['ACTIVATE', 'ADJUST_INCREMENT'] },
+  refundPaymentId: { not: null },
+} satisfies Prisma.GiftCardActivityWhereInput
+
 export async function getGiftCardSummary(venueId: string, r: { from: string; to: string }): Promise<GiftCardSummary> {
   const timezone = await getVenueTimezone(venueId)
   const { from, to } = rangoDelNegocio(r.from, r.to, timezone)
   const ahora = new Date()
   const vivos: Prisma.GiftCardWhereInput = { venueId, status: { in: VIVOS }, balance: { gt: 0 } }
-  const [porTipo, vivo, vencido] = await Promise.all([
+  const periodo = { venueId, createdAt: { gte: from, lte: to } }
+  const [porTipo, abonos, vivo, vencido] = await Promise.all([
     prisma.giftCardActivity.groupBy({
       by: ['type'],
       // M4 (cierre): la desactivación de $0 de un sobre que nunca se activó (la cuenta se canceló sin pagar) no es una tarjeta
       // «cancelada»: nunca se vendió. Las de $0 de una tarjeta que sí se activó (se gastó completa) siguen contando.
-      where: { venueId, createdAt: { gte: from, lte: to }, NOT: WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO },
+      // S8a: los abonos de saldo a favor van en su propia línea (abajo).
+      where: { ...periodo, NOT: [WHERE_DESACTIVACION_DE_SOBRE_NUNCA_COBRADO, WHERE_ABONO_DE_SALDO_A_FAVOR] },
+      _sum: { amount: true },
+      _count: { _all: true },
+      orderBy: { type: 'asc' },
+    }),
+    prisma.giftCardActivity.groupBy({
+      by: ['type'],
+      where: { ...periodo, ...WHERE_ABONO_DE_SALDO_A_FAVOR },
       _sum: { amount: true },
       _count: { _all: true },
       orderBy: { type: 'asc' },
@@ -502,10 +591,13 @@ export async function getGiftCardSummary(venueId: string, r: { from: string; to:
     prisma.giftCard.aggregate({ where: vivos, _sum: { balance: true }, _count: { _all: true } }),
     prisma.giftCard.aggregate({ where: { ...vivos, expiresAt: { lte: ahora } }, _sum: { balance: true } }),
   ])
-  const de = (tipo: GiftCardActivityType) => {
-    const g = porTipo.find(x => x.type === tipo)
+  const lector = (grupos: typeof porTipo) => (tipo: GiftCardActivityType) => {
+    const g = grupos.find(x => x.type === tipo)
     return { n: g?._count?._all ?? 0, monto: pesos(g?._sum?.amount ?? null) }
   }
+  const de = lector(porTipo)
+  const sobresDeSaldo = lector(abonos)('ACTIVATE')
+  const recargasDeSaldo = lector(abonos)('ADJUST_INCREMENT')
   const activadas = de('ACTIVATE')
   const usadas = de('REDEEM')
   const revertidas = de('REDEEM_REVERSAL')
@@ -520,6 +612,11 @@ export async function getGiftCardSummary(venueId: string, r: { from: string; to:
     redeemed: { movements: usadas.n, amount: usadas.monto, reversed: revertidas.monto, net: resta(usadas.monto, revertidas.monto) },
     cancelled: { cards: canceladas.n, amount: canceladas.monto },
     adjustments: { increments: suben.monto, decrements: bajan.monto, net: resta(suben.monto, bajan.monto) },
+    storeCredit: {
+      cards: sobresDeSaldo.n,
+      movements: sobresDeSaldo.n + recargasDeSaldo.n,
+      amount: suma(sobresDeSaldo.monto, recargasDeSaldo.monto),
+    },
     liveBalance: {
       cards: vivo._count._all,
       amount: pesos(vivo._sum.balance),
@@ -591,6 +688,9 @@ const PENDIENTE_SELECT = Prisma.validator<Prisma.PaymentSelect>()({
 })
 
 function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string | null } | null }): PendingAccountingKind {
+  // Saldo a favor (S8b): la devolución abonada al sobre de la clienta regresa la venta a un SALDO, igual que el reverso de un canje (la
+  // misma póliza: devolución contra el saldo que se le debe). No es la cancelación de una venta de tarjetas.
+  if (esDevolucionASaldoAFavor(p)) return 'REVERSO_DE_SALDO'
   const conSaldo = isGiftCardTenderKind(p.tenderType?.systemKind)
   const devolucion = p.type === 'REFUND'
   if (conSaldo) return devolucion ? 'REVERSO_DE_SALDO' : 'COBRO_CON_SALDO'
@@ -599,7 +699,7 @@ function claseDe(p: { type: PaymentType | null; tenderType: { systemKind: string
 
 /** B4: el canje no lleva póliza de ingreso, pero el costo de su mercancía sí entra a la póliza de costo de ventas (`generateCogsPolicyForVenue`). */
 export const AVISO_PENDIENTES_CONTABLES =
-  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente.'
+  'Estos cobros no generan póliza automática: regístralos a mano en la contabilidad. El costo de la mercancía que se pagó con saldo ya está en la póliza de costo de ventas; falta el ingreso del canje y, en la venta de tarjetas, el saldo que se le debe al cliente. En una devolución a saldo a favor falta la devolución de la venta y el saldo que se le debe al cliente.'
 
 /**
  * Los pagos que la contabilidad automática NO postea en la fase 1 (B4): la venta de tarjetas (y su cancelación) y el cobro
@@ -622,7 +722,8 @@ export async function listPendingAccountingReview(venueId: string, q: ListPendin
     AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, ...marcas],
   })
   const where = delPeriodo(WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE)
-  const conSaldo = delPeriodo(WHERE_COBRO_ES_SALDO_DE_REGALO)
+  // S8b: los totales «con saldo» también traen la devolución a saldo a favor (su clase es REVERSO_DE_SALDO, como en `claseDe`).
+  const conSaldo = delPeriodo({ OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, WHERE_DEVOLUCION_A_SALDO_A_FAVOR] })
   const ventaDeTarjetas = delPeriodo({ order: WHERE_ORDEN_DE_TARJETAS }, WHERE_COBRO_NO_ES_SALDO_DE_REGALO)
   const [total, filas, gruposSaldo, gruposVenta] = await Promise.all([
     prisma.payment.count({ where }),

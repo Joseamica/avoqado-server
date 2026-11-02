@@ -42,6 +42,7 @@
  *    Ejecutar:  CONFIRM=EJECUTAR npx tsx scripts/separar-cubre-descanso-zonas.ts
  */
 import { PrismaClient } from '@prisma/client'
+import { borrarDisenoAlCambiarDeNegocio } from '../src/services/customer-display/customerDisplayVenueChange'
 
 const url = process.env.RENDER_DATABASE_URL ?? process.env.DATABASE_URL
 if (!url) {
@@ -229,6 +230,13 @@ async function main() {
     // 🔴 La terminal es lo que decide en qué tienda cae una venta NUEVA. Sin moverla, las
     // ventas futuras de Heavan seguirían contándose en la tienda de José.
     if (terminalHeavan && !terminalYaMovida) {
+      // ya se ejecutó; si se repite, la pantalla del cliente no hereda el diseño de la tienda compartida
+      await borrarDisenoAlCambiarDeNegocio(tx, {
+        terminalId: terminalHeavan.id,
+        toVenueId: norte2Id,
+        reason: 'terminal_moved',
+        staffId: ACTOR_STAFF_ID,
+      })
       await tx.terminal.update({ where: { id: terminalHeavan.id }, data: { venueId: norte2Id } })
       await tx.activityLog.create({
         data: {

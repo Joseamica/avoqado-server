@@ -19,6 +19,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import emailService from '@/services/email.service'
 import { classifyUndeliverable } from '@/utils/undeliverableEmail'
+import { conNegocio } from '@/services/demo/candadoDemo'
 
 export type ApprovalOutboxEvent = 'REQUESTED_STAFF' | 'PENDING_CUSTOMER' | 'APPROVED_CUSTOMER' | 'REJECTED_CUSTOMER'
 export type DeliveryChannel = 'EMAIL' | 'WHATSAPP'
@@ -234,6 +235,8 @@ type ClaimedDelivery = {
     customerId: string
     approvalVersion: number
     payload: Prisma.JsonValue | null
+    /** Para correr el envío con su negocio en el contexto (candado de negocios demo). */
+    venueId?: string
     venue: { name: string; slug: string }
     customer: { firstName: string | null; lastName: string | null }
   }
@@ -336,14 +339,17 @@ export async function deliverClaimed(
       }
 
       const customerName = [d.outbox.customer.firstName, d.outbox.customer.lastName].filter(Boolean).join(' ') || null
-      const ok = await emailService.sendCustomerApprovalEmail(d.outbox.event as ApprovalOutboxEvent, d.recipient, {
-        venueName: d.outbox.venue.name,
-        customerName,
-        bookingUrl: bookingUrlFor(d.outbox.venue.slug),
-        dashboardUrl: dashboardInboxUrlFor(d.outbox.venue.slug),
-        reason: rejectionReasonFromPayload(d.outbox.payload),
-        idempotencyKey: d.providerKey,
-      })
+      // Con el negocio de la fila en el contexto (candado demo, capa 3): un cliente de un negocio demo no recibe correo.
+      const ok = await conNegocio(d.outbox.venueId, () =>
+        emailService.sendCustomerApprovalEmail(d.outbox.event as ApprovalOutboxEvent, d.recipient, {
+          venueName: d.outbox.venue.name,
+          customerName,
+          bookingUrl: bookingUrlFor(d.outbox.venue.slug),
+          dashboardUrl: dashboardInboxUrlFor(d.outbox.venue.slug),
+          reason: rejectionReasonFromPayload(d.outbox.payload),
+          idempotencyKey: d.providerKey,
+        }),
+      )
 
       if (!ok) throw new Error('EMAIL_PROVIDER_REJECTED')
 
@@ -395,6 +401,7 @@ export async function sweepOnce(input: { limit?: number; now?: Date } = {}): Pro
           customerId: true,
           approvalVersion: true,
           payload: true,
+          venueId: true,
           venue: { select: { name: true, slug: true } },
           customer: { select: { firstName: true, lastName: true } },
         },

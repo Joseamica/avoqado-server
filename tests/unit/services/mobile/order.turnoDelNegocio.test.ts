@@ -101,6 +101,57 @@ describe('createOrderWithItems (POS móvil) — cae en el turno del NEGOCIO', ()
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(datosDeLaOrden().shiftId ?? null).toBeNull()
   })
+
+  // 🔴 «Cobrar sin red» (S5, D4): la cola de la terminal manda el turno en que se VENDIÓ; nunca se le estampa uno que no sea el vivo.
+  describe('el turno de la venta (shiftIdDeLaVenta)', () => {
+    it('= el vivo ⇒ como hoy: la orden nace en él', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-A' } as any)
+
+      await createOrderWithItems(VENUE, { ...input, shiftIdDeLaVenta: 'turno-A' })
+
+      expect(datosDeLaOrden().shiftId).toBe('turno-A')
+    })
+
+    it('cerrado y otro abierto ⇒ la orden queda SIN turno: no se mezcla con el nuevo', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-B' } as any)
+
+      await createOrderWithItems(VENUE, { ...input, shiftIdDeLaVenta: 'turno-A' })
+
+      expect(datosDeLaOrden().shiftId).toBeNull()
+    })
+
+    it('cerrado y ninguno abierto ⇒ sin turno', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue(null)
+
+      await createOrderWithItems(VENUE, { ...input, shiftIdDeLaVenta: 'turno-A' })
+
+      expect(datosDeLaOrden().shiftId ?? null).toBeNull()
+    })
+
+    // 🔴 Codex servidor r1 #1: sólo un turno REAL de ESTE negocio saca la orden del vivo; uno inventado o de otro negocio se ignora.
+    it.each(['NO-EXISTE', 'turno-de-otro-negocio'])('%s ⇒ se ignora: la orden nace en el vivo, como hoy', async pedido => {
+      // El vivo es B; por id sólo existe A, y sólo en este negocio.
+      prismaMock.shift.findFirst.mockImplementation((async ({ where }: any) =>
+        typeof where?.id === 'string'
+          ? where.id === 'turno-A' && where.venueId === VENUE
+            ? { id: 'turno-A' }
+            : null
+          : { id: 'turno-B' }) as any)
+
+      await createOrderWithItems(VENUE, { ...input, shiftIdDeLaVenta: pedido })
+
+      expect(datosDeLaOrden().shiftId).toBe('turno-B')
+      expect(prismaMock.shift.findFirst).toHaveBeenCalledWith({ where: { id: pedido, venueId: VENUE }, select: { id: true } })
+    })
+
+    it('sin shiftIdDeLaVenta (o null) ⇒ como hoy: el vivo', async () => {
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-B' } as any)
+
+      await createOrderWithItems(VENUE, { ...input, shiftIdDeLaVenta: null })
+
+      expect(datosDeLaOrden().shiftId).toBe('turno-B')
+    })
+  })
 })
 
 describe('separar cheque — el turno se HEREDA del origen, no se resuelve', () => {

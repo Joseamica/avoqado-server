@@ -27,19 +27,26 @@ async function esperarEnLaFila(n: number) {
   throw new Error(`nunca hubo ${n} escrituras esperando el candado`)
 }
 
-/** Toma la fila del alta y la suelta cuando se le pide; `antesDeSoltar` escribe con la fila tomada. */
+/**
+ * Toma la fila del alta y la suelta cuando se le pide; `antesDeSoltar` escribe con la fila tomada. Hay que esperar
+ * `tomada` ANTES de lanzar las escrituras: si no, en un CI cargado una escritura corría antes del FOR UPDATE, terminaba
+ * sin formarse y `esperarEnLaFila` agotaba su espera (main, 22-oct-2026, tres intentos seguidos).
+ */
 function tomarLaFila(antesDeSoltar?: (tx: any) => Promise<unknown>) {
   let soltar!: () => void
+  let marcarTomada!: () => void
   const suelta = new Promise<void>(r => (soltar = r))
+  const tomada = new Promise<void>(r => (marcarTomada = r))
   const listo = prisma.$transaction(
     async tx => {
       await tx.$queryRaw`SELECT id FROM "OnboardingProgress" WHERE "organizationId" = ${organizationId} FOR UPDATE`
+      marcarTomada()
       await suelta
       if (antesDeSoltar) await antesDeSoltar(tx)
     },
     { timeout: 20_000 },
   )
-  return { soltar, listo }
+  return { soltar, listo, tomada: Promise.race([tomada, listo.then(() => {})]) }
 }
 
 const leer = () => prisma.onboardingProgress.findUniqueOrThrow({ where: { organizationId } })
@@ -75,6 +82,7 @@ afterAll(async () => {
 describe('el formulario del alta no se pisa entre pestañas', () => {
   it('🔴 dos pestañas guardan pasos distintos al mismo tiempo: los dos sobreviven, y los dos quedan como hechos', async () => {
     const fila = tomarLaFila()
+    await fila.tomada
     const pestanaA = saveV2StepData(organizationId, 3, { businessType: 'CAFE' })
     const pestanaB = saveV2StepData(organizationId, 4, { entityType: 'PERSONA_FISICA' })
     await esperarEnLaFila(2)
@@ -94,6 +102,7 @@ describe('el formulario del alta no se pisa entre pestañas', () => {
     const plan = { tier: 'PRO', interval: 'monthly', payNow: false, acceptedAt: '2026-10-20T10:00:00.000Z' }
     // El cierre del plan escribe con la fila tomada; el guardado del paso ya está formado detrás.
     const fila = tomarLaFila(tx => fusionarV2SetupData(tx, organizationId, { plan }))
+    await fila.tomada
     const pestana = saveV2StepData(organizationId, 5, { rfc: 'XAXX010101000' })
     await esperarEnLaFila(1)
     fila.soltar()

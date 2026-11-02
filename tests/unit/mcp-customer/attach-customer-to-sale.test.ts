@@ -10,10 +10,12 @@ const mockAttach = jest.fn()
 const mockPreview = jest.fn()
 const mockAudit = jest.fn()
 const mockOrderFindMany = jest.fn()
+const mockOrderFindFirst = jest.fn()
 const mockPaymentFindFirst = jest.fn()
 const mockCustomerFindFirst = jest.fn()
 const mockVenueFindUnique = jest.fn()
 const mockRequirePermission = jest.fn()
+const mockActor = jest.fn()
 
 jest.mock('@/services/mobile/order.mobile.service', () => ({ attachCustomerToOrder: (...a: unknown[]) => mockAttach(...a) }))
 jest.mock('@/services/shared/loyaltyOnLateCustomer', () => ({ previewSaleStamp: (...a: unknown[]) => mockPreview(...a) }))
@@ -25,12 +27,13 @@ jest.mock('@/mcp/guard', () => ({
       return { venueId: { in: [v] } }
     },
     requirePermission: (...a: unknown[]) => mockRequirePermission(...a),
+    customerAttributionActor: () => mockActor(),
   }),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    order: { findMany: (...a: unknown[]) => mockOrderFindMany(...a) },
+    order: { findMany: (...a: unknown[]) => mockOrderFindMany(...a), findFirst: (...a: unknown[]) => mockOrderFindFirst(...a) },
     payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...a) },
     customer: { findFirst: (...a: unknown[]) => mockCustomerFindFirst(...a) },
     venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...a) },
@@ -66,6 +69,8 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockOrderFindMany.mockResolvedValue([VENTA])
+  mockOrderFindFirst.mockResolvedValue({ customerId: null, orderCustomers: [] })
+  mockActor.mockReturnValue({ staffId: 's1', canAssignHistorical: true, canAttachAtReceipt: true })
   mockCustomerFindFirst.mockResolvedValue(DANY)
   mockPreview.mockResolvedValue(VISTA_SI)
   mockAttach.mockResolvedValue({ id: 'order-1', loyalty: SELLO })
@@ -169,7 +174,8 @@ describe('attach_customer_to_sale', () => {
   it('🔴 sin confirm: vista previa «Venta X · cliente Y · ¿suma sello? sí/no (por qué)» y NO escribe', async () => {
     const out = parse(await call({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1' }))
     expect(out.requiresConfirmation).toBe(true)
-    expect(out.message).toMatch(/^Venta ORD-1790121567183 · cliente Dany · ¿suma sello\? sí \(/)
+    expect(out.preview.cambioCliente).toBe('Sin cliente → Dany')
+    expect(out.preview.sumaSello).toBe('sí')
     expect(out.confirmationArgs).toEqual({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1', confirm: true })
     expect(mockAttach).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()
@@ -183,6 +189,8 @@ describe('attach_customer_to_sale', () => {
     [{ decision: 'STAMPED' }, /no \(esta venta ya le sumó su sello a este cliente/],
     // Cierre de tarjetas 1a (punto 15): comprar tarjetas de regalo no suma sellos; la vista previa no promete uno.
     [{ decision: 'NOT_APPLICABLE' }, /no \(es una venta de tarjetas de regalo/],
+    // Cambio de producto: la venta nueva de un cambio no es una visita nueva; la diferencia cobrada sí da puntos.
+    [{ decision: 'NOT_APPLICABLE', esVentaNuevaDeCambio: true }, /no \(es la venta nueva de un cambio/],
     [{ decision: 'ELIGIBLE', dailyLimitReached: true }, /no \(ya recibió su sello de hoy/],
     [{ decision: 'ELIGIBLE', stampsEnabled: false }, /no \(el negocio no tiene activa la tarjeta de sellos/],
   ])('vista previa explica por qué no suma: %p', async (over, patron) => {
@@ -199,7 +207,13 @@ describe('attach_customer_to_sale', () => {
 
   it('confirm:true: liga por el MISMO servicio con el staff conectado y audita', async () => {
     const out = parse(await call({ venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1', confirm: true }))
-    expect(mockAttach).toHaveBeenCalledWith('v1', 'order-1', 'cust-1', 's1')
+    expect(mockAttach).toHaveBeenCalledWith(
+      'v1',
+      'order-1',
+      'cust-1',
+      's1',
+      expect.objectContaining({ actor: expect.objectContaining({ staffId: 's1' }), historicalOnly: false }),
+    )
     expect(out).toMatchObject({ ok: true, venta: VENTA.orderNumber, cliente: 'Dany', loyalty: SELLO })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({
       action: 'CUSTOMER_ATTACHED_TO_SALE',
@@ -241,6 +255,42 @@ describe('attach_customer_to_sale', () => {
       expect(mockAttach).toHaveBeenCalledTimes(1)
     } finally {
       await c.close()
+    }
+  })
+})
+
+describe('assign_customer_to_paid_sale — historial, sólo catálogo libre', () => {
+  const historical = (args: Record<string, unknown>) => handlers.get('assign_customer_to_paid_sale')!(args, {})
+  const input = { venueId: 'v1', orderNumber: VENTA.orderNumber, customerId: 'cust-1' }
+
+  it('exige permiso histórico y confirmación vigente antes de escribir', async () => {
+    const preview = parse(await historical(input))
+    expect(mockRequirePermission).toHaveBeenCalledWith('orders:attach-customer', 'v1')
+    expect(preview).toMatchObject({ requiresConfirmation: true, preview: { cambioCliente: 'Sin cliente → Dany' } })
+    expect(mockAttach).not.toHaveBeenCalled()
+    await historical({ ...input, confirm: true })
+    expect(mockAttach).toHaveBeenCalledWith('v1', VENTA.id, 'cust-1', 's1', expect.objectContaining({ historicalOnly: true }))
+  })
+
+  it('la excepción del recibo del cajero no da acceso a la herramienta histórica', async () => {
+    mockActor.mockReturnValue({ staffId: 's1', canAssignHistorical: false, canAttachAtReceipt: true })
+    await expect(historical({ ...input, confirm: true })).rejects.toMatchObject({ statusCode: 403 })
+    expect(mockAttach).not.toHaveBeenCalled()
+  })
+
+  it('si ya hay otro cliente, no inventa una vista previa de venta anónima', async () => {
+    mockOrderFindFirst.mockResolvedValue({ customerId: null, orderCustomers: [{ customerId: 'other' }] })
+    expect(parse(await historical(input))).toMatchObject({ ok: false, error: expect.stringContaining('no se puede reemplazar') })
+    expect(mockAttach).not.toHaveBeenCalled()
+  })
+
+  it('el catálogo firma el nuevo nombre y confirma exactamente el mismo cambio', async () => {
+    const client = await conectarPorElCatalogo(server => registerLateStampTools(server, scope), scope)
+    try {
+      await pasoUnoYDos(client, 'assign_customer_to_paid_sale', input)
+      expect(mockAttach).toHaveBeenCalledTimes(1)
+    } finally {
+      await client.close()
     }
   })
 })

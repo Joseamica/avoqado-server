@@ -1,9 +1,11 @@
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
 import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
+import { WHERE_PAYMENT_IS_EXCHANGE_CREDIT, esVentaNuevaDeCambio } from '../exchanges/exchangeMarks'
 
 /**
  * Lealtad al quedar PAGADA una orden: métricas de visita y puntos/sellos.
@@ -108,6 +110,52 @@ function nombre(c: { firstName: string | null; lastName: string | null } | null 
   return `${c?.firstName || ''} ${c?.lastName || ''}`.trim()
 }
 
+/** Lo que la venta premia con puntos y sello. */
+interface PremioDeLaVenta {
+  /** El total de la venta sin propina, el de siempre. */
+  orderTotal: number
+  /** Sobre cuánto se calculan los puntos. */
+  base: number
+  /** La venta nueva de un cambio: puntos sí, sello no. */
+  sinSello: boolean
+}
+
+/**
+ * Cambio de producto (spec 2026-10-20 §7.7): la venta nueva de un cambio NO da sello —no es una visita nueva, aunque se haya
+ * llevado algo sin regresar nada— y sus puntos salen sólo de lo cobrado de más: lo pagado con «Crédito de cambio» ya dio puntos
+ * en la venta original. El sello lo decide SER la venta nueva de un cambio (`Exchange.newOrderId`), no el importe del crédito.
+ * Una venta sin crédito que no es de un cambio sale igual que siempre (la base es `orderTotal`). Dos lecturas por índice.
+ */
+async function premioDeLaVenta(venueId: string, orderId: string, orderTotal: number): Promise<PremioDeLaVenta> {
+  const [credito, sinSello] = await Promise.all([
+    prisma.payment.aggregate({
+      // Los cobros capturados con el crédito, sin reembolsos (`type` admite NULL: el `not` pelón la dejaría fuera).
+      where: {
+        orderId,
+        venueId,
+        status: 'COMPLETED',
+        AND: [{ OR: [{ type: null }, { type: { not: 'REFUND' } }] }, WHERE_PAYMENT_IS_EXCHANGE_CREDIT],
+      },
+      _sum: { amount: true },
+    }),
+    esVentaNuevaDeCambio(prisma, orderId),
+  ])
+  const pagadoConCredito = credito._sum.amount ?? new Prisma.Decimal(0)
+  if (pagadoConCredito.lte(0)) return { orderTotal, base: orderTotal, sinSello }
+  // En Decimal: los pesos con centavos no se redondean de más ni de menos al restar.
+  return { orderTotal, base: Prisma.Decimal.max(0, new Prisma.Decimal(orderTotal).minus(pagadoConCredito)).toNumber(), sinSello }
+}
+
+/**
+ * La visita y el gasto de un cliente por esta venta. Una venta de siempre, igual que hoy. La venta nueva de un cambio no es una
+ * visita nueva: sólo suma al gasto lo cobrado de más, y nada si no cobró nada.
+ */
+async function actualizarMetricas(customerId: string, premio: PremioDeLaVenta, orderId: string, venueId: string): Promise<void> {
+  if (!premio.sinSello) return updateCustomerMetrics(customerId, premio.orderTotal, orderId, venueId)
+  if (premio.base <= 0) return
+  return updateCustomerMetrics(customerId, premio.base, orderId, venueId, { skipVisit: true })
+}
+
 export async function awardLoyaltyForPaidOrder(
   args: AwardLoyaltyForPaidOrderArgs,
   opciones: OpcionesDeLealtad = {},
@@ -162,10 +210,12 @@ export async function awardLoyaltyForPaidOrder(
         ahora: resuelto,
       })
     } else if (orderCustomers.length > 0) {
+      // Si esta lectura truena, la venta queda pendiente (el reconciliador la reintenta) en vez de premiar el total.
+      const premio = await premioDeLaVenta(venueId, orderId, orderTotal)
       // La visita (métricas) de UN cliente de la venta; un fallo no le quita el sello a nadie.
       const medirVisita = async (oc: (typeof orderCustomers)[number]) => {
         try {
-          await updateCustomerMetrics(oc.customerId, orderTotal, orderId, venueId)
+          await actualizarMetricas(oc.customerId, premio, orderId, venueId)
           logger.info('📊 Customer metrics updated', {
             orderId,
             customerId: oc.customerId,
@@ -184,7 +234,7 @@ export async function awardLoyaltyForPaidOrder(
       // Puntos y sello SÓLO al primario (el primero que se agregó a la cuenta) — y, con beneficiario fijado, sólo a ése.
       const acreditarSiEsPrimario = async (oc: (typeof orderCustomers)[number]) => {
         if (!oc.isPrimary || (fijado && oc.customerId !== opciones.beneficiario)) return
-        const r = await acreditar(venueId, oc.customerId, nombre(oc.customer), orderTotal, orderId, staffVenueId, 'PRIMARY customer')
+        const r = await acreditar(venueId, oc.customerId, nombre(oc.customer), premio, orderId, staffVenueId, 'PRIMARY customer')
         if (r.estado === 'FALLO') errors.push(`loyalty:${oc.customerId}`)
         if (r.estado === 'OTRO_CLIENTE') otroCliente = true
         if (r.otorgado) otorgado = r.otorgado
@@ -204,9 +254,10 @@ export async function awardLoyaltyForPaidOrder(
       }
     } else if (args.legacyCustomer?.id) {
       const legacy = args.legacyCustomer
+      const premio = await premioDeLaVenta(venueId, orderId, orderTotal)
       const medirVisitaHeredada = async () => {
         try {
-          await updateCustomerMetrics(legacy.id, orderTotal, orderId, venueId)
+          await actualizarMetricas(legacy.id, premio, orderId, venueId)
         } catch (metricsError: any) {
           errors.push(`metrics:${legacy.id}:${metricsError?.message ?? String(metricsError)}`)
           logger.error('⚠️ Failed to update customer metrics (continuing)', {
@@ -217,7 +268,7 @@ export async function awardLoyaltyForPaidOrder(
         }
       }
       const acreditarHeredado = async () => {
-        const r = await acreditar(venueId, legacy.id, nombre(legacy), orderTotal, orderId, staffVenueId, 'legacy single customer')
+        const r = await acreditar(venueId, legacy.id, nombre(legacy), premio, orderId, staffVenueId, 'legacy single customer')
         if (r.estado === 'FALLO') errors.push(`loyalty:${legacy.id}`)
         if (r.estado === 'OTRO_CLIENTE') otroCliente = true
         if (r.otorgado) otorgado = r.otorgado
@@ -282,13 +333,20 @@ async function acreditar(
   venueId: string,
   customerId: string,
   customerName: string,
-  orderTotal: number,
+  premio: PremioDeLaVenta,
   orderId: string,
   staffVenueId: string | undefined,
   quien: string,
 ): Promise<{ estado: 'ACREDITADO' | 'FALLO' | 'OTRO_CLIENTE'; otorgado?: { sello: boolean; puntos: boolean } }> {
+  if (premio.sinSello && premio.base <= 0) {
+    // Cambio parejo o con devolución: nada cobrado de más y sin sello. No es un fallo: no hay nada que dar.
+    logger.info(`⏭️ Lealtad omitida (${quien}): la venta nueva de un cambio no cobró nada de más`, { orderId, customerId })
+    return { estado: 'ACREDITADO' }
+  }
   try {
-    const loyaltyResult = await earnPoints(venueId, customerId, orderTotal, orderId, staffVenueId)
+    const loyaltyResult = premio.sinSello
+      ? await earnPoints(venueId, customerId, premio.base, orderId, staffVenueId, { skipStamp: true })
+      : await earnPoints(venueId, customerId, premio.base, orderId, staffVenueId)
     if (loyaltyResult.otroCliente) {
       logger.warn(`⚠️ Loyalty not credited (${quien}): another customer already earned this order`, { orderId, customerId })
       // 🔴 R4-1 (ronda 4): en la carrera H4 esta llamada pudo SELLAR antes de ver que otro cliente ya tenía los puntos. Es un
@@ -299,7 +357,8 @@ async function acreditar(
       orderId,
       customerId,
       customerName,
-      orderTotal,
+      orderTotal: premio.orderTotal,
+      base: premio.base,
       pointsEarned: loyaltyResult.pointsEarned,
       newBalance: loyaltyResult.newBalance,
     })

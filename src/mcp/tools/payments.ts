@@ -12,12 +12,16 @@ import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashbo
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
+import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
+import { chainRefundSemanticsInTx } from '@/services/exchanges/exchangeTx'
 import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import AppError from '@/errors/AppError'
+import { assertCardRefundGoesThroughOnlineOrders } from '@/services/online-ordering/card/guards'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
+import { getCashPaymentByKey } from '@/services/mobile/order.mobile.service'
 
 // Maps the tool's friendly reasons to the service's RefundReason values.
 const REFUND_REASON_MAP: Record<string, RefundReason> = {
@@ -200,6 +204,45 @@ export function costoPendienteDe(processorData: unknown): boolean {
 
 export function registerPaymentTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'get_cash_payment_by_key',
+    'Read the recorded cash payment for an exact payment reference in a venue you can access. Returns null when no completed eligible payment is found. Amounts and current remaining balance are in pesos. This lookup does not collect money or create a receipt.',
+    {
+      venueId: z.string().describe('Venue whose payment to read (must be in your scope)'),
+      idempotencyKey: z
+        .string({ invalid_type_error: 'El folio del cobro debe ser un texto' })
+        .min(1, 'El folio del cobro es requerido')
+        .max(64, 'El folio del cobro admite hasta 64 caracteres')
+        .describe('Exact original payment reference'),
+    },
+    async ({ venueId, idempotencyKey }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:read', venueId)
+      const proof = await getCashPaymentByKey(venueId, idempotencyKey)
+      if (!proof) return text({ ok: true, payment: null })
+      const { amountCents, tipCents, cashRetainedCents, remainingBalanceCents, deliveryCashAllocation, ...identity } = proof
+      return text({
+        ok: true,
+        payment: {
+          ...identity,
+          amount: amountCents / 100,
+          tipAmount: tipCents / 100,
+          cashRetained: cashRetainedCents / 100,
+          remainingBalance: remainingBalanceCents / 100,
+          ...(deliveryCashAllocation
+            ? {
+                deliveryCashAllocation: {
+                  sale: deliveryCashAllocation.saleCents / 100,
+                  tip: deliveryCashAllocation.tipCents / 100,
+                  thirdParty: deliveryCashAllocation.thirdPartyCents / 100,
+                },
+              }
+            : {}),
+        },
+      })
+    },
+  )
 
   server.tool(
     'list_payments',
@@ -486,6 +529,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           status: true,
           type: true,
           createdAt: true,
+          orderId: true,
+          processorId: true,
           order: { select: { orderNumber: true } },
           tenderType: { select: { systemKind: true } },
         },
@@ -514,7 +559,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
-          error: 'Lo pagado con tarjeta de regalo sólo regresa al saldo de la tarjeta; quita refundMethod para devolverlo al saldo.',
+          error:
+            'Lo pagado con saldo (tarjeta de regalo o saldo a favor) sólo regresa a ese mismo saldo; quita refundMethod para devolverlo ahí.',
         })
       }
       // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).
@@ -525,48 +571,61 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       ) {
         return text({ ok: false, error: 'Este cobro sólo se devuelve por el mismo medio con que se pagó.' })
       }
-      const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
-      if (amount > originalTotal) {
-        return text({ ok: false, error: `El reembolso ($${amount}) excede el total original del pago ($${originalTotal}).` })
-      }
-
-      // 🔴 Desde 2026-08-16 el reembolso en efectivo RESTA del cajón del local
-      // (`postCashRefundToDrawer`). Quien opera por MCP no está frente a esa caja, así
-      // que la vista previa tiene que decirlo: está autorizando que alguien saque
-      // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
-      // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
-      const saleDeCajonDeEfectivo = refundMethod ? refundMethod === 'CASH' : paymentCountsAsDrawerCash(payment)
-
-      if (!confirm) {
-        return text({
-          ok: false,
-          requiresConfirmation: true,
-          preview: {
-            payment: {
-              id: paymentId,
-              orderNumber: payment.order?.orderNumber ?? null,
-              method: payment.method,
-              originalTotal,
-              paidAt: payment.createdAt.toISOString(),
-            },
-            refundAmount: amount,
-            reason: REFUND_REASON_MAP[reason],
-            note: note ?? null,
-            saleDeCajonDeEfectivo,
-            refundMethod: refundMethod ?? null,
-            ...(esSaldoDeRegalo ? { regresaAlSaldoDeRegalo: true } : {}),
-          },
-          message:
-            `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
-            (saleDeCajonDeEfectivo
-              ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
-              : '') +
-            ' Vuelve a llamar con confirm:true para ejecutar.' +
-            (esSaldoDeRegalo ? ' Regresa al saldo de la tarjeta de regalo del cliente.' : ''),
-        })
-      }
-
       try {
+        // Pedidos en línea fase 2 (F3): el cobro de Stripe de un pedido con tarjeta se devuelve a la tarjeta con su herramienta;
+        // se dice desde la vista previa (el servicio lo vuelve a revisar bajo su candado).
+        if (payment.orderId && payment.processorId) {
+          await assertCardRefundGoesThroughOnlineOrders(prisma, {
+            venueId,
+            paymentId,
+            payment: { orderId: payment.orderId, processorId: payment.processorId },
+          })
+        }
+        const chain = isExchangeCreditTenderKind(cobroParaDevolver.tenderSystemKind)
+          ? await chainRefundSemanticsInTx(prisma, venueId, paymentId)
+          : null
+        if (chain?.kind === 'BLOCKED') throw chain.error
+        const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
+        if (amount > originalTotal) {
+          return text({ ok: false, error: `El reembolso ($${amount}) excede el total original del pago ($${originalTotal}).` })
+        }
+
+        // 🔴 Desde 2026-08-16 el reembolso en efectivo RESTA del cajón del local
+        // (`postCashRefundToDrawer`). Quien opera por MCP no está frente a esa caja, así
+        // que la vista previa tiene que decirlo: está autorizando que alguien saque
+        // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
+        // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
+        const saleDeCajonDeEfectivo = refundMethod ? refundMethod === 'CASH' : paymentCountsAsDrawerCash(chain?.money ?? payment)
+
+        if (!confirm) {
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview: {
+              payment: {
+                id: paymentId,
+                orderNumber: payment.order?.orderNumber ?? null,
+                method: payment.method,
+                originalTotal,
+                paidAt: payment.createdAt.toISOString(),
+              },
+              refundAmount: amount,
+              reason: REFUND_REASON_MAP[reason],
+              note: note ?? null,
+              saleDeCajonDeEfectivo,
+              refundMethod: chain?.money.method ?? refundMethod ?? null,
+              ...(esSaldoDeRegalo ? { regresaAlSaldoDeRegalo: true } : {}),
+            },
+            message:
+              `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
+              (saleDeCajonDeEfectivo
+                ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
+                : '') +
+              ' Vuelve a llamar con confirm:true para ejecutar.' +
+              (esSaldoDeRegalo ? ' Regresa al saldo de donde se pagó (tarjeta de regalo o saldo a favor del cliente).' : ''),
+          })
+        }
+
         const result = await issueRefund({
           venueId,
           paymentId,
@@ -600,6 +659,16 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           },
         })
       } catch (err) {
+        if (err instanceof AppError && err.code === 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS') {
+          return text({
+            ok: false,
+            code: err.code,
+            error:
+              "Este cobro es de un pedido en línea pagado con tarjeta al pedir: no se reembolsa por aquí. Usa la herramienta 'online_order_card_refund' con el orderId del pedido, que regresa el dinero a la tarjeta del cliente.",
+            useInstead: 'online_order_card_refund',
+            ...(payment.orderId ? { orderId: payment.orderId } : {}),
+          })
+        }
         // Tarjetas de regalo (B1 r1): el `code` y los `details` de un rechazo de negocio viajan al agente, para que distinga
         // `GIFT_CARD_CANCEL_NOT_STARTED` de `SOBRE_DESACTIVADO` (y cualquier otro AppError) sin leer el texto.
         return text({

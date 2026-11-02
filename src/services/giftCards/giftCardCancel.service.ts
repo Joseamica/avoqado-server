@@ -187,20 +187,23 @@ async function ventaPagada(tx: Tx, venueId: string, orderId: string): Promise<bo
 
 export async function bloquearSobresDelReembolsoEnTx(
   tx: Tx,
-  p: { venueId: string; originalPaymentId: string; original?: CobroOriginalDeTarjetas },
+  p: { venueId: string; originalPaymentId: string | string[]; original?: CobroOriginalDeTarjetas },
 ): Promise<void> {
-  // El cobro original tiene que existir (el llamador lo leyó bajo su candado, o se lee aquí); si no, nada que bloquear.
-  const original = p.original ?? (await leerCobroOriginal(tx, p.venueId, p.originalPaymentId))
-  if (!original) return
-  let ids: string[] = []
-  // r1 (fix 2): aquí sólo se BLOQUEA. Un sobre DEACTIVATED entre los del canje NO se rechaza: quién recibe saldo depende del monto, y
-  // eso lo decide `revertirCanjeEnTx` (nota 1) dentro de esta MISMA transacción, que se revierte entera si rechaza. Rechazar aquí
-  // por cualquier sobre muerto —aunque ya se le hubiera devuelto todo— atrapaba la parte que le toca a uno vivo del mismo cobro.
-  if (isGiftCardTenderKind(original.tenderSystemKind)) ids = await sobresDelCanje(tx, p.venueId, p.originalPaymentId)
-  else if (await leerSiEsCuentaDeTarjetas(tx, original.orderId)) {
-    // E4 (excepción escrita): la venta PAGADA se comprueba ANTES de cualquier candado de sobre.
-    if (!(await ventaPagada(tx, p.venueId, original.orderId))) return
-    ids = await sobresDeLaCuenta(tx, original.orderId)
+  const ids: string[] = []
+  // La unión precede al primer candado: ordenar por separado los sobres de cada cobro permite A→B contra B→A.
+  for (const paymentId of typeof p.originalPaymentId === 'string' ? [p.originalPaymentId] : p.originalPaymentId) {
+    // El cobro original tiene que existir (el llamador lo leyó bajo su candado, o se lee aquí); si no, nada que bloquear.
+    const original = p.original ?? (await leerCobroOriginal(tx, p.venueId, paymentId))
+    if (!original) continue
+    // r1 (fix 2): aquí sólo se BLOQUEA. Un sobre DEACTIVATED entre los del canje NO se rechaza: quién recibe saldo depende del monto, y
+    // eso lo decide `revertirCanjeEnTx` (nota 1) dentro de esta MISMA transacción, que se revierte entera si rechaza. Rechazar aquí
+    // por cualquier sobre muerto —aunque ya se le hubiera devuelto todo— atrapaba la parte que le toca a uno vivo del mismo cobro.
+    if (isGiftCardTenderKind(original.tenderSystemKind)) ids.push(...(await sobresDelCanje(tx, p.venueId, paymentId)))
+    else if (await leerSiEsCuentaDeTarjetas(tx, original.orderId)) {
+      // E4 (excepción escrita): la venta PAGADA se comprueba ANTES de cualquier candado de sobre.
+      if (!(await ventaPagada(tx, p.venueId, original.orderId))) continue
+      ids.push(...(await sobresDeLaCuenta(tx, original.orderId)))
+    }
   }
   if (ids.length > 0) await lockGiftCardsForUpdate(tx, ids)
 }

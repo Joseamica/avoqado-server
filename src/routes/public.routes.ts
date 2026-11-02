@@ -1,6 +1,7 @@
 import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
-import express, { Router } from 'express'
+import express, { ErrorRequestHandler, Router } from 'express'
+import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
 import { z } from 'zod'
 import cors from 'cors'
 import crypto from 'crypto'
@@ -22,7 +23,14 @@ import * as paymentLinkPublicController from '../controllers/public/paymentLink.
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import * as walletPassController from '../controllers/public/walletPass.public.controller'
 import * as walletStampsController from '../controllers/public/walletStamps.public.controller'
-import { submitContact, submitLabsBrief, continuarOnboarding } from '../controllers/public/landing.public.controller'
+import * as giftCardPublicController from '../controllers/public/giftCard.public.controller'
+import {
+  submitContact,
+  submitLabsBrief,
+  continuarOnboarding,
+  verificarAlta,
+  reenviarAlta,
+} from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
@@ -30,6 +38,14 @@ import * as customerEmailController from '../controllers/public/customerEmail.pu
 import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
+import {
+  limiteContactoPorCorreo,
+  limiteContactoPorIp,
+  limiteEnviosDeCodigoEnContacto,
+  contrasenaValidaEnAlta,
+  limiteIntentosDeCodigoEnAlta,
+  limiteDiarioDeIntentosDeCodigoEnAlta,
+} from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
@@ -90,10 +106,61 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.service'
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
+import { getPriceList, postPriceSelection } from '../controllers/public/priceList.public.controller'
 import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
+import { negocioPorLigaDePago, negocioPorReciboDigital, negocioPorSlug } from '../middlewares/negocioDeRutaPublica.middleware'
 
 const router = Router()
+
+// El negocio de cada ruta pública entra al contexto en cuanto la URL lo identifica (logs y candado de negocios demo).
+router.param('venueSlug', negocioPorSlug)
+router.param('shortCode', negocioPorLigaDePago)
+router.param('accessKey', negocioPorReciboDigital)
 router.use('/document-requests', documentRequestsRoutes)
+
+// ── Tarjetas de regalo: la página pública del regalo (1b S6) ───────────────────────────────────────────────────────────
+// 🔴 VA ANTES DEL COMODÍN DE ABAJO, a propósito (K-2). `cors({ origin: '*' })` contesta los OPTIONS de TODO el router y le
+// pondría `*` a esta ruta, que enseña el código de la tarjeta. Aquí el GET termina la respuesta antes de llegar al comodín, y
+// el OPTIONS lo resuelve su propio `cors` (204) sin pasar por el límite: el preflight no cuenta.
+// 🔴 El límite lleva su propia llave: `porVisitante` es un `const` de más abajo y usarlo aquí revienta al cargar (B-S6 1).
+// Nombres de Cloudflare Pages medidos el 21-oct (dig y la página que sirven: «Pago seguro — Avoqado»): `avoqado-checkout` y
+// `avoqado-checkout-staging`, sin sufijo. `*.pages.dev` es un espacio GLOBAL (el panel quedó en `-4wx`, ver `corsOptions.ts`):
+// si un proyecto cambia de nombre, se vuelve a medir antes de tocar esto.
+export const ORIGENES_DE_LA_PAGINA_DEL_REGALO: Array<string | RegExp> = [
+  'https://pay.avoqado.io',
+  /^https:\/\/[a-z0-9-]+\.avoqado-checkout\.pages\.dev$/,
+  /^https:\/\/[a-z0-9-]+\.avoqado-checkout-staging\.pages\.dev$/,
+  'http://localhost:5174',
+]
+const corsDeLaPaginaDelRegalo = cors({ origin: ORIGENES_DE_LA_PAGINA_DEL_REGALO, methods: ['GET', 'OPTIONS'], credentials: false })
+const regaloLimit = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  keyGenerator: req => ipDelCliente(req) || 'desconocida',
+  standardHeaders: true,
+  legacyHeaders: false,
+  // El 429 también en el sobre JSON de la API y en español (el texto por omisión es inglés y plano).
+  message: {
+    success: false,
+    code: 'RATE_LIMIT_EXCEEDED',
+    message: 'Demasiadas consultas seguidas. Espera un minuto e inténtalo de nuevo.',
+  },
+})
+router.options('/gift-cards/:pageToken', corsDeLaPaginaDelRegalo)
+router.get('/gift-cards/:pageToken', corsDeLaPaginaDelRegalo, regaloLimit, giftCardPublicController.getPaginaDelRegalo)
+// 🔴 S6 m2: un token con un `%` suelto (`…/<token>%`) no se puede decodificar. Express 4 lanza `URIError` («Failed to decode
+// param '<token>%'», `status` 400) al CASAR estas dos rutas, antes de su CORS, su límite y su controller, y el manejador global
+// lo escribiría —con el token en el mensaje— a nivel `error` y contestaría 500. Aquí se contesta como cualquier token mal
+// formado (S-11), con sus encabezados y su CORS propio, y sin log: el mensaje no se escribe en ningún lado y la URL ya sale
+// tapada en el log de peticiones. Sólo ESE error: cualquier otro (el del controller, p. ej.) sigue al manejador global.
+const tokenQueNoSeDecodifica: ErrorRequestHandler = (err, req, res, next) => {
+  if (!(err instanceof URIError) || (err as { status?: number }).status !== 400) return next(err)
+  res.set({ 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' })
+  corsDeLaPaginaDelRegalo(req, res, errDelCors =>
+    errDelCors ? next(errDelCors) : res.json({ success: true, data: { disponible: false } }),
+  )
+}
+router.use('/gift-cards', tokenQueNoSeDecodifica)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
@@ -116,6 +183,8 @@ const offerReadLimit = rateLimit({ windowMs: 60_000, max: 600, standardHeaders: 
 
 router.get('/feature-catalog', offerReadLimit, validateRequest(z.object({ query: featureCatalogQuery })), getFeatureCatalog)
 router.get('/hybrid-offers', offerReadLimit, publicHybridOffers)
+// /presentacion/precios del DASHBOARD: precios de lista vivos del SUPERADMIN (spec 2026-10-26-presentacion-de-precios).
+router.get('/price-list', offerReadLimit, getPriceList)
 router.get('/hybrid-offers/:slug', offerReadLimit, publicHybridOffer)
 
 // CFDI stamping costs money — tight per-IP cap to prevent abuse
@@ -585,7 +654,58 @@ router.get(
   getFeaturedLaunchOffer,
 )
 
-router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)
+// `/contact` cuenta por CORREO (la landing llama desde su servidor: todos comparten IP), con un techo
+// holgado por IP, y —sólo con ALTA_LANDING_CON_CODIGO prendido— cuenta como un envío de código, igual
+// que `/onboarding/resend-verification` (mismo contador).
+router.post(
+  '/contact',
+  limiteContactoPorIp,
+  limiteContactoPorCorreo,
+  limiteEnviosDeCodigoEnContacto,
+  validateRequest(contactSchema),
+  submitContact,
+)
+
+// El prospecto manda los módulos que eligió en /presentacion/precios: un correo interno a onboarding, nunca a él.
+const priceSelectionSchema = z.object({
+  body: z
+    .object({
+      nombre: z.string().trim().max(80, 'El nombre es muy largo').optional(),
+      telefono: z
+        .string()
+        .trim()
+        .max(20, 'El teléfono es muy largo')
+        .regex(/^[0-9+\s()-]*$/, 'Teléfono inválido')
+        .optional(),
+      ids: z
+        .array(z.string().max(64), { invalid_type_error: 'Elige al menos un módulo' })
+        .min(1, 'Elige al menos un módulo')
+        .max(50, 'Son demasiados módulos'),
+      pageUri: paginaSchema,
+    })
+    .refine(body => !!body.nombre || !!body.telefono, { message: 'Escribe tu nombre o tu teléfono', path: ['nombre'] }),
+})
+router.post('/price-list/selection', writeLimit, validateRequest(priceSelectionSchema), postPriceSelection)
+
+// ---- Alta con código (landing): verificar el código de 6 dígitos + crear contraseña, y reenviar ----
+// Con ALTA_LANDING_CON_CODIGO apagado las dos rutas responden 404 (antes de gastar ningún límite).
+// Los límites son las MISMAS instancias de `/onboarding/*` y `/contact`: un correo tiene UN solo
+// presupuesto de intentos (5/15 min) y UN solo presupuesto de envíos (3/h) entre todas las puertas.
+
+const altaVerificarSchema = z.object({
+  body: z.object({
+    email: z.string().trim().email('Formato de correo invalido'),
+    codigo: z.string({ required_error: 'El código es requerido.' }).trim().min(1, 'El código es requerido.'),
+    // La regla de contraseña la aplica el servicio (responde CONTRASENA_INVALIDA con su mensaje).
+    password: z.string({ required_error: 'La contraseña es requerida.' }).min(1, 'La contraseña es requerida.').max(1024),
+  }),
+})
+const altaReenviarSchema = z.object({ body: z.object({ email: z.string().trim().email('Formato de correo invalido') }) })
+
+// Una prueba lee esta línea tal cual (límites del alta con código, la compuerta primero): que el formateador no la parta.
+// prettier-ignore
+router.post('/alta/verificar', soloConAltaConCodigo, contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
+router.post('/alta/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest(altaReenviarSchema), reenviarAlta)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige
 // a la pantalla de contrasena del dashboard. readLimit (no writeLimit) porque un

@@ -16,6 +16,8 @@
  *     de inmediato y Uber le devuelve su dinero sin fricción.
  *   · DESPUÉS de aceptar → cancelar (`cancelDeliveryOrder`). Ya dijimos que sí, así que
  *     cuesta más caro: el cliente ya está esperando. Sigue siendo mejor que no entregar.
+ *     🔴 Sólo si el proveedor cancela por API (F2): si no, aquí no se cancela nada y la cocina
+ *     recibe qué hacer (`PROVEEDOR_NO_CANCELA`).
  */
 import { DeliveryProvider, OrderStatus, Prisma } from '@prisma/client'
 
@@ -26,7 +28,7 @@ import prisma from '@/utils/prismaClient'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { cancelDeliveryOrder } from './cancelDeliveryOrder.service'
 import { soltarReserva, tomarReserva, withDeliveryOrderLock, type OperacionDeReparto } from './deliveryOrderLock'
-import type { ActionResult } from './types'
+import { TEXTO_PROVEEDOR_NO_CANCELA, type ActionResult } from './types'
 
 export type MotivoRechazo = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
@@ -43,9 +45,15 @@ export interface RespuestaPedido {
     | 'OP_IN_PROGRESS'
     // Hay un retiro de renglón PENDING|UNCERTAIN: un cambio a la vez por pedido.
     | 'LINE_ACTION_IN_PROGRESS'
+    // 🔴 El proveedor ya no admite la acción (`ActionResult.terminal`): se dejó de intentar. NUNCA significa «hecho».
+    | 'NO_REINTENTAR'
+    // 🔴 F2: pedido YA ACEPTADO de un proveedor sin cancelación por API. NO se canceló en ningún lado: `mensaje` dice qué hacer.
+    | 'PROVEEDOR_NO_CANCELA'
   error?: string
   /** Con `OP_IN_PROGRESS`: qué operación tiene el pedido. */
   ocupadaPor?: OperacionDeReparto
+  /** Con `PROVEEDOR_NO_CANCELA`: qué debe hacer la cocina, en español y listo para mostrarse. */
+  mensaje?: string
 }
 
 /**
@@ -134,6 +142,17 @@ export function proveedorDelPedido(externalId: string | null | undefined) {
   return hasAdapter(provider) ? { provider, externalOrderId: externalId.slice(sep + 1) } : null
 }
 
+/**
+ * ¿De qué proveedor es ESTE pedido? `null` = no es de un proveedor con adaptador (o no existe en este negocio).
+ *
+ * Lo usa el controlador de la cocina para nombrar la app en sus mensajes («Rappi está desconectada…») sin cargar todo el
+ * contexto del pedido: lee sólo `externalId`, filtrado por negocio, y deja a `proveedorDelPedido` decidir qué prefijo cuenta.
+ */
+export async function proveedorDeLaOrden(venueId: string, orderId: string): Promise<DeliveryProvider | null> {
+  const orden = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { externalId: true } })
+  return proveedorDelPedido(orden?.externalId)?.provider ?? null
+}
+
 /** Respaldo para órdenes previas al cambio: la orden aún no guardaba su propio link. */
 async function linkPorEventoOriginador(
   venueId: string,
@@ -172,6 +191,8 @@ export async function contexto(venueId: string, orderId: string, db: Prisma.Tran
       deliveryChannelLinkId: true,
       providerAcceptedAt: true,
       readyReportedAt: true,
+      // 🔴 NO se trae `posRawData` (el crudo del proveedor, pesado): `contexto` lo usan el «listo» del KDS —en CADA comanda, también
+      // de mesas— y el resto del reparto. Lo lee `denyDeliveryOrder`, sólo en el camino que lo necesita.
     },
   })
   const origen = proveedorDelPedido(order?.externalId)
@@ -214,8 +235,9 @@ export async function markDeliveryOrderReady(venueId: string, orderId: string): 
     orderId,
     'READY',
     () => ctx.adapter.markOrderReady!(ctx.externalOrderId, ctx.storeId),
+    // 🔴 Sólo la evidencia HTTP sella, como siempre; una respuesta `terminal` jamás (es «se dejó de intentar», no «listo»).
     (tx, r) =>
-      esEvidenciaHttp(r.status)
+      esEvidenciaHttp(r.status) && !r.terminal
         ? tx.order.updateMany({ where: { id: orderId, readyReportedAt: null }, data: { readyReportedAt: new Date() } })
         : Promise.resolve(),
     // El 2xx del bump pudo acreditarse entre la lectura de arriba y la reserva: no se manda otro /ready.
@@ -225,6 +247,17 @@ export async function markDeliveryOrderReady(venueId: string, orderId: string): 
   if (s.tipo === 'BLOQUEADA') return s.respuesta
   if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
   const r = s.r
+  if (!r.ok && r.terminal) {
+    // El proveedor ya no admite el «listo» de este pedido (tope de llamadas, transición inválida): repetirlo sólo gastaría
+    // llamadas. `readyReportedAt` sigue nulo a propósito: nadie confirmó que el proveedor lo tenga por listo.
+    logger.warn('El marketplace ya no admite el "listo" del pedido: se deja de intentar', {
+      orderId,
+      externalOrderId: ctx.externalOrderId,
+      status: r.status,
+      cuerpo: r.raw.slice(0, 200),
+    })
+    return { outcome: 'NO_REINTENTAR', error: r.raw.slice(0, 200) }
+  }
   if (!r.ok) {
     logger.warn('El marketplace rechazó el "listo" del pedido', {
       orderId,
@@ -279,6 +312,9 @@ export async function acceptDeliveryOrder(venueId: string, orderId: string, staf
  * Elige solo el camino correcto según dónde esté el pedido: rechazo limpio si todavía no se
  * había aceptado, cancelación si ya. Que el mesero tenga que saber la diferencia sería
  * pedirle que entienda el protocolo de Uber para poder decir que se acabó la carne.
+ *
+ * 🔴 Ya aceptado y con un proveedor que NO cancela por API: `PROVEEDOR_NO_CANCELA` con el texto
+ * de qué hacer. Nada se cancela en Avoqado ni se le habla al proveedor (F2).
  */
 export async function denyDeliveryOrder(
   venueId: string,
@@ -294,11 +330,27 @@ export async function denyDeliveryOrder(
   const yaAceptado = ctx.order.status === OrderStatus.CONFIRMED
 
   if (yaAceptado) {
-    const s = await conReserva(venueId, orderId, 'DENY', async () =>
-      typeof ctx.adapter.cancelOrder === 'function'
-        ? ctx.adapter.cancelOrder(ctx.externalOrderId, ctx.storeId, motivo)
-        : { ok: true, status: 0, raw: 'el proveedor no cancela por API' },
-    )
+    // 🔴 F2: si el proveedor no cancela por API, NO se cancela en Avoqado. Antes se fingía un `{ ok: true, status: 0 }` y la
+    // venta se cancelaba sólo aquí: salía de la cocina mientras, para el proveedor, el pedido seguía vivo (repartidor en
+    // camino, cliente esperando). Ahora se devuelve qué hacer (lo dice el adaptador), sin reserva y sin red: no hay nada que
+    // mandarle. La venta se cancela cuando llega el aviso de cancelación del proveedor.
+    if (typeof ctx.adapter.cancelOrder !== 'function') {
+      // El crudo del proveedor, con una lectura mínima y SÓLO aquí: de él lee el adaptador cómo se cancela un pedido aceptado
+      // (`instruccionesParaCancelar`). Un adaptador sin esas instrucciones no lo necesita.
+      const mensaje = ctx.adapter.instruccionesParaCancelar
+        ? ctx.adapter.instruccionesParaCancelar(
+            (await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { posRawData: true } }))?.posRawData,
+          )
+        : TEXTO_PROVEEDOR_NO_CANCELA
+      logger.warn('[Delivery] la cocina quiso cancelar un pedido ya aceptado que el proveedor no cancela por API: NO se cancela', {
+        orderId,
+        provider: ctx.provider,
+        motivo,
+        staffId,
+      })
+      return { outcome: 'PROVEEDOR_NO_CANCELA', mensaje }
+    }
+    const s = await conReserva(venueId, orderId, 'DENY', () => ctx.adapter.cancelOrder!(ctx.externalOrderId, ctx.storeId, motivo))
     if (s.tipo === 'BLOQUEADA') return s.respuesta
     if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
     if (!s.r.ok) return { outcome: 'FAILED', error: `HTTP ${s.r.status}` }

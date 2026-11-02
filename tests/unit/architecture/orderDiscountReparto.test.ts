@@ -130,9 +130,11 @@ const SYNC = 'sincronizarRepartos('
 const HISTORICO = 'conservarDescuentoHistorico('
 const RECORTA = 'recortarDescuentosDeRenglones('
 const ESCRITORES_DE_FILAS: Record<string, Fila> = {
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': { clase: 'ESCRIBE', marcas: ['keptMarkdownDiscountRow(', SYNC] },
+  // Cobrar sin red S4: la cortesía y el descuento de catálogo de la cuenta, con las mismas filas que «Cobrar» de la terminal.
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     clase: 'ESCRIBE',
-    marcas: ['buildItemDiscountRow(', 'filaDeDescuentoDeCuenta(', SYNC],
+    marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', 'filaDeDescuentoDeCuenta(', SYNC],
   },
   'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction': {
     clase: 'ESCRIBE',
@@ -145,7 +147,7 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     clase: 'ESCRIBE',
-    marcas: ['nuevoRepartoDirigido(', 'buildItemDiscountRow(', 'nuevoRepartoDeCuenta(', SYNC],
+    marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', SYNC],
   },
   'src/services/tpv/order.tpv.service.ts#applyDiscount': {
     clase: 'ESCRIBE',
@@ -176,9 +178,19 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
-  'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': {
+  'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDirigido(', 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
+  },
+  // Descuento en ligas de pago (spec 2026-10-24): la venta de una liga con descuento nace con su fila de cuenta, repartida.
+  'src/services/dashboard/paymentLink.service.ts#completeCharge': { clase: 'ESCRIBE', marcas: ['filaDeDescuentoDeLiga(', SYNC] },
+  'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
+    clase: 'ESCRIBE',
+    marcas: ['filaDeDescuentoDeLiga(', SYNC],
+  },
+  'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
+    clase: 'ESCRIBE',
+    marcas: ['filaDeDescuentoDeLiga(', SYNC],
   },
   'src/services/shared/repartoDescuentoTx.ts#sincronizarRepartos': { clase: 'SINCRONIZA', marcas: ['repartosDeLaOrden('] },
   // B2c T2 (P4 + P13): conserva el resto histórico (R7-1), recorta lo dirigido a lo anulado, recalcula como borrar y sincroniza;
@@ -214,9 +226,13 @@ const RECALCULADORES = [
 
 type Origen = { origen: 'FILAS' | 'RECALCULO' | 'CERO' | 'RENGLON' | 'D8'; nota: string }
 const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': {
     origen: 'FILAS',
-    nota: 'espejos de artículo + fila de cuenta del POS; con promociones, reafirmada',
+    nota: 'Rebajas heredadas con filas espejo en la misma transacción.',
+  },
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
+    origen: 'FILAS',
+    nota: 'espejos de cortesía y de artículo + fila de cuenta del POS o de catálogo; con promociones, reafirmada',
   },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     origen: 'FILAS',
@@ -259,7 +275,7 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'P4 + P13: recorta lo dirigido a lo anulado y recalcula como borrar',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { origen: 'CERO', nota: 'la cuenta nace vacía, sin descuento' },
-  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
     origen: 'CERO',
     nota: 'pedido en línea: la orden nace sin descuento (la tienda no aplica descuentos en la v1)',
   },
@@ -273,14 +289,18 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     origen: 'CERO',
     nota: 'cobro en línea sin descuento de cuenta',
   },
-  'src/services/dashboard/paymentLink.service.ts#completeCharge': { origen: 'CERO', nota: 'liga de pago: la orden nace sin descuento' },
+  // Descuento en ligas de pago (spec 2026-10-24): la cabecera = el descuento de la sesión, que es su única fila de cuenta.
+  'src/services/dashboard/paymentLink.service.ts#completeCharge': {
+    origen: 'FILAS',
+    nota: 'liga de pago: el descuento de la sesión de pago (0 sin descuento), su fila filaDeDescuentoDeLiga',
+  },
   'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
-    origen: 'CERO',
-    nota: 'liga de pago: la orden nace sin descuento',
+    origen: 'FILAS',
+    nota: 'liga de pago: el descuento de la sesión de pago (0 sin descuento), su fila filaDeDescuentoDeLiga',
   },
   'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
-    origen: 'CERO',
-    nota: 'liga de pago: la orden nace sin descuento',
+    origen: 'FILAS',
+    nota: 'liga de pago: el descuento de la sesión de pago (0 sin descuento), su fila filaDeDescuentoDeLiga',
   },
   'src/services/mobile/estimate.mobile.service.ts#convertToOrder': {
     origen: 'CERO',
@@ -372,6 +392,10 @@ describe('B2: inventario de quien escribe descuentos (spec §4.1)', () => {
   })
   it('buildItemDiscountRow guarda el reparto espejo', () => {
     expect(de('src/services/shared/discount.service.ts#buildItemDiscountRow')).toContain('nuevoRepartoDirigido(')
+  })
+  it('la fila de cortesías guarda su reparto espejo y la de catálogo de la cuenta su reparto de cuenta', () => {
+    expect(de('src/services/shared/discount.service.ts#filaDeCortesias')).toMatch(/nuevoRepartoDirigido\([^;]*\{\s*espejo: true\s*\}\s*\)/)
+    expect(de('src/services/shared/discount.service.ts#filaDeDescuentoDeCatalogoEnCuenta')).toContain('nuevoRepartoDeCuenta(')
   })
   it('toda función que escribe Order.discountAmount declara de dónde sale', () => {
     expect([...cabecera].sort()).toEqual(Object.keys(ORIGEN_DE_LA_CABECERA).sort())
@@ -489,11 +513,12 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     nota: 'igual que splitOrderItems, por puesto',
   },
   // La orden nace en la misma transacción: no hay repartos anteriores.
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': { clase: 'CREACION', nota: 'Venta nueva con rebajas conservadas.' },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     clase: 'CREACION',
     nota: '«Cobrar»: orden, renglones y filas con su reparto (B2)',
   },
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     clase: 'CREACION',
     nota: 'venta del móvil: espejos y fila de cuenta con su reparto (B2)',
   },
@@ -516,15 +541,18 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
   },
   'src/services/dashboard/paymentLink.service.ts#completeCharge': {
     clase: 'CREACION',
-    nota: 'liga de pago: la orden nace sin descuentos',
+    marcas: [SYNC],
+    nota: 'liga de pago: orden y renglones nuevos; con descuento, su fila de cuenta se reparte en la misma transacción',
   },
   'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
     clase: 'CREACION',
-    nota: 'liga de pago: la orden nace sin descuentos',
+    marcas: [SYNC],
+    nota: 'liga de pago: orden y renglones nuevos; con descuento, su fila de cuenta se reparte en la misma transacción',
   },
   'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
     clase: 'CREACION',
-    nota: 'liga de pago: la orden nace sin descuentos',
+    marcas: [SYNC],
+    nota: 'liga de pago: orden y renglones nuevos; con descuento, su fila de cuenta se reparte en la misma transacción',
   },
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder': {
     clase: 'CREACION',
@@ -534,6 +562,10 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: 'datos demo: órdenes sembradas sin filas de descuento',
   },
+  'src/services/demo/negociosDemo.service.ts#seedHistory': {
+    clase: 'CREACION',
+    nota: 'negocios demo de ventas: un mes de órdenes sembradas sin filas de descuento',
+  },
   'src/services/reservation/createOrderFromReservation.ts#createOrderFromReservation': {
     clase: 'CREACION',
     nota: 'la reservación crea su orden con renglones nuevos',
@@ -542,7 +574,7 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: 'venta serializada: orden nueva de un solo renglón',
   },
-  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
     clase: 'CREACION',
     nota: 'pedido en línea: orden, renglones y extras nuevos en la misma transacción, sin filas de descuento',
   },
@@ -559,10 +591,20 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'SIN_FILAS',
     nota: 'POS importado: la cabecera es la del POS externo (D8)',
   },
+  // D2 (24-oct): corregir el importe de una venta verificada mueve su único renglón; `cuentaQueSigueAlCobro` lo permite sólo sin
+  // descuento en la cuenta ni en el renglón (409 si no), así que no hay reparto que sincronizar.
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#moverCuentaAlImporte': {
+    clase: 'SIN_FILAS',
+    nota: 'venta de un solo artículo sin descuentos (lo exige cuentaQueSigueAlCobro): no hay filas con reparto',
+  },
   // No mueven total ni descuento.
   'src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets': {
     clase: 'METADATA',
     nota: 'marca las comandas del renglón; no mueve total ni descuento',
+  },
+  'src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas': {
+    clase: 'METADATA',
+    nota: 'D1: pasa el vínculo del vale a la procedencia en el renglón de una cuenta CANCELADA; no mueve total ni descuento',
   },
   'src/services/fiscal/sellosIva.ts#sellarRenglones': {
     clase: 'SELLO_FISCAL',

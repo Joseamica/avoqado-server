@@ -19,7 +19,8 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
-import { esOrdenImportada, rechazarSiEsImportada } from '../shared/ordenImportada'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
+import { esOrdenImportada, esPedidoDePlataforma, rechazarSiEsImportada } from '../shared/ordenImportada'
 import { esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 
 /** Resuelve StaffVenue.id: appliedById NO acepta un Staff.id (P2003). */
@@ -67,6 +68,8 @@ export async function listOrderServiceCharges(venueId: string, orderId: string) 
 /** Guard compartido: solo se toca una cuenta abierta. */
 async function requireOpenOrder(tx: Prisma.TransactionClient, venueId: string, orderId: string) {
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: { id: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, covers: true, originSystem: true },
@@ -239,7 +242,8 @@ export async function syncAutomaticServiceChargesInTransaction(
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') return null
   // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y sus
   // renglones traen el IVA dentro): como cuando la regla no aplica.
-  if (esOrdenImportada(order)) return null
+  // Rappi 2b (T10): tampoco rearma un pedido de plataforma (su total lo manda la plataforma).
+  if (esOrdenImportada(order) || esPedidoDePlataforma(order)) return null
   if (await esCuentaDeTarjetasEnTx(tx, orderId)) return null
 
   const covers = order.covers ?? 0

@@ -17,11 +17,20 @@
  * 🔴 NO se arregla subiendo `trust proxy` a 2: eso es global y cambiaría también el registro, la
  * sesión y todos los demás limitadores. Se resuelve aquí, acotado a quien lo necesita.
  *
- * ⚠️ Límite declarado: `CF-Connecting-IP` es falsificable por quien alcance el origen de Render sin
- * pasar por el borde (`avoqado-server.onrender.com` es alcanzable). Aun así el saldo es favorable:
- * hoy la llave es UNA sola para todo México y bloquea a clientes buenos. Contra el abuso real lo que
- * aguanta no es la IP sino la verificación por correo y la tarjeta de Stripe — por eso los
- * limitadores de este carril llavean por CORREO y dejan la IP como respaldo.
+ * 🔴 MEDIDO EN PRODUCCIÓN el 2026-10-21: `CF-Connecting-IP` NO se puede inventar, ni por
+ * `api.avoqado.io` ni por `avoqado-server.onrender.com`. Las dos puertas pasan por el MISMO borde: el
+ * Cloudflare de Render (`onrender.com` responde `server: cloudflare` + `cf-ray`, y `api.avoqado.io` es
+ * un CNAME hacia él). Una petición que trae su propio `CF-Connecting-IP` la corta Cloudflare con el
+ * error 1000 antes de llegar aquí, y desde un Worker ajeno el valor queda fijo en `2a06:98c0:3600::103`.
+ * Detalle y la medición: `docs/audit/2026-10-21-limites-por-ip/` del workspace.
+ *
+ * 🔴 `X-Forwarded-For` en cambio SÍ llega como lo escribió el visitante: Cloudflare y el proxy de
+ * Render AGREGAN su eslabón al final, no reemplazan la cadena. Por eso su PRIMER eslabón no se usa
+ * nunca: sin `CF-Connecting-IP` (petición que no pasó por Cloudflare) la llave es `req.ip`, que es el
+ * eslabón que puso el proxy de Render y nadie de afuera escribe.
+ *
+ * Contra el abuso lo que aguanta no es la IP sino la verificación por correo y la tarjeta de Stripe —
+ * por eso los limitadores de este carril llavean por CORREO y dejan la IP como respaldo.
  *
  * Hermano de `resolveClientIp` en `heartbeat.tpv.controller.ts`, que documentó lo mismo para las
  * terminales. Si algún día se unifican, que sea aquí.
@@ -31,11 +40,6 @@ import { Request } from 'express'
 export function ipDelCliente(req: Request): string | undefined {
   const cf = req.headers['cf-connecting-ip']
   if (typeof cf === 'string' && cf.trim()) return cf.trim()
-
-  const xff = req.headers['x-forwarded-for']
-  const cadena = Array.isArray(xff) ? xff[0] : xff
-  const primero = cadena?.split(',')[0]?.trim()
-  if (primero) return primero
 
   return req.ip
 }

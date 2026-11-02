@@ -9,7 +9,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { logAction } from '../dashboard/activity-log.service'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment, turnoDeLaOrdenQueNace, ventaDeLaColaEnTx } from '../shared/paymentShiftClaim'
 import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
 
 interface TableStatusResponse {
@@ -29,6 +29,8 @@ interface TableStatusResponse {
   /** Tamaño propio (spec 2026-10-12), 0–1 de la cuadrícula de su área; null = automático. Opcional: create/updateTable no lo mandan. */
   width?: number | null
   height?: number | null
+  /** Cuentas fuera del plano (23-oct): mesa ARCHIVADA que sigue aquí porque tiene una cuenta viva. Va sin posición. Opcional. */
+  archived?: boolean
   currentOrder: {
     id: string
     orderNumber: string
@@ -112,7 +114,9 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
   const tables = await prisma.table.findMany({
     // Only active tables — soft-deleted ones (active: false) must not resurface
     // on the floor plan. Mirrors getFloorElements, which already filters active.
-    where: { venueId, active: true },
+    // 🔴 Salvo una archivada con una cuenta VIVA (la abrió o la movió un aparato sin red con el plano viejo): sin ella, esa cuenta no
+    // se veía en ningún aparato (cuentas fuera del plano, 23-oct). Mismo conjunto que cuenta `tablesVersionSql`.
+    where: { venueId, OR: [{ active: true }, { id: { in: [...openByTable.keys()] } }] },
     include: {
       area: {
         select: { id: true, name: true, sortOrder: true, floorShape: true },
@@ -139,8 +143,10 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     id: table.id,
     number: table.number,
     capacity: table.capacity,
-    positionX: table.positionX,
-    positionY: table.positionY,
+    // La archivada va SIN posición: su lugar pudo tomarlo otra mesa; las apps la ponen en «Sin ubicación en el plano» (Codex r1 #1).
+    positionX: table.active ? table.positionX : null,
+    positionY: table.active ? table.positionY : null,
+    ...(table.active ? {} : { archived: true }),
     shape: table.shape,
     rotation: table.rotation,
     status: table.status,
@@ -223,6 +229,12 @@ export async function assignTable(
    * salidas, así que la admisión y la prueba de que ocurrió commitean juntas — o ninguna.
    */
   dentroDeLaTx?: (tx: Prisma.TransactionClient, admitida: { orderId: string; isNewOrder: boolean }) => Promise<void>,
+  /**
+   * S3 «Efectivo sin red en el turno correcto»: sólo el reducer `OPEN_TABLE` del outbox lo pasa, con la caja en que el POS
+   * (ANDROID/iOS) abrió la mesa sin red. Si esa caja es de un turno que ya no es el vivo, o es una caja cerrada sin turno ligado, la
+   * cuenta nace SIN turno (misma regla que `createOrderWithItems`: `ventaDeLaColaEnTx` + `turnoDeLaOrdenQueNace`). Sin él, como hoy.
+   */
+  ventaDeLaCola?: { cashDrawerSessionId: string },
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -338,7 +350,10 @@ export async function assignTable(
     // (`../shared/turnoDeCaja.ts`). Desde la fase 1, `getActiveShifts` cuenta las órdenes del
     // turno agrupando por `Order.shiftId`: sin esto, un restaurante entero salía con «0 órdenes».
     // Opcional a propósito — un negocio que no abrió caja sigue atendiendo mesas.
-    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+    const turnoVivo = await turnoAbiertoDelNegocio(tx, venueId)
+    const currentShift = ventaDeLaCola
+      ? await turnoDeLaOrdenQueNace(tx, venueId, await ventaDeLaColaEnTx(tx, venueId, ventaDeLaCola), turnoVivo)
+      : turnoVivo
 
     const newOrder = await tx.order.create({
       data: {

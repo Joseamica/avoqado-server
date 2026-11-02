@@ -33,6 +33,12 @@ jest.mock('../../../src/services/onboarding/ensureVenue.service', () => ({
 }))
 
 jest.mock('../../../src/services/onboarding/signup.service', () => ({ __esModule: true }))
+// H0 (28-oct): con el plan ya cobrado, «Entrar» usa el cierre todo-o-nada (probado en terminarAltaCobrada.test.ts). Por
+// default contesta «sin negocio» para que el carril de siempre (que crea el negocio) siga como lo prueban los casos de abajo.
+jest.mock('../../../src/services/onboarding/terminarAltaCobrada', () => ({
+  __esModule: true,
+  terminarAltaCobrada: jest.fn(),
+}))
 jest.mock('../../../src/services/onboarding/testPaymentLink.service', () => ({ __esModule: true }))
 
 jest.mock('../../../src/services/stripe.service', () => ({
@@ -87,6 +93,7 @@ import { resolvePlanNotificationTarget } from '../../../src/services/access/plan
 import emailService from '../../../src/services/email.service'
 import prisma from '../../../src/utils/prismaClient'
 import AppError from '../../../src/errors/AppError'
+import { terminarAltaCobrada } from '../../../src/services/onboarding/terminarAltaCobrada'
 
 const VENUE = { id: 'venue_1', slug: 'bar-test', name: 'Bar Test' }
 
@@ -151,6 +158,7 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
     jest.clearAllMocks()
     ;(prisma.$transaction as jest.Mock).mockImplementation(async fn => fn(prisma))
     process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
+    ;(terminarAltaCobrada as jest.Mock).mockReset().mockResolvedValue({ estado: 'NADA', motivo: 'SIN_NEGOCIO' })
     mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
     ;(stripeService.createPlanSubscription as jest.Mock).mockResolvedValue({ subscriptionId: 'sub_123' })
     ;(stripeService.entregarSuscripcionDePlan as jest.Mock).mockResolvedValue({
@@ -621,5 +629,57 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
 
     expect(res.status).toHaveBeenCalledWith(201)
     expect(prisma.organization.update).toHaveBeenCalled()
+  })
+
+  describe('🔴 H0: con el plan ya cobrado, «Entrar» usa el cierre todo-o-nada', () => {
+    async function entrar(body: Record<string, any> = {}) {
+      const res = buildRes()
+      const next = jest.fn()
+      await completeV2Onboarding(buildReq(body) as Request, res as Response, next as unknown as NextFunction)
+      return { res, next }
+    }
+
+    it('lo cierra terminarAltaCobrada con el idioma del panel, y contesta 201 con el negocio', async () => {
+      conProgreso({ planActivationStatus: 'ACTIVE' }, { payNow: true })
+      ;(terminarAltaCobrada as jest.Mock).mockResolvedValue({ estado: 'TERMINADA', venue: { ...VENUE, status: 'ACTIVE' } })
+
+      const { res, next } = await entrar({ language: 'en' })
+
+      expect(terminarAltaCobrada).toHaveBeenCalledWith('org_1', { via: 'navegador', staffId: 'user_1', language: 'en' })
+      expect(next).not.toHaveBeenCalled()
+      expect(res.status).toHaveBeenCalledWith(201)
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, venue: expect.objectContaining({ id: 'venue_1' }) }))
+      // El candado viejo y la creación de negocio NO corren: el cierre fue de la función compartida.
+      expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(venueCreationService.createVenueFromOnboarding).not.toHaveBeenCalled()
+      expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
+    })
+
+    it('si el cobro (o el aviso, o el barrido) ya la terminó, contesta 200 «ya terminada»', async () => {
+      conProgreso({ planActivationStatus: 'ACTIVE' }, { payNow: true })
+      ;(terminarAltaCobrada as jest.Mock).mockResolvedValue({ estado: 'YA_TERMINADA', venue: { ...VENUE, status: 'ACTIVE' } })
+
+      const { res, next } = await entrar()
+
+      expect(next).not.toHaveBeenCalled()
+      expect(res.status).toHaveBeenCalledWith(200)
+    })
+
+    it('🔴 un cierre a medias de otra petición contesta 409 «se está terminando», nunca éxito', async () => {
+      conProgreso({ planActivationStatus: 'ACTIVE' }, { payNow: true })
+      ;(terminarAltaCobrada as jest.Mock).mockResolvedValue({ estado: 'NADA', motivo: 'CIERRE_EN_CURSO' })
+
+      const { res, next } = await entrar()
+
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
+      expect(res.status).not.toHaveBeenCalled()
+    })
+
+    it('sin el plan cobrado, «Entrar» sigue por el carril de siempre', async () => {
+      conProgreso({ planActivationStatus: 'NONE' }, { payNow: true })
+      await entrar()
+      expect(terminarAltaCobrada).not.toHaveBeenCalled()
+      expect(prisma.onboardingProgress.updateMany).toHaveBeenCalled()
+    })
   })
 })

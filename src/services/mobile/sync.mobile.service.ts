@@ -240,26 +240,17 @@ export function requiredPermissionForIntent(type: string): string | null {
     // WAITER/CASHIER reproduciría offline lo que tiene prohibido — el replay no es
     // puerta trasera.
     //
-    // 🔴 DECLARADO, NO ARREGLADO (auditoría de permisos de piso, 2026-08-17): ese
-    // "online" es cierto para TPV y FALSO para `/mobile`. Medido hoy:
+    // Las cinco puertas de la cortesía piden lo mismo (desde el 25-oct; antes las dos de
+    // `/mobile` pedían `orders:update` y eran de mesero — decisión del founder «A», 21-oct):
     //
-    //   POST /tpv/venues/:id/orders/:orderId/comp              → orders:comp   (MANAGER+)
-    //   POST /mobile/venues/:id/orders/:orderId/comp           → orders:update (WAITER+)
-    //   POST /mobile/.../orders/:orderId/items/:itemId/comp    → orders:update (WAITER+)
-    //   intent COMP_ORDER  (offline)                           → orders:comp   (MANAGER+)
-    //   intent ADD_ITEMS con isCortesia (offline)              → orders:comp   (MANAGER+)
+    //   POST /tpv/venues/:id/orders/:orderId/comp              → orders:comp
+    //   POST /mobile/venues/:id/orders/:orderId/comp           → orders:comp
+    //   POST /mobile/.../orders/:orderId/items/:itemId/comp    → orders:comp
+    //   intent COMP_ORDER  (offline)                           → orders:comp
+    //   intent ADD_ITEMS con isCortesia (offline)              → orders:comp
     //
-    // O sea: la MISMA cortesía es de gerente por TPV y por la cola offline, pero de
-    // mesero por la ruta online de `/mobile`. `orders:update` lo traen WAITER y CASHIER
-    // por default; `orders:comp` no lo trae ningún rol debajo de MANAGER. La puerta
-    // floja es `/mobile`, y es PREEXISTENTE — no la abrió esta auditoría.
-    //
-    // No se aprieta aquí a propósito: subir `/mobile` a `orders:comp` le quita a los
-    // meseros de TODOS los venues una capacidad que hoy ya usan (regalar un postre por
-    // un plato tardado es operación normal, no fraude), y eso es una decisión de
-    // producto con dinero enfrente — del founder, no de un fix de permisos. Lo que sí
-    // se corrige es el comentario, que afirmaba un espejo inexistente y habría hecho
-    // que el siguiente lector diera por cerrada una puerta abierta.
+    // De fábrica lo trae MANAGER+; el dueño se lo da a otro rol con `tpv-orders:comp`.
+    // Fijado en `tests/unit/routes/mobile.cortesia.permiso.routes.test.ts`.
     case 'COMP_ORDER':
       return 'orders:comp'
     case 'APPLY_DISCOUNT':
@@ -467,6 +458,8 @@ export async function processIntents(params: {
   staffId: string
   deviceId: string
   intents: SyncIntentInput[]
+  /** Terminal serial from the authenticated session, never deviceId or payload. */
+  terminalSerialNumber?: string
   authorizeIntent: (intent: SyncIntentInput, requiredPermission: string) => boolean
 }): Promise<SyncIntentAck[]> {
   const { venueId, staffId, deviceId, authorizeIntent } = params
@@ -523,107 +516,106 @@ export async function processIntents(params: {
     }
 
     if (!reclamo) {
-
-    // Fence monotónico: una reinstalación/bug no puede reutilizar una seq con
-    // otro UUID y ejecutar una operación vieja como si fuera nueva. Clientes
-    // legacy sin seq siguen soportados.
-    if (typeof intent.seq === 'number') {
-      const latestForDevice = await prisma.posSyncIntent.findFirst({
-        where: {
-          venueId,
-          deviceId,
-          seq: { not: null },
-          type: lane === 'preparation' ? 'KDS_ITEM_PROGRESS' : { notIn: ['HTTP_OP_V1', 'KDS_ITEM_PROGRESS'] },
-        },
-        orderBy: { seq: 'desc' },
-        select: { seq: true },
-      })
-      if (typeof latestForDevice?.seq === 'number' && latestForDevice.seq >= intent.seq) {
-        // The same UUID may have been reserved after the first lookup; its result wins over the sequence fence.
-        const concurrent = await prisma.posSyncIntent.findUnique({
-          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+      // Fence monotónico: una reinstalación/bug no puede reutilizar una seq con
+      // otro UUID y ejecutar una operación vieja como si fuera nueva. Clientes
+      // legacy sin seq siguen soportados.
+      if (typeof intent.seq === 'number') {
+        const latestForDevice = await prisma.posSyncIntent.findFirst({
+          where: {
+            venueId,
+            deviceId,
+            seq: { not: null },
+            type: lane === 'preparation' ? 'KDS_ITEM_PROGRESS' : { notIn: ['HTTP_OP_V1', 'KDS_ITEM_PROGRESS'] },
+          },
+          orderBy: { seq: 'desc' },
+          select: { seq: true },
         })
-        if (concurrent) {
-          const ack = await ackFromExisting(concurrent, intent.id, intent.type)
-          if (concurrent.localRef && ack.result?.orderId) localRefMap.set(concurrent.localRef, String(ack.result.orderId))
-          acks.push(ack)
-          if (ack.status === 'RETRY') blockedLanes.add(lane)
-          continue
-        }
-        acks.push({
-          id: intent.id,
-          status: 'REJECTED',
-          errorCode: 'STALE_DEVICE_SEQUENCE',
-          message: 'La secuencia del dispositivo ya fue utilizada. Requiere revisión antes de repetir la operación.',
-          details: { latestSeq: latestForDevice.seq },
-        })
-        continue
-      }
-    }
-
-    // 2. Reservar ANTES del efecto. La unique hace de compare-and-set: sólo
-    // un request puede ejecutar; los concurrentes observan PROCESSING.
-    marca = marcaInicial(intent)
-    const nuevoReclamo = new Date()
-    try {
-      await prisma.posSyncIntent.create({
-        data: {
-          venueId,
-          deviceId,
-          staffId,
-          seq: intent.seq ?? null,
-          type: intent.type,
-          idempotencyKey: intent.id,
-          localRef: typeof intent.payload?.localOrderId === 'string' ? (intent.payload.localOrderId as string) : null,
-          status: 'PROCESSING',
-          createdAt: nuevoReclamo,
-          ...(marca ? { resultJson: marca as unknown as Prisma.InputJsonValue } : {}),
-        },
-      })
-      reclamo = nuevoReclamo
-    } catch (reserveError: any) {
-      if (reserveError?.code === 'P2002') {
-        const winner = await prisma.posSyncIntent.findUnique({
-          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
-        })
-        if (winner) {
-          const winnerAck = await ackFromExisting(winner, intent.id, intent.type)
-          acks.push(winnerAck)
-          if (winnerAck.status === 'RETRY') blockedLanes.add(lane)
-          continue
-        }
-        if (typeof intent.seq === 'number') {
-          const sequenceWinner = await prisma.posSyncIntent.findFirst({
-            where: { venueId, deviceId, seq: intent.seq, type: { not: 'HTTP_OP_V1' } },
-            select: { idempotencyKey: true },
+        if (typeof latestForDevice?.seq === 'number' && latestForDevice.seq >= intent.seq) {
+          // The same UUID may have been reserved after the first lookup; its result wins over the sequence fence.
+          const concurrent = await prisma.posSyncIntent.findUnique({
+            where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
           })
-          if (sequenceWinner) {
-            const latestForDevice = await prisma.posSyncIntent.findFirst({
-              where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
-              orderBy: { seq: 'desc' },
-              select: { seq: true },
-            })
-            acks.push({
-              id: intent.id,
-              status: 'REJECTED',
-              errorCode: 'STALE_DEVICE_SEQUENCE',
-              message: 'La secuencia del dispositivo pertenece a otra operación. Requiere revisión.',
-              details: { latestSeq: latestForDevice?.seq ?? intent.seq },
-            })
+          if (concurrent) {
+            const ack = await ackFromExisting(concurrent, intent.id, intent.type)
+            if (concurrent.localRef && ack.result?.orderId) localRefMap.set(concurrent.localRef, String(ack.result.orderId))
+            acks.push(ack)
+            if (ack.status === 'RETRY') blockedLanes.add(lane)
             continue
           }
+          acks.push({
+            id: intent.id,
+            status: 'REJECTED',
+            errorCode: 'STALE_DEVICE_SEQUENCE',
+            message: 'La secuencia del dispositivo ya fue utilizada. Requiere revisión antes de repetir la operación.',
+            details: { latestSeq: latestForDevice.seq },
+          })
+          continue
         }
       }
-      logger.error(`❌ [POS SYNC] No se pudo reservar el intent ${intent.id}`, reserveError)
-      acks.push({
-        id: intent.id,
-        status: 'RETRY',
-        errorCode: reserveError?.code ?? 'INTENT_RESERVATION_FAILED',
-        message: 'No se pudo reservar la operación de forma segura. Reintenta.',
-      })
-      blockedLanes.add(lane)
-      continue
-    }
+
+      // 2. Reservar ANTES del efecto. La unique hace de compare-and-set: sólo
+      // un request puede ejecutar; los concurrentes observan PROCESSING.
+      marca = marcaInicial(intent)
+      const nuevoReclamo = new Date()
+      try {
+        await prisma.posSyncIntent.create({
+          data: {
+            venueId,
+            deviceId,
+            staffId,
+            seq: intent.seq ?? null,
+            type: intent.type,
+            idempotencyKey: intent.id,
+            localRef: typeof intent.payload?.localOrderId === 'string' ? (intent.payload.localOrderId as string) : null,
+            status: 'PROCESSING',
+            createdAt: nuevoReclamo,
+            ...(marca ? { resultJson: marca as unknown as Prisma.InputJsonValue } : {}),
+          },
+        })
+        reclamo = nuevoReclamo
+      } catch (reserveError: any) {
+        if (reserveError?.code === 'P2002') {
+          const winner = await prisma.posSyncIntent.findUnique({
+            where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+          })
+          if (winner) {
+            const winnerAck = await ackFromExisting(winner, intent.id, intent.type)
+            acks.push(winnerAck)
+            if (winnerAck.status === 'RETRY') blockedLanes.add(lane)
+            continue
+          }
+          if (typeof intent.seq === 'number') {
+            const sequenceWinner = await prisma.posSyncIntent.findFirst({
+              where: { venueId, deviceId, seq: intent.seq, type: { not: 'HTTP_OP_V1' } },
+              select: { idempotencyKey: true },
+            })
+            if (sequenceWinner) {
+              const latestForDevice = await prisma.posSyncIntent.findFirst({
+                where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
+                orderBy: { seq: 'desc' },
+                select: { seq: true },
+              })
+              acks.push({
+                id: intent.id,
+                status: 'REJECTED',
+                errorCode: 'STALE_DEVICE_SEQUENCE',
+                message: 'La secuencia del dispositivo pertenece a otra operación. Requiere revisión.',
+                details: { latestSeq: latestForDevice?.seq ?? intent.seq },
+              })
+              continue
+            }
+          }
+        }
+        logger.error(`❌ [POS SYNC] No se pudo reservar el intent ${intent.id}`, reserveError)
+        acks.push({
+          id: intent.id,
+          status: 'RETRY',
+          errorCode: reserveError?.code ?? 'INTENT_RESERVATION_FAILED',
+          message: 'No se pudo reservar la operación de forma segura. Reintenta.',
+        })
+        blockedLanes.add(lane)
+        continue
+      }
     }
     const turno = reclamo as Date
 
@@ -660,7 +652,16 @@ export async function processIntents(params: {
         ack = await ackDesdeHuella(venueId, intent, huellaPrevia, localRefMap)
       } else {
         const dejarHuella = marca?.retomable ? dejarHuellaCon(venueId, intent.id, turno, marca) : undefined
-        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella, authorizeIntent })
+        ack = await applyIntent({
+          venueId,
+          staffId,
+          deviceId,
+          intent,
+          localRefMap,
+          dejarHuella,
+          authorizeIntent,
+          terminalSerialNumber: params.terminalSerialNumber,
+        })
       }
     }
 
@@ -770,7 +771,12 @@ async function intentarRetomar(p: {
   if (sinPermiso) {
     return {
       tipo: 'contestar',
-      ack: { id: intent.id, status: 'REJECTED', errorCode: 'PERMISSION_DENIED', message: `No tienes permiso para reproducir ${intent.type}.` },
+      ack: {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'PERMISSION_DENIED',
+        message: `No tienes permiso para reproducir ${intent.type}.`,
+      },
     }
   }
   const reclamo = new Date()
@@ -831,6 +837,7 @@ async function ackDesdeHuella(
 // ─── Reducers por tipo ───────────────────────────────────────────────────────
 
 async function applyIntent(ctx: {
+  terminalSerialNumber?: string
   venueId: string
   staffId: string
   deviceId: string
@@ -855,7 +862,7 @@ async function applyIntent(ctx: {
       case 'ADD_ITEMS':
         return await applyAddItems(venueId, staffId, intent, localRefMap, dejarHuella)
       case 'PAY_CASH':
-        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella)
+        return await applyPayCash(venueId, staffId, intent, localRefMap, dejarHuella, ctx.terminalSerialNumber)
       case 'APPLY_DISCOUNT':
       case 'APPLY_SERVICE_CHARGE':
       case 'COMP_ORDER':
@@ -1022,6 +1029,21 @@ async function applyOpenTable(
   if (!tableId) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: 'OPEN_TABLE requiere tableId' }
   }
+  // S3: la caja en que el aparato abrió la mesa sin red (misma forma que en PAY_CASH).
+  const cajaDeLaMesa = intent.payload.cashDrawerSessionId
+  if (
+    cajaDeLaMesa !== undefined &&
+    cajaDeLaMesa !== null &&
+    cajaDeLaMesa !== '' &&
+    (typeof cajaDeLaMesa !== 'string' || cajaDeLaMesa.length > 64)
+  ) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'OPEN_TABLE: cashDrawerSessionId debe ser texto de hasta 64 caracteres',
+    }
+  }
 
   // Propiedad de mesa: abrir una mesa ocupada por otro reutilizaría su orden.
   if (await isTableOwnershipEnforced(venueId)) {
@@ -1047,6 +1069,8 @@ async function applyOpenTable(
     covers,
     undefined,
     dejarHuella ? (tx, admitida) => dejarHuella(tx, admitida) : undefined,
+    // Sin caja, la llamada de hoy byte a byte (sin un séptimo argumento).
+    ...(typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? [{ cashDrawerSessionId: cajaDeLaMesa }] : []),
   )
   if (localOrderId) localRefMap.set(localOrderId, order.id)
   return {
@@ -1336,7 +1360,34 @@ async function applyPayCash(
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
+  terminalSerialNumber?: string,
 ): Promise<SyncIntentAck> {
+  let shiftIdDeLaVenta: string | undefined
+  const declaredShift = intent.payload.shiftIdDeLaVenta
+  // Old POS payloads keep their prior treatment; only an authenticated terminal opts into this reference.
+  if (terminalSerialNumber && declaredShift !== undefined && declaredShift !== null && declaredShift !== '') {
+    if (typeof declaredShift !== 'string' || !/^c[a-z0-9]{24}$/.test(declaredShift)) {
+      return {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'INVALID_PAYLOAD',
+        message: 'PAY_CASH: el turno de la venta debe ser un cuid v1 del servidor',
+      }
+    }
+    const terminal = await prisma.terminal.findFirst({
+      where: { venueId, serialNumber: terminalSerialNumber, status: 'ACTIVE' },
+      select: { id: true },
+    })
+    const shift = terminal ? await prisma.shift.findFirst({ where: { id: declaredShift, venueId }, select: { id: true } }) : null
+    if (!shift)
+      return {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'INVALID_PAYLOAD',
+        message: 'PAY_CASH: el turno o la terminal no pertenecen a este negocio',
+      }
+    shiftIdDeLaVenta = shift.id
+  }
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
   const amountCents = Number(intent.payload.amountCents ?? NaN)
   const tipCents = Number(intent.payload.tipCents ?? 0)
@@ -1365,6 +1416,22 @@ async function applyPayCash(
       status: 'REJECTED',
       errorCode: 'INVALID_PAYLOAD',
       message: 'PAY_CASH: manda method o tenderTypeId, no ambos',
+    }
+  }
+  // S3 «Efectivo sin red en el turno correcto»: la caja que el aparato tenía abierta al cobrar. Misma forma que en HTTP (texto de
+  // hasta 64); otra cosa es un rechazo visible en la cola, nunca un valor sin tope que llegue al servicio.
+  const cashDrawerSessionId = intent.payload.cashDrawerSessionId
+  if (
+    cashDrawerSessionId !== undefined &&
+    cashDrawerSessionId !== null &&
+    cashDrawerSessionId !== '' &&
+    (typeof cashDrawerSessionId !== 'string' || cashDrawerSessionId.length > 64)
+  ) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'PAY_CASH: cashDrawerSessionId debe ser texto de hasta 64 caracteres',
     }
   }
   // Espejo del guard HTTP: una propina negativa es un descuento disfrazado e
@@ -1441,9 +1508,15 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    // S3: el servicio la convierte en el turno de la venta (liga 1:1 caja↔turno).
+    ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
+    ...(shiftIdDeLaVenta ? { shiftIdDeLaVenta } : {}),
+    ...(terminalSerialNumber ? { terminalSerialNumber } : {}),
     ...marcaDeMesaAjena,
     ...propiedadDeMesa,
-    ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
+    ...(dejarHuella
+      ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) }
+      : {}),
   })
   return {
     id: intent.id,
@@ -1461,6 +1534,8 @@ async function applyPayCash(
       ...(payment.amount !== undefined ? { amount: payment.amount } : {}),
       ...(payment.tipAmount !== undefined ? { tipAmount: payment.tipAmount } : {}),
       ...(payment.changeCents !== undefined ? { changeCents: payment.changeCents } : {}),
+      // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. Aditivo.
+      ...(payment.cashRetainedCents !== undefined ? { cashRetainedCents: payment.cashRetainedCents } : {}),
       ...(payment.method !== undefined ? { method: payment.method } : {}),
       // 🔴 El saldo autoritativo TAMBIÉN por aquí. El ack se arma a mano, así
       // que no heredaba los campos nuevos de `payCashOrder` y el contrato nuevo
@@ -1533,7 +1608,16 @@ async function applyOrderMutation(
       // la venta, si se puede cambiar el cliente de una venta COBRADA; aquí sólo se le dice si quien encoló tiene
       // `payments:create` (sin `authorizeIntent`, falla cerrado). Sin red no es puerta trasera.
       const opciones =
-        customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: authorizeIntent?.(intent, 'payments:create') === true } : {}
+        customerId !== undefined
+          ? {
+              puedeCambiarClienteEnVentaCobrada: authorizeIntent?.(intent, 'payments:create') === true,
+              customerAttribution: {
+                staffId,
+                canAssignHistorical: authorizeIntent?.(intent, 'orders:attach-customer') === true,
+                canAttachAtReceipt: authorizeIntent?.(intent, 'payments:create') === true,
+              },
+            }
+          : {}
       await orderMobileService.updateOrderDetails(
         venueId,
         orderId,

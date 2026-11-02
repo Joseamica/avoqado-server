@@ -98,7 +98,10 @@ function mockHappyPathPrisma() {
     a?.where?.status === 'COMPLETED' &&
     typeof a?.where?.id === 'string' &&
     Object.keys(a?.select ?? {}).every(
-      (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+      (k: string) =>
+        k === 'orderId' ||
+        (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId) ||
+        (k === 'tenderType' && a.select.tenderType?.select?.systemKind === true),
     ) &&
     a?.select?.orderId === true
       ? { orderId: a.where.orderId ?? null }

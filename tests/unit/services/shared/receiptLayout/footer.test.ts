@@ -15,6 +15,22 @@ const sp = (n: number) => ' '.repeat(n)
 const totals = { type: 'totals', showSubtotal: true, showTax: true, showDiscount: true, showTip: true } as const
 
 describe('renderTotals', () => {
+  it.each([32, 48] as const)('EXCHANGE labels the signed total DIFERENCIA at width %i', width => {
+    for (const [totalCents, amount] of [
+      [-5000, '-$50.00'],
+      [0, '$0.00'],
+      [5000, '$50.00'],
+    ] as const) {
+      const r = renderTotals(totals, input({ kind: 'EXCHANGE', subtotalCents: totalCents, totalCents }), width)
+      const last = r[r.length - 1]
+      expect(last).toMatchObject({ kind: 'text', bold: true, text: expect.stringMatching(/^DIFERENCIA:\s+-?\$\d+\.00$/) })
+      if (last.kind === 'text') {
+        expect(last.text.endsWith(amount)).toBe(true)
+        expect(last.double ? last.text.length * 2 : last.text.length).toBeLessThanOrEqual(width)
+      }
+    }
+  })
+
   it('IVA incluido (la norma): subtotal, descuento, la LEYENDA sin cantidad, propina, divisor y TOTAL a la mitad del ancho', () => {
     const r = renderTotals(totals, input({ subtotalCents: 4500, discountCents: 500, taxCents: 0, tipCents: 1000, totalCents: 5000 }), W)
     expect(r).toEqual([
@@ -80,6 +96,21 @@ describe('renderTotals', () => {
 })
 
 describe('renderPayment — el voucher de tarjeta SIEMPRE lleva autorización y referencia', () => {
+  it.each([
+    [-5000, 'Devuelto:'],
+    [0, 'Pago:'],
+    [5000, 'Pago:'],
+  ] as const)('EXCHANGE uses the payment label for signed difference %i', (totalCents, label) => {
+    const r = renderPayment(
+      { type: 'payment', showChange: true, showCardLastFour: true },
+      input({ kind: 'EXCHANGE', totalCents, tender: { kind: 'CARD', label: 'Tarjeta', authCode: 'R9X0', referenceNumber: '000777' } }),
+      W,
+    )
+    expect(r[1]).toMatchObject({ kind: 'text', text: expect.stringMatching(new RegExp(`^${label}\\s+Tarjeta$`)) })
+    expect(r).toContainEqual(line('Autorización:' + sp(15) + 'R9X0'))
+    expect(r).toContainEqual(line('Referencia:' + sp(15) + '000777'))
+  })
+
   it('tarjeta', () => {
     const r = renderPayment(
       { type: 'payment', showChange: true, showCardLastFour: true },
@@ -155,6 +186,16 @@ describe('renderAreaDelivery', () => {
 })
 
 describe('renderQr, renderReference, renderSignature', () => {
+  it('pendingUpload has no QR, including when a stale receipt URL is present', () => {
+    for (const receiptUrl of [null, 'https://r.avoqado.io/x/abc']) {
+      expect(renderQr({ type: 'qr', caption: 'Escanea' }, input({ kind: 'EXCHANGE', pendingUpload: true, receiptUrl }), W)).toEqual([])
+    }
+    expect(renderQr({ type: 'qr', caption: 'Escanea' }, input({ kind: 'EXCHANGE', pendingUpload: false }), W)).toContainEqual({
+      kind: 'qr',
+      data: 'https://r.avoqado.io/x/abc',
+    })
+  })
+
   it('QR sólo con URL; la leyenda se sanea', () => {
     expect(renderQr({ type: 'qr', caption: 'Escanea' }, input({ receiptUrl: null }), W)).toEqual([])
     const r = renderQr({ type: 'qr', caption: 'Escanea para tu recibo' }, input(), W)

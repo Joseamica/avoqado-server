@@ -1,13 +1,26 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { omitirPorDemo } from './demo/candadoDemo'
 import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
+import { escapeHtml } from '../controllers/public/publicHtml'
 import { isValidIANATimezone } from '../utils/sanitizeTimezone'
+import type { PriceSelection } from './launchCampaigns/publicPriceList.service'
+import { formatMoney } from './shared/receiptLayout/format'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
+const PRICE_PAGE_URL = 'https://dashboard.avoqado.io/presentacion/precios'
+
+export interface PriceSelectionEmailData {
+  nombre: string | null
+  telefono: string | null
+  whatsappUrl: string | null
+  pageUri: string | null
+  selection: PriceSelection
+}
 
 interface EmailAttachment {
   filename: string
@@ -99,7 +112,13 @@ interface ReceiptEmailData {
     quantity: number
     price: number
     totalPrice: number
-    modifiers?: Array<{ name: string; price: number }>
+    modifiers?: Array<{ name: string; price?: number }>
+    /** D1, de una copia del ticket: el resumen impreso del peso, la nota, el área del vale, «Cortesía» y la pieza de un combo. */
+    peso?: string
+    nota?: string
+    area?: string
+    cortesia?: boolean
+    pieza?: boolean
   }>
   // Totals
   subtotal?: number
@@ -402,6 +421,8 @@ class EmailService {
     if (!isDeliverableRecipient(options.to, 'emailService.sendEmail', { subject: options.subject })) {
       return false
     }
+    // Negocios demo (capa 2): ni el negocio demo ni sus usuarios @demo.avoqado.io reciben correo de verdad.
+    if (await omitirPorDemo('correo', options.to)) return false
 
     try {
       // Build email payload - Resend requires at least html or text
@@ -471,6 +492,9 @@ class EmailService {
     if (!isDeliverableRecipient(options.to, 'emailService.sendEmailWithResult', { subject: options.subject })) {
       return { ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' }
     }
+    const motivoDemo = await omitirPorDemo('correo', options.to)
+    // `sin confirmar` (la base no contestó) se reintenta; un demo de verdad nunca se manda.
+    if (motivoDemo) return { ok: false, transient: motivoDemo === 'sin confirmar', errorCode: 'NEGOCIO_DEMO' }
 
     try {
       // Mismo payload que `sendEmail` — ver ahí el porqué de cada pieza. `from` y `tags` son
@@ -546,11 +570,15 @@ class EmailService {
               item => `
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 12px 0; font-size: 15px; color: #000;">
-            ${item.name}
-            ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${m.name}`).join(', ')}</span>` : ''}
+            ${item.pieza ? `&nbsp;&nbsp;${item.quantity}x ` : ''}${escapeHtml(String(item.name ?? ''))}
+            ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${escapeHtml(String(m.name ?? ''))}`).join(', ')}</span>` : ''}
+            ${[item.peso, item.area, item.nota && `Nota: ${item.nota}`]
+              .filter(Boolean)
+              .map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`)
+              .join('')}
           </td>
-          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">x${item.quantity}</td>
-          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(item.totalPrice)}</td>
+          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">${item.pieza ? '' : `x${item.quantity}`}</td>
+          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${item.pieza ? '' : item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}</td>
         </tr>
         `,
             )
@@ -560,7 +588,21 @@ class EmailService {
     // Build items text for plain text version
     const itemsText =
       data.items && data.items.length > 0
-        ? data.items.map(item => `  ${item.name} x${item.quantity} - ${formatCurrency(item.totalPrice)}`).join('\n')
+        ? data.items
+            .map(item => {
+              // D1 (Codex código r1 #2): el texto plano dice lo mismo que el HTML (modificadores, peso, área y nota).
+              const renglon = item.pieza
+                ? `    ${item.quantity}x ${item.name}`
+                : `  ${item.name} x${item.quantity} - ${item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}`
+              const extras = [
+                ...(item.modifiers ?? []).map(m => `+ ${m.name}`),
+                item.peso,
+                item.area,
+                item.nota && `Nota: ${item.nota}`,
+              ].filter(Boolean)
+              return [renglon, ...extras.map(x => `      ${x}`)].join('\n')
+            })
+            .join('\n')
         : ''
 
     const html = `
@@ -654,7 +696,7 @@ class EmailService {
         Recibo enviado por ${data.venueName} via Avoqado
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -732,13 +774,13 @@ Recibo enviado por ${data.venueName} via Avoqado
       </p>
 
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Esto te dara acceso al panel de administracion de ${data.organizationName} donde podras:
+        Esto te dará acceso al panel de administración de ${data.organizationName} donde podrás:
       </p>
 
       <ul style="font-size: 15px; margin: 0 0 24px 0; padding-left: 24px; color: #000;">
-        <li style="margin-bottom: 8px;">Gestionar ordenes y pagos</li>
-        <li style="margin-bottom: 8px;">Ver reportes y estadisticas</li>
-        <li style="margin-bottom: 8px;">Administrar el menu y productos</li>
+        <li style="margin-bottom: 8px;">Gestionar órdenes y pagos</li>
+        <li style="margin-bottom: 8px;">Ver reportes y estadísticas</li>
+        <li style="margin-bottom: 8px;">Administrar el menú y productos</li>
         <li style="margin-bottom: 8px;">Supervisar las operaciones del negocio</li>
       </ul>
     </div>
@@ -746,14 +788,14 @@ Recibo enviado por ${data.venueName} via Avoqado
     <!-- CTA Button -->
     <div style="padding: 32px 0; text-align: center;">
       <a href="${data.inviteLink}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Aceptar Invitacion
+        Aceptar invitación
       </a>
     </div>
 
     <!-- Note -->
     <div style="padding-bottom: 24px;">
       <p style="font-size: 14px; color: #666; margin: 0;">
-        Esta invitacion expirara en 7 dias. Si tienes alguna pregunta, contacta con ${data.inviterName}.
+        Esta invitación expirará en 7 días. Si tienes alguna pregunta, contacta con ${data.inviterName}.
       </p>
     </div>
 
@@ -769,10 +811,10 @@ Recibo enviado por ${data.venueName} via Avoqado
         Ciudad de Mexico, Mexico
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
-        Este correo fue enviado por Avoqado. Si no esperabas recibir esta invitacion, puedes ignorar este mensaje.
+        Este correo fue enviado por Avoqado. Si no esperabas recibir esta invitación, puedes ignorar este mensaje.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -786,9 +828,9 @@ Hola,
 
 ${data.inviterName} te ha invitado a unirte al equipo de ${data.venueName} como ${data.roleDisplayName || data.role}.
 
-Para aceptar la invitacion, visita: ${data.inviteLink}
+Para aceptar la invitación, visita: ${data.inviteLink}
 
-Esta invitacion expirara en 7 dias.
+Esta invitación expirará en 7 días.
 
 Saludos,
 Equipo de Avoqado
@@ -840,16 +882,16 @@ Equipo de Avoqado
             greeting: 'Hola,',
             intro: `Te escribimos para recordarte que tu <strong>prueba gratuita de ${data.featureName}</strong> esta por terminar el <strong>${trialEndDateFormatted}</strong>.`,
             importantLabel: 'Importante',
-            importantBody: `Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago. Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora.`,
+            importantBody: `Después de esta fecha, la función será desactivada automáticamente si no actualizas tu método de pago. Para continuar usando ${data.featureName} sin interrupciones, actualiza tu método de pago ahora.`,
             cta: 'Ir a Facturacion',
             footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico',
-            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
-            privacy: 'Politica de Privacidad',
+            footerHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
+            privacy: 'Política de Privacidad',
             textIntro: `Tu prueba gratuita de ${data.featureName} esta por terminar el ${trialEndDateFormatted}.`,
             textImportant:
-              'IMPORTANTE: Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago.',
-            textCallToAction: `Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora:`,
-            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+              'IMPORTANTE: Después de esta fecha, la función será desactivada automáticamente si no actualizas tu método de pago.',
+            textCallToAction: `Para continuar usando ${data.featureName} sin interrupciones, actualiza tu método de pago ahora:`,
+            textHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -996,7 +1038,7 @@ ${t.textSignoff}
             htmlTitle: 'Problema con el pago',
             title: 'Problema con el pago',
             greeting: 'Hola,',
-            intro: `No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripcion de <strong>${data.featureName}</strong>.`,
+            intro: `No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripción de <strong>${data.featureName}</strong>.`,
             cardEndingIn: (last4: string) => `Tarjeta terminada en <strong>${last4}</strong>`,
             reasonsLabel: 'Razones comunes de rechazo',
             reasons: [
@@ -1007,26 +1049,26 @@ ${t.textSignoff}
             ],
             cta: 'Actualizar Metodo de Pago',
             footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico',
-            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.',
-            privacy: 'Politica de Privacidad',
+            footerHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.',
+            privacy: 'Política de Privacidad',
             attempt1: {
               level: 'Intento 1 de 3',
-              steps: 'Intentaremos cobrar nuevamente en los proximos dias. Por favor, actualiza tu metodo de pago lo antes posible.',
+              steps: 'Intentaremos cobrar nuevamente en los próximos días. Por favor, actualiza tu método de pago lo antes posible.',
             },
             attempt2: {
               level: 'Intento 2 de 3 - Accion Requerida',
               steps:
-                'Este es el segundo intento fallido. Si el proximo intento tambien falla, tu suscripcion sera cancelada automaticamente.',
+                'Este es el segundo intento fallido. Si el próximo intento también falla, tu suscripción será cancelada automáticamente.',
             },
             attempt3: {
               level: 'ULTIMO INTENTO - Accion Urgente',
-              steps: 'Este es el ultimo intento. Si no actualizas tu metodo de pago inmediatamente, tu suscripcion sera cancelada.',
+              steps: 'Este es el último intento. Si no actualizas tu método de pago inmediatamente, tu suscripción será cancelada.',
             },
-            textIntro: `No pudimos procesar el pago de ${amountFormatted} para tu suscripcion de ${data.featureName}.`,
+            textIntro: `No pudimos procesar el pago de ${amountFormatted} para tu suscripción de ${data.featureName}.`,
             textCardEndingIn: (last4: string) => `Tarjeta terminada en ${last4}`,
-            textCallToAction: 'Actualiza tu metodo de pago ahora:',
+            textCallToAction: 'Actualiza tu método de pago ahora:',
             textReasonsLabel: 'Razones comunes de rechazo:',
-            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.',
+            textHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1200,31 +1242,31 @@ ${t.textSignoff}
             textSignoff: 'The Avoqado Team',
           }
         : {
-            subject: `Tu suscripcion de ${data.featureName} ha sido suspendida - ${data.venueName}`,
+            subject: `Tu suscripción de ${data.featureName} ha sido suspendida - ${data.venueName}`,
             htmlTitle: 'Suscripcion suspendida',
             title: 'Suscripcion Suspendida',
             greeting: 'Hola,',
-            intro: `Tu suscripcion de <strong>${data.featureName}</strong> ha sido suspendida debido a multiples intentos de pago fallidos.`,
+            intro: `Tu suscripción de <strong>${data.featureName}</strong> ha sido suspendida debido a múltiples intentos de pago fallidos.`,
             currentStatusLabel: 'Estado actual',
             currentStatusValue: `Acceso bloqueado desde ${suspendedDateFormatted}`,
             cancellationLabel: 'Fecha de cancelacion definitiva',
-            warning: `Si no actualizas tu metodo de pago antes del ${cancellationDateFormatted}, tu suscripcion sera cancelada permanentemente.`,
+            warning: `Si no actualizas tu método de pago antes del ${cancellationDateFormatted}, tu suscripción será cancelada permanentemente.`,
             meaningLabel: 'Que significa esto:',
             meaning: [
               `Tu acceso a ${data.featureName} esta actualmente bloqueado`,
               'Tus datos permanecen seguros y guardados',
-              'Puedes reactivar tu suscripcion actualizando tu metodo de pago',
-              `Despues del ${cancellationDateFormatted}, la suscripcion sera cancelada`,
+              'Puedes reactivar tu suscripción actualizando tu método de pago',
+              `Después del ${cancellationDateFormatted}, la suscripción será cancelada`,
             ],
             cta: 'Actualizar Metodo de Pago',
-            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
-            privacy: 'Politica de Privacidad',
-            textSuspendedHeadline: `Tu suscripcion de ${data.featureName} ha sido SUSPENDIDA debido a multiples intentos de pago fallidos.`,
+            footerHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
+            privacy: 'Política de Privacidad',
+            textSuspendedHeadline: `Tu suscripción de ${data.featureName} ha sido SUSPENDIDA debido a múltiples intentos de pago fallidos.`,
             textCurrentStatus: `Estado actual: Acceso bloqueado desde ${suspendedDateFormatted}`,
             textCancellation: `Fecha de cancelacion definitiva: ${cancellationDateFormatted}`,
             textMeaningLabel: 'Que significa esto:',
-            textCallToAction: 'Reactiva tu suscripcion ahora:',
-            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            textCallToAction: 'Reactiva tu suscripción ahora:',
+            textHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1391,30 +1433,30 @@ ${t.textSignoff}
             textSignoff: 'The Avoqado Team',
           }
         : {
-            subject: `Tu suscripcion de ${data.featureName} ha sido cancelada - ${data.venueName}`,
+            subject: `Tu suscripción de ${data.featureName} ha sido cancelada - ${data.venueName}`,
             htmlTitle: 'Suscripcion cancelada',
             title: 'Suscripcion Cancelada',
             greeting: 'Hola,',
-            intro: `Tu suscripcion de <strong>${data.featureName}</strong> ha sido cancelada permanentemente el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
+            intro: `Tu suscripción de <strong>${data.featureName}</strong> ha sido cancelada permanentemente el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
             suspensionLabel: 'Fecha de suspension',
             cancellationLabel: 'Fecha de cancelacion',
             accessDeactivated: `Tu acceso a ${data.featureName} ha sido completamente desactivado.`,
             reactivateLabel: `Quieres volver a activar ${data.featureName}?`,
             reactivateBody:
-              'Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.',
+              'Puedes reactivar tu suscripción en cualquier momento. Tus datos previos permanecen seguros y podrás recuperar el acceso inmediatamente después de configurar tu método de pago.',
             ctaPrompt: 'Listo para volver?',
-            ctaLink: 'Contactanos para reactivar tu suscripcion',
-            footerNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.',
-            privacy: 'Politica de Privacidad',
-            textCanceledHeadline: `Tu suscripcion de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
+            ctaLink: 'Contáctanos para reactivar tu suscripción',
+            footerNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.',
+            privacy: 'Política de Privacidad',
+            textCanceledHeadline: `Tu suscripción de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
             textSuspension: `Fecha de suspension: ${suspendedDateFormatted}`,
             textCancellation: `Fecha de cancelacion: ${canceledDateFormatted}`,
             textAccessDeactivated: `Tu acceso a ${data.featureName} ha sido completamente desactivado.`,
             textReactivateLabel: `Quieres volver a activar ${data.featureName}?`,
             textReactivateBody:
-              'Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.',
-            textContact: 'Contactanos si necesitas ayuda: hola@avoqado.io',
-            textFooterNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.',
+              'Puedes reactivar tu suscripción en cualquier momento. Tus datos previos permanecen seguros y podrás recuperar el acceso inmediatamente después de configurar tu método de pago.',
+            textContact: 'Contáctanos si necesitas ayuda: hola@avoqado.io',
+            textFooterNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1583,17 +1625,17 @@ ${t.textSignoff}
             likedBody:
               'Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.',
             ctaPrompt: 'Listo para suscribirte?',
-            ctaBody: 'Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.',
-            footerNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.`,
-            privacy: 'Politica de Privacidad',
+            ctaBody: 'Visita la sección de facturación en tu dashboard para activar tu suscripción.',
+            footerNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aquí para ayudarte.`,
+            privacy: 'Política de Privacidad',
             textExpiredHeadline: `Tu periodo de prueba de ${data.featureName} ha TERMINADO el ${expiredDateFormatted}.`,
             textExpiration: `Fecha de expiracion: ${expiredDateFormatted}`,
             textAccess: `Tu acceso a ${data.featureName} ha sido desactivado temporalmente.`,
             textLikedLabel: `Te gusto ${data.featureName}?`,
             textLikedBody:
               'Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.',
-            textCallToAction: 'Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.',
-            textFooterNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.`,
+            textCallToAction: 'Visita la sección de facturación en tu dashboard para activar tu suscripción.',
+            textFooterNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aquí para ayudarte.`,
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1708,7 +1750,11 @@ ${t.textSignoff}
   }
 
   async sendEmailVerification(email: string, data: EmailVerificationData): Promise<boolean> {
-    const subject = `Verifica tu correo electronico`
+    // El código en el asunto: se lee en la notificación sin abrir el correo (como Google o Slack).
+    const subject = `${data.verificationCode} es tu código de Avoqado`
+    // «Usuario» era el relleno del registro directo, que no pide nombre: «Hola Usuario» se veía de robot.
+    const nombre = (data.firstName || '').trim()
+    const saludo = nombre && nombre !== 'Usuario' ? `Hola, ${nombre}:` : 'Hola:'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
 
     const html = `
@@ -1735,16 +1781,16 @@ ${t.textSignoff}
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola ${data.firstName},</p>
+      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">${saludo}</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electronico usando el siguiente codigo:
+        Gracias por registrarte en Avoqado. Para continuar, verifica tu correo con este código:
       </p>
     </div>
 
     <!-- Verification Code Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 32px; margin-bottom: 24px; text-align: center;">
       <p style="margin: 0 0 12px 0; font-size: 13px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;">
-        TU CODIGO DE VERIFICACION
+        TU CÓDIGO DE VERIFICACIÓN
       </p>
       <div style="font-size: 40px; font-weight: 600; color: #000; letter-spacing: 12px; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', monospace; line-height: 1.2;">
         ${data.verificationCode}
@@ -1754,10 +1800,10 @@ ${t.textSignoff}
     <!-- Warning -->
     <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
       <p style="font-size: 14px; color: #92400e; margin: 0 0 4px 0; font-weight: 500;">
-        Este codigo expirara en 10 minutos
+        Este código vence en 10 minutos
       </p>
       <p style="font-size: 13px; color: #92400e; margin: 0;">
-        Si no solicitaste este codigo, puedes ignorar este correo.
+        Si no lo pediste tú, ignora este correo.
       </p>
     </div>
 
@@ -1769,10 +1815,10 @@ ${t.textSignoff}
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Necesitas ayuda? Contactanos en cualquier momento.
+        ¿Necesitas ayuda? Escríbenos a hola@avoqado.io.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -1782,17 +1828,17 @@ ${t.textSignoff}
     `
 
     const text = `
-Hola ${data.firstName},
+${saludo}
 
-Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electronico usando el siguiente codigo:
+Gracias por registrarte en Avoqado. Para continuar, verifica tu correo con este código:
 
-Codigo de verificacion: ${data.verificationCode}
+Código de verificación: ${data.verificationCode}
 
-Este codigo expirara en 10 minutos.
+Este código vence en 10 minutos.
 
-Si no solicitaste este codigo, puedes ignorar este correo.
+Si no lo pediste tú, ignora este correo.
 
-Necesitas ayuda? Contactanos en cualquier momento.
+¿Necesitas ayuda? Escríbenos a hola@avoqado.io.
 
 Equipo de Avoqado
     `
@@ -1806,7 +1852,7 @@ Equipo de Avoqado
   }
 
   async sendPasswordResetEmail(email: string, data: PasswordResetData): Promise<boolean> {
-    const subject = `Restablece tu contrasena - Avoqado`
+    const subject = `Restablece tu contraseña - Avoqado`
     const logoUrl = 'https://avoqado.io/isotipo.svg'
 
     const html = `
@@ -1815,7 +1861,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Restablece tu contrasena</title>
+  <title>Restablece tu contraseña</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -1828,21 +1874,21 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Restablece tu contrasena</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Restablece tu contraseña</h1>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
       <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola ${data.firstName},</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Recibimos una solicitud para restablecer la contrasena de tu cuenta de Avoqado. Haz clic en el boton de abajo para crear una nueva contrasena.
+        Recibimos una solicitud para restablecer la contraseña de tu cuenta de Avoqado. Haz clic en el botón de abajo para crear una nueva contraseña.
       </p>
     </div>
 
     <!-- CTA Button -->
     <div style="padding: 16px 0 24px 0; text-align: center;">
       <a href="${data.resetLink}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Restablecer Contrasena
+        Restablecer contraseña
       </a>
     </div>
 
@@ -1867,8 +1913,8 @@ Equipo de Avoqado
     <!-- Security Info -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
       <p style="font-size: 14px; color: #000; margin: 0;">
-        <strong>No solicitaste esto?</strong><br>
-        Si no pediste restablecer tu contrasena, ignora este correo. Tu cuenta esta segura.
+        <strong>¿No solicitaste esto?</strong><br>
+        Si no pediste restablecer tu contraseña, ignora este correo. Tu cuenta está segura.
       </p>
     </div>
 
@@ -1880,10 +1926,10 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Necesitas ayuda? Contactanos en <a href="mailto:hola@avoqado.io" style="color: #1a73e8; text-decoration: none;">hola@avoqado.io</a>
+        ¿Necesitas ayuda? Contáctanos en <a href="mailto:hola@avoqado.io" style="color: #1a73e8; text-decoration: none;">hola@avoqado.io</a>
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -1893,19 +1939,19 @@ Equipo de Avoqado
     `
 
     const text = `
-Restablece tu contrasena - Avoqado
+Restablece tu contraseña - Avoqado
 
 Hola ${data.firstName},
 
-Recibimos una solicitud para restablecer la contrasena de tu cuenta de Avoqado.
+Recibimos una solicitud para restablecer la contraseña de tu cuenta de Avoqado.
 
-Para restablecer tu contrasena, visita el siguiente enlace:
+Para restablecer tu contraseña, visita el siguiente enlace:
 ${data.resetLink}
 
-Este enlace expirara en ${data.expiresInMinutes} minutos y solo puede usarse una vez.
+Este enlace expirará en ${data.expiresInMinutes} minutos y solo puede usarse una vez.
 
-No solicitaste esto?
-Si no pediste restablecer tu contrasena, ignora este correo. Tu cuenta esta segura.
+¿No solicitaste esto?
+Si no pediste restablecer tu contraseña, ignora este correo. Tu cuenta está segura.
 
 Equipo de Avoqado
     `
@@ -1924,10 +1970,10 @@ Equipo de Avoqado
 
     const shippingSpeedText =
       data.shippingSpeed === 'express'
-        ? 'Express (2-3 dias)'
+        ? 'Express (2-3 días)'
         : data.shippingSpeed === 'overnight'
           ? 'Nocturno (1 dia)'
-          : 'Estandar (5-7 dias)'
+          : 'Estándar (5-7 días)'
 
     const html = `
 <!DOCTYPE html>
@@ -2041,7 +2087,7 @@ Equipo de Avoqado
         Si tienes alguna pregunta sobre tu pedido, no dudes en contactarnos.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -2116,10 +2162,10 @@ Equipo de Avoqado
 
     const shippingSpeedText =
       data.shippingSpeed === 'express'
-        ? 'Express (2-3 dias)'
+        ? 'Express (2-3 días)'
         : data.shippingSpeed === 'overnight'
           ? 'Nocturno (1 dia)'
-          : 'Estandar (5-7 dias)'
+          : 'Estándar (5-7 días)'
 
     const html = `
 <!DOCTYPE html>
@@ -2911,7 +2957,7 @@ Avoqado Dashboard
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Este email fue enviado automaticamente desde Avoqado TPV
+        Este email fue enviado automáticamente desde Avoqado TPV
       </p>
       <p style="margin: 8px 0 0 0; font-size: 14px; color: #666;">
         Para responder al usuario, contacta directamente al venue: ${data.venueSlug}
@@ -3073,7 +3119,7 @@ Avoqado Dashboard
         Este informe solo considera los pedidos cerrados y las ventas realizadas durante el horario comercial.
       </p>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Consulta el <a href="${data.dashboardUrl}/reports/sales-summary" style="color: #1a73e8; text-decoration: none;">informe de conciliacion</a> para obtener mas informacion sobre los pagos y las transferencias anteriores.
+        Consulta el <a href="${data.dashboardUrl}/reports/sales-summary" style="color: #1a73e8; text-decoration: none;">informe de conciliación</a> para obtener más información sobre los pagos y las transferencias anteriores.
       </p>
       <p style="margin: 16px 0 0 0;">
         <a href="${data.dashboardUrl}" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Abrir Dashboard</a>
@@ -3250,7 +3296,7 @@ Avoqado Dashboard
         <sup>2</sup>Incluye tarifas de procesamiento de Avoqado y tarifas de cualquier tercero (p.ej. tarifas de envio)
       </p>
       <p style="margin: 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
       <p style="margin: 8px 0 0 0; font-size: 14px;">
         <a href="${data.dashboardUrl}/notifications/preferences" style="color: #000; text-decoration: none; font-weight: 600;">Administrar preferencias de notificaciones</a>
@@ -3713,6 +3759,114 @@ Aviso de privacidad: https://avoqado.io/privacy`
     return this.sendEmail({ to: email, subject, html, text })
   }
 
+  /**
+   * Tarjetas de regalo 1b (S3, Q4): le lleva su tarjeta a quien la RECIBE. Mismo contenido que el WhatsApp: la liga de su
+   * página y el folio, NUNCA el código (E8: el código sólo se ve en la página). El lector no es el negocio ni Avoqado: el
+   * asunto nombra al negocio y nosotros sólo aparecemos en el pie (como `sendWalletPassEmail`).
+   *
+   * Devuelve el detalle (`sendEmailWithResult`): la entrega necesita el `resendId` (Q105, el rebote se cruza por él) y saber
+   * si el fallo es transitorio. `idempotencyKey` la arma la entrega (`llaveDeCorreo`, Q46).
+   */
+  async sendGiftCardDeliveryEmail(
+    email: string,
+    d: { negocio: string; monto: string; deParteDe: string; para: string | null; folio: string; url: string },
+    idempotencyKey: string,
+  ): Promise<EmailSendResult> {
+    const esc = escapeHtmlForReferralEmail
+    const subject = `Tu tarjeta de regalo de ${d.negocio}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const saludo = d.para ? `Hola ${d.para}:` : 'Hola:'
+    // Dictamen legal § 6 (LFPDPPP art. 16 fr. II y 17): quien la recibe no dio sus datos; se le avisa en versión simplificada.
+    const privacidad = `${d.negocio} usa tu nombre y tu correo sólo para entregarte esta tarjeta y avisarte de su saldo. Su aviso de privacidad y los términos están en la liga.`
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Recibiste una tarjeta de regalo de ${esc(d.negocio)}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
+      ${esc(saludo)} toca &laquo;Ver mi tarjeta&raquo; para ver tu c&oacute;digo y tu saldo.
+    </p>
+
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">Monto</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${esc(d.monto)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">De parte de</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${esc(d.deParteDe)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666;">Folio</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000;">${esc(d.folio)}</td>
+      </tr>
+    </table>
+
+    <div style="margin: 0 0 32px 0;">
+      <a href="${esc(d.url)}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Ver mi tarjeta
+      </a>
+    </div>
+
+    <p style="margin: 0 0 24px 0; font-size: 13px; color: #666;">
+      ${esc(privacidad)}
+    </p>
+
+    <div style="padding-top: 8px; border-top: 1px solid #e5e7eb;">
+      <div style="margin: 16px 0;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque ${esc(d.deParteDe)} te regal&oacute; una tarjeta de ${esc(d.negocio)}.
+      </p>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="https://avoqado.io/privacy" style="color: #666; text-decoration: underline;">Aviso de privacidad</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Recibiste una tarjeta de regalo de ${d.negocio}
+
+${saludo} abre la liga para ver tu código y tu saldo.
+
+Monto: ${d.monto}
+De parte de: ${d.deParteDe}
+Folio: ${d.folio}
+
+Ver mi tarjeta: ${d.url}
+
+${privacidad}
+
+---
+Recibiste este correo porque ${d.deParteDe} te regaló una tarjeta de ${d.negocio}.
+Servicios Tecnologicos Avo S.A. de C.V.
+Aviso de privacidad: https://avoqado.io/privacy`
+
+    return this.sendEmailWithResult({ to: email, subject, html, text, idempotencyKey })
+  }
+
   async sendReservationRescheduledEmail(email: string, data: ReservationRescheduledEmailData): Promise<boolean> {
     const subject = `Tu reservacion en ${data.venueName} cambio de horario`
     const logoUrl = 'https://avoqado.io/isotipo.svg'
@@ -3795,7 +3949,7 @@ Aviso de privacidad: https://avoqado.io/privacy`
         Recibiste este correo porque tienes una reservacion activa en ${data.venueName}.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -4504,8 +4658,8 @@ Servicios Tecnologicos Avo S.A. de C.V.`
             privacy: 'Privacy Policy',
           }
         : {
-            help: 'Necesitas ayuda? Contactanos en cualquier momento.',
-            privacy: 'Politica de Privacidad',
+            help: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
+            privacy: 'Política de Privacidad',
           }
 
     return `
@@ -4574,11 +4728,8 @@ Servicios Tecnologicos Avo S.A. de C.V.`
    * 3 months on monthly). Money formatted via Intl.NumberFormat (es-MX/en-US, currency MXN).
    */
   async sendPlanConfirmationEmail(email: string, data: PlanConfirmationEmailData): Promise<boolean> {
-    const fmt = (cents: number) =>
-      new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
-        style: 'currency',
-        currency: 'MXN',
-      }).format(cents / 100)
+    // D13 (28-oct): sin Intl. En producción el ICU escribió «$1970.84» (sin coma de miles); `formatMoney` agrupa siempre.
+    const fmt = (cents: number) => formatMoney(cents)
     // 🔴 En la zona del NEGOCIO: con la del servidor (UTC), un cobro a las 20:00 de México se anunciaba para «mañana».
     const dateFormatted = data.firstChargeDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
@@ -4723,15 +4874,89 @@ Equipo de Avoqado`
   }
 
   /**
+   * A prospect sent the modules they chose on /presentacion/precios. Internal notice to Avoqado sales, never to the
+   * prospect; everything in it was recomputed by the server (`priceSelection`).
+   */
+  async sendPriceSelectionEmail(to: string, data: PriceSelectionEmailData): Promise<boolean> {
+    const esc = escapeHtmlForReferralEmail
+    const money = (totalCents: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalCents / 100)
+    const { selection } = data
+    // One line: the name travels in the subject, where a newline must never open a header.
+    const who = (data.nombre || data.telefono || 'Un prospecto').replace(/\s+/g, ' ').trim()
+    const count = selection.chosen.length + selection.quoted.length
+    const subject = `${who} eligió ${count} ${count === 1 ? 'módulo' : 'módulos'} · ${money(selection.best.totalCents)}/mes`
+    const when = new Intl.DateTimeFormat('es-MX', { dateStyle: 'long', timeStyle: 'short', timeZone: 'America/Mexico_City' }).format(
+      new Date(),
+    )
+    const nameOf = (id: string) => selection.chosen.find(f => f.id === id)?.name ?? id
+    const optionLabel = (kind: string) => (kind === 'SUELTO' ? 'Funciones sueltas' : `Plan ${kind === 'PRO' ? 'Pro' : 'Premium'}`)
+    const row = (left: string, right: string) =>
+      `<tr><td style="padding: 8px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${left}</td><td style="padding: 8px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; text-align: right; white-space: nowrap;">${right}</td></tr>`
+    const chosenRows = selection.chosen.map(f => {
+      const why = selection.addedByRequirement.includes(f.id)
+        ? ` <span style="color: #666;">(lo requiere ${esc(selection.chosen.find(o => o.requires.includes(f.id))?.name ?? '')})</span>`
+        : ''
+      return row(`${esc(f.name)}${why}`, money(Math.round(f.price! * 100)))
+    })
+    const quotedRows = selection.quoted.map(f => row(esc(f.name), 'Se cotiza aparte'))
+    const optionRows = selection.options.map(o => {
+      const extras = o.extras.length ? ` <span style="color: #666;">+ ${o.extras.map(id => esc(nameOf(id))).join(', ')}</span>` : ''
+      const label = `${optionLabel(o.kind)}${extras}`
+      return row(
+        o === selection.best ? `<strong>${label}</strong>` : label,
+        o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents),
+      )
+    })
+    const advice =
+      selection.best.kind === 'SUELTO'
+        ? ''
+        : `<p style="font-size: 16px; margin: 24px 0 0 0;">💡 Le conviene el <strong>${optionLabel(selection.best.kind)}</strong>${
+            selection.best.extras.length ? ` + ${selection.best.extras.map(id => esc(nameOf(id))).join(', ')}` : ''
+          }: ${money(selection.best.totalCents)}/mes, ahorra ${money(selection.savingsCents)} al mes.</p>`
+    // The button never points where the visitor says (Codex r1 #2: a public POST must not put a phishing link in an
+    // Avoqado e-mail): WhatsApp to the number, or the canonical page. `pageUri` is shown as text only when it is ours.
+    const ctaUrl = data.whatsappUrl ?? PRICE_PAGE_URL
+    const pageUri = data.pageUri?.startsWith(PRICE_PAGE_URL) ? data.pageUri : null
+    const bodyHtml = `
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+        <p style="font-size: 14px; margin: 0; color: #000;"><strong>${esc(data.nombre) || '—'}</strong></p>
+        <p style="font-size: 14px; margin: 4px 0 0 0; color: #666;">${esc(data.telefono) || 'Sin teléfono'} · ${when}</p>
+      </div>
+      <p style="font-size: 14px; margin: 0 0 8px 0; color: #666;">Lo que eligió (IVA incluido)</p>
+      <table style="width: 100%; border-collapse: collapse;">${[...chosenRows, ...quotedRows].join('')}</table>
+      <p style="font-size: 14px; margin: 24px 0 8px 0; color: #666;">Cuánto pagaría al mes</p>
+      <table style="width: 100%; border-collapse: collapse;">${optionRows.join('')}</table>
+      ${advice}
+      ${pageUri ? `<p style="font-size: 12px; margin: 24px 0 0 0; color: #666;">Desde: ${esc(pageUri)}</p>` : ''}`
+    const html = this.buildPlanEmailHtml({
+      locale: 'es',
+      title: esc(subject),
+      venueName: 'Presentación de precios',
+      bodyHtml,
+      ctaLabel: data.whatsappUrl ? 'Escribir por WhatsApp' : 'Ver la presentación',
+      ctaUrl: esc(ctaUrl),
+    })
+    const text = [
+      subject,
+      `${data.nombre ?? '—'} · ${data.telefono ?? 'Sin teléfono'} · ${when}`,
+      '',
+      ...selection.chosen.map(f => `- ${f.name}: ${money(Math.round(f.price! * 100))}`),
+      ...selection.quoted.map(f => `- ${f.name}: se cotiza aparte`),
+      '',
+      ...selection.options.map(o => `${optionLabel(o.kind)}: ${money(o.totalCents)}`),
+      pageUri ? `\nDesde: ${pageUri}` : '',
+    ].join('\n')
+    return this.sendEmail({ to, subject, html, text })
+  }
+
+  /**
    * Plan reminder before the next charge (renewal, or with `isTrialEnd` the end of the trial). Sent by the daily
    * `plan-renewal-reminder` job less than 9 days before the charge (first send normally 8-9 days out) and by the Stripe
    * `trial_will_end` webhook (3 days before).
    */
   async sendPlanRenewalReminderEmail(email: string, data: PlanRenewalReminderEmailData): Promise<boolean> {
-    const amount = new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
-      style: 'currency',
-      currency: 'MXN',
-    }).format(data.amountCents / 100)
+    // D13 (28-oct): sin Intl, como la confirmación del plan (en producción el ICU no ponía la coma de miles).
+    const amount = formatMoney(data.amountCents)
     // Sin zona explícita la fecha salía en la del servidor (UTC en Render): un cobro a las 20:00 del 16 en CDMX decía «17».
     const dateFormatted = data.renewalDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
@@ -5112,6 +5337,7 @@ export async function sendReferralWelcomeEmail(input: SendReferralWelcomeEmailIn
   if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
+  if (await omitirPorDemo('correo de referidos', input.to)) return false
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,
@@ -5198,6 +5424,7 @@ export async function sendReferralTierUpEmail(input: SendReferralTierUpEmailInpu
   if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
+  if (await omitirPorDemo('correo de referidos', input.to)) return false
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,

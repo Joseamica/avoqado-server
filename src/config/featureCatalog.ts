@@ -661,6 +661,45 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         requirement: null,
         names: { es: 'Variantes de producto', en: 'Product variants', fr: 'Variantes de produit' },
       },
+      {
+        // Incluida en Pro y Premium, sin precio suelto (founder, 30-oct): su fila `Feature` lleva `monthlyPrice: 0`.
+        id: 'DEVICE_MENUS',
+        featureCode: 'DEVICE_MENUS',
+        name: 'Menú de cada aparato',
+        description: 'Elige qué menús muestra cada aparato; la búsqueda y el escáner siguen encontrando todo.',
+        category: 'sell',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: { es: 'Menú de cada aparato', en: 'Menu per device', fr: 'Menu par appareil' },
+      },
+      {
+        // Pro desde antes (LEGACY_PLAN_CODES) pero sin entrada: una oferta de plan nueva no la traía (D4, 31-oct).
+        id: 'KITCHEN_DISPLAY',
+        featureCode: 'KITCHEN_DISPLAY',
+        name: 'Pantalla de cocina',
+        description: 'Las comandas llegan a una pantalla en cada estación de la cocina.',
+        category: 'sell',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: { es: 'Pantalla de cocina', en: 'Kitchen display', fr: 'Écran de cuisine' },
+      },
+      {
+        id: 'CUSTOMER_DISPLAY_PROMOS',
+        featureCode: 'CUSTOMER_DISPLAY_PROMOS',
+        name: 'Promociones en la pantalla del cliente',
+        description: 'Muestra tus promociones en la pantalla del cliente mientras no hay una venta en curso.',
+        category: 'customers',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: {
+          es: 'Promociones en la pantalla del cliente',
+          en: 'Customer display promotions',
+          fr: "Promotions sur l'écran client",
+        },
+      },
     ] as FeatureCatalogEntry[]
   ).map(entry => Object.freeze({ ...entry, names: Object.freeze(entry.names) })),
 )

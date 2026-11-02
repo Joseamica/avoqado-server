@@ -12,6 +12,7 @@ import { MovementType, Prisma, RawMaterialMovementType } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { adjustStock } from './rawMaterial.service'
+import { renglonesQueSeReponen } from '../inventory/reponerLoQueFalta'
 
 /**
  * Add stock back for a single refunded item.
@@ -135,30 +136,29 @@ export async function restockItem(args: {
  * thrown, so the caller's refund is never rolled back. Serialized-inventory
  * items and products without inventory tracking are skipped by `restockItem`.
  */
-export async function restockOrderItems(args: { venueId: string; orderId: string; refundPaymentId: string; staffId?: string }) {
+export async function restockOrderItems(args: {
+  venueId: string
+  orderId: string
+  refundPaymentId: string
+  staffId?: string
+  items?: Array<{ orderItemId: string; quantity: number }>
+}) {
   const { venueId, orderId, refundPaymentId, staffId } = args
-
-  const items = await prisma.orderItem.findMany({
-    where: { orderId, productId: { not: null } },
-    select: { id: true, productId: true, quantity: true },
-  })
-
+  const renglones = await renglonesQueSeReponen(prisma, venueId, orderId, args.items)
   let restocked = 0
-  for (const item of items) {
-    if (!item.productId || item.quantity <= 0) continue
+  for (const item of renglones) {
     try {
       await restockItem({ venueId, productId: item.productId, quantity: item.quantity, refundPaymentId, staffId })
       restocked++
     } catch (err: any) {
       logger.warn('[INVENTORY RESTOCK] Failed to restock order item', {
         orderId,
-        orderItemId: item.id,
+        orderItemId: item.orderItemId,
         productId: item.productId,
         error: err?.message ?? err,
       })
     }
   }
-
-  logger.info('[INVENTORY RESTOCK] Restocked order items', { venueId, orderId, refundPaymentId, items: items.length, restocked })
-  return { items: items.length, restocked }
+  logger.info('[INVENTORY RESTOCK] Restocked order items', { venueId, orderId, refundPaymentId, items: renglones.length, restocked })
+  return { items: renglones.length, restocked }
 }

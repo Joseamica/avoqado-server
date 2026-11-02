@@ -12,6 +12,9 @@ import { getTransactionDetail } from '@/services/mobile/transaction.mobile.servi
 import { getPaymentById } from '@/services/dashboard/payment.dashboard.service'
 
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ listRefundsForPayment: jest.fn() }))
+jest.mock('@/services/exchanges/exchangeDetail', () => ({
+  exchangeDetailFields: jest.fn(async () => ({ fields: {}, itemExtras: new Map() })),
+}))
 
 const prismaMock = prisma as any
 const espejo = (renglones: Record<string, number>) => ({ v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones })

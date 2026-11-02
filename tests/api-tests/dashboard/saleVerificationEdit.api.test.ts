@@ -112,7 +112,7 @@ function seedFailedSale() {
     paymentId: PAYMENT_ID,
     status: 'FAILED',
     isPortabilidad: false,
-    payment: { id: PAYMENT_ID, amount: '0', method: 'OTHER' },
+    payment: { id: PAYMENT_ID, amount: '0', method: 'OTHER', orderId: 'ord-1' },
     venue: { organizationId: ORG_ID },
   })
   prismaMock.payment.update.mockResolvedValue({ id: PAYMENT_ID, amount: '100', method: 'CASH' })
@@ -130,8 +130,38 @@ function seedFailedSale() {
   }))
   prismaMock.activityLog.create.mockResolvedValue({ id: 'log-1' })
   // Codex R13-3: la decisión económica relee la fila VIGENTE bajo el mutex; por defecto el cobro NO es del protocolo.
-  prismaMock.payment.findUniqueOrThrow.mockResolvedValue({ amount: '0', method: 'OTHER' } as any)
-  prismaMock.$queryRaw.mockResolvedValue([])
+  prismaMock.payment.findUniqueOrThrow.mockResolvedValue({
+    amount: '0',
+    method: 'OTHER',
+    feeAmount: '0',
+    orderId: 'ord-1',
+    status: 'COMPLETED',
+    type: 'REGULAR',
+    tipAmount: '0',
+  } as any)
+  // D2: la corrección del importe mueve la cuenta; la venta es la de producción (1 artículo, ningún otro cobro).
+  prismaMock.payment.count.mockResolvedValue(0)
+  prismaMock.order.findFirst.mockResolvedValue({
+    id: 'ord-1',
+    version: 1,
+    status: 'COMPLETED',
+    paymentStatus: 'PAID',
+    contratoDePrecio: null,
+    subtotal: '0',
+    discountAmount: '0',
+    serviceChargeAmount: '0',
+    deliveryFeeAmount: '0',
+    taxAmount: '0',
+    tipAmount: '0',
+    total: '0',
+    paidAmount: '0',
+    remainingBalance: '0',
+    items: [{ id: 'it-1', quantity: 1, weightQuantity: null, discountAmount: '0', taxAmount: '0', _count: { modifiers: 0 } }],
+  } as any)
+  prismaMock.order.update.mockResolvedValue({ id: 'ord-1' } as any)
+  // El candado de la cuenta (`lockExistingOrderForPayment`) contesta su fila; lo demás de `$queryRaw` sigue vacío.
+  prismaMock.$queryRaw.mockImplementation((async (q: TemplateStringsArray) =>
+    q.join('').includes('FROM "Order"') ? [{ id: 'ord-1' }] : []) as any)
   // Codex R16-1: el candado toma el PAR original → reembolso (`bloquearConSuOriginal`): lee la foto del Payment (id, tipo, puntero)
   // antes y después de bloquear, entre savepoints. Por defecto el cobro NO es un reembolso (sin original que tomar).
   prismaMock.payment.findFirst.mockResolvedValue({ id: PAYMENT_ID, type: 'CREDIT', processorData: {} } as any)

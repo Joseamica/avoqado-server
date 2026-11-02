@@ -86,12 +86,12 @@ export function decideCheckIn(status: ReservationStatus | string): 'TRANSITION' 
 
 type StatusLogEntry = { status: string; at: string; by: string | null; source?: string; reason?: string }
 
-function actorLabel(actor: CheckInActor): string {
+export function actorLabel(actor: CheckInActor): string {
   return actor.type === 'HUMAN' ? actor.staffId : `service:${actor.servicePrincipalId}`
 }
 
 /** Campos de ActivityLog que satisfacen `ActivityLog_actor_identity_check` para cada actor. */
-function activityActorFields(actor: CheckInActor, organizationId: string) {
+export function activityActorFields(actor: CheckInActor, organizationId: string) {
   return actor.type === 'HUMAN'
     ? {
         actorType: 'HUMAN' as const,
@@ -110,7 +110,7 @@ function activityActorFields(actor: CheckInActor, organizationId: string) {
 }
 
 /** La organización DEL VENUE — la única que el tenant guard de ActivityLog acepta. */
-async function venueOrganizationId(client: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<string> {
+export async function venueOrganizationId(client: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<string> {
   const venue = await client.venue.findUniqueOrThrow({ where: { id: venueId }, select: { organizationId: true } })
   return venue.organizationId
 }
@@ -242,6 +242,16 @@ export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promi
   const passBooking = await prisma.aggregatorBooking.findUnique({ where: { reservationId: cmd.reservationId }, select: { id: true } })
   if (passBooking) return { ...result.reservation, services: result.services, orderId: null, orderCreated: false }
 
+  // 0.e — el kiosco reenvía su toque (cola sin red, doble toque). Ya registrada ⇒ se devuelve la orden viva y NUNCA se
+  // abre otra: si la del primer toque se canceló, reabrirla sería cobrarle a la persona algo que el negocio ya anuló.
+  if (cmd.source === 'KIOSK' && result.outcome === 'ALREADY_CHECKED_IN') {
+    const alive = await prisma.order.findFirst({
+      where: { reservationId: cmd.reservationId, venueId: cmd.venueId, status: { notIn: ['CANCELLED', 'DELETED'] } },
+      select: { id: true },
+    })
+    return { ...result.reservation, services: result.services, orderId: alive?.id ?? null, orderCreated: false }
+  }
+
   let orderId: string | null = null
   let orderCreated = false
   let orderError: typeof ORDER_CREATION_FAILED | undefined
@@ -352,6 +362,12 @@ export async function undoCheckIn(tx: Prisma.TransactionClient, cmd: UndoCheckIn
     )
   }
 
+  // 🔴 D4: una llegada que corrigió un «No asistió» ya re-descontó la clase. Si volviera a CONFIRMED, una cancelación o
+  // un nuevo «No asistió» la devolvería otra vez. Aquí, y no en una ruta: lo comparten panel, POS, MCP y pases.
+  if (await tx.reservationNoShowCorrection.findUnique({ where: { reservationId: cmd.reservationId }, select: { id: true } })) {
+    throw new ConflictError('Esta llegada corrigió un “No asistió”; no se puede deshacer el check-in.', CHECK_IN_UNDO_NOT_APPLICABLE)
+  }
+
   // 🔴 Dinero primero: si la orden del check-in ya cobró, esto no se deshace.
   const orders = await tx.order.findMany({
     where: { reservationId: cmd.reservationId, venueId: cmd.venueId },
@@ -381,9 +397,10 @@ export async function undoCheckIn(tx: Prisma.TransactionClient, cmd: UndoCheckIn
     { status: target, at: cmd.now.toISOString(), by: actorLabel(cmd.actor), source: cmd.source, reason: cmd.reason },
   ]
 
-  // CAS: sólo gana quien todavía la encuentre en CHECKED_IN.
+  // CAS: sólo gana quien todavía la encuentre en CHECKED_IN y SIN corrección de «No asistió» (red por si la corrección
+  // se confirmó entre el chequeo de arriba y aquí).
   const cas = await tx.reservation.updateMany({
-    where: { id: cmd.reservationId, venueId: cmd.venueId, status: 'CHECKED_IN' },
+    where: { id: cmd.reservationId, venueId: cmd.venueId, status: 'CHECKED_IN', noShowCorrection: { is: null } },
     data: { status: target, checkedInAt: null, statusLog: statusLog as unknown as Prisma.InputJsonValue },
   })
   if (cas.count === 0) {

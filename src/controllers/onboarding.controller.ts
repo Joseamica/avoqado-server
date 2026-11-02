@@ -11,6 +11,8 @@ import { z } from 'zod'
 import { EntityType, VenueType } from '@prisma/client'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
+import { terminarAltaCobrada } from '../services/onboarding/terminarAltaCobrada'
+import { renovarSesionConLaSucursal as renovarSesion } from '../services/onboarding/sesionTrasElAlta'
 import { ensureVenueForOnboarding } from '../services/onboarding/ensureVenue.service'
 import * as signupService from '../services/onboarding/signup.service'
 import * as testPaymentLinkService from '../services/onboarding/testPaymentLink.service'
@@ -24,6 +26,7 @@ import {
 } from '../services/stripe.service'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
+import * as resendService from '../services/resend.service'
 import {
   LEGACY_INTRO_OFFER,
   STANDARD_PLAN_GROSS_CENTS,
@@ -47,12 +50,6 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
-import * as authService from '../services/dashboard/auth.service'
-import { ponerCookiesDeSesion } from '../utils/cookiesDeSesion'
-import { esSucursalReal } from '../utils/sucursalDelToken'
-import { motivoDeConcesionInvalidada } from '../utils/passwordChangeGuard'
-import { revokeSession } from '../services/auth/session.service'
-import { invalidateSession } from '../services/auth/sessionCache'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 /**
@@ -332,12 +329,33 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         // venue-scoped backend APIs before the wizard finishes.
         ...(venue ? { venueId: venue.id, venueSlug: venue.slug } : {}),
         // Don't expose step8_paymentInfo for security (contains CLABE)
+        // ADITIVO: lo que la persona ya escribió en el formulario de la landing, para que el /setup no
+        // se lo vuelva a pedir en blanco (27-oct). Ruta con sesión y guarda de dueño: son sus propios datos.
+        ...(await negocioSugerido(organizationId, progress.acquisitionSource)),
       },
     })
   } catch (error) {
     logger.error('Error getting onboarding progress:', error)
     next(error)
   }
+}
+
+/** El placeholder con el que nace la organización cuando el formulario no trae negocio (signup.service). */
+const NOMBRE_DE_RELLENO = 'Nuevo Negocio'
+
+/**
+ * Nombre y teléfono del negocio que la persona ya dio en la landing. Sólo para altas de landing:
+ * en el registro directo la organización nace sin nombre real y no hay nada que sugerir.
+ */
+async function negocioSugerido(
+  organizationId: string,
+  acquisitionSource: string | null,
+): Promise<{ suggestedBusiness?: { name: string; phone: string | null } }> {
+  if (!acquisitionSource?.startsWith('landing')) return {}
+  const org = await prisma.organization.findUnique({ where: { id: organizationId }, select: { name: true, phone: true } }).catch(() => null)
+  const name = org?.name?.trim()
+  if (!name || name === NOMBRE_DE_RELLENO) return {}
+  return { suggestedBusiness: { name, phone: org?.phone?.trim() || null } }
 }
 
 /**
@@ -730,39 +748,9 @@ async function exigirAltaTerminada(organizationId: string): Promise<void> {
   }
 }
 
-/**
- * Terminar el alta reemite la sesión con la sucursal REAL (monitor de producción, 19-oct).
- *
- * El alta emite el token del panel con `venueId = 'pending'` (signup.service.ts) y la cookie dura 24 h: sin esto,
- * todo lo que toma la sucursal sólo del token (`/dashboard/tokens/*`, `/google-calendar/oauth/init`) fallaba un día
- * entero. Se hace EXACTAMENTE como el cambio de sucursal: `switchVenueForStaff` (misma verificación de acceso, misma
- * Session y mismo grant de refresco) y las mismas cookies.
- *
- * Nunca bloquea el alta: la sucursal ya existe, y sin tokens nuevos la persona puede cambiar de sucursal o volver a
- * entrar. No se reemite:
- * - suplantando: sería darle al superadmin una sesión normal a nombre de la persona suplantada;
- * - si la sesión YA tenía una sucursal real: un reintento desde otra pestaña no le cambia la sucursal en silencio;
- * - si hubo un corte de sesiones («cerrar todas», cambio de contraseña, cuenta desactivada) después de emitirse el
- *   token del alta (Codex r1/r2). Se revisa DESPUÉS de crear la sesión nueva, nunca antes: el corte escribe su fecha y
- *   luego cierra las Session vivas (`cerrarSesionesDeStaff`), así que la nueva o ya existía y el corte la cierra, o el
- *   corte ya se ve aquí y la cerramos nosotros. Revisar antes dejaba la ventana entre la revisión y `createSession`.
- */
+/** La renovación vive en `services/onboarding/sesionTrasElAlta.ts` (también la usa `/auth/status` desde H0, 28-oct). */
 async function renovarSesionConLaSucursal(req: Request, res: Response, venueId: string): Promise<void> {
-  const authContext = (req as any).authContext
-  if (!authContext?.userId || authContext.isImpersonating || esSucursalReal(authContext.venueId)) return
-  try {
-    const { accessToken, refreshToken, sessionId } = await authService.switchVenueForStaff(authContext.userId, authContext.orgId, venueId)
-    const emitido = typeof authContext.emitidoMs === 'number' ? new Date(authContext.emitidoMs) : undefined
-    if (await motivoDeConcesionInvalidada(authContext.userId, emitido)) {
-      await revokeSession(sessionId, 'sessions_revoked_during_onboarding')
-      await invalidateSession(sessionId)
-      return
-    }
-    ponerCookiesDeSesion(res, accessToken, refreshToken)
-  } catch (error) {
-    // error, no warn: sin esto la persona se queda 24 h en «sucursal pendiente» y el monitor debe verlo.
-    logger.error('No se pudo renovar la sesión con la sucursal al terminar el alta', { userId: authContext.userId, venueId, error })
-  }
+  await renovarSesion((req as any).authContext, res, venueId)
 }
 
 /**
@@ -785,6 +773,12 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
 
     if (!progress) {
       throw new NotFoundError('Onboarding progress not found')
+    }
+
+    // 🔴 D8 (26-oct): este carril no tiene paso de plan. Un alta del asistente nuevo, o cualquiera con el plan obligatorio,
+    // terminaba aquí sin plan ni tarjeta (armando step/2, step/3 y complete a mano) y el POS la dejaba entrar.
+    if (progress.wizardVersion === 2 || requiresBaseSubscriptionPlan()) {
+      throw new BadRequestError('Termina tu alta en dashboard.avoqado.io/setup: ahí eliges tu plan.', 'ALTA_EN_SETUP')
     }
 
     // Validate required steps completed
@@ -1289,6 +1283,26 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // camino ya cobró, ya escribió el plan del local y ya mandó su propio correo.
     const planYaCobrado = progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
 
+    // 🔴 H0 (28-oct): con el plan ya cobrado, el cierre es el MISMO que hace el cobro por su cuenta (`terminarAltaCobrada`):
+    // progreso, negocio y organización en una sola transacción. Antes este botón era el ÚNICO que terminaba el alta, y quien
+    // pagaba y cerraba la página se quedaba fuera del POS. Sin negocio (no debería pasar: el cobro lo crea) sigue el carril
+    // de siempre, que lo crea.
+    if (planYaCobrado) {
+      const cierre = await terminarAltaCobrada(organizationId, { via: 'navegador', staffId: authContext.userId, language })
+      if (cierre.estado !== 'NADA') {
+        await renovarSesionConLaSucursal(req, res, cierre.venue.id)
+        res.status(cierre.estado === 'TERMINADA' ? 201 : 200).json({
+          success: true,
+          message: cierre.estado === 'TERMINADA' ? 'Setup completed successfully' : 'Setup already completed',
+          venue: cierre.venue,
+        })
+        return
+      }
+      if (cierre.motivo !== 'SIN_NEGOCIO') {
+        throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+      }
+    }
+
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
     const lockResult = await prisma.$transaction(async tx => {
@@ -1420,6 +1434,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // quedaría sin aplicar. Ese cobro le toca a `activate-plan`, que sí lee la oferta, aparta el
     // cupo y libera el lugar si el banco rechaza.
     const traeCampanaReclamada = Boolean(progress.launchCampaignId)
+    // Si este cierre manda el correo de confirmación del plan (la bienvenida con precio). Ver la bienvenida genérica abajo.
+    let correoDelPlanEnviado = false
     if (planEnabled && !planYaCobrado && !traeCampanaReclamada && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
       // The guard above already excluded FREE; name the paid tier once so neither the coupon
       // decision nor the price lookup below has to re-derive it.
@@ -1507,6 +1523,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // recipient or any email/Stripe hiccup must never break onboarding.
         // 🔴 Sin `await`, como el correo de `activatePlan`: leer la fecha de Stripe (con sus reintentos) o mandar el correo
         // detenía la respuesta, la marca final y la sesión de un alta YA cobrada (Codex r3, 20-oct).
+        correoDelPlanEnviado = true
         void (async () => {
           try {
             const target = await resolvePlanNotificationTarget(result.venue.id)
@@ -1590,6 +1607,26 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           await dejarCobroEnCurso(organizationId)
         }
       }
+    }
+
+    // La bienvenida del alta corta. El negocio provisional ya no la manda (antes de la tarjeta el cliente creía que había
+    // terminado), así que se da aquí cuando este cierre NO llevó el correo del plan: ni lo cobró `activate-plan` ni lo
+    // mandó el bloque de arriba (Enterprise, compra híbrida, Gratis, banco que rechazó, cobro anterior recuperado).
+    // Se mide por el correo que de verdad salió, no por las condiciones de entrada al cobro (Codex r1 y r2, 27-oct).
+    if (existingVenue && !planYaCobrado && !correoDelPlanEnviado) {
+      void resolvePlanNotificationTarget(result.venue.id)
+        .then(target =>
+          target.email
+            ? resendService.sendOnboardingWelcomeEmail({
+                ownerEmail: target.email,
+                ownerFirstName: target.ownerName ?? '',
+                venueName: target.venueName ?? result.venue.name,
+                venueSlug: result.venue.slug,
+                hasKycDocuments: false,
+              })
+            : false,
+        )
+        .catch(err => logger.error(`V2 completion: no se pudo mandar la bienvenida de ${result.venue.id}`, err))
     }
 
     // Mark organization as onboarding completed

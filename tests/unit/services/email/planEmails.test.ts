@@ -37,6 +37,28 @@ describe('Subscription lifecycle plan emails', () => {
       expect(html).not.toContain('21 de octubre de 2027')
     })
 
+    it('🔴 D13: el monto lleva coma de miles aunque el Intl del servidor no la ponga (prod escribió «$1970.84»)', async () => {
+      const original = Intl.NumberFormat
+      ;(Intl as any).NumberFormat = jest.fn(() => ({ format: () => 'SIN-COMA' }))
+      try {
+        await emailService.sendPlanConfirmationEmail('a@x.com', {
+          locale: 'es',
+          venueName: 'Bar',
+          planName: 'Premium',
+          payNow: false,
+          interval: 'monthly',
+          firstChargeDate: new Date('2026-11-27'),
+          firstChargeAmountCents: 197084,
+          billingPortalUrl: 'u',
+        } as any)
+      } finally {
+        ;(Intl as any).NumberFormat = original
+      }
+      const html = JSON.stringify(spy.mock.calls.at(-1))
+      expect(html).toContain('$1,970.84')
+      expect(html).not.toContain('SIN-COMA')
+    })
+
     it('confirmation: trial es subject, no emoji', async () => {
       await emailService.sendPlanConfirmationEmail('a@x.com', {
         locale: 'es',
@@ -213,7 +235,7 @@ describe('Subscription lifecycle plan emails', () => {
     it('locale omitted → Spanish subject (regression for legacy callers)', async () => {
       await emailService.sendSubscriptionSuspendedEmail('a@x.com', base)
       const arg = spy.mock.calls[0][0]
-      expect(arg.subject).toBe('Tu suscripcion de Plan Pro ha sido suspendida - Bar')
+      expect(arg.subject).toBe('Tu suscripción de Plan Pro ha sido suspendida - Bar')
       expect(arg.subject).not.toMatch(EMOJI_RE)
     })
   })
@@ -237,7 +259,7 @@ describe('Subscription lifecycle plan emails', () => {
     it('locale omitted → Spanish subject (regression for legacy callers)', async () => {
       await emailService.sendSubscriptionCanceledEmail('a@x.com', base)
       const arg = spy.mock.calls[0][0]
-      expect(arg.subject).toBe('Tu suscripcion de Plan Pro ha sido cancelada - Bar')
+      expect(arg.subject).toBe('Tu suscripción de Plan Pro ha sido cancelada - Bar')
       expect(arg.subject).not.toMatch(EMOJI_RE)
     })
   })

@@ -41,6 +41,8 @@ export async function getLastCloseoutDate(venueId: string): Promise<Date> {
  */
 export async function getExpectedCashAmount(venueId: string): Promise<{
   expectedAmount: number
+  /** Rappi 2b (aditivo): la parte del esperado cobrada por cuenta de terceros (Rappi). */
+  thirdPartyCashAmount: number
   periodStart: Date
   transactionCount: number
   daysSinceLastCloseout: number
@@ -87,11 +89,13 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
       createdAt: { gt: periodStart },
       OR: DRAWER_CASH_WHERE.OR,
     },
-    _sum: { amount: true, tipAmount: true },
+    // Rappi 2b (T11): lo cobrado por cuenta de Rappi también está en el cajón (no es venta ni propina).
+    _sum: { amount: true, tipAmount: true, thirdPartyCashAmount: true },
     _count: { _all: true },
   })
 
-  const expectedAmount = Number(efectivo._sum.amount ?? 0) + Number(efectivo._sum.tipAmount ?? 0)
+  const thirdPartyCashAmount = Number(efectivo._sum.thirdPartyCashAmount ?? 0)
+  const expectedAmount = Number(efectivo._sum.amount ?? 0) + Number(efectivo._sum.tipAmount ?? 0) + thirdPartyCashAmount
   const transactionCount = efectivo._count._all
   const daysSinceLastCloseout = Math.floor((Date.now() - periodStart.getTime()) / (1000 * 60 * 60 * 24))
 
@@ -103,6 +107,8 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
 
   return {
     expectedAmount,
+    /** Rappi 2b (aditivo): la parte del esperado que se cobró por cuenta de terceros (Rappi). */
+    thirdPartyCashAmount,
     periodStart,
     transactionCount,
     daysSinceLastCloseout,

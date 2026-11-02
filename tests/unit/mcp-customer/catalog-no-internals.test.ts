@@ -58,6 +58,16 @@ describe('customer tool catalog', () => {
     expect(DIRECTORY_TOOLS.has('attach_customer_to_sale')).toBe(false)
   })
 
+  it('registers list_exchanges only in the free catalog', () => {
+    expect(customer.some(t => t.name === 'list_exchanges')).toBe(true)
+    expect(DIRECTORY_TOOLS.has('list_exchanges')).toBe(false)
+  })
+
+  it('registers review_exchange only in the free catalog', () => {
+    expect(customer.some(t => t.name === 'review_exchange')).toBe(true)
+    expect(DIRECTORY_TOOLS.has('review_exchange')).toBe(false)
+  })
+
   it.each(FORBIDDEN)('no customer-visible tool description exposes %s', (_label, pattern) => {
     const offenders = customer.filter(t => pattern.test(t.desc)).map(t => `${t.name}: ${t.desc.match(pattern)?.[0]}`)
     expect(offenders).toEqual([])

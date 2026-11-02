@@ -104,7 +104,7 @@ describe('acceptInvitation — interactive transaction timeout (P2028 regression
     await acceptInvitation('all-venues-token', {
       firstName: 'New',
       lastName: 'Owner',
-      password: 'Password123',
+      password: 'Zorro-verde-42',
     })
 
     const txMock = prisma.$transaction as jest.Mock

@@ -5,6 +5,7 @@ import {
   lineGross,
   lineGrossSql,
   lineRevenue,
+  lineOrderDiscountSql,
   lineRevenueSql,
   lineUnits,
   lineUnitsSql,
@@ -113,10 +114,31 @@ describe('lineRevenue — one definition of what a line earned', () => {
     // The two implementations drift apart silently; pin the shape that makes
     // `net = gross − discounts` hold in the reports that show both.
     // (Same gross expression, minus the discount, inside the same `removedAt` guard.)
-    expect(lineRevenueSql()).toBe(lineGrossSql().replace(' ELSE 0 END)', ' - oi."discountAmount" ELSE 0 END)'))
+    // net = gross − descuento del renglón − su parte de los descuentos de cuenta (reparto, sin espejos).
+    const cuenta = lineOrderDiscountSql().replace('(CASE WHEN oi."removedAt" IS NULL THEN ', '').replace(' ELSE 0 END)', '')
+    expect(cuenta).toContain(`od."reparto"->'renglones'->>oi."id"`)
+    expect(cuenta).toContain(`'espejo')::boolean, false) = false`)
+    expect(lineRevenueSql()).toBe(lineGrossSql().replace(' ELSE 0 END)', ` - oi."discountAmount" - ${cuenta} ELSE 0 END)`))
     const line = { quantity: 1, unitPrice: 169, discountAmount: 20, modifiers: [{ price: 280, quantity: 1 }] }
     expect(lineGross(line)).toBe(449)
     expect(lineRevenue(line)).toBe(429)
+  })
+})
+
+describe('lineRevenue — descuentos de CUENTA repartidos (gemelo de lineRevenueSql)', () => {
+  const linea = { id: 'oi-1', quantity: 1, unitPrice: 600, discountAmount: 0 }
+  it('resta su parte de las filas NO espejo (centavos ÷ 100) y no la de un espejo ni la de otro renglón', () => {
+    const filas = [
+      { reparto: { espejo: false, renglones: { 'oi-1': 9000, 'oi-2': 6000 } } },
+      { reparto: { espejo: true, renglones: { 'oi-1': 2000 } } },
+      { reparto: null },
+      { reparto: { renglones: { 'oi-1': 500 } } }, // sin bandera: como el SQL (COALESCE(espejo, false))
+    ]
+    expect(lineRevenue(linea, filas)).toBeCloseTo(600 - 90 - 5, 2)
+  })
+  it('sin filas de descuento queda como antes', () => {
+    expect(lineRevenue(linea, [])).toBe(600)
+    expect(lineRevenue(linea)).toBe(600)
   })
 })
 
@@ -195,6 +217,18 @@ describe('shift top products — revenue is net of the line discount', () => {
 
     expect(tacos.revenue).toBeCloseTo(77.29, 2)
     expect(tacos.quantity).toBe(1)
+  })
+
+  it('resta el descuento de CUENTA repartido al renglón (igual que lineRevenueSql)', async () => {
+    const pizza = { id: 'oi-1', quantity: 1, unitPrice: 600, discountAmount: 0, total: 600, product: { id: 'p9', name: 'Pizza' } }
+    const row = shiftRow([pizza])
+    prismaMock.order.findMany.mockResolvedValue([
+      { ...orderRow([pizza]), orderDiscounts: [{ reparto: { espejo: false, renglones: { 'oi-1': 9000 } } }] },
+    ] as any)
+    prismaMock.shift.findFirst.mockResolvedValue(row as any)
+    const shift = await getShiftById('venue-1', 'shift-1')
+    expect(shift.topProducts.find((p: any) => p.name === 'Pizza').revenue).toBe(510)
+    expect((prismaMock.order.findMany.mock.calls[0][0] as any).select.orderDiscounts).toEqual({ select: { reparto: true } })
   })
 
   it('still reports an undiscounted line at full price (regression)', async () => {

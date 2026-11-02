@@ -432,8 +432,10 @@ export class DeliveryLineActionReconcilerJob {
       }
       // Reserva en curso o ya acreditado: no se habló con el proveedor.
       if (outcome === 'OP_IN_PROGRESS' || outcome === 'LINE_ACTION_IN_PROGRESS' || outcome === 'ALREADY_DONE') continue
-      // Sin canal o sin «listo» en el proveedor: nada que reintentar en toda la ventana.
-      if (outcome === 'NOT_A_DELIVERY_ORDER') {
+      // Sin canal, sin «listo» en el proveedor, o el proveedor ya no lo admite (NO_REINTENTAR: tope de llamadas, transición
+      // inválida): nada que reintentar en toda la ventana, y no cuenta como llamada. Tras un reinicio el «no» lo vuelve a
+      // decir el adaptador, sin salir a la red (el tope vive en la base).
+      if (outcome === 'NOT_A_DELIVERY_ORDER' || outcome === 'NO_REINTENTAR') {
         this.esperaListo.set(f.id, { n: 0, hasta: ahora + LISTO_LOOKBACK_MS })
         continue
       }

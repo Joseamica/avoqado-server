@@ -1,5 +1,5 @@
 // Montado en dashboard.routes.ts con `authenticateTokenMiddleware` a nivel router.
-import { Router } from 'express'
+import { Router, type NextFunction, type Request, type Response } from 'express'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -7,6 +7,9 @@ import * as orders from '@/controllers/mobile/onlineOrders.mobile.controller'
 import * as admin from '@/controllers/dashboard/onlineOrdering.dashboard.controller'
 import {
   acceptSchema,
+  cardRefundResolveSchema,
+  cardRefundSchema,
+  cardRefundsListSchema,
   inboxSchema,
   menuAvailabilitySchema,
   menuCategoriesSchema,
@@ -50,5 +53,34 @@ router.post('/orders/:orderId/reject', validateRequest(rejectSchema), checkPermi
 router.post('/orders/:orderId/ready', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.ready)
 router.post('/orders/:orderId/delivered', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.delivered)
 router.post('/orders/:orderId/cancel', validateRequest(orderActionSchema), checkPermission('orders:cancel-unpaid'), orders.cancel)
+
+// Fase 2 (T10): devolver a la tarjeta y «Devolver por otro medio». El dinero ya cobrado se devuelve aunque se pierda el plan.
+router.get(
+  '/orders/:orderId/card-refunds',
+  validateRequest(cardRefundsListSchema),
+  checkPermission('payments:read'),
+  admin.listCardRefundsHandler,
+)
+router.post('/orders/:orderId/card-refund', validateRequest(cardRefundSchema), checkPermission('payments:refund'), admin.refundCardHandler)
+/**
+ * F2: «Devolver por otro medio» en EFECTIVO saca billetes del cajón por un cobro que fue con tarjeta: pide `payments:refund-to-cash`
+ * EN LUGAR de `payments:refund`, como «Devolver con: Efectivo de la caja» del POS (`permisoDeReembolso`, mobile.routes). UNA sola
+ * revisión por petición (el código del encargado es de un solo uso). Va después de validar el cuerpo.
+ */
+const revisarReembolso = checkPermission('payments:refund')
+const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
+const permisoParaResolver = Object.assign(
+  (req: Request, res: Response, next: NextFunction) =>
+    (req.body as { method?: unknown } | undefined)?.method === 'CASH'
+      ? revisarDevolverEnEfectivo(req, res, next)
+      : revisarReembolso(req, res, next),
+  { requiredPermission: 'payments:refund' },
+)
+router.post(
+  '/orders/:orderId/card-refund/:refundId/resolve',
+  validateRequest(cardRefundResolveSchema),
+  permisoParaResolver,
+  admin.resolveCardRefundHandler,
+)
 
 export default router

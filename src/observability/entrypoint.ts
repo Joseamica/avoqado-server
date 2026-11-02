@@ -21,20 +21,32 @@ const looksLikeId = (segment: string): boolean => CUID.test(segment) || UUID.tes
  * 🔴 Rutas cuyo SEGMENTO es un secreto (no un id): el proveedor no firma y la URL misma autentica. Cada entrada es el
  * prefijo de segmentos (`*` = cualquiera) y el segmento que le sigue es el secreto. Hoy:
  * `/webhooks/aggregators/:provider/:token/:kind` (conector de pases: 32 bytes base64url por conexión) y
- * `/venues/:slug/ordering/orders/:trackingToken[/cancel]` (pedidos en línea: el token lee y cancela ESE pedido).
+ * `/venues/:slug/ordering/orders/:trackingToken[/cancel]` (pedidos en línea: el token lee y cancela ESE pedido) y
+ * `/public/gift-cards/:pageToken` (página del regalo, 1b S6: el token enseña el código y cobra con el saldo).
  */
 const SECRET_SEGMENT_AFTER: ReadonlyArray<ReadonlyArray<string>> = [
   ['webhooks', 'aggregators', '*'],
   ['venues', '*', 'ordering', 'orders'],
+  ['public', 'gift-cards'],
 ]
 
-/** Reemplaza por `placeholder` cada segmento-secreto de una RUTA (sin query string). Sin distinguir mayúsculas: Express tampoco. */
+/**
+ * Reemplaza por `placeholder` cada segmento-secreto de una RUTA (sin query string). Sin distinguir mayúsculas: Express tampoco.
+ * 🔴 Se busca dos veces: con los segmentos tal cual (un vacío cuenta: `aggregators//<token>` ya se tapaba así) y saltando los
+ * vacíos, porque el montaje de Express se come la barra de más y SÍ sirve `/public//gift-cards/<token>` (1b S6 m1). No se
+ * colapsan las barras: la ruta sale igual y sólo cambia el secreto (una ruta sin secreto no cambia de forma).
+ */
 export function redactPathSecrets(path: string, placeholder: string): string {
   const segments = path.split('/')
-  for (const prefix of SECRET_SEGMENT_AFTER) {
-    for (let i = 0; i + prefix.length < segments.length; i++) {
-      const matches = prefix.every((p, j) => p === '*' || segments[i + j].toLowerCase() === p)
-      if (matches && segments[i + prefix.length] !== '') segments[i + prefix.length] = placeholder
+  const todos = segments.map((_, i) => i)
+  const sinVacios = todos.filter(i => segments[i] !== '')
+  for (const vista of [todos, sinVacios]) {
+    for (const prefix of SECRET_SEGMENT_AFTER) {
+      for (let k = 0; k + prefix.length < vista.length; k++) {
+        const matches = prefix.every((p, j) => p === '*' || segments[vista[k + j]].toLowerCase() === p)
+        const secreto = vista[k + prefix.length]
+        if (matches && segments[secreto] !== '') segments[secreto] = placeholder
+      }
     }
   }
   return segments.join('/')

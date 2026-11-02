@@ -18,6 +18,7 @@ const mockCrear = jest.fn()
 const mockArchivar = jest.fn()
 const mockAsignar = jest.fn()
 const mockTerminar = jest.fn()
+const mockCambiar = jest.fn()
 const mockVigentes = jest.fn()
 const mockAsegurar = jest.fn()
 const mockPagoGenerico = jest.fn()
@@ -36,6 +37,7 @@ jest.mock('@/services/dashboard/rh/puestos.service', () => ({
 jest.mock('@/services/dashboard/rh/asignaciones.service', () => ({
   asignarPuesto: (...a: unknown[]) => mockAsignar(...(a as [])),
   terminarAsignacion: (...a: unknown[]) => mockTerminar(...(a as [])),
+  cambiarAsignacion: (...a: unknown[]) => mockCambiar(...(a as [])),
   asignacionesVigentes: (...a: unknown[]) => mockVigentes(...(a as [])),
 }))
 jest.mock('@/services/dashboard/rh/marcaBlanca', () => ({
@@ -153,6 +155,7 @@ beforeEach(() => {
   mockArchivar.mockImplementation(async () => dtoPuesto({ archivedAt: new Date().toISOString() }))
   mockAsignar.mockResolvedValue(dtoAsignacion())
   mockTerminar.mockResolvedValue(dtoAsignacion({ effectiveTo: '2026-10-11' }))
+  mockCambiar.mockResolvedValue(dtoAsignacion({ id: 'asg-2', tracksAttendance: false, supersedesId: 'asg-1' }))
   mockVigentes.mockResolvedValue(new Map())
 })
 
@@ -462,6 +465,78 @@ describe('MCP RH', () => {
     })
   })
 
+  describe('change_staff_assignment («Checa entrada y salida», puesto o relación de una asignación vigente)', () => {
+    const base = { venueId: V, assignmentId: 'asg-1' }
+    const vigente = (o: Record<string, unknown> = {}) => ({
+      effectiveTo: null,
+      positionId: P,
+      relation: null,
+      tracksAttendance: true,
+      position: { name: 'Coach' },
+      staff: { firstName: 'Ana', lastName: 'López' },
+      ...o,
+    })
+
+    it('sin confirm: vista previa con el antes y el después de la casilla, y NO escribe', async () => {
+      mockAsignacionFind.mockResolvedValueOnce(vigente())
+      const out = await armar().call('change_staff_assignment', { ...base, tracksAttendance: false })
+      expect(out).toMatchObject({ ok: false, requiresConfirmation: true, fecha: expect.stringMatching(FECHA) })
+      expect(out.preview).toMatchObject({ persona: 'Ana López', puesto: 'Coach', checaEntradaYSalida: 'sí → no' })
+      expect(mockCambiar).not.toHaveBeenCalled()
+      expect(mockAudit).not.toHaveBeenCalled()
+    })
+
+    it('con confirm cambia con el actor de la conexión y audita', async () => {
+      const out = await armar().call('change_staff_assignment', { ...base, tracksAttendance: false, fecha: '2026-10-11', confirm: true })
+      expect(mockCambiar).toHaveBeenCalledWith({
+        venueId: V,
+        assignmentId: 'asg-1',
+        tracksAttendance: false,
+        fecha: '2026-10-11',
+        actorId: 'actor-1',
+      })
+      expect(mockAudit).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: 'STAFF_ASSIGNMENT_CHANGED', entity: 'StaffAssignment', entityId: 'asg-2', venueId: V }),
+      )
+      expect(out).toMatchObject({ ok: true, asignacion: { id: 'asg-2', tracksAttendance: false } })
+    })
+
+    it('sin nada que cambiar ⇒ ok:false sin tocar el servicio', async () => {
+      expect(await armar().call('change_staff_assignment', { ...base, confirm: true })).toMatchObject({ ok: false })
+      mockAsignacionFind.mockResolvedValueOnce(vigente())
+      expect(await armar().call('change_staff_assignment', { ...base, tracksAttendance: true })).toMatchObject({ ok: false })
+      expect(mockCambiar).not.toHaveBeenCalled()
+    })
+
+    it('asignación ajena o ya terminada ⇒ ok:false desde la vista previa', async () => {
+      mockAsignacionFind.mockResolvedValueOnce(null)
+      expect(await armar().call('change_staff_assignment', { ...base, tracksAttendance: false })).toMatchObject({
+        ok: false,
+        error: 'Esa asignación no existe en esta sucursal.',
+      })
+      mockAsignacionFind.mockResolvedValueOnce(vigente({ effectiveTo: new Date() }))
+      expect(await armar().call('change_staff_assignment', { ...base, tracksAttendance: false })).toMatchObject({ ok: false })
+      expect(mockCambiar).not.toHaveBeenCalled()
+    })
+
+    it('sin teams:update ⇒ rechazado', async () => {
+      await expect(
+        armar(['teams:read']).call('change_staff_assignment', { ...base, tracksAttendance: false, confirm: true }),
+      ).rejects.toThrow('teams:update')
+      expect(mockCambiar).not.toHaveBeenCalled()
+    })
+
+    it('es una escritura en el catálogo', () => {
+      expect(TOOL_EFFECTS.change_staff_assignment).toBe('write')
+    })
+  })
+
+  it('assign_staff_position pasa «Checa entrada y salida» al servicio cuando se manda', async () => {
+    await armar().call('assign_staff_position', { venueId: V, staffId: S, positionId: P, tracksAttendance: false, confirm: true })
+    expect(mockAsignar).toHaveBeenCalledWith(expect.objectContaining({ tracksAttendance: false }))
+  })
+
   describe('list_staff y staff_detail traen los puestos vigentes', () => {
     const filas = [
       { id: 'sv-1', staffId: 'st-1', role: 'MANAGER', staff: { firstName: 'Ana', lastName: 'Alfa', active: true } },
@@ -525,7 +600,7 @@ describe('MCP RH', () => {
   })
 
   describe('por el protocolo MCP real (catálogo con confirmación firmada)', () => {
-    it('cada parámetro declara su tipo (sin $ref a otro parámetro) y las cinco herramientas se anuncian', async () => {
+    it('cada parámetro declara su tipo (sin $ref a otro parámetro) y las seis herramientas se anuncian', async () => {
       const c = await conectado()
       try {
         const { tools } = await c.client.listTools()
@@ -533,6 +608,7 @@ describe('MCP RH', () => {
         expect(mias.map(t => t.name).sort()).toEqual([
           'archive_position',
           'assign_staff_position',
+          'change_staff_assignment',
           'create_position',
           'end_staff_assignment',
           'list_positions',
@@ -633,11 +709,12 @@ describe('MCP RH', () => {
   describe('regresión', () => {
     const NUNCA = /por fuera|informal|sin comprobante/i
 
-    it('registra las cinco herramientas con su efecto declarado', () => {
+    it('registra las seis herramientas con su efecto declarado', () => {
       const { descs } = armar()
       expect([...descs.keys()].filter(n => /position|assignment/.test(n)).sort()).toEqual([
         'archive_position',
         'assign_staff_position',
+        'change_staff_assignment',
         'create_position',
         'end_staff_assignment',
         'list_positions',
@@ -648,12 +725,20 @@ describe('MCP RH', () => {
         archive_position: 'write',
         assign_staff_position: 'write',
         end_staff_assignment: 'write',
+        change_staff_assignment: 'write',
       })
     })
 
     it('ni las descripciones ni las vistas previas dicen «por fuera», «informal» o «sin comprobante»', async () => {
       const t = armar()
-      for (const n of ['list_positions', 'create_position', 'archive_position', 'assign_staff_position', 'end_staff_assignment'])
+      for (const n of [
+        'list_positions',
+        'create_position',
+        'archive_position',
+        'assign_staff_position',
+        'end_staff_assignment',
+        'change_staff_assignment',
+      ])
         expect({ n, desc: t.descs.get(n) }).toEqual({ n, desc: expect.not.stringMatching(NUNCA) })
       const previas = [
         await t.raw('create_position', { venueId: V, name: 'Coach', suggestedRole: 'WAITER' }),
@@ -690,7 +775,14 @@ describe('MCP RH', () => {
 
     it('las descripciones no mencionan tablas ni Prisma (lo cubre catalog-no-internals.test.ts)', () => {
       const { descs } = armar()
-      for (const n of ['list_positions', 'create_position', 'archive_position', 'assign_staff_position', 'end_staff_assignment'])
+      for (const n of [
+        'list_positions',
+        'create_position',
+        'archive_position',
+        'assign_staff_position',
+        'end_staff_assignment',
+        'change_staff_assignment',
+      ])
         expect(descs.get(n)).not.toMatch(/prisma|StaffVenue|StaffPosition|StaffAssignment|ActivityLog/i)
     })
   })

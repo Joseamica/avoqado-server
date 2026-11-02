@@ -21,6 +21,16 @@
 
 import { Decimal } from '@prisma/client/runtime/library'
 
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
     order: { findUnique: jest.fn(), update: jest.fn() },
@@ -34,7 +44,7 @@ jest.mock('@/utils/prismaClient', () => {
     // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
     staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
-    $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
+    $queryRaw: jest.fn(async () => [{ id: 'order-cas' }]),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },

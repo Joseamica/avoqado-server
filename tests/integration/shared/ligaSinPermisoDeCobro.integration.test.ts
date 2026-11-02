@@ -14,6 +14,7 @@
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
+import { customerAttributionActor } from '@/middlewares/customerAttribution.middleware'
 
 // La bitácora es parte de lo que se prueba: aquí va la DE VERDAD, no el doble del setup.
 jest.unmock('@/services/dashboard/activity-log.service')
@@ -113,6 +114,24 @@ async function venta(opciones: { haceMs?: number; procesada?: boolean; abierta?:
         total: 20,
         status: opciones.abierta ? 'PENDING' : 'COMPLETED',
         paymentStatus: opciones.abierta ? 'PENDING' : 'PAID',
+        ...(!opciones.abierta
+          ? {
+              payments: {
+                create: {
+                  venueId: venueId!,
+                  amount: 20,
+                  feePercentage: 0,
+                  feeAmount: 0,
+                  netAmount: 20,
+                  method: 'CASH' as const,
+                  status: 'COMPLETED' as const,
+                  type: 'REGULAR' as const,
+                  processedById: cajero.staffId,
+                  createdAt: cuando,
+                },
+              },
+            }
+          : {}),
         loyaltyEligibleAt: opciones.abierta ? null : cuando,
         loyaltyProcessedAt: opciones.procesada ? cuando : null,
       },
@@ -285,7 +304,11 @@ describe('🔴 F1: COCINA (sin payments:create) liga a una venta PAGADA con su l
     await ligarPorTpv(cocina, 'KITCHEN', orderId, { customerId: kev })
     await awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 20, staffId: cajero.staffId, legacyCustomer: null })
 
-    const pos = await attachCustomerToOrder(venueId!, orderId, kev, cajero.staffId)
+    const actor = await customerAttributionActor({
+      params: { venueId: venueId! },
+      authContext: { userId: cajero.staffId, venueId: venueId!, orgId: orgId!, role: 'CASHIER' },
+    } as unknown as Request)
+    const pos = await attachCustomerToOrder(venueId!, orderId, kev, cajero.staffId, { actor })
     expect(pos.loyalty).toMatchObject({ stamped: true })
     // Y la TPV, con permiso, es éxito idempotente: ni otra liga, ni otro sello, ni otra fila.
     const otra = await ligarPorTpv(cajero, 'CASHIER', orderId, { customerId: kev })
@@ -395,7 +418,7 @@ describe('🔴 F1: COCINA (sin payments:create) liga a una venta PAGADA con su l
 /**
  * 🔴 Ronda 2 (cierra el riesgo 1 de la ronda 1): quitar al PRIMARIO de una venta cobrada promovía al siguiente. COCINA quitaba
  * al primario de una venta pagada con la lealtad pendiente y su acompañante se volvía beneficiario. Ahora, en una venta
- * cobrada, sólo se promueve si quien quita tiene `payments:create`.
+ * cobrada, no se permite quitar al primario aunque quien quita pueda cobrar.
  */
 describe('🔴 Ronda 2: quitar al primario de una venta PAGADA con la lealtad pendiente', () => {
   /** Venta pagada pendiente con P primario, y C ligado por COCINA (acompañante, F1). */
@@ -414,37 +437,58 @@ describe('🔴 Ronda 2: quitar al primario de una venta PAGADA con la lealtad pe
     return { p, c, orderId }
   }
 
-  it('🔴 COCINA quita a P ⇒ C sigue acompañante; el cobro en curso y el reconciliador ⇒ nada para C y la venta cierra «sin cliente»', async () => {
+  it('🔴 COCINA no puede quitar a P: C sigue acompañante y el cobro y reconciliador conservan el premio de P', async () => {
     const { p, c, orderId } = await ventaConPrimarioYAcompanante()
-    const { status, cuerpo } = await quitarPorTpv(cocina, 'KITCHEN', orderId, p)
-    expect(status).toBe(200)
-    expect(cuerpo.data).toEqual([expect.objectContaining({ customerId: c, isPrimary: false })])
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    await expect(quitarPorTpv(cocina, 'KITCHEN', orderId, p)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SALE_CUSTOMER_ALREADY_ASSIGNED',
+    })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toEqual(antes)
+    expect(await prisma.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { customerId: true } })).toEqual({
+      customerId: p,
+    })
 
     await awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 20, staffId: cajero.staffId, legacyCustomer: null })
     await reconciliadorDe(orderId).runNow()
     const r = await loQueRecibio(orderId, c)
-    expect(r).toMatchObject(NADA)
+    // La visita del acompañante es del cobro normal (no de la petición rechazada); sólo P recibe premio.
+    expect(r).toMatchObject({ ...NADA, visitas: 1, totalVisits: 1 })
     expect(r.orden.loyaltyProcessedAt).toBeInstanceOf(Date)
-    expect(await prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN' } })).toBe(0)
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN', stampCard: { customerId: p } } })).toBe(1)
   })
 
   it('(1b) lo mismo si sólo corre el reconciliador', async () => {
     const { p, c, orderId } = await ventaConPrimarioYAcompanante()
-    await quitarPorTpv(cocina, 'KITCHEN', orderId, p)
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    await expect(quitarPorTpv(cocina, 'KITCHEN', orderId, p)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SALE_CUSTOMER_ALREADY_ASSIGNED',
+    })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toEqual(antes)
     expect(await reconciliadorDe(orderId).runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
     const r = await loQueRecibio(orderId, c)
-    expect(r).toMatchObject(NADA)
+    // La visita del acompañante es del cobro normal (no de la petición rechazada); sólo P recibe premio.
+    expect(r).toMatchObject({ ...NADA, visitas: 1, totalVisits: 1 })
     expect(r.orden.loyaltyProcessedAt).toBeInstanceOf(Date)
   })
 
-  it('🔴 el CAJERO (con payments:create) quita a P ⇒ C se promueve y la lealtad pendiente se la acredita (el camino de siempre)', async () => {
+  it('🔴 el CAJERO con recibo propio tampoco puede quitar a P ni promover al acompañante', async () => {
     const { p, c, orderId } = await ventaConPrimarioYAcompanante()
-    const { cuerpo } = await quitarPorTpv(cajero, 'CASHIER', orderId, p)
-    expect(cuerpo.data).toEqual([expect.objectContaining({ customerId: c, isPrimary: true })])
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    await expect(quitarPorTpv(cajero, 'CASHIER', orderId, p)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SALE_CUSTOMER_ALREADY_ASSIGNED',
+    })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toEqual(antes)
+    expect(await prisma.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { customerId: true } })).toEqual({
+      customerId: p,
+    })
     await awardLoyaltyForPaidOrder({ venueId: venueId!, orderId, orderTotal: 20, staffId: cajero.staffId, legacyCustomer: null })
     const r = await loQueRecibio(orderId, c)
-    expect(r.sellos).toBe(1)
-    expect(r.puntos).toBe(1)
+    // La visita del acompañante es del cobro normal (no de la petición rechazada); sólo P recibe premio.
+    expect(r).toMatchObject({ ...NADA, visitas: 1, totalVisits: 1 })
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId, type: 'EARN', stampCard: { customerId: p } } })).toBe(1)
   })
 
   it('regresión: cuenta ABIERTA y COCINA quita al primario ⇒ el siguiente se promueve como siempre', async () => {
@@ -473,7 +517,7 @@ describe('🔴 R4-2: el PUT del panel respeta la decisión «A»', () => {
     const r = await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: kev, customerName: 'Kev' })
     expect(r).toEqual({
       status: 403,
-      mensaje: 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.',
+      mensaje: 'Sólo un gerente o superior con permiso puede asignar un cliente a esta venta.',
     })
     expect(await clienteYNombre(orderId)).toEqual({ customerId: null, customerName: null }) // ni el cliente ni el nombre
     expect(await reconciliadorDe(orderId).runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
@@ -483,11 +527,11 @@ describe('🔴 R4-2: el PUT del panel respeta la decisión «A»', () => {
     expect(await prisma.stampEvent.count({ where: { venueId, orderId } })).toBe(0)
   })
 
-  it('🔴 COCINA tampoco puede QUITAR el cliente de una venta pagada (le quitaría su sello pendiente) ⇒ 403', async () => {
+  it('🔴 COCINA tampoco puede QUITAR el cliente de una venta pagada (le quitaría su sello pendiente) ⇒ 409', async () => {
     const kev = await cliente('Kev')
     const orderId = await venta()
     await prisma.order.update({ where: { id: orderId }, data: { customerId: kev } })
-    expect((await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: null })).status).toBe(403)
+    expect((await editarPorPanel(cocina, 'KITCHEN', orderId, { customerId: null })).status).toBe(409)
     expect(await clienteYNombre(orderId)).toEqual({ customerId: kev, customerName: null })
   })
 
@@ -500,7 +544,7 @@ describe('🔴 R4-2: el PUT del panel respeta la decisión «A»', () => {
     expect(await clienteYNombre(orderId)).toEqual({ customerId: kev, customerName: 'Kevin' })
   })
 
-  it('un GERENTE (con payments:create) ⇒ como hoy: fija el cliente y el respaldo heredado lo acredita', async () => {
+  it('un GERENTE con orders:attach-customer ⇒ fija el cliente y el respaldo heredado lo acredita', async () => {
     const gerente = await empleado('Gerente', 'MANAGER')
     const kev = await cliente('Kev')
     const orderId = await venta()

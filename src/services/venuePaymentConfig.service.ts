@@ -3,6 +3,7 @@ import { getEffectivePaymentConfig, getEffectivePricing } from '@/services/organ
 import { BadRequestError } from '@/errors/AppError'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '@/services/shared/slotsDeAfiliacion'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
 
 interface VenuePaymentConfigCreateInput {
   venueId: string
@@ -53,6 +54,7 @@ export async function createVenuePaymentConfig(data: VenuePaymentConfigCreateInp
   // Codex R12-2: una afiliación no puede ocupar dos slots.
   const repetidos = mensajeDeSlotsRepetidos(data)
   if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
+  await assertAngelPayLoginsInVenue(data.venueId, [data.primaryAccountId, data.secondaryAccountId, data.tertiaryAccountId])
 
   // Verify merchant accounts exist and are active
   const primaryAccount = await prisma.merchantAccount.findUnique({
@@ -185,6 +187,7 @@ export async function updateVenuePaymentConfig(configId: string, data: VenuePaym
     tertiaryAccountId: data.tertiaryAccountId === undefined ? existente?.tertiaryAccountId : data.tertiaryAccountId,
   })
   if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
+  await assertAngelPayLoginsInVenue(existingConfig.venueId, [data.primaryAccountId, data.secondaryAccountId, data.tertiaryAccountId])
 
   // Update payment config
   const config = await prisma.venuePaymentConfig.update({

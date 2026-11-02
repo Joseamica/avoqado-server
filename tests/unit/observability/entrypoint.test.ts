@@ -78,6 +78,43 @@ describe('normalizeEntrypoint', () => {
       expect(r).not.toContain(TOKEN)
     })
 
+    // 1b S6 — la página pública del regalo: el `pageToken` es la llave de la tarjeta
+    it('colapsa el pageToken de la página pública del regalo a :token, con o sin query', () => {
+      const pageToken = 'Xk3pQ9vLmN2rT8wYz5aB7cD1eF4gH6jK0sU'
+      expect(normalizeEntrypoint('GET', `/api/v1/public/gift-cards/${pageToken}`)).toBe('GET /api/v1/public/gift-cards/:token')
+      expect(normalizeEntrypoint('GET', `/api/v1/public/gift-cards/${pageToken}?x=1`)).toBe('GET /api/v1/public/gift-cards/:token')
+    })
+
+    // 1b S6 m1 — Express sirve `/public//gift-cards/<token>` (el montaje se come la barra de más): el secreto se tapa igual
+    it('🔴 con barras repetidas también colapsa el secreto a :token, en toda la familia', () => {
+      const pageToken = 'Xk3pQ9vLmN2rT8wYz5aB7cD1eF4gH6jK0sU'
+      const tracking = 'Tr4ck1ngT0k3nDelPedido_EnLinea-abcdefgh'
+      expect(normalizeEntrypoint('GET', `/api/v1/public//gift-cards/${pageToken}`)).toBe('GET /api/v1/public//gift-cards/:token')
+      expect(normalizeEntrypoint('GET', `/api/v1/public/gift-cards//${pageToken}?x=1`)).toBe('GET /api/v1/public/gift-cards//:token')
+      expect(normalizeEntrypoint('GET', `/api/v1/public/venues/x/ordering//orders/${tracking}`)).toBe(
+        'GET /api/v1/public/venues/x/ordering//orders/:token',
+      )
+      expect(normalizeEntrypoint('POST', `/api/v1/webhooks//aggregators/totalpass/${TOKEN}/booking`)).toBe(
+        'POST /api/v1/webhooks//aggregators/totalpass/:token/booking',
+      )
+    })
+
+    it('un segmento vacío donde va el proveedor sigue tapando el token (como antes de S6 m1)', () => {
+      // Antes el `*` casaba con el segmento vacío y el token era el siguiente: colapsar las barras lo habría destapado.
+      expect(redactPathSecrets(`/api/v1/webhooks/aggregators//${TOKEN}/booking`, ':token')).not.toContain(TOKEN)
+    })
+
+    it('una ruta SIN secreto con barras repetidas no cambia de forma (las métricas por entrypoint siguen igual)', () => {
+      expect(normalizeEntrypoint('GET', '/api/v1//orders/cmrb9clsl0001c9126obyxp2q')).toBe('GET /api/v1//orders/:id')
+      expect(redactPathSecrets('/api/v1//public//receipt/abc', ':token')).toBe('/api/v1//public//receipt/abc')
+    })
+
+    it('la ruta de tarjetas del POS conserva su :id (no es un secreto)', () => {
+      expect(normalizeEntrypoint('POST', '/api/v1/mobile/venues/v1/gift-cards/cm2k9x0ab0001c912abcdefgh/resend')).toBe(
+        'POST /api/v1/mobile/venues/v1/gift-cards/:id/resend',
+      )
+    })
+
     it('redactPathSecrets no toca otras rutas', () => {
       expect(redactPathSecrets('/api/v1/webhooks/delivery/rappi/new-order', ':token')).toBe('/api/v1/webhooks/delivery/rappi/new-order')
       expect(redactPathSecrets('/api/v1/webhooks/aggregators', ':token')).toBe('/api/v1/webhooks/aggregators')

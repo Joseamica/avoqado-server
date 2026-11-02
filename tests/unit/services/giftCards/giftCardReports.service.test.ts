@@ -20,10 +20,12 @@ import { bloqueosVigentes, estadoDeCancelacionDeVenta } from '@/services/giftCar
 import {
   WHERE_COBRO_ES_SALDO_DE_REGALO,
   WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+  WHERE_DEVOLUCION_A_SALDO_A_FAVOR,
   WHERE_ORDEN_DE_TARJETAS,
   WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE,
 } from '@/services/giftCards/giftCardMarks'
 import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal/autoPosting.service'
+import { TEXTO_DE_FALLO_DE_ENTREGA } from '@/services/giftCards/giftCardEntrega'
 import {
   LOTE_CSV,
   PAGINA_MAXIMA,
@@ -50,6 +52,8 @@ const tarjeta = (extra: Record<string, unknown> = {}) => ({
   expiresAt: null,
   deliveryChannel: 'WHATSAPP',
   deliveryStatus: 'PENDING',
+  deliveredAt: null,
+  deliveryErrorCode: null,
   recipientName: 'Ana',
   purchaserName: 'Luis',
   source: 'POS',
@@ -67,6 +71,7 @@ const detalle = (extra: Record<string, unknown> = {}) => ({
   purchaserContact: null,
   deliveredAt: null,
   deactivatedAt: null,
+  deliveryAttempts: 0,
 })
 const renglon = (id: string, iso: string, type = 'REDEEM') => ({
   id,
@@ -86,6 +91,8 @@ beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.customer.findMany.mockResolvedValue([])
   prismaMock.staff.findMany.mockResolvedValue([])
+  // S8a: la lista y el detalle preguntan, en una consulta por página, cuáles son saldo a favor (aquí, ninguna).
+  prismaMock.$queryRaw.mockResolvedValue([])
 })
 
 describe('tope de página (lo impone el servidor)', () => {
@@ -128,12 +135,34 @@ describe('lista', () => {
       expiresAt: null,
       deliveryChannel: 'WHATSAPP',
       deliveryStatus: 'PENDING',
+      deliveredAt: null,
+      deliveryErrorCode: null,
+      deliveryError: null,
       recipientName: 'Ana',
       purchaserName: 'Luis',
       source: 'POS',
       customer: null,
       order: { id: 'o1', orderNumber: 'ORD-1' },
+      // S8a (aditivo): no es saldo a favor.
+      storeCredit: null,
     })
+  })
+
+  it('S-10: cada fila dice cuándo se envió y, si falló, el código del fallo y su texto', async () => {
+    prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { balance: D('1500') } })
+    prismaMock.giftCard.findMany.mockResolvedValue([
+      tarjeta({ id: 'gc1', deliveryStatus: 'SENT', deliveredAt: new Date('2026-10-20T17:00:00.000Z') }),
+      tarjeta({ id: 'gc2', deliveryStatus: 'FAILED', deliveryErrorCode: 'WHATSAPP_SEND_FAILED' }),
+      // Un código que escribió una versión más nueva: texto genérico, nunca `undefined`.
+      tarjeta({ id: 'gc3', deliveryStatus: 'FAILED', deliveryErrorCode: 'ALGO_NUEVO' }),
+    ])
+    const r = await listGiftCards('v1', {})
+    expect(prismaMock.giftCard.findMany.mock.calls[0][0].select).toMatchObject({ deliveredAt: true, deliveryErrorCode: true })
+    expect(r.items.map(i => [i.id, i.deliveredAt, i.deliveryErrorCode, i.deliveryError])).toEqual([
+      ['gc1', '2026-10-20T17:00:00.000Z', null, null],
+      ['gc2', null, 'WHATSAPP_SEND_FAILED', TEXTO_DE_FALLO_DE_ENTREGA.WHATSAPP_SEND_FAILED],
+      ['gc3', null, 'ALGO_NUEVO', 'No se pudo entregar la tarjeta. Reenvíala, cambia el destino o imprímela.'],
+    ])
   })
 
   it('sin página ni tamaño: 50 desde la primera', async () => {
@@ -353,6 +382,65 @@ describe('detalle con su libreta', () => {
     expect(bloqueosVigentes).not.toHaveBeenCalled()
   })
 
+  it('el detalle trae la entrega con el destino enmascarado', async () => {
+    prismaMock.giftCard.findFirst.mockResolvedValue({
+      ...detalle({ deliveryStatus: 'FAILED', deliveryErrorCode: 'WHATSAPP_SEND_FAILED' }),
+      recipientPhone: '+525512345678',
+      deliveryAttempts: 4,
+    })
+    prismaMock.giftCardActivity.count.mockResolvedValue(0)
+    prismaMock.giftCardActivity.findMany.mockResolvedValueOnce([])
+    const r = await getGiftCardDetail('v1', 'gc1', {})
+    expect(r.entrega).toEqual({
+      channel: 'WHATSAPP',
+      status: 'FAILED',
+      deliveredAt: null,
+      errorCode: 'WHATSAPP_SEND_FAILED',
+      error: TEXTO_DE_FALLO_DE_ENTREGA.WHATSAPP_SEND_FAILED,
+      destino: '55•••••678',
+      intentos: 4,
+    })
+    expect(prismaMock.giftCard.findFirst.mock.calls[0][0].select).toMatchObject({
+      deliveredAt: true,
+      deliveryErrorCode: true,
+      deliveryAttempts: true,
+    })
+    // El destino completo de la entrega nunca sale en `entrega`.
+    expect(JSON.stringify(r.entrega)).not.toContain('5512345678')
+  })
+
+  it.each([
+    [
+      'correo enviado',
+      {
+        deliveryChannel: 'EMAIL',
+        deliveryStatus: 'SENT',
+        deliveredAt: new Date('2026-10-20T17:00:00.000Z'),
+        recipientEmail: 'ana@gmail.com',
+        deliveryAttempts: 1,
+      },
+      {
+        channel: 'EMAIL',
+        status: 'SENT',
+        deliveredAt: '2026-10-20T17:00:00.000Z',
+        errorCode: null,
+        error: null,
+        destino: 'a•••@gmail.com',
+        intentos: 1,
+      },
+    ],
+    [
+      'impresa (S-8: sigue PENDING y no tiene destino)',
+      { deliveryChannel: 'PRINTED', deliveryStatus: 'PENDING' },
+      { channel: 'PRINTED', status: 'PENDING', deliveredAt: null, errorCode: null, error: null, destino: null, intentos: 0 },
+    ],
+  ])('la entrega del detalle: %s', async (_caso, fila, entrega) => {
+    prismaMock.giftCard.findFirst.mockResolvedValue({ ...detalle(), ...fila })
+    prismaMock.giftCardActivity.count.mockResolvedValue(0)
+    prismaMock.giftCardActivity.findMany.mockResolvedValueOnce([])
+    expect((await getGiftCardDetail('v1', 'gc1', {})).entrega).toEqual(entrega)
+  })
+
   it('🔴 nunca pide ni expone el código, su huella ni sus llaves de página', async () => {
     prismaMock.giftCard.findFirst.mockResolvedValue(detalle())
     prismaMock.giftCardActivity.count.mockResolvedValue(0)
@@ -366,14 +454,17 @@ describe('detalle con su libreta', () => {
 
 describe('resumen del periodo', () => {
   it('cifras de la libreta en pesos exactos, con los días del negocio', async () => {
-    prismaMock.giftCardActivity.groupBy.mockResolvedValue([
-      { type: 'ACTIVATE', _sum: { amount: D('3000') }, _count: { _all: 3 } },
-      { type: 'REDEEM', _sum: { amount: D('300.10') }, _count: { _all: 2 } },
-      { type: 'REDEEM_REVERSAL', _sum: { amount: D('100.20') }, _count: { _all: 1 } },
-      { type: 'DEACTIVATE', _sum: { amount: D('500') }, _count: { _all: 1 } },
-      { type: 'ADJUST_INCREMENT', _sum: { amount: D('50') }, _count: { _all: 1 } },
-      { type: 'ADJUST_DECREMENT', _sum: { amount: D('20.5') }, _count: { _all: 1 } },
-    ])
+    // S8a: el primer groupBy es el de siempre (sin abonos de saldo); el segundo, sólo los abonos (aquí, ninguno).
+    prismaMock.giftCardActivity.groupBy
+      .mockResolvedValueOnce([
+        { type: 'ACTIVATE', _sum: { amount: D('3000') }, _count: { _all: 3 } },
+        { type: 'REDEEM', _sum: { amount: D('300.10') }, _count: { _all: 2 } },
+        { type: 'REDEEM_REVERSAL', _sum: { amount: D('100.20') }, _count: { _all: 1 } },
+        { type: 'DEACTIVATE', _sum: { amount: D('500') }, _count: { _all: 1 } },
+        { type: 'ADJUST_INCREMENT', _sum: { amount: D('50') }, _count: { _all: 1 } },
+        { type: 'ADJUST_DECREMENT', _sum: { amount: D('20.5') }, _count: { _all: 1 } },
+      ])
+      .mockResolvedValueOnce([])
     prismaMock.giftCard.aggregate
       .mockResolvedValueOnce({ _sum: { balance: D('2100.30') }, _count: { _all: 4 } })
       .mockResolvedValueOnce({ _sum: { balance: D('250') } })
@@ -384,8 +475,12 @@ describe('resumen del periodo', () => {
         where: {
           venueId: 'v1',
           createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lte: new Date('2026-10-15T05:59:59.999Z') },
-          // M4 (cierre): sin la desactivación de $0 de un sobre que nunca se activó.
-          NOT: { type: 'DEACTIVATE', amount: { lte: 0 }, giftCard: { activities: { none: { type: 'ACTIVATE' } } } },
+          NOT: [
+            // M4 (cierre): sin la desactivación de $0 de un sobre que nunca se activó.
+            { type: 'DEACTIVATE', amount: { lte: 0 }, giftCard: { activities: { none: { type: 'ACTIVATE' } } } },
+            // S8a: sin los abonos de saldo a favor (van en su propia línea; storeCreditCardGuards.test.ts).
+            { type: { in: ['ACTIVATE', 'ADJUST_INCREMENT'] }, refundPaymentId: { not: null } },
+          ],
         },
       }),
     )
@@ -397,7 +492,14 @@ describe('resumen del periodo', () => {
       redeemed: { movements: 2, amount: 300.1, reversed: 100.2, net: 199.9 },
       cancelled: { cards: 1, amount: 500 },
       adjustments: { increments: 50, decrements: 20.5, net: 29.5 },
+      storeCredit: { cards: 0, movements: 0, amount: 0 },
       liveBalance: { cards: 4, amount: 2100.3, expiredAmount: 250 },
+    })
+    expect(prismaMock.giftCardActivity.groupBy.mock.calls[1][0].where).toEqual({
+      venueId: 'v1',
+      createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lte: new Date('2026-10-15T05:59:59.999Z') },
+      type: { in: ['ACTIVATE', 'ADJUST_INCREMENT'] },
+      refundPaymentId: { not: null },
     })
     expect(prismaMock.giftCard.aggregate.mock.calls[0][0].where).toEqual({
       venueId: 'v1',
@@ -527,9 +629,10 @@ describe('pendientes de revisión contable', () => {
     const args = prismaMock.payment.findMany.mock.calls[0][0]
     expect(args.where).toEqual({ ...dias, AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE] })
     expect(prismaMock.payment.count.mock.calls[0][0].where).toEqual(args.where)
+    // S8b: los totales «con saldo» también traen la devolución a saldo a favor (reverso de saldo).
     expect(prismaMock.payment.groupBy.mock.calls[0][0].where).toEqual({
       ...dias,
-      AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, WHERE_COBRO_ES_SALDO_DE_REGALO],
+      AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { OR: [WHERE_COBRO_ES_SALDO_DE_REGALO, WHERE_DEVOLUCION_A_SALDO_A_FAVOR] }],
     })
     expect(prismaMock.payment.groupBy.mock.calls[1][0].where).toEqual({
       ...dias,

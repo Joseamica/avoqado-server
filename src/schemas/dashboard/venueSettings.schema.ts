@@ -59,6 +59,9 @@ export const UpdateVenueSettingsSchema = z.object({
     // el POS sólo lo lee. Sin esta línea el PUT descartaba el campo en silencio
     // y el switch parecería funcionar sin guardar nada.
     managerPinOverrideEnabled: z.boolean().optional(),
+    exchangesEnabled: z.boolean({ invalid_type_error: 'El ajuste de cambios debe ser true o false' }).optional(),
+    // «Sólo saldo a favor» (spec 2026-10-30): sin esta línea el middleware tiraría el campo en silencio y el switch no guardaría nada.
+    storeCreditOnly: z.boolean({ invalid_type_error: 'El ajuste «Sólo saldo a favor» debe ser true o false' }).optional(),
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
     trackPromoterLocation: z.boolean().optional(), // "Cambaceo": emit/accept periodic promoter location pings
 

@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import * as menuCategoryService from '../../services/dashboard/menu.dashboard.service'
+import { buildProductsListResponse } from '../dashboard/product.dashboard.controller'
 
 /**
  * Menú, productos y categorías bajo `/tpv` (Plan B Task 5, 2026-07-27).
@@ -13,14 +14,23 @@ import * as menuCategoryService from '../../services/dashboard/menu.dashboard.se
 /**
  * GET /tpv/venues/:venueId/products
  *
- * Re-export VERBATIM del controller de dashboard: hay un shape PREVIO que el cliente ya
- * parsea con éxito hoy (`ProductsResponse` / `ProductDto` en avoqado-tpv, ProductDto.kt) desde
- * `dashboard/venues/{venueId}/products` — `{ message, data, correlationId }`. Re-exportar (en vez
- * de reimplementar) garantiza paridad byte-a-byte para siempre y evita duplicar la query de
- * `productService.getProducts` (mismo patrón que `syncIntents` en sync.tpv.controller.ts). El
- * cliente solo cambia el prefijo de la URL, no sus parsers.
+ * Mismo sobre que el del controller de dashboard — `{ message, data, correlationId }`, el shape que el
+ * cliente ya parsea con éxito hoy (`ProductsResponse` / `ProductDto` en avoqado-tpv, ProductDto.kt) —
+ * más `catalogAt` en la RAÍZ (Cobrar sin red, S1): la hora del SERVIDOR, tomada ANTES de leer los
+ * productos, de la que parte la terminal para reconocer el precio que vio el cliente al vender sin red
+ * (si se tomara después, un cambio de precio ocurrido durante la lectura quedaría "antes" del catálogo
+ * que la terminal ya trae). Aditivo: `data` queda igual para las versiones viejas, y la respuesta del
+ * panel NO cambia (comparten `buildProductsListResponse`, no el handler). Cada producto ya trae `gtin`.
  */
-export { getProductsHandler as getProducts } from '../dashboard/product.dashboard.controller'
+export const getProducts = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const catalogAt = new Date().toISOString()
+    const body = await buildProductsListResponse(req)
+    res.status(200).json({ ...body, catalogAt })
+  } catch (error) {
+    next(error)
+  }
+}
 
 /**
  * GET /tpv/venues/:venueId/categories

@@ -23,6 +23,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import emailService from '@/services/email.service'
+import { conNegocio } from '@/services/demo/candadoDemo'
 
 /** Con dos créditos o menos se avisa: da tiempo a renovar sin quedarse a medias. */
 export const LOW_CREDITS_THRESHOLD = 2
@@ -162,6 +163,7 @@ export async function sweepOnce(args: { now: Date; batchSize?: number }): Promis
       event: true,
       paymentLinkUrl: true,
       payload: true,
+      venueId: true,
       venue: { select: { name: true } },
       customer: { select: { email: true, firstName: true, marketingConsent: true } },
     },
@@ -195,19 +197,23 @@ export async function sweepOnce(args: { now: Date; batchSize?: number }): Promis
 
     let ok = false
     let lastError = 'SEND_FAILED'
+    const to = row.customer.email
     try {
-      ok = await emailService.sendEmail({
-        to: row.customer.email,
-        subject,
-        html:
-          `<p>Hola ${row.customer.firstName ?? ''},</p>` +
-          `<p>${isExpiring ? `${packName} vence pronto.` : `Ya casi terminas ${packName}.`} ` +
-          `Puedes renovarlo cuando quieras:</p>` +
-          `<p><a href="${row.paymentLinkUrl}">Renovar en ${row.venue?.name ?? 'el estudio'}</a></p>`,
-        // Resend deduplica esta llave incluso si el proceso muere después de que el
-        // proveedor aceptó el correo pero antes de persistir SENT.
-        idempotencyKey: row.dedupeKey,
-      })
+      // Con el negocio de la fila en el contexto (candado demo, capa 3).
+      ok = await conNegocio(row.venueId, () =>
+        emailService.sendEmail({
+          to,
+          subject,
+          html:
+            `<p>Hola ${row.customer.firstName ?? ''},</p>` +
+            `<p>${isExpiring ? `${packName} vence pronto.` : `Ya casi terminas ${packName}.`} ` +
+            `Puedes renovarlo cuando quieras:</p>` +
+            `<p><a href="${row.paymentLinkUrl}">Renovar en ${row.venue?.name ?? 'el estudio'}</a></p>`,
+          // Resend deduplica esta llave incluso si el proceso muere después de que el
+          // proveedor aceptó el correo pero antes de persistir SENT.
+          idempotencyKey: row.dedupeKey,
+        }),
+      )
     } catch (error) {
       lastError = (error as Error).message.slice(0, 1_000) || 'SEND_FAILED'
     }

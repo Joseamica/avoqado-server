@@ -9,6 +9,9 @@ import * as refundService from '@/services/dashboard/refund.dashboard.service'
 import { getTransactionDetail } from '@/services/mobile/transaction.mobile.service'
 
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ listRefundsForPayment: jest.fn() }))
+jest.mock('@/services/exchanges/exchangeDetail', () => ({
+  exchangeDetailFields: jest.fn(async () => ({ fields: {}, itemExtras: new Map() })),
+}))
 
 const prismaMock = prisma as any
 const detalle = (amount: number, tipAmount: number) => ({
@@ -50,6 +53,20 @@ beforeEach(() => {
 })
 
 describe('getTransactionDetail · totales del comprobante', () => {
+  it('D1 fotocopia: el detalle trae la copia del ticket que guardó ESTE cobro, aparte de ticketTotals (las apps viejas no la ven)', async () => {
+    const copia = { lineas: [{ nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000 }], subtotalCents: 3000, descuentoCents: 300 }
+    prismaMock.payment.findFirst.mockResolvedValue({ ...detalle(27, 0), processorData: { lineasDelTicket: copia } })
+    prismaMock.payment.findUnique.mockResolvedValue(paraElTicket(27, 0, { subtotal: 50 }, 2))
+    const d = await getTransactionDetail('venue_1', 'pay_1')
+    expect(d.lineasDelTicket).toEqual(copia)
+    expect(d.ticketTotals).not.toHaveProperty('lineasDelTicket')
+  })
+  it('D1 fotocopia: sin copia (app vieja, TPV, cobro de antes) no aparece la llave', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(detalle(116, 10))
+    prismaMock.payment.findUnique.mockResolvedValue(paraElTicket(116, 10, { taxAmount: 16, contratoDePrecio: 'DESCONOCIDO' }))
+    const d = await getTransactionDetail('venue_1', 'pay_1')
+    expect(d.lineasDelTicket).toBeUndefined()
+  })
   it('una venta vieja con IVA aparte, cobrada completa en un solo pago y sin recibo: el comprobante desglosa el IVA agregado', async () => {
     prismaMock.payment.findFirst.mockResolvedValue(detalle(116, 10))
     prismaMock.payment.findUnique.mockResolvedValue(paraElTicket(116, 10, { taxAmount: 16, contratoDePrecio: 'DESCONOCIDO' }))

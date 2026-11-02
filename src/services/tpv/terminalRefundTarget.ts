@@ -31,7 +31,14 @@ export interface CobroParaDevolver {
   tenderSystemKind?: string | null
 }
 
-export type DevolverCon = 'CASH' | 'BANK_TRANSFER'
+/**
+ * Con qué devuelve la cajera si no es «por el mismo medio». `STORE_CREDIT` = saldo a favor (spec 2026-10-30-saldo-a-favor §5.5): no
+ * sale dinero, lo devuelto se abona al sobre de una clienta. Las rutas lo convierten en el destino `aSaldoAFavor` del núcleo; nunca
+ * llega al núcleo como método de la fila.
+ */
+export type DevolverCon = 'CASH' | 'BANK_TRANSFER' | 'STORE_CREDIT'
+/** Lo que SÍ sale como dinero por otro medio: el núcleo lo escribe como método de la devolución. */
+export type DevolverEnDinero = Exclude<DevolverCon, 'STORE_CREDIT'>
 
 /** Lo único que la decisión necesita saber del cobro original. */
 export interface RefundablePaymentSnapshot {
@@ -144,6 +151,11 @@ const CANALES_EN_LINEA = new Set(['WEB', 'QR', 'SDK', 'DASHBOARD_TEST'])
 export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean {
   // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo. Nunca efectivo ni transferencia, aunque lo pida una app vieja.
   if (payment.tenderSystemKind === TenderSystemKind.GIFT_CARD) return false
+  // Cambio de producto (spec 2026-10-20 §6.7): lo pagado con crédito de cambio sale por el medio de su cobro RAÍZ, nunca por uno escogido.
+  if (payment.tenderSystemKind === TenderSystemKind.EXCHANGE_CREDIT) return false
+  // Saldo a favor (spec 2026-10-30; S8b): lo que es de saldo a favor sólo regresa a saldo a favor, nunca efectivo, transferencia ni tarjeta.
+  // Ese medio sólo vive en la fila de una devolución a saldo: sin esto, el detalle la ofrecía para «Devolver con».
+  if (payment.tenderSystemKind === TenderSystemKind.STORE_CREDIT) return false
   if (CARD_METHODS.has(payment.method) || METODOS_DE_PROCESADOR.has(payment.method)) return false
   if (payment.tenderSatFormaPago && FORMAS_SAT_DE_TARJETA.has(payment.tenderSatFormaPago)) return false
   if (/^tarjeta/i.test(payment.externalSource ?? '')) return false
@@ -157,8 +169,37 @@ export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean 
  * Igual al método del cobro, o efectivo sobre algo que YA entra al cajón (un vale), es el mismo medio.
  * NO valida si se puede escoger: eso lo hace quien llama con `sePuedeEscogerComoDevolver`.
  */
-export function devolverConEfectivo(original: CobroParaDevolver, refundMethod: DevolverCon | undefined): DevolverCon | undefined {
+export function devolverConEfectivo(original: CobroParaDevolver, refundMethod: DevolverEnDinero | undefined): DevolverEnDinero | undefined {
   if (!refundMethod || refundMethod === original.method) return undefined
   if (refundMethod === 'CASH' && paymentCountsAsDrawerCash(original)) return undefined
   return refundMethod
 }
+
+/**
+ * ¿Por qué este cobro NO se puede devolver a saldo a favor? `null` = sí se puede (spec 2026-10-30-saldo-a-favor §3, §5.5): efectivo,
+ * transferencia, tarjeta de nuestra terminal o de otra, un vale, un crédito de cambio (su raíz la revisa el núcleo). A diferencia de
+ * `sePuedeEscogerComoDevolver`, la tarjeta SÍ: el saldo a favor no le devuelve nada a la tarjeta ni al procesador.
+ */
+export function sinSaldoAFavorPorque(payment: CobroParaDevolver): string | null {
+  // Lo pagado con saldo regresa a su sobre (`refundToGiftCardBalance`), nunca a un saldo nuevo.
+  if (payment.tenderSystemKind === TenderSystemKind.GIFT_CARD) return 'Lo pagado con tarjeta de regalo regresa a su misma tarjeta.'
+  if (payment.tenderSystemKind === TenderSystemKind.STORE_CREDIT) return 'Esto ya es un saldo a favor.'
+  // El cobro de una app de reparto lo devuelve la app: ese dinero nunca estuvo en el local.
+  if (payment.source === 'DELIVERY_PLATFORM') return 'Lo cobrado por una app de reparto se devuelve desde la app.'
+  return null
+}
+
+/** El rechazo de «Sólo saldo a favor» al devolver a la tarjeta (código STORE_CREDIT_ONLY). */
+export const MENSAJE_SOLO_SALDO =
+  'Este negocio devuelve sólo como saldo a favor. Usa Reembolso → Saldo a favor, o marca que es por defecto o cobro por error.'
+
+/**
+ * «Sólo saldo a favor» (spec §5.5, Codex plan r2 h6): las excepciones que dejan abrir la devolución en la terminal con el interruptor
+ * prendido (LFPC art. 92: defecto, cobro por error, cobro fraudulento, cuenta cancelada).
+ */
+export const EXCEPCIONES_DE_SOLO_SALDO: ReadonlySet<string> = new Set([
+  'DEFECTIVE',
+  'ACCIDENTAL_CHARGE',
+  'FRAUDULENT_CHARGE',
+  'CANCELLED_ORDER',
+])

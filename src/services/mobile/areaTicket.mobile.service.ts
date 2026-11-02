@@ -51,7 +51,7 @@ import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/p
 import { importesDeLasFilas, leerReparto } from '../shared/repartoDescuento'
 import { RENGLON_PARA_REPARTO_SELECT, filasDeLaOrden, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
+import { buildOrderItemsData, CreateOrderItemInput, type CreateOrderInput } from './order.mobile.service'
 import { formatVenueTime } from '@/utils/datetime'
 
 // MARK: - Constantes de contrato
@@ -450,7 +450,7 @@ export async function assignDevicePartition(venueId: string, input: AssignPartit
 
 // MARK: - §6 · POST /mobile/venues/:venueId/area-tickets
 
-export interface OpenAreaTicketInput {
+export interface OpenAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
   /** Código ACUÑADO POR EL CLIENTE (`9 PP NNNNNN C`). El server lo valida, no lo inventa. */
   code: string
   deviceUid: string
@@ -544,7 +544,14 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
 
   // 🔴 El área la pone el SERVER desde el binding de la terminal, jamás el payload.
-  const { itemsData, subtotal, itemDiscountTotal, discounts } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
+  const { itemsData, subtotal, itemDiscountTotal, discounts } = await buildOrderItemsData(
+    venueId,
+    input.items,
+    terminal.fulfillmentAreaId,
+    undefined,
+    undefined,
+    input,
+  )
   const total = subtotal - itemDiscountTotal
 
   try {
@@ -643,7 +650,7 @@ export async function resolveAreaTicket(venueId: string, rawCode: string): Promi
 
 // MARK: - §6 · POST /mobile/venues/:venueId/area-tickets/:code/items
 
-export interface AddAreaTicketItemsInput {
+export interface AddAreaTicketItemsInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
   deviceUid: string
   staffId?: string | null
   items: CreateOrderItemInput[]
@@ -676,7 +683,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
   await validateStaffVenue(input.staffId ?? undefined, venueId)
 
   // Misma aritmética que abrir la cuenta y que el mostrador: una sola función.
-  const { itemsData, discounts } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
+  const { itemsData, discounts } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId, undefined, undefined, input)
 
   const updated = await prisma.$transaction(async tx => {
     // Plan 3b: lock the Order (route venue) before reading what decides the write. A claim, a partial payment, a tip,

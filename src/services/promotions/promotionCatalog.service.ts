@@ -55,7 +55,7 @@ export interface PromotionCard {
 export async function listPromotionsForPos(
   venueId: string,
   now: Date = new Date(),
-): Promise<{ active: PromotionCard[]; upcoming: PromotionCard[] }> {
+): Promise<{ active: PromotionCard[]; upcoming: PromotionCard[]; timezone: string }> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const timezone = venue?.timezone || DEFAULT_TIMEZONE
   const horizonEnd = new Date(now.getTime() + UPCOMING_HORIZON_MS)
@@ -113,7 +113,8 @@ export async function listPromotionsForPos(
     }
   }
 
-  return { active, upcoming }
+  // `timezone` es aditivo (la pantalla del cliente): la zona CRUDA del venue, con la que se evaluó lo de arriba.
+  return { active, upcoming, timezone }
 }
 
 /** "HH:mm" de un instante en la zona del venue, para la tarjeta de "próximas". */

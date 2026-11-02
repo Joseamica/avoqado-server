@@ -430,3 +430,50 @@ describe('sesión del POS sin identidad de aparato', () => {
     expect(next).toHaveBeenCalledWith()
   })
 })
+
+describe('x-app-version-code (F0-B, Task 11): el número de compilación del POS', () => {
+  // 🔴 Review Focus 4: la basura se ignora (nunca truena) y los espacios se recortan, como las demás cabeceras.
+  it.each([
+    ['55', 55],
+    ['  55  ', 55],
+    ['2147483647', 2147483647],
+    ['55.0', undefined],
+    ['-1', undefined],
+    ['0', undefined],
+    ['007', undefined],
+    ['99999999999', undefined],
+    ['2147483648', undefined],
+    ['abc', undefined],
+    ['', undefined],
+    // Cabeceras hostiles (camino del cobro): nada de esto truena ni rompe el registro del aparato.
+    ['55abc', undefined],
+    ['+55', undefined],
+    ['5e1', undefined],
+    ['0x37', undefined],
+    ['9007199254740993', undefined], // > Number.MAX_SAFE_INTEGER
+    ['55, 56', undefined], // así entrega Node una cabecera repetida
+  ])('«%s» → %s', (crudo, esperado) => {
+    const next = run(makeReq({ ...BASE_HEADERS, 'x-app-version-code': crudo }))
+    expect(next).toHaveBeenCalledWith()
+    expect(mockRegister).toHaveBeenCalledTimes(1)
+    expect(mockRegister.mock.calls[0][0].identity.appVersionCode).toBe(esperado)
+  })
+
+  it('una cadena enorme de dígitos se ignora sin trabarse', () => {
+    run(makeReq({ ...BASE_HEADERS, 'x-app-version-code': '9'.repeat(100_000) }))
+    expect(mockRegister).toHaveBeenCalledTimes(1)
+    expect(mockRegister.mock.calls[0][0].identity.appVersionCode).toBeUndefined()
+  })
+
+  it('una cabecera repetida que llega como arreglo es ambigua: se ignora y el aparato se registra igual', () => {
+    const next = run(makeReq({ ...BASE_HEADERS, 'x-app-version-code': ['55', '56'] }))
+    expect(next).toHaveBeenCalledWith()
+    expect(mockRegister).toHaveBeenCalledTimes(1)
+    expect(mockRegister.mock.calls[0][0].identity.appVersionCode).toBeUndefined()
+  })
+
+  it('sin la cabecera (las apps de hoy) no hay número', () => {
+    run(makeReq())
+    expect(mockRegister.mock.calls[0][0].identity.appVersionCode).toBeUndefined()
+  })
+})

@@ -149,7 +149,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'gift_cards_summary',
-    'Gift cards (tarjetas de regalo) of a venue you can access, in PESOS: how many were SOLD (activated) in the period and for how much, how much balance customers USED (net of reversals), sales CANCELLED, manager adjustments, the LIVE BALANCE the business still owes today (and how much of it is already expired), and that balance by AGE since activation (0-30, 31-90, 91-180, 181-365, 366+ days) at the end of the period. Answers "¿cuánto vendí en tarjetas de regalo este mes?", "¿cuánto saldo deben mis tarjetas?", "¿qué tan viejo es ese saldo?". Dates are the venue\'s own calendar days (YYYY-MM-DD); by default, the current month up to today. Pass venueId. Requires giftCards:read. Works even if the business no longer has the plan: existing balances can always be read.',
+    'Gift cards (tarjetas de regalo) of a venue you can access, in PESOS: how many were SOLD (activated) in the period and for how much, how much balance customers USED (net of reversals), sales CANCELLED, manager adjustments, the LIVE BALANCE the business still owes today (and how much of it is already expired), and that balance by AGE since activation (0-30, 31-90, 91-180, 181-365, 366+ days) at the end of the period. The field storeCredit is the SALDO A FAVOR (store credit) credited in the period (cards = new envelopes, movements = new envelopes + top-ups, amount in PESOS): it comes from Cambios and Reembolsos to store credit, it is NOT a sale, so SOLD no longer includes it and it is not in the manager adjustments; spending it does count in USED. Store credit is never paid out in cash. Answers "¿cuánto vendí en tarjetas de regalo este mes?", "¿cuánto saldo deben mis tarjetas?", "¿qué tan viejo es ese saldo?". Dates are the venue\'s own calendar days (YYYY-MM-DD); by default, the current month up to today. Pass venueId. Requires giftCards:read. Works even if the business no longer has the plan: existing balances can always be read.',
     {
       venueId: z.string().describe('Venue whose gift cards to summarize (must be in your scope)'),
       fromDate: z
@@ -182,7 +182,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'gift_card_lookup',
-    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to and its sale ticket. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
+    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to, its sale ticket and how it was delivered (WhatsApp, email, printed or handed to the buyer; sent or failed, with the reason). The delivery status is independent of the card status: delivery PENDING only means nothing has been sent yet, and a printed or handed-to-the-buyer card is never sent, so its delivery stays PENDING for good (there is nothing to send) — that does NOT mean the card is unpaid; only the card status says that. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
     {
       venueId: z.string().describe('Venue that issued the cards (must be in your scope)'),
       last4: z
@@ -223,6 +223,15 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
           recipient: t.recipientName,
           buyer: t.purchaserName,
           saleTicket: t.order?.orderNumber ?? null,
+          // 1b S7 (aditivo): cómo se entregó. Nunca el teléfono ni el correo (ni enmascarados): el destino lo ve el panel.
+          // Impresa o en mano se queda en PENDING (S-8): la descripción le dice a la IA que eso no es «sin pagar» (m1 de S7).
+          delivery: {
+            channel: t.deliveryChannel,
+            status: t.deliveryStatus,
+            sentOn: dia(t.deliveredAt ?? null),
+            errorCode: t.deliveryErrorCode ?? null,
+            error: t.deliveryError ?? null,
+          },
         })),
       })
     },

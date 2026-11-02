@@ -187,6 +187,8 @@ describe('settleOrder — turno y señal atómica', () => {
       const staged = { payments: [...committed.payments], audits: [...committed.audits] }
       const tx = {
         $queryRaw: jest.fn().mockResolvedValue([]),
+        // Pedidos en línea fase 2 (T8): la guarda de tarjeta lee el pedido en línea de la cuenta; aquí no hay ninguno.
+        onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
         order: {
           findFirst: jest.fn().mockResolvedValue({
             id: 'order-1',
@@ -246,6 +248,8 @@ describe('settleOrder — turno y señal atómica', () => {
       const staged = { payments: [...committed.payments], audits: [...committed.audits] }
       const tx = {
         $queryRaw: jest.fn().mockResolvedValue([]),
+        // Pedidos en línea fase 2 (T8): la guarda de tarjeta lee el pedido en línea de la cuenta; aquí no hay ninguno.
+        onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
         order: {
           findFirst: jest.fn().mockResolvedValue({
             id: 'order-1',
@@ -355,16 +359,22 @@ describe('settleCustomerBalance — un claim por cada Payment ganador', () => {
       version: 1,
     })
     const makeTx = (name: TxName) => ({
-      $queryRaw: jest.fn(async (_sql: any, orderId: string) => {
-        if (name === 'bulk' && orderId === 'order-a') bulkHasA.resolve()
-        if (name === 'bulk' && orderId === 'order-b') {
+      $queryRaw: jest.fn(async (sql: TemplateStringsArray, ...values: unknown[]) => {
+        if (!sql.join('?').includes('"Order"')) return []
+        if (Array.isArray(values[1])) {
+          // La liquidación reclama una sola unión. La otra transacción ya posee B cuando empieza esa sentencia.
+          bulkHasA.resolve()
           bulkNextAttempted.resolve()
           await singleHasB.promise
+          for (const id of [...values[1]].sort().reverse()) await acquire(name, `order:${id}`)
+          return values[1].map(id => ({ id }))
         }
+        const orderId = values[0] as string
         await acquire(name, `order:${orderId}`)
         if (name === 'single' && orderId === 'order-b') singleHasB.resolve()
         return []
       }),
+      onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
       order: {
         findFirst: jest.fn(async ({ where }: any) => fresh(where.id)),
         updateMany: jest.fn(async ({ where }: any) => {
@@ -459,8 +469,11 @@ describe('settleCustomerBalance — un claim por cada Payment ganador', () => {
     prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-open', status: 'OPEN' } as any)
     prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as any)
     const ops: string[] = []
-    prismaMock.$queryRaw.mockImplementation(async (_sql: any, orderId: string) => {
-      ops.push(`order:${orderId}`)
+    prismaMock.$queryRaw.mockImplementation(async (sql: TemplateStringsArray, ...values: unknown[]) => {
+      if (sql.join('?').includes('"Order"')) {
+        expect(sql.join('?')).toContain('ORDER BY "createdAt" DESC, id DESC FOR UPDATE')
+        ops.push(`order-set:${(values[1] as string[]).join(',')}`)
+      } else ops.push('venue')
       return []
     })
     prismaMock.shift.findFirst.mockImplementation(async () => {
@@ -470,7 +483,7 @@ describe('settleCustomerBalance — un claim por cada Payment ganador', () => {
 
     await settleCustomerBalance(VENUE, 'customer-1', undefined, ACTOR)
 
-    expect(ops.slice(0, 3)).toEqual(['order:order-a', 'order:order-b', 'shift'])
+    expect(ops.slice(0, 3)).toEqual(['venue', 'order-set:order-a,order-b', 'shift'])
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
     expect(prismaMock.payment.create).toHaveBeenCalledTimes(2)
   })

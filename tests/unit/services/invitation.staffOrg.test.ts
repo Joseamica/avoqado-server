@@ -108,7 +108,7 @@ describe('Invitation - StaffOrganization', () => {
     const result = await acceptInvitation('test-token', {
       firstName: 'New',
       lastName: 'User',
-      password: 'Password123',
+      password: 'Zorro-verde-42',
     })
 
     // Verify result structure

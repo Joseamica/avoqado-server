@@ -9,12 +9,17 @@
 import { PaymentMethod, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 import { totalesDelComprobante } from '../shared/ticketTotals'
+import { copiaGuardada } from '../shared/lineasDelTicket'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { exchangeDetailFields } from '../exchanges/exchangeDetail'
+import { opcionDeSaldoAFavor, saldosAFavorDeReembolsos } from '../storeCredit/storeCreditRefund.service'
+import { esDevolucionASaldoAFavor, esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -92,6 +97,8 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         maskedPan: true,
         referenceNumber: true,
         createdAt: true,
+        // 1b Q28: qué cobro es saldo de tarjeta de regalo.
+        tenderType: { select: { systemKind: true } },
         order: {
           select: {
             orderNumber: true,
@@ -118,6 +125,12 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
     }),
   ])
 
+  // Saldo a favor (spec §5.5, Codex plan r1 h9): la reimpresión del REFUND dice a quién se abonó. Una consulta, acotada por la página.
+  const saldos = await saldosAFavorDeReembolsos(
+    venueId,
+    payments.filter(p => esMedioDeSaldoAFavor(p.tenderType?.systemKind)).map(p => p.id),
+  )
+
   return {
     data: payments.map(p => ({
       id: p.id,
@@ -134,6 +147,10 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
       orderType: p.order?.type ?? null,
       tableNumber: p.order?.table?.number ?? null,
+      // Aditivo (1b Q28): las apps lo nombran «Tarjeta de regalo».
+      esSaldoDeTarjeta: isGiftCardTenderKind(p.tenderType?.systemKind),
+      // Aditivo (saldo a favor): sólo en la devolución a saldo; «Devuelto con: Saldo a favor (nombre)».
+      ...reimpresionDeSaldo(saldos.get(p.id)),
     })),
     meta: {
       total,
@@ -143,6 +160,10 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
     },
   }
 }
+
+/** Lo que la reimpresión de una devolución a saldo necesita: a quién y cuánto (la destinataria, no la clienta de la venta). */
+const reimpresionDeSaldo = (s: { customerName: string; amountCents: number } | undefined) =>
+  s ? { storeCredit: { customerName: s.customerName, amountCents: s.amountCents } } : {}
 
 /** Pesos → centavos enteros (la convención del carril de reembolso). */
 const toCents = (pesos: unknown): number => Math.round(Number(pesos ?? 0) * 100)
@@ -171,6 +192,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       // Tarjetas de regalo (B1): la marca del tender de sistema decide «Devolver con» y el aviso «regresa al saldo».
       tenderType: { select: { systemKind: true } },
       status: true,
+      type: true,
       cardBrand: true,
       maskedPan: true,
       referenceNumber: true,
@@ -186,6 +208,15 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       },
       order: {
         select: {
+          status: true,
+          paymentStatus: true,
+          customerId: true,
+          customerName: true,
+          orderCustomers: {
+            where: { isPrimary: true },
+            select: { customerId: true, customer: { select: { firstName: true, lastName: true } } },
+            take: 1,
+          },
           orderNumber: true,
           // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
           type: true,
@@ -220,6 +251,10 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   if (!payment) {
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado`)
   }
+
+  const { fields, itemExtras } = await exchangeDetailFields(prisma, venueId, paymentId)
+  const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
+  const saldo = esDevolucionASaldoAFavor(payment) ? (await saldosAFavorDeReembolsos(venueId, [payment.id])).get(payment.id) : undefined
 
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
   // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).
@@ -272,6 +307,15 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
 
   return {
     id: payment.id,
+    customerId: payment.order?.customerId ?? payment.order?.orderCustomers?.[0]?.customerId ?? null,
+    customerName: payment.order?.customerId
+      ? payment.order.customerName
+      : payment.order?.orderCustomers?.[0]
+        ? `${payment.order.orderCustomers[0].customer.firstName ?? ''} ${payment.order.orderCustomers[0].customer.lastName ?? ''}`.trim() ||
+          null
+        : null,
+    canAssignCustomer:
+      isCustomerAssignableSale(payment, payment.order) && !payment.order?.customerId && !payment.order?.orderCustomers?.[0],
     amount: Number(payment.amount),
     tipAmount: Number(payment.tipAmount),
     method: payment.method,
@@ -293,14 +337,21 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // todo lo demás se reembolsa como el efectivo. Misma regla que acepta `refund-request` (`seDevuelveEnTerminal`).
     refundOnTerminal: seDevuelveEnTerminal(payment),
     // Aditivo (30-sep-2026): ¿el cajero puede escoger con qué devolver? Misma regla que valida el reembolso.
-    canChooseRefundMethod: sePuedeEscogerComoDevolver({ ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }),
+    canChooseRefundMethod: sePuedeEscogerComoDevolver(cobroParaDevolver),
     // Aditivo (tarjetas de regalo, 1a): la devolución de este cobro regresa al saldo de la tarjeta (las apps 1b lo dicen así).
     refundToGiftCardBalance: isGiftCardTenderKind(payment.tenderType?.systemKind),
+    // Aditivo (saldo a favor, spec §5.5): ¿la cajera puede escoger «Saldo a favor»? Si no, el POS lo pinta en gris con `reason`.
+    storeCreditOption: opcionDeSaldoAFavor(cobroParaDevolver),
+    // Aditivo: en la devolución a saldo, a quién se abonó (reimpresión del ticket).
+    ...reimpresionDeSaldo(saldo),
     tenderLabel: payment.tenderLabel ?? null,
     // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
     // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve
     // a leer `amount`/`tipAmount` (que siguen aquí arriba, vivos, como siempre).
     ticketTotals: totalesDelTicket,
+    // D1 «fotocopia del ticket», aditivo y APARTE de ticketTotals (las apps viejas no la ven): los renglones que imprimió el cobro de
+    // esta parte. La reimpresión los pinta en vez de «Pago parcial». Sin copia, la llave no existe.
+    lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {
@@ -336,7 +387,14 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
           name: m.name,
           price: Number(m.price),
         })),
+        ...itemExtras.get(item.id),
       }
     }),
+    ...fields,
   }
+}
+
+export async function assignTransactionCustomer(venueId: string, paymentId: string, customerId: string, actor: CustomerAttributionActor) {
+  const { attachCustomerToPayment } = await import('./order.mobile.service')
+  return attachCustomerToPayment(venueId, paymentId, customerId, actor.staffId, { actor, historicalOnly: true })
 }

@@ -12,6 +12,16 @@
  * recibe el permiso y la lectura bajo el candado sólo pide el estado de cobro.
  */
 // R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
   lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
   cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
@@ -221,7 +231,8 @@ describe('🔴 R7-1: el pago manual rechaza una venta YA cobrada (PAID/REFUNDED)
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1) // el candado de siempre
     expect(lecturasDeLaVenta).toHaveLength(1)
     // R8-3a: sólo el estado de cobro — el cliente y el primario los pedía la regla R5-1, ya quitada.
-    expect(lecturasDeLaVenta[0]).toEqual({ where: { id: ORDER, venueId: VENUE }, select: { paymentStatus: true } })
+    // Rappi 2b (T7): la misma lectura bajo el candado también trae el carril de Rappi en efectivo.
+    expect(lecturasDeLaVenta[0]).toEqual({ where: { id: ORDER, venueId: VENUE }, select: { paymentStatus: true, thirdPartyCashDue: true } })
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
     expect(tx.shift.findFirst).not.toHaveBeenCalled()
     expect(tx.payment.count).not.toHaveBeenCalled() // ni los cobros previos del turno ni reembolsos

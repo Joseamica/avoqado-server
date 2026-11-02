@@ -155,7 +155,7 @@ describe('runAreaTicketExternalReconciliation — contra Postgres real', () => {
     return ticket
   }
 
-  it('correr el job dos veces sobre el mismo vale deja UNA fila con occurrenceCount:2 y reopenedAt sellado', async () => {
+  it('correr el job dos veces no toca la incidencia abierta; sólo la reabre si alguien ya la había resuelto', async () => {
     const ticket = await issueExternalTicketFromYesterday()
 
     // --- Primera corrida: INSERT liso (el unique no encuentra fila previa) ---
@@ -170,21 +170,32 @@ describe('runAreaTicketExternalReconciliation — contra Postgres real', () => {
     expect(afterFirst[0].reopenedAt).toBeNull()
     const incidentId = afterFirst[0].id
 
-    // --- Segunda corrida: el vale SIGUE PENDING (nadie lo confirmó) — el `upsert`
-    // debe tomar la rama `update` sobre la MISMA fila, no chocar contra el unique ni
-    // insertar una segunda. ---
+    // --- Segunda corrida: el vale SIGUE PENDING y su incidencia SIGUE abierta: no hay nada nuevo que reportar.
+    // Antes subía occurrenceCount cada hora (La Galeterie, 2-nov-2026: 9 vales huérfanos, 5,874 filas de bitácora). ---
     await runAreaTicketExternalReconciliation()
 
     const afterSecond = await prisma.areaTicketExternalIncident.findMany({
       where: { areaTicketId: ticket.id, kind: 'UNCONFIRMED_CHARGE' },
     })
-    // UNA fila, no dos — la prueba directa de que `@@unique([areaTicketId, kind])`
-    // hizo su trabajo y el código realmente reabrió en vez de duplicar.
     expect(afterSecond).toHaveLength(1)
     expect(afterSecond[0].id).toBe(incidentId)
     expect(afterSecond[0].status).toBe('OPEN')
-    expect(afterSecond[0].occurrenceCount).toBe(2)
-    expect(afterSecond[0].reopenedAt).not.toBeNull()
-    expect(afterSecond[0].reopenedAt!.getTime()).toBeGreaterThanOrEqual(afterFirst[0].openedAt.getTime())
+    expect(afterSecond[0].occurrenceCount).toBe(1)
+    expect(afterSecond[0].reopenedAt).toBeNull()
+
+    // --- Alguien la da por resuelta, pero el cobro sigue sin confirmarse: la siguiente corrida la REABRE
+    // sobre la MISMA fila (el `@@unique([areaTicketId, kind])`), no inserta otra. ---
+    await prisma.areaTicketExternalIncident.update({ where: { id: incidentId }, data: { status: 'RESOLVED', resolvedAt: new Date() } })
+    await runAreaTicketExternalReconciliation()
+
+    const afterThird = await prisma.areaTicketExternalIncident.findMany({
+      where: { areaTicketId: ticket.id, kind: 'UNCONFIRMED_CHARGE' },
+    })
+    expect(afterThird).toHaveLength(1)
+    expect(afterThird[0].id).toBe(incidentId)
+    expect(afterThird[0].status).toBe('OPEN')
+    expect(afterThird[0].occurrenceCount).toBe(2)
+    expect(afterThird[0].reopenedAt).not.toBeNull()
+    expect(afterThird[0].reopenedAt!.getTime()).toBeGreaterThanOrEqual(afterFirst[0].openedAt.getTime())
   })
 })

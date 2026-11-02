@@ -1,8 +1,11 @@
 import logger from '@/config/logger'
 import { getWhatsappAdminAlertEmail } from '@/config/whatsappCloud'
-import { normalizePhoneE164 } from '@/utils/phone'
+import { Prisma } from '@prisma/client'
+
+import { canonicalPhoneE164, normalizePhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
 
+import { marcarEntregaFallidaPorMensaje } from './giftCards/giftCardDelivery.service'
 import { handleActivationCommand } from './venueChatActivation.service'
 import { maybeSendVenueReplyEmail } from './venueChatEmail.service'
 import { sendServiceMessage, WhatsappCloudApiError } from './whatsapp.service'
@@ -27,6 +30,7 @@ interface CloudApiStatusEvent {
 interface CloudApiChange {
   field: string
   value: {
+    metadata?: { phone_number_id?: string; display_phone_number?: string }
     messages?: CloudApiInboundMessage[]
     statuses?: CloudApiStatusEvent[]
     [key: string]: unknown
@@ -61,10 +65,15 @@ export async function processWhatsappWebhook(payload: CloudApiWebhookPayload): P
     for (const change of changes) {
       if (change.field === 'messages') {
         await processMessagesChange(change)
+      } else if (change.field === 'smb_message_echoes' || change.field === 'history') {
+        // Coexistence-only fields: they only ever exist for the sales number.
+        if (whichNumber(change) === 'SALES') await storeSalesMessages(change)
+        else logger.warn('WhatsApp coexistence field from a number that is not the sales one; ignored', fieldInfo(change))
       } else if (change.field === 'message_template_status_update') {
         await handleTemplateStatusUpdate(change.value)
       } else {
-        logger.warn('Unknown webhook field', { field: change.field })
+        // account_update carries PARTNER_REMOVED (the sales number lost its API connection).
+        logger.warn('Unknown webhook field', { field: change.field, event: change.value?.event })
       }
     }
   }
@@ -75,12 +84,99 @@ async function processMessagesChange(change: CloudApiChange) {
   for (const s of statuses) {
     logger.info('WhatsApp status event', { wamid: s.id, status: s.status })
     // v1: log only, do not persist. Per spec §Status events.
+    // Tarjetas de regalo (1b S3, Q2/Q103): Meta no pudo entregar ESE mensaje ⇒ la tarjeta pasa a «No se entregó». Si truena,
+    // el error sube y el controlador responde 500: Meta reintenta y el CAS lo vuelve idempotente.
+    if (s.status === 'failed') await marcarEntregaFallidaPorMensaje(s.id)
   }
 
   const messages = change.value.messages ?? []
+  if (!messages.length) return
+  const number = whichNumber(change)
+  if (number === 'SALES') return storeSalesMessages(change)
+  if (number === 'OTHER') {
+    // Fail closed: only the central number ever auto-replies.
+    logger.warn('WhatsApp messages for a number that is neither central nor sales; not answered', fieldInfo(change))
+    return
+  }
   for (const msg of messages) {
     await processInboundMessage(msg)
   }
+}
+
+// Which of OUR numbers a change belongs to, by the id Meta stamps on every delivery. Sales is checked first: if both env
+// vars ever hold the same id, the central goes quiet instead of auto-replying to a prospect.
+function whichNumber(change: CloudApiChange): 'SALES' | 'CENTRAL' | 'OTHER' {
+  const id = change.value?.metadata?.phone_number_id
+  if (!id) return 'OTHER'
+  if (id === process.env.WHATSAPP_SALES_PHONE_NUMBER_ID) return 'SALES'
+  if (id === process.env.WHATSAPP_PHONE_NUMBER_ID) return 'CENTRAL'
+  return 'OTHER'
+}
+
+const fieldInfo = (change: CloudApiChange) => ({ field: change.field, phoneNumberId: change.value?.metadata?.phone_number_id ?? null })
+
+interface MetaMessage {
+  id?: string
+  from?: string
+  to?: string
+  timestamp?: string
+  type?: string
+  [key: string]: unknown
+}
+
+interface HistoryChunk {
+  errors?: unknown[]
+  threads?: { id?: string; messages?: MetaMessage[] }[]
+}
+
+const SALES_BATCH = 500
+
+// Sales number (CRM phase 3, coexistence): store and NEVER reply. Nothing here may call a sender. The wamid is unique, so a
+// Meta retry, a history chunk sent twice or a message seen live and in history land once. One history delivery can hold
+// thousands of messages, hence the batches; a failed batch throws, the controller answers 500 and Meta retries the rest.
+async function storeSalesMessages(change: CloudApiChange): Promise<void> {
+  const value = change.value
+  const phoneNumberId = value.metadata!.phone_number_id!
+  const rows: Prisma.CrmWhatsappMessageCreateManyInput[] = []
+  const add = (m: MetaMessage, contact: string | undefined, direction: 'ENTRA' | 'SALE', origin: string, contactName?: string) => {
+    if (!m.id || !contact) return logger.warn('WhatsApp sales message without id or contact; skipped', { origin, wamid: m.id })
+    const content = m[m.type ?? ''] as { body?: string; caption?: string } | undefined
+    const seconds = Number(m.timestamp)
+    rows.push({
+      wamid: m.id,
+      phoneNumberId,
+      contactPhone: canonicalPhoneE164(contact) ?? `+${contact.replace(/\D/g, '')}`,
+      contactName: contactName ?? null,
+      direction,
+      origin,
+      type: m.type ?? 'unknown',
+      body: content?.body ?? content?.caption ?? null,
+      sentAt: seconds > 0 ? new Date(seconds * 1000) : new Date(),
+      raw: m as Prisma.InputJsonValue,
+    })
+  }
+
+  if (change.field === 'messages') {
+    const contacts = (value.contacts as { wa_id?: string; profile?: { name?: string } }[] | undefined) ?? []
+    const names = new Map(contacts.map(c => [c.wa_id, c.profile?.name]))
+    for (const m of value.messages ?? []) add(m, m.from, 'ENTRA', 'MENSAJE', names.get(m.from))
+  } else if (change.field === 'smb_message_echoes') {
+    // What the founder sent from the WhatsApp Business app on his phone.
+    for (const m of (value.message_echoes as MetaMessage[] | undefined) ?? []) add(m, m.to, 'SALE', 'ECO')
+  } else {
+    for (const chunk of (value.history as HistoryChunk[] | undefined) ?? []) {
+      // 2593109 = the business turned history sharing off in the app: there is nothing to store.
+      if (chunk.errors?.length) logger.warn('WhatsApp sales history not shared by Meta', { errors: chunk.errors })
+      for (const thread of chunk.threads ?? []) {
+        for (const m of thread.messages ?? []) add(m, thread.id, m.from === thread.id ? 'ENTRA' : 'SALE', 'HISTORIAL')
+      }
+    }
+  }
+
+  for (let i = 0; i < rows.length; i += SALES_BATCH) {
+    await prisma.crmWhatsappMessage.createMany({ data: rows.slice(i, i + SALES_BATCH), skipDuplicates: true })
+  }
+  logger.info('WhatsApp sales messages stored', { field: change.field, count: rows.length })
 }
 
 async function processInboundMessage(msg: CloudApiInboundMessage): Promise<void> {

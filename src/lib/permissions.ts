@@ -91,6 +91,7 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'products:read',
     'inventory:read', // May need to update stock when modifying order
   ],
+  'orders:attach-customer': ['orders:attach-customer', 'orders:read', 'payments:read', 'customers:read'],
   'orders:cancel': [
     'orders:read',
     'orders:cancel',
@@ -375,6 +376,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'printers:manage': ['printers:manage', 'printers:read'],
   'receipt-layout:read': ['receipt-layout:read'],
   'receipt-layout:manage': ['receipt-layout:manage', 'receipt-layout:read'],
+  // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, promos en reposo)
+  'customer-display:read': ['customer-display:read'],
+  'customer-display:update': ['customer-display:update', 'customer-display:read'],
 
   // ===========================
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
@@ -434,7 +438,10 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'reservations:read': ['reservations:read'],
   'reservations:create': ['reservations:read', 'reservations:create'],
-  'reservations:update': ['reservations:read', 'reservations:update'],
+  // El check-in del kiosco es un subconjunto de editar reservaciones (mismo patrón que `tpv-orders:comp` → `orders:comp`).
+  'reservations:update': ['reservations:read', 'reservations:update', 'self-service:check-in'],
+  // `resolvePermissions` busca la llave exacta: un Conjunto guardado desde el preset ADMIN trae `reservations:*` crudo.
+  'reservations:*': ['reservations:*', 'self-service:check-in'],
   'reservations:cancel': ['reservations:read', 'reservations:cancel'],
   // Conector de pases (TotalPass/Wellhub): conectar la sucursal, ligar clases, modo de confirmación y lugares para pases.
   // Ver y confirmar check-ins usa reservations:read / reservations:update.
@@ -446,6 +453,10 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // `reservations:read`, que abre la agenda completa del negocio — quien da una clase de
   // yoga no tiene por qué ver quién viene a las siete ni cuánto pagó.
   'class-sessions:read-assigned': ['class-sessions:read-assigned'],
+
+  // Modo Autoservicio 0.e — la lista y el check-in del kiosco, y nada más: no implica
+  // `reservations:read` (la agenda del negocio) ni `reservations:update` (editar cualquier reserva).
+  'self-service:check-in': ['self-service:check-in'],
 
   // ===========================
   // SETTINGS
@@ -739,6 +750,16 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
  * //                    payments:read, menu:read, inventory:read
  * ```
  */
+/**
+ * Permisos que se implican también cuando el que implica llega por COMODÍN (`*:update`, `reservations:*`).
+ * `PERMISSION_DEPENDENCIES` sólo mira la llave exacta; esto cubre a los permisos nuevos que heredan una ruta que antes
+ * pedía otro: quien antes pasaba el check-in del kiosco con `reservations:update` (por la vía que sea) lo sigue pasando
+ * (Codex, código r1 #5). Se mide con `permissionListGrants`, la misma regla de comodines con la que se autoriza.
+ */
+const IMPLICADOS_TAMBIEN_POR_COMODIN: ReadonlyArray<readonly [quienImplica: string, implicado: string]> = [
+  ['reservations:update', 'self-service:check-in'],
+]
+
 export function resolvePermissions(permissions: string[]): Set<string> {
   const resolved = new Set<string>()
 
@@ -760,6 +781,10 @@ export function resolvePermissions(permissions: string[]): Set<string> {
         resolved.add(dep)
       })
     }
+  }
+
+  for (const [quienImplica, implicado] of IMPLICADOS_TAMBIEN_POR_COMODIN) {
+    if (permissionListGrants(resolved, quienImplica)) resolved.add(implicado)
   }
 
   return resolved
@@ -1007,6 +1032,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory:log-waste', // registrar merma desde el POS (además tiene inventory:adjust)
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'self-service:check-in', // Autoservicio 0.e — lista y check-in del kiosco
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
     'home:read',
@@ -1022,6 +1048,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tender-types:read', // Tipos de pago personalizados: ver el catálogo (editar = ADMIN+)
     'printers:read', // PRINT_STATIONS: ver impresoras, estaciones y ruteo de comandas
     'printers:manage', // PRINT_STATIONS: configurar impresoras, estaciones y ruteo (operativo — MANAGER+)
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet — MANAGER SÍ (spec §5.8), al revés que receipt-layout
     'menu:read',
     'menu:create',
     'menu:update',
@@ -1031,6 +1058,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:update',
     'orders:cancel',
     'orders:merge', // Fusionar cuentas — MANAGER+; WAITER queda a un PIN de distancia
+    'orders:attach-customer', // Cliente olvidado en venta cobrada — MANAGER+, sin reemplazo.
     'area-tickets:issue',
     'area-tickets:checkout',
     'area-tickets:cancel',
@@ -1185,6 +1213,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.ADMIN]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
     'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
@@ -1205,6 +1234,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'estimates:create',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, pasos)
     'payments:*',
     'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
     'payments:reconcile-uncharged', // el cajero también lo tiene; explícito para que la lista se lea sin expandir el comodín
@@ -1267,6 +1297,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (all except factory-reset)
+    // Ajustes de CADA aparato: pasos del cobro (propina, estrellas, recibo), pestaña de configuración de la terminal
+    // y lo que el POS cambia de su propia ficha. Decisión del founder (15-oct-2026): el ADMIN los ve y los edita —
+    // antes el GERENTE podía (vía `scale:configure`) y el ADMIN no, al revés de la jerarquía. Explícitos y no
+    // `tpv-settings:*`, para que una acción nueva de ese recurso se decida aparte.
+    'tpv-settings:read',
+    'tpv-settings:update',
     'tpv-terminal:settings', // Can modify terminal configuration
     'tpv-devices:manage', // Can link external devices (iPad, tablets) for BLE payments
     'tpv-kiosk:enable', // Can enable/disable kiosk mode
@@ -1306,7 +1342,6 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'calendar:connect_self',
     'calendar:disconnect_staff',
     'calendar:view_status',
-    // NO: tpv-settings:* (OWNER only - org-level TPV config)
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
@@ -1330,6 +1365,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.OWNER]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
     'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
@@ -1347,6 +1383,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, pasos)
     'commissions:*', // Commission system (full control including payout)
     'staffpay:read',
     'staffpay:manage',
@@ -1683,7 +1720,18 @@ export function getEffectiveRolePermissions(
   // Por eso lo que sobrevive se recorta a lo que la base SIN exclusiones ya concedía, medido
   // con la misma regla de comodines con la que se autoriza. La decisión del 18-ago queda
   // intacta: lo implicado por un permiso que el rol conserva vuelve — si la base lo concedía.
-  return Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+  const efectivos = Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+
+  // Lo IMPLICADO se va con lo que lo implicaba (Codex, código r2 #4): sin esto, quitar `reservations:update` (o el
+  // `*:update` que lo daba) dejaba el check-in del kiosco suelto, porque la resta de arriba sólo quita lo nombrado. Se queda
+  // si el rol o el negocio lo tienen ESCRITO (MANAGER lo trae en sus defaults; un negocio puede darlo a mano).
+  return efectivos.filter(
+    p =>
+      !IMPLICADOS_TAMBIEN_POR_COMODIN.some(
+        ([quienImplica, implicado]) =>
+          p === implicado && !permissionListGrants(basePermissions, implicado) && !permissionListGrants(efectivos, quienImplica),
+      ),
+  )
 }
 
 /**
@@ -1943,6 +1991,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'orders:read',
     'orders:create',
     'orders:update',
+    'orders:attach-customer',
     'orders:cancel',
     'orders:cancel-unpaid',
     'orders:comp',
@@ -1979,6 +2028,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tender-types': ['tender-types:read', 'tender-types:manage'],
   printers: ['printers:read', 'printers:manage'],
   'receipt-layout': ['receipt-layout:read', 'receipt-layout:manage'],
+  'customer-display': ['customer-display:read', 'customer-display:update'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
@@ -2026,6 +2076,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any', 'tables:configure'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel', 'reservations:manage-passes'],
   'class-sessions': ['class-sessions:read-assigned'],
+  'self-service': ['self-service:check-in'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
   customers: [
@@ -2225,4 +2276,28 @@ export async function resolveCustomPermissionsForRole(venueId: string, role: Sta
   })
 
   return (customPermissionRecord?.permissions as string[]) || null
+}
+
+/**
+ * CRM platform keys (spec 2026-10-30 §5.1). They are NOT venue role permissions: each person's keys live in
+ * `PlatformAccess` (by email), `requireCrm` re-reads them from the database on every request, and they never enter
+ * `DEFAULT_PERMISSIONS` or the role editor's catalog — a venue admin must never be able to hand out access to Avoqado's
+ * own sales pipeline. Mirrored by exact name in `avoqado-superadmin/src/features/crm/access.ts`.
+ *
+ * `crm:ver` and `crm:editar` carry a scope (`propios` = mine + unowned, or `todos`). `crm:editar`, `crm:contactar`,
+ * `crm:exportar` and `crm:ventas` only work on top of `crm:ver`; `crm:campanas` and `crm:admin` stand alone.
+ */
+export const CRM_KEYS = ['crm:ver', 'crm:editar', 'crm:contactar', 'crm:campanas', 'crm:exportar', 'crm:ventas', 'crm:admin'] as const
+
+export type CrmKey = (typeof CRM_KEYS)[number]
+
+/** The name a person reads, in the 403 («No tienes la llave «…»») and in the console. */
+export const CRM_KEY_LABELS: Record<CrmKey, string> = {
+  'crm:ver': 'Ver negocios',
+  'crm:editar': 'Editar',
+  'crm:contactar': 'Mandar correo',
+  'crm:campanas': 'Campañas masivas',
+  'crm:exportar': 'Exportar',
+  'crm:ventas': 'Ver ventas',
+  'crm:admin': 'Administrar',
 }

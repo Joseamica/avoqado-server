@@ -9,6 +9,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
+import { exigirQueNoRijaSoloSaldoEnTerminal } from '@/services/storeCredit/soloSaldoEnTerminal'
+import AppError from '@/errors/AppError'
 import { exigirCancelacionParaDevolverEnTerminal } from '@/services/giftCards/giftCardCancel.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { readOperatorResolution } from '@/services/tpv/no-instrument-resolution.service'
@@ -963,15 +965,19 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'refund_card_on_terminal',
-    'Abre en una terminal física la devolución de un cobro con TARJETA, para que alguien la confirme ahí. Es la salida cuando `issue_refund` rechaza un pago con tarjeta: esta herramienta NO devuelve el dinero — sólo deja la pantalla lista en el aparato con ese cobro cargado, y una persona pone la tarjeta y confirma. Cuando el dinero se mueve, la TPV registra el reembolso sola. La terminal debe estar conectada y NO estar a media venta. Identifica el cobro por su paymentId (de list_payments) y la terminal por su id/serie (de list_devices). Requiere payments:refund.',
+    'Abre en una terminal física la devolución de un cobro con TARJETA, para que alguien la confirme ahí. Es la salida cuando `issue_refund` rechaza un pago con tarjeta: esta herramienta NO devuelve el dinero — sólo deja la pantalla lista en el aparato con ese cobro cargado, y una persona pone la tarjeta y confirma. Cuando el dinero se mueve, la TPV registra el reembolso sola. La terminal debe estar conectada y NO estar a media venta. Identifica el cobro por su paymentId (de list_payments) y la terminal por su id/serie (de list_devices). Si el negocio tiene prendido «Sólo saldo a favor», la devolución a tarjeta se rechaza con el código STORE_CREDIT_ONLY (el dinero no sale a la tarjeta: se devuelve como saldo a favor desde el POS) salvo que pases storeCreditOnlyException con la excepción que el cliente invoca: DEFECTIVE (producto defectuoso), ACCIDENTAL_CHARGE (cobro por error), FRAUDULENT_CHARGE (cobro fraudulento) o CANCELLED_ORDER (cuenta cancelada). Requiere payments:refund.',
     {
       venueId: z.string().describe('Venue dueño del cobro y de la terminal (debe estar en tu alcance)'),
       paymentId: z.string().min(1).describe('El id del cobro con tarjeta a devolver (de list_payments)'),
       terminalId: z.string().min(1).describe('Serie o id de la terminal donde se abrirá la devolución (de list_devices)'),
       reason: z.string().optional().describe('Motivo, para que el cajero vea en la terminal por qué se le pidió'),
+      storeCreditOnlyException: z
+        .enum(['DEFECTIVE', 'ACCIDENTAL_CHARGE', 'FRAUDULENT_CHARGE', 'CANCELLED_ORDER'])
+        .optional()
+        .describe('Sólo con «Sólo saldo a favor» prendido: la excepción que deja devolver a la tarjeta (los mismos 4 valores que el POS)'),
       confirm: z.boolean().optional().describe('Debe ser true para mandarlo de verdad; sin esto sólo obtienes una vista previa'),
     },
-    async ({ venueId, paymentId, terminalId, reason, confirm }) => {
+    async ({ venueId, paymentId, terminalId, reason, storeCreditOnlyException, confirm }) => {
       const base = guard.venueFilter(venueId) // lanza ScopeError si el venue no es tuyo
       guard.requirePermission('payments:refund', venueId)
 
@@ -1012,6 +1018,15 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         await exigirCancelacionParaDevolverEnTerminal(venueId, payment.orderId)
       } catch (error) {
         if (error instanceof GiftCardError) return text({ ok: false, code: error.code, error: error.message })
+        throw error
+      }
+
+      // «Sólo saldo a favor»: la vista previa evalúa la MISMA regla que el servicio al confirmar (con código, no sólo texto).
+      try {
+        await exigirQueNoRijaSoloSaldoEnTerminal(venueId, storeCreditOnlyException)
+      } catch (error) {
+        if (error instanceof AppError && error.code === 'STORE_CREDIT_ONLY')
+          return text({ ok: false, code: error.code, error: error.message })
         throw error
       }
 
@@ -1059,10 +1074,18 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
-          preview: { paymentId, terminalId, maxRefundable: target.remainingRefundableCents / 100, reason: reason ?? null },
-          message: `Esto ABRIRÁ en la terminal ${terminalId} la devolución de hasta $${
-            target.remainingRefundableCents / 100
-          }. Nadie devuelve nada hasta que una persona lo confirme en el aparato. Vuelve a llamar con confirm:true para mandarlo.`,
+          preview: {
+            paymentId,
+            terminalId,
+            maxRefundable: target.remainingRefundableCents / 100,
+            reason: reason ?? null,
+            excepcionSoloSaldo: storeCreditOnlyException ?? null,
+          },
+          message: `Esto ABRIRÁ en la terminal ${terminalId} la devolución de hasta $${target.remainingRefundableCents / 100}.${
+            storeCreditOnlyException
+              ? ` Se invoca la excepción ${storeCreditOnlyException} de «Sólo saldo a favor»: la devolución sale a la tarjeta y no como saldo a favor.`
+              : ''
+          } Nadie devuelve nada hasta que una persona lo confirme en el aparato. Vuelve a llamar con confirm:true para mandarlo.`,
         })
       }
 
@@ -1073,6 +1096,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           paymentId,
           requestedBy: scope.staffId,
           reason,
+          storeCreditOnlyException,
         })
         return text({
           ok: result.status === 'opened',
@@ -1086,7 +1110,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         })
       } catch (error) {
         // A2 del cierre (r1): el rechazo de negocio (la regla de tarjetas de regalo) llega con su `code`, como en la ruta del POS.
-        const code = error instanceof GiftCardError ? error.code : undefined
+        const code = error instanceof AppError ? error.code : undefined
         return text({ ok: false, ...(code ? { code } : {}), error: error instanceof Error ? error.message : 'Error desconocido' })
       }
     },

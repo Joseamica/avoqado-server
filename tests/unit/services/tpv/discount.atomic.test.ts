@@ -1,4 +1,14 @@
 /** Plan3b T3: transaction and global clients deliberately disagree. */
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { $transaction: jest.fn() } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 import { Prisma } from '@prisma/client'
@@ -174,7 +184,7 @@ describe('fresh discount mutations', () => {
     expect(tx.order.findUnique.mock.calls.filter(([args]: any[]) => args?.select?.venueId)).toHaveLength(0)
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
     // Tagged template: [strings, orderId, venueId] — the bound venue must be the route's.
-    expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['order', 'venue'])
+    expect(Prisma.sql(tx.$queryRaw.mock.calls[0][0], ...tx.$queryRaw.mock.calls[0].slice(1)).values).toEqual(['order', 'venue'])
   })
   // B2b T4 (D16): este caso esperaba `taxReduction: 3.2` (el 16 % inventado) sobre una orden sin contrato; desde B2b T2 ya da
   // 0 y el impuesto no se toca. Lo reemplaza P10 (nace verde con T2 ⇒ control). Sigue probando que todo sale del tx.
@@ -417,9 +427,11 @@ describe('B2 — el motor guarda a qué renglones aplicó (spec §4.1, D7)', () 
     }
     tx.customer = { ...tx.customer, update: jest.fn(async () => ({})) }
     tx.stampReward = {
-      findFirst: jest.fn(async () => ({ id: 'rw', customerId: 'c1', rewardLabel: 'Café' })),
+      findFirst: jest.fn(async () => ({ id: 'rw', customerId: 'c1', rewardLabel: 'Café', stampCardId: 'sc' })),
       update: jest.fn(async () => ({})),
     }
+    // D3 (21-oct): devolver un premio canjeado lee su cartilla; llena = el premio vuelve por cobrar.
+    tx.stampCard = { findUnique: jest.fn(async () => ({ id: 'sc', stampsEarned: 7, stampsRequired: 7 })), update: jest.fn() }
     await tpv.removeDiscount('venue', 'order', 'od', 'staff')
     expect(tx.loyaltyTransaction.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ type: 'ADJUST', points: 1000 }) }),

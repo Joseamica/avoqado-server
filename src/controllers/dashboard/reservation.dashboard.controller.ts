@@ -12,6 +12,8 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { fromZonedTime } from 'date-fns-tz'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '../../services/reservation/resolveAppointmentWindow'
+import { previewUndoNoShow, resolveNoShowCorrection, undoNoShow } from '../../services/reservation/undoNoShow.service'
+import { afterNoShowCorrection } from '../../services/reservation/noShowNotices.service'
 
 // ==========================================
 // RESERVATION DASHBOARD CONTROLLER
@@ -354,6 +356,61 @@ export async function markNoShow(req: Request, res: Response, next: NextFunction
 
     const reservation = await reservationService.markNoShow(venueId, id, userId)
     res.json(reservation)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /venues/:venueId/reservations/:id/no-show/undo  (D4)
+ *
+ * Qué revertiría «Sí llegó», sin escribir. 409 con su `code` si no aplica (no es NO_SHOW) o si vino de un pase.
+ */
+export async function previewReservationNoShowUndo(req: Request, res: Response, next: NextFunction) {
+  try {
+    const plan = await previewUndoNoShow(prisma, resolveVenueId(req), req.params.id, new Date())
+    res.json({ plan })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /venues/:venueId/reservations/:id/no-show/undo  (D4 — «Sí llegó»)
+ *
+ * Mismo molde que `undoReservationCheckIn`. 🔴 `prisma.$transaction` normal (READ COMMITTED), nunca
+ * `withSerializableRetry`: `undoNoShow` lee lo que `markNoShow` confirmó después de esperar el candado.
+ * El aviso a gerentes sale DESPUÉS del commit y sin esperarlo (correo por Resend); nunca lanza.
+ */
+export async function undoReservationNoShow(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const result = await prisma.$transaction(tx =>
+      undoNoShow(tx, {
+        reservationId: req.params.id,
+        venueId,
+        actor: { type: 'HUMAN', staffId: userId },
+        source: deriveCheckInSource(req.headers['x-device-platform']),
+        now: new Date(),
+        reason: req.body?.reason || undefined,
+      }),
+    )
+    if (result.outcome === 'UNDONE') void afterNoShowCorrection(result.correction.id)
+    res.json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /venues/:venueId/reservations/:id/no-show/undo/resolve  (D4 — «Marcar resuelto»)
+ */
+export async function resolveReservationNoShowCorrection(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId } = (req as any).authContext
+    const source = deriveCheckInSource(req.headers['x-device-platform'])
+    res.json(await resolveNoShowCorrection(resolveVenueId(req), req.params.id, userId, req.body?.note || undefined, source))
   } catch (error) {
     next(error)
   }

@@ -23,10 +23,14 @@
  * `DeliveryChannelLink` — meterlos ahí implicaría copiar el mismo secreto en cada venue y
  * tener que rotarlo N veces.
  */
-import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
+import crypto from 'crypto'
+import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 
+import logger from '../../../../config/logger'
 import prisma from '../../../../utils/prismaClient'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
+import { esPedidoProgramado, type RappiOrderPayload } from './rappi.mapper'
+import { leerEstadoAprovisionamiento } from './rappi.selfOnboarding'
 import { parseRappiSignatureHeader, verifyRappiSignature } from './rappi.signature'
 
 /** Los eventos que sabemos manejar, y el pedazo de URL con el que los registramos en Rappi. */
@@ -94,11 +98,27 @@ export function secretosDelEvento(mapaJson: string | undefined, evento: string):
  * consecuencia inmediata.
  *
  * Rappi **no documenta reintentos**. Eso significa que un 5xx nuestro probablemente pierde el
- * evento para siempre — por eso el sondeo de pedidos (`GET /orders`) no es un lujo, es la red.
+ * evento para siempre — por eso el sondeo de pedidos por tienda (`rappi-order-poll.job.ts`) no es un lujo, es la red.
  */
 export function esPing(evento: string): boolean {
   return evento === RAPPI_EVENTS.PING
 }
+
+/**
+ * Los estados de un vínculo RAPPI que siguen "ahí para recibir" pedidos. La usan el PING (`rappi.webhook.controller`: contesta
+ * OK sólo con vínculo vivo) y el sondeo por tienda (`rappi-order-poll.job.ts`: sólo sondea tiendas vivas): 🔴 una sola lista,
+ * para que nunca digan cosas distintas de la misma tienda.
+ *
+ * DISABLED (y cualquier estado que no conozcamos) NO: la lista de vivos es CERRADA a propósito, para que un estado nuevo nunca se
+ * cuele como OK. PAUSED sí cuenta: pausar ya apaga la tienda en Rappi (`habilitarTiendaRappi(false)`), y contestarle ERROR al
+ * PING reportaría como caída de conectividad lo que el negocio apagó a propósito. PENDING es una tienda recién vinculada que ya
+ * debe poder recibir su primer aviso.
+ */
+export const ESTADOS_VIVOS_RAPPI: ReadonlySet<DeliveryChannelStatus> = new Set<DeliveryChannelStatus>([
+  DeliveryChannelStatus.ACTIVE,
+  DeliveryChannelStatus.PAUSED,
+  DeliveryChannelStatus.PENDING,
+])
 
 // ────────────────────────────────────────────────────────────────────────────────────
 //  Persistencia — el 200 sólo sale con el evento ya guardado
@@ -121,6 +141,16 @@ interface CuerpoRappi {
 }
 
 /**
+ * La llave de un aviso CON PEDIDO (`NEW_ORDER`, cancelaciones…): `RAPPI:evento:tienda:pedido`. Es la base de
+ * `llaveDeDeduplicacion` y la usa también el procesador para encontrar el aviso hermano de un pedido (su cancelación, o el
+ * pedido de una cancelación) por el índice único `dedupKey`, en vez de recorrer los eventos del vínculo. 🔴 Una sola
+ * función: si la forma de la llave cambia aquí, la búsqueda cambia con ella.
+ */
+export function llaveDeAvisoDePedido(evento: string, storeId: string | null, orderId: string | null): string {
+  return `RAPPI:${evento}:${storeId ?? 'sin-tienda'}:${orderId ?? 'sin-pedido'}`
+}
+
+/**
  * La llave de deduplicación, compuesta — Rappi NO manda un id de evento propio.
  *
  * Tres familias, porque la identidad natural de cada evento es distinta:
@@ -133,10 +163,23 @@ interface CuerpoRappi {
  *  · Sin identidad natural (`MENU_APPROVED`, `STORE_CONNECTIVITY`…): el TIMESTAMP de la
  *    firma. Un menú se aprueba muchas veces a lo largo de meses con el mismo `store_id` —
  *    sin el timestamp, la segunda aprobación jamás se procesaría.
+ *
+ * Y un caso aparte, antes que las tres: `STORE_PROVISIONING_STATUS` no trae tienda ni pedido de
+ * primer nivel. Su identidad es el LOTE (+ la operación, + el timestamp de la firma): con sólo el
+ * timestamp, dos lotes firmados en el mismo segundo colisionaban y el segundo se tiraba. Más una
+ * huella corta del cuerpo: Rappi no garantiza un solo aviso completo por lote, y dos fragmentos
+ * distintos en el mismo segundo chocaban igual. El reenvío del MISMO cuerpo sigue deduplicando.
  */
 export function llaveDeDeduplicacion(evento: string, payload: unknown, signatureHeader: string | undefined): string {
+  if (evento === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) {
+    const { batchId, operation } = leerEstadoAprovisionamiento(payload)
+    const t = parseRappiSignatureHeader(signatureHeader)?.timestamp ?? 'sin-t'
+    const huella = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+    return `RAPPI:STORE_PROVISIONING_STATUS:${batchId ?? 'sin-lote'}:${operation ?? 'sin-op'}:t${t}:${huella}`
+  }
+
   const identidad = rappiAdapter.extractIdentity(payload)
-  const base = `RAPPI:${evento}:${identidad.storeId ?? 'sin-tienda'}:${identidad.orderId ?? 'sin-pedido'}`
+  const base = llaveDeAvisoDePedido(evento, identidad.storeId, identidad.orderId)
 
   if (evento === RAPPI_EVENTS.ORDER_OTHER_EVENT) {
     const c = (payload ?? {}) as CuerpoRappi
@@ -155,6 +198,40 @@ export function llaveDeDeduplicacion(evento: string, payload: unknown, signature
 
   const t = parseRappiSignatureHeader(signatureHeader)?.timestamp ?? 'sin-t'
   return `${base}:t${t}`
+}
+
+/** El `:t<dígitos>` con que TERMINA la llave de un aviso sin identidad natural (ver `llaveDeDeduplicacion`). */
+const T_FINAL_DE_LA_LLAVE = /:t(\d+)$/
+/** Más allá de esto, «la hora de la firma» no es una hora: es otra unidad (un desfase de reloj normal es de segundos). */
+const FUTURO_MAXIMO_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Cuándo firmó Rappi un aviso sin identidad natural (`MENU_APPROVED`, `MENU_REJECTED`…), en milisegundos, leído de su llave
+ * guardada: el `t` de `Rappi-Signature` (`rappi.signature.ts`) que `llaveDeDeduplicacion` pone al final. `null` si la llave no
+ * lo trae (sin firma legible queda `:tsin-t`; los avisos con pedido no lo llevan).
+ *
+ * Rappi no documenta la unidad del `t` (su ejemplo es `t=123456`) y el sandbox no ha mandado ningún veredicto del menú para
+ * medirlo (M7/M8): un valor menor que 1e12 se lee como SEGUNDOS (estilo Stripe) y se multiplica por 1000; uno mayor ya son
+ * milisegundos (1e12 ms es 2001: ningún aviso real cae del lado equivocado). Una hora más de un día en el futuro, o que no cabe en
+ * un entero seguro, es otra unidad y también da `null` (con warn).
+ *
+ * 🔴 Lo usa la regla de la hora del veredicto del menú (diseño §4.5.1): si la forma de la llave cambia, cambia aquí también.
+ */
+export function firmadoEnMsDeLaLlave(dedupKey: string | null): number | null {
+  const m = dedupKey ? T_FINAL_DE_LA_LLAVE.exec(dedupKey) : null
+  if (!m) return null
+  const t = Number(m[1])
+  // 🔴 T16b: una hora en el futuro lejano (p. ej. microsegundos, que pasan el umbral y se leerían como ms del año 57 000) haría
+  // que TODO veredicto «se firmó después» de cualquier publicación: apagaba la regla de la hora sin aviso. Se descarta y se dice.
+  const ms = !Number.isSafeInteger(t) ? null : t < 1e12 ? t * 1000 : t
+  if (ms === null || ms > Date.now() + FUTURO_MAXIMO_MS) {
+    logger.warn('🛵 [Rappi] la hora de la firma del aviso cae en el futuro lejano (¿otra unidad?): no se usa como hora', {
+      dedupKey,
+      t: m[1],
+    })
+    return null
+  }
+  return ms
 }
 
 /**
@@ -177,8 +254,21 @@ export async function persistRappiWebhookEvent(input: RappiIngressInput): Promis
     return { outcome: 'MALFORMED' }
   }
 
+  return guardarEventoRappi(input.evento, payload, input.signatureHeader)
+}
+
+/**
+ * Lo que guarda, DEBAJO de la firma: la llave, el vínculo y el INSERT. Es la pieza común del webhook (ya verificado) y del
+ * sondeo (`guardarPedidoSondeadoRappi`, que no trae firma). 🔴 Una sola pieza: si la llave o la fila cambian, cambian para
+ * los dos caminos, y un pedido que llega por los dos sigue chocando en el mismo índice único.
+ */
+async function guardarEventoRappi(
+  evento: string,
+  payload: unknown,
+  signatureHeader: string | undefined,
+): Promise<{ outcome: 'PERSISTED' | 'DUPLICATE'; eventRowId?: string }> {
   const identidad = rappiAdapter.extractIdentity(payload)
-  const dedupKey = llaveDeDeduplicacion(input.evento, payload, input.signatureHeader)
+  const dedupKey = llaveDeDeduplicacion(evento, payload, signatureHeader)
 
   const link = identidad.storeId
     ? await prisma.deliveryChannelLink.findUnique({
@@ -194,7 +284,7 @@ export async function persistRappiWebhookEvent(input: RappiIngressInput): Promis
         externalEventId: dedupKey,
         // 🔴 El tipo es el de la RUTA — el payload puede no traer ninguno (PING y
         // MENU_REJECTED son literalmente indistinguibles por contenido).
-        eventType: input.evento,
+        eventType: evento,
         dedupKey,
         externalOrderId: identidad.orderId,
         channelLinkId: link?.id ?? null,
@@ -209,4 +299,46 @@ export async function persistRappiWebhookEvent(input: RappiIngressInput): Promis
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') return { outcome: 'DUPLICATE' }
     throw e
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  El sondeo por tienda (Tarea 20): la red por si el aviso NEW_ORDER se perdió
+// ────────────────────────────────────────────────────────────────────────────────────
+
+export type RappiSondeoOutcome = 'PERSISTED' | 'DUPLICATE' | 'MALFORMED'
+
+/**
+ * Guarda UN pedido que llegó por el sondeo (`GET …/stores/{storeId}/orders` o `…/orders/status/sent`), por la MISMA pieza que
+ * el webhook y con la MISMA llave: `llaveDeDeduplicacion('NEW_ORDER', …)`, que para un aviso con pedido no usa la firma
+ * (`RAPPI:NEW_ORDER:tienda:pedido`). 🔴 Por eso un pedido que llega por los dos caminos, en cualquier orden, choca en el índice
+ * único `dedupKey` (P2002 = DUPLICATE) y se registra UNA vez. Medido (M13): cada elemento del GET tiene la forma del cuerpo del
+ * aviso (`{ store, customer, order_detail }`).
+ *
+ * El sondeo no trae firma: entra aquí, debajo de la verificación del webhook, sin debilitarla. La confianza es otra: el pedido
+ * lo leímos NOSOTROS de la API de Rappi con nuestro token.
+ *
+ * 🔴 Un pedido PROGRAMADO (`action: 'scheduled'`, montos en cero) se guarda como `NEW_ORDER_SCHEDULED`, la llave que le pondría
+ * SU webhook: guardado como NEW_ORDER no se podría vender (el traductor lo rechaza) y además tomaría la llave del pedido real:
+ * si Rappi lo libera con el mismo id (lo esperable; el sandbox no mandó ningún programado), ese NEW_ORDER sería DUPLICATE y se
+ * perdería.
+ *
+ * Sin id de pedido o sin tienda NO se guarda (`MALFORMED`): su llave sería `sin-pedido`/`sin-tienda` y chocaría con cualquier
+ * otro roto. Tampoco con una identidad que no se puede leer (un id que no es texto). Nunca lanza por el cuerpo; un fallo de la
+ * base sí se propaga (quien llama decide).
+ */
+export async function guardarPedidoSondeadoRappi(
+  payload: unknown,
+): Promise<{ outcome: RappiSondeoOutcome; eventRowId?: string; evento?: string }> {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return { outcome: 'MALFORMED' }
+  let identidad: ReturnType<typeof rappiAdapter.extractIdentity>
+  try {
+    identidad = rappiAdapter.extractIdentity(payload)
+  } catch {
+    // Un id que no es texto (`external_id: 123`) hace lanzar el `.trim()` de la identidad: es un elemento roto, no una caída.
+    return { outcome: 'MALFORMED' }
+  }
+  if (!identidad.orderId || !identidad.storeId) return { outcome: 'MALFORMED' }
+
+  const evento = esPedidoProgramado(payload as RappiOrderPayload) ? RAPPI_EVENTS.NEW_ORDER_SCHEDULED : RAPPI_EVENTS.NEW_ORDER
+  return { ...(await guardarEventoRappi(evento, payload, undefined)), evento }
 }

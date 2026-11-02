@@ -164,6 +164,8 @@ export async function cambiarAsignacion(input: {
   assignmentId: string
   positionId?: string
   relation?: WorkRelation | null
+  /** «Checa entrada y salida»: decide si sale en Turnos y Asistencia (rh/checaAsistencia). Sin mandarla, se conserva. */
+  tracksAttendance?: boolean
   fecha?: Fecha
   actorId: string
 }): Promise<AsignacionDto> {
@@ -173,23 +175,35 @@ export async function cambiarAsignacion(input: {
     if (actual.effectiveTo) throw new BadRequestError('Esa asignación ya terminó. Crea una nueva.')
     const positionId = input.positionId ?? actual.positionId
     const relation = input.relation !== undefined ? input.relation : actual.relation
+    const tracksAttendance = input.tracksAttendance ?? actual.tracksAttendance
     const cambiaPuesto = positionId !== actual.positionId
     // Nada cambia: ni versión nueva ni auditoría.
-    if (!cambiaPuesto && relation === actual.relation) return aDto(actual)
+    if (!cambiaPuesto && relation === actual.relation && tracksAttendance === actual.tracksAttendance) return aDto(actual)
     const desde = await contextoDeFecha(tx, input.venueId, input.fecha)
     if (cambiaPuesto) await validarPersonaYPuesto(tx, input.venueId, actual.staffId, positionId)
 
     // Mismo día: reemplaza la versión abierta ese día (spec RH §3.2), sin crear una de un día.
     if (dbDateComoFecha(actual.effectiveFrom) === desde) {
       if (cambiaPuesto) await sinTraslape(tx, input.venueId, actual.staffId, positionId, desde, actual.id)
-      const a = await tx.staffAssignment.update({ where: { id: actual.id }, data: { positionId, relation }, include: CON_PUESTO })
+      const a = await tx.staffAssignment.update({
+        where: { id: actual.id },
+        data: { positionId, relation, tracksAttendance },
+        include: CON_PUESTO,
+      })
       await writeLegacyActivityAuditTx(tx, {
         staffId: input.actorId,
         venueId: input.venueId,
         action: 'STAFF_ASSIGNMENT_UPDATED',
         entity: 'StaffAssignment',
         entityId: a.id,
-        data: { antes: { positionId: actual.positionId, relation: actual.relation }, positionId, relation, desde, mismoDia: true },
+        data: {
+          antes: { positionId: actual.positionId, relation: actual.relation, tracksAttendance: actual.tracksAttendance },
+          positionId,
+          relation,
+          tracksAttendance,
+          desde,
+          mismoDia: true,
+        },
       })
       return aDto(a)
     }
@@ -205,7 +219,7 @@ export async function cambiarAsignacion(input: {
         positionId,
         relation,
         effectiveFrom: fechaComoDbDate(desde),
-        tracksAttendance: actual.tracksAttendance,
+        tracksAttendance,
         supersedesId: actual.id,
         createdById: input.actorId,
       },
@@ -217,7 +231,7 @@ export async function cambiarAsignacion(input: {
       action: 'STAFF_ASSIGNMENT_VERSIONED',
       entity: 'StaffAssignment',
       entityId: a.id,
-      data: { anterior: actual.id, positionId, relation, desde },
+      data: { anterior: actual.id, positionId, relation, tracksAttendance, desde },
     })
     return aDto(a)
   })

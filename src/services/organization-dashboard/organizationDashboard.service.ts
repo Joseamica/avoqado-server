@@ -32,6 +32,7 @@ import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { countUpdatedTerminals, scopedTerminalWhere } from '../shared/terminalScopedWrites'
+import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from '../shared/vendedorDelMovimiento'
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
 
@@ -2305,17 +2306,24 @@ class OrganizationDashboardService {
       },
     })
 
-    // Get sales for each staff member per venue from completed payments
-    const salesData = await prisma.payment.groupBy({
-      by: ['processedById', 'venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: dayStart, lte: dayEnd },
-        status: 'COMPLETED',
-        processedById: { not: null },
-      },
-      _sum: { amount: true },
-    })
+    // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
+    // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web, liga)
+    // no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
+    const salesData =
+      venueIds.length === 0
+        ? []
+        : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
+            SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "processedById",
+                   p."venueId" AS "venueId",
+                   SUM(p."amount") AS "amount"
+            FROM "Payment" p
+            ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+            WHERE p."venueId" IN (${Prisma.join(venueIds)})
+              AND ${rangeSql(Prisma.raw('p."createdAt"'), dayStart, dayEnd)}
+              AND p."status" = 'COMPLETED'
+              AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} IS NOT NULL
+            GROUP BY 1, 2
+          `
 
     // Get CASH-only sales per staff (for deposit verification)
     const cashSalesData = await prisma.payment.groupBy({
@@ -2338,7 +2346,7 @@ class OrganizationDashboardService {
     salesData.forEach(s => {
       if (s.processedById) {
         const key = `${s.processedById}:${s.venueId}`
-        salesByStaffVenue[key] = Number(s._sum.amount) || 0
+        salesByStaffVenue[key] = Number(s.amount) || 0
       }
     })
 
@@ -2474,8 +2482,9 @@ class OrganizationDashboardService {
     })
 
     return {
-      // Only return staff with actual activity (check-in or sales) for the day
-      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales > 0)) as any,
+      // Only return staff with actual activity (check-in or sales) for the day. Codex r1 de D2: también con ventas NEGATIVAS (una
+      // devolución hoy de lo que vendió otro día, sin checar hoy): si no, esa devolución desaparecía del checador.
+      staff: staffData.filter(s => s !== null && (s.checkInTime !== null || s.sales !== 0)) as any,
     }
   }
 
@@ -3397,12 +3406,13 @@ class OrganizationDashboardService {
     const salesRows = await prisma.$queryRaw<
       Array<{ staffId: string; venueId: string; localDate: string; count: number; amount: Prisma.Decimal | null }>
     >`
-      SELECT p."processedById" AS "staffId", p."venueId",
+      SELECT ${SQL_VENDEDOR_DEL_MOVIMIENTO} AS "staffId", p."venueId",
              ${venueLocalDay(Prisma.raw('p."createdAt"'))} AS "localDate",
-             COUNT(*)::int AS "count", SUM(p."amount") AS "amount"
+             (COUNT(*) FILTER (WHERE p."type" IS DISTINCT FROM 'REFUND'))::int AS "count", SUM(p."amount") AS "amount"
       FROM "Payment" p
       JOIN "Venue" v ON v."id" = p."venueId"
-      WHERE p."processedById" IN (${Prisma.join(staffIds)})
+      ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+      WHERE ${SQL_VENDEDOR_DEL_MOVIMIENTO} IN (${Prisma.join(staffIds)})
         AND p."venueId" IN (${Prisma.join(venueIds)})
         AND p."status" = 'COMPLETED'
         AND ${rangeSql(Prisma.raw('p."createdAt"'), rangeStart, rangeEnd)}

@@ -1,3 +1,4 @@
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { CfdiStatus, OrderStatus, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 
 import AppError, { NotFoundError, ServiceUnavailableError, ValidationError } from '../../errors/AppError'
@@ -6,7 +7,7 @@ import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { sumarDesglose, type DesgloseDeCobro, type DesglosePorTratamiento } from '../fiscal/ivaMath'
 import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
-import { paymentInFiscalScope, metodoParaAlcanceFiscal } from '../fiscal/fiscalScope'
+import { esDevolucionASaldoAFavor, paymentInFiscalScope, metodoParaAlcanceFiscal } from '../fiscal/fiscalScope'
 import { computePeriodCogsCents } from '../fiscal/cogs.service'
 import { MAX_ORDENES_POR_REPORTE, recorrerLibros, sqlDeOrdenesDelPeriodo, type MovimientoLeido } from '../fiscal/librosDeOrdenes'
 import type { ParteDelLibro } from '../fiscal/libroDeLaOrden'
@@ -231,6 +232,12 @@ export async function estadoDeResultadosEnFoto(
   venue: { id: string; name: string; timezone: string | null },
   filters: IncomeStatementFilters,
   limites: LimitesDelReporte = LIMITES_DEL_REPORTE,
+  /**
+   * Saldo a favor (S8b, ronda 1): quien lo pide (el ISR, para su aviso) recibe la parte sin IVA que la base FISCAL restó por cada
+   * devolución a saldo a favor del periodo, con la regla única `esDevolucionASaldoAFavor`. La misma lectura, sin consultas nuevas; la
+   * respuesta no cambia.
+   */
+  alDevolverASaldoAFavor?: (sinIvaCents: number) => void,
 ): Promise<IncomeStatement> {
   const venueId = venue.id
   const timezone = venue.timezone || 'America/Mexico_City'
@@ -286,11 +293,13 @@ export async function estadoDeResultadosEnFoto(
     // Ruling M3 (revisión de la Tarea 3): un movimiento de 0 centavos no cuenta como aproximado. Una devolución de $0 hereda
     // `aproximada` del libro, pero su IVA es 0, no aproximado.
     const cuentaComoAproximado = parte.aproximada && m.amountCents !== 0
-    const inFiscal = paymentInFiscalScope(
-      esDevolucion ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method,
-      m.incluirEnContabilidad,
-      includeCashInAccounting,
-    )
+    const inFiscal =
+      !isExchangeCreditTenderKind(m.tenderSystemKind) &&
+      paymentInFiscalScope(
+        esDevolucion ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method,
+        m.incluirEnContabilidad,
+        includeCashInAccounting,
+      )
     if (esDevolucion) {
       const magnitudeCents = Math.abs(m.amountCents)
       ger.refunds += magnitudeCents
@@ -300,6 +309,7 @@ export async function estadoDeResultadosEnFoto(
         fis.refunds += magnitudeCents
         sumar(fis, parte, 1)
         if (cuentaComoAproximado) fis.aproximados += 1
+        if (alDevolverASaldoAFavor && esDevolucionASaldoAFavor(m)) alDevolverASaldoAFavor(-parte.netCents)
       }
       refundCount += 1
       return
@@ -484,9 +494,11 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
 
     acc.inflowCents += toCents(g._sum.amount) // devoluciones ya vienen negativas
     acc.tipCents += toCents(g._sum.tipAmount) // propina con signo (las devoluciones traen propina negativa)
-    if (g.type === PaymentType.REFUND) continue // no suma conteo ni comisión
-    acc.count += g._count._all
+    // Codex r4 H2 (pedidos): la devolución trae la comisión devuelta en negativo (Stripe la regresa con el reembolso; el costo negativo
+    // de la terminal también la proyecta así): resta, como en las pólizas. Sin esto, «Bancos y cajas» seguía cobrando los $2.90.
     feesCents += toCents(g._sum.feeAmount)
+    if (g.type === PaymentType.REFUND) continue // no suma conteo
+    acc.count += g._count._all
   }
 
   const accounts = [...buckets.values()].sort((a, b) => b.inflowCents - a.inflowCents)

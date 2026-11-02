@@ -1,4 +1,4 @@
-import { UpdateLoyaltyConfigSchema } from '@/schemas/dashboard/loyalty.schema'
+import { UpdateLoyaltyConfigSchema, AdjustStampsSchema } from '@/schemas/dashboard/loyalty.schema'
 
 /**
  * El zod del programa de sellos.
@@ -50,5 +50,39 @@ describe('UpdateLoyaltyConfigSchema — campos de sellos', () => {
 
   it('acepta quitar el producto del premio mandando null', () => {
     expect(parse({ stampRewardProductId: null }).success).toBe(true)
+  })
+})
+
+describe('AdjustStampsSchema — ajuste manual de sellos', () => {
+  const cuid = 'cmabcdefghijklmnopqrstuvw'
+  const body = {
+    stampsEarned: 7,
+    expectedStampCardId: cuid,
+    expectedStampsEarned: 3,
+    expectedVersion: 0,
+    expectedStampsRequired: 10,
+    reason: 'Migración de cartón',
+  }
+  const parse = (b: Record<string, unknown>) => AdjustStampsSchema.safeParse({ params: { venueId: cuid, customerId: cuid }, body: b })
+
+  it('🔴 F1: sin expectedStampsRequired lo rechaza (la meta es parte de lo que se vio)', () => {
+    const { expectedStampsRequired: _meta, ...sinMeta } = body
+    expect(parse(sinMeta).success).toBe(false)
+  })
+  it('acepta el cuerpo válido, también sin cartilla (null)', () => {
+    expect(parse(body).success).toBe(true)
+    expect(parse({ ...body, expectedStampCardId: null }).success).toBe(true)
+  })
+  it.each([
+    ['decimal', { stampsEarned: 7.5 }],
+    ['negativo', { stampsEarned: -1 }],
+    ['más de 100', { stampsEarned: 101 }],
+    ['motivo de 4 caracteres', { reason: 'abcd' }],
+    ['motivo sólo espacios', { reason: '      ' }],
+    ['cartilla que no es cuid', { expectedStampCardId: 'abc' }],
+    ['campo extra', { venueId: cuid }],
+    ['meta 0', { expectedStampsRequired: 0 }],
+  ])('rechaza %s', (_n, extra) => {
+    expect(parse({ ...body, ...extra }).success).toBe(false)
   })
 })

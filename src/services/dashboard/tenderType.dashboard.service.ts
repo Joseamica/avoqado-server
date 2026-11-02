@@ -1,3 +1,4 @@
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 // src/services/dashboard/tenderType.dashboard.service.ts
 
 /**
@@ -27,8 +28,10 @@ import { OrderSource, PaymentFundsFlow, PaymentMethod, Prisma, TenderSection } f
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from './activity-log.service'
+import { esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 import { parseDbDateRange } from '../../utils/datetime'
 import { GiftCardError } from '../giftCards/giftCardErrors'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 
 /** SAT c_FormaPago codes accepted for a tender type. '99 Por definir' is excluded on purpose. */
 const VALID_SAT_FORMA_PAGO = new Set([
@@ -292,6 +295,20 @@ export async function updateTenderType(
 ) {
   const existing = await prisma.venueTenderType.findFirst({ where: { id: tenderTypeId, venueId } })
   if (!existing) throw new NotFoundError('Tipo de pago no encontrado.')
+  // Cambio de producto (spec 2026-10-20 §6.2): el «Crédito de cambio» tampoco; su rama va antes para dejar intacta la de regalo.
+  if (isExchangeCreditTenderKind(existing.systemKind)) {
+    throw new BadRequestError(
+      'El tipo de pago «Crédito de cambio» lo administra Avoqado: no se puede editar ni apagar.',
+      'EXCHANGE_CREDIT_TENDER_NOT_ALLOWED',
+    )
+  }
+  // Saldo a favor (spec 2026-10-30 §5.3; S8b): el destino de las devoluciones a saldo, con su propio texto (no el de tarjetas).
+  if (esMedioDeSaldoAFavor(existing.systemKind)) {
+    throw new BadRequestError(
+      'El tipo de pago «Saldo a favor» lo administra Avoqado: no se puede editar ni apagar. Sólo lo usan las devoluciones que se abonan al saldo de un cliente.',
+      'STORE_CREDIT_TENDER_NOT_ALLOWED',
+    )
+  }
   // R4: un tender que administra Avoqado (systemKind) no se edita, no se apaga y no se muestra en el POS por decisión
   // del negocio: ni dinero, ni presentación, ni `active`.
   if (existing.systemKind != null) {
@@ -427,6 +444,18 @@ export async function resolveTenderForCharge(
     select: { id: true, baseMethod: true, active: true, revision: true, name: true, systemKind: true },
   })
   if (!tender) throw new NotFoundError('Tipo de pago no encontrado en este negocio.')
+  // Cambio de producto (spec 2026-10-20 §6.2): el crédito de cambio nunca es un medio de cobro; la operación de Cambio lo resuelve
+  // aparte (`resolveExchangeCreditTenderInTx`). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.
+  if (isExchangeCreditTenderKind(tender.systemKind)) {
+    throw new BadRequestError('El crédito de cambio sólo lo aplica la operación de Cambio.', 'EXCHANGE_CREDIT_TENDER_NOT_ALLOWED')
+  }
+  // Saldo a favor (S8b): el medio STORE_CREDIT sólo es el destino de una devolución; la clienta gasta su saldo con «Pagar con saldo».
+  if (esMedioDeSaldoAFavor(tender.systemKind)) {
+    throw new BadRequestError(
+      'El saldo a favor no es un tipo de pago: el cliente lo gasta con «Pagar con saldo» y el código que le llega a su teléfono.',
+      'STORE_CREDIT_TENDER_NOT_ALLOWED',
+    )
+  }
   // R4 / Review Focus 2: el saldo de una tarjeta de regalo sólo se cobra por «Pagar con saldo» (prueba de posesión,
   // descuento condicionado de la libreta). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.
   if (tender.systemKind != null) {
@@ -542,7 +571,13 @@ export async function getTenderCommissionsReport(
   // secas daría jul-31 18:00 en México y el reporte arrancaría un día antes.
   const { from, to } = parseDbDateRange(filters.from, filters.to, venue?.timezone, 30)
 
-  const base = { venueId, tenderTypeId: { not: null }, status: 'COMPLETED' as const, createdAt: { gte: from, lte: to } }
+  const base = {
+    venueId,
+    tenderTypeId: { not: null },
+    status: 'COMPLETED' as const,
+    createdAt: { gte: from, lte: to },
+    AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+  }
   // 🔴 `{ not: 'REFUND' }`, NO `'REGULAR'`: la venta rápida del mostrador se guarda como
   // `FAST`, y es justo donde más se usan los tipos propios. Filtrar por REGULAR mostraba
   // CERO en el caso más común (encontrado validando contra datos reales, no con mocks).

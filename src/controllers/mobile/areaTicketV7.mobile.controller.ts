@@ -3,6 +3,7 @@ import { AreaTicketFulfillmentMethod, AreaTicketPrintAttemptKind, AreaTicketPrin
 
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
+import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as service from '../../services/mobile/areaTicketV7.mobile.service'
 
 function requiredEnum<T extends string>(value: unknown, allowed: readonly T[], field: string, code: string): T {
@@ -10,6 +11,19 @@ function requiredEnum<T extends string>(value: unknown, allowed: readonly T[], f
     throw new AppError(`${field} debe ser uno de: ${allowed.join(', ')}.`, 400, true, code)
   }
   return value as T
+}
+
+const ORIGENES_DEL_COBRO = ['AVOQADO_IOS', 'AVOQADO_ANDROID', 'TPV', 'POS'] as const
+
+/**
+ * Origen de la orden del cobro de vales. Todas las versiones de iOS publicadas hasta la 1.15.x mandan «IOS», que no es un
+ * `OrderSource`: la orden tronaba con 500 y en iOS no se podía cobrar ningún vale (QA en iPhone, 28-oct-2026). Se acepta como
+ * AVOQADO_IOS para que las apps ya instaladas cobren sin actualizarse. Desconocido ⇒ 400 claro; ausente ⇒ el default del servicio.
+ */
+function origenDelCobro(value: unknown): service.MaterializeCheckoutInput['source'] {
+  if (value === undefined || value === null) return undefined
+  if (value === 'IOS') return 'AVOQADO_IOS'
+  return requiredEnum(value, ORIGENES_DEL_COBRO, 'source', 'INVALID_ORDER_SOURCE')
 }
 
 function deviceUid(req: Request): string {
@@ -74,6 +88,11 @@ export async function issue(req: Request, res: Response, next: NextFunction) {
       deviceUid: deviceUid(req),
       staffId: staffId(req),
       lines: req.body?.lines,
+      canCompItems:
+        Array.isArray(req.body?.lines) &&
+        req.body.lines.some((line: any) => !!line.discountId) &&
+        (await tienePermisoEnVenue(req, 'orders:comp')),
+      performedBy: req.authContext?.userId,
     })
     return success(res, { ticket }, 201)
   } catch (error) {
@@ -150,7 +169,13 @@ export async function materialize(req: Request, res: Response, next: NextFunctio
       deviceUid: deviceUid(req),
       staffId: staffId(req),
       normalItems: req.body?.normalItems,
-      source: req.body?.source,
+      // Los snapshots previos no se vuelven a autorizar ni calcular: sólo las nuevas líneas de catálogo de la caja.
+      canCompItems:
+        Array.isArray(req.body?.normalItems) &&
+        req.body.normalItems.some((item: any) => !!item.discountId) &&
+        (await tienePermisoEnVenue(req, 'orders:comp')),
+      performedBy: req.authContext?.userId,
+      source: origenDelCobro(req.body?.source),
       customerName: req.body?.customerName,
       note: req.body?.note,
     })

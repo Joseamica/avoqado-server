@@ -157,7 +157,7 @@ describe('qué schedulers quedan cubiertos (cobertura declarada, no supuesta)', 
     const DESCARTAN_LA_PROMESA_CONOCIDOS: Record<string, number> = {
       'jobs/angelpay-event-worker.job.ts': 1,
       'jobs/blumon-payment-audit.job.ts': 2,
-      'jobs/delivery-webhook-reconciliation.job.ts': 1,
+      // `delivery-webhook-reconciliation` salió de la lista: su tick devuelve la promesa de sus dos carriles.
       'jobs/loyalty-reconciliation.job.ts': 1,
       'jobs/payment-effects.job.ts': 1,
     }

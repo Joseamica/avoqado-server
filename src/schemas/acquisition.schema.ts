@@ -80,6 +80,12 @@ export type AcquisitionSource =
   | 'dashboard_attach'
 
 /** A recommendation, never a reservation or a client-controlled price. */
+/**
+ * D12 (28-oct-2026): host de la página de la que llegó al registro (`document.referrer`). Forma floja aquí, como los
+ * demás campos de atribución: se normaliza —o se descarta en silencio— al resolver la atribución, nunca tumba el alta.
+ */
+export const optionalReferrer = z.string().max(300).optional().catch(undefined)
+
 export const optionalHybridOfferSlug = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]{0,99}$/)

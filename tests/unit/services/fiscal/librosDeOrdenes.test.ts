@@ -431,3 +431,12 @@ describe('lo que el cargador le da a la composición y al libro', () => {
     expect(tx.payment.findMany.mock.calls[0][0]).not.toHaveProperty('cursor')
   })
 })
+
+it('carries the exact exchange tender kind without dropping managerial movements', async () => {
+  tx.payment.findMany.mockResolvedValueOnce([cobro('caaaaaaaaaaaaaaaaaaaaaaaa', 216, { tenderType: { systemKind: 'EXCHANGE_CREDIT' } })])
+  const v = vistos()
+  await pedir(['o1'], v.alMovimiento)
+  expect(v.lista).toHaveLength(1)
+  expect(v.lista[0][0]).toMatchObject({ tenderSystemKind: 'EXCHANGE_CREDIT', amountCents: 21600 })
+  expect(tx.payment.findMany.mock.calls[0][0].select.tenderType).toEqual({ select: { systemKind: true } })
+})

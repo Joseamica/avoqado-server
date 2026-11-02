@@ -49,10 +49,12 @@ describe('Extras: SKU de caja externa', () => {
     expect('sku' in parse({})).toBe(false)
   })
 
-  it('rechaza un SKU con espacios o símbolos, con mensaje en español', () => {
-    const result = CreateModifierSchema.safeParse({ params, body: { name: 'Shot', price: 15, sku: 'P 000672' } })
+  it('rechaza un SKU con símbolos o Ñ, con mensaje en español (espacio y punto sí se aceptan desde D3)', () => {
+    const result = CreateModifierSchema.safeParse({ params, body: { name: 'Shot', price: 15, sku: 'P/000672' } })
     expect(result.success).toBe(false)
-    expect(JSON.stringify((result as any).error.issues)).toContain('El SKU sólo admite letras, números, guion y guion bajo')
+    expect(JSON.stringify((result as any).error.issues)).toContain(
+      'El SKU sólo puede llevar letras sin acento, números, espacios, puntos, guion y guion bajo',
+    )
   })
 
   it('createModifier guarda el SKU', async () => {

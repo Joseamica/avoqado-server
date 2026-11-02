@@ -6,6 +6,8 @@
 
 import { NextFunction, Request, Response } from 'express'
 import * as transactionService from '../../services/mobile/transaction.mobile.service'
+import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
+import { requireHistoricalCustomerAuthority } from '../../services/shared/customerAttributionPolicy'
 
 /**
  * List transactions (paginated)
@@ -49,6 +51,17 @@ export const getTransaction = async (req: Request, res: Response, next: NextFunc
       success: true,
       transaction,
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const assignCustomer = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const actor = await customerAttributionActor(req)
+    requireHistoricalCustomerAuthority(actor)
+    const result = await transactionService.assignTransactionCustomer(req.params.venueId, req.params.paymentId, req.body.customerId, actor)
+    return res.json({ success: true, data: result })
   } catch (error) {
     next(error)
   }

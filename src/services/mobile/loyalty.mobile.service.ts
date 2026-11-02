@@ -19,6 +19,7 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
@@ -119,11 +120,26 @@ export async function redeemPointsToOrderInTransaction(
   }
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, originSystem: true },
+    select: {
+      id: true,
+      total: true,
+      subtotal: true,
+      discountAmount: true,
+      paymentStatus: true,
+      paidAmount: true,
+      originSystem: true,
+      status: true,
+    },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
+  // 🔴 LEALTAD (hz:a8104ac8:D1, Codex r1 #2): una venta anulada ya devolvió sus puntos y es final; no recibe canjes nuevos.
+  if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+    throw new BadRequestError('Esta venta está cancelada: no se pueden canjear puntos.')
+  }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)

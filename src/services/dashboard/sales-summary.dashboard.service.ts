@@ -1,3 +1,4 @@
+import { sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
 /**
  * Sales Summary Dashboard Service
  *
@@ -52,6 +53,7 @@ import {
   sqlCobroNoEsSaldoDeRegalo,
   sqlOrdenSinTarjetasTexto,
 } from '@/services/giftCards/giftCardMarks'
+import { montoSaldoAFavorSql, sqlNoEsDelMedioSaldoAFavor } from '@/services/storeCredit/saldoAFavorEnLectores'
 
 // ============================================================
 // Types
@@ -84,7 +86,10 @@ export interface SalesSummaryMetrics {
   giftCardLoads?: number
   /** Sobres de cuentas de tarjetas PAGADAS en el rango. */
   giftCardLoadsCount?: number
-  /** Pagado con saldo (venta + propina), menos sus reversos. YA está dentro de las ventas: se muestra para leerlo aparte. */
+  /**
+   * Pagado con saldo (venta + propina), menos sus reversos. YA está dentro de las ventas: se muestra para leerlo aparte. Sólo de
+   * tarjetas VENDIDAS: lo gastado de un saldo a favor es venta normal (S8b).
+   */
   paidWithGiftCardBalance?: number
 }
 
@@ -128,6 +133,18 @@ export interface GiftCardFigures {
   balanceCount: number
   balanceTips: number
   balanceReversals: number
+  /**
+   * Saldo a favor (spec 2026-10-30 §5.3, S8b), las dos patas con signo: la devolución a saldo (negativa) y lo gastado de un sobre de
+   * saldo a favor menos lo que regresó a él. Es VENTA normal (método OTHER), nunca «pagado con saldo» de tarjetas vendidas.
+   */
+  storeCreditNet: number
+  /**
+   * Cuántas filas tienen una pata de saldo a favor (cuentan en OTHER): cada devolución a saldo y cada fila con el medio de tarjetas que
+   * canjeó o regresó algo a un sobre de saldo a favor. POR PATA (S10 r3, ruling): un cobro mixto cuenta aquí y también en
+   * `balanceCount`, como el desglose por medio de pago del mercado; así «importe ≠ 0 ⇒ conteo > 0» se cumple siempre. La suma de los
+   * conteos por método es de PATAS, no de cobros: el total de cobros es `transactionCount`.
+   */
+  storeCreditCount: number
 }
 
 export interface TimePeriodMetrics {
@@ -194,7 +211,8 @@ export interface SalesSummaryResponse {
   /**
    * Aditivo (tarjetas de regalo, full-testing v2 #1): VENTAS por método para la barra bajo «Total de Ventas»: sin los cobros de
    * cuentas de tarjetas y con lo pagado con saldo como `GIFT_CARD`. `byPaymentMethod` sigue siendo DINERO (B5). Sólo sin filtro y
-   * en negocios que tienen tarjetas; sin él, los dos son iguales.
+   * en negocios que tienen tarjetas; sin él, los dos son iguales. Saldo a favor (S8b): la devolución a saldo y lo gastado de un sobre
+   * van en `OTHER` (su método), como venta.
    */
   salesByPaymentMethod?: PaymentMethodBreakdown[]
   byPaymentMethodDetailed?: PaymentMethodDetailedBreakdown[]
@@ -215,6 +233,17 @@ export interface SalesSummaryResponse {
 export type ReportType = 'summary' | 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum'
 
 export type PaymentMethodFilter = 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER'
+
+/**
+ * La comisión de UN cobro (alias `p` para Payment y `tc` para su TransactionCost, 1:1): su costo (cargo + cuota fija) si lo tiene; si no,
+ * y sólo si es un cobro en línea de Avoqado, la que trae el propio `Payment` (Codex r4 H1): el de Stripe de pedidos en línea, las ligas,
+ * Checkout y Mercado Pago no tienen costo y su comisión vive en `feeAmount`. «En línea de Avoqado» = `fundsFlow = AVOQADO_PROCESSED` (lo
+ * nuevo, y la devolución que lo copia y trae la comisión devuelta en negativo) o un comercio en línea (`ecommerceMerchantId`: lo de antes
+ * de `fundsFlow`, Codex r6). El resto sin costo publica 0 como siempre: el importador de SoftRestaurant y el efectivo de los demos guardan
+ * un `feeAmount` que no se cobró (Codex r5). El de terminal sin costo todavía trae 0.
+ */
+const SQL_COMISION_DEL_COBRO = `CASE WHEN tc."id" IS NOT NULL THEN COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0) WHEN p."fundsFlow" = 'AVOQADO_PROCESSED' OR p."ecommerceMerchantId" IS NOT NULL THEN COALESCE(p."feeAmount", 0) ELSE 0 END`
+
 export type CardTypeFilter = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
 
 export interface SalesSummaryFilters {
@@ -738,7 +767,8 @@ export async function computeSettlementProjection(
  * - cargado: renglones con `giftCardId` de cuentas PAGADAS creadas en el rango (misma base de fecha que las ventas brutas);
  * - cancelado: `REFUND` del rango cuya cuenta es de tarjetas y está PAGADA (la parte de venta, sin propina, como lo cargado). Sólo
  *   las pagadas: el abono devuelto de una venta que nunca se pagó no restó nada de lo cargado y no puede dejar la cifra negativa;
- * - pagado con saldo: cobros del tender de sistema del rango, venta + propina, y sus reversos.
+ * - pagado con saldo: cobros del tender de sistema del rango, venta + propina, y sus reversos. Sólo de tarjetas VENDIDAS (S8b): la parte
+ *   de cada canje que salió de un sobre de saldo a favor (`montoSaldoAFavorSql`) va con las devoluciones a saldo en `storeCreditNet`.
  */
 export async function computeGiftCardFigures(
   venueId: string,
@@ -775,19 +805,28 @@ export async function computeGiftCardFigures(
         AND EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = p."orderId" AND gc_oi."giftCardId" IS NOT NULL)
         ${porComercioDeCobro}
     `,
-    prisma.$queryRaw<Array<{ amount: string; count: number; tips: string; reversals: string }>>`
+    prisma.$queryRaw<
+      Array<{ amount: string; count: number; tips: string; reversals: string; storeCreditNet: string; storeCreditCount: number }>
+    >`
       SELECT
-        COALESCE(SUM(p.amount + p."tipAmount") FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'), 0)::text AS amount,
-        (COUNT(*) FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'))::int AS count,
-        COALESCE(SUM(p."tipAmount") FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'), 0)::text AS tips,
-        COALESCE(SUM(ABS(p.amount + p."tipAmount")) FILTER (WHERE p.type = 'REFUND'), 0)::text AS reversals
+        COALESCE(SUM(p.amount + p."tipAmount" - sf.monto) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND'), 0)::text AS amount,
+        (COUNT(*) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND' AND p.amount + p."tipAmount" > sf.monto))::int AS count,
+        COALESCE(SUM(ROUND(p."tipAmount" * (p.amount + p."tipAmount" - sf.monto) / NULLIF(p.amount + p."tipAmount", 0), 2))
+          FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type IS DISTINCT FROM 'REFUND'), 0)::text AS tips,
+        COALESCE(SUM(ABS(p.amount + p."tipAmount") - sf.monto) FILTER (WHERE t."systemKind" = 'GIFT_CARD' AND p.type = 'REFUND'), 0)::text AS reversals,
+        COALESCE(SUM(CASE
+          WHEN t."systemKind" = 'STORE_CREDIT' THEN p.amount + p."tipAmount"
+          WHEN p.type = 'REFUND' THEN -sf.monto
+          ELSE sf.monto END), 0)::text AS "storeCreditNet",
+        (COUNT(*) FILTER (WHERE t."systemKind" = 'STORE_CREDIT' OR sf.monto > 0))::int AS "storeCreditCount"
       FROM "Payment" p
       JOIN "VenueTenderType" t ON t."venueId" = p."venueId" AND t.id = p."tenderTypeId"
+      CROSS JOIN LATERAL (SELECT ${montoSaldoAFavorSql('p')} AS monto) sf
       WHERE p."venueId" = ${venueId}
         AND p."createdAt" >= ${utcTs(start)}
         AND p."createdAt" <= ${utcTs(end)}
         AND p.status = 'COMPLETED'
-        AND t."systemKind" = 'GIFT_CARD'
+        AND t."systemKind" IN ('GIFT_CARD', 'STORE_CREDIT')
         ${porComercioDeCobro}
     `,
   ])
@@ -799,6 +838,8 @@ export async function computeGiftCardFigures(
     balanceCount: Number(saldo[0]?.count ?? 0),
     balanceTips: round2(Number(saldo[0]?.tips ?? 0)),
     balanceReversals: round2(Number(saldo[0]?.reversals ?? 0)),
+    storeCreditNet: round2(Number(saldo[0]?.storeCreditNet ?? 0)),
+    storeCreditCount: Number(saldo[0]?.storeCreditCount ?? 0),
   }
 }
 
@@ -1041,7 +1082,11 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ...paymentLevelFilter,
       // Tarjetas de regalo: la cancelación de una venta de tarjetas no es devolución de mercancía (resta de «tarjetas cargadas»).
       // El REFUND de un cobro con saldo SÍ se queda: devuelve mercancía.
-      order: WHERE_ORDEN_SIN_TARJETAS,
+      // Codex r3 #1 (pedidos en línea): la devolución de una cuenta que NO cuenta como venta (cancelada o borrada) tampoco se
+      // resta, igual que su venta no se suma arriba. Sin esto, devolver un pedido rechazado que el negocio había cobrado a mano en
+      // su Stripe dejaba las ventas netas en −$250. Codex r4 H5: sólo sin filtro de método; filtrada, la vista es de movimientos
+      // (ventas netas nulas, cobrado = suma con signo) y la devolución que sí salió se ve.
+      order: isFiltered ? WHERE_ORDEN_SIN_TARJETAS : { ...WHERE_ORDEN_SIN_TARJETAS, status: { notIn: ['CANCELLED', 'DELETED'] } },
     },
     _sum: {
       amount: true,
@@ -1091,13 +1136,16 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // never user-supplied strings, so it is safe to concatenate.
   const platformFeesSqlClause = buildPaymentSqlClause(paymentMethod, cardType, 'p')
   const platformFeesMerchantClause = merchantAccountId ? ' AND p."merchantAccountId" = $4' : ''
+  // Codex r4 H1: un cobro sin TransactionCost (Stripe de pedidos en línea, ligas) trae su comisión en `Payment.feeAmount`; las filas de
+  // costo de siempre se conservan todas (cualquier estado del pago), y sólo se agregan los cobros COMPLETED sin costo.
   const platformFeesQuery = `
-    SELECT COALESCE(SUM(COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0)), 0)::float AS sum_fee
-    FROM "TransactionCost" tc
-    JOIN "Payment" p ON p.id = tc."paymentId"
+    SELECT COALESCE(SUM(${SQL_COMISION_DEL_COBRO}), 0)::float AS sum_fee
+    FROM "Payment" p
+    LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
     WHERE p."venueId" = $1
       AND p."createdAt" >= ${utcTsParam(2)}
       AND p."createdAt" <= ${utcTsParam(3)}
+      AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
       ${platformFeesMerchantClause}
       ${platformFeesSqlClause}
   `
@@ -1329,15 +1377,28 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         _count: true,
       })
       const saldo = summary.paidWithGiftCardBalance ?? 0
+      const ventasPorMetodo = ventas.map(p => ({
+        method: String(p.method),
+        amount: Number(p._sum.amount || 0) + Number(p._sum.tipAmount || 0),
+        count: p._count,
+        percentage: 0,
+      }))
+      // Saldo a favor (S8b): sus dos patas —la devolución a saldo y lo gastado de un sobre— son VENTA con su método (OTHER). El filtro
+      // de arriba deja fuera todo medio de sistema; sin esto la barra no cuadraba con «Total de ventas» el día de la devolución.
+      // Importe y conteo, cada uno por su lado (S10 r2 y r3): la fila sale si hubo alguna pata de saldo a favor (conteo, por pata) o
+      // si su neto no es 0; así la compuerta es correcta por sí misma aunque el conteo cambie de regla.
+      if (tarjetas.storeCreditCount > 0 || tarjetas.storeCreditNet !== 0) {
+        const otro = ventasPorMetodo.find(m => m.method === 'OTHER')
+        if (otro) {
+          otro.amount = round2(otro.amount + tarjetas.storeCreditNet)
+          otro.count += tarjetas.storeCreditCount
+        } else ventasPorMetodo.push({ method: 'OTHER', amount: tarjetas.storeCreditNet, count: tarjetas.storeCreditCount, percentage: 0 })
+      }
       salesByPaymentMethod = withPercentages([
-        ...ventas.map(p => ({
-          method: String(p.method),
-          amount: Number(p._sum.amount || 0) + Number(p._sum.tipAmount || 0),
-          count: p._count,
-          percentage: 0,
-        })),
+        ...ventasPorMetodo,
         ...byPaymentMethod.filter(m => m.method === 'QR_LEGACY'),
-        ...(tarjetas.balanceCount > 0 || saldo !== 0
+        // S10 r3: sale con cualquier movimiento de tarjetas vendidas —conteo, bruto o reverso—, aunque el neto sea 0 (gastado y devuelto).
+        ...(tarjetas.balanceCount > 0 || tarjetas.balancePaid !== 0 || tarjetas.balanceReversals !== 0
           ? [{ method: 'GIFT_CARD', amount: saldo, count: tarjetas.balanceCount, percentage: 0 }]
           : []),
       ])
@@ -1379,6 +1440,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     // (1) Completed payments with their platform fee (TransactionCost is 1:1 by
     // paymentId, so the LEFT JOIN never fans out). (2) Refund payments, summed
     // as positive magnitudes row by row (ABS inside the SUM, as before).
+    // Es DINERO, como `byPaymentMethod`: ni lo pagado con saldo ni la devolución a saldo a favor (S8b: no salió de la caja ni del banco).
     const merchantSql = merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty
     type GroupRow = { method: string; cardBrand: string | null; isIntl: boolean; count: number }
     const [completedGroups, refundGroups] = await Promise.all([
@@ -1389,7 +1451,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
                COUNT(*)::int AS "count",
                COALESCE(SUM(p."amount"), 0)::text AS "amount",
                COALESCE(SUM(p."tipAmount"), 0)::text AS "tips",
-               COALESCE(SUM(tc."venueChargeAmount" + COALESCE(tc."venueFixedFee", 0)), 0)::text AS "fees"
+               COALESCE(SUM(${Prisma.raw(SQL_COMISION_DEL_COBRO)}), 0)::text AS "fees"
         FROM "Payment" p
         LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
         WHERE p."venueId" = ${venueId}
@@ -1398,6 +1460,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND p."status" = 'COMPLETED'
           ${merchantSql}
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
+          AND ${sqlPaymentIsNotExchangeCredit('p')}
+          AND ${sqlNoEsDelMedioSaldoAFavor('p')}
         GROUP BY 1, 2, 3
       `,
       prisma.$queryRaw<Array<GroupRow & { refunds: string }>>`
@@ -1413,6 +1477,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND p."type" = 'REFUND'
           ${merchantSql}
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
+          AND ${sqlPaymentIsNotExchangeCredit('p')}
+          AND ${sqlNoEsDelMedioSaldoAFavor('p')}
         GROUP BY 1, 2, 3
       `,
     ])
@@ -1664,14 +1730,28 @@ export function flattenSalesSummaryForExport(
         percentage: round2x(m.percentage),
       })
     }
-    if (report.giftCardBalanceBreakdown) {
+    // Tarjetas de regalo (Q100), igual que «Métodos de pago» del panel (B5/M2, `SalesSummary.tsx` `lineaDeSaldo`): los métodos son
+    // DINERO; el saldo va aparte, BRUTO y sin porcentaje, y lo que regresó al saldo se dice en su propia fila. Sin sobres ni saldo
+    // en el rango no sale ninguna de las dos. S10 r3 (Codex r3): la compuerta mira el bruto y el reverso, no el neto: gastado y devuelto
+    // completo deja el neto en 0 y los dos movimientos tienen que verse.
+    const saldo = report.giftCardBalanceBreakdown
+    if (saldo && (saldo.count > 0 || saldo.amount !== 0 || saldo.refunds !== 0)) {
       rows.push({
         section: 'paymentMethods',
         label: 'Saldo de tarjeta de regalo',
-        count: report.giftCardBalanceBreakdown.count,
-        amount: round2x(report.giftCardBalanceBreakdown.amount),
+        count: saldo.count,
+        amount: round2x(saldo.amount),
         percentage: null,
       })
+      if (saldo.refunds > 0) {
+        rows.push({
+          section: 'paymentMethods',
+          label: 'Regresó al saldo de tarjetas',
+          count: null,
+          amount: round2x(saldo.refunds),
+          percentage: null,
+        })
+      }
     }
   }
   // NOTE (see Task 6 FIX 7): getSalesSummary only populates byPaymentMethodDetailed when
@@ -1910,6 +1990,12 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" <= $3::timestamp
       AND type = 'REFUND'
       AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
+      ${
+        isFiltered
+          ? ''
+          : `-- Codex r3 #1: igual que el resumen, la devolución de una cuenta cancelada o borrada no se resta (r4 H5: sin filtro).
+      AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = "Payment"."orderId" AND o.status IN ('CANCELLED', 'DELETED'))`
+      }
       ${merchantPaymentClause}
       ${paymentSqlClause}
     GROUP BY ${groupByExpression}
@@ -1939,15 +2025,17 @@ async function calculateTimePeriodMetrics(
   // VenueTransaction.feeAmount is not currently synced from TransactionCost.
   const platformFeesGroupBy = groupByExpression.replace(/"createdAt"/g, 'p."createdAt"')
   const platformFeesOrderBy = orderByExpression.replace(/"createdAt"/g, 'p."createdAt"')
+  // Codex r4 H1 y A2: la misma comisión que la cabecera (costo con su cuota fija, o `Payment.feeAmount` del cobro sin costo).
   const platformFeesQuery = `
     SELECT
       ${platformFeesGroupBy} as period,
-      COALESCE(SUM(tc."venueChargeAmount"), 0) as platform_fees
-    FROM "TransactionCost" tc
-    JOIN "Payment" p ON p.id = tc."paymentId"
+      COALESCE(SUM(${SQL_COMISION_DEL_COBRO}), 0) as platform_fees
+    FROM "Payment" p
+    LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
     WHERE p."venueId" = $1
       AND p."createdAt" >= $2::timestamp
       AND p."createdAt" <= $3::timestamp
+      AND (tc."id" IS NOT NULL OR p."status" = 'COMPLETED')
       ${merchantPlatformClause}
       ${paymentSqlClauseWithPrefix}
     GROUP BY ${platformFeesGroupBy}
@@ -2084,13 +2172,18 @@ async function calculateTimePeriodMetrics(
   if (allPeriods.length > 0) {
     periodsToProcess = allPeriods
   } else {
-    const nativePeriods = isFiltered ? paymentMetrics.map(p => p.period) : orderMetrics.map(o => o.period)
-    const seen = new Set(nativePeriods.map(p => String(Number(p))))
+    // Codex r5 (H1): también los periodos que sólo traen cobros, devoluciones o comisión (una devolución otro día sin pedidos nuevos):
+    // antes la barra se descartaba y la gráfica no sumaba la cabecera. Por clave, en orden de tiempo.
+    const porClave = new Map<string, Date | number>()
+    for (const filas of [isFiltered ? [] : orderMetrics, paymentMetrics, refundsMetrics, platformFeesMetrics])
+      for (const f of filas) if (!porClave.has(String(Number(f.period)))) porClave.set(String(Number(f.period)), f.period)
+    const nativePeriods = [...porClave.entries()].sort(([a], [b]) => Number(a) - Number(b)).map(([, period]) => period)
+    const seen = new Set(porClave.keys())
     const legacyOnly: Array<Date | number> = []
     for (const key of legacyPeriodMap.keys()) {
       if (!seen.has(key)) legacyOnly.push(new Date(Number(key))) // epoch-ms key → Date for formatPeriod
     }
-    periodsToProcess = [...nativePeriods, ...legacyOnly]
+    periodsToProcess = [...nativePeriods, ...legacyOnly].sort((a, b) => Number(a) - Number(b)) // Codex r6: los legacy, en su lugar
   }
 
   // Un byPeriod vacío deja la gráfica del POS en "Sin datos para este periodo"

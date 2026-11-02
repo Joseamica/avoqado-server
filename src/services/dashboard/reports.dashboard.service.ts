@@ -5,6 +5,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 
 /**
  * Pay-Later Aging Report
@@ -21,14 +22,16 @@ export async function getPayLaterAgingReport(venueId: string) {
     return Math.floor(diffMs / (1000 * 60 * 60 * 24))
   }
 
-  // Fetch all pay-later orders (PENDING/PARTIAL + has customer)
+  // Fetch all pay-later orders (PENDING/PARTIAL + has customer), sin los cobros del momento que fallaron (`porCobrar.ts`)
+  // y sin canceladas ni borradas, la misma regla que el saldo del cliente y su «Liquidar todo».
   const payLaterOrders = await prisma.order.findMany({
     where: {
       venueId,
       paymentStatus: { in: ['PENDING', 'PARTIAL'] },
       remainingBalance: { gt: 0 },
-      status: { not: 'CANCELLED' },
+      status: { notIn: ['CANCELLED', 'DELETED'] },
       orderCustomers: { some: {} }, // Must have customer linkage
+      ...NO_ES_COBRO_DEL_MOMENTO,
     },
     include: {
       orderCustomers: {

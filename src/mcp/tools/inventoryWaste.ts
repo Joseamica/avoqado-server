@@ -9,8 +9,9 @@
  *   · exige `mcp:write` SIEMPRE y EXPLÍCITO (`requireWriteScopeAlways`, sin la excepción del token sin
  *     scopes declarados), no el guard observador;
  *   · la primera llamada sólo arma una vista previa legible y emite el folio; la segunda escribe;
- *   · el folio va atado a lo que se previsualizó (`previewDigest`): confirmar con otra cantidad,
- *     otro motivo u otro artículo se rechaza, porque no es lo que el operador vio;
+ *   · el folio va atado a lo que se previsualizó (`previewDigest`, firmado por el servidor y con
+ *     vencimiento): confirmar con otra cantidad, otro motivo u otro artículo, o sin haber pedido la
+ *     vista previa, se rechaza, porque no es lo que el operador vio;
  *   · resuelve, no adivina: un nombre que coincide con varios artículos devuelve los candidatos.
  *
  * La vista previa NO calcula cuánto se descontaría: `inventory:log-waste` no concede
@@ -21,7 +22,7 @@
  * (mismo criterio que `create_recipe` y `approve_overtime`, que marcan el canal en el asiento que
  * ya existe en vez de duplicar el evento).
  */
-import { createHash, randomUUID } from 'crypto'
+import { randomUUID } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
@@ -37,6 +38,7 @@ import { isWasteReasonCode, WASTE_REASON_CODES, WASTE_REASONS } from '@/services
 import type { WasteReasonCode } from '@/services/shared/wasteReasons'
 import { parseWasteSchema, WasteQuerySchema } from '@/schemas/mobile/inventoryWaste.mobile.schema'
 import type { McpScope } from '../scope'
+import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from '../confirmation'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
@@ -122,16 +124,14 @@ const SOURCE_LABEL: Record<string, string> = {
 }
 
 /**
- * La huella que ata el folio a la vista previa. `payloadHash` ya cubre al autor, el artículo, la
- * cantidad, la unidad, el motivo y la nota; aquí se le suman el venue y el folio. No es un secreto:
- * sirve para que una confirmación que DERIVÓ de la vista previa (otra cantidad, otro artículo) se
- * detecte en vez de escribirse.
+ * Lo que ata la huella (`previewDigest`) a la vista previa. `payloadHash` ya cubre al autor, el
+ * artículo, la cantidad, la unidad, el motivo y la nota; aquí se le suman el venue y el folio. La
+ * huella es la confirmación FIRMADA del catálogo (`../confirmation`: persona, organización, vence en
+ * CONFIRMATION_TTL). Antes era un sha256 de estos datos y un cliente podía calcularla sin pedir la
+ * vista previa (D5, 27-oct-2026). El catálogo no pone su token aquí porque la tool declara su huella.
  */
-function previewDigest(venueId: string, payload: { idempotencyKey: string; payloadHash: string }): string {
-  return createHash('sha256')
-    .update(JSON.stringify(['log_waste', venueId, payload.idempotencyKey, payload.payloadHash]))
-    .digest('hex')
-    .slice(0, 32)
+function previewBinding(venueId: string, payload: { idempotencyKey: string; payloadHash: string }) {
+  return { venueId, idempotencyKey: payload.idempotencyKey, payloadHash: payload.payloadHash }
 }
 
 function wasteInput(
@@ -247,6 +247,7 @@ export function registerInventoryWasteTools(server: McpServer, scope: McpScope):
       'Indica el artículo por nombre (name) o con itemType + itemId; si el nombre coincide con varios, te devuelve los candidatos para que el operador elija — no escojas tú. ' +
       `Motivos (reasonCode): ${REASON_LIST} (OTHER exige nota). ` +
       'Funciona en DOS pasos: la primera llamada sólo devuelve una vista previa (artículo, cantidad con unidad, motivo) y un folio, sin mover nada. Enséñasela al operador y, sólo con su confirmación expresa, vuelve a llamar con los datos de confirmationPayload tal cual (incluyen confirm:true, el folio y su huella). ' +
+      `La vista previa vence a los ${CONFIRMATION_TTL / 60} minutos. ` +
       'Repetir la confirmación con el mismo folio no duplica la merma. No se puede deshacer desde aquí. ' +
       'Escribe: requiere el permiso inventory:log-waste y una conexión con permiso de escritura. PREMIUM (INVENTORY_TRACKING).',
     {
@@ -274,7 +275,7 @@ export function registerInventoryWasteTools(server: McpServer, scope: McpScope):
       reasonCode: z.enum(MCP_REASON_CODES).describe('Motivo de la merma (ver la lista en la descripción)'),
       note: z.string().max(280).optional().describe('Nota libre, hasta 280 caracteres (obligatoria con OTHER)'),
       idempotencyKey: z.string().uuid().optional().describe('Folio que dio la vista previa — sólo al confirmar'),
-      previewDigest: z.string().max(128).optional().describe('Huella que dio la vista previa — sólo al confirmar'),
+      previewDigest: z.string().max(2048).optional().describe('Huella que dio la vista previa — sólo al confirmar'),
       confirm: z.boolean().optional().describe('true sólo tras la confirmación expresa del operador, con los datos de confirmationPayload'),
     },
     async args => {
@@ -324,9 +325,9 @@ export function registerInventoryWasteTools(server: McpServer, scope: McpScope):
         const recovered = await recoverByKey(venueId, payload.idempotencyKey, scope.staffId, payload.payloadHash)
         if (recovered) return text({ ok: true, report: recovered })
 
-        if (args.previewDigest !== previewDigest(venueId, payload)) {
+        if (!validConfirmation(args.previewDigest, scope, 'log_waste', previewBinding(venueId, payload))) {
           throw new ValidationError(
-            'Estos datos no son los de la vista previa que vio el operador (artículo, cantidad, unidad, motivo o nota cambiaron). Pide una vista previa nueva y confírmala tal cual.',
+            `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que vio el operador (artículo, cantidad, unidad, motivo o nota cambiaron). Pide una vista previa nueva y confírmala tal cual.`,
             'WASTE_PREVIEW_MISMATCH',
           )
         }
@@ -435,7 +436,7 @@ export function registerInventoryWasteTools(server: McpServer, scope: McpScope):
           reasonCode: payload.reasonCode,
           ...(payload.note !== null ? { note: payload.note } : {}),
           idempotencyKey: payload.idempotencyKey,
-          previewDigest: previewDigest(venueId, payload),
+          previewDigest: issueConfirmation(scope, 'log_waste', previewBinding(venueId, payload)),
           confirm: true,
         },
       })

@@ -34,11 +34,16 @@ import { registerCustomerTools } from './tools/customers'
 import { registerCustomerGroupTools } from './tools/customerGroups'
 import { registerCampaignTools } from './tools/campaigns'
 import { registerReceiptLayoutTools } from './tools/receiptLayout'
+import { registerCustomerDisplayTools } from './tools/customerDisplay'
 import { registerServiceCourseTools } from './tools/serviceCourses'
 import { registerCreditPackTools } from './tools/creditPacks'
 import { registerGiftCardTools } from './tools/giftCards'
 import { registerShiftTools } from './tools/shifts'
+import { registerShiftOperationTools } from './tools/shiftOperations'
+import { registerCryptoOperationTools } from './tools/cryptoOperations'
 import { registerDiscountTools } from './tools/discounts'
+import { registerExchangeTools } from './tools/exchanges'
+import { registerStoreCreditTools } from './tools/storeCredit'
 import { registerUpsellTools } from './tools/upsell'
 import { registerPromotionTools } from './tools/promotions'
 import { registerServiceChargeTools } from './tools/service-charges'
@@ -54,6 +59,7 @@ import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
 import { registerProductVariantTools } from './tools/productVariants'
+import { registerDeviceMenuTools } from './tools/deviceMenus'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
 import { registerPaymentLinkTools } from './tools/paymentLinks'
@@ -71,6 +77,7 @@ import { registerActivityLogTools } from './tools/activity-log'
 import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
 import { registerDocumentRequestTools } from './tools/documentRequests'
+import { registerCrmTools } from './tools/crm'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPassIntegrationTools } from './tools/passIntegrations'
@@ -131,11 +138,16 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerCustomerGroupTools(server, scope)
   registerCampaignTools(server, scope)
   registerReceiptLayoutTools(server, scope)
+  registerCustomerDisplayTools(server, scope)
   registerServiceCourseTools(server, scope)
   registerCreditPackTools(server, scope)
   registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)
   registerShiftTools(server, scope)
+  registerShiftOperationTools(server, scope)
+  registerCryptoOperationTools(server, scope)
   registerDiscountTools(server, scope)
+  registerExchangeTools(server, scope) // Exchange reads, review and settings: free mode only, outside the certified catalog.
+  registerStoreCreditTools(server, scope) // Saldo a favor: ajuste, saldo del cliente y teléfono. Sólo modo libre; no entra al catálogo certificado.
   registerUpsellTools(server, scope)
   registerPromotionTools(server, scope)
   registerServiceChargeTools(server, scope)
@@ -152,6 +164,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
   registerProductVariantTools(server, scope) // free mode only: not in the certified directory
+  registerDeviceMenuTools(server, scope) // free mode only: not in the certified directory
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)
   registerPaymentLinkTools(server, scope)
@@ -169,6 +182,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   // de clientes para fijar que aquí no aparecen.
   if (scope.isSuperAdmin) registerLaunchCampaignTools(server, scope)
   if (scope.isSuperAdmin) registerDocumentRequestTools(server, scope)
+  // El CRM de ventas de Avoqado (rutina seguimiento-prospectos). Tener llaves crm:* NO amplía isSuperAdmin.
+  if (scope.isSuperAdmin) registerCrmTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPassIntegrationTools(server, scope)
   registerShopifyTools(server, scope)

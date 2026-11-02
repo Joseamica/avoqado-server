@@ -396,7 +396,9 @@ describe('H1A legacy Product contracts', () => {
 
   it('proves TPV is byte-compatible with the dashboard contract and covers its declared 500 error envelope', async () => {
     expect(tpvFixture.list).toEqual(dashboardFixture.list)
-    expect(tpvMenuController.getProducts).toBe(dashboardProductController.getProductsHandler)
+    // Cobrar sin red (S1): `/tpv` ya no re-exporta el handler del panel; comparte su cuerpo (`buildProductsListResponse`)
+    // y SUMA `catalogAt` en la raíz. Todo lo demás sigue byte a byte igual al panel.
+    expect(tpvMenuController.getProducts).not.toBe(dashboardProductController.getProductsHandler)
     prismaMock.product.findMany.mockResolvedValueOnce([legacyProductReturn]).mockRejectedValueOnce(new Error('database unavailable'))
 
     const app = makeApp()
@@ -407,7 +409,9 @@ describe('H1A legacy Product contracts', () => {
     const failure = await request(app).get(`/venues/${venueId}/products`)
 
     expect(success.status).toBe(tpvFixture.list.status)
-    expect(success.body).toEqual(tpvFixture.list.body)
+    const { catalogAt, ...successSinCatalogAt } = success.body
+    expect(catalogAt).toHaveLength(24)
+    expect(successSinCatalogAt).toEqual(tpvFixture.list.body)
     expect(failure.status).toBe(tpvFixture.error.status)
     expect(failure.body).toEqual(tpvFixture.error.body)
     expect(prismaMock.product.findMany.mock.calls[0][0]).toEqual(dashboardProductQuery)

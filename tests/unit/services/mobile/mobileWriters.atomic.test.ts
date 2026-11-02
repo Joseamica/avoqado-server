@@ -7,6 +7,7 @@
  * escape to the global client fails here instead of hiding behind a shared double.
  */
 import { Prisma } from '@prisma/client'
+import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
 import { prismaMock } from '../../../__helpers__/setup'
 import {
   updateOrderDetails,
@@ -28,6 +29,16 @@ import * as stampService from '@/services/wallet/redeemStampReward.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from '@/services/wallet/notifyPassUpdated.service'
 
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
 jest.mock('@/services/venueSalesGuard', () => ({ __esModule: true, assertVenueSalesEnabled: jest.fn() }))
@@ -130,6 +141,7 @@ const MODELS = [
   'loyaltyConfig',
   'staffVenue',
   'stampReward',
+  'stampCard',
   'shift',
 ]
 const WRITES = ['create', 'createMany', 'update', 'updateMany', 'delete', 'deleteMany']
@@ -203,9 +215,13 @@ beforeEach(() => {
   jest.clearAllMocks()
   committed = false
   tx = {
+    // D9: la llave de la cuenta no está cerrada (OrderKeyRelease).
+    orderKeyRelease: { findUnique: jest.fn().mockResolvedValue(null) },
     $queryRaw: jest.fn().mockImplementation(async (query: any) => {
       const sql = Array.isArray(query) ? query.join('?') : query.sql
-      return [{ id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') ? 'venue' : 'order' }]
+      return [
+        { id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') && !sql.includes('FROM "Order"') ? 'venue' : 'order' },
+      ]
     }),
     ...Object.fromEntries(MODELS.map(name => [name, model()])),
   }
@@ -266,6 +282,8 @@ beforeEach(() => {
     where.orderDiscountId ? { id: 'rw-od', customerId: 'customer', rewardLabel: 'Premio' } : { ...REWARD },
   )
   tx.stampReward.updateMany.mockResolvedValue({ count: 1 })
+  // D3 (21-oct): devolver un premio canjeado lee su cartilla; llena = el premio vuelve por cobrar (el caso de estas pruebas).
+  tx.stampCard.findUnique.mockResolvedValue({ id: 'sc', stampsEarned: 7, stampsRequired: 7 })
   tx.shift.findFirst.mockResolvedValue(null)
 
   prismaMock.$transaction.mockImplementation(async (callback: any) => {
@@ -317,13 +335,21 @@ describe('locked mobile writers', () => {
       }))
       expect(statements).toEqual([
         { sql: 'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE', values: ['venue'] },
-        { sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE', values: ['venue', ['order']] },
+        {
+          sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
+          values: ['venue', ['order']],
+        },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
       ])
       const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
-      expect(venueLock).toBeLessThan(Math.min(...txCallOrders()))
+      // D2 (27-oct): lo único antes del candado es buscar si es fiado y, si lo es, apartar a su cliente (Cliente → mesa,
+      // como las métricas del cobro). Esa búsqueda se vuelve a comprobar ya con la mesa apartada.
+      const [buscarFiado, ...lecturasDeLaCuenta] = tx.order.findFirst.mock.invocationCallOrder
+      expect(tx.order.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'order', venueId: 'venue' }, select: { payLater: true } })
+      expect(buscarFiado).toBeLessThan(venueLock)
+      expect(venueLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findFirst]), ...lecturasDeLaCuenta))
       expect(orderLock).toBeLessThan(tableLock)
-      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany])))
+      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta))
       const orderTopology = { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true }
       const tableTopology = { id: true, number: true, status: true, currentOrderId: true }
       expect(tx.order.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(
@@ -348,8 +374,15 @@ describe('locked mobile writers', () => {
         expect(delegate.mock.invocationCallOrder.slice(2).every((call: number) => call > tableLock)).toBe(true)
       }
     } else {
-      expect(raw.map((call: any[]) => call.slice(1))).toEqual([['order', 'venue']])
-      expect(tx.$queryRaw.mock.invocationCallOrder[raw.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
+      // D3 (21-oct): quitar un descuento que vino de un premio de sellos bloquea DESPUÉS la fila de ese premio (la misma que
+      // toma la reversa del sello). No es un candado de la cuenta: va aparte y siempre después del candado de la cuenta.
+      const esDelPremio = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : '').includes('FROM "StampReward"')
+      const deLaCuenta = raw.filter((call: any[]) => !esDelPremio(call))
+      expect(
+        deLaCuenta.map((call: any[]) => (Array.isArray(call[0]) ? Prisma.sql(call[0], ...call.slice(1)).values : call[0].values)),
+      ).toEqual([['order', 'venue']])
+      expect(tx.$queryRaw.mock.invocationCallOrder[deLaCuenta.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
+      if (raw.length > deLaCuenta.length) expect(name).toBe('removeDiscount')
     }
     expect(tx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -598,6 +631,40 @@ describe('writer-specific fresh decisions', () => {
     })
   })
 
+  it('🔴 split de un fiado: aparta al cliente ANTES que la mesa y la parte nueva nace con su cliente (D2)', async () => {
+    const FIADO = { ...ORDER, payLater: true, orderCustomers: [{ customerId: 'customer', isPrimary: true }] }
+    tx.order.findFirst.mockResolvedValue(FIADO)
+
+    await splitOrderItems('venue', 'order', ['i2'], 'staff')
+
+    const sql = tx.$queryRaw.mock.calls.map(([q]: any[]) => (Array.isArray(q) ? q.join('?') : q.sql))
+    // Negocio → Cliente → (el candado de siempre) Negocio → Cuenta → Mesa.
+    expect(sql.slice(0, 4)).toEqual([
+      'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
+      'SELECT id FROM "Customer" WHERE id = ANY(?::text[]) ORDER BY id FOR KEY SHARE',
+      'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
+      'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
+    ])
+    expect(tx.$queryRaw.mock.calls[1].slice(1)).toEqual([['customer']])
+    expect(tx.order.create.mock.calls[0][0].data).toMatchObject({
+      payLater: true,
+      customerId: 'customer',
+      orderCustomers: { create: [{ customerId: 'customer', isPrimary: true }] },
+    })
+  })
+
+  it('split de un fiado cuyo cliente cambió mientras esperaba el candado: no copia un vínculo sin apartar (D2)', async () => {
+    tx.order.findFirst
+      .mockResolvedValueOnce({ payLater: true, customerId: 'customer', orderCustomers: [{ customerId: 'customer' }] })
+      .mockResolvedValue({ ...ORDER, payLater: true, customerId: 'otro', orderCustomers: [{ customerId: 'otro', isPrimary: true }] })
+
+    const error = await splitOrderItems('venue', 'order', ['i2'], 'staff').catch((e: unknown) => e)
+    expect(error).toMatchObject({ message: expect.stringMatching(/cambió de cliente/), code: 'VERSION_CONFLICT', statusCode: 409 })
+    // La cola sin red lo reintenta (RETRY), no lo manda a cuarentena (Codex, revisión de apps viejas del 27-oct).
+    expect(esErrorTransitorio(error)).toBe(true)
+    expect(txWrites()).toEqual([])
+  })
+
   it('splitBySeat groups the locked seats', async () => {
     tx.order.findFirst.mockResolvedValue({
       ...ORDER,
@@ -701,7 +768,14 @@ describe('writer-specific fresh decisions', () => {
       },
     })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
-    expect(tx.stampReward.update).toHaveBeenCalledWith({ where: { id: 'rw' }, data: { orderDiscountId: 'od-new' } })
+    // D4 (21-oct): el rastro al descuento va en la MISMA escritura que quema el premio; ya no hay segunda escritura.
+    expect(tx.stampReward.update).not.toHaveBeenCalled()
+    // El descuento del premio es el que nace con id propio (el histórico que se conserva antes no lo trae).
+    const idDelDescuento = tx.orderDiscount.create.mock.calls.map(([args]: any[]) => args.data.id).find(Boolean)
+    expect(idDelDescuento).toMatch(/^c[a-z0-9]{24}$/)
+    expect(tx.stampReward.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REDEEMED', orderDiscountId: idDelDescuento }) }),
+    )
   })
 
   it('redeemStamp losing the reward CAS creates no discount and no totals', async () => {

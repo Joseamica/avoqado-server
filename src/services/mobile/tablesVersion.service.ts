@@ -6,7 +6,7 @@ import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
 /**
  * «¿Cambió algo?» barato para el plano del POS (spec docs/superpowers/specs/2026-10-09-plano-de-mesas-pos-design.md §3.1).
  *
- * - `tablesVersion`: mesas ACTIVAS del venue + cuentas que `/tables` puede pintar (vivas con `tableId`, más las apuntadas
+ * - `tablesVersion`: mesas ACTIVAS del venue (y las archivadas con una cuenta viva, que `/tables` también manda) + cuentas que `/tables` puede pintar (vivas con `tableId`, más las apuntadas
  *   por `Table.currentOrderId` de una mesa activa) + el switch `VenueSettings.enforceTableOwnership`.
  * - `floorPlanVersion`: áreas del venue + elementos ACTIVOS del plano.
  *
@@ -72,14 +72,20 @@ export function tablesVersionSql(venueId: string): Prisma.Sql {
            a.c AS "areaCount", a.s AS "areaSum",
            e.c AS "elementCount", e.s AS "elementSum",
            r.v AS "ownershipRule"
-    FROM (SELECT COUNT(*)::int AS c, ${SUMA_MS(Prisma.sql`"updatedAt"`)} AS s FROM "Table"
-          WHERE "venueId" = ${venueId} AND "active" = true) t
+    FROM (SELECT COUNT(*)::int AS c, ${SUMA_MS(Prisma.sql`tm."updatedAt"`)} AS s FROM "Table" tm
+          WHERE tm."venueId" = ${venueId}
+            AND (tm."active" = true OR EXISTS (
+                  SELECT 1 FROM "Order" vo
+                  WHERE vo."venueId" = ${venueId} AND vo."tableId" = tm.id AND vo."status" IN (${ESTADOS_EN_LA_MESA_SQL})))) t
     CROSS JOIN (SELECT COUNT(*)::int AS c, ${SUMA_MS(Prisma.sql`x."updatedAt"`)} AS s FROM (
                   SELECT ord.id, ord."updatedAt" FROM "Order" ord
                   WHERE ord."venueId" = ${venueId} AND ord."tableId" IS NOT NULL AND ord."status" IN (${ESTADOS_EN_LA_MESA_SQL})
                   UNION
                   SELECT ord.id, ord."updatedAt" FROM "Table" tb JOIN "Order" ord ON ord.id = tb."currentOrderId"
-                  WHERE tb."venueId" = ${venueId} AND tb."active" = true
+                  WHERE tb."venueId" = ${venueId}
+                    AND (tb."active" = true OR EXISTS (
+                          SELECT 1 FROM "Order" vp
+                          WHERE vp."venueId" = ${venueId} AND vp."tableId" = tb.id AND vp."status" IN (${ESTADOS_EN_LA_MESA_SQL})))
                 ) x) o
     CROSS JOIN (SELECT COUNT(*)::int AS c, ${SUMA_MS(Prisma.sql`"updatedAt"`)} AS s FROM "Area"
                 WHERE "venueId" = ${venueId}) a

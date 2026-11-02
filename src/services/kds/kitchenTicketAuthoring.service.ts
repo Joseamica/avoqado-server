@@ -17,6 +17,7 @@ import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
 import { initialPreparation, parsePreparation, PREPARATION_VERSION } from './kitchenPreparation'
 import { ConflictError } from '../../errors/AppError'
 import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
+import { esRenglonDeVale } from '../shared/renglonDeVale'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
@@ -105,6 +106,7 @@ export async function authorKitchenTickets(params: {
           serviceCourse: true,
           orderPromotionId: true,
           areaTicketLineId: true,
+          releasedAreaTicketLineId: true,
           giftCardId: true,
           weightQuantity: true,
           weightUnit: true,
@@ -122,7 +124,8 @@ export async function authorKitchenTickets(params: {
       // (I1, revisión final fase 3.3). Si TODOS los renglones son de vale no queda nada que cocinar aquí: se
       // limpia la marca igual que antes, o el barrido dispara un 🚨 falso a los 15 min.
       // Tarjetas de regalo (spec § 4.4): una línea de tarjeta no se cocina. Si no queda nada, la marca se limpia igual.
-      const normales = renglones.filter(r => !r.areaTicketLineId && !r.giftCardId)
+      // D1: el renglón de un vale que se volvió a cobrar en otra cuenta tampoco se cocina aquí (`esRenglonDeVale`).
+      const normales = renglones.filter(r => !esRenglonDeVale(r) && !r.giftCardId)
       if (normales.length === 0) continue
 
       const cubiertos = await tx.kdsOrderItem.findMany({

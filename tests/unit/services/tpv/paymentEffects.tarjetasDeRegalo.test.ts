@@ -60,6 +60,7 @@ describe('enqueuePaymentEffect · tarjetas de regalo (R1)', () => {
           _count: { select: { items: { where: { giftCardId: null } } } },
         },
       },
+      tenderType: { select: { systemKind: true } },
     })
     // B6 r1: sin `relationJoins`, la marca anidada son 2 SQL más dentro de la transacción del cobro (con el FOR UPDATE tomado). Los
     // demás efectos —recibo, reseña, costo— no la usan, así que leen lo de siempre.
@@ -96,6 +97,8 @@ describe('enqueueRefundPaymentEffectsInTx · tarjetas de regalo (R1)', () => {
         findFirst: jest.fn().mockResolvedValue({ orderId: 'o1', order: { items: esDeTarjetas ? [{ id: 'oi-gc' }] : [] } }),
         findUniqueOrThrow: jest.fn().mockResolvedValue({ venueId: 'v1', orderId: 'o1' }),
       },
+      // El referido pregunta si la orden es la venta nueva de un cambio; aquí no lo es.
+      exchange: { findUnique: jest.fn().mockResolvedValue(null) },
       paymentEffect: { createMany: jest.fn().mockResolvedValue({ count: 1 }), updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     }
     const tipos = () => doble.paymentEffect.createMany.mock.calls.map(([arg]) => (arg as { data: Array<{ kind: string }> }).data[0].kind)

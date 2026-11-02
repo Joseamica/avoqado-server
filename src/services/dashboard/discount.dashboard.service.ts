@@ -13,6 +13,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, DiscountScope, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
+import { esCompatibleConLigas } from './paymentLinkDiscount'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -46,6 +47,8 @@ interface DiscountListItem {
     customerDiscounts: number
     orderDiscounts: number
   }
+  /** Si el descuento cabe en una liga de pago (lo usa el selector de ligas). */
+  paymentLinkCompatibility?: { ok: boolean; razon: string | null }
 }
 
 interface PaginatedDiscountsResponse {
@@ -232,10 +235,14 @@ export async function getDiscounts(
   const totalPages = Math.ceil(totalCount / pageSize)
 
   return {
-    data: discounts.map(d => ({
-      ...d,
-      value: Number(d.value),
-    })) as unknown as DiscountListItem[],
+    data: discounts.map(d => {
+      const compat = esCompatibleConLigas(d)
+      return {
+        ...d,
+        value: Number(d.value),
+        paymentLinkCompatibility: { ok: compat.ok, razon: compat.ok ? null : compat.razon },
+      }
+    }) as unknown as DiscountListItem[],
     meta: {
       totalCount,
       pageSize,
@@ -309,8 +316,15 @@ export async function getDiscountById(venueId: string, discountId: string) {
     throw new NotFoundError('Discount not found')
   }
 
+  // Uso: dos conteos acotados (nunca se cargan filas). `pos` = todo lo que no vino de una liga de pago.
+  const [total, ligasPagadas] = await Promise.all([
+    prisma.orderDiscount.count({ where: { discountId, order: { venueId } } }),
+    prisma.orderDiscount.count({ where: { discountId, order: { venueId, source: 'PAYMENT_LINK' } } }),
+  ])
+
   return {
     ...discount,
+    usage: { total, pos: total - ligasPagadas, ligasPagadas },
     value: Number(discount.value),
     minPurchaseAmount: discount.minPurchaseAmount ? Number(discount.minPurchaseAmount) : null,
     maxDiscountAmount: discount.maxDiscountAmount ? Number(discount.maxDiscountAmount) : null,

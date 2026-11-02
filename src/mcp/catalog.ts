@@ -11,6 +11,8 @@ import { directoryInputSchema } from './directory/input'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
+  review_pending_courtesy: 'write',
+  cancel_unpaid_order: 'write',
   venue_administration: 'read',
   update_venue_business_profile: 'write',
   update_venue_organization: 'write',
@@ -32,6 +34,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   add_ledger_account: 'write',
   add_to_waitlist: 'write',
   adjust_loyalty_points: 'write',
+  adjust_stamps: 'write',
   adjust_raw_material_stock: 'write',
   adjust_stock: 'write',
   aggregator_capacity_rules: 'read',
@@ -42,6 +45,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   area_ticket_reconciliation_queue: 'read',
   area_ticket_status: 'read',
   assign_table_check: 'write',
+  assign_customer_to_paid_sale: 'write',
   attach_customer_to_sale: 'write',
   attendance_heatmap: 'read',
   attendance_payroll_summary: 'read',
@@ -66,6 +70,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   cash_out_withdrawals: 'read',
   category_mix: 'read',
   cfdi_status: 'read',
+  order_invoice_status: 'read',
   change_sim_category: 'write',
   channel_mix: 'read',
   chart_of_accounts: 'read',
@@ -83,6 +88,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   confirm_catalog_import: 'write',
   confirm_catalog_publication: 'write',
   confirm_order_price_contract: 'write',
+  copy_customer_display_design: 'write',
   create_category: 'write',
   create_coupon: 'write',
   create_customer: 'write',
@@ -92,7 +98,18 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_launch_campaign: 'write',
   create_modifier_group: 'write',
   create_payment_link: 'write',
+  create_customer_payment_link: 'write',
+  add_customer_to_payment_link: 'write',
+  customer_payment_links: 'read',
   create_percent_promotion: 'write',
+  // CRM de ventas de Avoqado (sólo SUPERADMIN, sólo el MCP libre): lo usa la rutina seguimiento-prospectos.
+  crm_find_account: 'read',
+  crm_upsert_whatsapp_prospect: 'write',
+  crm_advance_stage: 'write',
+  crm_add_note: 'write',
+  crm_add_activity: 'write',
+  crm_pending: 'read',
+  crm_pipeline_summary: 'read',
   create_product: 'write',
   create_product_with_variants: 'write',
   create_products: 'write',
@@ -104,6 +121,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   update_raw_material: 'write',
   create_reservation: 'write',
   customer_credit_balance: 'read',
+  customer_display_design: 'read',
   customer_group_detail: 'read',
   customer_history: 'read',
   customers_awaiting_approval: 'read',
@@ -139,11 +157,13 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   get_announcement: 'read',
   get_cash_drawer_status: 'read',
   get_catalog_item: 'read',
+  get_crypto_operation: 'read',
   get_document_request: 'read',
   get_hybrid_campaign: 'read',
   get_inventory_movements: 'read',
   get_launch_campaign: 'read',
   get_recipe: 'read',
+  get_shift_operation: 'read',
   get_venue_downgrade_preview: 'read',
   get_venue_plan_status: 'read',
   get_venue_seat_status: 'read',
@@ -179,8 +199,18 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_credit_packs: 'read',
   list_customer_campaigns: 'read',
   list_customer_groups: 'read',
+  list_device_menus: 'read',
   list_devices: 'read',
   list_discounts: 'read',
+  list_exchanges: 'read',
+  get_exchange: 'read',
+  get_exchanges_setting: 'read',
+  set_exchanges_setting: 'write',
+  review_exchange: 'write',
+  get_store_credit_settings: 'read',
+  set_store_credit_only: 'write',
+  get_customer_store_credit: 'read',
+  change_store_credit_phone: 'write',
   list_document_requests: 'read',
   list_venue_document_requests: 'read',
   list_document_request_venue_options: 'read',
@@ -200,6 +230,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_payment_effects: 'read',
   list_payment_links: 'read',
   list_payments: 'read',
+  get_cash_payment_by_key: 'read',
   list_prices: 'read',
   list_print_stations: 'read',
   list_printers: 'read',
@@ -229,6 +260,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   merge_table_check: 'write',
   move_table_check: 'write',
   my_class_now: 'read',
+  online_order_card_refund: 'write',
+  online_order_card_refund_resolve: 'write',
+  online_order_card_refunds: 'read',
   online_order_respond: 'write',
   online_ordering_configure: 'write',
   online_ordering_menu: 'read',
@@ -244,6 +278,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   pending_area_ticket_deliveries: 'read',
   pending_external_confirmations: 'read',
   pos_sync_status: 'read',
+  pos_sync_recovery: 'read',
   kitchen_preparation: 'read',
   preview_catalog_import: 'write',
   preview_catalog_publication: 'write',
@@ -264,6 +299,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   purchase_order_detail: 'read',
   quarantine_batch: 'write',
   quote_hybrid_purchase: 'write',
+  rappi_connect_link: 'write',
+  rappi_disconnect: 'write',
+  delivery_cash_pending: 'read',
   raw_material_presentations: 'read',
   reassign_sim_promoter: 'write',
   reassign_sim_supervisor: 'write',
@@ -291,6 +329,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   reservation_detail: 'read',
   reservation_settings: 'read',
   reservations: 'read',
+  reset_customer_display_design: 'write',
   resolve_inter_venue_transfer_variance: 'write',
   respond_to_review: 'write',
   resume_hybrid_purchase: 'write',
@@ -318,6 +357,8 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_aggregator_capacity_rule: 'write',
   set_birthday_automation: 'write',
   set_customer_tags: 'write',
+  set_device_menus: 'write',
+  update_customer_contact: 'write',
   set_feature_list_price: 'write',
   set_fiscal_loss: 'write',
   set_hybrid_campaign_status: 'write',
@@ -325,6 +366,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_launch_campaign_status: 'write',
   set_menu_item_active: 'write',
   set_menu_item_price: 'write',
+  set_menu_usage: 'write',
   set_merchant_routing_rule: 'write',
   set_prices_by_code: 'write',
   set_print_station_kitchen_display: 'write',
@@ -379,6 +421,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   archive_position: 'write',
   assign_staff_position: 'write',
   end_staff_assignment: 'write',
+  change_staff_assignment: 'write',
   stamp_card_status: 'read',
   stamp_payroll_receipts: 'write',
   stock_batches: 'read',
@@ -401,6 +444,8 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   top_products: 'read',
   trial_balance: 'read',
   undo_check_in: 'write',
+  undo_no_show: 'write',
+  update_customer_display_design: 'write',
   update_fixed_asset: 'write',
   update_gift_card_settings: 'write',
   update_reservation: 'write',
@@ -415,6 +460,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   who_is_late_now: 'read',
   work_shifts: 'read',
 }
+
+/** Campos de concurrencia cuyo `null` es un valor visto (p. ej. `adjust_stamps` sin cartilla): se atan aunque valgan null. */
+const NULLABLE_CONFIRMATION_FIELDS = new Set(['expectedStampCardId'])
 
 const outputSchema = {
   status: z.enum(['success', 'needs_input', 'not_found', 'error']),
@@ -496,6 +544,12 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
           throw new ScopeError(
             `Esta conexión requiere autorizar ${readOnly ? 'mcp:read' : 'mcp:write'}. Vuelve a conectar con ese permiso.`,
           )
+        // Negocios demo (candado, capa 4): si todos los negocios de la conexión son demo, el asistente sólo consulta;
+        // así el MCP no se vuelve una puerta trasera para lo que el panel y la app tienen bloqueado.
+        if (!readOnly && !scope.isSuperAdmin && scope.soloNegociosDemo)
+          throw new ScopeError(
+            'En el negocio de demostración, el asistente sólo puede consultar. En tu cuenta de Avoqado también puede hacer cambios.',
+          )
         if (!needsPreview) return structureToolResult(await run(...args))
         const { confirmationToken, ...input } = args[0]
         const { confirm: _confirm, ...intent } = input
@@ -539,8 +593,21 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedElecciones',
             // «Desde Shopify» (variantes, bloque 5): se confirman exactamente los pares producto + huella que se VIERON.
             'expectedItems',
+            // Sellos a mano (`adjust_stamps`, F8): se ajusta el cliente, la cartilla, el número, la versión y la meta que se VIERON.
+            'expectedCustomerId',
+            'expectedStampCardId',
+            'expectedStampsEarned',
+            'expectedVersion',
+            'expectedStampsRequired',
+            // Cortesía pendiente: ligar la cabecera y todas las líneas que se vieron, en pesos.
+            'expectedCourtesySnapshot',
+            // Saldo a favor (`change_store_credit_phone`): el teléfono se cambia sobre los últimos 4 que el operador VIO.
+            'expectedPhoneLast4',
           ]) {
-            if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
+            // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
+            // no atar un `null` que el esquema de otra herramienta no acepta.
+            const presente = NULLABLE_CONFIRMATION_FIELDS.has(field) ? field in data : data[field] != null
+            if (config.inputSchema?.[field] && presente) confirmationArguments[field] = data[field]
           }
           return structureToolResult(
             text({

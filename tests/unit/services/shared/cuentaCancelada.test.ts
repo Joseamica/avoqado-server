@@ -65,7 +65,8 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
         idempotencyKey: 'k-1',
       }),
     ).toBe('PENDING')
-    expect(tx.order.update).toHaveBeenCalledWith({ where: { id: 'o', venueId: 'v' }, data: { status: 'PENDING' } })
+    // Pedidos en línea 1c (S1): la misma escritura trae su pedido en línea (`select`); aquí no hay (`{}`), así que nada más se escribe.
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'o', venueId: 'v' }, data: { status: 'PENDING' } }))
     expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
     expect(tx.activityLog.create.mock.calls[0][0].data).toMatchObject({
       action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT',
@@ -139,5 +140,16 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
     const sinLlave = txPagos({ id: 'pay-x', orderId: 'o' })
     await expect(salirSiLaLlaveYaTienePago(sinLlave as any, { venueId: 'v', orderId: 'o' })).resolves.toBeUndefined()
     expect(sinLlave.payment.findUnique).not.toHaveBeenCalled()
+  })
+})
+
+describe('Rappi 2b (T8, Codex código r1 #3): un pedido de Rappi no se reabre al recibir dinero, por ningún canal', () => {
+  it('cancelada de Rappi que recibe dinero que la cubre ⇒ sigue CANCELLED', () => {
+    expect(estadoParaCobrar({ status: 'CANCELLED', originSystem: 'DELIVERY_PLATFORM', source: 'RAPPI' }, 205, true)).toBe('CANCELLED')
+  })
+  it('control: una cancelada de otra plataforma conserva la regla de hoy (sale de CANCELADA si cubre)', () => {
+    expect(estadoParaCobrar({ status: 'CANCELLED', originSystem: 'DELIVERY_PLATFORM', source: 'UBER_EATS' }, 205, true)).not.toBe(
+      'CANCELLED',
+    )
   })
 })

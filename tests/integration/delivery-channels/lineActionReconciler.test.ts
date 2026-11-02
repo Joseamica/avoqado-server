@@ -649,6 +649,27 @@ describe('barrido de acciones de línea y FULFILLMENT_CHANGED (Tarea 15)', () =>
     expect(primera.listos).toBe(0)
   })
 
+  // Tarea 13 (Rappi fase 2): un proveedor que ya no admite el «listo» (tope de llamadas, transición inválida) contesta
+  // `terminal`; el núcleo lo traduce a NO_REINTENTAR y el barrido lo deja en paz toda la ventana, como a un pedido sin canal.
+  it('NO_REINTENTAR no se vuelve a intentar en la ventana ni cuenta como llamada (y no sella readyReportedAt)', async () => {
+    const s = await sembrar()
+    await prisma.kdsOrder.updateMany({ where: { orderId: s.order.id }, data: { status: KdsOrderStatus.COMPLETED } })
+    // Los «listos» pendientes de pruebas anteriores no deben entrar al contador de esta pasada.
+    await prisma.order.updateMany({ where: { venueId, id: { not: s.order.id } }, data: { readyReportedAt: new Date() } })
+    ;(uberAdapter.markOrderReady as jest.Mock).mockResolvedValue({ ok: false, status: 0, raw: 'TOPE_DE_LISTO', terminal: true })
+    const espia = jest.spyOn(respuestas, 'markDeliveryOrderReady')
+
+    const job = new DeliveryLineActionReconcilerJob()
+    const primera = await correr(job)
+    await correr(job)
+    // Aun con el reloj 2 h adelante (más que cualquier espera de un rechazo normal: tope 60 min), sigue fuera.
+    await dentroDe(2 * 60 * MIN, () => correr(job))
+
+    expect(espia.mock.calls.filter(c => c[1] === s.order.id)).toHaveLength(1)
+    expect(primera.listos).toBe(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: s.order.id } })).readyReportedAt).toBeNull()
+  })
+
   it('M-5: un pedido de un proveedor SIN adaptador no ocupa lugar en el reintento de «listo»', async () => {
     const s = await sembrar()
     await prisma.order.update({ where: { id: s.order.id }, data: { externalId: `DELIVERECT:${s.ext}` } })

@@ -5,6 +5,13 @@ import { NotFoundError } from '@/errors/AppError'
 
 const mockAttach = jest.fn()
 const mockAttachLatest = jest.fn()
+jest.mock('@/middlewares/customerAttribution.middleware', () => ({
+  customerAttributionActor: async (req: any) => ({
+    staffId: req.authContext?.userId,
+    canAttachAtReceipt: true,
+    canAssignHistorical: false,
+  }),
+}))
 jest.mock('@/services/mobile/order.mobile.service', () => ({
   attachCustomerToPayment: (...a: unknown[]) => mockAttach(...a),
   attachCustomerToLatestPayment: (...a: unknown[]) => mockAttachLatest(...a),
@@ -33,7 +40,9 @@ describe('payment.mobile.controller — el actor sale del token', () => {
       r,
       next,
     )
-    expect(mockAttach).toHaveBeenCalledWith('v1', 'p1', 'c1', 'staff-1')
+    expect(mockAttach).toHaveBeenCalledWith('v1', 'p1', 'c1', 'staff-1', {
+      actor: { staffId: 'staff-1', canAttachAtReceipt: true, canAssignHistorical: false },
+    })
     expect(r.json).toHaveBeenCalledWith({
       success: true,
       data: { id: 'order-1', loyalty: { stamped: true } },
@@ -58,6 +67,7 @@ describe('payment.mobile.controller — el actor sale del token', () => {
       tipCents: 0,
       staffId: 'cobro-staff',
       actorStaffId: 'quien-ligo',
+      actor: { staffId: 'quien-ligo', canAttachAtReceipt: true, canAssignHistorical: false },
     })
   })
 

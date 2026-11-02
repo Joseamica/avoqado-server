@@ -224,7 +224,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/googleOAuth.service.ts': 1,
   'src/services/dashboard/impersonation.service.ts': 1,
   'src/services/dashboard/interVenueTransfer.service.ts': 4,
-  'src/services/dashboard/inventoryRestock.service.ts': 1,
   'src/services/dashboard/itemCategory.dashboard.service.ts': 1,
   'src/services/dashboard/loyalty.dashboard.service.ts': 1,
   'src/services/dashboard/manualSale.resolvers.ts': 1,
@@ -307,7 +306,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/workSchedule.service.ts': 1,
   'src/services/dashboard/workShift.service.ts': 5,
   'src/services/delivery-channels/core/deliveryActivation.service.ts': 1,
-  'src/services/delivery-channels/core/deliveryChannelLink.service.ts': 3,
+  'src/services/delivery-channels/core/deliveryChannelLink.service.ts': 2,
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': 2,
   'src/services/delivery-channels/core/menuSnapshot.service.ts': 1,
   'src/services/delivery-channels/core/menuSync.service.ts': 2,
@@ -370,7 +369,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/mobile/menu.mobile.service.ts': 1,
   // 1 → 0 (2026-09-23, KDS Uber T16): la venta de cada comanda se carga por lote en
   // `kdsCapacidades.ts`, con `take` = número de ids pedidos.
-  'src/services/mobile/order.mobile.service.ts': 6,
+  // 6 → 5 (2026-10-21, tarjetas 1b S4): `listOrders` ya estaba paginada (`take,` abreviado, que la ventana no reconoce); ahora
+  // su include de la marca de tarjetas lleva `take: 1` dentro de la ventana y el barrido la ve acotada.
+  'src/services/mobile/order.mobile.service.ts': 5,
   'src/services/mobile/print.mobile.service.ts': 2,
   'src/services/mobile/product-option.mobile.service.ts': 1,
   'src/services/mobile/push.mobile.service.ts': 2,
@@ -474,7 +475,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/tpv/merchantRouting.service.ts': 3,
   'src/services/tpv/order.tpv.service.ts': 12,
   'src/services/tpv/payment.tpv.service.ts': 4,
-  'src/services/tpv/refund.tpv.service.ts': 1,
   'src/services/tpv/sale-verification.service.ts': 1,
   // 2026-09-04, ronda de arreglo 1 (P1.3/P2.5): de 7 a 4. Se fueron el `include` anidado sin tope
   // de `getShifts` (`orders → payments → allocations`) y los dos `findMany` de `getCurrentShift`,

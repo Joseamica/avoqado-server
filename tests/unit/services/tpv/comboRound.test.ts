@@ -4,6 +4,16 @@ import { addItemsToOrder } from '@/services/tpv/order.tpv.service'
 import { applyPromotionToOrder } from '@/services/promotions/promotion.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/services/promotions/promotion.service', () => ({ applyPromotionToOrder: jest.fn() }))
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
 jest.mock('@/services/kds/kitchenDisplayStations', () => ({

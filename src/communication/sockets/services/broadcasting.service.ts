@@ -45,7 +45,7 @@ export class BroadcastingService {
   /**
    * Broadcast to entire venue
    */
-  public broadcastToVenue(venueId: string, event: SocketEventType, payload: any, options: BroadcastOptions = {}): void {
+  public broadcastToVenue(venueId: string, event: SocketEventType, payload: any, options: BroadcastOptions = {}): boolean {
     const correlationId = uuidv4()
 
     try {
@@ -67,6 +67,7 @@ export class BroadcastingService {
         filteredSockets: filteredSockets.length,
         options: this.sanitizeOptions(options),
       })
+      return true
     } catch (error) {
       logger.error('Error broadcasting to venue', {
         correlationId,
@@ -75,6 +76,7 @@ export class BroadcastingService {
         error: error instanceof Error ? error.message : 'Unknown error',
         stack: error instanceof Error ? error.stack : undefined,
       })
+      return false
     }
   }
 

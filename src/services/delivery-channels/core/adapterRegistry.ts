@@ -19,12 +19,14 @@
  */
 import { DeliveryProvider } from '@prisma/client'
 
+import { rappiAdapter } from '../providers/rappi/rappi.adapter'
 import { uberAdapter } from '../providers/uber-eats/uber.adapter'
 import type { DirectDeliveryAdapter } from './types'
 
 const ADAPTERS: Partial<Record<DeliveryProvider, DirectDeliveryAdapter>> = {
   [DeliveryProvider.UBER_EATS]: uberAdapter,
-  // RAPPI y DIDI_FOOD: cada uno con su plan. DELIVERECT migra en trabajo aparte.
+  [DeliveryProvider.RAPPI]: rappiAdapter,
+  // DIDI_FOOD: con su plan. DELIVERECT migra en trabajo aparte.
 }
 
 export function hasAdapter(provider: DeliveryProvider): boolean {

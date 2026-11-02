@@ -4,8 +4,10 @@ import { CronJob } from 'cron'
 import { Prisma } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { conNegocio } from '../services/demo/candadoDemo'
 import { scheduleJob } from '../observability/jobContext'
 import { lockExistingOrderForPayment } from '../services/shared/paymentShiftClaim'
+import { devolverCanjesDeVentaAnuladaEnTx } from '../services/shared/orderCancelGuard'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { utcTs } from '../utils/sqlDates'
 
@@ -34,10 +36,14 @@ const abandonada = (threshold: Date): Prisma.Sql => Prisma.sql`
 /** Candidatas por pasada: la limpieza corre cada 15 min y alcanza el resto en las siguientes. */
 const LOTE = 200
 
-/** Lo que hizo una pasada. `kept` = cambió o empezó a usarse después de elegirla; `failed` = no se pudo borrar. */
+/**
+ * Lo que hizo una pasada. `kept` = cambió o empezó a usarse después de elegirla; `failed` = no se pudo borrar; `cancelled` =
+ * traía canjes de lealtad: se devolvieron y la venta se anuló en vez de borrarse (hz:a8104ac8:D1).
+ */
 export interface ResultadoDeLimpieza {
   selected: number
   deleted: number
+  cancelled: number
   kept: number
   failed: number
 }
@@ -126,7 +132,7 @@ export class AbandonedOrdersCleanupJob {
   }
 
   private async runOnce(): Promise<ResultadoDeLimpieza> {
-    const result: ResultadoDeLimpieza = { selected: 0, deleted: 0, kept: 0, failed: 0 }
+    const result: ResultadoDeLimpieza = { selected: 0, deleted: 0, cancelled: 0, kept: 0, failed: 0 }
     try {
       const thresholdDate = new Date()
       thresholdDate.setMinutes(thresholdDate.getMinutes() - this.ABANDONMENT_THRESHOLD_MINUTES)
@@ -158,18 +164,36 @@ export class AbandonedOrdersCleanupJob {
         try {
           // Lock the order, reread the SAME rule, and only then delete. A payment or item written concurrently holds the
           // order's foreign-key lock, so the lock waits for it and the reread sees it: the order is kept.
-          const wasDeleted = await prisma.$transaction(
+          const desenlace = await prisma.$transaction(
             async tx => {
               if (!(await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId: order.id }))) return false
               const still = await tx.$queryRaw<Array<{ id: string }>>`
                 SELECT o.id FROM "Order" o WHERE o.id = ${order.id} AND o."venueId" = ${order.venueId} AND ${abandonada(thresholdDate)}`
               if (still.length === 0) return false
+              // 🔴 LEALTAD (hz:a8104ac8:D1, Codex r1 #3 y r2 #2): una venta vacía puede traer un canje de CUENTA (puntos o premio de
+              // sellos) que sobrevivió a quitar sus renglones. Se devuelve en esta misma transacción, y esa venta NO se borra: se
+              // anula. Borrada, un reintento de su creación (misma `externalId`) ya no la encontraría, crearía otra y volvería a
+              // quemar el premio recién devuelto; anulada, el reintento la encuentra y el canje sobre una anulada se rechaza.
+              const canjes = await devolverCanjesDeVentaAnuladaEnTx(tx, {
+                venueId: order.venueId,
+                orderId: order.id,
+                camino: 'abandonedOrdersCleanup',
+              })
+              if (canjes.filasQuitadas > 0) {
+                await tx.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', version: { increment: 1 } } })
+                return 'cancelled' as const
+              }
               await tx.order.delete({ where: { id: order.id } })
               return true
             },
             { timeout: 15_000, maxWait: 5_000 },
           )
-          if (!wasDeleted) {
+          if (desenlace === 'cancelled') {
+            result.cancelled += 1
+            logger.info(`  🎁 Cancelled order ${order.orderNumber}: its loyalty redemptions went back to the customer`)
+            continue
+          }
+          if (!desenlace) {
             result.kept += 1
             logger.info(`  ↩️  Kept order ${order.orderNumber}: it changed or is in use since it was selected`)
             continue
@@ -182,11 +206,13 @@ export class AbandonedOrdersCleanupJob {
         } catch (error) {
           // One order that cannot go (for example, a restricted child) must not stop the rest of the batch.
           result.failed += 1
-          logger.error(`❌ [CLEANUP] Could not delete abandoned order ${order.orderNumber}:`, error)
+          conNegocio(order.venueId, () => logger.error(`❌ [CLEANUP] Could not delete abandoned order ${order.orderNumber}:`, error))
         }
       }
 
-      logger.info(`✅ [CLEANUP] Deleted ${result.deleted} abandoned orders (kept ${result.kept}, failed ${result.failed})`)
+      logger.info(
+        `✅ [CLEANUP] Deleted ${result.deleted} abandoned orders (cancelled ${result.cancelled}, kept ${result.kept}, failed ${result.failed})`,
+      )
     } catch (error) {
       result.failed += 1
       logger.error('❌ [CLEANUP] Error during abandoned orders cleanup:', error)

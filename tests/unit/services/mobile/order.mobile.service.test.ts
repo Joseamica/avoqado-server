@@ -799,6 +799,50 @@ describe('order.mobile.service', () => {
   // La deducción corre DESPUÉS de registrar el cobro y nunca lo bloquea; lo que
   // cambia es que la respuesta ahora trae `inventoryWarning` para que el POS
   // pinte el toast ámbar. El contrato es el mismo OrderInventoryWarning del TPV.
+  // Pedidos en línea fase 2 (T8): la caja no cobra un pedido que ya se pagó con tarjeta en línea; pagar al recoger, como hoy.
+  describe('payCashOrder — pedido en línea con tarjeta', () => {
+    const preparar = (paymentMode: 'CARD_ONLINE' | 'PAY_AT_PICKUP') => {
+      prismaMock.order.findUnique.mockResolvedValue({
+        id: 'order-1',
+        orderNumber: 'WEB-1',
+        paymentStatus: 'PENDING',
+        subtotal: new Decimal(100),
+        discountAmount: new Decimal(0),
+        total: new Decimal(100),
+        remainingBalance: new Decimal(100),
+        venueId: 'venue-1',
+        source: 'WEB',
+      })
+      prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+      prismaMock.shift.findFirst.mockResolvedValue(null)
+      prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
+      prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+      prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
+      prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.payment.findMany.mockResolvedValue([])
+      prismaMock.onlineOrder.findFirst.mockResolvedValue({
+        paymentMode,
+        charge: paymentMode === 'CARD_ONLINE' ? { id: 'ch1', status: 'AUTHORIZED', paymentIntentId: 'pi_1' } : null,
+      } as any)
+    }
+
+    it('sobre un pedido CARD_ONLINE → 409 ONLINE_ORDER_PAID_BY_CARD y ningún Payment', async () => {
+      preparar('CARD_ONLINE')
+      await expect(payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1' })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'ONLINE_ORDER_PAID_BY_CARD',
+      })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('un pedido PAY_AT_PICKUP se cobra en efectivo igual que hoy (regresión)', async () => {
+      preparar('PAY_AT_PICKUP')
+      await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1' })
+      expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('payCashOrder — inventoryWarning post-cobro', () => {
     const arrangeFullyPaid = () => {
       prismaMock.order.findUnique.mockResolvedValue({
@@ -1078,6 +1122,8 @@ describe('cancelOrder — guard against live terminal charges', () => {
     prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
     prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
       const sql = Array.isArray(query) ? query.join(' ') : ''
+      // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
+      if (sql.includes('"OrderDiscount"')) return []
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       if (sql.includes('pg_advisory_xact_lock')) return []
@@ -1341,6 +1387,8 @@ describe('cancelOrder — libera la mesa aunque la cuenta sea el último hijo de
         : query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)
           ? query.strings.join(' ')
           : ''
+      // hz:a8104ac8:D1: la búsqueda de canjes de lealtad; estas cuentas de prueba no traen ninguno.
+      if (sql.includes('"OrderDiscount"')) return []
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"'))
         return rows()

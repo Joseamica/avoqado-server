@@ -5,9 +5,19 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { calcularTasaInyeccion, UMBRAL_OBJETIVO } from '../services/delivery-channels/core/injectionRate.service'
+import { syncChannelHours } from '../services/delivery-channels/core/hoursSync.service'
 import { syncChannelAvailability, syncChannelMenu, syncableLinksWhere } from '../services/delivery-channels/core/menuSync.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+
+/** Los contadores de una pasada. `enRevision` ya cuenta también dentro de `sinCambio` (no se publicó nada en esa pasada). */
+interface ResultadoDeLaPasada {
+  publicados: number
+  sinCambio: number
+  fallidos: number
+  /** Cuántos canales quedaron con su menú EN REVISIÓN (esperando el veredicto del proveedor) en esta pasada. */
+  enRevision: number
+}
 
 /**
  * Mantiene el menú de cada canal de delivery igual al de Avoqado.
@@ -22,7 +32,8 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  *     con la integración completa.
  *
  * Compara por HUELLA, no por eventos (ver `menuSync.service.ts`): detecta cambios vengan de
- * donde vengan y se auto-corrige si una publicación se perdió.
+ * donde vengan y se auto-corrige si una publicación se perdió. Con la misma idea publica el
+ * horario de la TIENDA donde el proveedor lo recibe aparte (`hoursSync.service.ts`).
  *
  * CADENCIA — 5 minutos, y el número está pensado, no elegido al azar: `PUT /menus` REEMPLAZA
  * el menú entero del proveedor, así que correrlo cada minuto mientras alguien edita su carta
@@ -38,6 +49,14 @@ export class DeliveryMenuSyncJob {
   /** Tope por pasada: publicar un menú es una llamada pesada; una tanda grande se reparte. */
   private readonly BATCH_SIZE = 20
 
+  /**
+   * 🔴 UNA pasada a la vez (Tarea 19, ronda 1). `cron` no espera a que la pasada anterior termine: una lenta (el proveedor
+   * contestando despacio, hasta 10 s por llamada) se encimaba con la siguiente, y las dos podían escribir el mismo horario de
+   * la tienda desde dos lecturas viejas distintas (borrar franjas distintas del mismo día y dejarlo vacío). En memoria, como
+   * `enCurso` del job de reconciliación: una sola instancia (`.claude/rules/una-sola-instancia.md`).
+   */
+  private enCurso = false
+
   start(): void {
     if (this.job) return
     this.job = scheduleJob('deliveryMenuSync', this.CRON_PATTERN, async () => {
@@ -51,10 +70,25 @@ export class DeliveryMenuSyncJob {
     this.job = null
   }
 
-  async runOnce(): Promise<{ publicados: number; sinCambio: number; fallidos: number }> {
+  async runOnce(): Promise<ResultadoDeLaPasada> {
+    if (this.enCurso) {
+      logger.warn('📋 [MenuSync] la pasada anterior sigue corriendo — se salta este tick')
+      return { publicados: 0, sinCambio: 0, fallidos: 0, enRevision: 0 }
+    }
+    this.enCurso = true
+    try {
+      return await this.pasada()
+    } finally {
+      // En `finally`: si la pasada revienta, el candado DEBE soltarse o el job queda muerto para siempre.
+      this.enCurso = false
+    }
+  }
+
+  private async pasada(): Promise<ResultadoDeLaPasada> {
     let publicados = 0
     let sinCambio = 0
     let fallidos = 0
+    let enRevision = 0
 
     try {
       // Regla del repo: la PRIMERA lectura del job va envuelta en retry — es la que muere
@@ -76,8 +110,12 @@ export class DeliveryMenuSyncJob {
         // otro reventó.
         const r = await syncChannelMenu(link)
         if (r.outcome === 'PUBLISHED') publicados++
-        else if (r.outcome === 'UNCHANGED') sinCambio++
-        else if (r.outcome === 'FAILED') fallidos++
+        // Un menú en revisión (esperando el veredicto del proveedor) o uno igual al que el proveedor ya rechazó tampoco se
+        // publica en esta pasada: es «sin cambio» para el conteo. Lo que necesita a una persona ya lo avisó el sincronizador.
+        else if (r.outcome === 'UNCHANGED' || r.outcome === 'IN_REVIEW' || r.outcome === 'REJECTED_UNCHANGED') {
+          sinCambio++
+          if (r.outcome === 'IN_REVIEW') enRevision++
+        } else if (r.outcome === 'FAILED') fallidos++
 
         // La disponibilidad va SIEMPRE, aunque el menú no haya cambiado — de hecho es el
         // caso normal: el menú cambia una vez al mes y los productos se acaban a diario.
@@ -92,10 +130,23 @@ export class DeliveryMenuSyncJob {
             error: error instanceof Error ? error.message : String(error),
           })
         }
+
+        // El horario de la TIENDA (Tarea 19), DESPUÉS del menú y de la disponibilidad: por huella, así que sin cambios no
+        // cuesta red. `syncChannelHours` no lanza (cada falla vuelve como FAILED y ya la avisó); el try/catch es para que, si
+        // algún día lanzara, no deje sin menú a este canal ni a los que siguen.
+        try {
+          await syncChannelHours(link)
+        } catch (error) {
+          logger.error('🚨 [MenuSync] falló el horario de la tienda — el proveedor puede tener un horario viejo', {
+            linkId: link.id,
+            venueId: link.venueId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
 
       if (publicados > 0 || fallidos > 0) {
-        logger.info('📋 [MenuSync] pasada terminada', { publicados, sinCambio, fallidos, revisados: links.length })
+        logger.info('📋 [MenuSync] pasada terminada', { publicados, sinCambio, fallidos, enRevision, revisados: links.length })
       }
 
       // 🔴 La tasa de inyección: el número con el que Uber decide REVOCAR el acceso (exige
@@ -135,7 +186,7 @@ export class DeliveryMenuSyncJob {
       logger.error('🚨 [MenuSync] la pasada falló completa', { error: error instanceof Error ? error.message : error })
     }
 
-    return { publicados, sinCambio, fallidos }
+    return { publicados, sinCambio, fallidos, enRevision }
   }
 }
 

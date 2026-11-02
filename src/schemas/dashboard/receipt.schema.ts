@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { LineasDelTicket } from '../../services/shared/lineasDelTicket'
 
 // Standardized Receipt Data Snapshot Schema
 export const ReceiptDataSnapshotSchema = z.object({
@@ -85,9 +86,13 @@ export const ReceiptDataSnapshotSchema = z.object({
       addedTax: z.number(),
       tip: z.number(),
       total: z.number(),
+      // D15: sólo existe en el comprobante de UNA parte de una venta dividida (sin esta línea zod la quitaría).
+      parcial: z.literal(true).optional(),
     })
     .nullable()
     .optional(),
+  // D1 «fotocopia del ticket»: los renglones que imprimió el cobro de esta parte (ya cuadraron al guardarse en el pago).
+  lineasDelTicket: z.custom<LineasDelTicket>().optional(),
 })
 
 export type ReceiptDataSnapshot = z.infer<typeof ReceiptDataSnapshotSchema>

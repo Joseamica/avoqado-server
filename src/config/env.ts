@@ -204,6 +204,33 @@ const envSchema = z.object({
   /** Tiendas donde SÍ se puede escribir. Vacía = ninguna (el candado del incidente 2026-08-17). */
   RAPPI_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
   RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
+  /**
+   * Sondeo de pedidos por tienda cada 45 s (`jobs/rappi-order-poll.job.ts`): la red por si se pierde un aviso NEW_ORDER.
+   * APAGADO por default; sólo `"true"` lo prende. 🔴 Prendido en EXACTAMENTE un servidor por integración —el que recibe sus
+   * webhooks, con su base—: el GET pasa los pedidos de READY a SENT, y dos servidores sondeando se roban los pedidos
+   * (`.claude/rules/una-sola-instancia.md`).
+   */
+  RAPPI_ORDER_POLL_ENABLED: z
+    .string()
+    .transform(val => val === 'true')
+    .default('false'),
+  // Self-onboarding (spec 2026-09-29). La llave firma el enlace y cifra el id_token del comercio;
+  // sin ella el FLUJO se niega a arrancar (igual que Uber con UBER_WEBHOOK_SIGNING_KEY), no el proceso.
+  // 🔴 Las seis de este bloque (hasta `RAPPI_WEBHOOK_BASE_URL`) son `z.string().optional()` a propósito: un fallo de
+  // este parseo hace `process.exit` de TODA la API, y una variable de una función opcional no puede tumbarla. La
+  // validación (URL http(s), barra final, largo de la llave) vive donde se USAN: `rappi.client.ts` y el flujo de conexión.
+  RAPPI_CONNECT_SIGNING_KEY: z.string().optional(),
+  RAPPI_OAUTH_REDIRECT_BASE: z.string().optional(),
+  // Client ID del login del dueño: lo crea Rappi al activar Self Onboarding y NO es el de la integración (14-oct).
+  RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX: z.string().optional(),
+  RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: z.string().optional(),
+  // ⚠️ Host de los endpoints de self-onboarding. OPCIONAL: sin ella se usa `hostDeLoginRappi` (`rappi.http.ts`, el dominio
+  // nuevo): en DEV `api.dev.rappi.com` (el que usa la doc; el login ahí se midió el 20-oct) y, en PRODUCTION de México,
+  // `api.rappi.com.mx`, que sólo lo confirma la documentación de Rappi (no se ha medido). Otro país en PRODUCTION lanza. La variable
+  // sólo SUSTITUYE ese host.
+  RAPPI_SELF_ONBOARDING_API_BASE: z.string().optional(),
+  // Base pública de NUESTROS webhooks (la URL que se le registra a Rappi en add-stores).
+  RAPPI_WEBHOOK_BASE_URL: z.string().optional(),
 
   // Base pública para la URL de retorno del OAuth de Uber (sin barra final). En local
   // es el túnel de ngrok; en prod, https://api.avoqado.io. Debe coincidir EXACTAMENTE

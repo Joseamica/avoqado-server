@@ -29,6 +29,9 @@
 
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
+import { customerAttributionActor } from '@/middlewares/customerAttribution.middleware'
+import type { CustomerAttributionActor } from '@/services/shared/customerAttributionPolicy'
+import type { Request } from 'express'
 import { linkCustomerToExistingOrder } from '@/services/tpv/fastPaymentCustomer'
 
 describe('FastPayment · cliente primario contra el índice único parcial (Postgres real)', () => {
@@ -37,6 +40,8 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
   let clienteA: string
   let clienteB: string
   let organizationId: string
+  let staffId: string
+  let actor: CustomerAttributionActor
 
   beforeAll(async () => {
     const org = await prisma.organization.create({
@@ -58,6 +63,15 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
       },
     })
     venueId = venue.id
+    const staff = await prisma.staff.create({
+      data: { email: `fastpay-manager-${Date.now()}@test.com`, firstName: 'Manager', lastName: 'Test' },
+    })
+    staffId = staff.id
+    await prisma.staffVenue.create({ data: { staffId, venueId, role: 'MANAGER' } })
+    actor = await customerAttributionActor({
+      params: { venueId },
+      authContext: { userId: staffId, venueId, orgId: organizationId, role: 'MANAGER' },
+    } as unknown as Request)
 
     const otroVenue = await prisma.venue.create({
       data: {
@@ -83,10 +97,13 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
   afterAll(async () => {
     // `Order_venueId_fkey` NO es cascade: hay que borrar las órdenes a mano antes del
     // venue (OrderCustomer sí cae por cascade desde Order).
+    if (!venueId || !otroVenueId || !organizationId) return
     const venues = [venueId, otroVenueId]
     await prisma.orderCustomer.deleteMany({ where: { order: { venueId: { in: venues } } } })
     await prisma.order.deleteMany({ where: { venueId: { in: venues } } })
     await prisma.customer.deleteMany({ where: { venueId: { in: venues } } })
+    await prisma.staffVenue.deleteMany({ where: { venueId: { in: venues } } })
+    if (staffId) await prisma.staff.delete({ where: { id: staffId } })
     await prisma.venue.deleteMany({ where: { id: { in: venues } } })
     await prisma.organization.deleteMany({ where: { id: organizationId } })
   })
@@ -105,6 +122,19 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
         taxAmount: 0,
         total: 100,
         paidAmount: 100,
+        payments: {
+          create: {
+            venueId,
+            amount: 100,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 100,
+            method: 'CASH',
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            processedById: staffId,
+          },
+        },
       },
     })
   }
@@ -126,7 +156,7 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
     const order = await ordenFast()
     await prisma.orderCustomer.create({ data: { orderId: order.id, customerId: clienteB, isPrimary: true } })
 
-    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA)
+    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA, actor)
 
     expect(link.status).toBe('CONFLICT')
     expect(link.customerId).toBe(clienteB)
@@ -146,7 +176,7 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
   it('venta realmente sin cliente ⇒ se rellena: Order.customerId + OrderCustomer primario', async () => {
     const order = await ordenFast()
 
-    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA)
+    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA, actor)
 
     expect(link.status).toBe('LINKED')
     expect(link.customerId).toBe(clienteA)
@@ -166,7 +196,7 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
     const order = await ordenFast()
     await prisma.orderCustomer.create({ data: { orderId: order.id, customerId: clienteA, isPrimary: false } })
 
-    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA)
+    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA, actor)
 
     expect(link.status).toBe('LINKED')
     const filas = await prisma.orderCustomer.findMany({ where: { orderId: order.id } })
@@ -179,7 +209,7 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
     const order = await ordenFast()
     await prisma.orderCustomer.create({ data: { orderId: order.id, customerId: clienteB, isPrimary: false } })
 
-    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA)
+    const link = await linkCustomerToExistingOrder(venueId, order.id, clienteA, actor)
 
     expect(link.status).toBe('LINKED')
     const filas = await prisma.orderCustomer.findMany({ where: { orderId: order.id }, orderBy: { addedAt: 'asc' } })
@@ -191,8 +221,8 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
   it('reintento con el MISMO cliente ⇒ idempotente (ni duplica fila ni rompe el índice)', async () => {
     const order = await ordenFast()
 
-    await linkCustomerToExistingOrder(venueId, order.id, clienteA)
-    const segundo = await linkCustomerToExistingOrder(venueId, order.id, clienteA)
+    await linkCustomerToExistingOrder(venueId, order.id, clienteA, actor)
+    const segundo = await linkCustomerToExistingOrder(venueId, order.id, clienteA, actor)
 
     expect(segundo.status).toBe('LINKED')
     const filas = await prisma.orderCustomer.findMany({ where: { orderId: order.id } })
@@ -204,7 +234,7 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
     const ajeno = await prisma.customer.create({ data: { venueId: otroVenueId, firstName: 'Ajeno', phone: '5559990000' } })
     const order = await ordenFast()
 
-    const link = await linkCustomerToExistingOrder(venueId, order.id, ajeno.id)
+    const link = await linkCustomerToExistingOrder(venueId, order.id, ajeno.id, actor)
 
     expect(link.status).toBe('NOT_FOUND')
     expect(link.customerId).toBeNull()
@@ -229,7 +259,7 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
       },
     })
 
-    const link = await linkCustomerToExistingOrder(venueId, ordenAjena.id, clienteA)
+    const link = await linkCustomerToExistingOrder(venueId, ordenAjena.id, clienteA, actor)
 
     expect(link.status).toBe('UNVERIFIED')
     const filas = await prisma.orderCustomer.findMany({ where: { orderId: ordenAjena.id } })
@@ -242,8 +272,8 @@ describe('FastPayment · cliente primario contra el índice único parcial (Post
     const order = await ordenFast()
 
     const [r1, r2] = await Promise.all([
-      linkCustomerToExistingOrder(venueId, order.id, clienteA),
-      linkCustomerToExistingOrder(venueId, order.id, clienteB),
+      linkCustomerToExistingOrder(venueId, order.id, clienteA, actor),
+      linkCustomerToExistingOrder(venueId, order.id, clienteB, actor),
     ])
 
     const estados = [r1.status, r2.status].sort()

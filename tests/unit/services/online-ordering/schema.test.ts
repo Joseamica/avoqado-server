@@ -1,7 +1,7 @@
 // tests/unit/services/online-ordering/schema.test.ts
 import fs from 'node:fs'
 import path from 'node:path'
-import { OnlineOrderPaymentMode, OnlineOrderRejectReason, OnlineOrderStatus } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderRejectReason, OnlineOrderStatus } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 describe('esquema de pedidos en línea', () => {
@@ -18,9 +18,19 @@ describe('esquema de pedidos en línea', () => {
     ])
   })
 
-  it('sólo pagar al recoger, y los motivos de rechazo', () => {
-    expect(Object.values(OnlineOrderPaymentMode)).toEqual(['PAY_AT_PICKUP'])
-    expect(Object.values(OnlineOrderRejectReason).sort()).toEqual(['CLOSED', 'OTHER', 'OUT_OF_ITEMS', 'TOO_BUSY'])
+  it('fase 2: CARD_ONLINE, PAYMENT_FAILED y los ocho estados del cargo existen', () => {
+    expect(Object.values(OnlineOrderPaymentMode)).toEqual(['PAY_AT_PICKUP', 'CARD_ONLINE'])
+    expect(Object.values(OnlineOrderRejectReason).sort()).toEqual(['CLOSED', 'OTHER', 'OUT_OF_ITEMS', 'PAYMENT_FAILED', 'TOO_BUSY'])
+    expect(Object.values(OnlineOrderChargeStatus)).toEqual([
+      'PENDING_AUTH',
+      'AUTHORIZED',
+      'CAPTURING',
+      'CAPTURED',
+      'CAPTURE_FAILED',
+      'RELEASING',
+      'RELEASED',
+      'ABANDONED',
+    ])
   })
 
   it('el mock global de Prisma conoce los modelos nuevos (R21: es una lista fija)', () => {

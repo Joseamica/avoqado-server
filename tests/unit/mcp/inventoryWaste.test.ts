@@ -10,10 +10,16 @@
  *   · el día que pide el operador es el día LOCAL del negocio, igual con el host en UTC
  *     (este archivo se corre también con `TZ=UTC`).
  */
+import { createHash } from 'crypto'
 import { Prisma, StaffRole } from '@prisma/client'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { ForbiddenError } from '@/errors/AppError'
+import { configureToolCatalog } from '@/mcp/catalog'
 import { registerInventoryWasteTools } from '@/mcp/tools/inventoryWaste'
 import { registerInventoryTools } from '@/mcp/tools/inventory'
+import { prepareWaste } from '@/services/shared/inventoryWaste.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const logWaste = jest.fn()
@@ -93,6 +99,25 @@ const RESUMEN = { reportId: 'r1', declared: '2', deducted: '2', unrecorded: '0' 
 const json = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text)
 /** Copia sin las llaves indicadas (para probar entradas a las que les falta algo). */
 const sin = (o: Record<string, unknown>, ...llaves: string[]) => Object.fromEntries(Object.entries(o).filter(([k]) => !llaves.includes(k)))
+
+/** D5 (27-oct): la confirmación que un cliente arma SIN vista previa, con la huella vieja (sha256 de datos que conoce). */
+function confirmacionFabricada() {
+  const idempotencyKey = '5d2c7e1a-9b3f-4c6d-8e2a-1f0b9c8d7e6a'
+  const { payloadHash } = prepareWaste('staff-1', {
+    itemType: 'PRODUCT',
+    itemId: 'p1',
+    quantity: '2',
+    unit: 'UNIT',
+    reasonCode: 'DROPPED',
+    idempotencyKey,
+    source: 'MCP',
+  })
+  const previewDigest = createHash('sha256')
+    .update(JSON.stringify(['log_waste', 'venue-1', idempotencyKey, payloadHash]))
+    .digest('hex')
+    .slice(0, 32)
+  return { ...entrada, confirm: true, idempotencyKey, previewDigest }
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -336,6 +361,24 @@ describe('MCP log_waste', () => {
     expect(venueHasFeatureAccess).not.toHaveBeenCalled()
   })
 
+  it('🔴 una huella calculada afuera, con datos que el cliente conoce, NO escribe (D5)', async () => {
+    await expect(tool('log_waste')(confirmacionFabricada())).rejects.toMatchObject({ code: 'WASTE_PREVIEW_MISMATCH' })
+    expect(logWaste).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una vista previa de hace más de 10 minutos ya no confirma', async () => {
+    const ahora = Date.now()
+    const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora)
+    try {
+      const previa = json(await tool('log_waste')(entrada))
+      reloj.mockReturnValue(ahora + 601_000)
+      await expect(tool('log_waste')(previa.confirmationPayload)).rejects.toMatchObject({ code: 'WASTE_PREVIEW_MISMATCH' })
+      expect(logWaste).not.toHaveBeenCalled()
+    } finally {
+      reloj.mockRestore()
+    }
+  })
+
   it('🔴 confirmar sin el artículo exacto (sólo un nombre) se rechaza sin escribir', async () => {
     const previa = json(await tool('log_waste')(entrada))
     const sinArticulo = sin(previa.confirmationPayload, 'itemId', 'itemType')
@@ -365,6 +408,42 @@ describe('MCP log_waste', () => {
     await tool('log_waste')(previa.confirmationPayload)
     expect(logWaste).toHaveBeenCalledTimes(1)
     expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+})
+
+// El catálogo apaga su propio token firmado para las tools que declaran `previewDigest`: la de log_waste es la única guarda.
+describe('log_waste por el catálogo REAL del MCP (cliente y servidor en memoria)', () => {
+  let server: McpServer
+  let client: Client
+  const llamar = (args: Record<string, unknown>) => client.callTool({ name: 'log_waste', arguments: args })
+  const texto = (r: Awaited<ReturnType<typeof llamar>>) => (r.content as Array<{ text: string }>)[0].text
+
+  beforeEach(async () => {
+    const scope = ambito(['mcp:read', 'mcp:write'])
+    server = new McpServer({ name: 'merma', version: '1' })
+    configureToolCatalog(server, scope as never)
+    registerInventoryWasteTools(server, scope as never)
+    client = new Client({ name: 'merma-dos-pasos', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+  })
+  afterEach(async () => {
+    await client.close()
+    await server.close()
+  })
+
+  it('🔴 una huella fabricada sin vista previa NO escribe', async () => {
+    expect((await llamar(confirmacionFabricada())).isError).toBe(true)
+    expect(logWaste).not.toHaveBeenCalled()
+  })
+
+  it('la vista previa copiada tal cual escribe UNA vez', async () => {
+    const previa = JSON.parse(texto(await llamar(sin(entrada, 'confirm'))))
+    expect(previa.requiresConfirmation).toBe(true)
+    const hecho = await llamar(previa.confirmationPayload)
+    expect(hecho.isError).toBeFalsy()
+    expect(JSON.parse(texto(hecho))).toEqual({ ok: true, report: RESUMEN })
+    expect(logWaste).toHaveBeenCalledTimes(1)
   })
 })
 

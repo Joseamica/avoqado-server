@@ -150,6 +150,14 @@ export function orAny(parts: Prisma.Sql[]): Prisma.Sql {
   )})`
 }
 
+// ponytail: tope fijo; de la sexta palabra en adelante no se busca (el resultado sólo se ensancha). Subirlo si alguien busca nombres más largos.
+const MAX_PALABRAS_DE_BUSQUEDA = 5
+
+/** Las palabras de una búsqueda, para casar «Ana López» con el nombre y el apellido del cliente por separado (D2, 28-oct). */
+export function palabrasDeBusqueda(term: string): string[] {
+  return term.trim().split(/\s+/).filter(Boolean).slice(0, MAX_PALABRAS_DE_BUSQUEDA)
+}
+
 /** `contains` + `mode: 'insensitive'` de Prisma → `ILIKE '%term%'`. */
 export function ilikeContains(col: Prisma.Sql, term: string): Prisma.Sql {
   return Prisma.sql`${col} ILIKE ${`%${term}%`}`

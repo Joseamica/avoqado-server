@@ -1,9 +1,9 @@
 import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { deliverPosCommand } from '../../communication/rabbitmq/commandListener'
 import { logAction } from '../dashboard/activity-log.service'
@@ -235,6 +235,13 @@ async function sanarTurnosAbiertosConCierre(tx: Prisma.TransactionClient, venueI
  */
 export type OrigenDeLaApertura = 'CAJA_MOVIL' | 'TURNO_TPV' | 'DASHBOARD'
 
+export interface TpvOpeningOperation {
+  operationId: string
+  terminalSerial: string
+  isOfflineReplay: boolean
+  declaredStaffId?: string
+}
+
 export interface AbrirTurnoDeCajaParams {
   venueId: string
   staffId: string
@@ -265,6 +272,8 @@ export interface AbrirTurnoDeCajaParams {
    * acota con `acotarOpenedAt` — nunca futuro, nunca más de 24 h atrás — y el ajuste va a la bitácora.
    */
   openedAt?: Date | null
+  /** Sólo TPV: identidad autenticada y correspondencia durable, incluidas aperturas adoptadas. */
+  tpvOperation?: TpvOpeningOperation
 }
 
 export interface AbrirTurnoDeCajaResult {
@@ -304,7 +313,14 @@ export interface AbrirTurnoDeCajaResult {
    * el turno de ENTONCES, sin relevo y sin bitácora nueva. La ruta móvil contesta 200 en vez de 201.
    */
   reintento: boolean
+  openingDisposition?: 'OWN' | 'ADOPTED'
 }
+
+const openingContractMismatch = () =>
+  new ConflictError('La llave de apertura ya corresponde a otra operación o a otros datos.', 'SHIFT_OPERATION_CONTRACT_MISMATCH')
+
+const openingPairConflict = () =>
+  new ConflictError('El turno y la caja no corresponden entre sí. Revisa la caja antes de continuar.', 'SHIFT_OPEN_PAIR_CONFLICT')
 
 /** Marca legible del relevo. Va en `Shift.notes`: quien lo lea tiene que saber que NADIE contó. */
 export const NOTA_DEL_RELEVO = 'Cerrado por relevo al abrir el turno del día siguiente. Sin conteo.'
@@ -492,6 +508,18 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     throw new BadRequestError('El fondo inicial no puede ser negativo')
   }
 
+  const tpvOperation = parametros.tpvOperation
+  if (tpvOperation) {
+    if (!/^c[a-z0-9]{24}$/.test(tpvOperation.operationId)) throw new BadRequestError('operationId debe ser un cuid v1 válido')
+    if (localId !== tpvOperation.operationId) throw openingContractMismatch()
+    if (parametros.openedAt && !Number.isFinite(parametros.openedAt.getTime())) throw new BadRequestError('openedAt no es válido')
+    const terminal = await prisma.terminal.findFirst({
+      where: { venueId, serialNumber: tpvOperation.terminalSerial },
+      select: { id: true },
+    })
+    if (!tpvOperation.terminalSerial || !terminal) throw new ForbiddenError('La terminal autenticada no pertenece a este negocio')
+  }
+
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
     select: { id: true, name: true, timezone: true, posType: true, posStatus: true },
@@ -499,7 +527,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
   if (!venue) throw new NotFoundError('Venue not found')
 
   const staffVenue = await prisma.staffVenue.findFirst({
-    where: { staffId, venueId },
+    where: { staffId, venueId, ...(tpvOperation ? { active: true, staff: { active: true } } : {}) },
     select: { posStaffId: true, staff: { select: { id: true, firstName: true, lastName: true } } },
   })
   if (!staffVenue) throw new NotFoundError('Staff member not found or not associated with this venue')
@@ -509,11 +537,83 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
   const corteDelDiaDeNegocio = businessDayStart(ahora, venue.timezone)
 
   const posIntegrado = venue.posType === 'SOFTRESTAURANT' && venue.posStatus === 'CONNECTED'
+  const operationRequest = tpvOperation
+    ? {
+        kind: 'OPEN',
+        venueId,
+        terminalSerial: tpvOperation.terminalSerial,
+        localId,
+        startingCash: fondo.toFixed(2),
+        openedAt: parametros.openedAt?.toISOString() ?? null,
+        isOfflineReplay: tpvOperation.isOfflineReplay,
+        stationId: stationId ?? null,
+      }
+    : undefined
+  const requestHash = operationRequest ? createHash('sha256').update(JSON.stringify(operationRequest)).digest('hex') : undefined
 
-  const resultadoConOutbox = await prisma.$transaction(async tx => {
+  const resultadoConOutbox = await prisma.$transaction<
+    AbrirTurnoDeCajaResult & { posCommandId?: string; anomaliasSanadas?: string[]; turnosAbiertosSanados?: string[] }
+  >(async tx => {
     // Orden global: advisory del venue → fila Shift → gaveta. Quien cierra o recupera un Shift
     // usa la misma autoridad; nadie puede observar ausencia y crear mientras otro queda CLOSING.
     await lockShiftLifecycleForVenue(tx, venueId)
+
+    if (tpvOperation) {
+      const previous = await tx.tpvShiftOperation.findFirst({ where: { id: tpvOperation.operationId, venueId } })
+      if (previous) {
+        if (previous.kind !== 'OPEN' || previous.terminalSerial !== tpvOperation.terminalSerial || previous.requestHash !== requestHash) {
+          throw openingContractMismatch()
+        }
+        if (previous.state !== 'APPLIED' || !previous.resultJson) {
+          throw new ConflictError('La apertura sigue pendiente de confirmar. Vuelve a intentar.', 'SHIFT_HANDOVER_RETRY')
+        }
+        return { ...(previous.resultJson as unknown as AbrirTurnoDeCajaResult), reintento: true }
+      }
+    }
+
+    const persistOpening = async (result: AbrirTurnoDeCajaResult) => {
+      if (!tpvOperation) return result
+      const resolved = { ...result, openingDisposition: result.cajaCreada ? ('OWN' as const) : ('ADOPTED' as const) }
+      await tx.tpvShiftOperation
+        .create({
+          data: {
+            id: tpvOperation.operationId,
+            venueId,
+            kind: 'OPEN',
+            terminalSerial: tpvOperation.terminalSerial,
+            actorStaffId: staffId,
+            requestJson: { ...operationRequest!, declaredStaffId: tpvOperation.declaredStaffId ?? null },
+            requestHash: requestHash!,
+            shiftId: result.shiftId,
+            cashDrawerSessionId: result.cashDrawerSessionId,
+            state: 'APPLIED',
+            resultJson: resolved as unknown as Prisma.InputJsonObject,
+          },
+        })
+        .catch((error: unknown) => {
+          // Otra sucursal puede tener la misma PK: nunca se consulta ni se devuelve su resultado.
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw openingContractMismatch()
+          throw error
+        })
+      await tx.activityLog.create({
+        data: {
+          staffId,
+          venueId,
+          action: 'TPV_SHIFT_OPEN_RESOLVED',
+          entity: 'TpvShiftOperation',
+          entityId: tpvOperation.operationId,
+          data: {
+            openingDisposition: resolved.openingDisposition,
+            shiftId: result.shiftId,
+            cashDrawerSessionId: result.cashDrawerSessionId,
+            declaredStaffId: tpvOperation.declaredStaffId ?? null,
+            declaredStaffIdVerified: false,
+            terminalSerial: tpvOperation.terminalSerial,
+          },
+        },
+      })
+      return resolved
+    }
 
     // ── El reintento de una apertura que YA aterrizó ──────────────────────────────────────
     //
@@ -531,6 +631,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         select: { sessionId: true, session: { select: { id: true, shiftId: true, startingAmount: true } } },
       })
       if (previa) {
+        if (tpvOperation && !previa.session.shiftId) throw openingPairConflict()
         const shiftDeLaCaja = previa.session.shiftId ?? (await turnoAbiertoDelNegocio(tx, venueId))?.id
         if (!shiftDeLaCaja) {
           // Prácticamente inalcanzable (la apertura siempre liga, o el negocio tiene turno vivo), pero
@@ -548,16 +649,17 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
           cashDrawerSessionId: previa.session.id,
           shiftId: shiftDeLaCaja,
         })
-        return {
+        return persistOpening({
           shiftId: shiftDeLaCaja,
           cashDrawerSessionId: previa.session.id,
           shiftCreado: false,
-          cajaCreada: true,
+          // Sin resultado de operación no se conoce el serial que abrió: el contrato nuevo adopta.
+          cajaCreada: !tpvOperation,
           reintento: true,
           localId,
           staffName,
           fondoAplicado: new Prisma.Decimal(previa.session.startingAmount).toString(),
-        } as AbrirTurnoDeCajaResult & { posCommandId?: string; anomaliasSanadas?: string[]; turnosAbiertosSanados?: string[] }
+        })
       }
     }
 
@@ -719,6 +821,8 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
     const fondoDeLaGavetaAbierta = caja != null ? new Prisma.Decimal(caja.startingAmount) : null
     const fondoEfectivo = fondoDeLaGavetaAbierta ?? fondoDelTurnoSinGaveta ?? fondo
 
+    if (tpvOperation && caja?.shiftId && caja.shiftId !== turnoAReusar?.id) throw openingPairConflict()
+
     // Un fondo tecleado que se descarta es la ÚNICA huella de que dos personas dijeron cosas
     // distintas del mismo dinero. Sin esto, la divergencia entre lo que se ve en pantalla y lo que
     // queda en la fila parece un bug del sistema.
@@ -851,7 +955,8 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
         gavetaDeEsteTurno = true
         // Condicional (`shiftId: null`) para que dos aperturas simultáneas no choquen contra el
         // único: la segunda encuentra 0 filas y sigue, en vez de reventar.
-        await tx.cashDrawerSession.updateMany({ where: { id: cashDrawerSessionId, shiftId: null }, data: { shiftId } })
+        const linked = await tx.cashDrawerSession.updateMany({ where: { id: cashDrawerSessionId, shiftId: null }, data: { shiftId } })
+        if (tpvOperation && linked.count !== 1) throw openingPairConflict()
       }
     } else if (cajaYaLigadaA !== shiftId) {
       logger.warn('[TURNO DE CAJA] El cajón abierto ya pertenece a otro turno; se conserva su liga', {
@@ -864,6 +969,7 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       // Ya estaban ligados de antes: la pareja que existe en producción desde ayer.
       gavetaDeEsteTurno = true
     }
+    if (tpvOperation && !gavetaDeEsteTurno) throw openingPairConflict()
 
     // ── QUE LOS DOS CIERRES DIGAN EL MISMO NÚMERO ─────────────────────────────────────────
     //
@@ -940,18 +1046,28 @@ export async function abrirTurnoDeCaja(parametros: AbrirTurnoDeCajaParams): Prom
       posCommandId = command.id
     }
 
-    return {
+    const actualOpening =
+      tpvOperation && !cajaCreada
+        ? await tx.cashDrawerEvent.findFirst({
+            where: { venueId, sessionId: cashDrawerSessionId, type: 'OPEN' },
+            select: { localId: true },
+          })
+        : null
+    const result = await persistOpening({
       shiftId,
       cashDrawerSessionId,
       shiftCreado,
       cajaCreada,
       reintento: false,
       // La llave sólo queda guardada si la caja NACIÓ aquí: una caja ligada conserva la suya.
-      localId: cajaCreada ? localId : null,
+      localId: cajaCreada ? localId : (actualOpening?.localId ?? null),
       staffName,
       fondoAplicado: fondoEfectivo.toString(),
       ...(turnoAlineadoDesde !== undefined ? { turnoAlineadoDesde } : {}),
       ...(relevo ? { relevo } : {}),
+    })
+    return {
+      ...result,
       ...(posCommandId ? { posCommandId } : {}),
       ...(anomaliasSanadas.length > 0 ? { anomaliasSanadas } : {}),
       ...(turnosAbiertosSanados.length > 0 ? { turnosAbiertosSanados } : {}),

@@ -14,12 +14,14 @@ import {
   rescheduleAppointmentReservation,
   getReservationsCalendar,
   handleNoShowDepositForfeit,
+  NO_SHOW_REFUND_REASON_PREFIX,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { countAppointmentOccupancy } from '@/services/dashboard/reservationAvailability.service'
 import * as reservationAvailabilityService from '@/services/dashboard/reservationAvailability.service'
 import * as appointmentStaffAssignmentService from '@/services/dashboard/appointmentStaffAssignment.service'
 import * as calendarOutboxService from '@/services/google-calendar/outbox.service'
 import * as reservationSettingsService from '@/services/dashboard/reservationSettings.service'
+import * as creditPackPublicService from '@/services/dashboard/creditPack.public.service'
 import * as appointmentWindowService from '@/services/reservation/resolveAppointmentWindow'
 import * as appointmentSlotHoldService from '@/services/reservation/appointmentSlotHold.service'
 import * as basePlanService from '@/services/access/basePlan.service'
@@ -1773,6 +1775,64 @@ describe('Reservation Dashboard Service', () => {
       await expect(getReservationById(VENUE_ID, 'nonexistent')).rejects.toThrow(NotFoundError)
     })
 
+    describe('D4 · la corrección de un «No asistió» en el detalle', () => {
+      const base = { pending: ['CLASS_UNPAID'], resolvedAt: null, source: 'DASHBOARD', createdAt: new Date('2026-10-28T15:00:00Z') }
+      const detalle = (correccion: unknown) =>
+        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CHECKED_IN', noShowCorrection: correccion }))
+
+      it('trae la corrección y SU autor («Ana G.»), con una sola consulta extra y acotada', async () => {
+        detalle({ ...base, actorStaffId: 'staff-1' })
+        prismaMock.staff.findUnique.mockResolvedValue({ firstName: 'Ana', lastName: 'gómez' } as any)
+
+        const result = await getReservationById(VENUE_ID, 'res-1')
+
+        expect(result.noShowCorrection).toEqual({ ...base, actorName: 'Ana G.' })
+        expect(result.noShowCorrection).not.toHaveProperty('actorStaffId')
+        const { include } = prismaMock.reservation.findFirst.mock.calls[0][0]
+        expect(include.noShowCorrection).toEqual({
+          select: { pending: true, resolvedAt: true, source: true, createdAt: true, actorStaffId: true },
+        })
+        expect(include.customer).toBeDefined() // el resto del detalle no cambia
+        expect(prismaMock.staff.findUnique).toHaveBeenCalledTimes(1)
+        expect(prismaMock.staff.findUnique).toHaveBeenCalledWith({ where: { id: 'staff-1' }, select: { firstName: true, lastName: true } })
+      })
+
+      it('el nombre lleva la inicial en mayúscula y sin apellido queda sólo el nombre', async () => {
+        detalle({ ...base, actorStaffId: 'staff-1' })
+        prismaMock.staff.findUnique.mockResolvedValue({ firstName: ' Ana ', lastName: ' gómez ruiz ' } as any)
+        expect((await getReservationById(VENUE_ID, 'res-1')).noShowCorrection?.actorName).toBe('Ana G.')
+
+        detalle({ ...base, actorStaffId: 'staff-1' })
+        prismaMock.staff.findUnique.mockResolvedValue({ firstName: 'Ana', lastName: '' } as any)
+        expect((await getReservationById(VENUE_ID, 'res-1')).noShowCorrection?.actorName).toBe('Ana')
+      })
+
+      it('🔴 si la corrigió el kiosco (sin actorStaffId) el autor es null y no consulta personal', async () => {
+        detalle({ ...base, source: 'KIOSK', actorStaffId: null })
+
+        const result = await getReservationById(VENUE_ID, 'res-1')
+
+        expect(result.noShowCorrection).toEqual({ ...base, source: 'KIOSK', actorName: null })
+        expect(prismaMock.staff.findUnique).not.toHaveBeenCalled()
+      })
+
+      it('si el personal ya no existe, el autor es null (no truena el detalle)', async () => {
+        detalle({ ...base, actorStaffId: 'staff-borrado' })
+        prismaMock.staff.findUnique.mockResolvedValue(null)
+
+        expect((await getReservationById(VENUE_ID, 'res-1')).noShowCorrection).toEqual({ ...base, actorName: null })
+      })
+
+      it('una reserva sin corrección no consulta personal y no inventa la llave', async () => {
+        detalle(null)
+
+        const result = await getReservationById(VENUE_ID, 'res-1')
+
+        expect(result.noShowCorrection).toBeNull()
+        expect(prismaMock.staff.findUnique).not.toHaveBeenCalled()
+      })
+    })
+
     // Regression — multi-service appointments store the lead service in
     // productId and the full ordered list in productIds[] (scalar text[], not a
     // relation). Before `attachServices`, only the lead `product` was returned
@@ -1939,6 +1999,27 @@ describe('Reservation Dashboard Service', () => {
     })
 
     describe('markNoShow', () => {
+      it('devuelve la clase sólo si la reserva sigue en NO_SHOW (onlyIfReservationStatus)', async () => {
+        jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue({
+          ...makeReservationSettings(),
+          cancellation: { ...makeReservationSettings().cancellation, creditNoShowRefund: true },
+        })
+        const refund = jest
+          .spyOn(creditPackPublicService, 'refundCreditsForReservation')
+          .mockResolvedValue({ creditsRefunded: 1, policyApplied: 'ALWAYS' })
+        prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'NO_SHOW' }))
+
+        await markNoShow(VENUE_ID, 'res-1', STAFF_ID)
+
+        expect(refund).toHaveBeenCalledWith(
+          expect.objectContaining({ venueId: VENUE_ID, reservationId: 'res-1', onlyIfReservationStatus: 'NO_SHOW' }),
+        )
+        // D4: «Sí llegó» re-descuenta lo que se devolvió con ESTE prefijo; renombrarlo en un solo lado lo rompería en silencio.
+        expect(NO_SHOW_REFUND_REASON_PREFIX).toBe('No-show refund')
+        expect(refund.mock.calls[0][0].reasonPrefix).toBe(NO_SHOW_REFUND_REASON_PREFIX)
+      })
+
       it('should transition CONFIRMED -> NO_SHOW', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
         prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'NO_SHOW' }))
@@ -3363,12 +3444,34 @@ describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)
     // getReservationSettings reads reservationSettings.findUnique; a row with
     // forfeitDeposit:true maps to cancellation.forfeitDeposit = true.
     prismaMock.reservationSettings.findUnique.mockResolvedValue({ venueId: VENUE_ID, forfeitDeposit: true } as any)
+    prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
 
     await handleNoShowDepositForfeit('res-1', VENUE_ID)
 
-    expect(prismaMock.reservation.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'res-1' }, data: { depositStatus: 'FORFEITED' } }),
+    // Condicionada: sólo retiene si la reserva SIGUE en NO_SHOW con el depósito pagado (D4, Task 0).
+    expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith({
+      where: { id: 'res-1', venueId: VENUE_ID, status: 'NO_SHOW', depositStatus: 'PAID' },
+      data: { depositStatus: 'FORFEITED' },
+    })
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+  })
+
+  it('no retiene el depósito si la reserva ya no está en NO_SHOW (la corrigieron a CHECKED_IN antes)', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1', confirmationCode: 'RES-ABC', depositStatus: 'PAID' })
+    prismaMock.reservationSettings.findUnique.mockResolvedValue({ venueId: VENUE_ID, forfeitDeposit: true } as any)
+    // La reserva ya es CHECKED_IN: la condición no encuentra fila.
+    prismaMock.reservation.updateMany.mockResolvedValue({ count: 0 } as any)
+    const info = jest.spyOn(logger, 'info')
+    const error = jest.spyOn(logger, 'error')
+
+    await expect(handleNoShowDepositForfeit('res-1', VENUE_ID)).resolves.toBeUndefined()
+
+    expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ status: 'NO_SHOW', depositStatus: 'PAID' }) }),
     )
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(error).not.toHaveBeenCalled()
+    expect(info).not.toHaveBeenCalledWith(expect.stringContaining('Forfeited deposit'))
   })
 
   it('does NOT touch the deposit when forfeitDeposit is off (no auto-refund on no-show)', async () => {
@@ -3379,6 +3482,7 @@ describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)
     await handleNoShowDepositForfeit('res-1', VENUE_ID)
 
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
   })
 
   it('does nothing when there is no PAID deposit', async () => {
@@ -3387,6 +3491,7 @@ describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)
     await handleNoShowDepositForfeit('res-1', VENUE_ID)
 
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
     // Should not even need to load settings when there's no paid deposit.
     expect(prismaMock.reservationSettings.findUnique).not.toHaveBeenCalled()
   })

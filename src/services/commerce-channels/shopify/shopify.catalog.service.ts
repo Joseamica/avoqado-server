@@ -249,7 +249,7 @@ export async function confirmarBajas(
   return { ok: true, data: bajas }
 }
 
-/** Sin acentos (DUEÑAS → DUENAS); lo demás que `SKU_REGEX` no acepta se vuelve «-». El original queda en `originalSku`. */
+/** Sin acentos (DUEÑAS → DUENAS); lo que no sea letra, número, - o _ se vuelve «-» (más estricta que `SKU_REGEX` a propósito: no cambia lo ya sincronizado). El original queda en `originalSku`. */
 export function normalizeSku(raw: string | null | undefined): string | null {
   const s = sinAcentos(raw ?? '')
     .trim()

@@ -20,7 +20,8 @@ import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
-import AppError, { BadRequestError, ConflictError } from './errors/AppError'
+import AppError, { BadRequestError, ConflictError, ServiceUnavailableError } from './errors/AppError'
+import { OrderTableTopologyChanged } from './services/shared/tableOrderLock'
 import { GiftCardError } from './services/giftCards/giftCardErrors'
 import {
   AFILIACION_EN_VARIOS_SLOTS,
@@ -32,6 +33,7 @@ import {
   PRODUCTO_CON_VENTAS_NO_SE_BORRA,
   esProductoConVentas,
 } from './services/dashboard/product.dashboard.service'
+import { comoErrorDeUsuarioDemo } from './services/demo/candadoDemo'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleDirectoryMcpRequest, handleMcpRequest } from './mcp/server'
@@ -53,6 +55,12 @@ import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.
 import { handlePassWebhook } from './controllers/aggregators/passWebhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import {
+  activarRappiOAuth,
+  rappiOAuthCallback,
+  resultadoRappiOAuth,
+  startRappiOAuth,
+} from './controllers/delivery-channels/rappi.oauth.controller'
+import {
   handleShopifyWebhook,
   SHOPIFY_WEBHOOK_MAX_BYTES,
   SHOPIFY_WEBHOOK_ROUTE,
@@ -65,6 +73,7 @@ import settlementReportRoutes from './routes/settlement-report.routes'
 import { authenticateTokenMiddleware } from './middlewares/authenticateToken.middleware'
 import { authorizeRole } from './middlewares/authorizeRole.middleware'
 import { redactUrlSecrets, requestLoggerMiddleware } from './middlewares/requestLogger'
+import { requireWhatsappSignatureHeader } from './middlewares/whatsappSignature.middleware'
 import { isJsonBodyParseError } from './utils/httpErrors'
 
 // Types (could be moved to a central types file)
@@ -167,6 +176,11 @@ app.post('/api/v1/webhooks/aggregators/:provider/:token/:kind', express.raw({ ty
 // por el `app.use('/api/v1/webhooks', requestLoggerMiddleware)` de arriba.
 app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOOK_MAX_BYTES }), handleShopifyWebhook)
 
+// WhatsApp POST, before the general parser below (which then skips it): a coexistence history delivery from Meta «could
+// describe thousands of messages», past the default 100 KB. 5 MB ≈ 12k messages and matches the server-wide unsigned cap;
+// a 413 on this route in the logs means Meta sent a bigger chunk and this has to grow.
+app.post('/api/v1/webhooks/whatsapp', requireWhatsappSignatureHeader, express.raw({ type: 'application/json', limit: '5mb' }))
+
 app.use(
   '/api/v1/webhooks',
   express.raw({ type: 'application/json' }), // Raw body parser for Stripe signature verification
@@ -212,6 +226,18 @@ app.post(
   express.urlencoded({ extended: false, limit: '16kb' }),
   activarUberOAuth,
 )
+
+// Self-onboarding de Rappi (spec 2026-09-29). PÚBLICAS a propósito, igual que las de Uber: Rappi
+// redirige aquí el navegador del comerciante sin sesión nuestra; la prueba de origen es la firma.
+app.get('/api/v1/delivery/rappi/oauth/start', requestLoggerMiddleware, startRappiOAuth)
+app.get('/api/v1/delivery/rappi/oauth/callback', requestLoggerMiddleware, rappiOAuthCallback)
+app.post(
+  '/api/v1/delivery/rappi/oauth/activate',
+  requestLoggerMiddleware,
+  express.urlencoded({ extended: false, limit: '16kb' }),
+  activarRappiOAuth,
+)
+app.get('/api/v1/delivery/rappi/oauth/result', requestLoggerMiddleware, resultadoRappiOAuth)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).
@@ -308,6 +334,9 @@ app.get('/health', (req: ExpressRequest, res: ExpressResponse) => {
 app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressResponse) => {
   const correlationId = (req as any).correlationId || 'N/A'
   const startTime = Date.now()
+  // Nunca se guarda (ni en el navegador ni en un proxy): las apps la usan para saber si el servidor contesta AHORA (el tope del
+  // cierre de caja que espera a sus ventas sin red, 24-oct-2026). Una respuesta vieja diría «sano» con el servidor caído.
+  res.set('Cache-Control', 'no-store')
 
   try {
     // Import prisma lazily to avoid circular dependency
@@ -451,6 +480,20 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
   // duros de demo quitan antes las órdenes); si una futura llega, responde 409 con su mensaje, nunca un 500 anónimo.
   if (esProductoConVentas(err)) {
     err = new ConflictError(MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  }
+
+  // hz:f26b3afc:D5: la base rechaza que un usuario demo (contraseña pública) quede en un negocio real, venga del SUPERADMIN,
+  // del panel o de cualquier camino que escriba membresías: 400 con su motivo, nunca un 500 anónimo.
+  err = comoErrorDeUsuarioDemo(err)
+
+  // D9 (26-oct): la cuenta o la mesa cambiaron en el mismo instante (`lockTableOrderScope`); se resuelve reintentando. Por las
+  // rutas sin protocolo de operación salía 500 anónimo. 503 y no 409: las apps ya tratan un 5xx/503 como «reintenta» o lo
+  // encolan, y un 409 haría rendirse a la cancelación durable de ANDROID. Sin `Retry-After` (OkHttp reenvía solo con 0).
+  if (err instanceof OrderTableTopologyChanged) {
+    err = new ServiceUnavailableError(
+      'La cuenta o la mesa cambiaron en ese mismo momento. Intenta de nuevo.',
+      'ORDER_TABLE_TOPOLOGY_CHANGED',
+    )
   }
 
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }

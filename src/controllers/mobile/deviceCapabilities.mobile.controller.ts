@@ -1,11 +1,10 @@
-import { TerminalType } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 
 import { BadRequestError, ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '../../errors/AppError'
 import { readDeviceIdentityFromRequest } from '../../middlewares/registerDevice.middleware'
 import type { ReportDeviceCapabilitiesInput } from '../../schemas/mobile/deviceCapabilities.mobile.schema'
+import { recordCapabilityReport } from '../../services/mobile/deviceCapabilityReport.service'
 import { ensureDeviceTerminal } from '../../services/mobile/deviceRegistry.service'
-import prisma from '../../utils/prismaClient'
 
 /**
  * Recibe hechos técnicos del POS Android. No activa el dispositivo, no concede
@@ -39,27 +38,19 @@ export async function reportDeviceCapabilities(req: Request, res: Response, next
       )
     }
 
-    const body = req.body as ReportDeviceCapabilitiesInput
     const observedAt = new Date()
 
-    // El binding vive en la MISMA escritura. Una lectura previa seguida de update por
+    // El binding vive en la MISMA escritura (dentro del servicio). Una lectura previa seguida de update por
     // id dejaría una ventana TOCTOU si el dispositivo cambia de venue/UID entre ambas.
-    const updateResult = await prisma.terminal.updateMany({
-      where: {
-        id: registration.terminalId,
-        venueId,
-        deviceUid: identity.deviceUid,
-        type: TerminalType.POS_ANDROID,
-      },
-      data: {
-        customerDisplayPresent: body.customerDisplay.present,
-        customerDisplayInvertible: body.customerDisplay.invertible,
-        displayModeProtocolVersion: body.displayModeProtocolVersion,
-        capabilitiesObservedAt: observedAt,
-        lastHeartbeat: observedAt,
-      },
+    const resultado = await recordCapabilityReport({
+      venueId,
+      terminalId: registration.terminalId,
+      deviceUid: identity.deviceUid,
+      staffId,
+      body: req.body as ReportDeviceCapabilitiesInput,
+      now: observedAt,
     })
-    if (updateResult.count !== 1) {
+    if (resultado === 'SIN_BINDING') {
       return next(new ForbiddenError('El dispositivo no pertenece a este venue o no es un POS Android'))
     }
 

@@ -47,7 +47,8 @@ const SITIOS_MEDIDOS = [
   'services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction',
   'services/mobile/order.mobile.service.ts#mergeOrdersInTransaction',
   'services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction',
-  'services/wallet/redeemStampReward.service.ts#redeemStampReward',
+  // Tarjetas 1b S2b: el canje se extrajo SIN cambiarlo a `canjearPremioEnTx` (la envoltura `redeemStampReward` sólo abre la tx).
+  'services/wallet/redeemStampReward.service.ts#canjearPremioEnTx',
   'services/mobile/service-charge.mobile.service.ts#applyServiceChargeInTransaction',
   'services/mobile/service-charge.mobile.service.ts#removeServiceChargeInTransaction',
   'services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceChargesInTransaction',

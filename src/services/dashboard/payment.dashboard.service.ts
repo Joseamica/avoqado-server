@@ -3,6 +3,7 @@
 import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
+import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchanges/exchangeMarks'
 import prisma from '../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
@@ -41,6 +42,19 @@ export function normalizeNativePaymentMethods(methods?: readonly string[]): stri
   if (!methods) return undefined
   const normalized = methods.flatMap(method => (method === 'CARD' ? ['CREDIT_CARD', 'DEBIT_CARD'] : [method]))
   return Array.from(new Set(normalized))
+}
+
+/**
+ * D-3 (saldo a favor): el medio de sistema de la fila (`STORE_CREDIT`, `GIFT_CARD`, `EXCHANGE_CREDIT`) o null, como campo OPCIONAL
+ * `tenderSystemKind` (el mismo nombre que el detalle del Cambio, `exchangeDetail.ts`). Sin él, el panel enseñaba una devolución a saldo
+ * a favor como «Otro» (`method = OTHER`). Se lee en la MISMA consulta (este `select` en el `include`) y sólo viaja el campo plano.
+ */
+const MEDIO_DE_SISTEMA = { select: { systemKind: true } } as const
+function conMedioDeSistema<T extends { tenderType?: { systemKind: string | null } | null }>(
+  p: T,
+): Omit<T, 'tenderType'> & { tenderSystemKind: string | null } {
+  const { tenderType, ...resto } = p
+  return { ...resto, tenderSystemKind: tenderType?.systemKind ?? null }
 }
 
 export async function getPaymentsData(
@@ -101,6 +115,7 @@ export async function getPaymentsData(
         },
       },
       transactionCost: true,
+      tenderType: MEDIO_DE_SISTEMA,
     }
 
     // Pre-flight: if the user's method/source filter cannot possibly match any
@@ -146,7 +161,7 @@ export async function getPaymentsData(
       newRows: newPaymentsWindow.length,
     })
 
-    const merged = [...newPaymentsWindow, ...filteredLegacyRows].sort(
+    const merged = [...newPaymentsWindow.map(conMedioDeSistema), ...filteredLegacyRows].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime() || b.id.localeCompare(a.id),
     )
     const combinedTotal = newPaymentsTotal + legacy.total
@@ -197,6 +212,7 @@ export async function getPaymentsData(
           },
         },
         transactionCost: true, // Include profit/cost information for SUPERADMIN
+        tenderType: MEDIO_DE_SISTEMA, // D-3: sólo el medio de sistema (`tenderSystemKind`)
       },
       // Desempate por id: con el tope de 100 el cliente pagina de verdad, y dos pagos
       // con el mismo createdAt cambiaban de página entre peticiones (offset inestable).
@@ -211,7 +227,7 @@ export async function getPaymentsData(
 
   // Devolvemos el objeto con el formato esperado
   return {
-    data: payments,
+    data: payments.map(conMedioDeSistema),
     meta: {
       total,
       page,
@@ -360,6 +376,7 @@ export async function getPaymentById(venueId: string, paymentId: string) {
       },
       transactionCost: true, // Include profit/cost information
       saleVerification: true, // Pre-payment verification photos
+      tenderType: MEDIO_DE_SISTEMA, // D-3: sólo el medio de sistema (`tenderSystemKind`)
     },
   })
 
@@ -370,12 +387,13 @@ export async function getPaymentById(venueId: string, paymentId: string) {
   // C2 A-R4 (aditivo, opcional): lo que cobró cada renglón completo, con el MISMO cargador que usa el escritor de devoluciones. Se omite
   // si la venta no es atribuible (A-R3). El dashboard usa `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor.
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
-  if (!payment.order) return payment
-  const items = payment.order.items.map(it => {
+  const conMedio = conMedioDeSistema(payment)
+  if (!conMedio.order) return conMedio
+  const items = conMedio.order.items.map(it => {
     const chargedTotal = chargedTotalDe(cobrado, it.id)
     return chargedTotal === undefined ? it : { ...it, chargedTotal }
   })
-  return { ...payment, order: { ...payment.order, items } }
+  return { ...conMedio, order: { ...conMedio.order, items } }
 }
 
 /**
@@ -442,6 +460,9 @@ function camposQueCambian(
     return valor !== vigente[campo]
   })
 }
+// Cambio de producto (spec 2026-10-20 §6.2, §6.7): de un cobro que es dinero de un cambio sólo se rechaza lo ECONÓMICO; los datos
+// de referencia (tarjeta, autorización, folio, modo de lectura) se siguen corrigiendo.
+const CAMPOS_ECONOMICOS: ReadonlySet<string> = new Set(['amount', 'tipAmount', 'status', 'method'])
 // Codex R14-2: el REEMBOLSO de un cobro del protocolo se protege por su ORIGINAL; el 409 lo nombra (`originalPaymentId`) — mismo
 // código, detalle aditivo.
 const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPaymentId: string | null = null) =>
@@ -451,6 +472,21 @@ const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPa
       : 'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe, propina, estado, método e identidad sólo cambian por reembolso, anulación o corrección acreditada, no por edición directa.',
     'PAYMENT_PROTECTED_BY_COST_PROTOCOL',
     { paymentId, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO, ...(originalPaymentId ? { originalPaymentId } : {}) },
+  )
+
+// Un cobro que YA movió dinero (COMPLETED, o REFUNDED) no cambia su dinero ni se borra desde el panel: se corrige con Reembolso
+// (founder 23-oct, «como Square»). Este camino cambiaba la fila Payment sin recalcular la cuenta — una venta de $100 PAID cuyo
+// cobro se corregía a $50 seguía PAID «debe $0» — y cambiaba `method` sin su `fundsFlow`, así que un CASH → tarjeta seguía
+// contando en el cajón. Lo que no mueve dinero (marca, últimos dígitos, autorización, referencia, modo de lectura) sí se corrige.
+const COBRO_YA_HECHO = new Set<string>([TransactionStatus.COMPLETED, TransactionStatus.REFUNDED])
+const CAMPOS_DE_DINERO = new Set<string>(['amount', 'tipAmount', 'status', 'method'])
+const cobroYaHecho = (paymentId: string, fields: string[]) =>
+  new ConflictError(
+    fields.includes('delete')
+      ? 'Un cobro ya hecho no se borra. Para devolver dinero usa Reembolso.'
+      : 'Este cobro ya se hizo: su importe, propina, estado y forma de pago no se corrigen aquí. Para devolver dinero usa Reembolso.',
+    'PAYMENT_SETTLED_USE_REFUND',
+    { paymentId, fields },
   )
 
 const PROYECCION_DEL_PAYMENT = {
@@ -498,6 +534,18 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
         payment: await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, include: PROYECCION_DEL_PAYMENT }),
       }
     }
+    // Bajo el mismo mutex: el dinero de un cambio (`exchangeProtectedPayments`) no cambia de importe, propina, estado ni método.
+    const economicos = camposQueCambian(vigente, data).filter(campo => CAMPOS_ECONOMICOS.has(campo))
+    if (economicos.length > 0 && (await exchangeProtectedPayments(tx, [paymentId])).has(paymentId)) {
+      throw paymentProtectedByExchange(paymentId, economicos)
+    }
+
+    // Decide sobre la fila RELEÍDA bajo el mutex: mandar los mismos valores (el formulario manda todo) no es un cambio.
+    const yaHecho = COBRO_YA_HECHO.has(vigente.status)
+    if (yaHecho) {
+      const dinero = camposQueCambian(vigente, data).filter(campo => CAMPOS_DE_DINERO.has(campo))
+      if (dinero.length > 0) throw cobroYaHecho(paymentId, dinero)
+    }
 
     // This endpoint corrects bookkeeping fields; it is not a capture rail. Letting
     // a client promote PENDING/FAILED/PROCESSING to COMPLETED here would create
@@ -523,10 +571,11 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
     const updated = await tx.payment.update({
       where: { id: paymentId },
       data: {
-        ...(data.amount !== undefined && { amount: data.amount }),
-        ...(data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
-        ...(data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
-        ...(data.method !== undefined && { method: data.method }),
+        // En un cobro ya hecho los campos de dinero llegan iguales (si no, ya se rechazó): no se reescriben.
+        ...(!yaHecho && data.amount !== undefined && { amount: data.amount }),
+        ...(!yaHecho && data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
+        ...(!yaHecho && data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
+        ...(!yaHecho && data.method !== undefined && { method: data.method }),
         ...(data.cardBrand !== undefined && { cardBrand: data.cardBrand }),
         ...(data.last4 !== undefined && { last4: data.last4 }),
         ...(data.maskedPan !== undefined && { maskedPan: data.maskedPan }),
@@ -583,6 +632,12 @@ export async function deletePayment(venueId: string, paymentId: string): Promise
     if ((await cobrosDelProtocolo(tx, [paymentId])).has(paymentId)) {
       throw protegidoPorElProtocolo(paymentId, ['delete'], candado.originalPaymentId)
     }
+    // Cambio de producto (spec 2026-10-20 §6.2, §6.7): el dinero de un cambio tampoco se borra.
+    if ((await exchangeProtectedPayments(tx, [paymentId])).has(paymentId)) {
+      throw paymentProtectedByExchange(paymentId, ['delete'])
+    }
+    const vigente = await tx.payment.findFirst({ where: { id: paymentId, venueId }, select: { status: true } })
+    if (vigente && COBRO_YA_HECHO.has(vigente.status)) throw cobroYaHecho(paymentId, ['delete'])
     // Delete transaction cost if exists
     if (payment.transactionCost) {
       await tx.transactionCost.delete({

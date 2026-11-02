@@ -9,12 +9,14 @@ import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
 import { splitPaymentIvaByOrderRates, mezclaDesdeTasas } from './ivaMath'
 import { grossByRateFromOrder, ordenParaIvaSelect, type OrdenParaIva, type RenglonParaIva } from './ivaDeOrden'
-import { paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
+import { esDevolucionASaldoAFavor, paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
 import logger from '../../config/logger'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -67,8 +69,9 @@ export interface GenerateResult {
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
   /**
-   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta y lo pagado con saldo—, porque su
-   * póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta, lo pagado con saldo y la devolución a
+   * saldo a favor—, porque su póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con
+   * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
    */
   pendientesDeRevision: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
@@ -166,6 +169,7 @@ export function buildRefundLines(
 
 /** ¿El pago es elegible para auto-postear? (espejo de las exclusiones del read-model de ingresos). */
 export function isEligible(p: PaymentRow): boolean {
+  if (isExchangeCreditTenderKind(p.tenderType?.systemKind)) return false // el par sólo transfiere crédito, no dinero
   if (p.type === PaymentType.TEST) return false // pagos de prueba no son contables
   if (p.type === PaymentType.ADJUSTMENT) return false // semántica ambigua → revisión manual
   if (p.method === PaymentMethod.CRYPTOCURRENCY) return false // no-MXN → manual (diferido)
@@ -181,6 +185,7 @@ export function isEligible(p: PaymentRow): boolean {
  */
 export const WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN = {
   AND: [
+    WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
     { status: TransactionStatus.COMPLETED },
     // NULL-safe: `type` es opcional y una fila vieja sin tipo cuenta como venta; `notIn` sola la descartaría (NOT IN con NULL).
     { OR: [{ type: null }, { type: { notIn: [PaymentType.TEST, PaymentType.ADJUSTMENT] } }] },
@@ -200,12 +205,19 @@ export const WHERE_PAGO_CONTABILIZABLE = {
   AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { order: { status: { not: OrderStatus.CANCELLED } } }],
 } satisfies Prisma.PaymentWhereInput
 
-/** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */
+/**
+ * ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo) o una devolución a saldo a favor? Mismo criterio que
+ * `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE` (la lista del contador; S8b la alineó).
+ * Saldo a favor (spec 2026-10-30 §5.3): la devolución a saldo también, porque `buildRefundLines` la llevaría contra el banco
+ * (BANK_RECEIPT) y el dinero nunca salió de ahí; su póliza (pasivo del sobre) es la fase 2 de la contabilidad de tarjetas.
+ */
 export function esPendienteDeRevisionContable(p: {
+  type?: PaymentType | null
   tenderType?: { systemKind: string | null } | null
   order?: { items?: Array<{ giftCardId?: string | null }> } | null
 }): boolean {
   if (isGiftCardTenderKind(p.tenderType?.systemKind)) return true
+  if (esDevolucionASaldoAFavor(p)) return true
   return (p.order?.items ?? []).some(it => !!it.giftCardId)
 }
 

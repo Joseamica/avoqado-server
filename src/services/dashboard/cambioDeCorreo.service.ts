@@ -127,7 +127,15 @@ export async function confirmarCambioDeCorreo(token: string): Promise<{ correoNu
   // CAS sobre el correo anterior: dos pestañas con el mismo enlace cambian una sola vez.
   const { count } = await prisma.staff.updateMany({
     where: { id: staff.id, email: enlace.correoAnterior },
-    data: { email: enlace.correoNuevo, emailVerified: true },
+    // Un código o un link de recuperación emitidos para el buzón ANTERIOR no deben abrir la cuenta nueva.
+    data: {
+      email: enlace.correoNuevo,
+      emailVerified: true,
+      emailVerificationCode: null,
+      emailVerificationExpires: null,
+      resetToken: null,
+      resetTokenExpiry: null,
+    },
   })
   if (count === 0) {
     throw new BadRequestError('Este enlace ya no es válido. Pide el cambio de correo otra vez.', 'EMAIL_CHANGE_LINK_STALE')

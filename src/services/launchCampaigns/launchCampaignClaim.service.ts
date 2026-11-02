@@ -47,6 +47,20 @@ export async function claimLaunchCampaign(
       return vacio
     }
 
+    // D12 (28-oct): el «último toque» reemplaza los UTMs, pero el referente (de dónde llegó al registro) es del alta y se
+    // conserva. Lectura previa sin candado a propósito: la atribución vale menos que la cuenta.
+    const traeUtm = !!utm && Object.keys(utm).length > 0
+    let referrerPrevio: unknown
+    if (traeUtm) {
+      try {
+        const previo = await prisma.onboardingProgress.findUnique({ where: { organizationId }, select: { acquisitionUtm: true } })
+        referrerPrevio = (previo?.acquisitionUtm as Record<string, unknown> | null | undefined)?.referrer
+      } catch {
+        referrerPrevio = undefined
+      }
+    }
+    const utmNuevo = traeUtm ? { ...utm, ...(typeof referrerPrevio === 'string' ? { referrer: referrerPrevio } : {}) } : undefined
+
     const r = await prisma.onboardingProgress.updateMany({
       where: {
         organizationId,
@@ -61,7 +75,7 @@ export async function claimLaunchCampaign(
         acquisitionSource: source,
         // Sólo se escriben UTMs cuando de verdad vienen: un `{}` en cada alta orgánica no dice
         // nada y además borraría los que la visita anterior sí traía.
-        ...(utm && Object.keys(utm).length > 0 ? { acquisitionUtm: utm as Prisma.InputJsonValue } : {}),
+        ...(utmNuevo ? { acquisitionUtm: utmNuevo as Prisma.InputJsonValue } : {}),
       },
     })
 

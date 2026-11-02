@@ -13,7 +13,7 @@ import { encenderBajoCandados, prepararEncendido } from '../fiscal/encendidoIva.
 import { isDeadlockError } from '../../utils/serializableRetry'
 import { ETIQUETA_DE_IVA, TRATAMIENTOS_OFRECIDOS_V1, tuplaDesdeTratamiento } from '../fiscal/ivaTratamiento'
 import { ensureQuantityInventoryRow } from '../dashboard/quantityInventoryRow'
-import { SKU_REGEX } from '../../schemas/dashboard/menu.schema'
+import { SKU_REGEX, skuFormatMessageFor } from '../../schemas/dashboard/menu.schema'
 import {
   MAX_OPTIONS,
   MAX_VALUES_PER_OPTION,
@@ -154,8 +154,7 @@ async function allocateSkus(
   wanted: Array<{ explicit: string | null; suggested: string }>,
 ): Promise<string[]> {
   const explicitos = wanted.map(w => w.explicit?.trim()).filter((s): s is string => !!s)
-  for (const s of explicitos)
-    if (!SKU_REGEX.test(s)) throw new BadRequestError(`El SKU «${s}» sólo puede llevar letras, números, guion y guion bajo.`)
+  for (const s of explicitos) if (!SKU_REGEX.test(s)) throw new BadRequestError(skuFormatMessageFor(s))
   if (new Set(explicitos).size !== explicitos.length) throw new BadRequestError('Hay SKUs repetidos en las variantes.')
   // Una sola raíz (ya recortada) para consultar Y para asignar: si no, se consulta una y se inserta otra (auditoría A2).
   // 58 deja sitio al sufijo; sin guion final («…A-» + «-2» sería «…A--2»).

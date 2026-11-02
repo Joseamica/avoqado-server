@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken'
 import { esTokenDeLaApi } from '../../utils/tokenDeLaApi'
 import { ponerCookiesDeSesion } from '../../utils/cookiesDeSesion'
 import prisma from '../../utils/prismaClient' // Corrected import path
-import { AuthenticationError } from '../../errors/AppError'
+import { AuthenticationError, GoneError } from '../../errors/AppError'
 import { StaffRole, VenueStatus } from '@prisma/client'
 import { UpdateAccountDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
@@ -13,7 +13,12 @@ import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/permissions'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import { canjearBoletoDeAlta } from '../../services/onboarding/signup.service'
+import { renovarSesionConLaSucursal, sucursalDelAltaTerminada } from '../../services/onboarding/sesionTrasElAlta'
+import { buildAuthContextFromPayload } from '../../security'
+import { esSucursalReal } from '../../utils/sucursalDelToken'
 import { verifyAccessToken } from '../../jwt.service'
+import { isJtiRevoked } from '../../utils/tokenRevocation'
 import {
   mensajeDeCorte,
   motivoDeSesionInvalidada,
@@ -23,9 +28,11 @@ import {
   olvidarCorteEnCache,
 } from '../../utils/passwordChangeGuard'
 import { revokeSession } from '@/services/auth/session.service'
-import { invalidateSession } from '@/services/auth/sessionCache'
+import { invalidateSession, isSessionAliveCached } from '@/services/auth/sessionCache'
+import { faseDelRolloutLegacy } from '@/middlewares/authenticateToken.middleware'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { zonaValida } from '@/utils/datetime'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
 /**
@@ -146,6 +153,29 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       })
     }
 
+    // 🔴 hz:f26b3afc:D2: la misma revisión de SESIÓN que `authenticateTokenMiddleware` (token revocado por `jti`, sesión
+    // `sid` cerrada, o fase 4 sin `sid`). Sin esto los datos daban 401 y esta ruta decía `authenticated: true`: el panel
+    // iba del login al inicio y de regreso, en ciclo.
+    const sesionCerrada =
+      (await isJtiRevoked(decoded.jti)) || (decoded.sid ? !(await isSessionAliveCached(decoded.sid)) : faseDelRolloutLegacy() >= 4)
+    if (sesionCerrada) {
+      logger.info('[AUTH] 📊 Session closed - returning unauthenticated', { conSid: !!decoded.sid })
+      res.clearCookie('accessToken')
+      return res.status(200).json({ authenticated: false, user: null, message: 'Sesión cerrada. Inicia sesión de nuevo.' })
+    }
+
+    // 🔴 H0 (28-oct): el alta ya se termina sin el navegador (el cobro, el aviso de Stripe o el barrido). Quien vuelve con la
+    // cookie del alta (sucursal `pending`) recibe aquí su sesión con la sucursal real, como si hubiera tocado «Entrar».
+    // Nunca tumba el estado de sesión.
+    const sesion = buildAuthContextFromPayload(decoded)
+    if (!esSucursalReal(sesion.venueId) && !sesion.isImpersonating) {
+      const sucursal = await sucursalDelAltaTerminada(sesion.userId, sesion.orgId).catch(error => {
+        logger.warn('[AUTH] 📊 No se pudo revisar si el alta ya terminó', { error })
+        return null
+      })
+      if (sucursal) await renovarSesionConLaSucursal(sesion, res, sucursal)
+    }
+
     // Buscar staff con venues y organization (World-Class Pattern: Need org to detect OWNER during onboarding)
     const staff = await prisma.staff.findUnique({
       where: { id: decoded.sub },
@@ -176,6 +206,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 slug: true,
                 logo: true,
                 currency: true, // Locale-aware money formatting on the dashboard
+                timezone: true, // Zona del negocio: el panel arma días y rangos con ella (D4)
                 type: true, // Business type for sector-aware UI terminology
                 status: true, // Single source of truth for venue state
                 kycStatus: true, // Include KYC status for access control
@@ -250,6 +281,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             slug: true,
             logo: true,
             currency: true,
+            timezone: true,
             status: true,
             kycStatus: true,
             address: true,
@@ -292,6 +324,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: venue.slug,
           logo: venue.logo,
           currency: venue.currency,
+          timezone: zonaValida(venue.timezone),
           role: StaffRole.SUPERADMIN,
           roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           status: venue.status,
@@ -354,6 +387,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: string
       logo: string | null
       currency?: string // ISO 4217 code for money formatting
+      timezone?: string // IANA; una inválida sale como America/Mexico_City (zonaValida)
       type?: string // Business type for sector-aware UI terminology
       role?: any
       roleDisplayName?: string // Custom display name for the role (per-venue)
@@ -407,6 +441,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       currency: sv.venue.currency,
+      timezone: zonaValida(sv.venue.timezone), // sin ella todo el panel usaba la hora de CDMX en cualquier sucursal (D4)
       type: sv.venue.type, // Business type for sector-aware UI
       role: sv.role,
       roleDisplayName: roleDisplayNamesByVenue.get(sv.venue.id)?.get(sv.role) ?? DEFAULT_ROLE_DISPLAY_NAMES[sv.role as StaffRole],
@@ -455,6 +490,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: true,
           logo: true,
           currency: true,
+          timezone: true,
           type: true, // Business type for sector-aware UI terminology
           status: true, // Single source of truth
           kycStatus: true, // Include KYC status
@@ -516,6 +552,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         slug: venue.slug,
         logo: venue.logo,
         currency: venue.currency,
+        timezone: zonaValida(venue.timezone),
         type: venue.type, // Business type for sector-aware UI
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
@@ -574,6 +611,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             slug: true,
             logo: true,
             currency: true,
+            timezone: true,
             type: true, // Business type for sector-aware UI terminology
             status: true, // Single source of truth
             kycStatus: true, // Include KYC status
@@ -635,6 +673,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: venue.slug,
           logo: venue.logo,
           currency: venue.currency,
+          timezone: zonaValida(venue.timezone),
           type: venue.type, // Business type for sector-aware UI
           status: venue.status, // Single source of truth
           kycStatus: venue.kycStatus, // Include KYC status
@@ -1216,6 +1255,24 @@ export async function confirmEmailChange(req: Request, res: Response, next: Next
     const { correoNuevo } = await confirmarCambioDeCorreo(token)
     res.status(200).json({ success: true, message: 'Tu correo quedó actualizado.', email: correoNuevo })
   } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Canjea el boleto de alta (`#boleto=` de la URL que armó la landing) por las cookies de sesión.
+ * PÚBLICO a propósito: el boleto firmado de 5 min y de un solo uso es la credencial. Nunca se loguea.
+ */
+export async function entrarConBoleto(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { accessToken, refreshToken } = await canjearBoletoDeAlta(req.body.boleto)
+    ponerCookiesDeSesion(res, accessToken, refreshToken)
+    res.status(200).json({ success: true })
+  } catch (error) {
+    if (error instanceof GoneError) {
+      res.status(410).json({ success: false, code: error.code, message: error.message })
+      return
+    }
     next(error)
   }
 }

@@ -19,7 +19,7 @@
 
 import type { PrismaClient, Prisma } from '@prisma/client'
 import prismaDefault from '@/utils/prismaClient'
-import { IncompatibleDeviceError } from '@/errors/AppError'
+import { ConflictError, IncompatibleDeviceError } from '@/errors/AppError'
 
 type Tx = PrismaClient | Prisma.TransactionClient
 
@@ -140,7 +140,7 @@ export async function assertMerchantTerminalCompatible(
   const [terminal, merchant] = await Promise.all([
     tx.terminal.findUnique({
       where: { id: terminalId },
-      select: { id: true, brand: true },
+      select: { id: true, brand: true, venueId: true },
     }),
     tx.merchantAccount.findUnique({
       where: { id: merchantAccountId },
@@ -160,6 +160,7 @@ export async function assertMerchantTerminalCompatible(
       `Cannot assign ${merchant.provider.code} merchant ${merchantAccountId} to ${terminal.brand} terminal ${terminalId}`,
     )
   }
+  await assertAngelPayLoginsInVenue(terminal.venueId, [merchantAccountId], tx)
 }
 
 /**
@@ -170,18 +171,22 @@ export async function assertMerchantTerminalCompatible(
  * operator UI honest — no "fix one, discover the next" loop.
  *
  * No-op when `merchantAccountIds` is empty.
+ *
+ * `servingVenueId`: the venue the terminal will serve with these merchants. Defaults to its current venue; a migration
+ * passes the DESTINATION, because the AngelPay login has to live where the terminal is going.
  */
 export async function assertMerchantsTerminalCompatible(
   terminalId: string,
   merchantAccountIds: string[],
   tx: Tx = prismaDefault as unknown as Tx,
+  servingVenueId?: string,
 ): Promise<void> {
   if (!merchantAccountIds.length) return
 
   const [terminal, merchants] = await Promise.all([
     tx.terminal.findUnique({
       where: { id: terminalId },
-      select: { id: true, brand: true },
+      select: { id: true, brand: true, venueId: true },
     }),
     tx.merchantAccount.findMany({
       where: { id: { in: merchantAccountIds } },
@@ -198,4 +203,79 @@ export async function assertMerchantsTerminalCompatible(
     const summary = incompatible.map(m => `${m.id} (${m.provider.code})`).join(', ')
     throw new IncompatibleDeviceError(`Cannot assign incompatible merchants to ${terminal.brand} terminal ${terminalId}: ${summary}`)
   }
+  await assertAngelPayLoginsInVenue(servingVenueId ?? terminal.venueId, merchantAccountIds, tx)
+}
+
+export const ANGELPAY_LOGIN_EN_OTRO_NEGOCIO = 'ANGELPAY_LOGIN_EN_OTRO_NEGOCIO'
+
+/**
+ * Un comercio de AngelPay sólo cobra en un negocio que tenga su llave (`AngelPayUserAccount`): la configuración de la
+ * terminal sólo manda las llaves de SU negocio. Si la llave del comercio vive en otro, la terminal recibe la
+ * configuración sin credenciales y no cobra («Faltan credenciales de AngelPay»). Pasó en IQ el 20-oct-2026: se le
+ * asignó «IQ T», cuya llave seguía en Amaena, y el panel dijo «guardado».
+ *
+ * Mover una llave de negocio no tiene pantalla (founder, 21-oct: «dile a tu IA que lo haga manual»): el mensaje lo dice.
+ * Los comercios sin llave ligada (legacy) y los que no son de AngelPay pasan.
+ */
+export async function assertAngelPayLoginsInVenue(
+  venueId: string,
+  merchantAccountIds: Array<string | null | undefined>,
+  tx: Tx = prismaDefault as unknown as Tx,
+): Promise<void> {
+  const ids = [...new Set(merchantAccountIds.filter((id): id is string => !!id))]
+  if (!ids.length) return
+
+  const ajenos = await tx.merchantAccount.findMany({
+    where: { id: { in: ids }, angelpayUserAccount: { venueId: { not: venueId } } },
+    select: { displayName: true, externalMerchantId: true, angelpayUserAccount: { select: { venue: { select: { name: true } } } } },
+    take: ids.length,
+  })
+  if (!ajenos.length) return
+
+  const detalle = ajenos
+    .map(m => `«${m.displayName ?? m.externalMerchantId}» (su llave está en ${m.angelpayUserAccount?.venue.name ?? 'otro negocio'})`)
+    .join(', ')
+  throw new ConflictError(
+    `La llave de AngelPay de ${detalle} es de otro negocio, así que la terminal no podría cobrar. ` +
+      'Pídele a tu IA que mueva esa llave a este negocio a mano y vuelve a intentarlo.',
+    ANGELPAY_LOGIN_EN_OTRO_NEGOCIO,
+  )
+}
+
+/**
+ * El lado inverso: cambiar la llave de un comercio que YA cobra en terminales o cuentas de un negocio. Si la llave nueva
+ * es de otro negocio, esas terminales dejan de recibir credenciales (Codex r1 del 21-oct-2026, hallazgo 3).
+ */
+export async function assertNuevaLlaveEnLosNegociosDelComercio(
+  merchantAccountId: string,
+  angelpayUserAccountId: string,
+  tx: Tx = prismaDefault as unknown as Tx,
+): Promise<void> {
+  const login = await tx.angelPayUserAccount.findUnique({
+    where: { id: angelpayUserAccountId },
+    select: { venueId: true, venue: { select: { name: true } } },
+  })
+  if (!login) return // la llave inexistente la rechaza la llave foránea, como antes
+
+  const [terminal, cuentas] = await Promise.all([
+    tx.terminal.findFirst({
+      where: { assignedMerchantIds: { has: merchantAccountId }, venueId: { not: login.venueId } },
+      select: { venue: { select: { name: true } } },
+    }),
+    tx.venuePaymentConfig.findFirst({
+      where: {
+        venueId: { not: login.venueId },
+        OR: [{ primaryAccountId: merchantAccountId }, { secondaryAccountId: merchantAccountId }, { tertiaryAccountId: merchantAccountId }],
+      },
+      select: { venue: { select: { name: true } } },
+    }),
+  ])
+  const otro = terminal?.venue.name ?? cuentas?.venue.name
+  if (!otro) return
+
+  throw new ConflictError(
+    `Este comercio cobra en «${otro}», pero la llave de AngelPay elegida es de «${login.venue.name}», así que esas terminales ` +
+      'dejarían de cobrar. Pídele a tu IA que lo acomode a mano.',
+    ANGELPAY_LOGIN_EN_OTRO_NEGOCIO,
+  )
 }

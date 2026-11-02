@@ -32,9 +32,12 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   'src/services/dashboard/productInventoryIntegration.service.ts': { update: 1 },
   'src/services/dashboard/productWizard.service.ts': { create: 1, update: 5, delete: 1 },
   'src/services/dashboard/venue.dashboard.service.ts': { deleteMany: 1 },
-  'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': { create: 1 },
+  // Rappi 2b (23-oct): el 2.º create es el producto «Envío» del venue (inactivo, sin inventario), tras el MISMO cerco del catálogo.
+  'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': { create: 2 },
   // WHY: flag-only write on rows already FOR NO KEY UPDATE-locked; never `active` nor a catalog-governed field.
   'src/services/delivery-channels/core/deliveryReconciliation.service.ts': { sqlUpdate: 1 },
+  // Negocios demo de ventas: el producto nace por createProduct; esto sólo prende el conteo de piezas (inventoryMethod, unit).
+  'src/services/demo/negociosDemo.service.ts': { update: 1 },
   'src/services/master-catalog/catalogBindingProductWriter.service.ts': { create: 1 },
   'src/services/master-catalog/catalogPublicationActivation.service.ts': { updateMany: 1 },
   'src/services/master-catalog/catalogPublicationPersistence.service.ts': { sqlUpdate: 1 },

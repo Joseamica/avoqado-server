@@ -3,20 +3,16 @@
  * orden de la unidad de costo. Ver la cabecera de `cobroDelProtocolo.ts` (pertenencia y el par ORIGINAL → reembolso).
  *
  *  1. Fotografía sin candado: tipo, venue y puntero (`processorData.originalPaymentId` de un REFUND) de cada candidato.
- *  2. ORIGINALES (dentro y fuera del lote), únicos y en `id ASC`, con NOWAIT y savepoint interior por cada uno: el ocupado
+ *  2. UNIÓN de ORIGINALES y candidatos, en `id ASC` antes del primer candado. Cada original usa NOWAIT y savepoint interior: el ocupado
  *     aparta a sus reembolsos y, si también está en el lote, a sí mismo (queda fuera de la fase bloqueante) — la corrección
  *     no espera a la unidad de costo.
- *  3. El LOTE (lo no apartado) en `id ASC`, esperando (`bloquearPayments`, el mismo mutex que la convergencia).
+ *  3. Cada candidato de esa misma pasada espera con `bloquearPayments`.
  *  4. RELECTURA bajo los candados de TODOS los candidatos —también los que no eran REFUND— y comparación con la fotografía:
  *     si alguno cambió de tipo, de venue o de original, `ROLLBACK TO SAVEPOINT` del intento (se sueltan TODOS sus candados) y
  *     se vuelve a empezar. Tres intentos; después, conflicto explícito (nunca escribir con el original equivocado sin candado).
  *
- * Residuo declarado: la fase del lote sí espera; dos lotes concurrentes cuyos originales están cruzados con sus lotes pueden
- * interbloquearse (Postgres aborta uno con 40P01 y la transacción perdedora revierte sus escrituras): si el perdedor es un apply, su lote
- * queda FAILED y se reintenta; si es un reverse, el lote conserva APPLIED —no alcanza la actualización posterior— y el reverse se repite
- * (Codex R16, precisión documental: no es FAILED para ambos).
  * Módulo aparte de `cobroDelProtocolo.ts` a propósito: la fase del lote llama a `bloquearPayments` A TRAVÉS del módulo, y así las
- * pruebas de intercalación pueden pausar entre las dos fases sin ganchos en el código de producción.
+ * pruebas de intercalación pueden pausar antes de cada candidato sin ganchos en el código de producción.
  */
 import { Prisma, PaymentType } from '@prisma/client'
 import { ConflictError } from '../../errors/AppError'
@@ -84,19 +80,40 @@ export async function bloquearLoteConOriginales(
   for (let intento = 0; intento < 3; intento++) {
     await tx.$executeRaw`SAVEPOINT lote_del_protocolo`
     const foto = await fotografiar()
-    // 2. Originales, únicos y ordenados, sin esperar.
+    // Una sola unión ordenada: originales→candidatos por separado permite A→B contra B→A entre dos lotes.
     const originales = [...new Set([...foto.values()].map(c => c.original).filter((o): o is string => !!o))].sort()
+    const esOriginal = new Set(originales)
     const ocupadosOriginales = new Set<string>()
-    for (const original of originales) if (!(await bloquearSinEsperar(tx, original, marcador))) ocupadosOriginales.add(original)
+    const union = [...new Set([...originales, ...ids.filter(id => foto.get(id)?.venueId === lote.venueId)])].sort()
+    let retomar: boolean
+    do {
+      retomar = false
+      for (const original of union) {
+        if (esOriginal.has(original)) {
+          if (ocupadosOriginales.has(original)) continue
+          if (!(await bloquearSinEsperar(tx, original, marcador))) {
+            ocupadosOriginales.add(original)
+            // Un hijo de id menor ya pudo reclamarse: suelta el intento y retoma la unión sin esa familia ocupada.
+            if (union.some(id => id < original && foto.get(id)?.original === original)) {
+              await tx.$executeRaw`ROLLBACK TO SAVEPOINT lote_del_protocolo`
+              retomar = true
+              break
+            }
+          }
+        } else {
+          const padre = foto.get(original)?.original
+          if (!padre || !ocupadosOriginales.has(padre)) await bloquearPayments(tx, [original], marcador)
+        }
+      }
+    } while (retomar) // Cada vuelta añade un original ocupado: a lo más originales.length reinicios.
     const ocupados = ids.filter(id => {
       const c = foto.get(id)
       return !!c && (ocupadosOriginales.has(id) || (!!c.original && ocupadosOriginales.has(c.original)))
     })
     const apartados = new Set(ocupados)
-    // 3. El lote (sólo candidatos existentes, del venue del lote y no apartados), en `id ASC`, esperando.
+    // 3. Sólo candidatos existentes, del venue del lote y no apartados; ya están tomados.
     const inexistentes = ids.filter(id => foto.get(id)?.venueId !== lote.venueId)
     const bloqueables = ids.filter(id => !apartados.has(id) && !inexistentes.includes(id))
-    await bloquearPayments(tx, bloqueables, marcador)
     // 4. Relectura bajo los candados: nada pudo cambiar de tipo, venue u original mientras se esperaba.
     const relectura = await fotografiar()
     const cambiaron = ids.filter(id => !misma(foto.get(id), relectura.get(id)))

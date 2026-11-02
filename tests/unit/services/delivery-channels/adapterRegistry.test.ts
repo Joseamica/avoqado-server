@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { DeliveryProvider } from '@prisma/client'
-import { adapterFor, hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
+import { adapterFor, hasAdapter, proveedoresConAdaptador } from '@/services/delivery-channels/core/adapterRegistry'
 
 describe('adapterRegistry', () => {
   it('devuelve el adaptador de Uber', () => {
@@ -9,8 +9,20 @@ describe('adapterRegistry', () => {
   })
 
   it('un proveedor sin adaptador lanza con un mensaje que dice qué falta', () => {
-    expect(() => adapterFor(DeliveryProvider.RAPPI)).toThrow(/RAPPI/)
-    expect(hasAdapter(DeliveryProvider.RAPPI)).toBe(false)
+    // DIDI_FOOD sigue sin adaptador (Rappi ya lo tiene desde la fase 2).
+    expect(() => adapterFor(DeliveryProvider.DIDI_FOOD)).toThrow(/DIDI_FOOD/)
+    expect(hasAdapter(DeliveryProvider.DIDI_FOOD)).toBe(false)
+  })
+
+  it('RAPPI tiene adaptador registrado', () => {
+    expect(hasAdapter(DeliveryProvider.RAPPI)).toBe(true)
+    expect(proveedoresConAdaptador()).toContain(DeliveryProvider.RAPPI)
+    expect(adapterFor(DeliveryProvider.RAPPI).provider).toBe(DeliveryProvider.RAPPI)
+  })
+
+  it('🔴 Rappi declara que sólo admite aceptación automática (y Uber no): el núcleo lo lee del adaptador, no de un `if` por proveedor', () => {
+    expect(adapterFor(DeliveryProvider.RAPPI).soloAceptacionAutomatica).toMatch(/se aceptan solos/)
+    expect(adapterFor(DeliveryProvider.UBER_EATS).soloAceptacionAutomatica).toBeUndefined()
   })
 
   it('🔴 TODO adaptador registrado trae los tres obligatorios del contrato', () => {

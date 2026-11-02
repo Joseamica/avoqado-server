@@ -1,4 +1,5 @@
 import { handleHybridStripeEvent } from './launchCampaigns/hybridLifecycle.service'
+import { programarCierreDelAltaPorAviso } from './onboarding/altaPorAvisoDeStripe'
 /**
  * Stripe Webhook Event Handlers
  *
@@ -588,6 +589,11 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
     return
   }
+
+  // 🔴 H0 (28-oct): la PRIMERA factura pagada del alta termina el alta si el navegador no lo hizo (autorizó con su banco y
+  // cerró, o pagó y cerró antes de «Entrar»). Va ANTES de las salidas tempranas de abajo (plan sin fila de acceso o ya
+  // activo): es justo el caso del alta. Sólo programa; la garantía es el barrido `altas-a-medio-pago`.
+  if (invoice.billing_reason === 'subscription_create') programarCierreDelAltaPorAviso(subscriptionIdStr)
 
   // ✅ FIX BUG #7: Retry with backoff if VenueFeature not yet created
   // Race condition: Webhook can fire before sync code creates VenueFeature

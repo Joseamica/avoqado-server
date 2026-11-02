@@ -3,7 +3,7 @@
  * "ShopifyStockOutbox" EN LA MISMA transacción (spec §4 ③, ajustes 12 bis.2 y 12 bis.6). Contra Postgres real: un
  * trigger no existe en un mock.
  *
- * Los 11 caminos que escriben stock de un producto hoy, todos con su servicio REAL:
+ * Los 12 caminos que escriben stock de un producto hoy, todos con su servicio REAL:
  *  1 venta (TPV, POS, ligas: SQL crudo) ............. deductInventoryForProduct
  *  2 reembolso ...................................... restockItem
  *  3 ajuste del dashboard y del POS ................. adjustInventoryStock
@@ -16,6 +16,7 @@
  * 10 recepción de mercancía de reventa .............. updatePurchaseOrderItemStatus
  * 11 vales por área V7 ............................... ruta externa (emitir consume, cancelar regresa) y ruta nativa
  *    (emitir reserva, cobrar consume la reserva y la línea normal), con la configuración de area-ticket-v7-flow.test.ts
+ * 12 regreso durable de un cambio .................. applyCustomerReturnPosting
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -28,6 +29,7 @@ import { logWaste } from '@/services/shared/inventoryWaste.service'
 import { importMenu } from '@/services/dashboard/menu.dashboard.service'
 import { confirmStockCount } from '@/services/mobile/inventory.mobile.service'
 import { reverseSalePosting } from '@/services/inventory/reverseSalePosting.service'
+import { createCustomerReturnPostingInTx, applyCustomerReturnPosting } from '@/services/inventory/inventoryPosting.service'
 import { updatePurchaseOrderItemStatus } from '@/services/dashboard/purchaseOrder.service'
 import {
   addTicketToCheckout,
@@ -62,6 +64,23 @@ afterEach(async () => {
 })
 
 describe('las formas en que se escribe el stock', () => {
+  it('enqueues the customer return delta exactly once through the stock guard', async () => {
+    const e = await escenario()
+    const posting = await prisma.$transaction(tx =>
+      createCustomerReturnPostingInTx(tx, {
+        venueId: e.venueId,
+        refundPaymentId: e.productId,
+        orderId: e.productId,
+        staffId: e.staffId,
+        lines: [{ orderItemId: e.productId, productId: e.productId, quantity: 2 }],
+      }),
+    )
+    expect(await applyCustomerReturnPosting(posting!.id)).toMatchObject({ applied: true })
+    expect(await applyCustomerReturnPosting(posting!.id)).toBeNull()
+    expect(await deltas(e.productId)).toEqual(['2'])
+    expect((await prisma.inventory.findUniqueOrThrow({ where: { id: e.inventoryId } })).currentStock.toString()).toBe('12')
+  })
+
   it('resta en SQL crudo (la forma de la venta y de los vales) ⇒ encola −1 con su sucursal y generación', async () => {
     const e = await escenario()
     await prisma.$executeRaw`UPDATE "Inventory" SET "currentStock" = "currentStock" - ${D(1)}, "updatedAt" = NOW() WHERE id = ${e.inventoryId} AND "venueId" = ${e.venueId}`

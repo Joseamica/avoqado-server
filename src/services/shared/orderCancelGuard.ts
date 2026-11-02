@@ -3,6 +3,8 @@ import type { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
+import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
+import { findCardOnlineOrderInTx } from '../online-ordering/card/guards'
 
 /**
  * Diseño §C.6 (11-sep): TODA ruta que cancela o anula una orden tiene que hacerlo bajo el MISMO candado de `Order` que
@@ -26,9 +28,13 @@ const MENSAJE_COBRO_VIVO =
   'Hay un cobro en curso en la terminal para esta orden. Cancela o espera el resultado del cobro antes de cancelar la orden.'
 
 type GuardTx = Pick<Prisma.TransactionClient, '$queryRaw' | 'order' | 'payment' | 'terminalPaymentRequest'>
+/** La cancelación además mira (y suelta) la tarjeta apartada de un pedido en línea. */
+type CancelGuardTx = GuardTx & Pick<Prisma.TransactionClient, 'onlineOrder' | 'onlineOrderCharge'>
 
 export interface OrdenBajoCandado {
   id: string
+  source: string
+  posRawData: Prisma.JsonValue | null
   paymentStatus: string
   status: string
   version: number
@@ -39,6 +45,8 @@ export interface OrdenBajoCandado {
    * que un CAS de versión no la ve. Quien recalcule el total debe usar ésta, no la de una prelectura.
    */
   tipAmount: Prisma.Decimal
+  /** La mesa de la cuenta, releída bajo el candado (`rechazarCuentaDeMesa`). */
+  tableId?: string | null
 }
 
 /**
@@ -53,7 +61,17 @@ export async function lockAndReadOrderForCancel(
   await lockExistingOrderForPayment(tx, input)
   const order = await tx.order.findUnique({
     where: { id: input.orderId, venueId: input.venueId },
-    select: { id: true, paymentStatus: true, status: true, version: true, paidAmount: true, tipAmount: true },
+    select: {
+      id: true,
+      source: true,
+      posRawData: true,
+      paymentStatus: true,
+      status: true,
+      version: true,
+      paidAmount: true,
+      tipAmount: true,
+      tableId: true,
+    },
   })
   if (!order) throw new NotFoundError(notFoundMessage)
   return order as OrdenBajoCandado
@@ -93,6 +111,8 @@ export async function assertNoLiveTerminalCharge(
   }
 }
 
+export const MENSAJE_CUENTA_DE_MESA = 'Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).'
+
 export interface OrderCancelGuardOptions {
   /** Mensaje del 400 cuando la orden ya tiene dinero. Por defecto, los de `cancelOrder` móvil. */
   mensajeConDinero?: string
@@ -102,6 +122,21 @@ export interface OrderCancelGuardOptions {
    */
   contarPagosRegistrados?: boolean
   notFoundMessage?: string
+  /**
+   * Una cuenta ya CANCELLED/DELETED responde 409 `ORDER_ALREADY_CANCELLED` en vez de volver a cancelarse (y a auditarse).
+   * El panel lo exige: su cliente HTTP reintenta solo los errores de red (Codex plan r1 #6, 30-oct). El POS no lo pide.
+   */
+  rechazarYaCancelada?: boolean
+  /**
+   * Una cuenta de mesa responde 400 `ORDER_IS_TABLE`: el panel no cancela mesas (se anulan en el POS). Se revisa BAJO el candado:
+   * «Mover» puede ligarle una mesa entre una lectura previa y la cancelación (Codex código r1 #1, 30-oct).
+   */
+  rechazarCuentaDeMesa?: boolean
+}
+
+/** Se llama con la orden releída bajo su candado; sólo el aviso del proveedor puede cancelar un Rappi. */
+export function rechazarCancelacionLocalDeRappi(order: { source: string; posRawData: unknown }): void {
+  if (order.source === 'RAPPI') throw new BadRequestError(instruccionesParaCancelarRappi(order.posRawData), 'RAPPI_CANCEL_IN_PROVIDER')
 }
 
 /**
@@ -110,11 +145,18 @@ export interface OrderCancelGuardOptions {
  * Devuelve la fila releída bajo el candado; la escritura de la cancelación va inmediatamente después, en la misma tx.
  */
 export async function assertOrderCancellableUnderLock(
-  tx: GuardTx,
+  tx: CancelGuardTx,
   input: { venueId: string; orderId: string },
   opciones: OrderCancelGuardOptions = {},
 ): Promise<OrdenBajoCandado> {
   const order = await lockAndReadOrderForCancel(tx, input, opciones.notFoundMessage)
+  rechazarCancelacionLocalDeRappi(order)
+  if (opciones.rechazarYaCancelada && (order.status === 'CANCELLED' || order.status === 'DELETED')) {
+    throw new ConflictError('Esta cuenta ya estaba cancelada.', 'ORDER_ALREADY_CANCELLED')
+  }
+  if (opciones.rechazarCuentaDeMesa && order.tableId) {
+    throw new BadRequestError(MENSAJE_CUENTA_DE_MESA, 'ORDER_IS_TABLE')
+  }
 
   // 🔴 Ninguna orden CON DINERO ENCIMA se cancela — ni PAID ni PARTIAL. Con pagos hechos el camino es reembolsar y
   // después cancelar, igual que en Square.
@@ -142,7 +184,89 @@ export async function assertOrderCancellableUnderLock(
   }
 
   await assertNoLiveTerminalCharge(tx, input)
+
+  // Pedidos en línea fase 2 (Codex r1 #1): mientras el banco cobra la tarjeta, nadie cancela; con la tarjeta apartada, la
+  // cancelación la suelta en esta MISMA transacción (`RELEASING`) y el conciliador la libera con Stripe.
+  const card = await findCardOnlineOrderInTx(tx, input)
+  if (card?.charge?.status === 'CAPTURING') {
+    throw new ConflictError(
+      'Confirmando el pago con tarjeta de este pedido. Intenta en unos segundos.',
+      'ONLINE_ORDER_CONFIRMING_PAYMENT',
+    )
+  }
+  if (card?.charge?.status === 'AUTHORIZED') {
+    await tx.onlineOrderCharge.updateMany({ where: { id: card.charge.id, status: 'AUTHORIZED' }, data: { status: 'RELEASING' } })
+  }
   return order
+}
+
+/** Lo que una anulación le devolvió al cliente. */
+export interface CanjesDevueltos {
+  pointsRefunded: number
+  stampRewardsReturned: string[]
+  /** Filas de canje que salieron de la venta (también las que ya no tenían qué devolver). */
+  filasQuitadas: number
+}
+
+/** Página de canjes: una venta real trae uno o dos; se recorre hasta agotarlos (Codex r2 #3: no hay tope por venta). */
+const PAGINA_DE_CANJES = 100
+
+/**
+ * 🔴 LEALTAD (pizarrón hz:a8104ac8:D1, 31-oct). Una venta que se anula SIN cobrar le devuelve al cliente lo que canjeó en ella
+ * —su premio de sellos y sus puntos— haciendo con cada canje EXACTAMENTE lo que hace «quitar el descuento»
+ * (`removeOrderDiscountInTransaction`): devuelve, revierte el renglón, devuelve el impuesto, BORRA la fila y recalcula. Antes la
+ * venta quedaba CANCELLED con el premio REDEEMED y los puntos gastados, sin salida desde el mostrador.
+ *
+ * Borrar la fila no es un detalle (Codex r1): con el premio de vuelta y su descuento todavía en la venta, el cliente se quedaba
+ * con los dos si después alguien quitaba el descuento (segunda devolución), si se reintentaba la creación o si un cobro tardío
+ * revivía la venta (`reabrirSiRecibeDinero`). Sin la fila, la venta revivida se calcula sin ese descuento y muestra el saldo.
+ * Idempotente por la misma razón: una segunda llamada ya no encuentra la fila.
+ *
+ * Va dentro de la transacción del que anula, con la orden YA bloqueada (Order → Customer/StampReward, el orden de siempre).
+ * Los descuentos que no son canje se quedan como historia de la venta anulada.
+ */
+export async function devolverCanjesDeVentaAnuladaEnTx(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; orderId: string; staffId?: string | null; camino: string },
+): Promise<CanjesDevueltos> {
+  const devuelto: CanjesDevueltos = { pointsRefunded: 0, stampRewardsReturned: [], filasQuitadas: 0 }
+  const quitadas: string[] = []
+  // Cada fila procesada se BORRA, así que cada página trae las que siguen; se repite hasta que no quede ninguna.
+  for (;;) {
+    // Canje = puntos (`loyaltyTransactionId`) o premio de sellos (`StampReward.orderDiscountId`, columna sin relación de Prisma).
+    const canjes = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT od.id FROM "OrderDiscount" od
+      WHERE od."orderId" = ${input.orderId}
+        AND (od."loyaltyTransactionId" IS NOT NULL
+             OR EXISTS (SELECT 1 FROM "StampReward" sr WHERE sr."orderDiscountId" = od.id AND sr."venueId" = ${input.venueId}))
+      ORDER BY od.id
+      LIMIT ${PAGINA_DE_CANJES}`
+    if (canjes.length === 0) break
+    // Import dinámico: order.mobile.service importa este módulo.
+    const { removeOrderDiscountInTransaction } = await import('../mobile/order.mobile.service')
+    for (const fila of canjes) {
+      const r = await removeOrderDiscountInTransaction(tx, input.venueId, input.orderId, fila.id, input.staffId ?? undefined)
+      devuelto.pointsRefunded += r.refund?.pointsRefunded ?? 0
+      if (r.stampRefund) devuelto.stampRewardsReturned.push(r.stampRefund.rewardId)
+      quitadas.push(fila.id)
+    }
+    if (canjes.length < PAGINA_DE_CANJES) break
+  }
+  devuelto.filasQuitadas = quitadas.length
+  if (quitadas.length === 0) return devuelto
+  // La bitácora va en la MISMA transacción (como `reabrirSiRecibeDinero`): si la anulación se revierte, también su rastro.
+  await tx.activityLog.create({
+    data: {
+      action: 'ORDER_CANCEL_LOYALTY_RETURNED',
+      entity: 'Order',
+      entityId: input.orderId,
+      venueId: input.venueId,
+      staffId: input.staffId ?? null,
+      data: { camino: input.camino, orderDiscountIds: quitadas, ...devuelto },
+    },
+  })
+  logger.info('🎁 [Anular] la venta anulada le devolvió al cliente sus canjes', { ...input, ...devuelto })
+  return devuelto
 }
 
 /**

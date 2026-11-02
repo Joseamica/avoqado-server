@@ -47,12 +47,12 @@ export class DeliverySnoozeResumeJob {
     this.job = null
   }
 
-  async runOnce(): Promise<{ reanudados: number; fallidos: number }> {
+  async runOnce(): Promise<{ reanudados: number; fallidos: number; noReabiertos: number }> {
     try {
       const r = await reanudarSnoozesVencidos()
       // Sólo se loguea cuando pasó algo: un job por minuto que reporta "0 y 0" ahoga el
       // log y entierra las líneas que sí importan.
-      if (r.reanudados > 0 || r.fallidos > 0) {
+      if (r.reanudados > 0 || r.fallidos > 0 || r.noReabiertos > 0) {
         logger.info('⏰ [DeliverySnoozeResume] pausas vencidas procesadas', r)
       }
       return r
@@ -62,7 +62,7 @@ export class DeliverySnoozeResumeJob {
       logger.error('🚨 [DeliverySnoozeResume] la pasada falló entera', {
         error: error instanceof Error ? error.message : String(error),
       })
-      return { reanudados: 0, fallidos: 0 }
+      return { reanudados: 0, fallidos: 0, noReabiertos: 0 }
     }
   }
 }

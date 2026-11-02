@@ -721,6 +721,32 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: item.b.id } })).removedAt).toBeNull()
   })
 
+  it('Rappi 2b: una foto con envío como renglón o dinero de terceros no se reprecia (el reprecio no los sabe escribir)', async () => {
+    const { order, item, foto } = await sembrar(
+      [
+        { linea: 'a', nombre: 'Cochinita', precio: '150.00' },
+        { linea: 'b', nombre: 'Horchata', precio: '50.00' },
+      ],
+      pago('200.00', '0.00'),
+    )
+    await accionConfirmada(order, item.b.id, 'b')
+    const antes = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+    proveedorDevuelve(
+      foto(['a'], { ...pago('150.00', '0.00'), shippingAsLine: '0.00', thirdPartyCashDue: '0.00', externallyPaidSale: '150.00' }),
+    )
+    expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'JOB' })).outcome).not.toBe('READ_FAILED')
+
+    const otra = await sembrar([{ linea: 'a', nombre: 'Cochinita', precio: '150.00' }], pago('150.00', '0.00'))
+    proveedorDevuelve(otra.foto(['a'], { ...pago('150.00', '0.00'), shippingAsLine: '35.00', externallyPaidSale: '185.00' }))
+    const r = await reconcileDeliveryOrderFromProvider(otra.order.id, { trigger: 'JOB' })
+
+    expect(r.outcome).toBe('READ_FAILED')
+    const despues = await prisma.order.findUniqueOrThrow({ where: { id: otra.order.id } })
+    expect(despues.total.toFixed(2)).toBe('150.00')
+    expect(despues.subtotal.toFixed(2)).toBe('150.00')
+    expect(antes.id).toBe(order.id)
+  })
+
   it(`el GET que nunca contesta se corta a los ${LECTURA_PROVEEDOR_MS} ms bajo el candado y no escribe NADA`, async () => {
     const { order, item } = await sembrar(
       [

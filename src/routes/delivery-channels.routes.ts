@@ -47,6 +47,7 @@ import {
   createChannelSchema,
   updateChannelSchema,
   pauseChannelSchema,
+  disconnectChannelSchema,
   createActivationRequestSchema,
 } from '../schemas/delivery-channels.schema'
 
@@ -190,6 +191,30 @@ router.get(
   withDeliveryPremiumMessage,
   checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.getUberConnectUrl,
+)
+
+/** El mismo enlace para el self-onboarding de Rappi (spec 2026-09-29): mismas guardas, PREMIUM, revalidado en cada paso. */
+router.get(
+  '/venues/:venueId/channels/rappi/connect-url',
+  authenticateTokenMiddleware,
+  checkPermission('delivery-channels:manage'),
+  withDeliveryPremiumMessage,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  ctrl.getRappiConnectUrl,
+)
+
+/**
+ * Rappi fase 3: el dueño desconecta su tienda (avisa a Rappi «no integrada» y la deja DISABLED; «Reconectar» usa el enlace
+ * de arriba). Mismas guardas que conectar. Sólo Rappi: el servicio responde 400 `SOLO_RAPPI` con otro proveedor.
+ */
+router.post(
+  '/venues/:venueId/channels/:linkId/disconnect',
+  authenticateTokenMiddleware,
+  validateRequest(disconnectChannelSchema),
+  checkPermission('delivery-channels:manage'),
+  withDeliveryPremiumMessage,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  ctrl.disconnectChannel,
 )
 
 router.post(

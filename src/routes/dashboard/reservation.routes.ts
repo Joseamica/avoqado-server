@@ -23,6 +23,8 @@ import {
   productStaffParamsSchema,
   replaceStaffScheduleBodySchema,
   replaceProductStaffBodySchema,
+  undoNoShowBodySchema,
+  resolveNoShowCorrectionBodySchema,
 } from '../../schemas/dashboard/reservation.schema'
 import { updateReservationBrandingSchema } from '../../schemas/dashboard/reservationBranding.schema'
 
@@ -196,6 +198,20 @@ router.post('/:id/check-in', checkPermission('reservations:update'), controller.
 router.post('/:id/check-in/undo', checkPermission('reservations:update'), controller.undoReservationCheckIn)
 router.post('/:id/complete', checkPermission('reservations:update'), controller.completeReservation)
 router.post('/:id/no-show', checkPermission('reservations:update'), controller.markNoShow)
+// D4 — «Sí llegó»: deshacer un «No asistió» (panel y POS). Vista previa, corrección y «Marcar resuelto» del pendiente.
+router.get('/:id/no-show/undo', checkPermission('reservations:update'), controller.previewReservationNoShowUndo)
+router.post(
+  '/:id/no-show/undo',
+  checkPermission('reservations:update'),
+  validateRequest(z.object({ body: undoNoShowBodySchema })),
+  controller.undoReservationNoShow,
+)
+router.post(
+  '/:id/no-show/undo/resolve',
+  checkPermission('reservations:update'),
+  validateRequest(z.object({ body: resolveNoShowCorrectionBodySchema })),
+  controller.resolveReservationNoShowCorrection,
+)
 
 router.post(
   '/:id/reschedule',

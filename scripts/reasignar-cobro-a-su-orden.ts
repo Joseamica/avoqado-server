@@ -142,7 +142,7 @@ const SELECT_ORDEN = {
   externalId: true,
   tableId: true,
   // ⭐ B6 M4 (cierre): `giftCardId` para rechazar una cuenta de tarjetas en los dos lados.
-  items: { select: { areaTicketLineId: true, giftCardId: true } },
+  items: { select: { areaTicketLineId: true, releasedAreaTicketLineId: true, giftCardId: true } },
   payments: {
     where: { status: 'COMPLETED' as const },
     select: { id: true, status: true, type: true, amount: true, tipAmount: true },

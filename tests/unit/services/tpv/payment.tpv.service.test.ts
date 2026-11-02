@@ -116,8 +116,11 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn().mockResolvedValue(null),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
+    exchange: { findUnique: jest.fn().mockResolvedValue(null) },
     inventoryPosting: { findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     inventoryPostingLine: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn() },
+    // Pedidos en línea fase 2: después del commit se pregunta si la cuenta es un pedido con tarjeta ya cobrado; por omisión, no.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
     $transaction: jest.fn(),
   },
 }))
@@ -235,6 +238,75 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         },
       }
       return callback(tx)
+    })
+  })
+
+  // Pedidos en línea fase 2 (T8): la TPV registrando un cobro YA hecho no se rechaza (el dinero ya se movió). Si el pedido de tarjeta ya
+  // estaba cobrado, el registro se acepta y deja ONLINE_ORDER_CARD_DOUBLE_PAYMENT para que el negocio devuelva uno.
+  describe('recordOrderPayment - pedido en línea con tarjeta ya cobrado', () => {
+    it('registro tardío de un cobro de TPV sobre un pedido CAPTURED → se acepta y deja ONLINE_ORDER_CARD_DOUBLE_PAYMENT', async () => {
+      const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+      const mockOrder = {
+        id: mockOrderId,
+        venueId: mockVenueId,
+        orderNumber: 'WEB-7',
+        total: new Decimal(100),
+        subtotal: new Decimal(100),
+        paymentStatus: 'PAID',
+        source: 'WEB',
+        externalId: null,
+        items: [],
+        payments: [],
+      }
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        venueId: mockVenueId,
+        orderId: mockOrderId,
+        id: 'payment-tpv-tarde',
+        status: 'COMPLETED',
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        processedById: 'staff-1',
+        feeAmount: 0,
+        netAmount: 100,
+      })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;((prisma as any).onlineOrder.findFirst as jest.Mock).mockResolvedValue({
+        paymentMode: 'CARD_ONLINE',
+        charge: { id: 'ch-web', status: 'CAPTURED', paymentIntentId: 'pi_web' },
+      })
+
+      await (paymentService as any).recordOrderPayment(
+        mockVenueId,
+        mockOrderId,
+        {
+          venueId: mockVenueId,
+          amount: 10000,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CREDIT_CARD',
+          source: 'TPV',
+          splitType: 'FULLPAYMENT',
+          tpvId: 'tpv-1',
+          staffId: 'staff-1',
+          paidProductsId: [],
+          currency: 'MXN',
+          isInternational: false,
+        },
+        'user-1',
+      )
+      await new Promise(r => setImmediate(r))
+
+      expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT',
+          entityId: mockOrderId,
+          data: expect.objectContaining({ paymentId: 'payment-tpv-tarde', chargeId: 'ch-web', source: 'TPV' }),
+        }),
+      )
+      ;((prisma as any).onlineOrder.findFirst as jest.Mock).mockResolvedValue(null)
     })
   })
 

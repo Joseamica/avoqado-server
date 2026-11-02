@@ -190,6 +190,7 @@ async function main(): Promise<void> {
         tableId: null,
         createdAt: { gte: desde },
         payments: { none: {} },
+        areaTicketCheckoutSession: { is: null },
       },
       select: {
         id: true,
@@ -332,6 +333,7 @@ async function main(): Promise<void> {
               paymentStatus: 'PENDING',
               updatedAt: c.updatedAt,
               payments: { none: {} },
+              areaTicketCheckoutSession: { is: null },
             },
             data: { status: 'CANCELLED', specialRequests: `Cancelled: ${motivo}` },
           })

@@ -55,6 +55,7 @@ function makeTx(open: ReturnType<typeof shift>) {
   let finalData: any
   return {
     $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+    tpvShiftOperation: { findFirst: jest.fn().mockResolvedValue(null) },
     shift: {
       findFirst: jest.fn(async () => open),
       updateMany: jest.fn(async (args: any) => {

@@ -6,6 +6,23 @@ import { createCheckoutSessionForOrder } from '@/services/dashboard/terminalOrde
 import { buildStripeCheckoutUrls } from '@/services/dashboard/terminalOrder/urls'
 
 /**
+ * Las llaves de los magic links (aprobar el SPEI, asignar series) son de VENTAS: van en su correo. Si el comprador
+ * las recibe, él mismo abre `/public/tpv-orders/:id/approve?token=…` y su pedido queda pagado sin pagar (D1, 1-nov).
+ * Toda respuesta de esta tienda al comprador pasa por aquí.
+ */
+function sinLlavesDeVentas<T extends object>(order: T): Omit<T, 'speiApprovalToken' | 'serialAssignmentToken'> {
+  const {
+    speiApprovalToken: _spei,
+    serialAssignmentToken: _series,
+    ...resto
+  } = order as T & {
+    speiApprovalToken?: unknown
+    serialAssignmentToken?: unknown
+  }
+  return resto
+}
+
+/**
  * POST /api/v1/dashboard/venues/:venueId/tpv-orders
  *
  * Creates a TerminalOrder. If paymentMethod is CARD_STRIPE, also creates a
@@ -92,7 +109,7 @@ export async function listOrdersHandler(req: Request, res: Response, next: NextF
       },
       orderBy: { createdAt: 'desc' },
     })
-    res.json({ success: true, data: orders })
+    res.json({ success: true, data: orders.map(sinLlavesDeVentas) })
   } catch (error) {
     next(error)
   }
@@ -138,7 +155,7 @@ export async function getOrderHandler(req: Request, res: Response, next: NextFun
           }
         : null
 
-    res.json({ success: true, data: { ...order, speiRecipient } })
+    res.json({ success: true, data: { ...sinLlavesDeVentas(order), speiRecipient } })
   } catch (error) {
     next(error)
   }
@@ -153,7 +170,7 @@ export async function getOrderHandler(req: Request, res: Response, next: NextFun
  */
 export async function uploadProofHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    const { id } = req.params
+    const { venueId, id } = req.params
     const file = (req as any).file as Express.Multer.File | undefined
     if (!file) {
       res.status(400).json({ success: false, error: 'No file uploaded (field name: proof)' })
@@ -162,6 +179,7 @@ export async function uploadProofHandler(req: Request, res: Response, next: Next
 
     const updated = await uploadSpeiProof({
       orderId: id,
+      venueId,
       file: {
         buffer: file.buffer,
         mimetype: file.mimetype,
@@ -169,7 +187,7 @@ export async function uploadProofHandler(req: Request, res: Response, next: Next
         size: file.size,
       },
     })
-    res.json({ success: true, data: updated })
+    res.json({ success: true, data: sinLlavesDeVentas(updated) })
   } catch (error) {
     logger.error('uploadProofHandler failed', {
       error: error instanceof Error ? error.message : String(error),

@@ -195,6 +195,18 @@ describe('onlineOrders.mobile.controller', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'PAYMENT_REQUIRED' }))
   })
 
+  it('fase 2: con el banco cobrando la tarjeta es 409 ONLINE_ORDER_CONFIRMING_PAYMENT con su texto', async () => {
+    ;(acceptOnlineOrder as jest.Mock).mockResolvedValue({ outcome: 'CONFIRMING_PAYMENT' })
+    const { req, res, next } = mock()
+    await ctrl.accept(req, res, next)
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
+      error: 'Confirmando el pago con el banco. Espera unos segundos.',
+    })
+  })
+
   it('A12: entregar lo que ya estaba entregado es 200 (idempotente), no un 409 «ya cambió»', async () => {
     ;(markOnlineOrderDelivered as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'COMPLETED', unchanged: true })
     const { req, res, next } = mock()

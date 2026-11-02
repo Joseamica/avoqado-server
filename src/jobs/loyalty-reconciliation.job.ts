@@ -7,6 +7,7 @@ import type { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidO
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { conNegocio } from '../services/demo/candadoDemo'
 
 const BATCH_LIMIT = 25
 const MAX_ATTEMPTS = 15
@@ -156,17 +157,20 @@ export class LoyaltyReconciliationJob {
         }
 
         try {
-          const result = await this.dependencies.award({
-            venueId: order.venueId,
-            orderId: order.id,
-            orderTotal: Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0)),
-            staffId: order.loyaltyStaffId,
-            // 🔴 H5, segunda ola (recheck de Codex): una liga DESPUÉS de este reclamo cambia el cliente y `loyaltyStaffId` a la
-            // vez. El envoltorio toma el actor de la MISMA lectura que el cliente que acredita; `staffId` de arriba es sólo el
-            // respaldo de un `award` inyectado.
-            actorDeLaVenta: true,
-            legacyCustomer: order.customer,
-          })
+          // Con el negocio de la orden en el contexto (candado demo, capa 3).
+          const result = await conNegocio(order.venueId, () =>
+            this.dependencies.award({
+              venueId: order.venueId,
+              orderId: order.id,
+              orderTotal: Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0)),
+              staffId: order.loyaltyStaffId,
+              // 🔴 H5, segunda ola (recheck de Codex): una liga DESPUÉS de este reclamo cambia el cliente y `loyaltyStaffId` a la
+              // vez. El envoltorio toma el actor de la MISMA lectura que el cliente que acredita; `staffId` de arriba es sólo el
+              // respaldo de un `award` inyectado.
+              actorDeLaVenta: true,
+              legacyCustomer: order.customer,
+            }),
+          )
 
           if (result.complete) {
             // 🔴 B1 (auditoría de Codex, ronda B): sólo SU reclamo. Una liga tardía que reabrió la venta pone

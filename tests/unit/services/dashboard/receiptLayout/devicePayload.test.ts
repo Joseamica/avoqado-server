@@ -1,4 +1,11 @@
-import { buildReceiptInfo, getDeviceReceiptPayload, RECEIPT_VENUE_SELECT } from '@/services/dashboard/receiptLayout/devicePayload.service'
+import {
+  buildReceiptInfo,
+  getDeviceReceiptPayload,
+  getDeviceReceiptPayloadWithStatus,
+  RECEIPT_ASSOCIATION_COLUMNS,
+  RECEIPT_EMISOR_COLUMNS,
+  RECEIPT_VENUE_SELECT,
+} from '@/services/dashboard/receiptLayout/devicePayload.service'
 import { CANONICAL_LAYOUT } from '@/services/shared/receiptLayout'
 import prisma from '@/utils/prismaClient'
 
@@ -85,10 +92,55 @@ describe('getDeviceReceiptPayload', () => {
     expect(r.receiptInfo).toBeDefined()
   })
 
-  it('🔴 el select pide los emisores por fecha de alta y con sus cuentas', () => {
-    expect(RECEIPT_VENUE_SELECT.fiscalEmisors.orderBy).toEqual({ createdAt: 'asc' })
-    expect(RECEIPT_VENUE_SELECT.fiscalEmisors.select.merchantConfigs).toBeDefined()
+  // Reemplaza a «el select pide los emisores por fecha de alta y con sus cuentas», que fijaba el DEFECTO (hallazgo F3 de
+  // la 5ª ronda): con sólo `createdAt`, dos emisores de la misma fecha salían en el orden que Postgres quisiera y el ticket
+  // cambiaba de RFC. La cobertura de `merchantConfigs` pasó a la prueba de columnas de abajo; la de `take`, se conserva.
+  it('🔴 orden TOTAL: por fecha y, a igual fecha, por id — el primero es el emisor PRINCIPAL del ticket', () => {
+    expect(RECEIPT_VENUE_SELECT.fiscalEmisors.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+    expect(RECEIPT_VENUE_SELECT.fiscalEmisors.select.merchantConfigs.orderBy).toEqual([{ merchantAccountId: 'asc' }, { id: 'asc' }])
     // 🔴 Sin `take: 1`: antes sólo viajaba el principal; ahora se necesitan todos.
     expect(RECEIPT_VENUE_SELECT.fiscalEmisors).not.toHaveProperty('take')
+  })
+
+  it('las columnas que consume el recibo salen de las MISMAS constantes que usa la firma fiscal', () => {
+    const { merchantConfigs, ...emisor } = RECEIPT_VENUE_SELECT.fiscalEmisors.select
+    expect(Object.keys(emisor).sort()).toEqual([...RECEIPT_EMISOR_COLUMNS].sort())
+    expect(Object.keys(merchantConfigs.select).sort()).toEqual([...RECEIPT_ASSOCIATION_COLUMNS].sort())
+  })
+})
+
+describe('getDeviceReceiptPayloadWithStatus — el estado explícito (spec §5.7.4)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('ok sólo si llegaron los DOS bloques', async () => {
+    mock.venue.findUnique.mockResolvedValue(venue())
+    mock.receiptLayout.findUnique.mockResolvedValue(null) // sin fila ⇒ la canónica: también cuenta como llegada
+    const r = await getDeviceReceiptPayloadWithStatus('v1')
+    expect(r.status).toBe('ok')
+    expect(r.payload.receiptInfo).toBeDefined()
+    expect(r.payload.receiptLayout).toBeDefined()
+  })
+
+  it('failed si el encabezado no se pudo leer', async () => {
+    mock.venue.findUnique.mockRejectedValue(new Error('base caída'))
+    mock.receiptLayout.findUnique.mockResolvedValue(null)
+    const r = await getDeviceReceiptPayloadWithStatus('v1')
+    expect(r.status).toBe('failed')
+    expect(r.payload.receiptInfo).toBeUndefined()
+    expect(r.payload.receiptLayout).toBeDefined()
+  })
+
+  it('failed si el diseño no se pudo leer', async () => {
+    mock.venue.findUnique.mockResolvedValue(venue())
+    mock.receiptLayout.findUnique.mockRejectedValue(new Error('base caída'))
+    expect((await getDeviceReceiptPayloadWithStatus('v1')).status).toBe('failed')
+  })
+
+  it('la función de siempre (la PAX la usa) sigue devolviendo SÓLO el payload', async () => {
+    mock.venue.findUnique.mockResolvedValue(venue())
+    mock.receiptLayout.findUnique.mockResolvedValue(null)
+    const r = await getDeviceReceiptPayload('v1')
+    expect(r).not.toHaveProperty('status')
+    expect(r.receiptInfo?.principalEmisorId).toBe(EMISOR_A.id)
   })
 })

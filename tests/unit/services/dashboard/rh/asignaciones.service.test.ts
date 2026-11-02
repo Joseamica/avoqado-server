@@ -123,6 +123,65 @@ describe('asignaciones (spec RH §3.2)', () => {
       await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a2', relation: 'ASIMILADO' as any, actorId: 'x' })
       expect(prismaMock.staffAssignment.create).not.toHaveBeenCalled()
     })
+    describe('«Checa entrada y salida» se cambia en la asignación (Asana 1219720211947237, D2)', () => {
+      const vigente = (over: Record<string, unknown> = {}) =>
+        ({
+          id: 'a1',
+          staffId: 's1',
+          venueId: 'v1',
+          positionId: 'p1',
+          relation: null,
+          effectiveFrom: new Date('2026-10-01T00:00:00Z'),
+          effectiveTo: null,
+          tracksAttendance: true,
+          ...over,
+        }) as any
+      it('otro día: abre una versión con la casilla nueva y lo deja en la bitácora', async () => {
+        prismaMock.staffAssignment.findFirst.mockResolvedValue(vigente())
+        prismaMock.staffAssignment.update.mockResolvedValue({} as any)
+        prismaMock.staffAssignment.create.mockResolvedValue(fila({ id: 'a2', supersedesId: 'a1' }) as any)
+        await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', tracksAttendance: false, actorId: 'x' })
+        expect(prismaMock.staffAssignment.create).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ supersedesId: 'a1', tracksAttendance: false, positionId: 'p1' }) }),
+        )
+        expect(writeLegacyActivityAuditTx).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ action: 'STAFF_ASSIGNMENT_VERSIONED', data: expect.objectContaining({ tracksAttendance: false }) }),
+        )
+      })
+      it('mismo día: reemplaza la versión abierta con la casilla nueva', async () => {
+        prismaMock.staffAssignment.findFirst.mockResolvedValue(vigente({ effectiveFrom: new Date('2026-10-09T00:00:00Z') }))
+        prismaMock.staffAssignment.update.mockResolvedValue(fila({ tracksAttendance: false }) as any)
+        await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', tracksAttendance: false, actorId: 'x' })
+        expect(prismaMock.staffAssignment.update).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ tracksAttendance: false }) }),
+        )
+        expect(prismaMock.staffAssignment.create).not.toHaveBeenCalled()
+        expect(writeLegacyActivityAuditTx).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            action: 'STAFF_ASSIGNMENT_UPDATED',
+            data: expect.objectContaining({ antes: expect.objectContaining({ tracksAttendance: true }), tracksAttendance: false }),
+          }),
+        )
+      })
+      it('la misma casilla y nada más: ni versión nueva ni bitácora', async () => {
+        prismaMock.staffAssignment.findFirst.mockResolvedValue(vigente())
+        await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', tracksAttendance: true, actorId: 'x' })
+        expect(prismaMock.staffAssignment.update).not.toHaveBeenCalled()
+        expect(prismaMock.staffAssignment.create).not.toHaveBeenCalled()
+        expect(writeLegacyActivityAuditTx).not.toHaveBeenCalled()
+      })
+      it('sin mandarla, una versión nueva conserva la casilla de antes', async () => {
+        prismaMock.staffAssignment.findFirst.mockResolvedValue(vigente({ tracksAttendance: false }))
+        prismaMock.staffAssignment.update.mockResolvedValue({} as any)
+        prismaMock.staffAssignment.create.mockResolvedValue(fila({ id: 'a2', supersedesId: 'a1' }) as any)
+        await cambiarAsignacion({ venueId: 'v1', assignmentId: 'a1', relation: 'ASIMILADO' as any, actorId: 'x' })
+        expect(prismaMock.staffAssignment.create).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ tracksAttendance: false }) }),
+        )
+      })
+    })
     it('historial: el servidor impone el tope de 100 y dice si hay más', async () => {
       prismaMock.staffAssignment.count.mockResolvedValue(150)
       prismaMock.staffAssignment.findMany.mockResolvedValue(Array.from({ length: 100 }, (_, i) => fila({ id: `a${i}` })) as any)
@@ -233,14 +292,14 @@ describe('asignaciones (spec RH §3.2)', () => {
         select: { id: true },
       })
       expect(prismaMock.staffAssignment.update).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: 'a2' }, data: { positionId: 'p2', relation: null } }),
+        expect.objectContaining({ where: { id: 'a2' }, data: { positionId: 'p2', relation: null, tracksAttendance: false } }),
       )
       expect(prismaMock.staffAssignment.create).not.toHaveBeenCalled()
       expect(writeLegacyActivityAuditTx).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
           action: 'STAFF_ASSIGNMENT_UPDATED',
-          data: expect.objectContaining({ antes: { positionId: 'p1', relation: null }, positionId: 'p2' }),
+          data: expect.objectContaining({ antes: { positionId: 'p1', relation: null, tracksAttendance: false }, positionId: 'p2' }),
         }),
       )
       expect(a.positionName).toBe('Recepción')

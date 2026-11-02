@@ -6,6 +6,7 @@ export const DATABASE_JOB_SCHEDULES = {
   documentRequests: '19 */2 * * * *',
   displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',
+  exchangeCardSettlement: '7,37 * * * * *',
   blumonWebhookReconciliation: '11,41 * * * * *',
   tpvHealthMonitor: '14 */2 * * * *',
   posConnectionMonitor: '17 1-59/5 * * * *',
@@ -19,6 +20,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // caja (:02), inventario (:44) y calendarios (:26/:56). Máximo 25 órdenes.
   loyaltyReconciliation: '41 */5 * * * *',
   paymentEffects: '16,46 * * * * *',
+  cancelOrderEffects: '24,54 * * * * *',
   // S4 (checkpoint 1 del webhook): worker propio de eventos PENDING de AngelPay. Segundos :13/:43, huecos libres
   // entre el reconciliador de Blumon (:11/:41) y el monitor de salud (:14).
   angelpayEventWorker: '13,43 * * * * *',
@@ -69,11 +71,26 @@ export const DATABASE_JOB_SCHEDULES = {
   // (:08/:38 watchdog de pagos, :11/:41 conciliador de Blumon, :13/:43 AngelPay); lectura barata por índice
   // (status, acceptDeadlineAt).
   onlineOrderAcceptanceExpiry: '10,40 * * * * *',
+  // Pedidos en línea con tarjeta (fase 2): termina cobros, liberaciones y borradores en duda. Cada minuto en el segundo :00,
+  // libre (ningún otro job de cada minuto lo usa); lectura por el índice (status, updatedAt), tope por estado.
+  onlineOrderCardReconciler: '0 * * * * *',
   // Tarjetas de regalo (B7): revisión nocturna — saldo contra libreta, cuentas pagadas con sobres sin activar (las activa), cobros con
   // saldo sin canje, reversos faltantes, cancelaciones atoradas, dinero sin sobres vivos y cuentas en $0 abiertas. Diario a las
   // 03:37:27 (CDMX): segundo :27 libre, lejos de deliveryConnectIntentCleanup (04:17:31) y shopifyReconcile (06:14:45).
   giftCardReconciliation: '27 37 3 * * *',
+  // Tarjetas de regalo 1b (S3): la entrega por WhatsApp y correo. Cada minuto en el segundo :24, libre entre el sweeper de gcal
+  // (:23) y el de salida de gcal (:26). Su entrada es un EXISTS barato por índice (deliveryStatus, deliveryNextAttemptAt).
+  giftCardDelivery: '24 * * * * *',
   // R1/R2 de la campaña 3DS: altas «esperando al banco» sin nadie en la pantalla. Cada 10 min en los minutos 3, 13, 23…
   // (lejos del :00 y del reconciliador de planes, que corre en */10) y en el segundo :34, libre entre :32 y :35.
   altasAMedioPago: '34 3-59/10 * * * *',
+  // CRM propio (tarea 6): el barrido que repara la captura de la landing, liga, carga las altas viejas y llena el primer
+  // dinero. Cada 5 min en los minutos 2, 7, 12… (lejos de los */5 del :00, :05…) y en el segundo :30, libre entre el
+  // outbox de catálogo (:29) y su watchdog (:32). De los jobs de cada 5 o 10 min, en esos minutos sólo cae
+  // `cfdiReconcile`, y en el segundo :00.
+  crmSweep: '30 2-59/5 * * * *',
+  // CRM propio (tarea 7): el aviso diario de pendientes. Cada 15 min de 8 a 11 de lunes a viernes (CDMX); el servicio sólo
+  // trabaja de 8:30 a 11:00 — la primera vuelta manda y las demás retoman lo que quedó a medias. Segundo :33, libre entre
+  // el watchdog de catálogo (:32) y las altas a medio pago (:34, cada 10 min).
+  crmDailyDigest: '33 */15 8-11 * * 1-5',
 } as const

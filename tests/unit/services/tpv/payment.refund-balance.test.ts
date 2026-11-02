@@ -184,6 +184,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
+        // These are ordinary sales; the exchange policy must read an explicit absence, not a missing delegate.
+        exchange: { findUnique: jest.fn().mockResolvedValue(null) },
         $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
         // El candado del intento con llave (`candadoDeIntento.ts:64-65`) corre ANTES de la guarda nueva.
         $executeRawUnsafe: jest.fn().mockResolvedValue(0),
@@ -871,7 +873,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
         undefined,
         undefined,
       ])
-      expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true })
+      expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true, reabiertaDeCancelada: false })
     },
   )
 
@@ -884,7 +886,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
       undefined,
       undefined,
     ])
-    expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true })
+    expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true, reabiertaDeCancelada: false })
     expect(createSalePostingInTx).not.toHaveBeenCalled()
   })
 
@@ -900,7 +902,7 @@ describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre un
     expect(data.completedAt).toEqual(expect.any(Date))
     expect(data.loyaltyEligibleAt).toEqual(expect.any(Date))
     expect(data.kitchenPendingAt).toEqual(expect.any(Date))
-    expect(r).toEqual({ firstSettlement: true, postingId: 'posting-1', ventaCerrada: false })
+    expect(r).toEqual({ firstSettlement: true, postingId: 'posting-1', ventaCerrada: false, reabiertaDeCancelada: false })
   })
 
   it('regresión: el ORIGEN de una reasignación (no entra dinero: `null`, sin efectos) sí vuelve a deber, como hoy', async () => {

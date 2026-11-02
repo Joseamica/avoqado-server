@@ -33,9 +33,37 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_SALE_REFUND_MUST_BE_FULL'
   // Pendientes 1a (T3): la devolución SIN venta se rechaza en un negocio que ya cobró tarjetas (aditivo).
   | 'GIFT_CARD_UNLINKED_REFUND_BLOCKED'
+  // 1b S2b (Q60): en la venta nueva cobrada con saldo, un premio de sellos que ya no aplica rechaza TODO (nada se crea).
+  | 'GIFT_CARD_STAMP_REWARD_NOT_APPLIED'
+  // 1b S2b (revisión): `pay-new-order` rechaza con 400 la mesa, `externalId` e `isOfflineReplay: true` (no los ignora).
+  | 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED'
+  // 1b S4/S5 (índice, «Códigos nuevos»). `GIFT_CARD_RESEND_NOT_ALLOWED` no existe (Q16: lo de gerente va en su ruta).
+  | 'GIFT_CARD_REVEAL_NOT_ALLOWED'
+  | 'GIFT_CARD_NOT_DELIVERABLE'
+  | 'GIFT_CARD_PHONE_RATE_LIMITED'
+  | 'GIFT_CARD_PHONE_CODE_INVALID'
+  | 'GIFT_CARD_PHONE_PROOF_INVALID'
+  // Cierre A (C4): el 429 del límite de reenvíos por tarjeta (`resend` y `change-destination`, POS y panel). Lo responde el
+  // limitador de ruta (`gift-card-lookup-rate-limit.middleware.ts`), no un `GiftCardError`.
+  | 'GIFT_CARD_RESEND_RATE_LIMITED'
+  // Saldo a favor (spec 2026-10-30-saldo-a-favor §5.2, aditivos). 🔴 Todo código `STORE_CREDIT_` es un 4xx SIN escritura: las apps
+  // borran lo pendiente con cualquier código de ese prefijo (`esRechazoDefinitivoDeSaldo`), así que nunca se lanza tras escribir, y lo
+  // que cambia entre el envío y el reenvío se mira después de reconocer la llave (S10, I1). Al revés también (S10, I2): con destino
+  // saldo a favor, el Reembolso del POS y el Cambio sacan todo otro 4xx como `STORE_CREDIT_REJECTED` (`comoRechazoDeSaldo`, con el
+  // código de siempre en `details.originalCode`), salvo los que pueden salir aunque ya se haya escrito (IDEMPOTENCY_KEY_REUSED, ACTOR_MISMATCH, REFUND_AUTHORITY_*, ORDER_LOCK_SCOPE_TOO_LARGE) y 401/403/408/429.
+  | 'STORE_CREDIT_OVER_CAP'
+  | 'STORE_CREDIT_CARD_BLOCKED'
+  | 'STORE_CREDIT_CUSTOMER_REQUIRED'
+  | 'STORE_CREDIT_CUSTOMER_PHONE_REQUIRED'
+  // S8a: un sobre de saldo a favor no se reenvía, no cambia de destino ni enseña su código (serían un código al portador).
+  | 'STORE_CREDIT_CARD_NOT_ELIGIBLE'
+  // S8a: el teléfono del saldo sólo se cambia en un sobre de saldo a favor; y, con `expectedPhoneLast4`, sólo si sigue siendo el que vio
+  // el gerente (una petición vieja que llega tarde no regresa el teléfono anterior).
+  | 'STORE_CREDIT_PHONE_NOT_ALLOWED'
+  | 'STORE_CREDIT_PHONE_OUTDATED'
 
 export class GiftCardError extends AppError {
-  constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422, extra?: Record<string, unknown>) {
+  constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {
     super(mensaje, status, true, code, extra)
     this.name = 'GiftCardError'
   }

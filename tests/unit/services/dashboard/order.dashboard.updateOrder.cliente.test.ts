@@ -1,22 +1,16 @@
 /**
- * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A» del founder): el PUT del panel
- * (`PUT /dashboard/venues/:venueId/orders/:orderId`, `orders:update` — lo trae COCINA) escribía `Order.customerId` en una venta
- * PAGADA. En una venta pagada con la lealtad pendiente y sin primario, el reconciliador premia a ese cliente por el respaldo
- * heredado. Ahora:
- *   · venta PAGADA o REEMBOLSADA + la petición CAMBIA el cliente (distinto del actual, también ponerlo donde no había o quitarlo)
- *     + quien edita NO tiene `payments:create` ⇒ 403 en español y NO se guarda nada de esa petición;
- *   · mismo cliente que el actual, venta abierta, o quien edita tiene el permiso ⇒ como hoy;
- *   · decidido bajo el candado de la venta (`bloquearVentaParaLiga`, primera sentencia de la transacción).
- * Por qué 403 y no ignorarlo en silencio: el panel sólo sabe mostrar `Order.customerId`; si el servidor lo ignorara, el panel
- * diría «guardado» con el cliente viejo.
+ * Postventa: el editor genérico conserva cuentas abiertas y reenvíos del mismo cliente.
+ * Una venta pagada anónima exige autoridad histórica o recibo propio reciente;
+ * nunca permite reemplazar o quitar un cliente existente, incluso con permiso.
+ * Todas las decisiones ocurren bajo el candado, sin guardar parcialmente la petición.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { ForbiddenError } from '@/errors/AppError'
+import { ForbiddenError, ConflictError } from '@/errors/AppError'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 
 const VENUE = 'venue-1'
 const ORDER = 'order-1'
-const MENSAJE = 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.'
+const MENSAJE = 'Sólo un gerente o superior con permiso puede asignar un cliente a esta venta.'
 
 /** Cada sentencia cruda, en orden (el candado de la venta y, con topología, el de la mesa). */
 let sentencias: string[]
@@ -49,24 +43,40 @@ beforeEach(() => {
   ])
   prismaMock.table.findMany.mockResolvedValue([])
   prismaMock.table.findFirst.mockResolvedValue({ id: 'table-1' })
+  prismaMock.orderCustomer.findFirst.mockResolvedValue(null)
+  prismaMock.payment.findFirst.mockResolvedValue({
+    status: 'COMPLETED',
+    type: 'REGULAR',
+    createdAt: new Date('2026-01-01'),
+    processedById: 'cashier',
+  } as any)
   prismaMock.customer.findFirst.mockResolvedValue({ id: 'cust-B' })
   prismaMock.order.update.mockImplementation(async (args: any) => orden(args.data))
 })
 
 const escribio = () => prismaMock.order.update.mock.calls.length > 0
 
-describe('🔴 R4-2: PUT del panel — cambiar el cliente de una venta COBRADA exige payments:create', () => {
-  it.each([
-    ['PAID, sin cliente ⇒ ponerlo', { paymentStatus: 'PAID', customerId: null }, 'cust-B'],
-    ['REFUNDED, sin cliente ⇒ ponerlo', { paymentStatus: 'REFUNDED', customerId: null }, 'cust-B'],
-    ['PAID, cliente A ⇒ cambiarlo a B', { paymentStatus: 'PAID', customerId: 'cust-A' }, 'cust-B'],
-    ['PAID, cliente A ⇒ quitarlo ("")', { paymentStatus: 'PAID', customerId: 'cust-A' }, ''],
-    ['PAID, cliente A ⇒ quitarlo (null)', { paymentStatus: 'PAID', customerId: 'cust-A' }, null],
-  ])('🔴 %s, SIN permiso ⇒ 403 en español y no se guarda NADA de la petición', async (_n, actual, nuevo) => {
-    prismaMock.order.findFirst.mockResolvedValue(orden(actual))
-    const error = await updateOrder(VENUE, ORDER, { customerId: nuevo, customerName: 'Kev' } as any).catch(e => e)
+describe('PUT del panel — autoridad histórica e inmutabilidad del cliente cobrado', () => {
+  it('PAID anónima sin autoridad: 403 y no guarda ningún campo', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orden())
+    const error = await updateOrder(VENUE, ORDER, { customerId: 'cust-B', customerName: 'Kev' } as any).catch(e => e)
     expect(error).toBeInstanceOf(ForbiddenError)
     expect(error).toMatchObject({ statusCode: 403, message: MENSAJE })
+    expect(escribio()).toBe(false)
+  })
+
+  it.each([
+    ['REFUNDED, sin cliente', { paymentStatus: 'REFUNDED', customerId: null }, 'cust-B', 'SALE_NOT_ELIGIBLE_FOR_CUSTOMER'],
+    ['PAID, cliente A a B', { customerId: 'cust-A' }, 'cust-B', 'SALE_CUSTOMER_ALREADY_ASSIGNED'],
+    ['PAID, cliente A a vacío', { customerId: 'cust-A' }, '', 'SALE_CUSTOMER_ALREADY_ASSIGNED'],
+    ['PAID, cliente A a null', { customerId: 'cust-A' }, null, 'SALE_CUSTOMER_ALREADY_ASSIGNED'],
+  ])('%s: conflicto aun para gerente y no guarda ningún campo', async (_n, actual, nuevo, code) => {
+    prismaMock.order.findFirst.mockResolvedValue(orden(actual as Record<string, unknown>))
+    const error = await updateOrder(VENUE, ORDER, { customerId: nuevo, customerName: 'Kev' } as any, {
+      customerAttribution: { staffId: 'manager', canAssignHistorical: true },
+    }).catch(e => e)
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ statusCode: 409, code })
     expect(escribio()).toBe(false)
   })
 
@@ -100,10 +110,31 @@ describe('🔴 R4-2: PUT del panel — cambiar el cliente de una venta COBRADA e
     expect(escribio()).toBe(false)
   })
 
-  it('con payments:create: como hoy, fija el cliente', async () => {
+  it('gerente autorizado fija el cliente olvidado de una venta elegible', async () => {
     prismaMock.order.findFirst.mockResolvedValue(orden())
-    await updateOrder(VENUE, ORDER, { customerId: 'cust-B' } as any, { puedeCambiarClienteEnVentaCobrada: true })
+    await updateOrder(VENUE, ORDER, { customerId: 'cust-B' } as any, {
+      customerAttribution: { staffId: 'manager', canAssignHistorical: true },
+    })
     expect(prismaMock.order.update.mock.calls[0][0].data).toMatchObject({ customerId: 'cust-B' })
+  })
+
+  it('el antiguo booleano payments:create no concede autoridad histórica', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orden())
+    await expect(
+      updateOrder(VENUE, ORDER, { customerId: 'cust-B' } as any, { puedeCambiarClienteEnVentaCobrada: true }),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER' })
+    expect(escribio()).toBe(false)
+  })
+
+  it('el primario existente bloquea reemplazar aunque la cabecera esté vacía', async () => {
+    prismaMock.order.findFirst.mockResolvedValue(orden())
+    prismaMock.orderCustomer.findFirst.mockResolvedValue({ customerId: 'cust-A' } as any)
+    await expect(
+      updateOrder(VENUE, ORDER, { customerId: 'cust-B' } as any, {
+        customerAttribution: { canAssignHistorical: true },
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SALE_CUSTOMER_ALREADY_ASSIGNED' })
+    expect(escribio()).toBe(false)
   })
 
   it('regresión: el MISMO cliente que ya tiene (el panel lo reenvía) ⇒ como hoy, sin permiso', async () => {

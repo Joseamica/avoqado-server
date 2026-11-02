@@ -2,10 +2,13 @@ import { registerPaymentTools } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
 import { GiftCardError } from '../../../src/services/giftCards/giftCardErrors'
 import { ConflictError } from '../../../src/errors/AppError'
+import { ExchangeError } from '../../../src/services/exchanges/exchangeErrors'
 
 const mockPaymentFindFirst = jest.fn()
 const mockIssue = jest.fn()
 const mockAudit = jest.fn()
+const mockChain = jest.fn()
+const mockOnlineOrderFindFirst = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -22,10 +25,12 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ issueRefund: (...a: unknown[]) => mockIssue(...(a as [])) }))
+jest.mock('@/services/exchanges/exchangeTx', () => ({ chainRefundSemanticsInTx: (...a: unknown[]) => mockChain(...a) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...(a as [])), findMany: jest.fn(), groupBy: jest.fn() },
+    onlineOrder: { findFirst: (...a: unknown[]) => mockOnlineOrderFindFirst(...(a as [])) },
     venue: { findUnique: jest.fn() },
   },
 }))
@@ -60,6 +65,40 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('issue_refund (critical money write, confirm-gated)', () => {
+  it('previews exchange credit with the root method and drawer semantics from the single resolver', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({
+      ...completedPayment,
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderType: { systemKind: 'EXCHANGE_CREDIT' },
+    })
+    mockChain.mockResolvedValueOnce({
+      kind: 'INHERIT',
+      rootPaymentId: 'root',
+      exchangeId: 'exchange',
+      money: { method: 'CASH', fundsFlow: 'CASH_DRAWER' },
+    })
+    const out = parse(await call(base))
+    expect(mockChain).toHaveBeenCalledWith(expect.anything(), 'v1', 'pay-1')
+    expect(out.preview).toMatchObject({ payment: { method: 'OTHER' }, refundMethod: 'CASH', saleDeCajonDeEfectivo: true })
+    expect(out.message).toMatch(/cajón/)
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('returns chain rejection codes and details during preview without confirming', async () => {
+    for (const code of ['EXCHANGE_CHAIN_NEEDS_TERMINAL', 'EXCHANGE_CHAIN_GIFT_CARD_PENDING'] as const) {
+      mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'OTHER', tenderType: { systemKind: 'EXCHANGE_CREDIT' } })
+      mockChain.mockResolvedValueOnce({
+        kind: 'BLOCKED',
+        error: new ExchangeError(code, 'No disponible', 422, { reason: 'PROCESSOR_ROOT' }),
+      })
+      const out = parse(await call(base))
+      expect(out).toMatchObject({ ok: false, code, error: 'No disponible', details: { reason: 'PROCESSOR_ROOT' } })
+      expect(out.requiresConfirmation).toBeUndefined()
+    }
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
   it('🔴 tarjeta de regalo: con refundMethod se rechaza con GIFT_CARD_REFUND_TO_BALANCE_ONLY; sin él, la vista previa dice que regresa al saldo', async () => {
     const conSaldo = {
       ...completedPayment,
@@ -75,12 +114,15 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
     const rechazo = parse(await call({ ...base, refundMethod: 'CASH', confirm: true }))
     expect(rechazo).toMatchObject({ ok: false, code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    // S8b: el medio de tarjetas también lo usa el gasto de un saldo a favor; el texto nombra los dos (regresa a ESE saldo).
+    expect(rechazo.error).toMatch(/saldo a favor/)
     expect(mockIssue).not.toHaveBeenCalled()
 
     mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
     const vista = parse(await call(base))
     expect(vista.requiresConfirmation).toBe(true)
     expect(vista.preview.regresaAlSaldoDeRegalo).toBe(true)
+    expect(vista.message).toMatch(/saldo a favor/)
     expect(mockPaymentFindFirst.mock.calls[1][0].select.tenderType).toEqual({ select: { systemKind: true } })
   })
 
@@ -316,4 +358,45 @@ it('no ejecuta dinero sin una llave estable de reintento', async () => {
   )
   expect(out).toMatchObject({ needsInput: true, field: 'idempotencyKey' })
   expect(mockIssue).not.toHaveBeenCalled()
+})
+
+// F3 (revisión final, pedidos en línea fase 2): el cobro de Stripe de un pedido en línea con tarjeta se devuelve con su propia
+// herramienta; issue_refund lo dice desde la vista previa y en el 409, en vez de dejar al agente en un callejón.
+describe('issue_refund sobre el cobro de tarjeta de un pedido en línea', () => {
+  const cobroDeStripe = {
+    ...completedPayment,
+    method: 'CREDIT_CARD',
+    source: 'WEB',
+    fundsFlow: 'AVOQADO_PROCESSED',
+    orderId: 'ord1',
+    processorId: 'pi_1',
+  }
+  beforeEach(() => {
+    mockOnlineOrderFindFirst.mockResolvedValue({
+      paymentMode: 'CARD_ONLINE',
+      charge: { id: 'ch1', status: 'CAPTURED', paymentIntentId: 'pi_1' },
+    })
+  })
+
+  it('la vista previa ya dice qué herramienta usar (online_order_card_refund) y no ofrece confirmar', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(cobroDeStripe)
+    const out = parse(await call(base))
+    expect(out).toMatchObject({ ok: false, code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS', useInstead: 'online_order_card_refund' })
+    expect(out.error).toContain('online_order_card_refund')
+    expect(out.requiresConfirmation).toBeUndefined()
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('si el 409 llega del servicio al confirmar, también dice qué herramienta usar', async () => {
+    mockOnlineOrderFindFirst.mockResolvedValue(null)
+    mockPaymentFindFirst.mockResolvedValueOnce(cobroDeStripe)
+    mockIssue.mockRejectedValueOnce(
+      new ConflictError(
+        'Devuelve este pago desde Pedidos en línea para que regrese a la tarjeta del cliente.',
+        'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS',
+      ),
+    )
+    const out = parse(await call({ ...base, confirm: true }))
+    expect(out).toMatchObject({ ok: false, code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS', useInstead: 'online_order_card_refund' })
+  })
 })

@@ -16,6 +16,9 @@
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
+import { customerAttributionActor } from '@/middlewares/customerAttribution.middleware'
+import type { CustomerAttributionActor } from '@/services/shared/customerAttributionPolicy'
+import type { Request } from 'express'
 
 // La bitácora es lo que se prueba (las filas `CUSTOMER_ATTACHED_TO_PAID_ORDER`): aquí va la DE VERDAD, no el doble del setup.
 jest.unmock('@/services/dashboard/activity-log.service')
@@ -46,6 +49,7 @@ let orgId: string | undefined
 let venueId: string | undefined
 let cajero: string | undefined
 let n = 0
+let actor: CustomerAttributionActor
 
 /**
  * Las escrituras de la bitácora son fire-and-forget en el código: se espía `logAction` SIN cambiarlo (el espía llama al de
@@ -70,6 +74,10 @@ beforeAll(async () => {
   const s = await prisma.staff.create({ data: { email: `itest-liga-${sello}-cajero@test.com`, firstName: 'Cajero', lastName: 'Prueba' } })
   await prisma.staffVenue.create({ data: { staffId: s.id, venueId, role: 'CASHIER' } })
   cajero = s.id
+  actor = await customerAttributionActor({
+    params: { venueId },
+    authContext: { userId: cajero, venueId, orgId, role: 'CASHIER' },
+  } as unknown as Request)
 
   espiaBitacora = jest.spyOn(bitacora, 'logAction')
 })
@@ -112,6 +120,20 @@ async function ventaCobradaSinCliente(): Promise<string> {
         total: 20,
         status: 'COMPLETED',
         paymentStatus: 'PAID',
+        payments: {
+          create: {
+            venueId: venueId!,
+            amount: 20,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 20,
+            method: 'CASH',
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            processedById: cajero,
+            createdAt: new Date(Date.now() - 60_000),
+          },
+        },
         loyaltyEligibleAt: new Date(Date.now() - 60_000),
         loyaltyProcessedAt: new Date(Date.now() - 60_000),
       },
@@ -162,12 +184,12 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
     let segunda: Promise<{ ok: Awaited<ReturnType<typeof attachCustomerToOrder>> | undefined; error: unknown }> | undefined
     try {
       // La primera liga crea el OrderCustomer y se queda ANTES del commit, con sus candados.
-      primera = attachCustomerToOrder(venueId!, orderId, hugo, cajero)
+      primera = attachCustomerToOrder(venueId!, orderId, hugo, cajero, { actor })
       const pidPrimera = await aTiempo(aparcada.pid, 15_000, 'la primera liga aparcada antes del commit')
       // La segunda (doble toque desde otro aparato). Ronda 1: las dos ligas toman PRIMERO el candado de la venta (el mismo que
       // la TPV y el cobro), así que la segunda espera ahí —antes esperaba el INSERT y chocaba con el único—; al soltarse, la
       // relectura ve la liga de la primera.
-      segunda = attachCustomerToOrder(venueId!, orderId, hugo, cajero).then(
+      segunda = attachCustomerToOrder(venueId!, orderId, hugo, cajero, { actor }).then(
         ok => ({ ok, error: undefined as unknown }),
         error => ({ ok: undefined, error }),
       )
@@ -216,10 +238,10 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
     }) as never)
     try {
       // La primera CREA la liga (y hace commit) y llega a su lealtad; ahí espera.
-      const primera = attachCustomerToOrder(venueId!, orderId, ivan, cajero)
+      const primera = attachCustomerToOrder(venueId!, orderId, ivan, cajero, { actor })
       await aTiempo(primeraLlego, 15_000, 'la primera liga llega a su lealtad')
       // La segunda (otro toque) encuentra la liga ya hecha, lee la venta todavía SIN sello y llega a la barrera.
-      const segunda = attachCustomerToOrder(venueId!, orderId, ivan, cajero)
+      const segunda = attachCustomerToOrder(venueId!, orderId, ivan, cajero, { actor })
       const [r1, r2] = await Promise.all([primera, segunda])
       expect(llegadas).toBe(2)
       expect(r1.loyalty).toMatchObject({ stamped: true })
@@ -241,13 +263,15 @@ describe('🔴 BAJO-3: el MISMO cliente agregado varias veces a la vez a una ven
     const juan = await cliente('Juan')
     const orderId = await ventaCobradaSinCliente()
     const llamadas = [
-      ...[1, 2, 3].map(() => attachCustomerToOrder(venueId!, orderId, juan, cajero)),
-      ...[1, 2, 3].map(() => addCustomerToOrder(venueId!, orderId, juan, cajero, { otorgarLealtad: true })),
+      ...[1, 2, 3].map(() => attachCustomerToOrder(venueId!, orderId, juan, cajero, { actor })),
+      ...[1, 2, 3].map(() => addCustomerToOrder(venueId!, orderId, juan, cajero, { otorgarLealtad: true, customerAttribution: actor })),
     ]
     const resultados = await Promise.allSettled(llamadas)
 
     // 🔴 F3 (ronda 1): TODAS con éxito, TPV incluida (antes la TPV respondía 400 «Customer already added to this order»).
-    const rechazos = resultados.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => r.reason?.message)
+    const rechazos = resultados
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map(r => ({ message: r.reason?.message, code: r.reason?.code, stack: r.reason?.stack }))
     expect(rechazos).toEqual([])
 
     const quedo = await loQueQuedo(orderId, juan)

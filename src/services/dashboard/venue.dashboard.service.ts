@@ -25,13 +25,15 @@
  * - Framework independent: Could switch from Express to Fastify without touching services
  */
 import prisma from '../../utils/prismaClient'
+import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
+import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
-import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
+import { deleteVenueFolder, deleteFileFromStorage, estaEnLaCarpetaDelNegocio } from '../storage.service'
 import { historiaDeSede, sedeConPagoAlPersonalError } from './staffPay/participacion'
 import { PresupuestoDeEspera, tomarCandado } from '../../utils/esperaDeCandados'
 import {
@@ -115,7 +117,11 @@ export async function listVenuesForOrganization(orgId: string, _queryOptions: an
   })
 }
 
-export async function getVenueById(orgId: string, venueId: string, options?: { skipOrgCheck?: boolean }): Promise<Venue> {
+export async function getVenueById(
+  orgId: string,
+  venueId: string,
+  options?: { skipOrgCheck?: boolean },
+): Promise<Venue & { exchangesEnabledEffective: boolean; storeCreditOnly: boolean; storeCreditAvailable: boolean }> {
   // SUPERADMIN can access venues across organizations (skipOrgCheck = true)
   // Other roles (including OWNER) are restricted to their own organization
   const whereClause: any = { id: venueId }
@@ -146,7 +152,13 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
-  return venue
+  return {
+    ...venue,
+    exchangesEnabledEffective: effectiveExchangesEnabled(venue.settings?.exchangesEnabled, venue.type),
+    // Saldo a favor (spec 2026-10-30 §5.1): el ajuste del negocio y si el SERVIDOR sabe darlo (las dos llaves de las tarjetas).
+    storeCreditOnly: venue.settings?.storeCreditOnly ?? false,
+    storeCreditAvailable: storeCreditAvailable(),
+  }
 }
 
 /**
@@ -232,7 +244,8 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     const newLogo = safeUpdateData.logo || null // Treat empty string as null
 
     // If logo is changing and there was an old logo, delete it from storage
-    if (oldLogo && oldLogo !== newLogo) {
+    // Sólo un archivo de la carpeta de este negocio: la URL del logo la escribe quien edita y puede ser de otro negocio.
+    if (oldLogo && oldLogo !== newLogo && estaEnLaCarpetaDelNegocio(oldLogo, existingVenue.slug)) {
       logger.info(`🗑️  Auto-cleanup: Deleting old logo from Firebase Storage`, {
         venueId,
         oldLogo,
@@ -256,7 +269,7 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     const oldLogoFull = existingVenue.logoFull
     const newLogoFull = safeUpdateData.logoFull || null // Treat empty string as null
 
-    if (oldLogoFull && oldLogoFull !== newLogoFull) {
+    if (oldLogoFull && oldLogoFull !== newLogoFull && estaEnLaCarpetaDelNegocio(oldLogoFull, existingVenue.slug)) {
       logger.info(`🗑️  Auto-cleanup: Deleting old full logo from Firebase Storage`, {
         venueId,
         oldLogoFull,
@@ -440,6 +453,10 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       )
 
     logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
+
+    // El crédito restringe sus cobros: el cambio del mismo negocio se elimina primero.
+    await tx.exchangeCreditLink.deleteMany({ where: { venueId } })
+    await tx.exchange.deleteMany({ where: { venueId } })
 
     // 1. Delete OrderItems (depends on Orders)
     const orderIds = await tx.order.findMany({

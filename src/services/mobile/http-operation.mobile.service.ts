@@ -6,6 +6,7 @@ import prisma from '@/utils/prismaClient'
 import { resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { tryDrainCancelledOrderEffects, type CancellationEffects } from './cancelOrderEffects.service'
 
 export const HTTP_TYPE = 'HTTP_OP_V1' as const
 export const HTTP_PREFIX = 'http:v1:' as const
@@ -247,6 +248,7 @@ export type DomainResult<A extends Action = Action> = A extends Action
   ? {
       response: Applied<A>['originalResponse']
       affectedRefs: HttpEnvelope['affectedRefs']
+      cancelEffects?: CancellationEffects
     } & (Applied<A> extends { effects: infer E } ? { effects: E } : {})
   : never
 export type OriginalResponse = z.infer<typeof responses.removeServiceCharge>
@@ -631,6 +633,7 @@ export function executeHttpOperation<A extends Action>(
             status: 'ACKED',
             errorCode: null,
             resultJson: e as Prisma.InputJsonValue,
+            ...(i.manifest.action === 'cancelOrder' && result.cancelEffects ? { cancelEffectsJson: result.cancelEffects } : {}),
           },
         })
         return e
@@ -646,7 +649,7 @@ export function executeHttpOperation<A extends Action>(
       if (error instanceof AppError) throw error
       return retry()
     }
-  })
+  }).then(reply => completeCancellation(input, reply))
 }
 export function resolveHttpOperation<A extends Action>(input: OperationInput<A>): Promise<OperationReply> {
   return databaseOutcome(async () => {
@@ -656,5 +659,12 @@ export function resolveHttpOperation<A extends Action>(input: OperationInput<A>)
     if (existing) return resolveStored(existing, i)
     if (!access.delegated) throw new ForbiddenError('Solicita resolución gerencial de esta operación', 'HTTP_OPERATION_ACCESS_DENIED')
     return insertRejected(i, null, { status: 409, code: 'OPERATION_NOT_APPLIED', message: 'La operación no fue aplicada' })
-  })
+  }).then(reply => completeCancellation(input, reply))
+}
+
+async function completeCancellation<A extends Action>(input: OperationInput<A>, reply: OperationReply): Promise<OperationReply> {
+  if (input.manifest.action === 'cancelOrder' && reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED') {
+    await tryDrainCancelledOrderEffects({ venueId: input.venueId, idempotencyKey: HTTP_PREFIX + input.operation.id })
+  }
+  return reply
 }

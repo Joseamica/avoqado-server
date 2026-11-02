@@ -25,7 +25,7 @@ const D = (n: number) => new Prisma.Decimal(n)
 /** Estas pruebas escriben y borran: sólo en la base de este plan o en una de CI, y sólo en esta Mac. */
 export function asegurarBaseDePrueba(): void {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
-  const permitida = /^\/(av-db-25-pago-f3|avoqado_[a-z0-9]+_test_|codex_testarudo_test_)/.test(url.pathname)
+  const permitida = /^\/(av-db-25-pago-f3|avoqado_(?:[a-z0-9]+|cambio_r5)_test_|codex_testarudo_test_)/.test(url.pathname)
   if (!['localhost', '127.0.0.1'].includes(url.hostname) || !permitida) throw new Error(`Base de prueba no permitida: ${url.pathname}`)
 }
 

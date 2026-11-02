@@ -16,7 +16,9 @@ import consumerRoutes from './consumer.routes'
 import googleCalendarRoutes from './google-calendar.routes'
 import mercadoPagoRoutes from './mercado-pago.routes'
 import deliveryChannelsRoutes from './delivery-channels.routes'
+import crmRoutes from './crm.routes'
 import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
+import { marcarRutaDeLaTpv } from '../services/shared/importePorPeso'
 
 const router = express.Router({ mergeParams: true })
 
@@ -28,7 +30,7 @@ router.use('/dashboard', dashboardRoutes) // All dashboard routes under /api/v1/
 // sales-summary, sales-by-item) y `src/services/command-center/`. El precedente interno es
 // `generalStats.dashboard.service.ts:244,958`: donde no hay medición se devuelve 0, no se inventa.
 router.use('/organizations', organizationRoutes) // Organization-level routes for OWNER dashboard
-router.use('/tpv', tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate)
+router.use('/tpv', marcarRutaDeLaTpv, tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate); la marca: cuenta del peso
 router.use('/invitations', invitationRoutes) // All invitation routes under /api/v1/invitations
 router.use('/onboarding', onboardingRoutes) // All onboarding routes under /api/v1/onboarding
 router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/v1/superadmin
@@ -42,5 +44,7 @@ router.use('/me', meRoutes) // Current user routes under /api/v1/me
 router.use('/google-calendar', googleCalendarRoutes) // Google Calendar Sync (Phase 1)
 router.use('/integrations/mercadopago', mercadoPagoRoutes) // MP marketplace OAuth (Phase 7 of MP plan v3)
 router.use('/delivery-channels', deliveryChannelsRoutes) // Gestión de canales de delivery (Task 10)
+// Avoqado's own CRM (spec 2026-10-30): outside `/superadmin` on purpose — its `crm:*` keys open nothing of the superadmin.
+router.use('/crm', crmRoutes)
 
 export default router

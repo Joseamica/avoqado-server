@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { IvaTratamiento, ProductType } from '@prisma/client'
 import { existingId } from '../common/existingId.schema'
 import { isWholeCents } from '../../services/product-variants/variantNaming'
-import { GTIN_MAX_LENGTH, SKU_REGEX, satProductKeySchema, satUnitKeySchema } from './menu.schema'
+import { GTIN_MAX_LENGTH, SKU_FORMAT_MESSAGE, SKU_REGEX, satProductKeySchema, satUnitKeySchema } from './menu.schema'
 
 // Mensajes en español a propósito: el middleware de validación los muestra tal cual. Zod = forma; las reglas viven en el servicio.
 const venueParams = z.object({ venueId: z.string().min(1, 'El venue es requerido') }).passthrough()
@@ -35,13 +35,7 @@ const variantRow = z.object({
     .refine(isWholeCents, 'El costo admite hasta 2 decimales')
     .nullable()
     .optional(),
-  sku: z
-    .string()
-    .trim()
-    .regex(SKU_REGEX, 'El SKU sólo puede llevar letras, números, guion y guion bajo')
-    .max(64, 'SKU muy largo')
-    .nullable()
-    .optional(),
+  sku: z.string().trim().regex(SKU_REGEX, SKU_FORMAT_MESSAGE).max(64, 'SKU muy largo').nullable().optional(),
   gtin: z.string().trim().max(GTIN_MAX_LENGTH, `El código pasa de ${GTIN_MAX_LENGTH} dígitos`).nullable().optional(),
   initialStock: z
     .number({ invalid_type_error: 'El stock inicial debe ser un número' })

@@ -48,7 +48,7 @@ describe('confirmarContratoDePrecio (integración)', () => {
   beforeAll(() => {
     const url = new URL(process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL ?? '')
     expect(['localhost', '127.0.0.1']).toContain(url.hostname)
-    expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_|av_db_25_iva_test)/)
+    expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_|av_db_25_iva_test)/)
   })
 
   const fixture = `confirmar-contrato-${randomUUID().slice(0, 8)}`

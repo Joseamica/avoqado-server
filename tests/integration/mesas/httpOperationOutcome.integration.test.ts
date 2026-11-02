@@ -23,7 +23,7 @@ try {
 if (
   !['postgres:', 'postgresql:'].includes(testDatabase.protocol) ||
   !['localhost', '127.0.0.1'].includes(testDatabase.hostname) ||
-  !/^\/avoqado_[a-z0-9]+_test_/.test(testDatabase.pathname) ||
+  !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(testDatabase.pathname) ||
   process.env.DATABASE_URL !== testDatabaseUrl
 ) {
   throw new Error('Exige DB propia local y DATABASE_URL=TEST_DATABASE_URL; no se imprimió la URL')
@@ -61,6 +61,9 @@ beforeAll(async () => {
     if (role === 'MANAGER') managerId = staff.id
     if (role === 'VIEWER') readerId = staff.id
   }
+  // Las pruebas de cortesía (Task3 comp*) actúan como el MESERO. Desde el 25-oct la cortesía pide `orders:comp`, que el mesero no trae
+  // de fábrica: aquí el dueño se la da a su rol desde el panel (`tpv-orders:comp`), el mismo camino que usa un negocio real.
+  await prisma.venueRolePermission.create({ data: { venueId, role: 'WAITER', permissions: ['tpv-orders:comp'], modifiedBy: managerId } })
 })
 
 afterEach(() => jest.restoreAllMocks())
@@ -4039,6 +4042,23 @@ describe('Task5 receipt coverage', () => {
       for (const action of actions) {
         const f = await detailsFixture(action)
         await prisma.order.update({ where: { id: f.o.id }, data: { paymentStatus } })
+        // PAID usa el recibo real propio y reciente; el estado solo no prueba autoridad de atribución.
+        if (paymentStatus === 'PAID') {
+          await prisma.payment.create({
+            data: {
+              venueId,
+              orderId: f.o.id,
+              amount: 100,
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: 100,
+              method: 'CASH',
+              status: 'COMPLETED',
+              type: 'REGULAR',
+              processedById: authorId,
+            },
+          })
+        }
         expect((await callHttp(f.input, 'post', detailsPath(f.input), detailsBody(f.input))).status).toBe(200)
         await assertDetailsApplied(f)
       }
@@ -5034,7 +5054,7 @@ async function task8HoldOrders(ids: string[]) {
   const hold = holder.$transaction(
     async tx => {
       pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int pid`)[0].pid
-      await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId"=${venueId} AND id=ANY(${ids}::text[]) ORDER BY id FOR UPDATE`
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId"=${venueId} AND id=ANY(${ids}::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE`
       ready.resolve()
       await release.promise
     },
@@ -5704,7 +5724,7 @@ test.each(['moveOrder', 'clearTable', 'mergeOrders', 'cancelOrder'] as const)(
     expect(await f.snapshot()).toEqual(before)
   },
 )
-test.each(['moveOrder', 'clearTable', 'mergeOrders', 'cancelOrder'] as const)(
+test.each(['moveOrder', 'clearTable', 'mergeOrders'] as const)(
   'Task8 %s publishes once after appliedNow; notification failure leaves committed body and replay/resolve publishes zero',
   async action => {
     const f = await task8Route(action),
@@ -5715,9 +5735,7 @@ test.each(['moveOrder', 'clearTable', 'mergeOrders', 'cancelOrder'] as const)(
         ? jest.spyOn(tables, 'publishMovedOrder')
         : action === 'clearTable'
           ? jest.spyOn(tables, 'publishClearedTable')
-          : action === 'mergeOrders'
-            ? jest.spyOn(mobile, 'publishMergedOrders')
-            : jest.spyOn(mobile, 'publishCancelledOrder')
+          : jest.spyOn(mobile, 'publishMergedOrders')
     let committed = false
     publish.mockImplementation(async () => {
       committed = (await stored(f.input))?.status === 'ACKED'

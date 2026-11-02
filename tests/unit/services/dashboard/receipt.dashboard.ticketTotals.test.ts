@@ -47,6 +47,18 @@ describe('generateAndStoreReceipt · ticketTotals', () => {
     prismaMock.digitalReceipt.create.mockImplementation(async ({ data }: any) => ({ id: 'r1', ...data }))
   }
 
+  it('D1 fotocopia: el snapshot congela la copia del ticket que guardó este cobro; sin copia no hay llave', async () => {
+    const copia = { lineas: [{ nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000 }], subtotalCents: 3000, descuentoCents: 300 }
+    preparar({ amount: 27, tipAmount: 0, processorData: { lineasDelTicket: copia } } as any, { subtotal: 50, taxAmount: 0, total: 50 })
+    await generateAndStoreReceipt('pay_1')
+    expect(prismaMock.digitalReceipt.create.mock.calls[0][0].data.dataSnapshot.lineasDelTicket).toEqual(copia)
+    jest.clearAllMocks()
+    prismaMock.digitalReceipt.update.mockResolvedValue({ id: 'r1' })
+    preparar({ amount: 116, tipAmount: 10 }, { subtotal: 100, taxAmount: 16, total: 116 })
+    await generateAndStoreReceipt('pay_1')
+    expect(prismaMock.digitalReceipt.create.mock.calls[0][0].data.dataSnapshot).not.toHaveProperty('lineasDelTicket', expect.anything())
+  })
+
   it('el snapshot nuevo lleva los totales del cobro, del MISMO cobro y la MISMA orden que el resto (r2 R2-10)', async () => {
     preparar({ amount: 116, tipAmount: 10 }, { subtotal: 100, taxAmount: 16, total: 116 })
     await generateAndStoreReceipt('pay_1')

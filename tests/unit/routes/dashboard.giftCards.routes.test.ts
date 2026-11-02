@@ -71,6 +71,18 @@ const CASOS: Array<[string, string, Record<string, unknown> | undefined, string,
     'giftCards:manage',
     'operate',
   ],
+  // S7 (Q16): el gerente reenvía o cambia el destino desde el panel con SU ruta, siempre con `giftCards:manage`.
+  ['post', `${B}/gc1/resend`, { operationKey: 'reenvia-0001-abc' }, 'giftCards:manage', 'resend'],
+  [
+    'post',
+    `${B}/gc1/resend`,
+    { operationKey: 'reenvia-0002-abc', deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com' },
+    'giftCards:manage',
+    'resend',
+  ],
+  // S8a: el teléfono con que se gasta un sobre de saldo a favor, de gerente.
+  ['post', `${B}/gc1/store-credit-phone`, { phone: '5598765432' }, 'giftCards:manage', 'storeCreditPhone'],
+  ['post', `${B}/gc1/store-credit-phone`, { phone: '5598765432', expectedPhoneLast4: '5678' }, 'giftCards:manage', 'storeCreditPhone'],
 ]
 
 beforeEach(() => {
@@ -187,6 +199,19 @@ describe('rutas del dashboard de tarjetas de regalo', () => {
       },
       /Elige un motivo de la lista/,
     ],
+    ['post', `${B}/gc1/resend`, { operationKey: 'reenvia-0003-abc', inventado: 1 }, /Hay un campo que no se esperaba/],
+    ['post', `${B}/gc1/resend`, { operationKey: 'reenvia-0004-abc', deliveryChannel: 'WHATSAPP' }, /falta el teléfono/],
+    [
+      'post',
+      `${B}/gc1/resend`,
+      { operationKey: 'reenvia-0005-abc', deliveryChannel: 'EMAIL', recipientEmail: 'no-es-correo' },
+      /El correo no es válido/,
+    ],
+    ['post', `${B}/gc1/resend`, { operationKey: 'corta' }, /al menos 8 caracteres/],
+    ['post', `${B}/gc1/store-credit-phone`, {}, /Falta el teléfono/],
+    ['post', `${B}/gc1/store-credit-phone`, { phone: '55 9876' }, /10 dígitos/],
+    ['post', `${B}/gc1/store-credit-phone`, { phone: '5598765432', deliveryChannel: 'WHATSAPP' }, /Hay un campo que no se esperaba/],
+    ['post', `${B}/gc1/store-credit-phone`, { phone: '5598765432', expectedPhoneLast4: '56a8' }, /deben ser 4 números/],
     ['get', `${B}/summary?from=01-10-2026&to=2026-10-14`, undefined, /AAAA-MM-DD/],
     ['get', `${B}?status=FOO`, undefined, /Estado no reconocido: FOO/],
   ])('%s %s con un cuerpo malo → 400 en español, antes del permiso', async (metodo, url, cuerpo, texto) => {

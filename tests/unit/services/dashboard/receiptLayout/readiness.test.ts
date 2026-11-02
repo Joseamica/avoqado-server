@@ -1,4 +1,5 @@
 import {
+  cargarVenueInfo,
   getReceiptDevices,
   getReceiptReadiness,
   minimoDeVersion,
@@ -6,6 +7,7 @@ import {
   posSoportaDiseno,
   versionAlMenos,
 } from '@/services/dashboard/receiptLayout/readiness.service'
+import { RECEIPT_VENUE_SELECT } from '@/services/dashboard/receiptLayout/devicePayload.service'
 import prisma from '@/utils/prismaClient'
 
 const mock = prisma as unknown as {
@@ -176,5 +178,76 @@ describe('capacidad de las tablets por nombre de versión (Terminal.version)', (
     expect(mock.terminal.findMany.mock.calls[0][0].select.version).toBe(true)
     expect(r.supporting).toBe(1)
     expect(r.notSupporting).toEqual([{ name: 'iPad', platform: 'POS_IOS', brand: null, appVersion: '1.10.2' }])
+  })
+})
+
+describe('cargarVenueInfo — la vista previa del dashboard predice el ticket del aparato', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('🔴 pide los emisores por (createdAt, id): el MISMO orden total que el aparato, así el principal es el mismo', async () => {
+    // Antes ordenaba sólo por `createdAt` y sin orden en las cuentas: con dos emisores de la misma fecha, la vista previa
+    // podía enseñar un RFC principal distinto al que imprime el aparato (revisión de la Task 2 de F0-B).
+    mock.venue.findUnique.mockResolvedValue({ name: 'X', timezone: 'America/Mexico_City', fiscalEmisors: [] })
+    await cargarVenueInfo('v1')
+    const { where, select } = mock.venue.findUnique.mock.calls[0][0]
+    expect(where).toEqual({ id: 'v1' })
+    expect(select.fiscalEmisors.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+    expect(select.fiscalEmisors.select.merchantConfigs.orderBy).toEqual([{ merchantAccountId: 'asc' }, { id: 'asc' }])
+    expect(select.fiscalEmisors).toEqual(RECEIPT_VENUE_SELECT.fiscalEmisors) // LA misma selección del aparato
+    // El resto de la consulta no cambia.
+    expect(Object.keys(select).sort()).toEqual(
+      ['address', 'city', 'fiscalEmisors', 'legalName', 'logo', 'name', 'phone', 'rfc', 'state', 'timezone', 'zipCode'].sort(),
+    )
+  })
+
+  it('la respuesta para el dashboard conserva su forma', async () => {
+    mock.venue.findUnique.mockResolvedValue({
+      name: 'Testarudo Cafe',
+      address: 'Nápoles 47',
+      city: 'Cuauhtémoc',
+      state: 'CDMX',
+      zipCode: '06600',
+      phone: '55 1234 5678',
+      logo: 'https://x/l.jpg',
+      rfc: 'VIE900101AAA',
+      legalName: 'VIEJO SA',
+      timezone: 'America/Mexico_City',
+      fiscalEmisors: [
+        {
+          id: 'emA',
+          legalName: 'CAFE A SA',
+          rfc: 'CAA010101AAA',
+          lugarExpedicion: '06600',
+          merchantConfigs: [{ merchantAccountId: 'maA' }],
+        },
+        {
+          id: 'emB',
+          legalName: 'CAFE B SA',
+          rfc: 'CBB020202BBB',
+          lugarExpedicion: '06700',
+          merchantConfigs: [{ merchantAccountId: 'maB' }, { merchantAccountId: null }],
+        },
+      ],
+    })
+    expect(await cargarVenueInfo('v1')).toEqual({
+      name: 'Testarudo Cafe',
+      address: 'Nápoles 47',
+      city: 'Cuauhtémoc',
+      state: 'CDMX',
+      zipCode: '06600',
+      phone: '55 1234 5678',
+      hasLogo: true,
+      fiscalEmisors: [
+        { id: 'emA', legalName: 'CAFE A SA', rfc: 'CAA010101AAA', lugarExpedicion: '06600', merchantAccountIds: ['maA'] },
+        { id: 'emB', legalName: 'CAFE B SA', rfc: 'CBB020202BBB', lugarExpedicion: '06700', merchantAccountIds: ['maB'] },
+      ],
+      principalEmisorId: 'emA',
+      legacy: { legalName: 'VIEJO SA', rfc: 'VIE900101AAA' },
+    })
+  })
+
+  it('un venue que no existe sigue siendo 404 VENUE_NOT_FOUND', async () => {
+    mock.venue.findUnique.mockResolvedValue(null)
+    await expect(cargarVenueInfo('v1')).rejects.toMatchObject({ statusCode: 404, code: 'VENUE_NOT_FOUND' })
   })
 })

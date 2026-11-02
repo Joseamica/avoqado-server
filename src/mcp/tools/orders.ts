@@ -6,11 +6,24 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { getRecentIntents } from '@/services/mobile/sync.mobile.service'
+import { lookupSyncRecovery } from '@/services/mobile/sync-recovery.mobile.service'
 import { text } from '../respond'
 import { hasPermission } from '@/services/access/access.service'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { summarizeRefunds } from '@/services/shared/orderBalance'
+import AppError from '@/errors/AppError'
+import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.mobile.service'
+import {
+  courtesyReviewPublicInputSchema,
+  courtesyReviewVenueIdSchema,
+  parseCourtesyReviewPublicInput,
+  toCourtesyReviewPublicReply,
+} from '@/services/mobile/cortesia-pendiente.public'
+import { auditMcpWrite, mcpProvenance } from '../audit'
+import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
+import { motivoDeCancelacionSchema } from '@/schemas/dashboard/order.schema'
+import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
@@ -32,6 +45,97 @@ const ORDER_TYPE_MAP: Record<string, OrderType> = {
 
 export function registerOrderTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'review_pending_courtesy',
+    'Revisa una captura ORIGINAL completa de cortesía pendiente con importe y propina cero. Todos los importes se expresan en PESOS. Sin confirm sólo muestra la cuenta canónica y la foto que deberá confirmarse; no crea cuentas ni pagos. Confirmar exige autorización humana, orders:comp y la misma foto. No acredita que una tarjeta no cobró por silencio ni reintenta el pago desde el MCP.',
+    courtesyReviewPublicInputSchema.omit({ expected: true }).extend({
+      venueId: courtesyReviewVenueIdSchema,
+      expectedCourtesySnapshot: z.unknown().optional(),
+    }).shape,
+    async ({ venueId, expectedCourtesySnapshot, ...publicInput }) => {
+      try {
+        const input = parseCourtesyReviewPublicInput({
+          ...publicInput,
+          ...(expectedCourtesySnapshot !== undefined ? { expected: expectedCourtesySnapshot } : {}),
+        })
+        guard.venueFilter(venueId)
+        guard.requirePermission(input.confirm ? 'orders:comp' : 'orders:read', venueId)
+        const reply = await revisarCortesiaPendiente(venueId, { actorId: scope.staffId, isImpersonating: false }, input)
+        const result = toCourtesyReviewPublicReply(reply)
+        if (!input.confirm)
+          return text({
+            requiresConfirmation: true,
+            ...result,
+            expectedCourtesySnapshot: result.snapshot,
+            message:
+              'Revisa la cuenta completa y pide autorización antes de aplicar la cortesía. El intento de pago original permanece guardado.',
+          })
+        avisarBeneficiosCortesiaPendiente(venueId, reply)
+        if (reply.outcome === 'APPLIED')
+          await auditMcpWrite(scope, {
+            action: 'ORDER_COURTESY_REVIEW_APPLIED',
+            entity: 'Order',
+            entityId: reply.snapshot.orderId,
+            venueId,
+            data: { originalPaymentKey: reply.originalPaymentKey },
+          })
+        return text({ ok: true, ...result })
+      } catch (error) {
+        if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
+        throw error
+      }
+    },
+  )
+
+  // «Cancelar orden» de Cuentas por cobrar, para el asistente (Amaena, 30-oct): la MISMA función que el panel
+  // (`cancelarCuentaSinCobrar`). Sin confirm sólo muestra la cuenta; el catálogo ata la confirmación a esa vista previa.
+  server.tool(
+    'cancel_unpaid_order',
+    'Cancela una cuenta abierta que no tiene NINGÚN pago y no es de mesa ni pedido en línea (por ejemplo, una cuenta por cobrar abierta por error). Pide el motivo, que queda en la bitácora. Con cualquier pago hay que reembolsar primero. Sin confirm:true sólo muestra la cuenta.',
+    {
+      venueId: z.string().describe('Venue de la cuenta (debe estar en tu scope)'),
+      orderId: z.string().describe('Id de la cuenta (el de find_order u open_orders)'),
+      reason: motivoDeCancelacionSchema.describe('Motivo de la cancelación; queda en la bitácora'),
+      confirm: z.boolean().optional().describe('true para cancelar de verdad, sólo tras la autorización del usuario'),
+    },
+    async ({ venueId, orderId, reason, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('orders:cancel-unpaid', venueId)
+      requireWriteScopeAlways(scope, 'orders:cancel-unpaid', 'cancela una cuenta del negocio')
+      const order = await prisma.order.findFirst({
+        where: { id: orderId, venueId },
+        select: { orderNumber: true, total: true, status: true, paymentStatus: true, tableId: true, onlineOrder: { select: { id: true } } },
+      })
+      if (!order) return text({ ok: false, error: 'Esa cuenta no existe en este negocio.' })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            cuenta: order.orderNumber,
+            total: num(order.total),
+            estado: order.status,
+            cobro: order.paymentStatus,
+            motivo: reason,
+            efecto:
+              'La cuenta queda cancelada y sale de Cuentas por cobrar. Si tiene un pago, es de mesa o es un pedido en línea, no se cancela y se dice por qué.',
+          },
+          mensaje: 'Vuelve a llamar con confirm:true para cancelarla.',
+        })
+      }
+      try {
+        const { cancelarCuentaSinCobrar } = await import('@/services/dashboard/order.dashboard.service')
+        await cancelarCuentaSinCobrar(venueId, orderId, reason, scope.staffId, await mcpProvenance(scope))
+      } catch (error) {
+        if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
+        throw error
+      }
+      // Sin `auditMcpWrite`: la cancelación deja UNA entrada (`ORDER_CANCELLED`) con autor, motivo y la procedencia MCP
+      // (`mcpProvenance`, Codex código r1 #2 y r2 #2).
+      return text({ ok: true, cuenta: order.orderNumber, status: 'CANCELLED' })
+    },
+  )
 
   // WHY: order tools expose money (totals, line items, per-payment amounts). The dashboard
   // gates order reads with orders:read; the MCP was only venue-scoped, so any in-scope role
@@ -361,6 +465,29 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           at: o.createdAt.toISOString(),
         })),
       })
+    },
+  )
+
+  server.tool(
+    'pos_sync_recovery',
+    'Consulta folios originales de ventas del POS y acredita si una cuenta cancelada tiene algún cobro o solicitud de terminal. Sólo lectura: no registra ventas, no cancela cobros y no marca pendientes como revisados. Una cuenta abierta o con cobros o solicitudes no acredita una cancelación sin dinero. Indica la sucursal y los folios originales del aparato.',
+    {
+      venueId: z.string().min(1, 'La sucursal es requerida').describe('Sucursal de la venta, dentro de tu acceso'),
+      externalOrderIds: z
+        .array(
+          z
+            .string()
+            .min(1, 'El folio no puede estar vacío')
+            .max(256, 'El folio no puede exceder 256 caracteres')
+            .refine(value => value.trim().length > 0, 'El folio no puede estar vacío'),
+        )
+        .min(1, 'Envía al menos un folio original')
+        .max(100, 'Máximo 100 folios por consulta')
+        .describe('De 1 a 100 folios originales de ventas, tal cual los conserva el aparato'),
+    },
+    async ({ venueId, externalOrderIds }) => {
+      orderReadableVenues(venueId)
+      return text(await lookupSyncRecovery(venueId, { externalOrderIds, includeCancelledPaymentEvidence: true }))
     },
   )
 

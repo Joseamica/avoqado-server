@@ -8,8 +8,10 @@
  * - si una escritura falla EN LA BASE, se deshace el lote entero, incluido el horario del negocio;
  * - `venue: { organizationId }` acota de verdad `update` y `updateMany`, y `{ id, venueId }` acota `delete`.
  *
- * «Se mudó a media operación» se simula devolviendo, en la lectura inicial, una terminal que en la base ya es de otro
- * negocio: es exactamente lo que ve el servicio cuando el traslado confirma entre su lectura y su escritura.
+ * En la cascada de la ORGANIZACIÓN, «se mudó a media operación» se simula devolviendo, en la lectura inicial, una terminal
+ * que en la base ya es de otro negocio: es exactamente lo que ve el servicio cuando el traslado confirma entre su lectura
+ * y su escritura. La cascada del NEGOCIO ya lo impide con candados (S1 de F1): bloquea las terminales del negocio antes
+ * de leerlas, así que una terminal de otro negocio ni se bloquea ni se escribe.
  *
  * Run with:
  *   TEST_DATABASE_URL='postgresql://…/av-db-25-test' \
@@ -92,10 +94,8 @@ afterAll(async () => {
 })
 
 describe('ajustes por negocio (updateVenueTpvSettings)', () => {
-  it('una terminal que se mudó a media operación se omite; el resto y el horario del negocio sí se guardan', async () => {
-    const lectura = [await readRow(t1), await readRow(t2)] // t2 ya es del negocio B
-    jest.spyOn(prisma.terminal, 'findMany').mockResolvedValueOnce(lectura as never)
-
+  it('una terminal de otro negocio ni se bloquea ni se escribe; las del negocio y su horario sí se guardan', async () => {
+    // «Se mudó a media operación» ya no puede pasar: el traslado escribe la fila de la terminal y espera el candado (S1).
     await updateVenueTpvSettings(venueA, { showTipScreen: false, expectedCheckInTime: '07:45' } as never)
 
     expect((await settingsOf(t1)).showTipScreen).toBe(false)
@@ -105,27 +105,41 @@ describe('ajustes por negocio (updateVenueTpvSettings)', () => {
   })
 
   it('si una escritura falla en la base, se deshace todo: el horario del negocio y la terminal que ya se había escrito', async () => {
-    // Orden del lote: [horario, t3, t1]. t3 tiene su propio valor de `notaDePrueba`, así que su escritura es válida;
-    // t1 hereda el valor del negocio, que lleva un carácter nulo (U+0000) que Postgres rechaza en jsonb. Si la base no deshiciera el
-    // lote, quedarían guardados el horario nuevo y la escritura de t3.
-    await prisma.venueSettings.upsert({
-      where: { venueId: venueA },
-      update: { expectedCheckInTime: '07:45' },
-      create: { venueId: venueA, expectedCheckInTime: '07:45' },
-    })
-    const lectura = [await readRow(t3), await readRow(t1)]
-    jest.spyOn(prisma.terminal, 'findMany').mockResolvedValueOnce(lectura as never)
-    const t3Antes = await settingsOf(t3)
-    const t1Antes = await settingsOf(t1)
+    // Bajo los candados las terminales se escriben en orden de id. La que falla es la ÚLTIMA: así hay una escritura
+    // válida antes (tiene su propio valor de `notaDePrueba`) y la prueba demuestra que la base también la deshace. La que
+    // falla hereda el valor del negocio, con un carácter nulo (U+0000) que Postgres rechaza en jsonb.
+    const [valida, falla] = [t1, t3].sort()
+    const overridesAntes = new Map([
+      [t1, (await readRow(t1)).configOverrides],
+      [t3, (await readRow(t3)).configOverrides],
+    ])
+    await prisma.terminal.update({ where: { id: valida }, data: { configOverrides: { notaDePrueba: 'propia' } } })
+    await prisma.terminal.update({ where: { id: falla }, data: { configOverrides: Prisma.JsonNull } })
+    try {
+      await prisma.venueSettings.upsert({
+        where: { venueId: venueA },
+        update: { expectedCheckInTime: '07:45' },
+        create: { venueId: venueA, expectedCheckInTime: '07:45' },
+      })
+      const validaAntes = await settingsOf(valida)
+      const fallaAntes = await settingsOf(falla)
 
-    await expect(
-      updateVenueTpvSettings(venueA, { showReviewScreen: false, expectedCheckInTime: '06:15', notaDePrueba: NULO } as never),
-    ).rejects.toThrow(/22P05|unsupported Unicode escape/) // lo rechaza POSTGRES al ejecutar, no una validación previa
+      await expect(
+        updateVenueTpvSettings(venueA, { showReviewScreen: false, expectedCheckInTime: '06:15', notaDePrueba: NULO } as never),
+      ).rejects.toThrow(/22P05|unsupported Unicode escape/) // lo rechaza POSTGRES al ejecutar, no una validación previa
 
-    const horario = await prisma.venueSettings.findUnique({ where: { venueId: venueA }, select: { expectedCheckInTime: true } })
-    expect(horario?.expectedCheckInTime).toBe('07:45')
-    expect(await settingsOf(t3)).toEqual(t3Antes)
-    expect(await settingsOf(t1)).toEqual(t1Antes)
+      const horario = await prisma.venueSettings.findUnique({ where: { venueId: venueA }, select: { expectedCheckInTime: true } })
+      expect(horario?.expectedCheckInTime).toBe('07:45')
+      expect(await settingsOf(valida)).toEqual(validaAntes)
+      expect(await settingsOf(falla)).toEqual(fallaAntes)
+    } finally {
+      for (const [id, antes] of overridesAntes) {
+        await prisma.terminal.update({
+          where: { id },
+          data: { configOverrides: (antes as Prisma.InputJsonValue | null) ?? Prisma.JsonNull },
+        })
+      }
+    }
   })
 })
 

@@ -40,7 +40,7 @@ let ranura = 0
 beforeAll(async () => {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
   expect(['localhost', '127.0.0.1']).toContain(url.hostname)
-  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/)
   await prisma.organization.create({ data: { id: fixture, name: fixture, email: `${fixture}@example.test`, phone: '5500000000' } })
   await prisma.venue.create({ data: { id: venueId, organizationId: fixture, name: fixture, slug: fixture } })
 })

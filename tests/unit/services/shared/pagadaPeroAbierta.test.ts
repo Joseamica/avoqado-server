@@ -1,5 +1,19 @@
 import { Prisma } from '@prisma/client'
-import { baseQueDebeCubrirseSql, criterioPagadaPeroAbiertaSql, findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
+import {
+  baseQueDebeCubrirseSql,
+  cerrarPedidoDePlataformaSoloDeEstado,
+  criterioPagadaPeroAbiertaSql,
+  esDeUnaPlataformaSql,
+  findPaidButOpenOrders,
+  findPedidosDePlataformaPorCerrar,
+  instanteUtcSql,
+  laCocinaLoTerminoSql,
+  momentoDeCerrarUnPedidoDePlataformaSql,
+  pedidoDePlataformaAceptadoSql,
+  pedidoDePlataformaQueBDejaAbiertoSql,
+  seAcaboSuDiaDelNegocioSql,
+} from '@/services/shared/pagadaPeroAbierta'
+import { BUSINESS_DAY_START_HOUR } from '@/services/shared/cashDrawerAutoClose'
 
 describe('criterio SQL «pagada pero abierta»', () => {
   const sql = criterioPagadaPeroAbiertaSql('o')
@@ -149,5 +163,139 @@ describe('findPaidButOpenOrders — la consulta que arma', () => {
     const q = consultaCapturada(db)
     expect(q.sql).not.toContain('o."createdAt" >=')
     expect(q.values).toEqual([new Date('2026-09-02T19:55:00.000Z'), 50])
+  })
+  /**
+   * 🔴 Codex b1 #1 (Rappi fase 2): el total de un pedido de plataforma lleva cargos del comercio (el envío del repartidor propio,
+   * los cargos de Uber) que el reparador no ve. Proponérselo era quitarle el envío a la venta y denunciar un sobrepago falso.
+   */
+  it('🔴 NO propone reparar un pedido cuyo dinero liquida una plataforma, sin excluirlo del criterio que lee el vigilante', async () => {
+    const db = dobleDb()
+    await findPaidButOpenOrders(comoDb(db), { graceMs: GRACIA_MS, limit: 50, now: AHORA })
+
+    const q = consultaCapturada(db)
+    expect(esDeUnaPlataformaSql('o')).toBe(`o."originSystem" = 'DELIVERY_PLATFORM'`)
+    expect(q.sql).toContain(`AND NOT (o."originSystem" = 'DELIVERY_PLATFORM')`)
+    expect(q.sql).toContain(criterioPagadaPeroAbiertaSql('o'))
+  })
+})
+
+/**
+ * La cuarta pasada del barrido: los pedidos de plataforma se cierran SÓLO de estado, nunca uno sin aceptar, y el CUÁNDO vive en
+ * un solo sitio (`momentoDeCerrarUnPedidoDePlataformaSql`): la decisión «B» del founder (22-oct-2026) —cuando la cocina lo
+ * termina, o al acabar el día del negocio, lo que pase primero—. Lo que el SQL ELIGE de verdad lo prueba la integración
+ * (`barridoDePagadasReparto.test.ts`, contra Postgres); aquí se fija la FORMA.
+ */
+describe('findPedidosDePlataformaPorCerrar — la consulta que arma', () => {
+  const AHORA = new Date('2026-10-22T20:00:00Z')
+  const DESDE = new Date('2026-09-22T20:00:00Z')
+  const dobleDb = () => ({ $queryRaw: jest.fn().mockResolvedValue([]) })
+  const consultaCapturada = (db: ReturnType<typeof dobleDb>) => {
+    const [strings, ...values] = db.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]
+    return Prisma.sql(strings, ...values)
+  }
+
+  it('sólo pedidos de plataforma que el núcleo dio por PAGADOS, aceptados y que cumplen el criterio compartido; gracia, ventana, orden y tope', async () => {
+    const db = dobleDb()
+    await findPedidosDePlataformaPorCerrar(db as never, { graceMs: 300_000, limit: 50, now: AHORA, since: DESDE })
+
+    const q = consultaCapturada(db)
+    expect(q.sql).toContain(criterioPagadaPeroAbiertaSql('o'))
+    expect(q.sql).toContain(esDeUnaPlataformaSql('o'))
+    // El barrido no decide si un pedido de plataforma está pagado: lo dice el núcleo de reparto (uno con efectivo por cobrar no).
+    expect(q.sql).toContain(`o."paymentStatus" = 'PAID'`)
+    expect(q.sql).toContain(pedidoDePlataformaAceptadoSql('o'))
+    // 🔴 El CUÁNDO, con el AHORA del barrido (el mismo reloj que su gracia), no el de la sesión de Postgres.
+    expect(q.sql).toContain(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(AHORA)))
+    expect(q.sql).toContain('o."updatedAt" <')
+    expect(q.sql).toContain('o."createdAt" >=')
+    expect(q.sql).toContain('ORDER BY o."createdAt" ASC')
+    // Sin binds de fecha nuevos: el ahora del CUÁNDO va como literal UTC.
+    expect(q.values).toEqual([new Date('2026-10-22T19:55:00.000Z'), DESDE, 50])
+  })
+
+  it('🔴 «aceptado» = CONFIRMED o más adelante, o PENDING con la aceptación acreditada: uno que espera a la cocina nunca se cierra', () => {
+    expect(pedidoDePlataformaAceptadoSql('o')).toBe(`(o.status <> 'PENDING' OR o."providerAcceptedAt" IS NOT NULL)`)
+  })
+})
+
+describe('decisión B: CUÁNDO se cierra un pedido de plataforma pagado y aceptado', () => {
+  const AHORA = instanteUtcSql(new Date('2026-10-22T20:00:00Z'))
+
+  it('el ahora va como literal del reloj de pared UTC (como el corte del vigilante), nunca como bind de fecha', () => {
+    expect(AHORA).toBe(`TIMESTAMP '2026-10-22 20:00:00.000'`)
+    // Un Date inválido no se convierte en SQL.
+    expect(() => instanteUtcSql(new Date('no es fecha'))).toThrow()
+  })
+
+  it('🔴 «la cocina lo terminó»: el pedido tiene comanda y NINGUNA sigue en la cocina (NEW o PREPARING), del mismo negocio', () => {
+    const sql = laCocinaLoTerminoSql('x')
+    // Es el mismo «comanda abierta» del tablero (`kdsCapacidades.ts`, COMANDA_ABIERTA) y del reintento del «listo».
+    expect(sql).toMatch(/^\(EXISTS \(SELECT 1 FROM "KdsOrder" k WHERE k\."orderId" = x\.id AND k\."venueId" = x\."venueId"\)/)
+    expect(sql).toMatch(
+      /AND NOT EXISTS \(\s*SELECT 1 FROM "KdsOrder" k WHERE k\."orderId" = x\.id AND k\."venueId" = x\."venueId" AND k\.status IN \('NEW', 'PREPARING'\)/,
+    )
+    // El alias manda: no habla de otra tabla.
+    expect(sql).not.toMatch(/\bo\./)
+  })
+
+  it('🔴 «se acabó su día del negocio»: el día de la CAJA (corte de `businessDayStart`) de la venta y el de AHORA, en la zona del negocio', () => {
+    const sql = seAcaboSuDiaDelNegocioSql('x', AHORA)
+    // Decisión del controlador (Ronda de arreglo 1): el día del negocio es el de la caja, que empieza a las
+    // BUSINESS_DAY_START_HOUR (04:00) en la zona del venue, no a medianoche. La hora sale de la MISMA constante.
+    const corte = `- INTERVAL '${BUSINESS_DAY_START_HOUR} hours')::date`
+    // El día de la venta: el último de llegó, se aceptó o se programó (un programado no se cierra antes de su día).
+    expect(sql).toContain(
+      `(((GREATEST(x."createdAt", x."providerAcceptedAt", x."scheduledFor") AT TIME ZONE 'UTC') AT TIME ZONE z.tz) ${corte}`,
+    )
+    // El de AHORA, con el reloj que le pasen, la MISMA zona y el MISMO corte.
+    expect(sql).toContain(`(((${AHORA} AT TIME ZONE 'UTC') AT TIME ZONE z.tz) ${corte}`)
+    expect(sql).toMatch(/::date < \(\(\(TIMESTAMP/)
+    // Nunca la medianoche a secas.
+    expect(sql).not.toMatch(/AT TIME ZONE z\.tz\)::date/)
+    // La zona es la del negocio de ESA venta; una zona que Postgres no conoce cae en la de default y no tumba la pasada.
+    expect(sql).toContain(`FROM "Venue" vz`)
+    expect(sql).toContain(`vz.id = x."venueId"`)
+    expect(sql).toContain(`vz.timezone IN (SELECT name FROM pg_timezone_names)`)
+    expect(sql).toContain(`ELSE 'America/Mexico_City'`)
+    expect(sql).not.toMatch(/\bo\./)
+  })
+
+  it('el momento = la cocina lo terminó O se acabó su día, lo que pase primero; nunca NULL', () => {
+    const sql = momentoDeCerrarUnPedidoDePlataformaSql('o', AHORA)
+    expect(sql).toBe(`COALESCE((${laCocinaLoTerminoSql('o')} OR ${seAcaboSuDiaDelNegocioSql('o', AHORA)}), FALSE)`)
+  })
+
+  it('🔴 lo que B deja abierto es el complemento EXACTO de lo que el barrido cierra (el vigilante no puede divergir del barrido)', () => {
+    const sql = pedidoDePlataformaQueBDejaAbiertoSql('o', AHORA)
+    expect(sql).toContain(esDeUnaPlataformaSql('o'))
+    expect(sql).toContain(`o."paymentStatus" = 'PAID'`)
+    expect(sql).toContain(pedidoDePlataformaAceptadoSql('o'))
+    expect(sql).toContain(`NOT ${momentoDeCerrarUnPedidoDePlataformaSql('o', AHORA)}`)
+  })
+})
+
+describe('cerrarPedidoDePlataformaSoloDeEstado', () => {
+  const AHORA = new Date('2026-10-22T20:00:00Z')
+  const pedido = { id: 'ord-1', venueId: 'v1', status: 'CONFIRMED' }
+
+  it('🔴 escribe SÓLO el estado: ni total, ni propina, ni lo pagado, ni lo por cobrar, ni el estado de cobro', async () => {
+    const db = { $executeRaw: jest.fn().mockResolvedValue(1) }
+    expect(await cerrarPedidoDePlataformaSoloDeEstado(db as never, pedido, AHORA)).toBe(true)
+
+    expect(db.$executeRaw).toHaveBeenCalledTimes(1)
+    const [strings, ...values] = db.$executeRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]
+    const q = Prisma.sql(strings, ...values)
+    expect(q.sql.match(/SET[\s\S]*?WHERE/)?.[0]).toBe(
+      `SET status = 'COMPLETED', "completedAt" = (? AT TIME ZONE 'UTC'), "updatedAt" = (? AT TIME ZONE 'UTC')\n    WHERE`,
+    )
+    expect(q.values).toEqual([AHORA, AHORA, pedido.id, pedido.venueId, pedido.status])
+    expect(q.sql).toContain(criterioPagadaPeroAbiertaSql('o'))
+    expect(q.sql).toContain(pedidoDePlataformaAceptadoSql('o'))
+    expect(q.sql).toContain(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(AHORA)))
+  })
+
+  it('si otro lo cambió en medio (CAS en 0) contesta false y no lanza', async () => {
+    const db = { $executeRaw: jest.fn().mockResolvedValue(0) }
+    expect(await cerrarPedidoDePlataformaSoloDeEstado(db as never, pedido, AHORA)).toBe(false)
   })
 })

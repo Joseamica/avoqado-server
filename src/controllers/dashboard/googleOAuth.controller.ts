@@ -3,7 +3,7 @@ import { NextFunction, Request, Response } from 'express'
 import * as googleOAuthService from '../../services/dashboard/googleOAuth.service'
 import { z } from 'zod'
 import { ForbiddenError, ValidationError } from '../../errors/AppError'
-import { optionalLaunchCampaignCode, optionalHybridOfferSlug, utmSchema } from '../../schemas/acquisition.schema'
+import { optionalLaunchCampaignCode, optionalHybridOfferSlug, optionalReferrer, utmSchema } from '../../schemas/acquisition.schema'
 import { ipDelCliente } from '../../utils/clientIp'
 
 /**
@@ -17,6 +17,7 @@ const signupIntentSchema = z
     launchCampaignCode: optionalLaunchCampaignCode,
     hybridOfferSlug: optionalHybridOfferSlug,
     utm: utmSchema,
+    referrer: optionalReferrer,
   })
   .optional()
 

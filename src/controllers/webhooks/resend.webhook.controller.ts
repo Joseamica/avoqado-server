@@ -14,6 +14,7 @@ import { Webhook } from 'svix'
 import logger from '@/config/logger'
 import * as marketingService from '../../services/superadmin/marketing.superadmin.service'
 import { procesarAvisoDeResend } from '../../services/marketing/campaignWebhook.service'
+import { FALLO_FINAL_DE_CORREO, marcarEntregaFallidaPorMensaje } from '../../services/giftCards/giftCardDelivery.service'
 
 /**
  * Secreto de firma de Resend (Svix). Se lee en CADA llamada, nunca en una constante de módulo.
@@ -94,6 +95,20 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
     }
 
     logger.info(`📧 [Resend Webhook] Received event: ${event.type}, email_id: ${event.data?.email_id}`)
+
+    // Tarjetas de regalo (1b S3, Q105): un correo de tarjeta que rebotó, se suprimió o falló ⇒ «No se entregó». Va ANTES de
+    // marketing, que a un correo sin `CampaignDelivery` lo da por manejado. Si falla, 500 para que Resend reintente (como el
+    // carril de campañas, abajo); el CAS por `deliveryMessageId` lo vuelve idempotente y no encuentra los correos que no son de
+    // tarjetas. Después sigue igual que siempre.
+    const falloDeTarjeta = FALLO_FINAL_DE_CORREO[event.type]
+    if (falloDeTarjeta && event.data?.email_id) {
+      try {
+        await marcarEntregaFallidaPorMensaje(event.data.email_id, falloDeTarjeta)
+      } catch (error) {
+        logger.error('📧 [Resend Webhook] Falló marcar la entrega de una tarjeta de regalo:', error)
+        return res.status(500).json({ success: false, error: 'Error procesando el aviso de una tarjeta de regalo' })
+      }
+    }
 
     // Handle the event — DOS carriles distintos comparten este webhook:
     //   1. Marketing de superadmin (Avoqado → los venues), que es el que ya estaba.

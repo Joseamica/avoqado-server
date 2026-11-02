@@ -44,8 +44,10 @@ import { DONDE_TIMBRE_EN_DUDA, timbreEnDuda } from './timbreEnDuda'
 import type { NotaDeDevolucion } from './facturaConDevolucion'
 import { leerReparto } from '../shared/repartoDescuento'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 import { formaGanadoraDeCobros } from './formaDePagoGanadora'
+import { importePorPesoCents, importePorPesoViejoCents } from '../shared/importePorPeso'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -954,6 +956,9 @@ export async function emitirConEntrada(
     if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
     if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
     if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
+    // D3 (Codex r5 #3 de pedidos): una venta cancelada después de entrar a la global no se saca de ella ni se factura al cliente: ni egreso
+    // ni ingreso (su dinero, si lo hubo, se devuelve; la devolución lleva su propia nota). Antes de la comprobación previa: cero efectos.
+    if (esVentaCancelada(bundle)) return { status: 'VALIDATION_FAILED', cfdi: null, reasons: [MOTIVO_VENTA_CANCELADA] }
     // La comprobación previa: con `prisma`, sin candados ni efectos (C3-11/C3-20: lo enviado ya se recuperó arriba).
     const previa = await ext.prepararPorExtraccion(prisma, params, enGlobal, bundle)
     if (previa.reasons.length) return { status: 'VALIDATION_FAILED', cfdi: null, reasons: previa.reasons }
@@ -972,6 +977,7 @@ export async function emitirConEntrada(
           if (!b) return ['La venta ya no tiene un emisor fiscal configurado.']
           if (!b.facturacionEnabled) return ['Facturación no habilitada para este comercio']
           if (params.flow === 'AUTOFACTURA_A' && !b.autofacturaEnabled) return ['Autofactura no habilitada para este comercio']
+          if (esVentaCancelada(b)) return [MOTIVO_VENTA_CANCELADA] // D3: se canceló entre la comprobación previa y la reserva
           const base = { remanentes: c.remanentes, filasD16: c.filasD16, bruto: c.bruto, porTratamiento: c.porTratamiento }
           return (await ext.prepararPorExtraccion(tx, params, enGlobal, b, base)).reasons
         },
@@ -1129,9 +1135,7 @@ export async function emitirConEntrada(
       // orden (el que toman las devoluciones). Sólo una emisión nueva del personal: la autofactura con devolución ya se detuvo en la admisión
       // (A7-R10) y la sustitución no decide (conserva o hereda lo de su original).
       const dev =
-        sustitucion || params.flow === 'AUTOFACTURA_A'
-          ? null
-          : await (await moduloDeDevolucion()).facturaConDevolucion(tx, params, bundle)
+        sustitucion || params.flow === 'AUTOFACTURA_A' ? null : await (await moduloDeDevolucion()).facturaConDevolucion(tx, params, bundle)
       // M1 (revisión final): en la RECAPTURA de una reserva que nunca se envió, la venta devuelta completa es un motivo (la fila pasa a
       // VALIDATION_FAILED, que no es viva), no un 409 que desharía la transacción y la dejaría «en proceso» para siempre.
       if (dev?.caso === 'TOTAL' && !recaptura) throw new ConflictError(MOTIVO_VENTA_DEVUELTA_COMPLETA, CODIGO_VENTA_DEVUELTA)
@@ -1153,6 +1157,9 @@ export async function emitirConEntrada(
         if (cancelada) reasons.push(cancelada)
       }
     }
+    // D3 (Codex r5 #3 de pedidos): las dos ramas de extracción no leen los motivos del cargador (conservan lo congelado), pero una venta
+    // cancelada no recibe un ingreso nuevo por ningún camino: la sustituta se detiene y la original sigue viva hasta que se cancele sola.
+    if (esVentaCancelada(bundle) && !reasons.includes(MOTIVO_VENTA_CANCELADA)) reasons.push(MOTIVO_VENTA_CANCELADA)
     // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC; tras el ajuste del cargador, la suma por concepto ya no es lo cobrado a propósito.
     const documentoCents = totalSegunElPacCents(entrada.params.items.map(conceptoDesdeElPayload))
     if (
@@ -1650,6 +1657,30 @@ export type RenglonParaCfdi = {
 const centavos = (d: any) => Math.round(Number(d ?? 0) * 100)
 
 /**
+ * El concepto de una venta SIN renglones (importe libre): lo pagado, IVA incluido, con la clave genérica del SAT. Con filas de
+ * descuento de CUENTA (la liga de pago con descuento) lleva la base (pagado + descuento) y ese descuento, así el total sigue
+ * siendo lo pagado. Sin esas filas, el concepto de siempre. Lo usan la factura individual y la captura de la global (la
+ * extracción factura con éste): un solo concepto.
+ */
+export function conceptoDeVentaSinRenglones(
+  paidCents: number,
+  filas: Array<{ amount: unknown; reparto?: unknown }> | null | undefined,
+): RenglonParaCfdi {
+  const descuentoCents = (filas ?? []).reduce((s, f) => {
+    const r = leerReparto(f.reparto)
+    return r?.alcance === 'CUENTA' && !r.espejo ? s + centavos(f.amount) : s
+  }, 0)
+  return {
+    productName: 'Venta',
+    quantity: 1,
+    unitPrice: new Prisma.Decimal(paidCents + descuentoCents).div(100),
+    discountAmount: descuentoCents > 0 ? new Prisma.Decimal(descuentoCents).div(100) : 0,
+    product: { satProductKey: '01010101', satUnitKey: 'ACT', objetoImp: '02', taxRate: 0.16, category: null },
+    tratamiento: 'IVA_16',
+  }
+}
+
+/**
  * Tasa con la que el PAC calculará el concepto. Con tratamiento, la de su traslado (IVA_0/EXENTO/NO_OBJETO = 0);
  * sin él (legacy), la del producto, y 16 % sin producto — la regla de siempre. Un bloqueado no llega al PAC
  * (lo detiene su motivo); aquí sólo conserva la tasa guardada.
@@ -1821,10 +1852,12 @@ export function examinarRenglon(it: RenglonParaCfdi, indice: number): RenglonExa
       // (`Math.round(precio × kilos × 100)`, order.tpv.service.ts:1738 y order.mobile.service.ts:666), que con flotante puede bajar
       // donde el redondeo decimal sube. Sólo esos dos resultados se aceptan (Codex r1 #5): con ellos el concepto lleva los kilos
       // reales y el precio por kilo que explica EXACTO lo cobrado, con hasta 6 decimales (experimento de la Tarea 1). Con
-      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen.
+      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen. Desde el 1-nov el SERVIDOR móvil cobra con
+      // la cuenta de las apps (`importePorPesoCents`, round(kg × centavos)): la tercera aceptada (0.570 kg × $100.50 ⇒ $57.28).
       const cobradoCents = brutoRenglonCents - extrasEsperadosCents
-      const delEscritor = Math.round(Number(it.unitPrice) * Number(it.weightQuantity) * 100)
-      if (cobradoCents === baseCents || cobradoCents === delEscritor) {
+      const delEscritor = importePorPesoViejoCents(Number(it.unitPrice), Number(it.weightQuantity))
+      const deLasApps = importePorPesoCents(Number(it.unitPrice), Number(it.weightQuantity))
+      if (cobradoCents === baseCents || cobradoCents === delEscritor || cobradoCents === deLasApps) {
         const derivado = new Prisma.Decimal(cobradoCents)
           .div(100)
           .div(new Prisma.Decimal(String(unidades)))
@@ -2066,6 +2099,12 @@ const METODOS_SIN_COMERCIO = new Set<string>(['CASH', 'BANK_TRANSFER', 'CREDIT_C
 export const MOTIVO_TARJETA_DE_REGALO =
   'Esta venta es de tarjetas de regalo: no se factura al venderla. Se factura cuando el cliente usa el saldo para pagar su compra.'
 
+/** Codex r4 H3 (pedidos en línea): una cuenta cancelada no es venta, aunque traiga un cobro que el negocio debe devolver. */
+export const MOTIVO_VENTA_CANCELADA = 'Esta venta está cancelada: no se factura. Si se cobró, primero se devuelve el dinero al cliente.'
+/** D3: el cargador marcó la cuenta como cancelada o borrada (su motivo sustituye a los demás). */
+export const esVentaCancelada = (bundle: Pick<LoadedOrderBundle, 'unsupportedReasons'>): boolean =>
+  bundle.unsupportedReasons?.includes(MOTIVO_VENTA_CANCELADA) ?? false
+
 export interface LoadOrderForCfdiOpts {
   /**
    * `true` cuando la factura la emite el PERSONAL a propósito (Pedidos → Facturar, o una sustitución).
@@ -2103,6 +2142,7 @@ export async function loadOrderForCfdiFromDb(
       // Candados de la rama mixta (plan 3): cómo se cobró el precio y si la venta está liquidada.
       contratoDePrecio: true,
       paymentStatus: true,
+      status: true,
       // B3a: las filas de descuento con su reparto (una página y una de más; ver filasDeDescuentoCompletas).
       orderDiscounts: DESCUENTOS_PARA_CONCEPTOS,
       venue: {
@@ -2122,6 +2162,10 @@ export async function loadOrderForCfdiFromDb(
           method: true,
           merchantAccountId: true,
           ecommerceMerchantId: true,
+          // El crédito conserva el emisor del dinero raíz; no se escribe comercio en el cobro EC.
+          exchangeCreditAsCredit: {
+            select: { venueId: true, originPayment: { select: { venueId: true, merchantAccountId: true, ecommerceMerchantId: true } } },
+          },
           tenderSatFormaPago: true,
           amount: true,
           type: true,
@@ -2168,7 +2212,27 @@ export async function loadOrderForCfdiFromDb(
   // el efectivo no trae merchant, así que se prefiere el pago con tarjeta para resolver el emisor.
   // Defensa en profundidad: el `where` ya filtra, pero la regla de elegibilidad vive también aquí para
   // que ningún llamador con filas sin filtrar (o una prueba) sume un pago TEST/ADJUSTMENT/REFUND.
-  const pays = order.payments.filter(pp => esCobroElegible(pp))
+  const cobros = order.payments.filter(pp => esCobroElegible(pp))
+  // El vínculo ya guarda la raíz, incluso tras varios cambios; un origen ajeno o ausente no se adivina.
+  if (
+    cobros.some(
+      pp =>
+        isExchangeCreditTenderKind(pp.tenderType?.systemKind) &&
+        (!pp.exchangeCreditAsCredit ||
+          pp.exchangeCreditAsCredit.venueId !== order.venueId ||
+          pp.exchangeCreditAsCredit.originPayment.venueId !== order.venueId),
+    )
+  )
+    return null
+  const pays = cobros.map(pp =>
+    isExchangeCreditTenderKind(pp.tenderType?.systemKind)
+      ? {
+          ...pp,
+          merchantAccountId: pp.exchangeCreditAsCredit!.originPayment.merchantAccountId,
+          ecommerceMerchantId: pp.exchangeCreditAsCredit!.originPayment.ecommerceMerchantId,
+        }
+      : pp,
+  )
   const pay = pays.find(pp => pp.merchantAccountId || pp.ecommerceMerchantId) ?? pays[0]
   if (!pay) return null
 
@@ -2206,7 +2270,15 @@ export async function loadOrderForCfdiFromDb(
     // 698 ventas en efectivo y una transferencia de $3,082 en 30 días no se podían facturar porque el
     // emisor sólo se sacaba del comercio de la terminal. El emisor es el del NEGOCIO, y sólo cuando es
     // inequívoco: con UN solo RFC. Con dos o más no se adivina (queda como antes).
-    if (pays.some(pp => !METODOS_SIN_COMERCIO.has(pp.method) && !isGiftCardTenderKind(pp.tenderType?.systemKind))) return null
+    if (
+      pays.some(
+        pp =>
+          !METODOS_SIN_COMERCIO.has(pp.method) &&
+          !isGiftCardTenderKind(pp.tenderType?.systemKind) &&
+          !isExchangeCreditTenderKind(pp.tenderType?.systemKind),
+      )
+    )
+      return null
     const emisores = await db.fiscalEmisor.findMany({
       where: { venueId: order.venueId },
       select: { ...EMISOR_SELECT, merchantConfigs: { select: { facturacionEnabled: true, autofacturaEnabled: true }, take: 50 } },
@@ -2284,16 +2356,7 @@ export async function loadOrderForCfdiFromDb(
     requiereReglaDelPac = false,
   }: ConceptosDeRenglon = sinRenglones
     ? {
-        items: [
-          {
-            productName: 'Venta',
-            quantity: 1,
-            unitPrice: new Prisma.Decimal(paidCents / 100),
-            discountAmount: 0,
-            product: { satProductKey: '01010101', satUnitKey: 'ACT', objetoImp: '02', taxRate: 0.16, category: null },
-            tratamiento: 'IVA_16',
-          } as unknown as RenglonParaCfdi,
-        ],
+        items: [conceptoDeVentaSinRenglones(paidCents, orderDiscounts)],
         // Las exclusiones de ORDEN (cargo por servicio) aplican también sin renglones.
         motivos: motivosDeOrden(order as OrdenParaConceptos),
       }
@@ -2365,6 +2428,10 @@ export async function loadOrderForCfdiFromDb(
   if (order.items.some(it => !!it.giftCardId)) {
     unsupportedReasons.splice(0, unsupportedReasons.length, MOTIVO_TARJETA_DE_REGALO)
   }
+  // Codex r4 H3: la cuenta cancelada (o borrada) tampoco, con su motivo propio para el ticket, el portal y el panel.
+  if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+    unsupportedReasons.splice(0, unsupportedReasons.length, MOTIVO_VENTA_CANCELADA)
+  }
 
   // El documento que se mandaría al PAC tiene que cuadrar con lo cobrado. Se declara AQUÍ (y no sólo en
   // el motor) para que el ticket y el recibo tampoco ofrezcan una autofactura que después fallaría.
@@ -2410,8 +2477,8 @@ export async function loadOrderForCfdiFromDb(
 
   // r1 B-2 (Anexo 20, spec §7): en una cuenta con cobro con SALDO, la forma del CFDI es la de MAYOR importe, con la MISMA regla que la
   // global; `pay` sigue siendo sólo quien resuelve el emisor (el cobro con comercio, arriba): $500 de saldo + $100 con tarjeta ⇒ 01.
-  // B3 r1 (fix 1): SÓLO con saldo. Sin él, la forma es la de siempre (la de `pay`): generalizar la regla es decisión del proyecto fiscal.
-  const conSaldo = pays.some(pp => isGiftCardTenderKind(pp.tenderType?.systemKind))
+  // Con saldo de regalo o crédito de cambio gana la mayor forma; sin ellos se conserva la forma de siempre.
+  const conSaldo = pays.some(pp => isGiftCardTenderKind(pp.tenderType?.systemKind) || isExchangeCreditTenderKind(pp.tenderType?.systemKind))
   const porForma = conSaldo ? (formaGanadoraDeCobros(pays).pagos[0] ?? pay) : pay
   return {
     venueId: order.venueId,

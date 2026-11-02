@@ -4,6 +4,7 @@
  * tratamiento distinto: un concepto normal. Mezclado: UN concepto NETO con una base por tratamiento (sin descuento, nunca ajustable:
  * variante 4) y lo «no objeto» aparte. Puro: sin base, sin reloj.
  */
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { Prisma } from '@prisma/client'
 import type { CfdiItemInput, CfdiItemTax, GlobalInvoiceParams } from './providers/fiscal-provider.interface'
 import { formaPagoDeLaGlobal, itemDeLineaGlobal, type GlobalInvoiceLine } from './cfdiPayloadBuilder'
@@ -436,18 +437,27 @@ export type Pertenencia = 'CANDIDATA' | 'AJENA' | 'EFECTIVO' | 'COMERCIO_FUERA' 
 /** La configuración fiscal del comercio de un cobro (`MerchantFiscalConfig`). */
 export type ConfigFiscal = { fiscalEmisorId: string; facturacionEnabled: boolean; includeInGlobal: boolean }
 
+type CobroParaPertenencia = { method: string; conComercio: boolean; config: ConfigFiscal | null; saldoDeRegalo?: boolean }
 /**
  * C1 (Codex C1-8): de quién es una venta y si entra a la global de este emisor. La MISMA regla que `dondePertenece` (SQL).
  * Precondición: `pagos` son SÓLO los cobros elegibles (`COBRO` de `cfdiGlobal.service.ts`: completados, tipo `REGULAR`/`FAST`/nulo; nunca `TEST` ni reembolsos).
  */
 export function pertenenciaAlEmisor(
   // Tarjetas de regalo (B3 r1): `saldoDeRegalo` = cobro con saldo (tender de sistema GIFT_CARD).
-  pagos: Array<{ method: string; conComercio: boolean; config: ConfigFiscal | null; saldoDeRegalo?: boolean }>,
+  pagos: Array<CobroParaPertenencia & { systemKind?: string | null; origenDelCredito?: CobroParaPertenencia }>,
   // Tarjetas de regalo (B3 r1): `comercioEnLaGlobal` = algún comercio de este RFC entra a la global (`configQueEntraALaGlobal`; lo contrario de
   // «apagada» de `estaApagadaLaGlobal` con un RFC y el interruptor apagado). Sin el dato, `false`: la clase de siempre.
   emisor: { id: string; invoiceCashSales: boolean; includeOffTerminalSalesInGlobal: boolean; comercioEnLaGlobal?: boolean },
   unSoloEmisor: boolean,
 ): Pertenencia {
+  // Los lectores aportan la misma raíz que recorre el predicado Prisma; nunca la excepción de canje.
+  pagos = pagos.map(p =>
+    isExchangeCreditTenderKind(p.systemKind)
+      ? p.origenDelCredito
+        ? { ...p.origenDelCredito, saldoDeRegalo: false }
+        : { method: 'OTHER', conComercio: true, config: null }
+      : p,
+  )
   const conComercio = pagos.filter(p => p.conComercio)
   const efectivoFuera = !emisor.invoiceCashSales && pagos.some(p => p.method === 'CASH')
   // Sin cobros con comercio (efectivo, transferencia, vales, tipos propios): con varios RFC, nadie sabe de quién es. Con uno solo es de él

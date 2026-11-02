@@ -30,6 +30,8 @@ const PAID_ORDER: Prisma.OrderWhereInput = {
  * misma pasada y DESPUÉS de R2; nunca la máquina de estados.
  * - `paymentMode` explícito: en la fase 2 la tarjeta queda PAGADA al aceptar y sin este filtro se «entregaría» sola.
  * - ACEPTADO espera a su hora estimada: quien pagó al llegar con la comida aún en la cocina no desaparece de «En preparación».
+ *   Sin confirmación de comanda (`printedAt`), espera a la impresión, a «Listo» o al botón «Entregado», incluso si nunca se
+ *   pudo reclamar o no hay impresora (founder, 22-oct). `READY` no cambia.
  * - Nunca `PENDING_ACCEPTANCE` (un pedido pagado antes de aceptarse lo sigue aceptando una persona, R1); `PARTIAL`, `REFUNDED`
  *   o una cuenta con cualquier reembolso (A3) no cierran. El CAS repite el filtro de la cuenta: un reembolso que cae entre la
  *   lectura y la escritura tampoco se entrega.
@@ -49,7 +51,15 @@ export async function syncOnlineOrdersOfPaidPickups(
         ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
         paymentMode: OnlineOrderPaymentMode.PAY_AT_PICKUP,
         order: PAID_ORDER,
-        OR: [{ status: OnlineOrderStatus.READY }, { status: OnlineOrderStatus.ACCEPTED, estimatedReadyAt: { lte: now } }],
+        OR: [
+          { status: OnlineOrderStatus.READY },
+          // S4: tampoco se entrega antes del PRIMER reclamo: ya COMPLETED no admite imprimir y se perdería la comanda.
+          {
+            status: OnlineOrderStatus.ACCEPTED,
+            estimatedReadyAt: { lte: now },
+            printedAt: { not: null },
+          },
+        ],
       },
       select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
       orderBy: { id: 'asc' },
@@ -61,7 +71,13 @@ export async function syncOnlineOrdersOfPaidPickups(
   for (const r of rows) {
     try {
       const cas = await db.onlineOrder.updateMany({
-        where: { id: r.id, status: r.status, order: PAID_ORDER },
+        where: {
+          id: r.id,
+          status: r.status,
+          order: PAID_ORDER,
+          // La escritura repite la confirmación de papel; READY ya es una decisión explícita de la cocina.
+          ...(r.status === OnlineOrderStatus.ACCEPTED ? { printedAt: { not: null } } : {}),
+        },
         data: { status: OnlineOrderStatus.COMPLETED, completedAt: now },
       })
       if (cas.count === 1) won.push({ id: r.id, orderId: r.orderId, venueId: r.venueId, orderNumber: r.order.orderNumber })

@@ -16,11 +16,12 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 const VENUE_CREATED = new Date('2026-01-15T06:00:00Z')
 
-function agregado(amount: string | null, tip: string | null, count: number) {
+function agregado(amount: string | null, tip: string | null, count: number, terceros: string | null = null) {
   return {
     _sum: {
       amount: amount === null ? null : new Prisma.Decimal(amount),
       tipAmount: tip === null ? null : new Prisma.Decimal(tip),
+      thirdPartyCashAmount: terceros === null ? null : new Prisma.Decimal(terceros),
     },
     _count: { _all: count },
   }
@@ -44,7 +45,8 @@ describe('getExpectedCashAmount — suma en Postgres, no en Node', () => {
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
     expect(prismaMock.payment.aggregate).toHaveBeenCalledTimes(1)
     const args = prismaMock.payment.aggregate.mock.calls[0][0]
-    expect(args._sum).toEqual({ amount: true, tipAmount: true })
+    // Rappi 2b (T11): también lo cobrado por cuenta de Rappi (está en el cajón).
+    expect(args._sum).toEqual({ amount: true, tipAmount: true, thirdPartyCashAmount: true })
     expect(args._count).toEqual({ _all: true })
     expect(args.where).toEqual({
       venueId: 'venue-1',
@@ -80,5 +82,12 @@ describe('getExpectedCashAmount — suma en Postgres, no en Node', () => {
     prismaMock.payment.aggregate.mockResolvedValue(agregado('1000.00', '-20.00', 4))
     const r = await getExpectedCashAmount('venue-1')
     expect(r.expectedAmount).toBeCloseTo(980, 2)
+  })
+
+  it('Rappi 2b: lo cobrado por cuenta de Rappi suma al esperado y se reporta aparte', async () => {
+    prismaMock.payment.aggregate.mockResolvedValue(agregado('175.00', '20.00', 1, '10.00'))
+    const r = await getExpectedCashAmount('venue-1')
+    expect(prismaMock.payment.aggregate.mock.calls[0][0]._sum).toMatchObject({ thirdPartyCashAmount: true })
+    expect(r).toMatchObject({ expectedAmount: 205, thirdPartyCashAmount: 10 })
   })
 })

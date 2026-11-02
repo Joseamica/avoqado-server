@@ -40,7 +40,7 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
 }))
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(database.pathname)) {
+if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(database.pathname)) {
   throw new Error('Esta suite exige una base local aislada (avoqado_<x>_test_…), nunca av-db-25.')
 }
 

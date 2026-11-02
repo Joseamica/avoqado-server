@@ -6,15 +6,21 @@ import { buildWatchdogSql } from '@/jobs/money-integrity-watchdog.job'
 // tables are changed, and rollback drops everything even when an assertion fails.
 const tables = {
   Organization: 'id text, name text',
-  Venue: 'id text, name text, slug text, "organizationId" text',
+  // `timezone`: la decisión B (22-oct) lee la zona del negocio para saber si se acabó su día. NULL = la zona de default.
+  // `status`: los negocios demo (`LIVE_DEMO`) no entran al vigilante (1-nov). Default ACTIVE = un negocio real.
+  Venue: `id text, name text, slug text, "organizationId" text, timezone text, status text NOT NULL DEFAULT 'ACTIVE'`,
   Order: `id text, "venueId" text, "orderNumber" text, source text, "originSystem" text,
     status text, "paymentStatus" text, subtotal numeric, "discountAmount" numeric,
     "serviceChargeAmount" numeric, "taxAmount" numeric, "tipAmount" numeric,
-    total numeric, "paidAmount" numeric, "createdAt" timestamp, "updatedAt" timestamp, "completedAt" timestamp`,
+    total numeric, "paidAmount" numeric, "createdAt" timestamp, "updatedAt" timestamp, "completedAt" timestamp,
+    "providerAcceptedAt" timestamp, "scheduledFor" timestamp, "remainingBalance" numeric DEFAULT 0`,
+  // Decisión B (22-oct): la invariante 6 resta el pedido de plataforma que la cocina todavía prepara.
+  KdsOrder: 'id text, "orderId" text, "venueId" text, status text',
   // `createdAt`: la ventana de alerta (7bffb295) fecha la orden por su último cobro. NULL = la fecha de la orden.
   Payment:
     '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp',
-  OrderItem: 'id text, "orderId" text, "productId" text',
+  // D1 (vale cancelado que se vuelve a cobrar): el renglón de un vale revendido en otra cuenta no descuenta aquí.
+  OrderItem: 'id text, "orderId" text, "productId" text, "areaTicketLineId" text, "releasedAreaTicketLineId" text',
   // B2c F2: «descuento excede el consumo» compara la cabecera con la suma de sus filas.
   OrderDiscount: '"orderId" text, amount numeric',
   Product: 'id text, "venueId" text, "trackInventory" boolean, "inventoryMethod" text',
@@ -250,5 +256,13 @@ describe.each(['UTC', 'America/Mexico_City'])('historical watchdog SQL under %s'
     await payment({ status: 'REFUNDED', origin: 'POS_SOFTRESTAURANT', tip: 500 })
     await payment()
     expect(await checks()).toContain('PROPINA NO CUADRA')
+  })
+
+  it('🔴 un negocio demo (LIVE_DEMO) con la MISMA propina descuadrada no suena, aunque se llame normal (1-nov)', async () => {
+    await client.query(`UPDATE pg_temp."Venue" SET status = 'LIVE_DEMO', name = 'Café Tostado', slug = 'cafe-tostado'`)
+    await seedOrder({ status: 'CANCELLED', origin: 'POS_SOFTRESTAURANT', tip: 500, tracked: false })
+    await payment({ status: 'REFUNDED', origin: 'POS_SOFTRESTAURANT', tip: 500 })
+    await payment()
+    expect(await checks()).toEqual([])
   })
 })

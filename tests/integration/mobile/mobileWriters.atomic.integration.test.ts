@@ -37,7 +37,7 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomer
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(database.pathname)
+  !/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(database.pathname)
 ) {
   throw new Error('This suite requires an explicitly selected isolated local test database.')
 }
@@ -110,7 +110,8 @@ function pauseAfterScopeOrderLock(orderId: string, entered: (pid: number) => voi
                     const ids = args[2]
                     if (
                       !paused &&
-                      sql === 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE' &&
+                      sql ===
+                        'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE' &&
                       args[1] === venueId &&
                       Array.isArray(ids) &&
                       ids.includes(orderId) &&

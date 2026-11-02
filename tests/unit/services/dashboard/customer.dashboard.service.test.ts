@@ -32,6 +32,13 @@ jest.mock('@/services/customer/consent.service', () => ({
   revokeMarketingConsent: (...a: unknown[]) => revokeConsentMock(...a),
 }))
 
+// S8c: el saldo a favor tiene su propia prueba (customerStoreCreditBalance); aquí no cuenta como consulta cruda de la lista.
+const storeCreditDeClientesMock = jest.fn()
+jest.mock('@/services/storeCredit/customerStoreCreditBalance', () => ({
+  __esModule: true,
+  storeCreditDeClientes: (...a: unknown[]) => storeCreditDeClientesMock(...a),
+}))
+
 // Helper to create mock customer
 const createMockCustomer = (overrides: Record<string, any> = {}) => ({
   id: 'customer-123',
@@ -59,6 +66,11 @@ const createMockCustomer = (overrides: Record<string, any> = {}) => ({
 })
 
 describe('Customer Dashboard Service', () => {
+  beforeEach(() => {
+    storeCreditDeClientesMock.mockReset()
+    storeCreditDeClientesMock.mockImplementation(async (_db: unknown, _venueId: string, ids: string[]) => new Map(ids.map(id => [id, null])))
+  })
+
   beforeEach(() => {
     jest.clearAllMocks()
     // Sin colas «Once» sobrantes de `$queryRaw` entre pruebas (ids de la búsqueda, el agregado de saldos de H6, métricas).
@@ -116,6 +128,18 @@ describe('Customer Dashboard Service', () => {
 
       // Verify $transaction was called (tag filter logic is tested by integration tests)
       expect(prismaMock.$transaction).toHaveBeenCalled()
+    })
+
+    it('S8c: adjunta storeCredit a cada fila (el saldo del lector o null), con el venue y los ids de la página', async () => {
+      const ficha = { balanceCents: 35000, phoneLast4: '5678', giftCardId: 'g1' }
+      storeCreditDeClientesMock.mockResolvedValue(new Map([['c1', ficha]]))
+      prismaMock.$transaction.mockResolvedValue([[createMockCustomer({ id: 'c1' }), createMockCustomer({ id: 'c2' })], 2] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([] as any)
+
+      const r = await getCustomers('venue-123')
+
+      expect(storeCreditDeClientesMock).toHaveBeenCalledWith(expect.anything(), 'venue-123', ['c1', 'c2'])
+      expect(r.data.map(c => c.storeCredit)).toEqual([ficha, null])
     })
 
     it('should enforce multi-tenant isolation (venueId filter)', async () => {
@@ -322,6 +346,15 @@ describe('Customer Dashboard Service', () => {
   })
 
   describe('getCustomerById', () => {
+    it('S8c: adjunta storeCredit a la ficha (y null si no tiene sobre)', async () => {
+      const ficha = { balanceCents: 35000, phoneLast4: '5678', giftCardId: 'g1' }
+      prismaMock.customer.findFirst.mockResolvedValue({ ...createMockCustomer(), orders: [], loyaltyTransactions: [] } as any)
+      storeCreditDeClientesMock.mockResolvedValueOnce(new Map([['customer-123', ficha]]))
+      expect((await getCustomerById('venue-123', 'customer-123')).storeCredit).toEqual(ficha)
+      expect(storeCreditDeClientesMock).toHaveBeenCalledWith(expect.anything(), 'venue-123', ['customer-123'])
+      expect((await getCustomerById('venue-123', 'customer-123')).storeCredit).toBeNull()
+    })
+
     it('should return customer with orders and loyalty transactions', async () => {
       const mockCustomer = {
         ...createMockCustomer(),
@@ -1106,6 +1139,26 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
 
     const args = prismaMock.customer.findFirst.mock.calls[0][0] as any
     expect(args.include.orderAssociations.where.order).toMatchObject({ status: { notIn: ['CANCELLED', 'DELETED'] } })
+  })
+
+  // Codex r1 C1 (pedidos en línea fase 2): un pedido pagado con tarjeta en línea al que la TPV le ligó un cliente no es fiado.
+  it('🔴 las candidatas a liquidar excluyen pedidos en línea pagados con tarjeta', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await settleCustomerBalance('venue-1', CLIENTE)
+
+    const args = prismaMock.customer.findFirst.mock.calls[0][0] as any
+    expect(args.include.orderAssociations.where.order.NOT).toEqual([{ onlineOrder: { is: { paymentMode: 'CARD_ONLINE' } } }])
+  })
+
+  it('🔴 bajo el candado, un pedido de tarjeta en línea → 409 ONLINE_ORDER_PAID_BY_CARD sin escribir nada', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce({ paymentMode: 'CARD_ONLINE', charge: { id: 'ch-1', status: 'AUTHORIZED' } })
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+
+    await expect(settleCustomerBalance('venue-1', CLIENTE)).rejects.toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_PAID_BY_CARD' })
+
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
   it('🔴 una cuenta que se canceló después de leer al cliente no se liquida: ni pago ni PAID', async () => {

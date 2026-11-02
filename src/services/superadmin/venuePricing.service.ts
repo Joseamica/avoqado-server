@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '../shared/slotsDeAfiliacion'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { AccountType } from '@prisma/client'
+import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
 
 /**
  * VenuePricing Service
@@ -100,6 +101,7 @@ export async function createVenuePaymentConfig(data: CreateVenuePaymentConfigDat
   // Codex R12-2: una afiliación en dos slots deja el cargo sin tarifa acreditable.
   const repetidos = mensajeDeSlotsRepetidos(data)
   if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
+  await assertAngelPayLoginsInVenue(data.venueId, [data.primaryAccountId, data.secondaryAccountId, data.tertiaryAccountId])
 
   // Validate primary account exists
   const primaryAccount = await prisma.merchantAccount.findUnique({
@@ -402,6 +404,7 @@ export async function updateVenuePaymentConfig(venueId: string, data: UpdateVenu
   }
   const repetidos = mensajeDeSlotsRepetidos(resultante)
   if (repetidos) throw new BadRequestError(repetidos, AFILIACION_EN_VARIOS_SLOTS)
+  await assertAngelPayLoginsInVenue(venueId, [data.primaryAccountId, data.secondaryAccountId, data.tertiaryAccountId])
 
   const config = await prisma.venuePaymentConfig.update({
     where: { venueId },

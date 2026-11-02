@@ -1,3 +1,4 @@
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 import { CreditEligibility, CreditGrade, CreditOfferStatus, Prisma, TrendDirection } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -823,6 +824,7 @@ async function calculateVenueMetrics(venueId: string): Promise<VenueMetrics> {
       venueId,
       status: 'COMPLETED',
       createdAt: { gte: oneYearAgo },
+      AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
     },
     select: {
       amount: true,

@@ -7,10 +7,13 @@
  * a Beto los puntos de una compra que ya le había sumado a Ana. Ahora el envoltorio de la recuperación ve el EARN de otro
  * cliente y cierra la venta como OTHER_CUSTOMER sin acreditar a nadie.
  *
- * Todo real contra Postgres: la TPV (quitar y agregar cliente), el reconciliador, el envoltorio, `earnPoints` y `grantStamp`.
+ * Todo real contra Postgres: rechazo de la TPV y estados heredados fabricados explícitamente, reconciliador, `earnPoints` y `grantStamp`.
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
+import { customerAttributionActor } from '@/middlewares/customerAttribution.middleware'
+import type { CustomerAttributionActor } from '@/services/shared/customerAttributionPolicy'
+import type { Request } from 'express'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/communication/sockets/managers/socketManager', () => {
@@ -34,8 +37,8 @@ import { esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 /** Texto EXACTO del ruling: la marca de fila que deja la reapertura. */
 const MARCA = 'REABIERTA: cliente ligado después del cobro'
-/** MEDIO-1 (15-oct-2026): la TPV sólo toca la lealtad si quien liga tiene `payments:create` (lo resuelve el controller). */
-const CON_PERMISO_DE_COBRO = { otorgarLealtad: true }
+/** Autoridad histórica resuelta con el rol y permisos efectivos del empleado; el bool de lealtad no la sustituye. */
+const conAutoridad = (actor: CustomerAttributionActor) => ({ otorgarLealtad: true, customerAttribution: actor })
 
 const sello = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`
 let orgId: string | undefined
@@ -109,11 +112,18 @@ function reconciliadorDe(orderId: string, trasReclamar?: () => Promise<void>) {
   })
 }
 
-/** Un empleado del negocio: devuelve su Staff.id (lo que viaja como actor) y su StaffVenue.id (lo que queda como autor). */
-async function empleado(nombre: string): Promise<{ staffId: string; staffVenueId: string }> {
+/** Empleado con piso MANAGER para la liga histórica; actor resuelto desde su acceso real al negocio. */
+async function empleado(nombre: string): Promise<{ staffId: string; staffVenueId: string; actor: CustomerAttributionActor }> {
   const s = await prisma.staff.create({ data: { email: `itest-otro-${sello}-${++n}@test.com`, firstName: nombre, lastName: 'Prueba' } })
-  const sv = await prisma.staffVenue.create({ data: { staffId: s.id, venueId: venueId!, role: 'CASHIER' } })
-  return { staffId: s.id, staffVenueId: sv.id }
+  const sv = await prisma.staffVenue.create({ data: { staffId: s.id, venueId: venueId!, role: 'MANAGER' } })
+  return {
+    staffId: s.id,
+    staffVenueId: sv.id,
+    actor: await customerAttributionActor({
+      params: { venueId },
+      authContext: { userId: s.id, venueId, orgId, role: 'MANAGER' },
+    } as unknown as Request),
+  }
 }
 
 /** Una venta cobrada hace un minuto, con su lealtad PENDIENTE (no se cerró), y `primero` como primario. */
@@ -128,6 +138,19 @@ async function ventaPendienteCon(primero: string): Promise<string> {
         total: 50,
         status: 'COMPLETED',
         paymentStatus: 'PAID',
+        payments: {
+          create: {
+            venueId: venueId!,
+            amount: 50,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: 50,
+            method: 'CASH',
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            createdAt: new Date(Date.now() - 60_000),
+          },
+        },
         loyaltyEligibleAt: new Date(Date.now() - 60_000),
       },
     })
@@ -137,7 +160,7 @@ async function ventaPendienteCon(primero: string): Promise<string> {
 }
 
 describe('🔴 H4: la recuperación no le acredita a OTRO cliente lo que la venta ya le dio a uno (Postgres real)', () => {
-  it('Ana sellada y con puntos → la TPV quita a Ana y pone a Beto → el reconciliador ⇒ Beto no recibe nada', async () => {
+  it('Ana sellada: TPV rechaza quitarla; ante una atribución heredada a Beto el reconciliador no lo premia', async () => {
     const ana = await cliente('Ana')
     const beto = await cliente('Beto')
     const orderId = (
@@ -150,6 +173,19 @@ describe('🔴 H4: la recuperación no le acredita a OTRO cliente lo que la vent
           total: 50,
           status: 'COMPLETED',
           paymentStatus: 'PAID',
+          payments: {
+            create: {
+              venueId: venueId!,
+              amount: 50,
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: 50,
+              method: 'CASH',
+              status: 'COMPLETED',
+              type: 'REGULAR',
+              createdAt: new Date(Date.now() - 60_000),
+            },
+          },
           // Cobrada hace un minuto; la lealtad del cobro quedó PENDIENTE (no se cerró).
           loyaltyEligibleAt: new Date(Date.now() - 60_000),
         },
@@ -160,10 +196,19 @@ describe('🔴 H4: la recuperación no le acredita a OTRO cliente lo que la vent
     // Ana recibió su sello y sus puntos; el proceso murió antes de cerrar la venta.
     expect((await earnPoints(venueId!, ana, 50, orderId)).pointsEarned).toBe(50)
 
-    // La TPV quita a Ana y agrega a Beto, que queda como primario.
-    await removeCustomerFromOrder(venueId!, orderId, ana)
-    const ligada = await addCustomerToOrder(venueId!, orderId, beto, undefined, CON_PERMISO_DE_COBRO)
-    expect(ligada.loyalty).toMatchObject({ stamped: false, reason: 'OTHER_CUSTOMER' })
+    // El camino público ya no permite quitar al primario cobrado.
+    await expect(removeCustomerFromOrder(venueId!, orderId, ana)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SALE_CUSTOMER_ALREADY_ASSIGNED',
+    })
+    expect(await prisma.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { customerId: true } })).toEqual({
+      customerId: ana,
+    })
+    // Conservamos la defensa del reconciliador ante datos heredados de antes del candado de atribución.
+    await prisma.orderCustomer.deleteMany({ where: { orderId, customerId: ana } })
+    await prisma.orderCustomer.create({ data: { orderId, customerId: beto, isPrimary: true } })
+    const ligada = await tardia.awardLoyaltyForLateCustomer({ venueId: venueId!, orderId, customerId: beto })
+    expect(ligada).toMatchObject({ stamped: false, reason: 'OTHER_CUSTOMER' })
 
     // El reconciliador de siempre toma la venta pendiente.
     expect(await reconciliadorDe(orderId).runNow()).toMatchObject({ scanned: 1, applied: 1, failed: 0 })
@@ -181,13 +226,13 @@ describe('🔴 H4: la recuperación no le acredita a OTRO cliente lo que la vent
   })
 
   // ── Segunda ola (recheck de Codex, 15-oct-2026): el primario cambia ENTRE la comprobación y la lealtad ────────────────────
-  it('🔴 el reconciliador valida a Ana y, justo antes de acreditar, la TPV cambia a Beto ⇒ Beto no recibe nada; la vuelta siguiente la cierra', async () => {
+  it('🔴 el reconciliador valida a Ana y, justo antes de acreditar, un estado heredado cambia a Beto ⇒ Beto no recibe nada; la vuelta siguiente la cierra', async () => {
     const ana = await cliente('Ana')
     const beto = await cliente('Beto')
     const orderId = await ventaPendienteCon(ana)
     expect((await earnPoints(venueId!, ana, 50, orderId)).pointsEarned).toBe(50) // Ana ya tiene su sello y sus puntos
 
-    // La lealtad lee los clientes de la venta: JUSTO antes, la TPV quita a Ana y pone a Beto (ya pasó la comprobación).
+    // La lealtad lee los clientes: JUSTO antes fabricamos el cambio heredado Ana→Beto, ya bloqueado por la API actual.
     const leer = prisma.orderCustomer.findMany.bind(prisma.orderCustomer)
     let cambiado = false
     const espia = jest.spyOn(prisma.orderCustomer, 'findMany').mockImplementation((async (args: any) => {
@@ -240,6 +285,19 @@ describe('🔴 H5: el sello lleva a quien ligó al cliente aunque la liga llegue
           total: 50,
           status: 'COMPLETED',
           paymentStatus: 'PAID',
+          payments: {
+            create: {
+              venueId: venueId!,
+              amount: 50,
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: 50,
+              method: 'CASH',
+              status: 'COMPLETED',
+              type: 'REGULAR',
+              createdAt: new Date(Date.now() - 60_000),
+            },
+          },
           loyaltyEligibleAt: new Date(Date.now() - 60_000),
           loyaltyStaffId: cajero.staffId, // la lealtad del cobro quedó pendiente; la cobró el cajero
         },
@@ -249,7 +307,7 @@ describe('🔴 H5: el sello lleva a quien ligó al cliente aunque la liga llegue
     const intento = jest.spyOn(tardia, 'awardLoyaltyForLateCustomer').mockResolvedValue(null)
     try {
       await reconciliadorDe(orderId, async () => {
-        await addCustomerToOrder(venueId!, orderId, dany, barista.staffId, CON_PERMISO_DE_COBRO)
+        await addCustomerToOrder(venueId!, orderId, dany, barista.staffId, conAutoridad(barista.actor))
       }).runNow()
     } finally {
       intento.mockRestore()
@@ -305,6 +363,19 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
           data: {
             status: 'COMPLETED',
             paymentStatus: 'PAID',
+            payments: {
+              create: {
+                venueId: venueId!,
+                amount: 50,
+                feePercentage: 0,
+                feeAmount: 0,
+                netAmount: 50,
+                method: 'CASH',
+                status: 'COMPLETED',
+                type: 'REGULAR',
+                createdAt: new Date(Date.now() - 60_000),
+              },
+            },
             loyaltyEligibleAt: new Date(Date.now() - 1_000),
             loyaltyProcessedAt: new Date(), // la lealtad del cobro ya corrió y cerró «sin cliente»
           },
@@ -329,7 +400,7 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
     const { orderId, restaurar } = await cuentaQueSeCobraEnMedio()
     const intento = jest.spyOn(tardia, 'awardLoyaltyForLateCustomer').mockResolvedValue(null)
     try {
-      await addCustomerToOrder(venueId!, orderId, dany, barista.staffId, CON_PERMISO_DE_COBRO)
+      await addCustomerToOrder(venueId!, orderId, dany, barista.staffId, conAutoridad(barista.actor))
     } finally {
       restaurar()
       intento.mockRestore()
@@ -342,7 +413,7 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
     const { orderId, restaurar } = await cuentaQueSeCobraEnMedio()
     const intento = jest.spyOn(tardia, 'awardLoyaltyForLateCustomer').mockResolvedValue(null)
     try {
-      await createAndAddCustomerToOrder(venueId!, orderId, { firstName: 'Nueva' }, barista.staffId, CON_PERMISO_DE_COBRO)
+      await createAndAddCustomerToOrder(venueId!, orderId, { firstName: 'Nueva' }, barista.staffId, conAutoridad(barista.actor))
     } finally {
       restaurar()
       intento.mockRestore()
@@ -365,7 +436,7 @@ describe('🔴 F1: la TPV decide reabrir con el estado de la venta leído DENTRO
         },
       })
     ).id
-    await addCustomerToOrder(venueId!, orderId, dany, undefined, CON_PERMISO_DE_COBRO)
+    await addCustomerToOrder(venueId!, orderId, dany)
     const fila = await prisma.order.findUniqueOrThrow({
       where: { id: orderId },
       select: { loyaltyLastError: true, loyaltyEligibleAt: true },
@@ -410,7 +481,7 @@ describe('🔴 H4: dos intentos validados para clientes distintos antes del prim
       // 1) Intento 1: valida a Ana y lee sus clientes (Ana) — se queda en la barrera, sin ningún EARN todavía.
       const intento1 = tardia.otorgarLealtadRespetandoReembolsos(argumentos)
       await aTiempoLocal(llego[0], 'el intento 1 no llegó a la barrera')
-      // 2) La TPV cambia a Ana por Beto.
+      // 2) Estado heredado: la API actual ya no permite este cambio de primario.
       await prisma.orderCustomer.deleteMany({ where: { orderId, customerId: ana } })
       await prisma.orderCustomer.create({ data: { orderId, customerId: beto, isPrimary: true } })
       // 3) Intento 2: valida a Beto (aún nadie tiene EARN) y lee sus clientes (Beto) — también se queda en la barrera.
@@ -473,6 +544,19 @@ describe('🔴 cuarta ola: una espera de más de 5 s no pierde los puntos (Postg
           total: 50,
           status: 'COMPLETED',
           paymentStatus: 'PAID',
+          payments: {
+            create: {
+              venueId: venueId!,
+              amount: 50,
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: 50,
+              method: 'CASH',
+              status: 'COMPLETED',
+              type: 'REGULAR',
+              createdAt: new Date(Date.now() - 60_000),
+            },
+          },
         },
       })
     ).id

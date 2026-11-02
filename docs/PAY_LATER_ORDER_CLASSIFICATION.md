@@ -29,7 +29,18 @@ order.orderCustomers.length > 0
 
 // Condición 3: Debe tener saldo pendiente
 order.remainingBalance > 0
+
+// AND (desde el 26-oct-2026, «como Toast»)
+
+// Condición 4: NO se creó para cobrarse en el momento
+order.payLater !== false   // true = el cajero eligió «Pagar después»; null = cuenta vieja o camino que no lo declara
 ```
+
+> 🔴 **Actualización 26-oct-2026 (founder: «como Toast»).** Sólo es deuda del cliente lo que el cajero mandó a «Pagar
+> después». El POS de ANDROID/iOS manda `paymentMethod` al crear la cuenta: `PAY_LATER` → `Order.payLater = true`; otro
+> método (un cobro con tarjeta que luego falla) → `false`, y esa cuenta ya no sale en «Cuentas por cobrar», en el saldo del
+> cliente ni en su «Liquidar todo». Sin método (apps viejas, TPV) → `null` y sigue la regla de las condiciones 1-3. Juntar
+> cuentas conserva el fiado; dividirlas lo hereda. Regla en código: `src/services/shared/porCobrar.ts`.
 
 ### Diagrama de Clasificación
 

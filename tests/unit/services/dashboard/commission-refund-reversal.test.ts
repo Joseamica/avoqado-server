@@ -26,6 +26,7 @@ const reembolso = (id: string, venta: number, propina: number) => ({
   venueId: 'venue-1',
   orderId: 'order-1',
   type: 'REFUND',
+  processorData: { originalPaymentId: 'pay-orig' },
   amount: new Decimal(-venta),
   tipAmount: new Decimal(-propina),
   createdAt: new Date('2026-09-29T18:00:00Z'),

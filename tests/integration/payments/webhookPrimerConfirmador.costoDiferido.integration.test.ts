@@ -12,6 +12,7 @@
  * exactamente el estado que deja un corte tras la primera escritura del servicio real.
  */
 import prisma from '@/utils/prismaClient'
+import cuid from 'cuid'
 import {
   asegurarCostoSincrono,
   convergerCostoDeTransaccion,
@@ -229,6 +230,57 @@ beforeEach(() => {
 
 afterEach(() => f.limpiar())
 afterAll(() => f.destruir())
+
+it('Cambio R6: el costo toma original y reembolsos en una unión por id, sin cruzarse con el par histórico inverso', async () => {
+  const menor = cuid()
+  const pago = await pagoDelWebhook()
+  expect(menor < pago.id).toBe(true)
+  await insertarCosto(pago.id)
+  const r = await reembolsoDe(pago.id, pago.orderId!)
+  await prisma.$executeRaw`UPDATE "Payment" SET id = ${menor} WHERE id = ${r.id}`
+  let listo!: (pid: number) => void, soltar!: () => void
+  const tomado = new Promise<number>(resolve => (listo = resolve))
+  const continuar = new Promise<void>(resolve => (soltar = resolve))
+  const par = Promise.allSettled([
+    prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${menor} FOR UPDATE`
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        listo(pid)
+        await continuar
+        await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${pago.id} FOR UPDATE`
+      },
+      { timeout: 15000 },
+    ),
+  ])
+  let costo: ReturnType<typeof Promise.allSettled> | undefined
+  try {
+    const pid = await tomado
+    let termino = false
+    costo = Promise.allSettled([convergerCostoDeTransaccion(pago.id)]).then(resultado => {
+      termino = true
+      return resultado
+    })
+    const limite = Date.now() + 5000
+    while (!termino) {
+      const [{ n }] = await prisma.$queryRaw<
+        Array<{ n: number }>
+      >`SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
+      if (n) break
+      if (Date.now() > limite) throw new Error('El costo no esperó ni devolvió CONTENDIDO')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    soltar()
+    const resultados = [...(await par), ...(await costo)]
+    expect(resultados.map(r => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled'])
+    await expect(convergerCostoDeTransaccion(pago.id)).resolves.toBe('CONVERGIO')
+    await proyeccionDelReembolso(menor)
+  } finally {
+    soltar()
+    await par
+    if (costo) await costo
+  }
+})
 
 describe('Codex R1 · P1-5: el costo diferido repara sus proyecciones desde el costo PERSISTIDO y sólo termina al converger', () => {
   it('con el costo ya en la base (corte tras crearlo) y las proyecciones en $0/bruto: las repara, no las da por hechas', async () => {

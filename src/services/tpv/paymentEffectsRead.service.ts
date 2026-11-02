@@ -2,7 +2,7 @@ export type PaymentEffectStatus = 'PENDING' | 'PROCESSING' | 'DONE' | 'DEAD_LETT
 export type PaymentEffectListInput = {
   venueId: string
   status?: PaymentEffectStatus
-  kind?: 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
+  kind?: 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST' | 'AVISO_TURNO_CERRADO'
   paymentId?: string
   limit?: number
   cursor?: string

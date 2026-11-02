@@ -321,6 +321,8 @@ describe('calculateCategoryFilteredAmount', () => {
         quantity: true,
         unitPrice: true,
         weightQuantity: true,
+        // Parte 2 (1-nov): el renglón por peso se lee con la cuenta que prueba lo guardado.
+        total: true,
         taxAmount: true,
         discountAmount: true,
         ivaTratamiento: true,

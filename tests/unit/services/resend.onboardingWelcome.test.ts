@@ -112,7 +112,7 @@ describe('sendOnboardingWelcomeEmail', () => {
 
     await mod.sendOnboardingWelcomeEmail(buildData({ ownerFirstName: '' }))
 
-    expect(mockWelcomeSend.mock.calls[0][0].subject).toBe('Bienvenido a Avoqado, equipo')
+    expect(mockWelcomeSend.mock.calls[0][0].subject).toBe('Bienvenido a Avoqado')
     expect(mockWelcomeSend.mock.calls[0][0].html).toContain('¡Hola!')
   })
 

@@ -9,6 +9,7 @@ jest.mock('@/utils/prismaClient', () => ({
     order: { findMany: jest.fn(), create: jest.fn(), update: jest.fn() },
     payment: { create: jest.fn(), update: jest.fn() },
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
   },
 }))
 
@@ -144,5 +145,165 @@ describe('Q16 readonly recovery before any pricing effect', () => {
     const result = await lookupSyncRecovery('venue-A', { externalOrderIds: ids })
     expect(result.orders).toEqual(rows.map(row => ({ externalId: row.externalId, orderId: row.id })))
     expect(result.orders).toHaveLength(100)
+  })
+})
+
+describe('cancelled payment evidence — opt-in y un snapshot de lectura', () => {
+  const verifiedAt = new Date('2026-10-23T12:00:00.000Z')
+  const row = {
+    id: 'order-A',
+    externalId: 'original-A',
+    venueId: 'venue-A',
+    orderStatus: 'CANCELLED',
+    hasPayments: false,
+    hasTerminalRequests: false,
+    verifiedAt,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([{ id: row.id, externalId: row.externalId }])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([row])
+  })
+
+  afterEach(() => {
+    expect(prisma.order.create).not.toHaveBeenCalled()
+    expect(prisma.order.update).not.toHaveBeenCalled()
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+    expect(prisma.payment.update).not.toHaveBeenCalled()
+  })
+
+  test('sin opt-in conserva exactamente la respuesta y consulta anteriores', async () => {
+    expect(await lookupSyncRecovery('venue-A', { externalOrderIds: ['original-A'] })).toEqual({
+      intents: [],
+      orders: [{ orderId: row.id, externalId: row.externalId }],
+    })
+    expect(prisma.$queryRaw).not.toHaveBeenCalled()
+  })
+
+  test('identidad, estado y ausencias se acreditan en un único SELECT acotado, sin N+1', async () => {
+    const result = await lookupSyncRecovery('venue-A', { externalOrderIds: ['original-A'], includeCancelledPaymentEvidence: true })
+    expect(result.orders).toEqual([
+      {
+        orderId: row.id,
+        externalId: row.externalId,
+        cancelledPaymentEvidence: {
+          version: 1,
+          venueId: row.venueId,
+          orderId: row.id,
+          externalId: row.externalId,
+          orderStatus: 'CANCELLED',
+          hasPayments: false,
+          hasTerminalRequests: false,
+          verifiedAt: verifiedAt.toISOString(),
+        },
+      },
+    ])
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(prisma.order.findMany).not.toHaveBeenCalled()
+    const sql = (prisma.$queryRaw as jest.Mock).mock.calls[0][0]
+    expect(sql.text).toMatch(/SELECT[\s\S]*EXISTS[\s\S]*"Payment"[\s\S]*EXISTS[\s\S]*"TerminalPaymentRequest"/i)
+    expect(sql.text).toMatch(/LIMIT/i)
+    expect(sql.values).toEqual(expect.arrayContaining(['venue-A', 'original-A', 100]))
+    expect(prisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  test.each([{ orderStatus: 'CONFIRMED' }, { hasPayments: true }, { hasTerminalRequests: true }])(
+    'lo que impide revisar queda explícito, nunca acredita una cancelada sin dinero (%j)',
+    async change => {
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ ...row, ...change }])
+      const result = await lookupSyncRecovery('venue-A', { externalOrderIds: ['original-A'], includeCancelledPaymentEvidence: true })
+      expect(result.orders[0]).toHaveProperty('cancelledPaymentEvidence', expect.objectContaining(change))
+    },
+  )
+
+  test.each([
+    { orderStatus: 'CONFIRMED', hasPayments: false, hasTerminalRequests: false },
+    { orderStatus: 'CANCELLED', hasPayments: true, hasTerminalRequests: false },
+    { orderStatus: 'CANCELLED', hasPayments: false, hasTerminalRequests: true },
+  ])('cruce D2/S3: reserva viva y evidencia adversa no se convierten en cancelación acreditada (%j)', async change => {
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ ...row, ...change, total: 110 }])
+    ;(prisma.posSyncIntent.findMany as jest.Mock).mockResolvedValue([
+      {
+        idempotencyKey: 'cash-capture-zero',
+        type: 'PAY_CASH',
+        deviceId: 'device-original',
+        seq: 9,
+        localRef: 'local-original',
+        status: 'PROCESSING',
+        errorCode: null,
+        resultJson: { protocolo: 'huella-v1', retomable: true, huella: { orderId: row.id, amount: 0 } },
+      },
+    ])
+    const result = await lookupSyncRecovery('venue-A', {
+      deviceId: 'device-original',
+      intentIds: ['cash-capture-zero'],
+      externalOrderIds: [row.externalId],
+      includeCancelledPaymentEvidence: true,
+    })
+    expect(result.intents).toEqual([
+      expect.objectContaining({ id: 'cash-capture-zero', status: 'PROCESSING', result: null, localRef: 'local-original' }),
+    ])
+    expect(result.orders).toEqual([
+      {
+        orderId: row.id,
+        externalId: row.externalId,
+        cancelledPaymentEvidence: {
+          version: 1,
+          venueId: row.venueId,
+          orderId: row.id,
+          externalId: row.externalId,
+          ...change,
+          verifiedAt: verifiedAt.toISOString(),
+        },
+      },
+    ])
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.update).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.delete).not.toHaveBeenCalled()
+    expect(prisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  test('una orden inexistente no recibe evidencia por el simple hecho de no haber pagos', async () => {
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+    const result = await lookupSyncRecovery('venue-A', { externalOrderIds: ['original-A'], includeCancelledPaymentEvidence: true })
+    expect(result.orders).toEqual([])
+  })
+
+  test('100 folios se resuelven en el mismo snapshot y cada uno conserva su identidad exacta', async () => {
+    const rows = Array.from({ length: 100 }, (_, index) => ({ ...row, id: `order-${index}`, externalId: `folio-${index}` }))
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue(rows)
+    const result = await lookupSyncRecovery('venue-A', {
+      externalOrderIds: rows.map(item => item.externalId),
+      includeCancelledPaymentEvidence: true,
+    })
+    expect(result.orders).toHaveLength(100)
+    result.orders.forEach((item, index) =>
+      expect(item).toMatchObject({
+        orderId: rows[index].id,
+        externalId: rows[index].externalId,
+        cancelledPaymentEvidence: { orderId: rows[index].id, externalId: rows[index].externalId },
+      }),
+    )
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(prisma.order.findMany).not.toHaveBeenCalled()
+  })
+
+  test('el límite también rechaza un opt-in hostil antes de abrir el snapshot', async () => {
+    await expect(
+      lookupSyncRecovery('venue-A', {
+        externalOrderIds: Array.from({ length: 101 }, (_, index) => `folio-${index}`),
+        includeCancelledPaymentEvidence: true,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestError)
+    expect(prisma.$queryRaw).not.toHaveBeenCalled()
+  })
+
+  test.each(['true', 1, null, {}])('opt-in no booleano se rechaza antes de consultar (%j)', async includeCancelledPaymentEvidence => {
+    await expect(
+      lookupSyncRecovery('venue-A', { externalOrderIds: ['original-A'], includeCancelledPaymentEvidence }),
+    ).rejects.toBeInstanceOf(BadRequestError)
+    expect(prisma.$queryRaw).not.toHaveBeenCalled()
+    expect(prisma.order.findMany).not.toHaveBeenCalled()
   })
 })

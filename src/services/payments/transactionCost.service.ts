@@ -9,6 +9,7 @@ import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { getEffectivePaymentConfig, getEffectivePricingForSlot } from '../organization-payment-config.service'
 import { calculatePaymentSettlement } from './settlementCalculation.service'
 import { paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+import { esMedioDeSaldoAFavor } from '../fiscal/fiscalScope'
 
 /** Codex R6 (g): TODA lectura y escritura de la unidad de convergencia va con el MISMO cliente (`tx`), nunca con el global. */
 type Cliente = Prisma.TransactionClient | typeof prisma
@@ -993,10 +994,21 @@ export async function createRefundTransactionCost(
   // Fetch the refund payment to get amount info
   const refundPayment = await db.payment.findUnique({
     where: { id: refundPaymentId },
+    include: { tenderType: { select: { systemKind: true } } },
   })
 
   if (!refundPayment) {
     throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
+  }
+  // Saldo a favor (spec 2026-10-30 §5.3; Codex plan r4 h1): el dinero quedó en el sobre de la clienta, el banco no devolvió nada. Copiar
+  // el costo del cobro aquí inventaría una comisión revertida. Lo mismo vale para los dos caminos que llegan aquí: el intento después del
+  // commit (`costearYProyectarReembolso`) y la convergencia de la obligación del cobro.
+  if (esMedioDeSaldoAFavor(refundPayment.tenderType?.systemKind)) {
+    logger.info('Refund to store credit: no negative TransactionCost (the processor returned nothing)', {
+      refundPaymentId,
+      originalPaymentId,
+    })
+    return null
   }
 
   // Calculate the refund ratio (for partial refunds)

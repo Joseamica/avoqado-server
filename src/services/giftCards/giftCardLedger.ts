@@ -5,9 +5,10 @@
  *  - El saldo se mueve con escrituras CONDICIONADAS (la condición va en el WHERE) bajo el candado de los sobres.
  *  - Cada movimiento inserta su renglón en `GiftCardActivity`; la base no deja editarlo ni borrarlo.
  *  - Jerarquía de candados: Order → Payment (si aplica) → GiftCard → Shift. Un reverso bloquea los sobres ANTES de
- *    `writeRefundInTx` (que reclama el turno): ver `sobresDelCanje`.
+ *    `writeRefundInTx` (que reclama el turno): ver `sobresDelCanje`. El saldo a favor (al final) entra en el mismo lugar: su candado
+ *    por clienta y su sobre van después de los Payments y antes del Shift.
  */
-import { Prisma, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
+import { Prisma, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
 import { addDays, addMonths } from 'date-fns'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -20,8 +21,10 @@ import {
   generateOpaqueToken,
   hashGiftCardCode,
 } from './giftCardCode'
+import { PROPOSITO_TELEFONO_DE_TARJETA, enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, MAXIMO_POR_SOBRE, formatoPesos } from './giftCardLimits'
+import { TERMINOS_VIGENTES } from './giftCardTerms'
 
 type Tx = Prisma.TransactionClient
 const CERO = () => new Prisma.Decimal(0)
@@ -33,6 +36,11 @@ export interface LockedGiftCard {
   venueId: string
   /** r1 (A-1): la huella VIGENTE del código, leída bajo el candado; el cobro la compara con la prueba presentada. */
   codeHash: string
+  /** 1b S2: la liga VIGENTE (reponer el código la cambia); el cobro con PAGE_TOKEN la compara bajo el candado. */
+  pageToken: string
+  /** 1b S5: el destino vigente; la prueba por teléfono lo compara bajo el candado. */
+  recipientPhone: string | null
+  deliveryChannel: GiftCardDeliveryChannel
   status: GiftCardStatus
   balance: Prisma.Decimal
   initialAmount: Prisma.Decimal
@@ -45,7 +53,8 @@ export interface LockedGiftCard {
 export type OperacionDeGerente =
   | { tipo: 'AJUSTE'; direccion: 'INCREMENT' | 'DECREMENT'; amount: Prisma.Decimal; reason: GiftCardReason; note?: string }
   | { tipo: 'BLOQUEAR' | 'DESBLOQUEAR'; reason: GiftCardReason; note?: string }
-  | { tipo: 'REEMPLAZAR_CODIGO'; reason: 'LOST_CARD'; note?: string }
+  // 1b S4 (P-3): el cambio de destino repone con CUSTOMER_REQUEST y su nota fija.
+  | { tipo: 'REEMPLAZAR_CODIGO'; reason: 'LOST_CARD' | 'CUSTOMER_REQUEST'; note?: string }
 
 function esUsable(c: { status: GiftCardStatus; expiresAt: Date | null }, ahora: Date): boolean {
   return c.status === 'ACTIVE' && (c.expiresAt === null || c.expiresAt.getTime() > ahora.getTime())
@@ -86,6 +95,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
       id: string
       venueId: string
       codeHash: string
+      pageToken: string
+      recipientPhone: string | null
+      deliveryChannel: string
       status: string
       balance: Prisma.Decimal
       initialAmount: Prisma.Decimal
@@ -95,7 +107,8 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
       customerId: string | null
     }>
   >`
-    SELECT id, "venueId", "codeHash", status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
+    SELECT id, "venueId", "codeHash", "pageToken", "recipientPhone", "deliveryChannel"::text AS "deliveryChannel",
+      status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
     FROM "GiftCard"
     WHERE id IN (${Prisma.join(unicos)})
     ORDER BY id ASC
@@ -104,6 +117,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
     id: f.id,
     venueId: f.venueId,
     codeHash: f.codeHash,
+    pageToken: f.pageToken,
+    recipientPhone: f.recipientPhone,
+    deliveryChannel: f.deliveryChannel as GiftCardDeliveryChannel,
     status: f.status as GiftCardStatus,
     balance: new Prisma.Decimal(f.balance),
     initialAmount: new Prisma.Decimal(f.initialAmount),
@@ -343,6 +359,8 @@ export async function canjearSobresEnTx(
     cards: LockedGiftCard[]
     staffId?: string | null
     deviceId?: string | null
+    /** S2b (Q58): sólo `pay-new-order` la pasa — la huella del cuerpo, con la que su reintento por la llave se reconoce. */
+    operationHash?: string
   },
 ): Promise<Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }>> {
   if (!p.amount.greaterThan(0) || p.amount.decimalPlaces() > 2) {
@@ -394,6 +412,7 @@ export async function canjearSobresEnTx(
         orderId: p.orderId,
         staffId: p.staffId ?? null,
         deviceId: p.deviceId ?? null,
+        ...(p.operationHash ? { operationHash: p.operationHash } : {}),
       },
     })
     resultado.push({ giftCardId: card.id, amount: toma, balanceAfter })
@@ -555,6 +574,17 @@ export async function revertirCanjeEnTx(
   return resultado
 }
 
+/** Lo que los canjes de un sobre todavía pueden regresar con un reembolso (REDEEM − REDEEM_REVERSAL): cuenta para el tope por sobre. */
+async function canjeadoQuePuedeRegresar(tx: Tx, venueId: string, giftCardId: string): Promise<Prisma.Decimal> {
+  const movimientos = await tx.giftCardActivity.groupBy({
+    by: ['type'],
+    where: { venueId, giftCardId, type: { in: ['REDEEM', 'REDEEM_REVERSAL'] } },
+    _sum: { amount: true },
+  })
+  const sumaDe = (tipo: 'REDEEM' | 'REDEEM_REVERSAL') => movimientos.find(m => m.type === tipo)?._sum.amount ?? CERO()
+  return Prisma.Decimal.max(CERO(), sumaDe('REDEEM').minus(sumaDe('REDEEM_REVERSAL')))
+}
+
 async function codigoVigente(tx: Tx, venueId: string, giftCardId: string): Promise<{ display: string; last4: string }> {
   const s = await tx.giftCard.findFirst({ where: { id: giftCardId, venueId }, select: { codeEnc: true, codeLast4: true } })
   if (!s) throw noEncontrada()
@@ -629,13 +659,7 @@ export async function operarSobreDeGerenteEnTx(
     if (p.op.direccion === 'INCREMENT') {
       // r1 (F7): el techo cuenta también lo que los canjes de este sobre todavía pueden regresar con un reembolso; así un
       // reverso legítimo nunca lo rebasa y nunca hay que rechazarlo. Ej.: $10,000 → canje $5,000 → ajuste +$5,000 se rechaza.
-      const movimientos = await tx.giftCardActivity.groupBy({
-        by: ['type'],
-        where: { venueId: p.venueId, giftCardId: card.id, type: { in: ['REDEEM', 'REDEEM_REVERSAL'] } },
-        _sum: { amount: true },
-      })
-      const sumaDe = (tipo: 'REDEEM' | 'REDEEM_REVERSAL') => movimientos.find(m => m.type === tipo)?._sum.amount ?? CERO()
-      const reversibles = Prisma.Decimal.max(CERO(), sumaDe('REDEEM').minus(sumaDe('REDEEM_REVERSAL')))
+      const reversibles = await canjeadoQuePuedeRegresar(tx, p.venueId, card.id)
       const nuevo = card.balance.plus(monto)
       if (nuevo.plus(reversibles).greaterThan(MAXIMO_POR_SOBRE)) {
         throw new GiftCardError(
@@ -857,4 +881,332 @@ export async function desactivarSobresPendientesDeCuentaEnTx(
     desactivados.push(card.id)
   }
   return { desactivados }
+}
+
+// ─── Saldo a favor (spec 2026-10-30-saldo-a-favor §5.2; tarea S2, la revisa TARJETAS) ────────────────────────────────────────
+
+/** Un alias de SQL crudo: sólo letras, dígitos y guion bajo. Lo comparten los fragmentos del saldo a favor (también los de S8b). */
+export const ALIAS_SQL = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * 🔴 EL predicado del saldo a favor: un sobre lo es si su ACTIVATE trae `refundPaymentId` (nació de una devolución). `customerId` NO
+ * basta: también significa «tarjeta regalada guardada en la cartera» (`operarSobreDeGerenteEnTx`, `giftCardCuenta.service.ts:74`).
+ * `alias` es el de `"GiftCard"` en la consulta de quien lo usa (la libreta, el bloqueo de reenvío y de «mostrar código»). El resumen de
+ * reportes usa su forma por renglón (`WHERE_ABONO_DE_SALDO_A_FAVOR`, giftCardReports.service.ts): el mismo ACTIVATE con `refundPaymentId`.
+ */
+export function esSobreDeSaldoAFavorSql(alias: string): Prisma.Sql {
+  if (!ALIAS_SQL.test(alias)) throw new Error(`Alias SQL inválido: ${alias}`)
+  return Prisma.sql`EXISTS (SELECT 1 FROM "GiftCardActivity" saldo_a_favor_act WHERE saldo_a_favor_act."giftCardId" = ${Prisma.raw(`"${alias}"`)}.id AND saldo_a_favor_act.type = 'ACTIVATE' AND saldo_a_favor_act."refundPaymentId" IS NOT NULL)`
+}
+
+export async function esSobreDeSaldoAFavor(tx: Tx, giftCardId: string): Promise<boolean> {
+  const [fila] = await tx.$queryRaw<Array<{ es: boolean }>>`
+    SELECT ${esSobreDeSaldoAFavorSql('g')} AS es FROM "GiftCard" g WHERE g.id = ${giftCardId}`
+  return fila?.es === true
+}
+
+/**
+ * Cuáles de estos sobres del negocio son de saldo a favor, en UNA consulta con EL predicado (una página del panel o del MCP: ≤100 ids,
+ * sin una consulta por renglón). Sin ids no consulta.
+ */
+export async function sobresDeSaldoAFavorEntre(db: Tx, venueId: string, ids: string[]): Promise<Set<string>> {
+  const unicos = [...new Set(ids)]
+  if (unicos.length === 0) return new Set()
+  const filas = await db.$queryRaw<Array<{ id: string }>>`
+    SELECT g.id FROM "GiftCard" g
+    WHERE g."venueId" = ${venueId} AND g.id IN (${Prisma.join(unicos)}) AND ${esSobreDeSaldoAFavorSql('g')}`
+  return new Set(filas.map(f => f.id))
+}
+
+export interface SobrePreparado {
+  venueId: string
+  customerId: string
+  /** Su sobre de saldo a favor vivo (ACTIVE o BLOCKED), bloqueado en ESTA transacción; `null` si todavía no tiene. */
+  sobre: LockedGiftCard | null
+  /** El teléfono de la ficha en la forma de `recipientPhone` (`telefonoDeTarjeta`); `null` si no tiene o no se entiende. */
+  telefonoCliente: string | null
+  nombreCliente: string
+}
+
+/**
+ * Primer paso del saldo a favor: el candado POR CLIENTA (Codex plan r1, hallazgo 3: dos cajas que le dan su primer saldo a la misma
+ * clienta a la vez dejarían dos sobres) y su sobre vivo bloqueado. Va DESPUÉS del cobro y ANTES de cualquier reclamo de turno
+ * (hallazgo 2: el gasto con saldo bloquea el sobre antes del turno, `order.mobile.service.ts:5589`). Un `preparado` sirve para el
+ * `abonarSaldoAFavorEnTx` de la MISMA transacción.
+ */
+export async function prepararSobreDeSaldoAFavorEnTx(tx: Tx, p: { venueId: string; customerId: string }): Promise<SobrePreparado> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${'saldo-a-favor:' + p.venueId + ':' + p.customerId}))::text`
+  const cliente = await tx.customer.findFirst({
+    where: { id: p.customerId, venueId: p.venueId },
+    select: { firstName: true, lastName: true, phone: true },
+  })
+  if (!cliente) {
+    throw new GiftCardError('STORE_CREDIT_CUSTOMER_REQUIRED', 'No encontramos a ese cliente en este negocio. Elígelo otra vez.', 400)
+  }
+  const [vivo] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT g.id FROM "GiftCard" g
+    WHERE g."venueId" = ${p.venueId} AND g."customerId" = ${p.customerId} AND g.status IN ('ACTIVE', 'BLOCKED')
+      AND ${esSobreDeSaldoAFavorSql('g')}
+    ORDER BY g."createdAt" ASC, g.id ASC
+    LIMIT 1`
+  const [card] = vivo ? await lockGiftCardsForUpdate(tx, [vivo.id]) : []
+  return {
+    venueId: p.venueId,
+    customerId: p.customerId,
+    sobre: card && (card.status === 'ACTIVE' || card.status === 'BLOCKED') ? card : null,
+    telefonoCliente: telefonoDeTarjeta(cliente.phone),
+    nombreCliente: `${cliente.firstName ?? ''} ${cliente.lastName ?? ''}`.trim() || 'Cliente',
+  }
+}
+
+/**
+ * Sin mínimo de $100 (eso es para vender); sí el tope por sobre, contando lo que sus canjes aún pueden regresar. No se parte. El texto
+ * es el del spec §4 («pasaría de $10,000. Devuelve {sobrante} de otra forma o elige a otra persona.»).
+ */
+function rechazarSiPasaDelTope(total: Prisma.Decimal, reversibles: Prisma.Decimal, nombre: string): void {
+  if (!total.greaterThan(MAXIMO_POR_SOBRE)) return
+  const sobrante = total.minus(MAXIMO_POR_SOBRE)
+  const tope = formatoPesos(MAXIMO_POR_SOBRE).replace(/\.00$/, '')
+  const salida = `Devuelve ${formatoPesos(sobrante)} de otra forma o elige a otra persona.`
+  throw new GiftCardError(
+    'STORE_CREDIT_OVER_CAP',
+    reversibles.isZero()
+      ? `El saldo a favor de ${nombre} pasaría de ${tope}. ${salida}`
+      : `El saldo a favor de ${nombre} podría pasar de ${tope}: ${formatoPesos(reversibles)} de sus compras todavía pueden regresar a su saldo con un reembolso. ${salida}`,
+    422,
+    { sobrante: sobrante.toNumber() },
+  )
+}
+
+export interface AbonoDeSaldoAFavor {
+  giftCardId: string
+  abonado: Prisma.Decimal
+  saldoNuevo: Prisma.Decimal
+  /** El teléfono con que se gasta (`recipientPhone`). Al recargar NO se copia el de la ficha (Codex r3, hallazgo 3). */
+  telefonoDelSobre: string
+  telefonoNoCoincide: boolean
+}
+
+/**
+ * Abona `monto` al sobre de saldo a favor de la clienta: lo crea ACTIVE con su ACTIVATE, o lo recarga con un ADJUST_INCREMENT
+ * (`reason: OTHER`). No toma candados nuevos: usa los de `preparado`. Idempotente por `saldo-a-favor:<refundPaymentId>`. Todo rechazo
+ * se lanza ANTES de escribir. El sobre nuevo nace «entregado» por WhatsApp (`SENT`) sin `ventaHuella` ni `deliveryOperationKey`:
+ * la búsqueda y la prueba por teléfono sólo aceptan WHATSAPP, y la entrega nunca lo manda sola (sería un código al portador).
+ */
+export async function abonarSaldoAFavorEnTx(
+  tx: Tx,
+  p: {
+    preparado: SobrePreparado
+    monto: Prisma.Decimal
+    staffId: string
+    origen: { orderId: string; refundPaymentId: string }
+    folio: string
+    tipo: 'CAMBIO' | 'REEMBOLSO'
+  },
+): Promise<AbonoDeSaldoAFavor> {
+  const s = p.preparado
+  const monto = p.monto
+  if (!monto.greaterThan(0) || monto.decimalPlaces() > 2) {
+    throw new GiftCardError('GIFT_CARD_AMOUNT_OUT_OF_RANGE', 'El saldo a favor debe ser mayor a cero y con centavos exactos.', 422)
+  }
+  const operationKey = `saldo-a-favor:${p.origen.refundPaymentId}`
+  const telefonoDe = (card: LockedGiftCard | null) => card?.recipientPhone ?? s.telefonoCliente ?? ''
+  const noCoincide = (card: LockedGiftCard | null) =>
+    s.telefonoCliente === null || (card !== null && telefonoDeTarjeta(card.recipientPhone) !== s.telefonoCliente)
+
+  const previa = await tx.giftCardActivity.findUnique({
+    where: { venueId_operationKey: { venueId: s.venueId, operationKey } },
+    select: { giftCardId: true, amount: true, balanceAfter: true, refundPaymentId: true },
+  })
+  if (previa) {
+    // La llave comparte espacio con las de gerente: sólo es repetición si es ESTE abono (su devolución y su monto).
+    if (previa.refundPaymentId !== p.origen.refundPaymentId || !previa.amount.equals(monto)) {
+      throw new GiftCardError('IDEMPOTENCY_KEY_REUSED', 'Este saldo a favor ya se registró con otros datos.', 409)
+    }
+    return {
+      giftCardId: previa.giftCardId,
+      abonado: previa.amount,
+      saldoNuevo: previa.balanceAfter,
+      telefonoDelSobre: telefonoDe(s.sobre),
+      telefonoNoCoincide: noCoincide(s.sobre),
+    }
+  }
+
+  const card = s.sobre
+  if (card) {
+    // El saldo y el estado de HOY: entre `preparar` y aquí otra función de la libreta pudo mover este sobre en la MISMA transacción
+    // (en el Cambio, `revertirCanjeEnTx` le regresa lo pagado con saldo). Sigue bloqueado por `preparar`: basta leerlo.
+    const vigente = await tx.giftCard.findFirst({ where: { id: card.id, venueId: s.venueId }, select: { balance: true, status: true } })
+    if (!vigente) throw noEncontrada()
+    card.balance = vigente.balance
+    card.status = vigente.status
+  }
+  if (card?.status === 'BLOCKED') {
+    throw new GiftCardError(
+      'STORE_CREDIT_CARD_BLOCKED',
+      `El saldo de ${s.nombreCliente} está bloqueado; un gerente lo puede desbloquear.`,
+      422,
+    )
+  }
+  const movimiento = {
+    venueId: s.venueId,
+    amount: monto,
+    note: `Saldo a favor · ${p.tipo === 'CAMBIO' ? 'Cambio' : 'Reembolso'} ${p.folio}`,
+    refundPaymentId: p.origen.refundPaymentId,
+    orderId: p.origen.orderId,
+    staffId: p.staffId,
+    operationKey,
+  }
+
+  if (card) {
+    const saldoNuevo = card.balance.plus(monto)
+    const reversibles = await canjeadoQuePuedeRegresar(tx, s.venueId, card.id)
+    rechazarSiPasaDelTope(saldoNuevo.plus(reversibles), reversibles, s.nombreCliente)
+    const r = await tx.giftCard.updateMany({
+      where: { id: card.id, venueId: s.venueId, status: 'ACTIVE' },
+      data: { balance: { increment: monto } },
+    })
+    if (r.count !== 1) throw noEncontrada()
+    await tx.giftCardActivity.create({
+      data: { ...movimiento, giftCardId: card.id, type: 'ADJUST_INCREMENT', balanceAfter: saldoNuevo, reason: 'OTHER' },
+    })
+    card.balance = saldoNuevo
+    return { giftCardId: card.id, abonado: monto, saldoNuevo, telefonoDelSobre: telefonoDe(card), telefonoNoCoincide: noCoincide(card) }
+  }
+
+  if (!s.telefonoCliente) {
+    throw new GiftCardError(
+      'STORE_CREDIT_CUSTOMER_PHONE_REQUIRED',
+      `Para darle saldo a favor a ${s.nombreCliente} hace falta su teléfono: con él lo usa. Agrégalo a su ficha.`,
+      400,
+    )
+  }
+  rechazarSiPasaDelTope(monto, CERO(), s.nombreCliente)
+  const venue = await tx.venue.findUnique({ where: { id: s.venueId }, select: { organizationId: true } })
+  if (!venue) throw noEncontrada()
+  const ajustes = await tx.giftCardSettings.findUnique({ where: { venueId: s.venueId }, select: { termsVersion: true } })
+  const codigo = generateGiftCardCode()
+  const codeHash = hashGiftCardCode(codigo.normalized)
+  const pageToken = generateOpaqueToken()
+  const ahora = new Date()
+  const creado = await tx.giftCard.create({
+    data: {
+      venueId: s.venueId,
+      organizationId: venue.organizationId,
+      codeHash,
+      codeEnc: encryptGiftCardCode(codigo.normalized),
+      codeLast4: codigo.last4,
+      pageToken,
+      initialAmount: monto,
+      balance: monto,
+      status: 'ACTIVE',
+      activatedAt: ahora,
+      expiresAt: null,
+      validityMonths: null,
+      termsVersion: ajustes?.termsVersion ?? TERMINOS_VIGENTES,
+      customerId: s.customerId,
+      recipientName: s.nombreCliente,
+      recipientPhone: s.telefonoCliente,
+      deliveryChannel: 'WHATSAPP',
+      deliveryStatus: 'SENT',
+      deliveredAt: null,
+      deliveryMessageId: null,
+      deliveryOperationKey: null,
+      ventaHuella: null,
+      source: 'POS',
+    },
+    select: { id: true },
+  })
+  await tx.giftCardActivity.create({ data: { ...movimiento, giftCardId: creado.id, type: 'ACTIVATE', balanceAfter: monto } })
+  // Si el mismo `preparado` llegara a un segundo abono, recargaría este sobre en vez de crear otro.
+  s.sobre = {
+    id: creado.id,
+    venueId: s.venueId,
+    codeHash,
+    pageToken,
+    recipientPhone: s.telefonoCliente,
+    deliveryChannel: 'WHATSAPP',
+    status: 'ACTIVE',
+    balance: monto,
+    initialAmount: monto,
+    expiresAt: null,
+    activatedAt: ahora,
+    validityMonths: null,
+    customerId: s.customerId,
+  }
+  return { giftCardId: creado.id, abonado: monto, saldoNuevo: monto, telefonoDelSobre: s.telefonoCliente, telefonoNoCoincide: false }
+}
+
+/** Lo que la bitácora y el panel enseñan de un teléfono: nunca completo (`enmascararDestino`). */
+const telefonoEnmascarado = (telefono: string | null) =>
+  enmascararDestino({ deliveryChannel: 'WHATSAPP', recipientPhone: telefono, recipientEmail: null })
+
+/** Una regla, un texto: la libreta y la vista previa del MCP (`change_store_credit_phone`) dicen lo mismo (S10, minor 11). */
+export const MENSAJE_TELEFONO_NO_PERMITIDO = 'Esta tarjeta no es un saldo a favor: su destino se cambia con «Cambiar destino».'
+export const mensajeTelefonoDesactualizado = (actualLast4: string | null): string =>
+  actualLast4
+    ? `El teléfono de este saldo ya cambió: ahora termina en ${actualLast4}. Revísalo y vuelve a intentarlo.`
+    : 'El teléfono de este saldo ya cambió. Revísalo y vuelve a intentarlo.'
+
+/**
+ * El teléfono con que se GASTA un sobre de saldo a favor (spec 2026-10-30 §5.2, TARJETAS 30-oct; tarea S8a). Sólo un gerente
+ * (`giftCards:manage`, lo exige la ruta) y nunca manda la página ni el código: serían un código al portador. No es «Cambiar destino»
+ * (ése pone la entrega en PENDING y la página saldría sola). Bajo el candado del sobre, así no se cruza con un canje:
+ *  - la prueba por teléfono se juzga contra el `recipientPhone` VIGENTE bajo ese mismo candado (`giftCardProof.ts`, `vigente`), así
+ *    que una prueba firmada para el número viejo deja de servir sola;
+ *  - en la MISMA transacción se consumen los retos vivos del número viejo (un código ya mandado ahí no sirve) y se escribe la bitácora
+ *    `STORE_CREDIT_PHONE_CHANGED` con los dos teléfonos enmascarados.
+ * Todo rechazo va antes de escribir. El mismo teléfono no escribe nada (repetir el cambio es seguro). Sirve ACTIVE o BLOCKED. Con
+ * `expectedPhoneLast4`, compara y cambia: una petición A→B que llega después de B→C responde 409 `STORE_CREDIT_PHONE_OUTDATED`.
+ */
+export async function cambiarTelefonoDeSaldoAFavorEnTx(
+  tx: Tx,
+  p: {
+    venueId: string
+    giftCardId: string
+    telefono: string
+    staffId: string
+    /** Comparar y cambiar: los últimos 4 del teléfono que el gerente VIO. Si ya es otro, 409 sin escribir (una petición vieja tarde). */
+    expectedPhoneLast4?: string
+    ipAddress?: string
+    userAgent?: string
+  },
+): Promise<{ phoneLast4: string }> {
+  const nuevo = telefonoDeTarjeta(typeof p.telefono === 'string' ? p.telefono.trim() : null)
+  if (!nuevo) throw new BadRequestError('El teléfono no es válido.', 'GIFT_CARD_PHONE_INVALID')
+  const [card] = await lockGiftCardsForUpdate(tx, [p.giftCardId])
+  if (!card || card.venueId !== p.venueId || (card.status !== 'ACTIVE' && card.status !== 'BLOCKED')) throw noEncontrada()
+  if (!(await esSobreDeSaldoAFavor(tx, card.id))) {
+    throw new GiftCardError('STORE_CREDIT_PHONE_NOT_ALLOWED', MENSAJE_TELEFONO_NO_PERMITIDO, 409)
+  }
+  const viejo = telefonoDeTarjeta(card.recipientPhone)
+  const phoneLast4 = nuevo.slice(-4)
+  // Primero «ya quedó»: la MISMA petición repetida (su esperado ya no es el actual) responde éxito sin otra bitácora.
+  if (viejo === nuevo) return { phoneLast4 }
+  const actualLast4 = viejo?.slice(-4) ?? null
+  if (p.expectedPhoneLast4 !== undefined && p.expectedPhoneLast4 !== actualLast4) {
+    throw new GiftCardError('STORE_CREDIT_PHONE_OUTDATED', mensajeTelefonoDesactualizado(actualLast4), 409, { phoneLast4: actualLast4 })
+  }
+
+  const r = await tx.giftCard.updateMany({ where: { id: card.id, venueId: p.venueId }, data: { recipientPhone: nuevo } })
+  if (r.count !== 1) throw noEncontrada()
+  if (viejo) {
+    await tx.otpChallenge.updateMany({
+      where: { venueId: p.venueId, destination: viejo, purpose: PROPOSITO_TELEFONO_DE_TARJETA, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+  }
+  await tx.activityLog.create({
+    data: {
+      venueId: p.venueId,
+      staffId: p.staffId,
+      action: 'STORE_CREDIT_PHONE_CHANGED',
+      entity: 'GiftCard',
+      entityId: card.id,
+      data: { telefonoAnterior: telefonoEnmascarado(viejo), telefonoNuevo: telefonoEnmascarado(nuevo) },
+      ipAddress: p.ipAddress ?? null,
+      userAgent: p.userAgent ?? null,
+    },
+  })
+  return { phoneLast4 }
 }

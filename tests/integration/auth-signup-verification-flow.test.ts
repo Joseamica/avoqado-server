@@ -46,6 +46,8 @@ const mockPrismaClient = {
     findUnique: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    // verifyEmailCode marca la cuenta con updateMany condicionado a `emailVerified: false` (27-oct).
+    updateMany: jest.fn(),
     findFirst: jest.fn(),
   },
   organization: {
@@ -84,6 +86,7 @@ describe('Auth Flow: Signup → Verification → Login (Approach B - FAANG Patte
   beforeEach(() => {
     // Reset all mocks
     jest.clearAllMocks()
+    mockPrismaClient.staff.updateMany.mockResolvedValue({ count: 1 })
 
     // Generate mock IDs
     userId = `user_${Date.now()}`

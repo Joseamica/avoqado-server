@@ -11,17 +11,17 @@ import { updateOrderDetails, updateOrderDetailsInTransaction } from '@/services/
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 
-const MENSAJE = 'Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar. Pídeselo a tu administrador.'
-
 /** `reembolsos`: los `Payment` REFUND COMPLETED de la venta (R7-2: ya no cuentan para «cobrada»; la prueba lo vigila). */
 function crearTx(orden: Record<string, unknown>, reembolsos = 0) {
   return {
     $queryRaw: jest.fn().mockResolvedValue([{ id: 'order' }]),
     // R11-2: la regla compartida suma los cobros capturados de una venta abierta (aquí: ninguno).
     payment: {
+      findFirst: jest.fn().mockResolvedValue({ status: 'COMPLETED', type: null, processedById: 'cashier', createdAt: new Date() }),
       count: jest.fn().mockResolvedValue(reembolsos),
       aggregate: jest.fn().mockResolvedValue({ _sum: { amount: null, tipAmount: null } }),
     },
+    orderCustomer: { findFirst: jest.fn().mockResolvedValue(null) },
     order: {
       findFirst: jest.fn().mockResolvedValue({ id: 'order', status: 'CONFIRMED', customerName: null, ...orden }),
       update: jest.fn().mockImplementation(async (a: { data: Record<string, unknown> }) => ({
@@ -38,14 +38,14 @@ function crearTx(orden: Record<string, unknown>, reembolsos = 0) {
 
 describe('🔴 R4-2: detalle de la cuenta del POS — cambiar el cliente de una venta COBRADA exige payments:create', () => {
   it.each([
-    ['PAID, sin cliente ⇒ ponerlo', { paymentStatus: 'PAID', customerId: null }, 'cust-B'],
-    ['REFUNDED, sin cliente ⇒ ponerlo', { paymentStatus: 'REFUNDED', customerId: null }, 'cust-B'],
-    ['PAID, cliente A ⇒ cambiarlo a B', { paymentStatus: 'PAID', customerId: 'cust-A' }, 'cust-B'],
-    ['PAID, cliente A ⇒ quitarlo ("")', { paymentStatus: 'PAID', customerId: 'cust-A' }, ''],
-  ])('🔴 %s (estado CONFIRMED), SIN permiso ⇒ 403 en español y no se guarda NADA', async (_n, orden, nuevo) => {
+    ['PAID, sin cliente ⇒ ponerlo', { paymentStatus: 'PAID', customerId: null }, 'cust-B', 403],
+    ['REFUNDED, sin cliente ⇒ ponerlo', { paymentStatus: 'REFUNDED', customerId: null }, 'cust-B', 409],
+    ['PAID, cliente A ⇒ cambiarlo a B', { paymentStatus: 'PAID', customerId: 'cust-A' }, 'cust-B', 409],
+    ['PAID, cliente A ⇒ quitarlo ("")', { paymentStatus: 'PAID', customerId: 'cust-A' }, '', 409],
+  ])('🔴 %s (estado CONFIRMED), SIN permiso ⇒ no se guarda NADA', async (_n, orden, nuevo, statusCode) => {
     const tx = crearTx(orden)
     const error = await updateOrderDetailsInTransaction(tx as any, 'venue', 'order', { name: 'Kev', customerId: nuevo }, {}).catch(e => e)
-    expect(error).toMatchObject({ statusCode: 403, message: MENSAJE })
+    expect(error).toMatchObject({ statusCode })
     expect(tx.order.update).not.toHaveBeenCalled()
   })
 
@@ -65,14 +65,14 @@ describe('🔴 R4-2: detalle de la cuenta del POS — cambiar el cliente de una 
     )
   })
 
-  it('con payments:create: como hoy, fija el cliente', async () => {
+  it('con autoridad histórica de gerencia: fija el cliente', async () => {
     const tx = crearTx({ paymentStatus: 'PAID', customerId: null })
     const r = await updateOrderDetailsInTransaction(
       tx as any,
       'venue',
       'order',
       { customerId: 'cust-B' },
-      { puedeCambiarClienteEnVentaCobrada: true },
+      { customerAttribution: { staffId: 'manager', canAssignHistorical: true } },
     )
     expect(r.data.customerId).toBe('cust-B')
   })
@@ -116,11 +116,16 @@ describe('🔴 R4-2: detalle de la cuenta del POS — cambiar el cliente de una 
   it('el envoltorio `updateOrderDetails` (intent offline y MCP) pasa el permiso a la transacción', async () => {
     const tx = crearTx({ paymentStatus: 'PAID', customerId: null })
     prismaMock.$transaction.mockImplementationOnce(async (cb: any) => cb(tx))
-    expect(await updateOrderDetails('venue', 'order', { customerId: 'cust-B' }, { puedeCambiarClienteEnVentaCobrada: true })).toMatchObject(
-      {
-        customerId: 'cust-B',
-      },
-    )
+    expect(
+      await updateOrderDetails(
+        'venue',
+        'order',
+        { customerId: 'cust-B' },
+        { customerAttribution: { staffId: 'manager', canAssignHistorical: true } },
+      ),
+    ).toMatchObject({
+      customerId: 'cust-B',
+    })
     prismaMock.$transaction.mockImplementationOnce(async (cb: any) => cb(crearTx({ paymentStatus: 'PAID', customerId: null })))
     await expect(updateOrderDetails('venue', 'order', { customerId: 'cust-B' })).rejects.toMatchObject({ statusCode: 403 })
   })

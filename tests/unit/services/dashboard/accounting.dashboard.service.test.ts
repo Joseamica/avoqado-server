@@ -124,6 +124,7 @@ const movimiento = (f: Record<string, any>): MovimientoLeido => ({
   tipCents: Math.round(Number(f.tipAmount ?? 0) * 100),
   method: f.method ?? null,
   processorData: f.processorData,
+  tenderSystemKind: f.tenderSystemKind,
   incluirEnContabilidad: f.merchantAccount?.fiscalConfig?.includeInAccounting ?? f.ecommerceMerchant?.fiscalConfig?.includeInAccounting,
 })
 const enumeracion = () => p.$queryRaw.mock.calls[0][0] as Prisma.Sql
@@ -324,7 +325,7 @@ describe('getBusinessSummary (Resumen del negocio)', () => {
     expect(r.collection.cashPct).toBe(63) // round(20000/32000*100)
   })
 
-  it('sums processing fees (non-refund) and net-after-fees', async () => {
+  it('sums processing fees (refunds subtract the fee they return) and net-after-fees', async () => {
     const r = await getBusinessSummary('venue-1', FILTERS)
     expect(r.costs.processingFeesCents).toBe(450) // 300+150
     expect(r.result.netAfterFeesCents).toBe(31550) // 32000-450
@@ -383,6 +384,17 @@ describe('getBankAndCashSummary (Bancos y cajas)', () => {
     expect(r.totals.electronicTipsCents).toBe(1500) // propina de tarjeta (10+5); la de efectivo/refund no
     expect(r.totals.feesCents).toBe(450)
     expect(r.totals.netToBankCents).toBe(13050) // 12000 + 1500 − 450 (la propina de tarjeta SÍ se deposita)
+  })
+
+  it('Codex r4 H2 (pedidos): la comisión que Stripe devuelve con el reembolso (fee negativo) baja las comisiones', async () => {
+    sembrar([
+      { amount: 250, tipAmount: 0, type: PaymentType.REGULAR, method: PaymentMethod.CREDIT_CARD, feeAmount: 2.9 },
+      { amount: -125, tipAmount: 0, type: PaymentType.REFUND, method: PaymentMethod.CREDIT_CARD, feeAmount: -1.45 },
+    ])
+    const r = await getBankAndCashSummary('venue-1', FILTERS)
+    expect(r.totals.electronicInflowCents).toBe(12500)
+    expect(r.totals.feesCents).toBe(145) // $2.90 − $1.45 devueltos
+    expect(r.totals.netToBankCents).toBe(12355) // 12500 − 145
   })
 
   it('⭐ (B4 r1) la exclusión del saldo de regalo va dentro de un AND: nada de OR suelto que otro filtro pueda pisar', async () => {
@@ -879,19 +891,20 @@ describe('B4b · el Resumen y Bancos suman en la base (Codex r1 P2 #7; r3 R3-5)'
     )
   })
 
-  // La suma en la base conserva lo de antes (ajustes del controlador): la devolución suma monto y propina, pero no conteo ni comisión;
-  // un cobro sin tipo (legado) es venta. Las devoluciones de `ROWS` y de la foto de 4b no traen comisión: éstas sí, para que se vea.
-  it('control — una devolución CON comisión no suma comisión ni conteo; sí resta su monto y su propina', async () => {
+  // La suma en la base: la devolución suma monto y propina, pero no conteo; un cobro sin tipo (legado) es venta. Codex r4 H2 (pedidos): la
+  // comisión que la devolución regresa (fee NEGATIVO, como lo escriben el reembolso de Stripe y el costo negativo de la terminal) sí resta;
+  // antes se ignoraba y «Bancos y cajas» seguía cobrando la comisión ya devuelta.
+  it('control — una devolución CON comisión devuelta resta esa comisión, su monto y su propina, pero no conteo', async () => {
     sembrar([
       { amount: 100, tipAmount: 10, type: PaymentType.REGULAR, method: PaymentMethod.CREDIT_CARD, feeAmount: 3 },
-      { amount: -30, tipAmount: -2, type: PaymentType.REFUND, method: PaymentMethod.CREDIT_CARD, feeAmount: 0.9 },
+      { amount: -30, tipAmount: -2, type: PaymentType.REFUND, method: PaymentMethod.CREDIT_CARD, feeAmount: -0.9 },
     ])
     const r = await getBankAndCashSummary('venue-1', FILTERS)
     expect(r.accounts).toEqual([
       { key: 'card', kind: 'bank', methods: ['CREDIT_CARD'], inflowCents: 7000, tipCents: 800, count: 1 }, // 100 − 30 · 10 − 2
     ])
-    expect(r.totals.feesCents).toBe(300) // la comisión de la venta; la de la devolución (0.90) no suma
-    expect(r.totals.netToBankCents).toBe(7500) // 7000 + 800 − 300
+    expect(r.totals.feesCents).toBe(210) // 3.00 de la venta − 0.90 que regresó la devolución
+    expect(r.totals.netToBankCents).toBe(7590) // 7000 + 800 − 210
   })
 
   it('control — un cobro sin tipo (legado, `type = null`) es venta: entra, cuenta y suma su comisión', async () => {
@@ -903,4 +916,16 @@ describe('B4b · el Resumen y Bancos suman en la base (Codex r1 P2 #7; r3 R3-5)'
     expect(r.accounts).toEqual([{ key: 'card', kind: 'bank', methods: ['DEBIT_CARD'], inflowCents: 15000, tipCents: 500, count: 2 }])
     expect(r.totals.feesCents).toBe(400) // 3 + 1
   })
+})
+
+it('keeps EC movements managerial while excluding both from fiscal revenue', async () => {
+  p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: true })
+  sembrar([
+    { amount: 500, type: 'REGULAR', method: PaymentMethod.CASH },
+    { amount: 500, type: 'REGULAR', method: PaymentMethod.OTHER, tenderSystemKind: 'EXCHANGE_CREDIT' },
+    { amount: -500, type: 'REFUND', method: PaymentMethod.OTHER, tenderSystemKind: 'EXCHANGE_CREDIT' },
+  ])
+  const r = await getIncomeStatement(VENUE, FILTERS)
+  expect(r.revenue).toMatchObject({ grossSalesCents: 100000, refundsCents: 50000 })
+  expect(r.fiscalRevenue).toMatchObject({ grossSalesCents: 50000, refundsCents: 0 })
 })

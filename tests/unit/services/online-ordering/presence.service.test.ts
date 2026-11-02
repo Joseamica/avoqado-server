@@ -21,6 +21,7 @@ beforeEach(() => {
   __resetPresenceDebounceForTests()
   prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
   prismaMock.onlineOrder.count.mockResolvedValue(0)
+  prismaMock.onlineOrderCharge.count.mockResolvedValue(0)
 })
 
 describe('touchInboxPoll', () => {
@@ -94,6 +95,20 @@ describe('getAcceptingStatus', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow() as any)
     prismaMock.onlineOrder.count.mockResolvedValue(MAX_PENDING_PER_VENUE)
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'TOO_BUSY' })
+  })
+})
+
+describe('getAcceptingStatus — fase 2: los borradores de tarjeta vigentes cuentan para la saturación', () => {
+  it('pedidos por aceptar + borradores vigentes = 30 → PAUSED TOO_BUSY; un vencido no cuenta', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow() as any)
+    prismaMock.onlineOrder.count.mockResolvedValue(MAX_PENDING_PER_VENUE - 1)
+    prismaMock.onlineOrderCharge.count.mockResolvedValue(1)
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'TOO_BUSY' })
+    expect(prismaMock.onlineOrderCharge.count).toHaveBeenCalledWith({
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW } },
+    })
+    prismaMock.onlineOrderCharge.count.mockResolvedValue(0) // el vencido ya no entra en la cuenta
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
   })
 })
 

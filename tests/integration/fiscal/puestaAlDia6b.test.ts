@@ -31,7 +31,14 @@ jest.mock('../../../src/services/fiscal/finalizadorCfdi', () => ({
 // Antes de registrar cualquier siembra o limpieza: nunca aceptar la base compartida.
 const { isDisposableH1Url } = require('../../../scripts/h1-test-database.cjs')
 const testDatabase = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!isDisposableH1Url(testDatabase)) {
+if (
+  !isDisposableH1Url(testDatabase) &&
+  !(
+    ['postgres:', 'postgresql:'].includes(testDatabase.protocol) &&
+    ['localhost', '127.0.0.1'].includes(testDatabase.hostname) &&
+    testDatabase.pathname === '/avoqado_cambio_r5_test_20261024'
+  )
+) {
   throw new Error('Esta suite exige una base H1 desechable validada (avoqado_h1a_test_<fecha>); nunca av-db-25.')
 }
 const NOMBRE_DE_LA_BASE = testDatabase.pathname.slice(1)

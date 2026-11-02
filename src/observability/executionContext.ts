@@ -55,6 +55,20 @@ export interface ExecutionContext {
   userId?: string
   role?: string
   terminalSerial?: string
+  /**
+   * La app que llama, como se presenta (`x-device-platform`, `x-app-version`), recortado. Lo lee la cuenta del renglón por peso
+   * (`importePorPeso.ts`) para dejar a iOS < 1.15.2 con la cuenta vieja. Nunca se registra en el log (no está en la lista).
+   */
+  cliente?: { plataforma?: string; version?: string }
+  /** La petición entró por el montaje `/tpv` (lo marca el enrutador, escriba como escriba la URL); también la lee `importePorPeso.ts`. */
+  rutaDeLaTpv?: true
+  /**
+   * Una ruta pública no pudo confirmar de qué negocio es (la base no contestó al buscarlo). El candado de los negocios
+   * demo no deja salir mensajes de esa operación (`services/demo/candadoDemo.ts`). Nunca se registra en el log.
+   */
+  negocioSinConfirmar?: true
+  /** El negocio que fijó `conNegocio` (candado demo): manda sobre el del token, también para un SUPERADMIN. */
+  negocioFijado?: string
   /** Present only for work that can be cancelled (the MCP guard sets it). See `RequestCancellation`. */
   cancellation?: RequestCancellation
   /**

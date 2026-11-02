@@ -20,6 +20,9 @@ import {
   generateOpaqueToken,
   hashGiftCardCode,
 } from './giftCardCode'
+import { telefonoDeTarjeta, urlDeLaPagina } from './giftCardEntrega'
+import { mismoDiaDelVenue } from './giftCardCancel.service'
+import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 import { GiftCardError } from './giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, assertMontoDeSobre, assertTopeDeOperacion } from './giftCardLimits'
 import { assertGiftCardsSellable, getGiftCardSettings } from './giftCardSettings.service'
@@ -38,11 +41,16 @@ const FUENTE_POR_OMISION = 'AVOQADO_ANDROID'
 const TELEFONO = /^\+?\d{10,15}$/
 const CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const LINEA = 'Tarjeta de regalo'
+/** S-6 y C5: WhatsApp y correo dicen de parte de quién va la tarjeta. Sólo se exige en una venta NUEVA (C3/Q44). */
+export const TEXTO_FALTA_DE_PARTE_DE = 'Para mandarla por WhatsApp o correo falta «De parte de».'
 
 export interface CreateGiftCardOrderInput {
   /** UUID que el POS genera UNA vez por venta y reenvía en cada reintento (8–64 caracteres). */
   idempotencyKey: string
   source?: 'AVOQADO_ANDROID' | 'AVOQADO_IOS' | 'TPV'
+  /** Q110: quién empezó la venta SEGÚN EL APARATO. Sólo nota de bitácora (el controller): nunca autor ni huella (Q37). */
+  iniciadoPor?: string
+  iniciadoPorNombre?: string
   purchaserName?: string | null
   purchaserContact?: string | null
   sobres: Array<{
@@ -69,11 +77,18 @@ export interface CreateGiftCardOrderResult {
   status?: OrderStatus
   sobres: Array<{
     id: string
-    /** `XXXX-XXXX-XXXX-XXXX-X`: sólo a quien vende (permiso `giftCards:sell`), para el QR o el certificado. */
-    codigo: string
+    /**
+     * `XXXX-XXXX-XXXX-XXXX-X`: sólo a quien vende (permiso `giftCards:sell`), para el QR o el certificado. 1b Q36: `null` sólo en
+     * un reintento cuyo sobre ya se repuso o que no es del mismo día de la venta (con `codigoOculto`); la app usa `reveal`.
+     */
+    codigo: string | null
     ultimos4: string
     monto: number
-    pageToken: string
+    pageToken: string | null
+    /** 1b Q22 (aditivo): la liga pública de la tarjeta, armada por el servidor. */
+    pageUrl: string | null
+    /** 1b Q36 (aditivo): sólo cuando `codigo`, `pageToken` y `pageUrl` llegan `null`. */
+    codigoOculto?: true
     deliveryChannel: GiftCardDeliveryChannel
     venceEnMeses: number | null
     termsVersion: string
@@ -87,6 +102,8 @@ const SELECT_CUENTA = {
   orderNumber: true,
   total: true,
   status: true,
+  // 1b Q36: el día de la venta de un sobre que todavía no se activa.
+  createdAt: true,
   items: {
     where: { giftCardId: { not: null } },
     orderBy: { sequence: 'asc' },
@@ -109,6 +126,10 @@ const SELECT_CUENTA = {
           message: true,
           purchaserName: true,
           purchaserContact: true,
+          ventaHuella: true,
+          // 1b Q36: ¿ya se repuso su código? Y el día en que se activó.
+          activatedAt: true,
+          activities: { where: { type: 'CODE_REPLACED' }, select: { id: true }, take: 1 },
         },
       },
     },
@@ -153,15 +174,18 @@ function normalizarPedido(input: CreateGiftCardOrderInput): {
     if (!CANALES_FASE_1A.has(s.deliveryChannel)) {
       throw new BadRequestError(`Elige cómo se entrega la tarjeta ${n}: WhatsApp, correo, impresa o en manos del comprador.`)
     }
-    const recipientPhone = texto(s.recipientPhone, 30, `El teléfono de la tarjeta ${n}`)?.replace(/[\s().-]/g, '') ?? null
+    const telefonoEscrito = texto(s.recipientPhone, 30, `El teléfono de la tarjeta ${n}`)?.replace(/[\s().-]/g, '') ?? null
+    // Q25: se guarda canónico (así se compara en phone/*). NUNCA lanza aquí: lo usa también el reintento de una venta de la 1a.
+    const recipientPhone = telefonoEscrito && (telefonoDeTarjeta(telefonoEscrito) ?? telefonoEscrito)
     const recipientEmail = texto(s.recipientEmail, 160, `El correo de la tarjeta ${n}`)?.toLowerCase() ?? null
-    if (s.deliveryChannel === 'WHATSAPP' && (!recipientPhone || !TELEFONO.test(recipientPhone))) {
+    // La regex de la 1a se aplica a lo ESCRITO, no al convertido: un «00…» de la 1a puede quedar con menos de 10 dígitos (Q44).
+    if (s.deliveryChannel === 'WHATSAPP' && (!telefonoEscrito || !TELEFONO.test(telefonoEscrito))) {
       throw new BadRequestError(`La tarjeta ${n} se entrega por WhatsApp: captura un teléfono de 10 dígitos.`)
     }
     if (s.deliveryChannel === 'EMAIL' && (!recipientEmail || !CORREO.test(recipientEmail))) {
       throw new BadRequestError(`La tarjeta ${n} se entrega por correo: captura un correo válido.`)
     }
-    if (recipientPhone && !TELEFONO.test(recipientPhone)) throw new BadRequestError(`El teléfono de la tarjeta ${n} no es válido.`)
+    if (telefonoEscrito && !TELEFONO.test(telefonoEscrito)) throw new BadRequestError(`El teléfono de la tarjeta ${n} no es válido.`)
     if (recipientEmail && !CORREO.test(recipientEmail)) throw new BadRequestError(`El correo de la tarjeta ${n} no es válido.`)
     return {
       monto: new Prisma.Decimal(s.amount),
@@ -191,6 +215,7 @@ function huellaDelPedido(p: ReturnType<typeof normalizarPedido>): string {
   return huella({ ...p, sobres: p.sobres.map(s => ({ ...s, monto: s.monto.toFixed(2) })) })
 }
 
+/** Sólo para ventas de la 1a (sin `ventaHuella`): el teléfono guardado pasa por la misma forma que el pedido (Q44). */
 function huellaDeLaCuenta(c: CuentaGuardada): string {
   const sobres = c.items.map(i => i.giftCard).filter((s): s is SobreGuardado => s != null)
   return huella({
@@ -200,15 +225,22 @@ function huellaDeLaCuenta(c: CuentaGuardada): string {
       monto: s.initialAmount.toFixed(2),
       deliveryChannel: s.deliveryChannel,
       recipientName: s.recipientName,
-      recipientPhone: s.recipientPhone,
+      recipientPhone: s.recipientPhone && (telefonoDeTarjeta(s.recipientPhone) ?? s.recipientPhone),
       recipientEmail: s.recipientEmail,
       message: s.message,
     })),
   })
 }
 
-function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResult {
+/**
+ * Q36: repetir la venta ya no es otra salida del código. En un reintento, el código, la liga y su URL salen SÓLO si el sobre no
+ * tiene `CODE_REPLACED` y hoy es el mismo día del negocio de la venta; si no, los tres en `null` con `codigoOculto: true`. La
+ * creación (`replay: false`) no cambia: el secreto nace con la venta.
+ */
+function respuesta(c: CuentaGuardada, replay: boolean, ctx: { ahora: Date; timezone: string }): CreateGiftCardOrderResult {
   const sobres = c.items.map(i => i.giftCard).filter((s): s is SobreGuardado => s != null)
+  const oculto = (s: SobreGuardado) =>
+    replay && (s.activities.length > 0 || !mismoDiaDelVenue(s.activatedAt ?? c.createdAt, ctx.ahora, ctx.timezone))
   return {
     orderId: c.id,
     orderNumber: c.orderNumber,
@@ -217,10 +249,11 @@ function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResul
     status: c.status,
     sobres: sobres.map(s => ({
       id: s.id,
-      codigo: formatGiftCardCode(decryptGiftCardCode(s.codeEnc)),
+      ...(oculto(s)
+        ? { codigo: null, pageToken: null, pageUrl: null, codigoOculto: true as const }
+        : { codigo: formatGiftCardCode(decryptGiftCardCode(s.codeEnc)), pageToken: s.pageToken, pageUrl: urlDeLaPagina(s.pageToken) }),
       ultimos4: s.codeLast4,
       monto: Number(s.initialAmount),
-      pageToken: s.pageToken,
       deliveryChannel: s.deliveryChannel,
       venceEnMeses: s.validityMonths,
       termsVersion: s.termsVersion,
@@ -229,21 +262,37 @@ function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResul
   }
 }
 
-function reintentoOConflicto(cuenta: CuentaGuardada, huellaPedida: string): CreateGiftCardOrderResult {
-  if (huellaDeLaCuenta(cuenta) !== huellaPedida) {
+/** El reintento corre antes de leer el negocio: lee su zona con UN `findUnique`, sólo cuando hay cuenta previa. */
+async function zonaDelNegocio(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  return venue?.timezone || DEFAULT_TIMEZONE
+}
+
+/**
+ * Q37: se compara contra la huella con que se CREÓ la venta (la de la primera tarjeta), no contra los datos de hoy, que
+ * cambiar el destino (S4) edita. Una venta de la 1a no la tiene: se recalcula de lo guardado.
+ */
+function reintentoOConflicto(
+  cuenta: CuentaGuardada,
+  huellaPedida: string,
+  ctx: { ahora: Date; timezone: string },
+): CreateGiftCardOrderResult {
+  const guardada = cuenta.items[0]?.giftCard?.ventaHuella ?? huellaDeLaCuenta(cuenta)
+  if (guardada !== huellaPedida) {
     throw new GiftCardError(
       'IDEMPOTENCY_KEY_REUSED',
       'Esta llave ya creó otra venta de tarjetas con datos distintos. Genera una llave nueva para esta venta.',
       409,
     )
   }
-  return respuesta(cuenta, true)
+  return respuesta(cuenta, true, ctx)
 }
 
 export async function createGiftCardOrder(
   venueId: string,
   staffId: string,
   input: CreateGiftCardOrderInput,
+  ahora: Date = new Date(),
 ): Promise<CreateGiftCardOrderResult> {
   if (!LLAVE.test(input?.idempotencyKey ?? '')) {
     throw new BadRequestError('idempotencyKey debe tener de 8 a 64 caracteres (letras, números, guion o guion bajo).')
@@ -254,7 +303,17 @@ export async function createGiftCardOrder(
 
   // El reintento primero: si el plan venció entre el intento y el reintento, el POS recibe la cuenta que YA existe.
   const previa = await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: SELECT_CUENTA })
-  if (previa) return reintentoOConflicto(previa, huellaPedida)
+  if (previa) return reintentoOConflicto(previa, huellaPedida, { ahora, timezone: await zonaDelNegocio(venueId) })
+
+  // Sólo la venta NUEVA (C3/Q44): un reintento de la 1a nunca recibe estos 400.
+  if (!pedido.purchaserName && pedido.sobres.some(s => s.deliveryChannel === 'WHATSAPP' || s.deliveryChannel === 'EMAIL')) {
+    throw new BadRequestError(TEXTO_FALTA_DE_PARTE_DE, 'GIFT_CARD_PURCHASER_REQUIRED')
+  }
+  pedido.sobres.forEach((s, i) => {
+    if (s.recipientPhone && telefonoDeTarjeta(s.recipientPhone) === null) {
+      throw new BadRequestError(`El teléfono de la tarjeta ${i + 1} no es válido.`, 'GIFT_CARD_PHONE_INVALID')
+    }
+  })
 
   await assertGiftCardsSellable(venueId)
   await assertVenueSalesEnabled(venueId)
@@ -263,7 +322,7 @@ export async function createGiftCardOrder(
   const limites = { minAmount: new Prisma.Decimal(ajustes.minAmount), maxAmount: new Prisma.Decimal(ajustes.maxAmount) }
   for (const s of pedido.sobres) assertMontoDeSobre(s.monto, limites)
   const total = pedido.sobres.reduce((suma, s) => suma.plus(s.monto), new Prisma.Decimal(0))
-  assertTopeDeOperacion(total, new Date())
+  assertTopeDeOperacion(total, ahora)
 
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
@@ -303,6 +362,7 @@ export async function createGiftCardOrder(
               deliveryChannel: s.deliveryChannel,
               deliveryStatus: 'PENDING',
               source: 'POS',
+              ventaHuella: huellaPedida,
             },
             select: { id: true },
           })
@@ -350,11 +410,11 @@ export async function createGiftCardOrder(
       },
       { timeout: 15_000, maxWait: 5_000 },
     )
-    return respuesta(cuenta, false)
+    return respuesta(cuenta, false, { ahora, timezone: DEFAULT_TIMEZONE })
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const ganadora = await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: SELECT_CUENTA })
-      if (ganadora) return reintentoOConflicto(ganadora, huellaPedida)
+      if (ganadora) return reintentoOConflicto(ganadora, huellaPedida, { ahora, timezone: await zonaDelNegocio(venueId) })
     }
     throw error
   }

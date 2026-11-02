@@ -18,6 +18,8 @@ import { utcTs } from '../../utils/sqlDates'
 import { abrirLibro, type Libro, type MovimientoDelLibro, type ParteDelLibro } from './libroDeLaOrden'
 import { mezclaDeLaOrden, type CuentaDeMezcla, type RenglonDeMezcla } from './mezclaDeOrden'
 import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
+import { esDevolucionASaldoAFavor } from './fiscalScope'
+import { sqlNoEsDelMedioSaldoAFavor } from '../storeCredit/saldoAFavorEnLectores'
 
 export const PAGINA_DE_LIBROS = 1000
 /** Fallo del controlador (ronda 6): lo más que puede tener un periodo; con una de más, REPORT_TOO_LARGE («elige un rango más corto»). */
@@ -63,6 +65,8 @@ export type MovimientoLeido = MovimientoDelLibro & {
   method: PaymentMethod | null
   /** El interruptor del comercio: `false` lo saca de lo fiscal (no del gerencial). */
   incluirEnContabilidad: boolean | null | undefined
+  /** El par EC sigue en el libro gerencial, pero no representa dinero fiscal. */
+  tenderSystemKind?: string | null
 }
 /** Cuántas consultas hizo un lote y cuántas filas trajo a Node. */
 export type LecturaDelLote = { consultas: number; filas: number }
@@ -162,9 +166,19 @@ export const sqlDelConteo = (venueId: string, orderIds: string[], hasta: Date) =
  * De cada devolución, sólo lo que usa el libro, por rutas de jsonb (Codex r5 R5-5): `provenance` y `originalMethod` si son texto,
  * `fiscalByRateCents` (su tamaño ya lo revisó el conteo) y, de cada artículo, `orderItemId` (texto), `quantity`, `amountCents` y
  * `amount` (números), en su orden. Un campo de otro tipo llega como null, que el libro trata igual que hoy.
+ * Saldo a favor (spec 2026-10-30 §5.3): `incluirOrigen` es el interruptor `includeInAccounting` del comercio del cobro de ORIGEN (la
+ * raíz de la cadena o el cobro devuelto, `sqlOrigenEconomico`); la devolución a saldo no lleva comercio y su alcance es el de ese cobro.
+ * No viaja en el processorData: el cargador lo usa sólo para esas devoluciones, así que sólo para ellas se calcula (minor 13 de S10: un
+ * CASE por el medio de la fila, el mismo predicado de las vistas de dinero; las demás reciben NULL sin la subconsulta).
  */
 export const sqlDeLasDevoluciones = (venueId: string, ids: string[]) => Prisma.sql`
   SELECT p.id,
+    CASE WHEN ${sqlNoEsDelMedioSaldoAFavor('p')} THEN NULL ELSE (SELECT coalesce(mfc."includeInAccounting", efc."includeInAccounting")
+      FROM "Payment" origen
+      LEFT JOIN "MerchantFiscalConfig" mfc ON mfc."merchantAccountId" = origen."merchantAccountId"
+      LEFT JOIN "MerchantFiscalConfig" efc ON efc."ecommerceMerchantId" = origen."ecommerceMerchantId"
+      WHERE origen.id = COALESCE(p."processorData" ->> 'rootPaymentId', p."processorData" ->> 'originalPaymentId')
+        AND origen."venueId" = p."venueId") END AS "incluirOrigen",
     CASE WHEN jsonb_typeof(p."processorData" -> 'provenance') = 'string' THEN left(p."processorData" ->> 'provenance', 64) END AS provenance,
     CASE WHEN jsonb_typeof(p."processorData" -> 'originalMethod') = 'string' THEN left(p."processorData" ->> 'originalMethod', 64) END AS "originalMethod",
     p."processorData" -> 'fiscalByRateCents' AS "fiscalByRateCents",
@@ -282,6 +296,7 @@ async function recorrerMovimientos(
         amount: true,
         tipAmount: true,
         method: true,
+        tenderType: { select: { systemKind: true } },
         // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
         merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
         ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
@@ -296,9 +311,12 @@ async function recorrerMovimientos(
         : await tx.$queryRaw<Array<{ id: string } & Record<string, unknown>>>(sqlDeLasDevoluciones(p.venueId, devoluciones))
     if (devoluciones.length > 0) lectura.consultas += 1
     lectura.filas += campos.length
-    const processorDataDe = new Map<string, unknown>(campos.map(({ id, ...pd }) => [id, pd]))
+    const processorDataDe = new Map<string, unknown>(campos.map(({ id, incluirOrigen: _, ...pd }) => [id, pd]))
+    const incluirOrigenDe = new Map(campos.map(c => [c.id, c.incluirOrigen as boolean | null | undefined]))
     for (const m of pagina) {
       if (m.type === PaymentType.TEST) continue // los cobros de prueba no son dinero
+      // Saldo a favor: la fila no lleva comercio; su alcance es el del cobro de origen (el original o la raíz de la cadena).
+      const aSaldo = esDevolucionASaldoAFavor({ type: m.type, tenderSystemKind: m.tenderType?.systemKind })
       const mov: MovimientoLeido = {
         id: m.id,
         orderId: m.orderId,
@@ -307,9 +325,11 @@ async function recorrerMovimientos(
         amountCents: centavos(m.amount),
         tipCents: centavos(m.tipAmount),
         method: m.method,
+        ...(m.tenderType?.systemKind ? { tenderSystemKind: m.tenderType.systemKind } : {}),
         processorData: processorDataDe.get(m.id),
-        incluirEnContabilidad:
-          m.merchantAccount?.fiscalConfig?.includeInAccounting ?? m.ecommerceMerchant?.fiscalConfig?.includeInAccounting,
+        incluirEnContabilidad: aSaldo
+          ? incluirOrigenDe.get(m.id)
+          : (m.merchantAccount?.fiscalConfig?.includeInAccounting ?? m.ecommerceMerchant?.fiscalConfig?.includeInAccounting),
       }
       alMovimiento(mov, libros.get(m.orderId)!.registrar(mov))
     }

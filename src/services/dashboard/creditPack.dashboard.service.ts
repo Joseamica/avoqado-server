@@ -14,6 +14,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { omitirPorDemo } from '@/services/demo/candadoDemo'
 
 /**
  * Lazy Stripe singleton. We used to do `new Stripe(process.env.STRIPE_SECRET_KEY || '')`
@@ -105,31 +106,34 @@ export async function createCreditPack(
     throw new BadRequestError('No se puede incluir el mismo producto mas de una vez en un paquete')
   }
 
-  // Create Stripe product and price
+  // Create Stripe product and price — salvo en un negocio demo: sería un producto real en el Stripe de Avoqado
+  // (candado demo, capa 4). El paquete funciona igual sin Stripe, como cuando Stripe falla. `omitirPorDemo` y no
+  // `esNegocioDemo`: un negocio que el reinicio acaba de borrar, o una base que no contesta, tampoco va a Stripe (Codex r8, 1).
   let stripeProductId: string | undefined
   let stripePriceId: string | undefined
 
-  try {
-    const stripe = getStripe()
-    const stripeProduct = await stripe.products.create({
-      name: data.name,
-      metadata: { type: 'credit_pack', venueId },
-    })
+  if (!(await omitirPorDemo('producto de Stripe del paquete', null, venueId)))
+    try {
+      const stripe = getStripe()
+      const stripeProduct = await stripe.products.create({
+        name: data.name,
+        metadata: { type: 'credit_pack', venueId },
+      })
 
-    const stripePrice = await stripe.prices.create({
-      product: stripeProduct.id,
-      unit_amount: Math.round(data.price * 100),
-      currency: (data.currency || 'MXN').toLowerCase(),
-      metadata: { type: 'credit_pack', venueId },
-    })
+      const stripePrice = await stripe.prices.create({
+        product: stripeProduct.id,
+        unit_amount: Math.round(data.price * 100),
+        currency: (data.currency || 'MXN').toLowerCase(),
+        metadata: { type: 'credit_pack', venueId },
+      })
 
-    stripeProductId = stripeProduct.id
-    stripePriceId = stripePrice.id
-  } catch (error) {
-    logger.warn('⚠️ [CREDIT PACK] Failed to create Stripe product/price, continuing without', {
-      error: error instanceof Error ? error.message : 'Unknown',
-    })
-  }
+      stripeProductId = stripeProduct.id
+      stripePriceId = stripePrice.id
+    } catch (error) {
+      logger.warn('⚠️ [CREDIT PACK] Failed to create Stripe product/price, continuing without', {
+        error: error instanceof Error ? error.message : 'Unknown',
+      })
+    }
 
   const pack = await prisma.creditPack.create({
     data: {
@@ -404,10 +408,13 @@ export async function redeemItemManually(venueId: string, balanceId: string, sta
   }
 
   return prisma.$transaction(async tx => {
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
+    // The check above ran outside the transaction: decrement only if the row STILL has a credit, so a
+    // concurrent consumer can never drive the balance to −1.
+    const { count } = await tx.creditItemBalance.updateMany({
+      where: { id: balanceId, remainingQuantity: { gte: 1 } },
       data: { remainingQuantity: { decrement: 1 } },
     })
+    if (count === 0) throw new BadRequestError('No hay creditos disponibles para canjear')
 
     const transaction = await tx.creditTransaction.create({
       data: {
@@ -463,10 +470,23 @@ export async function adjustItemBalance(venueId: string, balanceId: string, quan
   }
 
   return prisma.$transaction(async tx => {
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
-      data: { remainingQuantity: { increment: quantity } },
-    })
+    if (quantity < 0) {
+      // A negative adjustment is a decrement: conditional on the balance it needs, like every other consumer.
+      const { count } = await tx.creditItemBalance.updateMany({
+        where: { id: balanceId, remainingQuantity: { gte: -quantity } },
+        data: { remainingQuantity: { increment: quantity } },
+      })
+      if (count === 0) {
+        const now = await tx.creditItemBalance.findUnique({ where: { id: balanceId }, select: { remainingQuantity: true } })
+        const resulting = (now?.remainingQuantity ?? 0) + quantity
+        throw new BadRequestError(`El ajuste dejaria el balance en ${resulting}, no se permite balance negativo`)
+      }
+    } else {
+      await tx.creditItemBalance.update({
+        where: { id: balanceId },
+        data: { remainingQuantity: { increment: quantity } },
+      })
+    }
 
     const transaction = await tx.creditTransaction.create({
       data: {

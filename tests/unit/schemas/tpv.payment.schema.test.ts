@@ -155,3 +155,26 @@ describe('recordPaymentBodySchema — referencia a un tipo de pago del catálogo
     expect(parsed.body.merchantAccountId).toBeUndefined()
   })
 })
+
+// 🔴 «Cobrar sin red» (S5): la cola de la terminal manda el turno en que se VENDIÓ. `validateRequest` reemplaza el cuerpo con lo
+// que Zod devuelve: sin declararlo aquí el campo se borra y la venta tardía caería en silencio en el turno nuevo.
+describe('recordPaymentBodySchema shiftIdDeLaVenta', () => {
+  const efectivo = { ...cardPayment, method: 'CASH', merchantAccountId: undefined, maskedPan: undefined }
+
+  it('lo conserva cuando viene', () => {
+    expect(
+      (recordPaymentBodySchema.parse({ body: { ...efectivo, shiftIdDeLaVenta: 'cmturnoa0000000000000000' } }).body as any).shiftIdDeLaVenta,
+    ).toBe('cmturnoa0000000000000000')
+  })
+
+  it('ausente o null no cambia nada (un cobro en línea no lo manda)', () => {
+    expect((recordPaymentBodySchema.parse({ body: efectivo }).body as any).shiftIdDeLaVenta).toBeUndefined()
+    expect((recordPaymentBodySchema.parse({ body: { ...efectivo, shiftIdDeLaVenta: null } }).body as any).shiftIdDeLaVenta).toBeNull()
+  })
+
+  it('el `shiftId` que ya manda la terminal NO se reinterpreta: sigue sin declararse', () => {
+    expect(
+      (recordPaymentBodySchema.parse({ body: { ...efectivo, shiftId: 'cmturnoa0000000000000000' } }).body as any).shiftId,
+    ).toBeUndefined()
+  })
+})

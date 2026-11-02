@@ -56,6 +56,7 @@ import * as paymentLinkService from './paymentLink.service'
 import * as reservationService from './reservation.dashboard.service'
 import * as teamDashboardService from './team.dashboard.service'
 import { localWallClockRaw, utcTs } from '../../utils/sqlDates'
+import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * Date range specification - supports both predefined periods and custom ranges
@@ -1335,6 +1336,7 @@ export class SharedQueryService {
         LEFT JOIN "Order" o ON (o."servedById" = s."id" OR o."createdById" = s."id")
           AND o."createdAt" >= ${utcTs(from)}
           AND o."createdAt" <= ${utcTs(to)}
+          AND ${sqlOrdenSinTarjetas('o.id')}
         LEFT JOIN "Payment" p ON p."orderId" = o."id" AND p."status" = 'COMPLETED'
         LEFT JOIN "Shift" sh ON sh."staffId" = s."id"
           AND sh."startTime" >= ${utcTs(from)}

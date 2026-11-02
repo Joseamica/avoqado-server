@@ -7,12 +7,19 @@
 import { isDeepStrictEqual } from 'util'
 
 import { prismaMock } from '@tests/__helpers__/setup'
+
+// El borrado de la foto busca la carpeta del negocio por su nombre.
+beforeEach(() => prismaMock.venue.findUnique.mockResolvedValue({ slug: 'mi-negocio' } as never))
 import * as menuService from '@/services/dashboard/menu.dashboard.service'
 import { deleteFileFromStorage } from '@/services/storage.service'
 import { productGroupInclude } from '@/services/product-variants/variantPayload'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn().mockReturnValue(null) } }))
-jest.mock('@/services/storage.service', () => ({ deleteFileFromStorage: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/storage.service', () => ({
+  deleteFileFromStorage: jest.fn().mockResolvedValue(undefined),
+  // La foto es de la carpeta de este negocio (la regla de la carpeta la prueba storage.carpetaDelNegocio.test.ts).
+  estaEnLaCarpetaDelNegocio: jest.fn().mockReturnValue(true),
+}))
 
 const V = 'venue-1'
 const VIGENTES = { deletedAt: null }

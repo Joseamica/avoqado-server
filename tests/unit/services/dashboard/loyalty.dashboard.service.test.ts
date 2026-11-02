@@ -756,31 +756,45 @@ describe('Loyalty Dashboard Service', () => {
   })
 
   describe('adjustPoints', () => {
-    it('should adjust points (positive) and update balance atomically', async () => {
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 500 })
-      const mockTransaction = createMockTransaction({ type: LoyaltyTransactionType.ADJUST, points: 100 })
-      const updatedCustomer = { loyaltyPoints: 600 }
+    beforeEach(() => {
+      prismaMock.$transaction.mockImplementation((callback: any) => callback(prismaMock))
+      prismaMock.customer.updateMany.mockResolvedValue({ count: 1 } as any)
+      prismaMock.loyaltyTransaction.create.mockResolvedValue(createMockTransaction({ type: LoyaltyTransactionType.ADJUST }) as any)
+    })
 
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, updatedCustomer] as any)
+    it('should adjust points (positive) and update balance atomically', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ loyaltyPoints: 500 }) as any)
+      prismaMock.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 600 } as any)
 
       const result = await adjustPoints('venue-123', 'customer-123', 100, 'Bonus points', 'staff-123')
 
       expect(result.newBalance).toBe(600)
-      expect(prismaMock.$transaction).toHaveBeenCalled()
+      expect(prismaMock.customer.updateMany).toHaveBeenCalledWith({
+        where: { id: 'customer-123', venueId: 'venue-123', loyaltyPoints: { gte: -100 } },
+        data: { loyaltyPoints: { increment: 100 } },
+      })
     })
 
     it('should adjust points (negative penalty) successfully', async () => {
-      const mockCustomer = createMockCustomer({ loyaltyPoints: 500 })
-      const mockTransaction = createMockTransaction({ type: LoyaltyTransactionType.ADJUST, points: -50 })
-      const updatedCustomer = { loyaltyPoints: 450 }
-
-      prismaMock.customer.findFirst.mockResolvedValue(mockCustomer as any)
-      prismaMock.$transaction.mockResolvedValue([mockTransaction, updatedCustomer] as any)
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ loyaltyPoints: 500 }) as any)
+      prismaMock.customer.findUniqueOrThrow.mockResolvedValue({ loyaltyPoints: 450 } as any)
 
       const result = await adjustPoints('venue-123', 'customer-123', -50, 'Penalty', 'staff-123')
 
       expect(result.newBalance).toBe(450)
+      expect(prismaMock.customer.updateMany).toHaveBeenCalledWith({
+        where: { id: 'customer-123', venueId: 'venue-123', loyaltyPoints: { gte: 50 } },
+        data: { loyaltyPoints: { increment: -50 } },
+      })
+    })
+
+    it('🔴 D1: si otro ajuste ya restó (la resta condicional no mueve nada), rechaza y no registra el movimiento', async () => {
+      // Los dos gerentes leyeron 10 y quitan 6; el otro ya restó, así que aquí quedan 4 y quitar 6 ya no cabe.
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ loyaltyPoints: 10 }) as any)
+      prismaMock.customer.updateMany.mockResolvedValue({ count: 0 } as any)
+
+      await expect(adjustPoints('venue-123', 'customer-123', -6, 'Penalty', 'staff-123')).rejects.toThrow(BadRequestError)
+      expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
     })
 
     it('should throw NotFoundError if customer not found', async () => {

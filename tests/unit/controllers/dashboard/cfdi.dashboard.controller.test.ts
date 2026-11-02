@@ -199,6 +199,8 @@ describe('issueCfdiForOrderController', () => {
         status: 'STAMPED',
         xmlUrl: 'https://example.com/cfdi.xml',
         pdfUrl: 'https://example.com/cfdi.pdf',
+        receptorRfc: 'EKU9003173C9',
+        stampedAt: new Date('2026-09-30T23:50:00.000Z'),
       },
     })
 
@@ -211,6 +213,10 @@ describe('issueCfdiForOrderController', () => {
         cfdi: expect.objectContaining({ uuid: 'U1', serie: 'F', folio: '2' }),
       }),
     )
+    // «Nueva factura» (28-oct, Codex código r3): el RFC de la factura DEVUELTA, que en una recuperación puede no ser el de la petición.
+    expect(res.json.mock.calls[0][0].cfdi).toHaveProperty('receptorRfc', 'EKU9003173C9')
+    // …y cuándo se timbró: una recuperada puede ser de un mes anterior y la lista tiene que ampliar sus fechas para enseñarla (Codex r4).
+    expect(res.json.mock.calls[0][0].cfdi).toHaveProperty('stampedAt', '2026-09-30T23:50:00.000Z')
     // ActivityLog: CFDI_ISSUED must fire on STAMPED
     expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CFDI_ISSUED', entity: 'Cfdi', entityId: 'c1' }))
   })

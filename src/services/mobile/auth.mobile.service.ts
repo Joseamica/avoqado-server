@@ -18,6 +18,7 @@ import { createSession } from '@/services/auth/session.service'
 import { issueGrant, rotateGrant } from '@/services/auth/refreshGrant.service'
 import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
 import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
+import { ALTA_DEL_ASISTENTE, ALTA_SIN_TERMINAR, altaSinTerminar, type VenueConAlta } from './altaSinTerminar'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '../../utils/passwordChangeGuard'
 import { getRoleDisplayNamesForVenues } from '../dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../dashboard/activity-log.service'
@@ -193,6 +194,7 @@ export async function verifyPasskeyAssertion(
                   kycStatus: true,
                   organizationId: true,
                   timezone: true,
+                  organization: ALTA_DEL_ASISTENTE,
                 },
               },
             },
@@ -331,24 +333,26 @@ export async function verifyPasskeyAssertion(
     phone: staff.phone,
     createdAt: staff.createdAt,
     lastLogin: staff.lastLoginAt,
-    venues: staff.venues.map(sv => {
-      const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-      const permissions = resolveStaffVenuePermissions(sv, customPerms)
+    venues: staff.venues
+      .filter(sv => !altaSinTerminar(sv.venue))
+      .map(sv => {
+        const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
+        const permissions = resolveStaffVenuePermissions(sv, customPerms)
 
-      return {
-        id: sv.venue.id,
-        name: sv.venue.name,
-        slug: sv.venue.slug,
-        logo: sv.venue.logo,
-        type: sv.venue.type,
-        role: sv.role,
-        roleDisplayName: roleDisplayNames.get(`${sv.venueId}:${sv.role}`),
-        status: sv.venue.status,
-        kycStatus: sv.venue.kycStatus,
-        timezone: sv.venue.timezone,
-        permissions,
-      }
-    }),
+        return {
+          id: sv.venue.id,
+          name: sv.venue.name,
+          slug: sv.venue.slug,
+          logo: sv.venue.logo,
+          type: sv.venue.type,
+          role: sv.role,
+          roleDisplayName: roleDisplayNames.get(`${sv.venueId}:${sv.role}`),
+          status: sv.venue.status,
+          kycStatus: sv.venue.kycStatus,
+          timezone: sv.venue.timezone,
+          permissions,
+        }
+      }),
   }
 
   logger.info(`🔐 [PASSKEY] Login successful for staff: ${staff.email}`)
@@ -598,6 +602,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
               organizationId: true,
               type: true,
               timezone: true,
+              organization: ALTA_DEL_ASISTENTE,
             },
           },
         },
@@ -717,24 +722,26 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     phone: staff.phone,
     createdAt: staff.createdAt,
     lastLogin: staff.lastLoginAt,
-    venues: staff.venues.map(sv => {
-      const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-      const permissions = resolveStaffVenuePermissions(sv, customPerms)
+    venues: staff.venues
+      .filter(sv => !altaSinTerminar(sv.venue))
+      .map(sv => {
+        const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
+        const permissions = resolveStaffVenuePermissions(sv, customPerms)
 
-      return {
-        id: sv.venue.id,
-        name: sv.venue.name,
-        slug: sv.venue.slug,
-        logo: sv.venue.logo,
-        type: sv.venue.type,
-        role: sv.role,
-        roleDisplayName: roleDisplayNames.get(`${sv.venueId}:${sv.role}`),
-        status: sv.venue.status,
-        kycStatus: sv.venue.kycStatus,
-        timezone: sv.venue.timezone,
-        permissions,
-      }
-    }),
+        return {
+          id: sv.venue.id,
+          name: sv.venue.name,
+          slug: sv.venue.slug,
+          logo: sv.venue.logo,
+          type: sv.venue.type,
+          role: sv.role,
+          roleDisplayName: roleDisplayNames.get(`${sv.venueId}:${sv.role}`),
+          status: sv.venue.status,
+          kycStatus: sv.venue.kycStatus,
+          timezone: sv.venue.timezone,
+          permissions,
+        }
+      }),
   }
 
   logger.info(`🔐 [MOBILE AUTH] Login successful for: ${staff.email}`)
@@ -744,9 +751,13 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     refreshToken,
     staff: sanitizedStaff,
     // La sucursal a la que quedó atada la sesión — la MISMA variable que ya eligió el
-    // token, nunca recalculada. Aditivo: `staff.venues[]` sigue completo, sin filtrar.
+    // token, nunca recalculada. Aditivo: `staff.venues[]` sigue completo salvo los negocios a medio alta (D7).
     selectedVenueId: selectedVenue.venueId,
   }
+}
+
+function puedeEntrarALaApp(venue: VenueConAlta): boolean {
+  return OPERATIONAL_VENUE_STATUSES.includes(venue.status) && !altaSinTerminar(venue)
 }
 
 /**
@@ -770,14 +781,15 @@ export async function loginWithEmail(email: string, password: string, rememberMe
  * login has always answered `NO_VENUE_ACCESS` and the passkey one nothing, and
  * an error code is part of the contract the apps in the field already read.
  */
-export function pickOperationalVenueForLogin<T extends { venue: { status: VenueStatus } }>(venues: T[], noAccessCode?: string): T {
+export function pickOperationalVenueForLogin<T extends { venue: VenueConAlta }>(venues: T[], noAccessCode?: string): T {
   if (venues.length === 0) {
     throw new ForbiddenError('No tienes acceso a ningún establecimiento', noAccessCode)
   }
 
-  const operational = venues.filter(sv => OPERATIONAL_VENUE_STATUSES.includes(sv.venue.status))
+  const operational = venues.filter(sv => puedeEntrarALaApp(sv.venue))
   if (operational.length > 0) return operational[0]
 
+  if (venues.length === 1 && altaSinTerminar(venues[0].venue)) throw new ForbiddenError(ALTA_SIN_TERMINAR, 'ALTA_SIN_TERMINAR')
   throw new ForbiddenError(
     venues.length === 1
       ? venueStatusMessage(venues[0].venue.status)
@@ -866,6 +878,7 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
               status: true,
               organizationId: true,
               timezone: true,
+              organization: ALTA_DEL_ASISTENTE,
             },
           },
         },
@@ -908,12 +921,18 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
   // off for non-payment — or closed for good — went on renewing its staff's
   // tokens forever. The TPV rail has blocked this since day one; this is the
   // mobile half of the same rule.
-  const operationalVenues = staff.venues.filter(sv => OPERATIONAL_VENUE_STATUSES.includes(sv.venue.status))
+  const operationalVenues = staff.venues.filter(sv => puedeEntrarALaApp(sv.venue))
 
+  // Alta sin terminar (D7): mismo texto que el login, para que la app diga qué hacer en vez de «no está operativo».
+  // También para el negocio que ya traía la sesión: si se cambiara en silencio a otro operativo, la app seguiría
+  // pintando y vendiendo el pendiente con un token de otro negocio (Codex r2). Mejor cortar y que vuelva a entrar.
+  const sesionEn = requested ?? (payload.venueId ? staff.venues.find(v => v.venueId === payload.venueId) : undefined)
+  if (sesionEn && altaSinTerminar(sesionEn.venue)) throw new ForbiddenError(ALTA_SIN_TERMINAR, 'ALTA_SIN_TERMINAR')
   if (requested && !OPERATIONAL_VENUE_STATUSES.includes(requested.venue.status)) {
     throw new ForbiddenError('Este establecimiento no está operativo')
   }
   if (operationalVenues.length === 0) {
+    if (staff.venues.every(sv => altaSinTerminar(sv.venue))) throw new ForbiddenError(ALTA_SIN_TERMINAR, 'ALTA_SIN_TERMINAR')
     throw new ForbiddenError('Ninguno de tus establecimientos está operativo')
   }
 

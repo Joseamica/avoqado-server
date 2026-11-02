@@ -8,7 +8,7 @@ import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
-import { esCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
 
 interface ShiftFilters {
@@ -341,13 +341,27 @@ const ORDEN_DEL_DETALLE = {
       product: { select: { id: true, name: true } },
     },
   },
+  // Descuentos de cuenta repartidos: lineRevenue los resta como lineRevenueSql (pocas filas por orden).
+  orderDiscounts: { select: { reparto: true } },
   payments: {
     where: { status: 'COMPLETED' },
     select: { id: true, method: true, cardBrand: true, maskedPan: true, shiftId: true, type: true, createdAt: true },
   },
 } satisfies Prisma.OrderSelect
 
-export async function getShiftById(venueId: string, shiftId: string, incluirEsperado = false): Promise<any | null> {
+export async function getShiftById(
+  venueId: string,
+  shiftId: string,
+  incluirEsperado = false,
+  view: 'detail' | 'state' = 'detail',
+): Promise<any | null> {
+  // La terminal sólo necesita acreditar SU caja cerrada, sin cargar el corte completo.
+  if (view === 'state') {
+    return prisma.shift.findFirst({
+      where: { id: shiftId, venueId },
+      select: { id: true, venueId: true, status: true },
+    })
+  }
   const shift = await prisma.shift.findFirst({
     where: {
       id: shiftId,
@@ -470,7 +484,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
-  const ordenesDeVenta = orders.filter(order => !esCuentaDeTarjetas(order.items))
+  const ordenesDeVenta = orders.filter(order => !tieneRenglonDeTarjeta(order.items))
 
   // ============================================================
   // Calculate Staff Breakdown (sales per employee)
@@ -556,7 +570,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
       const quantity = item.quantity || 1
       // Revenue is net of the line's own discount — charging it at list price
       // overstated every shift that sold a combo or a discounted item.
-      const revenue = lineRevenue(item)
+      const revenue = lineRevenue(item, order.orderDiscounts)
 
       if (productMap.has(productName)) {
         const existing = productMap.get(productName)!
@@ -866,12 +880,16 @@ export async function deleteShift(venueId: string, shiftId: string, performedBy?
       throw new BadRequestError('Cannot delete an open shift. Please close the shift first.')
     }
 
-    // Delete the shift
-    await prisma.shift.delete({
-      where: {
-        id: shiftId,
-      },
+    // 🔴 S3 «Efectivo sin red en el turno correcto» (Codex r8 código #1): borrar un turno SUELTA la liga de su caja (`SetNull`). Si la
+    // caja sigue ABIERTA (el cierre va en dos pasos y el segundo falló), queda «abierta sin turno» y la venta tardía de la cola de un
+    // aparato cae en el turno vivo. El turno se borra sólo cuando su caja ya cerró, y en el MISMO `DELETE` (atómico, sin ventana).
+    const borrados = await prisma.shift.deleteMany({
+      where: { id: shiftId, venueId, NOT: { cashDrawerSession: { is: { status: 'OPEN' } } } },
     })
+    if (borrados.count === 0) {
+      logger.warn('Cannot delete a shift whose cash drawer is still open', { venueId, shiftId })
+      throw new BadRequestError('No se puede borrar un turno cuya caja sigue abierta. Cierra la caja primero.')
+    }
 
     logger.info('Shift deleted successfully', { venueId, shiftId })
 
@@ -1402,7 +1420,19 @@ export async function updateShift(
           puedeVerEsperado,
         )
 
-  const expectedCash = gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawer)
+  // Rappi 2b (T11): sin gaveta, la fórmula del turno también suma lo cobrado por cuenta de Rappi en sus cobros (está en el cajón y
+  // no es venta ni propina). Sólo se consulta cuando la fórmula del turno es la que manda.
+  const tercerosDelTurno = async () => {
+    const r = await prisma.payment.aggregate({
+      where: { venueId, shiftId: existingShift.id, status: 'COMPLETED', thirdPartyCashAmount: { gt: 0 } },
+      _sum: { thirdPartyCashAmount: true },
+    })
+    return Number(r?._sum?.thirdPartyCashAmount ?? 0)
+  }
+  const mandaLaFormulaDelTurno = gaveta != null && gaveta.fuente !== 'DESCONOCIDO' && gaveta.esperado == null
+  const cashInDrawerConTerceros = cashInDrawer + (mandaLaFormulaDelTurno ? await tercerosDelTurno() : 0)
+  const expectedCash =
+    gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawerConTerceros)
 
   const difference =
     gaveta == null || gaveta.fuente === 'DESCONOCIDO'
@@ -1410,7 +1440,7 @@ export async function updateShift(
       : computeCashDifference({
           countedCash,
           startingCash: effectiveStartingCash,
-          cashInDrawer,
+          cashInDrawer: cashInDrawerConTerceros,
           expectedCash: gaveta.esperado,
         })
   if (data.endingCash === null) {

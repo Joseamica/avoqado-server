@@ -91,6 +91,7 @@ afterAll(async () => {
   await prisma.stampReward.deleteMany({ where: { venueId } })
   await prisma.stampEvent.deleteMany({ where: { venueId } })
   await prisma.stampCard.deleteMany({ where: { venueId } })
+  await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.customer.deleteMany({ where: { venueId } })
   await prisma.loyaltyConfig.deleteMany({ where: { venueId } })
@@ -269,8 +270,12 @@ describe('H3: la reversión toma el MISMO candado (negocio, cliente) que el otor
       select: { cycle: true, stampsEarned: true, completedAt: true },
       take: 5,
     })
-    // El premio de una cartilla que ya no está completa se cancela, la cartilla vuelve a 2 de 3 y la nueva (vacía) se va.
-    expect(cartillas).toEqual([{ cycle: 1, stampsEarned: 2, completedAt: null }])
+    // El premio de una cartilla que ya no está completa se cancela y la cartilla vuelve a 2 de 3. La nueva (vacía) ya NO se
+    // borra (D2, 21-oct: borrarla se llevaba su historia en cascada): queda abierta detrás de la reabierta, que se llena primero.
+    expect(cartillas).toEqual([
+      { cycle: 1, stampsEarned: 2, completedAt: null },
+      { cycle: 2, stampsEarned: 0, completedAt: null },
+    ])
     expect(await prisma.stampReward.count({ where: { venueId, customerId: c, status: 'PENDING' } })).toBe(0)
     expect(await prisma.stampReward.count({ where: { venueId, customerId: c, status: 'CANCELLED' } })).toBe(1)
   })
@@ -315,5 +320,182 @@ describe('🔴 quinta ola: la reversión espera más de 5 s detrás de un otorga
       take: 3,
     })
     expect(cartillas).toEqual([{ cycle: 1, stampsEarned: 1, completedAt: null }]) // 2 sellos − 1 reversa
+  })
+})
+
+describe('🔴 D1 (21-oct): cartilla reabierta por una devolución se vuelve a llenar (Postgres real, con su índice único)', () => {
+  it('llenar → devolver una venta → volver a llenar: la compra SÍ recibe su sello y el MISMO premio vuelve a estar por cobrar', async () => {
+    await programa(0, 2) // sin tope diario, cartilla de 2
+    const c = await cliente()
+    const [o1, o2, o3] = [await venta(), await venta(), await venta()]
+
+    expect(await grantStamp(venueId!, c, o1)).toMatchObject({ granted: true, completed: false })
+    const llena = await grantStamp(venueId!, c, o2)
+    expect(llena).toMatchObject({ granted: true, completed: true })
+    const premio = llena.rewardId!
+
+    // La devolución de o1 cancela el premio pendiente, borra la cartilla siguiente vacía y reabre la llena en 1 de 2.
+    expect(await reverseStampForOrder(venueId!, o1)).toMatchObject({ reversed: true })
+    expect(await prisma.stampReward.findUnique({ where: { id: premio }, select: { status: true } })).toEqual({ status: 'CANCELLED' })
+
+    // Antes: `stampReward.create` chocaba con `stampCardId @unique`, se deshacía todo y o3 se quedaba sin sello.
+    const otraVez = await grantStamp(venueId!, c, o3)
+    expect(otraVez).toMatchObject({ granted: true, completed: true, rewardId: premio })
+    expect(await prisma.stampReward.findMany({ where: { venueId, customerId: c }, select: { id: true, status: true } })).toEqual([
+      { id: premio, status: 'PENDING' },
+    ])
+    const cartillas = await prisma.stampCard.findMany({
+      where: { venueId, customerId: c },
+      orderBy: { cycle: 'asc' },
+      select: { cycle: true, stampsEarned: true, completedAt: true },
+      take: 3,
+    })
+    expect(cartillas.map(x => ({ cycle: x.cycle, stampsEarned: x.stampsEarned, llena: x.completedAt !== null }))).toEqual([
+      { cycle: 1, stampsEarned: 2, llena: true },
+      { cycle: 2, stampsEarned: 0, llena: false },
+    ])
+  })
+
+  it('Codex r1 #1: con la 1 y la 2 llenas, devolver una compra de la 1 y volver a llenarla abre la 3 (no choca con la 2)', async () => {
+    await programa(0, 2)
+    const c = await cliente()
+    const [o1, o2, o3, o4, o5] = [await venta(), await venta(), await venta(), await venta(), await venta()]
+    for (const o of [o1, o2, o3, o4]) expect(await grantStamp(venueId!, c, o)).toMatchObject({ granted: true })
+
+    expect(await reverseStampForOrder(venueId!, o1)).toMatchObject({ reversed: true })
+    expect(await grantStamp(venueId!, c, o5)).toMatchObject({ granted: true, completed: true })
+
+    const cartillas = await prisma.stampCard.findMany({
+      where: { venueId, customerId: c },
+      orderBy: { cycle: 'asc' },
+      select: { cycle: true, stampsEarned: true, completedAt: true },
+      take: 5,
+    })
+    expect(cartillas.map(x => ({ cycle: x.cycle, stampsEarned: x.stampsEarned, llena: x.completedAt !== null }))).toEqual([
+      { cycle: 1, stampsEarned: 2, llena: true },
+      { cycle: 2, stampsEarned: 2, llena: true },
+      { cycle: 3, stampsEarned: 0, llena: false },
+    ])
+    expect(await prisma.stampReward.count({ where: { venueId, customerId: c, status: 'PENDING' } })).toBe(2)
+  })
+})
+
+describe('🔴 D2 (21-oct): una devolución ya no borra la cartilla siguiente con su historia (Postgres real)', () => {
+  it('la siguiente quedó en 0 por otra devolución: se conserva con sus sellos y reversas, y la misma venta no se revierte dos veces', async () => {
+    await programa(0, 2)
+    const c = await cliente()
+    const [o1, o2, o3, o4, o5] = [await venta(), await venta(), await venta(), await venta(), await venta()]
+    for (const o of [o1, o2, o3]) expect(await grantStamp(venueId!, c, o)).toMatchObject({ granted: true }) // 1 llena, 2 con 1
+
+    expect(await reverseStampForOrder(venueId!, o1)).toMatchObject({ reversed: true }) // se descuenta de la 2: queda en 0
+    expect(await reverseStampForOrder(venueId!, o2)).toMatchObject({ reversed: true }) // reabre la 1; antes BORRABA la 2
+
+    // La historia de la 2 sigue: el sello de o3 y la reversa de o1.
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId: o3, type: 'EARN' } })).toBe(1)
+    expect(await prisma.stampEvent.count({ where: { venueId, orderId: o1, type: 'REVERSAL' } })).toBe(1)
+    // Y por eso o1 NO se revierte otra vez.
+    expect(await reverseStampForOrder(venueId!, o1)).toMatchObject({ reversed: false })
+
+    // El siguiente sello termina la reabierta (la más vieja) y no abre una tercera; el que sigue va a la 2.
+    expect(await grantStamp(venueId!, c, o4)).toMatchObject({ granted: true, completed: true })
+    expect(await grantStamp(venueId!, c, o5)).toMatchObject({ granted: true, completed: false })
+    const cartillas = await prisma.stampCard.findMany({
+      where: { venueId, customerId: c },
+      orderBy: { cycle: 'asc' },
+      select: { cycle: true, stampsEarned: true, completedAt: true },
+      take: 5,
+    })
+    expect(cartillas.map(x => ({ cycle: x.cycle, stampsEarned: x.stampsEarned, llena: x.completedAt !== null }))).toEqual([
+      { cycle: 1, stampsEarned: 2, llena: true },
+      { cycle: 2, stampsEarned: 1, llena: false },
+    ])
+    // El libro cuadra: 5 sellos − 2 reversas = 3 = 2 + 1.
+    expect(await prisma.stampEvent.count({ where: { venueId, type: 'EARN', stampCard: { customerId: c } } })).toBe(5)
+    expect(await prisma.stampEvent.count({ where: { venueId, type: 'REVERSAL', stampCard: { customerId: c } } })).toBe(2)
+  })
+})
+
+describe('🔴 D3 (21-oct, «A, como Square»): una devolución nunca deja sellos negativos ni un premio sin respaldo (Postgres real)', () => {
+  it('llena la 1, un sello en la 2, devolver A y C: la 1 se reabre con su premio cancelado y la 2 queda en 0, no en −1', async () => {
+    await programa(0, 2)
+    const c = await cliente()
+    const [a, b, cc] = [await venta(), await venta(), await venta()]
+    for (const o of [a, b, cc]) expect(await grantStamp(venueId!, c, o)).toMatchObject({ granted: true })
+    const premio = await prisma.stampReward.findFirst({ where: { venueId, customerId: c }, select: { id: true } })
+
+    expect(await reverseStampForOrder(venueId!, a)).toMatchObject({ reversed: true }) // sale de la 2 (1 → 0)
+    expect(await reverseStampForOrder(venueId!, cc)).toMatchObject({ reversed: true }) // la 2 ya no alcanza: sale de la 1
+
+    const cartillas = await prisma.stampCard.findMany({
+      where: { venueId, customerId: c },
+      orderBy: { cycle: 'asc' },
+      select: { cycle: true, stampsEarned: true, completedAt: true },
+      take: 5,
+    })
+    expect(cartillas.map(x => ({ cycle: x.cycle, stampsEarned: x.stampsEarned, llena: x.completedAt !== null }))).toEqual([
+      { cycle: 1, stampsEarned: 1, llena: false },
+      { cycle: 2, stampsEarned: 0, llena: false },
+    ])
+    expect(await prisma.stampReward.findUnique({ where: { id: premio!.id }, select: { status: true } })).toEqual({ status: 'CANCELLED' })
+    // El libro cuadra: 3 sellos − 2 reversas = 1 = 1 + 0.
+    expect(await prisma.stampEvent.count({ where: { venueId, type: 'REVERSAL', stampCard: { customerId: c } } })).toBe(2)
+  })
+})
+
+/** Una devolución COMPLETED de la venta, como la escriben la terminal, el POS o Uber. */
+async function devolver(orderId: string) {
+  await prisma.payment.create({
+    data: {
+      venueId: venueId!,
+      orderId,
+      amount: -50,
+      method: 'CASH',
+      type: 'REFUND',
+      status: 'COMPLETED',
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: -50,
+    },
+  })
+}
+
+describe('carrera cobro–devolución (24-oct): devolver mientras el cobro todavía otorga el sello (Postgres real)', () => {
+  it('🔴 la reversión espera al otorgamiento en curso y quita el sello que éste deja', async () => {
+    await programa(0, 5)
+    const c = await cliente()
+    const o = await venta()
+    // El cobro otorga con sus candados tomados y aún sin commit…
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let otorgar: Promise<Awaited<ReturnType<typeof grantStamp>>> | undefined
+    let revertir: Promise<Awaited<ReturnType<typeof reverseStampForOrder>>> | undefined
+    let espera: Awaited<ReturnType<typeof esperarBloqueado>> = null
+    try {
+      otorgar = grantStamp(venueId!, c, o)
+      const pidOtorgar = await aTiempo(aparcada.pid, 8_000, 'el otorgamiento no llegó al commit')
+      // …y en ese momento se devuelve la venta. Antes la reversión no veía todavía el sello y salía sin hacer nada.
+      await devolver(o)
+      revertir = reverseStampForOrder(venueId!, o)
+      espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtorgar], consulta: /pg_advisory_xact_lock/ })
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+    const [otorgado, revertido] = await Promise.all([otorgar!, revertir!])
+    expect(espera).toMatchObject({ waitEvent: 'advisory' })
+    expect(otorgado.granted).toBe(true)
+    expect(revertido.reversed).toBe(true)
+    expect(await prisma.stampCard.findFirst({ where: { venueId, customerId: c }, select: { stampsEarned: true } })).toEqual({
+      stampsEarned: 0,
+    })
+  })
+
+  it('🔴 una venta que ya tiene una devolución no recibe sello', async () => {
+    await programa(0, 5)
+    const c = await cliente()
+    const o = await venta()
+    await devolver(o)
+
+    expect(await grantStamp(venueId!, c, o)).toMatchObject({ granted: false, reason: 'ORDER_REFUNDED' })
+    expect(await earnsDe(c)).toBe(0)
   })
 })

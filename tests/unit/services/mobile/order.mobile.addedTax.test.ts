@@ -156,3 +156,57 @@ describe('getOrder — saldo aditivo para precuenta, sin cambiar los importes le
     )
   })
 })
+
+describe('getOrder — Rappi 2b: la precuenta de un pedido con repartidor propio en efectivo', () => {
+  // Pedido real DEV 881655210: venta 175 (Burger 140 + Envío 35), propina 20 y tarifa de Rappi 10 por cobrar.
+  const rappiEfectivo = (payments: unknown[] = []) =>
+    orden({
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      type: 'DELIVERY',
+      source: 'RAPPI',
+      subtotal: 175,
+      total: 175,
+      tipAmount: 20,
+      taxAmount: 0,
+      serviceChargeAmount: 0,
+      contratoDePrecio: 'IVA_INCLUIDO',
+      thirdPartyCashDue: 10,
+      cashTipDue: 20,
+      payments,
+    })
+
+  it('pide los 205 y trae el desglose venta / propina / Rappi', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(rappiEfectivo())
+    const o = await getOrder('v1', 'o1')
+    expect(o.preBillBalance).toMatchObject({
+      remainingBalanceCents: 20500,
+      deliveryCashBreakdown: { saleCents: 17500, tipCents: 2000, thirdPartyCents: 1000, thirdPartyLabel: 'Rappi' },
+    })
+  })
+
+  it('ya cobrado {175, 20, 10}: no falta nada', async () => {
+    const pagado = {
+      id: 'p1',
+      amount: 175,
+      tipAmount: 20,
+      thirdPartyCashAmount: 10,
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      method: 'CASH',
+      createdAt: new Date('2026-10-23T12:00:00Z'),
+      processedBy: null,
+    }
+    prismaMock.order.findUnique.mockResolvedValue(rappiEfectivo([pagado]))
+    const o = await getOrder('v1', 'o1')
+    expect(o.preBillBalance).toMatchObject({
+      remainingBalanceCents: 0,
+      deliveryCashBreakdown: { saleCents: 0, tipCents: 0, thirdPartyCents: 0 },
+    })
+  })
+
+  it('una orden que no es de este carril no trae desglose', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orden({ taxAmount: 0, contratoDePrecio: 'IVA_INCLUIDO' }))
+    expect((await getOrder('v1', 'o1')).preBillBalance).not.toHaveProperty('deliveryCashBreakdown')
+  })
+})

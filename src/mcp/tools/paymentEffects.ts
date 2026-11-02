@@ -16,7 +16,7 @@ export function registerPaymentEffectTools(server: McpServer, scope: McpScope) {
         .enum(['PENDING', 'PROCESSING', 'DONE', 'DEAD_LETTER'], { errorMap: () => ({ message: 'Selecciona un estado válido' }) })
         .optional(),
       kind: z
-        .enum(['REVIEW', 'RECEIPT', 'REFERRAL', 'COMMISSION', 'TRANSACTION_COST'], {
+        .enum(['REVIEW', 'RECEIPT', 'REFERRAL', 'COMMISSION', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO'], {
           errorMap: () => ({ message: 'Selecciona un tipo de trabajo válido' }),
         })
         .optional(),

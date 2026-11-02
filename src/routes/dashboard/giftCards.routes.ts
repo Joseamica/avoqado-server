@@ -10,6 +10,7 @@ import { Router } from 'express'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { exigirPlanSiPrende } from '@/middlewares/giftCardsPlan.middleware'
+import { giftCardResendRateLimiter } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import * as ctrl from '@/controllers/dashboard/giftCard.dashboard.controller'
 import * as venta from '@/controllers/shared/giftCardSale.controller'
 import * as s from '@/schemas/dashboard/giftCard.schema'
@@ -46,5 +47,21 @@ router.post(
 router.get('/', validateRequest(s.listSchema), checkPermission('giftCards:read'), ctrl.list)
 router.get('/:giftCardId', validateRequest(s.detailSchema), checkPermission('giftCards:read'), ctrl.detail)
 router.post('/:giftCardId/operations', validateRequest(s.operationSchema), checkPermission('giftCards:manage'), ctrl.operate)
+// 1b S7 (Q16): reenviar o cambiar el destino desde el panel. Siempre de gerente: el panel no pide PIN, así que usa SU ruta.
+// Cierre A (C4): el MISMO límite por tarjeta que `resend` y `change-destination` del POS (5 por hora entre las tres).
+router.post(
+  '/:giftCardId/resend',
+  validateRequest(s.resendSchema),
+  checkPermission('giftCards:manage'),
+  giftCardResendRateLimiter,
+  ctrl.resend,
+)
+// S8a: el teléfono con que se gasta un sobre de saldo a favor. De gerente; no manda nada (sin el límite de reenvíos).
+router.post(
+  '/:giftCardId/store-credit-phone',
+  validateRequest(s.storeCreditPhoneSchema),
+  checkPermission('giftCards:manage'),
+  ctrl.storeCreditPhone,
+)
 
 export default router

@@ -37,6 +37,7 @@ const PREMIO_MONTO = {
   rewardProductId: null,
   rewardLabel: '$50 de descuento',
   expiresAt: null,
+  updatedAt: new Date('2026-10-21T18:00:00.000Z'),
 }
 
 describe('redeemStampReward', () => {
@@ -62,6 +63,32 @@ describe('redeemStampReward', () => {
         data: expect.objectContaining({ orderId: 'o1', type: 'FIXED_AMOUNT' }),
       }),
     )
+  })
+
+  // D1 (21-oct, Codex r1 #2): una devolución cancela el premio y una compra lo REACTIVA con las condiciones de hoy mientras
+  // este canje calculaba con las de antes. Quemar exige la misma versión que se leyó: si cambió, no se canjea nada.
+  it('🔴 el premio cambió desde que se leyó (se reactivó con otras condiciones): no se canjea con las viejas', async () => {
+    prismaMock.stampReward.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await expect(redeemStampReward('v1', 'o1', 'rw1')).rejects.toThrow()
+
+    expect(prismaMock.stampReward.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'rw1', status: 'PENDING', updatedAt: PREMIO_MONTO.updatedAt }) }),
+    )
+    expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
+  })
+
+  // D4 (21-oct, Codex D3-r5 #2): el canje escribía el premio DOS veces (quemar y luego ligar el descuento). Postgres vuelve a
+  // comprobar las llaves foráneas de una fila que la misma transacción ya actualizó: la segunda escritura pedía el cliente y
+  // cerraba un círculo con la liquidación de varias cuentas y las métricas del cobro. Ahora es UNA sola escritura.
+  it('🔴 D4: el premio se quema y se liga a su descuento en UNA sola escritura (el id del descuento se genera antes)', async () => {
+    await redeemStampReward('v1', 'o1', 'rw1')
+
+    expect(prismaMock.stampReward.update).not.toHaveBeenCalled()
+    const quemar = (prismaMock.stampReward.updateMany as jest.Mock).mock.calls[0][0]
+    const crear = (prismaMock.orderDiscount.create as jest.Mock).mock.calls[0][0]
+    expect(quemar.data).toMatchObject({ status: 'REDEEMED', orderDiscountId: crear.data.id })
+    expect(crear.data.id).toMatch(/^c[a-z0-9]{24}$/) // cuid v1, como @default(cuid())
   })
 
   it('🔴 el MISMO premio no se puede canjear dos veces', async () => {

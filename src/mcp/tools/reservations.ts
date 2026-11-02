@@ -18,12 +18,15 @@ import {
 } from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { checkInReservationAndOpenOrder, undoCheckIn } from '@/services/reservation/checkIn.service'
+import { previewUndoNoShow, undoNoShow, type UndoNoShowPlan } from '@/services/reservation/undoNoShow.service'
+import { afterNoShowCorrection, PENDING_TEXT } from '@/services/reservation/noShowNotices.service'
 import { getMyClassNow } from '@/services/reservation/coachClass.service'
 import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
 import { getClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { getWaitlist, addToWaitlist } from '@/services/dashboard/reservationWaitlist.service'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
+import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from '../confirmation'
 import { hasPermission } from '@/services/access/access.service'
 import { fromZonedTime } from 'date-fns-tz'
 import { ClassSessionStatus, WaitlistStatus, type ReservationStatus } from '@prisma/client'
@@ -63,6 +66,49 @@ function reservationToolError(error: unknown): { ok: false; error: string; code?
     ...(error.code ? { code: error.code } : {}),
     ...(error.details !== undefined ? { details: error.details } : {}),
   }
+}
+
+/** «$50» o «$50.50» (pesos, como el `mxn` de paymentLinks.ts pero con dos decimales fijos cuando hay centavos). */
+const mxn = (n: number) => `$${n.toLocaleString('es-MX', { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 })}`
+
+/**
+ * D4: lo que revertiría «Sí llegó», en llano. `done = false` es la vista previa (lo que va a pasar, antes de confirmar);
+ * `done = true` es el «Listo:» de después (lo que ya pasó). Con monto y nombre del paquete dice exactamente cuánto y de qué;
+ * sin ellos (un plan guardado antes de que existieran) cae al texto genérico.
+ */
+function describeNoShowUndo(plan: UndoNoShowPlan, done = false): string[] {
+  const lines: string[] = []
+  if (plan.creditToReconsume > 0) {
+    const n = plan.creditToReconsume
+    lines.push(
+      plan.packName
+        ? `Se le ${done ? 'volvió' : 'vuelve'} a descontar ${n} de «${plan.packName}» (la clase que se le devolvió al marcar el «No asistió»).`
+        : `Se ${done ? 'volvió' : 'vuelve'} a descontar ${n} clase${n === 1 ? '' : 's'} del paquete del cliente (la que se le devolvió al marcar el «No asistió»).`,
+    )
+  }
+  if (plan.clearFee) {
+    lines.push(
+      plan.feeAmount != null
+        ? `Se ${done ? 'anuló' : 'anula'} la multa de ${mxn(plan.feeAmount)} por no presentarse (estaba anotada, no se había cobrado).`
+        : `Se ${done ? 'anuló' : 'anula'} la multa por no presentarse que estaba anotada (no se había cobrado).`,
+    )
+  }
+  if (plan.restoreDeposit) {
+    lines.push(
+      plan.depositAmount != null
+        ? `Sus ${mxn(plan.depositAmount)} de depósito retenido ${done ? 'volvieron' : 'vuelven'} a ser parte de su visita (${done ? 'quedaron' : 'quedan'} como pagados).`
+        : `El depósito retenido ${done ? 'volvió' : 'vuelve'} a quedar como pagado.`,
+    )
+  }
+  if (lines.length === 0) {
+    lines.push(
+      done
+        ? 'No había clase, multa ni depósito que revertir: sólo cambió el estado de la reserva.'
+        : 'No hay clase, multa ni depósito que revertir: sólo cambia el estado de la reserva.',
+    )
+  }
+  for (const p of plan.pending) lines.push(`Queda pendiente para una persona: ${PENDING_TEXT[p] ?? p}.`)
+  return lines
 }
 
 // Human labels for the configure_reservations preview, so the operator can verify
@@ -554,6 +600,103 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         return text({ ok: true, outcome: result.outcome, reservation: result.reservation })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  // D4 — «Sí llegó»: deshacer un «No asistió». Escribe sobre paquete, multa y depósito, así que va en DOS pasos con el
+  // token de confirmation.ts atado a {local, código, motivo}. Sólo en el modo libre (`/mcp`): no está en el catálogo certificado.
+  server.tool(
+    'undo_no_show',
+    'Undo a «No asistió» (no-show) that was recorded by mistake — the guest DID attend — in a venue you can access. Identify the reservation by confirmationCode. It works in TWO STEPS: first call WITHOUT confirmationToken — it WRITES NOTHING and returns exactly what would be reverted (the class credit that was given back is taken again, a no-show fee that was only noted is cleared, a forfeited deposit goes back to paid, and any pending item left for a person) plus a confirmationToken valid for 10 minutes; show it to the operator and, ONLY with their yes, call again with the SAME venueId, confirmationCode and reason plus that confirmationToken. The reservation ends as CHECKED_IN. It NEVER refunds money to a card: a fee already charged to the card, or a class that cannot be taken again, is left as a pending item for a person. It refuses reservations that came from a pass (TotalPass/Wellhub) and reservations that are not NO_SHOW. This WRITES — requires reservations:update. PRO feature (RESERVATIONS).',
+    {
+      venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
+      confirmationCode: z.string().min(1).describe('Reservation confirmation code, e.g. RES-PK6JHD'),
+      reason: z.string().max(280).optional().describe('Why it is being undone — stored in the reservation status log and the activity log'),
+      confirmationToken: z
+        .string()
+        .max(2048)
+        .optional()
+        .describe(
+          'Omit on the first call (preview). On the second call, the confirmationToken returned by the preview, with the same other arguments.',
+        ),
+    },
+    async ({ venueId, confirmationCode, reason, confirmationToken }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('reservations:update', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const reservation = await prisma.reservation.findFirst({
+        where: { ...where, confirmationCode },
+        select: { id: true, venueId: true, status: true },
+      })
+      if (!reservation) {
+        return text({ ok: false, error: `No encontre la reservacion ${confirmationCode} en ese venue.` })
+      }
+
+      // El motivo se normaliza ANTES de atar el token: así el espacio de más no invalida una confirmación legítima.
+      const cleanReason = reason?.trim() || undefined
+      const binding = { venueId, confirmationCode, reason: cleanReason ?? null }
+
+      try {
+        if (!confirmationToken?.trim()) {
+          const plan = await previewUndoNoShow(prisma, reservation.venueId, reservation.id, new Date())
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview: plan,
+            message:
+              `Vas a corregir el «No asistió» de la reserva ${confirmationCode}: pasará a «Sí llegó». ` +
+              `${describeNoShowUndo(plan).join(' ')} Nunca se devuelve dinero a la tarjeta desde aquí. ` +
+              `Confirma con el operador y, sólo con su sí, vuelve a llamar con los mismos venueId, confirmationCode y reason más este confirmationToken (vale ${CONFIRMATION_TTL / 60} minutos).`,
+            confirmationToken: issueConfirmation(scope, 'undo_no_show', binding),
+            expiresInSeconds: CONFIRMATION_TTL,
+          })
+        }
+
+        if (!validConfirmation(confirmationToken, scope, 'undo_no_show', binding)) {
+          return text({
+            ok: false,
+            code: 'NO_SHOW_UNDO_CONFIRMATION_INVALID',
+            error: `La confirmación venció (dura ${CONFIRMATION_TTL / 60} minutos) o no corresponde a estos datos (local, reserva o motivo distintos). Pide una vista previa nueva llamando sin confirmationToken y confírmala tal cual.`,
+          })
+        }
+
+        // 🔴 Transacción normal (READ COMMITTED), nunca serializable: undoNoShow lee lo que markNoShow ya confirmó.
+        const result = await prisma.$transaction(tx =>
+          undoNoShow(tx, {
+            reservationId: reservation.id,
+            venueId: reservation.venueId,
+            actor: { type: 'HUMAN', staffId: scope.staffId },
+            source: 'MCP',
+            now: new Date(),
+            reason: cleanReason,
+          }),
+        )
+        if (result.outcome === 'UNDONE') {
+          void afterNoShowCorrection(result.correction.id) // después del commit y sin esperarlo; nunca lanza
+          await auditMcpWrite(scope, {
+            action: 'RESERVATION_NO_SHOW_UNDONE',
+            entity: 'Reservation',
+            entityId: reservation.id,
+            venueId: reservation.venueId,
+            data: { confirmationCode, outcome: result.outcome, reason: cleanReason ?? null, pending: result.correction.pending },
+          })
+        }
+        const pending = result.correction.pending
+        return text({
+          ok: true,
+          outcome: result.outcome,
+          plan: result.plan,
+          pending,
+          message:
+            result.outcome === 'ALREADY_UNDONE'
+              ? `La reserva ${confirmationCode} ya estaba corregida a «Sí llegó»: no se cambió nada.`
+              : `Listo: la reserva ${confirmationCode} quedó como «Sí llegó». ${describeNoShowUndo(result.plan, true).join(' ')}`,
+        })
+      } catch (err) {
+        return text(reservationToolError(err))
       }
     },
   )

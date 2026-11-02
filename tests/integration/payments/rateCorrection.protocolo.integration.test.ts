@@ -352,7 +352,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-4: la corrección de tarifas excl
   })
 })
 
-describe('Codex R15-2 · la corrección de tarifas PROTEGE el par ORIGINAL → reembolso durante la clasificación y la escritura: los originales de los reembolsos del lote (dentro y fuera del lote) se bloquean PRIMERO y SIN ESPERAR (NOWAIT); un original ocupado aparta a sus reembolsos —y a sí mismo si está en el lote— en vez de esperar; después el lote en `id ASC`; bajo los candados se releen tipo, venue y puntero y, si cambiaron, se sueltan TODOS los candados del intento y se reinicia (≤3; después 409 que declara que la tarifa vigente ya cambió)', () => {
+describe('Codex R15-2 · la corrección de tarifas PROTEGE el par ORIGINAL → reembolso durante la clasificación y la escritura: los originales de los reembolsos del lote (dentro y fuera del lote) se bloquean en la UNIÓN por id y SIN ESPERAR (NOWAIT); un original ocupado aparta a sus reembolsos —y a sí mismo si está en el lote— en vez de esperar; los candidatos esperan en la misma pasada por `id ASC`; bajo los candados se releen tipo, venue y puntero y, si cambiaron, se sueltan TODOS los candados del intento y se reinicia (≤3; después 409 que declara que la tarifa vigente ya cambió)', () => {
   const ctx = () => ({ staffId: f.staffId })
   const reembolsar = (p: { id: string; orderId: string | null }, amount = 10000, isPartialRefund = false) =>
     recordRefund(
@@ -586,7 +586,7 @@ describe('Codex R15-2 · la corrección de tarifas PROTEGE el par ORIGINAL → r
     })
   })
 
-  it('ORDEN INVERSO DE IDS DENTRO DEL LOTE · original y reembolso legacy en el lote con el id del reembolso MENOR que el del original: el original se bloquea en la fase de originales, ANTES del lote — pausado entre las dos fases, el original está tomado y el reembolso sigue libre —; después ambos se corrigen', async () => {
+  it('ORDEN INVERSO DE IDS DENTRO DEL LOTE · original y reembolso legacy en el lote con el id del reembolso MENOR que el del original: la unión toma primero el reembolso de id menor — antes de la pasada ambos siguen libres —; después ambos se corrigen', async () => {
     const viejo = await legacy()
     const reembolso = await reembolsar(viejo)
     // Un id menor que cualquier cuid (`c…`): la fase del lote (id ASC) lo tomaría ANTES que a su original — el orden inverso al de la
@@ -602,7 +602,7 @@ describe('Codex R15-2 · la corrección de tarifas PROTEGE el par ORIGINAL → r
     try {
       apply = Act.lanzar('apply', applyRateCorrection(args('CREATE_COST'), ctx()))
       expect(await lote.pausadaEn(5000)).toBe(true)
-      expect(await sondaSinEsperar(viejo.id)).toBe('TOMADA')
+      expect(await sondaSinEsperar(viejo.id)).toBe('LIBRE')
       expect(await sondaSinEsperar(idMenor)).toBe('LIBRE')
     } catch (error) {
       fallo = { error }

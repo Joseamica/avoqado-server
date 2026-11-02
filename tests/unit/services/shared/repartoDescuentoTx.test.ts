@@ -699,6 +699,9 @@ describe('recortarDescuentosDeRenglones — B2c (P4, P5)', () => {
         delete: jest.fn().mockResolvedValue({}),
       },
       stampReward: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn().mockResolvedValue({}) },
+      // D3 (21-oct): devolver un premio canjeado bloquea su fila y lee su cartilla; llena = vuelve por cobrar.
+      stampCard: { findUnique: jest.fn().mockResolvedValue({ id: 'sc', stampsEarned: 7, stampsRequired: 7 }), update: jest.fn() },
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'rw' }]),
       loyaltyTransaction: { findUnique: jest.fn(), create: jest.fn() },
       customer: { update: jest.fn() },
       staffVenue: { findUnique: jest.fn() },

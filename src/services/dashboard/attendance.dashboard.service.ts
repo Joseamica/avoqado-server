@@ -27,6 +27,8 @@ import {
 } from './overtime'
 import { type ExpectedDay, resolveExpectedDay, type WeeklyWorkSchedule, type WorkScheduleException } from './workSchedule.service'
 import type { TimeEntryStatus } from '@prisma/client'
+import { checaAsistencia } from './rh/checaAsistencia'
+import { fechaComoDbDate } from './staffPay/periodos'
 
 export interface VenueTimeEntriesQuery {
   staffId?: string
@@ -234,6 +236,8 @@ export async function buildAttendanceGrid(
    * clasificaba correctamente (4ª auditoría de Codex, 31-ago-2026, P1 #1).
    */
   const diaSiguienteAlRango = end.plus({ days: 1 }).toISODate()!
+  // Puestos vigentes HOY, con la misma definición que la lista de Personas (asignacionesVigentes): deciden quién sale.
+  const hoyDb = fechaComoDbDate(DateTime.now().setZone(timezone).toISODate()!)
 
   // Quien estuvo en el equipo en ALGÚN momento del rango, aunque hoy ya no esté: dar de baja
   // pone `active=false, endDate=hoy`, y su historia no debe desaparecer del reporte de la
@@ -247,9 +251,19 @@ export async function buildAttendanceGrid(
     select: {
       id: true,
       staffId: true,
+      role: true,
       startDate: true,
       endDate: true,
-      staff: { select: { firstName: true, lastName: true } },
+      staff: {
+        select: {
+          firstName: true,
+          lastName: true,
+          staffAssignments: {
+            where: { venueId, effectiveFrom: { lte: hoyDb }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoyDb } }] },
+            select: { tracksAttendance: true },
+          },
+        },
+      },
       workSchedule: { select: { weekly: true } },
       // 🔴 Hasta `endDate + 1`, NO hasta `endDate`. La atribución de un turno nocturno
       // necesita saber qué le tocaba al día SIGUIENTE para no robarle su jornada, y si ese
@@ -358,8 +372,13 @@ export async function buildAttendanceGrid(
     days.push(d.toISODate()!)
   }
 
+  // Quién sale: quien checa asistencia (rh/checaAsistencia) y, siempre, quien SÍ checó en el periodo — son horas que pueden
+  // pagarse y nunca se esconden aunque la persona sea un inversionista.
+  const checaronEnElRango = new Set(entries.map(e => e.staffId))
+  const personas = memberships.filter(m => checaronEnElRango.has(m.staffId) || checaAsistencia(m.role, m.staff.staffAssignments ?? []))
+
   const rows: AttendanceGridCell[] = []
-  for (const membership of memberships) {
+  for (const membership of personas) {
     const weekly = (membership.workSchedule?.weekly as unknown as WeeklyWorkSchedule) ?? null
     const exceptions = membership.workScheduleExceptions as unknown as WorkScheduleException[]
     // Ventana de pertenencia en fechas del negocio: fuera de ella no se juzga a nadie.

@@ -1,6 +1,7 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`, y el
+// `tenderType.systemKind` del cobro, que dice si es crédito de cambio).
 // Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
@@ -8,7 +9,10 @@ const esConsultaDelOutbox = (a: any) =>
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
   Object.keys(a?.select ?? {}).every(
-    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+    (k: string) =>
+      k === 'orderId' ||
+      (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId) ||
+      (k === 'tenderType' && a.select.tenderType?.select?.systemKind === true),
   ) &&
   a?.select?.orderId === true
 // tests/__helpers__/setup.ts
@@ -153,6 +157,7 @@ const prismaMock: any = {
   area: createMockModel(),
   order: createMockModel(),
   orderItem: createMockModel(),
+  orderKeyRelease: createMockModel(), // D9: llaves de «Pagar después» cerradas
   // 🔴 Sin esta entrada, `awardLoyaltyForPaidOrder` (services/shared/loyaltyOnPaidOrder.ts:84)
   // revienta con "Cannot read properties of undefined (reading 'findMany')", entra por su
   // catch y guarda `loyaltyLastError` — o sea que el camino de lealtad del cobro en efectivo
@@ -166,6 +171,7 @@ const prismaMock: any = {
   promotionOption: createMockModel(),
   orderPromotion: createMockModel(),
   deliveryChannelLink: createMockModel(),
+  deliveryConnectIntent: createMockModel(),
   kdsOrder: createMockModel(),
   kdsOrderItem: createMockModel(),
   printStation: createMockModel(),
@@ -184,6 +190,7 @@ const prismaMock: any = {
   paymentAllocation: createMockModel(),
   posCommand: createMockModel(),
   shift: createMockModel(),
+  tpvShiftOperation: createMockModel(),
   // El cajón físico: `getShiftById` lo consulta desde `resolveShiftCashDrawer`
   // (unificación de caja, fase 5). Este mock ENUMERA los modelos, así que un modelo
   // nuevo no falla donde se agregó — falla en cualquier suite vecina que llame al
@@ -246,6 +253,10 @@ const prismaMock: any = {
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),
   receiptLayout: createMockModel(),
+  // Pantalla del cliente (F0-A). Sin estas entradas, cualquier prueba unitaria o HTTP que toque el diseño o sus
+  // activos muere con TypeError, y la ruta HTTP responde 500 en vez de su código real.
+  customerDisplayDesign: createMockModel(),
+  customerDisplayAsset: createMockModel(),
   walletCardDesign: createMockModel(),
   walletPassRegistration: createMockModel(),
   stampCard: createMockModel(),
@@ -319,6 +330,10 @@ const prismaMock: any = {
   // Compras (un modelo sin registrar aquí revienta con "Cannot read properties of undefined")
   supplier: createMockModel(),
   purchaseOrder: createMockModel(),
+  // Limpieza de negocios demo (deleteVenueDataTx) borra también cotizaciones y traspasos.
+  estimate: createMockModel(),
+  deviceToken: createMockModel(), // dueños de los teléfonos (candado de avisos push de los negocios demo)
+  inventoryTransfer: createMockModel(),
   purchaseOrderInvoice: createMockModel(),
   purchaseOrderInvoiceLine: createMockModel(),
   supplierItemCode: createMockModel(),
@@ -362,6 +377,11 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  // Menú del aparato (31-oct-2026): la regla de qué menús muestra un aparato lee `terminalMenu.findMany`, y los fixtures POS de
+  // `settingsEnvelope.test.ts` la llaman sin saberlo. Este mock es una LISTA FIJA: sin esta entrada revientan con «Cannot read
+  // properties of undefined (reading 'findMany')» en vez de fallar por su aserción. Su default (`[]`) va más abajo.
+  terminalMenu: createMockModel(),
+  terminalOrder: createMockModel(),
   tpvCommandQueue: createMockModel(),
   // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega
   fulfillmentArea: createMockModel(),
@@ -381,6 +401,7 @@ const prismaMock: any = {
   scaleProfile: createMockModel(),
   // Reservation / Booking models
   reservation: createMockModel(),
+  reservationNoShowCorrection: createMockModel(),
   kioskCheckInChallenge: createMockModel(),
   kioskCheckInAttempt: createMockModel(),
   kioskOutreachOutbox: createMockModel(),
@@ -509,6 +530,30 @@ const prismaMock: any = {
   // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
   onlineOrderingSettings: createMockModel(),
   onlineOrder: createMockModel(),
+  // Fase 2 (tarjeta en línea): el cargo del pedido. Por omisión no hay cargo (pagar al recoger), así la máquina de estados se
+  // comporta igual que en 1a.
+  onlineOrderCharge: { ...createMockModel(), findUnique: jest.fn().mockResolvedValue(null) },
+  // T10 fix r1: el candado compartido del reembolso las lee cuando el cobro trae `processorId`; por default, ninguna.
+  onlineOrderCardRefund: { ...createMockModel(), findMany: jest.fn().mockResolvedValue([]) },
+  onlineOrderCardRefundReversal: createMockModel(),
+  // Product exchange (block A): this mock is a FIXED list. Without these two entries any test that touches the new models
+  // dies with «Cannot read properties of undefined» instead of failing on its assertion.
+  exchange: createMockModel(),
+  exchangeCreditLink: createMockModel(),
+  // CRM propio (spec 2026-10-30): same FIXED-list rule — without these entries a test touching the CRM models dies with
+  // «Cannot read properties of undefined» instead of failing on its assertion.
+  platformAccess: createMockModel(),
+  crmTeam: createMockModel(),
+  crmHiddenClient: createMockModel(),
+  crmAccount: createMockModel(),
+  crmContact: createMockModel(),
+  crmStage: createMockModel(),
+  crmLostReason: createMockModel(),
+  crmActivity: createMockModel(),
+  crmTimelineEvent: createMockModel(),
+  crmInboundEntry: createMockModel(),
+  crmDigestSend: createMockModel(),
+  crmWhatsappMessage: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
@@ -556,6 +601,10 @@ prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', st
 // ventana no tengan que mockearlo.
 prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null, tipAmount: null } })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
+// «Regresa lo que salió menos lo que ya regresó» (28-oct): las devoluciones leen lo ya resuelto de la venta. Por default nada:
+// ninguna anotación de regreso ni devolución previa, salvo que la prueba diga otra cosa.
+prismaMock.inventoryPostingLine.findMany.mockResolvedValue([])
+prismaMock.payment.findMany.mockResolvedValue([])
 // IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —
 // el estado real de casi todo negocio hoy. Tests que lo necesitan encendido lo sobrescriben.
 prismaMock.venueIvaPorProducto.count.mockResolvedValue(0)
@@ -615,6 +664,10 @@ prismaMock.printStation.findFirst.mockResolvedValue(null)
 prismaMock.printStation.findMany.mockResolvedValue([])
 prismaMock.printer.findMany.mockResolvedValue([])
 prismaMock.printGateway.findUnique.mockResolvedValue(null)
+// Menú del aparato (31-oct-2026): un aparato sin filas en `TerminalMenu` muestra «Todos los menús» (la regla entrega `null`). Casi
+// ninguna prueba elige menús: por default ninguna fila, para que los fixtures POS que llaman a la regla sin saberlo
+// (`settingsEnvelope.test.ts`) no tengan que mockearla.
+prismaMock.terminalMenu.findMany.mockResolvedValue([])
 
 function primeReservationStaffMocks() {
   prismaMock.staffSchedule.findUnique.mockResolvedValue(null)

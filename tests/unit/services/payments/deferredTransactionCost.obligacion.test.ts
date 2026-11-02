@@ -64,12 +64,13 @@ it('cualquier otro fallo se anota como TRANSACTION_COST_FAILED (el worker reinte
   )
 })
 
-it('Codex R6 (diseño B): la unidad de convergencia toma PRIMERO la fila del Payment con FOR NO KEY UPDATE NOWAIT — el mutex es la fila que ya existe (sin bloquear los INSERT ajenos por FK)', async () => {
+it('Cambio R6: la unidad de convergencia toma la unión del original y el lote pendiente por id con FOR NO KEY UPDATE NOWAIT', async () => {
   ;(prismaMock as any).payment.findUniqueOrThrow.mockResolvedValue({ id: 'p1', status: 'COMPLETED', method: 'CASH' })
   const desenlace = await convergerCostoDeTransaccion('p1', { tipo: 'REST' })
   expect(desenlace).toBe('NO_APLICA')
-  const primera = ((prismaMock as any).$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
-  expect(primera).toMatch(/SELECT "id" FROM "Payment" \/\* convergencia \*\/ WHERE "id" = \? FOR NO KEY UPDATE NOWAIT/)
+  const primera = (prismaMock as any).$queryRaw.mock.calls[0][0].strings.join('?')
+  expect(primera).toMatch(/WITH pendientes AS MATERIALIZED/)
+  expect(primera).toMatch(/ORDER BY "id" FOR NO KEY UPDATE NOWAIT/)
   expect((prismaMock as any).$transaction).toHaveBeenCalledTimes(1)
 })
 

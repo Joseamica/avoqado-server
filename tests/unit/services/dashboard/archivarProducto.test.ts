@@ -4,6 +4,9 @@
  * `deletedAt`: el widget y la app de clientes, que filtran `active`, seguían ofreciendo el servicio borrado.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
+
+// El borrado de la foto busca la carpeta del negocio por su nombre.
+beforeEach(() => prismaMock.venue.findUnique.mockResolvedValue({ slug: 'mi-negocio' } as never))
 import { deleteProduct as deleteProductMovil } from '@/controllers/mobile/product.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { archivarProductos, deleteProduct } from '@/services/dashboard/product.dashboard.service'
@@ -11,7 +14,11 @@ import { deleteFileFromStorage } from '@/services/storage.service'
 
 const mockBroadcaster = { broadcastMenuItemDeleted: jest.fn(), broadcastMenuUpdated: jest.fn() }
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => mockBroadcaster } }))
-jest.mock('@/services/storage.service', () => ({ deleteFileFromStorage: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/storage.service', () => ({
+  deleteFileFromStorage: jest.fn().mockResolvedValue(undefined),
+  // La foto es de la carpeta de este negocio (la regla de la carpeta la prueba storage.carpetaDelNegocio.test.ts).
+  estaEnLaCarpetaDelNegocio: jest.fn().mockReturnValue(true),
+}))
 
 const ARCHIVAR = { deletedAt: expect.any(Date), active: false }
 

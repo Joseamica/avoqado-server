@@ -8,7 +8,10 @@ const esConsultaDelOutbox = (a: any) =>
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
   Object.keys(a?.select ?? {}).every(
-    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+    (k: string) =>
+      k === 'orderId' ||
+      (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId) ||
+      (k === 'tenderType' && a.select.tenderType?.select?.systemKind === true),
   ) &&
   a?.select?.orderId === true
 /**
@@ -213,10 +216,10 @@ function datosDeLaOrdenFast() {
 describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     installFakes()
   })
 
@@ -738,10 +741,10 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
 describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la terminal', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     installFakes()
   })
 
@@ -869,5 +872,58 @@ describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la termi
 
     expect(payments).toHaveLength(1)
     expect(result.customerLink.status).toBe('NOT_REQUESTED')
+  })
+})
+
+describe('cliente postventa — /fast no abre una puerta por replay', () => {
+  beforeEach(() => {
+    installFakes()
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'old-order' }])
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+    prismaMock.order.findFirst.mockResolvedValue({
+      id: 'old-order',
+      venueId: VENUE,
+      customerId: null,
+      paymentStatus: 'PAID',
+      status: 'COMPLETED',
+    })
+    prismaMock.payment.findFirst.mockResolvedValue({
+      id: 'old-payment',
+      orderId: 'old-order',
+      status: 'COMPLETED',
+      type: null,
+      processedById: 'user-1',
+      createdAt: new Date(Date.now() - 60 * 60_000),
+    })
+  })
+
+  it('un replay antiguo devuelve el cobro existente con advertencia sin ligar ni cobrar otra vez', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue({ id: 'old-payment', orderId: 'old-order', receipts: [], idempotencyKey: 'old-key' })
+    const result = await recordFastPayment(VENUE, cobroRapido({ customerId: 'cust-1', idempotencyKey: 'old-key' }), 'user-1', undefined, {
+      staffId: 'user-1',
+      canAttachAtReceipt: true,
+    })
+    expect(result).toMatchObject({ id: 'old-payment', customerLink: { status: 'UNVERIFIED', warning: expect.stringContaining('gerente') } })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
+  })
+
+  it('una atribución original durable conserva su cliente aun con recuperación tardía', async () => {
+    const result = await linkCustomerToExistingOrder(VENUE, 'old-order', 'cust-1', {
+      originalCustomer: { orderId: 'old-order', customerId: 'cust-1' },
+    })
+    expect(result).toMatchObject({ status: 'LINKED', customerId: 'cust-1' })
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ customerId: 'cust-1' }) }),
+    )
+  })
+
+  it('la evidencia durable de otro cliente no autoriza el cliente del body', async () => {
+    const result = await linkCustomerToExistingOrder(VENUE, 'old-order', 'cust-1', {
+      originalCustomer: { orderId: 'old-order', customerId: 'different' },
+    })
+    expect(result).toMatchObject({ status: 'UNVERIFIED' })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
 })

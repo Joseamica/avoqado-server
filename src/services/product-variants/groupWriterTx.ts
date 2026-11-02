@@ -2,7 +2,7 @@ import { IvaTratamiento, Prisma, ProductGroupSource, ProductType } from '@prisma
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { isModelLockTimeoutError } from '../../utils/serializableRetry'
-import { GTIN_MAX_LENGTH, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
+import { GTIN_MAX_LENGTH, SKU_REGEX, skuFormatMessageFor } from '../../schemas/dashboard/menu.schema'
 import {
   MAX_VALUES_PER_OPTION,
   MAX_VARIANTS_PER_GROUP,
@@ -292,7 +292,7 @@ export async function revisarFilasContraBase(
   const sku = (r: VariantRowInput) => r.sku?.trim() || null
   for (const f of sanas()) {
     const s = sku(f.r)
-    if (s && !SKU_REGEX.test(s)) marcar(f.i, `El SKU «${s}» sólo puede llevar letras, números, guion y guion bajo.`, false)
+    if (s && !SKU_REGEX.test(s)) marcar(f.i, skuFormatMessageFor(s), false)
   }
   const conSku = () => sanas().flatMap(f => (sku(f.r) ? [{ i: f.i, valor: sku(f.r)! }] : []))
   repetidas(conSku(), 'Hay SKUs repetidos en las variantes.')

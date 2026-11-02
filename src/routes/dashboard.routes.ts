@@ -1,6 +1,8 @@
 import hybridBillingRoutes from './dashboard/hybridBilling.routes'
 import serviceCourseRoutes from './dashboard/serviceCourse.routes'
 import express, { RequestHandler } from 'express'
+import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
+import { ipDelCliente } from '../utils/clientIp'
 import { z } from 'zod'
 import {
   OrdersListQuerySchema,
@@ -65,6 +67,8 @@ import * as announcementReadController from '../controllers/shared/announcement.
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as refundController from '../controllers/dashboard/refund.dashboard.controller'
+import * as exchangeController from '../controllers/dashboard/exchange.dashboard.controller'
+import { listExchangesSchema, reviewExchangeSchema, getExchangeSchema } from '../schemas/dashboard/exchange.dashboard.schema'
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
@@ -92,6 +96,7 @@ import * as testingController from '../controllers/dashboard/testing.dashboard.c
 import * as textToSqlAssistantController from '../controllers/dashboard/text-to-sql-assistant.controller'
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
+import * as deviceMenusController from '../controllers/dashboard/deviceMenus.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
 import { soloElDuenoBorraDeFabrica } from '../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
@@ -172,12 +177,14 @@ import {
   bulkConfirmIncidentSchema,
 } from '../schemas/dashboard/settlementIncident.schema'
 import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
-import { updateTpvSchema } from '../schemas/dashboard/tpv.schema'
+import { updateTerminalTpvSettingsSchema, updateTpvSchema } from '../schemas/dashboard/tpv.schema'
+import { ListDeviceMenuOptionsSchema, ListDeviceMenusSchema, SetTerminalMenusSchema } from '../schemas/dashboard/deviceMenus.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
   resetPasswordSchema,
   confirmEmailChangeSchema,
+  entrarConBoletoSchema,
   switchVenueSchema,
   updateAccountSchema,
 } from '../schemas/dashboard/auth.schema'
@@ -227,7 +234,7 @@ import {
   VenueIdParamsSchema as CustomerVenueIdParamsSchema,
 } from '../schemas/dashboard/customer.schema'
 import { GetPrivacyNoticeSchema, UpsertPrivacyNoticeSchema } from '../schemas/dashboard/privacyNotice.schema'
-import { SettleOrderSchema } from '../schemas/dashboard/order.schema'
+import { CancelarCuentaSinCobrarSchema, SettleOrderSchema } from '../schemas/dashboard/order.schema'
 import { UpdateShiftSchema } from '../schemas/dashboard/shift.schema'
 import {
   CreateCustomerGroupSchema,
@@ -257,6 +264,7 @@ import {
   CalculateDiscountSchema,
   RedeemPointsSchema,
   AdjustPointsSchema,
+  AdjustStampsSchema,
   LoyaltyTransactionsQuerySchema,
   LoyaltyParamsSchema,
   LoyaltyVenueParamsSchema,
@@ -368,6 +376,7 @@ import floorPlanRoutes from './dashboard/floorPlan.routes'
 import productGroupRoutes from './dashboard/productGroup.routes'
 import productOptionRoutes from './dashboard/productOption.routes'
 import receiptLayoutRoutes from './dashboard/receiptLayout.routes'
+import customerDisplayRoutes, { customerDisplayDevicesRoutes } from './dashboard/customerDisplay.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
 import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
@@ -1192,6 +1201,45 @@ router.post('/auth/reset-password', validateRequest(resetPasswordSchema), authDa
  *       409: { description: El correo ya lo usa otra cuenta }
  */
 router.post('/auth/confirm-email-change', validateRequest(confirmEmailChangeSchema), authDashboardController.confirmEmailChange)
+
+// Alta con código: el DASHBOARD canjea el boleto de 5 min (#boleto=) por las cookies de sesión. Detrás del interruptor:
+// apagado responde 404, igual que /public/alta/*. El boleto es un JWT firmado de un solo uso; el límite sólo frena ruido.
+const boletoRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDevelopment ? 100 : 20,
+  keyGenerator: req => ipDelCliente(req) || 'desconocida', // detrás de Cloudflare req.ip es el borde compartido
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ success: false, code: 'DEMASIADOS_INTENTOS', message: 'Demasiados intentos. Intenta de nuevo en unos minutos.' })
+  },
+})
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/entrar-con-boleto:
+ *   post:
+ *     tags: [Dashboard - Auth]
+ *     summary: Canjea el boleto de alta (landing) por la sesión (público, detrás de ALTA_LANDING_CON_CODIGO)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [boleto]
+ *             properties:
+ *               boleto: { type: string }
+ *     responses:
+ *       200: { description: Sesión abierta (cookies) }
+ *       410: { description: "BOLETO_USADO: ya se usó, venció o no es válido" }
+ */
+router.post(
+  '/auth/entrar-con-boleto',
+  soloConAltaConCodigo,
+  boletoRateLimiter,
+  validateRequest(entrarConBoletoSchema),
+  authDashboardController.entrarConBoleto,
+)
 
 // --- Menu Category Routes ---
 
@@ -3525,6 +3573,16 @@ router.post(
   orderController.settleOrder,
 )
 
+// «Cancelar orden» de Cuentas por cobrar (Amaena, 30-oct): el MISMO permiso acotado del POS (`orders:cancel-unpaid`, sólo
+// cuentas sin dinero). Las de mesa y los pedidos en línea se rechazan en el servicio (`cancelarCuentaSinCobrar`).
+router.post(
+  '/venues/:venueId/orders/:orderId/cancel',
+  authenticateTokenMiddleware,
+  validateRequest(CancelarCuentaSinCobrarSchema),
+  checkPermission('orders:cancel-unpaid'),
+  orderController.cancelarCuentaSinCobrar,
+)
+
 // ---- UPSELL (PRO): "¿Algo más?" en la pantalla del cliente y la franja del cajero ----
 // Orden de middleware por permissions-policy: validar el cuerpo ANTES de los checks
 // de feature/permiso, para que un cuerpo malformado no se confunda con un 403.
@@ -3969,6 +4027,28 @@ router.get(
 )
 
 // Refund endpoints (manual cash/dashboard refunds — not the TPV terminal flow)
+router.get(
+  '/venues/:venueId/exchanges',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(listExchangesSchema),
+  exchangeController.listExchanges,
+)
+router.get(
+  '/venues/:venueId/exchanges/:exchangeId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(getExchangeSchema),
+  exchangeController.getExchange,
+)
+router.post(
+  '/venues/:venueId/exchanges/:exchangeId/review',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  validateRequest(reviewExchangeSchema),
+  exchangeController.reviewExchange,
+)
+
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
@@ -4621,6 +4701,11 @@ router.use('/venues/:venueId/floor-plan', authenticateTokenMiddleware, floorPlan
 router.use('/venues/:venueId/product-groups', authenticateTokenMiddleware, productGroupRoutes)
 router.use('/venues/:venueId/product-options', authenticateTokenMiddleware, productOptionRoutes)
 router.use('/venues/:venueId/receipt-layout', authenticateTokenMiddleware, receiptLayoutRoutes)
+// CUSTOMER_DISPLAY — la pantalla que ve el cliente en la tablet. Marca, textos y pasos gratis; las promos en reposo
+// (PRO) se revisan por CAMPO en el servicio, no por ruta: sin plan el negocio tiene que poder seguir editando su marca y
+// apagar lo que ya no puede usar. Permission-gated dentro de los sub-routers (customer-display:read/update).
+router.use('/venues/:venueId/terminals/:terminalId/customer-display', authenticateTokenMiddleware, customerDisplayRoutes)
+router.use('/venues/:venueId/customer-display', authenticateTokenMiddleware, customerDisplayDevicesRoutes)
 // Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
 // (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).
 router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fiscalProfileRoutes)
@@ -4775,6 +4860,59 @@ router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  */
 router.get('/venues/:venueId/tpvs', authenticateTokenMiddleware, checkPermission('tpv:read'), tpvController.getTerminals)
+
+// Menú del aparato («Qué muestra cada aparato»). Las dos GET son estáticas y van ANTES de cualquier `tpvs/:algo`; sin candado
+// de plan (la página enseña el candado), sólo `tpv:read`.
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/menus:
+ *   get:
+ *     tags: [Terminals]
+ *     summary: Qué muestra cada aparato POS (sus menús y lo que ve su cuadrícula)
+ *     description: |
+ *       Aparatos POS_* no retirados, por nombre, con los menús elegidos (`[]` = «Todos los menús») y lo que ve su cuadrícula
+ *       (`sees`); `everything` es lo que ve «Todos». `pageSize` se topa en 100.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+ *       - { in: query, name: pageSize, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+ *     responses:
+ *       200: { description: '{ everything, terminals, total, page, pageSize }' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/tpvs/menus',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  validateRequest(ListDeviceMenusSchema),
+  deviceMenusController.listDeviceMenusHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpvs/menus/options:
+ *   get:
+ *     tags: [Terminals]
+ *     summary: Menús que se pueden elegir para un aparato (encendidos y «Aparatos»), en el orden de Mesas
+ *     description: No usa GET /menus (pide menu:read y baja el catálogo completo). `search` por nombre, sin importar mayúsculas.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: query, name: search, schema: { type: string, maxLength: 100 } }
+ *       - { in: query, name: page, schema: { type: integer, minimum: 1, default: 1 } }
+ *       - { in: query, name: pageSize, schema: { type: integer, minimum: 1, maximum: 100, default: 100 } }
+ *     responses:
+ *       200: { description: '{ menus: [{ id, name, appliesToOnline, categoryCount }], total, page, pageSize }' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.get(
+  '/venues/:venueId/tpvs/menus/options',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  validateRequest(ListDeviceMenuOptionsSchema),
+  deviceMenusController.listDeviceMenuOptionsHandler,
+)
 
 /**
  * @openapi
@@ -4953,6 +5091,40 @@ router.put(
   checkPermission('tpv:update'),
   validateRequest(updateTpvSchema),
   tpvController.updateTpv,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/tpv/{tpvId}/menus:
+ *   put:
+ *     tags: [Terminals]
+ *     summary: Elegir qué menús muestra un aparato POS (`[]` = «Todos los menús»)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: venueId, required: true, schema: { type: string } }
+ *       - { in: path, name: tpvId, required: true, schema: { type: string } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [menuIds]
+ *             properties:
+ *               menuIds: { type: array, maxItems: 50, items: { type: string } }
+ *     responses:
+ *       200: { description: 'La fila del aparato (misma forma que terminals[i] de GET tpvs/menus)' }
+ *       400: { description: 'MENU_NO_DISPONIBLE: «Ese menú no existe, está apagado o no es para aparatos.»' }
+ *       403: { description: 'Sin tpv:update o sin el plan Pro (DEVICE_MENUS)' }
+ *       404: { description: 'TERMINAL_NOT_FOUND: no es del negocio o no es un aparato POS' }
+ */
+router.put(
+  '/venues/:venueId/tpv/:tpvId/menus',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:update'),
+  checkFeatureAccess('DEVICE_MENUS'),
+  validateRequest(SetTerminalMenusSchema),
+  deviceMenusController.setTerminalMenusHandler,
 )
 
 /**
@@ -5313,8 +5485,14 @@ router.get(
  *                 nullable: true
  *               tipSuggestions:
  *                 type: array
+ *                 description: Porcentajes de propina que ofrece el POS (1 a 100, enteros, sin repetir, de 1 a 6)
+ *                 minItems: 1
+ *                 maxItems: 6
+ *                 uniqueItems: true
  *                 items:
- *                   type: number
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 100
  *               requirePinLogin:
  *                 type: boolean
  *     responses:
@@ -5340,6 +5518,8 @@ router.get(
  *                     type: number
  *                 requirePinLogin:
  *                   type: boolean
+ *       400:
+ *         description: tipSuggestions con forma inválida (más de 6, vacía, repetidos, fuera de 1-100 o no enteros); no se escribe nada
  *       403:
  *         description: Forbidden (missing tpv-settings:update permission)
  *       404:
@@ -5350,27 +5530,45 @@ router.put(
   authenticateTokenMiddleware,
   bindTpvSettingsTarget,
   checkPermission('tpv-settings:update'),
+  // F0-B (Task 12): el tope de 6 propinas del POS, DESPUÉS del permiso.
+  validateRequest(updateTerminalTpvSettingsSchema),
   tpvController.updateTpvSettings,
 )
 
 // ---------------------------------------------------------------------------
 // TPV Shop — TerminalOrder endpoints (Plan 1 · Tasks 9 + 10)
+// 🔴 checkPermission valida que :venueId sea tuyo (D1, 31-oct): sin él, cualquier staff de cualquier
+// negocio leía y creaba pedidos ajenos. Mismos permisos que el dashboard: la pantalla de Aparatos pide
+// `tpv:read` y el botón de comprar `tpv:create`; subir el comprobante es parte de comprar.
 // ---------------------------------------------------------------------------
 router.post(
   '/venues/:venueId/tpv-orders',
   authenticateTokenMiddleware,
+  checkPermission('tpv:create'),
   validateRequest(createTerminalOrderSchema),
   terminalOrderController.createOrderHandler,
 )
-router.get('/venues/:venueId/tpv-orders', authenticateTokenMiddleware, terminalOrderController.listOrdersHandler)
-router.get('/venues/:venueId/tpv-orders/:id', authenticateTokenMiddleware, terminalOrderController.getOrderHandler)
+router.get(
+  '/venues/:venueId/tpv-orders',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  terminalOrderController.listOrdersHandler,
+)
+router.get(
+  '/venues/:venueId/tpv-orders/:id',
+  authenticateTokenMiddleware,
+  checkPermission('tpv:read'),
+  terminalOrderController.getOrderHandler,
+)
 
 // SPEI proof upload (Plan 2 · Task 8) — multipart, field name `proof`.
 // Reuses the existing `documentUpload` multer instance (memoryStorage, 10MB,
-// PDF/JPG/PNG) defined above.
+// PDF/JPG/PNG) defined above. The permission runs BEFORE multer so a stranger
+// never gets a 10MB body buffered.
 router.post(
   '/venues/:venueId/tpv-orders/:id/upload-proof',
   authenticateTokenMiddleware,
+  checkPermission('tpv:create'),
   preserveContext(documentUpload.single('proof')),
   terminalOrderController.uploadProofHandler,
 )
@@ -8695,6 +8893,7 @@ router.get('/venues/:venueId/shifts/summary', authenticateTokenMiddleware, check
  *     parameters:
  *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
  *       - { name: shiftId, in: path, required: true, schema: { type: string, format: cuid } }
+ *       - { name: view, in: query, required: false, schema: { type: string, enum: [detail, state] }, description: "state returns only id, venueId and status; the default detailed response is unchanged" }
  *     responses:
  *       200:
  *         description: The requested shift
@@ -11230,6 +11429,54 @@ router.post(
   checkPermission('loyalty:adjust'),
   validateRequest(AdjustPointsSchema),
   loyaltyController.adjustPoints,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/stamps/adjust:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Manual stamp adjustment (leaves the open card at stampsEarned)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [stampsEarned, expectedStampCardId, expectedStampsEarned, expectedVersion, expectedStampsRequired, reason]
+ *             properties:
+ *               stampsEarned: { type: integer, minimum: 0, maximum: 100 }
+ *               expectedStampCardId: { type: string, nullable: true }
+ *               expectedStampsEarned: { type: integer, minimum: 0 }
+ *               expectedVersion: { type: integer, minimum: 0 }
+ *               expectedStampsRequired: { type: integer, minimum: 1 }
+ *               reason: { type: string, minLength: 5, maxLength: 500 }
+ *     responses:
+ *       200:
+ *         description: Stamps adjusted successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       409:
+ *         description: STAMPS_DISABLED or STAMPS_CHANGED (the card changed since the caller read it)
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/loyalty/stamps/adjust',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:adjust'),
+  validateRequest(AdjustStampsSchema),
+  loyaltyController.adjustStampsHandler,
 )
 
 /**

@@ -25,11 +25,12 @@ import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
 import { calcularTasaInyeccion } from './injectionRate.service'
-import { menuSyncStatusOf } from './menuSync.service'
+import { cerradaEnElProveedor, configComoObjeto, escribirLlavesDelSistema, LLAVES_DEL_SISTEMA } from './llavesDelSistema'
+import { menuSyncStatusOf, revisionDeMenuOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
 /** Select explícito — NUNCA incluye `webhookSecret`. Usado por list/create/update. */
-const SAFE_SELECT = {
+export const SAFE_SELECT = {
   id: true,
   venueId: true,
   provider: true,
@@ -60,27 +61,70 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
     orderBy: { createdAt: 'desc' },
   })) as unknown as Array<DeliveryChannelLinkSafe & { autoSyncMenu: boolean; lastMenuHash: string | null; provider: DeliveryProvider }>
 
-  // 🔴 Dos cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
+  // 🔴 Tres cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
   // base:
   //   · `menuSyncStatus` — un menú que nunca se logró publicar deja al proveedor vendiendo
   //     otra carta, o ninguna, y nadie se entera hasta que un cliente se queja.
+  //   · `menuRevision` — si el menú está en revisión del proveedor, desde cuándo, si ya pasó el
+  //     plazo sin veredicto, cuándo lo rechazó y por qué. Antes sólo se leía en el log.
   //   · `injectionRate` — es el número con el que el proveedor decide REVOCAR el acceso
   //     (Uber: exige 99.9%, revoca bajo 99%). Era invisible: se podía estar cayendo semanas.
   //
   // Se calculan aquí, en el listado que la pantalla ya pide, en vez de en un endpoint aparte:
   // un dato que exige una segunda llamada es un dato que la UI acaba no mostrando.
-  return Promise.all(
-    links.map(async l => {
-      const { lastMenuHash: _oculto, ...resto } = l
-      return {
-        ...resto,
-        menuSyncStatus: menuSyncStatusOf(l),
-        // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
-        // invita a que alguien la use como si significara algo.
-        injectionRate: await calcularTasaInyeccion({ venueId, provider: l.provider }).catch(() => null),
+  //
+  // La tasa es del PROVEEDOR en el venue, no del vínculo: una vez por proveedor (antes, una por vínculo).
+  const porProveedor = new Map<DeliveryProvider, typeof links>()
+  for (const l of links) porProveedor.set(l.provider, [...(porProveedor.get(l.provider) ?? []), l])
+  const proveedores = [...porProveedor.keys()]
+  const tasas = new Map(
+    await Promise.all(proveedores.map(async p => [p, await calcularTasaInyeccion({ venueId, provider: p }).catch(() => null)] as const)),
+  )
+  // Lo que cada proveedor quiera agregar a sus vínculos (Rappi fase 3: pedidos en curso y la conexión que ve el dueño), una
+  // llamada por proveedor con todos sus vínculos. Si falla, esos campos no salen: el servidor sigue validando al actuar.
+  const extras = new Map<string, Record<string, unknown>>()
+  await Promise.all(
+    proveedores.map(async p => {
+      const adaptador = hasAdapter(p) ? adapterFor(p) : null
+      if (!adaptador?.datosDelListado) return
+      try {
+        for (const [id, campos] of await adaptador.datosDelListado(porProveedor.get(p) ?? [])) extras.set(id, campos)
+      } catch (e) {
+        logger.warn('🛵 [delivery] el proveedor no pudo completar el listado de canales', {
+          venueId,
+          provider: p,
+          error: (e as Error).message,
+        })
       }
     }),
-  ) as unknown as DeliveryChannelLinkSafe[]
+  )
+  return links.map(l => {
+    const { lastMenuHash: _oculto, ...resto } = l
+    return {
+      ...(extras.get(l.id) ?? {}),
+      ...resto,
+      menuSyncStatus: menuSyncStatusOf(l),
+      // La revisión del menú (pendiente, último rechazo, problemas), sacada de `config`, que este mismo select ya trae: ni una
+      // consulta más por canal. Aditivo: el `config` crudo sigue saliendo como siempre, y esto sin huellas.
+      menuRevision: revisionDeMenuOf(l.config),
+      // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
+      // invita a que alguien la use como si significara algo.
+      injectionRate: tasas.get(l.provider) ?? null,
+    }
+  }) as unknown as DeliveryChannelLinkSafe[]
+}
+
+/**
+ * 🔴 Un proveedor que declara `soloAceptacionAutomatica` en su adaptador NO admite el modo manual: un
+ * `ValidationError` con la RAZÓN que el propio adaptador trae. El núcleo no sabe qué proveedor es ni por
+ * qué: lee la propiedad del contrato (nunca compara contra un nombre; lo vigila el guardrail de
+ * `adapterRegistry.test.ts`). Sin modo pedido, o en AUTO, no hay nada que rechazar.
+ */
+function exigirAceptacionPermitida(provider: DeliveryProvider, modo: OrderAcceptanceMode | undefined): void {
+  if (modo === undefined || modo === OrderAcceptanceMode.AUTO) return
+  if (!hasAdapter(provider)) return
+  const razon = adapterFor(provider).soloAceptacionAutomatica
+  if (razon) throw new ValidationError(razon)
 }
 
 export interface CreateChannelLinkInput {
@@ -102,6 +146,8 @@ export async function createChannelLink(
   data: CreateChannelLinkInput,
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
+  exigirAceptacionPermitida(data.provider, data.orderAcceptanceMode)
+
   const webhookSecret = crypto.randomBytes(32).toString('hex')
 
   let link: DeliveryChannelLinkSafe
@@ -116,7 +162,8 @@ export async function createChannelLink(
         orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
         status: DeliveryChannelStatus.PENDING,
         autoSyncMenu: data.autoSyncMenu ?? true,
-        config: data.config ?? undefined,
+        // Mismo filtro que el PATCH: las llaves del sistema no se siembran desde fuera (ver `mezclarConfig`).
+        config: data.config != null ? mezclarConfig({}, data.config) : undefined,
       },
       select: SAFE_SELECT,
     })) as unknown as DeliveryChannelLinkSafe
@@ -231,11 +278,27 @@ function validarPrecios(v: unknown): void {
  *
  * `config: null` sigue limpiando todo — es la forma explícita de borrar, y se distingue de
  * `undefined` (no lo tocaste).
+ *
+ * 🔴 Salvo las LLAVES DEL SISTEMA (`llavesDelSistema.ts`): la reclamación del aprovisionamiento de la
+ * tienda, el menú en revisión, el rechazado, sus problemas y el horario publicado. Las escriben SÓLO
+ * el sistema (el aprovisionamiento, el sincronizador, los avisos del proveedor). Desde aquí nunca se
+ * tocan — ni con `config: null` — y lo que llegue con esos nombres se ignora: editable, la reclamación
+ * se apuntaba a la intención de otro negocio; borrado, el menú en revisión se republicaba encima de la
+ * revisión (o el rechazado, cada 5 minutos); sembrado, bloqueaba la publicación del menú para siempre.
  */
-function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue): Prisma.InputJsonValue {
-  const base = actual && typeof actual === 'object' && !Array.isArray(actual) ? (actual as Record<string, unknown>) : {}
-  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return entrante
-  return { ...base, ...(entrante as Record<string, unknown>) } as Prisma.InputJsonValue
+function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+  const base = configComoObjeto(actual)
+  const reservadas = Object.fromEntries(
+    LLAVES_DEL_SISTEMA.filter(llave => base[llave] !== undefined).map(llave => [llave, base[llave]]),
+  ) as Prisma.InputJsonObject
+  const hayReservadas = Object.keys(reservadas).length > 0
+  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) {
+    return hayReservadas ? reservadas : (entrante ?? Prisma.JsonNull)
+  }
+  const pedido = Object.fromEntries(
+    Object.entries(entrante as Record<string, unknown>).filter(([llave]) => !(LLAVES_DEL_SISTEMA as readonly string[]).includes(llave)),
+  )
+  return { ...base, ...pedido, ...reservadas } as Prisma.InputJsonValue
 }
 
 /**
@@ -271,11 +334,19 @@ export async function updateChannelLink(
   // dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
   // guardando horario y precios a la vez se pisaban, y un PATCH leído antes de que el job de
   // disponibilidad guardara sus agotados los borraba al escribir: el producto se quedaba agotado en Uber.
+  // Lo mismo con Rappi: un PATCH leído antes de que guardara su lote lo borraba al escribir.
   const link = await prisma.$transaction(async tx => {
+    // 🔴 El proveedor se lee de la FILA, en la misma transacción que el update (el cliente nunca lo manda en un
+    // PATCH): un modo manual sobre un canal cuyo proveedor sólo admite el automático se rechaza ANTES de escribir.
+    // Con el modo ausente o en AUTO no se lee nada. Un canal de otro negocio no da fila: no se rechaza aquí y el
+    // `updateMany` de abajo lo resuelve como 404, sin revelar qué proveedor es.
+    if (data.orderAcceptanceMode !== undefined && data.orderAcceptanceMode !== OrderAcceptanceMode.AUTO) {
+      const fila = await tx.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { provider: true } })
+      if (fila) exigirAceptacionPermitida(fila.provider, data.orderAcceptanceMode)
+    }
+
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
-    if (data.config === null) {
-      config = Prisma.JsonNull
-    } else if (data.config !== undefined) {
+    if (data.config !== undefined) {
       // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el
       // `updateMany` de abajo devuelve count 0 → NotFoundError, sin filtrar nada.
       const [actual] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
@@ -363,7 +434,7 @@ export async function pauseChannelLink(
   // cómo el dueño vuelve indefinida una pausa del POS.
   const previo = await prisma.deliveryChannelLink.findFirst({
     where: { id: linkId, venueId },
-    select: { status: true, snoozedUntil: true, provider: true },
+    select: { status: true, snoozedUntil: true, provider: true, config: true },
   })
   if (!previo) throw new NotFoundError('Canal de delivery no encontrado')
   const desde: DeliveryChannelStatus[] = paused
@@ -378,6 +449,13 @@ export async function pauseChannelLink(
     throw new ConflictError(`No se puede pausar un canal en estado ${previo.status}: sólo un canal activo se pausa.`)
   }
   if (!paused && soloSnooze) {
+    const cerrada = cerradaEnElProveedor(previo.config)
+    // D4: lo que se cerró desde el proveedor tampoco se reabre desde el POS (Codex r3 #5), con o sin reloj.
+    if (cerrada && soloSnooze === 'CUALQUIERA') {
+      throw new ValidationError(
+        'Esta tienda se cerró desde el portal de la app de reparto. Para volver a recibir pedidos, reábrela desde el dashboard o pídeselo a quien administra el negocio.',
+      )
+    }
     if (previo.snoozedUntil === null) {
       throw new ValidationError(
         'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
@@ -386,6 +464,7 @@ export async function pauseChannelLink(
     if (soloSnooze === 'VENCIDO' && previo.snoozedUntil > new Date()) {
       throw new ConflictError('La pausa de este canal se extendió; se reanudará cuando venza.')
     }
+    if (cerrada) return dejarCerrada(venueId, linkId, previo)
   }
 
   // Resolver capacidad ANTES del CAS: sin adaptador nunca se simula una pausa local.
@@ -490,6 +569,16 @@ export async function pauseChannelLink(
     }
   }
 
+  // D4: reabrir desde el panel lo decidió una persona; la nota de «cerrada en el proveedor» ya cumplió. Sólo después de que el
+  // proveedor aceptó: si no, se lanzó arriba y la nota se queda.
+  // Sólo la nota que había al empezar: un cierre NUEVO que llegó mientras se reabría se queda (Codex r2 de código).
+  if (!paused && !soloSnooze && cerradaEnElProveedor(previo.config)) {
+    const nota = JSON.stringify(configComoObjeto(previo.config).cerradaEnElProveedor)
+    await escribirLlavesDelSistema(linkId, fila =>
+      JSON.stringify(fila.config.cerradaEnElProveedor) === nota ? { cerradaEnElProveedor: null } : null,
+    )
+  }
+
   void logAction({
     staffId: performedBy,
     venueId,
@@ -500,6 +589,39 @@ export async function pauseChannelLink(
   })
 
   const { webhookSecret: _webhookSecret, ...safeLink } = fullLink
+  return safeLink
+}
+
+/**
+ * D4: la pausa del POS venció, pero el proveedor avisó que la tienda se cerró de su lado: NO se reabre. Se le quita el reloj con
+ * el mismo CAS (queda pausada sin fecha, como la del dashboard) y la bitácora dice por qué. Sin llamarle al proveedor.
+ */
+async function dejarCerrada(
+  venueId: string,
+  linkId: string,
+  previo: { status: DeliveryChannelStatus; snoozedUntil: Date | null; provider: DeliveryProvider },
+): Promise<DeliveryChannelLinkSafe> {
+  const { count } = await prisma.deliveryChannelLink.updateMany({
+    where: { id: linkId, venueId, status: previo.status, snoozedUntil: previo.snoozedUntil },
+    data: { snoozedUntil: null },
+  })
+  if (count === 0) throw new ConflictError('El canal cambió mientras se procesaba la pausa. Recarga e inténtalo de nuevo.')
+  logger.error('🚨 [DeliveryChannel] venció la pausa del POS, pero la tienda se cerró desde el proveedor: queda pausada sin fecha', {
+    linkId,
+    venueId,
+    provider: previo.provider,
+  })
+  void logAction({
+    staffId: null, // nadie la reabrió: lo decidió el sistema por el aviso del proveedor
+    venueId,
+    action: 'DELIVERY_CHANNEL_SNOOZE_NO_REABIERTO',
+    entity: 'DeliveryChannelLink',
+    entityId: linkId,
+    data: { provider: previo.provider, snoozedUntil: previo.snoozedUntil?.toISOString() ?? null },
+  })
+  const link = await prisma.deliveryChannelLink.findUnique({ where: { id: linkId } })
+  if (!link) throw new NotFoundError('Canal de delivery no encontrado')
+  const { webhookSecret: _webhookSecret, ...safeLink } = link
   return safeLink
 }
 
@@ -578,6 +700,9 @@ export async function cancelarSnooze(venueId: string, linkId: string, performedB
   return pauseChannelLink(venueId, linkId, false, performedBy, 'CUALQUIERA')
 }
 
+/** Cuántos canales lee cada página del barrido de pausas vencidas. */
+const PAGINA_DE_PAUSAS = 100
+
 /**
  * Reactiva los canales cuyo reloj ya venció. Lo llama un job cada minuto.
  *
@@ -586,36 +711,54 @@ export async function cancelarSnooze(venueId: string, linkId: string, performedB
  * convierte una falla de uno en una falla de todos, y nadie se entera porque desde afuera
  * "la tienda está pausada" se ve igual que "la tienda no reanudó".
  */
-export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; fallidos: number }> {
-  const vencidos = await prisma.deliveryChannelLink.findMany({
-    where: { status: DeliveryChannelStatus.PAUSED, snoozedUntil: { lte: new Date() } },
-    select: { id: true, venueId: true, provider: true },
-  })
-
+export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; fallidos: number; noReabiertos: number }> {
+  const ahora = new Date()
   let reanudados = 0
   let fallidos = 0
+  let noReabiertos = 0
 
-  for (const canal of vencidos) {
-    try {
-      await pauseChannelLink(canal.venueId, canal.id, false, undefined, 'VENCIDO')
-      reanudados++
-      logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
-        linkId: canal.id,
-        venueId: canal.venueId,
-        provider: canal.provider,
-      })
-    } catch (error) {
-      fallidos++
-      // Se deja el reloj puesto para reintentar en el siguiente tick: borrarlo aquí
-      // dejaría el canal pausado PARA SIEMPRE, que es justo lo que esto evita.
-      logger.error('🚨 [DeliveryChannel] no se pudo reactivar un canal cuya pausa venció', {
-        linkId: canal.id,
-        venueId: canal.venueId,
-        provider: canal.provider,
-        error: error instanceof Error ? error.message : String(error),
-      })
+  // Por páginas (regla de capacidad): nunca se carga la lista entera, y una página llena de canales que fallan no le quita el
+  // turno a los siguientes (Codex r2 de código: con un tope fijo, el 101 no se intentaba nunca).
+  for (let despuesDe: string | undefined; ; ) {
+    const vencidos = await prisma.deliveryChannelLink.findMany({
+      where: {
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: { lte: ahora },
+        ...(despuesDe ? { id: { gt: despuesDe } } : {}),
+      },
+      select: { id: true, venueId: true, provider: true },
+      orderBy: { id: 'asc' },
+      take: PAGINA_DE_PAUSAS,
+    })
+
+    for (const canal of vencidos) {
+      try {
+        const link = await pauseChannelLink(canal.venueId, canal.id, false, undefined, 'VENCIDO')
+        if (link.status === DeliveryChannelStatus.PAUSED) {
+          noReabiertos++ // D4: se cerró desde el proveedor (ya quedó en el log y en la bitácora)
+          continue
+        }
+        reanudados++
+        logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
+          linkId: canal.id,
+          venueId: canal.venueId,
+          provider: canal.provider,
+        })
+      } catch (error) {
+        fallidos++
+        // Se deja el reloj puesto para reintentar en el siguiente tick: borrarlo aquí
+        // dejaría el canal pausado PARA SIEMPRE, que es justo lo que esto evita.
+        logger.error('🚨 [DeliveryChannel] no se pudo reactivar un canal cuya pausa venció', {
+          linkId: canal.id,
+          venueId: canal.venueId,
+          provider: canal.provider,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
+    if (vencidos.length < PAGINA_DE_PAUSAS) break
+    despuesDe = vencidos[vencidos.length - 1].id
   }
 
-  return { reanudados, fallidos }
+  return { reanudados, fallidos, noReabiertos }
 }

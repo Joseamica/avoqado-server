@@ -62,8 +62,9 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
   !(
-    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(database.pathname) ||
-    isDisposableH1Url(database)
+    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808', '/avoqado_cambio_r5_test_20261024'].includes(
+      database.pathname,
+    ) || isDisposableH1Url(database)
   )
 )
   throw new Error('Dedicated test DB required')
@@ -682,6 +683,37 @@ describe('C3 · la nota de extracción de un ticket que está en la factura glob
     } finally {
       await prisma.merchantFiscalConfig.update({ where: { merchantAccountId: m1 }, data: { autofacturaEnabled: true } })
     }
+  })
+
+  it('🔴 D3 (Codex r5 #3 de pedidos): la venta de la global se CANCELA después (delivery) ⇒ ni extracción ni factura, con su motivo', async () => {
+    const t = await venta([{ productId: p16, precio: 116 }])
+    await laGlobal()
+    await prisma.order.update({ where: { id: t.id }, data: { status: 'CANCELLED' } })
+    for (const flujo of ['STAFF_B', 'AUTOFACTURA_A'] as const) {
+      expect(await issue(t.id, flujo).catch(e => e)).toMatchObject({
+        status: 'VALIDATION_FAILED',
+        reasons: [cfdiService.MOTIVO_VENTA_CANCELADA],
+      })
+    }
+    expect(provider.createCreditNote).not.toHaveBeenCalled()
+    expect(provider.createInvoice).not.toHaveBeenCalled()
+    expect(await extracciones(t.id)).toBe(0)
+  })
+
+  it('🔴 D3: la factura del cliente salió de la global y DESPUÉS la venta se cancela ⇒ sustituirla no prepara otro ingreso (la original sigue viva)', async () => {
+    const t = await venta([{ productId: p16, precio: 116 }])
+    await laGlobal()
+    const r = await issue(t.id)
+    expect(r.status).toBe('STAMPED')
+    const ingresos = provider.createInvoice.mock.calls.length
+    await prisma.order.update({ where: { id: t.id }, data: { status: 'CANCELLED' } })
+    provider.cancelInvoice.mockResolvedValue({ status: 'canceled', cancelledAt: new Date() })
+    const s = await replaceCfdi({ cfdiId: r.cfdi.id, sandbox: true, expectedVenueId: venueId })
+    expect(s.status).toBe('VALIDATION_FAILED')
+    expect(s.sustituta).toBeNull()
+    expect(provider.createInvoice).toHaveBeenCalledTimes(ingresos)
+    expect(provider.cancelInvoice).not.toHaveBeenCalled()
+    expect(await prisma.cfdi.findUniqueOrThrow({ where: { id: r.cfdi.id }, select: { status: true } })).toEqual({ status: 'STAMPED' })
   })
 
   it('🔴 G1 (A7-R10): devolución completada + autofactura de un ticket en la global ⇒ cero extracciones, cero egresos', async () => {

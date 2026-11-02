@@ -35,7 +35,7 @@ function migrationStatements(): string[] {
 beforeAll(() => {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
   expect(['localhost', '127.0.0.1']).toContain(url.hostname)
-  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/)
 })
 beforeEach(async () => {
   organizationId = 'tip-semantics-' + randomUUID()

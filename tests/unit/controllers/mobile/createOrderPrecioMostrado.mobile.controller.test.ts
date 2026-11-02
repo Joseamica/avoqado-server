@@ -82,4 +82,20 @@ describe('createOrder — cola y hora de la venta para el precio que vio el clie
     expect(res.statusCode).toBe(201)
     expect(createOrderWithItemsMock.mock.calls[0][1].items).toEqual([basura])
   })
+
+  // Task S3: los precios de extras que vio el cliente son un campo de LÍNEA más; el servicio los valida
+  // (`precioDeExtraMostrado`: objeto de centavos enteros ≥ 0 por id de extra) y la basura se ignora, nunca un 400.
+  it.each([
+    ['válido', { 'mod-1': 1000, 'mod-2': 0 }],
+    ['arreglo', [1000]],
+    ['texto', 'x'],
+    ['negativo', { 'mod-1': -1 }],
+    ['null', null],
+  ])('displayedModifierPrices %s llega intacto y la venta sigue (201)', async (_, valor) => {
+    const linea = { ...LINEA, modifierIds: ['mod-1'], displayedModifierPrices: valor }
+    const res = buildRes()
+    await createOrder(buildReq({ items: [linea] }), res, jest.fn() as NextFunction)
+    expect(res.statusCode).toBe(201)
+    expect(createOrderWithItemsMock.mock.calls[0][1].items).toEqual([linea])
+  })
 })

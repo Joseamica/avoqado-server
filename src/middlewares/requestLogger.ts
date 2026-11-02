@@ -82,7 +82,10 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
   // Everything below runs INSIDE the execution context, including the res listeners
   // registered here. Wrapping only next() would leave the request-completion log — the one
   // line people actually search — without a tenant.
-  runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, fullUrl) }, () => {
+  // La app que llama (`importePorPeso.ts`); un encabezado repetido llega como arreglo y se ignora.
+  const corto = (v: unknown) => (typeof v === 'string' ? v.slice(0, 32) : undefined)
+  const cliente = { plataforma: corto(req.headers['x-device-platform']), version: corto(req.headers['x-app-version']) }
+  runWithContext({ correlationId, source: 'http', entrypoint: normalizeEntrypoint(req.method, fullUrl), cliente }, () => {
     const start = process.hrtime()
     const { method, ip } = req
     // 🔴 NUNCA la URL cruda: el query string carga credenciales. El callback de OAuth recibe

@@ -3,9 +3,10 @@ import { WorkRelation } from '@prisma/client'
 import { z } from 'zod'
 import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { asignarPuesto, terminarAsignacion, type AsignacionDto } from '@/services/dashboard/rh/asignaciones.service'
+import { asignarPuesto, cambiarAsignacion, terminarAsignacion, type AsignacionDto } from '@/services/dashboard/rh/asignaciones.service'
 import { asegurarSedeNoMarcaBlanca } from '@/services/dashboard/rh/marcaBlanca'
 import { hoyDeLaSede } from '@/services/dashboard/rh/vigencias'
+import { checaPorDefault } from '@/services/dashboard/rh/checaAsistencia'
 import { archivarPuesto, crearPuesto, listarPuestos, type PuestoDto } from '@/services/dashboard/rh/puestos.service'
 import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
@@ -20,6 +21,11 @@ const ROLES_SUGERIBLES = ['OWNER', 'ADMIN', 'MANAGER', 'CASHIER', 'WAITER', 'KIT
 
 // Cada campo se crea aparte: reusar la MISMA instancia de Zod en dos parámetros sale como `$ref` y el portal del directorio lo rechaza.
 const venueIdZ = () => z.string().describe('Sucursal (debe estar dentro de tu alcance)')
+const checaZ = () =>
+  z
+    .boolean()
+    .optional()
+    .describe('«Checa entrada y salida»: si es false no sale en Turnos, Puntualidad ni Nómina (p. ej. un inversionista)')
 const confirmZ = () => z.boolean().optional().describe('Debe ser true para ejecutar de verdad; sin él sólo ves la vista previa')
 const relacionZ = (que: string) =>
   z.nativeEnum(WorkRelation).nullable().optional().describe(`${que} Vacía = «${SIN_DEFINIR}» (no se ha indicado)`)
@@ -104,7 +110,7 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
       tracksAttendanceDefault: z
         .boolean()
         .optional()
-        .describe('Si por defecto las personas con este puesto checan asistencia (por defecto sí)'),
+        .describe('Si por defecto las personas con este puesto checan asistencia (por defecto sí, salvo el rol de sólo lectura)'),
       confirm: confirmZ(),
     },
     async ({ venueId, name, suggestedRole, suggestedRelation, tracksAttendanceDefault, confirm }) => {
@@ -117,7 +123,7 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
             nombre: name,
             rolSugerido: suggestedRole,
             relacionSugerida: suggestedRelation ?? SIN_DEFINIR,
-            checaAsistencia: tracksAttendanceDefault ?? true,
+            checaAsistencia: tracksAttendanceDefault ?? checaPorDefault(suggestedRole),
           },
           message: `Esto CREARÁ el puesto «${name}» en esta sucursal. No cambia el rol ni los permisos de nadie. Vuelve a llamar con confirm:true para crearlo.`,
         })
@@ -200,9 +206,10 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
       positionId: z.string().describe('Puesto (positionId de list_positions)'),
       relation: relacionZ('Relación de trabajo de esta persona en este puesto.'),
       fecha: fechaZ('Desde cuándo tiene el puesto.'),
+      tracksAttendance: checaZ(),
       confirm: confirmZ(),
     },
-    async ({ venueId, staffId, positionId, relation, fecha, confirm }) => {
+    async ({ venueId, staffId, positionId, relation, fecha, tracksAttendance, confirm }) => {
       await puertaDeEscritura(venueId)
       if (!confirm) {
         const [persona, puesto] = await Promise.all([
@@ -227,7 +234,15 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
       }
       let a: AsignacionDto
       try {
-        a = await asignarPuesto({ venueId, staffId, positionId, relation: relation ?? null, fecha, actorId: scope.staffId })
+        a = await asignarPuesto({
+          venueId,
+          staffId,
+          positionId,
+          relation: relation ?? null,
+          fecha,
+          tracksAttendance,
+          actorId: scope.staffId,
+        })
       } catch (err) {
         return rechazo(err)
       }
@@ -237,6 +252,96 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
         entityId: a.id,
         venueId,
         data: { staffId, positionId, relation: relation ?? null, desde: a.effectiveFrom },
+      })
+      return text({ ok: true, asignacion: asignacionVista(a) })
+    },
+  )
+
+  server.tool(
+    'change_staff_assignment',
+    'Cambia la asignación vigente de una persona: su puesto, su relación o si «checa entrada y salida» (quien no checa, como un inversionista, no sale en Turnos, Puntualidad ni Nómina). Desde hoy o desde una fecha pasada; el historial se conserva. No cambia su rol ni sus permisos. Pide confirmación: sin confirm sólo muestra la vista previa. Requiere permiso para editar el equipo. Pasa venueId y assignmentId (de los puestos que trae list_staff o staff_detail) y sólo lo que cambia.',
+    {
+      venueId: venueIdZ(),
+      assignmentId: z.string().describe('Asignación a cambiar (assignmentId de los puestos de list_staff o staff_detail)'),
+      positionId: z.string().optional().describe('Puesto nuevo (positionId de list_positions); omítelo para conservarlo'),
+      relation: relacionZ('Relación nueva; omítela para conservarla.'),
+      tracksAttendance: checaZ(),
+      fecha: fechaZ('Desde cuándo vale el cambio.'),
+      confirm: confirmZ(),
+    },
+    async ({ venueId, assignmentId, positionId, relation, tracksAttendance, fecha, confirm }) => {
+      await puertaDeEscritura(venueId)
+      if (positionId === undefined && relation === undefined && tracksAttendance === undefined) {
+        return text({ ok: false, error: 'No dijiste qué cambiar: manda positionId, relation o tracksAttendance.' })
+      }
+      if (!confirm) {
+        const actual = await prisma.staffAssignment.findFirst({
+          where: { id: assignmentId, venueId },
+          select: {
+            effectiveTo: true,
+            positionId: true,
+            relation: true,
+            tracksAttendance: true,
+            position: { select: { name: true } },
+            staff: { select: { firstName: true, lastName: true } },
+          },
+        })
+        if (!actual) return text({ ok: false, error: 'Esa asignación no existe en esta sucursal.' })
+        if (actual.effectiveTo) return text({ ok: false, error: 'Esa asignación ya terminó. Asígnale el puesto de nuevo.' })
+        const sino = (v: boolean) => (v ? 'sí' : 'no')
+        const cambios: Record<string, string> = {}
+        if (positionId !== undefined && positionId !== actual.positionId) {
+          const nuevo = await prisma.staffPosition.findFirst({
+            where: { id: positionId, venueId },
+            select: { name: true, archivedAt: true },
+          })
+          if (!nuevo) return text({ ok: false, error: 'Ese puesto no existe en esta sucursal.' })
+          if (nuevo.archivedAt) return text({ ok: false, error: `El puesto «${nuevo.name}» está archivado. Elige otro.` })
+          cambios.puesto = `${actual.position.name} → ${nuevo.name}`
+        }
+        if (relation !== undefined && relation !== actual.relation)
+          cambios.relacion = `${actual.relation ?? SIN_DEFINIR} → ${relation ?? SIN_DEFINIR}`
+        if (tracksAttendance !== undefined && tracksAttendance !== actual.tracksAttendance) {
+          cambios.checaEntradaYSalida = `${sino(actual.tracksAttendance)} → ${sino(tracksAttendance)}`
+        }
+        if (Object.keys(cambios).length === 0) return text({ ok: false, error: 'Eso ya es lo que tiene: no hay nada que cambiar.' })
+        const desde = fecha ?? (await hoyDeLaSedeCivil(venueId))
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          fecha: desde, // arriba, no sólo en `preview`: así la firma de la confirmación ata este día
+          preview: { persona: nombreDe(actual.staff), puesto: actual.position.name, ...cambios, fecha: desde },
+          message: `Esto CAMBIARÁ la asignación de ${nombreDe(actual.staff)} desde ${desde} (${Object.entries(cambios)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join('; ')}). No cambia su rol ni sus permisos. Vuelve a llamar con confirm:true para cambiarla.`,
+        })
+      }
+      let a: AsignacionDto
+      try {
+        a = await cambiarAsignacion({
+          venueId,
+          assignmentId,
+          ...(positionId !== undefined ? { positionId } : {}),
+          ...(relation !== undefined ? { relation } : {}),
+          ...(tracksAttendance !== undefined ? { tracksAttendance } : {}),
+          fecha,
+          actorId: scope.staffId,
+        })
+      } catch (err) {
+        return rechazo(err)
+      }
+      await auditMcpWrite(scope, {
+        action: 'STAFF_ASSIGNMENT_CHANGED',
+        entity: 'StaffAssignment',
+        entityId: a.id,
+        venueId,
+        data: {
+          anterior: assignmentId,
+          positionId: a.positionId,
+          relation: a.relation,
+          tracksAttendance: a.tracksAttendance,
+          desde: a.effectiveFrom,
+        },
       })
       return text({ ok: true, asignacion: asignacionVista(a) })
     },

@@ -3,13 +3,29 @@ import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.mid
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
-import { acceptSchema, inboxSchema, orderActionSchema, pauseSchema, rejectSchema } from '@/schemas/online-ordering.schema'
+import {
+  acceptSchema,
+  deliveryCashSchema,
+  inboxSchema,
+  orderActionSchema,
+  pauseSchema,
+  rejectSchema,
+} from '@/schemas/online-ordering.schema'
 
 const router = Router({ mergeParams: true })
 
 // R14: sin candado de plan. Perder el plan bloquea pedidos NUEVOS (público) y configurar (panel), nunca atender los que ya
 // existen. Orden: auth → validación → permiso. `:orderId` es el id de la CUENTA (`Order.id`, el `orderId` de la bandeja).
 router.get('/inbox', authenticateTokenMiddleware, validateRequest(inboxSchema), checkPermission('orders:read'), ctrl.inbox)
+// Rappi 2b (decisión «A», 23-oct): la sección «Rappi · por cobrar» de esta misma pantalla. Mismo criterio R14 (sin candado de plan:
+// cobrar un pedido que ya existe nunca se bloquea) y mismo permiso de lectura que la bandeja; cobrar pide el suyo (`payments:create`).
+router.get(
+  '/delivery-cash',
+  authenticateTokenMiddleware,
+  validateRequest(deliveryCashSchema),
+  checkPermission('orders:read'),
+  ctrl.deliveryCash,
+)
 // R12 (founder, 16-oct): pausar desde el piso tiene su propio permiso, de gerente para arriba. En el POS, la cajera lo logra con
 // el PIN del gerente (`x-permission-override`, que `checkPermission` ya resuelve). Sólo admite 15, 30 o 60 minutos (o null).
 router.post('/pause', authenticateTokenMiddleware, validateRequest(pauseSchema), checkPermission('online-orders:pause'), ctrl.pause)

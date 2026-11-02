@@ -61,7 +61,8 @@ describe('updateOrder — ya no toca inventario (ni pesado ni normal)', () => {
     ])
     prismaMock.table.findMany.mockResolvedValue([])
 
-    prismaMock.order.findFirst.mockResolvedValue({ status: 'PENDING', venueId: VENUE_ID } as any)
+    // Cobrada: desde el 23-oct el panel sólo cierra una cuenta cobrada (cuentas fuera del plano); lo que se prueba es el inventario.
+    prismaMock.order.findFirst.mockResolvedValue({ status: 'PENDING', paymentStatus: 'PAID', venueId: VENUE_ID } as any)
   })
 
   it('línea PESADA: completar desde el dashboard no deduce (antes deducía los kilos)', async () => {

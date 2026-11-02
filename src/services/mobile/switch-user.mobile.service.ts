@@ -33,6 +33,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import { OPERATIONAL_VENUE_STATUSES, venueStatusMessage } from '../../lib/venueStatus.constants'
+import { ALTA_DEL_ASISTENTE, ALTA_SIN_TERMINAR, altaSinTerminar } from './altaSinTerminar'
 import { createSession, revokeSession } from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -135,6 +136,7 @@ export async function switchUserByPin(params: SwitchUserParams) {
           kycStatus: true,
           organizationId: true,
           timezone: true,
+          organization: ALTA_DEL_ASISTENTE,
         },
       },
     },
@@ -154,6 +156,11 @@ export async function switchUserByPin(params: SwitchUserParams) {
   // El mensaje NO es el genérico del PIN a propósito: quien está tecleando ya está autenticado en
   // este venue, así que su estado no es un secreto que proteger — y la regla de la casa es que lo
   // apagado se VE y se EXPLICA, nunca un rechazo mudo que parece un PIN mal tecleado.
+  // Alta sin terminar (D7): una tablet con sesión de antes del arreglo no consigue sesiones nuevas cambiando de usuario.
+  if (altaSinTerminar(staffVenue.venue)) {
+    logger.warn(`🔐 [SWITCH-USER] Alta sin terminar | venue=${venueId}`)
+    throw new ForbiddenError(ALTA_SIN_TERMINAR, 'ALTA_SIN_TERMINAR')
+  }
   if (!OPERATIONAL_VENUE_STATUSES.includes(staffVenue.venue.status)) {
     logger.warn(`🔐 [SWITCH-USER] Venue no operativo (${staffVenue.venue.status}) | venue=${venueId}`)
     throw new ForbiddenError(venueStatusMessage(staffVenue.venue.status), 'VENUE_NOT_OPERATIONAL')

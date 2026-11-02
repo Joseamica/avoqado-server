@@ -90,6 +90,47 @@ describe('unsubscribeFromEmailCategory (INVENTORY)', () => {
   })
 })
 
+describe('unsubscribeFromEmailCategory (RESERVATIONS, D4)', () => {
+  it('sin filas previas CREA la preferencia [IN_APP] para los dos avisos (no contesta «ya estabas dado de baja»)', async () => {
+    mockFindMany.mockResolvedValue([])
+    mockFindFirst.mockResolvedValue(null)
+    mockCreate.mockImplementation(async ({ data }: any) => ({ id: 'x', ...data }))
+
+    const res = await unsubscribeFromEmailCategory(STAFF, VENUE, 'RESERVATIONS')
+
+    expect(mockFindMany).toHaveBeenCalledWith({
+      where: {
+        staffId: STAFF,
+        venueId: VENUE,
+        type: { in: [NotificationType.RESERVATION_NO_SHOW_SUMMARY, NotificationType.RESERVATION_NEEDS_REVIEW] },
+      },
+      select: { type: true, channels: true },
+    })
+    expect(mockCreate).toHaveBeenCalledTimes(2)
+    expect(mockCreate.mock.calls.map(c => c[0].data)).toEqual([
+      expect.objectContaining({
+        staffId: STAFF,
+        venueId: VENUE,
+        type: NotificationType.RESERVATION_NO_SHOW_SUMMARY,
+        channels: [NotificationChannel.IN_APP],
+      }),
+      expect.objectContaining({
+        staffId: STAFF,
+        venueId: VENUE,
+        type: NotificationType.RESERVATION_NEEDS_REVIEW,
+        channels: [NotificationChannel.IN_APP],
+      }),
+    ])
+    expect(res).toEqual({ affectedTypes: 2, alreadyUnsubscribed: false })
+  })
+
+  it('la página de baja dice «avisos de reservaciones»', async () => {
+    mockStaff.mockResolvedValue({ email: 'jose@example.com', firstName: 'Jose' })
+    mockVenue.mockResolvedValue({ name: 'Mindform' })
+    expect((await getUnsubscribeContext(STAFF, VENUE, 'RESERVATIONS'))?.categoryLabel).toBe('avisos de reservaciones')
+  })
+})
+
 describe('getUnsubscribeContext', () => {
   it('returns staff email + venue name for the confirm page', async () => {
     mockStaff.mockResolvedValue({ email: 'jose@example.com', firstName: 'Jose' })

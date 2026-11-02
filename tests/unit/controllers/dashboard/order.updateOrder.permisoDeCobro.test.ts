@@ -1,11 +1,6 @@
 /**
- * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A» del founder): el PUT del panel
- * (`PUT /dashboard/venues/:venueId/orders/:orderId`, `orders:update`) resuelve `payments:create` de quien edita — con el
- * resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`: el de `checkPermission`, con personalizaciones del negocio y conjuntos
- * de permisos), cerrado ante falla — y se lo pasa al servicio, que decide bajo el candado de la venta. Sólo cuando la petición
- * trae `customerId`: editar el nombre o el estado no cuesta una consulta de permisos de más.
- *
- * Controller REAL con el resolvedor real; la base es el prismaMock y el servicio se espía.
+ * Controller real y resolvedor efectivo: transporta actor actual, autoridad histórica
+ * y permiso de recibo por separado. No confía en rol viejo del JWT ni en staffId del body.
  */
 import type { NextFunction, Request, Response } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -62,39 +57,91 @@ beforeEach(() => {
 })
 afterEach(() => espia.mockRestore())
 
-describe('🔴 R4-2: el PUT del panel resuelve payments:create de quien cambia el cliente', () => {
+describe('PUT del panel — actor y permisos efectivos de atribución', () => {
   it('🔴 KITCHEN (sin payments:create): el servicio recibe puedeCambiarClienteEnVentaCobrada: false', async () => {
     quienEdita('KITCHEN')
     const { status, next } = await editar({ customerId: 'cust-K' })
     expect(next).not.toHaveBeenCalled()
     expect(status).toBe(200)
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, { customerId: 'cust-K' }, { puedeCambiarClienteEnVentaCobrada: false })
+    expect(espia).toHaveBeenCalledWith(
+      VENUE,
+      ORDER,
+      { customerId: 'cust-K' },
+      {
+        puedeCambiarClienteEnVentaCobrada: false,
+        staffId: STAFF,
+        customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: false },
+      },
+    )
   })
 
-  it.each([['CASHIER'], ['MANAGER']])('%s (con payments:create): el servicio recibe puedeCambiarClienteEnVentaCobrada: true', async rol => {
+  it.each([['CASHIER'], ['MANAGER']])('%s: recibo permitido y autoridad histórica sólo para gerente', async rol => {
     quienEdita(rol)
     await editar({ customerId: 'cust-K' }, rol)
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, { customerId: 'cust-K' }, { puedeCambiarClienteEnVentaCobrada: true })
+    expect(espia).toHaveBeenCalledWith(
+      VENUE,
+      ORDER,
+      { customerId: 'cust-K' },
+      {
+        puedeCambiarClienteEnVentaCobrada: true,
+        staffId: STAFF,
+        customerAttribution: { staffId: STAFF, canAssignHistorical: rol === 'MANAGER', canAttachAtReceipt: true },
+      },
+    )
   })
 
   it('🔴 el negocio le QUITÓ payments:create al CASHIER (editor de roles) ⇒ false: manda el resolvedor efectivo', async () => {
     quienEdita('CASHIER', { deniedPermissions: SIN_COBRAR })
     await editar({ customerId: 'cust-K' }, 'CASHIER')
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), { puedeCambiarClienteEnVentaCobrada: false })
+    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), {
+      puedeCambiarClienteEnVentaCobrada: false,
+      staffId: STAFF,
+      customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: false },
+    })
   })
 
-  it('🔴 si el permiso no se puede resolver (falla la base) ⇒ CERRADO: false, y la petición sigue al servicio', async () => {
+  it('falla la resolución: propaga el error sin invocar una escritura sin autoridad', async () => {
     quienEdita('CASHIER')
-    prismaMock.staffVenue.findUnique.mockRejectedValue(new Error('se cayó la base'))
-    const { next } = await editar({ customerId: 'cust-K' }, 'CASHIER')
-    expect(next).not.toHaveBeenCalled()
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), { puedeCambiarClienteEnVentaCobrada: false })
+    const error = new Error('se cayó la base')
+    prismaMock.staffVenue.findUnique.mockRejectedValue(error)
+    const { next, status } = await editar({ customerId: 'cust-K' }, 'CASHIER')
+    expect(status).toBeUndefined()
+    expect(next).toHaveBeenCalledWith(error)
+    expect(espia).not.toHaveBeenCalled()
+  })
+
+  it('CASHIER con permiso nuevo explícito no alcanza el piso de gerente', async () => {
+    quienEdita('CASHIER', { permissions: ['orders:attach-customer'] })
+    await editar({ customerId: 'cust-K', staffId: 'manager-spoof' }, 'MANAGER')
+    expect(espia).toHaveBeenCalledWith(
+      VENUE,
+      ORDER,
+      expect.any(Object),
+      expect.objectContaining({
+        staffId: STAFF,
+        customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: true },
+      }),
+    )
+  })
+
+  it('MANAGER con el permiso histórico quitado tampoco obtiene autoridad', async () => {
+    quienEdita('MANAGER', { deniedPermissions: ['orders:attach-customer'] })
+    await editar({ customerId: 'cust-K' }, 'MANAGER')
+    expect(espia).toHaveBeenCalledWith(
+      VENUE,
+      ORDER,
+      expect.any(Object),
+      expect.objectContaining({
+        customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: true },
+      }),
+    )
   })
 
   it('una petición SIN customerId no consulta permisos de más (como hoy)', async () => {
     quienEdita('KITCHEN')
     await editar({ customerName: 'Kev', status: 'COMPLETED' })
-    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, { customerName: 'Kev', status: 'COMPLETED' }, {})
+    // D2 (vales): quien edita siempre viaja (`staffId`), para firmar la bitácora si cancelar suelta los vales de la venta.
+    expect(espia).toHaveBeenCalledWith(VENUE, ORDER, { customerName: 'Kev', status: 'COMPLETED' }, { staffId: STAFF })
     expect(prismaMock.staffVenue.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.venueRolePermission.findUnique).not.toHaveBeenCalled()
   })

@@ -106,6 +106,14 @@ describe('Order.contratoDePrecio — escritores', () => {
     expect(faltan).toEqual([])
   })
 
+  it('the exchange private sale writer declares IVA_INCLUIDO at creation', () => {
+    const rel = 'services/exchanges/exchangeTx.ts'
+    const sitios = creates.filter(s => s.rel === rel)
+    expect(sitios.map(s => ({ funcion: s.funcion, declara: s.declara }))).toEqual([{ funcion: 'createExchangeSaleInTx', declara: true }])
+    const lineas = fs.readFileSync(path.join(SRC, rel), 'utf8').split('\n')
+    expect(llamada(lineas, sitios[0].linea - 1)).toMatch(/contratoDePrecio\s*:\s*'IVA_INCLUIDO'/)
+  })
+
   it('ningún update reescribe el contrato fuera de la fusión y la confirmación', () => {
     expect(reescrituras.map(s => `${s.rel}:${s.linea} (${s.funcion})`)).toEqual([])
   })

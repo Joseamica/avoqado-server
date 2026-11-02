@@ -5,8 +5,16 @@ import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import logger from '@/config/logger'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
+import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
+import { esVentaNuevaDeCambio, sqlOrigenEconomico } from '@/services/exchanges/exchangeMarks'
+import { ORDER_LOCK_WAIT_BUDGET, esVentaDeCajaCerrada, esVentaDeTurnoCerrado, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { aCentavos } from '@/services/shared/repartoDescuento'
 
-export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
+/**
+ * `AVISO_TURNO_CERRADO` (S3 «Efectivo sin red en el turno correcto»): el aviso al gerente de una venta de la cola que quedó APARTE
+ * porque su turno (o su caja sin turno) ya se había cerrado. Nace en la transacción del cobro y es el ÚNICO emisor de ese aviso.
+ */
+export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST' | 'AVISO_TURNO_CERRADO'
 export type PaymentEffectInput = {
   venueId: string
   paymentId: string
@@ -26,6 +34,25 @@ const COMMISSION_AWAITS_ORIGINAL_OVERDUE = 'COMMISSION_AWAITS_ORIGINAL_OVERDUE'
 /** Desde que nace el efecto: a partir de aquí la espera de la comisión original se escala (como el costo diferido). */
 const ESPERA_DE_COMISION_ORIGINAL_VENCE_MS = 24 * 60 * 60_000
 const MAX_ATTEMPTS = 6
+/** S3: cada cuánto se reintenta un aviso de venta apartada que todavía no consta (sin gastar intentos). */
+const ESPERA_DEL_AVISO_MS = 5 * 60_000
+/**
+ * S3: el aviso de una venta apartada NUNCA se descarta (Codex r1 código #4: abandonarlo rompe «el gerente recibe un aviso»), pero
+ * tampoco gira en silencio (revisión de «Cobrar sin red TPV»): pasado este plazo desde que nació, se reintenta cada hora
+ * (`ESPERA_DEL_AVISO_ATRASADO_MS`) y cada intento fallido queda como ERROR en el log con `AVISO_TURNO_CERRADO_ATRASADO`.
+ */
+export const PLAZO_DEL_AVISO_MS = 7 * 24 * 60 * 60_000
+const ESPERA_DEL_AVISO_ATRASADO_MS = 60 * 60_000
+/** El único tipo que el agotamiento genérico (reclamo o falla) no manda a DEAD_LETTER. */
+const AVISO_NUNCA_SE_DESCARTA = 'AVISO_TURNO_CERRADO'
+
+/** Lo que se guarda del error del aviso: sólo códigos propios o el código/nombre del error, nunca texto arbitrario (política de arriba). */
+function codigoDelErrorDelAviso(error: unknown): string {
+  const mensaje = error instanceof Error ? error.message : String(error)
+  if (/^AVISO_[A-Z_]+/.test(mensaje)) return mensaje.slice(0, 200)
+  const codigo = (error as { code?: unknown } | null)?.code
+  return typeof codigo === 'string' ? codigo : error instanceof Error ? error.name : 'ERROR'
+}
 const LEASE_MS = 120_000
 
 /**
@@ -65,8 +92,16 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   } satisfies Prisma.PaymentWhereInput
   // Tarjetas de regalo (R1): la marca COMPLETA de la cuenta (⭐ B6 M2: con tarjeta y sin renglones sin ella) viaja en esta MISMA
   // lectura, y sólo para comisión y referido: sin `relationJoins` son SQL de más dentro de la transacción del cobro (con el FOR UPDATE).
-  const source: { orderId: string; order?: { items?: Array<{ id: string }>; _count?: { items?: number } } } | null = premiaVenta
-    ? await tx.payment.findFirst({ where, select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS } } })
+  // El tender del cobro (crédito de cambio) viaja en la misma lectura, por la misma razón.
+  const source: {
+    orderId: string
+    order?: { items?: Array<{ id: string }>; _count?: { items?: number } }
+    tenderType?: { systemKind: string | null } | null
+  } | null = premiaVenta
+    ? await tx.payment.findFirst({
+        where,
+        select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS }, tenderType: { select: { systemKind: true } } },
+      })
     : await tx.payment.findFirst({ where, select: { orderId: true } })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
   // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
@@ -74,7 +109,47 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   // la cuenta de mercancía pagada con saldo no es de tarjetas.
   // r1 (lote ⭐): el `?.` de `items` NO sobra: el reembolso de la TPV llega con `order` sin `items`.
   if (premiaVenta && esCuentaDeTarjetasSeleccionada(source.order)) return
+  // Crédito de cambio (spec §7.6): ni el cobro de la venta nueva comisiona ni su devolución gemela revierte la comisión, y ninguno
+  // toca referidos. Así un cambio parejo deja la comisión igual con cualquier esquema; sólo la diferencia comisiona o revierte.
+  if (premiaVenta && isExchangeCreditTenderKind(source.tenderType?.systemKind)) return
+  // La venta nueva de un cambio no es una compra nueva: no dispara referidos, ni con la diferencia cobrada. Su comisión sí va.
+  if (input.kind === 'REFERRAL' && (await esVentaNuevaDeCambio(tx, input.orderId))) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
+}
+
+/**
+ * S3 (Codex r1 código #5): un pago APARTADO (marca `ventaDeTurnoCerrado` o `cajaDeLaVentaCerrada`) que nació ANTES de este cambio no
+ * tiene su efecto `AVISO_TURNO_CERRADO`; el reintento idempotente de la cola lo asegura desde lo GUARDADO. Idempotente por `dedupeKey`.
+ * Codex r2 código #2: si la escritura falla, LANZA: el reintento responde error y el aparato vuelve con la misma llave (nunca un éxito
+ * sin el efecto). #3: el monto es el del pago guardado, no el que trae el reintento. Sólo un pago COMPLETED (como el cobro nuevo).
+ */
+export async function asegurarAvisoDeVentaApartada(pago: {
+  venueId: string
+  paymentId: string
+  orderId: string | null
+  status: string
+  posRawData: Prisma.JsonValue | undefined
+  externalId: string
+  montoPesos: Prisma.Decimal | number | string
+  terminalSerial: string | null
+}): Promise<void> {
+  if (pago.status !== 'COMPLETED') return
+  if (!esVentaDeTurnoCerrado(pago.posRawData) && !esVentaDeCajaCerrada(pago.posRawData)) return
+  await prisma.$transaction(tx =>
+    enqueuePaymentEffect(tx, {
+      venueId: pago.venueId,
+      paymentId: pago.paymentId,
+      orderId: pago.orderId,
+      kind: 'AVISO_TURNO_CERRADO',
+      dedupeKey: 'aviso-turno-cerrado:' + pago.paymentId,
+      payload: {
+        externalId: pago.externalId,
+        montoCents: aCentavos(pago.montoPesos),
+        orderId: pago.orderId,
+        terminalSerial: pago.terminalSerial,
+      },
+    }),
+  )
 }
 
 /** Both pending and abandoned work are bounded and claimed atomically across processes. */
@@ -107,11 +182,11 @@ export async function claimPaymentEffects(input: { now: Date; limit?: number; db
       LIMIT ${limit} FOR UPDATE SKIP LOCKED
     )
     UPDATE "PaymentEffect" e SET
-      status = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} THEN 'DEAD_LETTER' ELSE 'PROCESSING' END,
-      attempts = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} THEN e.attempts ELSE e.attempts + 1 END,
-      "claimToken" = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} THEN NULL ELSE ${token} END,
-      "leaseUntil" = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} THEN NULL ELSE ${utcTs(leaseUntil)} END,
-      "lastError" = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} THEN COALESCE(e."lastError", 'LEASE_ATTEMPTS_EXHAUSTED') ELSE e."lastError" END,
+      status = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} AND e.kind <> ${AVISO_NUNCA_SE_DESCARTA} THEN 'DEAD_LETTER' ELSE 'PROCESSING' END,
+      attempts = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} AND e.kind <> ${AVISO_NUNCA_SE_DESCARTA} THEN e.attempts ELSE e.attempts + 1 END,
+      "claimToken" = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} AND e.kind <> ${AVISO_NUNCA_SE_DESCARTA} THEN NULL ELSE ${token} END,
+      "leaseUntil" = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} AND e.kind <> ${AVISO_NUNCA_SE_DESCARTA} THEN NULL ELSE ${utcTs(leaseUntil)} END,
+      "lastError" = CASE WHEN e.attempts >= ${MAX_ATTEMPTS} AND e.kind <> ${AVISO_NUNCA_SE_DESCARTA} THEN COALESCE(e."lastError", 'LEASE_ATTEMPTS_EXHAUSTED') ELSE e."lastError" END,
       "updatedAt" = ${utcTs(input.now)}
     FROM picked WHERE e.id = picked.id RETURNING e.*
   `)
@@ -129,7 +204,12 @@ export async function claimPaymentEffects(input: { now: Date; limit?: number; db
 /** DB side effects and completion share a transaction. A reclaimed token cannot mutate either. */
 export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: PrismaClient = prisma): Promise<boolean> {
   const external = await db.paymentEffect.findFirst({
-    where: { id: claim.id, claimToken: claim.claimToken, status: 'PROCESSING', kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST'] } },
+    where: {
+      id: claim.id,
+      claimToken: claim.claimToken,
+      status: 'PROCESSING',
+      kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO'] },
+    },
   })
   if (external) {
     // These existing consumers own their transaction and dedupe. In particular,
@@ -137,6 +217,48 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
     if (external.kind === 'RECEIPT') {
       const { generateDigitalReceipt } = await import('./digitalReceipt.tpv.service')
       await generateDigitalReceipt(external.paymentId)
+    } else if (external.kind === 'AVISO_TURNO_CERRADO') {
+      // S3 (Codex plan r4 #3): termina sólo cuando consta la notificación de cada OWNER/ADMIN. Si no —una notificación que falló,
+      // otra ejecución con la llave en vuelo—, vuelve a PENDIENTE SIN gastar intentos, como la espera de `TRANSACTION_COST`: un aviso
+      // prometido nunca llega a DEAD_LETTER ni queda DONE sin notificación. Su dedupe por persona evita repetirlo.
+      const { enviarAvisoDeVentaSinRed } = await import('../mobile/avisoDeVentaSinRed')
+      const datos = external.payload as { externalId: string; montoCents?: number; orderId?: string; terminalSerial?: string | null }
+      try {
+        await enviarAvisoDeVentaSinRed(external.venueId, 'TURNO_CERRADO', {
+          externalId: datos.externalId,
+          montoCents: datos.montoCents,
+          orderId: datos.orderId,
+          terminalSerial: datos.terminalSerial ?? undefined,
+        })
+      } catch (error) {
+        const motivo = codigoDelErrorDelAviso(error)
+        const atrasado = Date.now() - external.createdAt.getTime() > PLAZO_DEL_AVISO_MS
+        if (atrasado) {
+          logger.error('[PAYMENT EFFECT] AVISO_TURNO_CERRADO_ATRASADO: el aviso de una venta apartada lleva más de 7 días sin constar', {
+            effectId: external.id,
+            venueId: external.venueId,
+            error: motivo,
+          })
+        } else {
+          logger.warn('[PAYMENT EFFECT] El aviso de la venta apartada todavía no consta; se reintenta', {
+            effectId: external.id,
+            venueId: external.venueId,
+            error: motivo,
+          })
+        }
+        await db.paymentEffect.updateMany({
+          where: { id: external.id, claimToken: claim.claimToken, status: 'PROCESSING' },
+          data: {
+            status: 'PENDING',
+            nextAttemptAt: new Date(Date.now() + (atrasado ? ESPERA_DEL_AVISO_ATRASADO_MS : ESPERA_DEL_AVISO_MS)),
+            claimToken: null,
+            leaseUntil: null,
+            attempts: 0,
+            lastError: `${atrasado ? 'AVISO_TURNO_CERRADO_ATRASADO' : 'AVISO_TURNO_CERRADO_PENDIENTE'}: ${motivo}`,
+          },
+        })
+        return false
+      }
     } else if (external.kind === 'TRANSACTION_COST') {
       // S2 (Codex P2): costo PENDIENTE de un Payment nacido del webhook. Esperar la marca NO es un fallo: se reprograma
       // sin consumir intentos; el plazo del payload acota la espera y un error REAL sí cuenta y llega a DEAD_LETTER.
@@ -183,8 +305,16 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
   }
   return db.$transaction(async tx => {
     // Use the same lock order as financial producers (Order before its effect rows).
-    if (claim.orderId)
-      await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${claim.orderId} AND "venueId" = ${claim.venueId} FOR UPDATE`)
+    if (claim.orderId) await lockExistingOrderForPayment(tx, { venueId: claim.venueId, orderId: claim.orderId })
+    // R19: la raíz ya quedó tomada con las otras órdenes; esta reentrada conserva la comprobación del origen económico.
+    if (claim.kind === 'COMMISSION')
+      await tx.$queryRaw(Prisma.sql`
+        SELECT o.id FROM "Order" o
+        JOIN "Payment" original ON original."orderId" = o.id AND original."venueId" = o."venueId"
+        JOIN "Payment" r ON ${sqlOrigenEconomico('r')} = original.id AND r."venueId" = original."venueId"
+        WHERE r.id = ${claim.paymentId} AND r."venueId" = ${claim.venueId} AND r.type = 'REFUND'
+          AND r."orderId" IS NOT DISTINCT FROM ${claim.orderId} AND o.id IS DISTINCT FROM ${claim.orderId}
+        FOR UPDATE OF o`)
     const [effect] = await tx.$queryRaw<PaymentEffect[]>(Prisma.sql`
       SELECT * FROM "PaymentEffect" WHERE id = ${claim.id} AND "claimToken" = ${claim.claimToken}
       AND status = 'PROCESSING' FOR UPDATE
@@ -244,7 +374,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       data: { status: 'DONE', completedAt: new Date(), claimToken: null, leaseUntil: null, lastError: null },
     })
     return true
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 export async function failClaimedPaymentEffect(
@@ -261,7 +391,9 @@ export async function failClaimedPaymentEffect(
   const result = await db.paymentEffect.updateMany({
     where: { id: claim.id, claimToken: claim.claimToken, status: 'PROCESSING' },
     data: {
-      status: claim.attempts >= MAX_ATTEMPTS ? 'DEAD_LETTER' : 'PENDING',
+      // S3 (Codex r1 código #4): el aviso de una venta apartada nunca se descarta por agotamiento; vuelve a pendiente sin contar intentos.
+      status: claim.attempts >= MAX_ATTEMPTS && claim.kind !== AVISO_NUNCA_SE_DESCARTA ? 'DEAD_LETTER' : 'PENDING',
+      ...(claim.kind === AVISO_NUNCA_SE_DESCARTA ? { attempts: 0 } : {}),
       nextAttemptAt: new Date(now.getTime() + Math.min(3_600_000, 30_000 * 2 ** Math.max(0, claim.attempts - 1))),
       leaseUntil: null,
       claimToken: null,
@@ -313,6 +445,8 @@ export async function enqueueRefundPaymentEffectsInTx(
   originalPaymentId: string,
 ): Promise<void> {
   const { createRefundCommission } = await import('../dashboard/commission/commission-calculation.service')
+  // El sobre conserva la orden de SU cobro; sólo el cálculo congelado se atribuye a la raíz (R6).
+  const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   // Fase 3 (A2, resolución del ensamblaje): una falla al CALCULAR el reverso de la comisión nunca bloquea la devolución —el
   // dinero ya salió o está saliendo—. Se revierte sólo ese cálculo y queda una obligación visible para revisión, igual que en
   // el cobro. Una conexión perdida de verdad sigue tumbando el commit (la siguiente consulta falla igual).
@@ -326,7 +460,7 @@ export async function enqueueRefundPaymentEffectsInTx(
         await enqueuePaymentEffect(tx, {
           venueId: data.venueId,
           paymentId: refundPaymentId,
-          orderId: data.orderId ?? null,
+          orderId: payment.orderId,
           kind: 'COMMISSION',
           dedupeKey,
           payload: JSON.parse(JSON.stringify(data)),
@@ -359,7 +493,6 @@ export async function enqueueRefundPaymentEffectsInTx(
     })
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
   }
-  const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,
     paymentId: refundPaymentId,

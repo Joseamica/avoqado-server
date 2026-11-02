@@ -9,10 +9,13 @@
  * Los dos importes salen de la MISMA lectura que la base (`recorrerLibros`: la parte sin IVA de cada movimiento, con el mismo alcance
  * fiscal y el mismo periodo, y las devoluciones restando), así que son exactamente lo que la base deja fuera o mete:
  *  - `cargasCents`: lo cobrado por cuentas de tarjetas, neto de sus devoluciones (sin IVA: sus renglones son NO_OBJETO);
- *  - `pagadoConSaldoSinIvaCents`: la parte sin IVA de los cobros con saldo (tender de sistema), neta de sus devoluciones.
+ *  - `pagadoConSaldoSinIvaCents`: la parte sin IVA de los cobros con saldo (tender de sistema), neta de sus devoluciones. Saldo a favor
+ *    (spec 2026-10-30 §5.3, S8b): lo canjeado de un sobre de saldo a favor NO va aquí —es venta normal y ya está bien en la base: su
+ *    devolución restó la venta original—. Se reparte por canje (`saldoAFavorPorFila`, cargado ANTES del recorrido, que es síncrono).
  * Las órdenes salen de las marcas de B1. Un negocio que nunca tuvo una tarjeta paga UNA consulta indexada y nada más.
  * Sólo lecturas, dentro de la foto de quien llama (recibe `tx`; no abre otra).
  */
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import { ValidationError } from '../../errors/AppError'
 import { parseDbDateRange } from '../../utils/datetime'
@@ -21,6 +24,7 @@ import { LOTE_DE_ORDENES, type LimitesDelReporte } from '../dashboard/accounting
 import { sqlCobroNoEsSaldoDeRegalo, sqlOrdenSinTarjetas, WHERE_COBRO_ES_SALDO_DE_REGALO } from '../giftCards/giftCardMarks'
 import { metodoParaAlcanceFiscal, paymentInFiscalScope } from './fiscalScope'
 import { recorrerLibros, TOPES_POR_ORDEN } from './librosDeOrdenes'
+import { saldoAFavorPorFila, sinLaParteDeSaldoAFavor } from '../storeCredit/saldoAFavorEnLectores'
 
 export type TarjetasEnElIsr = { cargasCents: number; pagadoConSaldoSinIvaCents: number }
 
@@ -81,31 +85,32 @@ export async function tarjetasDeRegaloEnFoto(
   for (let i = 0; i < filas.length; i += LOTE_DE_ORDENES) {
     const lote = filas.slice(i, i + LOTE_DE_ORDENES).map(f => f.orderId)
     const deMercancia = lote.filter(id => !deTarjetas.has(id))
-    const conSaldo = new Set(
+    const cobrosConSaldo =
       deMercancia.length === 0
         ? []
-        : (
-            await tx.payment.findMany({
-              take: deMercancia.length * TOPES_POR_ORDEN.movimientos,
-              where: {
-                venueId,
-                orderId: { in: deMercancia },
-                status: TransactionStatus.COMPLETED,
-                createdAt: { gte: from, lte: to },
-                ...WHERE_COBRO_ES_SALDO_DE_REGALO,
-              },
-              select: { id: true },
-              orderBy: { id: 'asc' },
-            })
-          ).map(p => p.id),
-    )
+        : await tx.payment.findMany({
+            take: deMercancia.length * TOPES_POR_ORDEN.movimientos,
+            where: {
+              venueId,
+              orderId: { in: deMercancia },
+              status: TransactionStatus.COMPLETED,
+              createdAt: { gte: from, lte: to },
+              ...WHERE_COBRO_ES_SALDO_DE_REGALO,
+            },
+            select: { id: true, type: true },
+            orderBy: { id: 'asc' },
+          })
+    const conSaldo = new Set(cobrosConSaldo.map(p => p.id))
+    // S8b: lo de sobres de saldo a favor, por canje y en UNA consulta del lote, antes del acumulador (que no espera promesas).
+    const deSaldoAFavor = await saldoAFavorPorFila(tx, cobrosConSaldo)
     // Las mismas reglas que `sumarMovimiento` del estado de resultados: del periodo, en el alcance fiscal, la parte con su signo.
     await recorrerLibros(tx, { venueId, orderIds: lote, hasta: to }, (m, parte) => {
-      if (m.createdAt < from || m.createdAt > to) return
+      if (m.createdAt < from || m.createdAt > to || isExchangeCreditTenderKind(m.tenderSystemKind)) return
       const metodo = m.type === PaymentType.REFUND ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method
       if (!paymentInFiscalScope(metodo, m.incluirEnContabilidad, includeCashInAccounting)) return
       if (deTarjetas.has(m.orderId)) cargasCents += parte.netCents
-      else if (conSaldo.has(m.id)) pagadoConSaldoSinIvaCents += parte.netCents
+      else if (conSaldo.has(m.id))
+        pagadoConSaldoSinIvaCents += sinLaParteDeSaldoAFavor(parte.netCents, m.amountCents + m.tipCents, deSaldoAFavor.get(m.id) ?? 0)
     })
   }
   return { cargasCents, pagadoConSaldoSinIvaCents }

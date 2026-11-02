@@ -31,6 +31,18 @@ describe.each([assertDisposableH1Database, assertDisposableCatalogPublicationDat
     process.env.TEST_DATABASE_URL = 'postgresql://test:test@localhost/avoqado_h1a_test_456'
     expect(guard).toThrow()
   })
+
+  if (guard === assertDisposableCatalogPublicationDatabase) {
+    it('accepts the explicitly selected local R5 database and still rejects remote or mismatched R5 aliases', () => {
+      const r5 = 'postgresql://test:test@localhost:5432/avoqado_cambio_r5_test_20261024'
+      process.env.DATABASE_URL = process.env.TEST_DATABASE_URL = r5
+      expect(guard).not.toThrow()
+      process.env.TEST_DATABASE_URL = r5.replace('localhost', 'remote.example')
+      expect(guard).toThrow()
+      process.env.DATABASE_URL = process.env.TEST_DATABASE_URL
+      expect(guard).toThrow()
+    })
+  }
 })
 
 describe('disposable runner ownership', () => {

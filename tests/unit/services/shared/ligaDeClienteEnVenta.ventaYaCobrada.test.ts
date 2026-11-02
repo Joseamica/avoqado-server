@@ -90,7 +90,11 @@ const venta = (paymentStatus: string, cobrado: string | null, over: Record<strin
         ...over,
       }),
     },
-    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: cobrado, tipAmount: null } }) },
+    orderCustomer: { findFirst: jest.fn().mockResolvedValue(null) },
+    payment: {
+      aggregate: jest.fn().mockResolvedValue({ _sum: { amount: cobrado, tipAmount: null } }),
+      findFirst: jest.fn().mockResolvedValue({ status: 'COMPLETED', type: null, createdAt: new Date(), processedById: 'cashier' }),
+    },
   }) as any
 
 describe('🔴 R7-2 / R11-2: asegurarCambioDeClienteBajoCandado — la regla compartida bajo el candado', () => {
@@ -107,7 +111,7 @@ describe('🔴 R7-2 / R11-2: asegurarCambioDeClienteBajoCandado — la regla com
     ).resolves.toBeUndefined()
   })
 
-  it('🔴 R11-2: venta PENDING cuyos cobros capturados YA la cubren (la finalización falló) ⇒ 403 sin el permiso', async () => {
+  it('venta PENDING cuyos cobros capturados YA la cubren espera a su finalización antes de atribuir cliente', async () => {
     await expect(
       asegurarCambioDeClienteBajoCandado(tx('PENDING', '100.00'), {
         venueId: VENUE,
@@ -115,21 +119,27 @@ describe('🔴 R7-2 / R11-2: asegurarCambioDeClienteBajoCandado — la regla com
         clienteNuevo: 'cust-y',
         puedeCobrar: false,
       }),
-    ).rejects.toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SALE_NOT_ELIGIBLE_FOR_CUSTOMER' })
   })
 
-  it('con el permiso no lee nada', async () => {
+  it('gerencia también relee estado y atribución para impedir reemplazar un cliente', async () => {
     const t = tx('PAID')
     await expect(
-      asegurarCambioDeClienteBajoCandado(t, { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-y', puedeCobrar: true }),
+      asegurarCambioDeClienteBajoCandado(t, {
+        venueId: VENUE,
+        orderId: ORDER,
+        clienteNuevo: 'cust-y',
+        puedeCobrar: true,
+        actor: { canAssignHistorical: true },
+      }),
     ).resolves.toBeUndefined()
-    expect(t.order.findFirst).not.toHaveBeenCalled()
+    expect(t.order.findFirst).toHaveBeenCalled()
   })
 
   it('PAID ⇒ 403', async () => {
     await expect(
       asegurarCambioDeClienteBajoCandado(tx('PAID'), { venueId: VENUE, orderId: ORDER, clienteNuevo: 'cust-nuevo', puedeCobrar: false }),
-    ).rejects.toMatchObject({ statusCode: 403, code: CODIGO_CLIENTE_DE_VENTA_COBRADA })
+    ).rejects.toMatchObject({ statusCode: 403, code: 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER' })
   })
 })
 
@@ -179,5 +189,34 @@ describe('🔴 R11-2: ventaYaCobradaBajoCandado', () => {
     const t = venta('PENDING', null)
     t.order.findFirst.mockResolvedValue(null)
     await expect(lee(t)).resolves.toBeNull()
+  })
+})
+
+/** Cuentas fuera del plano (23-oct): el PUT del panel no cierra una cuenta sin cobrar y dice lo que falta (`pendiente`). */
+describe('ventaYaCobradaBajoCandado — pendiente', () => {
+  const lee = (t: any) => ventaYaCobradaBajoCandado(t, { venueId: VENUE, orderId: ORDER })
+
+  it('abono de $40 a $100 ⇒ faltan $60, no cobrada', async () => {
+    const r = await lee(venta('PENDING', '40.00'))
+    expect(r).toMatchObject({ cobrada: false })
+    expect(r!.pendiente.toFixed(2)).toBe('60.00')
+  })
+
+  it('PAID ⇒ nada pendiente, sin leer los cobros', async () => {
+    const t = venta('PAID', null)
+    const r = await lee(t)
+    expect(r).toMatchObject({ cobrada: true })
+    expect(r!.pendiente.toFixed(2)).toBe('0.00')
+    expect(t.payment.aggregate).not.toHaveBeenCalled()
+  })
+
+  it('cortesía total ($0) sin cobros ⇒ nada pendiente, pero NO cobrada (como hoy)', async () => {
+    const r = await lee(venta('PENDING', null, { discountAmount: '100.00' }))
+    expect(r).toMatchObject({ cobrada: false })
+    expect(r!.pendiente.toFixed(2)).toBe('0.00')
+  })
+
+  it('$99.99 cobrados de $100 ⇒ cobrada (la tolerancia de un centavo de los cobros)', async () => {
+    await expect(lee(venta('PENDING', '99.99'))).resolves.toMatchObject({ cobrada: true })
   })
 })
