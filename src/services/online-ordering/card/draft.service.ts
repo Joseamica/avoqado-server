@@ -145,10 +145,17 @@ async function trackingStatus(charge: OnlineOrderCharge): Promise<PublicTracking
   return order?.status ?? cardDraftTrackingStatus(charge)
 }
 
-const toResult = (charge: OnlineOrderCharge, replay: boolean, status: PublicTracking['status']): CardDraftResult => ({
+/**
+ * S7 (Codex plan r2 #5): la página de pago de un borrador que sigue esperando pero ya venció no se vuelve a mandar: la tienda va
+ * al seguimiento, que confirma el borrador y da su estado real.
+ */
+const checkoutExpired = (charge: OnlineOrderCharge, now: Date) =>
+  charge.status === OnlineOrderChargeStatus.PENDING_AUTH && charge.checkoutExpiresAt.getTime() <= now.getTime()
+
+const toResult = (charge: OnlineOrderCharge, replay: boolean, status: PublicTracking['status'], now: Date): CardDraftResult => ({
   trackingToken: charge.trackingToken,
   // ponytail: un borrador que el conciliador cerró sin sesión responde sin liga; la tienda sigue el seguimiento.
-  checkoutUrl: charge.checkoutUrl ?? '',
+  checkoutUrl: checkoutExpired(charge, now) ? '' : (charge.checkoutUrl ?? ''),
   status,
   total: new Prisma.Decimal(charge.amount).toFixed(2),
   replay,
@@ -297,5 +304,5 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
   const { charge, replay } = decided
   const ready =
     charge.checkoutUrl || charge.status !== OnlineOrderChargeStatus.PENDING_AUTH ? charge : await requestCardCheckout(charge, now)
-  return toResult(ready, replay, replay ? await trackingStatus(ready) : 'AWAITING_PAYMENT')
+  return toResult(ready, replay, replay ? await trackingStatus(ready) : 'AWAITING_PAYMENT', now)
 }

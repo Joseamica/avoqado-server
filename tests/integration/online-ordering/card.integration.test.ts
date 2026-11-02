@@ -299,6 +299,21 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(await prisma.onlineOrderCharge.count({ where: { venueId: venueId!, idempotencyKey: key } })).toBe(1)
   })
 
+  it('S7 (clientes, Codex plan r2 #5): repetir con la página de pago ya vencida no manda checkoutUrl; vigente, la misma', async () => {
+    const key = nextKey()
+    const phone = nextPhone()
+    const first = await draft({ key, phone })
+    const { checkoutExpiresAt } = await chargeOf(key)
+    await expect(draft({ key, phone, now: new Date(checkoutExpiresAt.getTime() - 1) })).resolves.toEqual({ ...first, replay: true })
+    await expect(draft({ key, phone, now: checkoutExpiresAt })).resolves.toEqual({
+      ...first,
+      checkoutUrl: '',
+      status: 'AWAITING_PAYMENT',
+      replay: true,
+    })
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
   it('misma llave con otro carrito → 409 IDEMPOTENCY_KEY_CONFLICT', async () => {
     const key = nextKey()
     const phone = nextPhone()
