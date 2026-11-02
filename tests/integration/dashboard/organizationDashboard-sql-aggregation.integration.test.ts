@@ -699,7 +699,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       prisma.payment.create({
         data: {
           venueId: v1,
-          orderId: original.orderId,
+          orderId: original.orderId ?? undefined,
           processedById,
           createdAt: new Date(EVENING.getTime() + 10 * 60_000), // 17:40 local: fuera de toda checada
           amount: -amount,
