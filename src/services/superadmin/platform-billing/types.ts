@@ -36,6 +36,12 @@ export interface PlatformCfdiLineInput {
   taxRate?: number
   /** When true, the line is IVA-exempt (objetoImp "01", no taxes). */
   taxExempt?: boolean
+  /**
+   * When true, `unitPriceCents` ALREADY includes the IVA (the PAC takes the base out of it). Default false = IVA added on top.
+   * Only «Por cobrar» lines set it (`conceptToCfdiLine`). `toCfdiItem` must hand it to the PAC (spec «Por cobrar» §6) — until that
+   * lands the flag has no effect, and `issueInvoiceSchema` must never accept it (the generic form can't produce these lines).
+   */
+  taxIncluded?: boolean
 }
 
 /** Computed money totals for an income CFDI, all in integer cents. */

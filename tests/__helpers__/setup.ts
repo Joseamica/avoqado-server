@@ -238,6 +238,10 @@ const prismaMock: any = {
   platformEmisor: createMockModel(),
   billingTaxProfile: createMockModel(),
   platformCfdi: createMockModel(),
+  // «Por cobrar» (recordatorios manuales de cobro con factura, SUPERADMIN)
+  platformCharge: createMockModel(),
+  platformChargeOccurrence: createMockModel(),
+  platformChargeDigest: createMockModel(),
   // Token budget models
   chatbotTokenBudget: createMockModel(),
   tokenUsageRecord: createMockModel(),
