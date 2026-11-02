@@ -1,3 +1,4 @@
+import { VenueStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import type { DecodedPng } from './pngDecode'
@@ -37,16 +38,26 @@ export interface ResultadoPrecalentado {
 
 /**
  * Las direcciones de los sellos propios, los más recientes primero. Con tope: no tiene caso preparar
- * más de los que el caché puede recordar.
+ * más de los que el caché puede recordar. Sin los negocios demo: su dirección la escribe cualquiera, y aquí
+ * no hay petición de la que el candado demo pueda saber de qué negocio es.
  */
 export async function listarSellosAPrecalentar(): Promise<string[]> {
   const filas = await prisma.walletCardDesign.findMany({
-    where: { stampImageUrl: { not: null } },
+    where: { stampImageUrl: { not: null }, venue: { status: { not: VenueStatus.LIVE_DEMO } } },
     select: { stampImageUrl: true },
     orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
     take: CACHE_SELLOS_MAX,
   })
   return [...new Set(filas.map(f => f.stampImageUrl).filter((url): url is string => Boolean(url)))]
+}
+
+/** Una base que no contesta tampoco puede detener el arranque: se deja de esperar, aunque la consulta siga. */
+function conTope<T>(promesa: Promise<T>, ms: number): Promise<T> {
+  let reloj: NodeJS.Timeout
+  const tope = new Promise<never>((_, rechazar) => {
+    reloj = setTimeout(() => rechazar(new Error(`sin respuesta en ${ms} ms`)), ms)
+  })
+  return Promise.race([promesa, tope]).finally(() => clearTimeout(reloj))
 }
 
 export async function precalentarSellos(
@@ -69,7 +80,7 @@ export async function precalentarSellos(
 
   let urls: string[]
   try {
-    urls = [...new Set(await listar())]
+    urls = [...new Set(await conTope(listar(), topeMs))]
   } catch (error) {
     logger.warn('[sellos] No se pudo leer qué sellos preparar al arrancar; se abrirán en la primera descarga', {
       error: error instanceof Error ? error.message : String(error),

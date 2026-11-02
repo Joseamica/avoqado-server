@@ -103,6 +103,22 @@ describe('precalentarSellos — la primera descarga tras un despliegue ya no abr
     expect(resultado).toMatchObject({ abiertos: 0, fallidos: 0, omitidos: 0 })
   })
 
+  it('🔴 una base que no contesta tampoco detiene el arranque: se deja de esperar en el tope (Codex, 2-nov)', async () => {
+    const abrir = jest.fn()
+    const resultado = await precalentarSellos({ listar: () => new Promise<string[]>(() => undefined), abrir, topeMs: 10 })
+    expect(abrir).not.toHaveBeenCalled()
+    expect(resultado.abiertos).toBe(0)
+  })
+
+  it('🔴 un negocio demo no se precalienta: su dirección la escribe cualquiera (Codex, 2-nov)', async () => {
+    prismaMock.walletCardDesign.findMany.mockResolvedValue([] as any)
+    await listarSellosAPrecalentar()
+    expect(prismaMock.walletCardDesign.findMany.mock.calls[0][0]?.where).toEqual({
+      stampImageUrl: { not: null },
+      venue: { status: { not: 'LIVE_DEMO' } },
+    })
+  })
+
   it('🔴 respeta el tope de tiempo: deja de abrir sellos y avisa cuántos quedaron', async () => {
     let reloj = 0
     const abrirSello = jest.fn(async () => {
@@ -135,7 +151,7 @@ describe('listarSellosAPrecalentar — qué sellos se preparan', () => {
 
     expect(urls).toEqual([URL_A, URL_B])
     const consulta = prismaMock.walletCardDesign.findMany.mock.calls[0][0] as any
-    expect(consulta.where).toEqual({ stampImageUrl: { not: null } })
+    expect(consulta.where).toEqual({ stampImageUrl: { not: null }, venue: { status: { not: 'LIVE_DEMO' } } })
     expect(consulta.take).toBe(CACHE_SELLOS_MAX)
     expect(consulta.orderBy).toEqual([{ updatedAt: 'desc' }, { id: 'desc' }])
   })
