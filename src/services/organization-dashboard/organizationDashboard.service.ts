@@ -2305,17 +2305,24 @@ class OrganizationDashboardService {
       },
     })
 
-    // Get sales for each staff member per venue from completed payments
-    const salesData = await prisma.payment.groupBy({
-      by: ['processedById', 'venueId'],
-      where: {
-        venueId: { in: venueIds },
-        createdAt: { gte: dayStart, lte: dayEnd },
-        status: 'COMPLETED',
-        processedById: { not: null },
-      },
-      _sum: { amount: true },
-    })
+    // Ventas de cada persona por tienda, agregadas en Postgres. D2 (Codex r4 A3 de pedidos en línea): una devolución cuenta en las
+    // VENTAS de quien hizo la venta (`processedById` de su cobro original), no de quien la opera; la de un cobro sin vendedor (web, liga)
+    // no es de nadie. El EFECTIVO de abajo sigue siendo de quien lo entregó: es dinero que salió de sus manos.
+    const salesData =
+      venueIds.length === 0
+        ? []
+        : await prisma.$queryRaw<Array<{ processedById: string; venueId: string; amount: Prisma.Decimal | null }>>`
+            SELECT CASE WHEN p."type" = 'REFUND' THEN o."processedById" ELSE p."processedById" END AS "processedById",
+                   p."venueId" AS "venueId",
+                   SUM(p."amount") AS "amount"
+            FROM "Payment" p
+            LEFT JOIN "Payment" o ON p."type" = 'REFUND' AND o."id" = p."processorData"->>'originalPaymentId'
+            WHERE p."venueId" IN (${Prisma.join(venueIds)})
+              AND ${rangeSql(Prisma.raw('p."createdAt"'), dayStart, dayEnd)}
+              AND p."status" = 'COMPLETED'
+              AND (CASE WHEN p."type" = 'REFUND' THEN o."processedById" ELSE p."processedById" END) IS NOT NULL
+            GROUP BY 1, 2
+          `
 
     // Get CASH-only sales per staff (for deposit verification)
     const cashSalesData = await prisma.payment.groupBy({
@@ -2338,7 +2345,7 @@ class OrganizationDashboardService {
     salesData.forEach(s => {
       if (s.processedById) {
         const key = `${s.processedById}:${s.venueId}`
-        salesByStaffVenue[key] = Number(s._sum.amount) || 0
+        salesByStaffVenue[key] = Number(s.amount) || 0
       }
     })
 
