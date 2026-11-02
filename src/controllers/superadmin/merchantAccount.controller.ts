@@ -196,13 +196,14 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
 
     logger.info('Merchant account created via API', {
       accountId: account.id,
-      createdBy: (req as any).user?.uid,
+      createdBy: req.authContext?.userId,
       isBlumonPendingAccount,
       blumonSerialNumber,
     })
 
     await logAction({
-      staffId: (req as any).user?.uid,
+      staffId: req.authContext?.userId,
+      venueId: account.provider?.code === 'ANGELPAY' ? venueId : undefined,
       action: 'MERCHANT_ACCOUNT_CREATED',
       entity: 'MerchantAccount',
       entityId: account.id,
@@ -228,6 +229,7 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
   try {
     const { id } = req.params
     const {
+      providerId,
       externalMerchantId,
       alias,
       displayName,
@@ -267,40 +269,35 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Datos inválidos')
     }
 
-    const account = await merchantAccountService.updateMerchantAccount(id, {
-      externalMerchantId,
-      alias,
-      displayName,
-      active,
-      displayOrder,
-      credentials,
-      providerConfig,
-      angelpayUserAccountId,
-      blumonSerialNumber,
-      blumonPosId,
-      blumonEnvironment,
-      blumonMerchantId,
-      angelpayAffiliation,
-      angelpayMerchantName,
-      // '' from an emptied input means "clear it", not "set empty string".
-      clabeNumber: clabeNumber === '' ? null : clabeNumber,
-      bankName,
-      accountHolder,
-    })
+    const account = await merchantAccountService.updateMerchantAccount(
+      id,
+      {
+        providerId,
+        externalMerchantId,
+        alias,
+        displayName,
+        active,
+        displayOrder,
+        credentials,
+        providerConfig,
+        angelpayUserAccountId,
+        blumonSerialNumber,
+        blumonPosId,
+        blumonEnvironment,
+        blumonMerchantId,
+        angelpayAffiliation,
+        angelpayMerchantName,
+        // '' from an emptied input means "clear it", not "set empty string".
+        clabeNumber: clabeNumber === '' ? null : clabeNumber,
+        bankName,
+        accountHolder,
+      },
+      { staffId: req.authContext?.userId, ipAddress: req.ip, userAgent: req.headers?.['user-agent'] },
+    )
 
     logger.info('Merchant account updated via API', {
       accountId: id,
-      updatedBy: (req as any).user?.uid,
-    })
-
-    await logAction({
-      staffId: (req as any).user?.uid,
-      action: 'MERCHANT_ACCOUNT_UPDATED',
-      entity: 'MerchantAccount',
-      entityId: id,
-      data: { externalMerchantId: account.externalMerchantId, active: account.active },
-      ipAddress: req.ip,
-      userAgent: req.headers?.['user-agent'],
+      updatedBy: req.authContext?.userId,
     })
 
     res.json({
@@ -2327,11 +2324,12 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
       throw new BadRequestError(first?.message || 'Datos inválidos')
     }
 
-    const createdBy = (req as Request & { user?: { id?: string } }).user?.id
+    const createdBy = req.authContext?.userId
     const result = await fullSetupAngelPayMerchantService(parsed.data, createdBy)
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: req.authContext?.userId ?? null,
+      venueId: parsed.data.venueId,
       action: 'MERCHANT_ACCOUNT_PROVISIONED_ANGELPAY',
       entity: 'MerchantAccount',
       entityId: result.merchantAccountId,

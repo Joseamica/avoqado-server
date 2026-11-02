@@ -72,6 +72,22 @@ describe('el contrato de la declaración', () => {
     expect(cuerpo.paymentId).toBe('pay-1')
   })
 
+  it('P1 E7 (A5): el cuerpo COMPLETO viaja (con el PIN del gerente) y SUPERVISOR_AUTHORIZATION_REQUIRED sale como 403 con su código', async () => {
+    const { UnchargedReconciliationError } = await import('@/services/tpv/uncharged-reconciliation.service')
+    mockRelease.mockRejectedValue(new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403))
+    const res = resFalso()
+    await releaseTerminalPayment(
+      reqFalso({ statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: 'uuid-1', supervisorPin: '918273' }),
+      res,
+    )
+    expect((mockRelease.mock.calls[0][0] as any).declaration).toMatchObject({ supervisorPin: '918273' })
+    expect(res.status).toHaveBeenCalledWith(403)
+    const cuerpo = res.json.mock.calls[0][0]
+    expect(cuerpo).toMatchObject({ success: false, released: false, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+    expect(cuerpo.message).toMatch(/gerente/i)
+    expect(JSON.stringify(cuerpo)).not.toContain('918273')
+  })
+
   it('la respuesta feliz devuelve la resolución, para que el POS pueda recuperarla', async () => {
     mockRelease.mockResolvedValue({ requestId: 'req-1', released: true, status: 'FAILED', resolution: { id: 'r1', acceptedAt: 'x' } })
     const res = resFalso()

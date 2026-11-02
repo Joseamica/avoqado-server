@@ -11,12 +11,21 @@
 
 import type { NextFunction, Request, Response } from 'express'
 
-import { updateMerchantAccount } from '@/controllers/superadmin/merchantAccount.controller'
+import {
+  updateMerchantAccount,
+  createMerchantAccount,
+  fullSetupAngelPayMerchant,
+} from '@/controllers/superadmin/merchantAccount.controller'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { fullSetupAngelPayMerchant as fullSetupService } from '@/services/superadmin/angelpayFullSetup.service'
 import * as merchantAccountService from '@/services/superadmin/merchantAccount.service'
 
 jest.mock('@/services/superadmin/merchantAccount.service', () => ({
   updateMerchantAccount: jest.fn(),
+  createMerchantAccount: jest.fn(),
 }))
+
+jest.mock('@/services/superadmin/angelpayFullSetup.service', () => ({ fullSetupAngelPayMerchant: jest.fn() }))
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({
   logAction: jest.fn().mockResolvedValue(undefined),
@@ -38,7 +47,8 @@ function makeReq(body: Record<string, any>): Request {
     body,
     ip: '127.0.0.1',
     headers: { 'user-agent': 'jest' },
-    user: { uid: 'admin-staff-1' },
+    user: { uid: 'wrong-legacy-actor' },
+    authContext: { userId: 'admin-real', venueId: 'token-venue-other', role: 'SUPERADMIN' },
   } as unknown as Request
 }
 
@@ -48,6 +58,62 @@ beforeEach(() => {
 })
 
 describe('updateMerchantAccount — provider + bank columns', () => {
+  it('PUT entrega actor a servicio sin duplicar la auditoría en controller', async () => {
+    const next = jest.fn() as unknown as NextFunction
+    await updateMerchantAccount(makeReq({ alias: 'Nuevo nombre' }), makeRes(), next)
+    expect(mockedUpdate.mock.calls[0][2]).toMatchObject({ staffId: 'admin-real', ipAddress: '127.0.0.1' })
+    expect(logAction).not.toHaveBeenCalled()
+  })
+  it('CREATE AngelPay audita venue de operación y actor authContext; nunca token/legacy ni secretos', async () => {
+    ;(merchantAccountService.createMerchantAccount as jest.Mock).mockResolvedValue({
+      id: 'merchant-new',
+      providerId: 'provider-1',
+      provider: { code: 'ANGELPAY' },
+      externalMerchantId: '123',
+      active: true,
+    })
+    const next = jest.fn() as unknown as NextFunction
+    await createMerchantAccount(
+      makeReq({
+        venueId: 'venue-real',
+        providerId: 'provider-1',
+        externalMerchantId: '123',
+        credentials: { merchantId: '123', apiKey: 'fixture-secret' },
+      }),
+      makeRes(),
+      next,
+    )
+    expect(next).not.toHaveBeenCalled()
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: 'admin-real', venueId: 'venue-real', action: 'MERCHANT_ACCOUNT_CREATED' }),
+    )
+    expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toMatch(/token-venue-other|wrong-legacy-actor|fixture-secret/)
+  })
+  it('alta completa acredita actor y venue de operación sin publicar PIN', async () => {
+    ;(fullSetupService as jest.Mock).mockResolvedValue({ merchantAccountId: 'merchant-new' })
+    const next = jest.fn() as unknown as NextFunction
+    await fullSetupAngelPayMerchant(
+      makeReq({
+        venueId: 'venue-real',
+        login: { mode: 'new', email: 'caja@example.test', environment: 'QA', pin: '123456' },
+        merchant: { mode: 'create', externalMerchantId: '123', name: 'Tienda', affiliation: 'AF', displayName: 'Tienda' },
+        slot: { accountType: 'PRIMARY', mode: 'fill' },
+      }),
+      makeRes(),
+      next,
+    )
+    expect(next).not.toHaveBeenCalled()
+    expect((fullSetupService as jest.Mock).mock.calls[0][1]).toBe('admin-real')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: 'admin-real', venueId: 'venue-real', action: 'MERCHANT_ACCOUNT_PROVISIONED_ANGELPAY' }),
+    )
+    expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toMatch(/token-venue-other|wrong-legacy-actor|123456/)
+  })
+  it('forwards explicit providerId so the shared service can reject an identity change', async () => {
+    const next = jest.fn() as unknown as NextFunction
+    await updateMerchantAccount(makeReq({ providerId: 'provider-other' }), makeRes(), next)
+    expect(mockedUpdate.mock.calls[0][1].providerId).toBe('provider-other')
+  })
   it('forwards the Blumon columns to the service', async () => {
     const next = jest.fn() as unknown as NextFunction
     await updateMerchantAccount(

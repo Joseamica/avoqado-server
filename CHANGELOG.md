@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- AngelPay: las respuestas JSON HTTP omiten la clave de firma del webhook, también en cuentas anidadas, sin modificar sus datos persistidos ni las credenciales SDK solicitadas.
+
 - Anuncios: las primeras aperturas simultáneas ya no fallan por clave duplicada; conservan una sola interacción y sus fechas de apertura, cierre y CTA.
 
 - TPV: entrega y confirmación verifican identidad; resultados finales inmutables, cancelación y reversión atómicas e idempotencia de comandos. Las TPVs del protocolo nuevo usan cola sin vencimiento y recuperación por eventos, con permiso de ejecución ligado al arranque. La migración requiere recibo completado y nuevo arranque autenticado. Versiones validan enteros, plataforma, audiencia y canal Nexgo/TMS; comandos no implementados se rechazan.

@@ -201,6 +201,7 @@ export class SocketManager implements ISocketManager {
           const ackVersion = Number(socket.handshake?.auth?.terminalPaymentAckVersion)
           const cancelVersion = Number(socket.handshake?.auth?.terminalPaymentCancelDispositionVersion)
           const probeVersion = Number(socket.handshake?.auth?.terminalPaymentProbeVersion)
+          const executionVersion = Number(socket.handshake?.auth?.terminalPaymentExecutionVersion)
           terminalRegistry.register(
             terminalId,
             socket.id,
@@ -210,6 +211,7 @@ export class SocketManager implements ISocketManager {
             Number.isInteger(cancelVersion) && cancelVersion > 0 ? cancelVersion : undefined,
             signedSerial,
             Number.isInteger(probeVersion) && probeVersion > 0 ? probeVersion : undefined,
+            Number.isInteger(executionVersion) && executionVersion > 0 ? executionVersion : undefined,
           )
         }
       }
@@ -225,22 +227,28 @@ export class SocketManager implements ISocketManager {
       // Sólo clientes que anunciaron inbox durable reciben reentregas. Mandar una
       // repetición a una APK vieja (sin dedupe local) podría cobrar dos veces.
       if (terminalId) {
-        // 🔴 Con `.catch`: un rechazo aquí (P2024 del pool en una tormenta de reconexiones) sería un
-        // `unhandledRejection`, y `server.ts` los convierte en gracefulShutdown a propósito.
-        terminalPaymentService.replayPendingForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id).catch(error =>
-          logger.warn('⚠️ [Socket] replayPendingForTerminal failed on connect', {
-            terminalId,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        )
-        // Y a las filas SIN desenlace acreditado se les pregunta: la evidencia viene de la bandeja
-        // durable de la terminal, nunca del reloj. Sólo si anunció la capacidad (APK viejo: silencio).
-        terminalPaymentService.probeUnresolvedForTerminal(terminalId, authenticatedSocket.authContext?.venueId, socket.id).catch(error =>
-          logger.warn('⚠️ [Socket] probeUnresolvedForTerminal failed on connect', {
-            terminalId,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        )
+        const venueId = authenticatedSocket.authContext?.venueId
+        // 🔴 Codex servidor r1 · F3 (21-oct): la SONDA va ANTES que la reentrega, en serie. Antes corrían en paralelo y, si la
+        // reentrega grababa primero su procedencia, la SENT de la app muerta ya apuntaba a este socket y la sonda la saltaba
+        // (E9): sin certificado de cese hasta el vencimiento de 5 min. A las filas SIN desenlace acreditado se les pregunta: la
+        // evidencia viene de la bandeja durable de la terminal, nunca del reloj; sólo si anunció la capacidad (APK viejo: silencio).
+        // 🔴 Cada una con su `.catch`: un rechazo aquí (P2024 del pool en una tormenta de reconexiones) sería un
+        // `unhandledRejection`, y `server.ts` los convierte en gracefulShutdown a propósito; y si la sonda truena, la reentrega
+        // corre igual.
+        void (async () => {
+          await terminalPaymentService.probeUnresolvedForTerminal(terminalId, venueId, socket.id).catch(error =>
+            logger.warn('⚠️ [Socket] probeUnresolvedForTerminal failed on connect', {
+              terminalId,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          )
+          await terminalPaymentService.replayPendingForTerminal(terminalId, venueId, socket.id).catch(error =>
+            logger.warn('⚠️ [Socket] replayPendingForTerminal failed on connect', {
+              terminalId,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          )
+        })()
       }
     })
   }
@@ -391,7 +399,12 @@ export class SocketManager implements ISocketManager {
           return
         }
         const handled = await terminalPaymentService.handleCancelDispositionFromSocket(
-          { requestId: payload?.requestId, disposition: payload?.disposition },
+          {
+            requestId: payload?.requestId,
+            disposition: payload?.disposition,
+            executionAlive: payload?.executionAlive,
+            closedForExecution: payload?.closedForExecution,
+          },
           terminal,
         )
         callback?.({ success: handled })
@@ -415,7 +428,13 @@ export class SocketManager implements ISocketManager {
           return
         }
         const handled = await terminalPaymentService.handleProbeResultFromSocket(
-          { requestId: payload?.requestId, disposition: payload?.disposition, finalResult: payload?.finalResult ?? null },
+          {
+            requestId: payload?.requestId,
+            disposition: payload?.disposition,
+            finalResult: payload?.finalResult ?? null,
+            executionAlive: payload?.executionAlive,
+            closedForExecution: payload?.closedForExecution,
+          },
           terminal,
         )
         callback?.({ success: handled })

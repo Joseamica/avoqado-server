@@ -27,13 +27,13 @@
  */
 import { createHash } from 'crypto'
 import { z } from 'zod'
-import { Prisma } from '@prisma/client'
+import { Prisma, TerminalPaymentRequestStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { evaluatePermissionList, hasPermission } from '../../lib/permissions'
+import { PIN_REGEX } from '../../schemas/common/pin.schema'
+import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
-import { estadoBancarioSql } from './estadoBancario'
-import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
-import { hayEvidenciaDeConciliacionSql, sinEvidenciaPositivaSql } from './evidenciaPositivaSql'
+import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
 import { sondaReportoActiva } from './sondaActiva'
 import logger from '../../config/logger'
 
@@ -62,6 +62,12 @@ const schema = z
       })
       .strict()
       .optional(),
+    // 🔴 A5 · E7 (founder, 20-oct): el MESERO declara con el PIN de un gerente. Misma regla de PIN del repo (4-10 dígitos) y
+    // `nullish` por lo mismo que «no presentó tarjeta»: un serializador con nulls lo mandaría `null` en TODA declaración. El PIN
+    // nunca entra a `bodyHash`, a la fila ni a la bitácora.
+    supervisorPin: z.string().regex(PIN_REGEX).nullish(),
+    /** A5 · E3: la terminal a la que iba el cobro, si el POS la manda (los publicados no: la lápida queda con `''`). */
+    terminalId: z.string().min(1).max(64).optional(),
   })
   .strict()
 
@@ -79,11 +85,13 @@ export class UnchargedReconciliationError extends Error {
             ? 'La terminal dice que este cobro sigue en curso. Espera unos segundos y vuelve a consultar.'
             : code === 'NOT_ALLOWED'
               ? 'No tienes permiso para declarar que un cobro no pasó. Pídeselo a tu administrador.'
-              : code === 'RESOLUTION_CONFLICT'
-                ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
-                : code === 'ATTEMPT_NOT_FOUND'
-                  ? 'No encontré ese cobro en este negocio.'
-                  : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
+              : code === 'SUPERVISOR_AUTHORIZATION_REQUIRED'
+                ? 'Pide a un gerente que ingrese su PIN para confirmar que este cobro no pasó.'
+                : code === 'RESOLUTION_CONFLICT'
+                  ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
+                  : code === 'ATTEMPT_NOT_FOUND'
+                    ? 'No encontré ese cobro en este negocio.'
+                    : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
     )
   }
 }
@@ -95,9 +103,15 @@ export type UnchargedReconciliation = {
   bodyHash: string
   staffId: string | null
   staffVenueId: string | null
+  /** A5 · E7: quién respondió. Con `SUPERVISOR_PIN`, `staffId` es el GERENTE y `sessionStaffId` quien operaba el POS. Ausente en el banco. */
+  by?: 'SESSION' | 'SUPERVISOR_PIN'
+  sessionStaffId?: string | null
   statementVersion: number
   source: string
-  previousRequest: { status: string; failureCode: string | null }
+  /** Ausente en la LÁPIDA (E3): no había solicitud, así que no hay estado previo que congelar (inventarlo sería un dato falso). */
+  previousRequest?: { status: string; failureCode: string | null }
+  /** A5 · E3: la declaración CREÓ la fila porque el POST nunca llegó. */
+  tombstone?: true
 }
 
 export function readUnchargedReconciliation(value: unknown): UnchargedReconciliation | null {
@@ -133,6 +147,175 @@ async function miembroConPermiso(
     permitido = hasPermission(sv.role, custom?.permissions ?? null, RECONCILE_UNCHARGED_PERMISSION, custom?.deniedPermissions ?? null)
   }
   return { id: sv.id, staffId: sv.staffId, permitido }
+}
+
+/**
+ * 🔴 A5 · E7 (founder, 20-oct): ¿quién responde por la declaración? La regla de `autorizarDeclaracion` de «no presentó
+ * tarjeta», con ESTE permiso: la SESIÓN tiene que ser miembro válido del venue (si no, ningún PIN la rescata); si lo es y tiene
+ * `payments:reconcile-uncharged`, responde ella; si no, hace falta el PIN de alguien de ESTE venue, activo y con el permiso —el
+ * gerente—, y entonces responde él. El mesero LLEGA aquí porque la ruta sólo le pide `payments:create`: el permiso de la
+ * declaración no se relaja, se exige a quien de verdad responde.
+ */
+async function autorizar(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  actorStaffId: string | null,
+  supervisorPin: string | undefined,
+): Promise<{ actor: { id: string; staffId: string }; by: 'SESSION' | 'SUPERVISOR_PIN'; sessionStaffId: string }> {
+  const sesion = actorStaffId ? await miembroConPermiso(tx, venueId, actorStaffId) : null
+  if (!sesion) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
+  if (sesion.permitido) return { actor: sesion, by: 'SESSION', sessionStaffId: sesion.staffId }
+  if (!supervisorPin) throw new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  const porPin = await tx.staffVenue.findFirst({
+    where: { venueId, pin: supervisorPin, active: true, staff: { active: true } },
+    select: { staffId: true },
+  })
+  const gerente = porPin ? await miembroConPermiso(tx, venueId, porPin.staffId) : null
+  if (!gerente?.permitido) throw new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403)
+  return { actor: gerente, by: 'SUPERVISOR_PIN', sessionStaffId: sesion.staffId }
+}
+
+/**
+ * A5 · E3: sólo la llave que genera un POS (UUID; Android minúsculas, iOS mayúsculas) puede dejar lápida. Cualquier otra cosa
+ * se rechaza como hoy («no encontré ese cobro»): una lápida con basura no la va a reclamar ningún POST.
+ */
+const llaveDeUnPos = z.string().uuid()
+
+/**
+ * A5 · E2: «la terminal contestó NOT_FOUND a la sonda DESPUÉS de la entrega». Es la auditoría que la sonda escribe UNA vez
+ * (`TERMINAL_PAYMENT_PROBE_UNACCREDITED` con `NOT_FOUND_AFTER_DELIVERY`). La TPV deja su lápida de esa solicitud ANTES de
+ * contestar, así que ya no la puede ejecutar: el cajero puede mirar la pantalla y declarar. 🔴 Sólo habilita la DECLARACIÓN
+ * humana, nunca un destrabe automático (S2 exige `executionClosedAt`, el certificado de la TPV nueva: Codex plan-r1-2).
+ */
+async function sondaNoLaEncontroTrasEntregarla(tx: Prisma.TransactionClient, rowId: string, venueId: string): Promise<boolean> {
+  const asiento = await tx.activityLog.findFirst({
+    where: {
+      action: 'TERMINAL_PAYMENT_PROBE_UNACCREDITED',
+      entity: 'TerminalPaymentRequest',
+      entityId: rowId,
+      venueId,
+      data: { path: ['evidence'], equals: 'NOT_FOUND_AFTER_DELIVERY' },
+    },
+    select: { id: true },
+  })
+  return Boolean(asiento)
+}
+
+/**
+ * ¿Hay un `Payment` de esta solicitud, por cualquiera de sus identidades (puntero de la fila, columna, etiqueta legacy y
+ * llave de cada intento, sin limitar a COMPLETED)? La MISMA pregunta para la fila y para la lápida.
+ */
+async function hayPagoDeLaSolicitud(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  requestId: string,
+  attemptIds: string[],
+  paymentId: string | null,
+): Promise<boolean> {
+  const pago = await tx.payment.findFirst({
+    where: {
+      OR: [
+        { terminalPaymentRequestId: requestId },
+        { venueId, processorData: { path: ['terminalPaymentRequestId'], equals: requestId } },
+        ...(paymentId ? [{ id: paymentId }] : []),
+      ],
+    },
+    select: { id: true },
+  })
+  if (pago) return true
+  // 🔴 P1 de Codex: y POR INTENTO, sin limitar a COMPLETED. Un `Payment` PENDING con evidencia de colisión vive con la llave
+  // del intento y sin columna de solicitud: por ahí se colaba la declaración.
+  return (
+    attemptIds.length > 0 && Boolean(await tx.payment.findFirst({ where: { idempotencyKey: { in: attemptIds } }, select: { id: true } }))
+  )
+}
+
+/**
+ * 🔴 A5 · E3, la LÁPIDA: el POST del POS nunca llegó (502, corte, muerte entre guardar la llave y enviar) y el GET da 404 para
+ * siempre. Una declaración YA AUTORIZADA sobre una llave sin fila la crea con el MISMO desenlace que deja hoy una declaración
+ * aceptada —`FAILED / OPERATOR_RECONCILED_NO_CHARGE`, que los POS viejos ya leen como «no se cobró»— y el POST tardío con esa
+ * llave la reproduce sin cobrar (`sendPaymentToTerminal`).
+ *
+ * `null` = otra escritura ganó la llave (la admisión del POST): quien llama RELEE y sigue el camino normal. Se inserta con
+ * `ON CONFLICT DO NOTHING` (`skipDuplicates`) y no con un `create` que choque: un P2002 aborta la transacción entera de
+ * Postgres y ya no se podría releer en ella. Bajo READ COMMITTED el INSERT espera a la otra transacción, así que la relectura
+ * ve su fila confirmada.
+ *
+ * Pasa por la MISMA guarda de dinero que la declaración (B0-1, `sinVetoDeDineroSql`) más los `Payment` por cualquier
+ * identidad, revalidados DESPUÉS de escribir: un `throw` revierte la lápida.
+ *
+ * 🔴 INVARIANTE en la que descansa: «sin fila ⇒ este servidor NUNCA emitió ese cobro» (la fila se crea en la admisión ANTES de
+ * emitir, nunca se borra, y hay una sola instancia). Por eso ningún `Payment` legítimo puede traer esta llave, y un cierre común
+ * tardío no la ligaría (`terminalId ''` no casa con ningún serial). Un carril que emita SIN fila (p. ej. cable o LAN directos de
+ * POS a terminal) rompe esta invariante y tiene que revisar la lápida antes de existir.
+ */
+async function dejarLapida(
+  tx: Prisma.TransactionClient,
+  p: {
+    venueId: string
+    requestId: string
+    attemptIds: string[]
+    terminalId: string
+    saved: UnchargedReconciliation
+    source: string
+  },
+): Promise<UnchargedReconciliation | null> {
+  const sobre = {
+    requestId: p.requestId,
+    status: 'failed',
+    outcomeEvidence: 'OPERATOR_RECONCILED',
+    tombstone: true,
+    errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+    operatorReconciliation: p.saved,
+  }
+  const { count } = await tx.terminalPaymentRequest.createMany({
+    data: [
+      {
+        requestId: p.requestId,
+        venueId: p.venueId,
+        terminalId: p.terminalId,
+        status: TerminalPaymentRequestStatus.FAILED,
+        failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+        amountCents: 0,
+        tipCents: 0,
+        expiresAt: new Date(),
+        // Nunca se entregó a nadie: la fila nace de que el POST no llegó (mismo valor que las lápidas de la admisión).
+        deliveryProvenance: { deliveries: [] },
+        resultJson: sobre as unknown as Prisma.InputJsonValue,
+        operatorReconciliation: p.saved as unknown as Prisma.InputJsonValue,
+      },
+    ],
+    skipDuplicates: true,
+  })
+  if (count !== 1) return null
+
+  const [veto] = await tx.$queryRaw<{ libre: boolean }[]>`
+    SELECT ${sinVetoDeDineroSql({ requestId: p.requestId, venueId: p.venueId, attemptIds: p.attemptIds, terminalId: p.terminalId })} AS "libre"`
+  if (!veto?.libre || (await hayPagoDeLaSolicitud(tx, p.venueId, p.requestId, p.attemptIds, null)))
+    throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
+
+  const fila = await tx.terminalPaymentRequest.findFirst({ where: { requestId: p.requestId, venueId: p.venueId }, select: { id: true } })
+  await tx.activityLog.create({
+    data: {
+      action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED',
+      entity: 'TerminalPaymentRequest',
+      entityId: fila?.id ?? null,
+      venueId: p.venueId,
+      staffId: p.saved.staffId,
+      data: {
+        requestId: p.requestId,
+        terminalId: p.terminalId,
+        orderId: null,
+        resolutionId: p.saved.id,
+        source: p.source,
+        previousStatus: null,
+        tombstone: true,
+        by: p.saved.by ?? null,
+        sessionStaffId: p.saved.sessionStaffId ?? null,
+      },
+    },
+  })
+  return p.saved
 }
 
 /**
@@ -177,8 +360,14 @@ function afirmaCobro(claimedSuccess: unknown): boolean {
  * Antes sólo se excluía `PENDING` y se confiaba en `desenlaceCanonico`, pero `SENT` y `CANCEL_REQUESTED`
  * también son UNRESOLVED — y son cobros que la terminal puede estar ejecutando AHORA. Declarar sobre ellos
  * es exactamente el camino del cobro doble.
+ *
+ * 🔴 A5 · E5 (20-oct): las filas HEREDADAS que cercan una venta abierta sin salida (las 6 órdenes de ese día) también son
+ * declarables: `CANCELLED` sin `cancelDisposition='ACCEPTED'` y `FAILED` sin evidencia acreditada. `TIMED_OUT` —con o sin
+ * código de liberación por política— ya lo era. La LISTA sigue siendo explícita (nunca PENDING/SENT/CANCEL_REQUESTED/
+ * COMPLETED), y la guarda `desenlaceCanonico === UNRESOLVED` decide el resto: una CANCELLED/ACCEPTED, una lápida de
+ * admisión o un FAILED ya acreditado (`BANK_DECLINED`, `NO_EVIDENCE_AFTER_WINDOW`, …) NO se declaran. Mismos vetos.
  */
-const ESTADOS_DECLARABLES = new Set<string>(['UNKNOWN', 'TIMED_OUT'])
+const ESTADOS_DECLARABLES = new Set<string>(['UNKNOWN', 'TIMED_OUT', 'CANCELLED', 'FAILED'])
 
 /** El texto EXACTO que redacta el servidor en `failUndelivered`. Ninguna terminal lo manda. */
 const MENSAJE_DEL_SOBRE_SINTETICO = 'La entrega no pudo confirmarse. Consulta el resultado en la terminal antes de volver a cobrar'
@@ -194,26 +383,6 @@ const MENSAJE_DEL_SOBRE_SINTETICO = 'La entrega no pudo confirmarse. Consulta el
 function sobreEscritoPorElServidor(sobre: Record<string, unknown>): boolean {
   if (sobre.origin === 'SERVER') return true
   return sobre.status === 'timeout' && sobre.errorMessage === MENSAJE_DEL_SOBRE_SINTETICO
-}
-
-/**
- * 🔴 P1 de Codex (18-sep): las contradicciones de PROCEDENCIA también vetan.
- *
- * Un evento del procesador para un intento de esta solicitud que llegó a OTRO venue, que contradice el
- * vínculo, que trae el serial de OTRA terminal, o que el banco APROBÓ aunque no naciera `Payment`. Copiado
- * del precedente (`evidenciaQueVetaLaDeclaracion`) y ampliado a TODOS los intentos ligados, no a uno.
- */
-function contradiccionDeProcedenciaSql(attemptIds: string[], venueId: string, terminalId: string): Prisma.Sql {
-  if (attemptIds.length === 0) return Prisma.sql`FALSE`
-  return Prisma.sql`EXISTS (
-    SELECT e."id" FROM "ProviderEventLog" e
-    WHERE e."attemptId" IN (${Prisma.join(attemptIds)}) AND e."provider" = 'PAYMENT_PROCESSOR'
-      AND (e."venueId" IS DISTINCT FROM ${venueId}
-        OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
-        OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
-          AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
-        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
-  )`
 }
 
 /**
@@ -258,11 +427,28 @@ export async function reconcileUncharged(
 ): Promise<UnchargedReconciliation> {
   const parsed = schema.safeParse(raw)
   if (!parsed.success) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
-  const declaration = parsed.data
+  // El PIN se separa AQUÍ y no viaja más allá de la autorización: ni en `bodyHash`, ni en la fila, ni en la bitácora. Sin él,
+  // los cuerpos de siempre producen el MISMO `bodyHash` que antes (el replay de declaraciones ya guardadas sigue valiendo).
+  const { supervisorPin: pinCrudo, ...declaration } = parsed.data
+  const supervisorPin = pinCrudo ?? undefined // JSON `null` = ausente
   if (declaration.requestId !== identity.requestId) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
   const bodyHash = createHash('sha256').update(JSON.stringify(declaration)).digest('hex')
 
   return prisma.$transaction(async tx => {
+    // 🔴 AUTORIZACIÓN ANTES DE BUSCAR LA FILA (A5, Codex plan-r1-8): sin ella no se lee el estado del cobro ni se crea una
+    // lápida. El rechazo del BANCO no tiene humano que autorizar — su credencial es la firma del webhook, que el controlador
+    // ya verificó (HMAC-SHA256 contra el secreto del comercio) antes de llegar aquí. Sigue siendo una puerta cerrada:
+    // `source: 'WEBHOOK'` sólo lo pone `reconcileBankDeclined`, nunca una petición HTTP.
+    // 🔴 La procedencia la decide la FUENTE, jamás el cuerpo. `identity.source` lo pone el servidor; `declaration.statement`
+    // viene del cliente. Si el guard mirara el cuerpo, cualquiera que alcance el endpoint del POS podría mandar
+    // `"statement":"BANK_DECLINED"` y SALTARSE el permiso del cajero. Se exigen los DOS, y que coincidan.
+    const porElBanco = identity.source === 'WEBHOOK'
+    if (porElBanco !== (declaration.statement === 'BANK_DECLINED')) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
+    const autorizacion = porElBanco ? null : await autorizar(tx, identity.venueId, identity.actorStaffId, supervisorPin)
+    const actor = autorizacion?.actor ?? null
+    /** Quién respondió, para la fila y la bitácora (el banco no lleva). */
+    const quien = autorizacion ? { by: autorizacion.by, sessionStaffId: autorizacion.sessionStaffId } : {}
+
     // Candado por SOLICITUD (no sólo por intento): una fila legacy sin intento ligado también se concilia.
     await candadoDeSolicitud(tx, declaration.requestId)
 
@@ -279,10 +465,40 @@ export async function reconcileUncharged(
       .sort()
     for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)
 
-    const inicial = await tx.terminalPaymentRequest.findFirst({
+    let inicial = await tx.terminalPaymentRequest.findFirst({
       where: { requestId: declaration.requestId, venueId: identity.venueId },
     })
-    if (!inicial) throw new UnchargedReconciliationError('ATTEMPT_NOT_FOUND', 404)
+    if (!inicial) {
+      // A5 · E3: sin fila, la declaración HUMANA (ya autorizada) deja la lápida. El banco nunca: su rechazo sin fila no
+      // tiene nada que cerrar. Una llave que no es de un POS tampoco: se rechaza como hoy.
+      if (porElBanco || !actor || !llaveDeUnPos.safeParse(declaration.requestId).success)
+        throw new UnchargedReconciliationError('ATTEMPT_NOT_FOUND', 404)
+      const lapida = await dejarLapida(tx, {
+        venueId: identity.venueId,
+        requestId: declaration.requestId,
+        attemptIds,
+        terminalId: declaration.terminalId ? normalizeTerminalId(declaration.terminalId) : '',
+        source: identity.source,
+        saved: {
+          id: declaration.resolutionId,
+          kind: 'UNCHARGED_VERIFIED',
+          acceptedAt: new Date().toISOString(),
+          bodyHash,
+          staffId: actor.staffId,
+          staffVenueId: actor.id,
+          ...quien,
+          statementVersion: declaration.statementVersion,
+          source: identity.source,
+          tombstone: true,
+        },
+      })
+      if (lapida) return lapida
+      // Otra escritura ganó la llave (la admisión del POST): se relee y se sigue el camino normal sobre SU fila.
+      inicial = await tx.terminalPaymentRequest.findFirst({
+        where: { requestId: declaration.requestId, venueId: identity.venueId },
+      })
+      if (!inicial) throw new UnchargedReconciliationError('ATTEMPT_NOT_FOUND', 404)
+    }
 
     // El candado de la orden va acotado al venue: una orden de otro negocio no se bloquea ni se acepta.
     // 🔴 P2 de Codex (18-sep): y su RESULTADO decide la pertenencia. `orderId` es una referencia BLANDA (sin
@@ -303,7 +519,8 @@ export async function reconcileUncharged(
     if (row.orderId && (row.orderId !== inicial.orderId || ordenBloqueada?.length !== 1))
       throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
-    // Replay idempotente ANTES de todo lo demás: repetir la misma declaración no re-audita ni reescribe.
+    // Replay idempotente ANTES de la elegibilidad (después de la autorización, A5): repetir la misma declaración no re-audita
+    // ni reescribe. Una lápida (E3) también se reproduce por aquí.
     const existente = readUnchargedReconciliation(row.operatorReconciliation)
     if (existente) {
       if (existente.id !== declaration.resolutionId || existente.bodyHash !== bodyHash)
@@ -311,21 +528,8 @@ export async function reconcileUncharged(
       return existente
     }
 
-    // 🔴 AUTORIZACIÓN ANTES QUE ELEGIBILIDAD: quien no puede declarar recibe 403 sin enterarse del estado del cobro.
-    // El rechazo del BANCO no tiene humano que autorizar — su credencial es la firma del webhook, que el
-    // controlador ya verificó (HMAC-SHA256 contra el secreto del comercio) antes de llegar aquí. Sigue siendo
-    // una puerta cerrada: `source: 'WEBHOOK'` sólo lo pone `reconcileBankDeclined`, nunca una petición HTTP.
-    // 🔴 La procedencia la decide la FUENTE, jamás el cuerpo. `identity.source` lo pone el servidor
-    // (`'WEBHOOK'` sólo lo escribe `reconcileBankDeclined`); `declaration.statement` viene del cliente. Si el
-    // guard mirara el cuerpo —como lo escribí primero—, cualquiera que alcance el endpoint del POS podría
-    // mandar `"statement":"BANK_DECLINED"` y SALTARSE el permiso del cajero. Se exigen los DOS, y que
-    // coincidan: un cuerpo que se declare del banco por un camino humano es un rechazo, no un dato.
-    const porElBanco = identity.source === 'WEBHOOK'
-    if (porElBanco !== (declaration.statement === 'BANK_DECLINED')) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
-    const actor = identity.actorStaffId ? await miembroConPermiso(tx, identity.venueId, identity.actorStaffId) : null
-    if (!porElBanco && (!actor || !actor.permitido)) throw new UnchargedReconciliationError('NOT_ALLOWED', 403)
-
-    // ELEGIBILIDAD
+    // ELEGIBILIDAD (la autorización ya se evaluó arriba, antes de buscar la fila: quien no puede declarar recibe 403 sin
+    // enterarse del estado del cobro)
     // 🔴 RONDA 4 de Codex, y corrige la decisión de la ronda 3. Al borrar la elegibilidad por reloj se
     // llevó por delante una barrera que no era un reloj: «que el latido no pruebe el cese no significa que
     // quitar TODAS esas condiciones conserve las mismas barreras». El caso que quedó abierto: un ACK perdido
@@ -352,6 +556,10 @@ export async function reconcileUncharged(
     //      su acuse es esperar algo que no va a llegar nunca
     //   4. la procedencia es DESCONOCIDA (`null`) — fila anterior a la columna; por regla del repo `null`
     //      nunca se lee como «no entregada» (ver `.claude/rules/cobro-remoto-pos-a-tpv.md`)
+    //   5. (A5 · E2) la TPV NUEVA certificó que cerró la ejecución (`executionClosedAt`, sólo lo escribe A3)
+    //   6. (A5 · E2) la terminal contestó NOT_FOUND a la sonda DESPUÉS de la entrega (la auditoría que se escribe UNA vez):
+    //      la TPV deja su lápida antes de contestar. Sólo habilita la declaración HUMANA (no el rechazo del banco, que pasa por
+    //      aquí mismo), nunca la liberación automática
     //
     // 🔴 Y sigue BLOQUEADA, que es lo que Codex hizo cerrar en la ronda 4 y NO se reabre:
     //   · la fila que consta NUNCA entregada (procedencia exactamente `[]`) — el cobro puede ir en camino;
@@ -372,7 +580,15 @@ export async function reconcileUncharged(
     const entregas = (row.deliveryProvenance as { deliveries?: { ackVersion?: number }[] } | null)?.deliveries
     const procedenciaDesconocida = !Array.isArray(entregas)
     const entregadaASordo = Array.isArray(entregas) && entregas.length > 0 && entregas.every(e => !Number(e?.ackVersion))
-    const constaQueSalio = Boolean(row.acknowledgedAt) || sobreConRespuesta || entregadaASordo || procedenciaDesconocida
+    const constaQueSalio =
+      Boolean(row.acknowledgedAt) ||
+      sobreConRespuesta ||
+      entregadaASordo ||
+      procedenciaDesconocida ||
+      Boolean(row.executionClosedAt) ||
+      // 🔴 Fix round 1 (I-2): SÓLO la persona. El rechazo del banco entra a este mismo núcleo y sería una liberación AUTOMÁTICA
+      // por el NOT_FOUND de la TPV vieja (decisión «B»: ninguna). El certificado de la TPV nueva sí vale para los dos.
+      (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
     if (sondaReportoActiva(row)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
@@ -390,25 +606,9 @@ export async function reconcileUncharged(
     const retenidaPorLaVentana =
       row.failureCode === 'BANK_APPROVED_AWAITING_PAYMENT' || row.failureCode === 'PAYMENT_UNBOUND_AWAITING_REVIEW'
 
-    // Las identidades del pago POR SOLICITUD: puntero, etiqueta legacy y fila.
-    const pago = await tx.payment.findFirst({
-      where: {
-        OR: [
-          { terminalPaymentRequestId: declaration.requestId },
-          { venueId: identity.venueId, processorData: { path: ['terminalPaymentRequestId'], equals: declaration.requestId } },
-          ...(row.paymentId ? [{ id: row.paymentId }] : []),
-        ],
-      },
-      select: { id: true },
-    })
-    // 🔴 P1 de Codex: y POR INTENTO, sin limitar a COMPLETED. Un `Payment` PENDING con evidencia de colisión
-    // vive con la llave del intento y sin columna de solicitud: por ahí se colaba la declaración.
-    const pagoPorIntento =
-      !pago && attemptIds.length > 0
-        ? await tx.payment.findFirst({ where: { idempotencyKey: { in: attemptIds } }, select: { id: true } })
-        : null
-    if (pago || pagoPorIntento || row.paymentId || senalPositiva || retenidaPorLaVentana)
-      throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
+    // Las identidades del pago POR SOLICITUD (puntero, etiqueta legacy y fila) y POR INTENTO: la misma pregunta que la lápida.
+    const pago = await hayPagoDeLaSolicitud(tx, identity.venueId, declaration.requestId, attemptIds, row.paymentId)
+    if (pago || row.paymentId || senalPositiva || retenidaPorLaVentana) throw new UnchargedReconciliationError('POSITIVE_EVIDENCE_EXISTS')
 
     // 🔴 P1 de Codex: contradicciones de procedencia del procesador (otro venue, otra terminal, aprobado sin Payment).
     if (await contradiccionDeProcedencia(tx, attemptIds, identity.venueId, row.terminalId))
@@ -455,6 +655,7 @@ export async function reconcileUncharged(
       bodyHash,
       staffId: actor?.staffId ?? null,
       staffVenueId: actor?.id ?? null,
+      ...quien,
       statementVersion: declaration.statementVersion,
       source: identity.source,
       previousRequest: { status: row.status, failureCode: row.failureCode },
@@ -488,9 +689,10 @@ export async function reconcileUncharged(
         : {}),
       operatorReconciliation: saved,
     }
-    // 🔴 Ronda 2 de Codex (19-sep): el veto de procedencia va TAMBIÉN en la escritura. `sinEvidenciaPositivaSql`
-    // exige que el evento sea de ESTE venue, así que un aprobado del MISMO intento recibido por OTRO venue
-    // —que entra por un INSERT sin ningún candado— pasaba el CAS aunque la lectura sí lo habría vetado. Ése era
+    // 🔴 Ronda 2 de Codex (19-sep): el veto de procedencia va TAMBIÉN en la escritura (hoy dentro de `sinVetoDeDineroSql`,
+    // el juego único de B0-1). El APROBADO vinculado exige que el evento sea de ESTE venue, así que un aprobado del MISMO
+    // intento recibido por OTRO venue —que entra por un INSERT sin ningún candado— pasaba el CAS aunque la lectura sí lo
+    // habría vetado. Ése era
     // exactamente el camino que permitía declarar «no cobrado» con un aprobado durable ya guardado.
     const cas = await tx.$executeRaw`
       UPDATE "TerminalPaymentRequest"
@@ -499,9 +701,7 @@ export async function reconcileUncharged(
           "operatorReconciliation" = ${JSON.stringify(saved)}::jsonb,
           "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "id" = ${row.id} AND "status" = ${row.status}::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL
-        AND ${sinEvidenciaPositivaSql(declaration.requestId, identity.venueId)}
-        AND NOT ${hayEvidenciaDeConciliacionSql(declaration.requestId, identity.venueId)}
-        AND NOT ${contradiccionDeProcedenciaSql(attemptIds, identity.venueId, row.terminalId)}`
+        AND ${sinVetoDeDineroSql({ requestId: declaration.requestId, venueId: identity.venueId, attemptIds, terminalId: row.terminalId })}`
     if (cas !== 1) throw new UnchargedReconciliationError('ATTEMPT_NOT_ELIGIBLE')
 
     // Asiento DENTRO de la transacción: una declaración = un asiento.
@@ -520,6 +720,8 @@ export async function reconcileUncharged(
           resolutionId: saved.id,
           source: identity.source,
           previousStatus: row.status,
+          // A5 · E7: con PIN, `staffId` es el GERENTE que autorizó; aquí queda también quién operaba el POS.
+          ...quien,
         },
       },
     })
@@ -560,8 +762,8 @@ export async function reconcileUncharged(
  *  | ¿exige que la terminal contestara? | **sí** (`constaQueSalio`) | **también sí**: al entrar por el núcleo se hereda. ⚠️ P2 abierto de Codex — con el ACK perdido un rechazo legítimo queda sin liberar, y **la declaración del cajero TAMPOCO lo salva: comparte la misma guarda**. Se deja a propósito: relajarla toca el camino que ya está en producción |
  *  | lanza | sí (`UnchargedReconciliationError`) | **nunca**: un webhook que lanza provoca reintentos del procesador. Devuelve `{closed:false, reason}` |
  *
- * 🔴 **Sólo se cierra desde `ESTADOS_DECLARABLES`** (`UNKNOWN`/`TIMED_OUT`), el mismo conjunto que la
- * declaración del cajero. ⚠️ Codex (21-sep) corrigió aquí una afirmación mía FALSA: yo decía «si el cajero está
+ * 🔴 **Sólo se cierra desde `ESTADOS_DECLARABLES`** (`UNKNOWN`/`TIMED_OUT` y, desde A5, `CANCELLED`/`FAILED` todavía sin
+ * desenlace), el mismo conjunto que la declaración del cajero; sin fila NO deja lápida (eso es sólo de la persona). ⚠️ Codex (21-sep) corrigió aquí una afirmación mía FALSA: yo decía «si el cajero está
  * reintentando, la fila está PENDING». No es cierto — con el ACK perdido el servidor escribe `UNKNOWN`
  * precisamente porque la terminal PUDO recibir y ejecutar. Por eso la correlación tiene que ser exacta (nuestra
  * llave) y no basta con el estado: es lo que dejó a Blumon fuera de la liberación automática.

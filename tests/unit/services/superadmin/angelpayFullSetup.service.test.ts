@@ -76,6 +76,7 @@ beforeEach(() => {
   })
   mockedPrisma.merchantAccount.findUnique.mockResolvedValue({
     id: 'merchant-1',
+    externalMerchantId: '123',
     angelpayUserAccountId: 'login-1',
     active: true,
     provider: { code: 'ANGELPAY' },
@@ -211,6 +212,7 @@ describe('fullSetupAngelPayMerchant — una afiliación ocupa UN solo slot', () 
   it('un merchant que no está en ningún slot sí entra a SECONDARY (la validación no estorba el caso legítimo)', async () => {
     mockedPrisma.merchantAccount.findUnique.mockResolvedValue({
       id: 'merchant-2',
+      externalMerchantId: '124',
       angelpayUserAccountId: 'login-1',
       active: true,
       provider: { code: 'ANGELPAY' },

@@ -183,6 +183,16 @@ describe('reconcileUncharged — autorización', () => {
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ statusCode: 403 })
   })
 
+  it('P1 A5 (Codex plan-r1-8): la AUTORIZACIÓN va antes de BUSCAR la fila: un mesero sin PIN no lee ni crea nada', async () => {
+    montar(filaDelIncidente(), MESERO)
+    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      statusCode: 403,
+    })
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentRequest.createMany).not.toHaveBeenCalled()
+  })
+
   it('🔴 la autorización se comprueba ANTES que la elegibilidad: no filtra el estado del cobro', async () => {
     montar(filaDelIncidente({ paymentId: 'pay-9' }), MESERO)
     await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({

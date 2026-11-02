@@ -10,11 +10,14 @@ jest.mock('@/services/terminal-payment.service', () => ({
     // Ventana de confirmación (plan 16-sep, Task 2): el barrido de negativos sin evidencia va entre la conciliación de
     // UNKNOWN y la recuperación del long-poll. Un mock de lista fija sin él convertía el tick en un TypeError silencioso.
     releaseUnprovenNegativesAfterWindow: jest.fn().mockResolvedValue({ released: 0, reconciled: 0, held: 0 }),
+    // S2 (A4b, 21-oct): la red durable del destrabe de la RANURA 10 s tras el cese acreditado por la terminal nueva.
+    liberarTrasCierreDeEjecucion: jest.fn().mockResolvedValue({ released: 0, reconciled: 0, scanned: 0 }),
     resolvePendingFromDurableState: jest.fn().mockResolvedValue({ resolved: 0, checked: 0 }),
   },
 }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
 
+import logger from '@/config/logger'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { TerminalPaymentWatchdogJob } from '@/jobs/terminal-payment-watchdog.job'
 
@@ -28,12 +31,15 @@ describe('S5 · el vigía recupera el long-poll desde la fila en cada tick', () 
     expect(s.reconcileStaleRequests).toHaveBeenCalledTimes(1)
     expect(s.reconcileUnknownRequests).toHaveBeenCalledTimes(1)
     expect(s.releaseUnprovenNegativesAfterWindow).toHaveBeenCalledTimes(1)
+    expect(s.liberarTrasCierreDeEjecucion).toHaveBeenCalledTimes(1)
     expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
     const orden = [
       s.reconcileStaleRequests,
       s.reconcileUnknownRequests,
       s.releaseUnprovenNegativesAfterWindow,
+      // Revisión A4 (I-1): el rescate del long-poll (S5) va ANTES que S2 — S2 recorre hasta 200 filas en serie.
       s.resolvePendingFromDurableState,
+      s.liberarTrasCierreDeEjecucion,
     ].map(m => m.mock.invocationCallOrder[0])
     expect(orden).toEqual([...orden].sort((a, b) => a - b))
   })
@@ -43,6 +49,24 @@ describe('S5 · el vigía recupera el long-poll desde la fila en cada tick', () 
     await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
     expect(s.releaseUnprovenNegativesAfterWindow).toHaveBeenCalledTimes(1)
     expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
+  })
+
+  it('S2 · un fallo del barrido tras el cese NO impide la recuperación del long-poll en el mismo tick', async () => {
+    s.liberarTrasCierreDeEjecucion.mockRejectedValueOnce(new Error('db down'))
+    await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
+    expect(s.liberarTrasCierreDeEjecucion).toHaveBeenCalledTimes(1)
+    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
+  })
+
+  it('S2 · con el rescate del long-poll lanzando error, el barrido tras el cese corre igual en la MISMA pasada (y el error se loguea)', async () => {
+    s.resolvePendingFromDurableState.mockRejectedValueOnce(new Error('db down'))
+    await expect(new TerminalPaymentWatchdogJob().run()).resolves.toBeUndefined()
+    expect(s.resolvePendingFromDurableState).toHaveBeenCalledTimes(1)
+    expect(s.liberarTrasCierreDeEjecucion).toHaveBeenCalledTimes(1)
+    expect(s.resolvePendingFromDurableState.mock.invocationCallOrder[0]).toBeLessThan(
+      s.liberarTrasCierreDeEjecucion.mock.invocationCallOrder[0],
+    )
+    expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('long-poll recovery failed'))).toBe(true)
   })
 
   it('un fallo de la recuperación no tumba el tick ni deja el vigía marcado como «corriendo»', async () => {

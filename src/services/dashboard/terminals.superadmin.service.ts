@@ -10,7 +10,9 @@ import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
 import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 import { logAction } from './activity-log.service'
-import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
+import { normalizeTerminalSerialNumber, terminalIdentityKey } from '../../utils/terminalSerial'
+import { predicadoDeBloqueo } from '../terminal-payment.service'
+import { getVenuesEstrictos } from '../terminal-payment-strictness'
 import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
 
 /**
@@ -214,10 +216,29 @@ export async function getTerminalById(terminalId: string) {
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { id: true, createdAt: true, payload: true, status: true },
   })
+  // A6 · S6 (para el panel de soporte, E1): el cobro que aparta la terminal, con el MISMO predicado que la admisión. Sin filtro de
+  // venue a propósito: la reserva es del aparato (puede venir de la sucursal anterior), y esta ruta es sólo de superadmin.
+  const bloqueo = terminal.serialNumber
+    ? await prisma.terminalPaymentRequest.findFirst({
+        where: { terminalId: terminalIdentityKey(terminal.serialNumber), ...predicadoDeBloqueo(getVenuesEstrictos()) },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { requestId: true, venueId: true, amountCents: true, status: true, createdAt: true },
+      })
+    : null
   const { commandTokenHash: _credential, ...publicTerminal } = terminal
   return {
     ...publicTerminal,
     migration: computeTerminalMigration(command, terminal.lastActivationStatusCheckAt, terminal.commandSessionId),
+    blockingPaymentRequest: bloqueo
+      ? {
+          requestId: bloqueo.requestId,
+          venueId: bloqueo.venueId,
+          amount: bloqueo.amountCents / 100, // PESOS
+          status: bloqueo.status,
+          createdAt: bloqueo.createdAt.toISOString(),
+          ageMinutes: Math.floor((Date.now() - bloqueo.createdAt.getTime()) / 60_000),
+        }
+      : null,
   }
 }
 

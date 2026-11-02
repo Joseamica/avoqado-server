@@ -29,6 +29,9 @@ import {
   llaveDeIntento,
 } from './candadoDeIntento'
 import { RETRIES_EXHAUSTED } from './angelpayEventWorker.service'
+import { sendOpsAlert } from '../alerts/opsAlert.service'
+import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
+import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 
 /** La liga del recibo tal como la lee el POS (`receipt.receiptUrl` / `receiptAccessKey`), desde el `digitalReceipt` del registrador. */
 function ligaDelRecibo(digitalReceipt: unknown): { receiptUrl: string; receiptAccessKey: string } | null {
@@ -163,12 +166,15 @@ export async function persistErrorEvent(args: {
   venueId: string | null
   errorReason: string
 }): Promise<{ id: string }> {
+  // Un cuerpo rechazado nunca puede hacerse pasar por el sello del receptor autenticado.
+  const sinSello = { ...args.payload }
+  delete sinSello._avoqado
   return prisma.providerEventLog.create({
     data: {
       provider: ProviderType.PAYMENT_PROCESSOR,
       eventId: args.eventId,
       type: args.type,
-      payload: args.payload as unknown as Prisma.InputJsonValue,
+      payload: sinSello as unknown as Prisma.InputJsonValue,
       venueId: args.venueId,
       status: EventStatus.ERROR,
       errorReason: args.errorReason,
@@ -176,6 +182,141 @@ export async function persistErrorEvent(args: {
     },
     select: { id: true },
   })
+}
+
+const AVISO_SIN_REFERENCIAS = 'ANGELPAY_APPROVED_WITHOUT_REFERENCES'
+/** Misma ventana operativa rodante de 24 h del money watchdog; se fecha por INGRESO, nunca por timestamp del cuerpo. */
+const HORIZONTE_AVISO_MS = 24 * 60 * 60_000
+const LOTE_AVISOS_SIN_REFERENCIAS = 100
+let avisosSinReferenciasCursor: { createdAt: Date; id: string } | null = null
+const INGRESOS_NO_ACREDITADOS = ['INVALID_SIGNATURE', 'INVALID_PAYLOAD', 'UNSUPPORTED_EVENT_TYPE', 'NOT_PROVISIONED', 'UNKNOWN_MERCHANT']
+
+/** Compartida por el receptor y el rescate: un objeto/número no se convierte en referencia. */
+function tieneReferenciasUtiles(payload: AngelPayWebhookPayload): boolean {
+  return (
+    Boolean(llaveDeIntento(payload.payload.integratorReference)) ||
+    (typeof payload.payload.transactionId === 'string' && payload.payload.transactionId.trim().length > 0)
+  )
+}
+
+/** D3: un asiento por EVENTO bajo candado de su fila; no busca ventas ni atribuye dinero por parecido. */
+export async function avisarAprobadoSinReferencias(eventLogId: string, now = new Date()): Promise<boolean> {
+  try {
+    const aviso = await prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '${esperaDeCandadoMs()}ms'`)
+      const [event] = await tx.$queryRaw<
+        Array<{
+          id: string
+          payload: Prisma.JsonValue
+          venueId: string | null
+          createdAt: Date
+          errorReason: string | null
+          paymentId: string | null
+        }>
+      >`
+        SELECT "id", "payload", "venueId", "createdAt", "errorReason", "paymentId" FROM "ProviderEventLog"
+        WHERE "id" = ${eventLogId} AND "provider" = 'PAYMENT_PROCESSOR' AND "type" = 'send_transaction'
+          AND "eventId" LIKE 'angelpay-%' FOR UPDATE`
+      if (
+        !event ||
+        event.paymentId ||
+        event.createdAt.getTime() < now.getTime() - HORIZONTE_AVISO_MS ||
+        INGRESOS_NO_ACREDITADOS.includes(event.errorReason ?? '') ||
+        !validateAngelPayWebhookPayload(event.payload) ||
+        clasificarEstadoBancario(event.payload.payload.status) !== 'APROBADO' ||
+        tieneReferenciasUtiles(event.payload)
+      )
+        return null
+      const payload = event.payload
+      const sello = payload._avoqado as { receivedByMerchantAccountId?: unknown } | undefined
+      const merchantAccountId = sello?.receivedByMerchantAccountId
+      if (typeof merchantAccountId !== 'string' || !merchantAccountId) return null
+      if (
+        await tx.activityLog.findFirst({
+          where: { entity: 'ProviderEventLog', entityId: event.id, action: AVISO_SIN_REFERENCIAS },
+          select: { id: true },
+        })
+      )
+        return null
+      const merchant = await tx.merchantAccount.findUnique({
+        where: { id: merchantAccountId },
+        select: { angelpayUserAccount: { select: { venueId: true, venue: { select: { name: true } } } } },
+      })
+      const venueId = event.venueId && event.venueId === merchant?.angelpayUserAccount?.venueId ? event.venueId : null
+      const venueName = venueId ? (merchant?.angelpayUserAccount?.venue.name ?? null) : null
+      const serial =
+        typeof payload.payload.terminalSerial === 'string' && payload.payload.terminalSerial.trim()
+          ? normalizeTerminalSerialNumber(payload.payload.terminalSerial.trim(), TerminalType.TPV_ANDROID)
+          : null
+      const terminal =
+        venueId && serial
+          ? await tx.terminal.findFirst({ where: { venueId, serialNumber: serial }, select: { id: true, serialNumber: true } })
+          : null
+      const raw = payload.payload.amount
+      const cents = Number(raw)
+      // Mismo normalizador de importe del backfill: sólo centavos enteros legibles, convertidos a pesos en la frontera.
+      const amountPesos =
+        (typeof raw === 'number' || typeof raw === 'string') && String(raw).trim() && Number.isSafeInteger(cents) && cents >= 0
+          ? new Prisma.Decimal(cents).div(100).toFixed(2)
+          : null
+      const data = {
+        eventLogId: event.id,
+        merchantAccountId,
+        terminalId: terminal?.id ?? null,
+        terminalSerial: terminal?.serialNumber ?? null,
+        amountPesos,
+      }
+      await tx.activityLog.create({
+        data: { action: AVISO_SIN_REFERENCIAS, entity: 'ProviderEventLog', entityId: event.id, venueId, data },
+      })
+      return { ...data, venueId, venueName }
+    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
+    if (!aviso) return false
+    logger.error('🚨 [AngelPay webhook] APROBADO sin referencias útiles — sólo aviso, ninguna venta atribuida ni retenida', aviso)
+    // Best effort FUERA de TX/retry, sin ocupar el siguiente tick del watchdog; el asiento ya es durable.
+    void sendOpsAlert({
+      subject: `Aprobado sin referencias · ${aviso.venueName ?? 'negocio sin acreditar'} · ${aviso.eventLogId}`,
+      lines: [
+        `AngelPay aprobó ${aviso.amountPesos === null ? 'un importe ilegible' : `$${aviso.amountPesos} MXN`} sin folio ni referencia útil.`,
+        `Aviso ${aviso.eventLogId}. Afiliación ${aviso.merchantAccountId}. Terminal ${aviso.terminalSerial ?? 'sin acreditar'}.`,
+        'Las coincidencias de importe, terminal o fecha no prueban pertenencia: no se asignó dinero ni se detuvo ninguna venta.',
+        'Revisar en el procesador antes de volver a cobrar; puede existir riesgo de cobro doble.',
+      ],
+    })
+    return true
+  } catch (err) {
+    logger.warn('[AngelPay webhook] aviso sin referencias pendiente de recuperación', {
+      eventLogId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return false
+  }
+}
+
+/** Un lote por tick, keyset estable y deduplicación durable: también recoge caída tras INSERT y worker agotado. */
+export async function recuperarAvisosAprobadosSinReferencias(now = new Date()): Promise<number> {
+  const cursor = avisosSinReferenciasCursor
+  const keyset = cursor ? Prisma.sql`AND (e."createdAt", e."id") > (${utcTs(cursor.createdAt)}, ${cursor.id})` : Prisma.empty
+  const rows = await retry(
+    () => prisma.$queryRaw<Array<{ id: string; createdAt: Date }>>`
+    SELECT e."id", e."createdAt" FROM "ProviderEventLog" e
+    WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."type" = 'send_transaction' AND e."eventId" LIKE 'angelpay-%'
+      AND e."createdAt" >= ${utcTs(new Date(now.getTime() - HORIZONTE_AVISO_MS))} AND e."paymentId" IS NULL
+      AND e."attemptId" IS NULL
+      AND (e."errorReason" IS NULL OR e."errorReason" NOT IN (${Prisma.join(INGRESOS_NO_ACREDITADOS)}))
+      AND jsonb_typeof(e."payload"->'_avoqado'->'receivedByMerchantAccountId') = 'string'
+      AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'APROBADO'
+      AND (jsonb_typeof(e."payload"->'payload'->'transactionId') IS DISTINCT FROM 'string'
+        OR regexp_replace(e."payload"->'payload'->>'transactionId', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') = '')
+      AND NOT EXISTS (SELECT 1 FROM "ActivityLog" a WHERE a."entity" = 'ProviderEventLog' AND a."entityId" = e."id" AND a."action" = ${AVISO_SIN_REFERENCIAS})
+      ${keyset} ORDER BY e."createdAt", e."id" LIMIT ${LOTE_AVISOS_SIN_REFERENCIAS}`,
+    { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:approvedWithoutReferences' },
+  )
+  const last = rows[rows.length - 1]
+  avisosSinReferenciasCursor = rows.length === LOTE_AVISOS_SIN_REFERENCIAS && last ? { createdAt: last.createdAt, id: last.id } : null
+  let avisados = 0
+  for (const row of rows) if (await avisarAprobadoSinReferencias(row.id, now)) avisados += 1
+  return avisados
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1495,12 +1636,13 @@ export async function reconciliarEventoPendiente(args: {
   }
 
   // 3. Bail: no usable matching field
-  const hasMatchableField = !!(payload.payload.integratorReference || payload.payload.transactionId)
+  const hasMatchableField = tieneReferenciasUtiles(payload)
   if (!hasMatchableField) {
     await prisma.providerEventLog.updateMany({
       where: { id: eventLogId, ...propietario },
       data: { status: EventStatus.ERROR, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NO_MATCH_FIELDS, processedAt: new Date() },
     })
+    if (estadoBancario === 'APROBADO') await avisarAprobadoSinReferencias(eventLogId)
     return { action: 'ORPHANED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NO_MATCH_FIELDS, eventLogId }
   }
 

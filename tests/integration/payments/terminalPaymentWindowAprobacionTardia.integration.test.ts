@@ -43,6 +43,9 @@ let duena: { id: string }
 beforeAll(async () => {
   exigirBaseDesechable()
   f = await crearFixture('vtardia')
+  // A8 (21-oct): estas pruebas parten de una solicitud que la ventana LIBERÓ («no se cobró»), y eso sólo pasa donde el aviso del
+  // banco está comprobado (el caso de Testarudo). Sin esto la ventana soltaría sólo la ranura.
+  await f.conAvisoDelBancoComprobado()
   duena = await prisma.staff.create({
     data: {
       email: `${f.fixture}-duena@example.test`,

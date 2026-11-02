@@ -21,6 +21,7 @@ import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '
 import logger from '../../config/logger'
 import { BASE_URL } from '../../config/env'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
+import { angelPayIdentityConflict, lockAngelPayVenue } from '../../lib/angelpayIdentity'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '../shared/slotsDeAfiliacion'
 import { encryptCredentials } from './merchantAccount.service'
 import { angelPayIntegrationsApiClient, type AngelPayEnvironment } from '../integrations/angelpay-integrations-api.client'
@@ -60,7 +61,7 @@ export interface FullSetupAngelPayResult {
 export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, createdBy?: string): Promise<FullSetupAngelPayResult> {
   // Fast-fail validation before opening the transaction.
   if (input.merchant.mode === 'create' && !isNumericMerchantId(input.merchant.externalMerchantId)) {
-    throw new ValidationError('El ID del merchant debe ser numérico')
+    throw new ValidationError('El ID del comercio debe contener sólo dígitos y estar entre 1 y 2147483647')
   }
   if (input.slot.mode === 'replace') {
     if (!input.slot.replacedAccountId) {
@@ -85,6 +86,7 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
   try {
     const result = await prisma.$transaction(
       async tx => {
+        await lockAngelPayVenue(tx, input.venueId)
         // ---- 1. Login ----
         let angelpayUserAccountId: string
         if (input.login.mode === 'new') {
@@ -98,11 +100,11 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
             if (existingLogin.status !== 'DELETED') {
               throw new ConflictError('Ya existe una cuenta AngelPay con ese correo en este venue')
             }
+            if (existingLogin.environment !== newLogin.environment) throw angelPayIdentityConflict()
             const reactivated = await tx.angelPayUserAccount.update({
               where: { id: existingLogin.id },
               data: {
                 pin: newLogin.pin,
-                environment: newLogin.environment,
                 status: 'ACTIVE',
                 statusChangedAt: new Date(),
                 statusChangedBy: createdBy ?? null,
@@ -156,6 +158,11 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
           }
           if (existing.angelpayUserAccountId !== angelpayUserAccountId) {
             throw new ValidationError('La cuenta de comercio pertenece a otra cuenta AngelPay')
+          }
+          if (!isNumericMerchantId(existing.externalMerchantId)) {
+            throw new ValidationError(
+              'Esta reserva aún no tiene un comercio AngelPay válido. Descúbrelo desde la terminal antes de activarla.',
+            )
           }
           // A discovered merchant lands inactive (PENDING_REVIEW) — activate it
           // so it can route payments once wired into the slot.

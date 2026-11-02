@@ -5,6 +5,7 @@
  * (see validation middleware). Shape mirrors the wizard design spec §7.1.
  */
 import { z } from 'zod'
+import { isNumericMerchantId } from '../../lib/angelpayValidators'
 
 const rateFields = {
   debitRate: z.number().min(0).max(1),
@@ -53,7 +54,9 @@ export const fullSetupAngelPaySchema = z
     merchant: z.discriminatedUnion('mode', [
       z.object({
         mode: z.literal('create'),
-        externalMerchantId: z.string().regex(/^\d+$/, 'El ID del merchant debe ser numérico'),
+        externalMerchantId: z
+          .string()
+          .refine(isNumericMerchantId, 'El ID del comercio debe contener sólo dígitos y estar entre 1 y 2147483647'),
         name: z.string().min(1, 'Nombre del merchant requerido'),
         affiliation: z.string().min(1, 'Afiliación requerida'),
         displayName: z.string().min(1, 'Nombre para mostrar requerido'),

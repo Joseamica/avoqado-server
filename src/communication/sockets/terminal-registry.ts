@@ -24,6 +24,8 @@ interface TerminalEntry {
   terminalPaymentCancelDispositionVersion?: number
   /** v1 = responde `terminal:payment_probe` desde su bandeja durable sin entregar. */
   terminalPaymentProbeVersion?: number
+  /** v1 = su ACTIVE trae `executionAlive`/`closedForExecution` con barrera: sólo así es evidencia de cese (S1). */
+  terminalPaymentExecutionVersion?: number
 }
 
 /**
@@ -55,6 +57,7 @@ class TerminalRegistry {
     terminalPaymentCancelDispositionVersion?: number,
     verifiedSerial?: string,
     terminalPaymentProbeVersion?: number,
+    executionVersion?: number,
   ): void {
     terminalId = normalizeTerminalId(terminalId)
     // Clean up old socket mapping if terminal reconnected with new socket
@@ -95,6 +98,10 @@ class TerminalRegistry {
       // La sonda sólo se le manda a una terminal IDENTIFICADA que anunció la capacidad.
       terminalPaymentProbeVersion: identityVerified
         ? (terminalPaymentProbeVersion ?? (sameBinding ? existing?.terminalPaymentProbeVersion : undefined))
+        : undefined,
+      // Igual: un cliente sin identidad firmada no aporta evidencia de que la ejecución cerró.
+      terminalPaymentExecutionVersion: identityVerified
+        ? (executionVersion ?? (sameBinding ? existing?.terminalPaymentExecutionVersion : undefined))
         : undefined,
     })
     if (effectiveSocketId) {

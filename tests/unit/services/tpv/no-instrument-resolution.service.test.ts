@@ -178,8 +178,14 @@ describe('resolveNoInstrument — la declaración del cajero cierra el intento c
     expect(cas.sql).toMatch(/"resultJson" = \?::jsonb, "updatedAt" = \(NOW\(\) AT TIME ZONE 'UTC'\)/)
     expect(cas.sql).toMatch(/WHERE "id" = \? AND "status" = \?::"TerminalPaymentRequestStatus" AND "paymentId" IS NULL/)
     expect(cas.values).toEqual(expect.arrayContaining(['row-1', 'TIMED_OUT']))
-    expect(cas.anidado.match(/NOT EXISTS/g)).toHaveLength(2)
+    // B0-1 (20-oct): el juego ÚNICO de vetos de dinero (`sinVetoDeDineroSql`) — APROBADO vinculado, Payment ligado, evidencia de
+    // conciliación PENDING y contradicción de procedencia del intento —, el mismo que llevan la ventana y la declaración del cajero.
+    expect(cas.anidado.match(/NOT EXISTS/g)).toHaveLength(4)
+    // Codex servidor r1 · F1 (21-oct): y ningún Payment con la llave de sus intentos (la regla única de la llave, cualquier estado).
+    expect(cas.anidado).toMatch(/NOT \(EXISTS \(\s*SELECT p\."id" FROM "Payment" p\s*WHERE regexp_replace\(p\."idempotencyKey"/)
     expect(cas.anidado).toMatch(/"ProviderEventLog"[\s\S]*"TerminalPaymentAttemptLink"[\s\S]*= 'APROBADO'/)
+    expect(cas.anidado).toMatch(/'POSSIBLE_REFERENCE_COLLISION', 'POSSIBLE_SECOND_CAPTURE'/)
+    expect(cas.anidado).toMatch(/'LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH'/)
     expect(cas.anidado).toMatch(
       // Ronda 3 (P2): la etiqueta legacy se compara ahora con la expresión INDEXADA (`#> … = to_jsonb(?::text)`); las TRES
       // identidades y su orden siguen siendo lo que esta prueba guarda.

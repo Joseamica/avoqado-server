@@ -207,6 +207,21 @@ export async function crearFixture(prefijo: string) {
 
   const nuevoEventId = () => `${fixture}-ev-${++eventos}`
 
+  /**
+   * A8 (21-oct): la VENTANA de 30 s sólo escribe «no se cobró» (`FAILED/NO_EVIDENCE_AFTER_WINDOW`) donde el aviso del banco de
+   * TODAS las cuentas con las que pudo cobrar la terminal está COMPROBADO (`avisoDelBancoComprobado`); si no, suelta sólo la
+   * ranura. Las suites que fijan ese desenlace —el caso de Testarudo— lo siembran con esto: la terminal del fixture con SU cuenta
+   * AngelPay asignada, activa y con avisos recibidos. Sin cobros con tarjeta de hace más de 60 s sin su aviso: los de cada prueba
+   * se borran en `limpiar`.
+   */
+  const conAvisoDelBancoComprobado = async () => {
+    await prisma.terminal.update({ where: { serialNumber: serial }, data: { assignedMerchantIds: [merchant.id] } })
+    await prisma.merchantAccount.update({
+      where: { id: merchant.id },
+      data: { active: true, angelpayWebhookLastReceivedAt: new Date(Date.now() - 60_000) },
+    })
+  }
+
   // ─── Codex R3: tarifas REALES (proveedor, precio al negocio por slot, liquidación) para calcular el costo sin fakes ───
   type Tasas = {
     debitRate?: number
@@ -406,6 +421,7 @@ export async function crearFixture(prefijo: string) {
     registroDeLaTerminal,
     eventoAngelPay,
     nuevoEventId,
+    conAvisoDelBancoComprobado,
     limpiar,
     destruir,
     conLiquidacion,

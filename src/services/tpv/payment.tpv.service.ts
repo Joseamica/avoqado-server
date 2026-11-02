@@ -490,9 +490,16 @@ async function retenerSiQuedoSinLigar(payment: Payment, paymentData: PaymentCrea
  */
 async function retenerSiHayColisionSobreUnaLiberada(evidencia: Payment, paymentData: PaymentCreationData): Promise<void> {
   if (paymentData.registradoVia === 'webhook') return
-  const requestId = evidencia.terminalPaymentRequestId ?? solicitudDelRegistro(evidencia.processorData)
-  if (!requestId) return
+  let requestId = evidencia.terminalPaymentRequestId ?? solicitudDelRegistro(evidencia.processorData)
   try {
+    // D9: una cola puede traer sólo la llave; el vínculo exacto también identifica su solicitud.
+    if (!requestId) {
+      const attemptId = llaveDeIntento(evidencia.idempotencyKey)
+      if (!attemptId) return
+      const vinculo = await terminalPaymentService.findAttemptLink(attemptId)
+      if (!vinculo || vinculo.venueId !== evidencia.venueId) return
+      requestId = vinculo.requestId
+    }
     const resultado = await terminalPaymentService.retenerSolicitudLiberadaPorColisionDeReferencia({
       requestId,
       venueId: evidencia.venueId,

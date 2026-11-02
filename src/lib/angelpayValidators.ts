@@ -13,5 +13,6 @@ export const isValidEmail = (v: string): boolean => EMAIL_REGEX.test(v)
 /** True when `v` is exactly 6 numeric digits (an AngelPay account PIN). */
 export const isValidPin = (v: string): boolean => PIN_REGEX.test(v)
 
-/** True when `v` is a non-empty numeric string (an AngelPay merchant id). */
-export const isNumericMerchantId = (v: string): boolean => v.length > 0 && NUMERIC_REGEX.test(v)
+/** AngelPay SDK MerchantOption.id is a positive signed 32-bit integer. */
+export const isNumericMerchantId = (v: string): boolean =>
+  typeof v === 'string' && NUMERIC_REGEX.test(v) && BigInt(v) >= 1n && BigInt(v) <= 2147483647n
