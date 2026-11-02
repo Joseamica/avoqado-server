@@ -1,5 +1,26 @@
 import winston from 'winston'
-import { getContext } from './executionContext'
+import { getContext, type ExecutionContext } from './executionContext'
+
+const CONTEXTO_AL_LLAMAR = Symbol('contextoAlLlamar')
+
+/**
+ * hz:f26b3afc:D3 — Each transport runs its format when it WRITES the line, not when the logger was called. When the
+ * console or a file backs up, lines wait in a queue and get formatted later, inside another request's or job's context:
+ * an alert could carry another business's venue. This takes a snapshot of the context at call time (`logger.write` is
+ * synchronous, and every logger method and child goes through it) and `contextFormat` reads only that snapshot. It is a
+ * copy, so what the request adds later (`enrichContext`) does not leak into an earlier line.
+ */
+export function capturarContextoAlLlamar<T extends winston.Logger>(logger: T): T {
+  const write = logger.write.bind(logger) as (...args: unknown[]) => boolean
+  logger.write = ((info: unknown, ...resto: unknown[]) => {
+    if (info && typeof info === 'object' && !(CONTEXTO_AL_LLAMAR in info)) {
+      const ctx = getContext()
+      ;(info as Record<symbol, ExecutionContext | undefined>)[CONTEXTO_AL_LLAMAR] = ctx ? { ...ctx } : undefined
+    }
+    return write(info, ...resto)
+  }) as T['write']
+  return logger
+}
 
 /**
  * Injects the active execution context into every log record.
@@ -17,9 +38,12 @@ import { getContext } from './executionContext'
  * Lives here rather than in config/logger.ts so it can be unit-tested: the test suite
  * mocks `@/config/logger` globally (tests/__helpers__/setup.ts) to keep logs quiet, which
  * would hide anything exported from there.
+ *
+ * The context comes from the snapshot `capturarContextoAlLlamar` took when the logger was CALLED. Without one (someone
+ * ran the format by hand, synchronously, as the unit tests do), it is read now.
  */
 export const contextFormat = winston.format(info => {
-  const ctx = getContext()
+  const ctx = CONTEXTO_AL_LLAMAR in info ? (info as Record<symbol, ExecutionContext | undefined>)[CONTEXTO_AL_LLAMAR] : getContext()
   if (!ctx) return info
 
   const injected: Record<string, unknown> = {
