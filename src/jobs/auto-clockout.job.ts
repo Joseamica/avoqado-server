@@ -3,6 +3,7 @@
 import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { conNegocio } from '../services/demo/candadoDemo'
 import { TimeEntryStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -170,12 +171,12 @@ export class AutoClockOutJob {
               })
             } catch (entryError) {
               errors++
-              logger.error(`Failed to auto clock-out entry ${entry.id}:`, entryError)
+              conNegocio(settings.venue.id, () => logger.error(`Failed to auto clock-out entry ${entry.id}:`, entryError))
             }
           }
         } catch (venueError) {
           errors++
-          logger.error(`Failed to process venue ${settings.venue.id}:`, venueError)
+          conNegocio(settings.venue.id, () => logger.error(`Failed to process venue ${settings.venue.id}:`, venueError))
         }
       }
     } catch (error) {
@@ -259,12 +260,12 @@ export class AutoClockOutJob {
               })
             } catch (entryError) {
               errors++
-              logger.error(`Failed to auto clock-out entry ${entry.id}:`, entryError)
+              conNegocio(settings.venue.id, () => logger.error(`Failed to auto clock-out entry ${entry.id}:`, entryError))
             }
           }
         } catch (venueError) {
           errors++
-          logger.error(`Failed to process venue ${settings.venue.id}:`, venueError)
+          conNegocio(settings.venue.id, () => logger.error(`Failed to process venue ${settings.venue.id}:`, venueError))
         }
       }
     } catch (error) {

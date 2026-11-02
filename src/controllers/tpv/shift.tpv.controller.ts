@@ -1,6 +1,41 @@
 import { NextFunction, Request, Response } from 'express'
+import { z } from 'zod'
+import { BadRequestError, ConflictError, UnauthorizedError } from '../../errors/AppError'
 
 import * as shiftTpvService from '../../services/tpv/shift.tpv.service'
+
+const openOperationSchema = z.object({
+  operationId: z
+    .string({ required_error: 'operationId es requerido', invalid_type_error: 'operationId debe ser texto' })
+    .regex(/^c[a-z0-9]{24}$/, 'operationId debe ser un cuid v1 válido'),
+  localId: z
+    .string({ required_error: 'localId es requerido', invalid_type_error: 'localId debe ser texto' })
+    .regex(/^c[a-z0-9]{24}$/, 'localId debe ser un cuid v1 válido'),
+  openedAt: z
+    .string({ invalid_type_error: 'openedAt debe ser una fecha ISO-8601 válida' })
+    .datetime({ offset: true, message: 'openedAt debe ser una fecha ISO-8601 válida' })
+    .optional(),
+  isOfflineReplay: z.boolean({ invalid_type_error: 'isOfflineReplay debe ser verdadero o falso' }).optional().default(false),
+  startingCash: z
+    .number({ required_error: 'El fondo inicial es requerido', invalid_type_error: 'El fondo inicial debe ser un número' })
+    .finite('El fondo inicial debe ser un número finito')
+    .nonnegative('El fondo inicial no puede ser negativo')
+    .max(99_999_999.99, 'El fondo inicial supera el máximo permitido'),
+  stationId: z.string({ invalid_type_error: 'stationId debe ser texto' }).max(200, 'stationId es demasiado largo').optional(),
+  staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).max(100, 'staffId es demasiado largo').optional(),
+})
+
+const closeOperationSchema = z.object({
+  operationId: openOperationSchema.shape.operationId,
+  closedAtLocal: z
+    .string({ invalid_type_error: 'closedAtLocal debe ser una fecha ISO-8601 válida' })
+    .datetime({ offset: true, message: 'closedAtLocal debe ser una fecha ISO-8601 válida' })
+    .optional(),
+  isOfflineReplay: openOperationSchema.shape.isOfflineReplay,
+  openingOperationId: openOperationSchema.shape.operationId.optional(),
+  cashDrawerSessionId: openOperationSchema.shape.operationId.optional(),
+  staffId: openOperationSchema.shape.staffId,
+})
 
 /**
  * Open a new shift for a venue
@@ -13,6 +48,28 @@ export async function openShift(req: Request, res: Response, next: NextFunction)
 
     // Extract data from request body
     const { staffId, startingCash, stationId } = req.body
+
+    if (['operationId', 'localId', 'openedAt', 'isOfflineReplay'].some(key => req.body[key] !== undefined)) {
+      const parsed = openOperationSchema.safeParse(req.body)
+      if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('; '))
+      const data = parsed.data
+      if (data.operationId !== data.localId) {
+        throw new ConflictError('operationId y localId deben identificar la misma apertura', 'SHIFT_OPERATION_CONTRACT_MISMATCH')
+      }
+      const actor = req.authContext?.userId
+      const terminalSerial = req.authContext?.terminalSerialNumber
+      if (!actor || !terminalSerial) throw new UnauthorizedError('Se requiere una persona y una terminal autenticadas para esta apertura')
+      const shift = await shiftTpvService.openShiftForVenue(venueId, actor, data.startingCash, data.stationId, orgId, {
+        operationId: data.operationId,
+        localId: data.localId,
+        openedAt: data.openedAt ? new Date(data.openedAt) : undefined,
+        isOfflineReplay: data.isOfflineReplay,
+        terminalSerial,
+        declaredStaffId: data.staffId,
+      })
+      res.status(201).json({ success: true, data: shift })
+      return
+    }
 
     // Validate required fields
     if (!staffId) {
@@ -44,6 +101,18 @@ export async function closeShift(req: Request, res: Response, next: NextFunction
     const orgId = req.authContext?.orgId
     const venueId: string = req.params.venueId
     const shiftId: string = req.params.shiftId
+    const body = req.body ?? {}
+    let operation: shiftTpvService.ShiftCloseRequestContext['operation']
+    if (
+      ['operationId', 'closedAtLocal', 'isOfflineReplay', 'openingOperationId', 'cashDrawerSessionId'].some(key => body[key] !== undefined)
+    ) {
+      const parsed = closeOperationSchema.safeParse(body)
+      if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('; '))
+      const actor = req.authContext?.userId
+      const terminalSerial = req.authContext?.terminalSerialNumber
+      if (!actor || !terminalSerial) throw new UnauthorizedError('Se requiere una persona y una terminal autenticadas para este cierre')
+      operation = { ...parsed.data, terminalSerial, declaredStaffId: parsed.data.staffId }
+    }
 
     // Forward the body without inventing zero declarations. The service owns the additive
     // reconciliation contract and keeps legacy Desktop/TPV shapes separate.
@@ -52,13 +121,30 @@ export async function closeShift(req: Request, res: Response, next: NextFunction
       actorStaffId: req.authContext?.userId,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
+      ...(operation ? { operation } : {}),
     })
 
     res.status(200).json({
       success: true,
       data: result.shift,
       reconciliation: result.reconciliation,
+      ...(result.operation ? { operation: result.operation } : {}),
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function getShiftOperation(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = openOperationSchema.shape.operationId.safeParse(req.params.operationId)
+    if (!parsed.success) throw new BadRequestError(parsed.error.issues.map(issue => issue.message).join('; '))
+    const terminalSerial = req.authContext?.terminalSerialNumber
+    const actorStaffId = req.authContext?.userId
+    if (!terminalSerial || !actorStaffId)
+      throw new UnauthorizedError('Se requiere una persona y una terminal autenticadas para consultar esta operación')
+    const result = await shiftTpvService.getShiftOperationForVenue(req.params.venueId, parsed.data, terminalSerial, actorStaffId)
+    res.status(200).json({ success: true, ...result })
   } catch (error) {
     next(error)
   }

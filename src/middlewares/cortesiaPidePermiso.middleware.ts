@@ -3,6 +3,12 @@ import { NextFunction, Request, Response } from 'express'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
 
+/** Con id de catálogo, `discount` sólo repite ese importe; sin id, el servicio aplica el número positivo como rebaja manual. */
+export const traeDescuentoManual = (body: any): boolean => !body?.orderDiscountId && typeof body?.discount === 'number' && body.discount > 0
+
+export const checkDescuentoManualPermissionIfPresent = (req: Request, res: Response, next: NextFunction) =>
+  traeDescuentoManual(req.body) ? checkPermission('discounts:apply')(req, res, next) : next()
+
 const cortesiasAutorizadas = new WeakMap<Request, { venueId: string; userId: string }>()
 
 /** Sólo acredita orders:comp comprobado por este middleware, en este request, negocio y sesión. */

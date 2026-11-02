@@ -1,6 +1,10 @@
 import { appendCatalogImportStandaloneErrorLines } from '@/services/master-catalog/catalogImportFieldValidation.service'
 import type { CatalogImportRowError, CatalogImportStagedLine } from '@/services/master-catalog/catalogImport.types'
-import { expectCatalogImportEventLoopSliceBudgetV1, startCatalogImportEventLoopProbeV1 } from './catalogImportEventLoopTestHarness'
+import {
+  CATALOG_IMPORT_EVENT_LOOP_PROBE_SUPPORTED_V1,
+  expectCatalogImportEventLoopSliceBudgetV1,
+  startCatalogImportEventLoopProbeV1,
+} from './catalogImportEventLoopTestHarness'
 import { blank, context, makeHarness, number, row, text, upload, validWorkbook } from './catalogImportTestHarness'
 
 describe('catalog import field finding scheduler', () => {
@@ -32,24 +36,28 @@ describe('catalog import field finding scheduler', () => {
     }
 
     const probe = startCatalogImportEventLoopProbeV1()
-    let sliceStartedAt = performance.now()
-    let checkpointCalls = 0
+    let completedCheckpointTurns = 0
+    let pendingCheckpointTurns = 0
+    let maximumPendingCheckpointTurns = 0
     const checkpoint = async () => {
-      checkpointCalls += 1
-      if (performance.now() - sliceStartedAt < 4) return
+      pendingCheckpointTurns += 1
+      maximumPendingCheckpointTurns = Math.max(maximumPendingCheckpointTurns, pendingCheckpointTurns)
       await new Promise<void>(resolve => setImmediate(resolve))
-      sliceStartedAt = performance.now()
+      completedCheckpointTurns += 1
+      pendingCheckpointTurns -= 1
     }
 
     await appendCatalogImportStandaloneErrorLines(staged, errors, checkpoint)
     const samples = probe.stop()
 
-    // WHY: Invalid workbooks are the adversarial path; pre-existing staged
-    // coordinates must not bypass the same <50 ms scheduler as valid rows.
-    // How often the loop actually yields depends on the CPU (twice on a fast
-    // runner), so the proof is the call count: one checkpoint per 64 of the
-    // 20k lines and 400k findings, whether or not the coordinate has a line.
-    expect(checkpointCalls).toBeGreaterThanOrEqual(Math.floor((20_000 + 400_000) / 64))
+    // WHY: Count awaited event-loop turns, not timer samples: fast runs may
+    // finish before three timer ticks even though every batch yielded.
+    expect(completedCheckpointTurns).toBe(Math.floor((20_000 + 400_000) / 64))
+    expect(pendingCheckpointTurns).toBe(0)
+    expect(maximumPendingCheckpointTurns).toBe(1)
+    if (CATALOG_IMPORT_EVENT_LOOP_PROBE_SUPPORTED_V1) {
+      expect(samples.length).toBeGreaterThan(0)
+    }
     expectCatalogImportEventLoopSliceBudgetV1(samples)
     expect(staged).toHaveLength(20_000)
   }, 20_000)

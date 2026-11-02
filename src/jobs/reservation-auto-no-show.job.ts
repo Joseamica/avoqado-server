@@ -146,7 +146,9 @@ export class ReservationAutoNoShowJob {
             continue
           }
           // One bad reservation must not kill the tick.
-          logger.error(`❌ [AUTO NO-SHOW] Failed to mark reservation=${reservation.id} (${reservation.confirmationCode})`, err)
+          conNegocio(reservation.venueId, () =>
+            logger.error(`❌ [AUTO NO-SHOW] Failed to mark reservation=${reservation.id} (${reservation.confirmationCode})`, err),
+          )
         }
       }
 

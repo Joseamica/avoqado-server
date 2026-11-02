@@ -935,6 +935,10 @@ export const initiateCryptoPaymentSchema = z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
   }),
   body: z.object({
+    idempotencyKey: z
+      .string()
+      .regex(/^c[a-z0-9]{24}$/, 'La operación debe ser un cuid v1 válido')
+      .optional(),
     amount: z.number().int().positive({ message: 'El monto debe ser un número entero positivo (en centavos).' }),
     tip: z.number().int().min(0, { message: 'La propina debe ser un número entero no negativo (en centavos).' }).optional(),
     staffId: z.string().cuid({ message: 'El ID del staff debe ser un CUID válido.' }),
@@ -958,7 +962,7 @@ export const cancelCryptoPaymentSchema = z.object({
       reason: z.string().optional(),
     })
     .refine(data => data.paymentId || data.requestId, {
-      message: 'paymentId or requestId is required',
+      message: 'Se requiere paymentId o requestId',
     }),
 })
 
@@ -967,5 +971,12 @@ export const getCryptoPaymentStatusSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
     requestId: z.string().min(1, { message: 'El requestId de B4Bit es requerido.' }),
+  }),
+})
+
+export const getCryptoOperationSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del venue debe ser un CUID válido.' }),
+    idempotencyKey: z.string().regex(/^c[a-z0-9]{24}$/, 'La operación debe ser un cuid v1 válido'),
   }),
 })
