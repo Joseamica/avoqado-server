@@ -28,7 +28,7 @@ import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
-import { chargeMerchant } from './card/merchant'
+import { chargeMerchant, findCardMerchant } from './card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
 
 export interface CreateOnlineOrderInput {
@@ -455,7 +455,15 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       })
     }
     if (!state.config.acceptsPayAtPickup) {
-      throw new BadRequestError('Este negocio no acepta pagar al recoger.', 'PAYMENT_MODE_NOT_ACCEPTED')
+      // S8: la tienda vieja abierta en una pestaña muestra este texto ante un código que no conoce. Si la tarjeta SÍ está disponible
+      // (misma regla que `paymentModes.cardOnline` de GET /info), le dice qué hacer. El código no cambia.
+      const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, input.venueId)) !== null
+      throw new BadRequestError(
+        cardOnline
+          ? 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.'
+          : 'Este negocio no acepta pagar al recoger.',
+        'PAYMENT_MODE_NOT_ACCEPTED',
+      )
     }
 
     // 4. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).

@@ -444,9 +444,48 @@ describe('createOnlineOrder', () => {
 
   it('una tienda abierta que no acepta pagar al recoger responde 400 PAYMENT_MODE_NOT_ACCEPTED y no cotiza ni crea', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, config: { ...OPEN.config, acceptsPayAtPickup: false } })
-    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 400, code: 'PAYMENT_MODE_NOT_ACCEPTED' })
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PAYMENT_MODE_NOT_ACCEPTED',
+      message: 'Este negocio no acepta pagar al recoger.',
+    })
     expect(quoteCart).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  describe('S8: la tienda vieja (abierta en una pestaña) muestra el texto del servidor ante un código que no conoce', () => {
+    const SIN_RECOGER_CON_TARJETA = { ...OPEN, config: { ...OPEN.config, acceptsPayAtPickup: false, acceptsCardOnline: true } }
+    const STRIPE = { chargesEnabled: true, providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } }
+
+    it('con la tarjeta disponible (switch prendido y comercio que cobra) pide recargar para pagar con tarjeta; el código no cambia', async () => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(SIN_RECOGER_CON_TARJETA)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([STRIPE] as any)
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.',
+      })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+    })
+
+    it('con el switch prendido pero sin comercio que cobre, o con el switch apagado, el texto de hoy', async () => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(SIN_RECOGER_CON_TARJETA)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([{ ...STRIPE, chargesEnabled: false }] as any)
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio no acepta pagar al recoger.',
+      })
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+        ...OPEN,
+        config: { ...OPEN.config, acceptsPayAtPickup: false, acceptsCardOnline: false },
+      })
+      prismaMock.ecommerceMerchant.findMany.mockClear()
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio no acepta pagar al recoger.',
+      })
+      expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
+    })
   })
 
   it('el candado se toma en la transacción ANTES de los topes, el folio y las escrituras, y todo eso corre en la transacción (R4)', async () => {

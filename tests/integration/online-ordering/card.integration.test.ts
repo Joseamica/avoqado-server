@@ -319,6 +319,25 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
+  it('S8: sin pagar al recoger y con la tarjeta disponible, pagar al recoger pide recargar para pagar con tarjeta (mismo código)', async () => {
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { acceptsPayAtPickup: false } })
+    try {
+      await expect(pickup(nextKey())).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.',
+      })
+      await prisma.ecommerceMerchant.update({ where: { id: merchantId }, data: { chargesEnabled: false } })
+      await expect(pickup(nextKey())).rejects.toMatchObject({
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio no acepta pagar al recoger.',
+      })
+    } finally {
+      await prisma.ecommerceMerchant.update({ where: { id: merchantId }, data: { chargesEnabled: true } })
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { acceptsPayAtPickup: true } })
+    }
+  })
+
   it('misma llave con otro carrito → 409 IDEMPOTENCY_KEY_CONFLICT', async () => {
     const key = nextKey()
     const phone = nextPhone()
