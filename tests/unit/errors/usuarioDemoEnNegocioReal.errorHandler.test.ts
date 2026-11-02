@@ -6,7 +6,12 @@ jest.mock('../../../src/config/env', () => ({
   NODE_ENV: 'production',
 }))
 
+jest.mock('../../../src/services/superadmin/kycReview.service', () => ({ approveKyc: jest.fn(), assignProcessorAndApproveKyc: jest.fn() }))
+
+import type { Request, Response } from 'express'
 import { globalErrorHandler } from '../../../src/app'
+import { approveKyc, assignProcessorAndApprove } from '../../../src/controllers/superadmin/kycReview.controller'
+import * as kyc from '../../../src/services/superadmin/kycReview.service'
 import { BadRequestError } from '../../../src/errors/AppError'
 import { esUsuarioDemoEnNegocioReal, USUARIO_DEMO_EN_NEGOCIO_REAL } from '../../../src/services/demo/candadoDemo'
 
@@ -56,5 +61,30 @@ describe('en el manejador general', () => {
     expect(res.status).toBe(400)
     expect(res.body).toMatchObject({ code: USUARIO_DEMO_EN_NEGOCIO_REAL })
     expect(res.body.message).toMatch(/demostración/)
+  })
+})
+
+describe('🔴 Codex D5 r1-5 · el KYC, que responde él mismo sin pasar por el manejador general', () => {
+  const llamar = async (fn: typeof approveKyc) => {
+    let status = 0
+    let body: Record<string, unknown> = {}
+    const res = {
+      status: (s: number) => ((status = s), res),
+      json: (b: Record<string, unknown>) => ((body = b), res),
+    } as unknown as Response
+    await fn({ params: { venueId: 'v' }, body: {}, authContext: { userId: 'u' } } as unknown as Request, res)
+    return { status, body }
+  }
+
+  it('aprobar el KYC de un demo con su usuario adentro da 400 con el motivo, no 500 con el texto de Postgres', async () => {
+    ;(kyc.approveKyc as jest.Mock).mockRejectedValueOnce(deModelo())
+    const r = await llamar(approveKyc)
+    expect(r.status).toBe(400)
+    expect(r.body.message).toMatch(/demostración/)
+  })
+
+  it('asignar procesador y aprobar, igual', async () => {
+    ;(kyc.assignProcessorAndApproveKyc as jest.Mock).mockRejectedValueOnce(deSqlCrudo())
+    expect((await llamar(assignProcessorAndApprove)).status).toBe(400)
   })
 })

@@ -19,7 +19,7 @@ import { randomUUID } from 'crypto'
 import { VenueStatus } from '@prisma/client'
 import type { Request } from 'express'
 import logger from '@/config/logger'
-import AppError from '@/errors/AppError'
+import AppError, { BadRequestError } from '@/errors/AppError'
 import { getContext, runWithContext } from '@/observability/executionContext'
 import { getVenueName } from '@/observability/venueNames'
 import prisma from '@/utils/prismaClient'
@@ -69,7 +69,7 @@ export function esCorreoDemo(email?: string | null): boolean {
 
 /**
  * hz:f26b3afc:D5: los triggers de la base rechazan que un usuario demo (contraseña pública) quede en un negocio real
- * (migración `usuario_demo_solo_en_negocios_demo`) con este código; el manejador general lo traduce a un 400.
+ * (migración `usuario_demo_solo_en_negocios_demo`) con este código; `comoErrorDeUsuarioDemo` lo traduce a un 400.
  */
 export const USUARIO_DEMO_EN_NEGOCIO_REAL = 'USUARIO_DEMO_EN_NEGOCIO_REAL'
 export const MENSAJE_USUARIO_DEMO_EN_NEGOCIO_REAL =
@@ -88,6 +88,11 @@ export function esUsuarioDemoEnNegocioReal(err: unknown): boolean {
   }
   const texto = String(e.message ?? '')
   return /PostgresError \{ code: "P0001"/.test(texto) && texto.includes(USUARIO_DEMO_EN_NEGOCIO_REAL)
+}
+
+/** El rechazo de la base como el 400 que ve quien lo intentó; cualquier otro error pasa igual. */
+export function comoErrorDeUsuarioDemo<E>(err: E): E | BadRequestError {
+  return esUsuarioDemoEnNegocioReal(err) ? new BadRequestError(MENSAJE_USUARIO_DEMO_EN_NEGOCIO_REAL, USUARIO_DEMO_EN_NEGOCIO_REAL) : err
 }
 
 /** `true` si la persona es un usuario compartido de los demos. Lanza si la base no contesta. */

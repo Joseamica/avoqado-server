@@ -92,6 +92,57 @@ describe('🔴 un usuario demo NO entra a un negocio real, por ningún camino', 
     expect(await rechazo(prisma.$executeRaw(sql))).toBe('rechazado')
   })
 
+  it('🔴 Codex D5 r1-1 · ser SUPERADMIN en su propio demo (da permisos globales)', async () => {
+    const v = await negocio(await organizacion(), 'LIVE_DEMO')
+    const demo = await persona('demo.avoqado.io')
+    expect(await rechazo(prisma.staffVenue.create({ data: { staffId: demo, venueId: v, role: 'SUPERADMIN' } }))).toBe('rechazado')
+    const sv = await prisma.staffVenue.create({ data: { staffId: demo, venueId: v, role: 'OWNER' } })
+    expect(await rechazo(prisma.staffVenue.update({ where: { id: sv.id }, data: { role: 'SUPERADMIN' } }))).toBe('rechazado')
+  })
+
+  it('🔴 Codex D5 r1-2 · un negocio demo dentro de una organización real (el dueño de una sucursal ve la organización)', async () => {
+    const org = await organizacion()
+    await negocio(org, 'ACTIVE')
+    const [enDemo, demo] = [await negocio(org, 'LIVE_DEMO'), await persona('demo.avoqado.io')]
+    expect(await rechazo(prisma.staffVenue.create({ data: { staffId: demo, venueId: enDemo, role: 'OWNER' } }))).toBe('rechazado')
+  })
+
+  it('🔴 Codex D5 r1-2 · un negocio real nuevo en la organización donde un demo sólo tiene su sucursal', async () => {
+    const org = await organizacion()
+    const [enDemo, demo] = [await negocio(org, 'LIVE_DEMO'), await persona('demo.avoqado.io')]
+    await prisma.staffVenue.create({ data: { staffId: demo, venueId: enDemo, role: 'OWNER' } })
+    expect(await rechazo(negocio(org, 'ACTIVE'))).toBe('rechazado')
+  })
+
+  it('🔴 Codex D5 r1-4 · cambiarle el correo a un usuario demo (su contraseña pública seguiría abriendo la cuenta)', async () => {
+    const demo = await persona('demo.avoqado.io')
+    expect(await rechazo(prisma.staff.update({ where: { id: demo }, data: { email: `${demo}@example.test` } }))).toBe('rechazado')
+    await prisma.staff.update({ where: { id: demo }, data: { firstName: 'Demo', email: `otro-${demo}@demo.avoqado.io` } })
+  })
+
+  it('🔴 Codex D5 r1-3 · dos transacciones a la vez no arman la combinación prohibida', async () => {
+    const org = await organizacion()
+    const demo = await persona('demo.avoqado.io')
+    let soltar!: () => void
+    const suelta = new Promise<void>(r => (soltar = r))
+    let insertada!: () => void
+    const yaInsertada = new Promise<void>(r => (insertada = r))
+    const t1 = prisma.$transaction(
+      async tx => {
+        await tx.staffOrganization.create({ data: { staffId: demo, organizationId: org } })
+        insertada()
+        await suelta
+      },
+      { timeout: 30_000 },
+    )
+    await yaInsertada
+    const t2 = rechazo(negocio(org, 'ACTIVE')) // sin el candado de la organización, no ve la membresía sin confirmar
+    await new Promise(r => setTimeout(r, 500))
+    soltar()
+    await t1
+    expect(await t2).toBe('rechazado')
+  })
+
   it('🔴 Codex r4 · las dos funciones del SUPERADMIN', async () => {
     const org = await organizacion()
     const real = await negocio(org, 'ACTIVE')
