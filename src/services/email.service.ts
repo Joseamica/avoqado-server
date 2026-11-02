@@ -696,7 +696,7 @@ class EmailService {
         Recibo enviado por ${data.venueName} via Avoqado
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -774,13 +774,13 @@ Recibo enviado por ${data.venueName} via Avoqado
       </p>
 
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Esto te dara acceso al panel de administracion de ${data.organizationName} donde podras:
+        Esto te dará acceso al panel de administración de ${data.organizationName} donde podrás:
       </p>
 
       <ul style="font-size: 15px; margin: 0 0 24px 0; padding-left: 24px; color: #000;">
-        <li style="margin-bottom: 8px;">Gestionar ordenes y pagos</li>
-        <li style="margin-bottom: 8px;">Ver reportes y estadisticas</li>
-        <li style="margin-bottom: 8px;">Administrar el menu y productos</li>
+        <li style="margin-bottom: 8px;">Gestionar órdenes y pagos</li>
+        <li style="margin-bottom: 8px;">Ver reportes y estadísticas</li>
+        <li style="margin-bottom: 8px;">Administrar el menú y productos</li>
         <li style="margin-bottom: 8px;">Supervisar las operaciones del negocio</li>
       </ul>
     </div>
@@ -788,14 +788,14 @@ Recibo enviado por ${data.venueName} via Avoqado
     <!-- CTA Button -->
     <div style="padding: 32px 0; text-align: center;">
       <a href="${data.inviteLink}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Aceptar Invitacion
+        Aceptar invitación
       </a>
     </div>
 
     <!-- Note -->
     <div style="padding-bottom: 24px;">
       <p style="font-size: 14px; color: #666; margin: 0;">
-        Esta invitacion expirara en 7 dias. Si tienes alguna pregunta, contacta con ${data.inviterName}.
+        Esta invitación expirará en 7 días. Si tienes alguna pregunta, contacta con ${data.inviterName}.
       </p>
     </div>
 
@@ -811,10 +811,10 @@ Recibo enviado por ${data.venueName} via Avoqado
         Ciudad de Mexico, Mexico
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
-        Este correo fue enviado por Avoqado. Si no esperabas recibir esta invitacion, puedes ignorar este mensaje.
+        Este correo fue enviado por Avoqado. Si no esperabas recibir esta invitación, puedes ignorar este mensaje.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -828,9 +828,9 @@ Hola,
 
 ${data.inviterName} te ha invitado a unirte al equipo de ${data.venueName} como ${data.roleDisplayName || data.role}.
 
-Para aceptar la invitacion, visita: ${data.inviteLink}
+Para aceptar la invitación, visita: ${data.inviteLink}
 
-Esta invitacion expirara en 7 dias.
+Esta invitación expirará en 7 días.
 
 Saludos,
 Equipo de Avoqado
@@ -882,16 +882,16 @@ Equipo de Avoqado
             greeting: 'Hola,',
             intro: `Te escribimos para recordarte que tu <strong>prueba gratuita de ${data.featureName}</strong> esta por terminar el <strong>${trialEndDateFormatted}</strong>.`,
             importantLabel: 'Importante',
-            importantBody: `Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago. Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora.`,
+            importantBody: `Después de esta fecha, la función será desactivada automáticamente si no actualizas tu método de pago. Para continuar usando ${data.featureName} sin interrupciones, actualiza tu método de pago ahora.`,
             cta: 'Ir a Facturacion',
             footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico',
-            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
-            privacy: 'Politica de Privacidad',
+            footerHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
+            privacy: 'Política de Privacidad',
             textIntro: `Tu prueba gratuita de ${data.featureName} esta por terminar el ${trialEndDateFormatted}.`,
             textImportant:
-              'IMPORTANTE: Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago.',
-            textCallToAction: `Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora:`,
-            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+              'IMPORTANTE: Después de esta fecha, la función será desactivada automáticamente si no actualizas tu método de pago.',
+            textCallToAction: `Para continuar usando ${data.featureName} sin interrupciones, actualiza tu método de pago ahora:`,
+            textHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1038,7 +1038,7 @@ ${t.textSignoff}
             htmlTitle: 'Problema con el pago',
             title: 'Problema con el pago',
             greeting: 'Hola,',
-            intro: `No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripcion de <strong>${data.featureName}</strong>.`,
+            intro: `No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripción de <strong>${data.featureName}</strong>.`,
             cardEndingIn: (last4: string) => `Tarjeta terminada en <strong>${last4}</strong>`,
             reasonsLabel: 'Razones comunes de rechazo',
             reasons: [
@@ -1049,26 +1049,26 @@ ${t.textSignoff}
             ],
             cta: 'Actualizar Metodo de Pago',
             footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico',
-            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.',
-            privacy: 'Politica de Privacidad',
+            footerHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.',
+            privacy: 'Política de Privacidad',
             attempt1: {
               level: 'Intento 1 de 3',
-              steps: 'Intentaremos cobrar nuevamente en los proximos dias. Por favor, actualiza tu metodo de pago lo antes posible.',
+              steps: 'Intentaremos cobrar nuevamente en los próximos días. Por favor, actualiza tu método de pago lo antes posible.',
             },
             attempt2: {
               level: 'Intento 2 de 3 - Accion Requerida',
               steps:
-                'Este es el segundo intento fallido. Si el proximo intento tambien falla, tu suscripcion sera cancelada automaticamente.',
+                'Este es el segundo intento fallido. Si el próximo intento también falla, tu suscripción será cancelada automáticamente.',
             },
             attempt3: {
               level: 'ULTIMO INTENTO - Accion Urgente',
-              steps: 'Este es el ultimo intento. Si no actualizas tu metodo de pago inmediatamente, tu suscripcion sera cancelada.',
+              steps: 'Este es el último intento. Si no actualizas tu método de pago inmediatamente, tu suscripción será cancelada.',
             },
-            textIntro: `No pudimos procesar el pago de ${amountFormatted} para tu suscripcion de ${data.featureName}.`,
+            textIntro: `No pudimos procesar el pago de ${amountFormatted} para tu suscripción de ${data.featureName}.`,
             textCardEndingIn: (last4: string) => `Tarjeta terminada en ${last4}`,
-            textCallToAction: 'Actualiza tu metodo de pago ahora:',
+            textCallToAction: 'Actualiza tu método de pago ahora:',
             textReasonsLabel: 'Razones comunes de rechazo:',
-            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.',
+            textHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento o verifica con tu banco.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1242,31 +1242,31 @@ ${t.textSignoff}
             textSignoff: 'The Avoqado Team',
           }
         : {
-            subject: `Tu suscripcion de ${data.featureName} ha sido suspendida - ${data.venueName}`,
+            subject: `Tu suscripción de ${data.featureName} ha sido suspendida - ${data.venueName}`,
             htmlTitle: 'Suscripcion suspendida',
             title: 'Suscripcion Suspendida',
             greeting: 'Hola,',
-            intro: `Tu suscripcion de <strong>${data.featureName}</strong> ha sido suspendida debido a multiples intentos de pago fallidos.`,
+            intro: `Tu suscripción de <strong>${data.featureName}</strong> ha sido suspendida debido a múltiples intentos de pago fallidos.`,
             currentStatusLabel: 'Estado actual',
             currentStatusValue: `Acceso bloqueado desde ${suspendedDateFormatted}`,
             cancellationLabel: 'Fecha de cancelacion definitiva',
-            warning: `Si no actualizas tu metodo de pago antes del ${cancellationDateFormatted}, tu suscripcion sera cancelada permanentemente.`,
+            warning: `Si no actualizas tu método de pago antes del ${cancellationDateFormatted}, tu suscripción será cancelada permanentemente.`,
             meaningLabel: 'Que significa esto:',
             meaning: [
               `Tu acceso a ${data.featureName} esta actualmente bloqueado`,
               'Tus datos permanecen seguros y guardados',
-              'Puedes reactivar tu suscripcion actualizando tu metodo de pago',
-              `Despues del ${cancellationDateFormatted}, la suscripcion sera cancelada`,
+              'Puedes reactivar tu suscripción actualizando tu método de pago',
+              `Después del ${cancellationDateFormatted}, la suscripción será cancelada`,
             ],
             cta: 'Actualizar Metodo de Pago',
-            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
-            privacy: 'Politica de Privacidad',
-            textSuspendedHeadline: `Tu suscripcion de ${data.featureName} ha sido SUSPENDIDA debido a multiples intentos de pago fallidos.`,
+            footerHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
+            privacy: 'Política de Privacidad',
+            textSuspendedHeadline: `Tu suscripción de ${data.featureName} ha sido SUSPENDIDA debido a múltiples intentos de pago fallidos.`,
             textCurrentStatus: `Estado actual: Acceso bloqueado desde ${suspendedDateFormatted}`,
             textCancellation: `Fecha de cancelacion definitiva: ${cancellationDateFormatted}`,
             textMeaningLabel: 'Que significa esto:',
-            textCallToAction: 'Reactiva tu suscripcion ahora:',
-            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            textCallToAction: 'Reactiva tu suscripción ahora:',
+            textHelp: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1433,30 +1433,30 @@ ${t.textSignoff}
             textSignoff: 'The Avoqado Team',
           }
         : {
-            subject: `Tu suscripcion de ${data.featureName} ha sido cancelada - ${data.venueName}`,
+            subject: `Tu suscripción de ${data.featureName} ha sido cancelada - ${data.venueName}`,
             htmlTitle: 'Suscripcion cancelada',
             title: 'Suscripcion Cancelada',
             greeting: 'Hola,',
-            intro: `Tu suscripcion de <strong>${data.featureName}</strong> ha sido cancelada permanentemente el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
+            intro: `Tu suscripción de <strong>${data.featureName}</strong> ha sido cancelada permanentemente el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
             suspensionLabel: 'Fecha de suspension',
             cancellationLabel: 'Fecha de cancelacion',
             accessDeactivated: `Tu acceso a ${data.featureName} ha sido completamente desactivado.`,
             reactivateLabel: `Quieres volver a activar ${data.featureName}?`,
             reactivateBody:
-              'Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.',
+              'Puedes reactivar tu suscripción en cualquier momento. Tus datos previos permanecen seguros y podrás recuperar el acceso inmediatamente después de configurar tu método de pago.',
             ctaPrompt: 'Listo para volver?',
-            ctaLink: 'Contactanos para reactivar tu suscripcion',
-            footerNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.',
-            privacy: 'Politica de Privacidad',
-            textCanceledHeadline: `Tu suscripcion de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
+            ctaLink: 'Contáctanos para reactivar tu suscripción',
+            footerNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.',
+            privacy: 'Política de Privacidad',
+            textCanceledHeadline: `Tu suscripción de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
             textSuspension: `Fecha de suspension: ${suspendedDateFormatted}`,
             textCancellation: `Fecha de cancelacion: ${canceledDateFormatted}`,
             textAccessDeactivated: `Tu acceso a ${data.featureName} ha sido completamente desactivado.`,
             textReactivateLabel: `Quieres volver a activar ${data.featureName}?`,
             textReactivateBody:
-              'Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.',
-            textContact: 'Contactanos si necesitas ayuda: hola@avoqado.io',
-            textFooterNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.',
+              'Puedes reactivar tu suscripción en cualquier momento. Tus datos previos permanecen seguros y podrás recuperar el acceso inmediatamente después de configurar tu método de pago.',
+            textContact: 'Contáctanos si necesitas ayuda: hola@avoqado.io',
+            textFooterNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aquí para ti.',
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1625,17 +1625,17 @@ ${t.textSignoff}
             likedBody:
               'Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.',
             ctaPrompt: 'Listo para suscribirte?',
-            ctaBody: 'Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.',
-            footerNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.`,
-            privacy: 'Politica de Privacidad',
+            ctaBody: 'Visita la sección de facturación en tu dashboard para activar tu suscripción.',
+            footerNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aquí para ayudarte.`,
+            privacy: 'Política de Privacidad',
             textExpiredHeadline: `Tu periodo de prueba de ${data.featureName} ha TERMINADO el ${expiredDateFormatted}.`,
             textExpiration: `Fecha de expiracion: ${expiredDateFormatted}`,
             textAccess: `Tu acceso a ${data.featureName} ha sido desactivado temporalmente.`,
             textLikedLabel: `Te gusto ${data.featureName}?`,
             textLikedBody:
               'Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.',
-            textCallToAction: 'Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.',
-            textFooterNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.`,
+            textCallToAction: 'Visita la sección de facturación en tu dashboard para activar tu suscripción.',
+            textFooterNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aquí para ayudarte.`,
             textSignoff: 'Equipo de Avoqado',
           }
 
@@ -1852,7 +1852,7 @@ Equipo de Avoqado
   }
 
   async sendPasswordResetEmail(email: string, data: PasswordResetData): Promise<boolean> {
-    const subject = `Restablece tu contrasena - Avoqado`
+    const subject = `Restablece tu contraseña - Avoqado`
     const logoUrl = 'https://avoqado.io/isotipo.svg'
 
     const html = `
@@ -1861,7 +1861,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Restablece tu contrasena</title>
+  <title>Restablece tu contraseña</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -1874,21 +1874,21 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Restablece tu contrasena</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Restablece tu contraseña</h1>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
       <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola ${data.firstName},</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Recibimos una solicitud para restablecer la contrasena de tu cuenta de Avoqado. Haz clic en el boton de abajo para crear una nueva contrasena.
+        Recibimos una solicitud para restablecer la contraseña de tu cuenta de Avoqado. Haz clic en el botón de abajo para crear una nueva contraseña.
       </p>
     </div>
 
     <!-- CTA Button -->
     <div style="padding: 16px 0 24px 0; text-align: center;">
       <a href="${data.resetLink}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Restablecer Contrasena
+        Restablecer contraseña
       </a>
     </div>
 
@@ -1913,8 +1913,8 @@ Equipo de Avoqado
     <!-- Security Info -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
       <p style="font-size: 14px; color: #000; margin: 0;">
-        <strong>No solicitaste esto?</strong><br>
-        Si no pediste restablecer tu contrasena, ignora este correo. Tu cuenta esta segura.
+        <strong>¿No solicitaste esto?</strong><br>
+        Si no pediste restablecer tu contraseña, ignora este correo. Tu cuenta está segura.
       </p>
     </div>
 
@@ -1926,10 +1926,10 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Necesitas ayuda? Contactanos en <a href="mailto:hola@avoqado.io" style="color: #1a73e8; text-decoration: none;">hola@avoqado.io</a>
+        ¿Necesitas ayuda? Contáctanos en <a href="mailto:hola@avoqado.io" style="color: #1a73e8; text-decoration: none;">hola@avoqado.io</a>
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -1939,19 +1939,19 @@ Equipo de Avoqado
     `
 
     const text = `
-Restablece tu contrasena - Avoqado
+Restablece tu contraseña - Avoqado
 
 Hola ${data.firstName},
 
-Recibimos una solicitud para restablecer la contrasena de tu cuenta de Avoqado.
+Recibimos una solicitud para restablecer la contraseña de tu cuenta de Avoqado.
 
-Para restablecer tu contrasena, visita el siguiente enlace:
+Para restablecer tu contraseña, visita el siguiente enlace:
 ${data.resetLink}
 
-Este enlace expirara en ${data.expiresInMinutes} minutos y solo puede usarse una vez.
+Este enlace expirará en ${data.expiresInMinutes} minutos y solo puede usarse una vez.
 
-No solicitaste esto?
-Si no pediste restablecer tu contrasena, ignora este correo. Tu cuenta esta segura.
+¿No solicitaste esto?
+Si no pediste restablecer tu contraseña, ignora este correo. Tu cuenta está segura.
 
 Equipo de Avoqado
     `
@@ -1970,10 +1970,10 @@ Equipo de Avoqado
 
     const shippingSpeedText =
       data.shippingSpeed === 'express'
-        ? 'Express (2-3 dias)'
+        ? 'Express (2-3 días)'
         : data.shippingSpeed === 'overnight'
           ? 'Nocturno (1 dia)'
-          : 'Estandar (5-7 dias)'
+          : 'Estándar (5-7 días)'
 
     const html = `
 <!DOCTYPE html>
@@ -2087,7 +2087,7 @@ Equipo de Avoqado
         Si tienes alguna pregunta sobre tu pedido, no dudes en contactarnos.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -2162,10 +2162,10 @@ Equipo de Avoqado
 
     const shippingSpeedText =
       data.shippingSpeed === 'express'
-        ? 'Express (2-3 dias)'
+        ? 'Express (2-3 días)'
         : data.shippingSpeed === 'overnight'
           ? 'Nocturno (1 dia)'
-          : 'Estandar (5-7 dias)'
+          : 'Estándar (5-7 días)'
 
     const html = `
 <!DOCTYPE html>
@@ -2957,7 +2957,7 @@ Avoqado Dashboard
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Este email fue enviado automaticamente desde Avoqado TPV
+        Este email fue enviado automáticamente desde Avoqado TPV
       </p>
       <p style="margin: 8px 0 0 0; font-size: 14px; color: #666;">
         Para responder al usuario, contacta directamente al venue: ${data.venueSlug}
@@ -3119,7 +3119,7 @@ Avoqado Dashboard
         Este informe solo considera los pedidos cerrados y las ventas realizadas durante el horario comercial.
       </p>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Consulta el <a href="${data.dashboardUrl}/reports/sales-summary" style="color: #1a73e8; text-decoration: none;">informe de conciliacion</a> para obtener mas informacion sobre los pagos y las transferencias anteriores.
+        Consulta el <a href="${data.dashboardUrl}/reports/sales-summary" style="color: #1a73e8; text-decoration: none;">informe de conciliación</a> para obtener más información sobre los pagos y las transferencias anteriores.
       </p>
       <p style="margin: 16px 0 0 0;">
         <a href="${data.dashboardUrl}" style="color: #1a73e8; text-decoration: none; font-size: 14px;">Abrir Dashboard</a>
@@ -3296,7 +3296,7 @@ Avoqado Dashboard
         <sup>2</sup>Incluye tarifas de procesamiento de Avoqado y tarifas de cualquier tercero (p.ej. tarifas de envio)
       </p>
       <p style="margin: 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
       <p style="margin: 8px 0 0 0; font-size: 14px;">
         <a href="${data.dashboardUrl}/notifications/preferences" style="color: #000; text-decoration: none; font-weight: 600;">Administrar preferencias de notificaciones</a>
@@ -3949,7 +3949,7 @@ Aviso de privacidad: https://avoqado.io/privacy`
         Recibiste este correo porque tienes una reservacion activa en ${data.venueName}.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -4658,8 +4658,8 @@ Servicios Tecnologicos Avo S.A. de C.V.`
             privacy: 'Privacy Policy',
           }
         : {
-            help: 'Necesitas ayuda? Contactanos en cualquier momento.',
-            privacy: 'Politica de Privacidad',
+            help: '¿Necesitas ayuda? Contáctanos en cualquier momento.',
+            privacy: 'Política de Privacidad',
           }
 
     return `
