@@ -8,6 +8,7 @@ import { conLimiteDeTiempo, dondeFaltanArchivos, repararArchivosCompartido } fro
 import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { conNegocio } from '../services/demo/candadoDemo'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { reconcileStuckCfdi, StuckCfdi } from '../services/fiscal/cfdiReconcile.service'
 import {
@@ -199,7 +200,7 @@ export class CfdiReconcileJob {
           logger.info(`[cfdiReconcile] cfdi=${cfdi.id} outcome=${result.outcome}${result.detail ? ` (${result.detail})` : ''}`)
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          logger.error(`[cfdiReconcile] unhandled error for cfdi=${cfdi.id}: ${message}`)
+          conNegocio(cfdi.venueId, () => logger.error(`[cfdiReconcile] unhandled error for cfdi=${cfdi.id}: ${message}`))
           tally.ERROR += 1
         }
       }

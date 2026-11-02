@@ -4,6 +4,7 @@ import { CronJob } from 'cron'
 import { Prisma } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { conNegocio } from '../services/demo/candadoDemo'
 import { scheduleJob } from '../observability/jobContext'
 import { lockExistingOrderForPayment } from '../services/shared/paymentShiftClaim'
 import { devolverCanjesDeVentaAnuladaEnTx } from '../services/shared/orderCancelGuard'
@@ -205,7 +206,7 @@ export class AbandonedOrdersCleanupJob {
         } catch (error) {
           // One order that cannot go (for example, a restricted child) must not stop the rest of the batch.
           result.failed += 1
-          logger.error(`❌ [CLEANUP] Could not delete abandoned order ${order.orderNumber}:`, error)
+          conNegocio(order.venueId, () => logger.error(`❌ [CLEANUP] Could not delete abandoned order ${order.orderNumber}:`, error))
         }
       }
 

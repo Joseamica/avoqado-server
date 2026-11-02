@@ -1,12 +1,16 @@
-import winston from 'winston'
+import winston, { type Logform } from 'winston'
 import { getContext, type ExecutionContext } from './executionContext'
+import { isDemoVenue } from './demoVenueIds'
 
 const CONTEXTO_AL_LLAMAR = Symbol('contextoAlLlamar')
 
-/** Only the fields `contextFormat` logs: internal ones (`cancellation`, `prismaBatch`) never travel with a line. */
+/**
+ * Only the fields `contextFormat` reads: internal ones (`cancellation`, `prismaBatch`) never travel with a line.
+ * `negocioFijado` decides the demo mark and is never logged.
+ */
 type FotoDelContexto = Pick<
   ExecutionContext,
-  'correlationId' | 'source' | 'entrypoint' | 'venueId' | 'venueName' | 'userId' | 'role' | 'terminalSerial'
+  'correlationId' | 'source' | 'entrypoint' | 'venueId' | 'venueName' | 'userId' | 'role' | 'terminalSerial' | 'negocioFijado'
 >
 
 const foto = ({
@@ -18,6 +22,7 @@ const foto = ({
   userId,
   role,
   terminalSerial,
+  negocioFijado,
 }: ExecutionContext): FotoDelContexto => ({
   correlationId,
   source,
@@ -27,6 +32,7 @@ const foto = ({
   userId,
   role,
   terminalSerial,
+  negocioFijado,
 })
 
 /**
@@ -71,6 +77,28 @@ export function capturarContextoAlLlamar<T extends winston.Logger>(logger: T): T
 export const contextFormat = winston.format(info => {
   const ctx: FotoDelContexto | undefined =
     CONTEXTO_AL_LLAMAR in info ? (info as Record<symbol, FotoDelContexto | undefined>)[CONTEXTO_AL_LLAMAR] : getContext()
+  const conCtx = conContexto(info, ctx)
+  return esActividadDeUnDemo(ctx) ? marcarDemo(conCtx) : conCtx
+})
+
+/**
+ * ¿La línea la generó un demo? Sólo lo que un job hace para un negocio demo (`conNegocio` fija `negocioFijado` por cada
+ * negocio que recorre): eso es certeza. NO por la sesión: Codex r1-r5 mostró que quien hizo la petición no dice de qué
+ * negocio es la línea (una ruta o un encabezado de otro negocio, un socket que resuelve un pendiente ajeno, trabajo de
+ * todos los negocios que despierta un demo). NO por un id en los campos ni por nombre: un negocio real puede llamarse
+ * igual. Peor marcar un real como demo que dejar sin marca un demo (founder, 2-nov: «sólo el sistema»).
+ */
+function esActividadDeUnDemo(ctx: FotoDelContexto | undefined): boolean {
+  return isDemoVenue(ctx?.negocioFijado)
+}
+
+/** «🧪 DEMO ·» y `demo: true`: las alertas de un demo no se confunden con las de un negocio real (founder, 1-nov). No cambia la gravedad. */
+function marcarDemo(info: Logform.TransformableInfo): Logform.TransformableInfo {
+  const yaLoDice = typeof info.message === 'string' && /demo|🧪/i.test(info.message)
+  return { ...info, demo: true, ...(typeof info.message === 'string' && !yaLoDice ? { message: `🧪 DEMO · ${info.message}` } : {}) }
+}
+
+function conContexto(info: Logform.TransformableInfo, ctx: FotoDelContexto | undefined): Logform.TransformableInfo {
   if (!ctx) return info
 
   const injected: Record<string, unknown> = {
@@ -85,4 +113,4 @@ export const contextFormat = winston.format(info => {
   if (ctx.terminalSerial) injected.terminalSerial = ctx.terminalSerial
 
   return { ...injected, ...info }
-})
+}
