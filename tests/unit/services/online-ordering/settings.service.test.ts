@@ -489,10 +489,10 @@ describe('settings.service', () => {
       expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
     })
 
-    it('A (founder, 2-nov): getSettings devuelve acceptsCardOnline; sin fila viene PRENDIDO', async () => {
+    it('getSettings devuelve acceptsCardOnline; sin fila es false hasta S1b (sale con la tienda nueva)', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
       await expect(getSettings('v1')).resolves.toMatchObject({ acceptsCardOnline: true })
-      expect(DEFAULT_CONFIG.acceptsCardOnline).toBe(true)
+      expect(DEFAULT_CONFIG.acceptsCardOnline).toBe(false)
     })
   })
 })

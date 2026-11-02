@@ -12,8 +12,8 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   minOrderAmount: 0,
   defaultPrepMinutes: 15,
   acceptsPayAtPickup: true,
-  // A (founder, 2-nov): la tarjeta viene PRENDIDA; cobra en cuanto el negocio tenga su Stripe listo (`findCardMerchant`).
-  acceptsCardOnline: true,
+  // A (founder, 2-nov): pasa a `true` con S1b, que sale junto con la tienda nueva (Codex plan r1 #7).
+  acceptsCardOnline: false,
   manualPause: false,
   pausedUntil: null,
   hours: null,

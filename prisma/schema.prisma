@@ -20397,7 +20397,7 @@ model OnlineOrderingSettings {
   defaultPrepMinutes Int       @default(15)
   acceptsPayAtPickup Boolean   @default(true)
   /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Apagado por default.
-  acceptsCardOnline  Boolean   @default(true)
+  acceptsCardOnline  Boolean   @default(false)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
