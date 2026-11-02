@@ -11,6 +11,7 @@ import { FAKE_LOST_STAGE_ID, FAKE_STAGE_ID, installCrmInboundFake } from '@tests
 import logger from '@/config/logger'
 import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
 import { applyEntry, recordSignupOutcome, sanitizeEntry, saveLandingEntry, type SignupOutcome } from '@/services/crm/inbound.service'
+import { esCorreoDePrueba } from '@/services/crm/internalEmail'
 
 jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn(), notifyReturningProspect: jest.fn() }))
 
@@ -655,6 +656,79 @@ describe('ruling 31: an entry that lands on an ARCHIVED account brings it back',
     expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('reactivated')
     expect(notifyReturningProspect).not.toHaveBeenCalled()
     expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+})
+
+// Founder, 2-nov («Sí, las dos»): las pruebas internas del embudo en producción (correo @avoqado.io o el buzón de pruebas
+// @resend.dev) llenaban el embudo de «QA …». Entran archivadas y sin «Nuevo prospecto»; se encuentran al buscar.
+describe('pruebas internas: un correo @avoqado.io o @resend.dev entra archivado y sin aviso', () => {
+  const PRUEBA = 'jose+e2e10-0941@Avoqado.io'
+  const prueba = (over: Record<string, unknown> = {}) =>
+    seedEntry({ externalKey: PRUEBA.toLowerCase(), payload: { ...FORM, email: PRUEBA }, ...over })
+
+  it('alta_de_prueba_entra_archivada_y_sin_aviso', async () => {
+    const entry = prueba()
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(1)
+    expect(db.accounts[0].archivedAt).toEqual(expect.any(Date))
+    expect(eventsOf('ENTRY_APPLIED')[0].data).toMatchObject({ entryId: entry.id, created: true, prueba: true })
+    expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('noticeContent')
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+    expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+  })
+
+  it('una_segunda_vuelta_de_la_prueba_tampoco_avisa (M-3)', async () => {
+    const entry = prueba()
+    prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
+    await applyEntry(entry.id)
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts).toHaveLength(1)
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+    expect(notifyReturningProspect).not.toHaveBeenCalled()
+  })
+
+  it('prueba_archivada_que_vuelve_por_la_landing_sigue_archivada', async () => {
+    const archivedAt = new Date(Date.now() - 2 * DAY)
+    const account = seedAccount({ externalKey: PRUEBA.toLowerCase(), organizationId: ORG, archivedAt })
+    prismaMock.staff.findUnique.mockResolvedValue(owner(ORG))
+    const entry = prueba({ signupOutcome: { organizationId: ORG, alreadyExisted: true, yaEsCliente: false } })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts[0]).toMatchObject({ id: account.id, archivedAt })
+    expect(eventsOf('REACTIVATED')).toHaveLength(0)
+    expect(notifyReturningProspect).not.toHaveBeenCalled()
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+  })
+
+  it('un_dominio_parecido_no_es_prueba: ana@noavoqado.io sí es un prospecto', async () => {
+    const entry = seedEntry({ externalKey: 'ana@noavoqado.io', payload: { ...FORM, email: 'ana@noavoqado.io' } })
+
+    await applyEntry(entry.id)
+
+    expect(db.accounts[0].archivedAt ?? null).toBeNull()
+    expect(eventsOf('ENTRY_APPLIED')[0].data).not.toHaveProperty('prueba')
+    expect(notifyNewProspect).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('esCorreoDePrueba', () => {
+  it.each([
+    ['jose+e2e@avoqado.io', true],
+    ['  JOSE@AVOQADO.IO ', true],
+    ['delivered+alta-codigo-081250@resend.dev', true],
+    ['ana@cafe.mx', false],
+    ['ana@noavoqado.io', false],
+    ['ana@ventas.avoqado.io.mx', false],
+    ['avoqado.io', false],
+    ['', false],
+    [null, false],
+  ])('%s → %s', (email, esperado) => {
+    expect(esCorreoDePrueba(email)).toBe(esperado)
   })
 })
 

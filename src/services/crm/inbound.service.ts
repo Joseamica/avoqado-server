@@ -18,6 +18,7 @@ import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { getInitialStage, resetFirstMoneyTx } from './accounts.service'
 import { notifyNewProspect, notifyReturningProspect, type NoticeContent } from './digest.service'
+import { esCorreoDePrueba } from './internalEmail'
 import { addEvent } from './timeline.service'
 
 export const LANDING = 'LANDING'
@@ -559,7 +560,7 @@ function savedNoticeContent(value: Prisma.JsonValue | undefined): NoticeContent 
  */
 export function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }): AppliedEntry {
   const data: Prisma.JsonObject = previous.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
-  if (data.signup === 'CUSTOMER') return { accountId: previous.accountId, notice: null }
+  if (data.signup === 'CUSTOMER' || data.prueba === true) return { accountId: previous.accountId, notice: null }
   const notice: Notice = data.created === true ? 'NEW' : data.reactivated === true ? 'RETURNED' : null
   const content = notice ? savedNoticeContent(data.noticeContent) : undefined
   return { accountId: previous.accountId, notice, ...(content ? { content } : {}) }
@@ -584,6 +585,9 @@ async function applyTx(
   if (previous) return repeatOf(previous)
 
   const customer = outcome?.yaEsCliente === true
+  // An internal test of the funnel (founder, 2-nov) goes in archived, is never announced and never brings an archived
+  // account back.
+  const prueba = esCorreoDePrueba(entry.externalKey)
   // THE account of this entry, by the resolver every writer shares (ruling 65 a): the one its Organization already holds,
   // whatever its source (ruling 25); the landing one of this email; or — one per person (ruling 48) — the one of another
   // source that already has this email or phone. Returned locked and checked again under the lock. Only when there is
@@ -604,6 +608,7 @@ async function applyTx(
         // late (ruling 50).
         qualifiedAt: entry.receivedAt,
         lastTouchAt: entry.receivedAt,
+        ...(prueba ? { archivedAt: new Date() } : {}),
       },
       contact: form.contact,
     },
@@ -624,11 +629,18 @@ async function applyTx(
 
   if (created) {
     // A customer is not a new prospect: the note instead of «Nuevo prospecto» (ruling 23).
-    const content = customer ? undefined : noticeContentOf({ name: form.name, ...form.qualification, qualificationAvailable: true })
-    const repeated = await proof({ entryId: entry.id, signup, created, ...(content ? { noticeContent: { ...content } } : {}) })
+    const content =
+      customer || prueba ? undefined : noticeContentOf({ name: form.name, ...form.qualification, qualificationAvailable: true })
+    const repeated = await proof({
+      entryId: entry.id,
+      signup,
+      created,
+      ...(prueba ? { prueba: true } : {}),
+      ...(content ? { noticeContent: { ...content } } : {}),
+    })
     if (repeated) return repeated
     if (customer) await customerNote(tx, accountId, entry.id)
-    return { accountId, notice: customer ? null : 'NEW', ...(content ? { content } : {}) }
+    return { accountId, notice: customer || prueba ? null : 'NEW', ...(content ? { content } : {}) }
   }
 
   // An account that was already there was locked by the resolver BEFORE its event is written: two entries of the same
@@ -653,7 +665,7 @@ async function applyTx(
   // Ruling 57: the account keeps this person's email and phone (an account of another source may lack them).
   const personGap = await personGapTx(tx, accountId, form.contact)
   // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24).
-  const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
+  const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA' && !prueba
   // Ruling 50: the qualification is the NEWEST form's. An older one the sweep repaired late keeps its story in the
   // timeline and overwrites nothing. A customer's account is theirs: what they type does not overwrite it either.
   const carries = QUALIFICATION_FIELDS.some(field => !isBlank(form.qualification[field]))
