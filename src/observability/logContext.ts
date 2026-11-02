@@ -3,21 +3,47 @@ import { getContext, type ExecutionContext } from './executionContext'
 
 const CONTEXTO_AL_LLAMAR = Symbol('contextoAlLlamar')
 
+/** Only the fields `contextFormat` logs: internal ones (`cancellation`, `prismaBatch`) never travel with a line. */
+type FotoDelContexto = Pick<
+  ExecutionContext,
+  'correlationId' | 'source' | 'entrypoint' | 'venueId' | 'venueName' | 'userId' | 'role' | 'terminalSerial'
+>
+
+const foto = ({
+  correlationId,
+  source,
+  entrypoint,
+  venueId,
+  venueName,
+  userId,
+  role,
+  terminalSerial,
+}: ExecutionContext): FotoDelContexto => ({
+  correlationId,
+  source,
+  entrypoint,
+  venueId,
+  venueName,
+  userId,
+  role,
+  terminalSerial,
+})
+
 /**
  * hz:f26b3afc:D3 — Each transport runs its format when it WRITES the line, not when the logger was called. When the
  * console or a file backs up, lines wait in a queue and get formatted later, inside another request's or job's context:
  * an alert could carry another business's venue. This takes a snapshot of the context at call time (`logger.write` is
- * synchronous, and every logger method and child goes through it) and `contextFormat` reads only that snapshot. It is a
- * copy, so what the request adds later (`enrichContext`) does not leak into an earlier line.
+ * synchronous, and every logger method and child goes through it) and `contextFormat` reads only that snapshot.
+ * Each write gets its own copy of the record with its own snapshot (Codex r1): the caller's object is never touched, so
+ * the same object logged twice carries each call's context, and the snapshot never shows up when the caller logs that
+ * object again. A copy of the fields, so what the request adds later (`enrichContext`) does not leak into an earlier line.
  */
 export function capturarContextoAlLlamar<T extends winston.Logger>(logger: T): T {
   const write = logger.write.bind(logger) as (...args: unknown[]) => boolean
   logger.write = ((info: unknown, ...resto: unknown[]) => {
-    if (info && typeof info === 'object' && !(CONTEXTO_AL_LLAMAR in info)) {
-      const ctx = getContext()
-      ;(info as Record<symbol, ExecutionContext | undefined>)[CONTEXTO_AL_LLAMAR] = ctx ? { ...ctx } : undefined
-    }
-    return write(info, ...resto)
+    if (!info || typeof info !== 'object') return write(info, ...resto)
+    const ctx = getContext()
+    return write({ ...info, [CONTEXTO_AL_LLAMAR]: ctx && foto(ctx) }, ...resto)
   }) as T['write']
   return logger
 }
@@ -43,7 +69,8 @@ export function capturarContextoAlLlamar<T extends winston.Logger>(logger: T): T
  * ran the format by hand, synchronously, as the unit tests do), it is read now.
  */
 export const contextFormat = winston.format(info => {
-  const ctx = CONTEXTO_AL_LLAMAR in info ? (info as Record<symbol, ExecutionContext | undefined>)[CONTEXTO_AL_LLAMAR] : getContext()
+  const ctx: FotoDelContexto | undefined =
+    CONTEXTO_AL_LLAMAR in info ? (info as Record<symbol, FotoDelContexto | undefined>)[CONTEXTO_AL_LLAMAR] : getContext()
   if (!ctx) return info
 
   const injected: Record<string, unknown> = {

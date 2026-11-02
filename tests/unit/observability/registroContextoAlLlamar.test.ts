@@ -60,3 +60,34 @@ it('🔴 con la foto al llamar, cada línea lleva el negocio de SU petición aun
   expect(lineas['sin contexto'].correlationId).toBeUndefined()
   expect(lineas['sin contexto'].venueId).toBeUndefined()
 })
+
+it('🔴 Codex r1 · el MISMO objeto registrado en dos peticiones y sin contexto lleva lo de cada llamada', async () => {
+  const lento = new TransporteLento({ format: contextFormat() })
+  const logger = capturarContextoAlLlamar(winston.createLogger({ transports: [lento] }))
+  const mismo = { level: 'info', message: 'mismo' }
+
+  runWithContext(ctx(1), () => logger.log(mismo))
+  runWithContext(ctx(2), () => logger.log(mismo))
+  logger.log(mismo)
+
+  while (lento.lineas.length < 3) await new Promise(r => setTimeout(r, 5))
+  expect(lento.lineas.map(l => l.correlationId)).toEqual(['req-1', 'req-2', undefined])
+})
+
+it('🔴 Codex r1 · la foto no se pega al objeto de quien llama ni lleva campos internos del contexto', async () => {
+  const lento = new TransporteLento({ format: contextFormat() })
+  const logger = capturarContextoAlLlamar(winston.createLogger({ transports: [lento] }))
+  const error = new Error('boom')
+  const cancellation = { signal: new AbortController().signal, hasWritten: false, refused: false }
+
+  runWithContext({ ...ctx(1), cancellation, prismaBatch: true }, () => logger.error(error))
+
+  while (lento.lineas.length < 1) await new Promise(r => setTimeout(r, 5))
+  expect(Object.getOwnPropertySymbols(error).map(String)).not.toContain('Symbol(contextoAlLlamar)')
+  const foto = Object.getOwnPropertySymbols(lento.lineas[0])
+    .filter(s => String(s) === 'Symbol(contextoAlLlamar)')
+    .map(s => (lento.lineas[0] as Record<symbol, Record<string, unknown>>)[s])[0]
+  expect(foto).toMatchObject({ correlationId: 'req-1', venueId: 'venue-1' })
+  expect(foto).not.toHaveProperty('cancellation')
+  expect(foto).not.toHaveProperty('prismaBatch')
+})
