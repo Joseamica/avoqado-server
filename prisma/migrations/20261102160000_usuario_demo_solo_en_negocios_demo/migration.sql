@@ -1,7 +1,8 @@
 -- hz:f26b3afc:D5 — los usuarios demo (`@demo.avoqado.io`) tienen contraseña pública (va en el PDF de prospectos): sólo
 -- pueden estar en negocios demo (`LIVE_DEMO`) de organizaciones donde TODOS los negocios son demo (el dueño de una sucursal
 -- ve su organización entera, Codex r1-2), nunca como SUPERADMIN (en una sucursal da permisos globales, r1-1) y sin cambiar
--- de correo (con otro, su contraseña pública seguiría abriendo la cuenta sin que se le reconozca, r1-4). La barrera vive en
+-- de correo (con otro, su contraseña pública seguiría abriendo la cuenta sin que se le reconozca, r1-4), ni recibe llaves
+-- del CRM interno (r3-3). La barrera vive en
 -- la BASE, como la del traslado de IVA: cubre todo camino que escriba membresías (SUPERADMIN, panel, alta, sync, scripts) y
 -- el SQL directo. Las dos mitades (membresía y negocio) se escriben en transacciones distintas: el renglón de la
 -- organización las forma en fila (r1-3). El código USUARIO_DEMO_EN_NEGOCIO_REAL lo traduce a un 400 `comoErrorDeUsuarioDemo`.
@@ -12,7 +13,16 @@ DECLARE
   org text;
 BEGIN
   IF TG_TABLE_NAME = 'Staff' THEN
-    IF lower(btrim(OLD.email)) LIKE '%@demo.avoqado.io' AND lower(btrim(NEW.email)) NOT LIKE '%@demo.avoqado.io' THEN
+    -- Ni a otro alias del mismo dominio: el PDF y la semilla lo conocen por ese correo (Codex D5 r3-2).
+    IF lower(btrim(OLD.email)) LIKE '%@demo.avoqado.io' AND NEW.email IS DISTINCT FROM OLD.email THEN
+      RAISE EXCEPTION 'USUARIO_DEMO_EN_NEGOCIO_REAL' USING ERRCODE = 'P0001';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_TABLE_NAME = 'PlatformAccess' THEN
+    -- Las llaves del CRM interno se dan por correo y abren la lista de clientes reales (Codex D5 r3-3).
+    IF lower(btrim(NEW.email)) LIKE '%@demo.avoqado.io' THEN
       RAISE EXCEPTION 'USUARIO_DEMO_EN_NEGOCIO_REAL' USING ERRCODE = 'P0001';
     END IF;
     RETURN NEW;
@@ -98,4 +108,9 @@ FOR EACH ROW EXECUTE FUNCTION "usuarioDemoSoloEnDemosGuard"();
 DROP TRIGGER IF EXISTS "Staff_usuarioDemo_guard" ON "Staff";
 CREATE TRIGGER "Staff_usuarioDemo_guard"
 BEFORE UPDATE OF email ON "Staff"
+FOR EACH ROW EXECUTE FUNCTION "usuarioDemoSoloEnDemosGuard"();
+
+DROP TRIGGER IF EXISTS "PlatformAccess_usuarioDemo_guard" ON "PlatformAccess";
+CREATE TRIGGER "PlatformAccess_usuarioDemo_guard"
+BEFORE INSERT OR UPDATE OF email ON "PlatformAccess"
 FOR EACH ROW EXECUTE FUNCTION "usuarioDemoSoloEnDemosGuard"();

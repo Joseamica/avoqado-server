@@ -117,7 +117,16 @@ describe('🔴 un usuario demo NO entra a un negocio real, por ningún camino', 
   it('🔴 Codex D5 r1-4 · cambiarle el correo a un usuario demo (su contraseña pública seguiría abriendo la cuenta)', async () => {
     const demo = await persona('demo.avoqado.io')
     expect(await rechazo(prisma.staff.update({ where: { id: demo }, data: { email: `${demo}@example.test` } }))).toBe('rechazado')
-    await prisma.staff.update({ where: { id: demo }, data: { firstName: 'Demo', email: `otro-${demo}@demo.avoqado.io` } })
+    // Ni a otro alias del dominio: el PDF y la semilla lo conocen por su correo (Codex D5 r3-2).
+    expect(await rechazo(prisma.staff.update({ where: { id: demo }, data: { email: `otro-${demo}@demo.avoqado.io` } }))).toBe('rechazado')
+    await prisma.staff.update({ where: { id: demo }, data: { firstName: 'Demo' } }) // la semilla sí le cambia el nombre
+  })
+
+  it('🔴 Codex D5 r3-3 · llaves del CRM interno (abren la lista de clientes reales) para un correo demo', async () => {
+    const email = `${id('crm')}@demo.avoqado.io`
+    expect(await rechazo(prisma.platformAccess.create({ data: { email, verScope: 'todos', createdById: 'x' } }))).toBe('rechazado')
+    const real = await prisma.platformAccess.create({ data: { email: `${id('crm')}@example.test`, createdById: 'x' } })
+    expect(await rechazo(prisma.platformAccess.update({ where: { id: real.id }, data: { email } }))).toBe('rechazado')
   })
 
   it('🔴 Codex D5 r1-3 · dos transacciones a la vez no arman la combinación prohibida', async () => {
