@@ -329,6 +329,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   SimRegistrationRequest: 'Serialized Inventory',
   SimRegistrationRequestItem: 'Serialized Inventory',
   SaleVerification: 'Serialized Inventory',
+  HistoricalLinkingNumber: 'Serialized Inventory',
 
   // 9. Orders, KDS & Cash
   Order: 'Orders, KDS & Cash',
