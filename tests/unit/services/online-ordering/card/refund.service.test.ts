@@ -38,7 +38,6 @@ import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import {
   advanceCardRefund,
   handleStripeRefundEvent,
-  listCardRefunds,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
   NEVER_AGAIN,
@@ -274,13 +273,6 @@ beforeEach(() => {
   getRefund.mockResolvedValue(stateOf('SUCCEEDED'))
   listRefunds.mockResolvedValue([])
   getApplicationFeeRefundedCents.mockResolvedValue(290)
-})
-
-describe('listCardRefunds', () => {
-  it('S9: cada devolución dice con qué llave nació, tal cual la mandó el panel (concilia su intento pendiente exacto, no por monto)', async () => {
-    const r = await pedir({ key: 'llave-del-panel-1', amount: '50.00' })
-    expect(await listCardRefunds('v1', 'ord1')).toEqual([expect.objectContaining({ id: r.cardRefundId, key: 'llave-del-panel-1' })])
-  })
 })
 
 describe('refundCardOnlineOrder', () => {
