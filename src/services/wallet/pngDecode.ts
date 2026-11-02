@@ -40,8 +40,11 @@ function paeth(a: number, b: number, c: number): number {
   return pb <= pc ? b : c
 }
 
-/** Más grande no se abre. El sello real más grande mide 2225×2550, 5.7 millones (Testarudo, medido el 2-nov-2026). */
-export const MAX_PIXELES = 16_000_000
+/**
+ * Más grande no se abre: 5000×5000, unos 300 MB abierta. El sello real más grande mide 2225×2550, 5.7 millones (Testarudo, medido
+ * el 2-nov-2026). La subida rechaza lo que pasa de aquí con un mensaje; una imagen ya guardada cae a la forma del catálogo.
+ */
+export const MAX_PIXELES = 25_000_000
 const HOLGURA_DESCOMPRIMIDO = 1024
 
 export function decodePng(buffer: Buffer): DecodedPng | null {

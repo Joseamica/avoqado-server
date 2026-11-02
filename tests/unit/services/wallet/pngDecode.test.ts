@@ -62,7 +62,7 @@ function pngCrudo(width: number, height: number, colorType: number, canales: num
 
 describe('decodePng', () => {
   it('🔴 una imagen enorme, chica al comprimirla, no se abre: tumbaría el servidor en cada reinicio (Codex, 2-nov)', () => {
-    const lado = 5000
+    const lado = 5001
     const crudo = Buffer.alloc((lado + 1) * lado) // pesa 25 MB abierta y muy poco comprimida
     expect(deflateSync(crudo).length).toBeLessThan(3 * 1024 * 1024)
     expect(decodePng(pngGris(lado, lado, crudo))).toBeNull()
@@ -73,11 +73,14 @@ describe('decodePng', () => {
     expect(decodePng(pngGris(4, 4, crudo))).toBeNull()
   })
 
-  it('el sello real más grande (Testarudo, 2225×2550) sí se abre', () => {
-    const crudo = Buffer.alloc((2225 + 1) * 2550)
-    const abierto = decodePng(pngGris(2225, 2550, crudo))
-    expect(abierto?.width).toBe(2225)
-    expect(abierto?.height).toBe(2550)
+  it.each([
+    ['el sello real más grande (Testarudo)', 2225, 2550],
+    ['una imagen de alta resolución (Codex, 2-nov)', 4096, 4096],
+    ['justo en el tope', 5000, 5000],
+  ])('%s sí se abre', (_, ancho, alto) => {
+    const abierto = decodePng(pngGris(ancho, alto, Buffer.alloc((ancho + 1) * alto)))
+    expect(abierto?.width).toBe(ancho)
+    expect(abierto?.height).toBe(alto)
   })
 
   it('🔴 ida y vuelta: lo que sale es lo que entró, pixel a pixel', () => {
