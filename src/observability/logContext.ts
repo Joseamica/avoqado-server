@@ -1,6 +1,6 @@
 import winston, { type Logform } from 'winston'
 import { getContext, type ExecutionContext } from './executionContext'
-import { isDemoUser, isDemoVenue } from './venueNames'
+import { isDemoVenue } from './demoVenueIds'
 
 const CONTEXTO_AL_LLAMAR = Symbol('contextoAlLlamar')
 
@@ -82,16 +82,14 @@ export const contextFormat = winston.format(info => {
 })
 
 /**
- * ¿La línea la generó un demo? Sólo con certeza: un job que fijó un negocio demo (`conNegocio`), o la sesión de un usuario
- * demo DENTRO de un negocio demo. Las dos cosas: un SUPERADMIN puede darle a un usuario demo un negocio real (Codex r4), y
- * un SUPERADMIN o una persona con un token viejo pueden tener abierto el demo mientras operan otro (Codex r1 y r2). NO por
- * un id en los campos ni por nombre: un negocio real puede llamarse igual. Peor marcar un real como demo que dejar sin
- * marca un demo (founder, 2-nov: «persona y negocio»).
+ * ¿La línea la generó un demo? Sólo lo que un job hace para un negocio demo (`conNegocio` fija `negocioFijado` por cada
+ * negocio que recorre): eso es certeza. NO por la sesión: Codex r1-r5 mostró que quien hizo la petición no dice de qué
+ * negocio es la línea (una ruta o un encabezado de otro negocio, un socket que resuelve un pendiente ajeno, trabajo de
+ * todos los negocios que despierta un demo). NO por un id en los campos ni por nombre: un negocio real puede llamarse
+ * igual. Peor marcar un real como demo que dejar sin marca un demo (founder, 2-nov: «sólo el sistema»).
  */
 function esActividadDeUnDemo(ctx: FotoDelContexto | undefined): boolean {
-  if (!ctx) return false
-  if (ctx.negocioFijado) return isDemoVenue(ctx.negocioFijado)
-  return isDemoUser(ctx.userId) && isDemoVenue(ctx.venueId)
+  return isDemoVenue(ctx?.negocioFijado)
 }
 
 /** «🧪 DEMO ·» y `demo: true`: las alertas de un demo no se confunden con las de un negocio real (founder, 1-nov). No cambia la gravedad. */

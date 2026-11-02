@@ -1,30 +1,20 @@
 /**
  * Los 6 negocios demo de prospectos se llaman normal («Café Tostado», «Lunaria Boutique») y escriben en el mismo registro
  * que los negocios reales. El founder (1-nov): «cuidado con las alertas de los demos, que no se confundan con productivas».
- * El formateador del registro marca «🧪 DEMO ·» y `demo: true` SÓLO lo que con certeza generó un demo: un job que fijó un
- * negocio demo (`conNegocio`) o la sesión de un usuario demo dentro de un negocio demo (persona Y negocio: un SUPERADMIN
- * le puede dar a un usuario demo un negocio real, Codex r4). Codex r1 y r2 mostraron que el negocio del token o un id en
- * los campos pueden ser de OTRO negocio (un SUPERADMIN con el demo abierto, un token viejo, `Request End` que copia el id
- * del contexto) y que un nombre lo puede repetir un negocio real: ninguno de esos marca. Peor marcar un real como demo que
- * dejar sin marca un demo.
+ * El formateador del registro marca «🧪 DEMO ·» y `demo: true` SÓLO lo que un job hace para un negocio demo
+ * (`conNegocio`). La sesión no marca: Codex r1-r5 mostró que quien hizo la petición no dice de qué negocio es la línea, y
+ * un real marcado como demo es peor que un demo sin marca (founder, 2-nov: «sólo el sistema»). Un id o un nombre en los
+ * campos tampoco: un negocio real puede llamarse igual.
  */
 import winston, { type Logform } from 'winston'
 import TransportStream from 'winston-transport'
 import prisma from '@/utils/prismaClient'
 import { capturarContextoAlLlamar, contextFormat } from '@/observability/logContext'
 import { runWithContext } from '@/observability/executionContext'
-import { readFileSync } from 'fs'
-import { join } from 'path'
-import {
-  DOMINIO_DE_USUARIOS_DEMO,
-  primeVenueNames,
-  marcarNegocioDemo,
-  marcarUsuarioDemo,
-  __resetVenueNameCacheForTests,
-} from '@/observability/venueNames'
-import { DOMINIO_DEMO } from '@/services/demo/candadoDemo'
+import { primeVenueNames, __resetVenueNameCacheForTests } from '@/observability/venueNames'
+import { marcarNegocioDemo } from '@/observability/demoVenueIds'
 
-const prismaMock = prisma as unknown as { venue: { findMany: jest.Mock }; staff: { findMany: jest.Mock } }
+const prismaMock = prisma as unknown as { venue: { findMany: jest.Mock } }
 
 const apply = (info: Partial<Logform.TransformableInfo>): Record<string, unknown> =>
   contextFormat().transform(info as Logform.TransformableInfo) as unknown as Record<string, unknown>
@@ -52,47 +42,26 @@ const job = (negocioFijado: string) => ({
 beforeEach(async () => {
   __resetVenueNameCacheForTests()
   prismaMock.venue.findMany.mockReset()
-  prismaMock.staff.findMany.mockReset()
   prismaMock.venue.findMany.mockResolvedValue([
     { id: DEMO, name: 'Café Tostado', status: 'LIVE_DEMO' },
     { id: REAL, name: 'Testarudo Cafe', status: 'ACTIVE' },
   ])
-  prismaMock.staff.findMany.mockResolvedValue([{ id: USUARIO_DEMO }])
   await primeVenueNames()
-})
-
-it('el dominio de los usuarios demo es el mismo del candado', () => {
-  expect(DOMINIO_DE_USUARIOS_DEMO).toBe(DOMINIO_DEMO)
-  expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
-    expect.objectContaining({ where: { email: { endsWith: `@${DOMINIO_DEMO}` } }, take: expect.any(Number) }),
-  )
-})
-
-it('🔴 lo que hace la sesión de un usuario demo sale marcado', () => {
-  runWithContext(sesion(USUARIO_DEMO, DEMO), () => {
-    const r = apply({ level: 'error', message: 'Error recording upsell impression' })
-    expect(r.demo).toBe(true)
-    expect(r.message).toBe('🧪 DEMO · Error recording upsell impression')
-  })
-})
-
-it('🔴 Codex r4 · un usuario demo con acceso a un negocio REAL (se lo dio un SUPERADMIN) NO marca lo que hace ahí', () => {
-  runWithContext(sesion(USUARIO_DEMO, REAL), () => {
-    const r = apply({ level: 'error', message: 'Error recording upsell impression' })
-    expect(r.demo).toBeUndefined()
-    expect(r.message).toBe('Error recording upsell impression')
-  })
-})
-
-it('un usuario demo sin negocio en la sesión (el login) no marca: sin el negocio no hay certeza', () => {
-  runWithContext({ correlationId: 'c', source: 'http' as const, entrypoint: 'POST /auth/login', userId: USUARIO_DEMO }, () => {
-    expect(apply({ level: 'warn', message: 'login lento' }).demo).toBeUndefined()
-  })
 })
 
 it('🔴 lo que un job fija para un negocio demo sale marcado', () => {
   runWithContext(job(DEMO), () => {
-    expect(apply({ level: 'error', message: '❌ [CLEANUP] Could not delete abandoned order CAFE-0012' }).demo).toBe(true)
+    const r = apply({ level: 'error', message: '❌ [CLEANUP] Could not delete abandoned order CAFE-0012' })
+    expect(r.demo).toBe(true)
+    expect(r.message).toBe('🧪 DEMO · ❌ [CLEANUP] Could not delete abandoned order CAFE-0012')
+  })
+})
+
+it('🔴 la sesión NO marca, ni la de un usuario demo en su demo: quien pide no dice de qué negocio es la línea (Codex r5)', () => {
+  runWithContext(sesion(USUARIO_DEMO, DEMO), () => {
+    const r = apply({ level: 'error', message: 'Error recording upsell impression' })
+    expect(r.demo).toBeUndefined()
+    expect(r.message).toBe('Error recording upsell impression')
   })
 })
 
@@ -104,13 +73,7 @@ it('🔴 un SUPERADMIN con el demo abierto que opera un negocio real NO marca, n
   })
 })
 
-it('🔴 una persona real con un token viejo del demo NO marca lo que hace en otro negocio (Codex r2)', () => {
-  runWithContext(sesion(PERSONA_REAL, DEMO, 'MANAGER'), () => {
-    expect(apply({ level: 'error', message: 'Error recording upsell impression (mobile)' }).demo).toBeUndefined()
-  })
-})
-
-it('🔴 un id o un nombre de demo en los campos, sin sesión ni job demo, NO marca (Codex r1)', () => {
+it('🔴 un id o un nombre de demo en los campos, sin job demo, NO marca (Codex r1)', () => {
   expect(apply({ level: 'error', message: '🚨 sobrepago', venueId: DEMO, venueName: 'Café Tostado' }).demo).toBeUndefined()
 })
 
@@ -147,26 +110,10 @@ it('lo marcado por la semilla no lo borra una recarga que ya había salido antes
   })
 })
 
-it('🔴 Codex r4 · el usuario demo que el reinicio vuelve a crear se marca desde su primera línea, y la recarga no lo borra', async () => {
-  const NUEVO = 'cusuarionuevo000000000aa'
-  marcarUsuarioDemo(NUEVO)
-  runWithContext(sesion(NUEVO, DEMO), () => expect(apply({ level: 'error', message: 'x' }).demo).toBe(true))
-  await primeVenueNames() // la consulta simulada no trae al usuario nuevo
-  runWithContext(sesion(NUEVO, DEMO), () => expect(apply({ level: 'error', message: 'x' }).demo).toBe(true))
-})
-
-it('🔴 Codex r4 · la semilla avisa al registro el usuario demo que asegura, también cuando lo crea de nuevo', () => {
-  const fuente = readFileSync(join(__dirname, '../../../src/services/demo/negociosDemo.service.ts'), 'utf8')
-  const cuerpo = fuente.slice(fuente.indexOf('async function asegurarUsuarioDemo'))
-  const fin = cuerpo.indexOf('return staff.id')
-  expect(fin).toBeGreaterThan(0)
-  expect(cuerpo.slice(0, fin)).toContain('marcarUsuarioDemo(staff.id)')
-})
-
-it('si la consulta de usuarios demo falla, los nombres se cargan igual', async () => {
-  __resetVenueNameCacheForTests()
-  prismaMock.staff.findMany.mockRejectedValueOnce(new Error('db'))
-  expect(await primeVenueNames()).toBe(2)
+it('un negocio que deja de ser demo deja de marcarse en la siguiente recarga', async () => {
+  prismaMock.venue.findMany.mockResolvedValue([{ id: DEMO, name: 'Café Tostado', status: 'ACTIVE' }])
+  await primeVenueNames()
+  runWithContext(job(DEMO), () => expect(apply({ level: 'error', message: 'x' }).demo).toBeUndefined())
 })
 
 it('🔴 Codex r3 · una línea demo que atora la salida no marca como demo las líneas reales que esperan detrás (D3)', async () => {
@@ -179,8 +126,8 @@ it('🔴 Codex r3 · una línea demo que atora la salida no marca como demo las 
   }
   const logger = capturarContextoAlLlamar(winston.createLogger({ transports: [new Lento({ format: contextFormat() })] }))
 
-  runWithContext(sesion(USUARIO_DEMO, DEMO), () => logger.error('cobro del prospecto'))
-  for (let i = 0; i < 5; i++) runWithContext(sesion(PERSONA_REAL, REAL), () => logger.error(`alerta real ${i}`))
+  runWithContext(job(DEMO), () => logger.error('limpieza del prospecto'))
+  for (let i = 0; i < 5; i++) runWithContext(job(REAL), () => logger.error(`alerta real ${i}`))
   runWithContext(job(DEMO), () => logger.error('job nocturno'))
   while (lineas.length < 7) await new Promise(r => setTimeout(r, 5))
 
@@ -190,5 +137,5 @@ it('🔴 Codex r3 · una línea demo que atora la salida no marca como demo las 
     expect(l.demo).toBeUndefined()
     expect(l.message).not.toContain('DEMO')
   }
-  expect(lineas.filter(l => l.demo === true).map(l => l.message)).toEqual(['🧪 DEMO · cobro del prospecto', '🧪 DEMO · job nocturno'])
+  expect(lineas.filter(l => l.demo === true).map(l => l.message)).toEqual(['🧪 DEMO · limpieza del prospecto', '🧪 DEMO · job nocturno'])
 })
