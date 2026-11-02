@@ -472,7 +472,7 @@ describe('approveSpei', () => {
       paymentStatus: 'AWAITING_PROOF',
       items: [],
     })
-    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io' })).rejects.toThrow(/not in PROOF_UPLOADED/i)
+    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io', token: 'T1' })).rejects.toThrow(/not in PROOF_UPLOADED/i)
   })
 
   it('marks PAID + AWAITING_SERIALS and clears approval token (single-use)', async () => {
@@ -480,6 +480,7 @@ describe('approveSpei', () => {
       id: 'ord_1',
       orderNumber: 'AVO-0001',
       paymentStatus: 'PROOF_UPLOADED',
+      speiApprovalToken: 'T1',
       items: [],
     })
     ;(prisma.terminalOrder.update as jest.Mock).mockResolvedValue({
@@ -489,7 +490,7 @@ describe('approveSpei', () => {
       items: [],
     })
 
-    await approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io' })
+    await approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io', token: 'T1' })
 
     const call = (prisma.terminalOrder.update as jest.Mock).mock.calls[0][0]
     expect(call.data.paymentStatus).toBe('PAID')
@@ -497,6 +498,44 @@ describe('approveSpei', () => {
     expect(call.data.speiApprovedAt).toBeInstanceOf(Date)
     expect(call.data.speiApprovedBy).toBe('sales@avoqado.io')
     expect(call.data.speiApprovalToken).toBeNull()
+  })
+
+  // 🔴 D1 (1-nov, Codex r1 P1): rechazar borra la llave y una nueva subida firma otra, pero aprobar sólo verificaba la
+  // firma. Una llave vieja (filtrada al comprador antes del arreglo) aprobaba el comprobante NUEVO sin que ventas lo viera.
+  it('una liga que ya no es la vigente (rechazo → nueva subida) no aprueba', async () => {
+    ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({
+      id: 'ord_1',
+      paymentStatus: 'PROOF_UPLOADED',
+      speiApprovalToken: 'T2',
+      items: [],
+    })
+    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'magic-link', token: 'T1' })).rejects.toThrow(/vigente/i)
+    expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
+  })
+
+  // D1 (Codex r2 P1): la llave se revisaba en una lectura y se escribía sólo por id. Una aprobación con T1 demorada
+  // escribía DESPUÉS de un rechazo y una nueva subida (T2). La escritura misma exige estado y llave.
+  it('la escritura exige la llave vigente: si cambió entre leer y escribir, no aprueba', async () => {
+    ;(prisma.terminalOrder.findUnique as jest.Mock)
+      .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: 'T1', items: [] })
+      .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: 'T2', items: [] })
+    ;(prisma.terminalOrder.update as jest.Mock).mockRejectedValue(Object.assign(new Error('not found'), { code: 'P2025' }))
+    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'magic-link', token: 'T1' })).rejects.toThrow(/vigente/i)
+    expect((prisma.terminalOrder.update as jest.Mock).mock.calls[0][0].where).toEqual({
+      id: 'ord_1',
+      paymentStatus: 'PROOF_UPLOADED',
+      speiApprovalToken: 'T1',
+    })
+  })
+
+  it('dos clics casi juntos: el segundo choca con «ya avanzó» (inofensivo), no aprueba dos veces', async () => {
+    ;(prisma.terminalOrder.findUnique as jest.Mock)
+      .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: 'T1', items: [] })
+      .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PAID', speiApprovalToken: null, items: [] })
+    ;(prisma.terminalOrder.update as jest.Mock).mockRejectedValue(Object.assign(new Error('not found'), { code: 'P2025' }))
+    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'magic-link', token: 'T1' })).rejects.toThrow(
+      /not in PROOF_UPLOADED state \(current: PAID\)/,
+    )
   })
 })
 
@@ -507,7 +546,7 @@ describe('rejectSpei', () => {
 
   it('rejects if order is not PROOF_UPLOADED', async () => {
     ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({ id: 'ord_1', paymentStatus: 'PAID' })
-    await expect(rejectSpei({ orderId: 'ord_1', reason: 'falso', rejectedBy: 'sales@avoqado.io' })).rejects.toThrow(
+    await expect(rejectSpei({ orderId: 'ord_1', reason: 'falso', rejectedBy: 'sales@avoqado.io', token: 'T1' })).rejects.toThrow(
       /not in PROOF_UPLOADED/i,
     )
   })
@@ -517,6 +556,7 @@ describe('rejectSpei', () => {
       id: 'ord_1',
       orderNumber: 'AVO-0001',
       paymentStatus: 'PROOF_UPLOADED',
+      speiApprovalToken: 'T1',
     })
     ;(prisma.terminalOrder.update as jest.Mock).mockResolvedValue({
       id: 'ord_1',
@@ -526,10 +566,34 @@ describe('rejectSpei', () => {
       orderId: 'ord_1',
       reason: 'El monto no coincide',
       rejectedBy: 'sales@avoqado.io',
+      token: 'T1',
     })
     const call = (prisma.terminalOrder.update as jest.Mock).mock.calls[0][0]
     expect(call.data.paymentStatus).toBe('REJECTED')
     expect(call.data.speiRejectionReason).toBe('El monto no coincide')
     expect(call.data.speiApprovalToken).toBeNull()
+  })
+
+  it('una liga que ya no es la vigente no rechaza', async () => {
+    ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({
+      id: 'ord_1',
+      paymentStatus: 'PROOF_UPLOADED',
+      speiApprovalToken: 'T2',
+    })
+    await expect(rejectSpei({ orderId: 'ord_1', reason: 'x', rejectedBy: 'magic-link', token: 'T1' })).rejects.toThrow(/vigente/i)
+    expect(prisma.terminalOrder.update).not.toHaveBeenCalled()
+  })
+
+  it('la escritura del rechazo exige la llave vigente', async () => {
+    ;(prisma.terminalOrder.findUnique as jest.Mock)
+      .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: 'T1' })
+      .mockResolvedValueOnce({ id: 'ord_1', paymentStatus: 'PROOF_UPLOADED', speiApprovalToken: 'T2' })
+    ;(prisma.terminalOrder.update as jest.Mock).mockRejectedValue(Object.assign(new Error('not found'), { code: 'P2025' }))
+    await expect(rejectSpei({ orderId: 'ord_1', reason: 'x', rejectedBy: 'magic-link', token: 'T1' })).rejects.toThrow(/vigente/i)
+    expect((prisma.terminalOrder.update as jest.Mock).mock.calls[0][0].where).toEqual({
+      id: 'ord_1',
+      paymentStatus: 'PROOF_UPLOADED',
+      speiApprovalToken: 'T1',
+    })
   })
 })

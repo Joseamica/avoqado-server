@@ -17,6 +17,19 @@ describe('terminalOrder token.service', () => {
     expect(payload).toMatchObject({ orderId: 'ord_1', action: 'approve' })
   })
 
+  // D1 (1-nov, Codex r2 P2): sin un id por emisión, dos firmas del mismo pedido en el mismo segundo salían IGUALES, y
+  // la llave de la subida anterior volvía a ser «la vigente» tras un rechazo y una nueva subida.
+  it('dos firmas del mismo pedido en el mismo segundo son llaves distintas', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-01T12:00:00Z'))
+    try {
+      expect(signApprovalToken({ orderId: 'ord_1', action: 'approve' })).not.toBe(
+        signApprovalToken({ orderId: 'ord_1', action: 'approve' }),
+      )
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
   it('rejects a token signed with a different secret', () => {
     const original = process.env.TERMINAL_ORDER_TOKEN_SECRET
     const token = signApprovalToken({ orderId: 'ord_1', action: 'approve' })

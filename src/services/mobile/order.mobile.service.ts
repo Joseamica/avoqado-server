@@ -40,6 +40,7 @@ import {
 import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderProvisioning.service'
 import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
 import { copiaQueCuadra } from '../shared/lineasDelTicket'
+import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
@@ -1084,10 +1085,11 @@ export async function buildOrderItemsData(
     const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
 
     // Calculate item total: (product price + modifiers) * quantity.
-    // Weighted: base = round(price × weightKg, 2) + modifiers (quantity is 1).
+    // Weighted: base = la cuenta de las apps, round(kg × centavos/kg), + modifiers (quantity is 1); iOS < 1.15.2 y la TPV,
+    // la vieja (`importePorPesoDeLaPeticionCents`).
     // El precio es el de la LÍNEA (el respetado o el de la base); peso, extras y descuento de línea no cambian.
     const precio = precioDeLinea[k]
-    const lineBase = product.soldByWeight ? Math.round(Number(precio) * weightKg! * 100) / 100 : Number(precio) * item.quantity
+    const lineBase = product.soldByWeight ? importePorPesoDeLaPeticionCents(Number(precio), weightKg!) / 100 : Number(precio) * item.quantity
     if (respetadas.has(k)) {
       preciosRespetados.push({
         externalId: typeof item.externalId === 'string' ? item.externalId : null,

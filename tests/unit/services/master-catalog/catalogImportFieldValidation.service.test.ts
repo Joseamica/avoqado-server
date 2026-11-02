@@ -1,9 +1,8 @@
 import { appendCatalogImportStandaloneErrorLines } from '@/services/master-catalog/catalogImportFieldValidation.service'
 import type { CatalogImportRowError, CatalogImportStagedLine } from '@/services/master-catalog/catalogImport.types'
-import { EVENT_LOOP_BUDGET_MS } from '@/services/master-catalog/catalogImportCanonical.service'
 import {
   CATALOG_IMPORT_EVENT_LOOP_PROBE_SUPPORTED_V1,
-  expectCatalogImportEventLoopBudgetV1,
+  expectCatalogImportEventLoopSliceBudgetV1,
   startCatalogImportEventLoopProbeV1,
 } from './catalogImportEventLoopTestHarness'
 import { blank, context, makeHarness, number, row, text, upload, validWorkbook } from './catalogImportTestHarness'
@@ -56,13 +55,10 @@ describe('catalog import field finding scheduler', () => {
     expect(completedCheckpointTurns).toBe(Math.floor((20_000 + 400_000) / 64))
     expect(pendingCheckpointTurns).toBe(0)
     expect(maximumPendingCheckpointTurns).toBe(1)
-    expect(EVENT_LOOP_BUDGET_MS).toBe(50)
     if (CATALOG_IMPORT_EVENT_LOOP_PROBE_SUPPORTED_V1) {
       expect(samples.length).toBeGreaterThan(0)
-      expect(Math.max(...samples)).toBeLessThan(EVENT_LOOP_BUDGET_MS)
-    } else {
-      expectCatalogImportEventLoopBudgetV1(samples)
     }
+    expectCatalogImportEventLoopSliceBudgetV1(samples)
     expect(staged).toHaveLength(20_000)
   }, 20_000)
 

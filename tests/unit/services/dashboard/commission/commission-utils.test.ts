@@ -306,6 +306,30 @@ describe('A1e · «sin IVA» con la regla de la póliza contable (D5 enmendada, 
     expect(listaDeLaOrden(peso(0.333), { includeTax: true })).toBe(38.63)
   })
 
+  describe('🔴 Parte 2 (1-nov): por peso, la cuenta que PRUEBA lo guardado (0.570 kg a $100.50: viejo $57.29, apps $57.28)', () => {
+    /** Un renglón por peso con lo que guardó su escritor (`total`, `discountAmount`) y su promoción si la tiene. */
+    const pesado = (total: number | null, descuento = 0, promo: string | null = null) => ({
+      ...item(100.5, 0.16, { kilos: 0.57, descuento }),
+      ...(total === null ? {} : { total: D(total) }),
+      orderPromotionId: promo,
+    })
+    const lista = (it: ReturnType<typeof pesado>) =>
+      listaDeLaOrden(ordenDe([it as unknown as ReturnType<typeof item>], { subtotal: 57.28 }), { includeTax: true })
+
+    it('venta nueva (el SERVIDOR ya cobra como las apps, total $57.28) ⇒ $57.28', () => expect(lista(pesado(57.28))).toBe(57.28))
+    it('venta vieja (escritor viejo, total $57.29) ⇒ $57.29, igual que hoy', () => expect(lista(pesado(57.29))).toBe(57.29))
+    it('cortesía nueva (total 0, descuento $57.28) ⇒ $57.28', () => expect(lista(pesado(0, 57.28))).toBe(57.28))
+    it('cortesía vieja (total 0, descuento $57.29) ⇒ $57.29, igual que hoy', () => expect(lista(pesado(0, 57.29))).toBe(57.29))
+    it('promoción vieja (total neto $50, descuento $7.29) ⇒ $57.29, igual que hoy', () =>
+      expect(lista(pesado(50, 7.29, 'promo-1'))).toBe(57.29))
+    it('sin `total` en la lectura ⇒ la cuenta vieja, igual que hoy', () => expect(lista(pesado(null))).toBe(57.29))
+    it('nada lo prueba (total $57.30) ⇒ la cuenta vieja, igual que hoy', () => expect(lista(pesado(57.3))).toBe(57.29))
+    it('cuando las dos cuentas coinciden (0.5 kg a $116) nada cambia ⇒ $58', () =>
+      expect(
+        listaDeLaOrden(ordenDe([{ ...item(116, 0.16, { kilos: 0.5 }), total: D(99) } as any], { subtotal: 58 }), { includeTax: true }),
+      ).toBe(58))
+  })
+
   it('IVA cobrado aparte: los renglones ya vienen sin IVA; «sin IVA» es la lista y «con IVA» le suma el registrado', () => {
     const aparte = { ...ordenDe([item(100)], { subtotal: 100 }), contratoDePrecio: 'IVA_APARTE', taxAmount: D(16) } as OrdenParaReparto
     expect([listaDeLaOrden(aparte, { includeTax: true }), listaDeLaOrden(aparte, { includeTax: false })]).toEqual([116, 100])

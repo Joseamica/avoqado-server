@@ -47,6 +47,7 @@ import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 import { formaGanadoraDeCobros } from './formaDePagoGanadora'
+import { importePorPesoCents, importePorPesoViejoCents } from '../shared/importePorPeso'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -1844,10 +1845,12 @@ export function examinarRenglon(it: RenglonParaCfdi, indice: number): RenglonExa
       // (`Math.round(precio × kilos × 100)`, order.tpv.service.ts:1738 y order.mobile.service.ts:666), que con flotante puede bajar
       // donde el redondeo decimal sube. Sólo esos dos resultados se aceptan (Codex r1 #5): con ellos el concepto lleva los kilos
       // reales y el precio por kilo que explica EXACTO lo cobrado, con hasta 6 decimales (experimento de la Tarea 1). Con
-      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen.
+      // cualquier otro, los motivos de abajo («menor que…» / «no cuadra…») lo dicen. Desde el 1-nov el SERVIDOR móvil cobra con
+      // la cuenta de las apps (`importePorPesoCents`, round(kg × centavos)): la tercera aceptada (0.570 kg × $100.50 ⇒ $57.28).
       const cobradoCents = brutoRenglonCents - extrasEsperadosCents
-      const delEscritor = Math.round(Number(it.unitPrice) * Number(it.weightQuantity) * 100)
-      if (cobradoCents === baseCents || cobradoCents === delEscritor) {
+      const delEscritor = importePorPesoViejoCents(Number(it.unitPrice), Number(it.weightQuantity))
+      const deLasApps = importePorPesoCents(Number(it.unitPrice), Number(it.weightQuantity))
+      if (cobradoCents === baseCents || cobradoCents === delEscritor || cobradoCents === deLasApps) {
         const derivado = new Prisma.Decimal(cobradoCents)
           .div(100)
           .div(new Prisma.Decimal(String(unidades)))

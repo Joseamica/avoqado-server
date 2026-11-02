@@ -218,3 +218,45 @@ describe('TPV Shop: regresión — el dueño de A sigue usando la tienda de A', 
     expect(res.status).toBe(200)
   })
 })
+
+/**
+ * 🔴 SPEI (2026-11-01, hallazgo D1 de «CRM propio»): la respuesta al COMPRADOR traía `speiApprovalToken` (y
+ * `serialAssignmentToken`). Con esa llave, el propio dueño abría `GET /public/tpv-orders/:id/approve?token=…` y su
+ * pedido quedaba PAGADO sin que ventas viera el comprobante ni el banco confirmara: bastaba subir cualquier PDF. Las
+ * llaves son de ventas (van en su correo); al comprador nunca le llegan, ni en la lista, ni en el detalle, ni al subir.
+ */
+describe('TPV Shop: las llaves de ventas nunca le llegan al comprador', () => {
+  const LLAVE_SPEI = 'llave-spei-de-ventas'
+  const LLAVE_SERIES = 'llave-series-de-ventas'
+  const conLlaves = (o: (typeof ORDERS)[number]) => ({ ...o, speiApprovalToken: LLAVE_SPEI, serialAssignmentToken: LLAVE_SERIES })
+
+  it('la lista no trae ninguna llave', async () => {
+    prismaMock.terminalOrder.findMany.mockResolvedValue([conLlaves(ORDERS[0])] as any)
+    const res = await request(makeApp()).get(`/api/v1/dashboard/venues/${VENUE_A}/tpv-orders`).set(as('owner-a', 'OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.body.data[0].id).toBe('ord-a')
+    expect(JSON.stringify(res.body)).not.toMatch(/llave-|speiApprovalToken|serialAssignmentToken"/)
+  })
+
+  it('el detalle no trae ninguna llave', async () => {
+    prismaMock.terminalOrder.findFirst.mockResolvedValue(conLlaves(ORDERS[0]) as any)
+    const res = await request(makeApp()).get(`/api/v1/dashboard/venues/${VENUE_A}/tpv-orders/ord-a`).set(as('owner-a', 'OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.body.data.id).toBe('ord-a')
+    expect(JSON.stringify(res.body)).not.toMatch(/llave-|speiApprovalToken|serialAssignmentToken"/)
+  })
+
+  it('al subir el comprobante, la llave que se acaba de firmar para ventas no viene en la respuesta', async () => {
+    let firmada: string | undefined
+    prismaMock.terminalOrder.update.mockImplementation((({ where, data }: any) => {
+      firmada = data.speiApprovalToken
+      return Promise.resolve({ ...ORDERS.find(o => o.id === where?.id), ...data, items: [] })
+    }) as any)
+    const res = await uploadProof(VENUE_A, 'ord-a', as('owner-a', 'OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.body.data.paymentStatus).toBe('PROOF_UPLOADED')
+    expect(firmada).toEqual(expect.any(String)) // ventas sí recibe su llave (se guarda y va en su correo)
+    expect(JSON.stringify(res.body)).not.toContain(firmada!)
+    expect(res.body.data).not.toHaveProperty('speiApprovalToken')
+  })
+})

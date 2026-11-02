@@ -1169,6 +1169,9 @@ describe('loadOrderForCfdiFromDb', () => {
     // [precio por kilo, kilos, lo que cobró el POS, precio que viaja] — el POS redondea con flotante: 69.165 ⇒ 69.16 y 30.015 ⇒ 30.01
     [45, 1.537, 69.16, '44.996747'],
     [100.05, 0.3, 30.01, '100.033333'],
+    // Parte 2 (1-nov): el SERVIDOR cobra ya con la cuenta de las apps, round(kg × centavos): 0.570 × 10050 = 5728.4999… ⇒ $57.28
+    [100.5, 0.57, 57.28, '100.491228'],
+    [100.05, 0.3, 30.02, '100.066667'],
   ])(
     'PESO %d $/kg × %d kg cobrado en $%d: se factura con los kilos reales y $%s por kilo (D9)',
     async (precio, kilos, cobrado, precioQueViaja) => {
@@ -1186,6 +1189,7 @@ describe('loadOrderForCfdiFromDb', () => {
     // [precio, kilos, cobrado, motivo] — ni el redondeo decimal ni el del POS dan esto (Codex r1 #5)
     [44.99, 1.537, 69.14, /menor que precio × cantidad/], // 69.14963: los dos redondeos dan 69.15
     [45, 1.537, 69.18, /no cuadra con precio × cantidad/], // los dos redondeos dan 69.17 o 69.16
+    [100.5, 0.57, 57.3, /no cuadra con precio × cantidad/], // ni lo exacto (57.29) ni las apps (57.28) dan 57.30
   ])('PESO %d $/kg × %d kg cobrado en $%d: no es un redondeo de lo cobrado ⇒ sigue detenido', async (precio, kilos, cobrado, motivo) => {
     orderMock.mockResolvedValue(ventaDePeso([[precio, kilos, cobrado]]))
     cfgMock.mockResolvedValue(aConfig())
