@@ -89,6 +89,17 @@ export function startCatalogImportEventLoopProbeV1(): CatalogImportEventLoopProb
 }
 
 export function expectCatalogImportEventLoopBudgetV1(samples: readonly number[]): void {
+  expectCatalogImportEventLoopSliceBudgetV1(samples)
+  if (CATALOG_IMPORT_EVENT_LOOP_PROBE_SUPPORTED_V1) expect(samples.length).toBeGreaterThan(2)
+}
+
+// WHY (1-nov, D4): More than two samples only means the workload outlasted two
+// slices, and that depends on the machine, not on the code. The field-validation
+// grouping finishes in 9-38 ms on the cloud runners, yields twice and leaves 2-4
+// samples, so `> 2` failed there two suites in three. A test whose workload can
+// end that fast proves its scheduling with a count no clock moves (how many times
+// the code consulted the checkpoint) and asserts only the budget below.
+export function expectCatalogImportEventLoopSliceBudgetV1(samples: readonly number[]): void {
   // The frozen budget is asserted on every runtime: it is a contract with the
   // production code, not a measurement, so it must hold even where the probe
   // cannot run.
@@ -102,6 +113,5 @@ export function expectCatalogImportEventLoopBudgetV1(samples: readonly number[])
     return
   }
 
-  expect(samples.length).toBeGreaterThan(2)
   expect(Math.max(...samples)).toBeLessThan(EVENT_LOOP_BUDGET_MS)
 }
