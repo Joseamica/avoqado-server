@@ -436,7 +436,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(firma).toContain('export function formaDeFirmaOAuth(')
     expect(cuerpo(firma, 'export function verifyOAuthQueryHmac(')).toContain('formaDeFirmaOAuth(query, secret)')
     // El montaje genérico no fija `limit` (100 KB por omisión) y su tipo es sólo application/json: por eso el de Shopify va aparte.
-    expect(app).not.toMatch(/express\.raw\(\{ type: 'application\/json', limit/)
+    // (Se mira ESE montaje: el de WhatsApp, que va antes con su propio tope, no es el genérico.)
+    expect(app).toContain("'/api/v1/webhooks',\n  express.raw({ type: 'application/json' }),")
     // C10: la forma codificada quedó confirmada con callbacks reales; ya no es una tarea pendiente.
     contieneTodas(['CONFIRMADO en vivo (C10, 9-oct-2026): tres callbacks reales de la tienda de prueba, los tres en la forma codificada'])
     expect(regla).not.toContain('falta confirmarlo con un callback real')
