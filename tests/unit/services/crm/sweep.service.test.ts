@@ -921,6 +921,28 @@ describe('backfillFromOnboarding', () => {
     )
   })
 
+  it('alta_de_prueba_de_hoy_entra_archivada_y_sin_aviso (founder, 2-nov): un correo @avoqado.io o @resend.dev', async () => {
+    const signups = ['jose+e2e22@avoqado.io', 'delivered+alta@resend.dev']
+    signups.forEach((email, n) => {
+      const organizationId = cuid('orgprueba', n + 1)
+      seedOrganization({ id: organizationId, name: email })
+      seedSignup(seedStaff(email, {}, organizationId).id, organizationId, { createdAt: new Date(Date.now() - 2 * 60 * MINUTE) })
+    })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(2)
+
+    for (const email of signups) {
+      const account = db.accounts.find(row => row.externalKey === email)
+      expect({ email, archived: (account?.archivedAt ?? null) !== null }).toEqual({ email, archived: true })
+      expect(systemEvents('CREATED_FROM_SIGNUP').find(event => event.accountId === account?.id)?.data).toMatchObject({
+        archived: true,
+        prueba: true,
+      })
+    }
+    expect(notifyNewProspect).not.toHaveBeenCalled()
+    expect(db.entries.filter(row => row.source === 'CARGA_INICIAL')).toHaveLength(0)
+  })
+
   it('aviso_de_la_carga_inicial_se_recupera (Codex exhaustiva #12): a notice that did not go out is retried with its key', async () => {
     seedOrganization()
     seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 2 * 60 * MINUTE) })

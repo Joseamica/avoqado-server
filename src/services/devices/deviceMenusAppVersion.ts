@@ -1,16 +1,16 @@
 /**
  * «Menú del aparato»: desde qué versión de cada app la cuadrícula aplica los menús elegidos.
  *
- * `null` = ninguna app lo aplica todavía: se fija en la Parte E, al publicar ANDROID, iOS y WINDOWS. Mientras tanto la página
- * del DASHBOARD dice «Actualiza la app para que lo aplique» en cada aparato.
+ * `null` = esa app todavía no lo aplica: la página del DASHBOARD dice «Actualiza la app para que lo aplique» en sus aparatos.
+ * iOS se fija al publicar su versión con este cambio (la siguiente a la 1.15.11).
  */
 
 import type { TerminalType } from '@prisma/client'
 
 export const DEVICE_MENUS_MIN_APP_VERSION: Record<'POS_ANDROID' | 'POS_IOS' | 'POS_DESKTOP', string | null> = {
-  POS_ANDROID: null,
+  POS_ANDROID: '2.25.26',
   POS_IOS: null,
-  POS_DESKTOP: null,
+  POS_DESKTOP: '2.25.26',
 }
 
 /** Sólo el prefijo numérico: `2.25.24-escritorio` y `2.25.24-dev` valen `2.25.24`. */

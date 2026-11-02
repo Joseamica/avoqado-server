@@ -40,6 +40,13 @@ function paeth(a: number, b: number, c: number): number {
   return pb <= pc ? b : c
 }
 
+/**
+ * Más grande no se abre: 5000×5000, unos 300 MB abierta. El sello real más grande mide 2225×2550, 5.7 millones (Testarudo, medido
+ * el 2-nov-2026). La subida rechaza lo que pasa de aquí con un mensaje; una imagen ya guardada cae a la forma del catálogo.
+ */
+export const MAX_PIXELES = 25_000_000
+const HOLGURA_DESCOMPRIMIDO = 1024
+
 export function decodePng(buffer: Buffer): DecodedPng | null {
   if (buffer.length < 8 || !buffer.subarray(0, 8).equals(SIGNATURE)) return null
 
@@ -88,15 +95,20 @@ export function decodePng(buffer: Buffer): DecodedPng | null {
   if (!canales) return null
   if (colorType === 3 && !paleta) return null
 
+  // 🔴 Lo que pesa un PNG descargado no dice cuánto pesa abierto: 3 MB comprimidos pueden ser gigas. Sin estos dos topes,
+  // una imagen así tumbaría el servidor por memoria, y al abrir los sellos al arrancar lo tumbaría en cada reinicio.
+  if (width * height > MAX_PIXELES) return null
+  const anchoFila = width * canales
+  const esperado = (anchoFila + 1) * height
+
   let crudo: Buffer
   try {
-    crudo = inflateSync(Buffer.concat(idat))
+    crudo = inflateSync(Buffer.concat(idat), { maxOutputLength: esperado + HOLGURA_DESCOMPRIMIDO })
   } catch {
     return null
   }
 
-  const anchoFila = width * canales
-  if (crudo.length < (anchoFila + 1) * height) return null
+  if (crudo.length < esperado) return null
 
   // ── Deshacer los filtros ────────────────────────────────────────────────
   const sinFiltro = Buffer.alloc(anchoFila * height)

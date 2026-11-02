@@ -8,6 +8,7 @@
 import { Request, Response } from 'express'
 import * as kycReviewService from '@/services/superadmin/kycReview.service'
 import logger from '@/config/logger'
+import { comoErrorDeUsuarioDemo } from '@/services/demo/candadoDemo'
 
 /**
  * GET /api/superadmin/kyc/pending
@@ -71,7 +72,9 @@ export async function approveKyc(req: Request, res: Response) {
       message: 'KYC approved successfully',
       data: updatedVenue,
     })
-  } catch (error: any) {
+  } catch (caught: any) {
+    // hz:f26b3afc:D5: la base no deja volver real un negocio demo con un usuario demo adentro: 400, no 500.
+    const error = comoErrorDeUsuarioDemo(caught)
     logger.error(`Error approving KYC for venue ${req.params.venueId}:`, error)
     res.status(error.statusCode || 500).json({
       success: false,
@@ -99,7 +102,8 @@ export async function assignProcessorAndApprove(req: Request, res: Response) {
       message: 'KYC approved and processor assigned successfully',
       data: merchantAccount,
     })
-  } catch (error: any) {
+  } catch (caught: any) {
+    const error = comoErrorDeUsuarioDemo(caught) // hz:f26b3afc:D5, igual que approveKyc
     logger.error(`Error assigning processor to venue ${req.params.venueId}:`, error)
     res.status(error.statusCode || 500).json({
       success: false,

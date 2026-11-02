@@ -44,6 +44,7 @@ import {
   sourceDetailOf,
   teamOrganizationId,
 } from './inbound.service'
+import { esCorreoDePrueba } from './internalEmail'
 import { addEvent } from './timeline.service'
 
 const BATCH = 200
@@ -380,14 +381,16 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
     if (!email || !signup.active || !organization || organization.crmAccount || pending.has(email)) continue
     const phone = signup.phone || organization.phone
     const age = startedAt - signup.createdAt.getTime()
-    const archived = age > ARCHIVE_AFTER_MS
+    // An internal test of the funnel (founder, 2-nov) goes in archived and is never announced, however new.
+    const prueba = esCorreoDePrueba(email)
+    const archived = age > ARCHIVE_AFTER_MS || prueba
     const person = {
       name: [signup.firstName, signup.lastName].filter(Boolean).join(' ') || organization.name,
       email,
       phoneE164: phone ? canonicalPhoneE164(phone) : null,
     }
     try {
-      const announce = age < ANNOUNCE_WITHIN_MS
+      const announce = age < ANNOUNCE_WITHIN_MS && !prueba
       const content: NoticeContent = {
         name: organization.name,
         giro: null,
@@ -426,7 +429,13 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
           accountId: account.id,
           kind: 'SYSTEM',
           actorStaffId: null,
-          data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString(), archived },
+          data: {
+            event: 'CREATED_FROM_SIGNUP',
+            activityLogId: signup.id,
+            signedUpAt: signup.createdAt.toISOString(),
+            archived,
+            ...(prueba ? { prueba: true } : {}),
+          },
         })
         if (!announce) return { accountId: account.id, entryId: null }
         // Ruling 65 (f, Codex exhaustiva #12): its notice is kept with the account, in the same transaction — an applied

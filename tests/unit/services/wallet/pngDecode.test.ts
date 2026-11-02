@@ -9,6 +9,26 @@
  */
 import { deflateSync } from 'zlib'
 import { decodePng } from '../../../../src/services/wallet/pngDecode'
+
+/** Un PNG gris de 8 bits armado a mano: su encabezado dice ancho × alto, y sus datos son `crudo`. */
+function pngGris(ancho: number, alto: number, crudo: Buffer): Buffer {
+  const trozo = (tipo: string, datos: Buffer) => {
+    const largo = Buffer.alloc(4)
+    largo.writeUInt32BE(datos.length)
+    return Buffer.concat([largo, Buffer.from(tipo, 'latin1'), datos, Buffer.alloc(4)]) // el decodificador no revisa el crc
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(ancho, 0)
+  ihdr.writeUInt32BE(alto, 4)
+  ihdr[8] = 8 // bits
+  ihdr[9] = 0 // gris
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    trozo('IHDR', ihdr),
+    trozo('IDAT', deflateSync(crudo)),
+    trozo('IEND', Buffer.alloc(0)),
+  ])
+}
 import { Canvas, encodePng, hexToRgb } from '../../../../src/services/wallet/pngCanvas'
 import { avoqadoLogoPng } from '../../../../src/services/wallet/avoqadoLogo'
 
@@ -41,6 +61,28 @@ function pngCrudo(width: number, height: number, colorType: number, canales: num
 }
 
 describe('decodePng', () => {
+  it('🔴 una imagen enorme, chica al comprimirla, no se abre: tumbaría el servidor en cada reinicio (Codex, 2-nov)', () => {
+    const lado = 5001
+    const crudo = Buffer.alloc((lado + 1) * lado) // pesa 25 MB abierta y muy poco comprimida
+    expect(deflateSync(crudo).length).toBeLessThan(3 * 1024 * 1024)
+    expect(decodePng(pngGris(lado, lado, crudo))).toBeNull()
+  })
+
+  it('🔴 un PNG que dice ser chico y al descomprimirlo trae mucho más tampoco se abre', () => {
+    const crudo = Buffer.alloc(64 * 1024 * 1024)
+    expect(decodePng(pngGris(4, 4, crudo))).toBeNull()
+  })
+
+  it.each([
+    ['el sello real más grande (Testarudo)', 2225, 2550],
+    ['una imagen de alta resolución (Codex, 2-nov)', 4096, 4096],
+    ['justo en el tope', 5000, 5000],
+  ])('%s sí se abre', (_, ancho, alto) => {
+    const abierto = decodePng(pngGris(ancho, alto, Buffer.alloc((ancho + 1) * alto)))
+    expect(abierto?.width).toBe(ancho)
+    expect(abierto?.height).toBe(alto)
+  })
+
   it('🔴 ida y vuelta: lo que sale es lo que entró, pixel a pixel', () => {
     const canvas = new Canvas(24, 16, hexToRgb('#204080'))
     canvas.shape(12, 8, 6, hexToRgb('#FF8800'), (nx, ny) => nx * nx + ny * ny <= 1)

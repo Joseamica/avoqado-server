@@ -176,7 +176,7 @@ it('PUT con Pro guarda y GET lo enseña', async () => {
 
   const res = await put(caja, [menuComida])
   expect(res.status).toBe(200)
-  // La app de hoy todavía no aplica la elección: `sees` es lo que muestra hoy (todo) y lo filtrado va en `seesAfterUpdate`.
+  // Un aparato que no reporta versión no aplica la elección: `sees` es lo que muestra hoy (todo) y lo filtrado va en `seesAfterUpdate`.
   expect(res.body).toMatchObject({
     id: caja,
     name: 'Caja',
