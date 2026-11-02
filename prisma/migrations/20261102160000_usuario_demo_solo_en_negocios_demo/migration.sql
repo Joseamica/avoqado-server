@@ -19,7 +19,14 @@ BEGIN
   END IF;
 
   IF TG_TABLE_NAME = 'Venue' THEN
-    IF NEW.status = 'LIVE_DEMO' THEN
+    -- Sólo lo que puede juntar a un usuario demo con un negocio real: un negocio real nuevo, uno demo que se vuelve real, o
+    -- cualquiera que cambie de organización. Entre estados reales no se pide nada: el cambio de estado ya tiene el negocio
+    -- y pedirle la organización formaría un ciclo con el traslado, que va organización → negocio (Codex D5 r2-4).
+    IF TG_OP = 'INSERT' AND NEW.status = 'LIVE_DEMO' THEN
+      RETURN NEW;
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW."organizationId" IS NOT DISTINCT FROM OLD."organizationId"
+       AND (NEW.status = 'LIVE_DEMO' OR OLD.status <> 'LIVE_DEMO') THEN
       RETURN NEW;
     END IF;
     org := NEW."organizationId";
@@ -32,6 +39,9 @@ BEGIN
         RAISE EXCEPTION 'USUARIO_DEMO_EN_NEGOCIO_REAL' USING ERRCODE = 'P0001';
       END IF;
       SELECT v."organizationId" INTO org FROM "Venue" v WHERE v.id = NEW."venueId";
+      -- Un traslado que corría con el candado de la organización vieja ya movió el negocio: se revisa la nueva (r2-2).
+      PERFORM 1 FROM "Organization" o WHERE o.id = org FOR NO KEY UPDATE;
+      SELECT v."organizationId" INTO org FROM "Venue" v WHERE v.id = NEW."venueId";
     ELSE
       org := NEW."organizationId";
     END IF;
@@ -42,10 +52,17 @@ BEGIN
   IF TG_TABLE_NAME = 'Venue' THEN
     -- Un negocio real (nuevo, que deja de ser demo o que llega a otra organización) no queda con un usuario demo adentro
     -- ni en una organización con uno: miembro, o con sucursal en otro de sus negocios.
-    IF EXISTS (SELECT 1 FROM "StaffOrganization" so JOIN "Staff" s ON s.id = so."staffId"
-                WHERE so."organizationId" = org AND lower(btrim(s.email)) LIKE '%@demo.avoqado.io')
-       OR EXISTS (SELECT 1 FROM "StaffVenue" sv JOIN "Staff" s ON s.id = sv."staffId" JOIN "Venue" v ON v.id = sv."venueId"
-                   WHERE (v."organizationId" = org OR sv."venueId" = NEW.id) AND lower(btrim(s.email)) LIKE '%@demo.avoqado.io') THEN
+    IF NEW.status <> 'LIVE_DEMO' AND (
+         EXISTS (SELECT 1 FROM "StaffOrganization" so JOIN "Staff" s ON s.id = so."staffId"
+                  WHERE so."organizationId" = org AND lower(btrim(s.email)) LIKE '%@demo.avoqado.io')
+      OR EXISTS (SELECT 1 FROM "StaffVenue" sv JOIN "Staff" s ON s.id = sv."staffId" JOIN "Venue" v ON v.id = sv."venueId"
+                  WHERE (v."organizationId" = org OR sv."venueId" = NEW.id) AND lower(btrim(s.email)) LIKE '%@demo.avoqado.io')) THEN
+      RAISE EXCEPTION 'USUARIO_DEMO_EN_NEGOCIO_REAL' USING ERRCODE = 'P0001';
+    END IF;
+    -- Un negocio demo con un usuario demo adentro tampoco llega a una organización con negocios reales (r2-1).
+    IF EXISTS (SELECT 1 FROM "StaffVenue" sv JOIN "Staff" s ON s.id = sv."staffId"
+                WHERE sv."venueId" = NEW.id AND lower(btrim(s.email)) LIKE '%@demo.avoqado.io')
+       AND EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = org AND v.id <> NEW.id AND v.status <> 'LIVE_DEMO') THEN
       RAISE EXCEPTION 'USUARIO_DEMO_EN_NEGOCIO_REAL' USING ERRCODE = 'P0001';
     END IF;
   ELSE

@@ -143,6 +143,14 @@ describe('🔴 un usuario demo NO entra a un negocio real, por ningún camino', 
     expect(await t2).toBe('rechazado')
   })
 
+  it('🔴 Codex D5 r2-1 · trasladar el negocio demo, con su usuario demo adentro, a una organización real', async () => {
+    const real = await organizacion()
+    await negocio(real, 'ACTIVE')
+    const [enDemo, demo] = [await negocio(await organizacion(), 'LIVE_DEMO'), await persona('demo.avoqado.io')]
+    await prisma.staffVenue.create({ data: { staffId: demo, venueId: enDemo, role: 'OWNER' } })
+    expect(await rechazo(prisma.venue.update({ where: { id: enDemo }, data: { organizationId: real } }))).toBe('rechazado')
+  })
+
   it('🔴 Codex r4 · las dos funciones del SUPERADMIN', async () => {
     const org = await organizacion()
     const real = await negocio(org, 'ACTIVE')
@@ -175,6 +183,7 @@ describe('lo que sigue pasando', () => {
     await prisma.staffVenue.create({ data: { staffId: s, venueId: real, role: 'OWNER' } })
     await prisma.staffVenue.create({ data: { staffId: s, venueId: enDemo, role: 'OWNER' } })
     await prisma.venue.update({ where: { id: enDemo }, data: { status: 'ACTIVE' } })
+    await prisma.venue.update({ where: { id: enDemo }, data: { status: 'SUSPENDED' } })
     await prisma.venue.update({ where: { id: real }, data: { organizationId: otra } })
     await prisma.staffOrganization.create({ data: { staffId: s, organizationId: otra } })
     expect(await upsertVenueAssignment(prisma, s, real, 'MANAGER')).toBeTruthy()
