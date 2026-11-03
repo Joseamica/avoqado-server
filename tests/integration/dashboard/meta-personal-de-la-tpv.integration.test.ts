@@ -128,7 +128,9 @@ beforeAll(async () => {
 
   // Beto vende $80 (2 renglones) y Ana $60 (1 renglón); Ana le devuelve $30 a la venta de Beto.
   const deBeto = await venta(venueId, beto, 80, 2)
-  await venta(venueId, ana, 60, 1)
+  const deAna = await venta(venueId, ana, 60, 1)
+  // Un cobro viejo puede no traer tipo: sigue siendo una venta.
+  await prisma.payment.updateMany({ where: { orderId: deAna.id }, data: { type: null } })
   await prisma.payment.create({
     data: {
       venueId,
@@ -146,6 +148,23 @@ beforeAll(async () => {
       processorData: { originalPaymentId: deBeto.payments[0].id },
     },
   })
+  // Ana también intentó cobrar esa venta de Beto y no se completó: tampoco la hace suya.
+  await prisma.payment.create({
+    data: {
+      venueId,
+      orderId: deBeto.id,
+      processedById: ana,
+      amount: 80,
+      tipAmount: 0,
+      method: 'CREDIT_CARD',
+      status: 'FAILED',
+      type: 'REGULAR',
+      splitType: 'FULLPAYMENT',
+      feeAmount: 0,
+      netAmount: 80,
+      feePercentage: 0,
+    },
+  })
   // No cuentan para sus metas de esta tienda: una venta de hace 40 días y una de Beto en otra tienda.
   await venta(venueId, beto, 1000, 5, new Date(Date.now() - CUARENTA_DIAS))
   await venta(otraTienda, beto, 40, 1)
@@ -155,6 +174,7 @@ beforeAll(async () => {
   await createSalesGoal(venueId, { staffId: ana, goal: 100, goalType: 'AMOUNT', period: 'MONTHLY' })
   await createSalesGoal(venueId, { staffId: null, goal: 500, goalType: 'AMOUNT', period: 'MONTHLY' })
   await createSalesGoal(venueId, { staffId: beto, goal: 10, goalType: 'QUANTITY', period: 'WEEKLY' })
+  await createSalesGoal(venueId, { staffId: ana, goal: 10, goalType: 'QUANTITY', period: 'WEEKLY' })
   await createSalesGoal(venueId, { staffId: null, goal: 10, goalType: 'QUANTITY', period: 'WEEKLY' })
 
   // La otra tienda no tiene metas propias: hereda la de la organización.
@@ -189,7 +209,12 @@ describe('D7: lo que recibe la terminal', () => {
       'sucursal QUANTITY 3',
     ])
     expect(deAna.body.salesGoals.every((m: { staffId: string | null }) => m.staffId === null || m.staffId === ana)).toBe(true)
-    expect(resumen(deAna.body.salesGoals)).toEqual(['personal AMOUNT 60', 'sucursal AMOUNT 110', 'sucursal QUANTITY 3'])
+    expect(resumen(deAna.body.salesGoals)).toEqual([
+      'personal AMOUNT 60',
+      'personal QUANTITY 1',
+      'sucursal AMOUNT 110',
+      'sucursal QUANTITY 3',
+    ])
   })
 
   it('GET /tpv/sales-goal (terminales viejas): la meta personal gana y trae lo de esa persona', async () => {
@@ -211,13 +236,14 @@ describe('D7: el avance de cada meta que lee la TPV', () => {
     const metas = await getEffectiveGoals(venueId)
 
     expect(laMeta(metas, beto, 'QUANTITY', 'WEEKLY').currentSales).toBe(2)
+    expect(laMeta(metas, ana, 'QUANTITY', 'WEEKLY').currentSales).toBe(1) // ni la venta que devolvió ni el cobro que no se completó
   })
 
   it('el panel y la TPV dicen lo mismo de cada meta', async () => {
     const delPanel = await getSalesGoals(venueId)
     const deLaTpv = await getEffectiveGoals(venueId)
 
-    expect(deLaTpv).toHaveLength(5)
+    expect(deLaTpv).toHaveLength(6)
     expect(deLaTpv.map(m => [m.id, m.currentSales]).sort()).toEqual(delPanel.map(m => [m.id, m.currentSales]).sort())
   })
 

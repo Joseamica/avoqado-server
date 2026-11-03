@@ -224,7 +224,10 @@ export async function calculateCurrentSales(
           venueId,
           status: 'COMPLETED',
           createdAt: { gte: startDate },
-          ...(staffId ? { payments: { some: { processedById: staffId } } } : {}),
+          // D7: sus ventas, igual que por importe. Ni la devolución que operó sobre una venta ajena ni un cobro que no se completó.
+          ...(staffId
+            ? { payments: { some: { processedById: staffId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } } }
+            : {}),
         },
       },
     })
