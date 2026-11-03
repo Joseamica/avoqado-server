@@ -2,7 +2,10 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import * as refundService from '../../services/dashboard/refund.dashboard.service'
+import { exigirSoloSaldoFueraDelPos } from '../../services/storeCredit/storeCreditRefund.service'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
+
+const MOTIVOS_DEL_PANEL = new Set<string>(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'])
 
 /**
  * Issue a refund against an existing payment.
@@ -31,6 +34,10 @@ export async function issueRefund(req: Request, res: Response, next: NextFunctio
     if (!reason || typeof reason !== 'string') {
       return res.status(400).json({ success: false, message: 'reason es requerido' })
     }
+    // Un motivo fuera del catálogo se saltaría «Sólo saldo a favor» (Codex r1 #2).
+    if (!MOTIVOS_DEL_PANEL.has(reason)) {
+      return res.status(400).json({ success: false, message: 'reason no es un motivo válido' })
+    }
 
     const result = await refundService.issueRefund({
       venueId,
@@ -42,6 +49,8 @@ export async function issueRefund(req: Request, res: Response, next: NextFunctio
       staffId: req.authContext?.userId,
       note: typeof note === 'string' ? note : null,
       tipRefundCents: typeof tipRefundCents === 'number' ? tipRefundCents : undefined,
+      reglasBajoCandado: (tx, cobro) =>
+        exigirSoloSaldoFueraDelPos(tx, { venueId, reason, pagadoConSaldo: cobro.original.tenderSystemKind === 'GIFT_CARD' }),
     })
 
     return res.status(201).json({ success: true, data: result })

@@ -8,6 +8,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
+import { exigirSoloSaldoFueraDelPos } from '@/services/storeCredit/storeCreditRefund.service'
 import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
@@ -470,7 +471,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'issue_refund',
-    '🔴 CRITICAL. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH also requires payments:refund-to-cash).',
+    '🔴 CRITICAL. If the venue has «Sólo saldo a favor» on, returned goods and «other» are rejected with STORE_CREDIT_ONLY: those go through the POS. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund (refundMethod CASH also requires payments:refund-to-cash).',
     {
       venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
       idempotencyKey: z
@@ -581,6 +582,16 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             payment: { orderId: payment.orderId, processorId: payment.processorId },
           })
         }
+        // «Sólo saldo a favor» se dice desde la vista previa. Al confirmar lo revisa sólo el servicio, con el cobro bloqueado y después de
+        // reconocer la llave: una repetición debe contestar lo que ya se escribió, nunca un rechazo (Codex r1 #1).
+        if (!confirm) {
+          await exigirSoloSaldoFueraDelPos(prisma, {
+            venueId,
+            reason: REFUND_REASON_MAP[reason],
+            ...(refundMethod ? { refundMethod } : {}),
+            pagadoConSaldo: esSaldoDeRegalo,
+          })
+        }
         const chain = isExchangeCreditTenderKind(cobroParaDevolver.tenderSystemKind)
           ? await chainRefundSemanticsInTx(prisma, venueId, paymentId)
           : null
@@ -635,6 +646,13 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           staffId: scope.staffId,
           ...(note ? { note } : {}),
           ...(refundMethod ? { refundMethod } : {}),
+          reglasBajoCandado: (tx, cobro) =>
+            exigirSoloSaldoFueraDelPos(tx, {
+              venueId,
+              reason: REFUND_REASON_MAP[reason],
+              ...(refundMethod ? { refundMethod } : {}),
+              pagadoConSaldo: cobro.original.tenderSystemKind === 'GIFT_CARD',
+            }),
         })
         await auditMcpWrite(scope, {
           action: 'REFUND_ISSUED',
