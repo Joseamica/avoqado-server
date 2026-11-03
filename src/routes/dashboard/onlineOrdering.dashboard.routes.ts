@@ -48,6 +48,8 @@ router.post('/pause', validateRequest(pauseSchema), checkPermission('online-orde
 // La bandeja del panel comparte manejadores con las apps; late sólo si su página de bandeja manda `x-online-orders-tray: 1`
 // (permitida en CORS, H2) y quien mira tiene `orders:update` efectivo (H3).
 router.get('/orders', validateRequest(inboxSchema), checkPermission('orders:read'), orders.inbox)
+// S3 (clientes): UN pedido por su cuenta, para devolver a la tarjeta después de las 24 h de la bandeja. Sin plan (R14).
+router.get('/orders/:orderId', validateRequest(orderActionSchema), checkPermission('orders:read'), admin.getOnlineOrderHandler)
 router.post('/orders/:orderId/accept', validateRequest(acceptSchema), checkPermission('orders:update'), orders.accept)
 router.post('/orders/:orderId/reject', validateRequest(rejectSchema), checkPermission('orders:update'), orders.reject)
 router.post('/orders/:orderId/ready', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.ready)

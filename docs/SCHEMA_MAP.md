@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **470 models / 412 enums / ~21,100 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
+`prisma/schema.prisma` is **472 models / 412 enums / ~21,200 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -39,7 +39,7 @@ primary domain.
 | 20  | **AI Chatbot (Text-to-SQL)**            | The in-dashboard AI assistant: conversations, training data, learned patterns.                                 | `ChatConversation`, `ChatFeedback`, `ChatLearningEvent`, `ChatMessage`, `ChatTrainingData`, `LearnedPatterns`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 21  | **Customers, Consumers & Reviews**      | End-customer identity (venue customers + cross-venue Consumers) and reviews.                                   | `BirthdayAutomation`, `ConsentEvent`, `Consumer`, `ConsumerAuthAccount`, `Customer`, `CustomerApprovalDelivery`, `CustomerApprovalOutbox`, `CustomerCampaign`, `CustomerCampaignDelivery`, `CustomerCaptureToken`, `CustomerExternalIdentity`, `CustomerGroup`, `EmailQuotaLedger`, `EmailSuppression`, `OtpChallenge`, `PrivacyNoticeVersion`, `Review`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | 22  | **System: Audit, Webhooks & Platform**  | Cross-cutting plumbing: audit log, webhook subscriptions, partner API keys, global settings.                   | `ActivityLog`, `PartnerAPIKey`, `PlatformSettings`, `WebhookEvent`, `WebhookSubscription`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| 23  | **CRM (equipo de ventas de Avoqado)**   | Platform-level CRM for Avoqado’s own sales team: CRM-only keys, accounts, contacts, pipeline, activities.      | `CrmAccount`, `CrmActivity`, `CrmCampaign`, `CrmCampaignDelivery`, `CrmContact`, `CrmDigestSend`, `CrmEmailConsent`, `CrmEmailMessage`, `CrmEmailOptOut`, `CrmEmailTemplate`, `CrmGmailAccountSeen`, `CrmGmailConnection`, `CrmHiddenClient`, `CrmInboundEntry`, `CrmLostReason`, `CrmStage`, `CrmTeam`, `CrmTimelineEvent`, `PlatformAccess`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 23  | **CRM (equipo de ventas de Avoqado)**   | Platform-level CRM for Avoqado’s own sales team: CRM-only keys, accounts, contacts, pipeline, activities.      | `CrmAccount`, `CrmActivity`, `CrmCampaign`, `CrmCampaignDelivery`, `CrmContact`, `CrmDigestSend`, `CrmEmailConsent`, `CrmEmailMessage`, `CrmEmailOptOut`, `CrmEmailTemplate`, `CrmErased`, `CrmGmailAccountSeen`, `CrmGmailConnection`, `CrmHiddenClient`, `CrmInboundEntry`, `CrmLostReason`, `CrmStage`, `CrmTeam`, `CrmTimelineEvent`, `CrmWhatsappMessage`, `PlatformAccess`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 > Line numbers are section starts and drift as the schema grows — treat them as "jump near here", then search for the exact `model Name {`.
 > When the map goes stale, regenerate it: `npm run schema:map` (CI runs it automatically on `prisma/schema.prisma` changes).
@@ -148,22 +148,24 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CreditTransaction` → `schema.prisma:L15904`
 - `CrmAccount` → `schema.prisma:L20831`
 - `CrmActivity` → `schema.prisma:L20948`
-- `CrmCampaign` → `schema.prisma:L21053`
-- `CrmCampaignDelivery` → `schema.prisma:L21079`
+- `CrmCampaign` → `schema.prisma:L21071`
+- `CrmCampaignDelivery` → `schema.prisma:L21097`
 - `CrmContact` → `schema.prisma:L20906`
-- `CrmDigestSend` → `schema.prisma:L21012`
-- `CrmEmailConsent` → `schema.prisma:L21122`
-- `CrmEmailMessage` → `schema.prisma:L21164`
-- `CrmEmailOptOut` → `schema.prisma:L21112`
-- `CrmEmailTemplate` → `schema.prisma:L21035`
-- `CrmGmailAccountSeen` → `schema.prisma:L21156`
-- `CrmGmailConnection` → `schema.prisma:L21140`
+- `CrmDigestSend` → `schema.prisma:L21030`
+- `CrmEmailConsent` → `schema.prisma:L21140`
+- `CrmEmailMessage` → `schema.prisma:L21182`
+- `CrmEmailOptOut` → `schema.prisma:L21130`
+- `CrmEmailTemplate` → `schema.prisma:L21053`
+- `CrmErased` → `schema.prisma:L21016`
+- `CrmGmailAccountSeen` → `schema.prisma:L21174`
+- `CrmGmailConnection` → `schema.prisma:L21158`
 - `CrmHiddenClient` → `schema.prisma:L20822`
 - `CrmInboundEntry` → `schema.prisma:L20985`
 - `CrmLostReason` → `schema.prisma:L20938`
 - `CrmStage` → `schema.prisma:L20926`
 - `CrmTeam` → `schema.prisma:L20809`
 - `CrmTimelineEvent` → `schema.prisma:L20970`
+- `CrmWhatsappMessage` → `schema.prisma:L21212`
 - `Customer` → `schema.prisma:L7983`
 - `CustomerApprovalDelivery` → `schema.prisma:L10563`
 - `CustomerApprovalOutbox` → `schema.prisma:L10538`

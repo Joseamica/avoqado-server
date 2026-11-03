@@ -17,7 +17,7 @@ import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
-import { advanceCardRefund, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
+import { advanceCardRefund, listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
@@ -138,7 +138,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     const payment = await prisma.payment.findFirstOrThrow({ where: { orderId: oo.orderId, type: 'REGULAR' } })
     return { orderId: oo.orderId, charge, paymentId: payment.id }
   }
-  const pedir = (orderId: string, o: Partial<{ amount: string; key: string; note: string }> = {}) =>
+  const pedir = async (orderId: string, o: Partial<{ amount: string; key: string; note: string; expected: string | null }> = {}) =>
     refundCardOnlineOrder({
       venueId: venueId!,
       orderId,
@@ -147,6 +147,8 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       staffId,
       idempotencyKey: o.key ?? nextKey(),
       note: o.note ?? null,
+      // Sin decir otra cosa, el operador vio la lista al día.
+      expectedLatestRefundId: o.expected === undefined ? ((await listCardRefunds(venueId!, orderId))[0]?.id ?? null) : o.expected,
     })
   const refundsOf = (orderId: string) =>
     prisma.payment.findMany({ where: { orderId, type: 'REFUND' }, include: { transaction: true }, orderBy: { createdAt: 'asc' }, take: 10 })
@@ -578,6 +580,21 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(again).toMatchObject({ cardRefundId: first.cardRefundId, status: 'RECORDED', replay: true })
     expect(await refundsOf(orderId)).toHaveLength(1)
     expect(refundSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('dos llaves con la misma vista, en paralelo y con el candado real: una sola devuelve, la otra 409 CARD_REFUND_STALE_VIEW', async () => {
+    const { orderId } = await capturedOrder()
+    const resultados = await Promise.allSettled([
+      pedir(orderId, { amount: '50.00', expected: null }),
+      pedir(orderId, { amount: '50.00', expected: null }),
+    ])
+    const devolvio = resultados.filter(r => r.status === 'fulfilled')
+    const rebote = resultados.filter(r => r.status === 'rejected') as PromiseRejectedResult[]
+    expect(devolvio).toHaveLength(1)
+    expect(rebote).toHaveLength(1)
+    expect(rebote[0].reason).toMatchObject({ statusCode: 409, code: 'CARD_REFUND_STALE_VIEW' })
+    expect(await refundsOf(orderId)).toHaveLength(1)
+    expect(await listCardRefunds(venueId!, orderId)).toHaveLength(1)
   })
 
   it('dos ejecutores de la misma devolución en paralelo → un solo renglón', async () => {

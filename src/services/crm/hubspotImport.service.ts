@@ -34,6 +34,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import type { CrmAccess } from './access.service'
 import { getInitialStage, listLostReasons, listStages } from './accounts.service'
+import { ErasedIdentityError } from './erase.service'
 import { accountForTx, addPersonTx, cleanText, personGapWith, type UpsertBySourceInput } from './inbound.service'
 import { addEvent } from './timeline.service'
 
@@ -558,8 +559,11 @@ export async function previewHubspot(contactsCsv: string, dealsCsv: string): Pro
   return (await plan(contactsCsv, dealsCsv)).summary
 }
 
-/** What writing one record did: created it, found its key already imported, or found its person already in the CRM. */
-type Written = { created: true } | { created: false; repeatedIn: string | null }
+/**
+ * What writing one record did: created it, found its key already imported, found its person already in the CRM, or found
+ * them deleted from the CRM (D7) — a file is always from before, so it never brings them back.
+ */
+type Written = { created: true } | { created: false; repeatedIn: string | null } | { created: false; erased: true }
 
 /**
  * Creates ONE account, unless the CRM already has it — its key (another import got there first, or an earlier run of
@@ -572,11 +576,19 @@ async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, ac
   const values = (pick: (contact: ContactInput) => string | null | undefined) => [
     ...new Set(record.contacts.flatMap(contact => pick(contact) ?? [])),
   ]
-  const { account, created, via } = await accountForTx(
-    tx,
-    { emails: values(contact => contact.email), phones: values(contact => contact.phoneE164), organizationId: null },
-    { source: IMPORTACION, externalKey: record.externalKey, data: record.data, contact: primary },
-  )
+  let found: Awaited<ReturnType<typeof accountForTx>>
+  try {
+    found = await accountForTx(
+      tx,
+      { emails: values(contact => contact.email), phones: values(contact => contact.phoneE164), organizationId: null },
+      { source: IMPORTACION, externalKey: record.externalKey, data: record.data, contact: primary },
+    )
+  } catch (error) {
+    // Thrown by our own check after its read, never by Postgres: the batch's transaction goes on.
+    if (error instanceof ErasedIdentityError) return { created: false, erased: true }
+    throw error
+  }
+  const { account, created, via } = found
   if (!created) return { created: false, repeatedIn: via === 'KEY' ? null : account.id }
   for (const contact of others) {
     await addPersonTx(tx, account.id, { name: contact.name, email: contact.email ?? null, phoneE164: contact.phoneE164 ?? null })
@@ -612,6 +624,7 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
 
   let aplicados = 0
   let fallaron = 0
+  let eliminados = 0
   const repeatedDeals: Array<{ deal: NonNullable<PlannedAccount['deal']>; accountId: string }> = []
   for (const batch of chunksOf(records, BATCH)) {
     try {
@@ -622,6 +635,7 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
       }, BATCH_TX)
       for (const { record, result } of written) {
         if (result.created) aplicados++
+        else if ('erased' in result) eliminados++
         else if (result.repeatedIn && record.deal) repeatedDeals.push({ deal: record.deal, accountId: result.repeatedIn })
       }
     } catch (error) {
@@ -634,10 +648,13 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
     }
   }
   const names = await accountNames(repeatedDeals.map(({ accountId }) => accountId))
-  const lateAvisos = repeatedDeals.map(
-    ({ deal, accountId }) =>
-      `${deal.where} no entra (ni sus contactos): alguien de él llegó al CRM mientras se importaba, en «${names.get(accountId) ?? 'otro negocio'}» (${accountId}); en HubSpot estaba en ${deal.hubspotStage}, ajústalo a mano`,
-  )
+  const lateAvisos = [
+    ...(eliminados ? [`${eliminados} no entra${eliminados === 1 ? '' : 'n'}: se eliminó del CRM y no vuelve con un archivo`] : []),
+    ...repeatedDeals.map(
+      ({ deal, accountId }) =>
+        `${deal.where} no entra (ni sus contactos): alguien de él llegó al CRM mientras se importaba, en «${names.get(accountId) ?? 'otro negocio'}» (${accountId}); en HubSpot estaba en ${deal.hubspotStage}, ajústalo a mano`,
+    ),
+  ]
 
   void logAction({
     staffId: actor.staffId,
@@ -652,6 +669,7 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
       archivados: summary.archivados,
       aplicados,
       fallaron,
+      eliminados,
     },
   })
   return {

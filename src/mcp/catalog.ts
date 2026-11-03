@@ -108,6 +108,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   crm_advance_stage: 'write',
   crm_add_note: 'write',
   crm_add_activity: 'write',
+  crm_delete_account: 'write',
   crm_pending: 'read',
   crm_pipeline_summary: 'read',
   // Correo del CRM (fase 2): sólo lectura. Mandar una campaña o un correo NO es una herramienta: es masivo y no se deshace.

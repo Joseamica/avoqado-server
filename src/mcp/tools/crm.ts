@@ -38,6 +38,7 @@ import {
 import { addActivity } from '@/services/crm/activities.service'
 import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 import { listTemplates } from '@/services/crm/email/templates.service'
+import { deleteAccount, ErasedIdentityError, sameName } from '@/services/crm/erase.service'
 import { accountForTx } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
 import { addEvent } from '@/services/crm/timeline.service'
@@ -55,6 +56,8 @@ const SOLO_AVOQADO = 'Sólo el equipo de Avoqado puede usar el CRM de ventas.'
 const GANAR = 'Para ganarlo usa la ficha en el SUPERADMIN: pide ligar su negocio de Avoqado.'
 const VOLVIO = 'Volvió a escribir por WhatsApp'
 const SOLO = 'Sólo para el equipo de Avoqado.'
+/** How far ahead of our clock a message's date may be (another device's clock) and still count as a message. */
+const FUTURE_SKEW_MS = 5 * 60_000
 
 /** Mexico City, like every date of the CRM. */
 const fecha = (date: Date | null, format = 'yyyy-MM-dd HH:mm') => (date ? formatInVenueTimezone(date, DEFAULT_TIMEZONE, format) : null)
@@ -140,7 +143,8 @@ class ChangedMeanwhile extends Error {}
 
 type Upsert =
   | { ok: true; accountId: string; creado: boolean; yaExistia: boolean; reactivado: boolean; notaNueva: boolean; actualizados: Llenable[] }
-  | { ok: false; error: string; candidatos: Awaited<ReturnType<typeof findDuplicates>> }
+  // Without candidates: a prospect the superadmin deleted (D7), which nobody picks among.
+  | { ok: false; error: string; candidatos?: Awaited<ReturnType<typeof findDuplicates>> }
 
 /**
  * Ruling 45: what the routine learned fills only what the business still lacks — the name while it is the phone (or
@@ -217,6 +221,9 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
           },
           contact: { name, phoneE164: input.phone, isPrimary: true },
         },
+        // D7: a chat re-read from before the superadmin deleted this business does not create it again; a newer message
+        // does. A date in the future proves no new message: it counts as none (Codex r4 H3).
+        input.ultimoMensajeAt && input.ultimoMensajeAt.getTime() <= now.getTime() + FUTURE_SKEW_MS ? input.ultimoMensajeAt : undefined,
       )
       // Its own WhatsApp business (by its key) is never ambiguous; anything else must be what the check verified — the one
       // business with this phone, or none. Thrown, so a creation rolls back too.
@@ -283,6 +290,12 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
       return { ok: true, accountId, creado: false, yaExistia: true, reactivado, notaNueva, actualizados: changes.map(({ field }) => field) }
     })
   } catch (error) {
+    if (error instanceof ErasedIdentityError) {
+      return {
+        ok: false,
+        error: `Ese prospecto se eliminó del CRM el ${fecha(error.erasedAt)} y no se vuelve a crear con mensajes de antes. Si escribe de nuevo, entra solo; si de verdad es un prospecto, créalo a mano en el SUPERADMIN.`,
+      }
+    }
     if (!(error instanceof ChangedMeanwhile)) throw error
     // Another business with this phone appeared between the check and the lock (Codex autorización H3): nothing was
     // written, and the routine chooses — never a silent switch to the newest one.
@@ -513,6 +526,60 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         await addNote(access, id, { text: note })
         await audit('CRM_NOTE_ADDED', id)
         return { ok: true, accountId: id, yaEstaba: false }
+      }),
+  )
+
+  server.tool(
+    'crm_delete_account',
+    'ELIMINA para siempre un negocio del CRM de ventas: sus contactos, notas, actividades e historia. No se puede deshacer; ' +
+      'para sólo sacarlo del embudo se archiva en su ficha. Sólo el superadmin real. DOS PASOS: la primera llamada dice qué ' +
+      'se borraría y pide confirmar; nada se borra hasta llamar otra vez con confirm:true. confirmName es el nombre del ' +
+      'negocio tal como aparece. Lo eliminado no vuelve con datos de antes (landing, altas, HubSpot o esta rutina): vuelve ' +
+      'sólo si la persona escribe o llena la landing después, o si alguien lo crea a mano. ' +
+      SOLO,
+    {
+      accountId,
+      // No maximum: it is the whole name of the business, whatever its length (Codex r3 H3).
+      confirmName: z.string().trim().min(1, 'Escribe el nombre del negocio').describe('El nombre del negocio, tal como aparece'),
+      confirm: z.boolean().optional().describe('true sólo en la SEGUNDA llamada, tras la autorización del usuario'),
+    },
+    async ({ accountId: id, confirmName, confirm }) =>
+      conLlave(scope, 'crm:admin', async access => {
+        requireWriteScopeAlways(scope, 'crm:admin', 'elimina un negocio del CRM de ventas')
+        if (!access.isSuperadmin) return { ok: false, error: 'Sólo el superadmin puede eliminar un negocio del CRM.' }
+        if (confirm !== true) {
+          const account = await prisma.crmAccount.findUnique({
+            where: { id },
+            select: {
+              name: true,
+              source: true,
+              stage: { select: { name: true } },
+              _count: { select: { contacts: true, activities: true, timelineEvents: true } },
+            },
+          })
+          if (!account) return { ok: false, error: 'Ese negocio ya no está en el CRM.' }
+          // The token signs `confirmName`: it must be the name this preview shows, or a name that changed afterwards could
+          // be confirmed without anybody seeing it (Codex r2 H4). The deletion compares it again under the lock.
+          if (!sameName(confirmName, account.name)) {
+            return { ok: false, error: `El nombre no coincide: este negocio se llama «${account.name}».` }
+          }
+          return {
+            requiresConfirmation: true,
+            negocio: account.name,
+            fuente: account.source,
+            etapa: account.stage.name,
+            seBorran: {
+              contactos: account._count.contacts,
+              actividades: account._count.activities,
+              eventos: account._count.timelineEvents,
+            },
+            aviso: 'Se borra para siempre y no se puede deshacer.',
+          }
+        }
+        const result = await deleteAccount(access, id, confirmName)
+        // The deletion's own ActivityLog is written in its transaction; this one adds which assistant did it.
+        await audit('CRM_ACCOUNT_DELETED_BY_MCP', id)
+        return { ok: true, ...result }
       }),
   )
 

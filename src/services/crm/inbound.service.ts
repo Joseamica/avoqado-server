@@ -22,6 +22,8 @@ import prisma from '../../utils/prismaClient'
 import { normalizeEmail } from '../marketing/emailSuppression.service'
 import { getInitialStage, resetFirstMoneyTx } from './accounts.service'
 import { notifyNewProspect, notifyReturningProspect, type NoticeContent } from './digest.service'
+import { esCorreoDePrueba } from './internalEmail'
+import { assertNotErasedTx, ErasedIdentityError } from './erase.service'
 import { addEvent } from './timeline.service'
 
 export const LANDING = 'LANDING'
@@ -77,12 +79,15 @@ export function sanitizeEntry(raw: Record<string, unknown>): CleanEntry {
  * blip must not cost the entry, and a database that is down must not hold up the signup. Never throws; twice down →
  * `null`, and the clean form goes to the log (the internal email to onboarding is the other copy).
  */
-export async function saveLandingEntry(payload: Record<string, unknown>): Promise<{ entryId: string } | null> {
+export async function saveLandingEntry(payload: Record<string, unknown>, receivedAt = new Date()): Promise<{ entryId: string } | null> {
   let entry: CleanEntry = {}
   try {
     entry = sanitizeEntry(payload)
     const externalKey = typeof entry.email === 'string' ? entry.email.toLowerCase().trim() : ''
-    const write = () => prisma.crmInboundEntry.create({ data: { source: LANDING, externalKey, payload: entry }, select: { id: true } })
+    // `receivedAt` is when the FORM came (the controller's clock, the one a deletion stamps with), never when this write
+    // went in: a retry after a blip — with a deletion in between — must not make an old form new (D7, Codex r4 H1).
+    const write = () =>
+      prisma.crmInboundEntry.create({ data: { source: LANDING, externalKey, payload: entry, receivedAt }, select: { id: true } })
     const { id } = await write().catch(write)
     return { entryId: id }
   } catch (error) {
@@ -255,11 +260,15 @@ export const organizationKey = (externalKey: string, organizationId: string) => 
  * brings (a customer of X opening Y), the entry goes to the account of ITS Organization: the one that holds it, or a new
  * one under `organizationKey` and linked to it — never to X's, never a retry forever. Without an Organization there is no
  * conflict: the key's account takes it as always.
+ *
+ * `seenAt` is when what the writer read was said (the entry's `receivedAt`, the signup's date, the last message): a person
+ * deleted from the CRM after it is an `ErasedIdentityError`, and nothing is created. Without it, it counts as old.
  */
 export async function accountForTx(
   tx: Prisma.TransactionClient,
   who: Omit<Identity, 'key'>,
   create: UpsertBySourceInput,
+  seenAt?: Date,
 ): Promise<{ account: { id: string; organizationId: string | null }; created: boolean; via: FoundVia | null }> {
   let input = create
   let identity: Identity = { ...who, key: { source: create.source, externalKey: create.externalKey } }
@@ -276,6 +285,9 @@ export async function accountForTx(
       continue
     }
     if (found) return { account: { id: found.id, organizationId: found.organizationId }, created: false, via: found.via }
+    // Nobody: before creating, the tombstone (D7). A person the superadmin deleted is not created again from what was said
+    // before — the person, not the business key alone: both keys, every email and phone, the Organization.
+    await assertNotErasedTx(tx, { ...who, keys: [create, input] }, seenAt)
     const upserted = await upsertAccountBySource(tx, input)
     if (upserted.created) return { ...upserted, via: null }
   }
@@ -539,15 +551,27 @@ const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: 
  * entry without the box is not an opt-out, which only comes from the one-click link or the seller (task 3). The timeline
  * says THAT it was given, never by whom (no email), once per entry. The caller is the first run of the entry, inside its
  * transaction: the consent and its ENTRY_APPLIED are written together or not at all.
+ *
+ * D7: a form sent before its person was deleted from the CRM does not bring their consent back, even when it lands on
+ * another account (a shared phone, one created again by hand) — the tombstone rule of `accountForTx`, with the entry's
+ * Organization. The entry is still applied as D7 decided; only the consent is left out.
  */
 async function consentTx(
   tx: Prisma.TransactionClient,
   entry: { id: string; externalKey: string; receivedAt: Date },
   form: LandingForm,
   accountId: string,
+  organizationId: string | null,
 ) {
   if (!form.consent) return
   const email = normalizeEmail(entry.externalKey)
+  try {
+    const keys = [{ source: LANDING, externalKey: entry.externalKey }]
+    await assertNotErasedTx(tx, { keys, emails: [email], phones: [], organizationId }, entry.receivedAt)
+  } catch (error) {
+    if (error instanceof ErasedIdentityError) return
+    throw error
+  }
   const data = { accountId, entryId: entry.id, consentAt: entry.receivedAt, source: LANDING, noticeVersion: form.consent.noticeVersion }
   await tx.crmEmailConsent.upsert({ where: { email }, create: { email, ...data }, update: data, select: { id: true } })
   await addEvent(tx, {
@@ -600,7 +624,7 @@ function savedNoticeContent(value: Prisma.JsonValue | undefined): NoticeContent 
  */
 export function repeatOf(previous: { accountId: string; data: Prisma.JsonValue }): AppliedEntry {
   const data: Prisma.JsonObject = previous.data && typeof previous.data === 'object' && !Array.isArray(previous.data) ? previous.data : {}
-  if (data.signup === 'CUSTOMER') return { accountId: previous.accountId, notice: null }
+  if (data.signup === 'CUSTOMER' || data.prueba === true) return { accountId: previous.accountId, notice: null }
   const notice: Notice = data.created === true ? 'NEW' : data.reactivated === true ? 'RETURNED' : null
   const content = notice ? savedNoticeContent(data.noticeContent) : undefined
   return { accountId: previous.accountId, notice, ...(content ? { content } : {}) }
@@ -625,6 +649,9 @@ async function applyTx(
   if (previous) return repeatOf(previous)
 
   const customer = outcome?.yaEsCliente === true
+  // An internal test of the funnel (founder, 2-nov) goes in archived, is never announced and never brings an archived
+  // account back.
+  const prueba = esCorreoDePrueba(entry.externalKey)
   // THE account of this entry, by the resolver every writer shares (ruling 65 a): the one its Organization already holds,
   // whatever its source (ruling 25); the landing one of this email; or — one per person (ruling 48) — the one of another
   // source that already has this email or phone. Returned locked and checked again under the lock. Only when there is
@@ -645,9 +672,11 @@ async function applyTx(
         // late (ruling 50).
         qualifiedAt: entry.receivedAt,
         lastTouchAt: entry.receivedAt,
+        ...(prueba ? { archivedAt: new Date() } : {}),
       },
       contact: form.contact,
     },
+    entry.receivedAt,
   )
   const accountId = account.id
   /**
@@ -665,12 +694,19 @@ async function applyTx(
 
   if (created) {
     // A customer is not a new prospect: the note instead of «Nuevo prospecto» (ruling 23).
-    const content = customer ? undefined : noticeContentOf({ name: form.name, ...form.qualification, qualificationAvailable: true })
-    const repeated = await proof({ entryId: entry.id, signup, created, ...(content ? { noticeContent: { ...content } } : {}) })
+    const content =
+      customer || prueba ? undefined : noticeContentOf({ name: form.name, ...form.qualification, qualificationAvailable: true })
+    const repeated = await proof({
+      entryId: entry.id,
+      signup,
+      created,
+      ...(prueba ? { prueba: true } : {}),
+      ...(content ? { noticeContent: { ...content } } : {}),
+    })
     if (repeated) return repeated
     if (customer) await customerNote(tx, accountId, entry.id)
-    await consentTx(tx, entry, form, accountId)
-    return { accountId, notice: customer ? null : 'NEW', ...(content ? { content } : {}) }
+    await consentTx(tx, entry, form, accountId, organizationId)
+    return { accountId, notice: customer || prueba ? null : 'NEW', ...(content ? { content } : {}) }
   }
 
   // An account that was already there was locked by the resolver BEFORE its event is written: two entries of the same
@@ -695,7 +731,7 @@ async function applyTx(
   // Ruling 57: the account keeps this person's email and phone (an account of another source may lack them).
   const personGap = await personGapTx(tx, accountId, form.contact)
   // Ruling 31: an ARCHIVED account comes back with the entry — not a lost one, which stays lost (ruling 24).
-  const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA'
+  const reactivate = state.archivedAt !== null && state.stage.kind !== 'PERDIDA' && !prueba
   // Ruling 50: the qualification is the NEWEST form's. An older one the sweep repaired late keeps its story in the
   // timeline and overwrites nothing. A customer's account is theirs: what they type does not overwrite it either.
   const carries = QUALIFICATION_FIELDS.some(field => !isBlank(form.qualification[field]))
@@ -739,7 +775,7 @@ async function applyTx(
   else if (changes.length) {
     await addEvent(tx, { accountId, kind: 'FIELD_CHANGE', actorStaffId: null, data: { entryId: entry.id, changes } })
   }
-  await consentTx(tx, entry, form, accountId)
+  await consentTx(tx, entry, form, accountId, organizationId)
   if (!state.organizationId && organizationId) await linkTx(tx, accountId, organizationId)
   return { accountId, notice, ...(content ? { content } : {}) }
 }
@@ -840,6 +876,17 @@ export async function applyEntry(entryId: string): Promise<void> {
     const message = errorText(error)
     // Ruling 71: even the account of the entry's own Organization belongs to another business. No retry changes that:
     // the entry is closed without an account — never retried forever — and said once, here.
+    if (error instanceof ErasedIdentityError) {
+      // D7: the superadmin deleted this person after the form was sent. The form is theirs and goes too — never kept closed
+      // with its data (Codex r1 H4) — so it can never be applied again either.
+      logger.info('[CRM] Landing entry from before its account was deleted; deleted too', { entryId })
+      try {
+        await prisma.crmInboundEntry.deleteMany({ where: { id: entryId } })
+      } catch {
+        // The sweep meets it again and tries again.
+      }
+      return
+    }
     const permanent = error instanceof IdentityConflictError
     logger.error(
       permanent

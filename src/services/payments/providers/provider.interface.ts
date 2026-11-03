@@ -184,6 +184,8 @@ export interface IEcommerceProvider {
   ): Promise<AuthorizationState>
   capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState>
   voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState>
+  /** S5: vence una página de pago abierta (el comensal la abandonó). El error del proveedor sale tal cual. */
+  expireAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, checkoutSessionId: string): Promise<void>
 
   getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState>
   /** Todas las devoluciones del PaymentIntent (todas las páginas, con tope), con su metadata. */

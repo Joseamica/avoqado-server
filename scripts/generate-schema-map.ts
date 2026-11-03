@@ -672,6 +672,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CrmGmailConnection: 'CRM (equipo de ventas de Avoqado)',
   CrmGmailAccountSeen: 'CRM (equipo de ventas de Avoqado)',
   CrmEmailMessage: 'CRM (equipo de ventas de Avoqado)',
+  CrmWhatsappMessage: 'CRM (equipo de ventas de Avoqado)',
+  CrmErased: 'CRM (equipo de ventas de Avoqado)',
 }
 
 // ---------------------------------------------------------------------------

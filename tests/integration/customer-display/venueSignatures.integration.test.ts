@@ -162,13 +162,20 @@ describe('readVenueSignatures', () => {
     const guardadoUno = await ordenDeGuardado()
     const unOrden = await firma()
     const unOrdenRecorrido = await firmaEnOrdenDeGuardado()
-    await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
-    await guardarEnUnaConexion([
-      ['AAA010101AAA', { id: idMenor, createdAt: fecha }],
-      ['ZZZ010101ZZZ', { id: idMayor, createdAt: fecha }],
-    ])
+    // Si la página se llena justo entre los dos INSERT, el segundo cae en otra página con espacio, que puede estar antes, y el
+    // orden físico sale invertido sin que haya defecto (medido; hz:ce4800da:D2). Se repite hasta lograrlo, con tope.
+    const alReves = [...guardadoUno].reverse()
+    let guardadoDos: string[] = []
+    for (let intento = 0; intento < 10 && guardadoDos.join() !== alReves.join(); intento++) {
+      await prisma.fiscalEmisor.deleteMany({ where: { venueId } })
+      await guardarEnUnaConexion([
+        ['AAA010101AAA', { id: idMenor, createdAt: fecha }],
+        ['ZZZ010101ZZZ', { id: idMayor, createdAt: fecha }],
+      ])
+      guardadoDos = await ordenDeGuardado()
+    }
     // La prueba sólo vale si de verdad quedaron guardados al revés; si no, que lo diga en vez de pasar sin probar nada.
-    expect(await ordenDeGuardado()).toEqual([...guardadoUno].reverse())
+    expect(guardadoDos).toEqual(alReves)
     expect((await firma()).emisores).toBe(unOrden.emisores)
     expect(await firmaEnOrdenDeGuardado()).toBe(unOrdenRecorrido)
   })

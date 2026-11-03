@@ -564,6 +564,8 @@ const prismaMock: any = {
   crmEmailMessage: createMockModel(),
   // La supresión global de correo (rebotes y quejas): `isBlocked` la lee antes de cualquier envío del CRM.
   emailSuppression: createMockModel(),
+  crmWhatsappMessage: createMockModel(),
+  crmErased: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

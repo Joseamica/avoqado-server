@@ -181,6 +181,8 @@ async function enviarSiLaListaLoPermite(options: Parameters<typeof emailService.
 }
 
 export async function submitContact(req: Request, res: Response, next: NextFunction) {
+  // Cuándo llegó el formulario, antes de guardar nada: viaja a la marca del alta (D7).
+  const formAt = new Date()
   try {
     const { firstName, lastName, phone, email, companyName, employees, revenue } = req.body || {}
     // Campos opcionales que manda la landing de sector (restaurantes): tipo de
@@ -199,7 +201,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
 
     // CRM propio (spec 2026-10-30 §5.3): el formulario crudo se guarda ANTES que todo lo demás. Nunca lanza: si la base
     // no responde, el alta sigue como siempre y la copia es el correo interno.
-    const entradaCrm = await saveLandingEntry(req.body || {})
+    const entradaCrm = await saveLandingEntry(req.body || {}, formAt)
 
     const logoUrl = 'https://avoqado.io/isotipo.svg'
     const nombre = `${String(firstName)} ${String(lastName)}`.trim()
@@ -239,6 +241,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
         organizationName: String(companyName),
         phone: String(phone),
         source: source ? String(source) : undefined,
+        formAt,
         // Los UTMs viajan al alta, no solo al correo interno: pegados en un
         // correo, "de que campana vino este lead" solo se contesta abriendo
         // correos a mano. En el ActivityLog del alta si se puede consultar.

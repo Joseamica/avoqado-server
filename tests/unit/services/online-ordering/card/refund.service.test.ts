@@ -83,14 +83,16 @@ const matches = (row: Row, where: Record<string, any> = {}): boolean =>
     return row[k] === v
   })
 const rows = () => [...store.values()]
+const masNuevas = (filas: Row[]) => [...filas].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
 const cardRefund = {
   findUnique: jest.fn(async ({ where, select }: any) => {
     const r = rows().find(x => matches(x, where))
     // El aviso de Stripe pide la foto del cargo (Codex r1 C2): en este doble el único cargo es ch1.
     return r ? { ...r, ...(select?.charge ? { charge: CHARGE } : {}) } : null
   }),
-  findFirst: jest.fn(async ({ where }: any) => {
-    const r = rows().find(x => matches(x, where))
+  findFirst: jest.fn(async ({ where, orderBy }: any) => {
+    const hallados = rows().filter(x => matches(x, where))
+    const r = orderBy ? masNuevas(hallados)[0] : hallados[0]
     return r ? { ...r } : null
   }),
   findMany: jest.fn(async ({ where, take }: any) =>
@@ -200,7 +202,9 @@ const stateOf = (status: string, o: Partial<{ refundId: string; amountCents: num
   failureReason: o.failureReason ?? null,
 })
 const created = (status: 'PENDING' | 'SUCCEEDED' | 'FAILED', refundId = 're_1') => ({ refundId, amount: 25_000, status })
-const pedir = (o: Partial<{ amount: string; key: string; note: string | null; reason: string; orderId: string }> = {}) =>
+const pedir = (
+  o: Partial<{ amount: string; key: string; note: string | null; reason: string; orderId: string; expected: string | null }> = {},
+) =>
   refundCardOnlineOrder({
     venueId: 'v1',
     orderId: o.orderId ?? 'ord1',
@@ -209,6 +213,8 @@ const pedir = (o: Partial<{ amount: string; key: string; note: string | null; re
     staffId: 'staff1',
     idempotencyKey: o.key ?? 'llave-del-panel-1',
     note: o.note === undefined ? null : o.note,
+    // Sin decir otra cosa, el operador vio la lista al día.
+    expectedLatestRefundId: o.expected === undefined ? (masNuevas(rows())[0]?.id ?? null) : o.expected,
   })
 
 // Sólo el reloj es falso (`new Date()` del servicio = NOW); los temporizadores siguen reales.
@@ -273,6 +279,42 @@ beforeEach(() => {
   getRefund.mockResolvedValue(stateOf('SUCCEEDED'))
   listRefunds.mockResolvedValue([])
   getApplicationFeeRefundedCents.mockResolvedValue(290)
+})
+
+describe('la vista del operador: sólo pasa si lo último que vio sigue siendo lo último (Codex panel r4)', () => {
+  const A = 'llave-intento-a'
+  const B = 'llave-intento-b'
+
+  it('dos llaves con la misma vista: la primera devuelve; la segunda 409 CARD_REFUND_STALE_VIEW, sin fila ni Stripe', async () => {
+    await pedir({ key: A, amount: '50.00', expected: null })
+    await expect(pedir({ key: B, amount: '50.00', expected: null })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CARD_REFUND_STALE_VIEW',
+    })
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(store.size).toBe(1)
+  })
+
+  it('la misma llave con la vista vieja sigue siendo replay: el reintento recupera su devolución', async () => {
+    const r = await pedir({ key: A, amount: '50.00', expected: null })
+    const otra = await pedir({ key: A, amount: '50.00', expected: null })
+    expect(otra).toMatchObject({ replay: true, cardRefundId: r.cardRefundId })
+    expect(refund).toHaveBeenCalledTimes(1)
+  })
+
+  it('una FAILED también cuenta como la última: con la vista vieja rebota; viéndola, se puede otra', async () => {
+    refund.mockResolvedValueOnce(created('FAILED'))
+    const fallida = await pedir({ key: A, amount: '50.00', expected: null })
+    expect(fallida.status).toBe('FAILED')
+    await expect(pedir({ key: B, amount: '50.00', expected: null })).rejects.toMatchObject({ code: 'CARD_REFUND_STALE_VIEW' })
+    await expect(pedir({ key: B, amount: '50.00', expected: fallida.cardRefundId })).resolves.toMatchObject({ replay: false })
+  })
+
+  it('decir que vio una devolución cuando el pedido no tiene ninguna → 409, nada se crea', async () => {
+    await expect(pedir({ key: A, amount: '50.00', expected: 'cr-que-no-existe' })).rejects.toMatchObject({ code: 'CARD_REFUND_STALE_VIEW' })
+    expect(store.size).toBe(0)
+    expect(refund).not.toHaveBeenCalled()
+  })
 })
 
 describe('refundCardOnlineOrder', () => {

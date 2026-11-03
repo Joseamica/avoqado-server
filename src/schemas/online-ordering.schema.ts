@@ -126,6 +126,15 @@ export const cardRefundSchema = z.object({
     note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
     // F1: opcional si viene el encabezado `Idempotency-Key`; si vienen los dos deben ser iguales (lo revisa el controlador).
     idempotencyKey: cardRefundKey.optional(),
+    // La última devolución que vio el operador (`null`: ninguna). Obligatorio: sin él no se sabe sobre qué decidió.
+    expectedLatestRefundId: z
+      .string({
+        required_error: 'Falta la última devolución que viste (null si no hay ninguna)',
+        invalid_type_error: 'La última devolución que viste debe ser un id o null',
+      })
+      .min(1, 'La última devolución que viste debe ser un id o null')
+      .max(64, 'La última devolución que viste debe ser un id o null')
+      .nullable(),
   }),
 })
 /** «Devolver por otro medio» de una devolución a la tarjeta que falló después (sólo efectivo o transferencia). */
