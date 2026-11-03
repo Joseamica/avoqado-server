@@ -470,6 +470,7 @@ describe('sendTestToSelf', () => {
   it.each([
     ['sin respuesta de Resend', { ok: false, transient: true }],
     ['un 5xx de Resend', { ok: false, transient: true, errorCode: 'application_error' }],
+    ['un 503 de Resend', { ok: false, transient: true, errorCode: 'service_unavailable' }],
     ['la llave ya usada con otro contenido', { ok: false, transient: false, errorCode: 'invalid_idempotent_request' }],
     ['la llave en vuelo', { ok: false, transient: false, errorCode: 'concurrent_idempotent_requests' }],
   ])('%s: {ok:false, incierto:true} con «revisa tu correo», no «No se pudo»', async (_caso, resultado) => {

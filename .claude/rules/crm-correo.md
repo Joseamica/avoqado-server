@@ -104,5 +104,7 @@ gastar).
 `crm_list_email_templates` y `crm_campaign_status`: de **lectura**, sólo SUPERADMIN, sólo en `/mcp` (nunca en el catálogo certificado).
 Mandar una campaña o un correo por MCP no existe a propósito: es masivo y no se deshace. En `crm_campaign_status`, `desconocidos` quiere
 decir «no sabemos si salieron»: Resend lo aceptó y no se guardó el resultado, pasaron más de 23 h desde el primer intento, se agotaron los
-seis intentos (Ruling 11: la fila no guarda si alguno llegó a Resend) **o** Resend ya tenía la llave con otro contenido. Nunca se lee como
-entregado; `FALLIDO` sólo cuando se sabe que no salió.
+seis intentos (Ruling 11: la fila no guarda si alguno llegó a Resend), Resend rechazó un **reintento** (el intento anterior pudo salir)
+**o** Resend ya tenía la llave con otro contenido. Nunca se lee como entregado; `FALLIDO` sólo cuando se sabe que no salió: un rechazo en
+el primer intento. En «Envíame una prueba», un 5xx de Resend (`application_error`, `internal_server_error`, `service_unavailable`) o la
+llave en conflicto también es «no sabemos si salió».

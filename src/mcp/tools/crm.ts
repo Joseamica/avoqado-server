@@ -680,7 +680,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
     'Estado de las campañas de correo del CRM de ventas: de cada una su estado (BORRADOR, ENVIANDO, ENVIADA o CANCELADA), el ' +
       'asunto, los públicos, a cuántas personas se encoló y cuántos correos van en cada estado (pendientes, en curso, enviados, ' +
       'reintentos, fallidos, omitidos y desconocidos: no sabemos si salieron, porque Resend los aceptó y no alcanzamos a guardarlo, ' +
-      'porque pasaron más de 23 h desde el primer intento o porque se agotaron los intentos sin confirmación; los fallidos son sólo ' +
+      'porque pasaron más de 23 h desde el primer intento, porque se agotaron los intentos sin confirmación o porque se rechazó ' +
+      'un reintento cuando el intento anterior pudo salir; los fallidos son sólo ' +
       'los que se sabe que no salieron). Sin ' +
       'campaignId lista las campañas, de 50 en 50 (hasta 100) con el total, y status filtra por estado; con campaignId trae ' +
       'esa campaña. No trae el contenido del correo. Sólo lectura: esta herramienta no manda correos ni campañas (es masivo y ' +

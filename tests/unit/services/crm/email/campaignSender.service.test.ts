@@ -333,6 +333,17 @@ describe('enviarDelivery — lo que sale y cómo se guarda', () => {
     await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('FALLIDO')
     expect(escrito().data).toMatchObject({ status: 'FALLIDO', lastError: 'validation_error' })
   })
+
+  // Codex código r3: un rechazo en un REINTENTO no borra la duda del intento anterior (respuesta perdida y luego, p. ej., la
+  // credencial revocada: Resend rechaza antes de mirar la llave). Pudo haber salido: DESCONOCIDO, nunca «No salieron».
+  it('el mismo rechazo en un reintento (respuesta perdida y luego credencial inválida) queda DESCONOCIDO', async () => {
+    send.mockResolvedValue({ ok: false, transient: false, errorCode: 'validation_error' })
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 2 }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('DESCONOCIDO')
+    expect(escrito().data).toMatchObject({ status: 'DESCONOCIDO', nextAttemptAt: null })
+    expect(escrito().data.lastError).toContain('validation_error')
+  })
 })
 
 describe('correrEnvioDeCampanas — el trabajo', () => {

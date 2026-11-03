@@ -187,10 +187,15 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
     d.attempts > 1
       ? escribir('DESCONOCIDO', { status: 'DESCONOCIDO', skipReason, lastError: PUDO_SALIR_EN_UN_INTENTO_ANTERIOR, nextAttemptAt: null })
       : escribir('OMITIDO', { status: 'OMITIDO', skipReason, nextAttemptAt: null })
-  const fallar = (lastError: string) => escribir('FALLIDO', { status: 'FALLIDO', lastError, nextAttemptAt: null })
   // `attempts` ya viene con el intento de ahora (el reclamo lo sube), así que la primera espera es BACKOFF_MS[0].
   /** Pudo haber salido: «no sabemos si salió», sin otro intento (nunca FALLIDO, que la pantalla pinta «No salieron»). */
   const desconocido = (lastError: string) => escribir('DESCONOCIDO', { status: 'DESCONOCIDO', lastError, nextAttemptAt: null })
+  // Un rechazo en un REINTENTO no borra la duda del intento anterior (respuesta perdida y luego, p. ej., la credencial revocada:
+  // Resend rechaza antes de mirar la llave). Igual que `omitir`: sólo el primer intento puede decir «no salió».
+  const fallar = (lastError: string) =>
+    d.attempts > 1
+      ? desconocido(`${PUDO_SALIR_EN_UN_INTENTO_ANTERIOR} (${lastError})`)
+      : escribir('FALLIDO', { status: 'FALLIDO', lastError, nextAttemptAt: null })
   const reintentar = (lastError: string) =>
     d.attempts >= MAX_INTENTOS
       ? desconocido(`No sabemos si salió: se agotaron los ${MAX_INTENTOS} intentos (${lastError})`)

@@ -51,7 +51,13 @@ const NO_SABEMOS_SI_SALIO_LA_PRUEBA =
  * Lo que dice que Resend pudo haberla mandado: sin respuesta (sin código), un 5xx, o la llave ya usada / en vuelo. Lo demás (429,
  * validación, sin configurar, demo) es un «no» que se sabe.
  */
-const PUDO_SALIR = new Set(['application_error', 'internal_server_error', 'invalid_idempotent_request', 'concurrent_idempotent_requests'])
+const PUDO_SALIR = new Set([
+  'application_error',
+  'internal_server_error',
+  'service_unavailable',
+  'invalid_idempotent_request',
+  'concurrent_idempotent_requests',
+])
 
 // ── Leer ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
