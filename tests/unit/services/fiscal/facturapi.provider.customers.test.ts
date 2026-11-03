@@ -149,6 +149,7 @@ describe('FacturapiProvider — customers', () => {
       ['una llave mal', 401, { message: 'No autorizado' }],
       ['el proveedor caído', 503, { message: 'Servicio no disponible' }],
       ['un 400 que no dice qué campo', 400, { code: 'invalid_request', message: 'Algo salió mal' }],
+      ['un 400 sobre algo que no es un dato del receptor', 400, { code: 'invalid_request', path: 'limit', location: 'query', message: 'Algo salió mal' }],
     ])('%s NO es un veredicto sobre el receptor', async (_caso, status, cuerpo) => {
       red.mockResolvedValue(responde(status, cuerpo))
 

@@ -137,9 +137,13 @@ export async function saveBillingTaxProfileIfSatAccepts(
   )
   if (sat && !sat.validation.valid) {
     // 🔴 Si son los mismos datos que ya estaban, el veredicto es de ellos: queda anotado, porque ya no están «Verificados».
-    const sameData = existing && isDeepStrictEqual(fiscalDataOf(existing), typed)
-    const profile = sameData ? (await recordVerdict(existing, sat)).profile : existing
-    return { saved: false, profile, validation: sat.validation, markedInvalid: Boolean(sameData) && existing?.validationStatus !== 'INVALID' }
+    if (!existing || !isDeepStrictEqual(fiscalDataOf(existing), typed)) {
+      return { saved: false, profile: existing, validation: sat.validation, markedInvalid: false }
+    }
+    const recorded = await recordVerdict(existing, sat)
+    // Sólo si de verdad cambió: la escritura pudo fallar, o no aplicar porque otra pestaña los corrigió mientras tanto.
+    const markedInvalid = existing.validationStatus !== 'INVALID' && recorded.profile.validationStatus === 'INVALID' && recorded.validation !== null
+    return { saved: false, profile: recorded.profile, validation: sat.validation, markedInvalid }
   }
 
   // Sin respuesta: lo ya verificado sigue verificado mientras sean los mismos datos. Un perfil nuevo nace PENDING por el default.

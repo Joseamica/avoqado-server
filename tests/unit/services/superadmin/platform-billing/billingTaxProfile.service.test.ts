@@ -309,6 +309,29 @@ describe('saveBillingTaxProfileIfSatAccepts: primero el SAT, después se guarda'
     expect(prismaMock.billingTaxProfile.upsert).not.toHaveBeenCalled()
   })
 
+  it('🔴 si otra pestaña corrigió el perfil mientras el SAT contestaba, no se dice que dejó de estar verificado: no cambió', async () => {
+    const CORREGIDO = { ...BUENO, rfc: 'COR010101AAA' }
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValueOnce(BUENO as never).mockResolvedValueOnce(CORREGIDO as never)
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 0 } as never)
+    mockResolve.mockReturnValue(pac(RECHAZO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, rfc: BUENO.rfc })
+
+    expect(res).toEqual({ saved: false, profile: CORREGIDO, validation: RECHAZO, markedInvalid: false })
+  })
+
+  it('🔴 si falla la escritura local, tampoco: el perfil sigue como estaba', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    prismaMock.billingTaxProfile.updateMany.mockRejectedValue(new Error('constraint violation'))
+    mockResolve.mockReturnValue(pac(RECHAZO))
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation()
+
+    const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, rfc: BUENO.rfc })
+
+    expect(res).toEqual({ saved: false, profile: BUENO, validation: RECHAZO, markedInvalid: false })
+    errorSpy.mockRestore()
+  })
+
   it('volver a intentar con datos ya marcados INVALID no es un cambio de estado: no hay nada nuevo que registrar', async () => {
     const YA_INVALIDO = { ...BUENO, validationStatus: 'INVALID' }
     prismaMock.billingTaxProfile.findUnique.mockResolvedValue(YA_INVALIDO as never)

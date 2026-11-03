@@ -190,7 +190,7 @@ export class FacturapiProvider implements FiscalProvider {
   /**
    * El SDK descarta status, código y campo, y sin ellos un RFC que no existe se confunde con una caída. Medido en modo de prueba el
    * 3-nov-2026: un dato malo contesta 400 con su `path` (`tax_id_not_found`, `tax_system_not_allowed_for_tax_id`, `invalid_request`).
-   * Su documentación dice que varios datos malos vienen en `errors[]`. Un 400 que no dice qué campo no es un veredicto.
+   * Su documentación dice que varios datos malos vienen en `errors[]`. Un 400 que no señala un dato del receptor no es un veredicto.
    */
   private async sendCustomer(method: 'POST' | 'PUT', ruta: string, payload: unknown): Promise<string> {
     const response = await fetch(`https://www.facturapi.io/v2${ruta}`, {
@@ -201,9 +201,9 @@ export class FacturapiProvider implements FiscalProvider {
     })
     const body = await response.json()
     if (response.status === 400) {
-      const tieneCampo = (d: { path?: unknown }) => typeof d?.path === 'string'
-      const detalles: { path: string; message?: string }[] = Array.isArray(body?.errors) ? body.errors.filter(tieneCampo) : []
-      const conCampo = detalles.length > 0 ? detalles : tieneCampo(body) ? [body] : []
+      const esDelReceptor = (d: { path?: unknown }) => typeof d?.path === 'string' && FacturapiProvider.mapValidationPath(d.path) !== 'otro'
+      const detalles: { path: string; message?: string }[] = Array.isArray(body?.errors) ? body.errors.filter(esDelReceptor) : []
+      const conCampo = detalles.length > 0 ? detalles : esDelReceptor(body) ? [body] : []
       if (conCampo.length > 0) {
         throw new CustomerDataRejectedError({
           valid: false,
