@@ -620,6 +620,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   WhatsappInboundEvent: 'Notifications, WhatsApp & Marketing',
   MarketingCampaign: 'Notifications, WhatsApp & Marketing',
   CampaignDelivery: 'Notifications, WhatsApp & Marketing',
+  EmailQuotaAlert: 'Notifications, WhatsApp & Marketing',
 
   // 19. AI Chatbot (Text-to-SQL)
   ChatConversation: 'AI Chatbot (Text-to-SQL)',
