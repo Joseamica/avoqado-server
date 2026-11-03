@@ -85,6 +85,34 @@ describe('procesarAvisoCrm', () => {
     expect(mockPrisma.crmEmailOptOut.createMany).not.toHaveBeenCalled()
   })
 
+  it('email.failed deja una delivery ENVIADO en FALLIDO con su motivo, libera el lease y no vuelve a suprimir ni da de baja', async () => {
+    mockPrisma.crmCampaignDelivery.findFirst.mockResolvedValue(nuestra({ status: 'ENVIADO' }))
+
+    await expect(procesarAvisoCrm(aviso('email.failed'))).resolves.toEqual({ manejado: true })
+
+    escritoCon({ status: 'FALLIDO', lastError: 'Resend no pudo mandarlo', leaseUntil: null, nextAttemptAt: null })
+    expect(mockPrisma.crmEmailOptOut.createMany).not.toHaveBeenCalled()
+    expect(mockPrisma.emailSuppression.upsert).not.toHaveBeenCalled()
+  })
+
+  it('email.suppressed deja una delivery ENVIADO en FALLIDO con su motivo, libera el lease y no agrega filas de supresión', async () => {
+    mockPrisma.crmCampaignDelivery.findFirst.mockResolvedValue(nuestra({ status: 'ENVIADO' }))
+
+    await expect(procesarAvisoCrm(aviso('email.suppressed'))).resolves.toEqual({ manejado: true })
+
+    escritoCon({ status: 'FALLIDO', lastError: 'Resend lo suprimió (lista de supresión)', leaseUntil: null, nextAttemptAt: null })
+    expect(mockPrisma.crmEmailOptOut.createMany).not.toHaveBeenCalled()
+    expect(mockPrisma.emailSuppression.upsert).not.toHaveBeenCalled()
+  })
+
+  it('email.failed con una delivery que el remitente todavía tiene (ENVIANDO) la cierra igual: su CAS ya no aplica', async () => {
+    mockPrisma.crmCampaignDelivery.findUnique.mockResolvedValue(nuestra({ status: 'ENVIANDO', resendId: null }))
+
+    await procesarAvisoCrm(aviso('email.failed', { tags: { crmDeliveryId: DELIVERY } }))
+
+    escritoCon({ status: 'FALLIDO', lastError: 'Resend no pudo mandarlo', leaseUntil: null, nextAttemptAt: null })
+  })
+
   it('🔴 un rebote con el tag crmDeliveryId y sin resendId guardado encuentra su delivery y guarda el resendId', async () => {
     mockPrisma.crmCampaignDelivery.findUnique.mockResolvedValue(nuestra({ status: 'DESCONOCIDO', resendId: null }))
 
@@ -149,6 +177,21 @@ describe('el controlador del webhook de Resend', () => {
     escritoCon({ status: 'FALLIDO' })
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ handled: true }))
+  })
+
+  it('email.failed y email.suppressed de una campaña del CRM llegan al carril, marcan FALLIDO y no suprimen (no son rebote ni queja)', async () => {
+    for (const tipo of ['email.failed', 'email.suppressed']) {
+      mockPrisma.crmCampaignDelivery.updateMany.mockClear()
+      mockPrisma.crmCampaignDelivery.findFirst.mockResolvedValue(nuestra())
+      const { req, res } = armar(aviso(tipo))
+
+      await handler(req, res, jest.fn())
+
+      escritoCon({ status: 'FALLIDO' })
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ handled: true }))
+    }
+    expect(mockPrisma.emailSuppression.upsert).not.toHaveBeenCalled()
   })
 
   it('una queja de una campaña del CRM suprime una vez y da de baja el correo', async () => {

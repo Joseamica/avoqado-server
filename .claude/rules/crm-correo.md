@@ -82,12 +82,18 @@ CRM_GMAIL_TOKEN_KEY=
 2. **Tarjetas de regalo**: un correo de tarjeta que rebotó, se suprimió o falló queda «No se entregó». No corta: después sigue igual.
 3. **Marketing de superadmin** (`marketingService.handleResendWebhook`).
 4. **Campañas de un negocio a sus clientes** (`procesarAvisoDeResend`).
-5. **Campañas del CRM** (`procesarAvisoCrm`): **no** vuelve a suprimir; sólo marca la delivery `FALLIDO` y, en una queja, anota la baja de
-   Avoqado (`CrmEmailOptOut`).
+5. **Campañas del CRM** (`procesarAvisoCrm`): **no** vuelve a suprimir; sólo marca la delivery `FALLIDO` (rebote duro, queja,
+   `email.failed` y `email.suppressed`, con su motivo) y, en una queja, anota la baja de Avoqado (`CrmEmailOptOut`).
 
 Los carriles 3 → 4 → 5 son una cascada: cada uno corre sólo si el anterior contestó «no es mío», por eso el del CRM va al final y sólo ve lo
 que los otros dos no reclamaron. `isBlocked` (`optOut.service.ts`) une `CrmEmailOptOut` y `EmailSuppression` y se revisa justo antes de cada
 envío.
+
+## Los avisos internos (`digest.service.ts`) no son marketing
+
+«Nuevo prospecto», «Volvió un prospecto» y el resumen diario van al equipo de ventas de Avoqado. Los frena un rebote duro o una queja
+(`isBlocked` dice `REBOTE` / `QUEJA`: protegen la reputación del remitente), **no** la baja de marketing (`BAJA`). Si la consulta falla, no
+salen y se reintentan (el aviso dice `false`; la fila del resumen queda `FALLO` con intentos por gastar).
 
 ## MCP (`src/mcp/tools/crm.ts`)
 

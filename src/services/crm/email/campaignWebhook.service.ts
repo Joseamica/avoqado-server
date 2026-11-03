@@ -3,8 +3,9 @@
  * plataforma. Corre en el controlador DESPUÉS de los carriles de marketing (`procesarAvisoDeResend`).
  *
  * 🔴 La supresión de la dirección no es de aquí: el paso de reputación del controlador ya la hizo antes de todos los carriles
- * (rebote Permanent → HARD_BOUNCE, queja → COMPLAINT). Aquí sólo se marca la delivery y, en la queja, se da de baja el correo
- * de Avoqado (quien marcó spam no quiere nada nuestro, tampoco el uno a uno).
+ * (rebote Permanent → HARD_BOUNCE, queja → COMPLAINT). Aquí sólo se marca la delivery (rebote duro, queja, `email.failed` y
+ * `email.suppressed` la dejan FALLIDO) y, en la queja, se da de baja el correo de Avoqado (quien marcó spam no quiere nada
+ * nuestro, tampoco el uno a uno).
  */
 import prisma from '../../../utils/prismaClient'
 import { optOut } from './optOut.service'
@@ -43,10 +44,19 @@ export async function procesarAvisoCrm(payload: AvisoCrm): Promise<{ manejado: b
 
   const queja = payload.type === 'email.complained'
   const reboteDuro = payload.type === 'email.bounced' && payload.data?.bounce?.type === 'Permanent'
-  if (queja || reboteDuro) {
-    const motivo = queja
-      ? 'El destinatario lo marcó como spam'
-      : `Rebote permanente${payload.data?.bounce?.subType ? ` (${payload.data.bounce.subType})` : ''}`
+  // Resend dice que NO salió (`email.failed`) o que no lo mandó porque la dirección está en su lista de supresión
+  // (`email.suppressed`): igual que un rebote duro, la delivery termina FALLIDO y no se cuenta como enviada. Aquí no se anota
+  // ninguna supresión nueva: la dirección ya está en la lista de Resend y de ahí en adelante decide el paso de reputación.
+  const motivo = queja
+    ? 'El destinatario lo marcó como spam'
+    : reboteDuro
+      ? `Rebote permanente${payload.data?.bounce?.subType ? ` (${payload.data.bounce.subType})` : ''}`
+      : payload.type === 'email.failed'
+        ? 'Resend no pudo mandarlo'
+        : payload.type === 'email.suppressed'
+          ? 'Resend lo suprimió (lista de supresión)'
+          : null
+  if (motivo) {
     // Si el remitente todavía la tiene, su CAS (estado y lease) ya no aplica: no la regresa a ENVIADO.
     await prisma.crmCampaignDelivery.updateMany({
       where: { id: delivery.id },
