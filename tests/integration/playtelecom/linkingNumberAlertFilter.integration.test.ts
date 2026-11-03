@@ -5,6 +5,8 @@
  * Además, el SQL de repetidos cuenta y ordena bien: total exacto con más de 5 llaves y un histórico sin fecha al final.
  * A11b: el ICCID se compara normalizado (…901f = …901F), 9 dígitos de importación y de venta externa, el portado faltante
  * con y sin su foto, y la venta que pasa de portabilidad a línea nueva (su portado se borra).
+ * B0: el filtro sólo recorre las ventas del rango (una fuera del rango no sale, pero sí cuenta como repetida) y recorta el
+ * ICCID como `trim()` de JS (un tabulador al final ya no lo separa de su histórico).
  *   TEST_DATABASE_URL='postgresql://…/avoqado_<tarea>_test_<fecha>' \
  *     npx jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/playtelecom/linkingNumberAlertFilter.integration.test.ts
  */
@@ -129,6 +131,11 @@ beforeAll(async () => {
     iccid: 'ICC-Q1',
   })
   await venta('q2', { org: PORT_ORG, linking: '557777777', linkingSource: 'BACKOFFICE', photos: ['f1'], iccid: 'ICC-Q2' })
+  // B0: «fuera» se cobró en septiembre: no sale en el filtro de octubre, pero hace repetida a «dentro».
+  await venta('fuera', { linking: '5588888880', photos: ['f1'], paidAt: new Date('2026-09-20T18:00:00.000Z') })
+  await venta('dentro', { linking: '5588888880', photos: ['f1'] })
+  // B0 (A11b): el ICCID trae un tabulador al final y «f» minúscula; `trim()` lo quita, `btrim` no. Es su propio histórico.
+  await venta('t1', { linking: '5577777770', photos: ['f1'], iccid: '8952140012345678902f\t' })
 
   await prisma.historicalLinkingNumber.createMany({
     data: [
@@ -137,6 +144,7 @@ beforeAll(async () => {
       ...['H1', 'H2', 'H3', 'H4', 'H5'].map(iccid => ({ organizationId: ORG, iccid, number: '5533333333', importBatch: tag })),
       { organizationId: ORG, iccid: 'ICC-X', number: '5544444444', importBatch: tag },
       { organizationId: ORG, iccid: '8952140012345678901F', number: '5555555555', importBatch: tag },
+      { organizationId: ORG, iccid: '8952140012345678902F', number: '5577777770', importBatch: tag },
     ],
   })
 })
@@ -204,10 +212,10 @@ const nombres = (lista: string[]) => lista.map(id => Object.keys(ids).find(n => 
 
 describe('filtro de alertas del número = alertas de la fila', () => {
   it.each<[NumberAlertFilter, string[]]>([
-    ['duplicate', ['a', 'b', 's1', 's2', 's7', 's9']],
+    ['duplicate', ['a', 'b', 'dentro', 's1', 's2', 's7', 's9']],
     ['not10', ['s3', 's3c', 's3d']],
     ['missing', ['p2', 'p3', 's4', 's5']],
-    ['any', ['a', 'b', 'p2', 'p3', 's1', 's2', 's3', 's3c', 's3d', 's4', 's5', 's7', 's9']],
+    ['any', ['a', 'b', 'dentro', 'p2', 'p3', 's1', 's2', 's3', 's3c', 's3d', 's4', 's5', 's7', 's9']],
   ])('%s: el SQL y la fila dan las mismas ventas', async (kind, esperadas) => {
     const filas = await alertasDeLaFila()
 
@@ -216,6 +224,31 @@ describe('filtro de alertas del número = alertas de la fila', () => {
 
     expect(nombres(delSql)).toEqual(esperadas)
     expect(nombres(deLaFila)).toEqual(esperadas)
+  })
+})
+
+describe('B0: el filtro sólo recorre las ventas del rango', () => {
+  it('una venta fuera del rango no sale, pero sí hace repetida a la del rango con quien comparte número', async () => {
+    for (const kind of ['duplicate', 'any'] as const) {
+      const delSql = await findVerificationIdsWithNumberAlert(ORG, kind, range)
+      expect(delSql).toContain(ids.dentro)
+      expect(delSql).not.toContain(ids.fuera)
+    }
+    // La fila dice lo mismo: el repetido de «dentro» es la venta de septiembre.
+    const res = await findDuplicatesForSales(ORG, [
+      { key: 'dentro', verificationId: ids.dentro, iccid: 'dentro-iccid', linkingNumber: '5588888880', portedNumber: null },
+    ])
+    expect(res.get('dentro')?.linking).toEqual({
+      total: 1,
+      matches: [expect.objectContaining({ kind: 'SALE', verificationId: ids.fuera })],
+    })
+  })
+
+  it('un ICCID con tabulador al final y «f» minúscula es el de su histórico, en el filtro y en la fila', async () => {
+    expect((await alertasDeLaFila()).find(f => f.id === ids.t1)?.codes).toEqual([])
+    for (const kind of ['duplicate', 'any'] as const) {
+      expect(await findVerificationIdsWithNumberAlert(ORG, kind, range)).not.toContain(ids.t1)
+    }
   })
 })
 

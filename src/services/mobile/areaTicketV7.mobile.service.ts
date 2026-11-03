@@ -431,6 +431,8 @@ export async function resolveTerminal(venueId: string, deviceUid: string | null 
       canCheckoutAreaTickets: true,
       canDeliverAreaTickets: true,
       defaultWorkspace: true,
+      selfRegistered: true,
+      areaRoleChosenAt: true,
       scaleProfile: {
         select: {
           id: true,
@@ -466,7 +468,7 @@ async function getSettingsRecord(venueId: string, client: DbClient = prisma) {
   return client.venueAreaTicketSettings.findUnique({ where: { venueId } })
 }
 
-async function assertAreaTicketsEnabled(venueId: string, client: DbClient = prisma) {
+export async function assertAreaTicketsEnabled(venueId: string, client: DbClient = prisma) {
   const [entitled, settings] = await Promise.all([venueHasFeatureAccess(venueId, 'AREA_TICKETS'), getSettingsRecord(venueId, client)])
   if (!entitled || !settings?.enabled) {
     throw new ForbiddenError('Los vales por área no están habilitados para este local.', 'AREA_TICKETS_DISABLED')
@@ -503,6 +505,23 @@ export async function getScaleSettings(venueId: string, deviceUid: string) {
   return mapScaleIntegration(entitled, settings?.enabled === true, terminal.scaleProfile)
 }
 
+/** Tope de áreas que viajan a la app para elegir el papel del aparato; el total va aparte y la app avisa si hay más (D3). */
+const AREA_ROLE_OPTIONS_MAX = 200
+
+async function activeAreasForRoleChoice(venueId: string) {
+  const where = { venueId, active: true }
+  const [areas, areasTotal] = await Promise.all([
+    prisma.fulfillmentArea.findMany({
+      where,
+      select: { id: true, name: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      take: AREA_ROLE_OPTIONS_MAX,
+    }),
+    prisma.fulfillmentArea.count({ where }),
+  ])
+  return { areas, areasTotal }
+}
+
 export async function getAreaTicketSettings(venueId: string, deviceUid: string) {
   const [areaTicketsEntitled, scaleEntitled, variableBarcodeEntitled, settings, scaleSettings, terminal] = await Promise.all([
     venueHasFeatureAccess(venueId, 'AREA_TICKETS'),
@@ -514,8 +533,12 @@ export async function getAreaTicketSettings(venueId: string, deviceUid: string) 
   ])
 
   const areaTicketsEnabled = areaTicketsEntitled && settings?.enabled === true
+  // D3: la app pregunta «¿Qué hará este aparato?» sólo a un aparato que se dio de alta solo y nunca eligió su papel.
+  const { areas, areasTotal } = areaTicketsEnabled ? await activeAreasForRoleChoice(venueId) : { areas: [], areasTotal: 0 }
   return {
     venueId,
+    areas,
+    areasTotal,
     areaTickets: {
       entitled: areaTicketsEntitled,
       enabled: areaTicketsEnabled,
@@ -536,6 +559,7 @@ export async function getAreaTicketSettings(venueId: string, deviceUid: string) 
       canCheckoutAreaTickets: areaTicketsEnabled && terminal.canCheckoutAreaTickets,
       canDeliverAreaTickets: areaTicketsEnabled && terminal.canDeliverAreaTickets,
       defaultWorkspace: terminal.defaultWorkspace,
+      roleChoicePending: areaTicketsEnabled && terminal.selfRegistered && terminal.areaRoleChosenAt == null && areasTotal > 0,
     },
     scaleIntegration: mapScaleIntegration(scaleEntitled, scaleSettings?.enabled === true, terminal.scaleProfile),
     variableWeightBarcode: {
@@ -1150,9 +1174,31 @@ async function loadCheckout(venueId: string, sessionId: string) {
   return session
 }
 
-async function assertCheckoutTerminal(venueId: string, session: { terminalId: string }, deviceUid: string) {
+/**
+ * 🔴 D3 (2-nov-2026, Codex r1 #3 y r2): quitarle la caja a un aparato le impide EMPEZAR cobros, no CERRAR los suyos. `close` =
+ * consultar el cobro o un intento, soltar vales y cancelar: la propia terminal de la sesión lo hace aunque ya no sea caja, para que
+ * un cobro a medias o un intento UNKNOWN no se quede sin quien lo aclare. `continue` (agregar vales, latido, armar la venta, preparar
+ * un pago) sigue pidiendo caja. Otra terminal nunca toca una sesión ajena.
+ */
+export type CheckoutTerminalUse = 'continue' | 'close'
+
+export function checkoutTerminalMismatch(
+  terminal: { id: string; canCheckoutAreaTickets: boolean },
+  session: { terminalId: string },
+  use: CheckoutTerminalUse,
+): boolean {
+  if (terminal.id !== session.terminalId) return true
+  return use === 'continue' && !terminal.canCheckoutAreaTickets
+}
+
+async function assertCheckoutTerminal(
+  venueId: string,
+  session: { terminalId: string },
+  deviceUid: string,
+  use: CheckoutTerminalUse = 'continue',
+) {
   const terminal = await resolveTerminal(venueId, deviceUid)
-  if (terminal.id !== session.terminalId || !terminal.canCheckoutAreaTickets) {
+  if (checkoutTerminalMismatch(terminal, session, use)) {
     throw new ForbiddenError('Esta sesión pertenece a otra caja o la terminal no puede cobrar vales.', 'CHECKOUT_TERMINAL_MISMATCH')
   }
   return terminal
@@ -1351,7 +1397,7 @@ export async function addTicketToCheckout(venueId: string, sessionId: string, ti
 export async function removeTicketFromCheckout(venueId: string, sessionId: string, ticketId: string, input: CheckoutMutationInput) {
   requireIdempotencyKey(input.idempotencyKey)
   const session = await loadCheckout(venueId, sessionId)
-  await assertCheckoutTerminal(venueId, session, input.deviceUid)
+  await assertCheckoutTerminal(venueId, session, input.deviceUid, 'close')
 
   await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
@@ -1435,7 +1481,7 @@ export async function heartbeatAreaTicketCheckout(venueId: string, sessionId: st
 
 export async function getAreaTicketCheckout(venueId: string, sessionId: string, deviceUid: string) {
   const session = await loadCheckout(venueId, sessionId)
-  await assertCheckoutTerminal(venueId, session, deviceUid)
+  await assertCheckoutTerminal(venueId, session, deviceUid, 'close')
   return mapCheckout(session)
 }
 
@@ -1825,7 +1871,7 @@ export async function prepareAreaTicketPayment(venueId: string, sessionId: strin
 
 export async function getAreaTicketPaymentAttempt(venueId: string, sessionId: string, attemptId: string, deviceUid: string) {
   const session = await loadCheckout(venueId, sessionId)
-  await assertCheckoutTerminal(venueId, session, deviceUid)
+  await assertCheckoutTerminal(venueId, session, deviceUid, 'close')
   const attempt = session.paymentAttempts.find(candidate => candidate.id === attemptId)
   if (!attempt) throw new NotFoundError('El intento de pago no existe.')
   return { ...attempt, amount: money(attempt.amount), checkoutStatus: session.status }
@@ -1834,7 +1880,7 @@ export async function getAreaTicketPaymentAttempt(venueId: string, sessionId: st
 export async function cancelAreaTicketCheckout(venueId: string, sessionId: string, input: CheckoutMutationInput) {
   const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
   const session = await loadCheckout(venueId, sessionId)
-  await assertCheckoutTerminal(venueId, session, input.deviceUid)
+  await assertCheckoutTerminal(venueId, session, input.deviceUid, 'close')
   if (session.status === AreaTicketCheckoutStatus.CANCELLED && session.cancelIdempotencyKey === idempotencyKey) {
     return mapCheckout(session)
   }

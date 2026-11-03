@@ -5795,6 +5795,9 @@ model Terminal {
   canCheckoutAreaTickets Boolean           @default(false)
   canDeliverAreaTickets  Boolean           @default(false)
   defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
+  /// D3 (2-nov-2026): cuándo se eligió el papel de este aparato en los vales (en el panel o en el propio aparato).
+  /// null = nunca se eligió; sólo un aparato `selfRegistered` con null pregunta «¿Qué hará este aparato?» al entrar.
+  areaRoleChosenAt       DateTime?
 
   /// Capacidades observadas del display del cliente. Son null hasta que el
   /// dispositivo anuncie soporte; capabilitiesObservedAt permite invalidar

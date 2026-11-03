@@ -332,8 +332,6 @@ function assertTicketAcceptsItems(
 export interface AssignPartitionInput {
   deviceUid: string
   staffId?: string | null
-  /** Área a la que pertenece este dispositivo, si el instalador ya la enlazó. */
-  fulfillmentAreaId?: string | null
 }
 
 export interface AssignPartitionResponse {
@@ -409,9 +407,8 @@ export async function assignDevicePartition(venueId: string, input: AssignPartit
       where: { id: terminal.id },
       data: {
         partition: next,
-        // El binding terminal→área sólo se escribe si viene explícito Y la terminal
-        // aún no tiene una: la configuración la siembra el instalador, no la app.
-        ...(input.fulfillmentAreaId && !terminal.fulfillmentAreaId ? { fulfillmentAreaId: input.fulfillmentAreaId } : {}),
+        // D6 (2-nov-2026): el área NO se acepta del cuerpo (el diseño: «el servidor deriva el área desde la terminal»). Esta ruta
+        // sólo pide sesión; el área se elige con area-tickets:configure en el panel o en «¿Qué hará este aparato?».
       },
       select: { id: true, partition: true, areaTicketLastCounter: true, fulfillmentAreaId: true },
     })

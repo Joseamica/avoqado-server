@@ -5,6 +5,8 @@ const mockPrisma: any = {
   },
   fulfillmentArea: { findFirst: jest.fn() },
   scaleProfile: { findFirst: jest.fn() },
+  $queryRaw: jest.fn(),
+  $transaction: jest.fn(),
 }
 
 jest.mock('../../../../src/utils/prismaClient', () => ({ __esModule: true, default: mockPrisma }))
@@ -28,6 +30,8 @@ const CURRENT = {
 describe('area ticket terminal default workspace', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrisma.$queryRaw.mockResolvedValue([])
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(mockPrisma))
     mockPrisma.terminal.findFirst.mockResolvedValue(CURRENT)
     mockPrisma.terminal.update.mockResolvedValue({ id: CURRENT.id })
   })

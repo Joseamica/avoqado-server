@@ -5,6 +5,7 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as service from '../../services/mobile/areaTicketV7.mobile.service'
+import { setTerminalAreaRole } from '../../services/mobile/areaTicketRole.mobile.service'
 
 function requiredEnum<T extends string>(value: unknown, allowed: readonly T[], field: string, code: string): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
@@ -68,6 +69,24 @@ function fail(error: unknown, req: Request, res: Response, next: NextFunction) {
 export async function getSettings(req: Request, res: Response, next: NextFunction) {
   try {
     return success(res, await service.getAreaTicketSettings(req.params.venueId, deviceUid(req)))
+  } catch (error) {
+    return fail(error, req, res, next)
+  }
+}
+
+/** D3: el aparato guarda su propio papel en los vales («¿Qué hará este aparato?»). */
+export async function setAreaRole(req: Request, res: Response, next: NextFunction) {
+  try {
+    return success(
+      res,
+      await setTerminalAreaRole({
+        venueId: req.params.venueId,
+        terminalId: req.params.terminalId,
+        deviceUid: deviceUid(req),
+        staffId: staffId(req),
+        choice: req.body,
+      }),
+    )
   } catch (error) {
     return fail(error, req, res, next)
   }
