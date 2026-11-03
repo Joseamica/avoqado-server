@@ -17,6 +17,7 @@ import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
+import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import { esRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import { assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
@@ -1053,6 +1054,24 @@ export async function settleCustomerBalance(
       await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
     }
   }, ORDER_LOCK_WAIT_BUDGET)
+
+  // D10-B: liquidar en efectivo una cuenta con una tarjeta en duda deja su rastro. Sin esperarlo, y de una en una: «Liquidar todo»
+  // puede traer muchas cuentas y esto no debe gastar una conexión por cada una al mismo tiempo.
+  void (async () => {
+    for (const s of settled) {
+      if (!s.paymentId) continue
+      await avisarEfectivoConTarjetaEnDuda({
+        id: s.paymentId,
+        venueId,
+        orderId: s.orderId,
+        amount: s.amount,
+        tipAmount: 0,
+        method: 'CASH',
+        fundsFlow: 'CASH_DRAWER',
+        processedById: actorStaffId,
+      })
+    }
+  })()
 
   // Fase 2 de la unificación de caja: cada liquidación en efectivo sube el cajón. Después del
   // commit y fail-open, igual que el vale de inventario de abajo.

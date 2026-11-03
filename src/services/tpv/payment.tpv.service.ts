@@ -21,6 +21,7 @@ import {
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
 import { avisarDineroDeRappi } from '../shared/avisoDeRappiEfectivo'
+import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 
 /**
@@ -4545,6 +4546,8 @@ export async function recordOrderPayment(
       staffId: payment.processedById ?? null,
       source: 'TPV',
     })
+    // D10-B: el efectivo de la terminal sobre una venta con otra tarjeta en duda. Con tarjeta sale sin consultar nada.
+    void avisarEfectivoConTarjetaEnDuda(payment)
   }
 
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).

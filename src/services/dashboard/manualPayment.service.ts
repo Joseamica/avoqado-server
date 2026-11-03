@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { avisarEfectivoConTarjetaEnDuda } from '@/services/shared/avisoDeEfectivoConTarjetaEnDuda'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 
@@ -644,6 +645,9 @@ export async function createManualPayment(
       ...(sesionState.cerrada ? { sesionDeValesCerrada: true } : {}),
     },
   })
+
+  // D10-B: una orden existente puede traer una tarjeta en duda (una orden sombra acaba de nacer: no). Sin esperarlo.
+  if (input.orderId) void avisarEfectivoConTarjetaEnDuda(result)
 
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).
   //

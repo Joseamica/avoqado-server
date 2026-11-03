@@ -93,5 +93,10 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   `COMPLETED`. Si contradice una cancelación o un fallo previos, se alerta (🚨 `money moved despite
   cancel`) para investigar y devolver **únicamente si corresponde**; la demora del registro no demuestra
   por sí sola un doble cobro.
+- 🔴 **El EFECTIVO sobre una venta con la tarjeta en duda se deja cobrar y sólo se avisa** (founder, 2-nov, D10 → «B»; medido en
+  prod, 90 días: 0 casos en 8,098 cobros). «No se inicia otro cobro» de arriba es de la TERMINAL: no le pongas una guarda al efectivo.
+  Después del commit queda `CASH_WITH_CARD_IN_DOUBT` (`avisarEfectivoConTarjetaEnDuda`, sin esperarlo: nunca tumba ni demora el cobro).
+  Si la tarjeta resulta aprobada (REST o webhook), su `Payment` se registra y grita 🚨 [Sobrepago] con `SOBREPAGO_DETECTADO`
+  (`tests/integration/payments/efectivoConTarjetaEnDuda.integration.test.ts`).
 
 Evidencia y clases de evidencia (A/B/C): `docs/investigations/testarudo-relevo-2026-09-10/README.md` §2-ter.

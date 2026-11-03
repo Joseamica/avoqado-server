@@ -23,6 +23,7 @@ import { logAction } from './activity-log.service'
 import { palabrasDeBusqueda } from './listSummary.shared'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
+import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -1112,6 +1113,17 @@ export async function settleOrder(
   // Antes el reporte de ventas subía y el arqueo no ⇒ FALTANTE falso al cerrar. Va DESPUÉS
   // del commit y falla abierto: el dinero ya está liquidado, el cajón sólo lo refleja.
   if (settledAmount !== null && settlementPaymentId) {
+    // D10-B: liquidar en efectivo una cuenta con una tarjeta en duda deja su rastro. Sin esperarlo.
+    void avisarEfectivoConTarjetaEnDuda({
+      id: settlementPaymentId,
+      venueId,
+      orderId,
+      amount: settledAmount,
+      tipAmount: 0,
+      method: 'CASH',
+      fundsFlow: 'CASH_DRAWER',
+      processedById: actorStaffId,
+    })
     try {
       await postCashSaleToDrawer({
         venueId,

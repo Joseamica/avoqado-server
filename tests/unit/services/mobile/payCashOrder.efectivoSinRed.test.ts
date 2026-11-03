@@ -1210,7 +1210,9 @@ describe('Task4: el primer cierre en cero espera el desenlace acreditado de la t
     expect(result).toMatchObject({ paymentId: 'payment-2', status: 'COMPLETED', amount: 10000, remainingBalanceCents: 0 })
     expect(pagos.map(p => p.amount)).toEqual([100, 100])
     expect([row.paymentStatus, Number(row.paidAmount)]).toEqual(['PAID', 200])
-    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    // D10-B: la terminal no decide nada sobre dinero positivo. Sólo se le pregunta DESPUÉS del dinero, para dejar el rastro.
+    const crearElPago = prismaMock.payment.create.mock.invocationCallOrder[0]
+    for (const consulta of prismaMock.terminalPaymentRequest.findFirst.mock.invocationCallOrder) expect(consulta).toBeGreaterThan(crearElPago)
     expect(postCashSaleToDrawer).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'payment-2', amount: 100 }))
     sinEfectosDeSaldar(cas)
   })
