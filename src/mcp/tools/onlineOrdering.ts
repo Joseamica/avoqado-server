@@ -299,7 +299,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       const { lastInboxPollAt: _latido, ...current } = settings
       const actual = current as Record<string, unknown>
       const diff = Object.entries(changes ?? {})
-        .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor))
+        // Un «no quiero tarjeta» explícito se guarda aunque ya estuviera apagada: su bitácora es la que evita que la tarjeta prendida
+        // de fábrica (S1b) se la prenda después.
+        .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor) || (campo === 'acceptsCardOnline' && valor === false))
         .map(([campo, a]) => ({
           campo,
           de: actual[campo],
