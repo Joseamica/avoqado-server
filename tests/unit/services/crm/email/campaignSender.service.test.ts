@@ -16,7 +16,9 @@ jest.mock('@/services/email.service', () => ({ __esModule: true, default: { send
 const send = emailService.sendEmailWithResult as jest.Mock
 
 const DELIVERY = 'cdeliverycrm0000000000001'
+const ACCOUNT = 'caccountcrm00000000000001'
 const AHORA = new Date('2026-11-02T18:00:00.000Z')
+const ENCOLADA = new Date(AHORA.getTime() - 3_600_000)
 const LEASE = new Date(AHORA.getTime() + 4 * 60_000)
 
 const fila = (over: Record<string, unknown> = {}, campana: Record<string, unknown> = {}) => ({
@@ -30,8 +32,10 @@ const fila = (over: Record<string, unknown> = {}, campana: Record<string, unknow
   leaseUntil: LEASE,
   sendAttemptAt: AHORA,
   resendId: null,
+  accountId: null,
   campaign: {
     status: 'ENVIANDO',
+    enqueuedAt: ENCOLADA,
     subject: 'Hola {{nombre}}',
     blocks: [{ type: 'paragraph', text: 'Te escribe {{vendedor}} <script>x</script>' }],
     ...campana,
@@ -50,6 +54,8 @@ beforeEach(() => {
     prismaMock.crmCampaignDelivery.updateMany,
     prismaMock.crmEmailOptOut.findUnique,
     prismaMock.emailSuppression.findUnique,
+    prismaMock.crmErased.findFirst,
+    prismaMock.crmAccount.findUnique,
     send,
   ])
     fn.mockReset()
@@ -57,6 +63,8 @@ beforeEach(() => {
   prismaMock.crmCampaignDelivery.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.crmEmailOptOut.findUnique.mockResolvedValue(null)
   prismaMock.emailSuppression.findUnique.mockResolvedValue(null)
+  prismaMock.crmErased.findFirst.mockResolvedValue(null)
+  prismaMock.crmAccount.findUnique.mockResolvedValue({ id: ACCOUNT })
   send.mockResolvedValue({ ok: true, resendId: 're_123', transient: false })
   process.env.CRM_CORREO_PRUEBAS = 'ana@cafeteria.mx'
 })
@@ -110,6 +118,47 @@ describe('enviarDelivery — lo que se revisa al borde', () => {
 
   it('si la revisión de bajas falla, no se manda a ciegas: queda REINTENTO', async () => {
     prismaMock.crmEmailOptOut.findUnique.mockRejectedValue(new Error('se cayó la base'))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  // I1 (revisión final): «Eliminar» (D7) corre mientras la campaña se manda. La eliminación deja OMITIDO lo que encuentra en la
+  // cola; esto es lo que ella no alcanza a ver (un encolado que leyó el público antes de que terminara).
+  it('🔴 una persona eliminada del CRM después de encolar queda OMITIDO «persona eliminada» y no se llama a Resend', async () => {
+    prismaMock.crmErased.findFirst.mockResolvedValue({ erasedAt: AHORA })
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('OMITIDO')
+
+    expect(send).not.toHaveBeenCalled()
+    expect(escrito().data).toMatchObject({ status: 'OMITIDO', skipReason: 'persona eliminada' })
+    // La lápida guarda el hash, nunca el correo; y sólo cuenta lo eliminado desde que se encoló (con margen).
+    const { where } = prismaMock.crmErased.findFirst.mock.calls[0][0]
+    expect(JSON.stringify(where)).not.toContain('ana@cafeteria.mx')
+    expect(where.erasedAt.gte.getTime()).toBeLessThan(ENCOLADA.getTime())
+  })
+
+  it('🔴 su cuenta del CRM ya no existe (se eliminó): OMITIDO «persona eliminada», aunque su correo no esté en la lápida', async () => {
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ accountId: ACCOUNT }))
+    prismaMock.crmAccount.findUnique.mockResolvedValue(null)
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('OMITIDO')
+
+    expect(send).not.toHaveBeenCalled()
+    expect(escrito().data).toMatchObject({ status: 'OMITIDO', skipReason: 'persona eliminada' })
+  })
+
+  it('con su cuenta viva y sin lápida, sale', async () => {
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ accountId: ACCOUNT }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('ENVIADO')
+
+    expect(prismaMock.crmAccount.findUnique).toHaveBeenCalledWith({ where: { id: ACCOUNT }, select: { id: true } })
+  })
+
+  it('si la lápida no se puede revisar, no se manda a ciegas: queda REINTENTO', async () => {
+    prismaMock.crmErased.findFirst.mockRejectedValue(new Error('se cayó la base'))
 
     await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
 

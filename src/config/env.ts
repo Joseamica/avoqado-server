@@ -126,7 +126,8 @@ const envSchema = z.object({
   CRM_CAMPAIGN_FROM: z.string().default('Avoqado <novedades@novedades.avoqado.io>'),
   CRM_CAMPAIGN_REPLY_TO: z.string().default('hola@avoqado.io'),
   // Primeros intentos por día (hora de Ciudad de México): calentamiento del subdominio. Se sube a mano.
-  CRM_CAMPAIGN_DAILY_CAP: z.coerce.number().int().min(0).default(300),
+  // 🔴 `.catch(300)` (Ruling 3): uno mal escrito («1,000», «mil») vale el default seguro en vez de hacer `process.exit` de TODA la API.
+  CRM_CAMPAIGN_DAILY_CAP: z.coerce.number().int().min(0).default(300).catch(300),
   // 🔴 Fuera de producción sólo sale correo a estas direcciones (lista separada por comas, en minúsculas). Vacía = no sale
   // nada: la base local trae correos de gente real. Se lee EN CADA ENVÍO desde `process.env`
   // (`services/crm/email/testAllowlist.ts`), no de este objeto congelado: aquí queda declarada y documentada.

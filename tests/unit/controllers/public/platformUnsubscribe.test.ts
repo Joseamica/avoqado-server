@@ -66,6 +66,8 @@ describe('GET /avoqado/unsubscribe', () => {
     const res = await run(getPlatformUnsubscribePage, query)
     expect(res.statusCode).toBe(400)
     expect(res.body).toContain('Esta liga no es válida')
+    // T3a: quien no puede darse de baja con la liga tiene a quién escribirle.
+    expect(res.body).toContain('escríbenos a hola@avoqado.io')
     expect(mockOptOut).not.toHaveBeenCalled()
   })
 })
@@ -106,6 +108,7 @@ describe('POST /avoqado/unsubscribe', () => {
     const res = await run(postPlatformUnsubscribe, query)
     expect(res.statusCode).toBe(400)
     expect(res.body).toContain('Esta liga no es válida')
+    expect(res.body).toContain('escríbenos a hola@avoqado.io')
     expect(mockOptOut).not.toHaveBeenCalled()
   })
 

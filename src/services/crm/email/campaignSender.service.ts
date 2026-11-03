@@ -8,8 +8,8 @@
  *  2. Un correo que Resend aceptó no se manda otra vez a ciegas. Si aceptó y no se pudo guardar, queda DESCONOCIDO. Un
  *     reintento (lease vencido, o un transitorio que pudo ser una respuesta perdida) va con la MISMA llave de idempotencia,
  *     que Resend recuerda 24 h; por eso nada se reintenta pasadas 23 h del primer intento: queda DESCONOCIDO.
- *  3. Lo que puede cambiar entre encolar y mandar se revisa AL BORDE: la campaña cancelada, la baja/rebote/queja y la lista
- *     de prueba fuera de producción.
+ *  3. Lo que puede cambiar entre encolar y mandar se revisa AL BORDE: la campaña cancelada, la baja/rebote/queja, la persona
+ *     eliminada del CRM (D7) y la lista de prueba fuera de producción.
  *
  * El tope diario (calentamiento del subdominio) cuenta `sendAttemptAt`, que se escribe al reclamar ANTES de tocar la red y
  * nadie mueve: el lugar queda apartado aunque la respuesta se pierda, un rebote no lo devuelve y un reintento no lo cuenta dos
@@ -24,6 +24,7 @@ import prisma from '../../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 import { utcTs } from '../../../utils/sqlDates'
 import emailService from '../../email.service'
+import { erasedAtTx, MOTIVO_PERSONA_ELIMINADA } from '../erase.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { cabecerasDeBaja, pieDeCampana, type MotivoDeEnvio } from './footer'
 import { isBlocked } from './optOut.service'
@@ -48,6 +49,11 @@ const LOTE_DE_VIEJAS = 500
 const PAUSA_ENTRE_ENVIOS_MS = 500
 /** «Hoy» del tope diario: el día de Ciudad de México. */
 const ZONA = 'America/Mexico_City'
+/**
+ * La lápida cuenta desde un minuto antes de encolar: una eliminación toma su hora antes de terminar (su transacción no pasa
+ * de los 5 s de Prisma), y un encolado que empezó en ese hueco pudo leer el público de antes.
+ */
+const MARGEN_DE_LA_LAPIDA_MS = 60_000
 const NO_SABEMOS_SI_SALIO = 'No sabemos si salió: pasaron más de 23 horas desde el primer intento'
 const ACEPTADO_SIN_GUARDAR = 'Resend lo aceptó, pero no se pudo guardar el resultado: no se vuelve a mandar'
 
@@ -140,7 +146,8 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
       status: true,
       attempts: true,
       leaseUntil: true,
-      campaign: { select: { status: true, subject: true, blocks: true } },
+      accountId: true,
+      campaign: { select: { status: true, enqueuedAt: true, subject: true, blocks: true } },
     },
   })
   // Si la fila ya no es nuestra (otro la reclamó al vencer el lease, o alguien la movió), no se toca ni se manda.
@@ -181,9 +188,9 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
   if (d.campaign.status !== 'ENVIANDO') {
     return omitir(d.campaign.status === 'CANCELADA' ? 'campaña cancelada' : `campaña ${d.campaign.status.toLowerCase()}`)
   }
-  let bloqueo: Awaited<ReturnType<typeof isBlocked>>
+  let bloqueo: string | false
   try {
-    bloqueo = await isBlocked(d.email)
+    bloqueo = (await isBlocked(d.email)) || ((await fueEliminada(d)) && MOTIVO_PERSONA_ELIMINADA)
   } catch (error) {
     // Nunca se toma un error de la base por «no está bloqueado»: no se manda y se reintenta después.
     logger.error('[CRM] Could not check the opt-outs before a campaign send', {
@@ -233,6 +240,18 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
   }
   if (resultado.transient) return reintentar(resultado.errorCode ?? 'Error transitorio de envío')
   return fallar(resultado.errorCode ?? 'Error de envío')
+}
+
+/**
+ * ¿La persona se eliminó del CRM (D7) después de que se leyó su público? Su cuenta ya no existe (sólo «Eliminar» borra una
+ * cuenta), o su correo está en la lápida desde que se encoló, con la misma llave que usa la eliminación. «Eliminar» ya deja
+ * OMITIDO lo que encuentra en la cola; esto cierra el hueco de un encolado que leyó el consentimiento antes de que la
+ * eliminación terminara y metió sus filas después. Si la base falla, lanza (quien llama reintenta, nunca manda a ciegas).
+ */
+async function fueEliminada(d: { email: string; accountId: string | null; campaign: { enqueuedAt: Date | null } }): Promise<boolean> {
+  if (d.accountId && !(await prisma.crmAccount.findUnique({ where: { id: d.accountId }, select: { id: true } }))) return true
+  const desde = d.campaign.enqueuedAt ? new Date(d.campaign.enqueuedAt.getTime() - MARGEN_DE_LA_LAPIDA_MS) : undefined
+  return (await erasedAtTx(prisma, { keys: [], emails: [d.email], phones: [], organizationId: null }, desde)) !== null
 }
 
 /** La campaña ENVIANDO que ya no tiene nada por mandar (ni PENDIENTE, ni REINTENTO, ni ENVIANDO) queda ENVIADA. */

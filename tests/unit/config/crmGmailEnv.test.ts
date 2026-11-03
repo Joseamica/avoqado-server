@@ -49,3 +49,25 @@ describe('CRM_GMAIL_* mal escritas no tumban el arranque', () => {
     exit.mockRestore()
   })
 })
+
+// Minor 1 de la revisión final: el tope diario de las campañas también va por Ruling 3. «1,000» (con coma) o «mil» hacían
+// `process.exit(1)` de toda la API; ahora valen el default de 300, el calentamiento seguro del subdominio.
+describe('CRM_CAMPAIGN_DAILY_CAP mal escrito no tumba el arranque', () => {
+  it.each([
+    ['con coma de miles', '1,000'],
+    ['con letras', 'mil'],
+    ['negativo', '-5'],
+    ['con decimales', '12.5'],
+  ])('%s («%s») arranca con el default de 300', async (_caso, valor) => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never)
+    const { env } = await loadEnv({ CRM_CAMPAIGN_DAILY_CAP: valor })
+    expect(exit).not.toHaveBeenCalled()
+    expect(env?.CRM_CAMPAIGN_DAILY_CAP).toBe(300)
+    exit.mockRestore()
+  })
+
+  it('un número bien escrito se respeta, y sin variable queda en 300', async () => {
+    expect((await loadEnv({ CRM_CAMPAIGN_DAILY_CAP: '1000' })).env?.CRM_CAMPAIGN_DAILY_CAP).toBe(1000)
+    expect((await loadEnv({ CRM_CAMPAIGN_DAILY_CAP: undefined })).env?.CRM_CAMPAIGN_DAILY_CAP).toBe(300)
+  })
+})

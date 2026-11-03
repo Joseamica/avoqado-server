@@ -20,7 +20,8 @@ import { escapeHtml, page } from './publicHtml'
 const INVALID_PAGE = page(
   'Liga no válida',
   `<h1>Esta liga no es válida</h1>
-   <p>No pudimos procesar tu solicitud: la liga está incompleta o se cortó. Abre otra vez el enlace desde tu correo.</p>`,
+   <p>No pudimos procesar tu solicitud: la liga está incompleta o se cortó. Abre otra vez el enlace desde tu correo.</p>
+   <p>Si sigue sin funcionar, escríbenos a hola@avoqado.io y te damos de baja.</p>`,
 )
 
 /** `req.query.token` puede venir repetido (`?token=a&token=b`) o como objeto: sólo cuenta un texto, y `verify` lo exige. */

@@ -18,8 +18,15 @@ Las campañas masivas salen por Resend desde `novedades.avoqado.io`; el uno a un
 
 Si `NODE_ENV !== 'production'`, sólo se manda a las direcciones de `CRM_CORREO_PRUEBAS` (separadas por comas, en minúsculas; vacía = no sale
 nada). Las demás quedan `OMITIDO` con «fuera de la lista de prueba», y en el Gmail la API responde 422. Es **una** función,
-`puedeMandarFueraDeProduccion` (`testAllowlist.ts`), y también la usan los avisos del CRM (`digest.service.ts`) y los dos correos del
-formulario de la landing. `av-db-25` trae correos de gente real.
+`puedeMandarFueraDeProduccion` (`testAllowlist.ts`), y también la usan los avisos del CRM (`digest.service.ts`), los dos correos del
+formulario de la landing y el marketing viejo del superadmin (`marketing.superadmin.service.ts`, que además respeta `isBlocked`).
+`av-db-25` trae correos de gente real.
+
+## «Eliminar» (D7) y las campañas
+
+`deleteAccount` deja `OMITIDO` «persona eliminada» lo que esperaba en la cola para esa cuenta o sus correos, y borra su
+`CrmEmailConsent` aunque cuelgue de otra cuenta o de ninguna. El remitente vuelve a mirar al borde: cuenta que ya no existe, o
+correo en la lápida (`erasedAtTx`) desde un minuto antes de encolar. El historial (`CrmEmailMessage`, deliveries) es de D1.
 
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 

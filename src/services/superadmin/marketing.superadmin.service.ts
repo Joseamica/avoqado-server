@@ -16,6 +16,8 @@ import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { classifyUndeliverable, isDeliverableRecipient } from '@/utils/undeliverableEmail'
 import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
 import { omitirPorDemo } from '../demo/candadoDemo'
+import { isBlocked } from '../crm/email/optOut.service'
+import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from '../crm/email/testAllowlist'
 
 // Initialize Resend
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -666,6 +668,32 @@ export async function processPendingDeliveries() {
         if (motivoDemo === 'sin confirmar') continue // sigue PENDING: se reintenta en la siguiente pasada
         if (motivoDemo) {
           await prisma.campaignDelivery.update({ where: { id: delivery.id }, data: { status: DeliveryStatus.FAILED } })
+          continue
+        }
+
+        // Quien se dio de baja, rebotó o se quejó ya no recibe nada de Avoqado, tampoco por aquí (promesa del CRM, fase 2:
+        // `CrmEmailOptOut` ∪ `EmailSuppression`), y fuera de producción sólo salen las direcciones de prueba. Justo antes de
+        // mandar, como el remitente del CRM. FAILED con su motivo, como los demo: no fue un fallo de envío.
+        let motivo: string | false
+        try {
+          motivo =
+            (await isBlocked(delivery.recipientEmail)) ||
+            (!puedeMandarFueraDeProduccion(delivery.recipientEmail) && MOTIVO_FUERA_DE_LA_LISTA)
+        } catch (error) {
+          // Un error de la base nunca se lee como «no está bloqueado»: sigue PENDING y se reintenta en la siguiente pasada.
+          logger.error('📧 [Marketing] Could not check the opt-outs; delivery left PENDING', {
+            campaignId: campaign.id,
+            deliveryId: delivery.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          continue
+        }
+        if (motivo) {
+          await prisma.campaignDelivery.update({
+            where: { id: delivery.id },
+            data: { status: DeliveryStatus.FAILED, error: `Omitido: ${motivo}` },
+          })
+          logger.info('📧 [Marketing] Skipped a blocked recipient', { campaignId: campaign.id, deliveryId: delivery.id, motivo })
           continue
         }
 
