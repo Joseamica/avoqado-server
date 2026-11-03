@@ -11,6 +11,7 @@ import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import emailService from '../email.service'
 import { effectiveKeys, getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
 import { getPending, type Pending, type PendingSection } from './accounts.service'
+import { puedeMandarFueraDeProduccion } from './email/testAllowlist'
 
 // ponytail: the sales team is a handful of people; past 200 key rows the oldest 200 get the emails (logged).
 const TEAM_CAP = 200
@@ -239,7 +240,13 @@ async function notifyTeam(
         select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true, qualificationAvailable: true },
       }))
     if (!account) return true
-    const recipients = await team('editar')
+    // 🔴 Fuera de producción sólo le llega a quien esté en la lista de prueba. Quien se omite cuenta como «nada que mandar»
+    // (igual que un equipo sin «Editar»): devolver false haría que el barrido reintente el aviso 5 veces para nada.
+    const recipients = (await team('editar')).filter(person => {
+      if (puedeMandarFueraDeProduccion(person.email)) return true
+      logger.info('[CRM] A prospect notice was not sent: the address is outside the test list', { accountId, notice, staffId: person.id })
+      return false
+    })
     if (!recipients.length) return true
     const email = prospectEmail(account, notice)
     const results = await Promise.allSettled(
@@ -362,6 +369,13 @@ const closeForGood = (id: string, now: Date) =>
  * address, a demo) closes the row instead of using up the tries; a throw counts as passing, like the email service's own.
  */
 async function deliver(row: { id: string; staffId: string }, day: string, content: DigestContent, now: Date): Promise<void> {
+  // 🔴 Fuera de producción sólo sale a la lista de prueba. La fila se cierra con el estado que ya existe para «esto no va a
+  // salir nunca» (FALLO sin intentos que gastar): ningún tick posterior la retoma ni la cuenta como pendiente.
+  if (!puedeMandarFueraDeProduccion(content.to)) {
+    logger.info('[CRM] A daily digest was not sent: the address is outside the test list', { staffId: row.staffId, day })
+    await closeForGood(row.id, now)
+    return
+  }
   let ok = false
   let permanent = false
   try {

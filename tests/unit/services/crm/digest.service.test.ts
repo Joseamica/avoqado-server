@@ -27,6 +27,15 @@ const STAFF_D = 'cstaffsld0000000000000001'
 const STAFF_F = 'cstaffslf0000000000000001'
 const STAFF_G = 'cstaffslg0000000000000001'
 
+// 🔴 Fuera de producción sólo sale a la lista de prueba (`testAllowlist`). Estas pruebas son del contenido, las llaves y la cola, así
+// que ponen en la lista a todos los vendedores que usan; las de la lista misma van al final de cada bloque.
+const EN_LA_LISTA = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'x'].map(letra => `${letra}@avoqado.io`).join(',')
+const LISTA_ORIGINAL = process.env.CRM_CORREO_PRUEBAS
+afterAll(() => {
+  if (LISTA_ORIGINAL === undefined) delete process.env.CRM_CORREO_PRUEBAS
+  else process.env.CRM_CORREO_PRUEBAS = LISTA_ORIGINAL
+})
+
 let keyRows: Array<Record<string, unknown>>
 /** Staff ids that already hold a claimed row somewhere (`PlatformAccess.staffId`). */
 let holders: string[]
@@ -46,6 +55,7 @@ const row = (over: Record<string, unknown>) => ({
 })
 
 beforeEach(() => {
+  process.env.CRM_CORREO_PRUEBAS = EN_LA_LISTA
   prismaMock.crmAccount.findUnique.mockReset()
   prismaMock.platformAccess.findMany.mockReset()
   prismaMock.staff.findMany.mockReset()
@@ -156,6 +166,42 @@ describe('notifyNewProspect', () => {
     prismaMock.platformAccess.findMany.mockResolvedValueOnce([])
     await notifyNewProspect(ACCOUNT)
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('fuera de producción: el aviso de prospecto sólo sale a la lista de prueba', () => {
+  it('sólo le llega a quien está en la lista, y la entrada no se reintenta por eso (true)', async () => {
+    process.env.CRM_CORREO_PRUEBAS = 'b@avoqado.io'
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['b@avoqado.io'])
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('outside the test list'),
+      expect.objectContaining({ accountId: ACCOUNT, staffId: STAFF_A }),
+    )
+  })
+
+  it('con la lista vacía no sale nada y cuenta como «nada que mandar»: el barrido no lo reintenta 5 veces', async () => {
+    process.env.CRM_CORREO_PRUEBAS = ''
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    await expect(notifyReturningProspect(ACCOUNT, 'centry000000000000000001')).resolves.toBe(true)
+
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('en producción sale a todos, con la lista vacía: el comportamiento de hoy', async () => {
+    const env = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    process.env.CRM_CORREO_PRUEBAS = ''
+    try {
+      await notifyNewProspect(ACCOUNT)
+    } finally {
+      process.env.NODE_ENV = env
+    }
+
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['a@avoqado.io', 'b@avoqado.io'])
   })
 })
 
@@ -551,6 +597,43 @@ describe('runDailyDigest', () => {
     accessOf.mockImplementation(async () => access(STAFF_A))
     await runDailyDigest(at(45))
     expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('fuera_de_la_lista: fuera de producción el aviso diario no sale, y su fila se cierra para siempre (FALLO sin intentos que gastar)', async () => {
+    process.env.CRM_CORREO_PRUEBAS = 'otra@avoqado.io'
+
+    await runDailyDigest(T0)
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, day: DAY, status: 'FALLO', attempts: 3 })])
+
+    // Ningún tick posterior la retoma ni la vuelve a reservar.
+    await runDailyDigest(at(15))
+    await runDailyDigest(at(45))
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toHaveLength(1)
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('outside the test list'),
+      expect.objectContaining({ staffId: STAFF_A }),
+    )
+  })
+
+  it('fuera_de_la_lista_al_retomar: una fila apartada que un tick posterior retoma tampoco sale fuera de la lista', async () => {
+    sends.push({
+      id: 'cdigestsd0000000000000099',
+      staffId: STAFF_A,
+      day: DAY,
+      kind: 'DIARIO',
+      status: 'APARTADO',
+      attempts: 0,
+      reservedAt: at(-11),
+      content: { to: 'a@avoqado.io', subject: 's', html: '<p>guardado</p>', text: 'guardado' },
+    })
+    process.env.CRM_CORREO_PRUEBAS = 'otra@avoqado.io'
+
+    await runDailyDigest(T0)
+
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
   })
 
   it('error_permanente_no_reintenta: a refusal that will not change (an undeliverable address) closes the row at once', async () => {
