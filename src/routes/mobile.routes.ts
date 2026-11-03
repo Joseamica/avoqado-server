@@ -90,6 +90,7 @@ import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } fr
 import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mobile.schema'
 import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
+import { areaRoleSchema } from '../schemas/mobile/areaTicketRole.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
@@ -4280,6 +4281,18 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('orders:read'),
   areaTicketV7MobileController.getSettings,
+)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/terminals/:terminalId/area-role
+ * D3: el aparato guarda su propio papel en los vales (caja o emite vales de un área). Sólo su terminal (X-Device-Id).
+ */
+router.put(
+  '/venues/:venueId/terminals/:terminalId/area-role',
+  authenticateTokenMiddleware,
+  validateRequest(areaRoleSchema),
+  checkPermission('area-tickets:configure'),
+  areaTicketV7MobileController.setAreaRole,
 )
 
 // 🔴 `SCALE_INTEGRATION` es PREMIUM (basePlan.service.ts) y NADIE lo exigía:

@@ -172,7 +172,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_devices',
-    'List the devices connected to your venues: PAX/NexGo payment terminals plus any phone, tablet or POS that installed Avoqado and signed in (Sunmi, iPhone, iPad, Android). Shows what kind of device it is, whether it is online right now, who used it last, and when it was first seen. Use it to answer "how many devices are running in my venue", "which device is offline", or to find the device behind a problem. Filter by formFactor (PHONE, TABLET, HANDHELD_POS, COUNTERTOP_POS, DESKTOP, UNKNOWN) or by onlyOnline. Retired devices are hidden unless includeRetired is true. Each device also reports `capabilities.configurableSettings`: which TPV settings THAT KIND of device can change from its own Settings screen (a POS tablet only obeys the checkout screens; a payment terminal has the full catalog; a printer or KDS none). Use `terminal_checkout_screens` to see what each device currently has turned on.',
+    'List the devices connected to your venues: PAX/NexGo payment terminals plus any phone, tablet or POS that installed Avoqado and signed in (Sunmi, iPhone, iPad, Android). Shows what kind of device it is, whether it is online right now, who used it last, and when it was first seen. Use it to answer "how many devices are running in my venue", "which device is offline", or to find the device behind a problem. Filter by formFactor (PHONE, TABLET, HANDHELD_POS, COUNTERTOP_POS, DESKTOP, UNKNOWN) or by onlyOnline. Retired devices are hidden unless includeRetired is true. Each device also reports `capabilities.configurableSettings`: which TPV settings THAT KIND of device can change from its own Settings screen (a POS tablet only obeys the checkout screens; a payment terminal has the full catalog; a printer or KDS none). Use `terminal_checkout_screens` to see what each device currently has turned on. Each device also reports `vales` for businesses that use area tickets: whether it issues tickets (and for which area), charges them at the register or delivers them, and `papelElegido` = false when a device that signed in by itself has never had that role chosen.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       formFactor: z
@@ -219,6 +219,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           firstSeenAt: true,
           lastHeartbeat: true,
           lastStaffId: true,
+          canIssueAreaTickets: true,
+          canCheckoutAreaTickets: true,
+          canDeliverAreaTickets: true,
+          areaRoleChosenAt: true,
+          fulfillmentArea: { select: { name: true } },
           venue: { select: { name: true } },
         },
         orderBy: [{ lastHeartbeat: 'desc' }, { name: 'asc' }, { id: 'asc' }],
@@ -268,6 +273,14 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           capabilities: r.capabilities,
           // Misma identidad que usa el POS para su outbox offline y el hub LAN.
           deviceUid: r.deviceUid,
+          // D3: qué hace en los vales por área, como lo muestra el panel.
+          vales: {
+            emite: row.canIssueAreaTickets,
+            cobra: row.canCheckoutAreaTickets,
+            entrega: row.canDeliverAreaTickets,
+            area: row.fulfillmentArea?.name ?? null,
+            papelElegido: !(row.selfRegistered && row.areaRoleChosenAt == null),
+          },
         }
       })
 
