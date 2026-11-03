@@ -135,6 +135,13 @@ beforeEach(() => {
     const i = filas.findIndex(x => x.id === where.id)
     return { ...filas.splice(i, 1)[0] }
   })
+  prismaMock.platformCfdi.deleteMany.mockImplementation(async ({ where }: any) => {
+    const i = filas.findIndex(x => x.id === where.id && x.status === where.status)
+    if (i < 0) return { count: 0 }
+    filas.splice(i, 1)
+    return { count: 1 }
+  })
+  prismaMock.platformCfdi.findUniqueOrThrow.mockImplementation(async ({ where }: any) => ({ ...filas.find(x => x.id === where.id) }))
   prismaMock.$transaction.mockImplementation(async (fn: any) => fn(prismaMock))
 })
 
@@ -157,7 +164,7 @@ describe('timbrar: lo que el PAC no confirmó no se da por hecho', () => {
     const error = await issuePlatformCfdi(ENTRADA).catch((e: unknown) => e)
 
     expect(error).toBeInstanceOf(PlatformBillingError)
-    expect(error).toMatchObject({ code: 'PROVIDER', inFlight: true })
+    expect(error).toMatchObject({ code: 'PROVIDER', attempt: { inFlight: true, cfdiId: 'nueva-0' } })
     expect((error as Error).message).toMatch(/^La factura pudo quedar en camino/)
     expect(filas[0]).toMatchObject({ status: 'STAMPING', lastError: 'ETIMEDOUT' })
   })
@@ -167,8 +174,17 @@ describe('timbrar: lo que el PAC no confirmó no se da por hecho', () => {
 
     const error = await issuePlatformCfdi(ENTRADA).catch((e: unknown) => e)
 
-    expect((error as PlatformBillingError).inFlight).toBeFalsy()
+    expect((error as PlatformBillingError).attempt).toEqual({ inFlight: false, cfdiId: 'nueva-0' })
     expect(filas[0].status).toBe('STAMP_FAILED')
+  })
+
+  it('🔴 un rechazo sin confirmar que parece un dato malo tampoco libera la llave: la fila sigue en camino', async () => {
+    pac.createInvoice.mockRejectedValue(new ProviderHttpError(400, 'codigo_nuevo', 'El campo Nombre del receptor no coincide'))
+
+    const error = await issuePlatformCfdi(ENTRADA).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({ code: 'VALIDATION', attempt: { inFlight: true } })
+    expect(filas[0].status).toBe('STAMPING')
   })
 })
 
@@ -326,12 +342,19 @@ describe('«Consultar estado»: le pregunta al PAC y nunca emite', () => {
     await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'CANCELLED' })
   })
 
-  it('un complemento de pago no se consulta aquí: adoptarlo también tendría que mover el saldo del padre', async () => {
+  it('el timbre de un complemento de pago no se consulta aquí: adoptarlo también tendría que mover el saldo del padre', async () => {
     filas.push(fila({ type: 'PAGO' }))
 
     await expect(refreshPlatformCfdi('c1')).rejects.toMatchObject({ code: 'VALIDATION' })
 
     expect(pac.findByExternalId).not.toHaveBeenCalled()
+  })
+
+  it('🔴 su cancelación sí: sin esto quedaba en trámite para siempre', async () => {
+    filas.push(fila({ type: 'PAGO', status: 'CANCEL_REQUESTED', cancelStatus: 'pending', uuid: 'U', facturapiId: 'fa-1' }))
+    pac.getCancellationStatus.mockResolvedValue({ status: 'accepted', cancelledAt: null })
+
+    await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'CANCELLED' })
   })
 })
 
@@ -373,6 +396,28 @@ describe('«Descartar» pregunta antes de borrar', () => {
     await expect(discardFailedPlatformCfdi('c1')).rejects.toBeInstanceOf(ConflictError)
 
     expect(filas).toHaveLength(1)
+  })
+
+  it('🔴 otra pestaña la adoptó mientras se preguntaba: no se borra una factura viva', async () => {
+    filas.push(fallida())
+    const borrar = prismaMock.platformCfdi.deleteMany.getMockImplementation()
+    prismaMock.platformCfdi.deleteMany.mockImplementation(async (args: any) => {
+      filas[0].status = 'STAMPED' // la otra pestaña llega justo antes del borrado
+      return borrar!(args)
+    })
+
+    await expect(discardFailedPlatformCfdi('c1')).rejects.toMatchObject({ code: 'PLATFORM_CFDI_CHANGED' })
+
+    expect(filas[0].status).toBe('STAMPED')
+  })
+
+  it('un complemento de pago fallido se descarta como siempre, sin preguntar', async () => {
+    filas.push(fila({ type: 'PAGO', status: 'STAMP_FAILED' }))
+
+    await expect(discardFailedPlatformCfdi('c1')).resolves.toMatchObject({ id: 'c1' })
+
+    expect(pac.findByExternalId).not.toHaveBeenCalled()
+    expect(filas).toHaveLength(0)
   })
 })
 
@@ -422,6 +467,34 @@ describe('«Reintentar» consulta y reemplaza de un jalón', () => {
     expect(pac.createInvoice).not.toHaveBeenCalled()
   })
 
+  it('🔴 otra pestaña adoptó la vieja justo antes de la transacción: no la borra ni timbra otra', async () => {
+    filas.push(fallida())
+    prismaMock.$transaction.mockImplementation(async (fn: any) => {
+      filas[0].status = 'STAMPED'
+      return fn(prismaMock)
+    })
+
+    await expect(issuePlatformCfdi(REINTENTO)).rejects.toMatchObject({ code: 'PLATFORM_CFDI_CHANGED' })
+
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(filas.map(f => f.status)).toEqual(['STAMPED'])
+  })
+
+  it('🔴 la nueva también la rechaza el PAC: el error trae su id, para que corregir la reemplace a ella', async () => {
+    filas.push(fallida())
+    pac.createInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invoice_stamping_validation_error', 'Clave inexistente'))
+
+    const error = await issuePlatformCfdi(REINTENTO).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({ attempt: { inFlight: false, cfdiId: 'nueva-0' } })
+    expect(filas.map(f => [f.id, f.status])).toEqual([['nueva-0', 'STAMP_FAILED']])
+
+    await expect(issuePlatformCfdi({ ...ENTRADA, idempotencyKey: 'llave-2', retryOfId: 'nueva-0' })).resolves.toMatchObject({
+      status: 'STAMPED',
+    })
+    expect(filas).toHaveLength(1)
+  })
+
   it('🔴 se perdió la respuesta y se repite con la misma llave: regresa la nueva, sin una tercera', async () => {
     filas.push(fallida())
     await issuePlatformCfdi(REINTENTO)
@@ -454,6 +527,38 @@ describe('«Cancelar» dice lo que dijo el SAT', () => {
       cancelStatus: 'pending',
       cancelledAt: null,
     })
+  })
+
+  it('🔴 se apunta antes de llamar: si la respuesta se pierde, queda en trámite y se puede consultar', async () => {
+    filas.push(timbrada())
+    pac.cancelInvoice.mockImplementation(async () => {
+      expect(filas[0].status).toBe('CANCEL_REQUESTED') // ya quedó escrito antes de llamar
+      throw new Error('ETIMEDOUT')
+    })
+
+    await expect(cancelPlatformCfdi('c1', '02')).rejects.toMatchObject({ code: 'PROVIDER', attempt: { inFlight: true } })
+
+    expect(filas[0]).toMatchObject({ status: 'CANCEL_REQUESTED', cancelMotivo: '02' })
+    pac.getCancellationStatus.mockResolvedValue({ status: 'canceled', cancelledAt: null })
+    await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'CANCELLED' })
+  })
+
+  it('el proveedor contesta que no (4xx): no pasó nada y sigue timbrada', async () => {
+    filas.push(timbrada())
+    pac.cancelInvoice.mockRejectedValue(new ProviderHttpError(400, 'invalid_request', 'No se puede cancelar'))
+
+    await expect(cancelPlatformCfdi('c1', '02')).rejects.toMatchObject({ code: 'PROVIDER' })
+
+    expect(filas[0]).toMatchObject({ status: 'STAMPED' })
+  })
+
+  it('otra pestaña ya la está cancelando: 409, y no se llama al proveedor dos veces', async () => {
+    filas.push(timbrada())
+    prismaMock.platformCfdi.updateMany.mockResolvedValueOnce({ count: 0 })
+
+    await expect(cancelPlatformCfdi('c1', '02')).rejects.toMatchObject({ code: 'PLATFORM_CFDI_CHANGED' })
+
+    expect(pac.cancelInvoice).not.toHaveBeenCalled()
   })
 
   it.each(['rejected', 'expired', 'none'])('🔴 %s: sigue timbrada y lo dice', async respuesta => {

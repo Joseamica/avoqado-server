@@ -32,8 +32,11 @@ export class PlatformBillingError extends Error {
     public readonly code: PlatformBillingErrorCode = 'VALIDATION',
     /** Campo del formulario culpable, cuando se pudo identificar. La UI lo usa para marcarlo. */
     public readonly field?: string,
-    /** El documento pudo quedar en camino: volver a timbrar debe llevar la MISMA llave. */
-    public readonly inFlight?: boolean,
+    /**
+     * `inFlight`: el documento pudo quedar en camino, y volver a timbrar debe llevar la MISMA llave.
+     * `cfdiId`: la fila del intento; corregir y timbrar otra vez la reemplaza.
+     */
+    public readonly attempt?: { inFlight?: boolean; cfdiId?: string },
   ) {
     super(message)
     this.name = 'PlatformBillingError'

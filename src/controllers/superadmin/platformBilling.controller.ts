@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import {
   getActivePlatformEmisor,
@@ -43,7 +44,7 @@ export function handleBillingError(error: unknown, res: Response, next: NextFunc
     // corregible por el operador → 422, para que la UI lo trate como validación y no
     // como caída del servidor.
     const status = error.code === 'NO_CFDI' ? 404 : error.code === 'PROVIDER' ? 502 : 422
-    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field, inFlight: error.inFlight })
+    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field, ...error.attempt })
     return
   }
   next(error as Error)
@@ -228,16 +229,15 @@ export async function issueInvoice(req: Request, res: Response, next: NextFuncti
       performedById: userId,
     })
     // Sólo lo que se timbró en esta llamada: una llave repetida regresa la fila de antes, y una sin timbre todavía no es una factura.
+    // 🔴 `logAction` nunca truena: un 500 aquí, con la factura ya timbrada, le diría al operador que falló y podría emitir otra.
     if (cfdi.status === 'STAMPED' && cfdi.updatedAt.getTime() >= startedAt) {
-      await prisma.activityLog.create({
-        data: {
-          staffId: userId,
-          venueId: cfdi.venueId,
-          action: 'PLATFORM_CFDI_ISSUED',
-          entity: 'PlatformCfdi',
-          entityId: cfdi.id,
-          data: { uuid: cfdi.uuid, totalCents: cfdi.totalCents, metodoPago: cfdi.metodoPago, formaPago: cfdi.formaPago },
-        },
+      void logAction({
+        staffId: userId,
+        venueId: cfdi.venueId,
+        action: 'PLATFORM_CFDI_ISSUED',
+        entity: 'PlatformCfdi',
+        entityId: cfdi.id,
+        data: { uuid: cfdi.uuid, totalCents: cfdi.totalCents, metodoPago: cfdi.metodoPago, formaPago: cfdi.formaPago },
       })
     }
     res.status(201).json({ success: true, data: cfdi })
@@ -342,15 +342,13 @@ export async function cancelInvoice(req: Request, res: Response, next: NextFunct
     const { userId } = (req as any).authContext
     const { motivo, substituteUuid } = req.body as { motivo: '01' | '02' | '03' | '04'; substituteUuid?: string }
     const cfdi = await cancelPlatformCfdi(req.params.id, motivo, substituteUuid)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId: cfdi.venueId,
-        action: cfdi.status === 'CANCELLED' ? 'PLATFORM_CFDI_CANCELLED' : 'PLATFORM_CFDI_CANCEL_REQUESTED',
-        entity: 'PlatformCfdi',
-        entityId: cfdi.id,
-        data: { motivo, substituteUuid: substituteUuid ?? null },
-      },
+    void logAction({
+      staffId: userId,
+      venueId: cfdi.venueId,
+      action: cfdi.status === 'CANCELLED' ? 'PLATFORM_CFDI_CANCELLED' : 'PLATFORM_CFDI_CANCEL_REQUESTED',
+      entity: 'PlatformCfdi',
+      entityId: cfdi.id,
+      data: { motivo, substituteUuid: substituteUuid ?? null },
     })
     res.json({ success: true, data: cfdi })
   } catch (error) {
@@ -373,15 +371,13 @@ export async function discardInvoice(req: Request, res: Response, next: NextFunc
   try {
     const { userId } = (req as any).authContext
     const cfdi = await discardFailedPlatformCfdi(req.params.id, userId)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId: cfdi.venueId,
-        action: 'PLATFORM_CFDI_DISCARDED',
-        entity: 'PlatformCfdi',
-        entityId: cfdi.id,
-        data: { priorStatus: cfdi.status, receptorRfc: cfdi.receptorRfc, totalCents: cfdi.totalCents },
-      },
+    void logAction({
+      staffId: userId,
+      venueId: cfdi.venueId,
+      action: 'PLATFORM_CFDI_DISCARDED',
+      entity: 'PlatformCfdi',
+      entityId: cfdi.id,
+      data: { priorStatus: cfdi.status, receptorRfc: cfdi.receptorRfc, totalCents: cfdi.totalCents },
     })
     res.json({ success: true, data: { id: cfdi.id, discarded: true } })
   } catch (error) {

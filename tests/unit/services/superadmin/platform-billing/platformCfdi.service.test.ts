@@ -573,11 +573,11 @@ describe('platformCfdi.service', () => {
       prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
       mockResolve.mockReturnValue({ findByExternalId: jest.fn().mockResolvedValue(null) })
       prismaMock.platformCfdi.count.mockResolvedValue(0)
-      prismaMock.platformCfdi.delete.mockResolvedValue(failed)
+      prismaMock.platformCfdi.deleteMany.mockResolvedValue({ count: 1 })
 
       const res = await discardFailedPlatformCfdi('f1')
 
-      expect(prismaMock.platformCfdi.delete).toHaveBeenCalledWith({ where: { id: 'f1' } })
+      expect(prismaMock.platformCfdi.deleteMany).toHaveBeenCalledWith({ where: { id: 'f1', status: 'STAMP_FAILED' } })
       expect(res).toEqual(failed)
     })
 
@@ -954,11 +954,11 @@ describe('platformCfdi.service — «Por cobrar»: descartar una factura fallida
     }
     prismaMock.platformCfdi.findUnique.mockResolvedValue(failed)
     prismaMock.platformCfdi.count.mockResolvedValue(0)
-    prismaMock.platformCfdi.delete.mockResolvedValue(failed)
+    prismaMock.platformCfdi.deleteMany.mockResolvedValue({ count: 1 })
 
     await expect(discardFailedPlatformCfdi('f4')).resolves.toEqual(failed)
 
-    expect(prismaMock.platformCfdi.delete).toHaveBeenCalledWith({ where: { id: 'f4' } })
+    expect(prismaMock.platformCfdi.deleteMany).toHaveBeenCalledWith({ where: { id: 'f4', status: 'STAMP_FAILED' } })
   })
 })
 
@@ -983,6 +983,7 @@ describe('platformCfdi.service — «Por cobrar»: modo de prueba (PLATFORM_CHAR
       platformChargeOccurrenceId: ligada ? 'occ-1' : null,
     })
     prismaMock.platformEmisor.findUnique.mockResolvedValue(emisor)
+    prismaMock.platformCfdi.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'c1', ...args.data }))
     mockResolve.mockReturnValue({
       cancelInvoice: jest.fn().mockResolvedValue({ status: 'canceled', cancelledAt: new Date() }),
