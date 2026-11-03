@@ -464,7 +464,8 @@ async function terminalPage(
 ): Promise<{ rows: TerminalRow[]; total: number; nextCursor: string | null }> {
   const after = cursor === undefined ? null : decodeTerminalCursor(cursor)
   const statuses: SaleVerificationStatus[] = [...TERMINAL_LISTS[list]]
-  const scope = Prisma.sql`v."organizationId" = ${orgId} AND sv."staffId" = ${staffId} AND sv.status::text = ANY(${statuses}::text[])`
+  // Contra el enum (no `status::text`): así la página y el conteo pueden usar el índice de status.
+  const scope = Prisma.sql`v."organizationId" = ${orgId} AND sv."staffId" = ${staffId} AND sv.status = ANY(${statuses}::"SaleVerificationStatus"[])`
 
   const [keys, counted] = await Promise.all([
     prisma.$queryRaw<TerminalKey[]>(Prisma.sql`
@@ -907,7 +908,16 @@ export async function createOrUpdateProofOfSale(
       saleVerification: { select: { staffId: true } },
       // Para la venta cobrada cuya verificación no se creó: portabilidad e ICCIDs salen de la orden.
       order: {
-        select: { tags: true, items: { where: { serializedItem: { isNot: null } }, select: { productSku: true }, take: 50 } },
+        select: {
+          tags: true,
+          items: {
+            where: { serializedItem: { isNot: null } },
+            select: { productSku: true },
+            // Orden estable: serialNumbers[0] es el ICCID con el que se buscan los repetidos.
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: 50,
+          },
+        },
       },
     },
   })

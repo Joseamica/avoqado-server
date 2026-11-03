@@ -26,7 +26,8 @@ export interface SaleNumbers {
   linkingNumber: string | null
   portedNumber: string | null
 }
-export type NumberAlertFilter = 'any' | 'duplicate' | 'missing' | 'not10'
+export const NUMBER_ALERT_FILTERS = ['any', 'duplicate', 'missing', 'not10'] as const
+export type NumberAlertFilter = (typeof NUMBER_ALERT_FILTERS)[number]
 
 type MatchRow = {
   n: string
@@ -199,7 +200,7 @@ export async function findVerificationIdsWithNumberAlert(
     dup AS (SELECT n FROM nums GROUP BY n HAVING count(DISTINCT k) > 1)
     SELECT id FROM org_sv
     WHERE paid_at >= ${utcTs(range.from)} AND paid_at <= ${utcTs(range.to)} AND ${ALERT_PREDICATES[kind]}
-    LIMIT 20001`) // ALERT_IDS_CAP + 1: la fila de más dice que el rango es demasiado ancho
+    LIMIT ${ALERT_IDS_CAP + 1}`) // la fila de más dice que el rango es demasiado ancho
   if (rows.length > ALERT_IDS_CAP) {
     throw new BadRequestError('Hay demasiadas ventas con alerta en el rango; acota las fechas', 'NUMBER_ALERT_RANGE_TOO_WIDE')
   }

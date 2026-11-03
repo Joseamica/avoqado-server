@@ -1799,6 +1799,10 @@ export async function setOrgSaleVerificationNumbers(
     reason?: string
   },
 ) {
+  // Apagado ⇒ 403 antes que cualquier otra cosa (regla de todo el número de vinculación).
+  if (!(await isLinkingNumberEnabledForOrg(orgId))) {
+    throw new ForbiddenError('El número de vinculación no está activo en esta organización', 'LINKING_NUMBER_DISABLED')
+  }
   const fields = (
     [
       ['linkingNumber', params.linkingNumber],
@@ -1811,9 +1815,8 @@ export async function setOrgSaleVerificationNumbers(
       throw new BadRequestError('El número debe tener 10 dígitos (o 9, confirmado)', 'INVALID_LINKING_NUMBER', { field })
     }
   }
-  if (!(await isLinkingNumberEnabledForOrg(orgId))) {
-    throw new ForbiddenError('El número de vinculación no está activo en esta organización', 'LINKING_NUMBER_DISABLED')
-  }
+  const linking = fields.find(f => f.field === 'linkingNumber')?.digits
+  const ported = fields.find(f => f.field === 'portedNumber')?.digits
   const reason = params.reason?.trim() || null
 
   const updated = await prisma.$transaction(async tx => {
@@ -1833,15 +1836,14 @@ export async function setOrgSaleVerificationNumbers(
     }
 
     const now = new Date()
+    const source = SaleVerificationNumberSource.BACKOFFICE
+    const data: Prisma.SaleVerificationUpdateInput = {
+      ...(linking !== undefined && { linkingNumber: linking, linkingNumberSource: source, linkingNumberSetAt: now }),
+      ...(ported !== undefined && { portedNumber: ported, portedNumberSource: source, portedNumberSetAt: now }),
+    }
     const row = await tx.saleVerification.update({
       where: { id: sv.id },
-      data: Object.fromEntries(
-        fields.flatMap(({ field, digits }) => [
-          [field, digits],
-          [`${field}Source`, 'BACKOFFICE'],
-          [`${field}SetAt`, now],
-        ]),
-      ) as Prisma.SaleVerificationUpdateInput,
+      data,
       select: {
         id: true,
         linkingNumber: true,

@@ -496,6 +496,15 @@ describe('venta cobrada cuya verificación no se creó', () => {
     })
   })
 
+  it('los ICCID de la orden se leen en un orden estable (createdAt, id): serialNumbers[0] es el que usan los repetidos', async () => {
+    w.sv = null
+
+    await createOrUpdateProofOfSale(VENUE_A, PAYMENT, [VINC], PROMOTER, undefined, undefined, undefined, { orgId: ORG })
+
+    const items = (prisma.payment.findFirst as jest.Mock).mock.calls[0][0].select.order.select.items
+    expect(items.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
+  })
+
   it('sin quien cobró, el staff es el remitente (terminal vieja, sin captura)', async () => {
     w.sv = null
     w.processedById = null

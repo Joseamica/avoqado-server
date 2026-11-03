@@ -70,12 +70,16 @@ function makeTx() {
   }
 }
 const svData = () => (lastTx.saleVerification.create as jest.Mock).mock.calls[0][0].data
-/** Ninguna venta a medias: la transacción puede abrirse (los resolvers corren dentro) pero nada se escribe. */
-function expectNothingWritten() {
-  for (const t of txs) {
+/**
+ * Ninguna venta a medias: la transacción puede abrirse (los resolvers corren dentro) pero nada se escribe. Sin argumento,
+ * en todas las transacciones; con `scope`, sólo en ésas (las de las filas malas de un archivo que sí crea otras).
+ */
+function expectNothingWritten(scope = txs) {
+  for (const t of scope) {
     for (const m of [t.order.create, t.orderItem.create, t.payment.create, t.saleVerification.create]) expect(m).not.toHaveBeenCalled()
   }
-  expect(markAsSoldMock).not.toHaveBeenCalled()
+  // markAsSold(venueId, serial, orderItemId, tx, …): ninguna llamada dentro de esas transacciones.
+  expect(markAsSoldMock.mock.calls.filter(c => scope.includes(c[3]))).toEqual([])
 }
 const SOLD = 'ICCID-SOLD'
 
@@ -183,6 +187,15 @@ describe('createOneManualSale — interruptor prendido', () => {
     expectNothingWritten()
   })
 
+  it.each(['-', '( )', ' . '])(
+    'una venta que no es de portabilidad con «%s» de relleno en el portado se crea: sin dígitos cuenta como vacío',
+    async filler => {
+      const result = await createOneManualSale(ORG_ID, ACTOR, row({ portedNumber: filler }), ON)
+      expect(result.ok).toBe(true)
+      expect(svData()).not.toHaveProperty('portedNumber')
+    },
+  )
+
   it('un SIM ya vendido sigue siendo «ICCID ya vendido» aunque la fila no traiga número (Ruling A8-3)', async () => {
     const result = await createOneManualSale(ORG_ID, ACTOR, row({ iccid: SOLD, linkingNumber: undefined }), ON)
     expect(result).toEqual({ ok: false, error: 'ICCID ya vendido' })
@@ -239,6 +252,12 @@ describe('bulkManualSales — vista previa con el interruptor prendido', () => {
         motivo: 'La venta no es de portabilidad: quita el número portado',
       },
     ])
+  })
+
+  it('vista previa: un «-» de relleno en el portado de una línea nueva no es error', async () => {
+    const result = await bulkManualSales(ORG_ID, ACTOR, [row({ portedNumber: '-' })], false, ON)
+    expect(result.error).toEqual([])
+    expect(result.crear).toHaveLength(1)
   })
 
   it('marca linkingDuplicate contra la organización y la fila se sigue creando', async () => {
@@ -333,6 +352,16 @@ describe('bulkManualSales — interruptor apagado (Review Focus 5)', () => {
     expect(result.created).toBe(1)
     expect(svData().linkingNumber).toBeUndefined()
   })
+
+  it('aplicar: estatus inválido + SIM ya vendido ⇒ error por el estatus (va antes que el SIM), no omitir', async () => {
+    const result = await bulkManualSales(ORG_ID, ACTOR, [row({ iccid: SOLD, saleStatus: 'Pendiente' })], true, OFF)
+    expect(result.omitir).toEqual([])
+    expect(result.error).toHaveLength(1)
+    expect(result.error[0]).toMatchObject({ index: 0, iccid: SOLD })
+    expect(result.error[0].motivo).toMatch(/estatus/i)
+    expect(result.created).toBe(0)
+    expectNothingWritten()
+  })
 })
 
 describe('bulkManualSales — aplicar con el interruptor prendido', () => {
@@ -345,8 +374,9 @@ describe('bulkManualSales — aplicar con el interruptor prendido', () => {
       { index: 0, iccid: 'ICCID-A', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Falta el número de vinculación' },
     ])
     expect(result.created).toBe(1)
-    // La fila mala abre su transacción (los resolvers corren dentro) pero no escribe: sólo hay una venta.
-    expect(txs.filter(t => t.saleVerification.create.mock.calls.length)).toHaveLength(1)
+    // La fila mala abre su transacción (los resolvers corren dentro) pero no escribe nada en ella.
+    expect(txs).toHaveLength(2)
+    expectNothingWritten([txs[0]])
     expect(svData()).toMatchObject({ linkingNumber: '5512345678', linkingNumberSource: 'EXTERNAL_SALE' })
   })
 })

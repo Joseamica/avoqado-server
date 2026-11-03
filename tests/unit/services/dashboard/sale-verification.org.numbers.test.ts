@@ -13,6 +13,7 @@ import { findDuplicatesForSales, findVerificationIdsWithNumberAlert } from '@/se
 import { listOrgSaleVerifications, setOrgSaleVerificationNumbers } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import * as ctrl from '@/controllers/dashboard/sale-verification.org.dashboard.controller'
 import orgSalesRouter from '@/routes/dashboard/saleVerification.org.dashboard.routes'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -29,6 +30,7 @@ jest.mock('@/config/logger', () => ({
 }))
 jest.mock('@/services/playtelecom/linkingNumber.flag', () => ({ isLinkingNumberEnabledForOrg: jest.fn() }))
 jest.mock('@/services/playtelecom/linkingNumber.duplicates', () => ({
+  NUMBER_ALERT_FILTERS: jest.requireActual('@/services/playtelecom/linkingNumber.duplicates').NUMBER_ALERT_FILTERS,
   findDuplicatesForSales: jest.fn(),
   findVerificationIdsWithNumberAlert: jest.fn(),
 }))
@@ -290,6 +292,27 @@ describe('listOrgSaleVerifications — búsqueda por número', () => {
     expect(data[0].linkingNumber).toBe('5512345678')
   })
 
+  it('con un número, las 3 ramas de antes (id del pago, nombre del promotor, ICCID) siguen en el OR, antes de las nuevas', async () => {
+    montarLista([])
+    await listOrgSaleVerifications(ORG, { pageNumber: 1, pageSize: 20, search: '5512345678' })
+    expect(whereDeLaLista().OR).toEqual([
+      { id: { contains: '5512345678', mode: 'insensitive' } },
+      {
+        saleVerification: {
+          staff: {
+            OR: [
+              { firstName: { contains: '5512345678', mode: 'insensitive' } },
+              { lastName: { contains: '5512345678', mode: 'insensitive' } },
+            ],
+          },
+        },
+      },
+      { saleVerification: { serialNumbers: { hasSome: ['5512345678'] } } },
+      { saleVerification: { linkingNumber: '5512345678' } },
+      { saleVerification: { portedNumber: '5512345678' } },
+    ])
+  })
+
   it('un número pegado con espacios y guiones se busca en dígitos; 9 dígitos también', async () => {
     montarLista([])
     await listOrgSaleVerifications(ORG, { pageNumber: 1, pageSize: 20, search: '55 1234-567' })
@@ -448,6 +471,25 @@ describe('setOrgSaleVerificationNumbers — corrección del back-office', () => 
     expect(mockPrisma.$transaction).not.toHaveBeenCalled()
   })
 
+  it('con el interruptor apagado ⇒ 403 aunque el número venga mal: apagado se dice antes que el formato', async () => {
+    enabled.mockResolvedValue(false)
+    for (const linkingNumber of ['123', '551234567']) {
+      await expect(setOrgSaleVerificationNumbers(ORG, { saleVerificationId: SV, editedById: EDITOR, linkingNumber })).rejects.toMatchObject(
+        {
+          statusCode: 403,
+          code: 'LINKING_NUMBER_DISABLED',
+        },
+      )
+    }
+    expect(mockPrisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('abre la transacción con ORDER_LOCK_WAIT_BUDGET (el candado de la fila espera lo mismo que las demás ediciones)', async () => {
+    montarTx(verificacion({ isPortabilidad: false }))
+    await setOrgSaleVerificationNumbers(ORG, { saleVerificationId: SV, editedById: EDITOR, linkingNumber: '5512345678' })
+    expect(mockPrisma.$transaction).toHaveBeenCalledWith(expect.any(Function), ORDER_LOCK_WAIT_BUDGET)
+  })
+
   it('sin ningún número ⇒ 400', async () => {
     montarTx(verificacion())
     await expect(setOrgSaleVerificationNumbers(ORG, { saleVerificationId: SV, editedById: EDITOR })).rejects.toMatchObject({
@@ -471,6 +513,7 @@ describe('controlador y rutas de Ventas de la organización', () => {
     const r = res()
     await ctrl.listOrgSaleVerifications(req({ query: { numberAlert: 'todas' } }), r)
     expect(r.status).toHaveBeenCalledWith(400)
+    expect(r.json.mock.calls[0][0]).toMatchObject({ success: false, code: 'INVALID_NUMBER_ALERT' })
     expect(mockPrisma.payment.findMany).not.toHaveBeenCalled()
   })
 
@@ -507,7 +550,29 @@ describe('controlador y rutas de Ventas de la organización', () => {
     const r = res()
     await ctrl.setOrgSaleVerificationNumbers(req({ params: { orgId: ORG, id: SV }, body: { linkingNumber: 5512345678 } }), r)
     expect(r.status).toHaveBeenCalledWith(400)
+    expect(r.json.mock.calls[0][0]).toMatchObject({ success: false, code: 'INVALID_LINKING_NUMBER' })
     expect(mockPrisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('PATCH numbers con otro campo mal formado (allowNineDigits, reason) ⇒ 400 VALIDATION_ERROR, no INVALID_LINKING_NUMBER', async () => {
+    for (const body of [
+      { linkingNumber: '5512345678', allowNineDigits: 'sí' },
+      { linkingNumber: '5512345678', reason: 'x'.repeat(501) },
+    ]) {
+      const r = res()
+      await ctrl.setOrgSaleVerificationNumbers(req({ params: { orgId: ORG, id: SV }, body }), r)
+      expect(r.status).toHaveBeenCalledWith(400)
+      expect(r.json.mock.calls[0][0]).toMatchObject({ success: false, code: 'VALIDATION_ERROR' })
+    }
+    expect(mockPrisma.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('PATCH numbers con el interruptor apagado y un número mal escrito ⇒ 403 LINKING_NUMBER_DISABLED', async () => {
+    enabled.mockResolvedValue(false)
+    const r = res()
+    await ctrl.setOrgSaleVerificationNumbers(req({ params: { orgId: ORG, id: SV }, body: { linkingNumber: '123' } }), r)
+    expect(r.status).toHaveBeenCalledWith(403)
+    expect(r.json.mock.calls[0][0]).toMatchObject({ success: false, code: 'LINKING_NUMBER_DISABLED' })
   })
 
   it('un error que no es AppError (p. ej. de Prisma) no expone su code', async () => {

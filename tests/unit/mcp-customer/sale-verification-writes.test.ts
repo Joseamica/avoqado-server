@@ -196,6 +196,15 @@ describe('edit_sale_verification', () => {
     expect(out.ok).toBe(false)
     expect(mockEdit).not.toHaveBeenCalled()
   })
+  it('sólo reviewNotes sigue sin ser un cambio → «Indica al menos un campo»', async () => {
+    mockFindFirst.mockResolvedValue(PENDING)
+    const out = parse(
+      await call('edit_sale_verification', { saleVerificationId: 'sv1', reviewNotes: 'Falta la foto', reason: 'ajuste', confirm: true }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/Indica al menos un campo/)
+    expect(mockEdit).not.toHaveBeenCalled()
+  })
   it('confirm with amount → calls edit', async () => {
     mockFindFirst.mockResolvedValue(PENDING)
     mockEdit.mockResolvedValue({ status: 'PENDING' })
@@ -352,6 +361,36 @@ describe('edit_sale_verification — número de vinculación (camino aparte)', (
     expect(out.ok).toBe(false)
     expect(out.requiresConfirmation).toBeUndefined()
     expect(out.error).toMatch(/Corrige el número en una edición aparte/)
+    nothingWritten()
+  })
+
+  it.each([false, true])(
+    'número + reviewNotes (confirm=%s) → «Corrige el número en una edición aparte» y ninguna escritura',
+    async confirm => {
+      const out = parse(
+        await call('edit_sale_verification', {
+          saleVerificationId: 'sv1',
+          linkingNumber: '5512345678',
+          reviewNotes: 'Falta la foto de vinculación',
+          reason: 'corrección completa',
+          confirm,
+        }),
+      )
+      expect(out.ok).toBe(false)
+      expect(out.requiresConfirmation).toBeUndefined()
+      expect(out.error).toMatch(/Corrige el número en una edición aparte/)
+      expect(out.error).toMatch(/reviewNotes/)
+      nothingWritten()
+    },
+  )
+
+  it('9 dígitos sin allowNineDigits ni confirm → la vista previa pregunta «Tiene 9 dígitos. ¿Guardarlo así?»', async () => {
+    const out = parse(
+      await call('edit_sale_verification', { saleVerificationId: 'sv1', linkingNumber: '55 1234 567', reason: 'número mal capturado' }),
+    )
+    expect(out).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(out.change.numbers.linkingNumber).toEqual({ from: '5511112222', to: '551234567' })
+    expect(out.message).toContain('Tiene 9 dígitos. ¿Guardarlo así?')
     nothingWritten()
   })
 

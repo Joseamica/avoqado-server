@@ -253,8 +253,8 @@ describe('findVerificationIdsWithNumberAlert', () => {
     expect(sql).toContain('h."organizationId" = ?')
     expect(sql).toMatch(/paid_at >= \(\? AT TIME ZONE 'UTC'\)/)
     expect(sql).toMatch(/paid_at <= \(\? AT TIME ZONE 'UTC'\)/)
-    expect(sql).toMatch(/LIMIT 20001\b/)
-    expect(valuesOf()).toEqual(expect.arrayContaining([ORG, range.from, range.to]))
+    expect(sql).toMatch(/LIMIT \?\s*$/)
+    expect(valuesOf()).toEqual(expect.arrayContaining([ORG, range.from, range.to, 20001])) // ALERT_IDS_CAP + 1
   })
 
   it('repetido = otra llave con el mismo número; el histórico de la propia venta no cuenta', async () => {

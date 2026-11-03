@@ -3,6 +3,7 @@ import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod 
 import { z } from 'zod'
 import * as svc from '../../services/dashboard/sale-verification.org.dashboard.service'
 import { isLinkingNumberEnabledForOrg } from '../../services/playtelecom/linkingNumber.flag'
+import { NUMBER_ALERT_FILTERS } from '../../services/playtelecom/linkingNumber.duplicates'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import { analyticsLimiter } from '../../utils/concurrencyLimiter'
@@ -36,7 +37,7 @@ function sendError(res: Response, error: any, label: string): void {
   })
 }
 
-const numberAlertSchema = z.enum(['any', 'duplicate', 'missing', 'not10']).optional()
+const numberAlertSchema = z.enum(NUMBER_ALERT_FILTERS).optional()
 
 function parseBool(raw: unknown): boolean | undefined {
   if (raw === undefined || raw === null) return undefined
@@ -69,7 +70,9 @@ export async function listOrgSaleVerifications(req: Request, res: Response): Pro
 
     const alert = numberAlertSchema.safeParse(numberAlert)
     if (!alert.success) {
-      res.status(400).json({ success: false, message: 'numberAlert debe ser any, duplicate, missing o not10' })
+      res
+        .status(400)
+        .json({ success: false, message: 'numberAlert debe ser any, duplicate, missing o not10', code: 'INVALID_NUMBER_ALERT' })
       return
     }
 
@@ -428,11 +431,17 @@ export async function setOrgSaleVerificationNumbers(req: Request, res: Response)
       res.status(401).json({ success: false, message: 'No staff context' })
       return
     }
+    // La forma del cuerpo va primero (400); lo demás (interruptor ⇒ 403, formato ⇒ 400) lo decide el servicio.
     const body = numbersBodySchema.safeParse(req.body ?? {})
     if (!body.success) {
-      res
-        .status(400)
-        .json({ success: false, message: 'Los números van como texto; allowNineDigits, como booleano', code: 'INVALID_LINKING_NUMBER' })
+      const numberIssue = body.error.issues.some(i => i.path[0] === 'linkingNumber' || i.path[0] === 'portedNumber')
+      res.status(400).json({
+        success: false,
+        message: numberIssue
+          ? 'Los números van como texto, de hasta 40 caracteres'
+          : 'allowNineDigits va como booleano y reason como texto de hasta 500 caracteres',
+        code: numberIssue ? 'INVALID_LINKING_NUMBER' : 'VALIDATION_ERROR',
+      })
       return
     }
 

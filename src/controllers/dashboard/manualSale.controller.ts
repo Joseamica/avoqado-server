@@ -11,8 +11,10 @@ import type { BulkManualSalesInput } from '@/schemas/dashboard/manualSale.schema
  * outside the TPV (PlayTelecom / Walmart). Two org-scoped handlers back the two
  * endpoints declared in `organizationDashboard.routes.ts`:
  *
- *   preview → bulkManualSales(orgId, actor, rows, apply=false)  (dry, read-only)
- *   apply   → bulkManualSales(orgId, actor, rows, apply=true)   (writes one sale/row)
+ *   preview → bulkManualSales(orgId, actor, rows, apply=false, opts)  (dry, read-only)
+ *   apply   → bulkManualSales(orgId, actor, rows, apply=true, opts)   (writes one sale/row)
+ *
+ * `opts.requireLinkingNumber` = el interruptor del número de vinculación de la organización.
  *
  * Both gate on the SERIALIZED_INVENTORY module for the org BEFORE calling the
  * service. Because SERIALIZED_INVENTORY is (for PlayTelecom) enabled at the ORG

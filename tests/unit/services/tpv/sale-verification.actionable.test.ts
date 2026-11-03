@@ -174,6 +174,20 @@ describe('GET tpv/verification/pending', () => {
     expect(text).toMatch(/ORDER BY complete, created_at, id\s+LIMIT/)
   })
 
+  it('el estado se compara contra el enum, no contra su texto: la página y el conteo pueden usar el índice de status', async () => {
+    db.keys = [key(1)]
+    db.total = 1
+
+    await getPendingVerifications(ORG, PROMOTER)
+
+    const texts = (prisma.$queryRaw as jest.Mock).mock.calls.map(c => sqlText(c[0]))
+    expect(texts).toHaveLength(2)
+    for (const text of texts) {
+      expect(text).toContain('sv.status = ANY(?::"SaleVerificationStatus"[])')
+      expect(text).not.toContain('status::text')
+    }
+  })
+
   it('con 205 pendientes devuelve 200, total 205 y un nextCursor que trae las 5 que faltan', async () => {
     db.keys = Array.from({ length: 205 }, (_, i) => key(i + 1))
     db.total = 205

@@ -394,7 +394,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'edit_sale_verification',
-    'Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter\'s Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status="FAILED" ("Revisar por promotor"), reviewNotes es obligatorio (mín. 5 caracteres). Cuando la organización tiene activado el número de vinculación, también corrige linkingNumber (número de vinculación) y/o portedNumber (número portado, sólo en una portabilidad): 10 dígitos, o 9 con allowNineDigits:true después de preguntarle al operador. Corrige el número en una edición aparte: si mandas un número junto con amount, paymentForm, isPortabilidad o status, no se guarda nada.',
+    'Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter\'s Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status="FAILED" ("Revisar por promotor"), reviewNotes es obligatorio (mín. 5 caracteres). Cuando la organización tiene activado el número de vinculación, también corrige linkingNumber (número de vinculación) y/o portedNumber (número portado, sólo en una portabilidad): 10 dígitos, o 9 con allowNineDigits:true después de preguntarle al operador. Corrige el número en una edición aparte: si mandas un número junto con amount, paymentForm, isPortabilidad, status o reviewNotes, no se guarda nada.',
     {
       saleVerificationId: z.string().min(1).describe('The verification id'),
       amount: z.number().min(0).optional().describe('New amount in PESOS (major units), e.g. 250'),
@@ -433,11 +433,12 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       const hasNumbers = linkingNumber !== undefined || portedNumber !== undefined
       const hasOther = amount !== undefined || paymentForm !== undefined || isPortabilidad !== undefined || status !== undefined
       // Codex plan r1 #5: dos servicios en una llamada podrían dejar una parte guardada; se rechaza antes de escribir.
-      if (hasNumbers && hasOther) {
+      // reviewNotes también cuenta: el camino de números no la guarda y se perdería en silencio.
+      if (hasNumbers && (hasOther || reviewNotes !== undefined)) {
         return text({
           ok: false,
           error:
-            'Corrige el número en una edición aparte: manda linkingNumber/portedNumber sin amount, paymentForm, isPortabilidad ni status.',
+            'Corrige el número en una edición aparte: manda linkingNumber/portedNumber sin amount, paymentForm, isPortabilidad, status ni reviewNotes.',
         })
       }
       if (hasNumbers) return editSaleNumbers(sale, { linkingNumber, portedNumber, allowNineDigits, reason, confirm })

@@ -99,7 +99,8 @@ async function main(): Promise<void> {
         `inválidas ${resumen.invalidos} · números repetidos en el archivo ${resumen.repetidos}`,
     )
     if (enVariasVentas.size) console.log(`⚠️  ${enVariasVentas.size} ICCID están en más de una venta: se usó la más reciente.`)
-    for (const i of plan.invalid) console.log(`  inválida: fila ${i.rowIndex} «${i.raw}»`)
+    // Sólo el número de fila: el valor crudo puede ser el teléfono de un cliente (va en el JSON de --report).
+    if (plan.invalid.length) console.log(`  inválidas (${plan.invalid.length}), filas: ${plan.invalid.map(i => i.rowIndex).join(', ')}`)
     const guardarReporte = (aplicado?: object) => {
       if (reporte) writeFileSync(reporte, JSON.stringify({ organizationId: org.id, importBatch, resumen, plan, aplicado }, null, 2))
     }

@@ -103,6 +103,8 @@ interface RowNumbers {
   linkingNumber: string | null
   portedNumber: string | null
 }
+/** Una fila de «crear» de la vista previa con sus números ya normalizados (para marcar repetidos al final). */
+type NumberedRow = RowNumbers & { result: RowResult; iccid: string }
 
 const isPortabilidadSale = (saleType: string): boolean => /portabilidad/i.test(saleType)
 
@@ -124,7 +126,7 @@ function resolveRowNumbers(row: ManualSaleRowInput, requireLinkingNumber: boolea
   const linking = readNumber(row.linkingNumber, 'Falta el número de vinculación', 'Número de vinculación inválido')
   const ported = isPortabilidadSale(row.saleType)
     ? readNumber(row.portedNumber, 'Falta el número portado', 'Número portado inválido')
-    : row.portedNumber?.trim()
+    : normalizeLinkingNumber(row.portedNumber ?? '') // un «-» o «( )» de relleno no tiene dígitos: cuenta como vacío
       ? { error: 'La venta no es de portabilidad: quita el número portado' }
       : null
   if (typeof linking !== 'string' || (ported !== null && typeof ported !== 'string')) {
@@ -522,7 +524,7 @@ export async function bulkManualSales(
   const omitir: RowResult[] = []
   const error: RowResult[] = []
   // Filas de «crear» con sus números ya normalizados, para marcar repetidos al final de la vista previa.
-  const numbered: Array<RowNumbers & { result: RowResult; iccid: string }> = []
+  const numbered: NumberedRow[] = []
 
   // 1. Dedup by normalized ICCID — keep the first occurrence, short-circuit
   //    every later one into `omitir` before any resolver/create runs.
@@ -633,7 +635,7 @@ export async function bulkManualSales(
  * «crear» con un conteo en memoria. El mismo número en vinculación y portado de una fila cuenta una vez: no es repetido
  * consigo mismo.
  */
-async function markDuplicateNumbers(orgId: string, rows: Array<RowNumbers & { result: RowResult; iccid: string }>): Promise<void> {
+async function markDuplicateNumbers(orgId: string, rows: NumberedRow[]): Promise<void> {
   const inOrg = await findDuplicatesForSales(
     orgId,
     rows.map(r => ({

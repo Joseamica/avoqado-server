@@ -38,11 +38,17 @@ describe('tpv.routes — lecturas de la verificación', () => {
       definition: { openapi: '3.0.0', info: { title: 'test', version: '1.0.0' } },
       apis: [path.join(__dirname, '../../../src/routes/tpv.routes.ts')],
       failOnErrors: true,
-    }) as { paths: Record<string, { get?: { summary?: string }; post?: { responses?: Record<string, unknown> } }> }
+    }) as { paths: Record<string, { get?: { summary?: string }; post?: { responses?: Record<string, unknown>; requestBody?: any } }> }
 
     for (const literal of ['number-check', 'actionable', 'status', 'pending']) {
       expect(spec.paths[`/tpv/verification/${literal}`]?.get?.summary).toEqual(expect.any(String))
     }
     expect(spec.paths['/tpv/verification/{verificationId}/number']?.post?.responses).toHaveProperty('403')
+    // proof-of-sale documenta los campos de la terminal nueva y el 409 VERIFICATION_MOVED.
+    const proof = spec.paths['/tpv/verification/proof-of-sale']?.post
+    expect(Object.keys(proof?.requestBody?.content['application/json'].schema.properties ?? {})).toEqual(
+      expect.arrayContaining(['linkingNumber', 'portedNumber', 'captureSeq', 'captureDeviceId', 'idempotencyKey', 'capturedAt']),
+    )
+    expect(proof?.responses).toHaveProperty('409')
   })
 })
