@@ -2,7 +2,7 @@ import type { PlatformCharge } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 import { handleBillingError } from '@/controllers/superadmin/platformBilling.controller'
 import * as chargesService from '@/services/superadmin/platform-charges/charges.service'
-import type { InvoiceOccurrenceInput } from '@/services/superadmin/platform-charges/invoice.service'
+import type { ConfirmedReceptor, InvoiceOccurrenceInput } from '@/services/superadmin/platform-charges/invoice.service'
 import * as occurrencesService from '@/services/superadmin/platform-charges/occurrences.service'
 import { dbToCalendarDay } from '@/services/superadmin/platform-charges/schedule'
 
@@ -56,8 +56,8 @@ export async function getPayPreview(req: Request, res: Response, next: NextFunct
 /** POST /api/v1/superadmin/platform-charges/occurrences/:id/pay — «Ya me pagó»; con `invoice: true` también timbra. */
 export async function payOccurrence(req: Request, res: Response, next: NextFunction) {
   try {
-    const { invoice } = req.body as { invoice: boolean }
-    res.json({ success: true, data: await occurrencesService.payOccurrence(req.params.id, { invoice }, actorOf(req)) })
+    const { invoice, receptor } = req.body as { invoice: boolean; receptor?: ConfirmedReceptor }
+    res.json({ success: true, data: await occurrencesService.payOccurrence(req.params.id, { invoice, receptor }, actorOf(req)) })
   } catch (error) {
     handleBillingError(error, res, next)
   }

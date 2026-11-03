@@ -107,7 +107,7 @@ function factura(over: Fila = {}): Fila {
   }
 }
 
-const PERFIL = { id: 'perfil-1', rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV' }
+const PERFIL = { id: 'perfil-1', rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV', regimenFiscal: '601', codigoPostal: '06000' }
 
 // ── Doble en memoria ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -152,7 +152,10 @@ function instalar() {
     async ({ where }: any) => mundo.cfdis.find(c => c.idempotencyKey === where.idempotencyKey) ?? null,
   )
   prismaMock.platformCfdi.count.mockImplementation(async () => mundo.ppd)
-  prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where }: any) => (where.id === PERFIL.id ? { ...PERFIL } : null))
+  prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where, select }: any) => {
+    if (where.id !== PERFIL.id) return null
+    return select ? Object.fromEntries(Object.keys(select).map(campo => [campo, (PERFIL as any)[campo]])) : { ...PERFIL }
+  })
   mockFindProfileId.mockResolvedValue(PERFIL.id)
   mockResolver.mockResolvedValue({ kind: 'NONE' })
 }
@@ -263,6 +266,15 @@ describe('platform-charges/occurrences — payOccurrence', () => {
     expect(mockInvoice).toHaveBeenCalledWith('occ-1', { actorId: 'staff-1' })
     expect(r.invoice).toMatchObject({ ok: true, cfdi: { id: 'cfdi-1', status: 'STAMPED' } })
     expect(mundo.occ.invoiceMode).toBe('AUTOMATIC') // se timbró: sigue siendo automática
+  })
+
+  it('🔴 lo que el diálogo enseñó viaja hasta el timbrado: si ya es otra cosa, no se le factura a quien no se vio', async () => {
+    const VISTO = { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV', regimenFiscal: '601', codigoPostal: '06000' }
+    mockInvoice.mockResolvedValue(factura())
+
+    await payOccurrence('occ-1', { invoice: true, receptor: VISTO }, 'staff-1', AHORA)
+
+    expect(mockInvoice).toHaveBeenCalledWith('occ-1', { actorId: 'staff-1', receptor: VISTO })
   })
 
   it('pay NO repite PLATFORM_CFDI_ISSUED: ya la escribe invoiceOccurrence al timbrar', async () => {
@@ -686,7 +698,7 @@ describe('platform-charges/occurrences — payPreview', () => {
       concepts: CONCEPTOS,
       ...TOTALES,
       willInvoice: true,
-      receptor: { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV' },
+      receptor: { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV', regimenFiscal: '601', codigoPostal: '06000' },
       pendingPpdCount: 0,
     })
   })

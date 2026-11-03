@@ -25,7 +25,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { PlatformBillingError } from '@/services/superadmin/platform-billing/platformEmisor.service'
 import prisma from '@/utils/prismaClient'
 import { pageParams } from './charges.service'
-import { findProfileId, intentKey, invoiceOccurrence, resolverIntento } from './invoice.service'
+import { findProfileId, intentKey, invoiceOccurrence, resolverIntento, type ConfirmedReceptor } from './invoice.service'
 import type { InvoiceOccurrenceInput } from './invoice.service'
 import { withChargeLock } from './lock'
 import { addDays, calendarDayToDb, dbToCalendarDay, monthBoundsInMexico, todayInMexico } from './schedule'
@@ -101,8 +101,8 @@ export interface PayPreview {
   totalCents: number
   /** La casilla «Timbrar factura ahora» sale marcada. */
   willInvoice: boolean
-  /** A quién se le timbraría; `null` si no hay datos fiscales con qué hacerlo. */
-  receptor: { rfc: string; razonSocial: string } | null
+  /** A quién se le timbraría; `null` si no hay datos fiscales con qué hacerlo. Regresa en `pay`: sólo se timbra lo que se vio. */
+  receptor: ConfirmedReceptor | null
   /** Facturas PPD ya timbradas del receptor que todavía no se liquidan en «Facturas CFDI». */
   pendingPpdCount: number
 }
@@ -289,7 +289,12 @@ function invoiceFailure(error: unknown, occurrenceId: string): Extract<PayInvoic
  * pagado y la respuesta trae `invoice: { ok: false, message, code, field? }`. Un proceso que muere en medio deja «Pagado · sin
  * factura», con su botón «Facturar».
  */
-export async function payOccurrence(id: string, input: { invoice: boolean }, actorId: string, now: Date = new Date()): Promise<PayResult> {
+export async function payOccurrence(
+  id: string,
+  input: { invoice: boolean; receptor?: ConfirmedReceptor },
+  actorId: string,
+  now: Date = new Date(),
+): Promise<PayResult> {
   const { chargeId } = await probe(id)
 
   const paid = await withChargeLock(chargeId, async tx => {
@@ -319,7 +324,7 @@ export async function payOccurrence(id: string, input: { invoice: boolean }, act
   let invoice: PayInvoiceResult | null = null
   if (paid && input.invoice) {
     try {
-      invoice = { ok: true, cfdi: await invoiceOccurrence(id, { actorId }) }
+      invoice = { ok: true, cfdi: await invoiceOccurrence(id, input.receptor ? { actorId, receptor: input.receptor } : { actorId }) }
     } catch (error) {
       invoice = invoiceFailure(error, id)
     }
@@ -443,7 +448,10 @@ export async function payPreview(occurrenceId: string): Promise<PayPreview> {
 
   const profileId = await findProfileId(row.charge)
   const profile = profileId
-    ? await prisma.billingTaxProfile.findUnique({ where: { id: profileId }, select: { rfc: true, razonSocial: true } })
+    ? await prisma.billingTaxProfile.findUnique({
+        where: { id: profileId },
+        select: { rfc: true, razonSocial: true, regimenFiscal: true, codigoPostal: true },
+      })
     : null
   const pendingPpdCount = profile && profileId ? await countPendingPpd(profileId) : 0
 
@@ -458,7 +466,7 @@ export async function payPreview(occurrenceId: string): Promise<PayPreview> {
     taxCents: row.taxCents,
     totalCents: row.totalCents,
     willInvoice: row.invoiceMode === 'AUTOMATIC' && profile !== null && pendingPpdCount === 0,
-    receptor: profile ? { rfc: profile.rfc, razonSocial: profile.razonSocial } : null,
+    receptor: profile,
     pendingPpdCount,
   }
 }

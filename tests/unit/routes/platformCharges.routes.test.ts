@@ -125,6 +125,18 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
       'La clave del SAT del concepto es requerida',
     ])
     expect(errores(invoiceOccurrenceSchema, body({ billingTaxProfileId: '' }))).toEqual(['El perfil fiscal no es válido'])
+  })
+
+  it('🔴 facturar y pagar reciben lo que se vio en pantalla, completo o nada: a medias no se puede comparar', () => {
+    const receptor = { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA', regimenFiscal: '601', codigoPostal: '06000' }
+    expect(errores(invoiceOccurrenceSchema, body({ receptor }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: true, receptor }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: true }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: true, receptor: { rfc: 'LUN010101AAA' } }))).toEqual([
+      'La razón social del receptor es requerida',
+      'El régimen fiscal del receptor es requerido',
+      'El código postal del receptor es requerido',
+    ])
     expect(errores(invoiceOccurrenceSchema, body({ conceptKeys: 'x' }))).toEqual([
       'Las claves del SAT deben ser una lista, un par por concepto',
     ])

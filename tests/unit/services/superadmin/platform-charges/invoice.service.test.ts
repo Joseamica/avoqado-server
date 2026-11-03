@@ -88,6 +88,9 @@ function fila(over: Fila = {}): Fila {
     idempotencyKey: LLAVE,
     receptorRfc: 'LUN010101AAA',
     receptorNombre: 'ESTETICA LUNA SA DE CV',
+    receptorRegimen: '601',
+    receptorCp: '06000',
+    usoCfdi: 'G03',
     formaPago: '03',
     metodoPago: 'PUE',
     ...TOTALES,
@@ -399,7 +402,7 @@ describe('resolverIntento — CANCELLED: se pregunta por la cancelación', () =>
       mundo.rows = [filaCancelada()]
       pac.getCancellationStatus.mockResolvedValue({ status: estado, cancelledAt: new Date() })
 
-      await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+      await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
       expect(pac.getCancellationStatus).toHaveBeenCalledWith('fa-1')
       expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled() // la cancelada se conserva: es el rastro fiscal
@@ -557,7 +560,7 @@ describe('resolverIntento — con facturapiId (el PAC aceptó pero no timbró)',
     mundo.rows = [enVuelo()]
     pac.getInvoice.mockResolvedValue({ ...PAC_VALIDO, status: 'canceled' })
 
-    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
     expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
     expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', cancelStatus: 'canceled' })
@@ -569,7 +572,7 @@ describe('resolverIntento — con facturapiId (el PAC aceptó pero no timbró)',
     mundo.rows = [enVuelo()] // STAMPING con facturapiId, sin UUID ni folio todavía
     pac.getInvoice.mockResolvedValue({ ...PAC_VALIDO, status: 'canceled', uuid: 'UUID-1', serie: 'B', folio: '118' })
 
-    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
     expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', facturapiId: 'fa-1', uuid: 'UUID-1', serie: 'B', folio: '118' })
   })
@@ -678,7 +681,7 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
 
     mundo.rows[0].createdAt = hace(2.1)
     pac.findByExternalId.mockResolvedValue(null)
-    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
     expect(pac.findByExternalId).toHaveBeenCalledWith(LLAVE)
   })
@@ -720,7 +723,7 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
     it('null (el PAC no tiene nada con esa llave): cierra — borra la fila y sube invoiceSeq — y da NONE', async () => {
       pac.findByExternalId.mockResolvedValue(null)
 
-      await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+      await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
       expect(mundo.rows).toHaveLength(0)
       expect(mundo.occurrence.invoiceSeq).toBe(1)
@@ -729,7 +732,7 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
     it('canceled: cierra, y la fila se queda CANCELLED con su UUID: ese documento existe ante el SAT y el contador tiene que verlo', async () => {
       pac.findByExternalId.mockResolvedValue(resumen({ status: 'canceled', uuid: 'UUID-1', serie: 'B', folio: '118' }))
 
-      await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+      await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
       expect(mundo.rows).toHaveLength(1)
       expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', uuid: 'UUID-1', serie: 'B', folio: '118' })
@@ -956,7 +959,7 @@ describe('resolverIntento — un PAC que no contesta no deja la petición colgad
     mundo.rows = [fila({ status: 'STAMP_FAILED' })]
     pac.findByExternalId.mockResolvedValue(null)
 
-    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
 
     expect(jest.getTimerCount()).toBe(0)
   })
@@ -1615,10 +1618,42 @@ describe('invoiceOccurrence — lo que cambia a media operación y no debe timbr
       expect(mundo.rows).toHaveLength(0)
     })
 
+    it('🔴 «Consultar estado» no trae datos: si el intento se perdió y el perfil ya es otro, lo cierra y NO le timbra a quien nadie vio', async () => {
+      pac.createInvoice.mockRejectedValueOnce(new Error('ETIMEDOUT'))
+      await expect(invoiceOccurrence('occ-1', input)).rejects.toBeInstanceOf(PlatformBillingError)
+      mundo.rows[0].createdAt = hace(3)
+      pac.findByExternalId.mockResolvedValue(null)
+      ;(mundo.profile as Fila).rfc = 'BBB010101BBB'
+
+      const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect((error as ConflictError).message).toMatch(/datos fiscales/)
+      expect(pac.createInvoice).toHaveBeenCalledTimes(1) // sólo el intento perdido
+      // Queda cerrado y con la llave siguiente libre: la fila ofrece «Facturar», donde el dato nuevo se ve y se confirma.
+      expect(mundo.rows).toHaveLength(0)
+      expect(mundo.occurrence.invoiceSeq).toBe(1)
+    })
+
+    it('«Consultar estado» con un intento perdido y el mismo perfil: vuelve a timbrar sin preguntar', async () => {
+      pac.createInvoice.mockRejectedValueOnce(new Error('ETIMEDOUT')).mockResolvedValue(PAC_VALIDO)
+      await expect(invoiceOccurrence('occ-1', input)).rejects.toBeInstanceOf(PlatformBillingError)
+      mundo.rows[0].createdAt = hace(3)
+      pac.findByExternalId.mockResolvedValue(null)
+
+      await expect(invoiceOccurrence('occ-1', input)).resolves.toMatchObject({ status: 'STAMPED', idempotencyKey: 'por-cobrar:occ-1:1' })
+    })
+
+    it('con la corrección que acaba de confirmar, un intento cerrado con otros datos no estorba', async () => {
+      mundo.rows.push(fila({ status: 'STAMP_FAILED', receptorCp: '00000', createdAt: hace(3) }))
+      pac.findByExternalId.mockResolvedValue(null)
+      pac.createInvoice.mockResolvedValue(PAC_VALIDO)
+
+      await expect(invoiceOccurrence('occ-1', { ...input, receptor: EN_PANTALLA })).resolves.toMatchObject({ status: 'STAMPED' })
+    })
+
     it('con una factura viva con los mismos datos, la regresa sin timbrar', async () => {
-      mundo.rows.push(
-        fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1', receptorRegimen: '601', receptorCp: '06000', usoCfdi: 'G03' }),
-      )
+      mundo.rows.push(fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1' }))
 
       await expect(invoiceOccurrence('occ-1', { ...input, receptor: EN_PANTALLA })).resolves.toMatchObject({ id: 'cfdi-1' })
 

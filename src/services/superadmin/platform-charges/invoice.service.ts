@@ -50,7 +50,8 @@ const PAYMENT_FORM_TRANSFER = '03'
 const IN_FLIGHT_NOTICE = 'La factura pudo quedar en camino: consulta su estado en 2 minutos y no la timbres otra vez.'
 
 /** Lo que `resolverIntento` concluye: no hay intento (se puede timbrar con la llave actual) o hay una factura VIVA. */
-export type InvoiceAttempt = { kind: 'NONE' } | { kind: 'LIVE'; cfdi: PlatformCfdi }
+/** `closed`: el intento que se acaba de cerrar (no dejó factura viva). Sin él, nunca hubo intento. */
+export type InvoiceAttempt = { kind: 'NONE'; closed?: PlatformCfdi } | { kind: 'LIVE'; cfdi: PlatformCfdi }
 
 export interface InvoiceOccurrenceInput {
   /** Perfil fiscal capturado o corregido en el diálogo de facturar: se guarda en el cobro. */
@@ -59,7 +60,8 @@ export interface InvoiceOccurrenceInput {
   conceptKeys?: { satProductKey: string; satUnitKey: string }[]
   /**
    * Lo que el operador vio en pantalla al pedir la factura. Si viene, es lo único que se puede timbrar: el perfil de una organización o
-   * un negocio se sobrescribe en la misma fila, así que su id no dice qué datos se confirmaron.
+   * un negocio se sobrescribe en la misma fila, así que su id no dice qué datos se confirmaron. «Consultar estado» no lo trae: ahí lo
+   * confirmado es lo del intento que se está consultando.
    */
   receptor?: ConfirmedReceptor
   /** Quién lo pidió (authContext.userId). */
@@ -346,7 +348,7 @@ async function resolveCancelled(occurrence: Occurrence, row: PlatformCfdi, actor
     case 'canceled':
     case 'accepted':
       await closeAttempt(occurrence, row, actorId)
-      return { kind: 'NONE' }
+      return { kind: 'NONE', closed: row }
     case 'pending':
       throw conflict(
         `La cancelación de ${labelOf(row)} sigue en trámite ante el SAT; consulta de nuevo más tarde`,
@@ -379,7 +381,7 @@ async function resolveWithProviderId(
   const doc = await askPac(() => provider.getInvoice(providerId))
   if (doc.status === 'canceled') {
     await closeAttempt(occurrence, row, actorId, { uuid: doc.uuid, serie: doc.serie, folio: doc.folio })
-    return { kind: 'NONE' }
+    return { kind: 'NONE', closed: row }
   }
   if (doc.status === 'valid' && doc.uuid) return adoptInvoice(occurrence, row, { ...doc, uuid: doc.uuid }, actorId)
   throw stillProcessing()
@@ -391,12 +393,12 @@ async function resolveLostAttempt(occurrence: Occurrence, row: PlatformCfdi, act
   const found = await askPac(() => provider.findByExternalId(intentKey(occurrence)))
   if (found === null) {
     await closeAttempt(occurrence, row, actorId)
-    return { kind: 'NONE' }
+    return { kind: 'NONE', closed: row }
   }
   if (found.status === 'canceled') {
     // Ese documento existe ante el SAT aunque esté cancelado: se queda como rastro fiscal, igual que en `resolveWithProviderId`.
     await closeAttempt(occurrence, row, actorId, { uuid: found.uuid, serie: found.serie, folio: found.folio })
-    return { kind: 'NONE' }
+    return { kind: 'NONE', closed: row }
   }
   if (found.status === 'valid' && found.uuid) return adoptInvoice(occurrence, row, { ...found, uuid: found.uuid }, actorId)
   await saveProviderId(occurrence, row, found.providerInvoiceId)
@@ -567,7 +569,7 @@ type ReceptorOfRow = Pick<
   'receptorRfc' | 'receptorNombre' | 'receptorRegimen' | 'receptorCp' | 'usoCfdi'
 >
 
-/** Sin `receptor` (factura automática, «Consultar estado») no hay nada confirmado en pantalla con qué comparar. */
+/** Sin nada confirmado no hay con qué comparar: es una llamada que no timbra lo de nadie (`invoiceOccurrence` lo resuelve). */
 function matchesConfirmed(confirmed: ConfirmedReceptor | undefined, row: ReceptorOfRow): boolean {
   return (
     !confirmed ||
@@ -665,6 +667,19 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
     return attempt.cfdi
   }
 
+  // 🔴 «Consultar estado» no trae datos y, si el intento no dejó factura, vuelve a timbrar solo. Lo último que alguien confirmó es lo de ese
+  // intento: si el perfil ya es otro, no se le timbra a quien nadie vio (409), y la fila ofrece «Facturar», donde se ve y se confirma.
+  const confirmed: ConfirmedReceptor | undefined =
+    input.receptor ??
+    (attempt.closed
+      ? {
+          rfc: attempt.closed.receptorRfc,
+          razonSocial: attempt.closed.receptorNombre,
+          regimenFiscal: attempt.closed.receptorRegimen,
+          codigoPostal: attempt.closed.receptorCp,
+        }
+      : undefined)
+
   // El modo de prueba se decide ANTES de escribir nada: con una configuración que se negaría a timbrar, tampoco se reescribe la foto.
   const emisor = await getActivePlatformEmisor()
   if (!emisor) throw new PlatformBillingError('No hay emisor de plataforma configurado', 'NO_EMISOR')
@@ -684,7 +699,7 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
       sandbox,
       totals: { subtotalCents: snapshot.subtotalCents, discountCents: 0, taxCents: snapshot.taxCents, totalCents: snapshot.totalCents },
       platformChargeOccurrenceId: occurrence.id,
-      reserveCheck: (tx, row) => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId, input.receptor, row),
+      reserveCheck: (tx, row) => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId, confirmed, row),
     })
   } catch (error) {
     throw await translateStampFailure(error, key)
