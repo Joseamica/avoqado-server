@@ -66,6 +66,31 @@ export function soloSaldoLoImpide(p: {
   return !(p.refundMethod === undefined && p.pagadoConSaldo)
 }
 
+/**
+ * «Sólo saldo a favor» para quien devuelve fuera del POS (Reembolso del panel e `issue_refund` del MCP). Ahí no se puede dar saldo ni
+ * marcar «es por defecto» (spec, no-metas), así que es la misma regla, pero el rechazo manda al POS. Sin llaves no restringe.
+ */
+export async function exigirSoloSaldoFueraDelPos(
+  cliente: Pick<Prisma.TransactionClient, 'venueSettings'>,
+  p: { venueId: string; reason: string; refundMethod?: DevolverCon; pagadoConSaldo: boolean },
+): Promise<void> {
+  if (!MOTIVOS_DE_SOLO_SALDO.has(p.reason)) return
+  const ajustes = await cliente.venueSettings.findUnique({ where: { venueId: p.venueId }, select: { storeCreditOnly: true } })
+  if (
+    soloSaldoLoImpide({
+      storeCreditOnly: soloSaldoEfectivo(ajustes?.storeCreditOnly),
+      reason: p.reason,
+      refundMethod: p.refundMethod,
+      pagadoConSaldo: p.pagadoConSaldo,
+    })
+  ) {
+    throw new BadRequestError(
+      'Este negocio devuelve sólo como saldo a favor. Hazlo desde el POS, donde también puedes marcar que es por defecto.',
+      'STORE_CREDIT_ONLY',
+    )
+  }
+}
+
 const cobroParaDevolver = (venueId: string, paymentId: string) =>
   prisma.payment.findFirst({
     where: { id: paymentId, venueId },

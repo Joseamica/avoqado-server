@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import * as refundService from '../../services/dashboard/refund.dashboard.service'
+import { exigirSoloSaldoFueraDelPos } from '../../services/storeCredit/storeCreditRefund.service'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
 /**
@@ -42,6 +43,8 @@ export async function issueRefund(req: Request, res: Response, next: NextFunctio
       staffId: req.authContext?.userId,
       note: typeof note === 'string' ? note : null,
       tipRefundCents: typeof tipRefundCents === 'number' ? tipRefundCents : undefined,
+      reglasBajoCandado: (tx, cobro) =>
+        exigirSoloSaldoFueraDelPos(tx, { venueId, reason, pagadoConSaldo: cobro.original.tenderSystemKind === 'GIFT_CARD' }),
     })
 
     return res.status(201).json({ success: true, data: result })
