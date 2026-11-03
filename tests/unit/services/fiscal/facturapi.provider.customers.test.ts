@@ -114,6 +114,27 @@ describe('FacturapiProvider — customers', () => {
       expect(error.validation).toEqual({ valid: false, errors: [{ field, message }] })
     })
 
+    it('🔴 varios datos mal a la vez vienen en `errors[]`, sin campo en la raíz (según su documentación): cada uno marca el suyo', async () => {
+      red.mockResolvedValue(
+        responde(400, {
+          code: 'invalid_request',
+          message: 'El nombre no coincide',
+          errors: [
+            { code: 'legal_name_mismatch', path: 'legal_name', message: 'El nombre no coincide' },
+            { code: 'tax_address_zip_mismatch', path: 'address.zip', message: 'El CP no coincide' },
+          ],
+        }),
+      )
+
+      const error = await new FacturapiProvider('sk_test_x').upsertCustomer(DATOS).catch(e => e)
+
+      expect(error).toBeInstanceOf(CustomerDataRejectedError)
+      expect(error.validation.errors).toEqual([
+        { field: 'razonSocial', message: 'El nombre no coincide' },
+        { field: 'codigoPostal', message: 'El CP no coincide' },
+      ])
+    })
+
     it('🔴 un rechazo al actualizar no crea otro Customer', async () => {
       red.mockResolvedValue(responde(400, { code: 'tax_id_not_found', path: 'tax_id', message: 'No existe' }))
 
