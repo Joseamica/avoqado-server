@@ -5,7 +5,13 @@
 import { StaffRole } from '@prisma/client'
 
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
-import { APPROVE, managersWithApproveSet, planDenyApprove } from '../../../scripts/negar-aprobar-a-supervisores'
+import {
+  APPROVE,
+  MANUAL_SALES,
+  managersWithApproveSet,
+  managersWithManualSales,
+  planDenyApprove,
+} from '../../../scripts/negar-aprobar-a-supervisores'
 
 const REVIEW = 'sale-verifications:review'
 
@@ -60,5 +66,38 @@ describe('managersWithApproveSet', () => {
       fila('WAITER', [REVIEW]),
     ]
     expect(managersWithApproveSet(filas, evaluatePermissionList)).toEqual(filas.slice(0, 4))
+  })
+})
+
+// A11b punto 9: Ventas externas crea ventas ya aprobadas; el MANAGER que la puede usar sigue aprobando por ahí. Sólo se reporta.
+describe('managersWithManualSales', () => {
+  const fila = (venueId: string, role: string, permissions: string[], deniedPermissions: string[] = []) => ({
+    venueId,
+    role,
+    permissions,
+    deniedPermissions,
+  })
+  const persona = (role: string, permissions: string[] | null) => ({ role, permissionSet: permissions ? { permissions } : null })
+
+  it('reporta las tiendas cuya fila de MANAGER lo concede (también por comodín) y no la que lo niega', () => {
+    const filas = [
+      fila('t-agrega', 'MANAGER', [MANUAL_SALES]),
+      fila('t-comodin', 'MANAGER', ['manual-sales:*']),
+      fila('t-niega', 'MANAGER', [MANUAL_SALES], [MANUAL_SALES]),
+      fila('t-default', 'MANAGER', []), // MANAGER no lo trae por default
+      fila('t-otro-rol', 'ADMIN', [MANUAL_SALES]),
+    ]
+    expect(managersWithManualSales(filas, [], hasPermission, evaluatePermissionList).venueIds).toEqual(['t-agrega', 't-comodin'])
+  })
+
+  it('reporta al MANAGER cuyo PermissionSet lo concede; sin conjunto u otro rol, no', () => {
+    const personas = [
+      persona('MANAGER', [MANUAL_SALES]),
+      persona('MANAGER', ['*:*']),
+      persona('MANAGER', ['orders:read']),
+      persona('MANAGER', null),
+      persona('WAITER', [MANUAL_SALES]),
+    ]
+    expect(managersWithManualSales([], personas, hasPermission, evaluatePermissionList).withSet).toEqual(personas.slice(0, 2))
   })
 })

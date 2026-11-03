@@ -13,6 +13,9 @@
  * Un MANAGER con `PermissionSet` propio no usa los permisos del rol: si su conjunto concede `approve` o `review`, la negación no
  * lo alcanza. El script lo REPORTA y no lo toca (decide el negocio).
  *
+ * También REPORTA, sin tocar, al MANAGER que tenga `manual-sales:create` (en la fila de su rol o en su `PermissionSet`): Ventas
+ * externas crea ventas ya aprobadas, así que por ahí sigue aprobando aunque `approve` esté negado.
+ *
  * `--modified-by` es quien firma el cambio (`VenueRolePermission.modifiedBy` es obligatorio). Escribir en producción pide el
  * «sí, en prod» del founder (Parte D del plan).
  */
@@ -47,6 +50,30 @@ export function managersWithApproveSet<T extends { role: string; permissionSet: 
   grants: (permissions: string[], required: string) => boolean,
 ): T[] {
   return rows.filter(r => r.role === 'MANAGER' && !!r.permissionSet && [APPROVE, REVIEW].some(p => grants(r.permissionSet!.permissions, p)))
+}
+
+export const MANUAL_SALES = 'manual-sales:create'
+
+/**
+ * Por dónde un MANAGER aún crea ventas ya aprobadas (Ventas externas): las tiendas cuya fila de MANAGER concede
+ * `manual-sales:create` (`hasRole` = `hasPermission`, rol + lo que la tienda agrega y quita) y los MANAGER cuyo conjunto
+ * propio lo concede (`grants` = `evaluatePermissionList`). Sólo se reporta.
+ */
+export function managersWithManualSales<
+  F extends { venueId: string; role: string; permissions: string[]; deniedPermissions: string[] },
+  C extends { role: string; permissionSet: { permissions: string[] } | null },
+>(
+  roleRows: F[],
+  setRows: C[],
+  hasRole: (role: 'MANAGER', permissions: string[], required: string, denied: string[]) => boolean,
+  grants: (permissions: string[], required: string) => boolean,
+): { venueIds: string[]; withSet: C[] } {
+  return {
+    venueIds: roleRows
+      .filter(r => r.role === 'MANAGER' && hasRole('MANAGER', r.permissions, MANUAL_SALES, r.deniedPermissions))
+      .map(r => r.venueId),
+    withSet: setRows.filter(r => r.role === 'MANAGER' && !!r.permissionSet && grants(r.permissionSet.permissions, MANUAL_SALES)),
+  }
 }
 
 async function main(): Promise<void> {
@@ -128,6 +155,18 @@ async function main(): Promise<void> {
     const reportados = managersWithApproveSet(conConjunto, evaluatePermissionList)
     console.log(`MANAGER con PermissionSet que concede approve o review (la negación no los alcanza): ${reportados.length}`)
     for (const r of reportados)
+      console.log(
+        `  ${r.staff.firstName} ${r.staff.lastName} (${r.staff.id}) · ${r.venue.name} · conjunto «${r.permissionSet!.name}»${r.active ? '' : ' · inactivo'}`,
+      )
+
+    // Ventas externas crea ventas ya aprobadas: un MANAGER que la usa sigue aprobando por ahí. Sólo se reporta.
+    const nombreDe = new Map(tiendas.map(t => [t.id, t.name]))
+    const ventasExternas = managersWithManualSales(filas, conConjunto, hasPermission, evaluatePermissionList)
+    console.log(
+      `MANAGER que puede crear Ventas externas (ya aprobadas; no se toca): ${ventasExternas.venueIds.length} tienda(s) por su rol · ${ventasExternas.withSet.length} con PermissionSet`,
+    )
+    for (const id of ventasExternas.venueIds) console.log(`  rol MANAGER · ${nombreDe.get(id) ?? id}`)
+    for (const r of ventasExternas.withSet)
       console.log(
         `  ${r.staff.firstName} ${r.staff.lastName} (${r.staff.id}) · ${r.venue.name} · conjunto «${r.permissionSet!.name}»${r.active ? '' : ' · inactivo'}`,
       )
