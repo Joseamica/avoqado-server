@@ -1,6 +1,7 @@
 import { Request, Response } from 'express'
 import { BadRequestError } from '../../errors/AppError'
 import { uploadAnnouncementImage } from '../../services/announcements/announcementImage.service'
+import { optOut } from '../../services/crm/email/optOut.service'
 import * as templates from '../../services/crm/email/templates.service'
 
 // Email templates, preview, «Envíame una prueba» and images (phase 2). `req.crmAccess` is the caller's own keys, read by
@@ -52,4 +53,13 @@ export async function uploadImage(req: Request, res: Response): Promise<void> {
   const file = req.file
   if (!file) throw new BadRequestError('No llegó ninguna imagen', 'CRM_IMAGEN_INVALIDA')
   res.json({ data: { url: await uploadAnnouncementImage(file.buffer, file.mimetype, file.originalname) } })
+}
+
+/**
+ * POST /api/v1/crm/opt-outs — «Dar de baja este correo» desde la ficha (la oposición): ya no recibe nada de Avoqado. Sólo
+ * `crm:admin`. Idempotente: darlo de baja otra vez contesta igual.
+ */
+export async function createOptOut(req: Request, res: Response): Promise<void> {
+  await optOut(req.body.email, 'ADMIN', req.crmAccess!.staffId)
+  res.json({ data: { ok: true } })
 }

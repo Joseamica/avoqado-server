@@ -437,3 +437,15 @@ export const previewTemplateSchema = z.object({
 
 /** POST /crm/templates/test — «Envíame una prueba». */
 export const sendTemplateTestSchema = z.object({ body: z.object({ subject: emailSubject, blocks: emailBlocks }) })
+
+/** POST /crm/opt-outs — «Dar de baja este correo» (la oposición). El correo se guarda en minúsculas, como el del equipo. */
+export const createOptOutSchema = z.object({
+  body: z.object({
+    email: z
+      .string({ required_error: 'El correo es obligatorio', invalid_type_error: 'El correo es obligatorio' })
+      .trim()
+      .toLowerCase()
+      .email('El correo no es válido')
+      .max(254, 'El correo es demasiado largo'),
+  }),
+})

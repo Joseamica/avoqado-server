@@ -96,6 +96,8 @@ describe('crm team routes', () => {
       { route: 'POST /templates/:id/archive', keys: campanas },
       { route: 'POST /templates/:id/unarchive', keys: campanas },
       { route: 'POST /uploads/image', keys: campanas },
+      // «Dar de baja este correo» (la oposición): sólo el administrador del CRM.
+      { route: 'POST /opt-outs', keys: admin },
       // «Importar lo de HubSpot» (task 8).
       { route: 'POST /import/hubspot/preview', keys: admin },
       { route: 'POST /import/hubspot/apply', keys: admin },

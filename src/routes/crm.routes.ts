@@ -25,6 +25,7 @@ import {
   completeActivitySchema,
   createAccountSchema,
   createLostReasonSchema,
+  createOptOutSchema,
   createStageSchema,
   createTemplateSchema,
   exportAccountsSchema,
@@ -164,6 +165,9 @@ function imageFile(req: Request, res: Response, next: NextFunction) {
 }
 // The key first: whoever is not allowed never gets 5 MB read into memory.
 router.post('/uploads/image', campanas, imageFile, crmEmailController.uploadImage)
+
+// «Dar de baja este correo» (the opposition, from the ficha): the person stops receiving anything from Avoqado. Only the CRM admin.
+router.post('/opt-outs', admin, validateRequest(createOptOutSchema), crmEmailController.createOptOut)
 
 // «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
 const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024

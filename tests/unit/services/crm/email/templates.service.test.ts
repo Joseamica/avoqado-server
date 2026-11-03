@@ -18,6 +18,7 @@ import {
   updateTemplate,
 } from '@/services/crm/email/templates.service'
 import emailService from '@/services/email.service'
+import { verifyPlatformUnsubscribeToken } from '@/utils/platformUnsubscribeToken'
 
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendEmailWithResult: jest.fn() } }))
 
@@ -70,6 +71,8 @@ beforeEach(() => {
     prismaMock.crmEmailTemplate.updateMany,
     prismaMock.crmAccount.findFirst,
     prismaMock.staff.findUnique,
+    prismaMock.crmEmailOptOut.findUnique,
+    prismaMock.emailSuppression.findUnique,
     send,
   ])
     fn.mockReset()
@@ -385,6 +388,57 @@ describe('sendTestToSelf', () => {
     expect(email.headers['List-Unsubscribe']).toMatch(/^<https?:\/\/.+>$/)
     expect(email.headers['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click')
     expect(email.html).toContain('Dejar de recibir estos correos')
+  })
+
+  it('la liga de baja del pie y de la cabecera lleva el token REAL del correo de quien recibe la prueba', async () => {
+    setList('rafa@avoqado.io')
+    await sendTestToSelf(actor(), input)
+
+    const email = send.mock.calls[0][0]
+    const liga = /^<(.+)>$/.exec(email.headers['List-Unsubscribe'])![1]
+    const url = new URL(liga)
+    expect(url.pathname).toBe('/api/v1/public/avoqado/unsubscribe')
+    expect(verifyPlatformUnsubscribeToken(url.searchParams.get('token'))).toEqual({ email: 'rafa@avoqado.io' })
+    expect(email.html).toContain(url.searchParams.get('token')!)
+    expect(email.text).toContain(liga)
+  })
+
+  describe('🔴 la prueba tampoco habilita el envío a quien se dio de baja, rebotó o se quejó', () => {
+    it('dada de baja: {ok:false, motivo:"BAJA"} y no llama a Resend', async () => {
+      setList('rafa@avoqado.io')
+      prismaMock.crmEmailOptOut.findUnique.mockResolvedValue({ id: 'cbaja' })
+
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'BAJA' })
+      expect(prismaMock.crmEmailOptOut.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: 'rafa@avoqado.io' } }))
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('rebote duro: «REBOTE»; queja: «QUEJA»; ninguno llama a Resend', async () => {
+      setList('rafa@avoqado.io')
+      prismaMock.emailSuppression.findUnique.mockResolvedValueOnce({ reason: 'HARD_BOUNCE' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'REBOTE' })
+
+      prismaMock.emailSuppression.findUnique.mockResolvedValueOnce({ reason: 'COMPLAINT' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'QUEJA' })
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('la lista de prueba se aplica primero: fuera de ella ni se consulta la supresión', async () => {
+      setList('otra@avoqado.io')
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'fuera de la lista de prueba' })
+      expect(prismaMock.crmEmailOptOut.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('si la base de supresión falla, la prueba NO sale (no se toma un error por «libre») y no lanza', async () => {
+      setList('rafa@avoqado.io')
+      prismaMock.crmEmailOptOut.findUnique.mockRejectedValue(new Error('db caída'))
+
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
+        ok: false,
+        motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento',
+      })
+      expect(send).not.toHaveBeenCalled()
+    })
   })
 
   it('la llave de idempotencia es crm-prueba:<staffId>:<huella>: lo mismo es UNA prueba, otro contenido es otra', async () => {

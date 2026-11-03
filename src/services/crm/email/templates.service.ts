@@ -10,6 +10,7 @@ import type { Prisma } from '@prisma/client'
 import { env } from '../../../config/env'
 import logger from '../../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
+import { platformUnsubscribeUrl } from '../../../utils/platformUnsubscribeToken'
 import prisma from '../../../utils/prismaClient'
 import { logAction } from '../../dashboard/activity-log.service'
 import emailService from '../../email.service'
@@ -17,6 +18,7 @@ import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { renderizarBloques } from '../../marketing/campaignRenderer'
 import { scopeWhere, type CrmAccess } from '../access.service'
 import { cabecerasDeBaja, pieDeCampana } from './footer'
+import { isBlocked } from './optOut.service'
 import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from './testAllowlist'
 import { aplicarVariables, variablesDesconocidasEn, type Vars } from './templateVars'
 
@@ -39,6 +41,9 @@ const TEMPLATE_SELECT = {
 const EJEMPLO = { nombre: 'Ana', negocio: 'Cafetería La Esquina' } as const
 
 const notFound = () => new NotFoundError('Esa plantilla no existe', 'CRM_PLANTILLA_NOT_FOUND')
+
+/** Lo único que se le dice a quien pidió la prueba cuando algo falla por nuestro lado (la causa va al log). */
+const NO_SE_PUDO_MANDAR_LA_PRUEBA = 'No se pudo mandar la prueba. Intenta de nuevo en un momento'
 
 // ── Leer ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -223,15 +228,6 @@ export async function previewTemplate(
 }
 
 /**
- * La liga de baja del pie de la prueba.
- * ponytail: la tarea 3 la cambia por la liga firmada de la persona (`platformUnsubscribeUrl`); mientras tanto apunta a la
- * página pública de baja SIN token, que contesta «Esta liga no es válida»: nadie se da de baja por probar.
- */
-function urlDeBajaDeLaPrueba(): string {
-  return `${(env.BASE_URL || 'https://api.avoqado.io').replace(/\/$/, '')}/api/v1/public/avoqado/unsubscribe`
-}
-
-/**
  * «Envíame una prueba»: el correo, con el pie y las cabeceras de baja de uno de verdad, al `Staff.email` de quien lo pide.
  * Nunca truena: lo que no sale vuelve como `{ ok: false, motivo }`.
  */
@@ -249,11 +245,21 @@ export async function sendTestToSelf(
   // 🔴 Fuera de producción sólo sale a la lista de prueba.
   if (!puedeMandarFueraDeProduccion(to)) return { ok: false, motivo: MOTIVO_FUERA_DE_LA_LISTA }
 
-  // ponytail: aquí, antes de mandar, la tarea 3 corre `isBlocked(to)`: quien se dio de baja, rebotó o se quejó no recibe ni la
-  // prueba, y devuelve `{ ok: false, motivo: 'BAJA' | 'REBOTE' | 'QUEJA' }` sin tocar Resend.
+  // 🔴 Quien se dio de baja, rebotó o se quejó no recibe ni la prueba: así «Envíame una prueba» tampoco habilita el envío a
+  // una dirección que ya no debe recibir nada de Avoqado. Si la base falla, la prueba no sale (nunca un error por «libre»).
+  try {
+    const bloqueo = await isBlocked(to)
+    if (bloqueo) return { ok: false, motivo: bloqueo }
+  } catch (error) {
+    logger.error('[CRM] The test email could not check the suppression lists', {
+      staffId: actor.staffId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
+  }
 
   const vendedor = `${staff.firstName} ${staff.lastName}`.trim() || null
-  const urlDeBaja = urlDeBajaDeLaPrueba()
+  const urlDeBaja = platformUnsubscribeUrl(to)
   const correo = armarCorreo(input.subject, input.blocks, { ...EJEMPLO, vendedor }, pieDeCampana('PROSPECTO', null, urlDeBaja))
   // Dos toques seguidos con lo mismo son UNA prueba (Resend recuerda la llave 24 h). El vendedor entra en la huella porque
   // es parte de lo que sale: Resend rechaza una llave repetida con otro contenido.
@@ -274,12 +280,12 @@ export async function sendTestToSelf(
     })
     if (result.ok) return { ok: true }
     logger.warn('[CRM] The test email did not go out', { staffId: actor.staffId, error: result.errorCode ?? 'not sent' })
-    return { ok: false, motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento' }
+    return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
   } catch (error) {
     logger.error('[CRM] The test email could not be sent', {
       staffId: actor.staffId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { ok: false, motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento' }
+    return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
   }
 }

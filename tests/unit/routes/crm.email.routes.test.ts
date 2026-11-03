@@ -225,6 +225,56 @@ describe('el administrador del CRM', () => {
   })
 })
 
+describe('POST /crm/opt-outs — «Dar de baja este correo» (la oposición, desde la ficha)', () => {
+  const EMAIL = 'cliente@example.com'
+
+  beforeEach(() => {
+    prismaMock.crmEmailOptOut.createMany.mockReset()
+    prismaMock.crmEmailOptOut.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it.each([
+    ['sin llaves', {}],
+    ['«Mandar correo» (contactar)', { verScope: 'todos', editarScope: 'todos', contactar: true }],
+    ['«Campañas masivas» (campanas)', { campanas: true }],
+    ['«Ver negocios», «Editar» y «Exportar»', { verScope: 'todos', editarScope: 'todos', exportar: true }],
+  ])('🔴 %s: 403 y no escribe nada (sólo crm:admin da de baja)', async (_name, over) => {
+    keys(over)
+    const res = await request(app).post('/crm/opt-outs').send({ email: EMAIL })
+    expect(res.status).toBe(403)
+    expect(res.body.code).toBe('CRM_FORBIDDEN')
+    expect(prismaMock.crmEmailOptOut.createMany).not.toHaveBeenCalled()
+  })
+
+  it('crm:admin: da de baja el correo (en minúsculas), con origen ADMIN y a su nombre', async () => {
+    keys({ admin: true })
+    const res = await request(app).post('/crm/opt-outs').send({ email: '  Cliente@Example.COM ' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ ok: true })
+    expect(prismaMock.crmEmailOptOut.createMany).toHaveBeenCalledWith({
+      data: [{ email: EMAIL, source: 'ADMIN', actorStaffId: STAFF }],
+      skipDuplicates: true,
+    })
+  })
+
+  it('repetirlo es 200 otra vez (idempotente)', async () => {
+    keys({ admin: true })
+    prismaMock.crmEmailOptOut.createMany.mockResolvedValue({ count: 0 })
+    expect((await request(app).post('/crm/opt-outs').send({ email: EMAIL })).status).toBe(200)
+  })
+
+  it.each([[{}], [{ email: '' }], [{ email: 'no-es-correo' }], [{ email: 42 }], [{ email: `${'a'.repeat(250)}@example.com` }]])(
+    'un cuerpo inválido (%j) es 400 y no escribe',
+    async body => {
+      keys({ admin: true })
+      const res = await request(app).post('/crm/opt-outs').send(body)
+      expect(res.status).toBe(400)
+      expect(prismaMock.crmEmailOptOut.createMany).not.toHaveBeenCalled()
+    },
+  )
+})
+
 describe('quien no tiene ninguna llave del correo', () => {
   it.each([
     ['sin llaves', {}],
