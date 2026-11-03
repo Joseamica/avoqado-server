@@ -665,6 +665,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CrmInboundEntry: 'CRM (equipo de ventas de Avoqado)',
   CrmDigestSend: 'CRM (equipo de ventas de Avoqado)',
   CrmWhatsappMessage: 'CRM (equipo de ventas de Avoqado)',
+  CrmErased: 'CRM (equipo de ventas de Avoqado)',
 }
 
 // ---------------------------------------------------------------------------

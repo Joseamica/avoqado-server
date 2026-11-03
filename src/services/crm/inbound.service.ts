@@ -19,6 +19,7 @@ import prisma from '../../utils/prismaClient'
 import { getInitialStage, resetFirstMoneyTx } from './accounts.service'
 import { notifyNewProspect, notifyReturningProspect, type NoticeContent } from './digest.service'
 import { esCorreoDePrueba } from './internalEmail'
+import { assertNotErasedTx, ErasedIdentityError } from './erase.service'
 import { addEvent } from './timeline.service'
 
 export const LANDING = 'LANDING'
@@ -250,11 +251,15 @@ export const organizationKey = (externalKey: string, organizationId: string) => 
  * brings (a customer of X opening Y), the entry goes to the account of ITS Organization: the one that holds it, or a new
  * one under `organizationKey` and linked to it — never to X's, never a retry forever. Without an Organization there is no
  * conflict: the key's account takes it as always.
+ *
+ * `seenAt` is when what the writer read was said (the entry's `receivedAt`, the signup's date, the last message): a person
+ * deleted from the CRM after it is an `ErasedIdentityError`, and nothing is created. Without it, it counts as old.
  */
 export async function accountForTx(
   tx: Prisma.TransactionClient,
   who: Omit<Identity, 'key'>,
   create: UpsertBySourceInput,
+  seenAt?: Date,
 ): Promise<{ account: { id: string; organizationId: string | null }; created: boolean; via: FoundVia | null }> {
   let input = create
   let identity: Identity = { ...who, key: { source: create.source, externalKey: create.externalKey } }
@@ -271,6 +276,9 @@ export async function accountForTx(
       continue
     }
     if (found) return { account: { id: found.id, organizationId: found.organizationId }, created: false, via: found.via }
+    // Nobody: before creating, the tombstone (D7). A person the superadmin deleted is not created again from what was said
+    // before — the person, not the business key alone: both keys, every email and phone, the Organization.
+    await assertNotErasedTx(tx, { ...who, keys: [create, input] }, seenAt)
     const upserted = await upsertAccountBySource(tx, input)
     if (upserted.created) return { ...upserted, via: null }
   }
@@ -612,6 +620,7 @@ async function applyTx(
       },
       contact: form.contact,
     },
+    entry.receivedAt,
   )
   const accountId = account.id
   /**
@@ -809,6 +818,17 @@ export async function applyEntry(entryId: string): Promise<void> {
     const message = errorText(error)
     // Ruling 71: even the account of the entry's own Organization belongs to another business. No retry changes that:
     // the entry is closed without an account — never retried forever — and said once, here.
+    if (error instanceof ErasedIdentityError) {
+      // D7: the superadmin deleted this person after the form was sent. The form is theirs and goes too — never kept closed
+      // with its data (Codex r1 H4) — so it can never be applied again either.
+      logger.info('[CRM] Landing entry from before its account was deleted; deleted too', { entryId })
+      try {
+        await prisma.crmInboundEntry.deleteMany({ where: { id: entryId } })
+      } catch {
+        // The sweep meets it again and tries again.
+      }
+      return
+    }
     const permanent = error instanceof IdentityConflictError
     logger.error(
       permanent

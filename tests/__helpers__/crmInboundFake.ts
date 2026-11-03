@@ -16,7 +16,14 @@ export const FAKE_LOST_STAGE_ID = 'cstageprd0000000000000001'
 const STAGE_KINDS: Record<string, string> = { [FAKE_STAGE_ID]: 'ABIERTA', [FAKE_LOST_STAGE_ID]: 'PERDIDA' }
 
 export function installCrmInboundFake(prismaMock: any) {
-  const db = { entries: [] as Row[], accounts: [] as Row[], contacts: [] as Row[], events: [] as Row[] }
+  const db = {
+    entries: [] as Row[],
+    accounts: [] as Row[],
+    contacts: [] as Row[],
+    events: [] as Row[],
+    erased: [] as Row[],
+    logs: [] as Row[],
+  }
   let sequence = 0
   /** cuid v1 shape: 25 characters, starting with «c». */
   const nextId = (prefix: string) => `c${prefix}${String(++sequence).padStart(24 - prefix.length, '0')}`
@@ -33,6 +40,7 @@ export function installCrmInboundFake(prismaMock: any) {
     if (filter && typeof filter === 'object' && !(filter instanceof Date)) {
       const operators = filter as Row
       if ('in' in operators) return operators.in.includes(value)
+      if ('gte' in operators) return value instanceof Date && value >= operators.gte
       throw new Error(`The CRM inbound fake does not know the filter ${JSON.stringify(filter)}`)
     }
     return value === filter
@@ -66,6 +74,13 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmContact.findFirst,
     prismaMock.crmTimelineEvent.createMany,
     prismaMock.crmTimelineEvent.findUnique,
+    prismaMock.crmAccount.delete,
+    prismaMock.crmContact.findMany,
+    prismaMock.crmInboundEntry.deleteMany,
+    prismaMock.crmErased.createMany,
+    prismaMock.crmErased.updateMany,
+    prismaMock.crmErased.findFirst,
+    prismaMock.activityLog.create,
     prismaMock.staff.findUnique,
     prismaMock.crmTeam.findUnique,
     prismaMock.organization.findUnique,
@@ -129,6 +144,14 @@ export function installCrmInboundFake(prismaMock: any) {
   prismaMock.crmAccount.findUniqueOrThrow.mockImplementation(async ({ where, select }: Row) => {
     const row = db.accounts.find(account => account.id === where.id)
     if (!row) throw new Error('No CrmAccount found')
+    if (select?._count) {
+      const counts = {
+        contacts: db.contacts.filter(contact => contact.accountId === row.id).length,
+        activities: 0,
+        timelineEvents: db.events.filter(event => event.accountId === row.id).length,
+      }
+      return { ...withStage(row), _count: counts }
+    }
     if (!select?.contacts) return withStage(row)
     const contacts = db.contacts
       .filter(contact => contact.accountId === row.id)
@@ -186,6 +209,54 @@ export function installCrmInboundFake(prismaMock: any) {
   prismaMock.crmTimelineEvent.findUnique.mockImplementation(
     async ({ where }: Row) => db.events.find(event => event.sourceKey === where.sourceKey) ?? null,
   )
+
+  // «Eliminar» (D7): the account goes with its people and its timeline (onDelete: Cascade), and its entries are deleted by
+  // `accountId` or by `id`.
+  prismaMock.crmAccount.delete.mockImplementation(async ({ where }: Row) => {
+    const index = db.accounts.findIndex(account => account.id === where.id)
+    if (index < 0) throw new Error('Record to delete does not exist')
+    const [row] = db.accounts.splice(index, 1)
+    db.contacts = db.contacts.filter(contact => contact.accountId !== row.id)
+    db.events = db.events.filter(event => event.accountId !== row.id)
+    for (const entry of db.entries) if (entry.accountId === row.id) entry.accountId = null
+    return { ...row }
+  })
+  prismaMock.crmContact.findMany.mockImplementation(async ({ where, take }: Row) =>
+    db.contacts.filter(contact => contactMatches(contact, where)).slice(0, take ?? Infinity),
+  )
+  prismaMock.crmInboundEntry.deleteMany.mockImplementation(async ({ where }: Row) => {
+    const doomed = db.entries.filter(entry => Object.entries(where).every(([field, value]) => (entry[field] ?? null) === value))
+    db.entries = db.entries.filter(entry => !doomed.includes(entry))
+    return { count: doomed.length }
+  })
+  /** The tombstone: unique (keyHash, scope), ON CONFLICT DO NOTHING; `OR` of `keyHash`/`scope` filters and `erasedAt.gte`. */
+  prismaMock.crmErased.createMany.mockImplementation(async ({ data }: Row) => {
+    let count = 0
+    for (const row of data) {
+      const scope = row.scope ?? ''
+      if (db.erased.some(existing => existing.keyHash === row.keyHash && existing.scope === scope)) continue
+      db.erased.push({ ...row, scope })
+      count++
+    }
+    return { count }
+  })
+  prismaMock.crmErased.updateMany.mockImplementation(async ({ where, data }: Row) => {
+    const rows = db.erased.filter(row => fieldMatches(row.keyHash, where.keyHash) && fieldMatches(row.scope, where.scope))
+    rows.forEach(row => patch(row, data))
+    return { count: rows.length }
+  })
+  const erasedMatches = (row: Row, where: Row): boolean =>
+    Object.entries(where).every(([field, filter]) =>
+      field === 'OR' ? (filter as Row[]).some(branch => erasedMatches(row, branch)) : fieldMatches(row[field], filter),
+    )
+  prismaMock.crmErased.findFirst.mockImplementation(async ({ where }: Row) => {
+    const found = db.erased.filter(row => erasedMatches(row, where)).sort((a, b) => b.erasedAt.getTime() - a.erasedAt.getTime())[0]
+    return found ? { erasedAt: found.erasedAt } : null
+  })
+  prismaMock.activityLog.create.mockImplementation(async ({ data }: Row) => {
+    db.logs.push(data)
+    return { id: nextId('log') }
+  })
 
   // Nobody with the entry's email owns an Organization, no sales-team organization, an Organization with a name, and
   // the pipeline already seeded.

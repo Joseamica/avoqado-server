@@ -44,6 +44,7 @@ import {
   sourceDetailOf,
   teamOrganizationId,
 } from './inbound.service'
+import { ErasedIdentityError } from './erase.service'
 import { esCorreoDePrueba } from './internalEmail'
 import { addEvent } from './timeline.service'
 
@@ -419,6 +420,9 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
             },
             contact: { ...person, isPrimary: true },
           },
+          // No `seenAt`: an old signup is always from before a deletion. Its mark can be written AFTER it — the form was
+          // sent, the deletion came, then the signup finished (Codex r1 H2) — and a person who comes back after it does
+          // through the landing entry, with its own date.
         )
         if (!isNew) {
           await addPersonTx(tx, account.id, person)
@@ -468,6 +472,8 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
     } catch (error) {
       // Even the account of this signup's own Organization belongs to another business (rulings 70 and 71): nothing to
       // create or write here, and no retry changes it — not a failure that holds the cursor.
+      // D7: the superadmin deleted this business after the signup; an old signup never brings it back.
+      if (error instanceof ErasedIdentityError) continue
       if (error instanceof IdentityConflictError) {
         logger.warn('[CRM] Old landing signup skipped: the accounts of this person are linked to another Organization', {
           activityLogId: signup.id,

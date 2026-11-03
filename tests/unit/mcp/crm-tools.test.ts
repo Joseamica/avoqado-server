@@ -17,6 +17,7 @@ import { DIRECTORY_TOOLS } from '@/mcp/directory/catalog'
 import { registerAllTools } from '@/mcp/server'
 import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
+import { deleteAccount, erasedHashes } from '@/services/crm/erase.service'
 import { auditMcpWrite } from '@/mcp/audit'
 import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, listAccounts, listLostReasons, listStages, lose, moveStage } from '@/services/crm/accounts.service'
@@ -42,6 +43,8 @@ jest.mock('@/services/crm/accounts.service', () => ({
   listLostReasons: jest.fn(),
 }))
 jest.mock('@/services/crm/activities.service', () => ({ addActivity: jest.fn() }))
+// «Eliminar» is tested on its own (erase.service.test.ts); here only who reaches it, and the two steps.
+jest.mock('@/services/crm/erase.service', () => ({ ...jest.requireActual('@/services/crm/erase.service'), deleteAccount: jest.fn() }))
 jest.mock('@/services/crm/reports.service', () => ({ getReports: jest.fn() }))
 
 const cuid = (prefix: string) => `c${prefix}`.padEnd(25, '0')
@@ -52,6 +55,7 @@ const CRM_TOOLS = [
   'crm_advance_stage',
   'crm_add_note',
   'crm_add_activity',
+  'crm_delete_account',
   'crm_pending',
   'crm_pipeline_summary',
 ]
@@ -61,6 +65,7 @@ const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_advance_stage: 'write',
   crm_add_note: 'write',
   crm_add_activity: 'write',
+  crm_delete_account: 'write',
   crm_pending: 'read',
   crm_pipeline_summary: 'read',
 }
@@ -95,6 +100,7 @@ const ARGS: Record<string, Record<string, unknown>> = {
   crm_advance_stage: { accountId: ACC, stageName: 'Demo' },
   crm_add_note: { accountId: ACC, text: 'Pidió precios' },
   crm_add_activity: { accountId: ACC, type: 'LLAMADA', title: 'Llamarle', dueAt: '2026-11-03T10:00:00-06:00' },
+  crm_delete_account: { accountId: ACC, confirmName: 'Tacos Lupe' },
   crm_pending: {},
   crm_pipeline_summary: {},
 }
@@ -260,7 +266,7 @@ describe('CRM MCP — access', () => {
       nuevosSinDueno: { rows: [], total: 0 },
     })
     const { call } = setup()
-    for (const name of WRITES)
+    for (const name of WRITES.filter(name => name !== 'crm_delete_account'))
       expect({ name, ...(await call(name)) }).toMatchObject({ name, ok: false, error: expect.stringContaining('crm:editar') })
     expect(await call('crm_pending')).toMatchObject({ ok: true })
     for (const service of [moveStage, lose, addNote, addActivity]) expect(service).not.toHaveBeenCalled()
@@ -270,6 +276,55 @@ describe('CRM MCP — access', () => {
     const { call } = setup({ scopes: ['mcp:read'] })
     await expect(call('crm_add_note')).rejects.toThrow(/mcp:write/)
     expect(addNote).not.toHaveBeenCalled()
+  })
+})
+
+describe('crm_delete_account (D7)', () => {
+  it('sin «Administrar» se niega y la nombra; un admin del equipo que no es el superadmin, tampoco', async () => {
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, admin: false })
+    expect(await setup().call('crm_delete_account', { ...ARGS.crm_delete_account, confirm: true })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('crm:admin'),
+    })
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, isSuperadmin: false })
+    expect(await setup().call('crm_delete_account', { ...ARGS.crm_delete_account, confirm: true })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('Sólo el superadmin'),
+    })
+    expect(deleteAccount).not.toHaveBeenCalled()
+  })
+
+  it('dos_pasos: la primera llamada sólo dice qué se borraría; con la confirmación firmada, se elimina', async () => {
+    prismaMock.crmAccount.findUnique.mockResolvedValue({
+      name: 'Tacos Lupe',
+      source: 'WHATSAPP',
+      stage: { name: 'Demo' },
+      _count: { contacts: 1, activities: 2, timelineEvents: 5 },
+    })
+    ;(deleteAccount as jest.Mock).mockResolvedValue({ id: ACC, eliminado: true })
+    const c = await connect('manual')
+    try {
+      const first = JSON.parse(
+        (
+          (await c.client.callTool({ name: 'crm_delete_account', arguments: ARGS.crm_delete_account })).content as Array<{ text: string }>
+        )[0].text,
+      )
+      expect(first).toMatchObject({
+        requiresConfirmation: true,
+        negocio: 'Tacos Lupe',
+        seBorran: { contactos: 1, actividades: 2, eventos: 5 },
+      })
+      expect(deleteAccount).not.toHaveBeenCalled()
+
+      await c.client.callTool({
+        name: 'crm_delete_account',
+        arguments: { ...first.confirmationArguments, confirm: true, confirmationToken: first.confirmationToken },
+      })
+      expect(deleteAccount).toHaveBeenCalledWith(ADMIN, ACC, 'Tacos Lupe')
+      expect(auditMcpWrite).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'CRM_ACCOUNT_DELETED_BY_MCP' }))
+    } finally {
+      await c.close()
+    }
   })
 })
 
@@ -341,6 +396,33 @@ describe('crm_upsert_whatsapp_prospect', () => {
   }
 
   const kinds = () => db.events.map(event => event.kind)
+
+  it('eliminado_no_vuelve_con_un_chat_viejo (D7): releer el chat de antes no lo crea; un mensaje nuevo sí', async () => {
+    // The superadmin deleted this WhatsApp prospect on Tuesday.
+    const { person } = erasedHashes({
+      keys: [{ source: 'WHATSAPP', externalKey: PHONE }],
+      emails: [],
+      phones: [PHONE],
+      organizationId: null,
+    })
+    db.erased.push(...person.map(keyHash => ({ keyHash, scope: '', erasedAt: TUE })))
+    jest.setSystemTime(THU)
+    const { call } = setup()
+
+    for (const ultimoMensajeAt of [MSG_1, undefined]) {
+      expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Tacos Lupe', ultimoMensajeAt })).toMatchObject({
+        ok: false,
+        error: expect.stringContaining('se eliminó del CRM'),
+      })
+    }
+    expect(db.accounts).toHaveLength(0)
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+
+    expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Tacos Lupe', ultimoMensajeAt: MSG_2 })).toMatchObject({
+      ok: true,
+      creado: true,
+    })
+  })
 
   it('upsert_dos_veces_un_negocio: the same call twice leaves ONE business «Sin dueño» in the first stage and ONE event', async () => {
     const { call } = setup()
