@@ -54,6 +54,17 @@ describe('areaRoleSchema', () => {
     expect(body({ role: 'ISSUE', fulfillmentAreaId: 'area-cremeria', alsoCheckout: true }).success).toBe(false)
   })
 
+  it('un dato de más se rechaza con mensaje en español, no el genérico de Zod', () => {
+    for (const extra of [
+      { role: 'ISSUE', fulfillmentAreaId: 'area-cremeria', alsoCheckout: true },
+      { role: 'CHECKOUT', fulfillmentAreaId: 'area-cremeria' },
+    ]) {
+      const issues = JSON.stringify(body(extra).error?.issues)
+      expect(issues).toContain('El papel del aparato trae un dato de más')
+      expect(issues).not.toContain('Unrecognized key')
+    }
+  })
+
   it('rechaza un papel desconocido, con mensaje en español', () => {
     const result = body({ role: 'DELIVER' })
     expect(result.success).toBe(false)
