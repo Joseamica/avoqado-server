@@ -10,6 +10,7 @@ import AppError from '../../errors/AppError'
 import * as refundService from '../../services/mobile/refund.mobile.service'
 import type { RefundReason } from '../../services/dashboard/refund.dashboard.service'
 import { issuePosRefund } from '../../services/storeCredit/storeCreditRefund.service'
+import { esPosSinSoloSaldo } from '../../services/storeCredit/posSinSoloSaldo'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
 /**
@@ -119,6 +120,7 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
       customerId: vieneAusente(customerId) ? undefined : customerId,
       idempotencyKey: vieneAusente(idempotencyKey) ? undefined : idempotencyKey,
       defective: defective === true,
+      posSinSoloSaldo: esPosSinSoloSaldo(req.headers),
     })
 
     return res.status(201).json({ success: true, data: result })

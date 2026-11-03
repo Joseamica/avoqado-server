@@ -40,6 +40,7 @@ import {
   type PosRefundInput,
 } from '@/services/storeCredit/storeCreditRefund.service'
 import { getTransactionDetail, getTransactions } from '@/services/mobile/transaction.mobile.service'
+import { issueAssociatedRefund } from '@/controllers/mobile/refund.mobile.controller'
 import { hayDevolucionEnTerminal, marcarDevolucionEnTerminal } from '@/services/storeCredit/terminalRefundMarker'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -365,6 +366,55 @@ describe('«Sólo saldo a favor»', () => {
     expect(soloSaldoLoImpide({ ...base, reason: 'OTHER', refundMethod: 'CASH' })).toBe(true)
     expect(soloSaldoLoImpide({ ...base, reason: 'ACCIDENTAL_CHARGE', refundMethod: 'CASH' })).toBe(false)
     expect(soloSaldoLoImpide({ ...base, storeCreditOnly: false, refundMethod: 'CASH' })).toBe(false)
+  })
+
+  describe('🔴 D1: un POS publicado que no sabe del interruptor no se queda atorado', () => {
+    /** La ruta del POS de punta a punta (controlador → servicio → reglas bajo el candado), con las cabeceras del aparato. */
+    async function desdeElPos(headers: Record<string, string>, body: Record<string, unknown>) {
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() } as any
+      const next = jest.fn()
+      await issueAssociatedRefund(
+        { params: { venueId: VENUE, paymentId: PAGO }, body, headers, authContext: { userId: CAJERA_A } } as any,
+        res,
+        next,
+      )
+      return { codigo: res.status.mock.calls[0]?.[0], error: next.mock.calls[0]?.[0] }
+    }
+
+    it.each([
+      ['ANDROID/WINDOWS 95', { 'x-device-platform': 'ANDROID', 'x-app-version-code': '95' }],
+      ['iOS 41', { 'x-device-platform': 'IOS', 'x-app-version-code': '41' }],
+      ['sin cabeceras', {}],
+    ])('%s: devolución de mercancía en efectivo pasa como antes', async (_app, headers) => {
+      soloSaldo()
+      const r = await desdeElPos(headers, { amount: 15000, reason: 'RETURNED_GOODS', refundMethod: 'CASH' })
+      expect(r).toEqual({ codigo: 201, error: undefined })
+      expect(issueRefundMock).toHaveBeenCalledWith(expect.objectContaining({ refundMethod: 'CASH' }))
+      // La marca se queda en la regla: no viaja al núcleo del reembolso.
+      expect(issueRefundMock.mock.calls[0][0]).not.toHaveProperty('posSinSoloSaldo')
+    })
+
+    it('una app vieja que no manda medio («como se pagó», OTHER) también pasa', async () => {
+      soloSaldo()
+      const r = await desdeElPos({ 'x-device-platform': 'ANDROID', 'x-app-version-code': '95' }, { amount: 15000, reason: 'OTHER' })
+      expect(r.codigo).toBe(201)
+    })
+
+    it.each([
+      ['ANDROID/WINDOWS 96', { 'x-device-platform': 'ANDROID', 'x-app-version-code': '96' }],
+      ['iOS 42', { 'x-device-platform': 'IOS', 'x-app-version-code': '42' }],
+    ])('%s (sabe del interruptor): sigue rechazando con STORE_CREDIT_ONLY', async (_app, headers) => {
+      soloSaldo()
+      const r = await desdeElPos(headers, { amount: 15000, reason: 'RETURNED_GOODS', refundMethod: 'CASH' })
+      expect(r.codigo).toBeUndefined()
+      expect(r.error).toMatchObject({ statusCode: 400, code: 'STORE_CREDIT_ONLY' })
+    })
+
+    it('regresión: la marca no salta las reglas del saldo a favor (sin llaves → STORE_CREDIT_UNAVAILABLE)', async () => {
+      soloSaldo()
+      delete process.env.GIFT_CARD_HMAC_KEY
+      await expect(issuePosRefund(pedir({ posSinSoloSaldo: true }))).rejects.toMatchObject({ code: 'STORE_CREDIT_UNAVAILABLE' })
+    })
   })
 
   it('sin el interruptor, una petición vieja con CASH ni siquiera lee la venta', async () => {
