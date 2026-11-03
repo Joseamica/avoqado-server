@@ -133,6 +133,8 @@ export async function crearFixture(prefijo: string) {
       alias: 'AngelPay de prueba',
       credentialsEncrypted: {},
       angelpayUserAccountId: login.id,
+      // La forma de producción: sin esto, cada cobro de estas suites gritaría «cuenta sin aviso del banco» (D11).
+      angelpayWebhookSecret: 'whsec_fixture_de_prueba',
     },
   })
 
@@ -270,6 +272,7 @@ export async function crearFixture(prefijo: string) {
         alias: 'AngelPay secundaria de prueba',
         credentialsEncrypted: {},
         angelpayUserAccountId: loginM2.id,
+        angelpayWebhookSecret: 'whsec_fixture_de_prueba',
       },
     })
     secundarias.push({ id: m2.id, loginId: loginM2.id })

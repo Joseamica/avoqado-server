@@ -119,8 +119,7 @@ describe('angelPayIntegrationsApiClient', () => {
   describe('registerWebhook()', () => {
     const params = { url: 'https://api.avoqado.io/api/v1/webhooks/angelpay/m1', events: ['send_transaction'] }
 
-    it('creates a new endpoint and returns {endpointId, secret} when none exists yet', async () => {
-      mockHttp.get.mockResolvedValue({ status: 200, data: [] })
+    it('creates a new endpoint and returns {endpointId, secret}', async () => {
       mockHttp.post.mockResolvedValue({
         status: 200,
         data: { id: 'ep_new', id_merchant: '990', url: params.url, secret: 'whsec_abc123', is_active: true, events: params.events },
@@ -129,7 +128,6 @@ describe('angelPayIntegrationsApiClient', () => {
       const result = await angelPayIntegrationsApiClient.registerWebhook('token-abc', 'PROD', params)
 
       expect(result).toEqual({ endpointId: 'ep_new', secret: 'whsec_abc123' })
-      expect(mockHttp.delete).not.toHaveBeenCalled()
       expect(mockHttp.post).toHaveBeenCalledWith(
         '/api/v1/webhooks/endpoints',
         { url: params.url, description: undefined, events: params.events },
@@ -137,46 +135,37 @@ describe('angelPayIntegrationsApiClient', () => {
       )
     })
 
-    it('deletes the pre-existing endpoint with the same url before creating (create-once secret constraint)', async () => {
+    // D11 (ruling del 2-nov): sólo crea. Un endpoint nuestro nunca se borra: ni lo lista para buscarlo.
+    it('only creates: it never lists nor deletes, even if AngelPay already has an endpoint with that url', async () => {
       mockHttp.get.mockResolvedValue({ status: 200, data: [{ id: 'ep_old', url: params.url }] })
-      mockHttp.delete.mockResolvedValue({ status: 204, data: {} })
-      mockHttp.post.mockResolvedValue({
-        status: 201,
-        data: { id: 'ep_new', url: params.url, secret: 'whsec_fresh', is_active: true, events: params.events },
-      })
+      mockHttp.post.mockResolvedValue({ status: 201, data: { id: 'ep_new', url: params.url, secret: 'whsec_fresh' } })
 
       const result = await angelPayIntegrationsApiClient.registerWebhook('token-abc', 'PROD', params)
 
-      expect(mockHttp.delete).toHaveBeenCalledWith(
-        '/api/v1/webhooks/endpoints/ep_old',
-        expect.objectContaining({ headers: { Authorization: 'Bearer token-abc' } }),
-      )
+      expect(mockHttp.get).not.toHaveBeenCalled()
+      expect(mockHttp.delete).not.toHaveBeenCalled()
       expect(result).toEqual({ endpointId: 'ep_new', secret: 'whsec_fresh' })
     })
 
-    it('does not delete endpoints whose url differs', async () => {
-      mockHttp.get.mockResolvedValue({
-        status: 200,
-        data: [{ id: 'ep_other', url: 'https://api.avoqado.io/api/v1/webhooks/angelpay/OTHER' }],
-      })
-      mockHttp.post.mockResolvedValue({ status: 201, data: { id: 'ep_new', url: params.url, secret: 'whsec_x' } })
-
-      await angelPayIntegrationsApiClient.registerWebhook('token-abc', 'QA', params)
-
-      expect(mockHttp.delete).not.toHaveBeenCalled()
-    })
-
     it('throws AngelPayIntegrationsApiError when the create response is missing id/secret', async () => {
-      mockHttp.get.mockResolvedValue({ status: 200, data: [] })
       mockHttp.post.mockResolvedValue({ status: 200, data: { id: 'ep_new' /* no secret */ } })
 
       await expect(angelPayIntegrationsApiClient.registerWebhook('token-abc', 'QA', params)).rejects.toThrow(AngelPayIntegrationsApiError)
     })
 
-    it('propagates a network failure as AngelPayIntegrationsApiError', async () => {
-      mockHttp.get.mockRejectedValue({ message: 'ECONNREFUSED' })
+    it('propagates a network failure as AngelPayIntegrationsApiError, without a status', async () => {
+      mockHttp.post.mockRejectedValue({ message: 'ECONNREFUSED' })
 
-      await expect(angelPayIntegrationsApiClient.registerWebhook('token-abc', 'QA', params)).rejects.toThrow(AngelPayIntegrationsApiError)
+      await expect(angelPayIntegrationsApiClient.registerWebhook('token-abc', 'QA', params)).rejects.toMatchObject({
+        name: 'AngelPayIntegrationsApiError',
+        status: undefined,
+      })
+    })
+
+    it('a rejection from AngelPay keeps its status (4xx = nothing was created)', async () => {
+      mockHttp.post.mockRejectedValue(axiosError(409, { message: 'url already registered' }))
+
+      await expect(angelPayIntegrationsApiClient.registerWebhook('token-abc', 'QA', params)).rejects.toMatchObject({ status: 409 })
     })
   })
 })

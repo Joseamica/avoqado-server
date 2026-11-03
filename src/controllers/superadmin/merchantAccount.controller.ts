@@ -11,8 +11,9 @@ import { createBlumonTpvService } from '../../services/tpv/blumon-tpv.service'
 import prisma from '@/utils/prismaClient'
 import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibility'
 import { IncompatibleDeviceError } from '@/errors/AppError'
-import { fullSetupAngelPaySchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
+import { fullSetupAngelPaySchema, registerAngelPayWebhookSchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
 import { fullSetupAngelPayMerchant as fullSetupAngelPayMerchantService } from '../../services/superadmin/angelpayFullSetup.service'
+import { registrarAvisoAngelPay } from '../../services/superadmin/angelpayWebhookRegistration.service'
 import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '../../services/integrations/angelpay-integrations-api.client'
 
 /**
@@ -2338,6 +2339,7 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
         accountType: parsed.data.slot.accountType,
         loginMode: parsed.data.login.mode,
         merchantMode: parsed.data.merchant.mode,
+        webhookRegistered: result.webhookRegistered,
       },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
@@ -2348,6 +2350,34 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
       data: result,
       message: 'Cuenta AngelPay configurada exitosamente',
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/:id/angelpay/webhook
+ * Da de alta el aviso del banco (webhook de AngelPay) de una cuenta SIN secreto, con la llave de API de esa cuenta. Si ya tiene secreto
+ * contesta `alreadyRegistered: true` sin llamar a nadie. El rechazo de la llave por AngelPay es 422, nunca 401: el 401 es de la sesión
+ * del operador. La llave se usa sólo en esta petición: ni se guarda ni se devuelve.
+ */
+export async function registerAngelPayWebhook(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = registerAngelPayWebhookSchema.safeParse({ ...req.body, id: req.params.id })
+    if (!parsed.success) {
+      const first = parsed.error.issues[0]
+      throw new BadRequestError(first?.message || 'Datos inválidos')
+    }
+
+    const { id, apiKey, environment } = parsed.data
+    const { alreadyRegistered } = await registrarAvisoAngelPay({
+      merchantAccountId: id,
+      apiKey,
+      environment,
+      actor: { staffId: req.authContext?.userId, ipAddress: req.ip, userAgent: req.headers?.['user-agent'] },
+    })
+
+    res.status(200).json({ success: true, data: { merchantAccountId: id, webhookRegistered: true, alreadyRegistered } })
   } catch (error) {
     next(error)
   }

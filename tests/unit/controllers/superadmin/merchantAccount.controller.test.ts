@@ -15,7 +15,8 @@
 
 import type { NextFunction, Request, Response } from 'express'
 
-import { createMerchantAccount, verifyAngelPayApiKey } from '@/controllers/superadmin/merchantAccount.controller'
+import { createMerchantAccount, registerAngelPayWebhook, verifyAngelPayApiKey } from '@/controllers/superadmin/merchantAccount.controller'
+import { registrarAvisoAngelPay } from '@/services/superadmin/angelpayWebhookRegistration.service'
 import * as merchantAccountService from '@/services/superadmin/merchantAccount.service'
 import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '@/services/integrations/angelpay-integrations-api.client'
 
@@ -33,7 +34,12 @@ jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
   },
 }))
 
+jest.mock('@/services/superadmin/angelpayWebhookRegistration.service', () => ({
+  registrarAvisoAngelPay: jest.fn(),
+}))
+
 const mockedCreate = merchantAccountService.createMerchantAccount as jest.Mock
+const mockedRegistrar = registrarAvisoAngelPay as jest.Mock
 const mockedAuth = angelPayIntegrationsApiClient.auth as jest.Mock
 
 interface FakeRes extends Response {
@@ -213,5 +219,88 @@ describe('POST /superadmin/merchant-accounts/verify-apikey', () => {
 
     expect(next).toHaveBeenCalledTimes(1)
     expect(mockedAuth).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /superadmin/merchant-accounts/:id/angelpay/webhook (D11)', () => {
+  const ID = 'ckz9d11cuenta0000000000001'
+  const LLAVE = 'llave-de-prueba-no-real'
+
+  function reqDeRegistro(body: Record<string, unknown>, id = ID) {
+    return {
+      params: { id },
+      query: {},
+      body,
+      ip: '10.0.0.1',
+      headers: { 'user-agent': 'prueba' },
+      authContext: { userId: 'ckz9d11staff00000000000001', role: 'SUPERADMIN' },
+    } as unknown as Request
+  }
+
+  it('200 con la forma acordada; el actor sale de authContext y el secreto no aparece en ningún lado', async () => {
+    mockedRegistrar.mockResolvedValue({ alreadyRegistered: false })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await registerAngelPayWebhook(reqDeRegistro({ apiKey: LLAVE, environment: 'QA' }), res, next)
+
+    expect(mockedRegistrar).toHaveBeenCalledWith({
+      merchantAccountId: ID,
+      apiKey: LLAVE,
+      environment: 'QA',
+      actor: { staffId: 'ckz9d11staff00000000000001', ipAddress: '10.0.0.1', userAgent: 'prueba' },
+    })
+    expect(res.__status).toBe(200)
+    expect(res.__json).toEqual({
+      success: true,
+      data: { merchantAccountId: ID, webhookRegistered: true, alreadyRegistered: false },
+    })
+    expect(JSON.stringify(res.__json)).not.toContain(LLAVE)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('una cuenta que ya tenía aviso también contesta 200, sin rotar nada', async () => {
+    mockedRegistrar.mockResolvedValue({ alreadyRegistered: true })
+    const res = makeRes()
+
+    await registerAngelPayWebhook(reqDeRegistro({ apiKey: LLAVE }), res, jest.fn() as unknown as NextFunction)
+
+    expect(res.__status).toBe(200)
+    expect(res.__json.data).toEqual({ merchantAccountId: ID, webhookRegistered: true, alreadyRegistered: true })
+  })
+
+  it.each([
+    ['sin llave', {}, ID, 'La llave de API es requerida'],
+    ['llave vacía', { apiKey: '   ' }, ID, 'La llave de API es requerida'],
+    ['llave enorme', { apiKey: 'x'.repeat(2049) }, ID, 'La llave de API es demasiado larga'],
+    ['llave que no es texto', { apiKey: 123 }, ID, 'La llave de API es requerida'],
+    ['ambiente inventado', { apiKey: LLAVE, environment: 'STAGING' }, ID, 'El ambiente debe ser QA o PROD'],
+    ['id que no es cuid', { apiKey: LLAVE }, 'no-es-un-cuid', 'Id de cuenta inválido'],
+  ])('%s: 400 en español y el servicio ni se entera', async (_caso, body, id, mensaje) => {
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await registerAngelPayWebhook(reqDeRegistro(body as Record<string, unknown>, id as string), res, next)
+
+    expect(mockedRegistrar).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: mensaje }))
+  })
+
+  it('recorta la llave antes de usarla (pegarla con un espacio es lo normal)', async () => {
+    mockedRegistrar.mockResolvedValue({ alreadyRegistered: false })
+
+    await registerAngelPayWebhook(reqDeRegistro({ apiKey: `  ${LLAVE}\n` }), makeRes(), jest.fn() as unknown as NextFunction)
+
+    expect(mockedRegistrar).toHaveBeenCalledWith(expect.objectContaining({ apiKey: LLAVE }))
+  })
+
+  it('los errores del registro siguen al manejador global tal cual', async () => {
+    const error = new Error('fallo del registro')
+    mockedRegistrar.mockRejectedValue(error)
+    const next = jest.fn() as unknown as NextFunction
+
+    await registerAngelPayWebhook(reqDeRegistro({ apiKey: LLAVE }), makeRes(), next)
+
+    expect(next).toHaveBeenCalledWith(error)
   })
 })

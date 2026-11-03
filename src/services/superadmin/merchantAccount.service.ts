@@ -408,6 +408,8 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
       venueConfigsSecondary: undefined,
       venueConfigsTertiary: undefined,
       hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
+      // D11: tiene canal por el que AngelPay le avisa. No dice que los avisos lleguen: eso es `angelpayWebhookLastReceivedAt`.
+      angelpayWebhookRegistered: !!account.angelpayWebhookSecret,
       venues: Array.from(venueMap.values()),
       terminals: terminals.map(t => ({ id: t.id, serialNumber: t.serialNumber })),
       _count: {
@@ -526,6 +528,8 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
     credentialsEncrypted: undefined, // Don't expose encrypted data
     credentials: decryptedCredentials, // Only if requested
     hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
+    // D11: mismo campo que la lista.
+    angelpayWebhookRegistered: !!account.angelpayWebhookSecret,
   }
 }
 

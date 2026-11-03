@@ -17,23 +17,14 @@
  * No external/network calls happen inside the transaction.
  */
 import prisma from '../../utils/prismaClient'
-import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import logger from '../../config/logger'
-import { BASE_URL } from '../../config/env'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
 import { angelPayIdentityConflict, lockAngelPayVenue } from '../../lib/angelpayIdentity'
 import { AFILIACION_EN_VARIOS_SLOTS, mensajeDeSlotsRepetidos } from '../shared/slotsDeAfiliacion'
 import { encryptCredentials } from './merchantAccount.service'
-import { angelPayIntegrationsApiClient, type AngelPayEnvironment } from '../integrations/angelpay-integrations-api.client'
+import { registrarAvisoAngelPay } from './angelpayWebhookRegistration.service'
 import type { FullSetupAngelPayInput } from '../../schemas/dashboard/angelpay-full-setup.schema'
-
-// BASE_URL is `.optional()` in env.ts (unset in local dev). Same fallback
-// pattern as `cfdi.public.controller.ts` — never build the AngelPay webhook
-// URL against a literal "undefined/api/v1/...".
-const PUBLIC_BASE_URL = BASE_URL || 'https://api.avoqado.io'
-
-// Registered on every AngelPay webhook — see angelpay-integrations-api.client.ts header.
-const ANGELPAY_WEBHOOK_EVENTS = ['send_transaction', 'offline_event', 'canceled_transaction']
 
 const SLOT_COLUMN = {
   PRIMARY: 'primaryAccountId',
@@ -52,10 +43,12 @@ export interface FullSetupAngelPayResult {
   costStructureId?: string
   pricingStructureId?: string
   settlementIds: string[]
-  /** True only when `input.apiKey` was provided AND the webhook was registered
-   * AND the returned secret was persisted. False (never throws) on any
-   * failure in that chain — see the soft-fail block below. */
+  /** True when the account ends this call with a webhook channel: it already had one (never rotated), or `input.apiKey` was provided
+   * and the webhook was registered and its secret persisted. False (never throws) otherwise — see the soft-fail block below. A
+   * registered webhook is NOT proof that its notices arrive. */
   webhookRegistered: boolean
+  /** Why it stayed false, safe to show to the operator. Absent when `webhookRegistered` is true. */
+  webhookRegistrationError?: string
 }
 
 export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, createdBy?: string): Promise<FullSetupAngelPayResult> {
@@ -84,7 +77,7 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
   const slotColumn = SLOT_COLUMN[input.slot.accountType]
 
   try {
-    const result = await prisma.$transaction(
+    const result: FullSetupAngelPayResult = await prisma.$transaction(
       async tx => {
         await lockAngelPayVenue(tx, input.venueId)
         // ---- 1. Login ----
@@ -356,28 +349,23 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
     // NEVER roll back or delete the merchant just created/reused above: the
     // webhook RECEIVER (angelpay-webhook.tpv.controller.ts) already returns
     // 503 for any merchant with no `angelpayWebhookSecret`, so an unregistered
-    // webhook is a safe, retryable degraded state — not a setup failure.
-    if (input.apiKey) {
-      try {
-        const env: AngelPayEnvironment = input.environment ?? (input.login.mode === 'new' ? input.login.environment : 'PROD')
-        const { accessToken } = await angelPayIntegrationsApiClient.auth(input.apiKey, env)
-        const url = `${PUBLIC_BASE_URL}/api/v1/webhooks/angelpay/${result.merchantAccountId}`
-        const { endpointId, secret } = await angelPayIntegrationsApiClient.registerWebhook(accessToken, env, {
-          url,
-          events: ANGELPAY_WEBHOOK_EVENTS,
-          description: 'Avoqado ' + (input.merchant.mode === 'create' ? input.merchant.displayName : ''),
-        })
-        await prisma.merchantAccount.update({
-          where: { id: result.merchantAccountId },
-          data: { angelpayWebhookSecret: secret, angelpayWebhookEndpointId: endpointId },
-        })
-        result.webhookRegistered = true
-      } catch (err: unknown) {
-        logger.warn('AngelPay webhook registration failed — merchant created OK; receiver returns 503 until provisioned', {
-          merchantAccountId: result.merchantAccountId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
+    // webhook is a safe, retryable degraded state — not a setup failure. The
+    // SUPERADMIN shows it on the account and can register it from there.
+    try {
+      await registrarAvisoAngelPay({
+        merchantAccountId: result.merchantAccountId,
+        apiKey: input.apiKey,
+        environment: input.environment,
+        actor: { staffId: createdBy },
+      })
+      result.webhookRegistered = true
+    } catch (err: unknown) {
+      // Only our own messages reach the operator: anything else (a Prisma error, say) can carry connection details.
+      result.webhookRegistrationError = err instanceof AppError ? err.message : 'No se pudo registrar el aviso del banco.'
+      logger.warn('AngelPay webhook not registered — merchant created OK; receiver returns 503 until provisioned', {
+        merchantAccountId: result.merchantAccountId,
+        motivo: result.webhookRegistrationError,
+      })
     }
 
     logger.info('AngelPay full setup completed', {
