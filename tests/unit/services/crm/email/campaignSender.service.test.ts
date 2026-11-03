@@ -434,7 +434,7 @@ describe('el cupo de Resend', () => {
 
     expect(send).toHaveBeenCalledTimes(2)
     expect(resumen).toEqual({ ...VACIO, ENVIADO: 2 })
-    const devoluciones = prismaMock.crmCampaignDelivery.updateMany.mock.calls.filter(([arg]) => arg.where?.id?.in)
+    const devoluciones = prismaMock.crmCampaignDelivery.updateMany.mock.calls.filter(([arg]: any[]) => arg.where?.id?.in)
     expect(devoluciones).toHaveLength(0)
   })
 
