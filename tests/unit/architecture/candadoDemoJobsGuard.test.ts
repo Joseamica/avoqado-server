@@ -36,6 +36,8 @@ const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
   'plan-access-reconciliation.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
   'plan-renewal-reminder.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
   'plan-winback.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
+  'platform-charge-digest.job.ts':
+    'sólo le escribe a jose@avoqado.io (el founder) lo que los clientes le deben a Avoqado por «Por cobrar»; nunca a personas de un negocio',
   'reservation-deposit-reconciliation.job.ts': 'depósitos con Stripe Connect; el demo no tiene cuenta de cobro (capa 1)',
   'shopify-worker.job.ts': 'Shopify; conectarlo está bloqueado en el demo (capa 1 y shopify.connect.service)',
   'stripe-webhook-reconciliation.job.ts': 'eventos de Stripe de suscripciones; el demo no puede contratar (capa 1)',

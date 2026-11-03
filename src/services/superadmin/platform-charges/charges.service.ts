@@ -102,7 +102,7 @@ const cleanId = (value: unknown): string | null => cleanText(value) || null
 
 const MONTHS_ES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
 /** «5 nov»: el día sin cero a la izquierda y el mes abreviado, fijo (no depende del ICU del servidor). */
-const shortDayEs = (day: CalendarDay): string => `${Number(day.slice(8, 10))} ${MONTHS_ES[Number(day.slice(5, 7)) - 1]}`
+export const shortDayEs = (day: CalendarDay): string => `${Number(day.slice(8, 10))} ${MONTHS_ES[Number(day.slice(5, 7)) - 1]}`
 
 // ── Validación de lo que llega ──────────────────────────────────────────────────────────────────────────────────────────────
 

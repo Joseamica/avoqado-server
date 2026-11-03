@@ -68,6 +68,7 @@ import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnounc
 import { announcementOutboxJob } from './jobs/announcementOutbox.job'
 import { crmDailyDigestJob } from './jobs/crm-daily-digest.job'
 import { crmSweepJob } from './jobs/crm-sweep.job'
+import { platformChargeDigestJob } from './jobs/platform-charge-digest.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { campaignSenderJob } from './jobs/campaign-sender.job'
 import { birthdaySweepJob } from './jobs/birthday-sweep.job'
@@ -315,6 +316,8 @@ const gracefulShutdown = async (signal: string) => {
       // CRM propio: barrido de reparación y primer dinero, y el aviso diario de pendientes
       crmSweepJob.stop()
       crmDailyDigestJob.stop()
+      // «Por cobrar»: el correo diario al founder y la generación de fechas por cobrar
+      platformChargeDigestJob.stop()
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
@@ -677,6 +680,9 @@ const startApplication = async (retries = 3) => {
       crmSweepJob.start()
       // CRM propio: «Tus pendientes de hoy» a cada vendedor (lunes a viernes, 8:30; hasta las 11:00 retoma lo que quedó a medias)
       crmDailyDigestJob.start()
+      // «Por cobrar»: el correo diario al founder (desde las 9:00; cada 15 min retoma lo que quedó a medias) y, una vez al día por
+      // proceso, la generación de las fechas por cobrar. Va en el mismo bloque que el resto: con DEMO_MODE=true no corre.
+      platformChargeDigestJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)

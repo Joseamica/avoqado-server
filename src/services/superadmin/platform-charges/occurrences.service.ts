@@ -30,8 +30,8 @@ import { withChargeLock } from './lock'
 import { addDays, calendarDayToDb, dbToCalendarDay, monthBoundsInMexico, todayInMexico } from './schedule'
 import type { CalendarDay, ChargeConcept } from './types'
 
-/** «Próximos 7 días» de las tarjetas: el mismo horizonte con el que el generador crea las fechas. */
-const UPCOMING_DAYS = 7
+/** «Próximos 7 días» de las tarjetas: el mismo horizonte con el que el generador crea las fechas (y el de la consulta por MCP). */
+export const UPCOMING_DAYS = 7
 
 const VIEW_STATUS: Record<string, PlatformChargeOccurrenceStatus> = { open: 'PENDING', paid: 'PAID', skipped: 'SKIPPED' }
 
