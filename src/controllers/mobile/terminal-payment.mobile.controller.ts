@@ -407,11 +407,18 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
  * A manager frees a terminal stuck by an UNKNOWN charge. Tenant-scoped by the venueId in the
  * URL (the service filters every query by it); money-safe (a card payment beats a release).
  */
-export async function releaseTerminalPayment(req: Request, res: Response) {
+export const releaseTerminalPayment = (req: Request, res: Response) => liberarCobro(req, res, 'MOBILE', 'Liberada desde el POS')
+
+/**
+ * POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration
+ * El botón «No se cobró» del banner de la terminal: la MISMA declaración del POS, con la terminal como origen en la bitácora.
+ */
+export const declararSinCobroDesdeLaTerminal = (req: Request, res: Response) => liberarCobro(req, res, 'TPV', 'Liberada desde la terminal')
+
+async function liberarCobro(req: Request, res: Response, source: 'MOBILE' | 'TPV', razonPorDefault: string) {
   try {
     const { venueId, requestId } = req.params
-    const reason =
-      typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : 'Liberada desde el POS'
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : razonPorDefault
     const staffId: string | undefined = (req as any).authContext?.userId
 
     // La declaración viaja SÓLO si el cuerpo trae `statement`. Nunca se deriva de `reason` ni de `confirm`:
@@ -426,7 +433,7 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
     const r = await terminalPaymentService.releaseUnknownRequest({
       requestId,
       venueId,
-      actor: { staffId: staffId ?? null, source: 'MOBILE' },
+      actor: { staffId: staffId ?? null, source },
       reason,
       declaration,
     })

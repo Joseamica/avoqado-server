@@ -52,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Cobros POS → TPV: la terminal declara «no se cobró» desde su banner con `POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration`, la misma declaración, con las mismas puertas y el mismo núcleo que la del POS; la bitácora dice `source: TPV` y, a diferencia del POS, esta ruta nunca libera a secas.
+
 - **Ventana de confirmación de 30 s para negativos sin evidencia (`NO_EVIDENCE_AFTER_WINDOW`), aprobación tardía con alarma y
   correo, declaración del cajero sin PIN con permiso (`payments:resolve-no-instrument`) — cobro remoto, 16-sep-2026.** Plan:
   `docs/superpowers/plans/2026-09-16-ventana-de-confirmacion-cobro-sin-evidencia.md`. Origen: los dos cobros dobles de Testarudo

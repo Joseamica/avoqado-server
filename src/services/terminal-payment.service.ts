@@ -6006,7 +6006,7 @@ class TerminalPaymentService {
   async releaseUnknownRequest(input: {
     requestId: string
     venueId: string
-    actor: { staffId?: string | null; source: 'MCP' | 'SUPERADMIN' | 'MOBILE' }
+    actor: { staffId?: string | null; source: 'MCP' | 'SUPERADMIN' | 'MOBILE' | 'TPV' }
     reason: string
     /** La declaración del cajero «revisé la terminal y no se cobró». Sin ella, TODO sigue exactamente igual. */
     declaration?: unknown

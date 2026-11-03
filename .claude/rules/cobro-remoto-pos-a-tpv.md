@@ -103,5 +103,8 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   Después del commit queda `CASH_WITH_CARD_IN_DOUBT` (`avisarEfectivoConTarjetaEnDuda`, sin esperarlo: nunca tumba ni demora el cobro).
   Si la tarjeta resulta aprobada (REST o webhook), su `Payment` se registra y grita 🚨 [Sobrepago] con `SOBREPAGO_DETECTADO`
   (`tests/integration/payments/efectivoConTarjetaEnDuda.integration.test.ts`).
+- 🔴 **La terminal también declara «no se cobró», y es la MISMA declaración** (botón del banner verde, founder, 3-nov: «A»):
+  `POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration`, con las puertas del POS y `reconcileUncharged`
+  sin tocar. Lo único distinto: el origen (`source: 'TPV'`) y que no libera a secas (`UNCHARGED_STATEMENT_REQUIRED`, antes de la cubeta).
 
 Evidencia y clases de evidencia (A/B/C): `docs/investigations/testarudo-relevo-2026-09-10/README.md` §2-ter.
