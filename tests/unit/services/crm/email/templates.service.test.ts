@@ -404,22 +404,28 @@ describe('sendTestToSelf', () => {
   })
 
   describe('🔴 la prueba tampoco habilita el envío a quien se dio de baja, rebotó o se quejó', () => {
-    it('dada de baja: {ok:false, motivo:"BAJA"} y no llama a Resend', async () => {
+    it('dada de baja: {ok:false} con el motivo en palabras, no el código «BAJA», y no llama a Resend', async () => {
       setList('rafa@avoqado.io')
       prismaMock.crmEmailOptOut.findUnique.mockResolvedValue({ id: 'cbaja' })
 
-      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'BAJA' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
+        ok: false,
+        motivo: 'tu correo se dio de baja de los correos de Avoqado',
+      })
       expect(prismaMock.crmEmailOptOut.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: 'rafa@avoqado.io' } }))
       expect(send).not.toHaveBeenCalled()
     })
 
-    it('rebote duro: «REBOTE»; queja: «QUEJA»; ninguno llama a Resend', async () => {
+    it('rebote duro y queja: el motivo en palabras; ninguno llama a Resend', async () => {
       setList('rafa@avoqado.io')
       prismaMock.emailSuppression.findUnique.mockResolvedValueOnce({ reason: 'HARD_BOUNCE' })
-      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'REBOTE' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'tu correo rebotó: ya no le mandamos nada' })
 
       prismaMock.emailSuppression.findUnique.mockResolvedValueOnce({ reason: 'COMPLAINT' })
-      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'QUEJA' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
+        ok: false,
+        motivo: 'tu correo marcó un envío como spam: ya no le mandamos nada',
+      })
       expect(send).not.toHaveBeenCalled()
     })
 

@@ -18,7 +18,7 @@ import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { renderizarBloques } from '../../marketing/campaignRenderer'
 import { scopeWhere, type CrmAccess } from '../access.service'
 import { cabecerasDeBaja, pieDeCampana } from './footer'
-import { isBlocked } from './optOut.service'
+import { isBlocked, type Bloqueo } from './optOut.service'
 import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from './testAllowlist'
 import { aplicarVariables, variablesDesconocidasEn, type Vars } from './templateVars'
 
@@ -53,6 +53,12 @@ const NO_SABEMOS_SI_SALIO_LA_PRUEBA =
  * Lo que dice que Resend pudo haberla mandado: sin respuesta (sin código), un 5xx, o la llave ya usada / en vuelo. Lo demás (429,
  * validación, sin configurar, demo) es un «no» que se sabe.
  */
+/** El bloqueo en palabras: la pantalla lo pinta tal cual, «Este intento no salió: …». */
+const MOTIVO_BLOQUEO: Record<Bloqueo, string> = {
+  BAJA: 'tu correo se dio de baja de los correos de Avoqado',
+  REBOTE: 'tu correo rebotó: ya no le mandamos nada',
+  QUEJA: 'tu correo marcó un envío como spam: ya no le mandamos nada',
+}
 const PUDO_SALIR = new Set([
   'application_error',
   'internal_server_error',
@@ -273,7 +279,7 @@ export async function sendTestToSelf(
   // una dirección que ya no debe recibir nada de Avoqado. Si la base falla, la prueba no sale (nunca un error por «libre»).
   try {
     const bloqueo = await isBlocked(to)
-    if (bloqueo) return { ok: false, motivo: bloqueo }
+    if (bloqueo) return { ok: false, motivo: MOTIVO_BLOQUEO[bloqueo] }
   } catch (error) {
     logger.error('[CRM] The test email could not check the suppression lists', {
       staffId: actor.staffId,

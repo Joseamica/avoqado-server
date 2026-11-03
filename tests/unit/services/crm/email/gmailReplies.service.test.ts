@@ -156,6 +156,21 @@ describe('sincronizarRespuestas: lo que contestan', () => {
     })
   })
 
+  // full-testing 3-nov: Gmail entrega el `snippet` con el HTML escapado; la historia mostraba «&lt;rafa@…&gt;».
+  it('el extracto se guarda legible: Gmail lo manda con &lt; &gt; &amp; &quot; &#39; escapados', async () => {
+    mockThreadsGet.mockResolvedValue({
+      data: {
+        id: 'th-1',
+        messages: [propio(), { ...respuesta(), snippet: 'Sí &#39;va&#39; &quot;ok&quot; &amp; Rafa &lt;rafa@x.mx&gt; wrote: &amp;lt;' }],
+      },
+    })
+
+    await sincronizarRespuestas(NOW)
+
+    const { data } = prismaMock.crmEmailMessage.createManyAndReturn.mock.calls[0][0]
+    expect(data[0].snippet).toBe('Sí \'va\' "ok" & Rafa <rafa@x.mx> wrote: &lt;')
+  })
+
   it('🔴 una respuesta es un toque: «Estancado» cuenta desde la más nueva de las recién guardadas, nunca hacia atrás', async () => {
     const vieja = mensaje('gm-vieja', 'Brenda <brenda@cafe.mx>', { internalDate: String(NOW.getTime() - 40 * 86_400_000) })
     const nueva = mensaje('gm-nueva', 'Brenda <brenda@cafe.mx>', { internalDate: String(NOW.getTime() - 60_000) })

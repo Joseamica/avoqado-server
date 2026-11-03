@@ -73,6 +73,15 @@ const encabezado = (mensaje: gmail_v1.Schema$Message, nombre: string) =>
 /** La dirección de un `From`: lo de entre `<>` si lo hay, en minúsculas. */
 const direccionDe = (from: string) => normalizeEmail(from.match(/<([^>]+)>/)?.[1] ?? from)
 
+/** Gmail entrega el `snippet` con el HTML escapado («&lt;rafa@…&gt;»): se guarda como texto. `&amp;` va al final. */
+const desescapar = (snippet: string) =>
+  snippet
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+
 /** Lo que NO es una respuesta: lo que mandó el propio vendedor (por su dirección, o porque Gmail lo marca enviado) y sus borradores. */
 const esPropio = (mensaje: gmail_v1.Schema$Message, googleEmail: string) =>
   direccionDe(encabezado(mensaje, 'From')) === googleEmail || (mensaje.labelIds ?? []).some(label => label === 'SENT' || label === 'DRAFT')
@@ -108,7 +117,7 @@ async function guardarRespuestas(
         gmailMessageId: m.id!,
         gmailThreadId: threadId,
         subject: encabezado(m, 'Subject') || '(sin asunto)',
-        snippet: m.snippet ?? null,
+        snippet: m.snippet == null ? null : desescapar(m.snippet),
         status: 'RECIBIDO',
         sentAt: m.internalDate ? new Date(Number(m.internalDate)) : null,
       })),
