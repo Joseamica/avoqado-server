@@ -529,7 +529,12 @@ export async function cancelPlatformCfdi(
     data: { ...asked, status: 'CANCEL_REQUESTED', cancelStatus: 'pending', cancelledAt: null },
   })
   if (claimed.count === 0) throw conflict('Esta factura acaba de cambiar: vuelve a consultarla', 'PLATFORM_CFDI_CHANGED')
-  const restore = { status: 'STAMPED' as const, cancelMotivo: row.cancelMotivo, cancelSubstituteUuid: row.cancelSubstituteUuid }
+  // Lo que contesta esta llamada tarda: si otra pestaña ya confirmó la cancelación, su «no» ya no decide nada.
+  const backToStamped = (cancelStatus: string | null) =>
+    prisma.platformCfdi.updateMany({
+      where: { id: row.id, status: 'CANCEL_REQUESTED' },
+      data: { status: 'STAMPED', cancelMotivo: row.cancelMotivo, cancelSubstituteUuid: row.cancelSubstituteUuid, cancelStatus },
+    })
 
   let res: Awaited<ReturnType<typeof provider.cancelInvoice>>
   try {
@@ -538,7 +543,7 @@ export async function cancelPlatformCfdi(
     const message = err instanceof Error ? err.message : String(err)
     // El PAC contestó que no: no pasó nada.
     if (err instanceof ProviderHttpError && err.status >= 400 && err.status < 500) {
-      await prisma.platformCfdi.update({ where: { id: row.id }, data: { ...restore, cancelStatus: row.cancelStatus } })
+      await backToStamped(row.cancelStatus)
       throw new PlatformBillingError(`El proveedor no aceptó la cancelación: ${message}`, 'PROVIDER')
     }
     throw new PlatformBillingError(
@@ -552,11 +557,18 @@ export async function cancelPlatformCfdi(
   if (res.status === 'canceled' || res.status === 'accepted') {
     return prisma.platformCfdi.update({
       where: { id: row.id },
-      data: { status: 'CANCELLED', cancelStatus: res.status, cancelledAt: res.cancelledAt ?? new Date() },
+      data: { ...asked, status: 'CANCELLED', cancelStatus: res.status, cancelledAt: res.cancelledAt ?? new Date() },
     })
   }
-  if (res.status === 'pending') return prisma.platformCfdi.findUniqueOrThrow({ where: { id: row.id } })
-  await prisma.platformCfdi.update({ where: { id: row.id }, data: { ...restore, cancelStatus: res.status } })
+  if (res.status === 'pending') {
+    // La respuesta de la cancelación manda sobre una consulta que se adelantó y la regresó a timbrada.
+    await prisma.platformCfdi.updateMany({
+      where: { id: row.id, status: { in: ['STAMPED', 'CANCEL_REQUESTED'] } },
+      data: { ...asked, status: 'CANCEL_REQUESTED', cancelStatus: 'pending', cancelledAt: null },
+    })
+    return prisma.platformCfdi.findUniqueOrThrow({ where: { id: row.id } })
+  }
+  await backToStamped(res.status)
   throw conflict(`La cancelación de ${labelOf(row)} no procedió: sigue vigente`, 'PLATFORM_CFDI_CANCEL_NOT_DONE')
 }
 
@@ -698,6 +710,8 @@ async function refreshCancellation(row: PlatformCfdi, provider: FiscalProvider, 
     return updated
   }
   if (answer.status === 'pending') return writeIfUnchanged(row, { status: 'CANCEL_REQUESTED', cancelStatus: 'pending', cancelledAt: null })
+  // Recién pedida: la petición puede seguir en vuelo y el PAC todavía no saberlo. Sólo tras la espera, «none» quiere decir que no se pidió.
+  if (answer.status === 'none' && row.status === 'CANCEL_REQUESTED' && Date.now() - row.updatedAt.getTime() < STAMPING_GRACE_MS) return row
   const updated = await writeIfUnchanged(row, { status: 'STAMPED', cancelStatus: answer.status, cancelledAt: null })
   audit('PLATFORM_CFDI_CANCEL_NOT_APPLIED', updated, actorId, { pacStatus: answer.status, priorStatus: row.status })
   return updated

@@ -85,6 +85,7 @@ function fila(over: Fila = {}): Fila {
     cancelStatus: null,
     cancelledAt: null,
     createdAt: hace(3),
+    updatedAt: hace(3),
     ...over,
   }
 }
@@ -112,7 +113,7 @@ beforeEach(() => {
     return f ? { ...f } : null
   })
   prismaMock.platformCfdi.updateMany.mockImplementation(async ({ where, data }: any) => {
-    const f = filas.find(x => x.id === where.id && x.status === where.status)
+    const f = filas.find(x => x.id === where.id && (where.status?.in ? where.status.in.includes(x.status) : x.status === where.status))
     if (!f) return { count: 0 }
     Object.assign(f, data)
     return { count: 1 }
@@ -320,6 +321,16 @@ describe('«Consultar estado»: le pregunta al PAC y nunca emite', () => {
     pac.getCancellationStatus.mockResolvedValue({ status: respuesta, cancelledAt: null })
 
     await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: estado })
+  })
+
+  it('🔴 recién pedida (menos de 2 min) y el PAC dice «none»: la petición puede seguir en vuelo, no se regresa a timbrada', async () => {
+    filas.push(fila({ status: 'CANCEL_REQUESTED', cancelStatus: 'pending', uuid: 'UUID-1', facturapiId: 'fa-1', updatedAt: hace(1) }))
+    pac.getCancellationStatus.mockResolvedValue({ status: 'none', cancelledAt: null })
+
+    await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'CANCEL_REQUESTED' })
+
+    filas[0].updatedAt = hace(3)
+    await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'STAMPED' })
   })
 
   it('🔴 una fila vieja «Cancelada» con la cancelación sin confirmar se corrige; una confirmada no se pregunta', async () => {
@@ -541,6 +552,43 @@ describe('«Cancelar» dice lo que dijo el SAT', () => {
     expect(filas[0]).toMatchObject({ status: 'CANCEL_REQUESTED', cancelMotivo: '02' })
     pac.getCancellationStatus.mockResolvedValue({ status: 'canceled', cancelledAt: null })
     await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'CANCELLED' })
+  })
+
+  it('🔴 otra pestaña consulta a media cancelación y el PAC todavía dice «none»: no se pierde el trámite', async () => {
+    filas.push(timbrada())
+    pac.getCancellationStatus.mockResolvedValue({ status: 'none', cancelledAt: null })
+    pac.cancelInvoice.mockImplementation(async () => {
+      filas[0].updatedAt = new Date() // lo escribió la cancelación hace un instante
+      await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: 'CANCEL_REQUESTED' })
+      return { status: 'pending', cancelledAt: null }
+    })
+
+    await expect(cancelPlatformCfdi('c1', '02')).resolves.toMatchObject({ status: 'CANCEL_REQUESTED' })
+    expect(filas[0].status).toBe('CANCEL_REQUESTED')
+  })
+
+  it('🔴 aunque la consulta la haya regresado a timbrada, la respuesta de la cancelación manda: en trámite', async () => {
+    filas.push(timbrada())
+    pac.cancelInvoice.mockImplementation(async () => {
+      filas[0].status = 'STAMPED'
+      return { status: 'pending', cancelledAt: null }
+    })
+
+    await expect(cancelPlatformCfdi('c1', '02')).resolves.toMatchObject({ status: 'CANCEL_REQUESTED', cancelStatus: 'pending' })
+  })
+
+  it.each(['4xx', 'rejected'])('🔴 un %s tardío no pisa una cancelación que otra pestaña ya confirmó', async caso => {
+    filas.push(timbrada())
+    pac.cancelInvoice.mockImplementation(async () => {
+      filas[0].status = 'CANCELLED'
+      filas[0].cancelStatus = 'canceled'
+      if (caso === '4xx') throw new ProviderHttpError(400, 'invalid_request', 'Ya estaba cancelada')
+      return { status: 'rejected', cancelledAt: null }
+    })
+
+    await expect(cancelPlatformCfdi('c1', '02')).rejects.toBeDefined()
+
+    expect(filas[0]).toMatchObject({ status: 'CANCELLED', cancelStatus: 'canceled' })
   })
 
   it('el proveedor contesta que no (4xx): no pasó nada y sigue timbrada', async () => {
