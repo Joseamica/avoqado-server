@@ -7,6 +7,7 @@
  * volvería por esa reservación, así que lo pendiente se termina a cualquier hora.
  *
  * Cada vuelta (cada 15 min, todo el día):
+ *   0. decide quién puede mandar (`digestMode`), antes de leer, retomar, generar o mandar nada (ver abajo);
  *   1. termina lo pendiente (`retakeLeftovers`), a cualquier hora;
  *   2. antes de las 9:00 de CDMX termina;
  *   3. genera las ocurrencias de todos los cobros, una vez al día por proceso (idempotente);
@@ -15,11 +16,21 @@
  *      14:15, y si el servidor estuvo caído a las 9 sale al volver);
  *   6. aparta el día (un choque de la llave primaria se ignora), guarda el correo y lo manda. Un rechazo permanente cierra el día.
  *
+ * 🔴 Quién puede mandar (`digestMode`, una sola decisión por vuelta que fija el asunto Y la llave de Resend):
+ *   · producción, sin la bandera: el correo de verdad, llave `por-cobrar:<día>`;
+ *   · producción con `PLATFORM_CHARGES_SANDBOX=true`: se niega, en voz alta (la misma regla de `sandbox.ts`);
+ *   · fuera de producción con la bandera: «[PRUEBA]» en el asunto y llave propia `por-cobrar-prueba:<día>`, que nunca choca con la
+ *     de producción;
+ *   · fuera de producción sin la bandera: NO HACE NADA (ni leer, ni generar, ni mandar). Unos 20 servidores locales comparten base
+ *     y sus cobros de prueba quedan vencidos para siempre: cada uno le mandaría avisos falsos al founder todos los días, y podría
+ *     cerrarle su correo de verdad, porque la llave de Resend es de toda la cuenta.
+ *
  * 🔴 La primera lectura de cada vuelta va con `retry(shouldRetryDbConnectionError)` (`.claude/rules/cron-jobs.md`). El envío y las
  * marcas NUNCA se reintentan a ciegas: un reintento pasa por la fila reservada y su llave.
  */
 import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
+import { escapeHtml } from '@/controllers/public/publicHtml'
 import emailService from '@/services/email.service'
 import { formatMoney } from '@/services/shared/receiptLayout/format'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '@/utils/datetime'
@@ -67,14 +78,32 @@ const isDigestContent = (value: unknown): value is DigestContent =>
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
-const escapeHtml = (value: string) =>
-  value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] ?? char)
-
 /** Un nombre o un concepto lo escribió una persona: saltos de línea y espacios de más no deben partir el texto. */
 const oneLine = (value: string) => value.replace(/\s+/g, ' ').trim()
 
 /** Como el resto de los correos al equipo: `SUPERADMIN_URL`, y el SUPERADMIN de producción si no está. */
 const porCobrarUrl = () => `${(process.env.SUPERADMIN_URL || 'https://superadmin.avoqado.io').replace(/\/$/, '')}/por-cobrar`
+
+// ── Quién puede mandar ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Cómo sale el correo: qué antepone al asunto y con qué llave de Resend. Las dos cosas salen de UNA decisión (`digestMode`). */
+interface DigestMode {
+  subjectPrefix: string
+  keyPrefix: string
+}
+const REAL_MODE: DigestMode = { subjectPrefix: '', keyPrefix: 'por-cobrar' }
+const TEST_MODE: DigestMode = { subjectPrefix: '[PRUEBA] ', keyPrefix: 'por-cobrar-prueba' }
+
+/**
+ * La única decisión de quién puede mandar y cómo (ver el encabezado). `null` = no hace nada. Lee `NODE_ENV` y la bandera en cada
+ * llamada, no al cargar el módulo. En producción con `PLATFORM_CHARGES_SANDBOX=true` lanza (`chargesSandbox`): esa configuración
+ * equivocada no debe pasar en silencio.
+ */
+function digestMode(): DigestMode | null {
+  // El «emisor» no importa para un correo: sin llave guardada, sólo queda la regla de producción.
+  if (chargesSandbox({ providerKeyEnc: null })) return TEST_MODE
+  return process.env.NODE_ENV === 'production' ? REAL_MODE : null
+}
 
 // ── Qué dice el correo ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -269,21 +298,23 @@ function renderDigest(subject: string, sections: LoadedSection[], now: Date): Di
   return { subject, html, text }
 }
 
-/**
- * El correo de hoy, o `null` si no hay nada que decir (ni «Hoy», ni «Vencidos», ni «Pagados sin factura»): lo próximo no cuenta.
- * No escribe nada: reservar el día es de `runPlatformChargeDigest`.
- *
- * Con `PLATFORM_CHARGES_SANDBOX=true` sólo cambia el asunto («[PRUEBA] …»). Es la misma regla de `sandbox.ts`, que además se niega a
- * trabajar en un servidor de producción: aquí también, para que esa configuración equivocada no pase en silencio.
- */
-export async function buildPlatformChargeDigest(now: Date): Promise<DigestEmail | null> {
-  // El «emisor» no importa para un correo: sin llave guardada, sólo queda la regla de producción.
-  const prefix = chargesSandbox({ providerKeyEnc: null }) ? '[PRUEBA] ' : ''
+/** El armado, con el modo que ya decidió la vuelta: de él sale el prefijo del asunto. */
+async function buildDigest(now: Date, mode: DigestMode): Promise<DigestEmail | null> {
   const sections: LoadedSection[] = []
   for (const section of sectionsFor(now)) sections.push(await loadSection(section))
   const withRows = sections.filter(section => section.total > 0)
   if (withRows.length === 0) return null
-  return renderDigest(subjectFor(prefix, withRows), withRows, now)
+  return renderDigest(subjectFor(mode.subjectPrefix, withRows), withRows, now)
+}
+
+/**
+ * El correo de hoy, o `null` si no hay nada que decir (ni «Hoy», ni «Vencidos», ni «Pagados sin factura»): lo próximo no cuenta.
+ * No escribe nada: reservar el día y decidir quién puede mandarlo es de `runPlatformChargeDigest`. Llamado directo, con la bandera
+ * `PLATFORM_CHARGES_SANDBOX=true` fuera de producción antepone «[PRUEBA]»; sin ella arma el correo de verdad (nadie lo manda); en
+ * producción con la bandera se niega, como la vuelta.
+ */
+export async function buildPlatformChargeDigest(now: Date): Promise<DigestEmail | null> {
+  return buildDigest(now, digestMode() ?? REAL_MODE)
 }
 
 // ── Reservar, mandar y terminar lo que quedó a medias ───────────────────────────────────────────────────────────────────────
@@ -293,23 +324,34 @@ const entryRead = <T>(context: string, read: () => Promise<T>) =>
   retry(read, { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context })
 
 /**
- * Manda el correo guardado de `day` con su llave y marca la fila — sólo mientras siga siendo nuestra (`reservedAt` es la marca de quien
- * la tiene: una vuelta que tardó más de 10 min pudo perderla). Si el proceso muere después de que Resend tomó el correo y antes de
- * esta marca, la fila queda reservada, una retoma manda el MISMO contenido con la MISMA llave y Resend no lo entrega otra vez. Un
- * rechazo que no va a cambiar (`transient: false`) cierra el día sin gastar intentos; un envío que lanza cuenta como un intento.
+ * Manda el correo guardado de `day` con la llave del modo de ahora (`${keyPrefix}:<día>`) y marca la fila — sólo mientras siga siendo
+ * nuestra (`reservedAt` es la marca de quien la tiene: una vuelta que tardó más de 10 min pudo perderla). Una retoma manda lo guardado
+ * con la llave del modo de ahora, que es la de su primer envío mientras el servidor no cambie de modo. Si el proceso muere después de
+ * que Resend tomó el correo y antes de esta marca, la fila queda reservada, una retoma manda el MISMO contenido con la MISMA llave y
+ * Resend no lo entrega otra vez. Un rechazo que no va a cambiar (`transient: false`) cierra el día sin gastar intentos; un envío que
+ * lanza cuenta como un intento. `priorAttempts` son los intentos que la fila ya trae: con ellos se sabe si ESTE intento cierra el día.
  */
-async function deliver(day: CalendarDay, content: DigestContent, now: Date): Promise<void> {
+async function deliver(mode: DigestMode, day: CalendarDay, content: DigestContent, now: Date, priorAttempts: number): Promise<void> {
   let ok = false
   let permanent = false
+  let failure = ''
   try {
-    const result = await emailService.sendEmailWithResult({ ...content, idempotencyKey: `por-cobrar:${day}` })
+    const result = await emailService.sendEmailWithResult({ ...content, idempotencyKey: `${mode.keyPrefix}:${day}` })
     ok = result.ok
     permanent = !ok && result.transient === false
-    if (!ok) {
-      logger.warn('[platform-charges] El correo diario de «Por cobrar» no salió', { day, error: result.errorCode ?? 'not sent', permanent })
-    }
+    if (!ok) failure = result.errorCode ?? 'not sent'
   } catch (error) {
-    logger.warn('[platform-charges] El correo diario de «Por cobrar» no salió', { day, error: errorText(error), permanent })
+    failure = errorText(error)
+  }
+  if (!ok) {
+    // El intento que cierra el día (un rechazo permanente o el tercer fallo) se registra como ERROR: es lo que una alerta de log lee
+    // como «hoy el founder no recibió su correo». Los intentos anteriores, que todavía se reintentan, son sólo aviso.
+    const detail = { day, error: failure, permanent, attempt: priorAttempts + 1 }
+    if (permanent || priorAttempts + 1 >= MAX_ATTEMPTS) {
+      logger.error('[platform-charges] El correo diario de «Por cobrar» no salió y el día se cierra sin correo', detail)
+    } else {
+      logger.warn('[platform-charges] El correo diario de «Por cobrar» no salió', detail)
+    }
   }
   await prisma.platformChargeDigest.updateMany({
     where: { day, reservedAt: now },
@@ -326,7 +368,7 @@ async function deliver(day: CalendarDay, content: DigestContent, now: Date): Pro
  * proceso murió antes o después de mandar) o `FALLO` con menos de 3 intentos. Cada una se toma con un compare-and-set sobre su estado y
  * su reservación, así que dos vueltas nunca la mandan las dos, ni se manda otra vez lo que su dueño lento acaba de marcar.
  */
-async function retakeLeftovers(today: CalendarDay, now: Date): Promise<void> {
+async function retakeLeftovers(mode: DigestMode, today: CalendarDay, now: Date): Promise<void> {
   const leftovers = await entryRead('platform-charge-digest.leftovers', () =>
     prisma.platformChargeDigest.findMany({
       where: {
@@ -337,7 +379,7 @@ async function retakeLeftovers(today: CalendarDay, now: Date): Promise<void> {
           { status: 'FALLO', attempts: { lt: MAX_ATTEMPTS } },
         ],
       },
-      select: { day: true, status: true, reservedAt: true, content: true },
+      select: { day: true, status: true, attempts: true, reservedAt: true, content: true },
       orderBy: { day: 'asc' },
       take: 2,
     }),
@@ -353,7 +395,8 @@ async function retakeLeftovers(today: CalendarDay, now: Date): Promise<void> {
         data: { status: 'APARTADO', reservedAt: now },
       })
       if (count !== 1) continue
-      await deliver(row.day, row.content, now)
+      // Si el compare-and-set ganó, nadie tocó la fila desde la lectura: sus intentos siguen siendo los que se leyeron.
+      await deliver(mode, row.day, row.content, now, row.attempts)
     } catch (error) {
       // Una fila que falla no frena a las demás ni al correo de hoy.
       logger.error('[platform-charges] El correo diario no se pudo retomar', { day: row.day, error: errorText(error) })
@@ -365,9 +408,11 @@ async function retakeLeftovers(today: CalendarDay, now: Date): Promise<void> {
 let generatedOn: CalendarDay | null = null
 
 /**
- * La generación diaria de ocurrencias (spec §3.3) viaja en esta tarea. Es idempotente, así que un reinicio sólo la repite. Si falla
- * se registra y no se marca como hecha: el correo no depende de ella (lo que vence en la semana ya se generó al crear o editar) y la
- * vuelta siguiente la reintenta.
+ * La generación diaria de ocurrencias (spec §3.3) viaja en esta tarea. Es idempotente, así que un reinicio sólo la repite.
+ * `generateAllActive` atrapa y registra por sí misma el fallo de CADA cobro y sigue con los demás (`charges.service.ts`), así que esos
+ * cobros no se reintentan hasta mañana. Aquí sólo llega un error si falla la lectura de la página de cobros activos: se registra, no
+ * se marca como hecha y la vuelta siguiente la reintenta. El correo no depende de ella (lo que vence en la semana ya se generó al
+ * crear o editar), así que sale igual.
  */
 async function generateOncePerDay(today: CalendarDay, now: Date): Promise<void> {
   if (generatedOn === today) return
@@ -389,18 +434,24 @@ export function __resetPlatformChargeDigestForTests(): void {
 
 /**
  * Una vuelta de la tarea (ver el encabezado). Secuencial a propósito: es un correo al día y el pool es compartido. Lo que lance
- * (la base caída, una marca que no se pudo escribir) lo atrapa la tarea; la fila reservada deja que la vuelta siguiente lo retome.
+ * (la base caída, una marca que no se pudo escribir, la bandera de prueba en producción) lo atrapa la tarea; la fila reservada deja que
+ * la vuelta siguiente lo retome.
  */
 export async function runPlatformChargeDigest(now: Date = new Date()): Promise<void> {
+  // Lo primero y antes de TODO: quién puede mandar. Fuera de producción y sin la bandera no se lee, ni se retoma, ni se genera,
+  // ni se manda. En producción con la bandera lanza aquí mismo, antes de tocar nada.
+  const mode = digestMode()
+  if (!mode) return
+
   const today = todayInMexico(now)
-  await retakeLeftovers(today, now)
+  await retakeLeftovers(mode, today, now)
   if (formatInVenueTimezone(now, DEFAULT_TIMEZONE, 'HH:mm') < SEND_FROM) return
 
   await generateOncePerDay(today, now)
   // Cualquier fila de hoy, sea cual sea su estado: un cobro que aparece después de mandar el correo no provoca otro.
   if (await prisma.platformChargeDigest.findUnique({ where: { day: today }, select: { day: true } })) return
 
-  const email = await buildPlatformChargeDigest(now)
+  const email = await buildDigest(now, mode)
   if (!email) return // nada que decir: sin fila, para que un cobro de las 14:00 salga a las 14:15
 
   const content: DigestContent = { to: RECIPIENT, ...email }
@@ -413,5 +464,5 @@ export async function runPlatformChargeDigest(now: Date = new Date()): Promise<v
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return
     throw error
   }
-  await deliver(today, content, now)
+  await deliver(mode, today, content, now, 0)
 }

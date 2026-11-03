@@ -681,7 +681,8 @@ const startApplication = async (retries = 3) => {
       // CRM propio: «Tus pendientes de hoy» a cada vendedor (lunes a viernes, 8:30; hasta las 11:00 retoma lo que quedó a medias)
       crmDailyDigestJob.start()
       // «Por cobrar»: el correo diario al founder (desde las 9:00; cada 15 min retoma lo que quedó a medias) y, una vez al día por
-      // proceso, la generación de las fechas por cobrar. Va en el mismo bloque que el resto: con DEMO_MODE=true no corre.
+      // proceso, la generación de las fechas por cobrar. Va en el mismo bloque que el resto: con DEMO_MODE=true no corre. Fuera de
+      // producción sólo trabaja con PLATFORM_CHARGES_SANDBOX=true (si no, la vuelta no hace nada).
       platformChargeDigestJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()

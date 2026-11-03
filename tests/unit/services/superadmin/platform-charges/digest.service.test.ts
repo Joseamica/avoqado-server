@@ -24,11 +24,18 @@ jest.mock('@/services/superadmin/platform-charges/charges.service', () => ({
  * filtros que el servicio les manda (un operador que el doble no conoce lanza, y se niega a leer sin `take`), así que lo que se
  * afirma es qué filas entran al correo y cuáles no, no la forma exacta de cada llamada a Prisma. Qué NO prueba un doble: que Postgres
  * resuelva igual un `none` sobre la relación ni el orden con un `@db.Date`; esto no usa ninguna base real.
+ *
+ * 🔴 Quién puede mandar: la llave `por-cobrar:<día>` y el correo de verdad son de PRODUCCIÓN. Fuera de ella la vuelta no hace nada si no
+ * está `PLATFORM_CHARGES_SANDBOX=true`, y con la bandera sale «[PRUEBA]» con la llave `por-cobrar-prueba:<día>`. Por eso las pruebas de
+ * la vuelta que fijan `por-cobrar:<día>` declaran `NODE_ENV=production` (`asProduction`), y el `afterEach` lo restaura.
  */
 
 const send = emailService.sendEmailWithResult as jest.Mock
 const generate = generateAllActive as jest.Mock
 const mockLoggerError = (logger as unknown as { error: jest.Mock }).error
+const mockLoggerWarn = (logger as unknown as { warn: jest.Mock }).warn
+/** Los avisos y errores de ESTE módulo (el logger es global y otros módulos también escriben en él). */
+const ours = (mock: jest.Mock) => mock.mock.calls.filter(([message]) => String(message).startsWith('[platform-charges]'))
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -52,6 +59,8 @@ function restoreEnv(name: 'PLATFORM_CHARGES_SANDBOX' | 'SUPERADMIN_URL' | 'NODE_
   if (value === undefined) delete process.env[name]
   else process.env[name] = value
 }
+/** El `afterEach` de abajo restaura `NODE_ENV`: cada prueba que lo cambia lo deja como estaba. */
+const asProduction = () => restoreEnv('NODE_ENV', 'production')
 
 // ── Doble de PlatformChargeDigest ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -258,6 +267,8 @@ const leftover = (over: Partial<DigestRow> = {}): DigestRow => ({
 })
 
 describe('runPlatformChargeDigest — cuándo manda', () => {
+  beforeEach(asProduction)
+
   it('a las 9:00 con algo por cobrar: aparta, manda a jose@avoqado.io con la llave del día y marca ENVIADO', async () => {
     occurrences = [dueToday()]
 
@@ -365,6 +376,32 @@ describe('runPlatformChargeDigest — cuándo manda', () => {
     expect(digests[0].status).toBe('ENVIADO')
   })
 
+  it('🔴 un cobro que vence HOY y se da de alta DESPUÉS del correo no provoca otro hoy, y mañana a las 9:00 sale en «Vencidos» (Review Focus)', async () => {
+    // El correo de hoy sale a las 9:00 por un cobro que ya había vencido.
+    occurrences = [overdue('2026-10-30', { charge: { customerName: 'Vencido De Antes' } })]
+    await runPlatformChargeDigest(T0)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(sentEmails()[0].text).toContain('Vencido De Antes')
+
+    // A las 14:00 se da de alta un cobro que vence HOY. Ya hay fila de hoy: ninguna vuelta del resto del día (hasta las 23:59) manda otro.
+    occurrences.push(dueToday({ charge: { customerName: 'Cobro De Hoy Tardío' } }))
+    for (const minutes of [300, 315, 600, 899]) await runPlatformChargeDigest(at(minutes))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(digests).toHaveLength(1)
+
+    // Mañana a las 9:00 ese mismo cobro ya está vencido: sale en «Vencidos» del correo de mañana, con la llave de mañana, y no en «Hoy».
+    await runPlatformChargeDigest(new Date(T0.getTime() + 24 * HOUR))
+    expect(send).toHaveBeenCalledTimes(2)
+    const second = sentEmails()[1]
+    expect(second.idempotencyKey).toBe('por-cobrar:2026-11-03')
+    expect(second.text).toMatch(/VENCIDOS \(2\)[\s\S]*Cobro De Hoy Tardío: \$580\.00 \(Renta de terminal · venció el 2 nov\)/)
+    expect(second.text).not.toMatch(/HOY \(/)
+    expect(digests.map(d => [d.day, d.status])).toEqual([
+      [DAY, 'ENVIADO'],
+      ['2026-11-03', 'ENVIADO'],
+    ])
+  })
+
   it('la fila de hoy, sea cual sea su estado, impide armar otro correo: un cierre por rechazo permanente no se reabre con un cobro nuevo', async () => {
     send.mockResolvedValue({ ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' })
     occurrences = [dueToday()]
@@ -396,6 +433,8 @@ describe('runPlatformChargeDigest — cuándo manda', () => {
 })
 
 describe('runPlatformChargeDigest — terminar lo pendiente', () => {
+  beforeEach(asProduction)
+
   it('🔴 un APARTADO de ayer a las 23:45 con más de 10 min se retoma hoy con el contenido guardado y la misma llave, sin armar otro', async () => {
     digests = [leftover({ day: YESTERDAY, status: 'APARTADO', attempts: 0, reservedAt: LAST_NIGHT, createdAt: LAST_NIGHT })]
 
@@ -447,6 +486,56 @@ describe('runPlatformChargeDigest — terminar lo pendiente', () => {
     expect(digests).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
   })
 
+  it('🔴 sólo el intento que CIERRA el día se registra como error: los dos primeros fallos son aviso, el tercero es error', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit' })
+    occurrences = [dueToday()]
+
+    await runPlatformChargeDigest(at(0))
+    await runPlatformChargeDigest(at(15))
+    // Dos intentos fallidos y todavía se reintenta: aviso, nunca error (una alerta de log no debe saltar).
+    expect(ours(mockLoggerWarn)).toHaveLength(2)
+    expect(ours(mockLoggerError)).toEqual([])
+
+    await runPlatformChargeDigest(at(30)) // el tercero: ya no hay cuarto
+    expect(ours(mockLoggerWarn)).toHaveLength(2)
+    expect(ours(mockLoggerError)).toEqual([
+      [
+        expect.stringMatching(/no salió y el día se cierra sin correo/),
+        expect.objectContaining({ day: DAY, error: 'rate_limit', attempt: 3 }),
+      ],
+    ])
+    await runPlatformChargeDigest(at(45)) // y el día cerrado ya no escribe nada más
+    expect(ours(mockLoggerWarn)).toHaveLength(2)
+    expect(ours(mockLoggerError)).toHaveLength(1)
+  })
+
+  it('un envío que LANZA en el tercer intento también cierra el día con un error; en los anteriores es aviso', async () => {
+    send.mockRejectedValue(new Error('socket hang up'))
+    occurrences = [dueToday()]
+
+    for (const minutes of [0, 15]) await runPlatformChargeDigest(at(minutes))
+    expect(ours(mockLoggerWarn).map(([, detail]) => detail)).toEqual([
+      expect.objectContaining({ error: 'socket hang up', attempt: 1 }),
+      expect.objectContaining({ error: 'socket hang up', attempt: 2 }),
+    ])
+    expect(ours(mockLoggerError)).toEqual([])
+
+    await runPlatformChargeDigest(at(30))
+    expect(ours(mockLoggerError)).toEqual([[expect.any(String), expect.objectContaining({ error: 'socket hang up', attempt: 3 })]])
+    expect(digests).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
+  })
+
+  it('una retoma que lleva 2 intentos y falla cierra el día: sus intentos previos salen de la fila, no de la memoria', async () => {
+    digests = [leftover({ attempts: 2 })]
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'timeout' })
+
+    await runPlatformChargeDigest(T0)
+
+    expect(ours(mockLoggerWarn)).toEqual([])
+    expect(ours(mockLoggerError)).toEqual([[expect.any(String), expect.objectContaining({ day: DAY, error: 'timeout', attempt: 3 })]])
+    expect(digests[0]).toEqual(expect.objectContaining({ status: 'FALLO', attempts: 3 }))
+  })
+
   it('un rechazo permanente (dirección no entregable) cierra el día: ni se reintenta ni cuenta intentos', async () => {
     send.mockResolvedValue({ ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' })
     occurrences = [dueToday()]
@@ -457,10 +546,14 @@ describe('runPlatformChargeDigest — terminar lo pendiente', () => {
     await runPlatformChargeDigest(at(15))
     await runPlatformChargeDigest(at(30))
     expect(send).toHaveBeenCalledTimes(1)
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[platform-charges]'),
-      expect.objectContaining({ day: DAY, error: 'UNDELIVERABLE_RECIPIENT', permanent: true }),
-    )
+    // Cierra el día en el PRIMER intento: se registra como error (la alerta de log lo lee como «hoy no hay correo»), no como aviso.
+    expect(ours(mockLoggerError)).toEqual([
+      [
+        expect.stringMatching(/no salió y el día se cierra sin correo/),
+        expect.objectContaining({ day: DAY, error: 'UNDELIVERABLE_RECIPIENT', permanent: true, attempt: 1 }),
+      ],
+    ])
+    expect(ours(mockLoggerWarn)).toEqual([])
   })
 
   it('un envío que lanza cuenta como intento fallido, no tumba la vuelta ni se reintenta dentro de ella', async () => {
@@ -576,10 +669,13 @@ describe('runPlatformChargeDigest — terminar lo pendiente', () => {
 })
 
 describe('runPlatformChargeDigest — la generación diaria de ocurrencias', () => {
+  beforeEach(asProduction)
+
   it('corre una vez al día por proceso: a las 9:00 sí, a las 9:15 y 9:30 no, y al día siguiente otra vez', async () => {
     await runPlatformChargeDigest(at(-1)) // 8:59: todavía no
     expect(generate).not.toHaveBeenCalled()
 
+    // `generateAllActive` atrapa y registra él mismo el fallo de cada cobro y regresa normal: esos cobros esperan a mañana.
     await runPlatformChargeDigest(T0)
     await runPlatformChargeDigest(at(15))
     await runPlatformChargeDigest(at(30))
@@ -596,7 +692,7 @@ describe('runPlatformChargeDigest — la generación diaria de ocurrencias', () 
     expect(send).not.toHaveBeenCalled()
   })
 
-  it('si falla, el correo sale igual y la generación se reintenta en la vuelta siguiente', async () => {
+  it('si falla la lectura de los cobros activos (lo único que `generateAllActive` deja salir), el correo sale igual y se reintenta en la vuelta siguiente', async () => {
     generate.mockRejectedValueOnce(new Error("Can't reach database server"))
     occurrences = [dueToday()]
 
@@ -609,6 +705,143 @@ describe('runPlatformChargeDigest — la generación diaria de ocurrencias', () 
     expect(generate).toHaveBeenCalledTimes(2)
     await runPlatformChargeDigest(at(30))
     expect(generate).toHaveBeenCalledTimes(2) // ya salió bien: no vuelve a correr
+  })
+})
+
+describe('runPlatformChargeDigest — quién puede mandar (producción, la bandera de prueba, o nada)', () => {
+  /**
+   * Lo que una vuelta que «no hace nada» NO toca: ninguna lectura ni escritura de las dos tablas, ni la generación, ni un correo.
+   * Se revisan TODAS las operaciones que el servicio usa, para que una lectura de más no pase por «no mandó nada».
+   */
+  const expectNothingAtAll = () => {
+    for (const model of [prismaMock.platformChargeDigest, prismaMock.platformChargeOccurrence]) {
+      for (const operation of ['findMany', 'findUnique', 'count', 'create', 'updateMany']) {
+        expect({ operation, calls: model[operation].mock.calls.length }).toEqual({ operation, calls: 0 })
+      }
+    }
+    expect(generate).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  }
+
+  /** Con trabajo de sobra: una entrega a medias de ayer que retomar y un cobro que vence hoy. Si algo corriera, se notaría. */
+  const seedSomethingToDo = () => {
+    digests = [leftover({ day: YESTERDAY, attempts: 1 })]
+    occurrences = [dueToday(), overdue('2026-10-28')]
+  }
+
+  it.each([['development'], ['test'], ['staging'], [undefined]])(
+    '🔴 fuera de producción (NODE_ENV=%s) y sin la bandera no hace NADA: ni lee, ni retoma, ni genera, ni manda',
+    async nodeEnv => {
+      restoreEnv('NODE_ENV', nodeEnv)
+      delete process.env.PLATFORM_CHARGES_SANDBOX
+      seedSomethingToDo()
+
+      await expect(runPlatformChargeDigest(T0)).resolves.toBeUndefined()
+
+      expectNothingAtAll()
+      // La entrega a medias sigue exactamente como estaba: ni la tomó.
+      expect(digests).toEqual([leftover({ day: YESTERDAY, attempts: 1 })])
+    },
+  )
+
+  it.each([['1'], ['TRUE'], ['yes'], ['false'], ['']])(
+    'la bandera sólo vale con el texto exacto «true»: %j fuera de producción tampoco hace nada',
+    async flag => {
+      restoreEnv('NODE_ENV', 'development')
+      process.env.PLATFORM_CHARGES_SANDBOX = flag
+      seedSomethingToDo()
+
+      await runPlatformChargeDigest(T0)
+
+      expectNothingAtAll()
+    },
+  )
+
+  it.each([['development'], ['test']])(
+    '🔴 fuera de producción (NODE_ENV=%s) con la bandera: «[PRUEBA]» en el asunto y la llave propia por-cobrar-prueba:<día>, también en una retoma',
+    async nodeEnv => {
+      restoreEnv('NODE_ENV', nodeEnv)
+      process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+      seedSomethingToDo()
+
+      await runPlatformChargeDigest(T0)
+
+      // Dos correos: la retoma de ayer (lo guardado, tal cual) y el de hoy. Los dos con la llave de PRUEBA de su día.
+      expect(send).toHaveBeenCalledTimes(2)
+      expect(send).toHaveBeenNthCalledWith(1, { ...SAVED, idempotencyKey: `por-cobrar-prueba:${YESTERDAY}` })
+      const today = sentEmails()[1]
+      expect(today.to).toBe(RECIPIENT)
+      expect(today.idempotencyKey).toBe(`por-cobrar-prueba:${DAY}`)
+      expect(today.subject).toMatch(/^\[PRUEBA\] Por cobrar: /)
+      // La fila guarda ese mismo correo: es lo que una retoma repetirá.
+      expect(digests.find(d => d.day === DAY)).toEqual(
+        expect.objectContaining({
+          status: 'ENVIADO',
+          content: { to: RECIPIENT, subject: today.subject, html: today.html, text: today.text },
+        }),
+      )
+      expect(generate).toHaveBeenCalledTimes(1)
+      // Y ninguna llave de producción: la de un servidor de pruebas nunca puede cerrarle el día al de verdad.
+      expect(
+        sentEmails()
+          .map(email => email.idempotencyKey)
+          .filter(key => key.startsWith('por-cobrar:')),
+      ).toEqual([])
+    },
+  )
+
+  it('en producción sin la bandera sale el correo de verdad: asunto sin prefijo y la llave por-cobrar:<día>, también en una retoma', async () => {
+    asProduction()
+    delete process.env.PLATFORM_CHARGES_SANDBOX
+    seedSomethingToDo()
+
+    await runPlatformChargeDigest(T0)
+
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenNthCalledWith(1, { ...SAVED, idempotencyKey: `por-cobrar:${YESTERDAY}` })
+    const today = sentEmails()[1]
+    expect(today.idempotencyKey).toBe(KEY)
+    expect(today.subject).toMatch(/^Por cobrar: /)
+    expect(today.subject).not.toMatch(/PRUEBA/)
+    expect(
+      sentEmails()
+        .map(email => email.idempotencyKey)
+        .filter(key => key.includes('prueba')),
+    ).toEqual([])
+  })
+
+  it('🔴 en producción con la bandera se niega en voz alta ANTES de todo: sin leer, sin retomar, sin generar y sin mandar', async () => {
+    asProduction()
+    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+    seedSomethingToDo()
+
+    await expect(runPlatformChargeDigest(T0)).rejects.toThrow(/PLATFORM_CHARGES_SANDBOX/)
+    // Tampoco a las 8:59: la decisión va antes que la hora y antes de terminar lo pendiente.
+    await expect(runPlatformChargeDigest(at(-1))).rejects.toThrow(/PLATFORM_CHARGES_SANDBOX/)
+
+    expectNothingAtAll()
+    expect(digests).toEqual([leftover({ day: YESTERDAY, attempts: 1 })])
+  })
+
+  it('el asunto y la llave salen de UNA decisión: nunca «[PRUEBA]» con la llave de producción ni al revés', async () => {
+    const modes: Array<[nodeEnv: string, flag: string | undefined, prefix: RegExp, keyPrefix: string]> = [
+      ['production', undefined, /^Por cobrar: /, 'por-cobrar:'],
+      ['development', 'true', /^\[PRUEBA\] Por cobrar: /, 'por-cobrar-prueba:'],
+    ]
+    for (const [nodeEnv, flag, subject, keyPrefix] of modes) {
+      send.mockClear()
+      digests = []
+      occurrences = [dueToday()]
+      __resetPlatformChargeDigestForTests()
+      restoreEnv('NODE_ENV', nodeEnv)
+      restoreEnv('PLATFORM_CHARGES_SANDBOX', flag)
+
+      await runPlatformChargeDigest(T0)
+
+      expect(sentEmails()).toEqual([
+        expect.objectContaining({ subject: expect.stringMatching(subject), idempotencyKey: `${keyPrefix}${DAY}` }),
+      ])
+    }
   })
 })
 
