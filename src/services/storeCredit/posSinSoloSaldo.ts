@@ -10,7 +10,7 @@
  * `app/build.gradle.kts`.
  */
 import type { IncomingHttpHeaders } from 'http'
-import { parsePlatform, parseVersionCode } from '@/middlewares/registerDevice.middleware'
+import { parsePlatform, parseVersionCode } from '@/utils/appHeaders'
 
 /** El último build publicado que no sabe de «Sólo saldo a favor», por plataforma. */
 const ULTIMO_BUILD_SIN_SOLO_SALDO = { ANDROID: 95, IOS: 41 } as const

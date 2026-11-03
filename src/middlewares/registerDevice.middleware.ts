@@ -58,8 +58,8 @@ import {
   registerDeviceSeen,
   registerPosSinAparato,
   type DeviceIdentity,
-  type DevicePlatformHeader,
 } from '../services/mobile/deviceRegistry.service'
+import { parsePlatform, parseVersionCode } from '../utils/appHeaders'
 
 /** Ventana del debounce. Un dispositivo se escribe a lo más una vez por ventana. */
 const SEEN_TTL_MS = 60_000
@@ -127,33 +127,11 @@ function readHeader(req: Request, name: string, maxLen = MAX_TEXT_LEN): string |
   return trimmed ? trimmed.slice(0, maxLen) : undefined
 }
 
-const VALID_PLATFORMS: readonly DevicePlatformHeader[] = ['IOS', 'ANDROID', 'DESKTOP']
-
 /** Valida contra los valores reales del enum. Un valor inventado se ignora, no truena. */
 function parseFormFactor(value: string | undefined): DeviceFormFactor | undefined {
   if (!value) return undefined
   const upper = value.toUpperCase()
   return (Object.values(DeviceFormFactor) as string[]).includes(upper) ? (upper as DeviceFormFactor) : undefined
-}
-
-export function parsePlatform(value: string | undefined): DevicePlatformHeader | undefined {
-  if (!value) return undefined
-  const upper = value.toUpperCase() as DevicePlatformHeader
-  return VALID_PLATFORMS.includes(upper) ? upper : undefined
-}
-
-/**
- * El número de compilación de la app (F0-B, Task 11): `x-app-version-code`, el MISMO nombre que ya manda la TPV
- * (`tpv-version-gate.middleware.ts:137`). Sólo un entero positivo de 32 bits sin ceros a la izquierda; cualquier otra cosa
- * se ignora, nunca truena (esto cuelga del camino del cobro). Una cabecera repetida (arreglo, o «55, 56» como la junta Node)
- * es ambigua: se ignora, a diferencia de las de texto, que toman la primera.
- */
-export function parseVersionCode(raw: string | string[] | undefined): number | undefined {
-  if (typeof raw !== 'string') return undefined
-  const value = raw.trim()
-  if (!/^[1-9]\d{0,9}$/.test(value)) return undefined
-  const n = Number(value)
-  return n <= 2_147_483_647 ? n : undefined
 }
 
 /**

@@ -82,8 +82,13 @@ async function seed(opts: Parameters<typeof seedClothingSale>[0] = {}) {
 }
 
 const cabeceras = (staffId: string) => ({ 'x-test-actor': staffId, 'x-test-role': 'OWNER', 'x-device-id': 'caja-reembolso-1' })
-const POST = (s: Seed, ruta: string, body: object, staffId = s.staffId) =>
-  request(app).post(`/api/v1/mobile/venues/${s.venueId}${ruta}`).set(cabeceras(staffId)).send(body)
+const POST = (s: Seed, ruta: string, body: object, staffId = s.staffId, extra: Record<string, string> = {}) =>
+  request(app)
+    .post(`/api/v1/mobile/venues/${s.venueId}${ruta}`)
+    .set({ ...cabeceras(staffId), ...extra })
+    .send(body)
+/** Un POS que ya sabe de «Sólo saldo a favor» (D1: ANDROID > 95). Sin cabeceras de versión, el SERVIDOR lo trata como app vieja. */
+const APP_NUEVA = { 'x-device-platform': 'ANDROID', 'x-app-version-code': '96' }
 const GET = (s: Seed, ruta: string) => request(app).get(`/api/v1/mobile/venues/${s.venueId}${ruta}`).set(cabeceras(s.staffId))
 const llave = () => `pos-saldo-${randomUUID().slice(0, 12)}`
 const reembolsos = (s: Seed) => prisma.payment.findMany({ where: { venueId: s.venueId, type: 'REFUND' }, take: 10 })
@@ -184,23 +189,51 @@ describe('Reembolso del POS a saldo a favor · HTTP + Postgres real', () => {
   })
 
   describe('«Sólo saldo a favor»', () => {
-    it('devolución de mercancía en efectivo (una app vieja) → 400 STORE_CREDIT_ONLY sin escribir; con «es por defecto» → 201', async () => {
+    it('devolución de mercancía en efectivo de una app nueva → 400 STORE_CREDIT_ONLY sin escribir; con «es por defecto» → 201', async () => {
       const s = await seed()
       await soloSaldo(s)
 
-      const vieja = await POST(s, `/payments/${s.payments[0].id}/refund`, { amount: 10000, reason: 'RETURNED_GOODS', refundMethod: 'CASH' })
-      expect(vieja.status).toBe(400)
-      expect(vieja.body).toMatchObject({ code: 'STORE_CREDIT_ONLY', message: expect.stringContaining('sólo como saldo a favor') })
+      const nueva = await POST(
+        s,
+        `/payments/${s.payments[0].id}/refund`,
+        { amount: 10000, reason: 'RETURNED_GOODS', refundMethod: 'CASH' },
+        s.staffId,
+        APP_NUEVA,
+      )
+      expect(nueva.status).toBe(400)
+      expect(nueva.body).toMatchObject({ code: 'STORE_CREDIT_ONLY', message: expect.stringContaining('sólo como saldo a favor') })
       expect(await reembolsos(s)).toHaveLength(0)
 
-      const defecto = await POST(s, `/payments/${s.payments[0].id}/refund`, {
-        amount: 10000,
-        reason: 'RETURNED_GOODS',
-        refundMethod: 'CASH',
-        defective: true,
-      })
+      const defecto = await POST(
+        s,
+        `/payments/${s.payments[0].id}/refund`,
+        { amount: 10000, reason: 'RETURNED_GOODS', refundMethod: 'CASH', defective: true },
+        s.staffId,
+        APP_NUEVA,
+      )
       expect(defecto.status).toBe(201)
       expect(await reembolsos(s)).toHaveLength(1)
+    })
+
+    it('D1: un POS publicado que no sabe del interruptor (sin cabeceras, o ANDROID 95) devuelve en efectivo como antes', async () => {
+      const s = await seed()
+      await soloSaldo(s)
+
+      const sinCabeceras = await POST(s, `/payments/${s.payments[0].id}/refund`, {
+        amount: 5000,
+        reason: 'RETURNED_GOODS',
+        refundMethod: 'CASH',
+      })
+      expect(sinCabeceras.status).toBe(201)
+      const android95 = await POST(
+        s,
+        `/payments/${s.payments[0].id}/refund`,
+        { amount: 5000, reason: 'RETURNED_GOODS', refundMethod: 'CASH' },
+        s.staffId,
+        { 'x-device-platform': 'ANDROID', 'x-app-version-code': '95' },
+      )
+      expect(android95.status).toBe(201)
+      expect(await reembolsos(s)).toHaveLength(2)
     })
 
     it('el registro tardío de lo que la terminal YA devolvió se acepta aunque haya sólo saldo', async () => {
