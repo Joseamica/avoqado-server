@@ -726,12 +726,13 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
       expect(mundo.occurrence.invoiceSeq).toBe(1)
     })
 
-    it('canceled: cierra igual (ese documento ya no está vigente)', async () => {
-      pac.findByExternalId.mockResolvedValue(resumen({ status: 'canceled' }))
+    it('canceled: cierra, y la fila se queda CANCELLED con su UUID: ese documento existe ante el SAT y el contador tiene que verlo', async () => {
+      pac.findByExternalId.mockResolvedValue(resumen({ status: 'canceled', uuid: 'UUID-1', serie: 'B', folio: '118' }))
 
       await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
-      expect(mundo.rows).toHaveLength(0)
+      expect(mundo.rows).toHaveLength(1)
+      expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', uuid: 'UUID-1', serie: 'B', folio: '118' })
       expect(mundo.occurrence.invoiceSeq).toBe(1)
     })
 

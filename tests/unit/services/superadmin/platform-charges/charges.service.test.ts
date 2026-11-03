@@ -728,7 +728,49 @@ describe('platform-charges/charges.service — updateCharge (NEW)', () => {
 
       await updateCharge('cobro-1', { anchorDate: '2026-10-03' }, 'staff-1', AHORA)
 
-      expect(resumen(filas)).toEqual(['2026-11-02:PENDING', '2026-11-03:PENDING'])
+      expect(resumen(filas)).toContain('2026-11-03:PENDING')
+    })
+  })
+
+  describe('🔴 mover la fecha con lo de hoy sin pagar: no deja dos cobros en el mes', () => {
+    // Hoy es 2-nov.
+    it('mensual de hoy que se mueve al día 5: lo de hoy se va y queda sólo la fecha nueva', async () => {
+      const filas = instalarOcurrencias([fila('2026-11-02')])
+      dadoElCobro(cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') }))
+
+      await updateCharge('cobro-1', { anchorDate: '2026-10-05' }, 'staff-1', AHORA)
+
+      expect(resumen(filas)).toEqual(['2026-11-05:PENDING'])
+    })
+
+    it('lo vencido se queda: eso sí se debe, y omitirlo es decisión de quien cobra', async () => {
+      const filas = instalarOcurrencias([fila('2026-10-02'), fila('2026-11-02')])
+      dadoElCobro(cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') }))
+
+      await updateCharge('cobro-1', { anchorDate: '2026-10-05' }, 'staff-1', AHORA)
+
+      expect(resumen(filas)).toEqual(['2026-10-02:PENDING', '2026-11-05:PENDING'])
+    })
+
+    it('si hoy sigue en el calendario nuevo, lo de hoy se queda con su foto', async () => {
+      const deHoy = fila('2026-11-02', { totalCents: 12345 })
+      const filas = instalarOcurrencias([deHoy])
+      dadoElCobro(cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') }))
+
+      await updateCharge('cobro-1', { frequency: 'WEEKLY', anchorDate: '2026-10-05' }, 'staff-1', AHORA)
+
+      expect(porDia(filas)['2026-11-02'].totalCents).toBe(12345)
+      expect(resumen(filas)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING'])
+    })
+
+    it('cambiar un monto no toca lo de hoy, aunque regenere lo que falta', async () => {
+      const deHoy = fila('2026-11-02', { totalCents: 12345 })
+      const filas = instalarOcurrencias([deHoy])
+      dadoElCobro(cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') }))
+
+      await updateCharge('cobro-1', { concepts: [RENTA] }, 'staff-1', AHORA)
+
+      expect(porDia(filas)['2026-11-02'].totalCents).toBe(12345)
     })
   })
 

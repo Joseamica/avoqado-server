@@ -56,7 +56,6 @@ export function monthBoundsInMexico(day: CalendarDay): { from: Date; to: Date } 
     : { from: midnight(year, month), to: midnight(year, month + 1) }
 }
 
-/** El día como lo lee y lo escribe Prisma en una columna `@db.Date`: medianoche UTC. */
 /**
  * 🔴 No se modelan periodos: una fecha cuenta como periodo nuevo sólo si ya pasaron 3/4 del periodo desde lo último pagado u omitido.
  * Sin esto, mover a mañana una mensualidad pagada hoy la volvería a cobrar. El calendario normal nunca cae aquí: su menor distancia es
@@ -69,6 +68,7 @@ export function isSamePeriodAsMarked(frequency: PlatformChargeFrequency, marked:
   return day > marked && day < addDays(marked, MIN_DAYS_AFTER_MARKED[frequency])
 }
 
+/** El día como lo lee y lo escribe Prisma en una columna `@db.Date`: medianoche UTC. */
 export function calendarDayToDb(day: CalendarDay): Date {
   return new Date(toUtcMs(day))
 }

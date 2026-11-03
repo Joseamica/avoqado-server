@@ -389,8 +389,13 @@ async function resolveWithProviderId(
 async function resolveLostAttempt(occurrence: Occurrence, row: PlatformCfdi, actorId?: string): Promise<InvoiceAttempt> {
   const provider = await providerFor(row)
   const found = await askPac(() => provider.findByExternalId(intentKey(occurrence)))
-  if (found === null || found.status === 'canceled') {
+  if (found === null) {
     await closeAttempt(occurrence, row, actorId)
+    return { kind: 'NONE' }
+  }
+  if (found.status === 'canceled') {
+    // Ese documento existe ante el SAT aunque esté cancelado: se queda como rastro fiscal, igual que en `resolveWithProviderId`.
+    await closeAttempt(occurrence, row, actorId, { uuid: found.uuid, serie: found.serie, folio: found.folio })
     return { kind: 'NONE' }
   }
   if (found.status === 'valid' && found.uuid) return adoptInvoice(occurrence, row, { ...found, uuid: found.uuid }, actorId)

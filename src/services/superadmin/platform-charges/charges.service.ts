@@ -436,7 +436,14 @@ export async function updateCharge(
 
     const updated = await tx.platformCharge.update({ where: { id }, data: dbFields(next) })
     if (changed.some(field => RESCHEDULE_FIELDS.includes(field))) {
-      await tx.platformChargeOccurrence.deleteMany({ where: { chargeId: id, status: 'PENDING', dueDate: { gt: calendarDayToDb(today) } } })
+      // 🔴 Mover la fecha no debe dejar dos cobros en el mes: lo de hoy sin pagar se va si ya no cae en el calendario nuevo. Lo vencido
+      // se queda: eso sí se debe, y omitirlo es decisión de quien cobra.
+      const calendarChanged = changed.includes('anchorDate') || changed.includes('frequency')
+      const todayLeaves = calendarChanged && occurrenceDatesBetween(next.frequency, next.anchorDate, today, today).length === 0
+      const todayDb = calendarDayToDb(today)
+      await tx.platformChargeOccurrence.deleteMany({
+        where: { chargeId: id, status: 'PENDING', dueDate: todayLeaves ? { gte: todayDb } : { gt: todayDb } },
+      })
       // Un cobro pausado no genera: al reanudarlo se generará desde hoy.
       if (!updated.pausedAt) await generateOccurrences(tx, updated, today, addDays(today, GENERATE_AHEAD_DAYS))
     }
