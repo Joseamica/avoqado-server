@@ -60,8 +60,7 @@ const ACCION_EN_BITACORA: Record<OperacionDelAsistente['tipo'], GiftCardAuditAct
   BLOQUEAR: 'GIFT_CARD_BLOCKED',
   DESBLOQUEAR: 'GIFT_CARD_UNBLOCKED',
 }
-const PRENDER_EN_EL_PANEL =
-  'Las tarjetas de regalo se prenden desde el panel (Ajustes › Tarjetas de regalo), porque hay que aceptar los términos.'
+const PRENDER_EN_EL_PANEL = 'Las tarjetas de regalo se prenden desde el panel o el punto de venta, porque hay que aceptar los términos.'
 const CONFIRMA = ' Confirma con el usuario; luego vuelve a llamar con confirm:true.'
 
 const llave = z
@@ -511,6 +510,8 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId)
       guard.requirePermission('giftCards:manage', venueId)
       if (enabled === true) return text({ ok: false, error: PRENDER_EN_EL_PANEL })
+      // Apagar es mover el interruptor, como en el panel: de administrador para arriba (founder, 3-nov-2026).
+      if (enabled !== undefined) guard.requirePermission('giftCards:enable', venueId)
       // El MISMO esquema que valida la ruta del panel; sólo lo que llegó (el servicio escribe sólo eso).
       const llegaron = Object.fromEntries(
         Object.entries({ enabled, suggestedAmounts, minAmount, maxAmount, validityMonths }).filter(([, v]) => v !== undefined),

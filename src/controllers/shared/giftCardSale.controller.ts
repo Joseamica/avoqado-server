@@ -5,9 +5,15 @@
  * `…_RELEASED`): no se repite aquí.
  */
 import type { Request, Response } from 'express'
-import { getGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
 import { iniciarCancelacionDeVenta, liberarCancelacionDeVenta } from '@/services/giftCards/giftCardCancel.service'
-import { CAPACIDADES_DEL_POS, estadoDeVentaDeTarjetas, negocioHaActivadoTarjetas } from '@/services/giftCards/giftCardSurface.service'
+import {
+  CAPACIDADES_DEL_POS,
+  estadoDeVentaDeTarjetas,
+  estadoParaPrender,
+  negocioHaActivadoTarjetas,
+} from '@/services/giftCards/giftCardSurface.service'
 import { staffDe } from '@/utils/giftCardRequest'
 
 /** 1b S1: `capacidades` y `tieneTarjetas` son aditivos; lo de la 1a no cambia. */
@@ -18,7 +24,23 @@ export async function getSettings(req: Request, res: Response) {
     estadoDeVentaDeTarjetas(venueId),
     negocioHaActivadoTarjetas(venueId),
   ])
-  res.json({ success: true, data: { ...settings, sale, capacidades: [...CAPACIDADES_DEL_POS], tieneTarjetas } })
+  // Aditivo (3-nov-2026): prendidas, va en null para no consultar plan y módulo en cada apertura de la hoja. `puedeEsteUsuario` lo
+  // contesta el servidor porque la lista de permisos del POS se toma una vez al entrar y no se refresca sola.
+  const prender = settings.enabled
+    ? null
+    : { ...(await estadoParaPrender(venueId)), puedeEsteUsuario: await tienePermisoEnVenue(req, 'giftCards:enable') }
+  res.json({ success: true, data: { ...settings, sale, capacidades: [...CAPACIDADES_DEL_POS], tieneTarjetas, prender } })
+}
+
+/**
+ * Prender desde el POS (el esquema ya exigió `aceptaTerminos: true`). El servicio serializa y escribe la bitácora, igual que el
+ * panel. Si ya estaba prendida no escribe nada: un doble toque no ensucia la bitácora. Responde como el GET, para que el POS
+ * guarde lo mismo que guardaría al consultar.
+ */
+export async function turnOn(req: Request, res: Response) {
+  const { enabled } = await getGiftCardSettings(req.params.venueId)
+  if (!enabled) await updateGiftCardSettings(req.params.venueId, { enabled: true, aceptaTerminos: true }, staffDe(req))
+  await getSettings(req, res)
 }
 
 export async function cancelSale(req: Request, res: Response) {

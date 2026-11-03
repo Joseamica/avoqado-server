@@ -1699,6 +1699,15 @@ router.get(
   checkPermission('giftCards:read'),
   giftCardSaleController.getSettings,
 )
+// Founder, 3-nov-2026: administrador para arriba las prende también desde el POS. Mismo servicio que el panel; apagar sigue en el panel.
+router.post(
+  '/venues/:venueId/gift-cards/settings/turn-on',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.turnOnSchema),
+  checkPermission('giftCards:enable'),
+  exigirPlanDeTarjetas,
+  giftCardSaleController.turnOn,
+)
 router.post(
   '/venues/:venueId/gift-cards/orders',
   authenticateTokenMiddleware,

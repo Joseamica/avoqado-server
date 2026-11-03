@@ -1,4 +1,8 @@
 jest.mock('@/services/access/basePlan.service', () => ({ venueHasFeatureAccess: jest.fn() }))
+jest.mock('@/services/modules/module.service', () => ({
+  moduleService: { isModuleEnabled: jest.fn() },
+  MODULE_CODES: { WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD' },
+}))
 jest.mock('@/services/giftCards/giftCardTender', () => ({
   ensureGiftCardTender: jest.fn().mockResolvedValue({ id: 'tt-gift', revision: 1 }),
 }))
@@ -7,7 +11,13 @@ import { Prisma } from '@prisma/client'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
-import { assertGiftCardsSellable, getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
+import { moduleService } from '@/services/modules/module.service'
+import {
+  assertGiftCardsSellable,
+  assertPuedePrender,
+  getGiftCardSettings,
+  updateGiftCardSettings,
+} from '@/services/giftCards/giftCardSettings.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = 'venue-1'
@@ -31,6 +41,34 @@ beforeEach(() => {
     .mockImplementation(async ({ create }: any) => ({ ...create, updatedAt: new Date('2026-10-14T18:00:00Z') }))
   prismaMock.$queryRaw.mockReset().mockResolvedValue([{ pg_advisory_xact_lock: '' }])
   ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true)
+  ;(moduleService.isModuleEnabled as jest.Mock).mockResolvedValue(false)
+})
+
+describe('assertPuedePrender (lo que la hoja del POS no puede deducir de `sale`)', () => {
+  it('con plan, llaves y fuera de marca blanca, se puede', async () => {
+    await expect(assertPuedePrender(VENUE)).resolves.toBeUndefined()
+  })
+
+  it('sin plan: GIFT_CARDS_NOT_IN_PLAN', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    await expect(assertPuedePrender(VENUE)).rejects.toMatchObject({ code: 'GIFT_CARDS_NOT_IN_PLAN', statusCode: 403 })
+  })
+
+  it('sin llaves: GIFT_CARD_KEYS_MISSING', async () => {
+    const antes = process.env.GIFT_CARD_HMAC_KEY
+    delete process.env.GIFT_CARD_HMAC_KEY
+    try {
+      await expect(assertPuedePrender(VENUE)).rejects.toMatchObject({ code: 'GIFT_CARD_KEYS_MISSING' })
+    } finally {
+      process.env.GIFT_CARD_HMAC_KEY = antes
+    }
+  })
+
+  it('en marca blanca no se puede, aunque tenga plan: las tarjetas van fuera de marca blanca en la fase 1', async () => {
+    ;(moduleService.isModuleEnabled as jest.Mock).mockResolvedValue(true)
+    await expect(assertPuedePrender(VENUE)).rejects.toMatchObject({ code: 'GIFT_CARDS_DISABLED', statusCode: 403 })
+    expect(moduleService.isModuleEnabled).toHaveBeenCalledWith(VENUE, 'WHITE_LABEL_DASHBOARD')
+  })
 })
 
 describe('getGiftCardSettings', () => {
@@ -50,6 +88,21 @@ describe('getGiftCardSettings', () => {
 })
 
 describe('updateGiftCardSettings', () => {
+  it('🔴 en marca blanca no se prende por ninguna entrada, y no crea el tender', async () => {
+    ;(moduleService.isModuleEnabled as jest.Mock).mockResolvedValue(true)
+    await expect(updateGiftCardSettings(VENUE, { enabled: true, aceptaTerminos: true }, 'owner-1')).rejects.toMatchObject({
+      code: 'GIFT_CARDS_DISABLED',
+    })
+    expect(ensureGiftCardTender).not.toHaveBeenCalled()
+    expect(prismaMock.giftCardSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('regresión: en marca blanca se puede apagar y cambiar montos, si ya estaban', async () => {
+    ;(moduleService.isModuleEnabled as jest.Mock).mockResolvedValue(true)
+    prismaMock.giftCardSettings.findUnique.mockResolvedValue(fila())
+    await expect(updateGiftCardSettings(VENUE, { enabled: false }, 'owner-1')).resolves.toMatchObject({ enabled: false })
+  })
+
   it('prender exige aceptar los términos', async () => {
     await expect(updateGiftCardSettings(VENUE, { enabled: true }, 'owner-1')).rejects.toMatchObject({ statusCode: 400 })
     expect(prismaMock.giftCardSettings.upsert).not.toHaveBeenCalled()

@@ -5,17 +5,23 @@
 jest.mock('@/services/giftCards/giftCardSettings.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSettings.service'),
   getGiftCardSettings: jest.fn(),
+  updateGiftCardSettings: jest.fn(),
 }))
 jest.mock('@/services/giftCards/giftCardSurface.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSurface.service'),
   estadoDeVentaDeTarjetas: jest.fn(),
+  estadoParaPrender: jest.fn(),
   negocioHaActivadoTarjetas: jest.fn(),
+}))
+jest.mock('@/middlewares/permissionFlag.middleware', () => ({
+  tienePermisoEnVenue: jest.fn(),
 }))
 
 import type { Request, Response } from 'express'
-import { getSettings } from '@/controllers/shared/giftCardSale.controller'
-import { getGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
-import { estadoDeVentaDeTarjetas, negocioHaActivadoTarjetas } from '@/services/giftCards/giftCardSurface.service'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { getSettings, turnOn } from '@/controllers/shared/giftCardSale.controller'
+import { getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
+import { estadoDeVentaDeTarjetas, estadoParaPrender, negocioHaActivadoTarjetas } from '@/services/giftCards/giftCardSurface.service'
 
 const m = (f: unknown) => f as jest.Mock
 
@@ -42,6 +48,60 @@ beforeEach(() => {
   jest.clearAllMocks()
   m(getGiftCardSettings).mockResolvedValue(AJUSTES)
   m(estadoDeVentaDeTarjetas).mockResolvedValue(VENTA)
+})
+
+describe('getSettings: ¿se pueden prender?', () => {
+  const PUEDE = { allowed: true, code: null, message: null, howToEnable: null }
+
+  it.each([true, false])('apagadas, trae si se pueden prender y si ESTE usuario puede (%s)', async puede => {
+    m(getGiftCardSettings).mockResolvedValue({ ...AJUSTES, enabled: false })
+    m(estadoParaPrender).mockResolvedValue(PUEDE)
+    m(tienePermisoEnVenue).mockResolvedValue(puede)
+    expect((await pedir()).data.prender).toEqual({ ...PUEDE, puedeEsteUsuario: puede })
+    expect(m(tienePermisoEnVenue).mock.calls[0][1]).toBe('giftCards:enable')
+  })
+
+  it('prendidas, no consulta nada de más y va en null', async () => {
+    expect((await pedir()).data.prender).toBeNull()
+    expect(estadoParaPrender).not.toHaveBeenCalled()
+    expect(tienePermisoEnVenue).not.toHaveBeenCalled()
+  })
+})
+
+describe('turnOn (prender desde el POS)', () => {
+  async function prender() {
+    const res = { json: jest.fn() } as unknown as Response
+    const req = { params: { venueId: 'v1' }, body: { aceptaTerminos: true, enabled: false, minAmount: 1 }, authContext: { userId: 's1' } }
+    await turnOn(req as unknown as Request, res)
+    return m(res.json).mock.calls[0][0]
+  }
+
+  it('prende con los términos aceptados, a nombre de quien tocó, y responde igual que el GET', async () => {
+    m(getGiftCardSettings)
+      .mockResolvedValueOnce({ ...AJUSTES, enabled: false })
+      .mockResolvedValueOnce(AJUSTES)
+    m(negocioHaActivadoTarjetas).mockResolvedValue(false)
+    const body = await prender()
+    expect(m(updateGiftCardSettings).mock.calls).toEqual([['v1', { enabled: true, aceptaTerminos: true }, 's1']])
+    expect(body).toEqual(await pedir())
+    expect(body.data.enabled).toBe(true)
+  })
+
+  it('si ya estaba prendida, no escribe nada y responde lo mismo: un doble toque no ensucia la bitácora', async () => {
+    m(negocioHaActivadoTarjetas).mockResolvedValue(false)
+    const body = await prender()
+    expect(updateGiftCardSettings).not.toHaveBeenCalled()
+    expect(body.data.enabled).toBe(true)
+  })
+
+  it('si el servicio rechaza, no responde éxito: el error sigue su camino', async () => {
+    m(getGiftCardSettings).mockResolvedValue({ ...AJUSTES, enabled: false })
+    m(updateGiftCardSettings).mockRejectedValue(new Error('sin llaves'))
+    const res = { json: jest.fn() } as unknown as Response
+    const req = { params: { venueId: 'v1' }, body: { aceptaTerminos: true }, authContext: { userId: 's1' } }
+    await expect(turnOn(req as unknown as Request, res)).rejects.toThrow('sin llaves')
+    expect(res.json).not.toHaveBeenCalled()
+  })
 })
 
 describe('getSettings', () => {

@@ -9,6 +9,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { assertGiftCardKeys, giftCardKeysPresent } from './giftCardCode'
 import { GiftCardError } from './giftCardErrors'
 import { MAXIMO_POR_SOBRE, MINIMO_POR_SOBRE, formatoPesos, topePorOperacion } from './giftCardLimits'
@@ -160,6 +161,23 @@ export async function assertGiftCardsSellable(venueId: string): Promise<void> {
   assertGiftCardKeys()
 }
 
+/** Lo que PRENDER pide antes de abrir la transacción. Las tarjetas van fuera de marca blanca en la fase 1 (como el menú del panel). */
+async function assertPermitidoPrender(venueId: string): Promise<void> {
+  if (await moduleService.isModuleEnabled(venueId, MODULE_CODES.WHITE_LABEL_DASHBOARD)) {
+    throw new GiftCardError('GIFT_CARDS_DISABLED', 'Las tarjetas de regalo todavía no están disponibles en marca blanca.', 403)
+  }
+  if (!(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) throw sinPlan()
+}
+
+/**
+ * ¿Se pueden prender aquí? No se deduce de `assertGiftCardsSellable`: apagadas, ésa contesta «apagadas» antes de mirar plan y llaves,
+ * y el POS necesita saberlo para ofrecer «Prender» (Codex r1).
+ */
+export async function assertPuedePrender(venueId: string): Promise<void> {
+  await assertPermitidoPrender(venueId)
+  assertGiftCardKeys()
+}
+
 function sinPlan(): GiftCardError {
   return new GiftCardError(
     'GIFT_CARDS_NOT_IN_PLAN',
@@ -182,7 +200,7 @@ export async function updateGiftCardSettings(
   // El plan se pregunta ANTES de abrir la transacción (A5 r1): `venueHasFeatureAccess` usa el cliente global y no debe pedir
   // otra conexión mientras ésta retiene la suya y el candado. Sólo cuando el cuerpo trae `enabled: true` (igual que la ruta,
   // C3); apagar o guardar montos nunca lo pide.
-  if (input.enabled === true && !(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) throw sinPlan()
+  if (input.enabled === true) await assertPermitidoPrender(venueId)
 
   const { actual, guardado } = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${llaveDeAjustes(venueId)}, 0))::text`)
