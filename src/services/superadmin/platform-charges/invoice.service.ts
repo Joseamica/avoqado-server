@@ -57,8 +57,20 @@ export interface InvoiceOccurrenceInput {
   billingTaxProfileId?: string
   /** Un par de claves del SAT por concepto, en el mismo orden: reescriben la foto de ESTA ocurrencia (los montos no cambian). */
   conceptKeys?: { satProductKey: string; satUnitKey: string }[]
+  /**
+   * Lo que el operador vio en pantalla al pedir la factura. Si viene, es lo único que se puede timbrar: el perfil de una organización o
+   * un negocio se sobrescribe en la misma fila, así que su id no dice qué datos se confirmaron.
+   */
+  receptor?: ConfirmedReceptor
   /** Quién lo pidió (authContext.userId). */
   actorId: string
+}
+
+export interface ConfirmedReceptor {
+  rfc: string
+  razonSocial: string
+  regimenFiscal: string
+  codigoPostal: string
 }
 
 type Occurrence = Pick<PlatformChargeOccurrence, 'id' | 'chargeId' | 'invoiceSeq'>
@@ -550,6 +562,17 @@ type ReceptorOfRow = Pick<
   'receptorRfc' | 'receptorNombre' | 'receptorRegimen' | 'receptorCp' | 'usoCfdi'
 >
 
+/** Sin `receptor` (factura automática, «Consultar estado») no hay nada confirmado en pantalla con qué comparar. */
+function matchesConfirmed(confirmed: ConfirmedReceptor | undefined, row: ReceptorOfRow): boolean {
+  return (
+    !confirmed ||
+    (confirmed.rfc === row.receptorRfc &&
+      confirmed.razonSocial === row.receptorNombre &&
+      confirmed.regimenFiscal === row.receptorRegimen &&
+      confirmed.codigoPostal === row.receptorCp)
+  )
+}
+
 function sameReceptor(profile: ReceptorOfProfile | null, row: ReceptorOfRow): boolean {
   return (
     profile !== null &&
@@ -572,6 +595,7 @@ async function reserveCheck(
   occurrence: Pick<Occurrence, 'id' | 'chargeId'>,
   invoiceSeq: number,
   billingTaxProfileId: string,
+  confirmed: ConfirmedReceptor | undefined,
   row: ReceptorOfRow,
 ): Promise<void> {
   await lockCharge(tx, occurrence.chargeId)
@@ -580,7 +604,11 @@ async function reserveCheck(
   if (fresh.invoiceSeq !== invoiceSeq) throw changed()
   const charge = await tx.platformCharge.findUnique({ where: { id: occurrence.chargeId }, select: { billingTaxProfileId: true } })
   const profile = await tx.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
-  if ((charge?.billingTaxProfileId && charge.billingTaxProfileId !== billingTaxProfileId) || !sameReceptor(profile, row)) {
+  if (
+    (charge?.billingTaxProfileId && charge.billingTaxProfileId !== billingTaxProfileId) ||
+    !sameReceptor(profile, row) ||
+    !matchesConfirmed(confirmed, row)
+  ) {
     throw conflict('Los datos fiscales de este cobro acaban de cambiar: vuelve a intentarlo', 'PLATFORM_CHARGE_INVOICE_PROFILE_CHANGED')
   }
 }
@@ -592,13 +620,16 @@ async function reserveCheck(
  * reintento), o no venía corrección («Consultar estado»), se regresa la factura.
  */
 async function assertLiveHasRequestedData(cfdi: PlatformCfdi, input: InvoiceOccurrenceInput, billingTaxProfileId: string): Promise<void> {
-  if (input.billingTaxProfileId === undefined && !input.conceptKeys) return
-  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
+  if (input.billingTaxProfileId === undefined && !input.conceptKeys && !input.receptor) return
+  const profile = input.receptor
+    ? null
+    : await prisma.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
   const lines = Array.isArray(cfdi.lines) ? (cfdi.lines as unknown as PlatformCfdiLineInput[]) : []
   const sameKeys = (input.conceptKeys ?? []).every(
     (key, i) => lines[i]?.satProductKey === key.satProductKey && lines[i]?.satUnitKey === key.satUnitKey,
   )
-  if (sameReceptor(profile, cfdi) && sameKeys) return
+  const sameData = input.receptor ? matchesConfirmed(input.receptor, cfdi) : sameReceptor(profile, cfdi)
+  if (sameData && sameKeys) return
   const name = [cfdi.serie, cfdi.folio].filter(Boolean).join('-')
   throw conflict(
     `La factura ${name} ya está timbrada con otros datos: cancélala en Facturas CFDI para corregirla`,
@@ -648,7 +679,7 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
       sandbox,
       totals: { subtotalCents: snapshot.subtotalCents, discountCents: 0, taxCents: snapshot.taxCents, totalCents: snapshot.totalCents },
       platformChargeOccurrenceId: occurrence.id,
-      reserveCheck: (tx, row) => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId, row),
+      reserveCheck: (tx, row) => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId, input.receptor, row),
     })
   } catch (error) {
     throw await translateStampFailure(error, key)

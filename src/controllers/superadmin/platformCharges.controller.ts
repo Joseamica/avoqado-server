@@ -2,6 +2,7 @@ import type { PlatformCharge } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 import { handleBillingError } from '@/controllers/superadmin/platformBilling.controller'
 import * as chargesService from '@/services/superadmin/platform-charges/charges.service'
+import type { InvoiceOccurrenceInput } from '@/services/superadmin/platform-charges/invoice.service'
 import * as occurrencesService from '@/services/superadmin/platform-charges/occurrences.service'
 import { dbToCalendarDay } from '@/services/superadmin/platform-charges/schedule'
 
@@ -83,13 +84,15 @@ export async function reopenOccurrence(req: Request, res: Response, next: NextFu
 /** POST /api/v1/superadmin/platform-charges/occurrences/:id/invoice — facturar, reintentar o consultar el estado. */
 export async function invoiceOccurrence(req: Request, res: Response, next: NextFunction) {
   try {
-    const { billingTaxProfileId, conceptKeys } = req.body as {
-      billingTaxProfileId?: string
-      conceptKeys?: { satProductKey: string; satUnitKey: string }[]
-    }
+    const { billingTaxProfileId, conceptKeys, receptor } = req.body as Omit<InvoiceOccurrenceInput, 'actorId'>
     res.json({
       success: true,
-      data: await occurrencesService.invoiceOccurrenceView(req.params.id, { billingTaxProfileId, conceptKeys, actorId: actorOf(req) }),
+      data: await occurrencesService.invoiceOccurrenceView(req.params.id, {
+        billingTaxProfileId,
+        conceptKeys,
+        receptor,
+        actorId: actorOf(req),
+      }),
     })
   } catch (error) {
     handleBillingError(error, res, next)

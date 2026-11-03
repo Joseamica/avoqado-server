@@ -126,5 +126,14 @@ export const invoiceOccurrenceSchema = z.object({
         { invalid_type_error: 'Las claves del SAT deben ser una lista, un par por concepto' },
       )
       .optional(),
+    // Lo que el operador vio en pantalla al pedir la factura: si viene, es lo único que se puede timbrar.
+    receptor: z
+      .object({
+        rfc: text('El RFC del receptor es requerido'),
+        razonSocial: text('La razón social del receptor es requerida'),
+        regimenFiscal: text('El régimen fiscal del receptor es requerido'),
+        codigoPostal: text('El código postal del receptor es requerido'),
+      })
+      .optional(),
   }),
 })

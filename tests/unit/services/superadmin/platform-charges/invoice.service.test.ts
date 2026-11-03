@@ -1592,6 +1592,60 @@ describe('invoiceOccurrence — lo que cambia a media operación y no debe timbr
     expect(mundo.rows).toHaveLength(0)
   })
 
+  describe('🔴 lo que el founder vio en pantalla (`receptor`) es lo único que se puede timbrar', () => {
+    const EN_PANTALLA = { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV', regimenFiscal: '601', codigoPostal: '06000' }
+
+    it('si coincide con lo que se va a timbrar: timbra', async () => {
+      pac.createInvoice.mockResolvedValue(PAC_VALIDO)
+
+      await expect(invoiceOccurrence('occ-1', { ...input, receptor: EN_PANTALLA })).resolves.toMatchObject({ status: 'STAMPED' })
+
+      expect(pac.createInvoice).toHaveBeenCalledTimes(1)
+    })
+
+    it('si otra pestaña guardó otro RFC en la misma fila antes de leer el perfil: 409, la fila no nace y NO se llama al PAC', async () => {
+      ;(mundo.profile as Fila).rfc = 'BBB010101BBB'
+
+      const error = await invoiceOccurrence('occ-1', { ...input, receptor: EN_PANTALLA }).catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect((error as ConflictError).message).toMatch(/datos fiscales/)
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+      expect(mundo.rows).toHaveLength(0)
+    })
+
+    it('con una factura viva con los mismos datos, la regresa sin timbrar', async () => {
+      mundo.rows.push(
+        fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1', receptorRegimen: '601', receptorCp: '06000', usoCfdi: 'G03' }),
+      )
+
+      await expect(invoiceOccurrence('occ-1', { ...input, receptor: EN_PANTALLA })).resolves.toMatchObject({ id: 'cfdi-1' })
+
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+    })
+
+    it('con una factura viva a otro contribuyente: 409, aunque el perfil de hoy coincida con esa factura', async () => {
+      mundo.rows.push(
+        fila({
+          status: 'STAMPED',
+          facturapiId: 'fa-1',
+          uuid: 'UUID-1',
+          folio: '118',
+          receptorRegimen: '601',
+          receptorCp: '06000',
+          usoCfdi: 'G03',
+        }),
+      )
+
+      const error = await invoiceOccurrence('occ-1', { ...input, receptor: { ...EN_PANTALLA, rfc: 'AAA010101AAA' } }).catch(
+        (e: unknown) => e,
+      )
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect((error as ConflictError).message).toMatch(/otros datos/)
+    })
+  })
+
   it('🔴 dos correcciones a la vez: la que encuentra la factura de la otra con otros datos recibe 409, no un éxito falso', async () => {
     const otras = [
       { satProductKey: '81112402', satUnitKey: 'H87' },
