@@ -56,6 +56,11 @@ export function computeChargeTotals(concepts: ChargeConcept[]): ChargeTotals {
   return { subtotalCents, taxCents, totalCents: subtotalCents + taxCents }
 }
 
+/** ¿Trae las dos claves del SAT? Una clave en blanco sólo la rechazaría el SAT al timbrar, y un concepto viejo de la base puede ni traerlas. */
+export function hasSatKeys(concept: Pick<ChargeConcept, 'satProductKey' | 'satUnitKey'>): boolean {
+  return Boolean(concept.satProductKey?.trim() && concept.satUnitKey?.trim())
+}
+
 /** El renglón del CFDI de un concepto: una unidad, al 16 %. Con IVA, el precio ya lo trae y el PAC saca la base (`taxIncluded`). */
 export function conceptToCfdiLine(concept: ChargeConcept): PlatformCfdiLineInput {
   return {

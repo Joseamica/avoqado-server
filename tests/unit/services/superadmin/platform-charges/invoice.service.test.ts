@@ -1391,6 +1391,39 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
     expect(mundo.rows[0]).toMatchObject(TOTALES)
   })
 
+  it('las claves se recortan al aplicarlas: la foto y el PAC reciben la clave sin los espacios con los que se revisó', async () => {
+    pac.createInvoice.mockResolvedValue(PAC_VALIDO)
+    const conEspacios = [
+      { satProductKey: ' 81112402 ', satUnitKey: ' H87' },
+      { satProductKey: '43232612  ', satUnitKey: 'E48 ' },
+    ]
+
+    await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: conEspacios })
+
+    expect((mundo.occurrence.concepts as Fila[]).map(c => [c.satProductKey, c.satUnitKey])).toEqual([
+      ['81112402', 'H87'],
+      ['43232612', 'E48'],
+    ])
+    expect(pac.createInvoice.mock.calls[0][0].items.map((i: Fila) => [i.satProductKey, i.satUnitKey])).toEqual([
+      ['81112402', 'H87'],
+      ['43232612', 'E48'],
+    ])
+  })
+
+  it('un reintento con esas mismas claves con espacios encuentra la factura ya timbrada recortada: no es «otros datos»', async () => {
+    pac.createInvoice.mockResolvedValue(PAC_VALIDO)
+    const conEspacios = [
+      { satProductKey: ' 81112402 ', satUnitKey: ' H87' },
+      { satProductKey: '43232612  ', satUnitKey: 'E48 ' },
+    ]
+    await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: conEspacios })
+
+    const otra = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: conEspacios })
+
+    expect(otra).toMatchObject({ status: 'STAMPED', uuid: 'UUID-1' })
+    expect(pac.createInvoice).toHaveBeenCalledTimes(1)
+  })
+
   it('la corrección de claves deja rastro: PLATFORM_CHARGE_UPDATED con la ocurrencia', async () => {
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 

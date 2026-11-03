@@ -29,7 +29,7 @@ import prisma from '@/utils/prismaClient'
 import { assertTaxProfileOfCustomer } from './charges.service'
 import { lockCharge, withChargeLock } from './lock'
 import { chargesSandbox } from './sandbox'
-import { conceptToCfdiLine } from './totals'
+import { conceptToCfdiLine, hasSatKeys } from './totals'
 import type { PlatformCfdiLineInput } from '@/services/superadmin/platform-billing/types'
 import type { ChargeConcept } from './types'
 
@@ -451,14 +451,14 @@ async function prepareSnapshot(occurrence: PlatformChargeOccurrence, input: Invo
       }
       concepts = concepts.map((concept, i) => ({
         ...concept,
-        satProductKey: conceptKeys[i].satProductKey,
-        satUnitKey: conceptKeys[i].satUnitKey,
+        satProductKey: conceptKeys[i].satProductKey.trim(),
+        satUnitKey: conceptKeys[i].satUnitKey.trim(),
       }))
     }
 
     // 🔴 Un cobro sin factura (NONE) guarda sus claves del SAT vacías: para timbrar tienen que llegar en esta llamada (el diálogo «Facturar»).
     // Se comprueba con lo que se va a timbrar, antes de escribir nada y de llamar al PAC: una clave en blanco sólo la rechazaría el SAT.
-    if (concepts.some(concept => !concept.satProductKey?.trim() || !concept.satUnitKey?.trim())) {
+    if (!concepts.every(hasSatKeys)) {
       throw new PlatformBillingError('Cada concepto necesita su clave del SAT y su unidad para poder facturar', 'VALIDATION')
     }
 
@@ -575,7 +575,7 @@ async function assertLiveHasRequestedData(cfdi: PlatformCfdi, input: InvoiceOccu
     : await prisma.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
   const lines = Array.isArray(cfdi.lines) ? (cfdi.lines as unknown as PlatformCfdiLineInput[]) : []
   const sameKeys = (input.conceptKeys ?? []).every(
-    (key, i) => lines[i]?.satProductKey === key.satProductKey && lines[i]?.satUnitKey === key.satUnitKey,
+    (key, i) => lines[i]?.satProductKey === key.satProductKey.trim() && lines[i]?.satUnitKey === key.satUnitKey.trim(),
   )
   const sameData = input.receptor ? matchesConfirmed(input.receptor, cfdi) : sameReceptor(profile, cfdi)
   if (sameData && sameKeys) return

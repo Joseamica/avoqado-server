@@ -19,7 +19,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import { lockCharge, withChargeLock } from './lock'
 import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
-import { computeChargeTotals } from './totals'
+import { computeChargeTotals, hasSatKeys } from './totals'
 import { LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
 
 /** El generador mira de hoy a hoy+7: lo que vence en la semana ya aparece en la pantalla y en el correo. */
@@ -193,7 +193,7 @@ function assertAnchorInWindow(anchor: CalendarDay, today: CalendarDay): void {
  */
 function assertConceptKeys(state: Pick<ChargeState, 'invoiceMode' | 'concepts'>): void {
   if (state.invoiceMode === 'NONE') return
-  if (state.concepts.some(concept => !concept.satProductKey || !concept.satUnitKey)) {
+  if (!state.concepts.every(hasSatKeys)) {
     throw invalid('Cada concepto necesita su clave del SAT y su unidad')
   }
 }
@@ -229,7 +229,9 @@ function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean): Part
   }
   if (given('concepts')) out.concepts = normalizeConcepts(input.concepts)
   if (given('invoiceMode')) {
-    if (!INVOICE_MODES.has(input.invoiceMode as string)) throw invalid('Elige si el cobro se factura automáticamente o con un botón')
+    if (!INVOICE_MODES.has(input.invoiceMode as string)) {
+      throw invalid('Elige si el cobro se factura automáticamente, con un botón o sin factura')
+    }
     out.invoiceMode = input.invoiceMode
   }
   return out
@@ -442,21 +444,19 @@ async function updateOneTime(tx: Prisma.TransactionClient, id: string, next: Cha
   if (!editsDate) return updated
   if (!date) {
     // No debería pasar (la fecha nace con el alta), pero un cobro sin su fecha no se cobraría nunca: editarlo la vuelve a crear.
+    logger.error('[platform-charges] un cobro de una sola vez no tenía su fecha; se vuelve a crear al editarlo', { chargeId: id })
     await generateOccurrences(tx, updated, next.anchorDate, next.anchorDate)
     return updated
   }
-  const { subtotalCents, taxCents, totalCents } = computeChargeTotals(next.concepts)
-  await tx.platformChargeOccurrence.update({
-    where: { id: date.id },
-    data: {
-      dueDate: calendarDayToDb(next.anchorDate),
-      concepts: next.concepts as unknown as Prisma.InputJsonValue,
-      subtotalCents,
-      taxCents,
-      totalCents,
-      invoiceMode: next.invoiceMode,
-    },
-  })
+  // 🔴 Sólo lo que cambió: la fila puede traer los números de una factura que se le anexó y luego se quitó, no los del cobro. Reescribir
+  // todo al mover sólo la fecha le devolvería en silencio el monto del cobro.
+  const data: Prisma.PlatformChargeOccurrenceUpdateInput = {}
+  if (changed.includes('anchorDate')) data.dueDate = calendarDayToDb(next.anchorDate)
+  if (changed.includes('invoiceMode')) data.invoiceMode = next.invoiceMode
+  if (changed.includes('concepts')) {
+    Object.assign(data, { concepts: next.concepts as unknown as Prisma.InputJsonValue, ...computeChargeTotals(next.concepts) })
+  }
+  await tx.platformChargeOccurrence.update({ where: { id: date.id }, data })
   return updated
 }
 

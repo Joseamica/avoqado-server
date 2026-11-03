@@ -1670,6 +1670,13 @@ describe('platform-charges/charges.service — sin factura (NONE) y las claves d
     })
   })
 
+  it('un modo que no existe se rechaza con un mensaje que también ofrece «sin factura»', async () => {
+    await expect(createCharge(SIN_FACTURA({ invoiceMode: 'A_VECES' as never, concepts: SIN_CLAVES }), 'staff-1', AHORA)).rejects.toThrow(
+      'Elige si el cobro se factura automáticamente, con un botón o sin factura',
+    )
+    ningunaEscritura()
+  })
+
   describe('updateCharge — las claves se exigen con el modo que QUEDA tras combinar lo que llega con lo guardado', () => {
     const cobroSinFactura = (over: Record<string, unknown> = {}) =>
       cobro({ invoiceMode: 'NONE', billingTaxProfileId: null, concepts: [GUARDADO_SIN_CLAVES], ...over })
@@ -1734,11 +1741,28 @@ describe('platform-charges/charges.service — sin factura (NONE) y las claves d
       expect(prismaMock.platformCharge.update.mock.calls[0][0].data.concepts).toEqual([{ ...GUARDADO_SIN_CLAVES, amountCents: 5000 }])
     })
 
-    it('cambiar el nombre de un cobro sin factura (claves vacías guardadas) no vuelve a pedir claves', async () => {
+    // Con el modo NONE esta prueba no podría fallar por su título: `assertConceptKeys` no pide nada en NONE. Con un modo que sí las
+    // exige, lo único que las deja de pedir es que el nombre no sea parte de lo que obliga a revisarlas.
+    it('cambiar el nombre de un cobro con las claves vacías guardadas no vuelve a pedir claves, aunque su modo las exija (dato viejo)', async () => {
       instalarOcurrencias([])
-      dadoElCobro(cobroSinFactura())
+      dadoElCobro(cobro({ invoiceMode: 'MANUAL', concepts: [GUARDADO_SIN_CLAVES] }))
 
-      await expect(updateCharge('cobro-1', { customerName: 'Otro nombre' }, 'staff-1', AHORA)).resolves.toBeDefined()
+      await updateCharge('cobro-1', { customerName: 'Otro nombre' }, 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.update.mock.calls[0][0].data).toMatchObject({
+        customerName: 'Otro nombre',
+        concepts: [GUARDADO_SIN_CLAVES],
+      })
+    })
+
+    it('el mismo cobro con conceptos nuevos sin claves sí las pide: lo que las exige es tocar los conceptos o el modo', async () => {
+      instalarOcurrencias([])
+      dadoElCobro(cobro({ invoiceMode: 'MANUAL', concepts: [GUARDADO_SIN_CLAVES] }))
+
+      await expect(updateCharge('cobro-1', { concepts: [{ ...VENTA, amountCents: 5000 }] }, 'staff-1', AHORA)).rejects.toThrow(
+        FALTAN_CLAVES,
+      )
+      ningunaEscritura()
     })
 
     it('un cobro sin factura reenviado igual (el formulario completo, con las claves vacías) no cambia nada ni exige nada', async () => {
@@ -1795,6 +1819,35 @@ describe('platform-charges/charges.service — cobros de UNA SOLA VEZ, ONE_TIME 
 
       const { data } = prismaMock.platformChargeOccurrence.createMany.mock.calls[0][0]
       expect(data.map((d: any) => dia(d.dueDate))).toEqual(['2026-10-03'])
+    })
+
+    it('«una sola vez» y «sin factura» juntos: nace UNA sola fecha, en modo NONE y con las claves vacías', async () => {
+      const venta = { description: 'Venta de equipo', amountCents: 1_000_000, ivaMode: 'WITH_IVA' as const }
+
+      await createCharge(
+        entrada({
+          frequency: 'ONE_TIME',
+          anchorDate: FECHA,
+          invoiceMode: 'NONE',
+          billingTaxProfileId: undefined,
+          concepts: [venta],
+        }),
+        'staff-1',
+        AHORA,
+      )
+
+      const { data } = prismaMock.platformChargeOccurrence.createMany.mock.calls[0][0]
+      expect(data).toEqual([
+        {
+          chargeId: 'cobro-nuevo',
+          dueDate: calendarDayToDb(FECHA),
+          concepts: [{ ...venta, satProductKey: '', satUnitKey: '' }],
+          subtotalCents: 862069,
+          taxCents: 137931,
+          totalCents: 1_000_000,
+          invoiceMode: 'NONE',
+        },
+      ])
     })
 
     it('el ancla se exige dentro de ±366 días como en los demás cobros', async () => {
@@ -1957,7 +2010,7 @@ describe('platform-charges/charges.service — cobros de UNA SOLA VEZ, ONE_TIME 
       expect(eventos[eventos.length - 1]).toBe('bitácora')
     })
 
-    it('si por algún motivo el cobro no tiene su fecha, editarlo la vuelve a crear (no queda un cobro sin fecha)', async () => {
+    it('si por algún motivo el cobro no tiene su fecha, editarlo la vuelve a crear (no queda un cobro sin fecha) y lo deja en el log', async () => {
       const filas = instalarOcurrencias([])
       instalarFacturas([])
       dadoElCobro(UNICA())
@@ -1966,6 +2019,87 @@ describe('platform-charges/charges.service — cobros de UNA SOLA VEZ, ONE_TIME 
 
       expect(filas.map(f => `${dia(f.dueDate)}:${f.status}`)).toEqual([`${OTRA_FECHA}:PENDING`])
       expect(filas[0]).toMatchObject({ concepts: NUEVOS_CONCEPTOS, totalCents: 116000 })
+      expect(mockLoggerError).toHaveBeenCalledTimes(1)
+      expect(mockLoggerError).toHaveBeenCalledWith(
+        expect.stringContaining('no tenía su fecha'),
+        expect.objectContaining({ chargeId: 'cobro-1' }),
+      )
+    })
+
+    it('con su fecha en su lugar no se escribe nada en el log', async () => {
+      instalarOcurrencias([fila(FECHA)])
+      instalarFacturas([])
+      dadoElCobro(UNICA())
+
+      await updateCharge('cobro-1', { concepts: NUEVOS_CONCEPTOS }, 'staff-1', AHORA)
+
+      expect(mockLoggerError).not.toHaveBeenCalled()
+    })
+
+    describe('🔴 sólo escribe lo que cambió: la fila puede traer los números de una factura que se le anexó, no los del cobro', () => {
+      const DE_LA_FACTURA = {
+        concepts: [{ ...RENTA, description: 'Lo que dijo la factura', amountCents: 20000 }],
+        subtotalCents: 20000,
+        taxCents: 3200,
+        totalCents: 23200,
+        invoiceMode: 'MANUAL',
+      }
+
+      it('sólo la fecha no toca conceptos, totales ni modo', async () => {
+        const filas = instalarOcurrencias([fila(FECHA, DE_LA_FACTURA)])
+        instalarFacturas([])
+        dadoElCobro(UNICA())
+
+        await updateCharge('cobro-1', { anchorDate: OTRA_FECHA }, 'staff-1', AHORA)
+
+        expect(filas[0]).toMatchObject({ ...DE_LA_FACTURA, id: `o-${FECHA}`, dueDate: calendarDayToDb(OTRA_FECHA) })
+        expect(Object.keys(prismaMock.platformChargeOccurrence.update.mock.calls[0][0].data)).toEqual(['dueDate'])
+      })
+
+      it('sólo el modo no toca conceptos, totales ni la fecha', async () => {
+        const filas = instalarOcurrencias([fila(FECHA, { ...DE_LA_FACTURA, invoiceMode: 'AUTOMATIC' })])
+        instalarFacturas([])
+        dadoElCobro(UNICA())
+
+        await updateCharge('cobro-1', { invoiceMode: 'MANUAL' }, 'staff-1', AHORA)
+
+        expect(filas[0]).toMatchObject({ ...DE_LA_FACTURA, invoiceMode: 'MANUAL', dueDate: calendarDayToDb(FECHA) })
+        expect(Object.keys(prismaMock.platformChargeOccurrence.update.mock.calls[0][0].data)).toEqual(['invoiceMode'])
+      })
+
+      it('sólo los conceptos cambian conceptos y totales, y no la fecha ni el modo', async () => {
+        const filas = instalarOcurrencias([fila(FECHA, DE_LA_FACTURA)])
+        instalarFacturas([])
+        dadoElCobro(UNICA())
+
+        await updateCharge('cobro-1', { concepts: NUEVOS_CONCEPTOS }, 'staff-1', AHORA)
+
+        expect(filas[0]).toMatchObject({
+          concepts: NUEVOS_CONCEPTOS,
+          subtotalCents: 100000,
+          taxCents: 16000,
+          totalCents: 116000,
+          invoiceMode: 'MANUAL',
+          dueDate: calendarDayToDb(FECHA),
+        })
+      })
+    })
+
+    it('de «sin factura» a MANUAL sin claves es 400 y no toca la fila: la misma regla que en un cobro recurrente', async () => {
+      const guardados = [
+        { description: 'Venta de equipo', amountCents: 1_000_000, ivaMode: 'WITH_IVA' as const, satProductKey: '', satUnitKey: '' },
+      ]
+      const filas = instalarOcurrencias([fila(FECHA, { concepts: guardados, invoiceMode: 'NONE' })])
+      instalarFacturas([])
+      dadoElCobro(UNICA({ invoiceMode: 'NONE', concepts: guardados, billingTaxProfileId: null }))
+      const antes = JSON.stringify(filas)
+
+      const error = await updateCharge('cobro-1', { invoiceMode: 'MANUAL' }, 'staff-1', AHORA).catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(BadRequestError)
+      expect((error as BadRequestError).message).toBe('Cada concepto necesita su clave del SAT y su unidad')
+      expect(JSON.stringify(filas)).toBe(antes)
+      ningunaEscritura()
     })
   })
 
