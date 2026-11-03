@@ -660,7 +660,8 @@ describe('platform-charges/charges.service — updateCharge (NEW)', () => {
     // Mismo lunes cada semana → ahora miércoles (7-oct + 7·k): el 4-nov cae en la ventana, el 28-oct ya pasó y no se inventa.
     await updateCharge('cobro-1', { anchorDate: '2026-10-07' }, 'staff-1', AHORA)
 
-    expect(resumen(filas)).toEqual(['2026-10-26:PENDING', '2026-11-02:PENDING', '2026-11-04:PENDING'])
+    // Lo de hoy (2-nov) ya no cae en el calendario nuevo y se va; lo vencido (26-oct) se queda.
+    expect(resumen(filas)).toEqual(['2026-10-26:PENDING', '2026-11-04:PENDING'])
     expect(prismaMock.platformCharge.update.mock.calls[0][0].data.anchorDate).toEqual(new Date('2026-10-07T00:00:00.000Z'))
   })
 
@@ -670,7 +671,7 @@ describe('platform-charges/charges.service — updateCharge (NEW)', () => {
 
     await updateCharge('cobro-1', { anchorDate: '2026-12-07' }, 'staff-1', AHORA)
 
-    expect(resumen(filas)).toEqual(['2026-10-26:PENDING', '2026-11-02:PENDING'])
+    expect(resumen(filas)).toEqual(['2026-10-26:PENDING'])
   })
 
   describe('🔴 mover la fecha con lo de este periodo ya pagado u omitido: no se vuelve a cobrar', () => {
