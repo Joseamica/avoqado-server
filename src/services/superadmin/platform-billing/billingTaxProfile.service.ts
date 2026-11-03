@@ -6,6 +6,7 @@
  * capture the data by hand — it does NOT depend on the client having self-served
  * a constancia. The constancia PDF is optional (stored as a URL for reference).
  */
+import { isDeepStrictEqual } from 'node:util'
 import prisma from '@/utils/prismaClient'
 import type { BillingTaxProfile } from '@prisma/client'
 import logger from '@/config/logger'
@@ -28,8 +29,15 @@ export async function getBillingTaxProfileForCustomer(customerType: BillingCusto
   return null
 }
 
+/** Lo que el SAT revisa: un veredicto sólo vale para estos cuatro datos. */
+type FiscalData = Pick<BillingTaxProfile, 'rfc' | 'razonSocial' | 'regimenFiscal' | 'codigoPostal'>
+const fiscalDataOf = ({ rfc, razonSocial, regimenFiscal, codigoPostal }: FiscalData): FiscalData => ({ rfc, razonSocial, regimenFiscal, codigoPostal })
+
+/** El veredicto que entra en la MISMA escritura que los datos, para que nunca haya datos nuevos marcados «Verificado». */
+type TaxVerdict = Partial<Pick<BillingTaxProfile, 'facturapiCustomerId' | 'validationStatus' | 'validatedAt'>>
+
 /** Create or update a receptor's fiscal profile. Handles org/venue (1 per entity) + standalone (dedupe by RFC). */
-export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput): Promise<BillingTaxProfile> {
+export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput, verdict: TaxVerdict = {}): Promise<BillingTaxProfile> {
   const common = {
     rfc: input.rfc.toUpperCase().trim(),
     razonSocial: input.razonSocial,
@@ -37,6 +45,7 @@ export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput): Pro
     codigoPostal: input.codigoPostal,
     defaultUsoCfdi: input.defaultUsoCfdi ?? 'G03',
     email: input.email ?? null,
+    ...verdict,
   }
 
   if (input.customerType === 'ORGANIZATION') {
@@ -70,61 +79,109 @@ export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput): Pro
   })
 }
 
+type SatAnswer = { customerId: string; validation: SatValidationResult }
+
 /**
- * Valida los datos fiscales del receptor contra el padrón del SAT vía el PAC, sin gastar timbre.
+ * Le pregunta al SAT por estos datos, vía el PAC y sin gastar timbre.
  *
- * BEST-EFFORT A PROPÓSITO: si no hay emisor, el CSD no sirve, o el PAC está caído, devuelve
- * `validation: null` y deja `validationStatus` como estaba. Una caída del PAC no puede dejar
- * al operador sin poder capturar ni corregir datos fiscales.
+ * BEST-EFFORT A PROPÓSITO: si no hay emisor, el CSD no sirve, o el PAC está caído, contesta `null`. Una caída del PAC no es
+ * un veredicto sobre los datos del receptor, y no puede dejar al operador sin poder capturar ni corregir datos fiscales.
  */
-export async function validateBillingTaxProfile(profileId: string): Promise<TaxProfileWithValidation> {
-  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: profileId } })
-  if (!profile) throw new PlatformBillingError('Perfil fiscal del receptor no encontrado', 'NO_PROFILE')
-
+async function askSat(data: FiscalData & Pick<BillingTaxProfile, 'email' | 'facturapiCustomerId'>, label: string): Promise<SatAnswer | null> {
   const emisor = await getActivePlatformEmisor()
-  if (!emisor) return { profile, validation: null }
-
-  // Sólo la llamada al PAC es best-effort: un PAC caído o una llave rechazada no es un
-  // veredicto sobre los datos del receptor, así que se deja el status previo y se reporta
-  // "no validado" sin reventar.
-  let customerId: string
-  let validation: SatValidationResult
+  if (!emisor) return null
   try {
     const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox: false })
-    customerId = await provider.upsertCustomer({
-      rfc: profile.rfc,
-      razonSocial: profile.razonSocial,
-      regimenFiscal: profile.regimenFiscal,
-      codigoPostal: profile.codigoPostal,
-      email: profile.email ?? undefined,
-      existingCustomerId: profile.facturapiCustomerId,
+    const customerId = await provider.upsertCustomer({
+      ...fiscalDataOf(data),
+      email: data.email ?? undefined,
+      existingCustomerId: data.facturapiCustomerId,
     })
-    validation = await provider.validateCustomerTaxInfo(customerId)
+    return { customerId, validation: await provider.validateCustomerTaxInfo(customerId) }
   } catch (err) {
-    logger.warn(`[platform-billing] no se pudo validar el perfil ${profile.id}: ${err instanceof Error ? err.message : String(err)}`)
-    return { profile, validation: null }
+    logger.warn(`[platform-billing] no se pudo validar ${label}: ${err instanceof Error ? err.message : String(err)}`)
+    return null
+  }
+}
+
+/**
+ * Guarda lo que escribió el SUPERADMIN sólo si el SAT no lo rechaza. Un rechazo no escribe nada: lo que estaba bien sigue
+ * igual, y un cliente externo no acumula filas con RFC malos. Si el SAT no contesta sí se guarda, sin presumir «Verificado».
+ *
+ * `upsertCustomer` sí deja el dato rechazado en el cliente de Facturapi, y no importa: cada timbrado manda el receptor completo.
+ *
+ * ponytail: dos pestañas guardando el mismo cliente en el mismo instante se pueden cruzar en ese cliente de Facturapi, y un
+ * dato malo quedaría «Verificado» hasta que el SAT lo rechace al timbrar. Evitarlo pide un cliente de usar y tirar por intento.
+ */
+export async function saveBillingTaxProfileIfSatAccepts(
+  input: UpsertTaxProfileInput,
+): Promise<
+  | { saved: true; profile: BillingTaxProfile; validation: SatValidationResult | null }
+  | { saved: false; profile: BillingTaxProfile | null; validation: SatValidationResult }
+> {
+  const typed = fiscalDataOf({ ...input, rfc: input.rfc.toUpperCase().trim() })
+  const existing =
+    input.customerType === 'STANDALONE'
+      ? await prisma.billingTaxProfile.findFirst({ where: { customerType: 'STANDALONE', rfc: typed.rfc } })
+      : await getBillingTaxProfileForCustomer(
+          input.customerType,
+          (input.customerType === 'ORGANIZATION' ? input.organizationId : input.venueId) ?? undefined,
+        )
+
+  const sat = await askSat(
+    { ...typed, email: input.email ?? null, facturapiCustomerId: existing?.facturapiCustomerId ?? null },
+    `un perfil ${input.customerType}`,
+  )
+  if (sat && !sat.validation.valid) {
+    // 🔴 Si son los mismos datos que ya estaban, el veredicto es de ellos: queda anotado, porque ya no están «Verificados».
+    const sameData = existing && isDeepStrictEqual(fiscalDataOf(existing), typed)
+    const profile = sameData ? (await recordVerdict(existing, sat)).profile : existing
+    return { saved: false, profile, validation: sat.validation }
   }
 
-  // El PAC SÍ respondió — ya tenemos un veredicto real del SAT. La escritura local queda
-  // FUERA del catch de arriba a propósito: si esta falla es un bug nuestro (dato mal
-  // formado, conexión a la BD, constraint), no una caída del proveedor, y el veredicto
-  // que YA obtuvimos no debe perderse ni confundirse con "PAC caído".
+  // Sin respuesta: lo ya verificado sigue verificado mientras sean los mismos datos. Un perfil nuevo nace PENDING por el default.
+  const verdict: TaxVerdict = sat
+    ? { facturapiCustomerId: sat.customerId, validationStatus: 'VALID', validatedAt: new Date() }
+    : existing && !isDeepStrictEqual(fiscalDataOf(existing), typed)
+      ? { validationStatus: 'PENDING', validatedAt: null }
+      : {}
+  return { saved: true, profile: await upsertBillingTaxProfile(input, verdict), validation: sat?.validation ?? null }
+}
+
+/**
+ * Anota el veredicto del SAT. La escritura queda FUERA del catch de `askSat` a propósito: si esta falla es un bug nuestro (dato
+ * mal formado, conexión a la BD, constraint), no una caída del proveedor, y el veredicto que YA obtuvimos no debe perderse ni
+ * confundirse con "PAC caído".
+ */
+async function recordVerdict(profile: BillingTaxProfile, { customerId, validation }: SatAnswer): Promise<TaxProfileWithValidation> {
   try {
-    const updated = await prisma.billingTaxProfile.update({
-      where: { id: profile.id },
+    // 🔴 Sólo sobre los datos que se revisaron. Si otro guardado los cambió mientras el SAT contestaba, este veredicto no es de
+    // los datos de ahora: no se escribe y se contesta como «no se pudo revisar».
+    const { count } = await prisma.billingTaxProfile.updateMany({
+      where: { id: profile.id, ...fiscalDataOf(profile) },
       data: {
         facturapiCustomerId: customerId,
         validationStatus: validation.valid ? 'VALID' : 'INVALID',
         validatedAt: new Date(),
       },
     })
-    return { profile: updated, validation }
+    const current = (await prisma.billingTaxProfile.findUnique({ where: { id: profile.id } })) ?? profile
+    return { profile: current, validation: count === 0 ? null : validation }
   } catch (err) {
     logger.error(
       `[platform-billing] el SAT validó el perfil ${profile.id} pero no se pudo persistir el resultado: ${err instanceof Error ? err.message : String(err)}`,
     )
     return { profile, validation }
   }
+}
+
+/** Revalida lo que ya está guardado contra el padrón del SAT. Ver `askSat`. */
+export async function validateBillingTaxProfile(profileId: string): Promise<TaxProfileWithValidation> {
+  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: profileId } })
+  if (!profile) throw new PlatformBillingError('Perfil fiscal del receptor no encontrado', 'NO_PROFILE')
+
+  const sat = await askSat(profile, `el perfil ${profile.id}`)
+  return sat ? recordVerdict(profile, sat) : { profile, validation: null }
 }
 
 /**

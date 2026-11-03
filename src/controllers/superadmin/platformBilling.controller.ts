@@ -12,7 +12,7 @@ import {
 } from '@/services/superadmin/platform-billing/platformEmisor.service'
 import { platformEmisorSeguro } from '@/services/superadmin/platform-billing/platformEmisorSeguro'
 import {
-  upsertBillingTaxProfile,
+  saveBillingTaxProfileIfSatAccepts,
   getBillingTaxProfileById,
   getBillingTaxProfileForCustomer,
   uploadConstancia,
@@ -161,24 +161,23 @@ export async function getTaxProfileForCustomer(req: Request, res: Response, next
   }
 }
 
-/** PUT /api/v1/superadmin/billing/tax-profiles — upsert a receptor profile (org / venue / standalone). */
+/** PUT /api/v1/superadmin/billing/tax-profiles — guarda un receptor (org / venue / standalone) si el SAT no lo rechaza; ver el service. */
 export async function upsertTaxProfile(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
-    const saved = await upsertBillingTaxProfile({ ...req.body, performedById: userId })
-    await prisma.activityLog.create({
-      data: {
+    const result = await saveBillingTaxProfileIfSatAccepts({ ...req.body, performedById: userId })
+    // Lo que el SAT rechazó no se guardó: no hay nada que registrar.
+    if (result.saved) {
+      void logAction({
         staffId: userId,
-        venueId: saved.venueId,
+        venueId: result.profile.venueId,
         action: 'PLATFORM_TAXPROFILE_UPSERTED',
         entity: 'BillingTaxProfile',
-        entityId: saved.id,
-        data: { customerType: saved.customerType, rfc: saved.rfc },
-      },
-    })
-    // Validación best-effort contra el SAT: nunca impide que el guardado haya sido exitoso.
-    const { profile, validation } = await validateBillingTaxProfile(saved.id)
-    res.json({ success: true, data: profile, validation })
+        entityId: result.profile.id,
+        data: { customerType: result.profile.customerType, rfc: result.profile.rfc },
+      })
+    }
+    res.json({ success: true, data: result.profile, validation: result.validation })
   } catch (error) {
     handleBillingError(error, res, next)
   }

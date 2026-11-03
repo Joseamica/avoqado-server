@@ -14,12 +14,21 @@ jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({
   resolveFiscalProvider: jest.fn(),
 }))
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
-import { validateBillingTaxProfile } from '@/services/superadmin/platform-billing/billingTaxProfile.service'
+import {
+  saveBillingTaxProfileIfSatAccepts,
+  upsertBillingTaxProfile,
+  validateBillingTaxProfile,
+} from '@/services/superadmin/platform-billing/billingTaxProfile.service'
 import logger from '@/config/logger'
 
 const mockUpload = uploadFileToStorage as jest.Mock
 const mockDelete = deleteFileFromStorage as jest.Mock
 const mockResolve = resolveFiscalProvider as jest.Mock
+const EMISOR = { id: 'em1', provider: 'FACTURAPI', providerKeyEnc: 'enc', csdStatus: 'ACTIVE', serie: 'A' }
+const pac = (veredicto: unknown) => ({
+  upsertCustomer: jest.fn().mockResolvedValue('cus_1'),
+  validateCustomerTaxInfo: jest.fn().mockResolvedValue(veredicto),
+})
 
 describe('billingTaxProfile.service — uploadConstancia (NEW)', () => {
   it('uploads the file to Firebase under the profile path and stores the URL', async () => {
@@ -79,7 +88,7 @@ describe('validateBillingTaxProfile (fase 2)', () => {
       csdStatus: 'ACTIVE',
       serie: 'A',
     } as never)
-    prismaMock.billingTaxProfile.update.mockImplementation((args: any) => Promise.resolve({ ...PROFILE, ...args.data }))
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 1 } as never)
     mockResolve.mockReturnValue({
       upsertCustomer: jest.fn().mockResolvedValue('cus_1'),
       validateCustomerTaxInfo: jest.fn().mockResolvedValue({ valid: true, errors: [] }),
@@ -88,7 +97,7 @@ describe('validateBillingTaxProfile (fase 2)', () => {
     const res = await validateBillingTaxProfile('p1')
 
     expect(res.validation).toEqual({ valid: true, errors: [] })
-    expect(prismaMock.billingTaxProfile.update).toHaveBeenCalledWith(
+    expect(prismaMock.billingTaxProfile.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ facturapiCustomerId: 'cus_1', validationStatus: 'VALID' }),
       }),
@@ -104,7 +113,7 @@ describe('validateBillingTaxProfile (fase 2)', () => {
       csdStatus: 'ACTIVE',
       serie: 'A',
     } as never)
-    prismaMock.billingTaxProfile.update.mockImplementation((args: any) => Promise.resolve({ ...PROFILE, ...args.data }))
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 1 } as never)
     mockResolve.mockReturnValue({
       upsertCustomer: jest.fn().mockResolvedValue('cus_1'),
       validateCustomerTaxInfo: jest.fn().mockResolvedValue({
@@ -117,7 +126,7 @@ describe('validateBillingTaxProfile (fase 2)', () => {
 
     expect(res.validation?.valid).toBe(false)
     expect(res.validation?.errors[0].field).toBe('razonSocial')
-    expect(prismaMock.billingTaxProfile.update).toHaveBeenCalledWith(
+    expect(prismaMock.billingTaxProfile.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ validationStatus: 'INVALID' }) }),
     )
   })
@@ -159,7 +168,7 @@ describe('validateBillingTaxProfile (fase 2)', () => {
       csdStatus: 'ACTIVE',
       serie: 'A',
     } as never)
-    prismaMock.billingTaxProfile.update.mockRejectedValue(new Error('constraint violation'))
+    prismaMock.billingTaxProfile.updateMany.mockRejectedValue(new Error('constraint violation'))
     mockResolve.mockReturnValue({
       upsertCustomer: jest.fn().mockResolvedValue('cus_1'),
       validateCustomerTaxInfo: jest.fn().mockResolvedValue({ valid: true, errors: [] }),
@@ -172,11 +181,11 @@ describe('validateBillingTaxProfile (fase 2)', () => {
     // El SAT SÍ respondió (upsertCustomer + validateCustomerTaxInfo tuvieron éxito) — ese
     // veredicto no debe descartarse sólo porque la escritura local falló después.
     expect(res.validation).toEqual({ valid: true, errors: [] })
-    // El profile devuelto es el original: el `update` falló, así que no hay `updated` que devolver,
+    // El profile devuelto es el original: la escritura falló, así que no hay `updated` que devolver,
     // pero el veredicto (arriba) sigue presente — nunca `validation: null`.
     expect(res.profile).toEqual(PROFILE)
     // Sí se intentó persistir con el veredicto correcto.
-    expect(prismaMock.billingTaxProfile.update).toHaveBeenCalledWith(
+    expect(prismaMock.billingTaxProfile.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ facturapiCustomerId: 'cus_1', validationStatus: 'VALID' }),
       }),
@@ -193,5 +202,189 @@ describe('validateBillingTaxProfile (fase 2)', () => {
   it('rechaza si el perfil no existe', async () => {
     prismaMock.billingTaxProfile.findUnique.mockResolvedValue(null)
     await expect(validateBillingTaxProfile('nope')).rejects.toMatchObject({ code: 'NO_PROFILE' })
+  })
+
+  it('el veredicto sólo se escribe sobre los datos que se revisaron', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE as never)
+    prismaMock.platformEmisor.findFirst.mockResolvedValue(EMISOR as never)
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 1 } as never)
+    mockResolve.mockReturnValue(pac({ valid: true, errors: [] }))
+
+    await validateBillingTaxProfile('p1')
+
+    expect(prismaMock.billingTaxProfile.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'p1', rfc: PROFILE.rfc, razonSocial: PROFILE.razonSocial, regimenFiscal: PROFILE.regimenFiscal, codigoPostal: PROFILE.codigoPostal },
+      }),
+    )
+  })
+
+  it('🔴 si los datos cambiaron mientras el SAT contestaba, no presume nada sobre los de ahora', async () => {
+    const AHORA = { ...PROFILE, rfc: 'NUE010101AAA', validationStatus: 'PENDING' }
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValueOnce(PROFILE as never).mockResolvedValueOnce(AHORA as never)
+    prismaMock.platformEmisor.findFirst.mockResolvedValue(EMISOR as never)
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 0 } as never)
+    mockResolve.mockReturnValue(pac({ valid: true, errors: [] }))
+
+    const res = await validateBillingTaxProfile('p1')
+
+    expect(res.validation).toBeNull()
+    expect(res.profile).toEqual(AHORA)
+  })
+})
+
+describe('saveBillingTaxProfileIfSatAccepts: primero el SAT, después se guarda', () => {
+  const BUENO = {
+    id: 'v1',
+    customerType: 'VENUE',
+    venueId: 'venue1',
+    rfc: 'BUE010101AAA',
+    razonSocial: 'NEGOCIO BUENO',
+    regimenFiscal: '601',
+    codigoPostal: '06400',
+    email: null,
+    facturapiCustomerId: 'cus_viejo',
+    validationStatus: 'VALID',
+  }
+  const TECLEADO = {
+    customerType: 'VENUE' as const,
+    venueId: 'venue1',
+    rfc: ' mal010101aaa ',
+    razonSocial: 'NEGOCIO BUENO',
+    regimenFiscal: '601',
+    codigoPostal: '06400',
+    performedById: 'staff1',
+  }
+  const RECHAZO = { valid: false, errors: [{ field: 'rfc', message: 'El RFC no existe' }] }
+  const ACEPTADO = { valid: true, errors: [] }
+  const escribio = () =>
+    [prismaMock.billingTaxProfile.upsert, prismaMock.billingTaxProfile.create, prismaMock.billingTaxProfile.update, prismaMock.billingTaxProfile.updateMany].filter(
+      m => (m as jest.Mock).mock.calls.length > 0,
+    ).length
+
+  beforeEach(() => {
+    prismaMock.platformEmisor.findFirst.mockResolvedValue(EMISOR as never)
+    prismaMock.billingTaxProfile.upsert.mockImplementation((args: any) => Promise.resolve({ ...BUENO, ...args.update }))
+  })
+
+  it('🔴 el SAT rechaza: no escribe nada y regresa el perfil como estaba', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    mockResolve.mockReturnValue(pac(RECHAZO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts(TECLEADO)
+
+    expect(res).toEqual({ saved: false, profile: BUENO, validation: RECHAZO })
+    expect(escribio()).toBe(0)
+  })
+
+  it('🔴 los MISMOS datos que ya estaban y el SAT los rechaza: dejan de estar «Verificados»', async () => {
+    const YA_INVALIDO = { ...BUENO, validationStatus: 'INVALID' }
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValueOnce(BUENO as never).mockResolvedValueOnce(YA_INVALIDO as never)
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 1 } as never)
+    mockResolve.mockReturnValue(pac(RECHAZO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, rfc: BUENO.rfc })
+
+    expect(res).toEqual({ saved: false, profile: YA_INVALIDO, validation: RECHAZO })
+    expect(prismaMock.billingTaxProfile.updateMany.mock.calls[0][0].data).toEqual(expect.objectContaining({ validationStatus: 'INVALID' }))
+    expect(prismaMock.billingTaxProfile.upsert).not.toHaveBeenCalled()
+  })
+
+  it('🔴 cliente externo con un RFC rechazado: no deja ninguna fila nueva, y no hay perfil que regresar', async () => {
+    prismaMock.billingTaxProfile.findFirst.mockResolvedValue(null)
+    mockResolve.mockReturnValue(pac(RECHAZO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, customerType: 'STANDALONE', venueId: undefined, displayName: 'Cliente' })
+
+    expect(res).toEqual({ saved: false, profile: null, validation: RECHAZO })
+    expect(escribio()).toBe(0)
+  })
+
+  it('le pregunta al SAT por lo tecleado, no por lo guardado, y con el cliente de Facturapi que ya tenía', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    const proveedor = pac(RECHAZO)
+    mockResolve.mockReturnValue(proveedor)
+
+    await saveBillingTaxProfileIfSatAccepts(TECLEADO)
+
+    expect(proveedor.upsertCustomer).toHaveBeenCalledWith(
+      expect.objectContaining({ rfc: 'MAL010101AAA', existingCustomerId: 'cus_viejo' }),
+    )
+  })
+
+  it('🔴 el SAT acepta: los datos y «VALID» entran en UNA sola escritura', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    mockResolve.mockReturnValue(pac(ACEPTADO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts(TECLEADO)
+
+    expect(res.saved).toBe(true)
+    expect(res.validation).toEqual(ACEPTADO)
+    expect(prismaMock.billingTaxProfile.upsert).toHaveBeenCalledTimes(1)
+    expect(prismaMock.billingTaxProfile.upsert.mock.calls[0][0].update).toEqual(
+      expect.objectContaining({ rfc: 'MAL010101AAA', facturapiCustomerId: 'cus_1', validationStatus: 'VALID', validatedAt: expect.any(Date) }),
+    )
+    expect(prismaMock.billingTaxProfile.update).not.toHaveBeenCalled()
+    expect(prismaMock.billingTaxProfile.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('cliente externo nuevo aceptado: nace con su veredicto', async () => {
+    prismaMock.billingTaxProfile.findFirst.mockResolvedValue(null)
+    prismaMock.billingTaxProfile.create.mockImplementation((args: any) => Promise.resolve({ id: 's1', ...args.data }))
+    mockResolve.mockReturnValue(pac(ACEPTADO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, customerType: 'STANDALONE', venueId: undefined, displayName: 'Cliente' })
+
+    expect(res.saved).toBe(true)
+    expect(prismaMock.billingTaxProfile.create.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({ rfc: 'MAL010101AAA', displayName: 'Cliente', validationStatus: 'VALID' }),
+    )
+  })
+
+  it('🔴 el SAT no contesta y cambió un dato fiscal: guarda, sin presumir «VALID»', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    mockResolve.mockReturnValue({ upsertCustomer: jest.fn().mockRejectedValue(new Error('ECONNRESET')), validateCustomerTaxInfo: jest.fn() })
+
+    const res = await saveBillingTaxProfileIfSatAccepts(TECLEADO)
+
+    expect(res.saved).toBe(true)
+    expect(res.validation).toBeNull()
+    expect(prismaMock.billingTaxProfile.upsert.mock.calls[0][0].update).toEqual(
+      expect.objectContaining({ rfc: 'MAL010101AAA', validationStatus: 'PENDING', validatedAt: null }),
+    )
+  })
+
+  it('el SAT no contesta y sólo cambió el correo: lo ya verificado sigue verificado', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    mockResolve.mockReturnValue({ upsertCustomer: jest.fn().mockRejectedValue(new Error('ECONNRESET')), validateCustomerTaxInfo: jest.fn() })
+
+    await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, rfc: BUENO.rfc, email: 'nuevo@correo.mx' })
+
+    const { update } = prismaMock.billingTaxProfile.upsert.mock.calls[0][0]
+    expect(update.email).toBe('nuevo@correo.mx')
+    expect(update).not.toHaveProperty('validationStatus')
+  })
+
+  it('sin emisor de plataforma también se guarda: nunca deja sin poder capturar', async () => {
+    prismaMock.platformEmisor.findFirst.mockResolvedValue(null)
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+
+    const res = await saveBillingTaxProfileIfSatAccepts(TECLEADO)
+
+    expect(res.saved).toBe(true)
+    expect(res.validation).toBeNull()
+    expect(mockResolve).not.toHaveBeenCalled()
+  })
+})
+
+describe('upsertBillingTaxProfile sin veredicto (el DASHBOARD)', () => {
+  it('sigue guardando sin tocar la validación', async () => {
+    prismaMock.billingTaxProfile.upsert.mockImplementation((args: any) => Promise.resolve({ id: 'v1', ...args.update }))
+
+    await upsertBillingTaxProfile({ customerType: 'VENUE', venueId: 'venue1', rfc: 'BUE010101AAA', razonSocial: 'NEGOCIO', regimenFiscal: '601', codigoPostal: '06400' })
+
+    const { update } = prismaMock.billingTaxProfile.upsert.mock.calls[0][0]
+    expect(update).not.toHaveProperty('validationStatus')
+    expect(update).not.toHaveProperty('facturapiCustomerId')
   })
 })
