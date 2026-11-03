@@ -32,33 +32,58 @@ const PLANS_AT_ONCE = 4
 /** The steps of the signup, the same count as `getOnboardingCompletionPercentage`. */
 const ONBOARDING_STEPS = 8
 
+/** The paid plans, with the `Feature.code` of its classic row and the `HybridContract.planTier` of a commercial contract. */
+const PAID_PLANS = {
+  PRO: { featureCode: 'PLAN_PRO', contractTier: Prisma.sql`'PRO'` },
+  PREMIUM: { featureCode: 'PLAN_PREMIUM', contractTier: Prisma.sql`'PREMIUM'` },
+} as const satisfies Record<string, { featureCode: (typeof PAID_PLAN_TIER_CODES)[number]; contractTier: Prisma.Sql }>
+export type PaidPlan = keyof typeof PAID_PLANS
+
+/**
+ * The «paid plan in force» rule over a venue aliased `v`, shared by «Clientes» (who is a client) and the campaign
+ * audiences (which plan a client has), so the two never say different things. A venue holds a paid plan when it has the
+ * classic row in force without a trial end (as `endDate` means in the schema) or a commercial contract in force (the same
+ * rule as `planContractOrigin`, whose `planTier` can exist with no classic row). `plans` narrows which tiers count; the
+ * default is any paid one. GRATIS is the absence of it: `NOT planVigenteSql(now)`.
+ *
+ * Two correlated EXISTS (ruling 51), each stopping at its first row on `VenueFeature(venueId)` and
+ * `HybridContract(venueId, …)`.
+ */
+export function planVigenteSql(now: Date, plans: readonly PaidPlan[] = ['PRO', 'PREMIUM']): Prisma.Sql {
+  return Prisma.sql`(
+          EXISTS (
+            SELECT 1 FROM "VenueFeature" vf JOIN "Feature" f ON f."id" = vf."featureId"
+            WHERE vf."venueId" = v."id" AND f."code" IN (${Prisma.join(plans.map(plan => PAID_PLANS[plan].featureCode))})
+              AND vf."active" = true AND vf."suspendedAt" IS NULL AND vf."endDate" IS NULL
+          )
+          OR EXISTS (
+            SELECT 1 FROM "HybridContract" hc
+            WHERE hc."venueId" = v."id" AND hc."endedAt" IS NULL AND hc."planTier" IN (${Prisma.join(
+              plans.map(plan => PAID_PLANS[plan].contractTier),
+              ', ',
+            )})
+              AND (hc."cancelAt" IS NULL OR hc."cancelAt" > ${utcTs(now)})
+          )
+        )`
+}
+
 /**
  * Ruling 35: who is a client — over an Organization aliased `o`, in ONE bounded query over the tables `getPlanState`
- * reads, never `getPlanState` per row: a REAL venue that charged real money, holds a paid plan in force (the classic row
- * without a trial end, as `endDate` means in the schema) or a commercial contract in force (the same rule as
- * `planContractOrigin`); or a CRM account a seller won. Never the sales team's own organization (ruling 14).
+ * reads, never `getPlanState` per row: a REAL venue that charged real money, holds a paid plan in force (`planVigenteSql`)
+ * or a commercial contract in force; or a CRM account a seller won. Never the sales team's own organization (ruling 14).
  *
  * Raw SQL with correlated EXISTS (ruling 51): as Prisma relation filters inside this OR, «charged real money» became a
  * hashed subplan over every completed payment of the platform, on every page and every total. Each EXISTS here stops at
  * the first row, on `Payment(venueId, status, createdAt)`, `VenueFeature(venueId)` and `HybridContract(venueId, …)`.
  */
-function clientSql(teamOrgId: string | null, now: Date): Prisma.Sql {
+export function clientSql(teamOrgId: string | null, now: Date): Prisma.Sql {
   return Prisma.sql`${teamOrgId ? Prisma.sql`o."id" <> ${teamOrgId} AND ` : Prisma.empty}(
     EXISTS (
       SELECT 1 FROM "Venue" v
       WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL}
         AND (
           ${VENUE_HAS_MONEY_SQL}
-          OR EXISTS (
-            SELECT 1 FROM "VenueFeature" vf JOIN "Feature" f ON f."id" = vf."featureId"
-            WHERE vf."venueId" = v."id" AND f."code" IN (${Prisma.join(PAID_PLAN_TIER_CODES)})
-              AND vf."active" = true AND vf."suspendedAt" IS NULL AND vf."endDate" IS NULL
-          )
-          OR EXISTS (
-            SELECT 1 FROM "HybridContract" hc
-            WHERE hc."venueId" = v."id" AND hc."endedAt" IS NULL AND hc."planTier" IN ('PRO', 'PREMIUM')
-              AND (hc."cancelAt" IS NULL OR hc."cancelAt" > ${utcTs(now)})
-          )
+          OR ${planVigenteSql(now)}
         )
     )
     OR EXISTS (

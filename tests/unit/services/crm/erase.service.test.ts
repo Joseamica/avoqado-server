@@ -150,6 +150,26 @@ describe('deleteAccount', () => {
       expect(row).toEqual({ keyHash: expect.stringMatching(/^[0-9a-f]{64}$/), scope: ORG_A, erasedAt: expect.any(Date) })
   })
 
+  // I1 (revisión final de la fase 2 de correo): la cola de campañas no tiene llave foránea y el consentimiento puede colgar de
+  // otra cuenta (o de ninguna). Sin esto la persona eliminada seguía recibiendo campañas.
+  it('🔴 lo_que_estaba_por_mandarse_se_omite_y_su_consentimiento_se_va: por cuenta y por correo, en la misma transacción', async () => {
+    seedAccount()
+    db.contacts.push({ id: 'ccontacter000000000000002', accountId: ACCOUNT, name: 'Beto', email: '  Beto@Cafe.MX ', phoneE164: null })
+
+    await deleteAccount(FOUNDER, ACCOUNT, 'Café Ana')
+
+    // Sólo lo que nunca se reclamó (PENDIENTE) es OMITIDO seguro. Una REINTENTO pudo haber salido en su intento anterior: se queda para
+    // el remitente, que al reclamarla mira la lápida y la deja DESCONOCIDO sin llamar a Resend (familia C, pasada r2).
+    expect(prismaMock.crmCampaignDelivery.updateMany).toHaveBeenCalledWith({
+      where: {
+        status: 'PENDIENTE',
+        OR: [{ accountId: ACCOUNT }, { email: { in: [EMAIL, 'beto@cafe.mx'] } }],
+      },
+      data: { status: 'OMITIDO', skipReason: 'persona eliminada', nextAttemptAt: null },
+    })
+    expect(prismaMock.crmEmailConsent.deleteMany).toHaveBeenCalledWith({ where: { email: { in: [EMAIL, 'beto@cafe.mx'] } } })
+  })
+
   it('borrarlo_otra_vez_renueva_la_lapida: alguien lo creó a mano y se vuelve a eliminar', async () => {
     seedAccount()
     await deleteAccount(FOUNDER, ACCOUNT, 'Café Ana')

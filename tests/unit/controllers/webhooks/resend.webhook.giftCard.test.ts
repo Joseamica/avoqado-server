@@ -1,6 +1,6 @@
 /**
- * Q105 (1b S3): el webhook de Resend pasa a «No se entregó» la tarjeta cuyo correo rebotó, se suprimió o falló, ANTES de que el
- * carril de marketing lo dé por manejado (para un correo sin `CampaignDelivery` responde `handled: true`). Lo demás no cambia.
+ * Q105 (1b S3): el webhook de Resend pasa a «No se entregó» la tarjeta cuyo correo rebotó, se suprimió o falló, ANTES de los
+ * carriles de marketing. Lo demás no cambia.
  * Firma de svix como en `resendWebhook.campanas.test.ts`: secreto de prueba fijado en cada prueba y regresado al final.
  */
 jest.mock('@/config/logger', () => ({
@@ -9,6 +9,9 @@ jest.mock('@/config/logger', () => ({
 }))
 jest.mock('@/services/superadmin/marketing.superadmin.service', () => ({ handleResendWebhook: jest.fn() }))
 jest.mock('@/services/marketing/campaignWebhook.service', () => ({ procesarAvisoDeResend: jest.fn() }))
+// La supresión de una queja o de un rebote Permanent es un paso previo del controlador (CRM fase 2, tarea 1) y lo prueba
+// `resendWebhook.rebotes.test.ts`; aquí no es el tema, pero sin este mock un `email.complained` tocaría la base real.
+jest.mock('@/services/marketing/emailSuppression.service', () => ({ recordSuppression: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/giftCards/giftCardDelivery.service', () => ({
   FALLO_FINAL_DE_CORREO: jest.requireActual('@/services/giftCards/giftCardDelivery.service').FALLO_FINAL_DE_CORREO,
   marcarEntregaFallidaPorMensaje: jest.fn(),

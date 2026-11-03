@@ -558,6 +558,17 @@ const prismaMock: any = {
   crmTimelineEvent: createMockModel(),
   crmInboundEntry: createMockModel(),
   crmDigestSend: createMockModel(),
+  // CRM fase 2 (correo): plantillas, campañas, bajas, consentimiento, Gmail del vendedor y correos de la ficha.
+  crmEmailTemplate: createMockModel(),
+  crmCampaign: createMockModel(),
+  crmCampaignDelivery: createMockModel(),
+  crmEmailOptOut: createMockModel(),
+  crmEmailConsent: createMockModel(),
+  crmGmailConnection: createMockModel(),
+  crmGmailAccountSeen: createMockModel(),
+  crmEmailMessage: createMockModel(),
+  // La supresión global de correo (rebotes y quejas): `isBlocked` la lee antes de cualquier envío del CRM.
+  emailSuppression: createMockModel(),
   crmWhatsappMessage: createMockModel(),
   crmErased: createMockModel(),
   // Add $connect and $disconnect for connection management

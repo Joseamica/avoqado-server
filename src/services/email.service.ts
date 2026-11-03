@@ -56,6 +56,11 @@ interface EmailOptions {
  */
 export interface EmailOptionsWithSender extends EmailOptions {
   from?: string
+  /**
+   * A dónde responde quien contesta el correo. Las campañas de plataforma salen de `novedades@novedades.avoqado.io`, un
+   * buzón que nadie lee, y piden las respuestas en `hola@avoqado.io`. Sin él no viaja nada: el payload queda como antes.
+   */
+  replyTo?: string
   tags?: Array<{ name: string; value: string }>
 }
 
@@ -507,6 +512,7 @@ class EmailService {
         html: options.html || undefined,
         text: options.text || 'Please view this email in an HTML-compatible email client.',
         ...(options.headers && { headers: options.headers }),
+        ...(options.replyTo && { replyTo: options.replyTo }),
         ...(options.tags?.length && { tags: options.tags }),
         ...(options.attachments?.length && {
           attachments: options.attachments.map(a => ({

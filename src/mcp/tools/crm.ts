@@ -10,6 +10,9 @@
  * here: one business per person on WhatsApp (ruling 38), a note only for a message the CRM has not seen (44), empty
  * fields filled and never overwritten (45), «sólo avanza» except to «Perdido» (46), reasons resolved by name, and writes
  * that a re-run of the routine does not repeat.
+ *
+ * Email (phase 2, plan task 8): two READ-ONLY tools, the templates and the status of the campaigns. Sending a campaign or an
+ * email is NOT here on purpose — it is mass and cannot be undone, so only a person does it, from the screens.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Prisma } from '@prisma/client'
@@ -33,6 +36,8 @@ import {
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
+import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
+import { listTemplates } from '@/services/crm/email/templates.service'
 import { deleteAccount, ErasedIdentityError, sameName } from '@/services/crm/erase.service'
 import { accountForTx } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
@@ -97,14 +102,22 @@ function negocio(row: AccountRow & { miActividad?: MiActividad | null }) {
 /**
  * Every handler: SUPERADMIN, the write grant for a write, the person's CRM keys read now from the database, and the
  * service's refusals written for the operator back as `ok:false` with their code. Anything else is thrown, and
- * `instrument.ts` handles it.
+ * `instrument.ts` handles it. With several keys, any one opens it (like the screens' `requireCrm([...])`).
  */
-async function conLlave(scope: McpScope, key: CrmKey, run: (access: CrmAccess) => Promise<unknown>) {
+export async function conLlave(scope: McpScope, key: CrmKey | CrmKey[], run: (access: CrmAccess) => Promise<unknown>) {
   if (!scope.isSuperAdmin) return text({ ok: false, error: SOLO_AVOQADO })
-  if (key === 'crm:editar') requireWriteScopeAlways(scope, key, 'escribe en el CRM de ventas')
+  const keys = Array.isArray(key) ? key : [key]
+  // «Editar» escribe: aunque venga dentro de una lista, el token necesita mcp:write.
+  if (keys.includes('crm:editar')) requireWriteScopeAlways(scope, 'crm:editar', 'escribe en el CRM de ventas')
   const access = await getCrmAccess(scope.staffId)
   if (!access) return text({ ok: false, error: 'Tu usuario no tiene acceso al CRM: está inactivo o ya no es SUPERADMIN.' })
-  if (!hasCrmKey(access, key)) return text({ ok: false, error: `Te falta la llave «${key}» del CRM.` })
+  if (!keys.some(one => hasCrmKey(access, one))) {
+    const names = keys.map(one => `«${one}»`)
+    return text({
+      ok: false,
+      error: keys.length === 1 ? `Te falta la llave ${names[0]} del CRM.` : `Te falta una de las llaves del CRM: ${names.join(', ')}.`,
+    })
+  }
   try {
     return text(await run(access))
   } catch (error) {
@@ -338,6 +351,55 @@ async function advance(access: CrmAccess, input: { accountId: string; stageName:
   }
   const row = await moveStage(access, account.id, target.id, current.id)
   return { ok: true, negocio: negocio(row), audit: { action: 'CRM_STAGE_MOVED', data: { from: current.name, to: target.name } } }
+}
+
+/** A page of the email lists: the service caps it at 100 too, this refuses a hostile number before it gets there. */
+const pageLimit = z.number().int('El límite es un número entero').min(1, 'El límite es de 1 a 100').max(100, 'El límite es de 1 a 100')
+const pageCursor = z.string().cuid('El cursor no es válido')
+
+/** One template as the routine reads it: name, subject and dates. Never the content (the blocks). */
+function plantilla(row: Awaited<ReturnType<typeof listTemplates>>['rows'][number]) {
+  return {
+    id: row.id,
+    nombre: row.name,
+    asunto: row.subject,
+    creada: fecha(row.createdAt),
+    actualizada: fecha(row.updatedAt),
+    archivada: row.archivedAt !== null,
+  }
+}
+
+/** The delivery states, in the words of the screen. ENVIANDO is a delivery the sender holds right now. */
+const CONTADORES = {
+  PENDIENTE: 'pendientes',
+  ENVIANDO: 'enCurso',
+  ENVIADO: 'enviados',
+  REINTENTO: 'reintentos',
+  FALLIDO: 'fallidos',
+  OMITIDO: 'omitidos',
+  DESCONOCIDO: 'desconocidos',
+} as const
+
+/** One campaign as the routine reads it: where it stands and how many emails are in each state. Never the content. */
+function campana(row: Awaited<ReturnType<typeof getCampaign>>) {
+  const segmentos = (row.audience as { segmentos?: Array<{ tipo?: unknown }> } | null)?.segmentos
+  return {
+    id: row.id,
+    nombre: row.name,
+    estado: row.status,
+    asunto: row.subject,
+    publicos: Array.isArray(segmentos) ? segmentos.flatMap(segmento => (typeof segmento?.tipo === 'string' ? [segmento.tipo] : [])) : [],
+    total: row.total,
+    pruebaVigente: row.pruebaVigente,
+    contadores: Object.fromEntries(Object.entries(CONTADORES).map(([estado, nombre]) => [nombre, row.contadores[estado] ?? 0])) as Record<
+      (typeof CONTADORES)[keyof typeof CONTADORES],
+      number
+    >,
+    creada: fecha(row.createdAt),
+    encolada: fecha(row.enqueuedAt),
+    terminada: fecha(row.finishedAt),
+    cancelada: fecha(row.cancelledAt),
+  }
 }
 
 const accountId = z.string().cuid('El id del negocio no es válido')
@@ -591,6 +653,56 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
           estancados: reports.estancados,
           mes: { desde, hasta, ganados: reports.ganados.total, perdidos: reports.perdidos.total },
         }
+      }),
+  )
+
+  server.tool(
+    'crm_list_email_templates',
+    'Lista las plantillas de correo del CRM de ventas: nombre, asunto y fechas (no trae el contenido). Por default las vivas; ' +
+      'archivadas:true trae las archivadas. De 50 en 50 (hasta 100) con el total; para la página siguiente manda el cursor que ' +
+      'devolvió. Sólo lectura: esta herramienta no manda correos ni campañas (es masivo y no se deshace) ni crea plantillas; ' +
+      'eso se hace en las pantallas del SUPERADMIN. ' +
+      SOLO,
+    {
+      cursor: pageCursor.optional().describe('El «siguiente» de la página anterior'),
+      limit: pageLimit.optional().describe('Cuántas traer, de 1 a 100 (50 si no lo dices)'),
+      archivadas: z.boolean().optional().describe('true = sólo las archivadas; si no, sólo las vivas'),
+    },
+    async ({ cursor, limit, archivadas }) =>
+      conLlave(scope, ['crm:contactar', 'crm:campanas', 'crm:admin'], async () => {
+        const { rows, nextCursor, total } = await listTemplates({ cursor, limit, archivadas })
+        return { ok: true, total, hayMas: nextCursor !== null, siguiente: nextCursor, plantillas: rows.map(plantilla) }
+      }),
+  )
+
+  server.tool(
+    'crm_campaign_status',
+    'Estado de las campañas de correo del CRM de ventas: de cada una su estado (BORRADOR, ENVIANDO, ENVIADA o CANCELADA), el ' +
+      'asunto, los públicos, a cuántas personas se encoló y cuántos correos van en cada estado (pendientes, en curso, enviados, ' +
+      'reintentos, fallidos, omitidos y desconocidos: no sabemos si salieron, porque Resend los aceptó y no alcanzamos a guardarlo, ' +
+      'porque pasaron más de 23 h desde el primer intento, porque se agotaron los intentos sin confirmación o porque se rechazó ' +
+      'un reintento cuando el intento anterior pudo salir; los fallidos son sólo ' +
+      'los que se sabe que no salieron). Sin ' +
+      'campaignId lista las campañas, de 50 en 50 (hasta 100) con el total, y status filtra por estado; con campaignId trae ' +
+      'esa campaña. No trae el contenido del correo. Sólo lectura: esta herramienta no manda correos ni campañas (es masivo y ' +
+      'no se deshace); eso lo hace una persona desde las pantallas del SUPERADMIN. ' +
+      SOLO,
+    {
+      campaignId: z.string().cuid('El id de la campaña no es válido').optional().describe('Una campaña en particular'),
+      cursor: pageCursor.optional().describe('El «siguiente» de la página anterior (sólo en la lista)'),
+      limit: pageLimit.optional().describe('Cuántas traer, de 1 a 100 (50 si no lo dices; sólo en la lista)'),
+      status: z
+        .enum(['BORRADOR', 'ENVIANDO', 'ENVIADA', 'CANCELADA'], {
+          errorMap: () => ({ message: 'El estado es BORRADOR, ENVIANDO, ENVIADA o CANCELADA' }),
+        })
+        .optional()
+        .describe('Sólo las campañas en ese estado (sólo en la lista)'),
+    },
+    async ({ campaignId, cursor, limit, status }) =>
+      conLlave(scope, ['crm:campanas', 'crm:admin'], async () => {
+        if (campaignId) return { ok: true, campana: campana(await getCampaign(campaignId)) }
+        const { rows, nextCursor, total } = await listCampaigns({ cursor, limit, status })
+        return { ok: true, total, hayMas: nextCursor !== null, siguiente: nextCursor, campanas: rows.map(campana) }
       }),
   )
 }

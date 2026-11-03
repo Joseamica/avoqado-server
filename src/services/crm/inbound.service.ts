@@ -9,6 +9,9 @@
  *    shares (ruling 65) — and creates it only when there is none; the timeline event `entry:<id>` proves it was
  *    applied. It never throws, and running it again — the sweep after a crash, or both at once — changes nothing.
  *
+ * The box «Quiero recibir novedades de Avoqado por correo» is applied in the same transaction (`consentTx`): it leaves the
+ * consent of the entry's own email — what the campaigns to prospects read — and nothing ever deletes one.
+ *
  * Nothing here can stop the signup: every function swallows its own failure into the log, and the sweep (task 6) picks
  * up whatever was left half done.
  */
@@ -16,6 +19,7 @@ import { OrgRole, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
+import { normalizeEmail } from '../marketing/emailSuppression.service'
 import { getInitialStage, resetFirstMoneyTx } from './accounts.service'
 import { notifyNewProspect, notifyReturningProspect, type NoticeContent } from './digest.service'
 import { esCorreoDePrueba } from './internalEmail'
@@ -33,7 +37,7 @@ const UNSAFE = /[\p{Cc}\p{Cs}]/gu
 /** What the signup returned; `null` = it failed. The controller passes the real `LandingSignupResult` fields. */
 export type SignupOutcome = { organizationId: string | null; alreadyExisted: boolean; yaEsCliente: boolean }
 
-export type CleanEntry = Record<string, string | string[] | Record<string, string>>
+export type CleanEntry = Record<string, string | boolean | string[] | Record<string, string>>
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
@@ -50,13 +54,15 @@ const asText = (value: unknown) =>
 
 /**
  * The form, safe to store: no NUL, control characters or lone surrogates, every text at most 500 characters and every
- * list (or nested object, like the UTMs) at most 20 items. Empty fields are dropped.
+ * list (or nested object, like the UTMs) at most 20 items. Empty fields are dropped. A boolean stays a boolean: as the text
+ * «true» the consent box would never be read.
  */
 export function sanitizeEntry(raw: Record<string, unknown>): CleanEntry {
   const clean: CleanEntry = {}
   for (const [key, value] of Object.entries(raw)) {
     if (value === undefined || value === null) continue
-    if (Array.isArray(value)) clean[cleanText(key)] = value.slice(0, MAX_LIST).map(asText)
+    if (typeof value === 'boolean') clean[cleanText(key)] = value
+    else if (Array.isArray(value)) clean[cleanText(key)] = value.slice(0, MAX_LIST).map(asText)
     else if (typeof value === 'object') {
       clean[cleanText(key)] = Object.fromEntries(
         Object.entries(value)
@@ -367,7 +373,12 @@ interface LandingForm {
   qualification: Qualification
   sourceDetail: Prisma.InputJsonObject | undefined
   contact: { name: string; phoneE164: string | null; email: string; isPrimary: true }
+  /** The consent box, ticked: the version of the privacy notice the person saw. null = not ticked (never a withdrawal). */
+  consent: { noticeVersion: string } | null
 }
+
+/** The privacy notice in force when the box was added; an entry that does not say which one it showed is read as this one. */
+const DEFAULT_NOTICE_VERSION = '2026-10-02'
 
 const textOf = (value: unknown) => (typeof value === 'string' && value.trim()) || null
 
@@ -410,6 +421,8 @@ function readForm(payload: Prisma.JsonValue, email: string): LandingForm {
       email,
       isPrimary: true,
     },
+    // Only a real `true`: the schema lets nothing else through, and the text «true» is not a yes.
+    consent: form.marketingConsent === true ? { noticeVersion: textOf(form.privacyNoticeVersion) ?? DEFAULT_NOTICE_VERSION } : null,
   }
 }
 
@@ -529,6 +542,46 @@ export async function linkTx(tx: Prisma.TransactionClient, accountId: string, or
 
 const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: string) =>
   addEvent(tx, { accountId, kind: 'NOTE', actorStaffId: null, data: { entryId, text: CUSTOMER_NOTE } })
+
+/**
+ * The ticked box «Quiero recibir novedades de Avoqado por correo»: the consent of THIS ENTRY'S email, normalized as the
+ * campaigns' audience compares it — never the email of the account that took the entry (Brenda, who shares Ana's phone,
+ * consents for Brenda). `accountId` is where the entry landed; `consentAt` is when the form was RECEIVED, not when the
+ * sweep applied it. One row per email: a later consent brings the row up to date. Nothing here deletes a consent — an
+ * entry without the box is not an opt-out, which only comes from the one-click link or the seller (task 3). The timeline
+ * says THAT it was given, never by whom (no email), once per entry. The caller is the first run of the entry, inside its
+ * transaction: the consent and its ENTRY_APPLIED are written together or not at all.
+ *
+ * D7: a form sent before its person was deleted from the CRM does not bring their consent back, even when it lands on
+ * another account (a shared phone, one created again by hand) — the tombstone rule of `accountForTx`, with the entry's
+ * Organization. The entry is still applied as D7 decided; only the consent is left out.
+ */
+async function consentTx(
+  tx: Prisma.TransactionClient,
+  entry: { id: string; externalKey: string; receivedAt: Date },
+  form: LandingForm,
+  accountId: string,
+  organizationId: string | null,
+) {
+  if (!form.consent) return
+  const email = normalizeEmail(entry.externalKey)
+  try {
+    const keys = [{ source: LANDING, externalKey: entry.externalKey }]
+    await assertNotErasedTx(tx, { keys, emails: [email], phones: [], organizationId }, entry.receivedAt)
+  } catch (error) {
+    if (error instanceof ErasedIdentityError) return
+    throw error
+  }
+  const data = { accountId, entryId: entry.id, consentAt: entry.receivedAt, source: LANDING, noticeVersion: form.consent.noticeVersion }
+  await tx.crmEmailConsent.upsert({ where: { email }, create: { email, ...data }, update: data, select: { id: true } })
+  await addEvent(tx, {
+    accountId,
+    kind: 'FIELD_CHANGE',
+    actorStaffId: null,
+    sourceKey: `consent:${entry.id}`,
+    data: { campo: 'consentimiento' },
+  })
+}
 
 /** What the team hears after the commit: a new prospect, one that came back from the archive (ruling 31), or nothing. */
 type Notice = 'NEW' | 'RETURNED' | null
@@ -652,6 +705,7 @@ async function applyTx(
     })
     if (repeated) return repeated
     if (customer) await customerNote(tx, accountId, entry.id)
+    await consentTx(tx, entry, form, accountId, organizationId)
     return { accountId, notice: customer || prueba ? null : 'NEW', ...(content ? { content } : {}) }
   }
 
@@ -721,6 +775,7 @@ async function applyTx(
   else if (changes.length) {
     await addEvent(tx, { accountId, kind: 'FIELD_CHANGE', actorStaffId: null, data: { entryId: entry.id, changes } })
   }
+  await consentTx(tx, entry, form, accountId, organizationId)
   if (!state.organizationId && organizationId) await linkTx(tx, accountId, organizationId)
   return { accountId, notice, ...(content ? { content } : {}) }
 }
