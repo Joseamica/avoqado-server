@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 
 import { bulkManualSales } from '@/services/dashboard/manualSale.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { isLinkingNumberEnabledForOrg } from '@/services/playtelecom/linkingNumber.flag'
 import prisma from '@/utils/prismaClient'
 import type { BulkManualSalesInput } from '@/schemas/dashboard/manualSale.schema'
 
@@ -10,8 +11,10 @@ import type { BulkManualSalesInput } from '@/schemas/dashboard/manualSale.schema
  * outside the TPV (PlayTelecom / Walmart). Two org-scoped handlers back the two
  * endpoints declared in `organizationDashboard.routes.ts`:
  *
- *   preview → bulkManualSales(orgId, actor, rows, apply=false)  (dry, read-only)
- *   apply   → bulkManualSales(orgId, actor, rows, apply=true)   (writes one sale/row)
+ *   preview → bulkManualSales(orgId, actor, rows, apply=false, opts)  (dry, read-only)
+ *   apply   → bulkManualSales(orgId, actor, rows, apply=true, opts)   (writes one sale/row)
+ *
+ * `opts.requireLinkingNumber` = el interruptor del número de vinculación de la organización.
  *
  * Both gate on the SERIALIZED_INVENTORY module for the org BEFORE calling the
  * service. Because SERIALIZED_INVENTORY is (for PlayTelecom) enabled at the ORG
@@ -66,7 +69,9 @@ export async function preview(req: Request, res: Response, next: NextFunction) {
       return res.status(403).json({ success: false, error: MODULE_DISABLED_MESSAGE })
     }
 
-    const data = await bulkManualSales(orgId, actorStaffId, rows, false)
+    // Interruptor del número de vinculación: prendido, cada fila lo exige; apagado, se ignora.
+    const requireLinkingNumber = await isLinkingNumberEnabledForOrg(orgId)
+    const data = await bulkManualSales(orgId, actorStaffId, rows, false, { requireLinkingNumber })
     res.json({ success: true, data })
   } catch (err) {
     next(err)
@@ -89,7 +94,8 @@ export async function apply(req: Request, res: Response, next: NextFunction) {
       return res.status(403).json({ success: false, error: MODULE_DISABLED_MESSAGE })
     }
 
-    const data = await bulkManualSales(orgId, actorStaffId, rows, true)
+    const requireLinkingNumber = await isLinkingNumberEnabledForOrg(orgId)
+    const data = await bulkManualSales(orgId, actorStaffId, rows, true, { requireLinkingNumber })
     res.json({ success: true, data })
   } catch (err) {
     next(err)

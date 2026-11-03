@@ -118,7 +118,7 @@ describe('createOneManualSale — la venta importada NO se ata al turno abierto 
   })
 
   it('la orden nace SIN `shiftId`, aunque haya un turno abierto ahora mismo', async () => {
-    const resultado = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, renglonViejo)
+    const resultado = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, renglonViejo, { requireLinkingNumber: false })
 
     expect(resultado.ok).toBe(true)
     const datos = tx.order.create.mock.calls[0][0].data

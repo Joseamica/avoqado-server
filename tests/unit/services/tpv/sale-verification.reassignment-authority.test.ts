@@ -36,6 +36,7 @@ jest.mock('@/config/logger', () => ({
   default: { warn: jest.fn(), debug: jest.fn(), info: jest.fn(), error: jest.fn() },
 }))
 
+const ORG_ID = 'org-1'
 const VENUE_A = 'venue-a'
 const VENUE_B = 'venue-b'
 const PAYMENT_ID = 'payment-1'
@@ -220,9 +221,21 @@ describe('SaleVerification authority during Payment venue reassignment', () => {
     })
     installStatefulTransaction({ state, mutations, moveBeforeLock: true, existingVerification: existing })
 
+    // La venta se busca por organización: si el job la mueve entre la búsqueda y el candado, la TPV reintenta (409).
     await expect(
-      createOrUpdateProofOfSale(VENUE_A, PAYMENT_ID, ['https://example.test/new-proof.jpg'], STAFF_ID, VERIFICATION_ID),
-    ).rejects.toThrow(/payment.+not found.+venue/i)
+      createOrUpdateProofOfSale(
+        VENUE_A,
+        PAYMENT_ID,
+        ['https://example.test/new-proof.jpg'],
+        STAFF_ID,
+        VERIFICATION_ID,
+        undefined,
+        undefined,
+        {
+          orgId: ORG_ID,
+        },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'VERIFICATION_MOVED' })
 
     expect(state).toEqual({ paymentVenueId: VENUE_B, verificationVenueId: VENUE_B })
     expect(mutations).toEqual([])
@@ -233,9 +246,11 @@ describe('SaleVerification authority during Payment venue reassignment', () => {
     ;(prisma.payment.findFirst as jest.Mock).mockResolvedValue({ id: PAYMENT_ID, venueId: VENUE_A, saleVerification: null })
     installStatefulTransaction({ state, mutations, moveBeforeLock: true, existingVerification: null })
 
-    await expect(createOrUpdateProofOfSale(VENUE_A, PAYMENT_ID, ['https://example.test/proof.jpg'], STAFF_ID)).rejects.toThrow(
-      /payment.+not found.+venue/i,
-    )
+    await expect(
+      createOrUpdateProofOfSale(VENUE_A, PAYMENT_ID, ['https://example.test/proof.jpg'], STAFF_ID, undefined, undefined, undefined, {
+        orgId: ORG_ID,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'VERIFICATION_MOVED' })
 
     expect(state).toEqual({ paymentVenueId: VENUE_B, verificationVenueId: VENUE_B })
     expect(mutations).toEqual([])

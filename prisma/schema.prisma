@@ -17,6 +17,7 @@ datasource db {
 
 model Organization {
   documentRequests DocumentRequest[]
+  historicalLinkingNumbers HistoricalLinkingNumber[]
   id    String       @id @default(cuid())
   name  String
   slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
@@ -5079,6 +5080,16 @@ model SaleVerification {
   reviewNotes      String? // Free-text feedback from back-office reviewer
   rejectionReasons SaleVerificationRejectionReason[] @default([])
 
+  // Número de vinculación / portado (PlayTelecom; sólo dígitos, 9-10). Quién lo escribió y cuándo.
+  linkingNumber       String?
+  linkingNumberSource SaleVerificationNumberSource?
+  linkingNumberSetAt  DateTime?
+  portedNumber        String?
+  portedNumberSource  SaleVerificationNumberSource?
+  portedNumberSetAt   DateTime?
+  // { destino: { captureDeviceId: maxSeq } } — descarta capturas viejas de una terminal
+  appliedCaptureSeqs Json @default("{}")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -5088,6 +5099,31 @@ model SaleVerification {
   @@index([status])
   @@index([createdAt])
   @@index([reviewedById])
+  @@index([linkingNumber])
+  @@index([portedNumber])
+}
+
+enum SaleVerificationNumberSource {
+  TPV
+  BACKOFFICE
+  EXTERNAL_SALE
+  IMPORT
+}
+
+/// Números de vinculación de ventas históricas (importados), para detectar repetidos.
+model HistoricalLinkingNumber {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  iccid          String
+  number         String
+  saleDate       DateTime?
+  sourceStatus   String?
+  importBatch    String
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, iccid, number])
+  @@index([organizationId, number])
 }
 
 model VenueTransaction {

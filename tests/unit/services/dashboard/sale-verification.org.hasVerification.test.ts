@@ -44,6 +44,8 @@ jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }))
+// Organización sin el interruptor del número de vinculación: la lista se comporta como siempre.
+jest.mock('@/services/playtelecom/linkingNumber.flag', () => ({ isLinkingNumberEnabledForOrg: jest.fn(async () => false) }))
 
 const mockPrisma = prisma as unknown as {
   payment: { findMany: jest.Mock; count: jest.Mock }

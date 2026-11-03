@@ -38,6 +38,7 @@ const mockedSvUpdate = prisma.saleVerification.update as jest.Mock
 const mockedTransaction = prisma.$transaction as jest.Mock
 const mockedIsModuleEnabled = moduleService.isModuleEnabled as jest.Mock
 
+const ORG_ID = 'org-1'
 const VENUE_ID = 'venue-1'
 const PAYMENT_ID = 'pay-1'
 const STAFF_ID = 'staff-1'
@@ -78,8 +79,11 @@ it('blocks re-upload on a REJECTED sale (terminal) and never writes', async () =
   })
   installAuthorityTransaction(existing)
 
-  await expect(createOrUpdateProofOfSale(VENUE_ID, PAYMENT_ID, ['https://x/photo.jpg'], STAFF_ID)).rejects.toMatchObject({
+  await expect(
+    createOrUpdateProofOfSale(VENUE_ID, PAYMENT_ID, ['https://x/photo.jpg'], STAFF_ID, undefined, undefined, undefined, { orgId: ORG_ID }),
+  ).rejects.toMatchObject({
     message: expect.stringMatching(/rechazada y no puede modificarse/i),
+    code: 'SALE_REJECTED',
   })
 
   expect(mockedSvUpdate).not.toHaveBeenCalled()
@@ -121,7 +125,9 @@ it('still allows re-upload on a FAILED sale ("Revisar" is correctable)', async (
     updatedAt: new Date(),
   })
 
-  await createOrUpdateProofOfSale(VENUE_ID, PAYMENT_ID, ['https://x/photo.jpg'], STAFF_ID)
+  await createOrUpdateProofOfSale(VENUE_ID, PAYMENT_ID, ['https://x/photo.jpg'], STAFF_ID, undefined, undefined, undefined, {
+    orgId: ORG_ID,
+  })
 
   // FAILED → re-upload returns it to the review queue (PENDING)
   expect(mockedSvUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'PENDING' }) }))

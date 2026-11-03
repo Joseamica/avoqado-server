@@ -1092,6 +1092,11 @@
       "loops": 0,
       "reason": "Un Payment tenant-scoped por transacción; sin Orders ni otro Payment después."
     },
+    "src/services/tpv/sale-verification.service.ts#setNumberFromTerminal#lockPaymentAuthority": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment tenant-scoped por transacción (el de la venta, en su tienda); sin Orders ni otro Payment después."
+    },
     "src/services/tpv/table.tpv.service.ts#assignTable#lockTableOrderScope": {
       "count": 1,
       "loops": 0,

@@ -5,6 +5,7 @@
  * al pasar una venta a FAILED, dejando al promotor sin saber qué corregir.
  */
 
+import { Prisma } from '@prisma/client'
 import { editOrgSaleVerification } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import prisma from '@/utils/prismaClient'
 
@@ -65,6 +66,11 @@ jest.mock('@/utils/prismaClient', () => {
     },
   }
 })
+
+jest.mock('@/middlewares/checkPermission.middleware', () => ({
+  __esModule: true,
+  staffHasPermissionInVenue: jest.fn().mockResolvedValue(true),
+}))
 
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
@@ -270,5 +276,125 @@ describe('editOrgSaleVerification — candado "Revisar por promotor"', () => {
         reason: 'Documentación correcta tras revisión',
       }),
     ).resolves.toBeDefined()
+  })
+})
+
+// Codex r1 C1 (A11b punto 1): la edición leía el estado ANTES de la transacción y lo volvía a escribir. Una edición de monto
+// cruzada con una reapertura dejaba la venta otra vez COMPLETED sin pasar por `approve`, y la bitácora decía COMPLETED → COMPLETED.
+describe('editOrgSaleVerification — carrera con una reapertura (Codex r1 C1)', () => {
+  /** La fila que hay en la base cuando llega el UPDATE: otro proceso ya la reabrió. */
+  let enLaBase: Record<string, any>
+  beforeEach(() => {
+    enLaBase = {
+      id: SV_ID,
+      paymentId: 'pay-1',
+      status: 'PENDING',
+      reviewedAt: null,
+      reviewNotes: null,
+      rejectionReasons: [],
+      reviewedBy: null,
+    }
+    // Como Postgres: el UPDATE sólo encuentra la fila si cumple todo el `where` (P2025 si no).
+    tx.saleVerification.update.mockImplementation(async ({ where, data }: any) => {
+      if (where.status !== undefined && where.status !== enLaBase.status) {
+        throw new Prisma.PrismaClientKnownRequestError('Record to update not found.', { code: 'P2025', clientVersion: 'test' })
+      }
+      return (enLaBase = { ...enLaBase, ...data })
+    })
+  })
+
+  it('leyó COMPLETED, la reabrieron a PENDING y termina la edición de monto ⇒ queda PENDING (no se aprueba sola)', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ status: 'COMPLETED' }))
+
+    const r = await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      amount: 250,
+      reason: 'Ajuste de monto',
+    })
+
+    expect(r.status).toBe('PENDING')
+    const { where, data } = tx.saleVerification.update.mock.calls[0][0]
+    expect(data).not.toHaveProperty('status')
+    expect(data).not.toHaveProperty('reviewedById')
+    expect(data).not.toHaveProperty('reviewedAt')
+    expect(where).toEqual({ id: SV_ID })
+    // La bitácora no inventa una transición: la edición no movió el estado.
+    const log = tx.activityLog.create.mock.calls[0][0].data.data
+    expect(log.before.status).toBe('PENDING')
+    expect(log.after.status).toBe('PENDING')
+  })
+
+  it('con estado pedido y la venta cambiada entretanto ⇒ 409 SALE_VERIFICATION_CHANGED y la bitácora no se escribe', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ status: 'COMPLETED' }))
+
+    await expect(
+      editOrgSaleVerification(ORG_ID, {
+        saleVerificationId: SV_ID,
+        editedById: EDITOR_ID,
+        status: 'COMPLETED', // el diálogo manda el estado que leyó
+        amount: 250,
+        reason: 'Ajuste de monto',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SALE_VERIFICATION_CHANGED' })
+
+    expect(tx.saleVerification.update.mock.calls[0][0].where).toEqual({ id: SV_ID, status: 'COMPLETED' })
+    expect(enLaBase.status).toBe('PENDING')
+    expect(tx.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  it('con estado pedido y la venta sin cambios ⇒ se escribe, condicionado al estado leído', async () => {
+    enLaBase.status = 'PENDING'
+    mockedFindUnique.mockResolvedValue(existingSale({ status: 'PENDING' }))
+
+    const r = await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      status: 'COMPLETED',
+      reason: 'Documentación correcta',
+    })
+
+    expect(r.status).toBe('COMPLETED')
+    expect(tx.saleVerification.update.mock.calls[0][0].where).toEqual({ id: SV_ID, status: 'PENDING' })
+    const log = tx.activityLog.create.mock.calls[0][0].data.data
+    expect([log.before.status, log.after.status]).toEqual(['PENDING', 'COMPLETED'])
+  })
+})
+
+// A11b punto 4a: portabilidad → línea nueva. El portado viejo se quedaba en la venta y nadie lo podía borrar (la corrección del
+// número no acepta portado en una venta que no es de portabilidad), así que seguía saliendo repetido o «9 dígitos».
+describe('editOrgSaleVerification — portabilidad a línea nueva borra el portado', () => {
+  it('pone en null el portado, su fuente y su hora en el mismo update, y la bitácora lleva el antes/después', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ isPortabilidad: true, portedNumber: '557777777' }))
+
+    await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      isPortabilidad: false,
+      reason: 'Era línea nueva',
+    })
+
+    expect(tx.saleVerification.update.mock.calls[0][0].data).toMatchObject({
+      isPortabilidad: false,
+      portedNumber: null,
+      portedNumberSource: null,
+      portedNumberSetAt: null,
+    })
+    const log = tx.activityLog.create.mock.calls[0][0].data.data
+    expect(log.before).toMatchObject({ isPortabilidad: true, portedNumber: '557777777' })
+    expect(log.after).toMatchObject({ isPortabilidad: false, portedNumber: null })
+  })
+
+  it('si sigue siendo portabilidad (o ya no lo era), el portado no se toca', async () => {
+    mockedFindUnique.mockResolvedValue(existingSale({ isPortabilidad: true, portedNumber: '5577777777' }))
+    await editOrgSaleVerification(ORG_ID, {
+      saleVerificationId: SV_ID,
+      editedById: EDITOR_ID,
+      isPortabilidad: true,
+      amount: 120,
+      reason: 'Ajuste de monto',
+    })
+    expect(tx.saleVerification.update.mock.calls[0][0].data).not.toHaveProperty('portedNumber')
+    expect(tx.activityLog.create.mock.calls[0][0].data.data.before).not.toHaveProperty('portedNumber')
   })
 })
