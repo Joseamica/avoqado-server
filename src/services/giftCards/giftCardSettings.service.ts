@@ -202,9 +202,14 @@ export async function updateGiftCardSettings(
   // C3); apagar o guardar montos nunca lo pide.
   if (input.enabled === true) await assertPermitidoPrender(venueId)
 
-  const { actual, guardado } = await prisma.$transaction(async tx => {
+  const { actual, guardado, sinCambios } = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${llaveDeAjustes(venueId)}, 0))::text`)
     const actual = (await tx.giftCardSettings.findUnique({ where: { venueId }, select: SELECT_AJUSTES })) ?? porDefecto()
+
+    // Prender lo ya prendido (dos administradores a la vez, un doble toque) no cambia nada: no se escribe ni se audita. Se decide
+    // aquí, bajo el candado: una lectura de antes no lo sabe.
+    const soloElInterruptor = Object.keys(input).every(campo => campo === 'enabled' || campo === 'aceptaTerminos')
+    if (input.enabled === true && actual.enabled && soloElInterruptor) return { actual, guardado: actual, sinCambios: true }
 
     // Se valida la MEZCLA (lo que llegó ∪ lo guardado bajo el candado): las reglas cruzadas (mínimo ≤ máximo, sugeridos
     // dentro del rango) se cumplen sobre lo que va a quedar.
@@ -252,8 +257,10 @@ export async function updateGiftCardSettings(
       update: cambios,
       select: SELECT_AJUSTES,
     })
-    return { actual, guardado }
+    return { actual, guardado, sinCambios: false }
   })
+
+  if (sinCambios) return vista(guardado)
 
   // Fuera de la transacción y después del commit (fire-and-forget).
   void logAction({

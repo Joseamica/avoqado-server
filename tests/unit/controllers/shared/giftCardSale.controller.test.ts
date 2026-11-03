@@ -13,12 +13,8 @@ jest.mock('@/services/giftCards/giftCardSurface.service', () => ({
   estadoParaPrender: jest.fn(),
   negocioHaActivadoTarjetas: jest.fn(),
 }))
-jest.mock('@/middlewares/permissionFlag.middleware', () => ({
-  tienePermisoEnVenue: jest.fn(),
-}))
 
 import type { Request, Response } from 'express'
-import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { getSettings, turnOn } from '@/controllers/shared/giftCardSale.controller'
 import { getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
 import { estadoDeVentaDeTarjetas, estadoParaPrender, negocioHaActivadoTarjetas } from '@/services/giftCards/giftCardSurface.service'
@@ -53,18 +49,31 @@ beforeEach(() => {
 describe('getSettings: ¿se pueden prender?', () => {
   const PUEDE = { allowed: true, code: null, message: null, howToEnable: null }
 
-  it.each([true, false])('apagadas, trae si se pueden prender y si ESTE usuario puede (%s)', async puede => {
+  it('apagadas, trae si se pueden prender: `sale` sólo dice que están apagadas', async () => {
     m(getGiftCardSettings).mockResolvedValue({ ...AJUSTES, enabled: false })
     m(estadoParaPrender).mockResolvedValue(PUEDE)
-    m(tienePermisoEnVenue).mockResolvedValue(puede)
-    expect((await pedir()).data.prender).toEqual({ ...PUEDE, puedeEsteUsuario: puede })
-    expect(m(tienePermisoEnVenue).mock.calls[0][1]).toBe('giftCards:enable')
+    expect((await pedir()).data.prender).toEqual(PUEDE)
   })
 
   it('prendidas, no consulta nada de más y va en null', async () => {
     expect((await pedir()).data.prender).toBeNull()
     expect(estadoParaPrender).not.toHaveBeenCalled()
-    expect(tienePermisoEnVenue).not.toHaveBeenCalled()
+  })
+
+  // Codex r2: es un campo de más. Si su consulta falla, abrir la hoja no se cae para quien sólo iba a consultar un saldo.
+  it('🔴 si falla la consulta de prender, la lectura sigue: prender va en null y lo demás intacto', async () => {
+    m(getGiftCardSettings).mockResolvedValue({ ...AJUSTES, enabled: false })
+    m(estadoParaPrender).mockRejectedValue(new Error('base caída'))
+    m(negocioHaActivadoTarjetas).mockResolvedValue(true)
+    const body = await pedir()
+    expect(body.success).toBe(true)
+    expect(body.data).toMatchObject({
+      enabled: false,
+      sale: VENTA,
+      capacidades: ['ENTREGA', 'PAGE_TOKEN', 'TELEFONO'],
+      tieneTarjetas: true,
+      prender: null,
+    })
   })
 })
 
@@ -77,9 +86,6 @@ describe('turnOn (prender desde el POS)', () => {
   }
 
   it('prende con los términos aceptados, a nombre de quien tocó, y responde igual que el GET', async () => {
-    m(getGiftCardSettings)
-      .mockResolvedValueOnce({ ...AJUSTES, enabled: false })
-      .mockResolvedValueOnce(AJUSTES)
     m(negocioHaActivadoTarjetas).mockResolvedValue(false)
     const body = await prender()
     expect(m(updateGiftCardSettings).mock.calls).toEqual([['v1', { enabled: true, aceptaTerminos: true }, 's1']])
@@ -87,15 +93,7 @@ describe('turnOn (prender desde el POS)', () => {
     expect(body.data.enabled).toBe(true)
   })
 
-  it('si ya estaba prendida, no escribe nada y responde lo mismo: un doble toque no ensucia la bitácora', async () => {
-    m(negocioHaActivadoTarjetas).mockResolvedValue(false)
-    const body = await prender()
-    expect(updateGiftCardSettings).not.toHaveBeenCalled()
-    expect(body.data.enabled).toBe(true)
-  })
-
   it('si el servicio rechaza, no responde éxito: el error sigue su camino', async () => {
-    m(getGiftCardSettings).mockResolvedValue({ ...AJUSTES, enabled: false })
     m(updateGiftCardSettings).mockRejectedValue(new Error('sin llaves'))
     const res = { json: jest.fn() } as unknown as Response
     const req = { params: { venueId: 'v1' }, body: { aceptaTerminos: true }, authContext: { userId: 's1' } }

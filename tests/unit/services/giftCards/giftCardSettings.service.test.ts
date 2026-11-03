@@ -97,6 +97,25 @@ describe('updateGiftCardSettings', () => {
     expect(prismaMock.giftCardSettings.upsert).not.toHaveBeenCalled()
   })
 
+  // Codex r2: dos administradores a la vez, o un doble toque. Lo decide el candado, no una lectura de antes.
+  it('🔴 prender lo ya prendido no escribe ni audita, y responde como quedó', async () => {
+    prismaMock.giftCardSettings.findUnique.mockResolvedValue(fila())
+    await expect(updateGiftCardSettings(VENUE, { enabled: true, aceptaTerminos: true }, 'owner-2')).resolves.toMatchObject({
+      enabled: true,
+    })
+    expect(prismaMock.giftCardSettings.upsert).not.toHaveBeenCalled()
+    expect(ensureGiftCardTender).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('regresión: con montos en la misma petición sí guarda, aunque ya estuviera prendida', async () => {
+    prismaMock.giftCardSettings.findUnique.mockResolvedValue(fila())
+    prismaMock.giftCardSettings.upsert.mockResolvedValue(fila({ minAmount: D(150) }))
+    await updateGiftCardSettings(VENUE, { enabled: true, minAmount: 150 }, 'owner-2')
+    expect(prismaMock.giftCardSettings.upsert).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledTimes(1)
+  })
+
   it('regresión: en marca blanca se puede apagar y cambiar montos, si ya estaban', async () => {
     ;(moduleService.isModuleEnabled as jest.Mock).mockResolvedValue(true)
     prismaMock.giftCardSettings.findUnique.mockResolvedValue(fila())

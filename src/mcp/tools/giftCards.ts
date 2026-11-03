@@ -496,7 +496,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'update_gift_card_settings',
-    'Change the gift card (tarjetas de regalo) rules of a venue you can access: suggested amounts (1 to 6), minimum and maximum amount per card in PESOS, and validity (12, 24, 36 or 60 months, or null = no expiry); they apply to the cards sold from now on. Or TURN OFF selling them (enabled:false): the cards already sold keep their balance and can still be used. Turning them ON is NOT possible here: it is done in the dashboard (Ajustes › Tarjetas de regalo), where the terms are accepted. By DEFAULT this only PREVIEWS (current → new); call again with confirm:true to save. This WRITES — requires giftCards:manage.',
+    'Change the gift card (tarjetas de regalo) rules of a venue you can access: suggested amounts (1 to 6), minimum and maximum amount per card in PESOS, and validity (12, 24, 36 or 60 months, or null = no expiry); they apply to the cards sold from now on. Or TURN OFF selling them (enabled:false): the cards already sold keep their balance and can still be used. Turning them ON is NOT possible here: it is done in the dashboard or the point of sale, where the terms are accepted. By DEFAULT this only PREVIEWS (current → new); call again with confirm:true to save. This WRITES — requires giftCards:manage; turning them off also requires giftCards:enable.',
     {
       venueId: z.string().describe('Venue whose rules to change (must be in your scope)'),
       enabled: z.boolean().optional().describe('false = turn OFF selling gift cards. true is not accepted here'),
@@ -538,7 +538,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
           preview: { changes },
           message:
             (cambios.enabled === false
-              ? 'Esto APAGA la venta de tarjetas de regalo: ya no se podrán vender nuevas. Las ya vendidas siguen valiendo: se pueden cobrar y consultar. Volver a prenderla se hace desde el panel. '
+              ? 'Esto APAGA la venta de tarjetas de regalo: ya no se podrán vender nuevas. Las ya vendidas siguen valiendo: se pueden cobrar y consultar. Volver a prenderla se hace desde el panel o el punto de venta. '
               : '') +
             'Las reglas nuevas (antes → después en preview.changes) aplican a las tarjetas que se vendan desde ahora.' +
             CONFIRMA,
