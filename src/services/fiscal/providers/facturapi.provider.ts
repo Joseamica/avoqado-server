@@ -143,7 +143,7 @@ export class FacturapiProvider implements FiscalProvider {
    * ("SA DE CV", "S DE RL") — el SAT lo prefiere fuera, pero hay contribuyentes registrados
    * CON él en el padrón, así que quitarlo automáticamente rompería a esos.
    */
-  private static normalizeReceptorName(nombre: string): string {
+  static normalizeReceptorName(nombre: string): string {
     return nombre.trim().replace(/\s+/g, ' ').toUpperCase()
   }
 
@@ -541,7 +541,9 @@ export class FacturapiProvider implements FiscalProvider {
    */
   async findByExternalId(externalId: string): Promise<ProviderInvoiceSummary | null> {
     const res = await this.client.invoices.list({ external_id: externalId, limit: 10 })
-    const data = res?.data ?? []
+    // 🔴 `null` autoriza a quien llama a timbrar otra vez: sólo una lista vacía de verdad dice «no existe». El SDK no valida la respuesta.
+    if (!Array.isArray(res?.data)) throw new Error(`Respuesta ilegible de Facturapi al buscar por external_id ${externalId}`)
+    const data = res.data
     if (data.length === 0) return null
     // Prefer the first valid document; fall back to the first result (e.g. canceled)
     const valid = data.find((inv: any) => inv.status === 'valid' && inv.uuid)

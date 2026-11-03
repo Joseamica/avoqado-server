@@ -36,6 +36,8 @@ export type PosRefundInput = Omit<IssueRefundInput, 'refundMethod' | 'aSaldoAFav
   customerId?: string
   /** «Es por defecto»: con «Sólo saldo a favor» deja devolver como se pagó (LFPC art. 92). */
   defective?: boolean
+  /** D1: la ruta del POS lo prende para una app publicada que no sabe de «Sólo saldo a favor» (`posSinSoloSaldo.ts`). */
+  posSinSoloSaldo?: boolean
 }
 
 /** ¿Puede la cajera escoger «Saldo a favor» para este cobro? El POS lo pinta en gris con `reason` cuando no. */
@@ -62,6 +64,31 @@ export function soloSaldoLoImpide(p: {
   if (!p.storeCreditOnly || p.defective || !MOTIVOS_DE_SOLO_SALDO.has(p.reason)) return false
   if (p.refundMethod === 'STORE_CREDIT') return false
   return !(p.refundMethod === undefined && p.pagadoConSaldo)
+}
+
+/**
+ * «Sólo saldo a favor» para quien devuelve fuera del POS (Reembolso del panel e `issue_refund` del MCP). Ahí no se puede dar saldo ni
+ * marcar «es por defecto» (spec, no-metas), así que es la misma regla, pero el rechazo manda al POS. Sin llaves no restringe.
+ */
+export async function exigirSoloSaldoFueraDelPos(
+  cliente: Pick<Prisma.TransactionClient, 'venueSettings'>,
+  p: { venueId: string; reason: string; refundMethod?: DevolverCon; pagadoConSaldo: boolean },
+): Promise<void> {
+  if (!MOTIVOS_DE_SOLO_SALDO.has(p.reason)) return
+  const ajustes = await cliente.venueSettings.findUnique({ where: { venueId: p.venueId }, select: { storeCreditOnly: true } })
+  if (
+    soloSaldoLoImpide({
+      storeCreditOnly: soloSaldoEfectivo(ajustes?.storeCreditOnly),
+      reason: p.reason,
+      refundMethod: p.refundMethod,
+      pagadoConSaldo: p.pagadoConSaldo,
+    })
+  ) {
+    throw new BadRequestError(
+      'Este negocio devuelve sólo como saldo a favor. Hazlo desde el POS, donde también puedes marcar que es por defecto.',
+      'STORE_CREDIT_ONLY',
+    )
+  }
 }
 
 const cobroParaDevolver = (venueId: string, paymentId: string) =>
@@ -93,7 +120,7 @@ export async function issuePosRefund(
 async function reembolsoDelPos(
   input: PosRefundInput,
 ): Promise<Omit<IssueRefundResult, 'abono'> & { storeCredit?: StoreCreditDelReembolso }> {
-  const { refundMethod, customerId, defective, ...base } = input
+  const { refundMethod, customerId, defective, posSinSoloSaldo, ...base } = input
   const aSaldo = refundMethod === 'STORE_CREDIT'
   if (aSaldo && !input.idempotencyKey) {
     throw new BadRequestError(
@@ -125,7 +152,9 @@ async function reembolsoDelPos(
       await rechazarSiLaTerminalEstaDevolviendo(input.venueId, { paymentId: input.paymentId }, tx)
       return
     }
-    if (defective || !MOTIVOS_DE_SOLO_SALDO.has(input.reason)) return
+    // D1: un POS publicado que no sabe del interruptor (ANDROID/WINDOWS ≤ 95, iOS ≤ 41, o sin cabeceras) no ofrece saldo a favor ni
+    // «es por defecto»: devuelve como antes. Las reglas del saldo a favor de arriba siguen igual.
+    if (defective || posSinSoloSaldo || !MOTIVOS_DE_SOLO_SALDO.has(input.reason)) return
     const ajustes = await tx.venueSettings.findUnique({ where: { venueId: input.venueId }, select: { storeCreditOnly: true } })
     if (
       soloSaldoLoImpide({

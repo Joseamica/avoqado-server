@@ -25,13 +25,22 @@ async function listStripeMerchants(db: Prisma.TransactionClient, venueId: string
   })
 }
 
+/**
+ * ¿Esta cuenta puede cobrar un pedido? Cobrable y con su cuenta conectada: editar el comercio puede dejar las credenciales vacías sin
+ * apagar `chargesEnabled`, y sin cuenta el borrador lo rechaza. Sin esto la tienda anunciaría una tarjeta que no se puede cobrar.
+ */
+function puedeCobrarUnPedido(merchant: Parameters<typeof isEcommerceMerchantChargeable>[0]): boolean {
+  const cuenta = (merchant.providerCredentials as { connectAccountId?: unknown } | null)?.connectAccountId
+  return isEcommerceMerchantChargeable(merchant) && typeof cuenta === 'string' && cuenta.length > 0
+}
+
 /** El comercio Stripe Connect activo y cobrable del negocio, el más nuevo; `null` si no hay. */
 export async function findCardMerchant(
   db: Prisma.TransactionClient,
   venueId: string,
 ): Promise<(EcommerceMerchantWithProvider & { id: string; platformFeeBps: number }) | null> {
   const merchants = await listStripeMerchants(db, venueId)
-  return merchants.find(m => isEcommerceMerchantChargeable(m)) ?? null
+  return merchants.find(puedeCobrarUnPedido) ?? null
 }
 
 export type CardMerchantStatus = 'NOT_CONNECTED' | 'NOT_CHARGEABLE' | 'READY'
@@ -40,7 +49,7 @@ export type CardMerchantStatus = 'NOT_CONNECTED' | 'NOT_CHARGEABLE' | 'READY'
 export async function cardMerchantStatus(db: Prisma.TransactionClient, venueId: string): Promise<CardMerchantStatus> {
   const merchants = await listStripeMerchants(db, venueId)
   if (merchants.length === 0) return 'NOT_CONNECTED'
-  return merchants.some(m => isEcommerceMerchantChargeable(m)) ? 'READY' : 'NOT_CHARGEABLE'
+  return merchants.some(puedeCobrarUnPedido) ? 'READY' : 'NOT_CHARGEABLE'
 }
 
 /**

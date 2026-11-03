@@ -30,7 +30,7 @@ import { createSaleVerification } from '@/services/tpv/sale-verification.service
 import { editOrgSaleVerification } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
-import { crearFixture, exigirBaseDesechable, type Fixture, exigir } from './webhookCheckpoint.fixture'
+import { crearBackOffice, crearFixture, exigirBaseDesechable, type Fixture, exigir } from './webhookCheckpoint.fixture'
 import { actores, type Fallo } from './actores'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
@@ -44,10 +44,12 @@ jest.mock('@/communication/sockets/terminal-registry', () => ({
 jest.mock('@/services/alerts/opsAlert.service', () => ({ sendOpsAlert: jest.fn() }))
 
 let f: Fixture
+let backOfficeId = ''
 beforeAll(async () => {
   exigirBaseDesechable()
   f = await crearFixture('verificacion')
   await f.conTarifas({ primary: { creditRate: 0.025, fixed: 0.5 } })
+  backOfficeId = await crearBackOffice(f)
 })
 beforeEach(() => {
   jest.clearAllMocks()
@@ -58,7 +60,10 @@ afterEach(async () => {
   await prisma.saleVerification.deleteMany({ where: { venueId: f.venueId } })
   await f.limpiar()
 })
-afterAll(() => f.destruir())
+afterAll(async () => {
+  await f.destruir() // borra su StaffVenue con la tienda
+  await prisma.staff.deleteMany({ where: { id: backOfficeId } })
+})
 
 const CODIGO = 'PAYMENT_PROTECTED_BY_COST_PROTOCOL'
 const tarjeta = { cardBrand: 'VISA', maskedPan: '****1234', entryMode: 'CHIP' }
@@ -128,7 +133,12 @@ const verificacionDe = (p: { id: string }) =>
     data: { venueId: f.venueId, paymentId: p.id, staffId: f.staffId, photos: [], status: 'PENDING', isPortabilidad: false },
   })
 const editar = (sv: { id: string }, cambios: Record<string, unknown>) =>
-  editOrgSaleVerification(f.fixture, { saleVerificationId: sv.id, editedById: f.staffId, reason: 'corrección de prueba R13-3', ...cambios })
+  editOrgSaleVerification(f.fixture, {
+    saleVerificationId: sv.id,
+    editedById: backOfficeId,
+    reason: 'corrección de prueba R13-3',
+    ...cambios,
+  })
 const rechazo = async (promesa: Promise<unknown>, campos: string[]) =>
   expect(promesa).rejects.toMatchObject({
     statusCode: 409,

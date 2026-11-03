@@ -10,7 +10,7 @@
  */
 
 import type { SatValidationResult } from '@/services/fiscal/providers/fiscal-provider.interface'
-import type { BillingTaxProfile } from '@prisma/client'
+import type { BillingTaxProfile, Prisma } from '@prisma/client'
 
 export type BillingCustomerKind = 'ORGANIZATION' | 'VENUE' | 'STANDALONE'
 
@@ -28,7 +28,7 @@ export interface PlatformCfdiLineInput {
   /** SAT c_ClaveUnidad (e.g. "E48" Servicio, "H87" Pieza). */
   satUnitKey: string
   quantity: number
-  /** Unit price in integer cents, BEFORE tax (IVA is added on top). */
+  /** Unit price in integer cents, BEFORE tax unless `taxIncluded` (then it already carries the IVA). */
   unitPriceCents: number
   /** Line-level discount in integer cents. Default 0. */
   discountCents?: number
@@ -36,6 +36,13 @@ export interface PlatformCfdiLineInput {
   taxRate?: number
   /** When true, the line is IVA-exempt (objetoImp "01", no taxes). */
   taxExempt?: boolean
+  /**
+   * When true, `unitPriceCents` ALREADY includes the IVA (the PAC takes the base out of it). Default false = IVA added on top.
+   * Only «Por cobrar» lines set it (`conceptToCfdiLine`); `toCfdiItem` hands it to the PAC. `issueInvoiceSchema` never accepts it
+   * (the generic form can't produce these lines), and `computePlatformCfdiTotals` does not know it — that is why «Por cobrar»
+   * passes its own `totals` to `issuePlatformCfdi`.
+   */
+  taxIncluded?: boolean
 }
 
 /** Computed money totals for an income CFDI, all in integer cents. */
@@ -87,6 +94,18 @@ export interface IssuePlatformCfdiInput {
   performedById: string
   /** When true, uses FACTURAPI_TEST_KEY (free, non-fiscal test stamp). Default false. */
   sandbox?: boolean
+  /**
+   * «Por cobrar»: los totales de la ocurrencia (`ChargeTotals` más `discountCents: 0`). Si vienen, se guardan TAL CUAL en lugar de
+   * calcularlos de las líneas: una línea con `taxIncluded` ya trae el IVA y el cálculo genérico lo sumaría otra vez.
+   */
+  totals?: PlatformCfdiTotals
+  /** «Por cobrar»: la ocurrencia que originó la factura. Liga la fila y activa el trato de las filas ligadas (ver `issuePlatformCfdi`). */
+  platformChargeOccurrenceId?: string
+  /**
+   * «Por cobrar»: comprobación que corre en la MISMA transacción que crea la fila STAMPING, antes de crearla. Si lanza, no hay fila
+   * ni llamada al PAC. Es lo que cierra la carrera «Facturar» contra «Deshacer» (ver `invoice.service.ts`).
+   */
+  reserveCheck?: (tx: Prisma.TransactionClient, row: Prisma.PlatformCfdiUncheckedCreateInput) => Promise<void>
 }
 
 export interface ListPlatformCfdisFilters {

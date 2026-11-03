@@ -2,6 +2,17 @@ import { Request, Response } from 'express'
 import * as saleVerificationService from '../../services/tpv/sale-verification.service'
 import logger from '../../config/logger'
 import { SaleVerificationStatus } from '@prisma/client'
+import AppError from '../../errors/AppError'
+
+/** Como el controlador de organización: sólo el `code` de un AppError viaja (nunca el de Prisma, p. ej. P2002). */
+function sendError(res: Response, what: string, error: any): void {
+  logger.error(`[SALE VERIFICATION CONTROLLER] Error ${what}: ${error?.message}`)
+  res.status(error?.statusCode || 500).json({
+    success: false,
+    message: error?.message || 'Internal server error',
+    ...(error instanceof AppError && error.code ? { code: error.code } : {}),
+  })
+}
 
 // ============================================================
 // Sale Verification Controller
@@ -35,11 +46,7 @@ export async function createSaleVerification(req: Request, res: Response): Promi
       message: 'Sale verification created successfully',
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error creating verification: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'creating verification', error)
   }
 }
 
@@ -69,11 +76,7 @@ export async function listSaleVerifications(req: Request, res: Response): Promis
       pagination: result.pagination,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error listing verifications: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'listing verifications', error)
   }
 }
 
@@ -94,11 +97,7 @@ export async function getSaleVerification(req: Request, res: Response): Promise<
       data: verification,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'getting verification', error)
   }
 }
 
@@ -127,11 +126,7 @@ export async function getVerificationByPaymentId(req: Request, res: Response): P
       data: verification,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification by payment: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'getting verification by payment', error)
   }
 }
 
@@ -159,11 +154,7 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
       message: 'Verification status updated successfully',
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error updating verification status: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'updating verification status', error)
   }
 }
 
@@ -174,10 +165,10 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
  */
 export async function getPendingVerifications(req: Request, res: Response): Promise<void> {
   try {
-    const venueId = req.authContext?.venueId
+    const orgId = req.authContext?.orgId
     const staffId = req.authContext?.userId
 
-    if (!venueId || !staffId) {
+    if (!orgId || !staffId) {
       res.status(401).json({
         success: false,
         message: 'Unauthorized - Missing authentication context',
@@ -187,18 +178,15 @@ export async function getPendingVerifications(req: Request, res: Response): Prom
 
     logger.info(`[SALE VERIFICATION CONTROLLER] GET /tpv/verification/pending - Staff: ${staffId}`)
 
-    const pending = await saleVerificationService.getPendingVerifications(venueId, staffId)
+    const page = await saleVerificationService.getPendingVerifications(orgId, staffId, req.query.cursor as string | undefined)
 
+    // `data` como hoy (la terminal vieja sólo lee la primera página) + `total` y `nextCursor`.
     res.status(200).json({
       success: true,
-      data: pending,
+      ...page,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting pending verifications: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'getting pending verifications', error)
   }
 }
 
@@ -209,11 +197,11 @@ export async function getPendingVerifications(req: Request, res: Response): Prom
  */
 export async function getVerificationDetail(req: Request, res: Response): Promise<void> {
   try {
-    const venueId = req.authContext?.venueId
+    const orgId = req.authContext?.orgId
     const staffId = req.authContext?.userId
     const { verificationId } = req.params
 
-    if (!venueId || !staffId) {
+    if (!orgId || !staffId) {
       res.status(401).json({
         success: false,
         message: 'Unauthorized - Missing authentication context',
@@ -223,18 +211,76 @@ export async function getVerificationDetail(req: Request, res: Response): Promis
 
     logger.info(`[SALE VERIFICATION CONTROLLER] GET /tpv/verification/${verificationId} - Staff: ${staffId}`)
 
-    const verification = await saleVerificationService.getVerificationForCorrection(venueId, staffId, verificationId)
+    const verification = await saleVerificationService.getVerificationForCorrection(orgId, staffId, verificationId)
 
     res.status(200).json({
       success: true,
       data: verification,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification detail: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
+    sendError(res, 'getting verification detail', error)
+  }
+}
+
+/** El token de la TPV nueva: tienda, organización y promotor; si falta algo, 401 como las demás rutas. */
+function terminalAuth(req: Request, res: Response): { venueId: string; orgId: string; staffId: string } | null {
+  const venueId = req.authContext?.venueId
+  const orgId = req.authContext?.orgId
+  const staffId = req.authContext?.userId
+  if (venueId && orgId && staffId) return { venueId, orgId, staffId }
+  res.status(401).json({ success: false, message: 'Unauthorized - Missing authentication context' })
+  return null
+}
+
+/**
+ * GET /tpv/verification/actionable?cursor=
+ * Las PENDING y FAILED del promotor, en el formato del detalle: lo que la TPV nueva guarda para trabajar sin señal.
+ */
+export async function getActionableVerifications(req: Request, res: Response): Promise<void> {
+  try {
+    const auth = terminalAuth(req, res)
+    if (!auth) return
+    const page = await saleVerificationService.getActionableVerifications(
+      auth.venueId,
+      auth.orgId,
+      auth.staffId,
+      req.query.cursor as string | undefined,
+    )
+    res.status(200).json({ success: true, ...page })
+  } catch (error: any) {
+    sendError(res, 'getting actionable verifications', error)
+  }
+}
+
+/**
+ * GET /tpv/verification/number-check?number=&kind=linking|ported&verificationId=
+ * Sólo dice si está repetido; nunca con qué venta.
+ */
+export async function checkLinkingNumber(req: Request, res: Response): Promise<void> {
+  try {
+    const auth = terminalAuth(req, res)
+    if (!auth) return
+    const { number, kind, verificationId } = req.query as { number: string; kind: 'linking' | 'ported'; verificationId?: string }
+    const { duplicate } = await saleVerificationService.checkTerminalNumber({ ...auth, number, kind, verificationId })
+    res.status(200).json({ success: true, duplicate })
+  } catch (error: any) {
+    sendError(res, 'checking linking number', error)
+  }
+}
+
+/**
+ * GET /tpv/verification/status?paymentIds=a,b,c
+ * El estado de la verificación de cada pago (NONE si no hay o es de otra organización).
+ */
+export async function getVerificationStatuses(req: Request, res: Response): Promise<void> {
+  try {
+    const auth = terminalAuth(req, res)
+    if (!auth) return
+    const paymentIds = req.query.paymentIds as unknown as string[] // el schema ya lo separó, sin repetidos y con tope de 100
+    const data = await saleVerificationService.getVerificationStatuses(auth.venueId, auth.orgId, paymentIds)
+    res.status(200).json({ success: true, data })
+  } catch (error: any) {
+    sendError(res, 'getting verification statuses', error)
   }
 }
 
@@ -247,11 +293,12 @@ export async function getVerificationDetail(req: Request, res: Response): Promis
  */
 export async function createProofOfSale(req: Request, res: Response): Promise<void> {
   try {
-    const { paymentId, photoUrls, verificationId, replaceIndex, photoLabel } = req.body
+    const { paymentId, photoUrls, verificationId, replaceIndex, photoLabel, linkingNumber, portedNumber } = req.body
     const venueId = req.authContext?.venueId
     const staffId = req.authContext?.userId
+    const orgId = req.authContext?.orgId
 
-    if (!venueId || !staffId) {
+    if (!venueId || !staffId || !orgId) {
       res.status(401).json({
         success: false,
         message: 'Unauthorized - Missing authentication context',
@@ -265,7 +312,7 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
       photoLabel: photoLabel ?? 'none',
     })
 
-    const verification = await saleVerificationService.createOrUpdateProofOfSale(
+    const result = await saleVerificationService.createOrUpdateProofOfSale(
       venueId,
       paymentId,
       photoUrls,
@@ -273,19 +320,70 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
       verificationId,
       replaceIndex,
       photoLabel,
+      { orgId, capture: terminalCaptureFrom(req.body), linkingNumber, portedNumber },
     )
 
     res.status(200).json({
       success: true,
-      verificationId: verification.id,
-      status: verification.status,
       message: 'Proof-of-sale photo uploaded successfully',
+      ...result, // verificationId y status (como hoy) + los desenlaces de la terminal nueva
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error creating proof-of-sale: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
+    sendError(res, 'creating proof-of-sale', error)
+  }
+}
+
+/** La terminal nueva se reconoce porque manda `captureSeq` (el schema exige que venga con lo demás). */
+function terminalCaptureFrom(body: {
+  captureSeq?: number
+  captureDeviceId?: string
+  idempotencyKey?: string
+  capturedAt?: string
+}): saleVerificationService.TerminalCapture | undefined {
+  if (body.captureSeq === undefined || !body.captureDeviceId || !body.idempotencyKey || !body.capturedAt) return undefined
+  return {
+    seq: body.captureSeq,
+    deviceId: body.captureDeviceId,
+    idempotencyKey: body.idempotencyKey,
+    capturedAt: new Date(body.capturedAt),
+  }
+}
+
+/**
+ * POST /tpv/verification/:verificationId/number
+ * Corregir sólo el número (sin foto) desde la terminal nueva. Mismas reglas que proof-of-sale; nunca toca fotos.
+ */
+export async function setVerificationNumber(req: Request, res: Response): Promise<void> {
+  try {
+    const venueId = req.authContext?.venueId
+    const staffId = req.authContext?.userId
+    const orgId = req.authContext?.orgId
+
+    if (!venueId || !staffId || !orgId) {
+      res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Missing authentication context',
+      })
+      return
+    }
+
+    const { slot, number } = req.body
+    const result = await saleVerificationService.setNumberFromTerminal({
+      venueId,
+      orgId,
+      staffId,
+      verificationId: req.params.verificationId,
+      slot,
+      number,
+      capture: terminalCaptureFrom(req.body)!,
     })
+
+    res.status(200).json({
+      success: true,
+      message: 'Número guardado',
+      ...result,
+    })
+  } catch (error: any) {
+    sendError(res, 'setting verification number', error)
   }
 }

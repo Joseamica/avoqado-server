@@ -1,4 +1,11 @@
-import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod, PaymentFundsFlow, Prisma } from '@prisma/client'
+import {
+  SaleVerificationStatus,
+  SaleVerificationRejectionReason,
+  SaleVerificationNumberSource,
+  PaymentMethod,
+  PaymentFundsFlow,
+  Prisma,
+} from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
@@ -12,9 +19,10 @@ import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchan
 import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { esPedidoDePlataforma, MENSAJE_ORDEN_DE_PLATAFORMA } from '../shared/ordenImportada'
-import { BadRequestError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ForbiddenError } from '../../errors/AppError'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
+  assertCanApproveSale,
   PROMOTER_FEEDBACK_MIN_CHARS,
   PROMOTER_FEEDBACK_REQUIRED_MESSAGE,
   type ReviewDecision,
@@ -23,6 +31,20 @@ import { monthBucketSql, dayBucketSql, weekLabelSql, isoWeekKeySql, buildRangeCo
 import { venueCivilDate } from '../../utils/venueDateKeys'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import socketManager from '../../communication/sockets'
+import {
+  computeNumberAlerts,
+  isValidBackofficeNumber,
+  isValidTerminalNumber,
+  normalizeLinkingNumber,
+  type NumberAlertCode,
+} from '../playtelecom/linkingNumber.rules'
+import {
+  findDuplicatesForSales,
+  findVerificationIdsWithNumberAlert,
+  type NumberAlertFilter,
+  type NumberMatch,
+} from '../playtelecom/linkingNumber.duplicates'
+import { isLinkingNumberEnabledForOrg } from '../playtelecom/linkingNumber.flag'
 import { SocketEventType } from '../../communication/sockets/types'
 
 // ============================================================
@@ -83,6 +105,15 @@ export interface OrgSaleListFilters {
   fromDate?: Date
   toDate?: Date
   search?: string
+  /** Sólo con el interruptor del número prendido (si no, se ignora) y con `fromDate` y `toDate`. */
+  numberAlert?: NumberAlertFilter
+}
+
+/** Una alerta del número; los repetidos traen cuántas otras ventas lo tienen y las más recientes. */
+export interface NumberAlert {
+  code: NumberAlertCode
+  total?: number
+  matches?: NumberMatch[]
 }
 
 export interface OrgSaleListRow {
@@ -134,6 +165,17 @@ export interface OrgSaleListRow {
    * Null when the device serial doesn't match a Terminal in the org.
    */
   terminal: { id: string; name: string; serialNumber: string } | null
+  /** Número de vinculación / portado (PlayTelecom), quién lo escribió y cuándo. Null sin verificación. */
+  linkingNumber: string | null
+  portedNumber: string | null
+  linkingNumberSource: SaleVerificationNumberSource | null
+  portedNumberSource: SaleVerificationNumberSource | null
+  linkingNumberSetAt: Date | null
+  portedNumberSetAt: Date | null
+  /** Venta capturada en «Ventas externas» (orden MANUAL_ENTRY). */
+  isExternalSale: boolean
+  /** Vacío con el interruptor del número apagado o sin verificación. */
+  numberAlerts: NumberAlert[]
 }
 
 export interface OrgSaleListResponse {
@@ -170,7 +212,7 @@ function deriveSaleType(isPortabilidad: boolean, _categoryName?: string | null):
   return isPortabilidad ? 'PORTABILIDAD' : 'LINEA_NUEVA'
 }
 
-function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.PaymentWhereInput {
+function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters, alertIds?: string[]): Prisma.PaymentWhereInput {
   const where: Prisma.PaymentWhereInput = {
     status: 'COMPLETED',
     order: { venue: { organizationId: orgId } },
@@ -197,6 +239,7 @@ function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.P
   if (filters.status) svFilter.status = filters.status
   if (filters.staffId) svFilter.staffId = filters.staffId
   if (filters.isPortabilidad !== undefined) svFilter.isPortabilidad = filters.isPortabilidad
+  if (alertIds) svFilter.id = { in: alertIds }
   if (Object.keys(svFilter).length > 0) {
     where.saleVerification = svFilter
   }
@@ -218,6 +261,11 @@ function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.P
     // search term via `hasSome` to make the ICCID lookup case-insensitive.
     const term = filters.search.trim()
     const serialVariants = Array.from(new Set([term, term.toUpperCase(), term.toLowerCase()]))
+    // Un número de 9 o 10 dígitos (pegado con espacios o guiones, también) busca el de vinculación y el portado exactos.
+    const digits = normalizeLinkingNumber(term)
+    const byNumber: Prisma.PaymentWhereInput[] = isValidTerminalNumber(digits)
+      ? [{ saleVerification: { linkingNumber: digits } }, { saleVerification: { portedNumber: digits } }]
+      : []
     where.OR = [
       { id: { contains: filters.search, mode: 'insensitive' } },
       {
@@ -231,6 +279,7 @@ function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.P
         },
       },
       { saleVerification: { serialNumbers: { hasSome: serialVariants } } },
+      ...byNumber,
     ]
   }
 
@@ -245,7 +294,18 @@ function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.P
 export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleListFilters): Promise<OrgSaleListResponse> {
   logger.info(`[ORG SALE VERIFICATION] List org=${orgId} page=${filters.pageNumber} size=${filters.pageSize}`)
 
-  const paymentWhere = buildPaymentWhere(orgId, filters)
+  // Sólo PlayTelecom: con el interruptor apagado no hay alertas ni filtro de alertas (los números, si existen, sí se ven).
+  const linkingEnabled = await isLinkingNumberEnabledForOrg(orgId)
+  let alertIds: string[] | undefined
+  if (linkingEnabled && filters.numberAlert) {
+    if (!filters.fromDate || !filters.toDate) {
+      throw new BadRequestError('El filtro de alertas del número necesita fecha de inicio y de fin', 'NUMBER_ALERT_NEEDS_RANGE')
+    }
+    // Los mismos extremos que `createdAt` de la lista (los dos inclusivos): una venta del borde sale con y sin filtro.
+    alertIds = await findVerificationIdsWithNumberAlert(orgId, filters.numberAlert, { from: filters.fromDate, to: filters.toDate })
+  }
+
+  const paymentWhere = buildPaymentWhere(orgId, filters, alertIds)
 
   const [payments, totalCount] = await Promise.all([
     prisma.payment.findMany({
@@ -266,6 +326,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
         order: {
           select: {
             id: true,
+            type: true,
             venue: { select: { id: true, name: true, city: true, slug: true } },
             items: {
               select: {
@@ -300,14 +361,35 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
     new Set(payments.map(p => p.saleVerification?.deviceId).filter((s): s is string => typeof s === 'string' && s.length > 0)),
   )
   const terminalBySerial = new Map<string, { id: string; name: string; serialNumber: string }>()
-  if (deviceSerials.length > 0) {
-    const terminals = await prisma.terminal.findMany({
-      where: { serialNumber: { in: deviceSerials }, venue: { organizationId: orgId } },
-      select: { id: true, name: true, serialNumber: true },
-    })
-    for (const t of terminals) {
-      if (t.serialNumber) terminalBySerial.set(t.serialNumber, { id: t.id, name: t.name, serialNumber: t.serialNumber })
-    }
+  const [terminals, duplicates] = await Promise.all([
+    deviceSerials.length > 0
+      ? prisma.terminal.findMany({
+          where: { serialNumber: { in: deviceSerials }, venue: { organizationId: orgId } },
+          select: { id: true, name: true, serialNumber: true },
+        })
+      : [],
+    // Repetidos de toda la página en UNA llamada, con los números guardados de cada verificación (descuenta su propia fila).
+    linkingEnabled
+      ? findDuplicatesForSales(
+          orgId,
+          payments.flatMap(p =>
+            p.saleVerification
+              ? [
+                  {
+                    key: p.saleVerification.id,
+                    verificationId: p.saleVerification.id,
+                    iccid: p.saleVerification.serialNumbers[0] ?? null,
+                    linkingNumber: p.saleVerification.linkingNumber,
+                    portedNumber: p.saleVerification.portedNumber,
+                  },
+                ]
+              : [],
+          ),
+        )
+      : null,
+  ])
+  for (const t of terminals) {
+    if (t.serialNumber) terminalBySerial.set(t.serialNumber, { id: t.id, name: t.name, serialNumber: t.serialNumber })
   }
 
   const rows: OrgSaleListRow[] = payments.map(p => {
@@ -315,6 +397,24 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
     const firstSerialized = p.order?.items?.find(oi => oi.serializedItem)?.serializedItem ?? null
     const category = firstSerialized?.category ?? null
     const isPort = v?.isPortabilidad ?? false
+    const isExternalSale = p.order?.type === 'MANUAL_ENTRY'
+    const dup = v ? duplicates?.get(v.id) : undefined
+    const numberAlerts: NumberAlert[] =
+      v && duplicates
+        ? computeNumberAlerts({
+            linkingNumber: v.linkingNumber,
+            linkingNumberSource: v.linkingNumberSource,
+            portedNumber: v.portedNumber,
+            portedNumberSource: v.portedNumberSource,
+            isPortabilidad: v.isPortabilidad,
+            photos: v.photos,
+            isExternalSale,
+            linkingDuplicate: !!dup?.linking,
+            portedDuplicate: !!dup?.ported,
+          }).map(code =>
+            code === 'LINKING_DUPLICATE' ? { code, ...dup!.linking! } : code === 'PORTED_DUPLICATE' ? { code, ...dup!.ported! } : { code },
+          )
+        : []
 
     return {
       id: v?.id ?? p.id,
@@ -353,6 +453,14 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
       saleType: deriveSaleType(isPort, category?.name ?? null),
       registeredFromVenue: firstSerialized?.registeredFromVenue ?? null,
       terminal: v?.deviceId ? (terminalBySerial.get(v.deviceId) ?? null) : null,
+      linkingNumber: v?.linkingNumber ?? null,
+      portedNumber: v?.portedNumber ?? null,
+      linkingNumberSource: v?.linkingNumberSource ?? null,
+      portedNumberSource: v?.portedNumberSource ?? null,
+      linkingNumberSetAt: v?.linkingNumberSetAt ?? null,
+      portedNumberSetAt: v?.portedNumberSetAt ?? null,
+      isExternalSale,
+      numberAlerts,
     }
   })
 
@@ -1138,10 +1246,9 @@ interface ServiceError extends Error {
   statusCode?: number
 }
 
+// AppError: el controlador sólo reenvía `code`/`details` de un AppError (nunca el `code` de Prisma).
 function createServiceError(message: string, statusCode: number): ServiceError {
-  const err = new Error(message) as ServiceError
-  err.statusCode = statusCode
-  return err
+  return new AppError(message, statusCode)
 }
 
 /**
@@ -1453,6 +1560,7 @@ export async function editOrgSaleVerification(
       paymentId: true,
       status: true,
       isPortabilidad: true,
+      portedNumber: true,
       reviewNotes: true,
       rejectionReasons: true,
       payment: { select: { id: true, amount: true, method: true, orderId: true } },
@@ -1473,6 +1581,11 @@ export async function editOrgSaleVerification(
   }
   const nextStatus: SaleVerificationStatus = params.status ?? existing.status
 
+  // Decidir la venta (pasar a aprobada, por revisar o rechazada) pide `approve` en la tienda de la venta; el monto solo, no.
+  if (params.status != null && params.status !== existing.status && ['COMPLETED', 'FAILED', 'REJECTED'].includes(params.status)) {
+    await assertCanApproveSale(params.editedById, existing.venueId)
+  }
+
   // Candado "Revisar por promotor": la venta no puede quedar en FAILED sin un
   // comentario que le diga al promotor QUÉ corregir. Se satisface con el texto
   // entrante O con el ya guardado — así, editar el monto de una venta que ya
@@ -1492,7 +1605,7 @@ export async function editOrgSaleVerification(
     }
   }
 
-  const updated = await prisma.$transaction(async tx => {
+  const { sv: updated, statusBefore } = await prisma.$transaction(async tx => {
     // 1. Payment (monto / forma de pago). Only rewrite `method` when the user
     // actually changed the payment-form bucket — otherwise an unrelated edit would
     // silently flip e.g. DEBIT_CARD → CREDIT_CARD (both render as "Tarjeta").
@@ -1584,6 +1697,8 @@ export async function editOrgSaleVerification(
     // 2. SaleVerification (tipo de venta + estado + metadata de revisión).
     // Only touch reviewer metadata when the status actually TRANSITIONS — editing
     // data on an already-COMPLETED sale must not rewrite who/when it was approved.
+    // Codex r1 C1: sin `status` pedido, el estado no se escribe (lo de la fila ahora, no lo leído antes de la transacción).
+    const statusRequested = params.status != null
     const statusChanged = nextStatus !== existing.status
     // El sello de revisor sólo se reescribe cuando el estado TRANSICIONA — editar
     // el monto de una venta ya revisada no debe cambiar quién/cuándo la revisó.
@@ -1603,19 +1718,37 @@ export async function editOrgSaleVerification(
                 // columna «Razón» del dashboard salía en «—». Gana el comentario explícito; si no, el motivo de la edición.
                 { ...reviewerStamp, reviewNotes: params.reviewNotes?.trim() || trimmedReason, rejectionReasons: [] }
 
-    const sv = await tx.saleVerification.update({
-      where: { id: existing.id },
-      data: {
-        ...(params.isPortabilidad != null ? { isPortabilidad: params.isPortabilidad } : {}),
-        status: nextStatus,
-        ...reviewMeta,
-      },
-      include: {
-        staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
-        reviewedBy: { select: { id: true, firstName: true, lastName: true } },
-        payment: { select: { id: true, amount: true, method: true, status: true, createdAt: true } },
-      },
-    })
+    // Portabilidad → línea nueva: el portado ya no es de esta venta (si no, nadie lo podría borrar y seguiría avisando).
+    const clearsPorted = existing.isPortabilidad && params.isPortabilidad === false
+    // Lo que depende del estado leído (el estado pedido o la nota de una FAILED) sólo se escribe si la fila sigue en él:
+    // una reapertura a la vez no termina aprobada sin `approve`. Si cambió, 409 y la transacción entera se deshace.
+    const casStatus = statusRequested || nextStatus === 'FAILED'
+    const sv = await tx.saleVerification
+      .update({
+        where: { id: existing.id, ...(casStatus ? { status: existing.status } : {}) },
+        data: {
+          ...(params.isPortabilidad != null ? { isPortabilidad: params.isPortabilidad } : {}),
+          ...(clearsPorted ? { portedNumber: null, portedNumberSource: null, portedNumberSetAt: null } : {}),
+          ...(statusRequested ? { status: nextStatus } : {}),
+          ...reviewMeta,
+        },
+        include: {
+          staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
+          reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+          payment: { select: { id: true, amount: true, method: true, status: true, createdAt: true } },
+        },
+      })
+      .catch((err: unknown) => {
+        if (casStatus && err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+          throw new ConflictError('La venta cambió mientras la editabas; vuelve a abrirla', 'SALE_VERIFICATION_CHANGED', {
+            saleVerificationId: existing.id,
+            expectedStatus: existing.status,
+          })
+        }
+        throw err
+      })
+    // Sin estado pedido, la bitácora dice el de la fila (la edición no lo movió).
+    const statusBefore = statusRequested ? existing.status : sv.status
 
     // 3. Audit (financial edit → DB record, not just logs)
     await tx.activityLog.create({
@@ -1627,12 +1760,13 @@ export async function editOrgSaleVerification(
         entityId: existing.id,
         data: {
           reason: trimmedReason,
-          before,
+          before: { ...before, status: statusBefore, ...(clearsPorted ? { portedNumber: existing.portedNumber } : {}) },
           after: {
-            status: nextStatus,
+            status: sv.status,
             isPortabilidad: params.isPortabilidad ?? existing.isPortabilidad,
             amount: params.amount ?? before.amount,
             method: methodChanged ? PAYMENT_FORM_TO_METHOD[params.paymentForm!] : before.method,
+            ...(clearsPorted ? { portedNumber: null } : {}),
           },
           // Queda escrito que el dinero cambió por la excepción de efectivo manual, no por una corrección acreditada.
           ...(viaExcepcionEfectivoManual ? { viaExcepcionEfectivoManual: true } : {}),
@@ -1641,12 +1775,12 @@ export async function editOrgSaleVerification(
       },
     })
 
-    return sv
+    return { sv, statusBefore }
   }, ORDER_LOCK_WAIT_BUDGET)
 
   logger.info(
     `[SALE_VERIFICATION_EDIT] verification=${existing.id} org=${orgId} by=${params.editedById} ` +
-      `status=${before.status}->${nextStatus} amount=${before.amount}->${params.amount ?? before.amount} ` +
+      `status=${statusBefore}->${updated.status} amount=${before.amount}->${params.amount ?? before.amount} ` +
       `reason="${trimmedReason.replace(/"/g, '\\"')}"`,
   )
 
@@ -1665,6 +1799,103 @@ export async function editOrgSaleVerification(
     logger.warn(`[SALE_VERIFICATION_EDIT] socket emit failed for staff ${existing.staffId}: ${err?.message ?? err}`)
   }
 
+  return updated
+}
+
+/**
+ * El back-office corrige el número de vinculación y/o el portado (spec §5.3, punto 4). Va aparte del PATCH de edición:
+ * `EditSaleDialog` manda todos los campos y registraría cambios que no hubo.
+ *
+ * Cada número que llega se guarda con `…Source = BACKOFFICE` y `…SetAt`, también si es el mismo (así se confirma uno de 9),
+ * y deja su `ActivityLog` con lo que había, en la misma transacción. La fila se toma con candado: el «antes» de la
+ * bitácora es el que se pisa, aunque la terminal escriba al mismo tiempo (ella ya no pisa un número del back-office).
+ */
+export async function setOrgSaleVerificationNumbers(
+  orgId: string,
+  params: {
+    saleVerificationId: string
+    editedById: string
+    linkingNumber?: string
+    portedNumber?: string
+    allowNineDigits?: boolean
+    reason?: string
+  },
+) {
+  // Apagado ⇒ 403 antes que cualquier otra cosa (regla de todo el número de vinculación).
+  if (!(await isLinkingNumberEnabledForOrg(orgId))) {
+    throw new ForbiddenError('El número de vinculación no está activo en esta organización', 'LINKING_NUMBER_DISABLED')
+  }
+  const fields = (
+    [
+      ['linkingNumber', params.linkingNumber],
+      ['portedNumber', params.portedNumber],
+    ] as const
+  ).flatMap(([field, raw]) => (raw === undefined ? [] : [{ field, digits: normalizeLinkingNumber(raw) }]))
+  if (fields.length === 0) throw new BadRequestError('Manda el número de vinculación, el portado o los dos')
+  for (const { field, digits } of fields) {
+    if (!isValidBackofficeNumber(digits, params.allowNineDigits === true)) {
+      throw new BadRequestError('El número debe tener 10 dígitos (o 9, confirmado)', 'INVALID_LINKING_NUMBER', { field })
+    }
+  }
+  const linking = fields.find(f => f.field === 'linkingNumber')?.digits
+  const ported = fields.find(f => f.field === 'portedNumber')?.digits
+  const reason = params.reason?.trim() || null
+
+  const updated = await prisma.$transaction(async tx => {
+    const [sv] = await tx.$queryRaw<
+      Array<{ id: string; venueId: string; isPortabilidad: boolean; linkingNumber: string | null; portedNumber: string | null }>
+    >`
+      SELECT sv.id, sv."venueId", sv."isPortabilidad", sv."linkingNumber", sv."portedNumber"
+      FROM "SaleVerification" sv
+      WHERE sv.id = ${params.saleVerificationId}
+      FOR UPDATE OF sv
+    `
+    if (!sv) throw createServiceError('Venta no encontrada', 404)
+    const venue = await tx.venue.findUnique({ where: { id: sv.venueId }, select: { organizationId: true } })
+    if (venue?.organizationId !== orgId) throw createServiceError('La venta no pertenece a esta organización', 403)
+    if (!sv.isPortabilidad && fields.some(f => f.field === 'portedNumber')) {
+      throw new BadRequestError('Esta venta no es de portabilidad: no lleva número portado', 'NOT_PORTABILIDAD')
+    }
+
+    const now = new Date()
+    const source = SaleVerificationNumberSource.BACKOFFICE
+    const data: Prisma.SaleVerificationUpdateInput = {
+      ...(linking !== undefined && { linkingNumber: linking, linkingNumberSource: source, linkingNumberSetAt: now }),
+      ...(ported !== undefined && { portedNumber: ported, portedNumberSource: source, portedNumberSetAt: now }),
+    }
+    const row = await tx.saleVerification.update({
+      where: { id: sv.id },
+      data,
+      select: {
+        id: true,
+        linkingNumber: true,
+        portedNumber: true,
+        linkingNumberSource: true,
+        portedNumberSource: true,
+        linkingNumberSetAt: true,
+        portedNumberSetAt: true,
+      },
+    })
+    for (const { field, digits } of fields) {
+      await tx.activityLog.create({
+        data: {
+          staffId: params.editedById,
+          venueId: sv.venueId,
+          organizationId: orgId,
+          action: 'SALE_VERIFICATION_NUMBER_EDIT',
+          entity: 'SaleVerification',
+          entityId: sv.id,
+          data: { field, before: sv[field], after: digits, reason, source: 'BACKOFFICE' },
+        },
+      })
+    }
+    return row
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  logger.info(
+    `[SALE_VERIFICATION_NUMBER_EDIT] verification=${updated.id} org=${orgId} by=${params.editedById} ` +
+      `fields=${fields.map(f => f.field).join(',')}`,
+  )
   return updated
 }
 

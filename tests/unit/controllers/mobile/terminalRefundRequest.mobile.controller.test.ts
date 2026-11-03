@@ -15,7 +15,7 @@ jest.mock('@/communication/sockets/terminal-registry', () => ({ terminalRegistry
 
 const abrir = terminalPaymentService.requestRefundOnTerminal as jest.Mock
 
-function llamar(body: Record<string, unknown> = { paymentId: 'pay-1' }) {
+function llamar(body: Record<string, unknown> = { paymentId: 'pay-1' }, headers: Record<string, string> = {}) {
   const res = { statusCode: 200, payload: undefined as unknown } as Response & { statusCode: number; payload: any }
   res.status = jest.fn((code: number) => {
     res.statusCode = code
@@ -28,6 +28,7 @@ function llamar(body: Record<string, unknown> = { paymentId: 'pay-1' }) {
   const req = {
     params: { venueId: 'v1', terminalId: 'AVQD-T1' },
     body,
+    headers,
     authContext: { userId: 'staff-1' },
   } as unknown as Request
   return requestRefundOnTerminal(req, res).then(() => res)
@@ -64,6 +65,18 @@ describe('POST /terminals/:terminalId/refund-request — «Sólo saldo a favor»
     abrir.mockResolvedValue({ requestId: 'r1', status: 'opened' })
     await llamar({ paymentId: 'pay-1', storeCreditOnlyException: 'DEFECTIVE' })
     expect(abrir).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'pay-1', storeCreditOnlyException: 'DEFECTIVE' }))
+  })
+
+  // D1: el POS publicado que no sabe del interruptor (ANDROID/WINDOWS ≤ 95, iOS ≤ 41, o sin cabeceras) lo marca la ruta del POS.
+  it.each([
+    [{ 'x-device-platform': 'ANDROID', 'x-app-version-code': '95' }, true],
+    [{}, true],
+    [{ 'x-device-platform': 'ANDROID', 'x-app-version-code': '96' }, false],
+    [{ 'x-device-platform': 'IOS', 'x-app-version-code': '42' }, false],
+  ])('D1: con las cabeceras %j le dice al servicio posSinSoloSaldo=%s', async (headers, vieja) => {
+    abrir.mockResolvedValue({ requestId: 'r1', status: 'opened' })
+    await llamar({ paymentId: 'pay-1' }, headers)
+    expect(abrir).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'pay-1', posSinSoloSaldo: vieja }))
   })
 
   it('🔴 el rechazo STORE_CREDIT_ONLY llega con su 422, su code y su texto (no un 500)', async () => {

@@ -9,6 +9,7 @@ const mockIssue = jest.fn()
 const mockAudit = jest.fn()
 const mockChain = jest.fn()
 const mockOnlineOrderFindFirst = jest.fn()
+const mockVenueSettingsFindUnique = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -32,7 +33,12 @@ jest.mock('@/utils/prismaClient', () => ({
     payment: { findFirst: (...a: unknown[]) => mockPaymentFindFirst(...(a as [])), findMany: jest.fn(), groupBy: jest.fn() },
     onlineOrder: { findFirst: (...a: unknown[]) => mockOnlineOrderFindFirst(...(a as [])) },
     venue: { findUnique: jest.fn() },
+    venueSettings: { findUnique: (...a: unknown[]) => mockVenueSettingsFindUnique(...(a as [])) },
   },
+}))
+jest.mock('@/services/storeCredit/storeCreditTender', () => ({
+  ...jest.requireActual('@/services/storeCredit/storeCreditTender'),
+  storeCreditAvailable: () => true,
 }))
 
 const schemas = new Map<string, Record<string, { safeParse: (v: unknown) => { success: boolean } }>>()
@@ -63,6 +69,46 @@ beforeAll(() => {
   )
 })
 beforeEach(() => jest.clearAllMocks())
+
+describe('issue_refund con «Sólo saldo a favor» prendido', () => {
+  const soloSaldo = () => mockVenueSettingsFindUnique.mockResolvedValue({ storeCreditOnly: true })
+
+  it('la vista previa ya dice que por mercancía devuelta no se puede y no reembolsa', async () => {
+    soloSaldo()
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    const body = parse(await call({ ...base, reason: 'returned_goods' }))
+    expect(body).toMatchObject({ ok: false, code: 'STORE_CREDIT_ONLY' })
+    expect(body.requiresConfirmation).toBeUndefined()
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('al confirmar, la regla también corre con el cobro bloqueado (el ajuste pudo cambiar)', async () => {
+    mockVenueSettingsFindUnique.mockResolvedValue({ storeCreditOnly: false })
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockResolvedValueOnce({ refundPaymentId: 'r1', orderId: 'o1', refundedAmount: 100, remainingRefundable: 300, reason: 'RETURNED_GOODS' })
+    await call({ ...base, reason: 'returned_goods', confirm: true })
+    const { reglasBajoCandado } = mockIssue.mock.calls[0][0]
+    const tx = { venueSettings: { findUnique: jest.fn().mockResolvedValue({ storeCreditOnly: true }) } }
+    await expect(reglasBajoCandado(tx, { original: { tenderSystemKind: null } })).rejects.toMatchObject({ code: 'STORE_CREDIT_ONLY' })
+  })
+
+  it('🔴 Codex r1 #1: al confirmar llega al servicio aunque esté prendido: una repetición debe contestar lo que ya se escribió', async () => {
+    soloSaldo()
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockResolvedValueOnce({ refundPaymentId: 'r1', orderId: 'o1', refundedAmount: 100, remainingRefundable: 300, reason: 'RETURNED_GOODS' })
+    const body = parse(await call({ ...base, reason: 'returned_goods', confirm: true }))
+    expect(mockIssue).toHaveBeenCalledTimes(1)
+    expect(body.code).toBeUndefined()
+  })
+
+  it('un cobro por error o lo pagado con saldo siguen pasando', async () => {
+    soloSaldo()
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    expect(parse(await call(base))).toMatchObject({ requiresConfirmation: true })
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'OTHER', tenderType: { systemKind: 'GIFT_CARD' } })
+    expect(parse(await call({ ...base, reason: 'returned_goods' }))).toMatchObject({ requiresConfirmation: true })
+  })
+})
 
 describe('issue_refund (critical money write, confirm-gated)', () => {
   it('previews exchange credit with the root method and drawer semantics from the single resolver', async () => {

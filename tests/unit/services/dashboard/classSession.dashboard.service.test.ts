@@ -8,6 +8,13 @@ jest.mock('@/services/venueSalesGuard', () => ({
 
 import { prismaMock } from '@tests/__helpers__/setup'
 
+// Quitar a un asistente ES cancelar su reserva: el camino real se prueba en tests/integration/classSession/quitar-asistente.test.ts.
+jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
+  __esModule: true,
+  ...jest.requireActual('@/services/dashboard/reservation.dashboard.service'),
+  cancelReservation: jest.fn(),
+}))
+
 jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
   __esModule: true,
   publishPushNotification: jest.fn().mockResolvedValue(undefined),
@@ -31,6 +38,7 @@ import {
 } from '@/services/dashboard/classSession.dashboard.service'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
+import { cancelReservation } from '@/services/dashboard/reservation.dashboard.service'
 import { assertOrganizationStaffAvailability, lockAppointmentVenue } from '@/services/dashboard/appointmentStaffAssignment.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import * as passCapacity from '@/services/aggregators/passCapacity.service'
@@ -1242,7 +1250,11 @@ describe('ClassSession Dashboard Service', () => {
       const cancelledSession = makeSession({ status: 'CANCELLED' })
       prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
       prismaMock.$executeRaw.mockResolvedValueOnce(1)
-      prismaMock.reservation.updateMany.mockResolvedValue({ count: 2 })
+      prismaMock.reservation.updateManyAndReturn.mockResolvedValue([
+        { id: 'res-a', depositStatus: null },
+        { id: 'res-b', depositStatus: null },
+      ])
+      prismaMock.creditTransaction.findMany.mockResolvedValue([])
       prismaMock.classSession.findUniqueOrThrow.mockResolvedValue(cancelledSession)
       prismaMock.activityLog.create.mockResolvedValue({ id: 'log-1' })
 
@@ -1253,7 +1265,7 @@ describe('ClassSession Dashboard Service', () => {
       expect((textos as string[]).join('?')).toMatch(/UPDATE "ClassSession"[\s\S]*"cancelledAt"[\s\S]*status <> 'CANCELLED'/)
       expect(valores).toEqual(expect.arrayContaining([SESSION_ID, VENUE_ID]))
       expect(prismaMock.classSession.update).not.toHaveBeenCalled()
-      expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
+      expect(prismaMock.reservation.updateManyAndReturn).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({ classSessionId: SESSION_ID, status: { in: ['PENDING', 'CONFIRMED'] } }),
           data: expect.objectContaining({ status: 'CANCELLED', cancelledBy: 'SYSTEM' }),
@@ -1272,7 +1284,7 @@ describe('ClassSession Dashboard Service', () => {
       prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
       prismaMock.$executeRaw.mockResolvedValueOnce(0)
       await expect(cancelClassSession(VENUE_ID, SESSION_ID, STAFF_ID)).rejects.toThrow(ConflictError)
-      expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.reservation.updateManyAndReturn).not.toHaveBeenCalled()
       expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
     })
 
@@ -1582,70 +1594,57 @@ describe('ClassSession Dashboard Service', () => {
   // ============================================================
 
   describe('removeAttendee', () => {
-    it('should cancel reservation by setting status to CANCELLED', async () => {
-      const reservation = makeReservation({ status: 'CONFIRMED' })
-      const cancelledReservation = makeReservation({ status: 'CANCELLED', cancelledAt: new Date(), cancelledBy: 'STAFF' })
+    const cancelReservationMock = cancelReservation as jest.MockedFunction<typeof cancelReservation>
 
-      prismaMock.reservation.findFirst.mockResolvedValue(reservation)
-      prismaMock.reservation.update.mockResolvedValue(cancelledReservation)
+    beforeEach(() => cancelReservationMock.mockReset())
 
-      const result = await removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)
+    it.each(['CONFIRMED', 'PENDING'])(
+      'una reserva %s se cancela por el mismo camino que cancelar la reserva, a nombre de quien la quitó',
+      async status => {
+        const cancelada = makeReservation({ status: 'CANCELLED' })
+        prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status }))
+        cancelReservationMock.mockResolvedValue(cancelada as any)
 
-      expect(prismaMock.reservation.findFirst).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: RESERVATION_ID, venueId: VENUE_ID, classSessionId: SESSION_ID },
-        }),
-      )
-      expect(prismaMock.reservation.update).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { id: RESERVATION_ID },
-          data: expect.objectContaining({
-            status: 'CANCELLED',
-            cancelledBy: 'STAFF',
+        const result = await removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)
+
+        expect(prismaMock.reservation.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: RESERVATION_ID, venueId: VENUE_ID, classSessionId: SESSION_ID },
           }),
-        }),
-      )
-      expect(result.status).toBe('CANCELLED')
-    })
-
-    it('should cancel a PENDING reservation', async () => {
-      prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status: 'PENDING' }))
-      prismaMock.reservation.update.mockResolvedValue(makeReservation({ status: 'CANCELLED' }))
-
-      const result = await removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)
-
-      expect(prismaMock.reservation.update).toHaveBeenCalled()
-      expect(result.status).toBe('CANCELLED')
-    })
+        )
+        expect(cancelReservationMock).toHaveBeenCalledTimes(1)
+        expect(cancelReservationMock).toHaveBeenCalledWith(VENUE_ID, RESERVATION_ID, STAFF_ID, 'Quitado de la clase por el negocio')
+        expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+        expect(result).toBe(cancelada)
+      },
+    )
 
     it('should throw NotFoundError when reservation not found', async () => {
       prismaMock.reservation.findFirst.mockResolvedValue(null)
 
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow(NotFoundError)
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow('Asistente no encontrado en esta sesión')
-      expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)).rejects.toThrow(NotFoundError)
+      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)).rejects.toThrow('Asistente no encontrado en esta sesión')
+      expect(cancelReservationMock).not.toHaveBeenCalled()
     })
 
-    it('should throw BadRequestError when reservation is already CANCELLED', async () => {
-      prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status: 'CANCELLED' }))
+    it.each(['CANCELLED', 'COMPLETED', 'NO_SHOW'])('should throw BadRequestError when reservation is %s', async status => {
+      prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status }))
 
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow(BadRequestError)
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow('Esta reservación ya no puede ser cancelada')
-      expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)).rejects.toThrow(BadRequestError)
+      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)).rejects.toThrow(
+        'Esta reservación ya no puede ser cancelada',
+      )
+      expect(cancelReservationMock).not.toHaveBeenCalled()
     })
 
-    it('should throw BadRequestError when reservation is COMPLETED', async () => {
-      prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status: 'COMPLETED' }))
+    it('quien ya llegó no se quita: lo dice en español y no toca nada', async () => {
+      prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status: 'CHECKED_IN' }))
 
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow(BadRequestError)
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow('Esta reservación ya no puede ser cancelada')
-    })
-
-    it('should throw BadRequestError when reservation is NO_SHOW', async () => {
-      prismaMock.reservation.findFirst.mockResolvedValue(makeReservation({ status: 'NO_SHOW' }))
-
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow(BadRequestError)
-      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID)).rejects.toThrow('Esta reservación ya no puede ser cancelada')
+      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)).rejects.toThrow(BadRequestError)
+      await expect(removeAttendee(VENUE_ID, SESSION_ID, RESERVATION_ID, STAFF_ID)).rejects.toThrow(
+        'Ya llegó a la clase: no se puede quitar.',
+      )
+      expect(cancelReservationMock).not.toHaveBeenCalled()
     })
   })
 })
