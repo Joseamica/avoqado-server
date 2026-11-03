@@ -3,6 +3,8 @@
  * (`findVerificationIdsWithNumberAlert`, una sola consulta) devuelve EXACTAMENTE las mismas ventas que la fila
  * (`findDuplicatesForSales` + `computeNumberAlerts`). Si no coinciden, el back-office filtra «repetidos» y ve otra cosa.
  * Además, el SQL de repetidos cuenta y ordena bien: total exacto con más de 5 llaves y un histórico sin fecha al final.
+ * A11b: el ICCID se compara normalizado (…901f = …901F), 9 dígitos de importación y de venta externa, el portado faltante
+ * con y sin su foto, y la venta que pasa de portabilidad a línea nueva (su portado se borra).
  *   TEST_DATABASE_URL='postgresql://…/avoqado_<tarea>_test_<fecha>' \
  *     npx jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/playtelecom/linkingNumberAlertFilter.integration.test.ts
  */
@@ -16,10 +18,15 @@ import {
   type NumberAlertFilter,
 } from '@/services/playtelecom/linkingNumber.duplicates'
 import { computeNumberAlerts, type NumberAlertCode } from '@/services/playtelecom/linkingNumber.rules'
+import { editOrgSaleVerification } from '@/services/dashboard/sale-verification.org.dashboard.service'
+
+jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { broadcastToUser: jest.fn() } }))
 
 const tag = `vinculacion-${randomUUID()}`
 const ORG = cuid()
 const OTHER_ORG = cuid()
+const PORT_ORG = cuid() // sólo para la venta que pasa de portabilidad a línea nueva: se edita a media prueba
+const ORGS = [ORG, OTHER_ORG, PORT_ORG]
 // Octubre en la hora del negocio, con los mismos extremos que `parseRange` (fin en 23:59:59.999 local).
 const range = { from: new Date('2026-10-01T06:00:00.000Z'), to: new Date('2026-11-01T05:59:59.999Z') }
 const ids: Record<string, string> = {}
@@ -40,7 +47,7 @@ type Venta = {
 }
 
 async function venta(nombre: string, v: Venta) {
-  const venueId = v.org === OTHER_ORG ? venueIds[1] : venueIds[0]
+  const venueId = venueIds[ORGS.indexOf(v.org ?? ORG)]
   const total = 100
   const order = await prisma.order.create({
     data: { venueId, orderNumber: randomUUID(), subtotal: total, taxAmount: 0, total, type: v.external ? 'MANUAL_ENTRY' : 'DINE_IN' },
@@ -77,7 +84,7 @@ async function venta(nombre: string, v: Venta) {
 }
 
 beforeAll(async () => {
-  for (const org of [ORG, OTHER_ORG]) {
+  for (const org of ORGS) {
     await prisma.organization.create({ data: { id: org, name: tag, email: `${org}@example.test`, phone: '5500000000' } })
     venueIds.push((await prisma.venue.create({ data: { organizationId: org, name: `Tienda ${org}`, slug: `${tag}-${org}` } })).id)
   }
@@ -103,6 +110,25 @@ beforeAll(async () => {
   // A(X,n) + histórico(X,n) + B(Y,n): el histórico de su propio ICCID no es repetido de A, pero B sí lo es (y A de B).
   await venta('a', { linking: '5544444444', photos: ['f1'], iccid: 'ICC-X' })
   await venta('b', { linking: '5544444444', photos: ['f1'], iccid: 'ICC-Y' })
+  // C2: la venta capturó el ICCID con «f» minúscula; el histórico (normalizado) lo trae con «F». Es la misma SIM: no repetido.
+  await venta('s11', { linking: '5555555555', photos: ['f1'], iccid: '8952140012345678901f' })
+  // 9 dígitos de la importación y de Ventas externas también avisan: sólo el back-office confirma uno de 9.
+  await venta('s3c', { linking: '551234569', linkingSource: 'IMPORT', photos: ['f1'] })
+  await venta('s3d', { linking: '551234560', linkingSource: 'EXTERNAL_SALE', external: true })
+  // Portado faltante: sin su foto aún no (la terminal lo manda con ella); con su foto o en venta externa, sí.
+  await venta('p1', { isPortabilidad: true, linking: '5560000001', photos: ['f1', ''] })
+  await venta('p2', { isPortabilidad: true, linking: '5560000002', photos: ['f1', 'f2'] })
+  await venta('p3', { isPortabilidad: true, linking: '5560000003', external: true })
+  // Punto 4: portabilidad con portado de 9 dígitos, que choca con otra venta (de 9 confirmado por el back-office).
+  await venta('q1', {
+    org: PORT_ORG,
+    isPortabilidad: true,
+    linking: '5566666666',
+    ported: '557777777',
+    photos: ['f1', 'f2'],
+    iccid: 'ICC-Q1',
+  })
+  await venta('q2', { org: PORT_ORG, linking: '557777777', linkingSource: 'BACKOFFICE', photos: ['f1'], iccid: 'ICC-Q2' })
 
   await prisma.historicalLinkingNumber.createMany({
     data: [
@@ -110,20 +136,22 @@ beforeAll(async () => {
       { organizationId: ORG, iccid: 'ICC-OTRA', number: '5511111111', importBatch: tag, saleDate: new Date('2026-05-01T18:00:00Z') },
       ...['H1', 'H2', 'H3', 'H4', 'H5'].map(iccid => ({ organizationId: ORG, iccid, number: '5533333333', importBatch: tag })),
       { organizationId: ORG, iccid: 'ICC-X', number: '5544444444', importBatch: tag },
+      { organizationId: ORG, iccid: '8952140012345678901F', number: '5555555555', importBatch: tag },
     ],
   })
 })
 
 afterAll(async () => {
   if (venueIds.length > 0) {
+    await prisma.activityLog.deleteMany({ where: { venueId: { in: venueIds } } })
     await prisma.saleVerification.deleteMany({ where: { venueId: { in: venueIds } } })
     await prisma.payment.deleteMany({ where: { venueId: { in: venueIds } } })
     await prisma.order.deleteMany({ where: { venueId: { in: venueIds } } })
     await prisma.venue.deleteMany({ where: { id: { in: venueIds } } })
   }
-  await prisma.historicalLinkingNumber.deleteMany({ where: { organizationId: { in: [ORG, OTHER_ORG] } } })
+  await prisma.historicalLinkingNumber.deleteMany({ where: { organizationId: { in: ORGS } } })
   if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
-  await prisma.organization.deleteMany({ where: { id: { in: [ORG, OTHER_ORG] } } })
+  await prisma.organization.deleteMany({ where: { id: { in: ORGS } } })
   await prisma.$disconnect()
 })
 
@@ -135,9 +163,9 @@ const CODES: Record<NumberAlertFilter, (c: NumberAlertCode[]) => boolean> = {
 }
 
 /** Lo que pinta la fila de la lista: las ventas de la organización cobradas en el rango, con sus alertas. */
-async function alertasDeLaFila() {
+async function alertasDeLaFila(org = ORG) {
   const svs = await prisma.saleVerification.findMany({
-    where: { venue: { organizationId: ORG }, payment: { createdAt: { gte: range.from, lte: range.to } } },
+    where: { venue: { organizationId: org }, payment: { createdAt: { gte: range.from, lte: range.to } } },
     select: {
       id: true,
       linkingNumber: true,
@@ -152,7 +180,7 @@ async function alertasDeLaFila() {
     take: 100,
   })
   const dups = await findDuplicatesForSales(
-    ORG,
+    org,
     svs.map(s => ({
       key: s.id,
       verificationId: s.id,
@@ -177,9 +205,9 @@ const nombres = (lista: string[]) => lista.map(id => Object.keys(ids).find(n => 
 describe('filtro de alertas del número = alertas de la fila', () => {
   it.each<[NumberAlertFilter, string[]]>([
     ['duplicate', ['a', 'b', 's1', 's2', 's7', 's9']],
-    ['not10', ['s3']],
-    ['missing', ['s4', 's5']],
-    ['any', ['a', 'b', 's1', 's2', 's3', 's4', 's5', 's7', 's9']],
+    ['not10', ['s3', 's3c', 's3d']],
+    ['missing', ['p2', 'p3', 's4', 's5']],
+    ['any', ['a', 'b', 'p2', 'p3', 's1', 's2', 's3', 's3c', 's3d', 's4', 's5', 's7', 's9']],
   ])('%s: el SQL y la fila dan las mismas ventas', async (kind, esperadas) => {
     const filas = await alertasDeLaFila()
 
@@ -227,5 +255,35 @@ describe('findDuplicatesForSales contra Postgres', () => {
 
     expect(res.get('s1')?.linking?.total).toBe(2) // s2 (portado) y s10
     expect(res.get('s6')).toEqual({})
+  })
+})
+
+describe('portabilidad → línea nueva (A11b punto 4)', () => {
+  it('se borra el portado: la fila queda sin alertas y la otra venta con ese número ya no sale repetida', async () => {
+    expect(nombres(await findVerificationIdsWithNumberAlert(PORT_ORG, 'duplicate', range))).toEqual(['q1', 'q2'])
+    expect(nombres(await findVerificationIdsWithNumberAlert(PORT_ORG, 'not10', range))).toEqual(['q1'])
+
+    await editOrgSaleVerification(PORT_ORG, {
+      saleVerificationId: ids.q1,
+      editedById: staffId,
+      isPortabilidad: false,
+      reason: 'Era línea nueva, no portabilidad',
+    })
+
+    for (const kind of ['any', 'duplicate', 'not10', 'missing'] as const) {
+      expect(await findVerificationIdsWithNumberAlert(PORT_ORG, kind, range)).toEqual([])
+    }
+    expect((await alertasDeLaFila(PORT_ORG)).map(f => f.codes)).toEqual([[], []])
+    await expect(
+      prisma.saleVerification.findUnique({
+        where: { id: ids.q1 },
+        select: { isPortabilidad: true, portedNumber: true, portedNumberSource: true, portedNumberSetAt: true },
+      }),
+    ).resolves.toEqual({ isPortabilidad: false, portedNumber: null, portedNumberSource: null, portedNumberSetAt: null })
+    const log = await prisma.activityLog.findFirst({
+      where: { entityId: ids.q1, action: 'SALE_VERIFICATION_EDIT' },
+      select: { data: true },
+    })
+    expect(log?.data).toMatchObject({ before: { portedNumber: '557777777' }, after: { portedNumber: null } })
   })
 })

@@ -47,8 +47,10 @@ const ALERT_IDS_CAP = 20000
 /** Por `sale.key`: `linking`/`ported` sólo vienen cuando ese número está repetido. Dos consultas para toda la página. */
 export async function findDuplicatesForSales(
   orgId: string,
-  sales: SaleNumbers[],
+  input: SaleNumbers[],
 ): Promise<Map<string, { linking?: NumberMatchSummary; ported?: NumberMatchSummary }>> {
+  // El histórico guarda el ICCID con trim + mayúsculas (`normalizeIccid`); la captura de la venta no: «…901f» es «…901F».
+  const sales = input.map(s => ({ ...s, iccid: s.iccid?.trim().toUpperCase() || null }))
   const out = new Map<string, { linking?: NumberMatchSummary; ported?: NumberMatchSummary }>()
   for (const s of sales) out.set(s.key, {})
   const numbersOf = (s: SaleNumbers) => [s.linkingNumber, s.portedNumber].filter((n): n is string => !!n)
@@ -182,7 +184,7 @@ export async function findVerificationIdsWithNumberAlert(
 ): Promise<string[]> {
   const rows = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     WITH org_sv AS (
-      SELECT sv.id, sv."linkingNumber", sv."portedNumber", sv."serialNumbers"[1] AS iccid, sv.photos, sv."isPortabilidad",
+      SELECT sv.id, sv."linkingNumber", sv."portedNumber", upper(btrim(sv."serialNumbers"[1])) AS iccid, sv.photos, sv."isPortabilidad",
              sv."linkingNumberSource", sv."portedNumberSource", o.type AS order_type, p."createdAt" AS paid_at
       FROM "SaleVerification" sv
       JOIN "Venue" v ON v.id = sv."venueId"

@@ -132,6 +132,21 @@ describe('findDuplicatesForSales', () => {
     })
   })
 
+  // C2 (Codex r1): el importador guarda el ICCID con trim + mayúsculas; la venta pudo capturarlo con «f» minúscula.
+  it('su propio histórico cuenta como suyo aunque la venta traiga el ICCID con minúscula o espacios (…901f vs …901F)', async () => {
+    queryRaw.mockResolvedValue([saleRow(N, 'x', 2), histRow(N, '8952140012345678901F', 2)])
+    histFindMany.mockResolvedValue([{ iccid: '8952140012345678901F', number: N }])
+
+    const out = await findDuplicatesForSales(ORG, [
+      sale({ key: 'x', verificationId: 'x', iccid: ' 8952140012345678901f ', linkingNumber: N }),
+    ])
+
+    expect(out.get('x')).toEqual({})
+    expect(histFindMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: { organizationId: ORG, OR: [{ iccid: '8952140012345678901F', number: N }] } }),
+    )
+  })
+
   it('el histórico de su ICCID se descuenta del total aunque no salga entre las filas traídas', async () => {
     queryRaw.mockResolvedValue([1, 2, 3, 4, 5].map(i => saleRow(N, `o${i}`, 7)))
     histFindMany.mockResolvedValue([{ iccid: 'I1', number: N }])
@@ -265,6 +280,12 @@ describe('findVerificationIdsWithNumberAlert', () => {
     expect(sql).toContain('NOT EXISTS')
     expect(sql).toContain('IN (SELECT n FROM dup)')
     expect(sql).not.toContain('MANUAL_ENTRY')
+  })
+
+  it('compara el ICCID de la venta normalizado como el del histórico (trim + mayúsculas)', async () => {
+    queryRaw.mockResolvedValue([])
+    await findVerificationIdsWithNumberAlert(ORG, 'duplicate', range)
+    expect(sqlOf()).toContain('upper(btrim(sv."serialNumbers"[1])) AS iccid')
   })
 
   it('cada filtro arma su propio predicado', async () => {
