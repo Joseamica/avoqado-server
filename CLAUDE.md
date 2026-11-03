@@ -289,7 +289,8 @@ the controller. Full rule + examples: `.claude/rules/critical-warnings.md`. (Bac
 ## 🔴 Offline-first (reducer de intents) — LEE `.claude/rules/offline-first-y-hub-lan.md`
 
 Este repo es la FUENTE DE VERDAD del contrato: `SyncIntentType` en `src/services/mobile/sync.mobile.service.ts` (15 tipos hoy). Agregar o
-cambiar uno obliga a tocar Android, iOS y el MCP `pos_sync_status` en el MISMO cambio — un nombre desalineado falla en silencio.
+cambiar uno obliga a tocar Android y el MCP `pos_sync_status` en el MISMO cambio, y a anotarlo en la ficha de iOS (iOS va después: `../AGENTS.md`). Un nombre desalineado
+falla en silencio: nunca se renombra ni se quita un tipo que iOS ya use.
 
 Tres cosas que no se negocian:
 
