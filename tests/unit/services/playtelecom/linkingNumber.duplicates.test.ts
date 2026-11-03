@@ -11,6 +11,7 @@ import {
   type SaleNumbers,
 } from '@/services/playtelecom/linkingNumber.duplicates'
 import prisma from '@/utils/prismaClient'
+import { PATRON_SQL_TRIM_COMO_JS } from '@/utils/terminalSerial'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -266,8 +267,8 @@ describe('findVerificationIdsWithNumberAlert', () => {
     const sql = sqlOf()
     expect(sql).toContain('v."organizationId" = ?')
     expect(sql).toContain('h."organizationId" = ?')
-    expect(sql).toMatch(/paid_at >= \(\? AT TIME ZONE 'UTC'\)/)
-    expect(sql).toMatch(/paid_at <= \(\? AT TIME ZONE 'UTC'\)/)
+    expect(sql).toMatch(/p\."createdAt" >= \(\? AT TIME ZONE 'UTC'\)/)
+    expect(sql).toMatch(/p\."createdAt" <= \(\? AT TIME ZONE 'UTC'\)/)
     expect(sql).toMatch(/LIMIT \?\s*$/)
     expect(valuesOf()).toEqual(expect.arrayContaining([ORG, range.from, range.to, 20001])) // ALERT_IDS_CAP + 1
   })
@@ -282,10 +283,36 @@ describe('findVerificationIdsWithNumberAlert', () => {
     expect(sql).not.toContain('MANUAL_ENTRY')
   })
 
-  it('compara el ICCID de la venta normalizado como el del histórico (trim + mayúsculas)', async () => {
+  // A11b: `btrim` sólo quita el espacio ASCII; un ICCID con tabulador o NBSP salía «filtro ≠ fila». Se recorta como `trim()`.
+  it('compara el ICCID de la venta normalizado como el del histórico (trim de JS + mayúsculas)', async () => {
     queryRaw.mockResolvedValue([])
     await findVerificationIdsWithNumberAlert(ORG, 'duplicate', range)
-    expect(sqlOf()).toContain('upper(btrim(sv."serialNumbers"[1])) AS iccid')
+    const sql = sqlOf()
+    expect(sql).toContain(`nullif(upper(regexp_replace(sv."serialNumbers"[1], ?, '', 'g')), '') AS iccid`)
+    expect(sql).not.toContain('btrim')
+    expect(valuesOf()).toContain(PATRON_SQL_TRIM_COMO_JS)
+  })
+
+  // B0: antes armaba TODAS las verificaciones y todos los números de la organización en cada llamada.
+  it('repetidos busca sólo los números de las ventas del rango, contra toda la organización y por los índices', async () => {
+    queryRaw.mockResolvedValue([])
+    await findVerificationIdsWithNumberAlert(ORG, 'duplicate', range)
+    const sql = sqlOf()
+    expect(sql).toContain('sv."linkingNumber" = ANY((SELECT a FROM range_nums)::text[])')
+    expect(sql).toContain('sv."portedNumber" = ANY((SELECT a FROM range_nums)::text[])')
+    expect(sql).toContain('h.number = ANY((SELECT a FROM range_nums)::text[])')
+    expect(sql).toContain('h."organizationId" = ?')
+  })
+
+  it('«9 dígitos» y «falta» sólo miran la propia fila: no arman repetidos', async () => {
+    queryRaw.mockResolvedValue([])
+    await findVerificationIdsWithNumberAlert(ORG, 'not10', range)
+    await findVerificationIdsWithNumberAlert(ORG, 'missing', range)
+    for (const call of [0, 1]) {
+      expect(sqlOf(call)).not.toContain('HistoricalLinkingNumber')
+      expect(sqlOf(call)).not.toContain('dup')
+      expect(sqlOf(call)).toContain('v."organizationId" = ?')
+    }
   })
 
   it('cada filtro arma su propio predicado', async () => {
