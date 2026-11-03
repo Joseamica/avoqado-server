@@ -49,6 +49,13 @@ export const manualSaleRowSchema = z.object({
    * aprobada se ignora.
    */
   rejectionNote: z.string().optional(),
+  /**
+   * «Número de vinculación» y «Número portado» (PlayTelecom). Opcionales aquí: si son obligatorias (y su formato de 9 o
+   * 10 dígitos) lo decide `bulkManualSales`/`createOneManualSale` con el interruptor de la organización; apagado se
+   * ignoran, así que la plantilla vieja y el MCP siguen entrando igual.
+   */
+  linkingNumber: z.string().optional(),
+  portedNumber: z.string().optional(),
 })
 
 /**

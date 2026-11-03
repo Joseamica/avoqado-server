@@ -16,6 +16,8 @@ import {
 import type { ManualSaleOutcome } from './manualSale.resolvers'
 import { manualSaleRowSchema, type ManualSaleRowInput } from '../../schemas/dashboard/manualSale.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
+import { normalizeLinkingNumber, isValidTerminalNumber } from '../playtelecom/linkingNumber.rules'
+import { findDuplicatesForSales } from '../playtelecom/linkingNumber.duplicates'
 
 /**
  * Creates ONE complete, already-approved external SIM sale in a single atomic
@@ -92,6 +94,42 @@ type TxResult =
     }
   | { ok: false; error: string }
 
+/** `requireLinkingNumber` = el interruptor del número de vinculación de la organización (`isLinkingNumberEnabledForOrg`). */
+export interface ManualSaleOptions {
+  requireLinkingNumber: boolean
+}
+
+interface RowNumbers {
+  linkingNumber: string | null
+  portedNumber: string | null
+}
+
+const isPortabilidadSale = (saleType: string): boolean => /portabilidad/i.test(saleType)
+
+/** Sólo dígitos (quita espacios, guiones, puntos y paréntesis) y 9 o 10 de ellos, como en la terminal (Ruling A8-1). */
+function readNumber(raw: string | undefined, missing: string, invalid: string): string | { error: string } {
+  const digits = normalizeLinkingNumber(raw ?? '')
+  if (!digits) return { error: missing }
+  return isValidTerminalNumber(digits) ? digits : { error: invalid }
+}
+
+/**
+ * Los números de la fila. Prendido: el de vinculación es obligatorio, y el portado también si la fila es de
+ * portabilidad (en una línea nueva se ignora). Apagado: se ignoran por completo, sin validar ni guardar ni buscar
+ * repetidos — la plantilla vieja, el MCP y cualquier otro negocio siguen igual que antes. Puro: no toca la base.
+ */
+function resolveRowNumbers(row: ManualSaleRowInput, requireLinkingNumber: boolean): RowNumbers | { error: string } {
+  if (!requireLinkingNumber) return { linkingNumber: null, portedNumber: null }
+  const linking = readNumber(row.linkingNumber, 'Falta el número de vinculación', 'Número de vinculación inválido')
+  const ported = isPortabilidadSale(row.saleType)
+    ? readNumber(row.portedNumber, 'Falta el número portado', 'Número portado inválido')
+    : null
+  if (typeof linking !== 'string' || (ported !== null && typeof ported !== 'string')) {
+    return { error: [linking, ported].flatMap(r => (r !== null && typeof r !== 'string' ? [r.error] : [])).join('; ') }
+  }
+  return { linkingNumber: linking, portedNumber: ported }
+}
+
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
@@ -142,7 +180,11 @@ export async function createOneManualSale(
   orgId: string,
   actorStaffId: string,
   row: ManualSaleRowInput,
+  opts: ManualSaleOptions,
 ): Promise<CreateOneManualSaleResult> {
+  // Antes de abrir la transacción: un número que falta o está mal es error de esta fila, sin tocar nada.
+  const numbers = resolveRowNumbers(row, opts.requireLinkingNumber)
+  if (isError(numbers)) return { ok: false, error: numbers.error }
   try {
     const result: TxResult = await runTxWithRetry<TxResult>(
       () =>
@@ -282,6 +324,7 @@ export async function createOneManualSale(
           // 8. SaleVerification created directly COMPLETED (NOT createPendingSaleVerification,
           //    which hardcodes PENDING). Reviewer = the uploading actor, at soldAt.
           const normalizedIccid = item.serialNumber
+          const numberSetAt = new Date()
           const verification = await tx.saleVerification.create({
             data: {
               venueId: venue.id,
@@ -291,7 +334,7 @@ export async function createOneManualSale(
               scannedProducts: [],
               status: outcome,
               inventoryDeducted: false,
-              isPortabilidad: /portabilidad/i.test(row.saleType),
+              isPortabilidad: isPortabilidadSale(row.saleType),
               serialNumbers: [normalizedIccid],
               // Backdate to the real sale day (row.saleDate). The org sales list + weekly/monthly
               // reports GROUP BY SaleVerification.createdAt, so leaving it at now() files a May
@@ -304,6 +347,13 @@ export async function createOneManualSale(
               // imágenes ilegibles…), no "no se pudo vincular la línea", y el propio flujo de
               // revisión tampoco exige motivos cuando el rechazo es final.
               reviewNotes: rejectionNote,
+              // Número de la línea (sólo con el interruptor prendido). Fuente EXTERNAL_SALE: la terminal no lo pisa.
+              ...(numbers.linkingNumber
+                ? { linkingNumber: numbers.linkingNumber, linkingNumberSource: 'EXTERNAL_SALE' as const, linkingNumberSetAt: numberSetAt }
+                : {}),
+              ...(numbers.portedNumber
+                ? { portedNumber: numbers.portedNumber, portedNumberSource: 'EXTERNAL_SALE' as const, portedNumberSetAt: numberSetAt }
+                : {}),
             },
           })
 
@@ -432,6 +482,13 @@ export interface RowResult {
    * por error queda como venta perdida y sólo se deshace a mano.
    */
   saleStatus?: ManualSaleOutcome
+  /**
+   * Sólo en la vista previa con el interruptor prendido, y sólo cuando es cierto: el número ya está en otra venta de la
+   * organización (o en el histórico con otro ICCID) o en otra fila del mismo archivo que también se va a crear. Un
+   * repetido no frena la fila: sólo avisa antes de confirmar.
+   */
+  linkingDuplicate?: boolean
+  portedDuplicate?: boolean
 }
 
 export interface BulkManualSalesResult {
@@ -454,10 +511,13 @@ export async function bulkManualSales(
   actorStaffId: string,
   rows: unknown[],
   apply: boolean,
+  opts: ManualSaleOptions,
 ): Promise<BulkManualSalesResult> {
   const crear: RowResult[] = []
   const omitir: RowResult[] = []
   const error: RowResult[] = []
+  // Filas de «crear» con sus números ya normalizados, para marcar repetidos al final de la vista previa.
+  const numbered: Array<RowNumbers & { result: RowResult; iccid: string }> = []
 
   // 1. Dedup by normalized ICCID — keep the first occurrence, short-circuit
   //    every later one into `omitir` before any resolver/create runs.
@@ -489,7 +549,7 @@ export async function bulkManualSales(
   // 2. Classify each deduped row via the requested mode.
   for (const { index, row } of dedupedRows) {
     if (apply) {
-      const result = await createOneManualSale(orgId, actorStaffId, row)
+      const result = await createOneManualSale(orgId, actorStaffId, row, opts)
       if (result.ok) {
         crear.push({ index, iccid: row.iccid, storeName: row.storeName, saleStatus: result.saleStatus })
       } else if (result.error === ICCID_ALREADY_SOLD_ERROR) {
@@ -509,6 +569,13 @@ export async function bulkManualSales(
     const saleStatusResult = mapSaleStatus(row.saleStatus)
     if (isError(saleStatusResult)) {
       error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: saleStatusResult.error })
+      continue
+    }
+
+    // Los números también son puros: un número que falta o está mal no espera a los resolvers.
+    const numbers = resolveRowNumbers(row, opts.requireLinkingNumber)
+    if (isError(numbers)) {
+      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: numbers.error })
       continue
     }
 
@@ -541,11 +608,44 @@ export async function bulkManualSales(
       continue
     }
 
-    crear.push({ index, iccid: row.iccid, storeName: row.storeName, saleStatus: saleStatusResult.outcome })
+    const result: RowResult = { index, iccid: row.iccid, storeName: row.storeName, saleStatus: saleStatusResult.outcome }
+    crear.push(result)
+    if (opts.requireLinkingNumber) numbered.push({ result, iccid: item.serialNumber, ...numbers })
   }
+
+  if (numbered.length) await markDuplicateNumbers(orgId, numbered)
 
   if (apply) {
     return { crear, omitir, error, created: crear.length }
   }
   return { crear, omitir, error }
+}
+
+/**
+ * Marca los repetidos de la vista previa: contra la organización con UNA consulta para todo el archivo (las filas aún no
+ * existen, así que `verificationId` va null y su ICCID descuenta su propio histórico), y contra las demás filas de
+ * «crear» con un conteo en memoria. El mismo número en vinculación y portado de una fila cuenta una vez: no es repetido
+ * consigo mismo.
+ */
+async function markDuplicateNumbers(orgId: string, rows: Array<RowNumbers & { result: RowResult; iccid: string }>): Promise<void> {
+  const inOrg = await findDuplicatesForSales(
+    orgId,
+    rows.map(r => ({
+      key: String(r.result.index),
+      verificationId: null,
+      iccid: r.iccid,
+      linkingNumber: r.linkingNumber,
+      portedNumber: r.portedNumber,
+    })),
+  )
+  const rowsWith = new Map<string, number>()
+  for (const r of rows) {
+    for (const n of new Set([r.linkingNumber, r.portedNumber])) if (n) rowsWith.set(n, (rowsWith.get(n) ?? 0) + 1)
+  }
+  const inFile = (n: string | null) => !!n && (rowsWith.get(n) ?? 0) > 1
+  for (const r of rows) {
+    const found = inOrg.get(String(r.result.index))
+    if (found?.linking || inFile(r.linkingNumber)) r.result.linkingDuplicate = true
+    if (found?.ported || inFile(r.portedNumber)) r.result.portedDuplicate = true
+  }
 }

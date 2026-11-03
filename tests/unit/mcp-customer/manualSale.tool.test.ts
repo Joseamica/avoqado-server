@@ -21,6 +21,7 @@ import type { UserAccess } from '../../../src/services/access/access.service'
 const mockCreateOneManualSale = jest.fn()
 const mockAudit = jest.fn()
 const mockHasPermission = jest.fn()
+const mockLinkingFlag = jest.fn()
 
 jest.mock('@/services/dashboard/manualSale.service', () => ({
   createOneManualSale: (...a: unknown[]) => mockCreateOneManualSale(...(a as [])),
@@ -28,6 +29,9 @@ jest.mock('@/services/dashboard/manualSale.service', () => ({
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/services/access/access.service', () => ({
   hasPermission: (...a: unknown[]) => mockHasPermission(...(a as [])),
+}))
+jest.mock('@/services/playtelecom/linkingNumber.flag', () => ({
+  isLinkingNumberEnabledForOrg: (...a: unknown[]) => mockLinkingFlag(...(a as [])),
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -70,6 +74,7 @@ function buildScope(perVenue: Array<[string, UserAccess]>): McpScope {
 beforeEach(() => {
   jest.clearAllMocks()
   mockHasPermission.mockReturnValue(true) // default: staff has manual-sales:create somewhere in the org
+  mockLinkingFlag.mockResolvedValue(false) // default: org sin el interruptor del número de vinculación
   handlers.clear()
   const scope = buildScope([['v1', access('org-1')]])
   registerManualSaleTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
@@ -103,9 +108,11 @@ describe('record_serialized_sale — confirm:true executes + audits', () => {
     const out = parse(await call({ ...baseInput, confirm: true }))
 
     expect(mockCreateOneManualSale).toHaveBeenCalledTimes(1)
-    const [orgId, actorStaffId, row] = mockCreateOneManualSale.mock.calls[0]
+    const [orgId, actorStaffId, row, opts] = mockCreateOneManualSale.mock.calls[0]
     expect(orgId).toBe('org-1')
     expect(actorStaffId).toBe('s1')
+    expect(opts).toEqual({ requireLinkingNumber: false })
+    expect(mockLinkingFlag).toHaveBeenCalledWith('org-1')
     expect(row).toMatchObject({
       iccid: baseInput.iccid,
       promoterName: baseInput.promoterName,
@@ -128,6 +135,16 @@ describe('record_serialized_sale — confirm:true executes + audits', () => {
       entityId: 'ord-1',
       venueId: 'v1',
     })
+  })
+
+  // A8-2: con el interruptor prendido el servicio exige el número; la tool todavía no lo acepta (A9), así que la fila
+  // falla con el motivo del servicio en vez de entrar sin número.
+  it('passes requireLinkingNumber from the org flag (prendido)', async () => {
+    mockLinkingFlag.mockResolvedValueOnce(true)
+    mockCreateOneManualSale.mockResolvedValueOnce({ ok: false, error: 'Falta el número de vinculación' })
+    const out = parse(await call({ ...baseInput, confirm: true }))
+    expect(mockCreateOneManualSale.mock.calls[0][3]).toEqual({ requireLinkingNumber: true })
+    expect(out).toMatchObject({ ok: false, error: 'Falta el número de vinculación' })
   })
 
   it('service {ok:false} surfaces the Spanish error via text(), no throw, no audit', async () => {

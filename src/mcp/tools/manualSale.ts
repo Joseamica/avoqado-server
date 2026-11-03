@@ -6,6 +6,7 @@ import { ScopeError, enforceWriteScope } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { createOneManualSale } from '@/services/dashboard/manualSale.service'
+import { isLinkingNumberEnabledForOrg } from '@/services/playtelecom/linkingNumber.flag'
 import type { ManualSaleRowInput } from '@/schemas/dashboard/manualSale.schema'
 
 /**
@@ -121,7 +122,10 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         rejectionNote,
       }
 
-      const result = await createOneManualSale(scope.activeOrg, scope.staffId, row)
+      // Con el interruptor prendido el servicio exige el número (la tool lo acepta en A9); apagado, igual que siempre.
+      const result = await createOneManualSale(scope.activeOrg, scope.staffId, row, {
+        requireLinkingNumber: await isLinkingNumberEnabledForOrg(scope.activeOrg),
+      })
       if (!result.ok) {
         return text({ ok: false, error: result.error })
       }
