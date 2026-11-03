@@ -11,8 +11,9 @@ import { createBlumonTpvService } from '../../services/tpv/blumon-tpv.service'
 import prisma from '@/utils/prismaClient'
 import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibility'
 import { IncompatibleDeviceError } from '@/errors/AppError'
-import { fullSetupAngelPaySchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
+import { fullSetupAngelPaySchema, registerAngelPayWebhookSchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
 import { fullSetupAngelPayMerchant as fullSetupAngelPayMerchantService } from '../../services/superadmin/angelpayFullSetup.service'
+import { registrarAvisoAngelPay } from '../../services/superadmin/angelpayWebhookRegistration.service'
 import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '../../services/integrations/angelpay-integrations-api.client'
 
 /**
@@ -196,13 +197,14 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
 
     logger.info('Merchant account created via API', {
       accountId: account.id,
-      createdBy: (req as any).user?.uid,
+      createdBy: req.authContext?.userId,
       isBlumonPendingAccount,
       blumonSerialNumber,
     })
 
     await logAction({
-      staffId: (req as any).user?.uid,
+      staffId: req.authContext?.userId,
+      venueId: account.provider?.code === 'ANGELPAY' ? venueId : undefined,
       action: 'MERCHANT_ACCOUNT_CREATED',
       entity: 'MerchantAccount',
       entityId: account.id,
@@ -228,6 +230,7 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
   try {
     const { id } = req.params
     const {
+      providerId,
       externalMerchantId,
       alias,
       displayName,
@@ -267,40 +270,35 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Datos inválidos')
     }
 
-    const account = await merchantAccountService.updateMerchantAccount(id, {
-      externalMerchantId,
-      alias,
-      displayName,
-      active,
-      displayOrder,
-      credentials,
-      providerConfig,
-      angelpayUserAccountId,
-      blumonSerialNumber,
-      blumonPosId,
-      blumonEnvironment,
-      blumonMerchantId,
-      angelpayAffiliation,
-      angelpayMerchantName,
-      // '' from an emptied input means "clear it", not "set empty string".
-      clabeNumber: clabeNumber === '' ? null : clabeNumber,
-      bankName,
-      accountHolder,
-    })
+    const account = await merchantAccountService.updateMerchantAccount(
+      id,
+      {
+        providerId,
+        externalMerchantId,
+        alias,
+        displayName,
+        active,
+        displayOrder,
+        credentials,
+        providerConfig,
+        angelpayUserAccountId,
+        blumonSerialNumber,
+        blumonPosId,
+        blumonEnvironment,
+        blumonMerchantId,
+        angelpayAffiliation,
+        angelpayMerchantName,
+        // '' from an emptied input means "clear it", not "set empty string".
+        clabeNumber: clabeNumber === '' ? null : clabeNumber,
+        bankName,
+        accountHolder,
+      },
+      { staffId: req.authContext?.userId, ipAddress: req.ip, userAgent: req.headers?.['user-agent'] },
+    )
 
     logger.info('Merchant account updated via API', {
       accountId: id,
-      updatedBy: (req as any).user?.uid,
-    })
-
-    await logAction({
-      staffId: (req as any).user?.uid,
-      action: 'MERCHANT_ACCOUNT_UPDATED',
-      entity: 'MerchantAccount',
-      entityId: id,
-      data: { externalMerchantId: account.externalMerchantId, active: account.active },
-      ipAddress: req.ip,
-      userAgent: req.headers?.['user-agent'],
+      updatedBy: req.authContext?.userId,
     })
 
     res.json({
@@ -2327,11 +2325,12 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
       throw new BadRequestError(first?.message || 'Datos inválidos')
     }
 
-    const createdBy = (req as Request & { user?: { id?: string } }).user?.id
+    const createdBy = req.authContext?.userId
     const result = await fullSetupAngelPayMerchantService(parsed.data, createdBy)
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: req.authContext?.userId ?? null,
+      venueId: parsed.data.venueId,
       action: 'MERCHANT_ACCOUNT_PROVISIONED_ANGELPAY',
       entity: 'MerchantAccount',
       entityId: result.merchantAccountId,
@@ -2340,6 +2339,7 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
         accountType: parsed.data.slot.accountType,
         loginMode: parsed.data.login.mode,
         merchantMode: parsed.data.merchant.mode,
+        webhookRegistered: result.webhookRegistered,
       },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
@@ -2350,6 +2350,34 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
       data: result,
       message: 'Cuenta AngelPay configurada exitosamente',
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/:id/angelpay/webhook
+ * Da de alta el aviso del banco (webhook de AngelPay) de una cuenta SIN secreto, con la llave de API de esa cuenta. Si ya tiene secreto
+ * contesta `alreadyRegistered: true` sin llamar a nadie. El rechazo de la llave por AngelPay es 422, nunca 401: el 401 es de la sesión
+ * del operador. La llave se usa sólo en esta petición: ni se guarda ni se devuelve.
+ */
+export async function registerAngelPayWebhook(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = registerAngelPayWebhookSchema.safeParse({ ...req.body, id: req.params.id })
+    if (!parsed.success) {
+      const first = parsed.error.issues[0]
+      throw new BadRequestError(first?.message || 'Datos inválidos')
+    }
+
+    const { id, apiKey, environment } = parsed.data
+    const { alreadyRegistered } = await registrarAvisoAngelPay({
+      merchantAccountId: id,
+      apiKey,
+      environment,
+      actor: { staffId: req.authContext?.userId, ipAddress: req.ip, userAgent: req.headers?.['user-agent'] },
+    })
+
+    res.status(200).json({ success: true, data: { merchantAccountId: id, webhookRegistered: true, alreadyRegistered } })
   } catch (error) {
     next(error)
   }

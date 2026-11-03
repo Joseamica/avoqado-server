@@ -55,6 +55,12 @@ jest.mock('@/services/modules/module.service', () => ({
   },
 }))
 
+// El interruptor del número de vinculación (A8): el controlador lo lee y se lo pasa al servicio.
+jest.mock('@/services/playtelecom/linkingNumber.flag', () => ({
+  __esModule: true,
+  isLinkingNumberEnabledForOrg: jest.fn(),
+}))
+
 // These are (re)bound in beforeAll AFTER `@/app` is imported. Because beforeAll
 // calls jest.resetModules() and then re-imports the app, the mock factories run a
 // SECOND time and produce fresh jest.fn()s — the controller closes over THOSE. If
@@ -62,6 +68,7 @@ jest.mock('@/services/modules/module.service', () => ({
 // fns the controller never calls. So we grab them post-reset via requireMock.
 let bulkManualSalesMock: jest.Mock
 let isModuleEnabledMock: jest.Mock
+let linkingFlagMock: jest.Mock
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -96,6 +103,8 @@ beforeAll(async () => {
   const modSvc = jest.requireMock('@/services/modules/module.service') as { moduleService: { isModuleEnabled: jest.Mock } }
   bulkManualSalesMock = svc.bulkManualSales
   isModuleEnabledMock = modSvc.moduleService.isModuleEnabled
+  linkingFlagMock = (jest.requireMock('@/services/playtelecom/linkingNumber.flag') as { isLinkingNumberEnabledForOrg: jest.Mock })
+    .isLinkingNumberEnabledForOrg
 })
 startApiServer(() => app)
 
@@ -142,6 +151,7 @@ beforeEach(() => {
   // one venue so the loop reaches isModuleEnabled; enable the module by default.
   prismaMock.venue.findMany.mockResolvedValue([{ id: VENUE_ID }])
   isModuleEnabledMock.mockResolvedValue(true)
+  linkingFlagMock.mockResolvedValue(true)
   bulkManualSalesMock.mockReset()
 })
 
@@ -164,12 +174,14 @@ describe('POST /organizations/:orgId/manual-sales/preview', () => {
     expect(res.body.data).toEqual(previewResult)
 
     expect(bulkManualSalesMock).toHaveBeenCalledTimes(1)
-    const [orgIdArg, actorArg, rowsArg, applyArg] = bulkManualSalesMock.mock.calls[0]
+    const [orgIdArg, actorArg, rowsArg, applyArg, optsArg] = bulkManualSalesMock.mock.calls[0]
     expect(orgIdArg).toBe(ORG_ID)
     expect(actorArg).toBe(STAFF_ID) // authContext.userId, NOT req.user
     expect(rowsArg).toHaveLength(1)
     expect(rowsArg[0].iccid).toBe(validRow.iccid)
     expect(applyArg).toBe(false) // preview = dry run
+    expect(optsArg).toEqual({ requireLinkingNumber: true }) // del interruptor de la organización
+    expect(linkingFlagMock).toHaveBeenCalledWith(ORG_ID)
   })
 
   it('403: a non-OWNER role is blocked by requireOrgOwner before the service runs', async () => {
@@ -234,11 +246,13 @@ describe('POST /organizations/:orgId/manual-sales', () => {
     expect(res.body.data.created).toBe(1)
 
     expect(bulkManualSalesMock).toHaveBeenCalledTimes(1)
-    const [orgIdArg, actorArg, rowsArg, applyArg] = bulkManualSalesMock.mock.calls[0]
+    const [orgIdArg, actorArg, rowsArg, applyArg, optsArg] = bulkManualSalesMock.mock.calls[0]
     expect(orgIdArg).toBe(ORG_ID)
     expect(actorArg).toBe(STAFF_ID)
     expect(rowsArg).toHaveLength(1)
     expect(applyArg).toBe(true) // apply = writes
+    expect(optsArg).toEqual({ requireLinkingNumber: true }) // del interruptor de la organización
+    expect(linkingFlagMock).toHaveBeenCalledWith(ORG_ID)
   })
 
   it('403: a non-OWNER role cannot apply (requireOrgOwner)', async () => {

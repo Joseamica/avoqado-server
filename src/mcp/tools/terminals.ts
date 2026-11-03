@@ -18,6 +18,7 @@ import {
   SOLO_BLOQUEA_EN_ESTRICTO,
   UNRESOLVED_FINANCIAL_OUTCOME,
   desenlaceCanonico,
+  fueSoltadaPorPolitica,
   proyectarEstado,
   terminalPaymentService,
 } from '@/services/terminal-payment.service'
@@ -172,7 +173,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_devices',
-    'List the devices connected to your venues: PAX/NexGo payment terminals plus any phone, tablet or POS that installed Avoqado and signed in (Sunmi, iPhone, iPad, Android). Shows what kind of device it is, whether it is online right now, who used it last, and when it was first seen. Use it to answer "how many devices are running in my venue", "which device is offline", or to find the device behind a problem. Filter by formFactor (PHONE, TABLET, HANDHELD_POS, COUNTERTOP_POS, DESKTOP, UNKNOWN) or by onlyOnline. Retired devices are hidden unless includeRetired is true. Each device also reports `capabilities.configurableSettings`: which TPV settings THAT KIND of device can change from its own Settings screen (a POS tablet only obeys the checkout screens; a payment terminal has the full catalog; a printer or KDS none). Use `terminal_checkout_screens` to see what each device currently has turned on.',
+    'List the devices connected to your venues: PAX/NexGo payment terminals plus any phone, tablet or POS that installed Avoqado and signed in (Sunmi, iPhone, iPad, Android). Shows what kind of device it is, whether it is online right now, who used it last, and when it was first seen. Use it to answer "how many devices are running in my venue", "which device is offline", or to find the device behind a problem. Filter by formFactor (PHONE, TABLET, HANDHELD_POS, COUNTERTOP_POS, DESKTOP, UNKNOWN) or by onlyOnline. Retired devices are hidden unless includeRetired is true. Each device also reports `capabilities.configurableSettings`: which TPV settings THAT KIND of device can change from its own Settings screen (a POS tablet only obeys the checkout screens; a payment terminal has the full catalog; a printer or KDS none). Use `terminal_checkout_screens` to see what each device currently has turned on. Each device also reports `vales` for businesses that use area tickets: whether it issues tickets (and for which area), charges them at the register or delivers them, and `papelElegido` = false when a device that signed in by itself has never had that role chosen.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       formFactor: z
@@ -219,6 +220,11 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           firstSeenAt: true,
           lastHeartbeat: true,
           lastStaffId: true,
+          canIssueAreaTickets: true,
+          canCheckoutAreaTickets: true,
+          canDeliverAreaTickets: true,
+          areaRoleChosenAt: true,
+          fulfillmentArea: { select: { name: true } },
           venue: { select: { name: true } },
         },
         orderBy: [{ lastHeartbeat: 'desc' }, { name: 'asc' }, { id: 'asc' }],
@@ -268,6 +274,14 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           capabilities: r.capabilities,
           // Misma identidad que usa el POS para su outbox offline y el hub LAN.
           deviceUid: r.deviceUid,
+          // D3: qué hace en los vales por área, como lo muestra el panel.
+          vales: {
+            emite: row.canIssueAreaTickets,
+            cobra: row.canCheckoutAreaTickets,
+            entrega: row.canDeliverAreaTickets,
+            area: row.fulfillmentArea?.name ?? null,
+            papelElegido: !(row.selfRegistered && row.areaRoleChosenAt == null),
+          },
         }
       })
 
@@ -350,7 +364,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'terminal_payment_requests',
-    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (supported by terminal/server evidence or an explicit cashier declaration that no card was presented — see `outcomeEvidence` and `evidenceClass`; OPERATOR is human testimony, not a bank decline) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos. `releasedAfterWindow` (window, instant, origin) means the 30-s confirmation window released this charge for lack of evidence; a later bank approval reopens it and is flagged. Each attempt carries `operatorResolution` (who declared no card was presented, how it was authorized — the terminal session or a supervisor PIN — and when) or null. The processor webhook can confirm a charge before the terminal reports it: each row also says who confirmed it first (`closedVia`: terminal or webhook, keeping the same winning payment), lists the attempts the terminal opened for it (`attempts`, at most 25 per charge; `attemptsTruncated`/`attemptsTotal` say when there are more) and which one won (`winnerAttemptId`). To page through ALL the attempts of one charge, call again with `attemptsRequestId` (that requestId) and, from the second page on, `attemptsAfter` = the `attemptsNextCursor` returned by the previous page.',
+    'See POS→terminal charge requests for your venues: which terminals are currently BUSY (an active charge in flight) and recent charges from the last 24h with their outcome (completed/failed/cancelled/timed_out/unknown). Use it to tell whether a terminal is stuck (an UNKNOWN result protects the sale until its outcome is confirmed; a reconnect or elapsed time does not prove no charge) or to check what happened to one charge. Read `outcome` to answer "was the card charged?": CHARGED (a Payment exists), NOT_CHARGED (supported by terminal/server evidence or an explicit cashier declaration that no card was presented — see `outcomeEvidence` and `evidenceClass`; OPERATOR is human testimony, not a bank decline) or UNRESOLVED (nobody proved anything: the charge still reserves the terminal, which is what `busy` means). `status` is the same value the POS sees, so a failed/cancelled charge with no evidence is reported as UNKNOWN on purpose. Each row also carries the customer the POS attached to that charge (customerId, null when the sale was anonymous). A charge the server refused before it ever reached the terminal (terminal offline, busy or from another location; sale cancelled, already paid or missing) is listed as failed with rejectedAtAdmission:true and its reason in failureCode: nothing reached the terminal, so no card was charged. Amounts are in pesos. `releasedAfterWindow` (window, instant, origin) means the 30-s confirmation window released this charge for lack of evidence; a later bank approval reopens it and is flagged. The window only does that where the bank notification (webhook) of every account that terminal could charge with is proven; otherwise it frees only the terminal for other sales and the charge stays UNRESOLVED (timed_out) until a person confirms on the terminal whether it was charged, or a bank approval reconciles it. Each attempt carries `operatorResolution` (who declared no card was presented, how it was authorized — the terminal session or a supervisor PIN — and when) or null. The processor webhook can confirm a charge before the terminal reports it: each row also says who confirmed it first (`closedVia`: terminal or webhook, keeping the same winning payment), lists the attempts the terminal opened for it (`attempts`, at most 25 per charge; `attemptsTruncated`/`attemptsTotal` say when there are more) and which one won (`winnerAttemptId`). To page through ALL the attempts of one charge, call again with `attemptsRequestId` (that requestId) and, from the second page on, `attemptsAfter` = the `attemptsNextCursor` returned by the previous page.',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       limit: z.number().int().positive().max(100).optional().describe('Charge requests per page (default 100)'),
@@ -608,11 +622,12 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'release_terminal_payment',
-    'Review a terminal charge that has an UNKNOWN result and reconcile it with its exact recorded payment when available. A reconnect, elapsed time, or missing payment does not establish that the card was not charged. Without confirmed completion the terminal remains protected. By DEFAULT only PREVIEWS amount, age and order; confirm:true requests reconciliation. Requires tpv:update and a write-capable connection.',
+    'Review a terminal charge that has an UNKNOWN result and reconcile it with its exact recorded payment when available. A reconnect, elapsed time, or missing payment does not establish that the card was not charged. Without confirmed completion the terminal remains protected. By DEFAULT only PREVIEWS amount, age and order; confirm:true requests reconciliation. Avoqado support (superadmin) can pass slotOnly:true with a reason to free only the terminal, never the sale. Requires tpv:update and a write-capable connection.',
     {
       venueId: z.string().describe('Venue that owns the terminal (must be in your scope)'),
       requestId: z.string().min(1).describe('The stuck charge (status UNKNOWN) from terminal_payment_requests'),
-      reason: z.string().min(3).max(300).optional().describe('Why you are releasing it (e.g. "la PAX se reinició y no cobró")'),
+      // A6 · fix 1: la misma regla que la ruta REST de superadmin — se mide RECORTADO.
+      reason: z.string().trim().min(3).max(300).optional().describe('Why you are releasing it (e.g. "la PAX se reinició y no cobró")'),
       confirm: z.boolean().optional().describe('Must be true to actually release; without it you get a preview'),
       verifiedUncharged: z
         .boolean()
@@ -622,8 +637,16 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
             'nunca evidencia del procesador: libera la venta y la terminal, queda auditado con su nombre, y si el dinero ' +
             'aparece después el registro manda sobre la declaración. Sólo úsalo si alguien lo revisó de verdad.',
         ),
+      slotOnly: z
+        .boolean()
+        .optional()
+        .describe(
+          'Sólo soporte de Avoqado: suelta LA TERMINAL, nunca la venta, de un cobro con resultado UNKNOWN — lo mismo que la ' +
+            'liberación automática hace 20 min después de que la terminal vuelve, pero ya. La venta sigue bloqueada hasta confirmar ' +
+            'qué pasó, y si ese cobro dejó rastro de dinero no se suelta nada. Pide reason y confirm:true.',
+        ),
     },
-    async ({ venueId, requestId, reason, confirm, verifiedUncharged }) => {
+    async ({ venueId, requestId, reason, confirm, verifiedUncharged, slotOnly }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       // Same bar as the tablet's manager button: `tpv:update` (MANAGER+). NOT `payments:create`,
       // which every cashier holds — a cashier must not be able to free a slot through the MCP
@@ -635,6 +658,13 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       guard.requirePermission(verifiedUncharged ? 'payments:reconcile-uncharged' : 'tpv:update', venueId)
       // 🔴 Freeing a terminal lets the cashier charge again on it: a read-only token must never do it.
       requireWriteScopeAlways(scope, 'tpv:update', 'cierra las sesiones abiertas de una terminal')
+      // A6 · S6: soltar SÓLO la terminal es de soporte. `scope.isSuperAdmin` lo resuelve el servidor con la sesión, no un argumento.
+      const motivo = reason?.trim()
+      if (slotOnly) {
+        if (!scope.isSuperAdmin) return text({ ok: false, error: 'Soltar sólo la terminal es una acción de soporte de Avoqado.' })
+        if (verifiedUncharged) return text({ ok: false, error: 'Elige una: declarar que no se cobró, o soltar sólo la terminal.' })
+        if (!motivo) return text({ ok: false, error: 'Falta el motivo: queda en la bitácora con tu nombre.' })
+      }
 
       const row = await prisma.terminalPaymentRequest.findFirst({
         where: { requestId, ...where },
@@ -656,6 +686,51 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           resultJson: true,
         },
       })
+      // 🔴 A5 · E3: con la declaración, una solicitud SIN fila (el POST del POS nunca llegó) ya no rebota aquí: pasa al núcleo,
+      // que autoriza primero y deja la lápida «no se cobró» si la llave es de un POS. El permiso y `confirm` son los mismos.
+      if (!row && verifiedUncharged) {
+        if (!confirm) {
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            message:
+              `El servidor no tiene registro del cobro ${requestId}: el POS lo intentó mandar y nunca llegó. Vas a DECLARAR que ` +
+              'alguien miró la terminal y ese cobro no pasó. Queda una constancia «no se cobró» a nombre de quien lo declara, para ' +
+              'que la venta pueda volver a cobrarse. Si el servidor encuentra cualquier señal de cobro, lo rechaza. Confirma sólo si se revisó de verdad.',
+          })
+        }
+        const r = await terminalPaymentService.releaseUnknownRequest({
+          requestId,
+          venueId,
+          actor: { staffId: scope.staffId, source: 'MCP' },
+          reason: reason ?? 'Declarada desde el MCP',
+          declaration: { requestId, resolutionId: randomUUID(), statement: 'UNCHARGED_VERIFIED' as const, statementVersion: 1 as const },
+        })
+        // La auditoría apunta a la fila que QUEDÓ (como la otra rama, `row.id`) y sólo dice «lápida» si lo es: si la admisión del
+        // POST ganó la llave, el núcleo siguió el camino normal sobre SU fila.
+        const quedo = await prisma.terminalPaymentRequest.findFirst({
+          where: { requestId, ...where },
+          select: { id: true, resultJson: true },
+        })
+        const sobre = quedo?.resultJson
+        const esLapida =
+          !!sobre && typeof sobre === 'object' && !Array.isArray(sobre) && (sobre as Record<string, unknown>).tombstone === true
+        await auditMcpWrite(scope, {
+          action: 'TERMINAL_PAYMENT_RELEASE_MCP',
+          entity: 'TerminalPaymentRequest',
+          entityId: quedo?.id ?? requestId,
+          venueId,
+          data: { requestId, released: r.released, status: r.status, reason: reason ?? null, tombstone: esLapida },
+        })
+        return text({
+          ok: r.released,
+          released: r.released,
+          status: r.status,
+          message: r.released
+            ? 'Quedó registrado que ese cobro no pasó. La venta ya puede volver a cobrarse.'
+            : 'No se registró: el servidor encontró señales de ese cobro. Consulta su resultado antes de volver a cobrar.',
+        })
+      }
       if (!row) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
       // 🔴 La variante declarada se salta ESTE filtro —no el del servicio, que revalida todo— porque una fila
       // TIMED_OUT todavía incierta también aparta la terminal: son justo las legacy que hay que poder limpiar.
@@ -663,6 +738,19 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         // Se informa TAMBIÉN el desenlace canónico: `terminal_payment_requests` muestra el status ya traducido, así
         // que sin esto una fila que ahí se ve «UNKNOWN» rebotaría aquí con «su estado es FAILED» y nadie entendería.
         const desenlace = desenlaceCanonico(row)
+        // A4b (21-oct): la RANURA ya se soltó (el reloj de 20 min, soporte o el cese acreditado por la terminal), pero la VENTA
+        // sigue en duda. Se dice eso, nunca «no se cobró» ni «no está atorado».
+        if (desenlace.outcome === 'UNRESOLVED' && fueSoltadaPorPolitica(row)) {
+          return text({
+            ok: false,
+            status: row.status,
+            outcome: desenlace.outcome,
+            slotHeld: false,
+            error:
+              'La terminal ya está libre: puede cobrar otras ventas. Esa venta sigue pendiente de confirmar si se cobró: si alguien ' +
+              'revisó la terminal, decláralo con verifiedUncharged:true; si aparece el pago, se concilia solo.',
+          })
+        }
         return text({
           ok: false,
           status: row.status,
@@ -684,20 +772,25 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           senderDevice: row.senderDevice,
           ageMinutes,
           terminalReturnedAt: row.terminalReturnedAt?.toISOString() ?? null,
-          message: verifiedUncharged
-            ? `Vas a DECLARAR que alguien miró la terminal ${row.terminalId} y el cobro de $${(row.amountCents / 100).toFixed(2)} ` +
-              `(hace ${ageMinutes} min) no pasó. Eso libera la venta y la terminal, y queda registrado a nombre de quien lo declara. ` +
-              'Si el servidor encuentra cualquier señal de que sí se cobró, lo rechaza. Confirma sólo si se revisó de verdad.'
-            : `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
-              'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
+          message: slotOnly
+            ? `Vas a SOLTAR LA TERMINAL ${row.terminalId} (no la venta): el cobro de $${(row.amountCents / 100).toFixed(2)} lleva ` +
+              `${ageMinutes} min sin resultado. La terminal podrá cobrar otras ventas; esta venta sigue bloqueada hasta confirmar qué ` +
+              'pasó, y si aparece el pago se concilia solo. Queda registrado a tu nombre con el motivo. Si ese cobro dejó rastro de ' +
+              'dinero, no se suelta nada.'
+            : verifiedUncharged
+              ? `Vas a DECLARAR que alguien miró la terminal ${row.terminalId} y el cobro de $${(row.amountCents / 100).toFixed(2)} ` +
+                `(hace ${ageMinutes} min) no pasó. Eso libera la venta y la terminal, y queda registrado a nombre de quien lo declara. ` +
+                'Si el servidor encuentra cualquier señal de que sí se cobró, lo rechaza. Confirma sólo si se revisó de verdad.'
+              : `La terminal ${row.terminalId} tiene un cobro de $${(row.amountCents / 100).toFixed(2)} sin confirmar desde hace ${ageMinutes} min. ` +
+                'Se buscará el pago exacto de esta solicitud. Si su resultado sigue pendiente, la terminal conservará la protección. Confirma para consultar y conciliar; no vuelvas a pasar la tarjeta.',
         })
       }
 
       const r = await terminalPaymentService.releaseUnknownRequest({
         requestId,
         venueId,
-        actor: { staffId: scope.staffId, source: 'MCP' },
-        reason: reason ?? 'Liberada desde el MCP',
+        actor: { staffId: scope.staffId, source: slotOnly ? 'SUPERADMIN' : 'MCP' },
+        reason: motivo || 'Liberada desde el MCP',
         ...(verifiedUncharged
           ? {
               declaration: {
@@ -715,14 +808,25 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         entity: 'TerminalPaymentRequest',
         entityId: row.id,
         venueId,
-        data: { requestId, released: r.released, status: r.status, reason: reason ?? null },
+        data: { requestId, released: r.released, status: r.status, reason: reason ?? null, slotOnly: Boolean(slotOnly) },
       })
       if (r.released) {
         return text({
           ok: true,
           released: true,
           status: r.status,
-          message: `Terminal ${row.terminalId} liberada. La tablet ya puede volver a mandarle cobros.`,
+          message: slotOnly
+            ? `Terminal ${row.terminalId} liberada (sólo la terminal). La venta sigue protegida hasta confirmar qué pasó con ese cobro.`
+            : `Terminal ${row.terminalId} liberada. La tablet ya puede volver a mandarle cobros.`,
+        })
+      }
+      if (r.heldByMoneyEvidence) {
+        return text({
+          ok: false,
+          released: false,
+          status: r.status,
+          message:
+            'No se soltó: ese cobro dejó rastro de dinero (aviso del banco, un pago ligado o la terminal dice que cobró). Concílialo antes de volver a cobrar.',
         })
       }
       if (r.status === TerminalPaymentRequestStatus.COMPLETED) {

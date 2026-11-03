@@ -24,11 +24,13 @@
  */
 import prisma from '@/utils/prismaClient'
 import { fullSetupAngelPayMerchant } from '@/services/superadmin/angelpayFullSetup.service'
-import { angelPayIntegrationsApiClient } from '@/services/integrations/angelpay-integrations-api.client'
+import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '@/services/integrations/angelpay-integrations-api.client'
 import type { FullSetupAngelPayInput } from '@/schemas/dashboard/angelpay-full-setup.schema'
 import { AFILIACION_EN_VARIOS_SLOTS } from '@/services/shared/slotsDeAfiliacion'
 
+// La clase real de error: el registro la distingue con `instanceof`. Sólo las llamadas de red son falsas.
 jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
+  ...jest.requireActual('@/services/integrations/angelpay-integrations-api.client'),
   angelPayIntegrationsApiClient: {
     auth: jest.fn(),
     registerWebhook: jest.fn(),
@@ -47,12 +49,26 @@ jest.mock('@/services/superadmin/merchantAccount.service', () => ({
 const mockedPrisma = prisma as unknown as {
   paymentProvider: { findUnique: jest.Mock }
   angelPayUserAccount: { findUnique: jest.Mock }
-  merchantAccount: { findUnique: jest.Mock; update: jest.Mock }
+  merchantAccount: { findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
   venuePaymentConfig: { findUnique: jest.Mock; create: jest.Mock; update: jest.Mock }
   $transaction: jest.Mock
 }
 const mockedAuth = angelPayIntegrationsApiClient.auth as jest.Mock
 const mockedRegisterWebhook = angelPayIntegrationsApiClient.registerWebhook as jest.Mock
+
+/** La misma fila contesta a las dos lecturas: la de la transacción del alta y la del registro del aviso, ya sobre lo comiteado. */
+const merchantFijo = (over: Record<string, unknown> = {}) => ({
+  id: 'merchant-1',
+  externalMerchantId: '990',
+  angelpayUserAccountId: 'login-1',
+  displayName: 'Boutique Centro',
+  active: true,
+  angelpayWebhookSecret: null,
+  angelpayWebhookEndpointId: null,
+  provider: { code: 'ANGELPAY' },
+  angelpayUserAccount: { environment: 'QA', venueId: 'venue-1' },
+  ...over,
+})
 
 function baseInput(overrides: Partial<FullSetupAngelPayInput> = {}): FullSetupAngelPayInput {
   return {
@@ -74,33 +90,29 @@ beforeEach(() => {
     status: 'ACTIVE',
     lastValidationErr: null,
   })
-  mockedPrisma.merchantAccount.findUnique.mockResolvedValue({
-    id: 'merchant-1',
-    angelpayUserAccountId: 'login-1',
-    active: true,
-    provider: { code: 'ANGELPAY' },
-  })
+  mockedPrisma.merchantAccount.findUnique.mockResolvedValue(merchantFijo())
+  mockedPrisma.merchantAccount.updateMany.mockResolvedValue({ count: 1 })
   mockedPrisma.venuePaymentConfig.findUnique.mockResolvedValue(null)
   mockedPrisma.venuePaymentConfig.create.mockResolvedValue({})
 })
 
 describe('fullSetupAngelPayMerchant — AngelPay webhook auto-registration', () => {
-  it('does not call the AngelPay client at all when no apiKey is provided (default webhookRegistered=false)', async () => {
+  it('sin llave en una cuenta sin secreto: no llama a AngelPay, el alta sale bien y dice por qué quedó sin aviso', async () => {
     const result = await fullSetupAngelPayMerchant(baseInput())
 
     expect(mockedAuth).not.toHaveBeenCalled()
     expect(mockedRegisterWebhook).not.toHaveBeenCalled()
-    expect(mockedPrisma.merchantAccount.update).not.toHaveBeenCalled()
+    expect(mockedPrisma.merchantAccount.updateMany).not.toHaveBeenCalled()
     expect(result.webhookRegistered).toBe(false)
+    expect(result.webhookRegistrationError).toEqual(expect.stringContaining('llave'))
     expect(result.merchantAccountId).toBe('merchant-1')
   })
 
-  it('with apiKey: authenticates, registers the webhook, and persists the EXACT secret + endpointId — webhookRegistered=true', async () => {
+  it('con llave: la valida, registra y guarda el secreto EXACTO y el endpoint — webhookRegistered=true, sin motivo', async () => {
     mockedAuth.mockResolvedValue({ accessToken: 'jwt-token-abc', merchantId: '990' })
     mockedRegisterWebhook.mockResolvedValue({ endpointId: 'ep_123', secret: 'whsec_abcXYZ' })
-    mockedPrisma.merchantAccount.update.mockResolvedValue({})
 
-    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }))
+    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }), 'staff-1')
 
     expect(mockedAuth).toHaveBeenCalledWith('key-1', 'QA')
     expect(mockedRegisterWebhook).toHaveBeenCalledWith(
@@ -111,55 +123,128 @@ describe('fullSetupAngelPayMerchant — AngelPay webhook auto-registration', () 
         events: ['send_transaction', 'offline_event', 'canceled_transaction'],
       }),
     )
-    expect(mockedPrisma.merchantAccount.update).toHaveBeenCalledWith({
-      where: { id: 'merchant-1' },
+    expect(mockedPrisma.merchantAccount.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: 'merchant-1', angelpayWebhookSecret: null }),
       data: { angelpayWebhookSecret: 'whsec_abcXYZ', angelpayWebhookEndpointId: 'ep_123' },
     })
     expect(result.webhookRegistered).toBe(true)
+    expect(result.webhookRegistrationError).toBeUndefined()
     expect(result.merchantAccountId).toBe('merchant-1')
   })
 
-  it('defaults environment to PROD when omitted and login.mode is "existing"', async () => {
-    mockedAuth.mockResolvedValue({ accessToken: 'jwt-token-abc', merchantId: '990' })
+  it('las llamadas a AngelPay van DESPUÉS de resolver la transacción del alta', async () => {
+    const orden: string[] = []
+    mockedPrisma.$transaction.mockImplementationOnce(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const resultado = await callback(prisma)
+      orden.push('commit')
+      return resultado
+    })
+    mockedAuth.mockImplementation(async () => {
+      orden.push('auth')
+      return { accessToken: 'jwt-token-abc', merchantId: '990' }
+    })
     mockedRegisterWebhook.mockResolvedValue({ endpointId: 'ep_1', secret: 'whsec_1' })
-    mockedPrisma.merchantAccount.update.mockResolvedValue({})
 
     await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1' }))
 
-    expect(mockedAuth).toHaveBeenCalledWith('key-1', 'PROD')
+    expect(orden).toEqual(['commit', 'auth'])
+  })
+
+  it('sin ambiente en la petición usa el de la cuenta vinculada: un login QA ya no se manda a PROD a ciegas', async () => {
+    mockedAuth.mockResolvedValue({ accessToken: 'jwt-token-abc', merchantId: '990' })
+    mockedRegisterWebhook.mockResolvedValue({ endpointId: 'ep_1', secret: 'whsec_1' })
+
+    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1' }))
+
+    expect(mockedAuth).toHaveBeenCalledWith('key-1', 'QA')
+    expect(result.webhookRegistered).toBe(true)
+  })
+
+  it('un ambiente distinto al de la cuenta: el alta sale bien y el aviso queda sin registrar, con el motivo', async () => {
+    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'PROD' }))
+
+    expect(mockedAuth).not.toHaveBeenCalled()
+    expect(result.webhookRegistered).toBe(false)
+    expect(result.webhookRegistrationError).toEqual(expect.stringContaining('QA'))
+  })
+
+  it('una cuenta que ya tenía secreto: registrado por lo que ya hay, sin llamar a AngelPay aunque traigan llave', async () => {
+    mockedPrisma.merchantAccount.findUnique.mockResolvedValue(merchantFijo({ angelpayWebhookSecret: 'whsec_viejo' }))
+
+    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }))
+
+    expect(mockedAuth).not.toHaveBeenCalled()
+    expect(mockedRegisterWebhook).not.toHaveBeenCalled()
+    expect(mockedPrisma.merchantAccount.updateMany).not.toHaveBeenCalled()
+    expect(result.webhookRegistered).toBe(true)
+  })
+
+  it('también sin llave: una cuenta con secreto sigue siendo registrada', async () => {
+    mockedPrisma.merchantAccount.findUnique.mockResolvedValue(merchantFijo({ angelpayWebhookSecret: 'whsec_viejo' }))
+
+    const result = await fullSetupAngelPayMerchant(baseInput())
+
+    expect(result.webhookRegistered).toBe(true)
+    expect(result.webhookRegistrationError).toBeUndefined()
+  })
+
+  it('una llave de OTRO comercio: el alta sale bien, no se crea nada y el motivo lo dice', async () => {
+    mockedAuth.mockResolvedValue({ accessToken: 'jwt-token-abc', merchantId: '991' })
+
+    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }))
+
+    expect(mockedRegisterWebhook).not.toHaveBeenCalled()
+    expect(result.merchantAccountId).toBe('merchant-1')
+    expect(result.webhookRegistered).toBe(false)
+    expect(result.webhookRegistrationError).toEqual(expect.stringContaining('991'))
   })
 
   it('soft-fails when auth() throws — merchant is still returned, webhookRegistered=false, no throw, no DB write', async () => {
-    mockedAuth.mockRejectedValue(new Error('AngelPay: fallo autenticando apiKey: 401'))
+    mockedAuth.mockRejectedValue(new AngelPayIntegrationsApiError('AngelPay: fallo autenticando apiKey: 401', 401, {}))
 
     const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'bad-key', environment: 'QA' }))
 
     expect(result.merchantAccountId).toBe('merchant-1')
     expect(result.webhookRegistered).toBe(false)
+    expect(result.webhookRegistrationError).toEqual(expect.stringContaining('rechazó'))
     expect(mockedRegisterWebhook).not.toHaveBeenCalled()
-    expect(mockedPrisma.merchantAccount.update).not.toHaveBeenCalled()
+    expect(mockedPrisma.merchantAccount.updateMany).not.toHaveBeenCalled()
   })
 
-  it('soft-fails when registerWebhook() throws — merchant is still returned, webhookRegistered=false, no throw, no DB write', async () => {
+  it('soft-fails when registerWebhook() throws — merchant is still returned, no DB write, and it says the result is unknown', async () => {
     mockedAuth.mockResolvedValue({ accessToken: 'jwt-token-abc', merchantId: '990' })
-    mockedRegisterWebhook.mockRejectedValue(new Error('AngelPay: fallo registrando webhook: 500'))
+    mockedRegisterWebhook.mockRejectedValue(new AngelPayIntegrationsApiError('AngelPay: fallo registrando webhook: 500', 500, {}))
 
     const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }))
 
     expect(result.merchantAccountId).toBe('merchant-1')
     expect(result.webhookRegistered).toBe(false)
-    expect(mockedPrisma.merchantAccount.update).not.toHaveBeenCalled()
+    expect(result.webhookRegistrationError).toEqual(expect.stringContaining('No sabemos'))
+    expect(mockedPrisma.merchantAccount.updateMany).not.toHaveBeenCalled()
   })
 
-  it('soft-fails when the merchantAccount.update persistence throws — webhookRegistered stays false, no throw', async () => {
+  it('soft-fails when saving the secret throws — webhookRegistered stays false, no throw', async () => {
     mockedAuth.mockResolvedValue({ accessToken: 'jwt-token-abc', merchantId: '990' })
     mockedRegisterWebhook.mockResolvedValue({ endpointId: 'ep_1', secret: 'whsec_1' })
-    mockedPrisma.merchantAccount.update.mockRejectedValue(new Error('DB unavailable'))
+    mockedPrisma.merchantAccount.updateMany.mockRejectedValue(new Error('DB unavailable'))
 
     const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }))
 
     expect(result.merchantAccountId).toBe('merchant-1')
     expect(result.webhookRegistered).toBe(false)
+  })
+
+  it('un error que no es nuestro (la base cae al leer) tampoco tumba el alta, y el motivo no repite su texto', async () => {
+    mockedPrisma.merchantAccount.findUnique
+      .mockResolvedValueOnce(merchantFijo())
+      .mockRejectedValueOnce(new Error('postgres://usuario:contrasena@host/base'))
+
+    const result = await fullSetupAngelPayMerchant(baseInput({ apiKey: 'key-1', environment: 'QA' }))
+
+    expect(result.merchantAccountId).toBe('merchant-1')
+    expect(result.webhookRegistered).toBe(false)
+    expect(result.webhookRegistrationError).toBeDefined()
+    expect(result.webhookRegistrationError).not.toContain('contrasena')
   })
 })
 
@@ -211,6 +296,7 @@ describe('fullSetupAngelPayMerchant — una afiliación ocupa UN solo slot', () 
   it('un merchant que no está en ningún slot sí entra a SECONDARY (la validación no estorba el caso legítimo)', async () => {
     mockedPrisma.merchantAccount.findUnique.mockResolvedValue({
       id: 'merchant-2',
+      externalMerchantId: '124',
       angelpayUserAccountId: 'login-1',
       active: true,
       provider: { code: 'ANGELPAY' },

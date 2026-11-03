@@ -194,6 +194,7 @@ export async function reviewSaleVerification(req: Request, res: Response): Promi
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      ...(error.code ? { code: error.code } : {}),
     })
   }
 }

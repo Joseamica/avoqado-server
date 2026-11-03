@@ -83,6 +83,7 @@ router.post(
   checkPermission('platform-billing:issue'),
   controller.registerPayment,
 )
+router.post('/invoices/:id/refresh', checkPermission('platform-billing:issue'), controller.refreshInvoice)
 router.post('/invoices/:id/email', validateRequest(sendEmailSchema), checkPermission('platform-billing:issue'), controller.sendInvoiceEmail)
 router.post(
   '/invoices/:id/cancel',

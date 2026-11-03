@@ -185,6 +185,69 @@ describe('MCP list_devices capability projection', () => {
       }),
     )
   })
+
+  // D3 (2-nov-2026): el MCP dice qué hace cada aparato en los vales, como el panel.
+  it('dice que la PC de la cremería emite vales de Cremería y que su papel ya se eligió', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      {
+        id: 'pc-cremeria',
+        name: 'PC de la cremería',
+        type: TerminalType.POS_ANDROID,
+        status: 'ACTIVE',
+        formFactor: DeviceFormFactor.DESKTOP,
+        deviceUid: 'device-cremeria',
+        selfRegistered: true,
+        firstSeenAt: new Date('2026-11-02T17:18:00.000Z'),
+        lastHeartbeat: null,
+        lastStaffId: null,
+        canIssueAreaTickets: true,
+        canCheckoutAreaTickets: false,
+        canDeliverAreaTickets: false,
+        areaRoleChosenAt: new Date('2026-11-02T20:52:00.000Z'),
+        fulfillmentArea: { name: 'Cremería' },
+        venue: { name: 'Tienda Centro' },
+      },
+    ])
+
+    const response = await captureListDevicesHandler()({ venueId: 'venue-1' })
+    const body = JSON.parse(response.content[0].text)
+
+    expect(prismaMock.terminal.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          canIssueAreaTickets: true,
+          canCheckoutAreaTickets: true,
+          canDeliverAreaTickets: true,
+          areaRoleChosenAt: true,
+          fulfillmentArea: { select: { name: true } },
+        }),
+      }),
+    )
+    expect(body.devices[0].vales).toEqual({ emite: true, cobra: false, entrega: false, area: 'Cremería', papelElegido: true })
+  })
+
+  it('un aparato que se dio de alta solo y nunca eligió su papel lo dice', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([
+      {
+        id: 'tablet-nueva',
+        name: 'Tableta nueva',
+        type: TerminalType.POS_ANDROID,
+        status: 'ACTIVE',
+        deviceUid: 'device-nueva',
+        selfRegistered: true,
+        canIssueAreaTickets: false,
+        canCheckoutAreaTickets: false,
+        canDeliverAreaTickets: false,
+        areaRoleChosenAt: null,
+        fulfillmentArea: null,
+        venue: { name: 'Tienda Centro' },
+      },
+    ])
+
+    const body = JSON.parse((await captureListDevicesHandler()({ venueId: 'venue-1' })).content[0].text)
+
+    expect(body.devices[0].vales).toEqual({ emite: false, cobra: false, entrega: false, area: null, papelElegido: false })
+  })
 })
 
 describe('MCP refund_card_on_terminal device action capability guard', () => {

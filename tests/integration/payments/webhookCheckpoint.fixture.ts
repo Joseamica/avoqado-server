@@ -70,7 +70,7 @@ async function purgarFixturesHuerfanos(prefijo: string): Promise<void> {
     await prisma.angelPayUserAccount.deleteMany({ where: { venueId } })
     await prisma.staffVenue.deleteMany({ where: { venueId } })
     await prisma.staffOrganization.deleteMany({ where: { organizationId: id } })
-    await prisma.staff.deleteMany({ where: { email: `${id}-cajero@example.test` } })
+    await prisma.staff.deleteMany({ where: { email: { in: [`${id}-cajero@example.test`, `${id}-backoffice@example.test`] } } })
     await prisma.terminal.deleteMany({ where: { venueId } })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     await prisma.organization.deleteMany({ where: { id } })
@@ -90,6 +90,19 @@ export interface IntentoRest {
   amount?: number
   tip?: number
   tarjeta?: { cardBrand?: string; maskedPan?: string; entryMode?: string; last4?: string; typeOfCard?: string; bank?: string }
+}
+
+/**
+ * Quien edita una verificación de venta es el back-office: un OWNER de verdad en la tienda del fixture (aprueba con
+ * `sale-verifications:approve`). El cajero compartido no aprueba desde A4 y no se le cambia el rol: otras suites dependen de
+ * él. La suite que lo crea borra a la persona después de `destruir()` (que ya se lleva su fila de la tienda).
+ */
+export async function crearBackOffice(f: { fixture: string; venueId: string }): Promise<string> {
+  const staff = await prisma.staff.create({
+    data: { email: `${f.fixture}-backoffice@example.test`, firstName: 'Back', lastName: 'Office', active: true },
+  })
+  await prisma.staffVenue.create({ data: { staffId: staff.id, venueId: f.venueId, role: 'OWNER', active: true } })
+  return staff.id
 }
 
 export async function crearFixture(prefijo: string) {
@@ -133,6 +146,8 @@ export async function crearFixture(prefijo: string) {
       alias: 'AngelPay de prueba',
       credentialsEncrypted: {},
       angelpayUserAccountId: login.id,
+      // La forma de producción: sin esto, cada cobro de estas suites gritaría «cuenta sin aviso del banco» (D11).
+      angelpayWebhookSecret: 'whsec_fixture_de_prueba',
     },
   })
 
@@ -210,6 +225,21 @@ export async function crearFixture(prefijo: string) {
 
   const nuevoEventId = () => `${fixture}-ev-${++eventos}`
 
+  /**
+   * A8 (21-oct): la VENTANA de 30 s sólo escribe «no se cobró» (`FAILED/NO_EVIDENCE_AFTER_WINDOW`) donde el aviso del banco de
+   * TODAS las cuentas con las que pudo cobrar la terminal está COMPROBADO (`avisoDelBancoComprobado`); si no, suelta sólo la
+   * ranura. Las suites que fijan ese desenlace —el caso de Testarudo— lo siembran con esto: la terminal del fixture con SU cuenta
+   * AngelPay asignada, activa y con avisos recibidos. Sin cobros con tarjeta de hace más de 60 s sin su aviso: los de cada prueba
+   * se borran en `limpiar`.
+   */
+  const conAvisoDelBancoComprobado = async () => {
+    await prisma.terminal.update({ where: { serialNumber: serial }, data: { assignedMerchantIds: [merchant.id] } })
+    await prisma.merchantAccount.update({
+      where: { id: merchant.id },
+      data: { active: true, angelpayWebhookLastReceivedAt: new Date(Date.now() - 60_000) },
+    })
+  }
+
   // ─── Codex R3: tarifas REALES (proveedor, precio al negocio por slot, liquidación) para calcular el costo sin fakes ───
   type Tasas = {
     debitRate?: number
@@ -255,6 +285,7 @@ export async function crearFixture(prefijo: string) {
         alias: 'AngelPay secundaria de prueba',
         credentialsEncrypted: {},
         angelpayUserAccountId: loginM2.id,
+        angelpayWebhookSecret: 'whsec_fixture_de_prueba',
       },
     })
     secundarias.push({ id: m2.id, loginId: loginM2.id })
@@ -409,6 +440,7 @@ export async function crearFixture(prefijo: string) {
     registroDeLaTerminal,
     eventoAngelPay,
     nuevoEventId,
+    conAvisoDelBancoComprobado,
     limpiar,
     destruir,
     conLiquidacion,

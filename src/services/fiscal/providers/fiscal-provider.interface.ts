@@ -73,6 +73,17 @@ export interface SatValidationResult {
   errors: SatValidationError[]
 }
 
+/**
+ * El proveedor rechazó el dato al dar de alta al cliente: un RFC que no está en la lista del SAT, un régimen que no le toca, un
+ * código postal que no existe. 🔴 Es un veredicto sobre el receptor, no una caída: no se confunde con «el SAT no contestó».
+ */
+export class CustomerDataRejectedError extends Error {
+  constructor(public readonly validation: SatValidationResult) {
+    super(validation.errors.map(e => e.message).join(' · '))
+    this.name = 'CustomerDataRejectedError'
+  }
+}
+
 export interface CfdiItemTax {
   type: 'IVA' | 'IEPS' | 'ISR'
   factor: 'Tasa' | 'Cuota' | 'Exento'

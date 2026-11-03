@@ -20,11 +20,11 @@
  *   POST /auth/token                    { apiKey } → 200 { access_token, token_type, expires_in }
  *     — access_token es un JWT; el claim `sub` (string, ej. "990") es el merchant_id.
  *     — apiKey inválida o de otro ambiente → 401.
- *   GET  /api/v1/webhooks/endpoints     (Bearer) → 200 [{ id, url, ... }]  (SIN secret)
+ *   GET  /api/v1/webhooks/endpoints     (Bearer) → 200 [{ id, url, ... }]  (SIN secret; no lo usamos)
  *   POST /api/v1/webhooks/endpoints     (Bearer) { url, description?, events } → 200/201
  *        { id (uuid), id_merchant, url, secret ("whsec_..."), is_active, events, created_at }
  *     — 🚨 `secret` SOLO se devuelve en el create. No hay GET ni regenerate — persistir de inmediato.
- *   DELETE /api/v1/webhooks/endpoints/{id}  (Bearer)
+ *   DELETE /api/v1/webhooks/endpoints/{id}  (Bearer; 🔴 no lo usamos: un endpoint nuestro nunca se borra, ver `registerWebhook`)
  */
 import axios, { AxiosInstance } from 'axios'
 
@@ -122,12 +122,11 @@ interface AngelPayWebhookEndpoint {
 }
 
 /**
- * Registra (o re-registra) el webhook de AngelPay para un merchant.
+ * Da de alta un webhook de AngelPay. AngelPay sólo entrega `secret` en esta respuesta: no hay GET ni regenerate.
  *
- * AngelPay solo entrega `secret` en la respuesta de create — no hay GET ni
- * regenerate — así que si ya existe un endpoint con la misma `url` lo
- * borramos primero (constraint de "un secret por create") para poder emitir
- * uno fresco y persistirlo.
+ * 🔴 Sólo crea. Nunca lista ni borra (D11, ruling del 2-nov): borrar un endpoint nuestro para «re-registrarlo» cambiaría el secreto
+ * con el que todavía se verifica dinero. Si AngelPay ya tiene uno con esa `url`, o admite otro (el de más sólo manda avisos que no
+ * validan) o lo rechaza con un 4xx, y eso lo decide quien llama. Quién llama y cuándo: `angelpayWebhookRegistration.service.ts`.
  */
 async function registerWebhook(
   accessToken: string,
@@ -138,13 +137,6 @@ async function registerWebhook(
   const headers = { Authorization: `Bearer ${accessToken}` }
 
   try {
-    const existingResp = await http.get<AngelPayWebhookEndpoint[]>('/api/v1/webhooks/endpoints', { baseURL, headers })
-    const existing = Array.isArray(existingResp.data) ? existingResp.data : []
-    const duplicate = existing.find(e => e.url === params.url)
-    if (duplicate) {
-      await http.delete(`/api/v1/webhooks/endpoints/${duplicate.id}`, { baseURL, headers })
-    }
-
     const createResp = await http.post<AngelPayWebhookEndpoint>(
       '/api/v1/webhooks/endpoints',
       { url: params.url, description: params.description, events: params.events },

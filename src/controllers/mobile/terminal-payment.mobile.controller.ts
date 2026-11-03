@@ -9,6 +9,7 @@ import { Request, Response } from 'express'
 import { type CancelPaymentOutcome, terminalPaymentService } from '../../services/terminal-payment.service'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 import logger from '../../config/logger'
+import { logAction } from '../../services/dashboard/activity-log.service'
 import AppError, {
   BadRequestError,
   OrderAlreadyPaidError,
@@ -406,11 +407,18 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
  * A manager frees a terminal stuck by an UNKNOWN charge. Tenant-scoped by the venueId in the
  * URL (the service filters every query by it); money-safe (a card payment beats a release).
  */
-export async function releaseTerminalPayment(req: Request, res: Response) {
+export const releaseTerminalPayment = (req: Request, res: Response) => liberarCobro(req, res, 'MOBILE', 'Liberada desde el POS')
+
+/**
+ * POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration
+ * El botón «No se cobró» del banner de la terminal: la MISMA declaración del POS, con la terminal como origen en la bitácora.
+ */
+export const declararSinCobroDesdeLaTerminal = (req: Request, res: Response) => liberarCobro(req, res, 'TPV', 'Liberada desde la terminal')
+
+async function liberarCobro(req: Request, res: Response, source: 'MOBILE' | 'TPV', razonPorDefault: string) {
   try {
     const { venueId, requestId } = req.params
-    const reason =
-      typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : 'Liberada desde el POS'
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : razonPorDefault
     const staffId: string | undefined = (req as any).authContext?.userId
 
     // La declaración viaja SÓLO si el cuerpo trae `statement`. Nunca se deriva de `reason` ni de `confirm`:
@@ -425,7 +433,7 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
     const r = await terminalPaymentService.releaseUnknownRequest({
       requestId,
       venueId,
-      actor: { staffId: staffId ?? null, source: 'MOBILE' },
+      actor: { staffId: staffId ?? null, source },
       reason,
       declaration,
     })
@@ -456,9 +464,28 @@ export async function releaseTerminalPayment(req: Request, res: Response) {
         requestId: req.params.requestId,
         venueId: req.params.venueId,
       })
+      // A5 · Fix round 0 (ruling del controlador): como «no presentó tarjeta» (`TERMINAL_PAYMENT_NO_INSTRUMENT_AUTH_DENIED`), un
+      // rechazo de AUTORIZACIÓN deja rastro —el PIN equivocado incluido— con la sesión y el venue. Nunca el PIN: sólo si venía uno.
+      if (error.statusCode === 403) {
+        void logAction({
+          staffId: (req as any).authContext?.userId ?? null,
+          venueId: req.params.venueId,
+          action: 'TERMINAL_PAYMENT_UNCHARGED_AUTH_DENIED',
+          entity: 'TerminalPaymentRequest',
+          entityId: req.params.requestId,
+          data: { requestId: req.params.requestId, code: error.code, conPin: typeof req.body?.supervisorPin === 'string' },
+        })
+      }
       return res.status(error.statusCode).json({ success: false, released: false, code: error.code, message: error.message })
     }
-    logger.error('Error in releaseTerminalPayment', { error: error instanceof Error ? error.message : 'Error desconocido' })
+    // 🔴 A5 · E7: con PIN en el cuerpo, el mensaje de un error inesperado puede llevarlo (Prisma imprime los argumentos de la
+    // consulta que falló): se registra nombre y código, nunca el mensaje. Sin PIN, como siempre.
+    const conPin = typeof req.body?.supervisorPin === 'string'
+    logger.error('Error in releaseTerminalPayment', {
+      ...(conPin ? {} : { error: error instanceof Error ? error.message : 'Error desconocido' }),
+      errorName: error instanceof Error ? error.name : typeof error,
+      errorCode: (error as { code?: unknown } | null)?.code ?? null,
+    })
     return res.status(500).json({ success: false, message: 'Error interno del servidor' })
   }
 }

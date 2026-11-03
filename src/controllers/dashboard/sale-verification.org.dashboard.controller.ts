@@ -1,6 +1,10 @@
 import { Request, Response } from 'express'
 import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod } from '@prisma/client'
+import { z } from 'zod'
 import * as svc from '../../services/dashboard/sale-verification.org.dashboard.service'
+import { isLinkingNumberEnabledForOrg } from '../../services/playtelecom/linkingNumber.flag'
+import { NUMBER_ALERT_FILTERS } from '../../services/playtelecom/linkingNumber.duplicates'
+import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import { analyticsLimiter } from '../../utils/concurrencyLimiter'
 
@@ -20,6 +24,20 @@ const VALID_REJECTION_REASONS: SaleVerificationRejectionReason[] = [
 // :orgId as a route param and rely on the route-level checkOrgAccess
 // middleware to enforce tenant isolation.
 // ============================================================
+
+/** Sólo un AppError viaja con su `code` y sus `details`: el `code` de cualquier otro error (p. ej. `P2025` de Prisma) no sale. */
+function sendError(res: Response, error: any, label: string): void {
+  logger.error(`[ORG SALE VERIFICATION] ${label} error: ${error?.message}`)
+  const known = error instanceof AppError ? error : null
+  res.status(error?.statusCode || 500).json({
+    success: false,
+    message: error?.message || 'Internal server error',
+    ...(known?.code ? { code: known.code } : {}),
+    ...(known?.details ? { details: known.details } : {}),
+  })
+}
+
+const numberAlertSchema = z.enum(NUMBER_ALERT_FILTERS).optional()
 
 function parseBool(raw: unknown): boolean | undefined {
   if (raw === undefined || raw === null) return undefined
@@ -45,9 +63,18 @@ export async function listOrgSaleVerifications(req: Request, res: Response): Pro
       fromDate,
       toDate,
       search,
+      numberAlert,
     } = req.query
 
     logger.info(`[ORG SALE VERIFICATION] GET /dashboard/organizations/${orgId}/sale-verifications`)
+
+    const alert = numberAlertSchema.safeParse(numberAlert)
+    if (!alert.success) {
+      res
+        .status(400)
+        .json({ success: false, message: 'numberAlert debe ser any, duplicate, missing o not10', code: 'INVALID_NUMBER_ALERT' })
+      return
+    }
 
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
 
@@ -63,12 +90,21 @@ export async function listOrgSaleVerifications(req: Request, res: Response): Pro
       fromDate: range.fromDate,
       toDate: range.toDate,
       search: search as string | undefined,
+      numberAlert: alert.data,
     })
 
     res.status(200).json({ success: true, data: result.data, pagination: result.pagination })
   } catch (error: any) {
-    logger.error(`[ORG SALE VERIFICATION] list error: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    sendError(res, error, 'list')
+  }
+}
+
+/** GET …/linking-number-status — el DASHBOARD muestra u oculta todo lo del número según el interruptor de la organización. */
+export async function getLinkingNumberStatus(req: Request, res: Response): Promise<void> {
+  try {
+    res.status(200).json({ success: true, enabled: await isLinkingNumberEnabledForOrg(req.params.orgId) })
+  } catch (error: any) {
+    sendError(res, error, 'linking-number-status')
   }
 }
 
@@ -260,8 +296,7 @@ export async function reviewOrgSaleVerification(req: Request, res: Response): Pr
 
     res.status(200).json({ success: true, data: updated })
   } catch (error: any) {
-    logger.error(`[ORG SALE VERIFICATION] review error: ${error.message}`)
-    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+    sendError(res, error, 'review')
   }
 }
 
@@ -370,13 +405,51 @@ export async function editOrgSaleVerification(req: Request, res: Response): Prom
 
     res.status(200).json({ success: true, data: updated })
   } catch (error: any) {
-    logger.error(`[ORG SALE VERIFICATION] edit error: ${error.message}`)
     // Codex R13-3: un 409 del protocolo de costo viaja con su `code` y sus `details` (qué campos), como el PUT del dashboard.
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      ...(error.code ? { code: error.code } : {}),
-      ...(error.details ? { details: error.details } : {}),
-    })
+    sendError(res, error, 'edit')
+  }
+}
+
+const numbersBodySchema = z.object({
+  linkingNumber: z.string().max(40).optional(),
+  portedNumber: z.string().max(40).optional(),
+  allowNineDigits: z.boolean().optional(),
+  reason: z.string().max(500).optional(),
+})
+
+/**
+ * PATCH /dashboard/organizations/:orgId/sale-verifications/:id/numbers
+ *
+ * El back-office corrige el número de vinculación y/o el portado (`sale-verifications:edit`).
+ * Body: { linkingNumber?, portedNumber?, allowNineDigits?, reason? } — 10 dígitos, o 9 con `allowNineDigits: true`.
+ */
+export async function setOrgSaleVerificationNumbers(req: Request, res: Response): Promise<void> {
+  try {
+    const { orgId, id } = req.params
+    const editedById = (req as any).authContext?.userId
+    if (!editedById) {
+      res.status(401).json({ success: false, message: 'No staff context' })
+      return
+    }
+    // La forma del cuerpo va primero (400); lo demás (interruptor ⇒ 403, formato ⇒ 400) lo decide el servicio.
+    const body = numbersBodySchema.safeParse(req.body ?? {})
+    if (!body.success) {
+      const numberIssue = body.error.issues.some(i => i.path[0] === 'linkingNumber' || i.path[0] === 'portedNumber')
+      res.status(400).json({
+        success: false,
+        message: numberIssue
+          ? 'Los números van como texto, de hasta 40 caracteres'
+          : 'allowNineDigits va como booleano y reason como texto de hasta 500 caracteres',
+        code: numberIssue ? 'INVALID_LINKING_NUMBER' : 'VALIDATION_ERROR',
+      })
+      return
+    }
+
+    logger.info(`[ORG SALE VERIFICATION] PATCH ${id}/numbers org=${orgId} by=${editedById}`)
+
+    const updated = await svc.setOrgSaleVerificationNumbers(orgId, { saleVerificationId: id, editedById, ...body.data })
+    res.status(200).json({ success: true, data: updated })
+  } catch (error: any) {
+    sendError(res, error, 'numbers')
   }
 }

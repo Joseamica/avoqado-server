@@ -18,7 +18,7 @@ jest.mock('@/config/logger', () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }))
 
-import { releaseTerminalPayment } from '@/controllers/mobile/terminal-payment.mobile.controller'
+import { declararSinCobroDesdeLaTerminal, releaseTerminalPayment } from '@/controllers/mobile/terminal-payment.mobile.controller'
 
 function reqFalso(body: unknown) {
   return { params: { venueId: 'v1', requestId: 'req-1' }, body, authContext: { userId: 'staff-cashier' } } as any
@@ -72,6 +72,22 @@ describe('el contrato de la declaración', () => {
     expect(cuerpo.paymentId).toBe('pay-1')
   })
 
+  it('P1 E7 (A5): el cuerpo COMPLETO viaja (con el PIN del gerente) y SUPERVISOR_AUTHORIZATION_REQUIRED sale como 403 con su código', async () => {
+    const { UnchargedReconciliationError } = await import('@/services/tpv/uncharged-reconciliation.service')
+    mockRelease.mockRejectedValue(new UnchargedReconciliationError('SUPERVISOR_AUTHORIZATION_REQUIRED', 403))
+    const res = resFalso()
+    await releaseTerminalPayment(
+      reqFalso({ statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: 'uuid-1', supervisorPin: '918273' }),
+      res,
+    )
+    expect((mockRelease.mock.calls[0][0] as any).declaration).toMatchObject({ supervisorPin: '918273' })
+    expect(res.status).toHaveBeenCalledWith(403)
+    const cuerpo = res.json.mock.calls[0][0]
+    expect(cuerpo).toMatchObject({ success: false, released: false, code: 'SUPERVISOR_AUTHORIZATION_REQUIRED' })
+    expect(cuerpo.message).toMatch(/gerente/i)
+    expect(JSON.stringify(cuerpo)).not.toContain('918273')
+  })
+
   it('la respuesta feliz devuelve la resolución, para que el POS pueda recuperarla', async () => {
     mockRelease.mockResolvedValue({ requestId: 'req-1', released: true, status: 'FAILED', resolution: { id: 'r1', acceptedAt: 'x' } })
     const res = resFalso()
@@ -120,5 +136,44 @@ describe('el contrato de la declaración', () => {
     mockRelease.mockResolvedValue({ requestId: 'req-1', released: false, status: 'UNKNOWN' })
     await releaseTerminalPayment(reqFalso({ reason: 'la PAX se reinició' }), resFalso())
     expect((mockRelease.mock.calls[0][0] as any).declaration).toBeUndefined()
+  })
+})
+
+describe('el origen de la declaración (botón «No se cobró» de la terminal, 3-nov)', () => {
+  const declaracion = { statement: 'UNCHARGED_VERIFIED', statementVersion: 1, resolutionId: 'uuid-1' }
+
+  it('el POS sigue diciendo MOBILE y su razón de siempre', async () => {
+    mockRelease.mockResolvedValue({ requestId: 'req-1', released: true, status: 'FAILED' })
+    await releaseTerminalPayment(reqFalso(declaracion), resFalso())
+    expect(mockRelease.mock.calls[0][0]).toMatchObject({
+      actor: { staffId: 'staff-cashier', source: 'MOBILE' },
+      reason: 'Liberada desde el POS',
+    })
+  })
+
+  it('la terminal dice TPV y su propia razón, con el mismo cuerpo del POS y el id de la ruta', async () => {
+    mockRelease.mockResolvedValue({ requestId: 'req-1', released: true, status: 'FAILED' })
+    await declararSinCobroDesdeLaTerminal(reqFalso(declaracion), resFalso())
+    expect(mockRelease.mock.calls[0][0]).toMatchObject({
+      requestId: 'req-1',
+      venueId: 'v1',
+      actor: { staffId: 'staff-cashier', source: 'TPV' },
+      reason: 'Liberada desde la terminal',
+      declaration: { ...declaracion, requestId: 'req-1' },
+    })
+  })
+
+  it('el error de la declaración sale igual que en el POS, con su código y su mensaje', async () => {
+    const { UnchargedReconciliationError } = await import('@/services/tpv/uncharged-reconciliation.service')
+    mockRelease.mockRejectedValue(new UnchargedReconciliationError('RESOLUTION_CONFLICT'))
+    const res = resFalso()
+    await declararSinCobroDesdeLaTerminal(reqFalso(declaracion), res)
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json.mock.calls[0][0]).toEqual({
+      success: false,
+      released: false,
+      code: 'RESOLUTION_CONFLICT',
+      message: 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.',
+    })
   })
 })

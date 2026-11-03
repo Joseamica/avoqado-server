@@ -21,7 +21,9 @@ import {
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
 import { avisarDineroDeRappi } from '../shared/avisoDeRappiEfectivo'
+import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
+import { avisarSiCobraSinAviso } from './avisoAngelpaySinWebhook'
 
 /**
  * Codex R3 (P1-3) + R4 (R4-3): el slot que ocupa HOY una afiliación en la configuración efectiva del venue (venue →
@@ -501,9 +503,16 @@ async function retenerSiQuedoSinLigar(payment: Payment, paymentData: PaymentCrea
  */
 async function retenerSiHayColisionSobreUnaLiberada(evidencia: Payment, paymentData: PaymentCreationData): Promise<void> {
   if (paymentData.registradoVia === 'webhook') return
-  const requestId = evidencia.terminalPaymentRequestId ?? solicitudDelRegistro(evidencia.processorData)
-  if (!requestId) return
+  let requestId = evidencia.terminalPaymentRequestId ?? solicitudDelRegistro(evidencia.processorData)
   try {
+    // D9: una cola puede traer sólo la llave; el vínculo exacto también identifica su solicitud.
+    if (!requestId) {
+      const attemptId = llaveDeIntento(evidencia.idempotencyKey)
+      if (!attemptId) return
+      const vinculo = await terminalPaymentService.findAttemptLink(attemptId)
+      if (!vinculo || vinculo.venueId !== evidencia.venueId) return
+      requestId = vinculo.requestId
+    }
     const resultado = await terminalPaymentService.retenerSolicitudLiberadaPorColisionDeReferencia({
       requestId,
       venueId: evidencia.venueId,
@@ -4528,6 +4537,8 @@ export async function recordOrderPayment(
     elapsedMs: elapsedMs(),
   })
   logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
+  // D11: la cuenta de este cobro no tiene aviso del banco. Sólo llega aquí un cobro nuevo y comiteado; nadie lo espera y nunca lanza.
+  void avisarSiCobraSinAviso(payment, venueId)
   // Pedidos en línea fase 2: el dinero ya se movió y se registra; si el pedido de tarjeta ya estaba cobrado, el cliente pagó dos
   // veces (🚨 + bitácora para que el negocio devuelva uno). Después del commit, sin esperar (la TPV abandona a los 10 s); nunca lanza.
   if (payment.status === 'COMPLETED') {
@@ -4538,6 +4549,8 @@ export async function recordOrderPayment(
       staffId: payment.processedById ?? null,
       source: 'TPV',
     })
+    // D10-B: el efectivo de la terminal sobre una venta con otra tarjeta en duda. Con tarjeta sale sin consultar nada.
+    void avisarEfectivoConTarjetaEnDuda(payment)
   }
 
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO (simétrico con el PAY_OUT del reembolso).
@@ -6056,6 +6069,8 @@ export async function recordFastPayment(
     netAmount: payment.netAmount,
   })
   logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
+  // D11: mismo punto que en el cobro con orden.
+  void avisarSiCobraSinAviso(payment, venueId)
 
   // 🔴 EL CAJÓN SUMA LA VENTA EN EFECTIVO. Esta función NO es sólo de la TPV: el POS
   // móvil también cobra la venta rápida por aquí (`POST /mobile/venues/:venueId/fast`),

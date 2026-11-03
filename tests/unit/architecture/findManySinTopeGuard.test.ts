@@ -442,7 +442,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/superadmin/creditAssessment.service.ts': 3,
   'src/services/superadmin/kycReview.service.ts': 2,
   'src/services/superadmin/marketing.superadmin.service.ts': 3,
-  'src/services/superadmin/merchantAccount.service.ts': 13,
+  'src/services/superadmin/merchantAccount.service.ts': 10,
   'src/services/superadmin/merchantRevenueShare.service.ts': 1,
   'src/services/superadmin/paymentAnalytics.service.ts': 1,
   'src/services/superadmin/paymentProvider.service.ts': 3,
@@ -462,7 +462,10 @@ const INVENTARIO: Record<string, number> = {
   'src/services/superadmin/training.service.ts': 4,
   'src/services/superadmin/venueCommission.service.ts': 1,
   'src/services/superadmin/venuePricing.service.ts': 2,
-  'src/services/terminal-payment.service.ts': 4,
+  // 2026-10-21 (A6, S6): 4 → 5. Soporte suelta la terminal bajo los MISMOS candados que la ventana (`soltarRanuraPorSoporte`):
+  // enumera los VÍNCULOS de UNA solicitud para tomar el candado de cada intento y tiene que verlos TODOS (truncarlos dejaría
+  // intentos sin candado). Una solicitud tiene un vínculo por intento de la terminal (unidades), acotado por `requestId`.
+  'src/services/terminal-payment.service.ts': 5,
   // 2026-09-18: settlementCalendar.superadmin 1 → 0. El calendario de todos los negocios
   // recorre por páginas con cursor; al llegar a cero sale del inventario.
   'src/services/tpv/blumon-webhook.service.ts': 2,
@@ -472,7 +475,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/tpv/merchantRouting.service.ts': 3,
   'src/services/tpv/order.tpv.service.ts': 12,
   'src/services/tpv/payment.tpv.service.ts': 4,
-  'src/services/tpv/sale-verification.service.ts': 1,
   // 2026-09-04, ronda de arreglo 1 (P1.3/P2.5): de 7 a 4. Se fueron el `include` anidado sin tope
   // de `getShifts` (`orders → payments → allocations`) y los dos `findMany` de `getCurrentShift`,
   // que ahora agregan en la base. Los 4 que quedan son P3.2/P3.3 y siguen abiertos.

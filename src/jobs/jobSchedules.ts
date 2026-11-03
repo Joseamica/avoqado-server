@@ -100,4 +100,10 @@ export const DATABASE_JOB_SCHEDULES = {
   // (minutos :00, :05…) en el segundo :42, libre en todos los minutos (entre :41 —Blumon y la lealtad— y :43, el worker de
   // AngelPay). Su entrada es la lista de conexiones ACTIVAS (~10 filas), con el reintento de conexión.
   crmGmailReplies: '42 */5 * * * *',
+  // «Por cobrar» (SUPERADMIN): el correo diario al founder y, una vez al día por proceso, la generación de las fechas por cobrar de
+  // todos los cobros. Cada 15 min todo el día (CDMX): el servicio sólo manda desde las 9:00 y a cualquier hora termina lo que un
+  // proceso muerto dejó a medias. Sólo trabaja en producción o, fuera de ella, con PLATFORM_CHARGES_SANDBOX=true: en un servidor local
+  // sin la bandera la vuelta no hace nada. Segundo :39, libre en todo este archivo (en `origin/develop` y en los demás worktrees
+  // también): los vecinos más cercanos son :38 (watchdog de pagos) y :40 (vencimiento de pedidos en línea), los dos cada 30 s.
+  platformChargeDigest: '39 */15 * * * *',
 } as const

@@ -29,9 +29,9 @@ Run through this checklist in order. Don't ship without it.
 4. **Backend gate** — use the _exact_ same string in `checkPermission('resource:action')`.
 5. **Frontend gate** — same string in `<PermissionGate permission="resource:action">` and `hasPermission('resource:action')` calls.
 6. **TPV gate** — same string in `permissionsRepository.hasPermission("resource:action")`.
-7. **Android + iOS** — for a new gate, use `RoleManager.hasVenuePermission("resource:action", fallbackRoles = …)`: it reads the EFFECTIVE
+7. **Android** — for a new gate, use `RoleManager.hasVenuePermission("resource:action", fallbackRoles = …)`: it reads the EFFECTIVE
    permission list the server sends for the venue (custom roles and Permission Sets included) and falls back to the role set only when
-   that list is empty. iOS mirrors it in `RoleManager.swift` (`hasVenuePermission(_:fallbackRoles:)`) — change both apps together. Make
+   that list is empty. iOS mirrors it in `RoleManager.swift` (`hasVenuePermission(_:fallbackRoles:)`) in its turn: note it in its ficha (iOS va después, `../AGENTS.md`). Make
    the fallback role set match `DEFAULT_PERMISSIONS` for the new perm.
 8. **Audit** — run `npm run audit:permissions` from `avoqado-server`. Must exit 0.
 

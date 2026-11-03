@@ -454,6 +454,18 @@ describe('vales por área — partición del dispositivo (§5.2)', () => {
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
   })
 
+  // D6 (2-nov-2026, Codex r1 de D3 #9): el diseño dice que el servidor deriva el área de la terminal y nunca la acepta del
+  // cuerpo. Esta ruta sólo pide sesión, así que sembrar el área desde aquí saltaba el permiso area-tickets:configure.
+  it('no siembra el área que manda la app aunque la terminal no tenga una', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({ id: 't-3', partition: null, areaTicketLastCounter: 0, fulfillmentAreaId: null })
+    prismaMock.terminal.findMany.mockResolvedValue([])
+    prismaMock.terminal.update.mockResolvedValue({ id: 't-3', partition: 10, areaTicketLastCounter: 0, fulfillmentAreaId: null })
+
+    await assignDevicePartition(VENUE, { deviceUid: DEVICE, staffId: 'staff-1', fulfillmentAreaId: 'area-de-otro' } as any)
+
+    expect(prismaMock.terminal.update.mock.calls[0][0].data).not.toHaveProperty('fulfillmentAreaId')
+  })
+
   it('avisa claramente cuando se agotaron las 90 particiones (no falla en silencio)', async () => {
     prismaMock.terminal.findFirst.mockResolvedValue({ id: 't-x', partition: null, areaTicketLastCounter: 0, fulfillmentAreaId: null })
     prismaMock.terminal.findMany.mockResolvedValue(Array.from({ length: 90 }, (_, i) => ({ partition: 10 + i })))

@@ -5,6 +5,7 @@
  * (see validation middleware). Shape mirrors the wizard design spec §7.1.
  */
 import { z } from 'zod'
+import { isNumericMerchantId } from '../../lib/angelpayValidators'
 
 const rateFields = {
   debitRate: z.number().min(0).max(1),
@@ -30,10 +31,10 @@ export const fullSetupAngelPaySchema = z
     // Optional AngelPay integrations-api apiKey — when provided, full-setup
     // auto-registers the AngelPay webhook (POST /auth/token → POST
     // /api/v1/webhooks/endpoints) after the transaction commits, and persists
-    // the returned secret on the created/reused MerchantAccount. `environment`
-    // picks which AngelPay base (QA/PROD) to call; defaults to the new login's
-    // environment when `login.mode === 'new'`, otherwise PROD. Failure here is
-    // soft — see `fullSetupAngelPayMerchant` in angelpayFullSetup.service.ts.
+    // the returned secret on the created/reused MerchantAccount, unless it
+    // already has one. The linked login's environment decides which AngelPay
+    // base (QA/PROD) to call; `environment` must match it. Failure here is
+    // soft — see `registrarAvisoAngelPay` in angelpayWebhookRegistration.service.ts.
     apiKey: z.string().min(1).optional(),
     environment: z.enum(['QA', 'PROD']).optional(),
     login: z.discriminatedUnion('mode', [
@@ -53,7 +54,9 @@ export const fullSetupAngelPaySchema = z
     merchant: z.discriminatedUnion('mode', [
       z.object({
         mode: z.literal('create'),
-        externalMerchantId: z.string().regex(/^\d+$/, 'El ID del merchant debe ser numérico'),
+        externalMerchantId: z
+          .string()
+          .refine(isNumericMerchantId, 'El ID del comercio debe contener sólo dígitos y estar entre 1 y 2147483647'),
         name: z.string().min(1, 'Nombre del merchant requerido'),
         affiliation: z.string().min(1, 'Afiliación requerida'),
         displayName: z.string().min(1, 'Nombre para mostrar requerido'),
@@ -125,3 +128,17 @@ export const fullSetupAngelPaySchema = z
   })
 
 export type FullSetupAngelPayInput = z.infer<typeof fullSetupAngelPaySchema>
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/:id/angelpay/webhook — dar de alta el aviso del banco de UNA cuenta. Sólo forma: que la
+ * llave sea de ESE comercio y qué ambiente manda lo decide el servicio (`angelpayWebhookRegistration.service.ts`).
+ */
+export const registerAngelPayWebhookSchema = z.object({
+  id: z.string().cuid('Id de cuenta inválido'),
+  apiKey: z
+    .string({ required_error: 'La llave de API es requerida', invalid_type_error: 'La llave de API es requerida' })
+    .trim()
+    .min(1, 'La llave de API es requerida')
+    .max(2048, 'La llave de API es demasiado larga'),
+  environment: z.enum(['QA', 'PROD'], { errorMap: () => ({ message: 'El ambiente debe ser QA o PROD' }) }).optional(),
+})

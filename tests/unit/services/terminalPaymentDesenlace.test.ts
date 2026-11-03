@@ -182,6 +182,13 @@ const CASOS: Caso[] = [
     null,
   ],
   ['vigía :1797 UNKNOWN/TIMED_OUT', fila({ status: S.UNKNOWN, failureCode: 'TIMED_OUT' }), 'UNRESOLVED', null, null],
+  [
+    'marcarEjecucionCerrada (S1) UNKNOWN/EXECUTION_CLOSED: el cese no acredita que no se cobró',
+    fila({ status: S.UNKNOWN, failureCode: 'EXECUTION_CLOSED' }),
+    'UNRESOLVED',
+    null,
+    null,
+  ],
   ['closeRow degradado a timeout :1424 UNKNOWN sin código', fila({ status: S.UNKNOWN }), 'UNRESOLVED', null, null],
 
   // ── UNRESOLVED: TIMED_OUT (lo escribió HEAD en PRODUCCIÓN; el árbol ya no) ──────────────────────
@@ -294,6 +301,7 @@ describe('invariantes de la lista blanca', () => {
     'SOCKET_NOT_FOUND',
     'DELIVERY_NOT_RECORDED',
     'TIMED_OUT',
+    'EXECUTION_CLOSED',
     'AUTO_RELEASED',
     'MANUAL_RELEASE',
     'MANUAL_RECONCILE',
@@ -315,7 +323,7 @@ describe('invariantes de la lista blanca', () => {
     { outcomeEvidence: 'OTRA' } as Prisma.JsonValue,
   ]
 
-  /** El producto cartesiano completo: 8 estados × 18 códigos × 4 disposiciones × 5 sobres × con/sin Payment. */
+  /** El producto cartesiano completo: 8 estados × 19 códigos × 4 disposiciones × 5 sobres × con/sin Payment. */
   function universo(): FilaDeDesenlace[] {
     const filas: FilaDeDesenlace[] = []
     for (const status of TODOS_LOS_ESTADOS)
@@ -431,6 +439,24 @@ describe('proyectarEstado — lo que ven las apps', () => {
     expect(
       proyectarCancelDisposition('ACCEPTED', { outcome: 'CHARGED', outcomeEvidence: 'PAYMENT_RECORDED', evidenceClass: 'TERMINAL' }),
     ).toBe('ACCEPTED')
+  })
+
+  // Revisión de iOS (3-nov): con la ranura ya suelta, «El cobro sigue activo» debajo de «La terminal ya está libre» es falso.
+  it.each(['AUTO_RELEASED', 'MANUAL_RELEASE'])(
+    '🔴 con la ranura ya suelta (%s) el ACTIVE se proyecta null y la venta sigue en duda',
+    failureCode => {
+      expect(proyectar({ status: S.TIMED_OUT, failureCode, cancelDisposition: 'ACTIVE' })).toMatchObject({
+        status: S.TIMED_OUT,
+        failureCode,
+        cancelDisposition: null,
+        outcome: 'UNRESOLVED',
+      })
+    },
+  )
+
+  it('🔴 con la ranura apartada el ACTIVE se sigue viendo', () => {
+    expect(proyectar({ status: S.TIMED_OUT, failureCode: null, cancelDisposition: 'ACTIVE' }).cancelDisposition).toBe('ACTIVE')
+    expect(proyectar({ status: S.UNKNOWN, cancelDisposition: 'ACTIVE' }).cancelDisposition).toBe('ACTIVE')
   })
 
   it('🔴 un ACTIVE viejo encima de un desenlace final se proyecta null (si no, la app dice «sigue activo» PARA SIEMPRE)', () => {
