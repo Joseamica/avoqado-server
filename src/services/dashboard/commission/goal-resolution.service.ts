@@ -13,10 +13,7 @@ import { Prisma } from '@prisma/client'
 import { MODULE_CODES } from '../../modules/module.service'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
-import { startOfWeek } from 'date-fns'
-import { fromZonedTime, toZonedTime } from 'date-fns-tz'
-import { venueStartOfDay, venueStartOfMonth, DEFAULT_TIMEZONE } from '../../../utils/datetime'
-import type { SalesGoal, SalesGoalPeriod, SalesGoalType } from './sales-goal.service'
+import { calculateCurrentSales, type SalesGoal, type SalesGoalPeriod, type SalesGoalType } from './sales-goal.service'
 
 // ==========================================
 // TYPES
@@ -65,72 +62,6 @@ function getSalesGoalsFromConfig(config: Prisma.JsonValue): StoredSalesGoal[] {
 }
 
 /**
- * Get timezone for a venue
- */
-async function getVenueTimezone(venueId: string, db: Prisma.TransactionClient = prisma): Promise<string> {
-  const venue = await db.venue.findUnique({
-    where: { id: venueId },
-    select: { timezone: true },
-  })
-  return venue?.timezone || DEFAULT_TIMEZONE
-}
-
-/**
- * Calculate current sales for a goal based on period and goal type.
- *
- * CRITICAL: Uses venue timezone for date boundaries (not UTC).
- */
-async function calculateCurrentSales(
-  venueId: string,
-  period: SalesGoalPeriod,
-  goalType: SalesGoalType = 'AMOUNT',
-  db: Prisma.TransactionClient = prisma,
-): Promise<number> {
-  const timezone = await getVenueTimezone(venueId, db)
-  let startDate: Date
-
-  switch (period) {
-    case 'DAILY':
-      startDate = venueStartOfDay(timezone)
-      break
-    case 'WEEKLY': {
-      // Start of week (Sunday) in venue timezone → converted to UTC for Prisma
-      const venueNow = toZonedTime(new Date(), timezone)
-      startDate = fromZonedTime(startOfWeek(venueNow, { weekStartsOn: 0 }), timezone)
-      break
-    }
-    case 'MONTHLY':
-      startDate = venueStartOfMonth(timezone)
-      break
-  }
-
-  if (goalType === 'QUANTITY') {
-    const count = await db.orderItem.count({
-      where: {
-        order: {
-          venueId,
-          status: 'COMPLETED',
-          createdAt: { gte: startDate },
-        },
-      },
-    })
-    return count
-  }
-
-  // AMOUNT: sum of payment amounts
-  const result = await db.payment.aggregate({
-    where: {
-      venueId,
-      status: 'COMPLETED',
-      createdAt: { gte: startDate },
-    },
-    _sum: { amount: true },
-  })
-
-  return result._sum.amount?.toNumber() || 0
-}
-
-/**
  * Get organizationId from venueId
  */
 async function getOrgIdFromVenue(venueId: string, db: Prisma.TransactionClient = prisma): Promise<string> {
@@ -172,7 +103,7 @@ export async function getEffectiveGoals(venueId: string, db: Prisma.TransactionC
         // Venue has its own goals — use those (venue wins)
         const enriched = await Promise.all(
           venueGoals.map(async (g): Promise<ResolvedGoal> => {
-            const currentSales = await calculateCurrentSales(venueId, g.period, g.goalType || 'AMOUNT', db)
+            const currentSales = await calculateCurrentSales(venueId, g.staffId, g.period, g.goalType || 'AMOUNT', db)
             return {
               id: g.id,
               venueId,
@@ -207,7 +138,7 @@ export async function getEffectiveGoals(venueId: string, db: Prisma.TransactionC
 
   const enriched = await Promise.all(
     orgGoals.map(async (g): Promise<ResolvedGoal> => {
-      const currentSales = await calculateCurrentSales(venueId, g.period as SalesGoalPeriod, g.goalType as SalesGoalType, db)
+      const currentSales = await calculateCurrentSales(venueId, null, g.period as SalesGoalPeriod, g.goalType as SalesGoalType, db)
       return {
         id: g.id,
         venueId,
@@ -244,7 +175,7 @@ export async function getOrgGoals(venueId: string): Promise<ResolvedGoal[]> {
 
   return Promise.all(
     orgGoals.map(async (g): Promise<ResolvedGoal> => {
-      const currentSales = await calculateCurrentSales(venueId, g.period as SalesGoalPeriod, g.goalType as SalesGoalType)
+      const currentSales = await calculateCurrentSales(venueId, null, g.period as SalesGoalPeriod, g.goalType as SalesGoalType)
       return {
         id: g.id,
         venueId,
@@ -303,7 +234,7 @@ export async function createOrgGoal(venueId: string, input: OrgGoalInput): Promi
     data: { goal: input.goal, goalType, period },
   })
 
-  const currentSales = await calculateCurrentSales(venueId, period as SalesGoalPeriod, goalType as SalesGoalType)
+  const currentSales = await calculateCurrentSales(venueId, null, period as SalesGoalPeriod, goalType as SalesGoalType)
 
   return {
     id: created.id,
@@ -352,7 +283,7 @@ export async function updateOrgGoal(venueId: string, goalId: string, input: OrgG
     data: { changes: Object.keys(input) },
   })
 
-  const currentSales = await calculateCurrentSales(venueId, updated.period as SalesGoalPeriod, updated.goalType as SalesGoalType)
+  const currentSales = await calculateCurrentSales(venueId, null, updated.period as SalesGoalPeriod, updated.goalType as SalesGoalType)
 
   return {
     id: updated.id,

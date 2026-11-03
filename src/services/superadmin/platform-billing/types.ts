@@ -94,6 +94,8 @@ export interface IssuePlatformCfdiInput {
   performedById: string
   /** When true, uses FACTURAPI_TEST_KEY (free, non-fiscal test stamp). Default false. */
   sandbox?: boolean
+  /** «Reintentar»: la factura fallida que ésta reemplaza. Se consulta con el PAC y se quita en la misma transacción que reserva la nueva. */
+  retryOfId?: string
   /**
    * «Por cobrar»: los totales de la ocurrencia (`ChargeTotals` más `discountCents: 0`). Si vienen, se guardan TAL CUAL en lugar de
    * calcularlos de las líneas: una línea con `taxIncluded` ya trae el IVA y el cálculo genérico lo sumaría otra vez.

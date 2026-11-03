@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import {
   getActivePlatformEmisor,
@@ -11,7 +12,7 @@ import {
 } from '@/services/superadmin/platform-billing/platformEmisor.service'
 import { platformEmisorSeguro } from '@/services/superadmin/platform-billing/platformEmisorSeguro'
 import {
-  upsertBillingTaxProfile,
+  saveBillingTaxProfileIfSatAccepts,
   getBillingTaxProfileById,
   getBillingTaxProfileForCustomer,
   uploadConstancia,
@@ -24,6 +25,7 @@ import {
   getPlatformCfdi,
   cancelPlatformCfdi,
   discardFailedPlatformCfdi,
+  refreshPlatformCfdi,
   fetchPlatformCfdiArtifact,
   registerPlatformPayment,
   listPlatformCfdiPayments,
@@ -42,7 +44,7 @@ export function handleBillingError(error: unknown, res: Response, next: NextFunc
     // corregible por el operador → 422, para que la UI lo trate como validación y no
     // como caída del servidor.
     const status = error.code === 'NO_CFDI' ? 404 : error.code === 'PROVIDER' ? 502 : 422
-    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field })
+    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field, ...error.attempt })
     return
   }
   next(error as Error)
@@ -159,24 +161,23 @@ export async function getTaxProfileForCustomer(req: Request, res: Response, next
   }
 }
 
-/** PUT /api/v1/superadmin/billing/tax-profiles — upsert a receptor profile (org / venue / standalone). */
+/** PUT /api/v1/superadmin/billing/tax-profiles — guarda un receptor (org / venue / standalone) si el SAT no lo rechaza; ver el service. */
 export async function upsertTaxProfile(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
-    const saved = await upsertBillingTaxProfile({ ...req.body, performedById: userId })
-    await prisma.activityLog.create({
-      data: {
+    const result = await saveBillingTaxProfileIfSatAccepts({ ...req.body, performedById: userId })
+    // Lo que el SAT rechazó no se guardó. Sí se registra si lo rechazado eran los datos ya guardados, que dejan de estar «Verificados».
+    if (result.profile && (result.saved || result.markedInvalid)) {
+      void logAction({
         staffId: userId,
-        venueId: saved.venueId,
-        action: 'PLATFORM_TAXPROFILE_UPSERTED',
+        venueId: result.profile.venueId,
+        action: result.saved ? 'PLATFORM_TAXPROFILE_UPSERTED' : 'PLATFORM_TAXPROFILE_SAT_REJECTED',
         entity: 'BillingTaxProfile',
-        entityId: saved.id,
-        data: { customerType: saved.customerType, rfc: saved.rfc },
-      },
-    })
-    // Validación best-effort contra el SAT: nunca impide que el guardado haya sido exitoso.
-    const { profile, validation } = await validateBillingTaxProfile(saved.id)
-    res.json({ success: true, data: profile, validation })
+        entityId: result.profile.id,
+        data: { customerType: result.profile.customerType, rfc: result.profile.rfc },
+      })
+    }
+    res.json({ success: true, data: result.profile, validation: result.validation })
   } catch (error) {
     handleBillingError(error, res, next)
   }
@@ -220,21 +221,24 @@ export async function attachConstanciaController(req: Request, res: Response, ne
 export async function issueInvoice(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
+    const startedAt = Date.now()
     const cfdi = await issuePlatformCfdi({
       ...req.body,
       idempotencyKey: req.body.idempotencyKey ?? randomUUID(),
       performedById: userId,
     })
-    await prisma.activityLog.create({
-      data: {
+    // Sólo lo que se timbró en esta llamada: una llave repetida regresa la fila de antes, y una sin timbre todavía no es una factura.
+    // 🔴 `logAction` nunca truena: un 500 aquí, con la factura ya timbrada, le diría al operador que falló y podría emitir otra.
+    if (cfdi.status === 'STAMPED' && cfdi.updatedAt.getTime() >= startedAt) {
+      void logAction({
         staffId: userId,
         venueId: cfdi.venueId,
         action: 'PLATFORM_CFDI_ISSUED',
         entity: 'PlatformCfdi',
         entityId: cfdi.id,
         data: { uuid: cfdi.uuid, totalCents: cfdi.totalCents, metodoPago: cfdi.metodoPago, formaPago: cfdi.formaPago },
-      },
-    })
+      })
+    }
     res.status(201).json({ success: true, data: cfdi })
   } catch (error) {
     handleBillingError(error, res, next)
@@ -264,7 +268,7 @@ export async function getInvoice(req: Request, res: Response, next: NextFunction
   try {
     const cfdi = await getPlatformCfdi(req.params.id)
     if (!cfdi) {
-      res.status(404).json({ success: false, error: 'CFDI no encontrado' })
+      res.status(404).json({ success: false, error: 'Esta factura ya no existe', code: 'NO_CFDI' })
       return
     }
     // Income CFDIs include their payment complements (REPs) for the detail view.
@@ -337,17 +341,25 @@ export async function cancelInvoice(req: Request, res: Response, next: NextFunct
     const { userId } = (req as any).authContext
     const { motivo, substituteUuid } = req.body as { motivo: '01' | '02' | '03' | '04'; substituteUuid?: string }
     const cfdi = await cancelPlatformCfdi(req.params.id, motivo, substituteUuid)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId: cfdi.venueId,
-        action: 'PLATFORM_CFDI_CANCELLED',
-        entity: 'PlatformCfdi',
-        entityId: cfdi.id,
-        data: { motivo, substituteUuid: substituteUuid ?? null },
-      },
+    void logAction({
+      staffId: userId,
+      venueId: cfdi.venueId,
+      action: cfdi.status === 'CANCELLED' ? 'PLATFORM_CFDI_CANCELLED' : 'PLATFORM_CFDI_CANCEL_REQUESTED',
+      entity: 'PlatformCfdi',
+      entityId: cfdi.id,
+      data: { motivo, substituteUuid: substituteUuid ?? null },
     })
     res.json({ success: true, data: cfdi })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** POST /api/v1/superadmin/billing/invoices/:id/refresh — «Consultar estado»: le pregunta al PAC. Nunca emite. */
+export async function refreshInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId } = (req as any).authContext
+    res.json({ success: true, data: await refreshPlatformCfdi(req.params.id, userId) })
   } catch (error) {
     handleBillingError(error, res, next)
   }
@@ -357,16 +369,14 @@ export async function cancelInvoice(req: Request, res: Response, next: NextFunct
 export async function discardInvoice(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
-    const cfdi = await discardFailedPlatformCfdi(req.params.id)
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId: cfdi.venueId,
-        action: 'PLATFORM_CFDI_DISCARDED',
-        entity: 'PlatformCfdi',
-        entityId: cfdi.id,
-        data: { priorStatus: cfdi.status, receptorRfc: cfdi.receptorRfc, totalCents: cfdi.totalCents },
-      },
+    const cfdi = await discardFailedPlatformCfdi(req.params.id, userId)
+    void logAction({
+      staffId: userId,
+      venueId: cfdi.venueId,
+      action: 'PLATFORM_CFDI_DISCARDED',
+      entity: 'PlatformCfdi',
+      entityId: cfdi.id,
+      data: { priorStatus: cfdi.status, receptorRfc: cfdi.receptorRfc, totalCents: cfdi.totalCents },
     })
     res.json({ success: true, data: { id: cfdi.id, discarded: true } })
   } catch (error) {

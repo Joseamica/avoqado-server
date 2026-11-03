@@ -46,9 +46,9 @@ que probar y las combinaciones en las que el producto puede romperse.
 ### 2. ¿Dónde vive el switch?
 
 - **Canónico: SIEMPRE en `avoqado-web-dashboard`**, escribiendo el registro del server. Sin excepción.
-- **Espejo en Android + iOS: solo si se toca DURANTE el turno, desde el piso** (no desde la oficina). Si se espeja va en **las dos** apps
-  (la regla android↔iOS aplica igual) y edita el **mismo** registro del server — nunca una copia local. Costo real de espejar: 2
-  implementaciones + días de rollout, contra minutos del dashboard.
+- **Espejo en Android: solo si se toca DURANTE el turno, desde el piso** (no desde la oficina). Si se espeja, lo de iOS va a su ficha (iOS
+  va después: `../AGENTS.md`) y edita el **mismo** registro del server — nunca una copia local. Costo real de espejar: otra implementación
+  + días de rollout, contra minutos del dashboard.
 - 🔴 **Nunca solo en la DB.** Un feature cuyo único switch es un `UPDATE` en Postgres está **incompleto** — deja al founder de switch humano
   para cada cliente que lo pida.
 

@@ -703,7 +703,7 @@ describe('platform-charges/occurrences — payPreview', () => {
     })
   })
 
-  it('pendingPpdCount cuenta las PPD STAMPED del perfil con amountPaidCents < totalCents (en la base, no en memoria)', async () => {
+  it('pendingPpdCount cuenta las PPD vigentes (timbradas o con la cancelación en trámite) del perfil con amountPaidCents < totalCents (en la base, no en memoria)', async () => {
     mundo.ppd = 2
 
     const preview = await payPreview('occ-1')
@@ -714,7 +714,7 @@ describe('platform-charges/occurrences — payPreview', () => {
         billingTaxProfileId: 'perfil-1',
         type: 'INGRESO',
         metodoPago: 'PPD',
-        status: 'STAMPED',
+        status: { in: ['STAMPED', 'CANCEL_REQUESTED'] },
         amountPaidCents: { lt: prismaMock.platformCfdi.fields.totalCents },
       },
     })
