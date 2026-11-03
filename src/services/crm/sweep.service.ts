@@ -43,6 +43,7 @@ import {
   repeatOf,
   sourceDetailOf,
   teamOrganizationId,
+  SIGNUP_GRACE_MS,
 } from './inbound.service'
 import { ErasedIdentityError } from './erase.service'
 import { esCorreoDePrueba } from './internalEmail'
@@ -420,9 +421,10 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
             },
             contact: { ...person, isPrimary: true },
           },
-          // No `seenAt`: an old signup is always from before a deletion. Its mark can be written AFTER it — the form was
-          // sent, the deletion came, then the signup finished (Codex r1 H2) — and a person who comes back after it does
-          // through the landing entry, with its own date.
+          // When its form was sent, at the latest: a signup finishes within `SIGNUP_GRACE_MS` of it (what the landing
+          // waits for). Its mark alone would be too late — form, deletion, then the signup's mark (Codex r1 H2) — and no
+          // date at all would drop a NEW signup whose entry could not be saved (Codex r2 H2).
+          new Date(signup.createdAt.getTime() - SIGNUP_GRACE_MS),
         )
         if (!isNew) {
           await addPersonTx(tx, account.id, person)

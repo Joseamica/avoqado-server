@@ -9,7 +9,7 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { deleteAccount, ErasedIdentityError } from '@/services/crm/erase.service'
+import { deleteAccount, erasedHashes, ErasedIdentityError } from '@/services/crm/erase.service'
 import { accountForTx, applyEntry } from '@/services/crm/inbound.service'
 import prisma from '@/utils/prismaClient'
 
@@ -166,6 +166,17 @@ describe('deleteAccount', () => {
 })
 
 describe('the tombstone', () => {
+  it('nunca_retrocede (Codex r2 H1): otro negocio que comparte el teléfono se eliminó después y su fecha se queda', async () => {
+    seedAccount()
+    const later = new Date(Date.now() + 60 * MINUTE)
+    const [phoneHash] = erasedHashes({ keys: [], emails: [], phones: [PHONE], organizationId: null }).person
+    db.erased.push({ keyHash: phoneHash, scope: '', erasedAt: later })
+
+    await deleteAccount(FOUNDER, ACCOUNT, 'Café Ana')
+
+    expect(db.erased.find(row => row.keyHash === phoneHash)!.erasedAt).toEqual(later)
+  })
+
   it('una_entrada_vieja_de_la_landing_no_lo_vuelve_a_crear_y_se_borra_tambien', async () => {
     seedAccount()
     seedEntry('centryold0000000000000001', MINUTE)

@@ -33,7 +33,7 @@ import {
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
-import { deleteAccount, ErasedIdentityError } from '@/services/crm/erase.service'
+import { deleteAccount, ErasedIdentityError, sameName } from '@/services/crm/erase.service'
 import { accountForTx } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
 import { addEvent } from '@/services/crm/timeline.service'
@@ -128,7 +128,8 @@ class ChangedMeanwhile extends Error {}
 
 type Upsert =
   | { ok: true; accountId: string; creado: boolean; yaExistia: boolean; reactivado: boolean; notaNueva: boolean; actualizados: Llenable[] }
-  | { ok: false; error: string; candidatos: Awaited<ReturnType<typeof findDuplicates>> }
+  // Without candidates: a prospect the superadmin deleted (D7), which nobody picks among.
+  | { ok: false; error: string; candidatos?: Awaited<ReturnType<typeof findDuplicates>> }
 
 /**
  * Ruling 45: what the routine learned fills only what the business still lacks — the name while it is the phone (or
@@ -473,7 +474,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       SOLO,
     {
       accountId,
-      confirmName: z.string().trim().min(1, 'Escribe el nombre del negocio').max(200).describe('El nombre del negocio, tal como aparece'),
+      confirmName: z.string().trim().min(1, 'Escribe el nombre del negocio').max(1000).describe('El nombre del negocio, tal como aparece'),
       confirm: z.boolean().optional().describe('true sólo en la SEGUNDA llamada, tras la autorización del usuario'),
     },
     async ({ accountId: id, confirmName, confirm }) =>
@@ -491,6 +492,11 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
             },
           })
           if (!account) return { ok: false, error: 'Ese negocio ya no está en el CRM.' }
+          // The token signs `confirmName`: it must be the name this preview shows, or a name that changed afterwards could
+          // be confirmed without anybody seeing it (Codex r2 H4). The deletion compares it again under the lock.
+          if (!sameName(confirmName, account.name)) {
+            return { ok: false, error: `El nombre no coincide: este negocio se llama «${account.name}».` }
+          }
           return {
             requiresConfirmation: true,
             negocio: account.name,

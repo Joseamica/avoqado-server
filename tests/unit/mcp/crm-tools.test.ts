@@ -315,6 +315,15 @@ describe('crm_delete_account (D7)', () => {
         seBorran: { contactos: 1, actividades: 2, eventos: 5 },
       })
       expect(deleteAccount).not.toHaveBeenCalled()
+      // Another name than the one it shows is never signed (Codex r2 H4).
+      const other = JSON.parse(
+        (
+          (await c.client.callTool({ name: 'crm_delete_account', arguments: { accountId: ACC, confirmName: 'Café Ana' } }))
+            .content as Array<{ text: string }>
+        )[0].text,
+      )
+      expect(other).toMatchObject({ ok: false, error: expect.stringContaining('«Tacos Lupe»') })
+      expect(other.confirmationToken).toBeUndefined()
 
       await c.client.callTool({
         name: 'crm_delete_account',

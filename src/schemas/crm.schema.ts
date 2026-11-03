@@ -207,7 +207,8 @@ export const addNoteSchema = z.object({
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,
-  body: z.object({ confirmName: text(200, 'Escribe el nombre del negocio') }),
+  // As long as any name the CRM keeps (the landing and HubSpot keep up to 500; Codex r2 H3).
+  body: z.object({ confirmName: text(1000, 'Escribe el nombre del negocio') }),
 })
 
 /** An activity's moment: an ISO 8601 instant with its offset (the screen sends UTC). */

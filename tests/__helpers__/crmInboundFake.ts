@@ -41,6 +41,7 @@ export function installCrmInboundFake(prismaMock: any) {
       const operators = filter as Row
       if ('in' in operators) return operators.in.includes(value)
       if ('gte' in operators) return value instanceof Date && value >= operators.gte
+      if ('lt' in operators) return value instanceof Date && value < operators.lt
       throw new Error(`The CRM inbound fake does not know the filter ${JSON.stringify(filter)}`)
     }
     return value === filter
@@ -240,15 +241,15 @@ export function installCrmInboundFake(prismaMock: any) {
     }
     return { count }
   })
-  prismaMock.crmErased.updateMany.mockImplementation(async ({ where, data }: Row) => {
-    const rows = db.erased.filter(row => fieldMatches(row.keyHash, where.keyHash) && fieldMatches(row.scope, where.scope))
-    rows.forEach(row => patch(row, data))
-    return { count: rows.length }
-  })
   const erasedMatches = (row: Row, where: Row): boolean =>
     Object.entries(where).every(([field, filter]) =>
       field === 'OR' ? (filter as Row[]).some(branch => erasedMatches(row, branch)) : fieldMatches(row[field], filter),
     )
+  prismaMock.crmErased.updateMany.mockImplementation(async ({ where, data }: Row) => {
+    const rows = db.erased.filter(row => erasedMatches(row, where))
+    rows.forEach(row => patch(row, data))
+    return { count: rows.length }
+  })
   prismaMock.crmErased.findFirst.mockImplementation(async ({ where }: Row) => {
     const found = db.erased.filter(row => erasedMatches(row, where)).sort((a, b) => b.erasedAt.getTime() - a.erasedAt.getTime())[0]
     return found ? { erasedAt: found.erasedAt } : null

@@ -74,7 +74,7 @@ export async function assertNotErasedTx(tx: Prisma.TransactionClient, who: Erase
 }
 
 /** «Ana  López» and «ana lópez» are the same name; an accent is not. */
-const sameName = (typed: string, name: string) => {
+export const sameName = (typed: string, name: string) => {
   const clean = (value: string) => value.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('es-MX')
   return clean(typed) === clean(name)
 }
@@ -89,10 +89,11 @@ const sameName = (typed: string, name: string) => {
  */
 export async function deleteAccount(access: CrmAccess, id: string, confirmName: string) {
   if (!access.isSuperadmin) throw new ForbiddenError('Sólo el superadmin puede eliminar un negocio del CRM', 'CRM_SOLO_SUPERADMIN')
-  const now = new Date()
   await prisma.$transaction(async tx => {
     const [locked] = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "CrmAccount" WHERE "id" = ${id} FOR UPDATE`
     if (!locked) throw new NotFoundError('Ese negocio ya no está en el CRM', 'CRM_NEGOCIO_NO_EXISTE')
+    // After the lock: a deletion that waited for it never stamps an earlier moment than one that went first.
+    const now = new Date()
     const account = await tx.crmAccount.findUniqueOrThrow({
       where: { id },
       select: {
@@ -122,9 +123,10 @@ export async function deleteAccount(access: CrmAccess, id: string, confirmName: 
     })
     const hashes = organization ? [organization, ...person] : person
     const scope = account.organizationId ?? ''
-    // A key already in the tombstone (deleted before, created again by hand) counts from now.
+    // A key already in the tombstone (deleted before, created again by hand, or shared with another deleted business)
+    // counts from now — never back: only an earlier date moves (Codex r2 H1).
     await tx.crmErased.createMany({ data: hashes.map(keyHash => ({ keyHash, scope, erasedAt: now })), skipDuplicates: true })
-    await tx.crmErased.updateMany({ where: { keyHash: { in: hashes }, scope }, data: { erasedAt: now } })
+    await tx.crmErased.updateMany({ where: { keyHash: { in: hashes }, scope, erasedAt: { lt: now } }, data: { erasedAt: now } })
     await tx.crmInboundEntry.deleteMany({ where: { accountId: id } })
     await tx.crmAccount.delete({ where: { id } })
     // In the same transaction, not `logAction` (best effort, outside it): an account is never gone without who deleted it

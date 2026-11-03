@@ -13,6 +13,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
 import logger from '@/config/logger'
 import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
+import { erasedHashes } from '@/services/crm/erase.service'
 import { applyEntry } from '@/services/crm/inbound.service'
 import {
   applyPending,
@@ -941,6 +942,31 @@ describe('backfillFromOnboarding', () => {
     }
     expect(notifyNewProspect).not.toHaveBeenCalled()
     expect(db.entries.filter(row => row.source === 'CARGA_INICIAL')).toHaveLength(0)
+  })
+
+  it('eliminado_por_el_superadmin (D7): un alta de antes no lo revive; una de mucho después, sin entrada guardada, sí entra', async () => {
+    const deletedAt = new Date(Date.now() - 60 * MINUTE)
+    const { organization, person } = erasedHashes({
+      keys: [{ source: 'LANDING', externalKey: EMAIL }],
+      emails: [EMAIL],
+      phones: [],
+      organizationId: ORG,
+    })
+    db.erased.push(...[organization!, ...person].map(keyHash => ({ keyHash, scope: ORG, erasedAt: deletedAt })))
+    seedOrganization()
+    const staff = seedStaff(EMAIL, {}, ORG)
+    // Its mark two minutes after the deletion: the form was sent before it (Codex r1 H2).
+    seedSignup(staff.id, ORG, { createdAt: new Date(deletedAt.getTime() + 2 * MINUTE) })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+    expect(db.accounts).toHaveLength(0)
+
+    // The same person signs up again half an hour after the deletion and their landing entry could not be saved
+    // (Codex r2 H2): the backfill is the only way in, and it lets them in.
+    resetSweepCursors()
+    seedSignup(staff.id, ORG, { createdAt: new Date(deletedAt.getTime() + 30 * MINUTE) })
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+    expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId: ORG })])
   })
 
   it('aviso_de_la_carga_inicial_se_recupera (Codex exhaustiva #12): a notice that did not go out is retried with its key', async () => {
