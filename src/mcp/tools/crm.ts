@@ -101,12 +101,13 @@ function negocio(row: AccountRow & { miActividad?: MiActividad | null }) {
  * service's refusals written for the operator back as `ok:false` with their code. Anything else is thrown, and
  * `instrument.ts` handles it. With several keys, any one opens it (like the screens' `requireCrm([...])`).
  */
-async function conLlave(scope: McpScope, key: CrmKey | CrmKey[], run: (access: CrmAccess) => Promise<unknown>) {
+export async function conLlave(scope: McpScope, key: CrmKey | CrmKey[], run: (access: CrmAccess) => Promise<unknown>) {
   if (!scope.isSuperAdmin) return text({ ok: false, error: SOLO_AVOQADO })
-  if (key === 'crm:editar') requireWriteScopeAlways(scope, key, 'escribe en el CRM de ventas')
+  const keys = Array.isArray(key) ? key : [key]
+  // «Editar» escribe: aunque venga dentro de una lista, el token necesita mcp:write.
+  if (keys.includes('crm:editar')) requireWriteScopeAlways(scope, 'crm:editar', 'escribe en el CRM de ventas')
   const access = await getCrmAccess(scope.staffId)
   if (!access) return text({ ok: false, error: 'Tu usuario no tiene acceso al CRM: está inactivo o ya no es SUPERADMIN.' })
-  const keys = Array.isArray(key) ? key : [key]
   if (!keys.some(one => hasCrmKey(access, one))) {
     const names = keys.map(one => `«${one}»`)
     return text({
@@ -611,7 +612,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
     'crm_campaign_status',
     'Estado de las campañas de correo del CRM de ventas: de cada una su estado (BORRADOR, ENVIANDO, ENVIADA o CANCELADA), el ' +
       'asunto, los públicos, a cuántas personas se encoló y cuántos correos van en cada estado (pendientes, en curso, enviados, ' +
-      'reintentos, fallidos, omitidos y desconocidos: los que el proveedor de correo aceptó y no alcanzamos a guardar). Sin ' +
+      'reintentos, fallidos, omitidos y desconocidos: no sabemos si salieron, porque Resend los aceptó y no alcanzamos a guardarlo, ' +
+      'o porque pasaron más de 23 h desde el primer intento). Sin ' +
       'campaignId lista las campañas, de 50 en 50 (hasta 100) con el total, y status filtra por estado; con campaignId trae ' +
       'esa campaña. No trae el contenido del correo. Sólo lectura: esta herramienta no manda correos ni campañas (es masivo y ' +
       'no se deshace); eso lo hace una persona desde las pantallas del SUPERADMIN. ' +

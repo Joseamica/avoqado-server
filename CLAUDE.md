@@ -130,46 +130,14 @@ Equipo de ventas», que vive en su **propia organización vacía**, del mismo no
 miembros leen las pantallas de esa organización. `/api/v1/crm` está **fuera** del guardia del superadmin a propósito: sólo
 lo abren las llaves `crm:*` de `PlatformAccess`, releídas en cada petición (`requireCrm`).
 
-## CRM propio · correo (fase 2: plantillas, campañas masivas y Gmail del vendedor)
+## CRM propio · correo (fase 2)
 
-Código en `src/services/crm/email/`. Las campañas salen por Resend desde `novedades.avoqado.io`; el uno a uno, del Gmail del vendedor.
-Dos jobs (`src/jobs/jobSchedules.ts`): el remitente `crmCampaignSender` (`'17 * * * * *'`, cada minuto) y las respuestas del Gmail
-`crmGmailReplies` (`'42 */5 * * * *'`, cada 5 min).
-
-- 🔴 **Fuera de producción no sale correo a nadie real.** Si `NODE_ENV !== 'production'`, sólo se manda a las direcciones de
-  `CRM_CORREO_PRUEBAS` (separadas por comas, en minúsculas; vacía = no sale nada). Las demás quedan `OMITIDO` con «fuera de la lista de
-  prueba» y en el Gmail la API responde 422. Es **una** función, `puedeMandarFueraDeProduccion` (`testAllowlist.ts`), y también la
-  usan los avisos del CRM (`digest.service.ts`) y los dos correos del formulario de la landing. `av-db-25` trae correos de gente real.
-- `MARKETING_KILL_SWITCH=true` también detiene las campañas del CRM (el remitente ni reclama).
-- **Gmail «configurado»** sólo si están presentes y bien formadas las cuatro `CRM_GMAIL_*` **y** `OAUTH_STATE_SECRET` (la llave, 64 hex;
-  la URI, http/https). Una mal escrita no tumba la API: «Mi Gmail» dice «Falta configurar la app de Google». La app de Google es
-  «External» y **sin verificar**: tope de **100 cuentas distintas en toda su vida** (`TOPE_CUENTAS_GMAIL`; se cuentan en
-  `CrmGmailAccountSeen`).
-- **Orden del webhook de Resend** (`resend.webhook.controller.ts`): (1) el paso de reputación suprime la dirección en `EmailSuppression`
-  (rebote `Permanent` o queja) antes de todo; (2) marketing de superadmin; (3) `procesarAvisoDeResend` (campañas de un negocio); (4)
-  `procesarAvisoCrm`, que **no** vuelve a suprimir: sólo marca la delivery `FALLIDO` y, en una queja, anota la baja de Avoqado
-  (`CrmEmailOptOut`). `isBlocked` (`optOut.service.ts`) une las dos listas y se revisa justo antes de cada envío.
-- 🔴 **La liga de baja de «Envíame una prueba» es REAL.** Si quien prueba la usa, su correo queda bloqueado y hoy no hay ruta para
+- 🔴 **Fuera de producción no sale correo a nadie real:** si `NODE_ENV !== 'production'`, sólo a las direcciones de `CRM_CORREO_PRUEBAS`
+  (vacía = no sale nada). Una sola función: `puedeMandarFueraDeProduccion` (`src/services/crm/email/testAllowlist.ts`).
+- 🔴 **La liga de baja de «Envíame una prueba» es REAL:** si quien prueba la usa, su correo queda bloqueado y hoy no hay ruta para
   revertirlo. Para probar la baja usa una dirección de `CRM_CORREO_PRUEBAS` que no sea la tuya.
-- **MCP** (`src/mcp/tools/crm.ts`, sólo SUPERADMIN y sólo en `/mcp`, nunca en el catálogo certificado): `crm_list_email_templates` y
-  `crm_campaign_status`, de **lectura**. Mandar una campaña o un correo por MCP no existe a propósito: es masivo y no se deshace.
-- Variables nuevas (`src/config/env.ts`). Bloque para `.env.example` (el agente no puede editarlo; lo pega el founder):
-
-```bash
-# CRM propio · correo (fase 2)
-CRM_CAMPAIGN_FROM="Avoqado <novedades@novedades.avoqado.io>"
-CRM_CAMPAIGN_REPLY_TO=hola@avoqado.io
-# Primeros intentos por día (hora de CDMX): calentamiento del subdominio; se sube a mano
-CRM_CAMPAIGN_DAILY_CAP=300
-# Fuera de producción sólo sale correo a estas direcciones (comas, minúsculas). Vacío = no sale nada
-CRM_CORREO_PRUEBAS=
-# Gmail del vendedor (app OAuth de Google «External», sin verificar). Sin estas cuatro «Mi Gmail» dice «Falta configurar la app de Google»
-CRM_GMAIL_CLIENT_ID=
-CRM_GMAIL_CLIENT_SECRET=
-CRM_GMAIL_REDIRECT_URI=
-# 64 caracteres hex (32 bytes), llave propia de esta integración: openssl rand -hex 32
-CRM_GMAIL_TOKEN_KEY=
-```
+- `MARKETING_KILL_SWITCH=true` también detiene las campañas del CRM.
+- Variables, jobs, Gmail, webhook de Resend y herramientas MCP: `.claude/rules/crm-correo.md` (carga sola al tocar esos archivos).
 
 ## Commands
 
@@ -249,6 +217,8 @@ canary checklist is in `.claude/rules/bounded-queries-and-server-load.md`.
 - `playtelecom-vertical.md` - PlayTelecom white-label vertical: who's who (Bait/Walmart), generic vs bespoke, gotchas
 - `blumon-seriales-virtuales.md` - 🔴 el dígito extra en `MerchantAccount.blumonSerialNumber` NO es typo: es multi-merchant deliberado. "¿Es
   nuestro?" = `Terminal` OR `MerchantAccount`, nunca solo una
+- `crm-correo.md` - CRM propio, correo (fase 2): variables `CRM_*`, jobs, Gmail del vendedor, orden del webhook de Resend, MCP de lectura
+  (path-conditional: `src/services/crm/email/**`, `src/jobs/crm-*`, `src/mcp/tools/crm.ts`)
 
 ### On-demand guides (`docs/guides/`)
 

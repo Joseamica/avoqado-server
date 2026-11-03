@@ -16,7 +16,7 @@ import { configureToolCatalog, TOOL_EFFECTS } from '@/mcp/catalog'
 import { DIRECTORY_TOOLS } from '@/mcp/directory/catalog'
 import { registerAllTools } from '@/mcp/server'
 import type { McpScope } from '@/mcp/scope'
-import { registerCrmTools } from '@/mcp/tools/crm'
+import { conLlave, registerCrmTools } from '@/mcp/tools/crm'
 import { auditMcpWrite } from '@/mcp/audit'
 import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, listAccounts, listLostReasons, listStages, lose, moveStage } from '@/services/crm/accounts.service'
@@ -1054,7 +1054,7 @@ describe('CRM MCP — email (read only)', () => {
     expect(auditMcpWrite).not.toHaveBeenCalled()
   })
 
-  it('crm_campaign_status with an id: that campaign alone, and DESCONOCIDO is counted apart (Resend took it, we did not save it)', async () => {
+  it('crm_campaign_status with an id: that campaign alone, and DESCONOCIDO is counted apart (we do not know whether it went out)', async () => {
     ;(getCampaign as jest.Mock).mockResolvedValue(
       campaignView({ status: 'ENVIADA', contadores: { ENVIADO: 38, DESCONOCIDO: 2 }, finishedAt: new Date('2026-11-03T18:00:00.000Z') }),
     )
@@ -1074,6 +1074,30 @@ describe('CRM MCP — email (read only)', () => {
       error: 'Esa campaña no existe',
       code: 'CRM_CAMPANA_NOT_FOUND',
     })
+  })
+
+  it('«desconocidos» is described with BOTH origins: Resend accepted it and it was not saved, or 23 h passed since the first attempt (I1)', () => {
+    const { descriptions } = setup()
+    const description = descriptions.crm_campaign_status.replace(/\s+/g, ' ')
+    // Not «delivered»: the safe reading of «unknown» is that it may never have left.
+    expect(description).toMatch(/desconocidos: no sabemos si salieron/)
+    expect(description).toMatch(/aceptó y no alcanzamos a guardarlo/)
+    expect(description).toMatch(/pasaron más de 23 h desde el primer intento/)
+  })
+
+  it('conLlave with a LIST that holds «crm:editar» still demands the write grant, and with it any one key opens (M1)', async () => {
+    const run = jest.fn().mockResolvedValue({ ok: true })
+    const readOnly = { ...SUPER, scopes: ['mcp:read'] } as McpScope
+    await expect(conLlave(readOnly, ['crm:editar', 'crm:admin'], run)).rejects.toThrow(/mcp:write/)
+    await expect(conLlave(readOnly, ['crm:admin', 'crm:editar'], run)).rejects.toThrow(/mcp:write/)
+    expect(run).not.toHaveBeenCalled()
+    expect(getCrmAccess).not.toHaveBeenCalled()
+
+    // With the grant it runs; one key of the list is enough (the person has «admin» but not «editar»).
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, editar: null })
+    const answer = JSON.parse((await conLlave(SUPER, ['crm:editar', 'crm:admin'], run)).content[0].text)
+    expect(answer).toEqual({ ok: true })
+    expect(run).toHaveBeenCalledTimes(1)
   })
 
   it('keys: templates open with «Mandar correo», «Campañas masivas» or «Administrar»; campaigns only with the last two', async () => {
