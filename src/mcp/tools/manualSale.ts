@@ -46,7 +46,7 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'record_serialized_sale',
-    'Record ONE SIM sale made OUTSIDE the TPV (PlayTelecom / Walmart external sale, already documentation-approved offline) — creates a paid order + payment and flips the SIM (by ICCID) to SOLD in a single step. This is the single-sale sibling of the dashboard\'s bulk "Subir ventas fuera de TPV" upload. Identify the SIM by iccid, the seller by promoterCode OR promoterName (at least one), and the store by storeName (must match a venue in your org). saleDate is the venue-local calendar day (YYYY-MM-DD). amount is in PESOS (e.g. 250.00), never cents. By DEFAULT this only PREVIEWS the sale; call again with confirm:true to actually record it. This WRITES — requires manual-sales:create in your organization.',
+    'Record ONE SIM sale made OUTSIDE the TPV (PlayTelecom / Walmart external sale, already documentation-approved offline) — creates a paid order + payment and flips the SIM (by ICCID) to SOLD in a single step. This is the single-sale sibling of the dashboard\'s bulk "Subir ventas fuera de TPV" upload. Identify the SIM by iccid, the seller by promoterCode OR promoterName (at least one), and the store by storeName (must match a venue in your org). saleDate is the venue-local calendar day (YYYY-MM-DD). amount is in PESOS (e.g. 250.00), never cents. When the organization has the número de vinculación turned on, linkingNumber (número de vinculación, 9 or 10 digits) is required, and portedNumber (número portado) too when saleType is a Portabilidad; otherwise both are ignored. By DEFAULT this only PREVIEWS the sale; call again with confirm:true to actually record it. This WRITES — requires manual-sales:create in your organization.',
     {
       iccid: z.string().min(5).describe('ICCID printed/encoded on the SIM being sold'),
       promoterCode: z.string().optional().describe("Seller's employee code. Provide this OR promoterName (at least one)"),
@@ -70,6 +70,18 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         .string()
         .optional()
         .describe('Free-text reason, only used when saleStatus is "Rechazada" (e.g. "no se pudo vincular, el cliente ya se lo llevó")'),
+      linkingNumber: z
+        .string()
+        .optional()
+        .describe(
+          'Número de vinculación de la línea (9 o 10 dígitos). Obligatorio cuando la organización tiene activado el número de vinculación',
+        ),
+      portedNumber: z
+        .string()
+        .optional()
+        .describe(
+          'Número portado (9 o 10 dígitos), sólo en una Portabilidad; ahí es obligatorio cuando la organización tiene activado el número de vinculación',
+        ),
       confirm: z.boolean().optional().describe('Must be true to actually record the sale; without it you get a preview'),
     },
     async ({
@@ -84,6 +96,8 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
       simType,
       saleStatus,
       rejectionNote,
+      linkingNumber,
+      portedNumber,
       confirm,
     }) => {
       requireManualSaleAccess() // throws ScopeError if no venue in the active org grants manual-sales:create
@@ -96,15 +110,18 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
       const amountLabel = typeof amount === 'number' ? amount.toFixed(2) : amount
       const isRejected = saleStatus === 'Rechazada'
       const statusLabel = isRejected ? 'RECHAZADA (venta perdida)' : 'Aprobada'
+      const numbersLabel = [linkingNumber && `vinculación ${linkingNumber}`, portedNumber && `portado ${portedNumber}`]
+        .filter(Boolean)
+        .join(', ')
 
       if (!confirm) {
         return text({
           ok: false,
           requiresConfirmation: true,
-          change: { iccid, seller, storeName, saleDate, amount: amountLabel, saleStatus: statusLabel },
+          change: { iccid, seller, storeName, saleDate, amount: amountLabel, saleStatus: statusLabel, linkingNumber, portedNumber },
           message: isRejected
-            ? `Voy a registrar como RECHAZADA la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}: el SIM sale del inventario pero la venta NO cuenta como buena${rejectionNote ? ` (motivo: ${rejectionNote})` : ''}. Vuelve a llamar con confirm:true para confirmar.`
-            : `Voy a registrar la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}. Vuelve a llamar con confirm:true para confirmar.`,
+            ? `Voy a registrar como RECHAZADA la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}${numbersLabel ? ` (${numbersLabel})` : ''}: el SIM sale del inventario pero la venta NO cuenta como buena${rejectionNote ? ` (motivo: ${rejectionNote})` : ''}. Vuelve a llamar con confirm:true para confirmar.`
+            : `Voy a registrar la venta del SIM ${iccid} de ${seller} en ${storeName} por $${amountLabel}${numbersLabel ? ` (${numbersLabel})` : ''}. Vuelve a llamar con confirm:true para confirmar.`,
         })
       }
 
@@ -120,9 +137,11 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         simType,
         saleStatus,
         rejectionNote,
+        linkingNumber,
+        portedNumber,
       }
 
-      // Con el interruptor prendido el servicio exige el número (la tool lo acepta en A9); apagado, igual que siempre.
+      // Con el interruptor prendido el servicio exige el número; apagado, lo ignora (igual que siempre).
       const result = await createOneManualSale(scope.activeOrg, scope.staffId, row, {
         requireLinkingNumber: await isLinkingNumberEnabledForOrg(scope.activeOrg),
       })
@@ -135,7 +154,7 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
         entity: 'Order',
         entityId: result.orderId,
         venueId: result.venueId,
-        data: { iccid, seller, storeName, saleDate, amount: amountLabel, saleStatus: result.saleStatus },
+        data: { iccid, seller, storeName, saleDate, amount: amountLabel, saleStatus: result.saleStatus, linkingNumber, portedNumber },
       })
 
       return text({

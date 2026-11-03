@@ -137,8 +137,8 @@ describe('record_serialized_sale — confirm:true executes + audits', () => {
     })
   })
 
-  // A8-2: con el interruptor prendido el servicio exige el número; la tool todavía no lo acepta (A9), así que la fila
-  // falla con el motivo del servicio en vez de entrar sin número.
+  // A8-2: con el interruptor prendido el servicio exige el número; sin él, la fila falla con el motivo del servicio en
+  // vez de entrar sin número.
   it('passes requireLinkingNumber from the org flag (prendido)', async () => {
     mockLinkingFlag.mockResolvedValueOnce(true)
     mockCreateOneManualSale.mockResolvedValueOnce({ ok: false, error: 'Falta el número de vinculación' })
@@ -218,5 +218,37 @@ describe('record_serialized_sale — venta rechazada', () => {
     })
     const out = parse(await call({ ...baseInput, confirm: true }))
     expect(out.message).toMatch(/Venta registrada/)
+  })
+})
+
+describe('record_serialized_sale — número de vinculación', () => {
+  const numbered = { ...baseInput, saleType: 'Portabilidad', linkingNumber: '55 1234-5678', portedNumber: '5599998888' }
+
+  it('la vista previa muestra los dos números y no escribe nada', async () => {
+    const out = parse(await call(numbered))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.change).toMatchObject({ linkingNumber: '55 1234-5678', portedNumber: '5599998888' })
+    expect(out.message).toContain('55 1234-5678')
+    expect(out.message).toContain('5599998888')
+    expect(mockCreateOneManualSale).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('con confirm:true pasa los dos números en la fila (con el interruptor prendido) y los audita', async () => {
+    mockLinkingFlag.mockResolvedValueOnce(true)
+    mockCreateOneManualSale.mockResolvedValueOnce({ ok: true, orderId: 'ord-4', verificationId: 'ver-4', venueId: 'v1' })
+    const out = parse(await call({ ...numbered, confirm: true }))
+    const [, , row, opts] = mockCreateOneManualSale.mock.calls[0]
+    expect(row).toMatchObject({ linkingNumber: '55 1234-5678', portedNumber: '5599998888', saleType: 'Portabilidad' })
+    expect(opts).toEqual({ requireLinkingNumber: true })
+    expect(out.ok).toBe(true)
+    expect(mockAudit.mock.calls[0][1].data).toMatchObject({ linkingNumber: '55 1234-5678', portedNumber: '5599998888' })
+  })
+
+  it('la descripción dice cuándo los números son obligatorios', () => {
+    const descs: string[] = []
+    registerManualSaleTools({ tool: (...a: unknown[]) => descs.push(a[1] as string) } as never, buildScope([['v1', access('org-1')]]))
+    expect(descs[0]).toMatch(/número de vinculación/i)
+    expect(descs[0]).toMatch(/portedNumber/)
   })
 })

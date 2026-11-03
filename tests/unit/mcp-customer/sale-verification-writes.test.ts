@@ -5,6 +5,8 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockReview = jest.fn()
 const mockReopen = jest.fn()
 const mockEdit = jest.fn()
+const mockSetNumbers = jest.fn()
+const mockLinkingFlag = jest.fn()
 const mockFindFirst = jest.fn()
 const mockAudit = jest.fn()
 
@@ -13,6 +15,7 @@ jest.mock('@/services/dashboard/sale-verification.org.dashboard.service', () => 
   reviewOrgSaleVerification: (...a: unknown[]) => mockReview(...(a as [])),
   reopenOrgSaleVerification: (...a: unknown[]) => mockReopen(...(a as [])),
   editOrgSaleVerification: (...a: unknown[]) => mockEdit(...(a as [])),
+  setOrgSaleVerificationNumbers: (...a: unknown[]) => mockSetNumbers(...(a as [])),
   listOrgSaleVerifications: jest.fn(),
   getOrgSalesSummary: jest.fn(),
   getSalesByMonth: jest.fn(),
@@ -28,6 +31,9 @@ jest.mock('@/services/dashboard/sale-verification.org.dashboard.service', () => 
   parseRange: (a?: string, b?: string) => ({ from: a, to: b }),
 }))
 jest.mock('@/services/access/access.service', () => ({ hasPermission: () => true }))
+jest.mock('@/services/playtelecom/linkingNumber.flag', () => ({
+  isLinkingNumberEnabledForOrg: (...a: unknown[]) => mockLinkingFlag(...(a as [])),
+}))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -252,5 +258,184 @@ describe('edit_sale_verification', () => {
     expect(out.error).toMatch(/protocolo de costo/)
     expect(mockEdit).toHaveBeenCalledTimes(1)
     expect(mockAudit).not.toHaveBeenCalled()
+  })
+})
+
+describe('edit_sale_verification — número de vinculación (camino aparte)', () => {
+  const NUMBERED = { ...PENDING, isPortabilidad: true, linkingNumber: '5511112222', portedNumber: null }
+  beforeEach(() => {
+    mockFindFirst.mockResolvedValue(NUMBERED)
+    mockLinkingFlag.mockResolvedValue(true)
+  })
+  const nothingWritten = () => {
+    expect(mockEdit).not.toHaveBeenCalled()
+    expect(mockSetNumbers).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  }
+
+  it('sólo el número, sin confirm → vista previa de antes → después en dígitos, y nada se escribe', async () => {
+    const out = parse(
+      await call('edit_sale_verification', { saleVerificationId: 'sv1', linkingNumber: '55 1234-5678', reason: 'número mal capturado' }),
+    )
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.change.numbers.linkingNumber).toEqual({ from: '5511112222', to: '5512345678' })
+    expect(out.message).toContain('5511112222 → 5512345678')
+    nothingWritten()
+  })
+
+  it('9 dígitos sin allowNineDigits → pregunta «Tiene 9 dígitos. ¿Guardarlo así?» y no escribe, aunque venga confirm:true', async () => {
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        linkingNumber: '551234567',
+        reason: 'número mal capturado',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.message).toContain('Tiene 9 dígitos. ¿Guardarlo así?')
+    expect(out.message).toMatch(/allowNineDigits\s*:\s*true/)
+    nothingWritten()
+  })
+
+  it('sólo el número con confirm → lo guarda por el camino de números (no por la edición general) y lo audita', async () => {
+    mockSetNumbers.mockResolvedValue({ id: 'sv1', linkingNumber: '5512345678', portedNumber: '5599998888' })
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        linkingNumber: '55 1234-5678',
+        portedNumber: '5599998888',
+        reason: 'número mal capturado',
+        confirm: true,
+      }),
+    )
+    expect(out).toMatchObject({ ok: true, saleVerificationId: 'sv1', updated: { linkingNumber: '5512345678', portedNumber: '5599998888' } })
+    expect(mockSetNumbers).toHaveBeenCalledWith('o1', {
+      saleVerificationId: 'sv1',
+      editedById: 's1',
+      linkingNumber: '55 1234-5678',
+      portedNumber: '5599998888',
+      allowNineDigits: undefined,
+      reason: 'número mal capturado',
+    })
+    expect(mockEdit).not.toHaveBeenCalled()
+    expect(mockAudit).toHaveBeenCalledTimes(1)
+    expect(mockAudit.mock.calls[0][1]).toMatchObject({ entity: 'SaleVerification', entityId: 'sv1', venueId: 'v1' })
+  })
+
+  it('9 dígitos con allowNineDigits:true y confirm → lo pasa al servicio', async () => {
+    mockSetNumbers.mockResolvedValue({ id: 'sv1', linkingNumber: '551234567', portedNumber: null })
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        linkingNumber: '551234567',
+        allowNineDigits: true,
+        reason: 'número mal capturado',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(true)
+    expect(mockSetNumbers).toHaveBeenCalledWith('o1', expect.objectContaining({ linkingNumber: '551234567', allowNineDigits: true }))
+  })
+
+  it.each([false, true])('número + status (confirm=%s) → «Corrige el número en una edición aparte» y ninguna escritura', async confirm => {
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        linkingNumber: '5512345678',
+        status: 'COMPLETED',
+        reason: 'corrección completa',
+        confirm,
+      }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBeUndefined()
+    expect(out.error).toMatch(/Corrige el número en una edición aparte/)
+    nothingWritten()
+  })
+
+  it('número + amount con confirm → también se rechaza antes de escribir', async () => {
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        portedNumber: '5512345678',
+        amount: 300,
+        reason: 'corrección completa',
+        confirm: true,
+      }),
+    )
+    expect(out.error).toMatch(/Corrige el número en una edición aparte/)
+    nothingWritten()
+  })
+
+  it('interruptor apagado → LINKING_NUMBER_DISABLED en llano, sin vista previa ni escritura', async () => {
+    mockLinkingFlag.mockResolvedValue(false)
+    for (const confirm of [undefined, true]) {
+      const out = parse(
+        await call('edit_sale_verification', {
+          saleVerificationId: 'sv1',
+          linkingNumber: '5512345678',
+          reason: 'número mal capturado',
+          confirm,
+        }),
+      )
+      expect(out).toMatchObject({ ok: false, code: 'LINKING_NUMBER_DISABLED' })
+      expect(out.error).toMatch(/no está activo/)
+    }
+    expect(mockLinkingFlag).toHaveBeenCalledWith('o1')
+    nothingWritten()
+  })
+
+  it('pegado con +52 (12 caracteres) → INVALID_LINKING_NUMBER desde la vista previa', async () => {
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        linkingNumber: '+52 55 1234 5678',
+        reason: 'número mal capturado',
+      }),
+    )
+    expect(out).toMatchObject({ ok: false, code: 'INVALID_LINKING_NUMBER' })
+    nothingWritten()
+  })
+
+  it('número portado en una venta que no es de portabilidad → NOT_PORTABILIDAD, sin escribir', async () => {
+    mockFindFirst.mockResolvedValue({ ...NUMBERED, isPortabilidad: false })
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        portedNumber: '5512345678',
+        reason: 'número mal capturado',
+        confirm: true,
+      }),
+    )
+    expect(out).toMatchObject({ ok: false, code: 'NOT_PORTABILIDAD' })
+    nothingWritten()
+  })
+
+  it('el servicio rechaza (p. ej. carrera con el interruptor) → ok:false con su código y nada se audita', async () => {
+    mockSetNumbers.mockRejectedValue(
+      new ForbiddenError('El número de vinculación no está activo en esta organización', 'LINKING_NUMBER_DISABLED'),
+    )
+    const out = parse(
+      await call('edit_sale_verification', {
+        saleVerificationId: 'sv1',
+        linkingNumber: '5512345678',
+        reason: 'número mal capturado',
+        confirm: true,
+      }),
+    )
+    expect(out).toMatchObject({ ok: false, code: 'LINKING_NUMBER_DISABLED' })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN: sin números la edición general no consulta el interruptor', async () => {
+    mockEdit.mockResolvedValue({ status: 'PENDING' })
+    const out = parse(
+      await call('edit_sale_verification', { saleVerificationId: 'sv1', amount: 300, reason: 'ajuste monto', confirm: true }),
+    )
+    expect(out.ok).toBe(true)
+    expect(mockLinkingFlag).not.toHaveBeenCalled()
+    expect(mockSetNumbers).not.toHaveBeenCalled()
   })
 })

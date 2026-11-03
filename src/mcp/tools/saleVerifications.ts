@@ -7,6 +7,8 @@ import { ScopeError, enforceWriteScope } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { PROMOTER_FEEDBACK_MIN_CHARS } from '@/services/dashboard/sale-verification.dashboard.service'
+import { isLinkingNumberEnabledForOrg } from '@/services/playtelecom/linkingNumber.flag'
+import { isValidTerminalNumber, normalizeLinkingNumber } from '@/services/playtelecom/linkingNumber.rules'
 import {
   getOrgSalesSummary,
   getSalesByMonth,
@@ -24,6 +26,7 @@ import {
   reviewOrgSaleVerification,
   reopenOrgSaleVerification,
   editOrgSaleVerification,
+  setOrgSaleVerificationNumbers,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
 
 /**
@@ -114,12 +117,12 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'list_sale_verifications',
-    'List INDIVIDUAL sale verifications (the back-office approval queue) for your organization — the per-sale detail behind the confirmed-sales counters. Each row is one sale with its status (PENDING/COMPLETED/FAILED/REJECTED), the promoter, the store, the SIM(s), and — when not approved — WHY. Filter by status (e.g. FAILED = las que el promotor debe corregir; REJECTED = rechazadas), by promoter (staffId), by portabilidad, or free `search` (ICCID / promoter name). Answers "muéstrame las ventas en revisión / rechazadas y por qué", "¿qué tiene pendiente de corregir el promotor X?". Paginated. Serialized-inventory / PlayTelecom back-office. IMPORTANT: a row with hasVerification:false is a payment that was recorded WITHOUT its sale verification (no SIM, no promoter, no photos) — its `id` is the PAYMENT id, not a verification id, so it CANNOT be approved, rejected or edited. Report those rows as incomplete sales that need support; never pass their id to review_sale_verification.',
+    'List INDIVIDUAL sale verifications (the back-office approval queue) for your organization — the per-sale detail behind the confirmed-sales counters. Each row is one sale with its status (PENDING/COMPLETED/FAILED/REJECTED), the promoter, the store, the SIM(s), and — when not approved — WHY. Filter by status (e.g. FAILED = las que el promotor debe corregir; REJECTED = rechazadas), by promoter (staffId), by portabilidad, or free `search` (ICCID / promoter name). When the organization has the número de vinculación turned on, each row also carries linkingNumber (número de vinculación) and portedNumber (número portado), who set each one (…Source: TPV, BACKOFFICE, EXTERNAL_SALE, IMPORT) and when (…SetAt), and numberAlerts: LINKING_DUPLICATE / PORTED_DUPLICATE (ya registrado en otra venta, con cuál), NOT_10_DIGITS, LINKING_MISSING / PORTED_MISSING; and a `search` of 9 or 10 digits (spaces or dashes allowed) finds the sale by its número de vinculación or portado. Answers "muéstrame las ventas en revisión / rechazadas y por qué", "¿qué tiene pendiente de corregir el promotor X?". Paginated. Serialized-inventory / PlayTelecom back-office. IMPORTANT: a row with hasVerification:false is a payment that was recorded WITHOUT its sale verification (no SIM, no promoter, no photos) — its `id` is the PAYMENT id, not a verification id, so it CANNOT be approved, rejected or edited. Report those rows as incomplete sales that need support; never pass their id to review_sale_verification.',
     {
       status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'REJECTED']).optional().describe('Filter by verification status'),
       staffId: z.string().optional().describe('Only sales by this promoter (staffId)'),
       isPortabilidad: z.boolean().optional().describe('true = only portabilidades; false = only líneas nuevas'),
-      search: z.string().optional().describe('Free text: ICCID or promoter name'),
+      search: z.string().optional().describe('Free text: ICCID, promoter name, or a 9 or 10 digit número de vinculación / portado'),
       pageSize: z.number().int().positive().max(100).optional().describe('Rows per page (default 20)'),
       pageNumber: z.number().int().positive().optional().describe('1-based page (default 1)'),
     },
@@ -155,12 +158,86 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
         status: true,
         isPortabilidad: true,
         venueId: true,
+        linkingNumber: true,
+        portedNumber: true,
         staff: { select: { firstName: true, lastName: true } },
         venue: { select: { name: true } },
         payment: { select: { amount: true } },
       },
     })
   }
+  /** El rechazo de un servicio viaja con su código (p. ej. `PAYMENT_PROTECTED_BY_COST_PROTOCOL`, `LINKING_NUMBER_DISABLED`). */
+  function failed(err: unknown) {
+    const code = (err as { code?: unknown }).code
+    return text({ ok: false, error: (err as Error).message, ...(typeof code === 'string' ? { code } : {}) })
+  }
+
+  /**
+   * Corregir el número de vinculación y/o el portado, igual que el DASHBOARD: 10 dígitos, o 9 con `allowNineDigits`.
+   * Va por su propio servicio (que guarda con fuente back-office y deja su bitácora); por eso nunca se mezcla con la
+   * edición general: o se guardan los números o nada.
+   */
+  async function editSaleNumbers(
+    sale: NonNullable<Awaited<ReturnType<typeof fetchSaleForPreview>>>,
+    args: { linkingNumber?: string; portedNumber?: string; allowNineDigits?: boolean; reason: string; confirm?: boolean },
+  ) {
+    if (!(await isLinkingNumberEnabledForOrg(scope.activeOrg))) {
+      return text({
+        ok: false,
+        code: 'LINKING_NUMBER_DISABLED',
+        error: 'El número de vinculación no está activo en esta organización: no hay número que corregir.',
+      })
+    }
+    if (args.portedNumber !== undefined && !sale.isPortabilidad) {
+      return text({ ok: false, code: 'NOT_PORTABILIDAD', error: 'Esta venta no es de portabilidad: no lleva número portado.' })
+    }
+    const changes = (['linkingNumber', 'portedNumber'] as const).flatMap(field => {
+      const raw = args[field]
+      return raw === undefined ? [] : [{ field, from: sale[field] ?? null, to: normalizeLinkingNumber(raw) }]
+    })
+    if (changes.some(c => !isValidTerminalNumber(c.to))) {
+      return text({
+        ok: false,
+        code: 'INVALID_LINKING_NUMBER',
+        error: 'El número debe tener 10 dígitos (o 9, confirmado): sólo dígitos, sin el +52.',
+      })
+    }
+    const needsNineOk = !args.allowNineDigits && changes.some(c => c.to.length === 9)
+    if (!args.confirm || needsNineOk) {
+      const label = { linkingNumber: 'número de vinculación', portedNumber: 'número portado' }
+      const lines = changes.map(c => `${label[c.field]} ${c.from ?? '(vacío)'} → ${c.to}`).join('; ')
+      return text({
+        ok: false,
+        requiresConfirmation: true,
+        change: { saleVerificationId: sale.id, numbers: Object.fromEntries(changes.map(c => [c.field, { from: c.from, to: c.to }])) },
+        message: needsNineOk
+          ? `Vas a CORREGIR en la venta ${sale.id}: ${lines}. Tiene 9 dígitos. ¿Guardarlo así? Pregúntale al operador; si dice que sí, vuelve a llamar con allowNineDigits:true y confirm:true.`
+          : `Vas a CORREGIR en la venta ${sale.id}: ${lines}. Queda como corregido por el back-office. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+      })
+    }
+    try {
+      const row = await setOrgSaleVerificationNumbers(scope.activeOrg, {
+        saleVerificationId: sale.id,
+        editedById: scope.staffId,
+        linkingNumber: args.linkingNumber,
+        portedNumber: args.portedNumber,
+        allowNineDigits: args.allowNineDigits,
+        reason: args.reason,
+      })
+      const updated = Object.fromEntries(changes.map(c => [c.field, row[c.field]]))
+      await auditMcpWrite(scope, {
+        action: 'SALE_VERIFICATION_EDITED_VIA_MCP',
+        entity: 'SaleVerification',
+        entityId: sale.id,
+        venueId: sale.venueId,
+        data: { ...updated, allowNineDigits: args.allowNineDigits === true, reason: args.reason },
+      })
+      return text({ ok: true, saleVerificationId: sale.id, updated })
+    } catch (err) {
+      return failed(err)
+    }
+  }
+
   const DECISION_MAP = { approve: 'APPROVE', reject: 'REJECT', reject_final: 'REJECT_FINAL' } as const
   /** Status each decision lands in — same table as the service (`DECISION_TARGET_STATUS`). */
   const DECISION_TARGET_STATUS = { approve: 'COMPLETED', reject: 'FAILED', reject_final: 'REJECTED' } as const
@@ -317,7 +394,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'edit_sale_verification',
-    'Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter\'s Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status="FAILED" ("Revisar por promotor"), reviewNotes es obligatorio (mín. 5 caracteres).',
+    'Correct a sale verification (OWNER back-office fix): amount (PESOS), paymentForm (CASH/CARD/OTHER), isPortabilidad, and/or status (PENDING/COMPLETED/FAILED/REJECTED). reason is mandatory (≥5 chars). Does NOT recompute commissions. ⚠️ Changing status AWAY from COMPLETED can claw back the promoter\'s Cash Out commission on the next reconciliation. By DEFAULT this only PREVIEWS; call again with confirm:true. This WRITES — OWNER-only (requires sale-verifications:edit). Si status="FAILED" ("Revisar por promotor"), reviewNotes es obligatorio (mín. 5 caracteres). Cuando la organización tiene activado el número de vinculación, también corrige linkingNumber (número de vinculación) y/o portedNumber (número portado, sólo en una portabilidad): 10 dígitos, o 9 con allowNineDigits:true después de preguntarle al operador. Corrige el número en una edición aparte: si mandas un número junto con amount, paymentForm, isPortabilidad o status, no se guarda nada.',
     {
       saleVerificationId: z.string().min(1).describe('The verification id'),
       amount: z.number().min(0).optional().describe('New amount in PESOS (major units), e.g. 250'),
@@ -326,14 +403,49 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'REJECTED']).optional().describe('New verification status'),
       reason: z.string().min(5).describe('Why (min 5 chars) — recorded in the activity log'),
       reviewNotes: z.string().optional().describe('Qué debe corregir el promotor — OBLIGATORIO (mín. 5 caracteres) cuando status="FAILED"'),
+      linkingNumber: z
+        .string()
+        .optional()
+        .describe('Número de vinculación corregido (10 dígitos; 9 sólo con allowNineDigits:true). Sin otros campos'),
+      portedNumber: z
+        .string()
+        .optional()
+        .describe('Número portado corregido, sólo en una portabilidad (10 dígitos; 9 sólo con allowNineDigits:true). Sin otros campos'),
+      allowNineDigits: z.boolean().optional().describe('true = el operador confirmó guardar un número de 9 dígitos'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
-    async ({ saleVerificationId, amount, paymentForm, isPortabilidad, status, reason, reviewNotes, confirm }) => {
+    async ({
+      saleVerificationId,
+      amount,
+      paymentForm,
+      isPortabilidad,
+      status,
+      reason,
+      reviewNotes,
+      linkingNumber,
+      portedNumber,
+      allowNineDigits,
+      confirm,
+    }) => {
       requireOrgPermission('sale-verifications:edit')
       const sale = await fetchSaleForPreview(saleVerificationId)
       if (!sale) return text({ ok: false, error: 'No encontré esa venta en tu organización.' })
-      if (amount === undefined && paymentForm === undefined && isPortabilidad === undefined && status === undefined) {
-        return text({ ok: false, error: 'Indica al menos un campo a cambiar (amount, paymentForm, isPortabilidad o status).' })
+      const hasNumbers = linkingNumber !== undefined || portedNumber !== undefined
+      const hasOther = amount !== undefined || paymentForm !== undefined || isPortabilidad !== undefined || status !== undefined
+      // Codex plan r1 #5: dos servicios en una llamada podrían dejar una parte guardada; se rechaza antes de escribir.
+      if (hasNumbers && hasOther) {
+        return text({
+          ok: false,
+          error:
+            'Corrige el número en una edición aparte: manda linkingNumber/portedNumber sin amount, paymentForm, isPortabilidad ni status.',
+        })
+      }
+      if (hasNumbers) return editSaleNumbers(sale, { linkingNumber, portedNumber, allowNineDigits, reason, confirm })
+      if (!hasOther) {
+        return text({
+          ok: false,
+          error: 'Indica al menos un campo a cambiar (amount, paymentForm, isPortabilidad, status, linkingNumber o portedNumber).',
+        })
       }
       if (status === 'FAILED' && (reviewNotes?.trim().length ?? 0) < PROMOTER_FEEDBACK_MIN_CHARS) {
         return text({
@@ -382,8 +494,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       } catch (err) {
         // Codex R13-3: un cobro del protocolo de costo no cambia de dinero desde aquí (409 `PAYMENT_PROTECTED_BY_COST_PROTOCOL`):
         // el rechazo viaja con su código para que el operador sepa que va por reembolso/anulación, no por otra edición.
-        const code = (err as { code?: unknown }).code
-        return text({ ok: false, error: (err as Error).message, ...(typeof code === 'string' ? { code } : {}) })
+        return failed(err)
       }
     },
   )
