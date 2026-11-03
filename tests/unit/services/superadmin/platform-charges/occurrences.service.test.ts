@@ -146,12 +146,12 @@ function instalar() {
   prismaMock.$queryRaw.mockImplementation(async (partes: TemplateStringsArray, ...valores: unknown[]) => {
     const sql = partes.join('?')
     if (sql.includes('FOR UPDATE')) return [{ id: valores[0] }]
-    if (sql.includes('"PlatformCfdi"')) return [{ count: mundo.ppd }]
     throw new Error(`consulta cruda inesperada: ${sql}`)
   })
   prismaMock.platformCfdi.findUnique.mockImplementation(
     async ({ where }: any) => mundo.cfdis.find(c => c.idempotencyKey === where.idempotencyKey) ?? null,
   )
+  prismaMock.platformCfdi.count.mockImplementation(async () => mundo.ppd)
   prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where }: any) => (where.id === PERFIL.id ? { ...PERFIL } : null))
   mockFindProfileId.mockResolvedValue(PERFIL.id)
   mockResolver.mockResolvedValue({ kind: 'NONE' })
@@ -166,6 +166,7 @@ beforeEach(() => {
     prismaMock.platformChargeOccurrence.aggregate,
     prismaMock.platformChargeOccurrence.update,
     prismaMock.platformCfdi.findUnique,
+    prismaMock.platformCfdi.count,
     prismaMock.billingTaxProfile.findUnique,
     mockLogAction,
     mockLoggerError,
@@ -513,7 +514,7 @@ describe('platform-charges/occurrences — reopenOccurrence («Deshacer»)', () 
     expect(eventos).toEqual(['resolver intento', 'tx:inicio', 'candado', 'buscar factura', 'actualizar', 'tx:fin', 'bitácora'])
     expect(prismaMock.platformChargeOccurrence.update).toHaveBeenCalledWith({
       where: { id: 'occ-1' },
-      data: { status: 'PENDING', paidAt: null, paidById: null, skippedAt: null, skippedById: null },
+      data: { status: 'PENDING', paidAt: null, paidById: null, skippedAt: null, skippedById: null, invoiceMode: 'AUTOMATIC' },
     })
     expect(mundo.occ).toMatchObject({ status: 'PENDING', paidAt: null, paidById: null, skippedAt: null, skippedById: null })
     expect(view).toMatchObject({ id: 'occ-1', status: 'PENDING', paidAt: null, skippedAt: null, bucket: 'OVERDUE' })
@@ -526,6 +527,23 @@ describe('platform-charges/occurrences — reopenOccurrence («Deshacer»)', () 
       entityId: 'cobro-1',
       data: { occurrenceId: 'occ-1', dueDate: '2026-11-01', previousStatus: 'PAID' },
     })
+  })
+
+  it('«Ya me pagó» sin la casilla la volvió manual: «Deshacer» la regresa al modo del cobro', async () => {
+    Object.assign(mundo.occ, PAGADA(), { invoiceMode: 'MANUAL' })
+
+    const view = await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+    expect(view.invoiceMode).toBe('AUTOMATIC')
+  })
+
+  it('en un cobro manual, «Deshacer» la deja manual', async () => {
+    Object.assign(mundo.occ, PAGADA(), { invoiceMode: 'MANUAL' })
+    mundo.charge.invoiceMode = 'MANUAL'
+
+    const view = await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+    expect(view.invoiceMode).toBe('MANUAL')
   })
 
   it('una OMITIDA también regresa a PENDING', async () => {
@@ -675,14 +693,15 @@ describe('platform-charges/occurrences — payPreview', () => {
     const preview = await payPreview('occ-1')
 
     expect(preview.pendingPpdCount).toBe(2)
-    const [partes, ...valores] = prismaMock.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]
-    const sql = partes.join('?').replace(/\s+/g, ' ')
-    expect(valores).toEqual(['perfil-1'])
-    expect(sql).toContain('"billingTaxProfileId" = ?')
-    expect(sql).toContain(`"metodoPago" = 'PPD'`)
-    expect(sql).toContain(`status = 'STAMPED'`)
-    expect(sql).toContain('"amountPaidCents" < "totalCents"')
-    expect(sql).toContain('COUNT(*)')
+    expect(prismaMock.platformCfdi.count).toHaveBeenCalledWith({
+      where: {
+        billingTaxProfileId: 'perfil-1',
+        type: 'INGRESO',
+        metodoPago: 'PPD',
+        status: 'STAMPED',
+        amountPaidCents: { lt: prismaMock.platformCfdi.fields.totalCents },
+      },
+    })
   })
 
   it('con PPD sin liquidar NO timbra aunque sea AUTOMÁTICA (la casilla se desmarca y el diálogo avisa)', async () => {
@@ -706,7 +725,7 @@ describe('platform-charges/occurrences — payPreview', () => {
     const preview = await payPreview('occ-1')
 
     expect(preview).toMatchObject({ receptor: null, willInvoice: false, pendingPpdCount: 0 })
-    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.platformCfdi.count).not.toHaveBeenCalled()
   })
 
   it('el perfil se busca como lo hace facturar (el del cobro, o el del cliente para una organización o un negocio)', async () => {

@@ -224,9 +224,11 @@ async function probe(id: string) {
   return row
 }
 
-const LOCKED_INCLUDE = { charge: { select: { venueId: true, organizationId: true } } } satisfies Prisma.PlatformChargeOccurrenceInclude
+const LOCKED_INCLUDE = {
+  charge: { select: { venueId: true, organizationId: true, invoiceMode: true } },
+} satisfies Prisma.PlatformChargeOccurrenceInclude
 
-/** Bajo el candado: la ocurrencia como está AHORA, con lo que la bitácora necesita del cobro. */
+/** Bajo el candado: la ocurrencia como está AHORA, con lo que la bitácora y «Deshacer» necesitan del cobro. */
 async function readLocked(tx: Prisma.TransactionClient, id: string) {
   const row = await tx.platformChargeOccurrence.findUnique({ where: { id }, include: LOCKED_INCLUDE })
   if (!row) throw occurrenceNotFound()
@@ -355,7 +357,8 @@ export async function skipOccurrence(id: string, actorId: string, now: Date = ne
  * proceso es 409 «Cancela primero la factura A-118 en Facturas CFDI». Si «Facturar» reservó primero, aquí se ve su fila; si éste va
  * primero, la reserva ve PENDING y no timbra (`reserveCheck`).
  *
- * Limpia el pago y la omisión (`paidAt`, `paidById`, `skippedAt`, `skippedById`). Repetirlo sobre una ya pendiente contesta éxito.
+ * Limpia el pago y la omisión (`paidAt`, `paidById`, `skippedAt`, `skippedById`) y regresa la ocurrencia al modo de factura del
+ * cobro. Repetirlo sobre una ya pendiente contesta éxito.
  */
 export async function reopenOccurrence(id: string, actorId: string, now: Date = new Date()): Promise<OccurrenceView> {
   const { chargeId, status } = await probe(id)
@@ -375,7 +378,8 @@ export async function reopenOccurrence(id: string, actorId: string, now: Date = 
     if (clash) throw blockedByInvoice(clash)
     const updated = await tx.platformChargeOccurrence.update({
       where: { id },
-      data: { status: 'PENDING', paidAt: null, paidById: null, skippedAt: null, skippedById: null },
+      // El modo también se deshace: «Ya me pagó» sin la casilla pudo haberla vuelto manual.
+      data: { status: 'PENDING', paidAt: null, paidById: null, skippedAt: null, skippedById: null, invoiceMode: row.charge.invoiceMode },
     })
     return { previousStatus: row.status, updated, charge: row.charge }
   })
@@ -408,21 +412,17 @@ export async function invoiceOccurrenceView(
 
 // ── Lecturas de la pantalla ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/**
- * Cuántas facturas PPD ya timbradas del receptor siguen sin liquidar en «Facturas CFDI» (`amountPaidCents < totalCents`). Una
- * columna contra otra no se puede pedir con `where` de Prisma, y traerlas todas para contarlas en memoria sería un `findMany` sin
- * tope: se cuenta en la base.
- */
-async function countPendingPpd(billingTaxProfileId: string): Promise<number> {
-  const [row] = await prisma.$queryRaw<{ count: number }[]>`
-    SELECT COUNT(*)::int AS "count"
-    FROM "PlatformCfdi"
-    WHERE "billingTaxProfileId" = ${billingTaxProfileId}
-      AND type = 'INGRESO'
-      AND "metodoPago" = 'PPD'
-      AND status = 'STAMPED'
-      AND "amountPaidCents" < "totalCents"`
-  return row?.count ?? 0
+/** Cuántas facturas PPD ya timbradas del receptor siguen sin liquidar en «Facturas CFDI». Se cuenta en la base, nunca en memoria. */
+function countPendingPpd(billingTaxProfileId: string): Promise<number> {
+  return prisma.platformCfdi.count({
+    where: {
+      billingTaxProfileId,
+      type: 'INGRESO',
+      metodoPago: 'PPD',
+      status: 'STAMPED',
+      amountPaidCents: { lt: prisma.platformCfdi.fields.totalCents },
+    },
+  })
 }
 
 /**

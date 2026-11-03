@@ -237,7 +237,8 @@ const prismaMock: any = {
   // Platform billing CFDI (Avoqado factura a sus propios clientes)
   platformEmisor: createMockModel(),
   billingTaxProfile: createMockModel(),
-  platformCfdi: createMockModel(),
+  // `fields`: «Por cobrar» cuenta las PPD sin liquidar comparando columna contra columna (`amountPaidCents < totalCents`).
+  platformCfdi: Object.assign(createMockModel(), { fields: { totalCents: { name: 'totalCents' } } }),
   // «Por cobrar» (recordatorios manuales de cobro con factura, SUPERADMIN)
   platformCharge: createMockModel(),
   platformChargeOccurrence: createMockModel(),
