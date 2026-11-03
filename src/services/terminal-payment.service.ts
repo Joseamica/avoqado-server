@@ -280,6 +280,8 @@ export interface TerminalRefundRequest {
    * (`DEFECTIVE` · `ACCIDENTAL_CHARGE` · `FRAUDULENT_CHARGE` · `CANCELLED_ORDER`). Opcional: apps viejas no lo mandan.
    */
   storeCreditOnlyException?: string
+  /** D1: la ruta del POS lo prende para una app publicada que no sabe de «Sólo saldo a favor» (`posSinSoloSaldo.ts`). El MCP, nunca. */
+  posSinSoloSaldo?: boolean
 }
 
 /**
@@ -6457,10 +6459,12 @@ class TerminalPaymentService {
     }
     // A2 (cierre): una venta de tarjetas de regalo pagada sólo se devuelve con su cancelación iniciada (R2), igual que en el panel.
     if (payment?.orderId) await exigirCancelacionParaDevolverEnTerminal(venueId, payment.orderId)
-    // «Sólo saldo a favor» (spec §5.5, Codex plan r2 h6): sin la excepción —apps viejas incluidas— se rechaza ANTES de mandar nada a la
-    // terminal. El registro de lo que la terminal YA devolvió (`refund.tpv.service.ts`) no pasa por aquí y nunca se rechaza por esto:
-    // el banco ya devolvió. Lo que una cajera devuelve desde el menú de la terminal, sin el POS, el interruptor no lo alcanza.
-    await exigirQueNoRijaSoloSaldoEnTerminal(venueId, request.storeCreditOnlyException)
+    // «Sólo saldo a favor» (spec §5.5, Codex plan r2 h6): sin la excepción se rechaza ANTES de mandar nada a la terminal. El registro de
+    // lo que la terminal YA devolvió (`refund.tpv.service.ts`) no pasa por aquí y nunca se rechaza por esto: el banco ya devolvió. Lo que
+    // una cajera devuelve desde el menú de la terminal, sin el POS, el interruptor no lo alcanza.
+    // D1: un POS publicado que no sabe del interruptor (ANDROID/WINDOWS ≤ 95, iOS ≤ 41, o sin cabeceras) no tiene cómo marcar la
+    // excepción: devuelve como antes. Sólo lo marca la ruta del POS; el MCP sigue rechazando.
+    if (!request.posSinSoloSaldo) await exigirQueNoRijaSoloSaldoEnTerminal(venueId, request.storeCreditOnlyException)
 
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
     if (!terminalEntry) {

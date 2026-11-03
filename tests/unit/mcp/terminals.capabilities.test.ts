@@ -510,6 +510,15 @@ describe('S9 (I1 de S4): refund_card_on_terminal y «Sólo saldo a favor»', () 
     const body = parseBody(await captureRefundHandler()({ ...base, storeCreditOnlyException: 'DEFECTIVE', confirm: true }))
     expect(body).toMatchObject({ ok: true, status: 'opened' })
     expect(requestRefundOnTerminal).toHaveBeenCalledWith(expect.objectContaining({ storeCreditOnlyException: 'DEFECTIVE' }))
+    // D1: la marca de «POS publicado que no sabe del interruptor» es sólo de la ruta del POS; Claude nunca la manda.
+    expect(requestRefundOnTerminal.mock.calls[0][0]).not.toHaveProperty('posSinSoloSaldo')
+  })
+
+  it('D1: al confirmar sin excepción también rechaza STORE_CREDIT_ONLY y no abre nada (el MCP no se exime como un POS viejo)', async () => {
+    ;(prismaMock.venueSettings.findUnique as jest.Mock).mockResolvedValue({ storeCreditOnly: true })
+    const body = parseBody(await captureRefundHandler()({ ...base, confirm: true }))
+    expect(body).toMatchObject({ ok: false, code: 'STORE_CREDIT_ONLY' })
+    expect(requestRefundOnTerminal).not.toHaveBeenCalled()
   })
 
   it('si el rechazo llega al confirmar (cambió el ajuste), el code STORE_CREDIT_ONLY también viaja', async () => {

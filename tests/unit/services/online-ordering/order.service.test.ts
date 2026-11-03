@@ -444,9 +444,48 @@ describe('createOnlineOrder', () => {
 
   it('una tienda abierta que no acepta pagar al recoger responde 400 PAYMENT_MODE_NOT_ACCEPTED y no cotiza ni crea', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, config: { ...OPEN.config, acceptsPayAtPickup: false } })
-    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 400, code: 'PAYMENT_MODE_NOT_ACCEPTED' })
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PAYMENT_MODE_NOT_ACCEPTED',
+      message: 'Este negocio no acepta pagar al recoger.',
+    })
     expect(quoteCart).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  describe('S8: la tienda vieja (abierta en una pestaña) muestra el texto del servidor ante un código que no conoce', () => {
+    const SIN_RECOGER_CON_TARJETA = { ...OPEN, config: { ...OPEN.config, acceptsPayAtPickup: false, acceptsCardOnline: true } }
+    const STRIPE = { chargesEnabled: true, providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } }
+
+    it('con la tarjeta disponible (switch prendido y comercio que cobra) pide recargar para pagar con tarjeta; el código no cambia', async () => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(SIN_RECOGER_CON_TARJETA)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([STRIPE] as any)
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.',
+      })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+    })
+
+    it('con el switch prendido pero sin comercio que cobre, o con el switch apagado, el texto de hoy', async () => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(SIN_RECOGER_CON_TARJETA)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([{ ...STRIPE, chargesEnabled: false }] as any)
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio no acepta pagar al recoger.',
+      })
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+        ...OPEN,
+        config: { ...OPEN.config, acceptsPayAtPickup: false, acceptsCardOnline: false },
+      })
+      prismaMock.ecommerceMerchant.findMany.mockClear()
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio no acepta pagar al recoger.',
+      })
+      expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
+    })
   })
 
   it('el candado se toma en la transacción ANTES de los topes, el folio y las escrituras, y todo eso corre en la transacción (R4)', async () => {
@@ -923,6 +962,77 @@ describe('getTrackingByToken', () => {
   it('un token desconocido devuelve null', async () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
     await expect(getTrackingByToken('x'.repeat(32))).resolves.toBeNull()
+  })
+
+  describe('S4 (Codex plan r1 #3 y r2 #3): con el dinero en duda no se afirma «no se cobró»', () => {
+    const VENUE = {
+      name: 'X',
+      slug: 'x',
+      timezone: 'America/Mexico_City',
+      address: null,
+      city: null,
+      state: null,
+      zipCode: null,
+      phone: null,
+    }
+    const draftRow = (o: Record<string, unknown>) => ({
+      id: 'ch1',
+      status: 'PENDING_AUTH',
+      lastError: null,
+      updatedAt: new Date(), // recién tocado: el seguimiento no le pregunta a Stripe
+      request: { quote: { lines: [] } },
+      amount: D('250.00'),
+      checkoutExpiresAt: NOW,
+      createdAt: NOW,
+      venueId: 'v1',
+      venue: VENUE,
+      ...o,
+    })
+    // El borrador simulado no se queda para las pruebas de crear pedido (buscan ahí la llave de tarjeta).
+    afterEach(() => prismaMock.onlineOrderCharge.findUnique.mockReset())
+    const tracking = async (o: Record<string, unknown>) => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
+      prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(draftRow(o) as any)
+      return getTrackingByToken('T'.repeat(32))
+    }
+
+    it('pedido rechazado con la liberación en curso (RELEASING) ⇒ cardStatus RELEASING, no RELEASED', async () => {
+      prismaMock.onlineOrder.findUnique.mockResolvedValue({
+        status: 'REJECTED',
+        paymentMode: 'CARD_ONLINE',
+        acceptDeadlineAt: NOW,
+        estimatedReadyAt: null,
+        rejectReason: 'OTHER',
+        createdAt: NOW,
+        venueId: 'v1',
+        charge: { status: 'RELEASING' },
+        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', items: [], venue: VENUE },
+      } as any)
+      await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
+    })
+
+    it('borrador normal ⇒ AWAITING_PAYMENT sin cardStatus', async () => {
+      await expect(tracking({})).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', cardStatus: null })
+    })
+
+    it('borrador que terminó CAPTURED sin pedido ⇒ PAYMENT_NOT_COMPLETED con cardStatus CAPTURED', async () => {
+      await expect(tracking({ status: 'CAPTURED', lastError: 'CAPTURED_OUTSIDE' })).resolves.toMatchObject({
+        status: 'PAYMENT_NOT_COMPLETED',
+        cardStatus: 'CAPTURED',
+      })
+    })
+
+    it('borrador PENDING_AUTH cobrado fuera (CAPTURED_OUTSIDE) ⇒ PAYMENT_NOT_COMPLETED con cardStatus CAPTURED', async () => {
+      await expect(tracking({ lastError: 'CAPTURED_OUTSIDE' })).resolves.toMatchObject({
+        status: 'PAYMENT_NOT_COMPLETED',
+        cardStatus: 'CAPTURED',
+      })
+    })
+
+    it('borrador con la liberación en curso ⇒ PAYMENT_NOT_COMPLETED con cardStatus RELEASING; vencido ⇒ sin cardStatus', async () => {
+      await expect(tracking({ status: 'RELEASING' })).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'RELEASING' })
+      await expect(tracking({ status: 'ABANDONED' })).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: null })
+    })
   })
 })
 

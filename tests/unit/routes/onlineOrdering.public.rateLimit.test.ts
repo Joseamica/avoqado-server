@@ -36,6 +36,7 @@ jest.mock('@/services/online-ordering/order.service', () => ({
   __esModule: true,
   createOnlineOrder: jest.fn(async () => ({ orderId: 'ord1', replay: false })),
   getTrackingByToken: jest.fn(),
+  abandonCardPayment: jest.fn(async () => ({ venueId: 'x', orderNumber: '' })),
 }))
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
 jest.mock('@/services/online-ordering/menu.service', () => ({ __esModule: true, getPublicMenu: jest.fn() }))
@@ -66,4 +67,14 @@ it('el sexto pedido del mismo visitante al mismo negocio en un minuto es 429; ot
   expect((await post('tacos')).status).toBe(201)
   // Otra IP REAL (la que manda Cloudflare) en el MISMO negocio tiene su propia cubeta.
   expect((await post('flautas', '203.0.113.7')).status).toBe(201)
+})
+
+it('S5: abandonar el pago usa el MISMO limitador que cancelar (10 por minuto, cubeta compartida)', async () => {
+  const token = 'T'.repeat(32)
+  const abandonar = () =>
+    request(app).post(`/venues/pagos/ordering/orders/${token}/abandon-payment`).set('CF-Connecting-IP', '198.51.100.20')
+  for (let i = 0; i < 10; i++) expect((await abandonar()).status).toBe(200)
+  expect((await abandonar()).status).toBe(429)
+  const cancelar = await request(app).post(`/venues/pagos/ordering/orders/${token}/cancel`).set('CF-Connecting-IP', '198.51.100.20')
+  expect(cancelar.status).toBe(429)
 })

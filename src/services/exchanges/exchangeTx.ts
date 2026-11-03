@@ -172,7 +172,7 @@ export async function prepareExchangeInTx(
   input: ExchangeTxInput | ExchangeSettleTxInput,
 ): Promise<PreparedExchange | ExchangeTxEarly> {
   if ('mode' in input) return prepareCardSettlementInTx(tx, input)
-  const { venueId, body, actorStaffId, originalOrderId } = input
+  const { venueId, body, actorStaffId, originalOrderId, posSinSoloSaldo } = input
   const aSaldo = body.settlement.method === 'STORE_CREDIT'
   // Saldo a favor: «primer-sobre» es SIEMPRE el primer candado de su transacción (S2), antes de la llave, Orders, Payments, sobres y turno.
   if (aSaldo) await tomarCandadoPrimerSobreSiHaceFaltaEnTx(tx, venueId)
@@ -370,6 +370,9 @@ export async function prepareExchangeInTx(
   const storeCredit = storeCreditAvailable()
   const soloSaldo =
     calc.kind === 'PAYOUT' &&
+    // D1: un POS publicado que no sabe del interruptor (ANDROID/WINDOWS ≤ 95, iOS ≤ 41, o sin cabeceras; sólo la ruta móvil lo marca)
+    // no ofrece saldo a favor: devuelve como antes, sin recortar los medios. Las demás reglas de cada medio siguen.
+    !posSinSoloSaldo &&
     rigeSoloSaldoAFavor(
       // D-1: el valor EFECTIVO (sin llaves no hay saldo que dar y el interruptor no restringe).
       soloSaldoEfectivo((await tx.venueSettings.findUnique({ where: { venueId }, select: { storeCreditOnly: true } }))?.storeCreditOnly),

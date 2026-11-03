@@ -21,6 +21,7 @@ import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { normalizeRequestedCustomerId } from '../../services/tpv/fastPaymentCustomer'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../../services/shared/inputCaps'
 import { GiftCardError } from '../../services/giftCards/giftCardErrors'
+import { esPosSinSoloSaldo } from '../../services/storeCredit/posSinSoloSaldo'
 
 /** Cota del id de cliente: la misma que `/fast` (`tpv.schema.ts`). */
 const MAX_CUSTOMER_ID_LENGTH = 64
@@ -345,6 +346,7 @@ export async function requestRefundOnTerminal(req: Request, res: Response) {
       requestId,
       reason,
       storeCreditOnlyException: typeof storeCreditOnlyException === 'string' ? storeCreditOnlyException : undefined,
+      posSinSoloSaldo: esPosSinSoloSaldo(req.headers),
     })
 
     const httpStatus = result.status === 'opened' ? 200 : result.status === 'timeout' ? 504 : 422

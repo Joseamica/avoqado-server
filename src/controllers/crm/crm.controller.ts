@@ -4,6 +4,7 @@ import { hubspotImportFilesSchema } from '../../schemas/crm.schema'
 import * as accounts from '../../services/crm/accounts.service'
 import { addActivity, completeActivity, rescheduleActivity } from '../../services/crm/activities.service'
 import * as clients from '../../services/crm/clients.service'
+import * as erase from '../../services/crm/erase.service'
 import { applyHubspot, previewHubspot } from '../../services/crm/hubspotImport.service'
 import * as reports from '../../services/crm/reports.service'
 import { addTeamMember, listTeamMembers, listTeamOptions, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
@@ -134,6 +135,11 @@ export async function winAccount(req: Request, res: Response): Promise<void> {
 /** POST /api/v1/crm/accounts/:id/archive */
 export async function archiveAccount(req: Request, res: Response): Promise<void> {
   res.json({ data: await accounts.archive(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/accounts/:id/delete — the real superadmin only; the service says so with a 403 to anyone else. */
+export async function deleteAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await erase.deleteAccount(req.crmAccess!, req.params.id, req.body.confirmName) })
 }
 
 /** POST /api/v1/crm/accounts/:id/reactivate */

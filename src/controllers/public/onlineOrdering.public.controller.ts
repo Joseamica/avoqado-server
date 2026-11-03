@@ -7,7 +7,7 @@ import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueByS
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
-import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
+import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { findCardMerchant } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
@@ -209,6 +209,18 @@ export async function getOrder(req: Request, res: Response) {
     return res.json({ success: true, data: publicData })
   } catch (error) {
     return fail(res, error, 'No se pudo consultar tu pedido')
+  }
+}
+
+/** POST /orders/:trackingToken/abandon-payment — S5: regresó de Stripe sin pagar. Nunca cancela; responde el seguimiento. */
+export async function postAbandonPayment(req: Request, res: Response) {
+  try {
+    const tracking = await abandonCardPayment({ venueId: venueOf(req).id, trackingToken: req.params.trackingToken })
+    if (!tracking) return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    const { venueId: _venueId, ...publicData } = tracking
+    return res.json({ success: true, data: publicData })
+  } catch (error) {
+    return fail(res, error, 'No se pudo actualizar tu pago')
   }
 }
 

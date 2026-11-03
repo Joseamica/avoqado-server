@@ -442,24 +442,20 @@ describe('online_ordering_configure', () => {
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDERING_CONFIGURED_VIA_MCP' }))
   })
 
-  it('fase 2: sin cuenta de Stripe el servicio rechaza (CARD_PAYMENT_NOT_ACCEPTED): responde ok:false con el texto claro, sin auditar ni tocar platillos', async () => {
-    mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: false })
-    mockUpdateSettings.mockRejectedValue(
-      new BadRequestError('Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.', 'CARD_PAYMENT_NOT_ACCEPTED'),
-    )
+  const SIN_COMO_COBRAR =
+    'Sin «Pagar al recoger» la tienda sólo cobraría con tarjeta, y tu cuenta de Stripe todavía no puede cobrar: déjalo prendido o conecta tu Stripe en Ligas de pago.'
+  it('A: quitar pagar al recoger sin Stripe cobrable, el servicio rechaza (NO_PAYMENT_MODE): responde ok:false con el texto claro, sin auditar ni tocar platillos', async () => {
+    mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: true })
+    mockUpdateSettings.mockRejectedValue(new BadRequestError(SIN_COMO_COBRAR, 'NO_PAYMENT_MODE'))
     const r = parse(
       await call('online_ordering_configure', {
         venueId: 'v1',
-        changes: { acceptsCardOnline: true },
+        changes: { acceptsPayAtPickup: false },
         availability: { availableOnline: true, categoryIds: ['c1'] },
         confirm: true,
       }),
     )
-    expect(r).toEqual({
-      ok: false,
-      code: 'CARD_PAYMENT_NOT_ACCEPTED',
-      error: 'Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.',
-    })
+    expect(r).toEqual({ ok: false, code: 'NO_PAYMENT_MODE', error: SIN_COMO_COBRAR })
     expect(mockSetAvailability).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()
   })
@@ -741,14 +737,15 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
 
   it('online_order_card_refund con confirm y el token: devuelve en pesos con una llave sacada de la confirmación; repetir = misma llave', async () => {
     const args = { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }
-    const { confirmationToken } = parse(await call('online_order_card_refund', args))
-    const r = parse(await call('online_order_card_refund', { ...args, confirm: true, confirmationToken }))
+    const { confirmationToken, expectedLatestRefundId } = parse(await call('online_order_card_refund', args))
+    expect(expectedLatestRefundId).toBe('cr1') // la última de la lista al hacer la vista previa
+    const r = parse(await call('online_order_card_refund', { ...args, expectedLatestRefundId, confirm: true, confirmationToken }))
     expect(r).toMatchObject({ ok: true, status: 'RECORDED', cardRefundId: 'cr2' })
     const i = mockRefundCard.mock.calls[0][0]
-    expect(i).toMatchObject({ venueId: 'v1', orderId: 'ord1', reason: 'CANCELLED_ORDER', staffId: 's1' })
+    expect(i).toMatchObject({ venueId: 'v1', orderId: 'ord1', reason: 'CANCELLED_ORDER', staffId: 's1', expectedLatestRefundId: 'cr1' })
     expect(i.amount.toFixed(2)).toBe('120.50')
     expect(i.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{8,64}$/)
-    await call('online_order_card_refund', { ...args, confirm: true, confirmationToken })
+    await call('online_order_card_refund', { ...args, expectedLatestRefundId, confirm: true, confirmationToken })
     expect(mockRefundCard.mock.calls[1][0].idempotencyKey).toBe(i.idempotencyKey)
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP', entityId: 'cr2' }))
   })
@@ -761,6 +758,25 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     const otro = parse(await call('online_order_card_refund', { ...args, amount: 250, confirm: true, confirmationToken }))
     expect(otro).toMatchObject({ ok: false })
     expect(mockRefundCard).not.toHaveBeenCalled()
+  })
+
+  it('online_order_card_refund: la confirmación queda atada a lo que se vio; cambiarlo u omitirlo no devuelve', async () => {
+    const args = { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }
+    const { confirmationToken } = parse(await call('online_order_card_refund', args))
+    for (const vista of [{}, { expectedLatestRefundId: null }, { expectedLatestRefundId: 'cr-otra' }]) {
+      expect(parse(await call('online_order_card_refund', { ...args, ...vista, confirm: true, confirmationToken }))).toMatchObject({ ok: false })
+    }
+    expect(mockRefundCard).not.toHaveBeenCalled()
+  })
+
+  it('online_order_card_refund: sin devoluciones, la primera se confirma sin mandar nada más; una vista previa no se deja dictar lo visto', async () => {
+    mockListCardRefunds.mockResolvedValue([])
+    const args = { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }
+    const previa = parse(await call('online_order_card_refund', { ...args, expectedLatestRefundId: 'cr-inventada' }))
+    expect(previa.expectedLatestRefundId).toBeNull()
+    const r = parse(await call('online_order_card_refund', { ...args, confirm: true, confirmationToken: previa.confirmationToken }))
+    expect(r).toMatchObject({ ok: true })
+    expect(mockRefundCard.mock.calls[0][0].expectedLatestRefundId).toBeNull()
   })
 
   it('r2 R1: un pedido rechazado cuya tarjeta quedó cobrada (a mano en Stripe) sí ofrece devolver a la tarjeta', async () => {
