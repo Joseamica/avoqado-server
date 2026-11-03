@@ -130,6 +130,16 @@ export const createGiftCardOrderSchema = z.object({
 })
 
 /** A3 (cierre): el código va en el CUERPO (`POST …/gift-cards/lookup`), nunca en la URL. 1b S2: o la liga (exactamente uno). */
+/**
+ * Prender desde el POS: los términos con un `true` de verdad. Sólo prende: lo demás que llegue se descarta, y ni apaga ni cambia montos.
+ */
+export const turnOnSchema = z.object({
+  params: venueParams,
+  body: z.object({
+    aceptaTerminos: z.literal(true, { errorMap: () => ({ message: 'Para activar las tarjetas de regalo acepta los términos.' }) }),
+  }),
+})
+
 export const lookupSchema = z.object({
   params: venueParams,
   body: z

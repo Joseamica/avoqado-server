@@ -9,6 +9,7 @@ import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { assertGiftCardKeys, giftCardKeysPresent } from './giftCardCode'
 import { GiftCardError } from './giftCardErrors'
 import { MAXIMO_POR_SOBRE, MINIMO_POR_SOBRE, formatoPesos, topePorOperacion } from './giftCardLimits'
@@ -160,6 +161,23 @@ export async function assertGiftCardsSellable(venueId: string): Promise<void> {
   assertGiftCardKeys()
 }
 
+/** Lo que PRENDER pide antes de abrir la transacción. Las tarjetas van fuera de marca blanca en la fase 1 (como el menú del panel). */
+async function assertPermitidoPrender(venueId: string): Promise<void> {
+  if (await moduleService.isModuleEnabled(venueId, MODULE_CODES.WHITE_LABEL_DASHBOARD)) {
+    throw new GiftCardError('GIFT_CARDS_DISABLED', 'Las tarjetas de regalo todavía no están disponibles en marca blanca.', 403)
+  }
+  if (!(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) throw sinPlan()
+}
+
+/**
+ * ¿Se pueden prender aquí? No se deduce de `assertGiftCardsSellable`: apagadas, ésa contesta «apagadas» antes de mirar plan y llaves,
+ * y el POS necesita saberlo para ofrecer «Prender» (Codex r1).
+ */
+export async function assertPuedePrender(venueId: string): Promise<void> {
+  await assertPermitidoPrender(venueId)
+  assertGiftCardKeys()
+}
+
 function sinPlan(): GiftCardError {
   return new GiftCardError(
     'GIFT_CARDS_NOT_IN_PLAN',
@@ -182,11 +200,16 @@ export async function updateGiftCardSettings(
   // El plan se pregunta ANTES de abrir la transacción (A5 r1): `venueHasFeatureAccess` usa el cliente global y no debe pedir
   // otra conexión mientras ésta retiene la suya y el candado. Sólo cuando el cuerpo trae `enabled: true` (igual que la ruta,
   // C3); apagar o guardar montos nunca lo pide.
-  if (input.enabled === true && !(await venueHasFeatureAccess(venueId, FUNCION_TARJETAS_DE_REGALO))) throw sinPlan()
+  if (input.enabled === true) await assertPermitidoPrender(venueId)
 
-  const { actual, guardado } = await prisma.$transaction(async tx => {
+  const { actual, guardado, sinCambios } = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${llaveDeAjustes(venueId)}, 0))::text`)
     const actual = (await tx.giftCardSettings.findUnique({ where: { venueId }, select: SELECT_AJUSTES })) ?? porDefecto()
+
+    // Prender lo ya prendido (dos administradores a la vez, un doble toque) no cambia nada: no se escribe ni se audita. Se decide
+    // aquí, bajo el candado: una lectura de antes no lo sabe.
+    const soloElInterruptor = Object.keys(input).every(campo => campo === 'enabled' || campo === 'aceptaTerminos')
+    if (input.enabled === true && actual.enabled && soloElInterruptor) return { actual, guardado: actual, sinCambios: true }
 
     // Se valida la MEZCLA (lo que llegó ∪ lo guardado bajo el candado): las reglas cruzadas (mínimo ≤ máximo, sugeridos
     // dentro del rango) se cumplen sobre lo que va a quedar.
@@ -234,8 +257,10 @@ export async function updateGiftCardSettings(
       update: cambios,
       select: SELECT_AJUSTES,
     })
-    return { actual, guardado }
+    return { actual, guardado, sinCambios: false }
   })
+
+  if (sinCambios) return vista(guardado)
 
   // Fuera de la transacción y después del commit (fire-and-forget).
   void logAction({
