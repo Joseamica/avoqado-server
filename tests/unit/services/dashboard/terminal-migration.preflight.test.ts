@@ -493,3 +493,50 @@ describe('migratePreflight — llave de AngelPay en otro negocio', () => {
     expect(consulta.where.angelpayUserAccount).toEqual({ venueId: { not: 'venue-new' } })
   })
 })
+
+/**
+ * D1 (3-nov-2026, PlayTelecom TPV 2841653101): una TPV con la app vieja (protocolo de comandos < 2) sólo recibe el borrado
+ * si alguien tiene la sesión abierta en ella. Si se migra en la pantalla de PIN, nadie puede entrar después (la terminal
+ * ya es de la sucursal destino) y la migración se queda esperando. El servidor no tiene cómo entregarle el borrado sin
+ * identidad sin abrir otros huecos (Codex r2), así que el asistente lo dice ANTES de migrar.
+ */
+describe('migratePreflight — aviso para la TPV con la app vieja', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const aviso = (r: { warnings: Array<{ code: string; message: string }> }) => r.warnings.find(w => w.code === 'LEGACY_APP_NEEDS_SESSION')
+
+  it('avisa que alguien entre con su PIN de la sucursal actual y la deje en inicio', async () => {
+    healthy()
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(aviso(r)?.message).toMatch(/versión vieja/)
+    expect(aviso(r)?.message).toMatch(/PIN de Old/)
+    expect(aviso(r)?.message).toMatch(/inicio/)
+    // es aviso, no bloqueo: la terminal puede ya tener a alguien dentro
+    expect(r.canProceed).toBe(true)
+  })
+
+  it('si en la sucursal actual nadie tiene PIN, dice que primero se lo pongan a alguien', async () => {
+    healthy()
+    // destino con PIN (lo pide otra validación); origen sin nadie
+    m.staffVenue.findFirst.mockImplementation(({ where }: { where: { venueId: string } }) =>
+      Promise.resolve(where.venueId === 'venue-old' ? null : { id: 'sv-1' }),
+    )
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(aviso(r)?.message).toMatch(/nadie tiene PIN/)
+    expect(aviso(r)?.message).toMatch(/Equipo/)
+  })
+
+  it('a una TPV con el protocolo nuevo no le avisa (recibe el borrado sin sesión)', async () => {
+    healthy()
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      type: 'TPV_ANDROID',
+      commandProtocolVersion: 2,
+      assignedMerchantIds: ['merch-p'],
+    })
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(aviso(r)).toBeUndefined()
+  })
+})
