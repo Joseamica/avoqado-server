@@ -582,13 +582,16 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             payment: { orderId: payment.orderId, processorId: payment.processorId },
           })
         }
-        // «Sólo saldo a favor»: se dice desde la vista previa; el servicio lo vuelve a revisar con el cobro bloqueado.
-        await exigirSoloSaldoFueraDelPos(prisma, {
-          venueId,
-          reason: REFUND_REASON_MAP[reason],
-          ...(refundMethod ? { refundMethod } : {}),
-          pagadoConSaldo: esSaldoDeRegalo,
-        })
+        // «Sólo saldo a favor» se dice desde la vista previa. Al confirmar lo revisa sólo el servicio, con el cobro bloqueado y después de
+        // reconocer la llave: una repetición debe contestar lo que ya se escribió, nunca un rechazo (Codex r1 #1).
+        if (!confirm) {
+          await exigirSoloSaldoFueraDelPos(prisma, {
+            venueId,
+            reason: REFUND_REASON_MAP[reason],
+            ...(refundMethod ? { refundMethod } : {}),
+            pagadoConSaldo: esSaldoDeRegalo,
+          })
+        }
         const chain = isExchangeCreditTenderKind(cobroParaDevolver.tenderSystemKind)
           ? await chainRefundSemanticsInTx(prisma, venueId, paymentId)
           : null

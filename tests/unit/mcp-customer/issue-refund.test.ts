@@ -92,6 +92,15 @@ describe('issue_refund con «Sólo saldo a favor» prendido', () => {
     await expect(reglasBajoCandado(tx, { original: { tenderSystemKind: null } })).rejects.toMatchObject({ code: 'STORE_CREDIT_ONLY' })
   })
 
+  it('🔴 Codex r1 #1: al confirmar llega al servicio aunque esté prendido: una repetición debe contestar lo que ya se escribió', async () => {
+    soloSaldo()
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockResolvedValueOnce({ refundPaymentId: 'r1', orderId: 'o1', refundedAmount: 100, remainingRefundable: 300, reason: 'RETURNED_GOODS' })
+    const body = parse(await call({ ...base, reason: 'returned_goods', confirm: true }))
+    expect(mockIssue).toHaveBeenCalledTimes(1)
+    expect(body.code).toBeUndefined()
+  })
+
   it('un cobro por error o lo pagado con saldo siguen pasando', async () => {
     soloSaldo()
     mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)

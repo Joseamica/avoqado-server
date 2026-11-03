@@ -53,6 +53,15 @@ describe('controladores de refund — centavos enteros seguros', () => {
     expect(tx.venueSettings.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1' } }))
   })
 
+  it('🔴 Codex r1 #2: un motivo fuera del catálogo no se cuela: 400 antes del servicio', async () => {
+    for (const reason of ['RETURNED_GOODS ', 'returned_goods', 'lo que sea']) {
+      const res = response()
+      await dashboardController.issueRefund(request({ amount: 100, reason }), res, jest.fn())
+      expect(res.status).toHaveBeenCalledWith(400)
+    }
+    expect(dashboardIssueRefund).not.toHaveBeenCalled()
+  })
+
   it('dashboard rechaza amount fraccionario con 400 antes del servicio', async () => {
     const res = response()
 
