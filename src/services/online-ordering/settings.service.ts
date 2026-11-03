@@ -1,6 +1,7 @@
 import { Prisma, type OnlineOrderingSettings } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
+import { normalizeLegacyActivityActor } from '@/lib/activityAuditActor'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 import { isValidOrderingHours } from './hours'
@@ -114,7 +115,7 @@ export async function updateSettings(
   patch: OnlineOrderingSettingsPatch,
   actorStaffId: string | null,
 ): Promise<OnlineOrderingConfig & { lastInboxPollAt: Date | null }> {
-  const { row, preloadHours, cardFrom } = await prisma.$transaction(async tx => {
+  const { row, bitacora, expresoLaTarjeta, cardFrom } = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-ordering-settings:' + venueId}))`
 
     const existing = await tx.onlineOrderingSettings.findUnique({ where: { venueId } })
@@ -163,21 +164,40 @@ export async function updateSettings(
       create: { ...(data as Prisma.OnlineOrderingSettingsUncheckedCreateInput), venueId, ...(preloadHours ? { hours: preloadHours } : {}) },
       update: data,
     })
-    return { row, preloadHours, cardFrom: current.acceptsCardOnline }
-  })
-
-  void logAction({
-    staffId: actorStaffId,
-    venueId,
-    action: 'ONLINE_ORDERING_SETTINGS_UPDATED',
-    entity: 'OnlineOrderingSettings',
-    entityId: row.id,
-    data: {
+    const bitacora = {
       changed: Object.keys(patch),
       patch: JSON.parse(JSON.stringify(patch)),
       ...(preloadHours ? { horarioPrecargadoDeReservas: true } : {}),
-    },
+    }
+    // La tarjeta viene prendida para quien nunca expresó el switch, y eso se decide por esta entrada: va en la MISMA transacción,
+    // para que el relleno nunca la adelante y no se pierda si falla. Lo demás sigue como auditoría de mejor esfuerzo, afuera.
+    const expresoLaTarjeta = patch.acceptsCardOnline !== undefined
+    if (expresoLaTarjeta) {
+      const actor = normalizeLegacyActivityActor(actorStaffId, bitacora)
+      await tx.activityLog.create({
+        data: {
+          staffId: actor.staffId,
+          venueId,
+          action: 'ONLINE_ORDERING_SETTINGS_UPDATED',
+          entity: 'OnlineOrderingSettings',
+          entityId: row.id,
+          data: actor.data,
+        },
+      })
+    }
+    return { row, bitacora, expresoLaTarjeta, cardFrom: current.acceptsCardOnline }
   })
+
+  if (!expresoLaTarjeta) {
+    void logAction({
+      staffId: actorStaffId,
+      venueId,
+      action: 'ONLINE_ORDERING_SETTINGS_UPDATED',
+      entity: 'OnlineOrderingSettings',
+      entityId: row.id,
+      data: bitacora,
+    })
+  }
 
   if (row.acceptsCardOnline !== cardFrom) {
     void logAction({

@@ -399,6 +399,32 @@ describe('settings.service', () => {
       )
     })
 
+    it('S1b: un patch con la tarjeta deja su bitácora DENTRO de la transacción: el relleno nunca la adelanta y no se pierde si falla', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
+      await updateSettings('v1', { acceptsCardOnline: false }, 'staff1')
+      expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          staffId: 'staff1',
+          venueId: 'v1',
+          action: 'ONLINE_ORDERING_SETTINGS_UPDATED',
+          entity: 'OnlineOrderingSettings',
+          entityId: 'set1',
+          data: expect.objectContaining({ changed: ['acceptsCardOnline'], patch: { acceptsCardOnline: false } }),
+        }),
+      })
+      // Sin duplicarla afuera.
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_SETTINGS_UPDATED' }))
+    })
+
+    it('un patch sin la tarjeta sigue con su bitácora de siempre, fuera de la transacción', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({}) as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ minOrderAmount: 50 }) as any)
+      await updateSettings('v1', { minOrderAmount: 50 }, 'staff1')
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDERING_SETTINGS_UPDATED' }))
+    })
+
     it('prender con comercio cobrable guarda y audita ONLINE_ORDERING_CARD_TOGGLED { from, to }', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
       prismaMock.ecommerceMerchant.findMany.mockResolvedValue([MERCHANT] as any)
@@ -432,8 +458,9 @@ describe('settings.service', () => {
       prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
       await updateSettings('v1', { acceptsCardOnline: true, minOrderAmount: 60 }, 'staff1')
       expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
-      const actions = (logAction as jest.Mock).mock.calls.map(c => c[0].action)
-      expect(actions).toEqual(['ONLINE_ORDERING_SETTINGS_UPDATED'])
+      // Sin CARD_TOGGLED ni otra entrada afuera: la del patch, con la tarjeta adentro, va dentro de la transacción.
+      expect(logAction).not.toHaveBeenCalled()
+      expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(1)
     })
 
     it('con tarjeta prendida y Stripe cobrable se puede quitar pagar al recoger (la tarjeta cuenta como medio de pago)', async () => {

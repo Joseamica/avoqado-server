@@ -2564,7 +2564,14 @@ describe('Codex R12 (pasada exhaustiva) · R12-15: el costo NEGATIVO de un reemb
     issueRefund({ venueId: f.venueId, paymentId: p.id, amount, tipRefundCents: 0, reason: 'CUSTOMER_REQUEST' as never, staffId: f.staffId })
   /** El worker REAL de efectos: reclama y corre lo que haya vencido. */
   const correrEfectos = async () => {
-    const claims = await claimPaymentEffects({ now: new Date() })
+    // El reclamo toma un lote de 25 por `nextAttemptAt` de TODA la base (corren todas las suites juntas): lo vencido de este
+    // negocio va primero en la fila y sólo se corre eso; no depende de cuántos efectos dejaron las demás pruebas (D15).
+    const ahora = new Date()
+    await prisma.paymentEffect.updateMany({
+      where: { venueId: f.venueId, status: 'PENDING', nextAttemptAt: { lte: ahora } },
+      data: { nextAttemptAt: new Date(0) },
+    })
+    const claims = (await claimPaymentEffects({ now: ahora })).filter(c => c.venueId === f.venueId)
     const r: boolean[] = []
     for (const c of claims) r.push(await runClaimedPaymentEffect(c))
     return { claims, r }

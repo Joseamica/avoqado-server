@@ -409,7 +409,14 @@ describe('Codex R14-2 · el REEMBOLSO de un cobro del protocolo también está p
   const idDelReembolso = (r: unknown) => (r as { id?: string }).id ?? (r as { refundId: string }).refundId
   /** El worker REAL de efectos: reclama y corre lo que haya vencido (cierra la obligación reabierta del original). */
   const correrEfectos = async () => {
-    const claims = await claimPaymentEffects({ now: new Date() })
+    // El reclamo toma un lote de 25 por `nextAttemptAt` de TODA la base (corren todas las suites juntas): lo vencido de este
+    // negocio va primero en la fila y sólo se corre eso; no depende de cuántos efectos dejaron las demás pruebas (D15).
+    const ahora = new Date()
+    await prisma.paymentEffect.updateMany({
+      where: { venueId: f.venueId, status: 'PENDING', nextAttemptAt: { lte: ahora } },
+      data: { nextAttemptAt: new Date(0) },
+    })
+    const claims = (await claimPaymentEffects({ now: ahora })).filter(c => c.venueId === f.venueId)
     for (const c of claims) await runClaimedPaymentEffect(c)
   }
   /** Foto del reembolso, del original y del historial del original (eventos, solicitud, cuántos reembolsos apuntan a él). */
@@ -468,6 +475,30 @@ describe('Codex R14-2 · el REEMBOLSO de un cobro del protocolo también está p
     expect(par.original).toMatchObject({ efecto: { status: 'DONE' }, costPending: false })
     return { original, refundId }
   }
+
+  // D15 (2-nov-2026): el reclamo es global y toma los 25 más viejos. En una base que ya usaron otros archivos, sus efectos
+  // vencidos llenaban la tanda, la obligación de esta prueba se quedaba sin turno y salía PENDING: un rojo falso.
+  it('los efectos vencidos de otro negocio no le quitan su turno a la obligación de esta prueba', async () => {
+    const ajena = await crearFixture('ajena')
+    try {
+      await ajena.conTarifas({ primary: { creditRate: 0.025, fixed: 0.5 } })
+      const suyo = await recordFastPayment(ajena.venueId, ajena.registroDeLaTerminal({ attemptId: randomUUID(), tarjeta }), ajena.staffId)
+      await prisma.paymentEffect.createMany({
+        data: Array.from({ length: 25 }, (_, i) => ({
+          venueId: ajena.venueId,
+          paymentId: suyo.id,
+          kind: 'RECEIPT',
+          dedupeKey: `ajeno-${i}`,
+          payload: {},
+          nextAttemptAt: new Date(1000),
+        })),
+      })
+
+      await conObligacionCumplida(p => reembolsoReal(p))
+    } finally {
+      await ajena.destruir()
+    }
+  })
 
   describe.each([
     ['TPV (recordRefund)', (p: { id: string; orderId: string | null }) => reembolsoReal(p)],
