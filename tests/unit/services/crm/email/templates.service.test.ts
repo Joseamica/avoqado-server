@@ -435,7 +435,7 @@ describe('sendTestToSelf', () => {
 
       await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
         ok: false,
-        motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento',
+        motivo: 'si ya habías pedido una prueba igual, revisa tu correo: esa pudo haber llegado',
       })
       expect(send).not.toHaveBeenCalled()
     })
@@ -458,7 +458,7 @@ describe('sendTestToSelf', () => {
     send.mockResolvedValue({ ok: false, transient: true, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' })
     await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
       ok: false,
-      motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento',
+      motivo: 'si ya habías pedido una prueba igual, revisa tu correo: esa pudo haber llegado',
     })
 
     send.mockRejectedValue(new Error('boom'))
@@ -493,13 +493,26 @@ describe('sendTestToSelf', () => {
   it.each([
     ['un 429', { ok: false, transient: true, errorCode: 'rate_limit_exceeded' }],
     ['un rechazo de validación', { ok: false, transient: false, errorCode: 'validation_error' }],
-  ])('%s sí es seguro: «No se pudo mandar la prueba», sin incierto', async (_caso, resultado) => {
+  ])('%s: «este intento no salió» sin incierto, y manda a revisar el correo por la anterior', async (_caso, resultado) => {
     setList('rafa@avoqado.io')
     send.mockResolvedValue(resultado)
     await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
       ok: false,
-      motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento',
+      motivo: 'si ya habías pedido una prueba igual, revisa tu correo: esa pudo haber llegado',
     })
+  })
+
+  // Codex código r4: el rechazo de ESTE intento no prueba que no saliera una prueba anterior igual (respuesta perdida y luego,
+  // p. ej., la credencial revocada). El texto sólo afirma lo de este intento y manda a revisar el correo.
+  it('respuesta perdida y luego un rechazo con la misma huella: el segundo no dice que la anterior no salió', async () => {
+    setList('rafa@avoqado.io')
+    send.mockRejectedValueOnce(new Error('socket hang up'))
+    await expect(sendTestToSelf(actor(), input)).resolves.toMatchObject({ ok: false, incierto: true })
+
+    send.mockResolvedValueOnce({ ok: false, transient: false, errorCode: 'validation_error' })
+    const segundo = await sendTestToSelf(actor(), input)
+    expect(segundo).toEqual({ ok: false, motivo: expect.stringContaining('revisa tu correo') })
+    expect(send.mock.calls[1][0].idempotencyKey).toBe(send.mock.calls[0][0].idempotencyKey)
   })
 
   it('quien ya no tiene correo no recibe nada', async () => {

@@ -43,7 +43,9 @@ const EJEMPLO = { nombre: 'Ana', negocio: 'Cafetería La Esquina' } as const
 const notFound = () => new NotFoundError('Esa plantilla no existe', 'CRM_PLANTILLA_NOT_FOUND')
 
 /** Lo único que se le dice a quien pidió la prueba cuando algo falla por nuestro lado (la causa va al log). */
-const NO_SE_PUDO_MANDAR_LA_PRUEBA = 'No se pudo mandar la prueba. Intenta de nuevo en un momento'
+// Sólo dice lo de ESTE intento: un rechazo no prueba que no saliera una prueba anterior igual (respuesta perdida y luego, p. ej., la
+// credencial revocada). La pantalla lo pinta como «Este intento no salió: …».
+const NO_SE_PUDO_MANDAR_LA_PRUEBA = 'si ya habías pedido una prueba igual, revisa tu correo: esa pudo haber llegado'
 /** Resend no confirmó y la prueba PUDO haber salido: no se dice «no salió». Pedirla otra vez con lo mismo es la misma llave. */
 const NO_SABEMOS_SI_SALIO_LA_PRUEBA =
   'Resend no confirmó. Revisa tu correo antes de pedirla otra vez; con el mismo contenido no llega dos veces'
