@@ -11,7 +11,7 @@ import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import emailService from '../email.service'
 import { effectiveKeys, getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
 import { getPending, type Pending, type PendingSection } from './accounts.service'
-import { isBlocked } from './email/optOut.service'
+import { bloqueoPorReputacion } from './email/optOut.service'
 import { puedeMandarFueraDeProduccion } from './email/testAllowlist'
 
 // ponytail: the sales team is a handful of people; past 200 key rows the oldest 200 get the emails (logged).
@@ -33,13 +33,11 @@ interface Recipient {
 /**
  * ¿Hay que dejar de escribirle a esta dirección para cuidar la reputación del remitente? Sólo un rebote duro o una queja
  * (`EmailSuppression`: «REBOTE» / «QUEJA»). 🔴 La BAJA de marketing (`CrmEmailOptOut`) NO cuenta: estos correos son avisos de trabajo
- * al equipo de ventas de Avoqado, no marketing. Si la consulta falla LANZA: quien llama lo trata como un envío fallido que se
+ * al equipo de ventas de Avoqado, no marketing. Va DIRECTO a la supresión: `isBlocked` contesta «BAJA» primero, y una queja
+ * registra supresión Y baja (Codex código r2 P1). Si la consulta falla LANZA: quien llama lo trata como un envío fallido que se
  * reintenta, nunca como «no está bloqueado».
  */
-async function frenadoPorReputacion(email: string): Promise<'REBOTE' | 'QUEJA' | false> {
-  const bloqueo = await isBlocked(email)
-  return bloqueo === 'REBOTE' || bloqueo === 'QUEJA' ? bloqueo : false
-}
+const frenadoPorReputacion = (email: string) => bloqueoPorReputacion(email)
 
 /**
  * Everyone who holds `key` (rulings 21 and 26): each active key row whose EFFECTIVE keys include it, resolved to its

@@ -3,9 +3,9 @@
  * plataforma. Corre en el controlador DESPUÉS de los carriles de marketing (`procesarAvisoDeResend`).
  *
  * 🔴 La supresión de la dirección no es de aquí: el paso de reputación del controlador ya la hizo antes de todos los carriles
- * (rebote Permanent → HARD_BOUNCE, queja → COMPLAINT). Aquí sólo se marca la delivery (rebote duro, queja, `email.failed` y
- * `email.suppressed` la dejan FALLIDO) y, en la queja, se da de baja el correo de Avoqado (quien marcó spam no quiere nada
- * nuestro, tampoco el uno a uno).
+ * (rebote Permanent → HARD_BOUNCE, queja → COMPLAINT). Aquí sólo se marca la delivery (rebote duro, `email.failed` y
+ * `email.suppressed` la dejan FALLIDO: no llegó) y, en la queja, se da de baja el correo de Avoqado (quien marcó spam no quiere nada
+ * nuestro, tampoco el uno a uno). La queja deja la delivery ENVIADO con su motivo: prueba que SÍ llegó, y FALLIDO es «No salieron».
  */
 import prisma from '../../../utils/prismaClient'
 import { optOut } from './optOut.service'
@@ -57,10 +57,10 @@ export async function procesarAvisoCrm(payload: AvisoCrm): Promise<{ manejado: b
           ? 'Resend lo suprimió (lista de supresión)'
           : null
   if (motivo) {
-    // Si el remitente todavía la tiene, su CAS (estado y lease) ya no aplica: no la regresa a ENVIADO.
+    // Si el remitente todavía la tiene, su CAS (estado y lease) ya no aplica: no la cambia otra vez.
     await prisma.crmCampaignDelivery.updateMany({
       where: { id: delivery.id },
-      data: { status: 'FALLIDO', lastError: motivo, leaseUntil: null, nextAttemptAt: null },
+      data: { status: queja ? 'ENVIADO' : 'FALLIDO', lastError: motivo, leaseUntil: null, nextAttemptAt: null },
     })
     if (queja) await optOut(delivery.email, 'QUEJA')
   }

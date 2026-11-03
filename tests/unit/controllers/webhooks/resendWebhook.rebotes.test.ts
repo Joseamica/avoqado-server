@@ -235,14 +235,32 @@ describe('webhook de Resend — si algo truena, Resend reintenta (500)', () => {
     expect(res.status).not.toHaveBeenCalledWith(200)
   })
 
-  it('si esa misma búsqueda truena con un aviso que no es de reputación, sigue contestando 200 como siempre', async () => {
-    mockPrisma.campaignDelivery.findFirst.mockRejectedValue(new Error('se cayó la base'))
+  // Familia B (Codex código r2 P2): TODO aviso que cambia un estado en algún carril — rebote y queja (los cuatro carriles), fallo y
+  // supresión de Resend (tarjetas y CRM), apertura y clic (marketing viejo y campañas a clientes) — se pierde si el primer carril
+  // truena y se contesta 200. Con 500, Resend lo reintenta y llega al carril que lo maneja.
+  it.each(['email.bounced', 'email.complained', 'email.failed', 'email.suppressed', 'email.opened', 'email.clicked'])(
+    'si la búsqueda del carril viejo truena con %s (cambia un estado en algún carril), responde 500',
+    async tipo => {
+      mockPrisma.campaignDelivery.findFirst.mockRejectedValue(new Error('se cayó la base'))
 
-    const res = await enviar(aviso('email.opened'))
+      const res = await enviar(aviso(tipo, { click: { link: 'https://avoqado.io' } }))
 
-    expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.status).not.toHaveBeenCalledWith(500)
-  })
+      expect(res.status).toHaveBeenCalledWith(500)
+      expect(res.status).not.toHaveBeenCalledWith(200)
+    },
+  )
+
+  it.each(['email.sent', 'email.delivered', 'email.delivery_delayed'])(
+    'si esa misma búsqueda truena con %s (no cambia nada que importe), sigue contestando 200 como siempre',
+    async tipo => {
+      mockPrisma.campaignDelivery.findFirst.mockRejectedValue(new Error('se cayó la base'))
+
+      const res = await enviar(aviso(tipo))
+
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.status).not.toHaveBeenCalledWith(500)
+    },
+  )
 })
 
 describe('carril viejo del superadmin (handleResendWebhook) — ya no se traga lo que no es suyo', () => {
@@ -261,6 +279,18 @@ describe('carril viejo del superadmin (handleResendWebhook) — ya no se traga l
 
     expect(resultado).toEqual({ handled: false, reason: 'Reputation event without CampaignDelivery' })
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Spam complaint on a non-campaign email'), expect.anything())
+  })
+
+  // Familia B: sin `email_id`, `findFirst({ where: { resendId: undefined } })` no filtra y devuelve CUALQUIER entrega: el carril viejo
+  // la marcaba (rebote, apertura) y contestaba handled: true, así que el CRM nunca veía el aviso aunque trajera su tag.
+  it('un aviso sin email_id no es del carril viejo: handled: false sin buscar ni marcar nada', async () => {
+    mockPrisma.campaignDelivery.findFirst.mockResolvedValue(entregaDeCampanaVieja)
+
+    const resultado = await carrilDelSuperadmin({ type: 'email.bounced', data: { to: ['a@b.mx'], bounce: { type: 'Permanent' } } } as any)
+
+    expect(resultado).toMatchObject({ handled: false })
+    expect(mockPrisma.campaignDelivery.findFirst).not.toHaveBeenCalled()
+    expect(mockPrisma.campaignDelivery.update).not.toHaveBeenCalled()
   })
 
   it('una apertura sin CampaignDelivery sigue siendo ruido: handled: false, sin warn', async () => {

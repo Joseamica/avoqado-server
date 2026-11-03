@@ -477,4 +477,32 @@ describe('encolar: una transacción con la fila bloqueada', () => {
       3,
     )
   })
+
+  // Familia C (pasada r2): una REINTENTO ya tuvo un intento que pudo llegar a Resend (su respuesta se perdió). Cancelar no la vuelve
+  // «omitida»: queda DESCONOCIDO con el motivo, y el trabajo tampoco la manda.
+  it('cancelar con una REINTENTO la deja DESCONOCIDO «campaña cancelada» y la PENDIENTE OMITIDO; ninguna sale', async () => {
+    const campaignId = await campanaEnviando()
+    const perdida = await delivery(campaignId, 'cancelperdida', {
+      status: 'REINTENTO',
+      attempts: 1,
+      sendAttemptAt: new Date(),
+      lastError: 'Sin respuesta de Resend',
+      nextAttemptAt: new Date(Date.now() - 60_000),
+    })
+    const pendiente = await delivery(campaignId, 'cancelpendiente')
+    process.env.CRM_CORREO_PRUEBAS = `${correo('cancelperdida')},${correo('cancelpendiente')}`
+    send.mockReset()
+
+    await cancelCampaign(rafa, campaignId)
+    await correrEnvioDeCampanas({ ahora: new Date(), pausaMs: 0 })
+
+    expect(send).not.toHaveBeenCalled()
+    expect(await estado(perdida.id)).toMatchObject({
+      status: 'DESCONOCIDO',
+      skipReason: 'campaña cancelada',
+      lastError: 'No sabemos si salió: un intento anterior pudo llegar a Resend',
+      nextAttemptAt: null,
+    })
+    expect(await estado(pendiente.id)).toMatchObject({ status: 'OMITIDO', skipReason: 'campaña cancelada' })
+  })
 })

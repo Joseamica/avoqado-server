@@ -77,6 +77,22 @@ export async function erasedAtTx(tx: Prisma.TransactionClient, who: ErasedIdenti
 }
 
 /**
+ * La lápida de un envío ya encolado cuenta desde un minuto antes de que se leyó su público: una eliminación toma su hora antes de
+ * terminar (su transacción no pasa de los 5 s de Prisma), y un encolado que empezó en ese hueco pudo leer el público de antes.
+ */
+export const MARGEN_DE_LA_LAPIDA_MS = 60_000
+
+/**
+ * ¿Este correo se eliminó del CRM (D7) desde que se leyó el público que lo trae (`leidoEn`, con el minuto de margen)? Quien se
+ * eliminó antes y volvió después no cuenta; sin fecha, cuenta cualquier eliminación. Lo preguntan al borde de cada envío el remitente
+ * del CRM y el marketing viejo del superadmin. Si la base falla, lanza: nadie manda a ciegas.
+ */
+export async function correoEliminadoDesde(email: string, leidoEn: Date | null): Promise<boolean> {
+  const desde = leidoEn ? new Date(leidoEn.getTime() - MARGEN_DE_LA_LAPIDA_MS) : undefined
+  return (await erasedAtTx(prisma, { keys: [], emails: [email], phones: [], organizationId: null }, desde)) !== null
+}
+
+/**
  * Throws `ErasedIdentityError` when `erasedAtTx` finds the deletion. Called by `accountForTx` only when it found nobody
  * and is about to create, inside the writer's transaction.
  */
@@ -140,12 +156,13 @@ export async function deleteAccount(access: CrmAccess, id: string, confirmName: 
     await tx.crmErased.createMany({ data: hashes.map(keyHash => ({ keyHash, scope, erasedAt: now })), skipDuplicates: true })
     await tx.crmErased.updateMany({ where: { keyHash: { in: hashes }, scope, erasedAt: { lt: now } }, data: { erasedAt: now } })
     // Campaign email (I1 of the email phase's final review): the queue has no foreign key and a consent can hang from another
-    // account, or none, so the cascade below leaves both. What was still waiting to go out to this account or these people
+    // account, or none, so the cascade below leaves both. What was never claimed (PENDIENTE) for this account or these people
     // stays in the history as OMITIDO, and their consent goes (PROSPECTOS stops reaching them). One statement each, bounded
-    // by CONTACTS_CAP emails; a row already claimed (ENVIANDO) is the sender's, which checks the tombstone before sending.
+    // by CONTACTS_CAP emails. A row already claimed (ENVIANDO, or REINTENTO: an earlier try may have reached Resend) is the
+    // sender's: it checks the tombstone before sending, and on a retry leaves it DESCONOCIDO, never «omitida».
     const emails = [...new Set(contacts.flatMap(contact => (contact.email ? [normalEmail(contact.email)] : [])))]
     await tx.crmCampaignDelivery.updateMany({
-      where: { status: { in: ['PENDIENTE', 'REINTENTO'] }, OR: [{ accountId: id }, ...(emails.length ? [{ email: { in: emails } }] : [])] },
+      where: { status: 'PENDIENTE', OR: [{ accountId: id }, ...(emails.length ? [{ email: { in: emails } }] : [])] },
       data: { status: 'OMITIDO', skipReason: MOTIVO_PERSONA_ELIMINADA, nextAttemptAt: null },
     })
     if (emails.length) await tx.crmEmailConsent.deleteMany({ where: { email: { in: emails } } })

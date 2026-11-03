@@ -44,6 +44,14 @@ const notFound = () => new NotFoundError('Esa plantilla no existe', 'CRM_PLANTIL
 
 /** Lo único que se le dice a quien pidió la prueba cuando algo falla por nuestro lado (la causa va al log). */
 const NO_SE_PUDO_MANDAR_LA_PRUEBA = 'No se pudo mandar la prueba. Intenta de nuevo en un momento'
+/** Resend no confirmó y la prueba PUDO haber salido: no se dice «no salió». Pedirla otra vez con lo mismo es la misma llave. */
+const NO_SABEMOS_SI_SALIO_LA_PRUEBA =
+  'Resend no confirmó. Revisa tu correo antes de pedirla otra vez; con el mismo contenido no llega dos veces'
+/**
+ * Lo que dice que Resend pudo haberla mandado: sin respuesta (sin código), un 5xx, o la llave ya usada / en vuelo. Lo demás (429,
+ * validación, sin configurar, demo) es un «no» que se sabe.
+ */
+const PUDO_SALIR = new Set(['application_error', 'internal_server_error', 'invalid_idempotent_request', 'concurrent_idempotent_requests'])
 
 // ── Leer ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -237,12 +245,12 @@ export async function previewTemplate(
 
 /**
  * «Envíame una prueba»: el correo, con el pie y las cabeceras de baja de uno de verdad, al `Staff.email` de quien lo pide.
- * Nunca truena: lo que no sale vuelve como `{ ok: false, motivo }`.
+ * Nunca truena: lo que no sale vuelve como `{ ok: false, motivo }`, y lo que pudo haber salido además con `incierto: true`.
  */
 export async function sendTestToSelf(
   actor: CrmAccess,
   input: { subject: string; blocks: BloqueCampana[] },
-): Promise<{ ok: boolean; motivo?: string }> {
+): Promise<{ ok: boolean; motivo?: string; incierto?: true }> {
   const staff = await prisma.staff.findUnique({
     where: { id: actor.staffId },
     select: { email: true, firstName: true, lastName: true },
@@ -288,12 +296,13 @@ export async function sendTestToSelf(
     })
     if (result.ok) return { ok: true }
     logger.warn('[CRM] The test email did not go out', { staffId: actor.staffId, error: result.errorCode ?? 'not sent' })
+    if (!result.errorCode || PUDO_SALIR.has(result.errorCode)) return { ok: false, incierto: true, motivo: NO_SABEMOS_SI_SALIO_LA_PRUEBA }
     return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
   } catch (error) {
     logger.error('[CRM] The test email could not be sent', {
       staffId: actor.staffId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
+    return { ok: false, incierto: true, motivo: NO_SABEMOS_SI_SALIO_LA_PRUEBA }
   }
 }

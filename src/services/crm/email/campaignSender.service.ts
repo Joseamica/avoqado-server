@@ -7,7 +7,8 @@
  *     sobre `{ id, status, attempts, leaseUntil }`. Si el CAS no aplica, el resultado se descarta (nunca se pisa a otro).
  *  2. Un correo que Resend aceptó no se manda otra vez a ciegas. Si aceptó y no se pudo guardar, queda DESCONOCIDO. Un
  *     reintento (lease vencido, o un transitorio que pudo ser una respuesta perdida) va con la MISMA llave de idempotencia,
- *     que Resend recuerda 24 h; por eso nada se reintenta pasadas 23 h del primer intento: queda DESCONOCIDO.
+ *     que Resend recuerda 24 h; por eso nada se reintenta pasadas 23 h del primer intento: queda DESCONOCIDO. FALLIDO sólo con
+ *     certeza de que no salió; lo que pudo salir (agotar los intentos, la llave usada con otro contenido) es DESCONOCIDO.
  *  3. Lo que puede cambiar entre encolar y mandar se revisa AL BORDE: la campaña cancelada, la baja/rebote/queja, la persona
  *     eliminada del CRM (D7) y la lista de prueba fuera de producción.
  *
@@ -24,7 +25,7 @@ import prisma from '../../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 import { utcTs } from '../../../utils/sqlDates'
 import emailService from '../../email.service'
-import { erasedAtTx, MOTIVO_PERSONA_ELIMINADA } from '../erase.service'
+import { correoEliminadoDesde, MOTIVO_PERSONA_ELIMINADA } from '../erase.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { cabecerasDeBaja, pieDeCampana, type MotivoDeEnvio } from './footer'
 import { isBlocked } from './optOut.service'
@@ -36,7 +37,10 @@ export type ResultadoEnvio = 'ENVIADO' | 'REINTENTO' | 'FALLIDO' | 'OMITIDO' | '
 
 /** 5 min: mandar un correo (esperar a Resend) es lento; un lease más corto dejaría a otro reclamar la fila a media llamada. */
 export const LEASE_MS = 5 * 60 * 1000
-/** 1 m, 5 m, 30 m, 2 h y 6 h: la espera tras cada transitorio. Cinco esperas = seis intentos; el sexto que falla es FALLIDO. */
+/**
+ * 1 m, 5 m, 30 m, 2 h y 6 h: la espera tras cada transitorio. Cinco esperas = seis intentos; el sexto que falla queda DESCONOCIDO
+ * (Ruling 11): seis fallos no prueban que ninguno llegó a Resend, y la fila no guarda qué pasó en cada intento.
+ */
 export const BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 6 * 3_600_000]
 const MAX_INTENTOS = BACKOFF_MS.length + 1
 /** Resend recuerda la llave de idempotencia 24 h: con una hora de margen, nada se reintenta pasadas 23 h del primer intento. */
@@ -49,13 +53,19 @@ const LOTE_DE_VIEJAS = 500
 const PAUSA_ENTRE_ENVIOS_MS = 500
 /** «Hoy» del tope diario: el día de Ciudad de México. */
 const ZONA = 'America/Mexico_City'
-/**
- * La lápida cuenta desde un minuto antes de encolar: una eliminación toma su hora antes de terminar (su transacción no pasa
- * de los 5 s de Prisma), y un encolado que empezó en ese hueco pudo leer el público de antes.
- */
-const MARGEN_DE_LA_LAPIDA_MS = 60_000
 const NO_SABEMOS_SI_SALIO = 'No sabemos si salió: pasaron más de 23 horas desde el primer intento'
 const ACEPTADO_SIN_GUARDAR = 'Resend lo aceptó, pero no se pudo guardar el resultado: no se vuelve a mandar'
+/**
+ * Resend ya tiene una petición con esta llave y otro contenido (p. ej. un deploy cambió el pie entre intentos): ése pudo salir. La
+ * llave en vuelo (`concurrent_idempotent_requests`) es otra cosa: se reintenta y Resend contesta lo que pasó con la primera.
+ */
+const LLAVE_YA_USADA = 'invalid_idempotent_request'
+/**
+ * Lo que se frena en un reintento (intento 2 en adelante): un intento anterior pudo haber llegado a Resend (respuesta perdida, o un
+ * proceso que murió a media llamada), así que no es «omitida». La usan el borde del remitente y cancelar la campaña.
+ */
+export const PUDO_SALIR_EN_UN_INTENTO_ANTERIOR = 'No sabemos si salió: un intento anterior pudo llegar a Resend'
+const LLAVE_EN_VUELO = 'concurrent_idempotent_requests'
 
 /**
  * Reclama lo que toca mandar, de campañas ENVIANDO, y lo deja ENVIANDO con su lease (`attempts + 1`, `sendAttemptAt` sólo
@@ -172,12 +182,18 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
     }
     return 'DESCONOCIDO' as const
   }
-  const omitir = (skipReason: string) => escribir('OMITIDO', { status: 'OMITIDO', skipReason, nextAttemptAt: null })
+  // En el primer intento, lo que se frena al borde no salió: OMITIDO. En un reintento pudo haber salido antes: DESCONOCIDO con el motivo.
+  const omitir = (skipReason: string) =>
+    d.attempts > 1
+      ? escribir('DESCONOCIDO', { status: 'DESCONOCIDO', skipReason, lastError: PUDO_SALIR_EN_UN_INTENTO_ANTERIOR, nextAttemptAt: null })
+      : escribir('OMITIDO', { status: 'OMITIDO', skipReason, nextAttemptAt: null })
   const fallar = (lastError: string) => escribir('FALLIDO', { status: 'FALLIDO', lastError, nextAttemptAt: null })
   // `attempts` ya viene con el intento de ahora (el reclamo lo sube), así que la primera espera es BACKOFF_MS[0].
+  /** Pudo haber salido: «no sabemos si salió», sin otro intento (nunca FALLIDO, que la pantalla pinta «No salieron»). */
+  const desconocido = (lastError: string) => escribir('DESCONOCIDO', { status: 'DESCONOCIDO', lastError, nextAttemptAt: null })
   const reintentar = (lastError: string) =>
     d.attempts >= MAX_INTENTOS
-      ? fallar(`Se agotaron los ${MAX_INTENTOS} intentos (${lastError})`)
+      ? desconocido(`No sabemos si salió: se agotaron los ${MAX_INTENTOS} intentos (${lastError})`)
       : escribir('REINTENTO', {
           status: 'REINTENTO',
           lastError,
@@ -238,7 +254,11 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
     await escribir('DESCONOCIDO', { status: 'DESCONOCIDO', lastError: ACEPTADO_SIN_GUARDAR, ...aceptado })
     return 'DESCONOCIDO'
   }
-  if (resultado.transient) return reintentar(resultado.errorCode ?? 'Error transitorio de envío')
+  if (resultado.transient || resultado.errorCode === LLAVE_EN_VUELO) return reintentar(resultado.errorCode ?? 'Error transitorio de envío')
+  if (resultado.errorCode === LLAVE_YA_USADA) {
+    return desconocido('No sabemos si salió: Resend ya tenía un envío con esta llave y otro contenido')
+  }
+  // Cualquier otro rechazo es seguro: con la misma llave y el mismo contenido, Resend devolvería el envío que hubiera aceptado antes.
   return fallar(resultado.errorCode ?? 'Error de envío')
 }
 
@@ -250,8 +270,7 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
  */
 async function fueEliminada(d: { email: string; accountId: string | null; campaign: { enqueuedAt: Date | null } }): Promise<boolean> {
   if (d.accountId && !(await prisma.crmAccount.findUnique({ where: { id: d.accountId }, select: { id: true } }))) return true
-  const desde = d.campaign.enqueuedAt ? new Date(d.campaign.enqueuedAt.getTime() - MARGEN_DE_LA_LAPIDA_MS) : undefined
-  return (await erasedAtTx(prisma, { keys: [], emails: [d.email], phones: [], organizationId: null }, desde)) !== null
+  return correoEliminadoDesde(d.email, d.campaign.enqueuedAt)
 }
 
 /** La campaña ENVIANDO que ya no tiene nada por mandar (ni PENDIENTE, ni REINTENTO, ni ENVIANDO) queda ENVIADA. */

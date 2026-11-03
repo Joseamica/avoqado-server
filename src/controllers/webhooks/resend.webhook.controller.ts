@@ -20,10 +20,20 @@ import { procesarAvisoCrm } from '../../services/crm/email/campaignWebhook.servi
 import { recordSuppression } from '../../services/marketing/emailSuppression.service'
 import { FALLO_FINAL_DE_CORREO, marcarEntregaFallidaPorMensaje } from '../../services/giftCards/giftCardDelivery.service'
 
-/** Los avisos que cuestan reputación del remitente: un rebote o una queja de spam. */
-function esAvisoDeReputacion(tipo: string): boolean {
-  return tipo === 'email.bounced' || tipo === 'email.complained'
-}
+/**
+ * Los avisos que CAMBIAN un estado en algún carril: si uno truena antes de llegar al carril que lo maneja, se contesta 500 para que
+ * Resend lo reintente (con 200 se pierde para siempre). Rebote y queja: los cuatro carriles. Fallo y supresión de Resend: tarjetas de
+ * regalo y CRM (Codex código r2 P2). Apertura y clic: marketing viejo y campañas a clientes. Los demás (`email.sent`, `email.delivered`,
+ * `email.delivery_delayed`…) no cambian nada que importe —el CRM sólo apunta el `resendId`, y su tag lo encuentra igual— y siguen en 200.
+ */
+const AVISOS_QUE_CAMBIAN_UN_ESTADO = new Set([
+  'email.bounced',
+  'email.complained',
+  'email.failed',
+  'email.suppressed',
+  'email.opened',
+  'email.clicked',
+])
 
 /**
  * Por qué hay que dejar de escribirle a esa dirección, si es que hay que dejarlo.
@@ -160,11 +170,11 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
     try {
       result = await marketingService.handleResendWebhook(event)
     } catch (error) {
-      // Un rebote o una queja no se pierde con un 200: 500 para que Resend reintente. Cualquier otro aviso sigue como siempre
-      // (lo atrapa el catch de afuera y contesta 200).
-      if (!esAvisoDeReputacion(event.type)) throw error
-      logger.error('📧 [Resend Webhook] Falló el carril de marketing de superadmin con un aviso de reputación:', error)
-      return res.status(500).json({ success: false, error: 'Error procesando el aviso de rebote o queja' })
+      // Un aviso que cambia un estado no se pierde con un 200: 500 para que Resend reintente. Los demás siguen como siempre (lo
+      // atrapa el catch de afuera y contesta 200).
+      if (!AVISOS_QUE_CAMBIAN_UN_ESTADO.has(event.type)) throw error
+      logger.error('📧 [Resend Webhook] Falló el carril de marketing de superadmin con un aviso que cambia un estado:', error)
+      return res.status(500).json({ success: false, error: 'Error procesando el aviso' })
     }
 
     if (!result?.handled) {

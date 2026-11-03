@@ -465,6 +465,42 @@ describe('sendTestToSelf', () => {
     await expect(sendTestToSelf(actor(), input)).resolves.toMatchObject({ ok: false })
   })
 
+  // Familia C: lo que PUDO haber salido no se pinta «No salió la prueba». Resend sin respuesta, un 5xx o la llave ya usada → incierto;
+  // un rechazo que se sabe (429, validación, servicio sin configurar) → «No se pudo». Volver a pedirla con lo mismo es la misma llave.
+  it.each([
+    ['sin respuesta de Resend', { ok: false, transient: true }],
+    ['un 5xx de Resend', { ok: false, transient: true, errorCode: 'application_error' }],
+    ['la llave ya usada con otro contenido', { ok: false, transient: false, errorCode: 'invalid_idempotent_request' }],
+    ['la llave en vuelo', { ok: false, transient: false, errorCode: 'concurrent_idempotent_requests' }],
+  ])('%s: {ok:false, incierto:true} con «revisa tu correo», no «No se pudo»', async (_caso, resultado) => {
+    setList('rafa@avoqado.io')
+    send.mockResolvedValue(resultado)
+
+    await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
+      ok: false,
+      incierto: true,
+      motivo: 'Resend no confirmó. Revisa tu correo antes de pedirla otra vez; con el mismo contenido no llega dos veces',
+    })
+  })
+
+  it('si el envío lanza, tampoco sabemos: incierto', async () => {
+    setList('rafa@avoqado.io')
+    send.mockRejectedValue(new Error('boom'))
+    await expect(sendTestToSelf(actor(), input)).resolves.toMatchObject({ ok: false, incierto: true })
+  })
+
+  it.each([
+    ['un 429', { ok: false, transient: true, errorCode: 'rate_limit_exceeded' }],
+    ['un rechazo de validación', { ok: false, transient: false, errorCode: 'validation_error' }],
+  ])('%s sí es seguro: «No se pudo mandar la prueba», sin incierto', async (_caso, resultado) => {
+    setList('rafa@avoqado.io')
+    send.mockResolvedValue(resultado)
+    await expect(sendTestToSelf(actor(), input)).resolves.toEqual({
+      ok: false,
+      motivo: 'No se pudo mandar la prueba. Intenta de nuevo en un momento',
+    })
+  })
+
   it('quien ya no tiene correo no recibe nada', async () => {
     setList('rafa@avoqado.io')
     prismaMock.staff.findUnique.mockResolvedValue(null)

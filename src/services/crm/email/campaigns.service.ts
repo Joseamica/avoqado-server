@@ -20,6 +20,7 @@ import { logAction } from '../../dashboard/activity-log.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import type { CrmAccess } from '../access.service'
 import { contarAudiencia, recorrerAudiencia } from './audience.service'
+import { PUDO_SALIR_EN_UN_INTENTO_ANTERIOR } from './campaignSender.service'
 import { assertSinVariablesDesconocidas, contentHash, sendTestToSelf } from './templates.service'
 
 export type EstadoDeCampana = 'BORRADOR' | 'ENVIANDO' | 'ENVIADA' | 'CANCELADA'
@@ -363,7 +364,10 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
   return { total }
 }
 
-/** Lo que falta por mandar queda OMITIDO «campaña cancelada»; lo que ya está en manos del remitente lo revisa él al borde. */
+/**
+ * Lo que nunca se reclamó queda OMITIDO «campaña cancelada»; lo que esperaba otro intento, DESCONOCIDO (pudo haber salido); lo que ya
+ * está en manos del remitente lo revisa él al borde.
+ */
 export async function cancelCampaign(actor: CrmAccess, id: string) {
   const omitidas = await prisma.$transaction(async tx => {
     const { count } = await tx.crmCampaign.updateMany({
@@ -379,10 +383,20 @@ export async function cancelCampaign(actor: CrmAccess, id: string) {
       )
     }
     const { count: n } = await tx.crmCampaignDelivery.updateMany({
-      where: { campaignId: id, status: { in: ['PENDIENTE', 'REINTENTO'] } },
+      where: { campaignId: id, status: 'PENDIENTE' },
       data: { status: 'OMITIDO', skipReason: 'campaña cancelada', nextAttemptAt: null },
     })
-    return n
+    // Una REINTENTO ya tuvo un intento que pudo llegar a Resend (su respuesta se perdió): no es «omitida», es «no sabemos».
+    const { count: inciertas } = await tx.crmCampaignDelivery.updateMany({
+      where: { campaignId: id, status: 'REINTENTO' },
+      data: {
+        status: 'DESCONOCIDO',
+        skipReason: 'campaña cancelada',
+        lastError: PUDO_SALIR_EN_UN_INTENTO_ANTERIOR,
+        nextAttemptAt: null,
+      },
+    })
+    return n + inciertas
   })
   void logAction({
     staffId: actor.staffId,

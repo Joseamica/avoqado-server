@@ -26,7 +26,8 @@ formulario de la landing y el marketing viejo del superadmin (`marketing.superad
 
 `deleteAccount` deja `OMITIDO` «persona eliminada» lo que esperaba en la cola para esa cuenta o sus correos, y borra su
 `CrmEmailConsent` aunque cuelgue de otra cuenta o de ninguna. El remitente vuelve a mirar al borde: cuenta que ya no existe, o
-correo en la lápida (`erasedAtTx`) desde un minuto antes de encolar. El historial (`CrmEmailMessage`, deliveries) es de D1.
+correo en la lápida desde un minuto antes de encolar (`correoEliminadoDesde`, `erase.service.ts`). El marketing viejo del superadmin
+hace la misma pregunta desde que empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 
@@ -82,22 +83,26 @@ CRM_GMAIL_TOKEN_KEY=
 2. **Tarjetas de regalo**: un correo de tarjeta que rebotó, se suprimió o falló queda «No se entregó». No corta: después sigue igual.
 3. **Marketing de superadmin** (`marketingService.handleResendWebhook`).
 4. **Campañas de un negocio a sus clientes** (`procesarAvisoDeResend`).
-5. **Campañas del CRM** (`procesarAvisoCrm`): **no** vuelve a suprimir; sólo marca la delivery `FALLIDO` (rebote duro, queja,
-   `email.failed` y `email.suppressed`, con su motivo) y, en una queja, anota la baja de Avoqado (`CrmEmailOptOut`).
+5. **Campañas del CRM** (`procesarAvisoCrm`): **no** vuelve a suprimir; sólo marca la delivery `FALLIDO` (rebote duro, `email.failed` y
+   `email.suppressed`, con su motivo: no llegó) o `ENVIADO` con su motivo (queja: sí llegó) y, en una queja, anota la baja de Avoqado
+   (`CrmEmailOptOut`).
 
 Los carriles 3 → 4 → 5 son una cascada: cada uno corre sólo si el anterior contestó «no es mío», por eso el del CRM va al final y sólo ve lo
-que los otros dos no reclamaron. `isBlocked` (`optOut.service.ts`) une `CrmEmailOptOut` y `EmailSuppression` y se revisa justo antes de cada
-envío.
+que los otros dos no reclamaron. Si el carril 3 truena con un aviso que cambia un estado en algún carril (rebote, queja, `email.failed`,
+`email.suppressed`, apertura, clic: `AVISOS_QUE_CAMBIAN_UN_ESTADO`), la respuesta es 500 para que Resend reintente; los demás siguen en 200.
+`isBlocked` (`optOut.service.ts`) une `CrmEmailOptOut` y `EmailSuppression` y se revisa justo antes de cada envío.
 
 ## Los avisos internos (`digest.service.ts`) no son marketing
 
 «Nuevo prospecto», «Volvió un prospecto» y el resumen diario van al equipo de ventas de Avoqado. Los frena un rebote duro o una queja
-(`isBlocked` dice `REBOTE` / `QUEJA`: protegen la reputación del remitente), **no** la baja de marketing (`BAJA`). Si la consulta falla, no
-salen y se reintentan (el aviso dice `false`; la fila del resumen queda `FALLO` con intentos por gastar).
+(`bloqueoPorReputacion` mira SÓLO `EmailSuppression`: una queja registra supresión y baja, y `isBlocked` contestaría `BAJA`), **no** la
+baja de marketing. Si la consulta falla, no salen y se reintentan (el aviso dice `false`; la fila del resumen queda `FALLO` con intentos por
+gastar).
 
 ## MCP (`src/mcp/tools/crm.ts`)
 
 `crm_list_email_templates` y `crm_campaign_status`: de **lectura**, sólo SUPERADMIN, sólo en `/mcp` (nunca en el catálogo certificado).
 Mandar una campaña o un correo por MCP no existe a propósito: es masivo y no se deshace. En `crm_campaign_status`, `desconocidos` quiere
-decir «no sabemos si salieron»: Resend lo aceptó y no se guardó el resultado, **o** pasaron más de 23 h desde el primer intento. Nunca se
-lee como entregado.
+decir «no sabemos si salieron»: Resend lo aceptó y no se guardó el resultado, pasaron más de 23 h desde el primer intento, se agotaron los
+seis intentos (Ruling 11: la fila no guarda si alguno llegó a Resend) **o** Resend ya tenía la llave con otro contenido. Nunca se lee como
+entregado; `FALLIDO` sólo cuando se sabe que no salió.

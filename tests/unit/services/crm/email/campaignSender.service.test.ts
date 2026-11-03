@@ -165,6 +165,35 @@ describe('enviarDelivery — lo que se revisa al borde', () => {
     expect(send).not.toHaveBeenCalled()
   })
 
+  // Familia C: en un REINTENTO (intento 2 en adelante) un intento anterior pudo haber llegado a Resend (respuesta perdida, o un
+  // proceso que murió a media llamada). Lo que lo frena ahora no prueba que no salió: DESCONOCIDO con su motivo, nunca OMITIDO.
+  it.each([
+    ['la baja (quien la recibió y le dio «baja»)', () => prismaMock.crmEmailOptOut.findUnique.mockResolvedValue({ id: 'cbaja' }), 'BAJA'],
+    [
+      'la campaña cancelada',
+      () => prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 2 }, { status: 'CANCELADA' })),
+      'campaña cancelada',
+    ],
+    ['la persona eliminada', () => prismaMock.crmErased.findFirst.mockResolvedValue({ erasedAt: AHORA }), 'persona eliminada'],
+  ] as const)('en el intento 2, %s deja DESCONOCIDO con su motivo y no llama a Resend', async (_caso, preparar, motivo) => {
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 2 }))
+    preparar()
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('DESCONOCIDO')
+
+    expect(send).not.toHaveBeenCalled()
+    expect(escrito()).toEqual({
+      where: { ...CAS, attempts: 2 },
+      data: {
+        status: 'DESCONOCIDO',
+        skipReason: motivo,
+        lastError: 'No sabemos si salió: un intento anterior pudo llegar a Resend',
+        nextAttemptAt: null,
+        leaseUntil: null,
+      },
+    })
+  })
+
   it('una fila que ya no es nuestra (lease vencido u otro estado) no se toca ni se manda', async () => {
     prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ leaseUntil: new Date(AHORA.getTime() - 1) }))
 
@@ -248,13 +277,54 @@ describe('enviarDelivery — lo que sale y cómo se guarda', () => {
     })
   })
 
-  it('las esperas son 1 m, 5 m, 30 m, 2 h y 6 h; el sexto transitorio ya es FALLIDO', async () => {
+  // Ruling 11 (Codex código r2 P3): seis transitorios no prueban que ninguno llegó a Resend (una respuesta perdida sí salió), y la fila
+  // no guarda qué pasó en cada intento. Al agotarlos queda DESCONOCIDO («no sabemos si salió»), nunca FALLIDO («no salió»).
+  it('las esperas son 1 m, 5 m, 30 m, 2 h y 6 h; el sexto transitorio queda DESCONOCIDO, sin otro intento', async () => {
     expect(BACKOFF_MS).toEqual([60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 6 * 3_600_000])
     send.mockResolvedValue({ ok: false, transient: true, errorCode: 'internal_server_error' })
     prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 6 }))
 
-    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('FALLIDO')
-    expect(escrito().data).toMatchObject({ status: 'FALLIDO' })
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('DESCONOCIDO')
+    expect(escrito()).toEqual({
+      where: { ...CAS, attempts: 6 },
+      data: expect.objectContaining({ status: 'DESCONOCIDO', nextAttemptAt: null, leaseUntil: null }),
+    })
+    expect(escrito().data.lastError).toMatch(/^No sabemos si salió: se agotaron los 6 intentos \(internal_server_error\)$/)
+  })
+
+  it('la respuesta perdida del primer intento y luego fallas de red: al sexto, DESCONOCIDO (no «No salieron»)', async () => {
+    send.mockRejectedValue(new Error('socket hang up'))
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 6 }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('DESCONOCIDO')
+    expect(escrito().data).toMatchObject({ status: 'DESCONOCIDO' })
+  })
+
+  it('aunque el sexto falle ANTES de Resend (al revisar las bajas), los cinco anteriores pudieron salir: DESCONOCIDO', async () => {
+    prismaMock.crmEmailOptOut.findUnique.mockRejectedValue(new Error('se cayó la base'))
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 6 }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('DESCONOCIDO')
+    expect(send).not.toHaveBeenCalled()
+    expect(escrito().data).toMatchObject({ status: 'DESCONOCIDO' })
+  })
+
+  // Familia C: un 409 de idempotencia en un reintento dice que Resend YA tiene una petición con esta llave (la que pudo salir).
+  it('invalid_idempotent_request (la llave ya se usó con otro contenido, p. ej. tras un deploy) queda DESCONOCIDO, nunca FALLIDO', async () => {
+    send.mockResolvedValue({ ok: false, transient: false, errorCode: 'invalid_idempotent_request' })
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 2 }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('DESCONOCIDO')
+    expect(escrito().data).toMatchObject({ status: 'DESCONOCIDO', nextAttemptAt: null })
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('concurrent_idempotent_requests (la primera sigue en vuelo) se reintenta con la misma llave: Resend contestará lo que pasó', async () => {
+    send.mockResolvedValue({ ok: false, transient: false, errorCode: 'concurrent_idempotent_requests' })
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 2 }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(escrito().data).toMatchObject({ status: 'REINTENTO', nextAttemptAt: new Date(AHORA.getTime() + 5 * 60_000) })
   })
 
   it('un error que no se arregla solo (422) queda FALLIDO a la primera', async () => {

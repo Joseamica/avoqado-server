@@ -22,14 +22,22 @@ export type OrigenDeBaja = 'UN_CLIC' | 'QUEJA' | 'ADMIN'
  * reserva el envío (el Gmail la vuelve a correr bajo el candado de su conexión).
  */
 export async function isBlocked(email: string, db: Prisma.TransactionClient = prisma): Promise<false | Bloqueo> {
-  const normalizado = normalizeEmail(email)
   const [baja, suprimido] = await Promise.all([
-    db.crmEmailOptOut.findUnique({ where: { email: normalizado }, select: { id: true } }),
-    db.emailSuppression.findUnique({ where: { email: normalizado }, select: { reason: true } }),
+    db.crmEmailOptOut.findUnique({ where: { email: normalizeEmail(email) }, select: { id: true } }),
+    bloqueoPorReputacion(email, db),
   ])
-  if (baja) return 'BAJA'
-  if (suprimido) return suprimido.reason === 'COMPLAINT' ? 'QUEJA' : 'REBOTE'
-  return false
+  return baja ? 'BAJA' : suprimido
+}
+
+/**
+ * Sólo la supresión por reputación (`EmailSuppression`: rebote duro → «REBOTE», queja → «QUEJA»), SIN mirar la baja. La usan los
+ * avisos de trabajo al equipo de ventas (Ruling 9): la baja de marketing no los frena, pero una baja no puede tapar un rebote o
+ * una queja (una queja registra las dos). Si la base falla LANZA, igual que `isBlocked`.
+ */
+export async function bloqueoPorReputacion(email: string, db: Prisma.TransactionClient = prisma): Promise<false | 'REBOTE' | 'QUEJA'> {
+  const suprimido = await db.emailSuppression.findUnique({ where: { email: normalizeEmail(email) }, select: { reason: true } })
+  if (!suprimido) return false
+  return suprimido.reason === 'COMPLAINT' ? 'QUEJA' : 'REBOTE'
 }
 
 /**

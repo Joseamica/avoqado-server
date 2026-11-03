@@ -16,6 +16,7 @@ import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { classifyUndeliverable, isDeliverableRecipient } from '@/utils/undeliverableEmail'
 import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
 import { omitirPorDemo } from '../demo/candadoDemo'
+import { correoEliminadoDesde, MOTIVO_PERSONA_ELIMINADA } from '../crm/erase.service'
 import { isBlocked } from '../crm/email/optOut.service'
 import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from '../crm/email/testAllowlist'
 
@@ -604,6 +605,7 @@ export async function processPendingDeliveries() {
           subject: true,
           bodyHtml: true,
           bodyText: true,
+          startedAt: true,
         },
       }),
     {
@@ -672,12 +674,14 @@ export async function processPendingDeliveries() {
         }
 
         // Quien se dio de baja, rebotó o se quejó ya no recibe nada de Avoqado, tampoco por aquí (promesa del CRM, fase 2:
-        // `CrmEmailOptOut` ∪ `EmailSuppression`), y fuera de producción sólo salen las direcciones de prueba. Justo antes de
-        // mandar, como el remitente del CRM. FAILED con su motivo, como los demo: no fue un fallo de envío.
+        // `CrmEmailOptOut` ∪ `EmailSuppression`), ni quien se eliminó del CRM desde que empezó la campaña (lápida D7, la misma
+        // pregunta que el remitente del CRM), y fuera de producción sólo salen las direcciones de prueba. Justo antes de mandar.
+        // FAILED con su motivo, como los demo: no fue un fallo de envío.
         let motivo: string | false
         try {
           motivo =
             (await isBlocked(delivery.recipientEmail)) ||
+            ((await correoEliminadoDesde(delivery.recipientEmail, campaign.startedAt)) && MOTIVO_PERSONA_ELIMINADA) ||
             (!puedeMandarFueraDeProduccion(delivery.recipientEmail) && MOTIVO_FUERA_DE_LA_LISTA)
         } catch (error) {
           // Un error de la base nunca se lee como «no está bloqueado»: sigue PENDING y se reintenta en la siguiente pasada.
@@ -835,6 +839,9 @@ const REPUTATION_EVENTS: ResendEventType[] = ['email.bounced', 'email.complained
 export async function handleResendWebhook(payload: ResendWebhookPayload) {
   const { type, data } = payload
   const resendId = data.email_id
+  // Sin id no es de este carril: `findFirst({ where: { resendId: undefined } })` no filtra y traería CUALQUIER entrega, que se marcaría
+  // con un aviso ajeno, y el `handled: true` le escondería el aviso a los carriles de abajo (el CRM lo encuentra por su tag).
+  if (!resendId) return { handled: false, reason: 'Webhook without email_id' }
 
   // Find the delivery by resendId
   const delivery = await prisma.campaignDelivery.findFirst({

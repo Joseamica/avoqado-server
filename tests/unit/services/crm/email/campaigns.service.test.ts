@@ -8,7 +8,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
-import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
+import { cancelCampaign, getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/services/crm/access.service', () => ({
@@ -126,5 +126,34 @@ describe('contadores de las campañas', () => {
     expect(a.contadores).toEqual({ pendientes: 5, enCurso: 2, enviados: 20, reintentos: 3, fallidos: 4, omitidos: 1, desconocidos: 5 })
     expect(suma(a.contadores)).toBe(a.total)
     expect(suma(b.contadores)).toBe(b.total)
+  })
+})
+
+// Familia C (pasada r2): cancelar no puede decir «omitida» de lo que pudo haber salido. Una REINTENTO ya llamó (o pudo llamar) a
+// Resend: su respuesta pudo perderse. PENDIENTE nunca se reclamó: ésa sí es OMITIDO seguro.
+describe('cancelCampaign — lo que esperaba otro intento queda DESCONOCIDO, no OMITIDO', () => {
+  it('PENDIENTE → OMITIDO «campaña cancelada»; REINTENTO → DESCONOCIDO con el mismo motivo', async () => {
+    prismaMock.crmCampaign.updateMany.mockResolvedValue({ count: 1 } as never)
+    prismaMock.crmCampaignDelivery.updateMany.mockResolvedValue({ count: 2 } as never)
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(fila(CAMP_A, TOTAL_A) as never)
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue(GRUPOS as never)
+
+    await cancelCampaign({ staffId: STAFF } as never, CAMP_A)
+
+    const escrituras = prismaMock.crmCampaignDelivery.updateMany.mock.calls.map(([arg]: any[]) => arg)
+    expect(escrituras).toContainEqual({
+      where: { campaignId: CAMP_A, status: 'PENDIENTE' },
+      data: { status: 'OMITIDO', skipReason: 'campaña cancelada', nextAttemptAt: null },
+    })
+    expect(escrituras).toContainEqual({
+      where: { campaignId: CAMP_A, status: 'REINTENTO' },
+      data: {
+        status: 'DESCONOCIDO',
+        skipReason: 'campaña cancelada',
+        lastError: 'No sabemos si salió: un intento anterior pudo llegar a Resend',
+        nextAttemptAt: null,
+      },
+    })
+    expect(escrituras.some((e: any) => e.data.status === 'OMITIDO' && JSON.stringify(e.where).includes('REINTENTO'))).toBe(false)
   })
 })

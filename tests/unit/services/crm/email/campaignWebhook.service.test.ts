@@ -63,12 +63,14 @@ const escritoCon = (data: Record<string, unknown>) =>
   )
 
 describe('procesarAvisoCrm', () => {
-  it('una queja deja la delivery FALLIDO y da de baja el correo (QUEJA), sin volver a suprimir', async () => {
-    mockPrisma.crmCampaignDelivery.findFirst.mockResolvedValue(nuestra())
+  // Familia C: una queja PRUEBA que el correo llegó (alguien lo abrió y lo marcó como spam). FALLIDO la contaba en «No salieron»;
+  // queda ENVIADO con el motivo, y sale de la cola: una que esperaba reintento (su respuesta se perdió) ya no se reintenta.
+  it('una queja deja la delivery ENVIADO con su motivo (sí llegó), la saca de la cola y da de baja el correo (QUEJA)', async () => {
+    mockPrisma.crmCampaignDelivery.findFirst.mockResolvedValue(nuestra({ status: 'REINTENTO' }))
 
     await expect(procesarAvisoCrm(aviso('email.complained'))).resolves.toEqual({ manejado: true })
 
-    escritoCon({ status: 'FALLIDO' })
+    escritoCon({ status: 'ENVIADO', lastError: 'El destinatario lo marcó como spam', leaseUntil: null, nextAttemptAt: null })
     expect(mockPrisma.crmEmailOptOut.createMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: [expect.objectContaining({ email: 'ana@cafeteria.mx', source: 'QUEJA' })] }),
     )

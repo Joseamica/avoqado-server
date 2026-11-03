@@ -249,6 +249,19 @@ describe('los avisos internos y las bajas (Codex r1, P1): un rebote o una queja 
     expect(send.mock.calls.map(([email]) => email.to)).toEqual(['a@avoqado.io', 'b@avoqado.io', 'a@avoqado.io', 'b@avoqado.io'])
   })
 
+  // Codex código r2 P1: una queja registra supresión Y baja; una baja vieja más un rebote nuevo, igual. La baja no tapa la supresión.
+  it.each([
+    ['baja + rebote', 'HARD_BOUNCE', 'REBOTE'],
+    ['baja + queja', 'COMPLAINT', 'QUEJA'],
+  ] as const)('%s: la supresión frena el aviso aunque también haya baja', async (_caso, reason, motivo) => {
+    bajas.add('a@avoqado.io')
+    suprimidos.set('a@avoqado.io', reason)
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['b@avoqado.io'])
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A, motivo }))
+  })
+
   it('si la consulta del bloqueo falla, a esa persona no se le manda y el aviso dice false para que el barrido lo reintente', async () => {
     consultaFalla.add('a@avoqado.io')
 
@@ -732,6 +745,20 @@ describe('runDailyDigest', () => {
 
     expect(send).not.toHaveBeenCalled()
     expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
+  })
+
+  it.each([
+    ['baja + rebote', 'HARD_BOUNCE', 'REBOTE'],
+    ['baja + queja', 'COMPLAINT', 'QUEJA'],
+  ] as const)('%s_frena_el_resumen: la baja no tapa la supresión (Codex código r2 P1)', async (_caso, reason, motivo) => {
+    bajas.add('a@avoqado.io')
+    suprimidos.set('a@avoqado.io', reason)
+
+    await runDailyDigest(T0)
+
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, status: 'FALLO', attempts: 3 })])
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A, motivo }))
   })
 
   it('la_baja_de_marketing_no_frena_el_resumen: quien se dio de baja de una campaña sigue recibiendo su resumen', async () => {

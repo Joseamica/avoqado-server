@@ -158,9 +158,11 @@ describe('deleteAccount', () => {
 
     await deleteAccount(FOUNDER, ACCOUNT, 'Café Ana')
 
+    // Sólo lo que nunca se reclamó (PENDIENTE) es OMITIDO seguro. Una REINTENTO pudo haber salido en su intento anterior: se queda para
+    // el remitente, que al reclamarla mira la lápida y la deja DESCONOCIDO sin llamar a Resend (familia C, pasada r2).
     expect(prismaMock.crmCampaignDelivery.updateMany).toHaveBeenCalledWith({
       where: {
-        status: { in: ['PENDIENTE', 'REINTENTO'] },
+        status: 'PENDIENTE',
         OR: [{ accountId: ACCOUNT }, { email: { in: [EMAIL, 'beto@cafe.mx'] } }],
       },
       data: { status: 'OMITIDO', skipReason: 'persona eliminada', nextAttemptAt: null },
