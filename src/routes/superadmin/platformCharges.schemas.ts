@@ -35,7 +35,8 @@ const anchorDate = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe tener el formato AAAA-MM-DD')
 
 const concept = z.object({
-  description: text('La descripción del concepto es requerida'),
+  // El límite del SAT: lo que pase de ahí lo rechaza al timbrar, y ya en la factura la descripción no se puede corregir.
+  description: text('La descripción del concepto es requerida').max(1000, 'La descripción no puede pasar de 1,000 letras'),
   amountCents: z
     .number({ required_error: 'El monto del concepto es requerido', invalid_type_error: 'El monto del concepto debe ser un número' })
     .int('El monto debe estar en centavos enteros'),
@@ -53,7 +54,7 @@ const chargeFields = {
   customerType,
   organizationId: optionalId,
   venueId: optionalId,
-  customerName: text('Escribe el nombre del cliente'),
+  customerName: text('Escribe el nombre del cliente').max(120, 'El nombre no puede pasar de 120 letras'),
   billingTaxProfileId: optionalId,
   frequency,
   anchorDate,

@@ -127,6 +127,17 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
     expect(errores(invoiceOccurrenceSchema, body({ billingTaxProfileId: '' }))).toEqual(['El perfil fiscal no es válido'])
   })
 
+  it('el nombre y la descripción tienen tope: el SAT no acepta una descripción de más de 1,000 letras, y ya en la factura no se puede corregir', () => {
+    const concepto = COBRO.concepts[0]
+    expect(errores(createChargeSchema, body({ ...COBRO, concepts: [{ ...concepto, description: 'x'.repeat(1000) }] }))).toEqual([])
+    expect(errores(createChargeSchema, body({ ...COBRO, concepts: [{ ...concepto, description: 'x'.repeat(1001) }] }))).toEqual([
+      'La descripción no puede pasar de 1,000 letras',
+    ])
+    expect(errores(createChargeSchema, body({ ...COBRO, customerName: 'x'.repeat(121) }))).toEqual([
+      'El nombre no puede pasar de 120 letras',
+    ])
+  })
+
   it('🔴 facturar y pagar reciben lo que se vio en pantalla, completo o nada: a medias no se puede comparar', () => {
     const receptor = { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA', regimenFiscal: '601', codigoPostal: '06000' }
     expect(errores(invoiceOccurrenceSchema, body({ receptor }))).toEqual([])
