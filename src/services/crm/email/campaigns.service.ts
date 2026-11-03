@@ -17,6 +17,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/A
 import { audienciaSchema, type Audiencia } from '../../../schemas/crm.schema'
 import prisma from '../../../utils/prismaClient'
 import { logAction } from '../../dashboard/activity-log.service'
+import { campanasPausadasPorCupo } from '../../email/resendQuota'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import type { CrmAccess } from '../access.service'
 import { contarAudiencia, recorrerAudiencia } from './audience.service'
@@ -139,10 +140,18 @@ async function contadoresDe(ids: string[]): Promise<Map<string, Record<string, n
   return porCampana
 }
 
-/** Lo que ve la pantalla: sin la huella cruda, con «¿ya te mandaste la prueba de esta versión?» y los contadores. */
+/**
+ * Lo que ve la pantalla: sin la huella cruda, con «¿ya te mandaste la prueba de esta versión?», los contadores y si la campaña
+ * espera al cupo de Resend (`pausadaPorCupo`, campo nuevo y opcional: hasta la medianoche de CDMX, sólo si sigue enviando).
+ */
 function vista(fila: Fila, contadores: Record<string, number> = {}) {
   const { testSentHash, ...resto } = fila
-  return { ...resto, pruebaVigente: testSentHash === contentHash(fila.subject, bloquesDe(fila)), contadores }
+  return {
+    ...resto,
+    pruebaVigente: testSentHash === contentHash(fila.subject, bloquesDe(fila)),
+    contadores,
+    pausadaPorCupo: fila.status === 'ENVIANDO' && campanasPausadasPorCupo(),
+  }
 }
 
 export interface ListCampaignsQuery {

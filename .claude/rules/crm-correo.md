@@ -46,7 +46,8 @@ hoy no hay ruta para revertirlo. Para probar la baja, usa una dirección de `CRM
 | ---------------------------------------------------------------------------- | --------------------------------------------- |
 | `CRM_CAMPAIGN_FROM`                                                          | `Avoqado <novedades@novedades.avoqado.io>`    |
 | `CRM_CAMPAIGN_REPLY_TO`                                                      | `hola@avoqado.io`                             |
-| `CRM_CAMPAIGN_DAILY_CAP` (primeros intentos por día de CDMX; se sube a mano) | `300`                                         |
+| `CRM_CAMPAIGN_DAILY_CAP` (primeros intentos por día de CDMX; se sube a mano) | `50` (era 300; el cupo de Resend, 3-nov)      |
+| `RESEND_DAILY_QUOTA`, `RESEND_MONTHLY_QUOTA` (cupo de la cuenta de Resend)   | `100` y `3000` (plan gratis); ver abajo       |
 | `CRM_CORREO_PRUEBAS`                                                         | vacío                                         |
 | `CRM_GMAIL_CLIENT_ID`, `CRM_GMAIL_CLIENT_SECRET`, `CRM_GMAIL_REDIRECT_URI`   | sin default                                   |
 | `CRM_GMAIL_TOKEN_KEY` (64 caracteres hex = 32 bytes; `openssl rand -hex 32`) | sin default; llave propia de esta integración |
@@ -58,7 +59,10 @@ hoy no hay ruta para revertirlo. Para probar la baja, usa una dirección de `CRM
 CRM_CAMPAIGN_FROM="Avoqado <novedades@novedades.avoqado.io>"
 CRM_CAMPAIGN_REPLY_TO=hola@avoqado.io
 # Primeros intentos por día (hora de CDMX): calentamiento del subdominio; se sube a mano
-CRM_CAMPAIGN_DAILY_CAP=300
+CRM_CAMPAIGN_DAILY_CAP=50
+# El cupo de la cuenta de Resend, sólo si cambia el plan (gratis: 100 al día y 3,000 al mes)
+RESEND_DAILY_QUOTA=
+RESEND_MONTHLY_QUOTA=
 # Fuera de producción sólo sale correo a estas direcciones (comas, minúsculas). Vacío = no sale nada
 CRM_CORREO_PRUEBAS=
 # Gmail del vendedor (app OAuth de Google «External», sin verificar). Sin estas cuatro «Mi Gmail» dice «Falta configurar la app de Google»
@@ -68,6 +72,24 @@ CRM_GMAIL_REDIRECT_URI=
 # 64 caracteres hex (32 bytes), llave propia de esta integración: openssl rand -hex 32
 CRM_GMAIL_TOKEN_KEY=
 ```
+
+## 🔴 El cupo de Resend (`src/services/email/resendQuota.ts`, 3-nov)
+
+Seguimos en el plan gratis: 100 correos al día y 3,000 al mes para TODO el servidor (login, recibos, avisos y campañas; cuentan también los
+recibidos). `instalarMedidorDeCupoResend()` (en `server.ts`, también en `DEMO_MODE`) envuelve el `fetch` global porque el SDK 6.3.0 tira las
+cabeceras: lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respuesta de `api.resend.com`, y el `name` de un 429
+(`daily_quota_exceeded` / `monthly_quota_exceeded`). Nunca cambia ni frena un correo, y nunca lanza.
+
+- **Aviso** al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` y un correo a jose@avoqado.io (fuera de
+  producción, sólo si está en `CRM_CORREO_PRUEBAS`). Una vez por día (el del mes, una vez por mes) aunque el servidor se reinicie: CAS sobre
+  la fila `EmailQuotaAlert` (`id = 'resend'`).
+- **Pausa, sólo de las campañas del CRM**, con 80 en el día o un 429 de cupo (el del mes, hasta el mes siguiente): el remitente no reclama,
+  y lo reclamado que ya no salió vuelve a la cola **sin gastar un intento**, con `nextAttemptAt` en la medianoche de CDMX (un primer intento
+  vuelve PENDIENTE y suelta su lugar del día; un reintento conserva su `sendAttemptAt`). El detalle de la campaña y `crm_campaign_status` lo
+  dicen con `pausadaPorCupo`. El login y los recibos nunca se pausan.
+- Sin `x-resend-daily-quota` en una respuesta exitosa, la cuenta ya es de pago: se dice una vez y no hay pausa diaria. Al subir de plan, pon
+  `RESEND_MONTHLY_QUOTA` (y `RESEND_DAILY_QUOTA` si aplica), o el aviso del mes saldría al 80 % de 3,000.
+- La pausa vive en la memoria del proceso: tras un reinicio se rearma con la primera respuesta de Resend.
 
 ## Gmail del vendedor
 

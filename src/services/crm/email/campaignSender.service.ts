@@ -14,7 +14,12 @@
  *
  * El tope diario (calentamiento del subdominio) cuenta `sendAttemptAt`, que se escribe al reclamar ANTES de tocar la red y
  * nadie mueve: el lugar queda apartado aunque la respuesta se pierda, un rebote no lo devuelve y un reintento no lo cuenta dos
- * veces. Sólo frena los PRIMEROS intentos.
+ * veces. Sólo frena los PRIMEROS intentos. La única excepción es un primer intento que vuelve a la cola sin haber salido (el
+ * cupo de Resend, abajo): suelta su lugar porque nunca llegó a Resend.
+ *
+ * 🔴 El cupo de Resend (`services/email/resendQuota.ts`): el plan gratis da 100 correos al día a TODO el servidor. Con 80 en el
+ * día las campañas esperan a la medianoche de CDMX para dejarle lugar al login y a los recibos. Lo que vuelve a la cola no gasta
+ * un intento (no debe acercarse al agotamiento del Ruling 11) y nunca sale dos veces: el mismo lease y el mismo CAS.
  */
 import { Prisma } from '@prisma/client'
 import { env } from '../../../config/env'
@@ -25,6 +30,7 @@ import prisma from '../../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 import { utcTs } from '../../../utils/sqlDates'
 import emailService from '../../email.service'
+import { campanasPausadasPorCupo, esErrorDeCupo } from '../../email/resendQuota'
 import { correoEliminadoDesde, MOTIVO_PERSONA_ELIMINADA } from '../erase.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { cabecerasDeBaja, pieDeCampana, type MotivoDeEnvio } from './footer'
@@ -119,6 +125,8 @@ export async function reclamarLote(topeNuevas: number, ahora: Date): Promise<str
       FROM "CrmCampaignDelivery" d
       JOIN "CrmCampaign" c ON c."id" = d."campaignId"
       WHERE c."status" = 'ENVIANDO' AND d."status" = 'PENDIENTE'
+        -- Sólo una que volvió a la cola por el cupo de Resend trae fecha: no sale antes de la medianoche, aunque el proceso se reinicie.
+        AND (d."nextAttemptAt" IS NULL OR d."nextAttemptAt" <= ${utcTs(ahora)})
       ORDER BY d."createdAt", d."id"
       LIMIT ${topeNuevas}
       FOR UPDATE OF d SKIP LOCKED
@@ -259,6 +267,8 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
     await escribir('DESCONOCIDO', { status: 'DESCONOCIDO', lastError: ACEPTADO_SIN_GUARDAR, ...aceptado })
     return 'DESCONOCIDO'
   }
+  // El cupo de Resend se acabó: Resend la rechazó sin mandarla. Vuelve a la cola sin gastar el intento (el remitente ya se pausó).
+  if (esErrorDeCupo(resultado.errorCode)) return escribir('REINTENTO', sinGastarIntento(d.attempts, ahora))
   if (resultado.transient || resultado.errorCode === LLAVE_EN_VUELO) return reintentar(resultado.errorCode ?? 'Error transitorio de envío')
   if (resultado.errorCode === LLAVE_YA_USADA) {
     return desconocido('No sabemos si salió: Resend ya tenía un envío con esta llave y otro contenido')
@@ -278,6 +288,42 @@ async function fueEliminada(d: { email: string; accountId: string | null; campai
   return correoEliminadoDesde(d.email, d.campaign.enqueuedAt)
 }
 
+/**
+ * La medianoche siguiente de Ciudad de México: cuando las campañas vuelven a salir tras la pausa del cupo de Resend.
+ * ponytail: +24 h y el inicio de ese día; vale porque CDMX no tiene horario de verano desde 2022.
+ */
+const medianocheSiguiente = (ahora: Date) => venueStartOfDay(ZONA, new Date(ahora.getTime() + 24 * 3_600_000))
+
+/**
+ * Cómo vuelve a la cola, sin gastar el intento, una delivery reclamada que no salió por el cupo de Resend. Un PRIMER intento
+ * (`attempts` 1) nunca llegó a Resend: vuelve PENDIENTE y suelta su lugar del día. Un reintento conserva su primer intento (la
+ * ventana de 23 h y la llave siguen: el intento anterior pudo salir) y sólo se le regresa el intento.
+ */
+const sinGastarIntento = (attempts: number, ahora: Date): Prisma.CrmCampaignDeliveryUpdateManyMutationInput =>
+  attempts > 1
+    ? { status: 'REINTENTO', attempts: attempts - 1, nextAttemptAt: medianocheSiguiente(ahora) }
+    : { status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: medianocheSiguiente(ahora) }
+
+/**
+ * Lo reclamado en esta vuelta que ya no se mandó vuelve a la cola sin gastar el intento (`sinGastarIntento`, en lote). CAS por
+ * el lease de ESTA vuelta y su estado: si otro remitente ya la reclamó, no se toca. Devuelve cuántas volvieron.
+ */
+async function devolverPorCupo(ids: string[], lease: Date, ahora: Date): Promise<number> {
+  const nextAttemptAt = medianocheSiguiente(ahora)
+  const nuestras = { id: { in: ids }, status: 'ENVIANDO', leaseUntil: lease }
+  const [primeras, reintentos] = await Promise.all([
+    prisma.crmCampaignDelivery.updateMany({
+      where: { ...nuestras, attempts: 1 },
+      data: { status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, leaseUntil: null, nextAttemptAt },
+    }),
+    prisma.crmCampaignDelivery.updateMany({
+      where: { ...nuestras, attempts: { gt: 1 } },
+      data: { status: 'REINTENTO', attempts: { decrement: 1 }, leaseUntil: null, nextAttemptAt },
+    }),
+  ])
+  return primeras.count + reintentos.count
+}
+
 /** La campaña ENVIANDO que ya no tiene nada por mandar (ni PENDIENTE, ni REINTENTO, ni ENVIANDO) queda ENVIADA. */
 export async function cerrarCampanasTerminadas(): Promise<number> {
   const { count } = await prisma.crmCampaign.updateMany({
@@ -291,7 +337,8 @@ const esperar = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
  * Una vuelta del trabajo: tope del día → reclamar → mandar uno por uno → cerrar las campañas terminadas. Con
- * `MARKETING_KILL_SWITCH` prendido no hace nada (ni una consulta) y devuelve null.
+ * `MARKETING_KILL_SWITCH` prendido no hace nada (ni una consulta) y devuelve null. Con el cupo de Resend en pausa tampoco toca la
+ * base (devuelve el resumen en ceros), y si la pausa llega a media vuelta lo que faltaba vuelve a la cola sin gastar intento.
  *
  * ponytail: el conteo del día y el reclamo no van juntos bajo candado; con UNA instancia (y el `isRunning` del trabajo) no
  * se enciman. Con dos, el tope podría pasarse por un lote: un candado advisory por vuelta.
@@ -300,6 +347,11 @@ export async function correrEnvioDeCampanas(opts: { ahora?: Date; pausaMs?: numb
   if (env.MARKETING_KILL_SWITCH === 'true') return null
   const ahora = opts.ahora ?? new Date()
   const pausaMs = opts.pausaMs ?? PAUSA_ENTRE_ENVIOS_MS
+  const resumen: Record<ResultadoEnvio, number> = { ENVIADO: 0, REINTENTO: 0, FALLIDO: 0, OMITIDO: 0, DESCONOCIDO: 0 }
+  if (campanasPausadasPorCupo()) {
+    logger.info('[CRM] Campaign sender paused by the Resend daily quota (cupo de Resend) until midnight in Mexico City')
+    return resumen
+  }
 
   // La lectura de entrada, con reintento de conexión (`.claude/rules/cron-jobs.md`): un COUNT, seguro de repetir. Usa el
   // índice de `sendAttemptAt`, con cualquier estado.
@@ -310,8 +362,17 @@ export async function correrEnvioDeCampanas(opts: { ahora?: Date; pausaMs?: numb
   const topeNuevas = Math.max(0, Math.min(TOPE_NUEVAS, env.CRM_CAMPAIGN_DAILY_CAP - intentadasHoy))
   const ids = await reclamarLote(topeNuevas, ahora)
 
-  const resumen: Record<ResultadoEnvio, number> = { ENVIADO: 0, REINTENTO: 0, FALLIDO: 0, OMITIDO: 0, DESCONOCIDO: 0 }
   for (const [i, id] of ids.entries()) {
+    // 🔴 El correo anterior (o uno del login) pudo cruzar el 80: lo que falta no sale y vuelve a la cola.
+    if (campanasPausadasPorCupo()) {
+      // El mismo lease que escribió `reclamarLote` con este `ahora`.
+      const devueltas = await devolverPorCupo(ids.slice(i), new Date(ahora.getTime() + LEASE_MS), ahora)
+      logger.warn('[CRM] Resend daily quota reached mid-tick: the rest of the batch went back to the queue', {
+        porMandar: ids.length - i,
+        devueltas,
+      })
+      break
+    }
     if (i > 0 && pausaMs > 0) await esperar(pausaMs)
     try {
       resumen[await enviarDelivery(id, opts.ahora)] += 1
