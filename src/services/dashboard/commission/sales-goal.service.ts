@@ -177,7 +177,7 @@ export async function ventasDeLaPersonaDesde(
  * CRITICAL: Uses venue timezone for date boundaries (not UTC).
  * "Today" means today in the venue's timezone, not UTC.
  */
-async function calculateCurrentSales(
+export async function calculateCurrentSales(
   venueId: string,
   staffId: string | null,
   period: SalesGoalPeriod,
