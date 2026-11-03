@@ -9,12 +9,22 @@
  * Money is integer cents end-to-end (MXN). IVA is ADD-ON (not included), unlike
  * the Stripe subscriptions which are IVA-inclusive.
  */
+import { isDeepStrictEqual } from 'node:util'
 import { Prisma, type PlatformCfdi, type PlatformEmisor } from '@prisma/client'
 import logger from '@/config/logger'
+import { ConflictError } from '@/errors/AppError'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
-import { esRechazoConfirmado } from '@/services/fiscal/providers/facturapi.provider'
-import type { CfdiItemInput, CreateInvoiceParams, PaymentComplementTax } from '@/services/fiscal/providers/fiscal-provider.interface'
+import { esRechazoConfirmado, ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
+import type {
+  CfdiItemInput,
+  CreateInvoiceParams,
+  FiscalProvider,
+  PaymentComplementTax,
+  ProviderInvoiceSummary,
+  StampedInvoice,
+} from '@/services/fiscal/providers/fiscal-provider.interface'
 import { chargesSandbox } from '@/services/superadmin/platform-charges/sandbox'
 import { getActivePlatformEmisor, PlatformBillingError } from './platformEmisor.service'
 import type {
@@ -27,6 +37,39 @@ import type {
 
 const DEFAULT_IVA_RATE = 0.16
 const MAX_PAGE_SIZE = 100
+
+/**
+ * Cuánto se espera antes de preguntarle a Facturapi por un intento que nunca nos contestó (STAMPING sin `facturapiId`). Nuestro cliente
+ * corta el timbrado a los 30 s (`AbortSignal.timeout` del proveedor): ese corte es NUESTRO, no una señal de que el PAC dejó de trabajar.
+ * Los 2 min son una defensa razonable, no una prueba de que el documento ya no vaya a aparecer. Cuenta desde `createdAt`.
+ */
+export const STAMPING_GRACE_MS = 2 * 60_000
+/** Las consultas a Facturapi (`getInvoice`, `findByExternalId`) van por el SDK, que no trae tiempo límite: aquí se impone. */
+const PAC_QUERY_TIMEOUT_MS = 30_000
+/** Lo primero que lee quien acaba de ver fallar un timbrado sin saber si llegó. */
+const IN_FLIGHT_NOTICE = 'La factura pudo quedar en camino: consulta su estado en 2 minutos y no la timbres otra vez.'
+
+const conflict = (message: string, code: string) => new ConflictError(message, code)
+
+/**
+ * Una consulta al PAC que va a decidir algo: si falla —o no contesta en 30 s— NO se decide (jamás se timbra ni se borra a ciegas) y
+ * es el 409 «no pude confirmar; reintenta». El temporizador se cancela siempre, conteste o falle la consulta.
+ */
+export async function askPac<T>(call: () => Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const silence = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Facturapi no contestó en ${PAC_QUERY_TIMEOUT_MS / 1000} s`)), PAC_QUERY_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([call(), silence])
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    logger.warn('[platform-billing] no se pudo confirmar con Facturapi', { error: reason })
+    throw conflict(`No pude confirmar con Facturapi; reintenta en un momento (${reason})`, 'PLATFORM_CHARGE_INVOICE_UNCONFIRMED')
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 /** Campo del formulario al que apunta un rechazo del SAT sobre los datos del receptor. */
 export type ReceptorField = 'razonSocial' | 'rfc' | 'regimenFiscal' | 'codigoPostal'
@@ -186,40 +229,68 @@ function toCfdiItem(line: PlatformCfdiLineInput): CfdiItemInput {
 }
 
 /**
- * El `sandbox` con el que se habla con Facturapi sobre una fila que ya existe: el que pidió quien llama o —con
- * `PLATFORM_CHARGES_SANDBOX=true` y SÓLO para filas ligadas a una ocurrencia de «Por cobrar»— el de ese flujo, para que el
- * recorrido de QA sea completo. Una fila sin ligar, o sin la variable, queda EXACTAMENTE como siempre.
+ * El `sandbox` con el que se habla con Facturapi: el que pidió quien llama o, con `PLATFORM_CHARGES_SANDBOX=true`, el del servidor de QA,
+ * para que el recorrido sea completo. Sin esa variable queda como siempre, y con ella en producción `chargesSandbox` se niega.
  */
-function sandboxFor(
-  row: Pick<PlatformCfdi, 'platformChargeOccurrenceId'>,
-  emisor: Pick<PlatformEmisor, 'providerKeyEnc'>,
-  requested: boolean,
-): boolean {
-  return requested || (row.platformChargeOccurrenceId != null && chargesSandbox(emisor))
+function sandboxFor(emisor: Pick<PlatformEmisor, 'providerKeyEnc'>, requested: boolean): boolean {
+  return requested || chargesSandbox(emisor)
+}
+
+/**
+ * ¿Es el mismo intento? Una llave repetida regresa la fila que ya existe, y eso sólo es cierto con los mismos datos: tras un corte, el
+ * operador pudo cambiar un dato y volver a timbrar, y regresarle la factura anterior le diría «timbrada» con lo que ya no está en pantalla.
+ */
+async function assertSameIntent(prior: PlatformCfdi, input: IssuePlatformCfdiInput): Promise<void> {
+  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: input.billingTaxProfileId } })
+  const same =
+    prior.billingTaxProfileId === input.billingTaxProfileId &&
+    prior.receptorRfc === profile?.rfc &&
+    prior.receptorNombre === profile?.razonSocial &&
+    prior.receptorRegimen === profile?.regimenFiscal &&
+    prior.receptorCp === profile?.codigoPostal &&
+    prior.usoCfdi === (input.usoCfdi ?? profile?.defaultUsoCfdi) &&
+    prior.formaPago === input.formaPago &&
+    prior.metodoPago === input.metodoPago &&
+    isDeepStrictEqual(prior.lines, JSON.parse(JSON.stringify(input.lines)))
+  if (!same) {
+    throw conflict(
+      'Ese intento ya había llegado con otros datos: revisa la factura en la lista antes de timbrar otra',
+      'PLATFORM_CFDI_OTHER_DATA',
+    )
+  }
 }
 
 /**
  * Issue an income CFDI to a customer. Idempotent by idempotencyKey: a repeated
  * call returns the existing row instead of double-stamping.
  *
+ * Lo que el PAC no confirmó no se da por hecho: si contesta sin timbre la fila se queda STAMPING con su `facturapiId`, y una falla que
+ * no es un rechazo confirmado (timeout, 5xx, respuesta ilegible) la deja STAMPING con su `lastError`. `refreshPlatformCfdi` las termina.
+ *
  * «Por cobrar» (spec 2026-11-02-por-cobrar-superadmin §6) usa tres campos opcionales que el camino de «Nueva factura» no manda:
  * `totals` (se guardan tal cual), `reserveCheck` (corre en la transacción que crea la fila) y `platformChargeOccurrenceId`, que
- * además liga la fila y cambia dos cosas: si el PAC contesta sin timbre la fila se queda STAMPING con su `facturapiId` (para que
- * `resolverIntento` la termine, en vez de darla por timbrada), y si el total del PAC difiere se guarda el del PAC.
+ * además liga la fila y hace que, si el total del PAC difiere, se guarde el del PAC. «Reintentar» manda `retryOfId`: le pregunta al PAC
+ * por la factura fallida y, en la misma transacción que reserva la nueva, la quita. Si fuera aparte, un corte dejaría las dos filas y
+ * reintentar la vieja otra vez emitiría una tercera.
  */
 export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<PlatformCfdi> {
   if (!input.lines.length) throw new PlatformBillingError('La factura requiere al menos un concepto', 'VALIDATION')
 
   // Idempotency short-circuit.
   const prior = await prisma.platformCfdi.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
-  if (prior) return prior
+  if (prior) {
+    // «Por cobrar» lo compara en su servicio, contra lo que el operador confirmó.
+    if (input.platformChargeOccurrenceId == null) await assertSameIntent(prior, input)
+    return prior
+  }
 
   const emisor = await getActivePlatformEmisor()
   if (!emisor) throw new PlatformBillingError('No hay emisor de plataforma configurado', 'NO_EMISOR')
 
-  const sandbox = input.sandbox ?? false
+  const requested = input.sandbox ?? false
   // 🔴 «Por cobrar» decidió `sandbox` con OTRA lectura del emisor: si entre las dos alguien guardó una llave real, con ella se timbraría de verdad.
-  if (sandbox && input.platformChargeOccurrenceId != null) chargesSandbox(emisor)
+  if (requested && input.platformChargeOccurrenceId != null) chargesSandbox(emisor)
+  const sandbox = sandboxFor(emisor, requested)
   if (!sandbox && emisor.csdStatus !== 'ACTIVE') {
     throw new PlatformBillingError('El emisor no tiene un CSD activo; sube el sello digital antes de timbrar', 'CSD_INACTIVE')
   }
@@ -258,17 +329,28 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
     createdById: input.performedById,
   }
 
+  // «Reintentar»: primero se le pregunta al PAC por la fallida. Si sí se timbró o sigue en camino, aquí termina.
+  const { reserveCheck, retryOfId } = input
+  if (retryOfId) {
+    const retried = await refreshPlatformCfdi(retryOfId, input.performedById, requested)
+    if (retried.status !== 'STAMP_FAILED') throw conflict(`${stillAlive(retried)} No se timbró otra.`, 'PLATFORM_CFDI_NOT_RETRYABLE')
+  }
+
   // Reserve the row first (unique idempotencyKey) so concurrent retries don't double-stamp.
   let row: PlatformCfdi
   try {
-    const { reserveCheck } = input
-    row = reserveCheck
-      ? // La comprobación y la reserva son UNA transacción: lo que la comprobación vio es lo que existe cuando nace la fila.
-        await prisma.$transaction(async tx => {
-          await reserveCheck(tx, data)
-          return tx.platformCfdi.create({ data })
-        })
-      : await prisma.platformCfdi.create({ data })
+    if (reserveCheck || retryOfId) {
+      // La comprobación, quitar la fallida y la reserva son UNA transacción: lo que se vio es lo que existe cuando nace la fila.
+      const reserved = await prisma.$transaction(async tx => {
+        const removed = retryOfId ? await removeFailed(tx, retryOfId) : null
+        if (reserveCheck) await reserveCheck(tx, data)
+        return { row: await tx.platformCfdi.create({ data }), removed }
+      })
+      row = reserved.row
+      if (reserved.removed) auditDiscarded(reserved.removed, input.performedById, { retriedBy: row.id })
+    } else {
+      row = await prisma.platformCfdi.create({ data })
+    }
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
       const dup = await prisma.platformCfdi.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
@@ -310,9 +392,9 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
     }
     const pacTotal = totalDiffers ? { totalCents: stamped.totalCents } : {}
 
-    // «Por cobrar»: si el PAC contestó SIN timbre (pending, o sin UUID) la fila NO se da por timbrada: se queda STAMPING con su
-    // `facturapiId` para que `resolverIntento` la termine preguntándole al PAC. El camino genérico no cambia.
-    const withoutStamp = linked && (stamped.status !== 'valid' || !stamped.uuid)
+    // Si el PAC contestó SIN timbre (pending, o sin UUID) la fila NO se da por timbrada: se queda STAMPING con su `facturapiId` para
+    // que `resolverIntento` o `refreshPlatformCfdi` la terminen preguntándole al PAC.
+    const withoutStamp = stamped.status !== 'valid' || !stamped.uuid
     const updated = await prisma.platformCfdi.update({
       where: { id: row.id },
       data: withoutStamp
@@ -327,26 +409,36 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
             ...pacTotal,
           },
     })
-    // Sin timbre no hay nada que entregar: el correo sale cuando `resolverIntento` adopta la factura.
+    // Sin timbre no hay nada que entregar: el correo sale cuando se adopta la factura.
     if (withoutStamp) return updated
     // Best-effort: entregar el CFDI por correo al timbrar. No bloquea ni hace fallar la emisión.
     if (profile.email) void sendPlatformCfdiEmail(updated.id, profile.email, sandbox).catch(() => undefined)
     return updated
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    // 🔴 «Por cobrar» (spec §6, «Por qué así»): una falla que NO es un rechazo confirmado del PAC (timeout, 5xx, respuesta ilegible)
-    // no prueba que el documento no haya quedado en camino. Si la fila pasara a STAMP_FAILED, el reintento inmediato preguntaría por la
-    // llave, Facturapi todavía podría no tenerla, `resolverIntento` cerraría el intento y se timbraría con otra llave: dos CFDI por un
-    // pago. Por eso, en una fila ligada, la fila SIGUE en STAMPING (con su `lastError` y un intento más): la espera de 2 min de
-    // `resolverIntento` la cubre. Sólo un rechazo confirmado pasa a STAMP_FAILED y se reintenta al momento (corregir un RFC no espera).
-    // Una fila sin ligar queda como siempre.
-    const stillInFlight = linked && !esRechazoConfirmado(err, true)
+    // 🔴 (spec de «Por cobrar» §6, «Por qué así»): una falla que NO es un rechazo confirmado del PAC (timeout, 5xx, respuesta ilegible) no
+    // prueba que el documento no haya quedado en camino. Si la fila pasara a STAMP_FAILED, el reintento inmediato preguntaría por la
+    // llave, Facturapi todavía podría no tenerla y se timbraría con otra llave: dos CFDI por un pago. Por eso la fila SIGUE en STAMPING
+    // (con su `lastError` y un intento más) y la espera de 2 min la cubre. Sólo un rechazo confirmado pasa a STAMP_FAILED.
+    const stillInFlight = !esRechazoConfirmado(err, true)
     await prisma.platformCfdi.update({
       where: { id: row.id },
       data: { ...(stillInFlight ? {} : { status: 'STAMP_FAILED' as const }), lastError: message, attempts: { increment: 1 } },
     })
     const info = classifyStampError(message)
-    throw new PlatformBillingError(`Error al timbrar el CFDI: ${info.message}`, info.code, info.field)
+    // Salen sin el aviso un dato corregible que el SAT nombró (VALIDATION: eso es lo que hay que leer) y un rechazo confirmado. Quien lee
+    // el aviso es un operador que podría volver a timbrar: se le dice qué hacer, y sigue el detalle del proveedor. `inFlight` y `cfdiId`
+    // son para la pantalla: si está en camino conserva la llave, y si no, la fila fallida es la que corregir reemplaza.
+    const text = `Error al timbrar el CFDI: ${info.message}`
+    throw new PlatformBillingError(
+      stillInFlight && info.code === 'PROVIDER' ? `${IN_FLIGHT_NOTICE} ${text}` : text,
+      info.code,
+      info.field,
+      {
+        inFlight: stillInFlight,
+        cfdiId: row.id,
+      },
+    )
   }
 }
 
@@ -381,7 +473,7 @@ export async function getPlatformCfdi(id: string): Promise<PlatformCfdi | null> 
  * deleted. Used to clean up failed attempts so they don't pile up in the list. Returns the deleted
  * row so the controller can write the ActivityLog audit entry.
  */
-export async function discardFailedPlatformCfdi(id: string): Promise<PlatformCfdi> {
+export async function discardFailedPlatformCfdi(id: string, actorId?: string): Promise<PlatformCfdi> {
   const row = await prisma.platformCfdi.findUnique({ where: { id } })
   if (!row) throw new PlatformBillingError('CFDI no encontrado', 'NO_CFDI')
   if (row.status !== 'STAMP_FAILED') {
@@ -396,10 +488,20 @@ export async function discardFailedPlatformCfdi(id: string): Promise<PlatformCfd
   if (children > 0) {
     throw new PlatformBillingError('No se puede descartar; tiene complementos de pago asociados', 'VALIDATION')
   }
-  return prisma.platformCfdi.delete({ where: { id } })
+  // 🔴 Antes de borrar se le pregunta al PAC: la fila dice «falló», pero la respuesta pudo perderse y la factura existir ante el SAT. Un
+  // complemento de pago queda como estaba: adoptarlo también tendría que mover el saldo de su factura (docs/audit/deuda-encontrada.md).
+  if (row.type === 'INGRESO') {
+    const fresh = await refreshPlatformCfdi(id, actorId)
+    if (fresh.status !== 'STAMP_FAILED') throw conflict(`${stillAlive(fresh)} No se descartó.`, 'PLATFORM_CFDI_NOT_RETRYABLE')
+  }
+  await deleteIfStillFailed(prisma, id)
+  return row
 }
 
-/** Cancel a stamped CFDI. Motivo 01 (substitution) requires the substitute UUID. */
+/**
+ * Cancel a stamped CFDI. Motivo 01 (substitution) requires the substitute UUID. 🔴 «Cancelada» sólo cuando el SAT la canceló: en trámite
+ * queda CANCEL_REQUESTED (sigue vigente; `refreshPlatformCfdi` la termina) y, si no procedió, sigue STAMPED y se dice.
+ */
 export async function cancelPlatformCfdi(
   id: string,
   motivo: '01' | '02' | '03' | '04',
@@ -417,20 +519,251 @@ export async function cancelPlatformCfdi(
 
   const provider = resolveFiscalProvider(
     { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
-    { sandbox: sandboxFor(row, emisor, sandbox) },
+    { sandbox: sandboxFor(emisor, sandbox) },
   )
-  const res = await provider.cancelInvoice({ providerInvoiceId: row.facturapiId, motivo, substituteUuid })
-
-  return prisma.platformCfdi.update({
-    where: { id: row.id },
-    data: {
-      status: 'CANCELLED',
-      cancelMotivo: motivo,
-      cancelSubstituteUuid: substituteUuid ?? null,
-      cancelStatus: res.status,
-      cancelledAt: res.cancelledAt ?? new Date(),
-    },
+  // 🔴 Se apunta ANTES de llamar: si la respuesta se pierde, la fila ya dice «en trámite» y «Consultar estado» la termina. Después de la
+  // llamada, un corte dejaba «Timbrada» una factura que el SAT pudo cancelar, sin rastro y sin nada que consultar.
+  const asked = { cancelMotivo: motivo, cancelSubstituteUuid: substituteUuid ?? null }
+  const claimed = await prisma.platformCfdi.updateMany({
+    where: { id: row.id, status: 'STAMPED' },
+    data: { ...asked, status: 'CANCEL_REQUESTED', cancelStatus: 'pending', cancelledAt: null },
   })
+  if (claimed.count === 0) throw conflict('Esta factura acaba de cambiar: vuelve a consultarla', 'PLATFORM_CFDI_CHANGED')
+  // Lo que contesta esta llamada tarda: si otra pestaña ya confirmó la cancelación, su «no» ya no decide nada.
+  const backToStamped = (cancelStatus: string | null) =>
+    prisma.platformCfdi.updateMany({
+      where: { id: row.id, status: 'CANCEL_REQUESTED' },
+      data: { status: 'STAMPED', cancelMotivo: row.cancelMotivo, cancelSubstituteUuid: row.cancelSubstituteUuid, cancelStatus },
+    })
+
+  let res: Awaited<ReturnType<typeof provider.cancelInvoice>>
+  try {
+    res = await provider.cancelInvoice({ providerInvoiceId: row.facturapiId, motivo, substituteUuid })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    // El PAC contestó que no: no pasó nada.
+    if (err instanceof ProviderHttpError && err.status >= 400 && err.status < 500) {
+      await backToStamped(row.cancelStatus)
+      throw new PlatformBillingError(`El proveedor no aceptó la cancelación: ${message}`, 'PROVIDER')
+    }
+    throw new PlatformBillingError(
+      `La cancelación pudo quedar en trámite: usa «Consultar estado» antes de volver a cancelar. ${message}`,
+      'PROVIDER',
+      undefined,
+      { inFlight: true },
+    )
+  }
+
+  if (res.status === 'canceled' || res.status === 'accepted') {
+    return prisma.platformCfdi.update({
+      where: { id: row.id },
+      data: { ...asked, status: 'CANCELLED', cancelStatus: res.status, cancelledAt: res.cancelledAt ?? new Date() },
+    })
+  }
+  if (res.status === 'pending') {
+    // La respuesta de la cancelación manda sobre una consulta que se adelantó y la regresó a timbrada.
+    await prisma.platformCfdi.updateMany({
+      where: { id: row.id, status: { in: ['STAMPED', 'CANCEL_REQUESTED'] } },
+      data: { ...asked, status: 'CANCEL_REQUESTED', cancelStatus: 'pending', cancelledAt: null },
+    })
+    return prisma.platformCfdi.findUniqueOrThrow({ where: { id: row.id } })
+  }
+  await backToStamped(res.status)
+  throw conflict(`La cancelación de ${labelOf(row)} no procedió: sigue vigente`, 'PLATFORM_CFDI_CANCEL_NOT_DONE')
+}
+
+// ── Consultar estado ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const labelOf = (row: Pick<PlatformCfdi, 'serie' | 'folio'>): string => [row.serie, row.folio].filter(Boolean).join('-') || 'la factura'
+
+/** Por qué una factura que parecía fallida no se puede reintentar ni descartar. */
+function stillAlive(row: PlatformCfdi): string {
+  if (row.status === 'STAMPED') return `Esta factura sí se timbró (${labelOf(row)}): ya quedó en la lista.`
+  if (row.status === 'CANCELLED') return `Esta factura existe ante el SAT, cancelada (${labelOf(row)}): se conserva como rastro.`
+  if (row.status === 'CANCEL_REQUESTED') return `La cancelación de ${labelOf(row)} sigue en trámite ante el SAT.`
+  return 'Esta factura sigue en camino ante el SAT: consulta su estado más tarde.'
+}
+
+function audit(action: string, row: PlatformCfdi, actorId: string | undefined, data: Prisma.InputJsonObject): void {
+  void logAction({
+    staffId: actorId ?? null,
+    venueId: row.venueId,
+    organizationId: row.organizationId,
+    action,
+    entity: 'PlatformCfdi',
+    entityId: row.id,
+    data,
+  })
+}
+
+function auditDiscarded(row: PlatformCfdi, actorId: string | undefined, extra: Prisma.InputJsonObject = {}): void {
+  audit('PLATFORM_CFDI_DISCARDED', row, actorId, {
+    priorStatus: row.status,
+    receptorRfc: row.receptorRfc,
+    totalCents: row.totalCents,
+    ...extra,
+  })
+}
+
+/** 🔴 Sólo si sigue fallida: otra pestaña pudo adoptarla mientras se le preguntaba al PAC, y borrarla perdería el rastro de una factura viva. */
+async function deleteIfStillFailed(db: Pick<Prisma.TransactionClient, 'platformCfdi'>, id: string): Promise<void> {
+  const { count } = await db.platformCfdi.deleteMany({ where: { id, status: 'STAMP_FAILED' } })
+  if (count === 0) throw conflict('Esta factura acaba de cambiar: revisa la lista', 'PLATFORM_CFDI_CHANGED')
+}
+
+/** Quita la factura fallida que se está reintentando, dentro de la transacción que reserva la nueva. */
+async function removeFailed(tx: Prisma.TransactionClient, id: string): Promise<PlatformCfdi> {
+  const row = await tx.platformCfdi.findUnique({ where: { id } })
+  if (!row || row.status !== 'STAMP_FAILED' || row.platformChargeOccurrenceId) {
+    throw conflict('Esta factura acaba de cambiar: revisa la lista antes de reintentar', 'PLATFORM_CFDI_CHANGED')
+  }
+  if ((await tx.platformCfdi.count({ where: { parentPlatformCfdiId: id } })) > 0) {
+    throw new PlatformBillingError('No se puede reintentar; tiene complementos de pago asociados', 'VALIDATION')
+  }
+  await deleteIfStillFailed(tx, id)
+  return row
+}
+
+/**
+ * Escribe sólo si la fila sigue como se leyó antes de preguntarle al PAC. Por `updatedAt` y no sólo por estado: mientras una consulta
+ * espera, la fila pudo ir y volver (se rechazó una cancelación y se pidió otra), y esa respuesta vieja no es de este trámite.
+ */
+async function writeIfUnchanged(row: PlatformCfdi, data: Prisma.PlatformCfdiUncheckedUpdateManyInput): Promise<PlatformCfdi> {
+  const { count } = await prisma.platformCfdi.updateMany({ where: { id: row.id, status: row.status, updatedAt: row.updatedAt }, data })
+  const fresh = await prisma.platformCfdi.findUnique({ where: { id: row.id } })
+  if (count === 0 || !fresh) throw conflict('Esta factura acaba de cambiar: vuelve a consultarla', 'PLATFORM_CFDI_CHANGED')
+  return fresh
+}
+
+type PacDocument = StampedInvoice | ProviderInvoiceSummary
+
+async function adopt(row: PlatformCfdi, doc: PacDocument & { uuid: string }, actorId?: string): Promise<PlatformCfdi> {
+  const updated = await writeIfUnchanged(row, {
+    status: 'STAMPED',
+    facturapiId: doc.providerInvoiceId,
+    uuid: doc.uuid,
+    serie: doc.serie ?? row.serie,
+    folio: doc.folio,
+    stampedAt: doc.stampedAt ?? new Date(),
+    totalCents: doc.totalCents,
+    lastError: null,
+  })
+  if (doc.totalCents !== row.totalCents) {
+    logger.error('[platform-billing] el total que timbró el PAC no es el de la fila adoptada; se guarda el del PAC', {
+      platformCfdiId: row.id,
+      rowTotalCents: row.totalCents,
+      stampedTotalCents: doc.totalCents,
+    })
+  }
+  audit('PLATFORM_CFDI_ISSUED', updated, actorId, { adopted: true, uuid: doc.uuid, totalCents: updated.totalCents })
+  void emailAdopted(updated)
+  return updated
+}
+
+/** Lo que dice el PAC de un documento del que no se tenía timbre. */
+async function settleDocument(row: PlatformCfdi, doc: PacDocument, actorId?: string): Promise<PlatformCfdi> {
+  if (doc.status === 'valid' && doc.uuid) return adopt(row, { ...doc, uuid: doc.uuid }, actorId)
+  if (doc.status === 'canceled') {
+    // Ese documento existe ante el SAT aunque esté cancelado: la fila es su rastro fiscal.
+    const updated = await writeIfUnchanged(row, {
+      status: 'CANCELLED',
+      facturapiId: doc.providerInvoiceId,
+      cancelStatus: 'canceled',
+      cancelledAt: new Date(),
+      uuid: doc.uuid ?? row.uuid,
+      serie: doc.serie ?? row.serie,
+      folio: doc.folio ?? row.folio,
+    })
+    audit('PLATFORM_CFDI_CANCELLED', updated, actorId, { source: 'PAC', priorStatus: row.status, uuid: updated.uuid })
+    return updated
+  }
+  // Sigue en camino: nadie puede emitir ni borrar, y la próxima consulta pregunta por su id.
+  return writeIfUnchanged(row, { status: 'STAMPING', facturapiId: doc.providerInvoiceId })
+}
+
+async function refreshStamp(row: PlatformCfdi, provider: FiscalProvider, actorId?: string): Promise<PlatformCfdi> {
+  const providerId = row.facturapiId
+  if (providerId) return settleDocument(row, await askPac(() => provider.getInvoice(providerId)), actorId)
+  if (row.status === 'STAMPING' && Date.now() - row.createdAt.getTime() < STAMPING_GRACE_MS) {
+    throw conflict('La factura se está timbrando; espera un par de minutos y consulta de nuevo', 'PLATFORM_CFDI_STAMPING')
+  }
+  const key = row.idempotencyKey
+  const found = key ? await askPac(() => provider.findByExternalId(key)) : null
+  if (found) return settleDocument(row, found, actorId)
+  if (row.status === 'STAMP_FAILED') return row
+  // Se le preguntó y no hay nada: ahora sí se puede corregir, reintentar o descartar.
+  return writeIfUnchanged(row, {
+    status: 'STAMP_FAILED',
+    lastError: row.lastError ?? 'La factura no llegó al SAT: puedes reintentarla o descartarla',
+  })
+}
+
+async function refreshCancellation(row: PlatformCfdi, provider: FiscalProvider, actorId?: string): Promise<PlatformCfdi> {
+  const providerId = row.facturapiId
+  const answer = providerId ? await askPac(async () => provider.getCancellationStatus?.(providerId)) : undefined
+  // Un proveedor que no sabe contestar esto (o una fila sin id) no deja decidir: jamás se supone que se canceló.
+  if (!answer) throw conflict('No puedo consultar la cancelación en Facturapi; confírmala ahí', 'PLATFORM_CHARGE_INVOICE_UNCONFIRMED')
+  if (answer.status === 'canceled' || answer.status === 'accepted') {
+    const updated = await writeIfUnchanged(row, {
+      status: 'CANCELLED',
+      cancelStatus: answer.status,
+      cancelledAt: answer.cancelledAt ?? row.cancelledAt ?? new Date(),
+    })
+    if (row.status !== 'CANCELLED') audit('PLATFORM_CFDI_CANCELLED', updated, actorId, { source: 'PAC', priorStatus: row.status })
+    return updated
+  }
+  if (answer.status === 'pending') return writeIfUnchanged(row, { status: 'CANCEL_REQUESTED', cancelStatus: 'pending', cancelledAt: null })
+  // Recién pedida: la petición puede seguir en vuelo y el PAC todavía no saberlo. Sólo tras la espera, «none» quiere decir que no se pidió.
+  if (answer.status === 'none' && row.status === 'CANCEL_REQUESTED' && Date.now() - row.updatedAt.getTime() < STAMPING_GRACE_MS) return row
+  const updated = await writeIfUnchanged(row, { status: 'STAMPED', cancelStatus: answer.status, cancelledAt: null })
+  audit('PLATFORM_CFDI_CANCEL_NOT_APPLIED', updated, actorId, { pacStatus: answer.status, priorStatus: row.status })
+  return updated
+}
+
+/**
+ * «Consultar estado»: le pregunta al PAC qué hay de una factura que la base no tiene confirmada y deja la fila como es. Nunca emite.
+ * Sirve también para las filas viejas que quedaron mal escritas: STAMPED sin UUID y CANCELLED con una cancelación sin confirmar.
+ * Una fila ligada a «Por cobrar» se termina desde ahí (`resolverIntento`), salvo su cancelación, que sí se consulta aquí: ésa es la
+ * salida de «Deshacer» mientras sigue en trámite. De un complemento de pago sólo su cancelación: adoptar uno también tendría que mover
+ * el saldo de su factura.
+ */
+export async function refreshPlatformCfdi(id: string, actorId?: string, sandbox = false): Promise<PlatformCfdi> {
+  const row = await prisma.platformCfdi.findUnique({ where: { id } })
+  if (!row) throw new PlatformBillingError('CFDI no encontrado', 'NO_CFDI')
+
+  const cancelUnconfirmed =
+    row.status === 'CANCEL_REQUESTED' || (row.status === 'CANCELLED' && row.cancelStatus !== 'canceled' && row.cancelStatus !== 'accepted')
+  const stampUnconfirmed = row.status === 'STAMPING' || row.status === 'STAMP_FAILED' || (row.status === 'STAMPED' && !row.uuid)
+  if (!cancelUnconfirmed && !stampUnconfirmed) return row
+  if (stampUnconfirmed && row.type !== 'INGRESO') {
+    throw new PlatformBillingError('El timbre de un complemento de pago no se consulta aquí', 'VALIDATION')
+  }
+  if (stampUnconfirmed && row.platformChargeOccurrenceId) {
+    throw conflict('Esta factura es de un cobro: su estado se consulta en «Por cobrar»', 'PLATFORM_CFDI_OF_A_CHARGE')
+  }
+
+  const emisor = await prisma.platformEmisor.findUnique({ where: { id: row.platformEmisorId } })
+  if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
+  const provider = resolveFiscalProvider(
+    { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
+    { sandbox: sandboxFor(emisor, sandbox) },
+  )
+  return cancelUnconfirmed ? refreshCancellation(row, provider, actorId) : refreshStamp(row, provider, actorId)
+}
+
+/** El correo con PDF y XML al receptor de una factura que se acaba de adoptar, sin que su falla cuente. */
+export async function emailAdopted(cfdi: PlatformCfdi): Promise<void> {
+  try {
+    const profile = cfdi.billingTaxProfileId
+      ? await prisma.billingTaxProfile.findUnique({ where: { id: cfdi.billingTaxProfileId }, select: { email: true } })
+      : null
+    if (profile?.email) await sendPlatformCfdiEmail(cfdi.id, profile.email)
+  } catch (error) {
+    logger.warn('[platform-billing] no se pudo mandar el correo de una factura adoptada', {
+      platformCfdiId: cfdi.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 /** Build the FULL related-document tax breakdown (Pago 2.0), grouping lines by rate (+ exempt). */
@@ -634,7 +967,7 @@ export async function sendPlatformCfdiEmail(id: string, emailOverride?: string, 
 
   const provider = resolveFiscalProvider(
     { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
-    { sandbox: sandboxFor(row, emisor, sandbox) },
+    { sandbox: sandboxFor(emisor, sandbox) },
   )
   if (!provider.sendInvoiceByEmail) throw new PlatformBillingError('El proveedor fiscal no soporta envío por correo', 'PROVIDER')
 
@@ -657,7 +990,7 @@ export async function fetchPlatformCfdiArtifact(
 
   const provider = resolveFiscalProvider(
     { provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc },
-    { sandbox: sandboxFor(row, emisor, sandbox) },
+    { sandbox: sandboxFor(emisor, sandbox) },
   )
   const buffer = kind === 'pdf' ? await provider.downloadPdf(row.facturapiId) : await provider.downloadXml(row.facturapiId)
   const filename = `${row.serie ?? ''}${row.folio ?? row.id}.${kind}`

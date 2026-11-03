@@ -117,6 +117,7 @@ export const issueInvoiceSchema = z.object({
     usoCfdi: z.string().trim().optional(),
     idempotencyKey: z.string().trim().min(1).optional(),
     sandbox: z.boolean().optional(),
+    retryOfId: z.string().trim().min(1).optional(),
   }),
 })
 

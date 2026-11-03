@@ -231,7 +231,21 @@ describe('platformCfdi.service', () => {
     })
 
     it('is idempotent: a repeated idempotencyKey returns the prior row WITHOUT re-stamping', async () => {
-      prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'cfdiX', status: 'STAMPED', uuid: 'UUID-X' })
+      prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE)
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({
+        id: 'cfdiX',
+        status: 'STAMPED',
+        uuid: 'UUID-X',
+        billingTaxProfileId: 'p1',
+        receptorRfc: PROFILE.rfc,
+        receptorNombre: PROFILE.razonSocial,
+        receptorRegimen: PROFILE.regimenFiscal,
+        receptorCp: PROFILE.codigoPostal,
+        usoCfdi: PROFILE.defaultUsoCfdi,
+        formaPago: baseInput.formaPago,
+        metodoPago: baseInput.metodoPago,
+        lines: baseInput.lines,
+      })
       const createInvoice = jest.fn()
       mockResolve.mockReturnValue({ createInvoice })
 
@@ -271,8 +285,9 @@ describe('platformCfdi.service', () => {
         message: expect.stringMatching(/facturapi rechazó la llave/i),
       })
 
+      // No es un rechazo confirmado: la fila sigue STAMPING hasta que alguien consulte.
       expect(prismaMock.platformCfdi.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ status: 'STAMP_FAILED', lastError: 'Unauthorized' }) }),
+        expect.objectContaining({ data: { lastError: 'Unauthorized', attempts: { increment: 1 } } }),
       )
     })
 
@@ -299,7 +314,9 @@ describe('platformCfdi.service', () => {
       prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE)
       prismaMock.platformCfdi.create.mockResolvedValue({ id: 'cfdiR', status: 'STAMPING' })
       prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'cfdiR', ...args.data }))
-      mockResolve.mockReturnValue({ createInvoice: jest.fn().mockRejectedValue(new Error(SAT)) })
+      mockResolve.mockReturnValue({
+        createInvoice: jest.fn().mockRejectedValue(new ProviderHttpError(400, 'invoice_stamping_validation_error', SAT)),
+      })
 
       await expect(issuePlatformCfdi(baseInput)).rejects.toMatchObject({
         message: expect.stringContaining(SAT),
@@ -542,14 +559,25 @@ describe('platformCfdi.service', () => {
 
   describe('discardFailedPlatformCfdi (NEW)', () => {
     it('deletes a STAMP_FAILED row with no child payments and returns it', async () => {
-      const failed = { id: 'f1', status: 'STAMP_FAILED', receptorRfc: 'XAXX010101000', totalCents: 464000, venueId: null }
+      const failed = {
+        id: 'f1',
+        type: 'INGRESO',
+        status: 'STAMP_FAILED',
+        platformEmisorId: 'em1',
+        idempotencyKey: 'k1',
+        receptorRfc: 'XAXX010101000',
+        totalCents: 464000,
+        venueId: null,
+      }
       prismaMock.platformCfdi.findUnique.mockResolvedValue(failed)
+      prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
+      mockResolve.mockReturnValue({ findByExternalId: jest.fn().mockResolvedValue(null) })
       prismaMock.platformCfdi.count.mockResolvedValue(0)
-      prismaMock.platformCfdi.delete.mockResolvedValue(failed)
+      prismaMock.platformCfdi.deleteMany.mockResolvedValue({ count: 1 })
 
       const res = await discardFailedPlatformCfdi('f1')
 
-      expect(prismaMock.platformCfdi.delete).toHaveBeenCalledWith({ where: { id: 'f1' } })
+      expect(prismaMock.platformCfdi.deleteMany).toHaveBeenCalledWith({ where: { id: 'f1', status: 'STAMP_FAILED' } })
       expect(res).toEqual(failed)
     })
 
@@ -723,13 +751,12 @@ describe('platformCfdi.service — «Por cobrar»: emitir (líneas con IVA inclu
       expect(sendInvoiceByEmail).toHaveBeenCalledWith('fa-inv-1', 'cliente@demo.mx')
     })
 
-    it('REGRESIÓN: SIN ligar, el mismo pending sin UUID sigue quedando STAMPED como hoy (deuda ajena, no se toca)', async () => {
-      armaEmision(jest.fn().mockResolvedValue(PENDIENTE_SIN_UUID))
+    it('SIN ligar, el mismo pending sin UUID también se queda STAMPING: «Timbrada» sin timbre era mentira', async () => {
+      armaEmision(jest.fn().mockResolvedValue({ ...STAMPED, status: 'pending', uuid: null }))
 
-      const row = await issuePlatformCfdi(baseInput)
+      await issuePlatformCfdi(baseInput)
 
-      expect(lasEscrituras()[0]).toMatchObject({ status: 'STAMPED', facturapiId: 'fa-inv-1', uuid: null })
-      expect(row.status).toBe('STAMPED')
+      expect(lasEscrituras()).toEqual([{ facturapiId: STAMPED.providerInvoiceId }])
     })
 
     it('si el total que timbró el PAC difiere: guarda el del PAC y lo registra con logger.error', async () => {
@@ -869,12 +896,12 @@ describe('platformCfdi.service — «Por cobrar»: emitir (líneas con IVA inclu
       },
     )
 
-    it.each(TRANSPORTE)('REGRESIÓN: SIN ligar, %s sigue pasando la fila a STAMP_FAILED, como hoy', async (_nombre, falla) => {
+    it.each(TRANSPORTE)('SIN ligar, %s también deja la fila en STAMPING: «Reintentar» a ciegas podía duplicar', async (_nombre, falla) => {
       armaEmision(jest.fn().mockRejectedValue(falla))
 
       await expect(issuePlatformCfdi(baseInput)).rejects.toBeInstanceOf(PlatformBillingError)
 
-      expect(lasEscrituras()).toEqual([{ status: 'STAMP_FAILED', lastError: falla.message, attempts: { increment: 1 } }])
+      expect(lasEscrituras()).toEqual([{ lastError: falla.message, attempts: { increment: 1 } }])
     })
 
     it.each(RECHAZOS)('ligada, un rechazo CONFIRMADO (%i %s) sí pasa a STAMP_FAILED: corregir un RFC no espera', async (status, code) => {
@@ -911,10 +938,15 @@ describe('platformCfdi.service — «Por cobrar»: descartar una factura fallida
     expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
   })
 
-  it('REGRESIÓN: una fila fallida SIN ligar (platformChargeOccurrenceId null) se descarta como hoy', async () => {
+  it('REGRESIÓN: una fila fallida SIN ligar (platformChargeOccurrenceId null) se descarta si el PAC no la tiene', async () => {
+    prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
+    mockResolve.mockReturnValue({ findByExternalId: jest.fn().mockResolvedValue(null) })
     const failed = {
       id: 'f4',
+      type: 'INGRESO',
       status: 'STAMP_FAILED',
+      platformEmisorId: 'em1',
+      idempotencyKey: 'k4',
       platformChargeOccurrenceId: null,
       receptorRfc: 'XAXX010101000',
       totalCents: 1,
@@ -922,11 +954,11 @@ describe('platformCfdi.service — «Por cobrar»: descartar una factura fallida
     }
     prismaMock.platformCfdi.findUnique.mockResolvedValue(failed)
     prismaMock.platformCfdi.count.mockResolvedValue(0)
-    prismaMock.platformCfdi.delete.mockResolvedValue(failed)
+    prismaMock.platformCfdi.deleteMany.mockResolvedValue({ count: 1 })
 
     await expect(discardFailedPlatformCfdi('f4')).resolves.toEqual(failed)
 
-    expect(prismaMock.platformCfdi.delete).toHaveBeenCalledWith({ where: { id: 'f4' } })
+    expect(prismaMock.platformCfdi.deleteMany).toHaveBeenCalledWith({ where: { id: 'f4', status: 'STAMP_FAILED' } })
   })
 })
 
@@ -951,6 +983,7 @@ describe('platformCfdi.service — «Por cobrar»: modo de prueba (PLATFORM_CHAR
       platformChargeOccurrenceId: ligada ? 'occ-1' : null,
     })
     prismaMock.platformEmisor.findUnique.mockResolvedValue(emisor)
+    prismaMock.platformCfdi.updateMany.mockResolvedValue({ count: 1 })
     prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'c1', ...args.data }))
     mockResolve.mockReturnValue({
       cancelInvoice: jest.fn().mockResolvedValue({ status: 'canceled', cancelledAt: new Date() }),
@@ -974,14 +1007,17 @@ describe('platformCfdi.service — «Por cobrar»: modo de prueba (PLATFORM_CHAR
     expect(sandboxUsado()).toEqual({ sandbox: true })
   })
 
-  it.each(OPERACIONES)('REGRESIÓN: con la variable, %s de una fila SIN ligar sigue con sandbox: false', async (_nombre, operacion) => {
-    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
-    dadaLaFila(false)
+  it.each(OPERACIONES)(
+    'con la variable, %s de una fila SIN ligar también usa sandbox: true (todo el servidor de QA)',
+    async (_nombre, operacion) => {
+      process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+      dadaLaFila(false)
 
-    await operacion('c1')
+      await operacion('c1')
 
-    expect(sandboxUsado()).toEqual({ sandbox: false })
-  })
+      expect(sandboxUsado()).toEqual({ sandbox: true })
+    },
+  )
 
   it.each(OPERACIONES)('REGRESIÓN: sin la variable, %s de una fila LIGADA sigue con sandbox: false', async (_nombre, operacion) => {
     dadaLaFila(true)
