@@ -24,6 +24,7 @@ import {
   getPlatformCfdi,
   cancelPlatformCfdi,
   discardFailedPlatformCfdi,
+  refreshPlatformCfdi,
   fetchPlatformCfdiArtifact,
   registerPlatformPayment,
   listPlatformCfdiPayments,
@@ -42,7 +43,7 @@ export function handleBillingError(error: unknown, res: Response, next: NextFunc
     // corregible por el operador → 422, para que la UI lo trate como validación y no
     // como caída del servidor.
     const status = error.code === 'NO_CFDI' ? 404 : error.code === 'PROVIDER' ? 502 : 422
-    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field })
+    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field, inFlight: error.inFlight })
     return
   }
   next(error as Error)
@@ -220,21 +221,25 @@ export async function attachConstanciaController(req: Request, res: Response, ne
 export async function issueInvoice(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
+    const startedAt = Date.now()
     const cfdi = await issuePlatformCfdi({
       ...req.body,
       idempotencyKey: req.body.idempotencyKey ?? randomUUID(),
       performedById: userId,
     })
-    await prisma.activityLog.create({
-      data: {
-        staffId: userId,
-        venueId: cfdi.venueId,
-        action: 'PLATFORM_CFDI_ISSUED',
-        entity: 'PlatformCfdi',
-        entityId: cfdi.id,
-        data: { uuid: cfdi.uuid, totalCents: cfdi.totalCents, metodoPago: cfdi.metodoPago, formaPago: cfdi.formaPago },
-      },
-    })
+    // Sólo lo que se timbró en esta llamada: una llave repetida regresa la fila de antes, y una sin timbre todavía no es una factura.
+    if (cfdi.status === 'STAMPED' && cfdi.updatedAt.getTime() >= startedAt) {
+      await prisma.activityLog.create({
+        data: {
+          staffId: userId,
+          venueId: cfdi.venueId,
+          action: 'PLATFORM_CFDI_ISSUED',
+          entity: 'PlatformCfdi',
+          entityId: cfdi.id,
+          data: { uuid: cfdi.uuid, totalCents: cfdi.totalCents, metodoPago: cfdi.metodoPago, formaPago: cfdi.formaPago },
+        },
+      })
+    }
     res.status(201).json({ success: true, data: cfdi })
   } catch (error) {
     handleBillingError(error, res, next)
@@ -264,7 +269,7 @@ export async function getInvoice(req: Request, res: Response, next: NextFunction
   try {
     const cfdi = await getPlatformCfdi(req.params.id)
     if (!cfdi) {
-      res.status(404).json({ success: false, error: 'CFDI no encontrado' })
+      res.status(404).json({ success: false, error: 'Esta factura ya no existe', code: 'NO_CFDI' })
       return
     }
     // Income CFDIs include their payment complements (REPs) for the detail view.
@@ -341,7 +346,7 @@ export async function cancelInvoice(req: Request, res: Response, next: NextFunct
       data: {
         staffId: userId,
         venueId: cfdi.venueId,
-        action: 'PLATFORM_CFDI_CANCELLED',
+        action: cfdi.status === 'CANCELLED' ? 'PLATFORM_CFDI_CANCELLED' : 'PLATFORM_CFDI_CANCEL_REQUESTED',
         entity: 'PlatformCfdi',
         entityId: cfdi.id,
         data: { motivo, substituteUuid: substituteUuid ?? null },
@@ -353,11 +358,21 @@ export async function cancelInvoice(req: Request, res: Response, next: NextFunct
   }
 }
 
+/** POST /api/v1/superadmin/billing/invoices/:id/refresh — «Consultar estado»: le pregunta al PAC. Nunca emite. */
+export async function refreshInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId } = (req as any).authContext
+    res.json({ success: true, data: await refreshPlatformCfdi(req.params.id, userId) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
 /** DELETE /api/v1/superadmin/billing/invoices/:id — descartar una factura que falló al timbrar. */
 export async function discardInvoice(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
-    const cfdi = await discardFailedPlatformCfdi(req.params.id)
+    const cfdi = await discardFailedPlatformCfdi(req.params.id, userId)
     await prisma.activityLog.create({
       data: {
         staffId: userId,

@@ -431,7 +431,8 @@ function countPendingPpd(billingTaxProfileId: string): Promise<number> {
       billingTaxProfileId,
       type: 'INGRESO',
       metodoPago: 'PPD',
-      status: 'STAMPED',
+      // Una cancelación en trámite sigue vigente: mientras el SAT no la acepte, esa factura se debe.
+      status: { in: ['STAMPED', 'CANCEL_REQUESTED'] },
       amountPaidCents: { lt: prisma.platformCfdi.fields.totalCents },
     },
   })
