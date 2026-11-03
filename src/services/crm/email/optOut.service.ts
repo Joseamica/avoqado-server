@@ -18,13 +18,14 @@ export type OrigenDeBaja = 'UN_CLIC' | 'QUEJA' | 'ADMIN'
  * ¿Por qué NO se le escribe a esta dirección? `false` = se puede. Una baja manda sobre un rebote: quien pidió no recibir
  * sigue diciendo «BAJA» aunque además haya rebotado.
  *
- * Si la base falla LANZA: quien manda nunca debe tomar un error por «no está bloqueado».
+ * Si la base falla LANZA: quien manda nunca debe tomar un error por «no está bloqueado». `db` = la transacción de quien
+ * reserva el envío (el Gmail la vuelve a correr bajo el candado de su conexión).
  */
-export async function isBlocked(email: string): Promise<false | Bloqueo> {
+export async function isBlocked(email: string, db: Prisma.TransactionClient = prisma): Promise<false | Bloqueo> {
   const normalizado = normalizeEmail(email)
   const [baja, suprimido] = await Promise.all([
-    prisma.crmEmailOptOut.findUnique({ where: { email: normalizado }, select: { id: true } }),
-    prisma.emailSuppression.findUnique({ where: { email: normalizado }, select: { reason: true } }),
+    db.crmEmailOptOut.findUnique({ where: { email: normalizado }, select: { id: true } }),
+    db.emailSuppression.findUnique({ where: { email: normalizado }, select: { reason: true } }),
   ])
   if (baja) return 'BAJA'
   if (suprimido) return suprimido.reason === 'COMPLAINT' ? 'QUEJA' : 'REBOTE'

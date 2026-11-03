@@ -17,6 +17,9 @@ export const TIMELINE_KINDS = [
   'REACTIVATED',
   'ENTRY_APPLIED',
   'SYSTEM',
+  // Correo uno a uno (fase 2): `data` sólo lleva ids; el asunto, el extracto y el estado se leen de `CrmEmailMessage`.
+  'EMAIL_SENT',
+  'EMAIL_RECEIVED',
 ] as const
 
 export type TimelineKind = (typeof TIMELINE_KINDS)[number]

@@ -5,6 +5,7 @@
  */
 import 'express-async-errors'
 import express from 'express'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { uploadAnnouncementImage } from '@/services/announcements/announcementImage.service'
@@ -24,6 +25,8 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
     }
     next()
   },
+  // La vuelta de Google lee la sesión SIN exigirla (`autenticacionOpcional`): aquí «hay sesión» = traer este encabezado.
+  extraerToken: (req: any) => req.headers['x-test-token'],
 }))
 jest.mock('@/services/announcements/announcementImage.service', () => ({ uploadAnnouncementImage: jest.fn() }))
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendEmailWithResult: jest.fn() } }))
@@ -530,5 +533,114 @@ describe('/crm/campaigns — sólo «Campañas masivas» o el administrador', ()
       .patch(`/crm/campaigns/${CAMPAIGN}`)
       .send({ audience: { segmentos: [{ tipo: 'CLIENTES' }, { tipo: 'CLIENTES' }] } })
     expect(res.status).toBe(400)
+  })
+})
+
+describe('el Gmail del vendedor — sólo «Mandar correo» (crm:contactar)', () => {
+  const EMAIL_BODY = {
+    contactId: 'ccontactem0000000000000001',
+    subject: 'Hola',
+    blocks: [{ type: 'paragraph', text: 'Hola' }],
+    clientRequestId: 'clic-0000-0001',
+  }
+
+  beforeEach(() => {
+    for (const fn of [prismaMock.crmGmailConnection.findUnique, prismaMock.crmGmailAccountSeen.count]) fn.mockReset()
+    prismaMock.crmGmailConnection.findUnique.mockResolvedValue(null)
+    prismaMock.crmGmailAccountSeen.count.mockResolvedValue(3)
+    for (const nombre of ['CRM_GMAIL_CLIENT_ID', 'CRM_GMAIL_CLIENT_SECRET', 'CRM_GMAIL_REDIRECT_URI', 'CRM_GMAIL_TOKEN_KEY'])
+      delete process.env[nombre]
+    process.env.SUPERADMIN_URL = 'https://superadmin.test'
+  })
+
+  afterEach(() => {
+    for (const nombre of [
+      'CRM_GMAIL_CLIENT_ID',
+      'CRM_GMAIL_CLIENT_SECRET',
+      'CRM_GMAIL_REDIRECT_URI',
+      'CRM_GMAIL_TOKEN_KEY',
+      'OAUTH_STATE_SECRET',
+      'SUPERADMIN_URL',
+    ]) {
+      if (ENV[nombre] === undefined) delete process.env[nombre]
+      else process.env[nombre] = ENV[nombre]
+    }
+  })
+
+  it('🔴 Rafa con sólo «Campañas masivas» recibe 403 en «Mi Gmail», al conectar, al desconectar y al mandar', async () => {
+    soloCampanas()
+    for (const res of [
+      await request(app).get('/crm/gmail'),
+      await request(app).get('/crm/gmail/connect'),
+      await request(app).post('/crm/gmail/disconnect'),
+      await request(app).post(`/crm/accounts/${ACCOUNT}/emails`).send(EMAIL_BODY),
+    ]) {
+      expect(res.status).toBe(403)
+      expect(res.body.code).toBe('CRM_FORBIDDEN')
+    }
+  })
+
+  it('con «Mandar correo», «Mi Gmail» dice que falta configurar la app, y conectar da el error claro', async () => {
+    soloContactar()
+    const estado = await request(app).get('/crm/gmail')
+    expect(estado.status).toBe(200)
+    expect(estado.body.data).toEqual({ configurado: false, conectado: false, cuentasUsadas: 3, tope: 100 })
+
+    const conectar = await request(app).get('/crm/gmail/connect')
+    expect(conectar.status).toBe(503)
+    expect(conectar.body.message).toBe('Falta configurar la app de Google')
+  })
+
+  it('mandar sin clientRequestId, o con uno raro, es 400 en español', async () => {
+    soloContactar()
+    const sinClic: Partial<typeof EMAIL_BODY> = { ...EMAIL_BODY }
+    delete sinClic.clientRequestId
+    expect((await request(app).post(`/crm/accounts/${ACCOUNT}/emails`).send(sinClic)).status).toBe(400)
+    const raro = await request(app)
+      .post(`/crm/accounts/${ACCOUNT}/emails`)
+      .send({ ...EMAIL_BODY, clientRequestId: 'a b"<script>' })
+    expect(raro.status).toBe(400)
+    expect(raro.body.message).toContain('El identificador del envío no es válido')
+  })
+
+  describe('GET /crm/gmail/callback — la vuelta de Google, sin exigir sesión', () => {
+    beforeEach(() => {
+      Object.assign(process.env, {
+        CRM_GMAIL_CLIENT_ID: 'client-id',
+        CRM_GMAIL_CLIENT_SECRET: 'client-secret',
+        CRM_GMAIL_REDIRECT_URI: 'https://api.avoqado.test/api/v1/crm/gmail/callback',
+        CRM_GMAIL_TOKEN_KEY: 'ab'.repeat(32),
+        OAUTH_STATE_SECRET: 'state-secret',
+      })
+    })
+    const state = (staffId: string) =>
+      jwt.sign({ intent: 'crm-gmail', staffId, nonce: 'n' }, 'state-secret', { algorithm: 'HS256', expiresIn: 600 })
+
+    it('🔴 sin sesión redirige a «Mi Gmail» con ?error=otra-sesion (no un 401 pelón)', async () => {
+      const res = await request(app)
+        .get('/crm/gmail/callback')
+        .query({ code: 'c', state: state(STAFF) })
+      expect(res.status).toBe(302)
+      expect(res.headers.location).toBe('https://superadmin.test/crm/gmail?error=otra-sesion')
+    })
+
+    it('🔴 con la sesión de OTRA persona también: la liga de Rafa no le conecta el Gmail de quien la abrió', async () => {
+      const res = await request(app)
+        .get('/crm/gmail/callback')
+        .set('x-test-token', 'token-de-la-sesion')
+        .query({ code: 'c', state: state('cstaffotro000000000000001') })
+      expect(res.status).toBe(302)
+      expect(res.headers.location).toBe('https://superadmin.test/crm/gmail?error=otra-sesion')
+    })
+
+    it('un state que no es nuestro es ?error=state; si la persona dijo que no en Google, ?error=cancelado', async () => {
+      const malo = await request(app).get('/crm/gmail/callback').query({ code: 'c', state: 'no-es-un-jwt' })
+      expect(malo.headers.location).toBe('https://superadmin.test/crm/gmail?error=state')
+      const cancelado = await request(app)
+        .get('/crm/gmail/callback')
+        .query({ error: 'access_denied', state: state(STAFF) })
+      expect(cancelado.status).toBe(302)
+      expect(cancelado.headers.location).toBe('https://superadmin.test/crm/gmail?error=cancelado')
+    })
   })
 })

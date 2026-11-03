@@ -26,6 +26,8 @@ const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
     'sólo escribe al equipo de ventas de Avoqado (quien tiene crm:ver) sus propios pendientes del CRM; nunca a personas de un negocio',
   'crm-campaign-sender.job.ts':
     'campañas de plataforma de Avoqado: CLIENTES y USUARIOS sólo leen negocios reales (REAL_VENUE_SQL deja fuera LIVE_DEMO y demoExpiresAt); PROSPECTOS sólo a quien marcó la casilla de la landing',
+  'crm-gmail-replies.job.ts':
+    'no manda nada: busca en «Enviados» y lee respuestas del Gmail de cada vendedor de Avoqado; el uno a uno sólo lo manda un vendedor desde la ficha',
   'crm-sweep.job.ts':
     'sólo avisa al equipo de ventas de Avoqado (quien tiene crm:editar) de un prospecto de la landing; nunca escribe a personas de un negocio',
   'customer-approval-outbox.job.ts': 'cada fila corre con conNegocio en customerApprovalOutbox.service',

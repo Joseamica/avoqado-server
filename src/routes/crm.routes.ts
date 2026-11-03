@@ -14,6 +14,7 @@ import * as crmEmailController from '../controllers/crm/crmEmail.controller'
 import { BadRequestError, ValidationError } from '../errors/AppError'
 import { CRM_KEYS } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { autenticacionOpcional } from '../middlewares/autenticacionOpcional.middleware'
 import { requireCrm } from '../middlewares/requireCrm.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { preserveContext } from '../observability/preserveContext'
@@ -45,6 +46,7 @@ import {
   removeTeamMemberSchema,
   rescheduleActivitySchema,
   searchOrganizationsSchema,
+  sendAccountEmailSchema,
   sendCampaignSchema,
   sendTemplateTestSchema,
   templateIdSchema,
@@ -57,6 +59,11 @@ import {
 } from '../schemas/crm.schema'
 
 const router = express.Router()
+
+// Google's return from «Conectar mi Gmail». Declared BEFORE the auth below on purpose: a missing or foreign session must
+// land on «Mi Gmail» with `?error=otra-sesion`, not on a bare 401. The session, if any, is read with the same token check
+// as every other route, and `completarConexion` demands it be the person who asked for the link (and re-reads their key).
+router.get('/gmail/callback', autenticacionOpcional, crmEmailController.gmailCallback)
 
 router.use(authenticateTokenMiddleware)
 
@@ -180,6 +187,14 @@ function imageFile(req: Request, res: Response, next: NextFunction) {
 }
 // The key first: whoever is not allowed never gets 5 MB read into memory.
 router.post('/uploads/image', campanas, imageFile, crmEmailController.uploadImage)
+
+// The seller's own Gmail (phase 2, plan task 7): connect it, see it, disconnect it, and «Mandar correo» from the ficha.
+// `crm:contactar` only counts on top of «Ver negocios» (`effectiveKeys`), so whoever holds only «Campañas masivas» gets 403.
+const contactar = requireCrm('crm:contactar')
+router.get('/gmail', contactar, crmEmailController.gmailStatus)
+router.get('/gmail/connect', contactar, crmEmailController.gmailConnect)
+router.post('/gmail/disconnect', contactar, crmEmailController.gmailDisconnect)
+router.post('/accounts/:id/emails', contactar, validateRequest(sendAccountEmailSchema), crmEmailController.sendAccountEmail)
 
 // «Dar de baja este correo» (the opposition, from the ficha): the person stops receiving anything from Avoqado. Only the CRM admin.
 router.post('/opt-outs', admin, validateRequest(createOptOutSchema), crmEmailController.createOptOut)

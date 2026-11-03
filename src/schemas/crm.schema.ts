@@ -439,6 +439,22 @@ export const previewTemplateSchema = z.object({
 /** POST /crm/templates/test — «Envíame una prueba». */
 export const sendTemplateTestSchema = z.object({ body: z.object({ subject: emailSubject, blocks: emailBlocks }) })
 
+/**
+ * POST /crm/accounts/:id/emails — «Mandar correo» desde el Gmail del vendedor. `clientRequestId` lo genera el diálogo al
+ * abrirse (un UUID): dos clics con el mismo son UN correo.
+ */
+export const sendAccountEmailSchema = z.object({
+  params: byId,
+  body: z.object({
+    contactId: cuid,
+    subject: emailSubject,
+    blocks: emailBlocks,
+    clientRequestId: z
+      .string({ required_error: 'Falta el identificador del envío', invalid_type_error: 'El identificador del envío no es válido' })
+      .regex(/^[A-Za-z0-9_-]{8,100}$/, 'El identificador del envío no es válido'),
+  }),
+})
+
 /** POST /crm/opt-outs — «Dar de baja este correo» (la oposición). El correo se guarda en minúsculas, como el del equipo. */
 export const createOptOutSchema = z.object({
   body: z.object({

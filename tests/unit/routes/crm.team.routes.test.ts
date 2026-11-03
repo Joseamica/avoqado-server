@@ -11,6 +11,7 @@ jest.mock('@/middlewares/requireCrm.middleware', () => ({
 }))
 
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
+import { autenticacionOpcional } from '@/middlewares/autenticacionOpcional.middleware'
 import router from '@/routes/crm.routes'
 
 type Layer = { route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: { crmKey?: unknown } }> } }
@@ -49,6 +50,8 @@ describe('crm team routes', () => {
     const asked = routes().filter(({ route }) => !route.split(' ')[1].startsWith('/team'))
 
     expect(asked).toEqual([
+      // Google's return from «Conectar mi Gmail» (task 7): the ONE route without a key, on purpose — see the next test.
+      { route: 'GET /gmail/callback', keys: [] },
       { route: 'GET /me', keys: [['crm:ver', 'crm:editar', 'crm:contactar', 'crm:campanas', 'crm:exportar', 'crm:ventas', 'crm:admin']] },
       { route: 'GET /pending', keys: ver },
       // An admin without «Ver negocios» still edits the stages and the reasons.
@@ -105,6 +108,11 @@ describe('crm team routes', () => {
       { route: 'POST /campaigns/:id/send', keys: campanas },
       { route: 'POST /campaigns/:id/cancel', keys: campanas },
       { route: 'POST /uploads/image', keys: campanas },
+      // The seller's own Gmail (task 7): «Mandar correo», which only counts on top of «Ver negocios».
+      { route: 'GET /gmail', keys: ['crm:contactar'] },
+      { route: 'GET /gmail/connect', keys: ['crm:contactar'] },
+      { route: 'POST /gmail/disconnect', keys: ['crm:contactar'] },
+      { route: 'POST /accounts/:id/emails', keys: ['crm:contactar'] },
       // «Dar de baja este correo» (la oposición): sólo el administrador del CRM.
       { route: 'POST /opt-outs', keys: admin },
       // «Importar lo de HubSpot» (task 8).
@@ -120,11 +128,17 @@ describe('crm team routes', () => {
     const unguarded = layers
       .filter(layer => layer.route && !layer.route.stack[0]?.handle.crmKey)
       .map(layer => `${Object.keys(layer.route!.methods).join(',').toUpperCase()} ${layer.route!.path}`)
-    expect(unguarded).toEqual([])
+    // The ONE exception (plan task 7): Google's return lands here from Google's screen, so a missing or foreign session must
+    // become a redirect to «Mi Gmail» (`?error=otra-sesion`), not a bare 401. It reads the session WITHOUT demanding it, and
+    // `completarConexion` demands it be the person who asked for the link and re-reads their key.
+    expect(unguarded).toEqual(['GET /gmail/callback'])
+    const callback = layers.findIndex(layer => layer.route?.path === '/gmail/callback')
+    expect(layers[callback].route!.stack[0].handle).toBe(autenticacionOpcional)
 
     const auth = layers.findIndex(layer => layer.handle === authenticateTokenMiddleware)
     expect(auth).toBeGreaterThanOrEqual(0)
-    expect(auth).toBeLessThan(layers.findIndex(layer => layer.route))
+    expect(callback).toBeLessThan(auth)
+    expect(auth).toBeLessThan(layers.findIndex(layer => layer.route && layer.route.path !== '/gmail/callback'))
   })
 
   it('importar_pide_crm_admin_antes_de_leer_los_archivos', () => {

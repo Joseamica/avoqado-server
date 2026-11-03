@@ -68,6 +68,7 @@ import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnounc
 import { announcementOutboxJob } from './jobs/announcementOutbox.job'
 import { crmCampaignSenderJob } from './jobs/crm-campaign-sender.job'
 import { crmDailyDigestJob } from './jobs/crm-daily-digest.job'
+import { crmGmailRepliesJob } from './jobs/crm-gmail-replies.job'
 import { crmSweepJob } from './jobs/crm-sweep.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { campaignSenderJob } from './jobs/campaign-sender.job'
@@ -317,6 +318,7 @@ const gracefulShutdown = async (signal: string) => {
       crmSweepJob.stop()
       crmDailyDigestJob.stop()
       crmCampaignSenderJob.stop()
+      crmGmailRepliesJob.stop()
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
@@ -681,6 +683,8 @@ const startApplication = async (retries = 3) => {
       crmDailyDigestJob.start()
       // CRM propio: el remitente de las campañas masivas (cada minuto, con el tope diario; MARKETING_KILL_SWITCH lo apaga)
       crmCampaignSenderJob.start()
+      // CRM propio: el Gmail del vendedor — busca lo que no sabemos si salió y trae las respuestas a la ficha (cada 5 min)
+      crmGmailRepliesJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)

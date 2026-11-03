@@ -133,10 +133,12 @@ const envSchema = z.object({
   CRM_CORREO_PRUEBAS: z.string().optional(),
   // Gmail del vendedor (app OAuth de Google «External»). Sin las cuatro, «Mi Gmail» dice «Falta configurar la app de
   // Google» y nada truena. La llave es PROPIA de esta integración: hex de 32 bytes (`openssl rand -hex 32`).
+  // 🔴 Texto opcional SIN `.url()` ni `.length(64)` a propósito (Ruling 3): una mal escrita haría `process.exit` de TODA la
+  // API. La URI (http/https) y la llave (64 hex) se validan donde se usan: `services/crm/email/gmailOAuth.service.ts`.
   CRM_GMAIL_CLIENT_ID: z.string().optional(),
   CRM_GMAIL_CLIENT_SECRET: z.string().optional(),
-  CRM_GMAIL_REDIRECT_URI: z.string().url().optional(),
-  CRM_GMAIL_TOKEN_KEY: z.string().length(64, 'CRM_GMAIL_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  CRM_GMAIL_REDIRECT_URI: z.string().optional(),
+  CRM_GMAIL_TOKEN_KEY: z.string().optional(),
   ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
   // Recipient for the weekly "new activated/paid venues" report (see
   // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and

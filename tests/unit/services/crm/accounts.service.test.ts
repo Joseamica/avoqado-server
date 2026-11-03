@@ -124,6 +124,8 @@ const MODELS = [
   'staff',
   'staffVenue',
   'platformAccess',
+  'crmEmailMessage',
+  'crmEmailConsent',
 ] as const
 
 beforeEach(() => {
@@ -135,6 +137,8 @@ beforeEach(() => {
   prismaMock.crmActivity.updateMany.mockResolvedValue({ count: 0 })
   prismaMock.crmStage.findMany.mockResolvedValue([])
   prismaMock.crmAccount.update.mockResolvedValue({})
+  prismaMock.crmEmailMessage.findMany.mockResolvedValue([])
+  prismaMock.crmEmailConsent.findMany.mockResolvedValue([])
 })
 
 describe('traffic light and «Estancado»', () => {
@@ -984,5 +988,120 @@ describe('stages and lost reasons', () => {
       new Prisma.PrismaClientKnownRequestError('Unique', { code: 'P2002', clientVersion: 'test', meta: { target: ['name'] } }),
     )
     await expect(updateStage(admin, GANADO, { name: 'Perdido' })).rejects.toMatchObject({ statusCode: 409, code: 'CRM_NOMBRE_REPETIDO' })
+  })
+})
+
+describe("the ficha: email events and each contact's consent (phase 2, plan task 7)", () => {
+  const BRENDA = 'ccontactbr0000000000000001'
+  const ANA = 'ccontactan0000000000000001'
+  const MSG_SENT = 'cmessagesent0000000000001'
+  const MSG_IN = 'cmessagein00000000000001'
+
+  function fichaConCorreos(events: Array<Record<string, unknown>>) {
+    prismaMock.crmAccount.findFirst.mockResolvedValue({
+      ...account(),
+      sucursales: null,
+      modulos: null,
+      sourceDetail: null,
+      referidoPor: null,
+      stageEnteredAt: daysAgo(1),
+      lostReason: null,
+      lostNote: null,
+      wonAt: null,
+      lostAt: null,
+      firstMoneySource: null,
+      consentMarketing: false,
+      consentAt: null,
+      consentSource: null,
+      qualificationAvailable: false,
+      contacts: [
+        { id: BRENDA, name: 'Brenda', phoneE164: null, email: 'Brenda@Cafe.mx ', role: null, isPrimary: true },
+        { id: ANA, name: 'Ana', phoneE164: null, email: 'ana@cafe.mx', role: null, isPrimary: false },
+        { id: 'ccontactsin0000000000001', name: 'Sin correo', phoneE164: '+525555555555', email: null, role: null, isPrimary: false },
+      ],
+    })
+    prismaMock.crmActivity.count.mockResolvedValue(0)
+    prismaMock.crmTimelineEvent.findMany.mockResolvedValue(events)
+    prismaMock.crmTimelineEvent.count.mockResolvedValue(events.length)
+    prismaMock.staff.findMany.mockResolvedValue([])
+  }
+
+  it('la ficha de la cuenta de Brenda muestra «Aceptó novedades · fecha» en el contacto de Brenda y no en el de Ana', async () => {
+    const aceptó = new Date('2026-10-30T15:00:00.000Z')
+    fichaConCorreos([])
+    prismaMock.crmEmailConsent.findMany.mockResolvedValue([{ email: 'brenda@cafe.mx', consentAt: aceptó, noticeVersion: '2026-10' }])
+
+    const ficha = await getAccount(access(), ACCOUNT, NOW)
+
+    // ONE query, by the normalized emails of THIS account's contacts.
+    expect(prismaMock.crmEmailConsent.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmEmailConsent.findMany).toHaveBeenCalledWith({
+      where: { email: { in: ['brenda@cafe.mx', 'ana@cafe.mx'] } },
+      select: { email: true, consentAt: true, noticeVersion: true },
+      take: 2,
+    })
+    const [brenda, ana, sinCorreo] = ficha.contacts
+    expect(brenda).toMatchObject({ id: BRENDA, consentAt: aceptó, noticeVersion: '2026-10' })
+    expect(ana).toMatchObject({ id: ANA, consentAt: null, noticeVersion: null })
+    expect(sinCorreo).toMatchObject({ consentAt: null, noticeVersion: null })
+    // The old account-level fields are still returned as they were (no field leaves an API response).
+    expect(ficha.consent).toEqual({ marketing: false, at: null, source: null })
+  })
+
+  it('un envío con timeout de Google se ve con «no sabemos si salió»: el evento trae su correo, leído en UNA consulta', async () => {
+    fichaConCorreos([
+      { id: 'cevent1', kind: 'EMAIL_SENT', actorStaffId: SELLER, data: { messageId: MSG_SENT, contactId: BRENDA }, createdAt: daysAgo(0) },
+      { id: 'cevent2', kind: 'EMAIL_RECEIVED', actorStaffId: null, data: { messageId: MSG_IN }, createdAt: daysAgo(0) },
+      { id: 'cevent3', kind: 'NOTE', actorStaffId: SELLER, data: { text: 'llamar' }, createdAt: daysAgo(1) },
+      // Task 6's consent event carries no `changes`: it must not break the read.
+      { id: 'cevent4', kind: 'FIELD_CHANGE', actorStaffId: null, data: { campo: 'consentimiento' }, createdAt: daysAgo(2) },
+    ])
+    prismaMock.crmEmailMessage.findMany.mockResolvedValue([
+      {
+        id: MSG_SENT,
+        subject: 'Hola Brenda',
+        snippet: 'Soy Rafa',
+        direction: 'SALIDA',
+        status: 'DESCONOCIDO',
+        error: 'Gmail no contestó',
+        fromEmail: 'rafa@gmail.com',
+      },
+      {
+        id: MSG_IN,
+        subject: 'Re: Hola Brenda',
+        snippet: 'Sí me interesa',
+        direction: 'ENTRADA',
+        status: 'RECIBIDO',
+        error: null,
+        fromEmail: 'brenda@cafe.mx',
+      },
+    ])
+
+    const ficha = await getAccount(access(), ACCOUNT, NOW)
+
+    expect(prismaMock.crmEmailMessage.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmEmailMessage.findMany).toHaveBeenCalledWith({
+      where: { id: { in: [MSG_SENT, MSG_IN] }, accountId: ACCOUNT },
+      select: { id: true, subject: true, snippet: true, direction: true, status: true, error: true, fromEmail: true },
+      take: 2,
+    })
+    const [enviado, recibido, nota, consentimiento] = ficha.timeline.events
+    expect(enviado.email).toEqual({
+      subject: 'Hola Brenda',
+      snippet: 'Soy Rafa',
+      direction: 'SALIDA',
+      status: 'DESCONOCIDO',
+      error: 'Gmail no contestó',
+      fromEmail: 'rafa@gmail.com',
+    })
+    expect(recibido.email).toMatchObject({ direction: 'ENTRADA', status: 'RECIBIDO', snippet: 'Sí me interesa' })
+    expect(nota).not.toHaveProperty('email')
+    expect(consentimiento).toMatchObject({ kind: 'FIELD_CHANGE', data: { campo: 'consentimiento' } })
+  })
+
+  it('sin eventos de correo no se consulta la tabla de correos', async () => {
+    fichaConCorreos([{ id: 'cevent3', kind: 'NOTE', actorStaffId: SELLER, data: { text: 'x' }, createdAt: daysAgo(1) }])
+    await getAccount(access(), ACCOUNT, NOW)
+    expect(prismaMock.crmEmailMessage.findMany).not.toHaveBeenCalled()
   })
 })

@@ -190,8 +190,8 @@ export function armarCorreo(subject: string, blocks: BloqueCampana[], vars: Vars
   }
 }
 
-/** El nombre de quien manda, para `{{vendedor}}`. */
-async function nombreDelActor(staffId: string): Promise<string | null> {
+/** El nombre de quien manda, para `{{vendedor}}` (y el «De» del Gmail del vendedor). */
+export async function nombreDelActor(staffId: string): Promise<string | null> {
   const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { firstName: true, lastName: true } })
   return staff ? `${staff.firstName} ${staff.lastName}`.trim() || null : null
 }
