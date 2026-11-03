@@ -115,15 +115,18 @@ function readNumber(raw: string | undefined, missing: string, invalid: string): 
 
 /**
  * Los números de la fila. Prendido: el de vinculación es obligatorio, y el portado también si la fila es de
- * portabilidad (en una línea nueva se ignora). Apagado: se ignoran por completo, sin validar ni guardar ni buscar
- * repetidos — la plantilla vieja, el MCP y cualquier otro negocio siguen igual que antes. Puro: no toca la base.
+ * portabilidad; un portado en una venta que no es de portabilidad es error (nunca se tira un dato en silencio,
+ * Ruling A8-4). Apagado: se ignoran por completo, sin validar ni guardar ni buscar repetidos — la plantilla vieja, el
+ * MCP y cualquier otro negocio siguen igual que antes. Puro: no toca la base.
  */
 function resolveRowNumbers(row: ManualSaleRowInput, requireLinkingNumber: boolean): RowNumbers | { error: string } {
   if (!requireLinkingNumber) return { linkingNumber: null, portedNumber: null }
   const linking = readNumber(row.linkingNumber, 'Falta el número de vinculación', 'Número de vinculación inválido')
   const ported = isPortabilidadSale(row.saleType)
     ? readNumber(row.portedNumber, 'Falta el número portado', 'Número portado inválido')
-    : null
+    : row.portedNumber?.trim()
+      ? { error: 'La venta no es de portabilidad: quita el número portado' }
+      : null
   if (typeof linking !== 'string' || (ported !== null && typeof ported !== 'string')) {
     return { error: [linking, ported].flatMap(r => (r !== null && typeof r !== 'string' ? [r.error] : [])).join('; ') }
   }
@@ -182,9 +185,14 @@ export async function createOneManualSale(
   row: ManualSaleRowInput,
   opts: ManualSaleOptions,
 ): Promise<CreateOneManualSaleResult> {
-  // Antes de abrir la transacción: un número que falta o está mal es error de esta fila, sin tocar nada.
-  const numbers = resolveRowNumbers(row, opts.requireLinkingNumber)
-  if (isError(numbers)) return { ok: false, error: numbers.error }
+  // Mismo orden que la vista previa (Ruling A8-3): estatus → resolvers (omitir/error) → números → escribir.
+  // Resultado declarado de la venta ("Estatus de Venta"). Es puro: un estatus no reconocido
+  // devuelve error sin abrir la transacción.
+  const saleStatusResult = mapSaleStatus(row.saleStatus)
+  if (isError(saleStatusResult)) return { ok: false, error: saleStatusResult.error }
+  const { outcome } = saleStatusResult
+  // El motivo solo tiene sentido en una venta rechazada; en una aprobada se ignora.
+  const rejectionNote = outcome === 'REJECTED' ? row.rejectionNote?.trim() || null : null
   try {
     const result: TxResult = await runTxWithRetry<TxResult>(
       () =>
@@ -209,13 +217,10 @@ export async function createOneManualSale(
           const categoryResult = await resolveCategory(orgId, row.simType, tx, item.categoryId ?? undefined)
           if (isError(categoryResult)) return { ok: false as const, error: categoryResult.error }
 
-          // Resultado declarado de la venta ("Estatus de Venta"). Se resuelve ANTES
-          // de escribir: un estatus no reconocido devuelve error con la tx intacta.
-          const saleStatusResult = mapSaleStatus(row.saleStatus)
-          if (isError(saleStatusResult)) return { ok: false as const, error: saleStatusResult.error }
-          const { outcome } = saleStatusResult
-          // El motivo solo tiene sentido en una venta rechazada; en una aprobada se ignora.
-          const rejectionNote = outcome === 'REJECTED' ? row.rejectionNote?.trim() || null : null
+          // Los números, después de los resolvers (un SIM ya vendido sigue siendo «omitir» aunque no traiga número) y
+          // ANTES de la primera escritura: un número que falta o está mal regresa con la tx intacta.
+          const numbers = resolveRowNumbers(row, opts.requireLinkingNumber)
+          if (isError(numbers)) return { ok: false as const, error: numbers.error }
 
           const { method, amountApplies } = mapPaymentForm(row.paymentForm)
           const amount = parseAmount(row.amount, amountApplies)
@@ -572,13 +577,6 @@ export async function bulkManualSales(
       continue
     }
 
-    // Los números también son puros: un número que falta o está mal no espera a los resolvers.
-    const numbers = resolveRowNumbers(row, opts.requireLinkingNumber)
-    if (isError(numbers)) {
-      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: numbers.error })
-      continue
-    }
-
     const iccidResult = await resolveIccid(orgId, row.iccid, prisma)
     if (isError(iccidResult)) {
       if (iccidResult.error === ICCID_ALREADY_SOLD_ERROR) {
@@ -605,6 +603,14 @@ export async function bulkManualSales(
     const categoryResult = await resolveCategory(orgId, row.simType, prisma, item.categoryId ?? undefined)
     if (isError(categoryResult)) {
       error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: categoryResult.error })
+      continue
+    }
+
+    // Los números sólo cuentan para las filas que se van a crear (Ruling A8-3): una ya registrada sigue en «omitir»
+    // aunque el archivo sea la plantilla vieja, sin las columnas.
+    const numbers = resolveRowNumbers(row, opts.requireLinkingNumber)
+    if (isError(numbers)) {
+      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: numbers.error })
       continue
     }
 

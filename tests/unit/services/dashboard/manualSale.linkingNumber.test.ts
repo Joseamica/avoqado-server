@@ -32,9 +32,10 @@ jest.mock('@/services/dashboard/manualSale.resolvers', () => ({
   mapSaleStatus: (...a: any[]) => jest.requireActual('@/services/dashboard/manualSale.resolvers').mapSaleStatus(...a),
 }))
 
+const markAsSoldMock = jest.fn().mockResolvedValue({})
 jest.mock('@/services/serialized-inventory/serializedInventory.service', () => ({
   __esModule: true,
-  serializedInventoryService: { markAsSold: jest.fn().mockResolvedValue({}) },
+  serializedInventoryService: { markAsSold: (...a: any[]) => markAsSoldMock(...a) },
 }))
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({
@@ -59,6 +60,7 @@ const ON = { requireLinkingNumber: true }
 const OFF = { requireLinkingNumber: false }
 
 let lastTx: ReturnType<typeof makeTx>
+let txs: Array<ReturnType<typeof makeTx>> = []
 function makeTx() {
   return {
     order: { create: jest.fn().mockResolvedValue({ id: 'order-1' }) },
@@ -68,6 +70,14 @@ function makeTx() {
   }
 }
 const svData = () => (lastTx.saleVerification.create as jest.Mock).mock.calls[0][0].data
+/** Ninguna venta a medias: la transacción puede abrirse (los resolvers corren dentro) pero nada se escribe. */
+function expectNothingWritten() {
+  for (const t of txs) {
+    for (const m of [t.order.create, t.orderItem.create, t.payment.create, t.saleVerification.create]) expect(m).not.toHaveBeenCalled()
+  }
+  expect(markAsSoldMock).not.toHaveBeenCalled()
+}
+const SOLD = 'ICCID-SOLD'
 
 function row(overrides: Partial<ManualSaleRowInput> = {}): ManualSaleRowInput {
   return {
@@ -86,13 +96,17 @@ const porta = (overrides: Partial<ManualSaleRowInput> = {}) => row({ saleType: '
 
 beforeEach(() => {
   jest.clearAllMocks()
+  txs = []
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) => {
     lastTx = makeTx()
+    txs.push(lastTx)
     return cb(lastTx)
   })
-  resolveIccidMock.mockImplementation(async (_org: string, iccid: string) => ({
-    item: { id: `sim-${iccid}`, serialNumber: iccid.trim().toUpperCase(), categoryId: 'cat-1' },
-  }))
+  resolveIccidMock.mockImplementation(async (_org: string, iccid: string) =>
+    iccid === SOLD
+      ? { error: 'ICCID ya vendido' }
+      : { item: { id: `sim-${iccid}`, serialNumber: iccid.trim().toUpperCase(), categoryId: 'cat-1' } },
+  )
   resolveVenueMock.mockResolvedValue({ venue: { id: 'store-venue-1', name: 'BAE MUÑOZ SLP' } })
   resolveStaffByCodeMock.mockResolvedValue({ staff: { id: 'seller-staff-1' } })
   resolveCategoryMock.mockResolvedValue({ categoryId: 'cat-1' })
@@ -100,10 +114,10 @@ beforeEach(() => {
 })
 
 describe('createOneManualSale — interruptor prendido', () => {
-  it('sin número de vinculación: la fila falla con «Falta el número de vinculación» y no abre la transacción', async () => {
+  it('sin número de vinculación: la fila falla con «Falta el número de vinculación» y no escribe nada', async () => {
     const result = await createOneManualSale(ORG_ID, ACTOR, row({ linkingNumber: undefined }), ON)
     expect(result).toEqual({ ok: false, error: 'Falta el número de vinculación' })
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expectNothingWritten()
   })
 
   it('un número de puros espacios cuenta como vacío', async () => {
@@ -124,7 +138,7 @@ describe('createOneManualSale — interruptor prendido', () => {
   ])('número de vinculación con %s: «Número de vinculación inválido»', async (_label, value) => {
     const result = await createOneManualSale(ORG_ID, ACTOR, row({ linkingNumber: value }), ON)
     expect(result).toEqual({ ok: false, error: 'Número de vinculación inválido' })
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expectNothingWritten()
   })
 
   it('número portado inválido: «Número portado inválido»', async () => {
@@ -163,10 +177,16 @@ describe('createOneManualSale — interruptor prendido', () => {
     expect(svData()).toMatchObject({ linkingNumber: '551234567', linkingNumberSource: 'EXTERNAL_SALE' })
   })
 
-  it('una línea nueva ignora el número portado que traiga', async () => {
-    await createOneManualSale(ORG_ID, ACTOR, row({ portedNumber: '5587654321' }), ON)
-    expect(svData().portedNumber).toBeUndefined()
-    expect(svData().portedNumberSource).toBeUndefined()
+  it('una venta que no es de portabilidad con número portado es error, nunca se tira en silencio (Ruling A8-4)', async () => {
+    const result = await createOneManualSale(ORG_ID, ACTOR, row({ portedNumber: '5587654321' }), ON)
+    expect(result).toEqual({ ok: false, error: 'La venta no es de portabilidad: quita el número portado' })
+    expectNothingWritten()
+  })
+
+  it('un SIM ya vendido sigue siendo «ICCID ya vendido» aunque la fila no traiga número (Ruling A8-3)', async () => {
+    const result = await createOneManualSale(ORG_ID, ACTOR, row({ iccid: SOLD, linkingNumber: undefined }), ON)
+    expect(result).toEqual({ ok: false, error: 'ICCID ya vendido' })
+    expectNothingWritten()
   })
 })
 
@@ -192,16 +212,33 @@ describe('createOneManualSale — interruptor apagado (Review Focus 5)', () => {
       expect(data).not.toHaveProperty(key)
     }
   })
+
+  it('una línea nueva con número portado se crea y lo ignora', async () => {
+    const result = await createOneManualSale(ORG_ID, ACTOR, row({ portedNumber: '5587654321' }), OFF)
+    expect(result.ok).toBe(true)
+    expect(svData()).not.toHaveProperty('portedNumber')
+  })
 })
 
 describe('bulkManualSales — vista previa con el interruptor prendido', () => {
-  it('una fila sin número va a error con su motivo y no toca los resolvers', async () => {
+  it('una fila nueva sin número va a error con su motivo', async () => {
     const result = await bulkManualSales(ORG_ID, ACTOR, [row({ linkingNumber: undefined })], false, ON)
     expect(result.error).toEqual([
       { index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Falta el número de vinculación' },
     ])
     expect(result.crear).toEqual([])
-    expect(resolveIccidMock).not.toHaveBeenCalled()
+  })
+
+  it('una fila que no es de portabilidad con número portado va a error (Ruling A8-4)', async () => {
+    const result = await bulkManualSales(ORG_ID, ACTOR, [row({ portedNumber: '5587654321' })], false, ON)
+    expect(result.error).toEqual([
+      {
+        index: 0,
+        iccid: '8952140064323812041F',
+        storeName: 'BAE MUÑOZ SLP (898)',
+        motivo: 'La venta no es de portabilidad: quita el número portado',
+      },
+    ])
   })
 
   it('marca linkingDuplicate contra la organización y la fila se sigue creando', async () => {
@@ -308,7 +345,48 @@ describe('bulkManualSales — aplicar con el interruptor prendido', () => {
       { index: 0, iccid: 'ICCID-A', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Falta el número de vinculación' },
     ])
     expect(result.created).toBe(1)
-    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    // La fila mala abre su transacción (los resolvers corren dentro) pero no escribe: sólo hay una venta.
+    expect(txs.filter(t => t.saleVerification.create.mock.calls.length)).toHaveLength(1)
     expect(svData()).toMatchObject({ linkingNumber: '5512345678', linkingNumberSource: 'EXTERNAL_SALE' })
+  })
+})
+
+// Ruling A8-3: estatus → resolvers (omitir/error) → números → crear, igual en la vista previa y al aplicar.
+describe.each([
+  ['vista previa', false],
+  ['aplicar', true],
+])('bulkManualSales — orden de las revisiones (%s, interruptor prendido)', (_label, apply) => {
+  it('archivo viejo, sin las columnas: el SIM ya registrado sigue en omitir', async () => {
+    const result = await bulkManualSales(ORG_ID, ACTOR, [row({ iccid: SOLD, linkingNumber: undefined })], apply, ON)
+    expect(result.omitir).toEqual([{ index: 0, iccid: SOLD, storeName: 'BAE MUÑOZ SLP (898)', motivo: 'ICCID ya vendido' }])
+    expect(result.error).toEqual([])
+    expectNothingWritten()
+  })
+
+  it('archivo mixto: los ya vendidos a omitir y sólo los nuevos sin número a error', async () => {
+    const rows = [row({ iccid: SOLD, linkingNumber: undefined }), row({ iccid: 'ICCID-NEW', linkingNumber: undefined })]
+
+    const result = await bulkManualSales(ORG_ID, ACTOR, rows, apply, ON)
+
+    expect(result.omitir).toEqual([{ index: 0, iccid: SOLD, storeName: 'BAE MUÑOZ SLP (898)', motivo: 'ICCID ya vendido' }])
+    expect(result.error).toEqual([
+      { index: 1, iccid: 'ICCID-NEW', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Falta el número de vinculación' },
+    ])
+    expect(result.crear).toEqual([])
+    expectNothingWritten()
+  })
+
+  it('un estatus inválido se dice antes que el número que falta', async () => {
+    const result = await bulkManualSales(ORG_ID, ACTOR, [row({ saleStatus: 'Pendiente', linkingNumber: undefined })], apply, ON)
+    expect(result.error).toHaveLength(1)
+    expect(result.error[0].motivo).toMatch(/estatus/i)
+  })
+
+  it('una tienda que no existe se dice antes que el número que falta', async () => {
+    resolveVenueMock.mockResolvedValue({ error: 'Tienda no encontrada' })
+    const result = await bulkManualSales(ORG_ID, ACTOR, [row({ linkingNumber: undefined })], apply, ON)
+    expect(result.error).toEqual([
+      { index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Tienda no encontrada' },
+    ])
   })
 })
