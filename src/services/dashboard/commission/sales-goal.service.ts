@@ -177,7 +177,7 @@ export async function ventasDeLaPersonaDesde(
  * CRITICAL: Uses venue timezone for date boundaries (not UTC).
  * "Today" means today in the venue's timezone, not UTC.
  */
-async function calculateCurrentSales(
+export async function calculateCurrentSales(
   venueId: string,
   staffId: string | null,
   period: SalesGoalPeriod,
@@ -224,7 +224,10 @@ async function calculateCurrentSales(
           venueId,
           status: 'COMPLETED',
           createdAt: { gte: startDate },
-          ...(staffId ? { payments: { some: { processedById: staffId } } } : {}),
+          // D7: sus ventas, igual que por importe. Ni la devolución que operó sobre una venta ajena ni un cobro que no se completó.
+          ...(staffId
+            ? { payments: { some: { processedById: staffId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } } }
+            : {}),
         },
       },
     })
