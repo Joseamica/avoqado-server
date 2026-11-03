@@ -99,8 +99,9 @@ const terminalIdSchema = z.object({
  */
 /**
  * POST /api/v1/dashboard/superadmin/terminals/payment-requests/:requestId/release
- * Free a terminal stuck BUSY by a POS→terminal charge that never got an answer (UNKNOWN).
- * Money-safe: if a card payment exists the request is closed as COMPLETED and NOT released.
+ * Avoqado support frees the TERMINAL (not the sale) stuck BUSY by a POS→terminal charge that never got an answer (UNKNOWN):
+ * TIMED_OUT / MANUAL_RELEASE, the sale stays blocked (A6 · S6). Money-safe: a card payment closes it as COMPLETED, and any
+ * money trace keeps it as it is.
  * Declared before the `/:terminalId` routes so the literal segment always wins.
  */
 router.post(
@@ -110,7 +111,8 @@ router.post(
       params: z.object({ requestId: z.string().min(1) }),
       body: z.object({
         venueId: z.string().cuid('Invalid venue ID'),
-        reason: z.string().min(3).max(300),
+        // A6 · S6: el motivo es obligatorio y queda en la bitácora con quién soltó la terminal; puros espacios no cuentan.
+        reason: z.string().trim().min(3, 'Escribe por qué se suelta la terminal (mínimo 3 letras)').max(300, 'Máximo 300 caracteres'),
       }),
     }),
   ),

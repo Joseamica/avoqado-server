@@ -883,7 +883,7 @@
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
     },
     "src/services/terminal-payment.service.ts#TerminalPaymentService.reconcileUnknownRequests#closeRowFromPaymentTx": {
-      "count": 2,
+      "count": 1,
       "loops": 0,
       "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
     },
@@ -1261,6 +1261,16 @@
       "count": 1,
       "loops": 0,
       "reason": "Una hoja Payment→CAS de cancelación local→ActivityLog, sin Order/GiftCard/sesiones posteriores; ActivityLog no tiene FK a Order/Payment/GiftCard y aquí no se clasifica actorType. PG cruza cancelación real y CO real en ambos sentidos, preservando confirmación ganadora o revisión si ganó la cancelación."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.conciliarUnknownConSuPago#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.soltarRanuraTrasCierre#findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
     }
   }
 }

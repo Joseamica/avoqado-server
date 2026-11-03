@@ -5,6 +5,7 @@ import logger from '../config/logger'
 import { terminalPaymentService } from '../services/terminal-payment.service'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { scheduleJob } from '../observability/jobContext'
+import { recuperarAvisosAprobadosSinReferencias } from '../services/tpv/angelpay-webhook.service'
 
 /**
  * Terminal Payment Watchdog
@@ -58,31 +59,37 @@ export class TerminalPaymentWatchdogJob {
     }
     this.isRunning = true
 
+    // Revisión A4 · fix round 2 (ruling del controlador, 21-oct): CADA paso en su propio try/catch. Antes un fallo del rescate
+    // del long-poll (o de un barrido anterior) saltaba el resto de la pasada; una falla persistente dejaba sin correr, para
+    // siempre, la liberación tras el cese (S2) y la terminal no se soltaba nunca. El orden se conserva.
+    const paso = async (nombre: string, fn: () => Promise<unknown>): Promise<void> => {
+      try {
+        await fn()
+      } catch (err) {
+        logger.error(`❌ [Terminal-payment watchdog] ${nombre} failed`, { error: err instanceof Error ? err.message : String(err) })
+      }
+    }
     try {
-      await terminalPaymentService.reconcileStaleRequests()
+      await paso('stale requests sweep', () => terminalPaymentService.reconcileStaleRequests())
       // UNKNOWN is not a dead end anymore: a terminal that is back (and stays back) + 20 min with
       // no card payment frees the slot; released rows are still swept for a late payment (see
       // reconcileUnknownRequests). A row parked UNKNOWN by the sweep above is seen by this one in
       // the same tick, which at most stamps "terminal returned" 30 s earlier — never frees it.
-      await terminalPaymentService.reconcileUnknownRequests()
+      await paso('unknown sweep', () => terminalPaymentService.reconcileUnknownRequests())
       // Ventana de confirmación (plan 16-sep): un negativo de la terminal sin evidencia que lleve ≥ 30 s se libera
-      // aquí si el temporizador en proceso no llegó (reinicio, otra instancia). Idempotente por CAS. Va en su propio
-      // try/catch: un barrido que falle (base caída a media pasada) no puede dejar sin la recuperación del long-poll
-      // de S5 a un POS que ya tiene su fila COMPLETED — el barrido se repite en el siguiente tick, el 504 del POS no.
-      try {
-        await terminalPaymentService.releaseUnprovenNegativesAfterWindow()
-      } catch (err) {
-        logger.error('❌ [Terminal-payment watchdog] confirmation window sweep failed', {
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
+      // aquí si el temporizador en proceso no llegó (reinicio, otra instancia). Idempotente por CAS. Un barrido que falle
+      // (base caída a media pasada) no puede dejar sin la recuperación del long-poll de S5 a un POS que ya tiene su fila
+      // COMPLETED — el barrido se repite en el siguiente tick, el 504 del POS no.
+      await paso('confirmation window sweep', () => terminalPaymentService.releaseUnprovenNegativesAfterWindow())
       // S5: un POS que sigue esperando en memoria mientras la fila ya quedó COMPLETED con Payment (el webhook
       // confirmó desde otra instancia, o el aviso se perdió) recibe el resultado durable en vez de un 504.
-      await terminalPaymentService.resolvePendingFromDurableState()
-    } catch (err) {
-      logger.error('❌ [Terminal-payment watchdog] pass failed', {
-        error: err instanceof Error ? err.message : String(err),
-      })
+      await paso('long-poll recovery', () => terminalPaymentService.resolvePendingFromDurableState())
+      // S2 («ninguna duda de un cobro sin salida», A4b): la red durable del temporizador de 10 s que suelta la RANURA (nunca la
+      // venta) tras el cese acreditado por la terminal nueva (reinicio, o el gancho nunca se llamó). DESPUÉS del rescate del
+      // long-poll (revisión A4, I-1): recorre hasta 200 filas en serie y no puede retrasar a un POS que ya tiene su respuesta en la
+      // base. Corre aunque el rescate truene.
+      await paso('execution-closed release sweep', () => terminalPaymentService.liberarTrasCierreDeEjecucion())
+      await paso('approved without references alert recovery', () => recuperarAvisosAprobadosSinReferencias())
     } finally {
       this.isRunning = false
     }

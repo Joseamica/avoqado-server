@@ -19,6 +19,8 @@ import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '@/err
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
 import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
+import { sondaReportoActiva } from '@/services/tpv/sondaActiva'
+import logger from '@/config/logger'
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   // El índice `@/communication/sockets` reexporta el NOMBRADO `socketManager` (lo usa `cancelOrder`); el resto importa el
   // default. Es el mismo objeto. `getBroadcastingService`: `cancelOrder` avisa al venue al cancelar; aquí no hay a quién.
@@ -83,6 +85,10 @@ afterEach(async () => {
 afterAll(async () => {
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.terminal.deleteMany({ where: { venueId } })
+  if (avisoComprobado) {
+    await prisma.merchantAccount.deleteMany({ where: { id: avisoComprobado.cuentaId } })
+    await prisma.angelPayUserAccount.deleteMany({ where: { id: avisoComprobado.accesoId } })
+  }
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: fixture } })
 })
@@ -112,6 +118,48 @@ async function terminalDelFixture(serial: string = fixture) {
     where: { serialNumber: serial },
     update: {},
     create: { venueId, name: 'fixture terminal', serialNumber: serial, type: 'TPV_ANDROID' },
+  })
+}
+
+/**
+ * A8 (21-oct): la ventana de 30 s sólo escribe «no se cobró» donde el aviso del banco de TODAS las cuentas con las que pudo cobrar
+ * la terminal está COMPROBADO; si no, suelta sólo la ranura. Las pruebas que fijan esa liberación (el caso de Testarudo) siembran
+ * aquí lo mínimo: una cuenta AngelPay del negocio, activa y con avisos recibidos (sin cobros con tarjeta suyos), asignada a la
+ * terminal de la fila. Se borra en `afterAll`.
+ */
+let avisoComprobado: { cuentaId: string; accesoId: string } | undefined
+async function conAvisoDelBancoComprobado(serial: string = fixture) {
+  if (!avisoComprobado) {
+    const angelpay = await prisma.paymentProvider.upsert({
+      where: { code: 'ANGELPAY' },
+      update: {},
+      create: { code: 'ANGELPAY', name: 'AngelPay', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+    })
+    const acceso = await prisma.angelPayUserAccount.create({
+      data: { venueId, email: `${fixture}@angelpay.test`, environment: 'QA', status: 'ACTIVE' },
+    })
+    const cuenta = await prisma.merchantAccount.create({
+      data: {
+        providerId: angelpay.id,
+        externalMerchantId: `${fixture}-aviso`,
+        alias: 'AngelPay con aviso comprobado',
+        credentialsEncrypted: {},
+        angelpayUserAccountId: acceso.id,
+        angelpayWebhookLastReceivedAt: new Date(Date.now() - 60_000),
+      },
+    })
+    avisoComprobado = { cuentaId: cuenta.id, accesoId: acceso.id }
+  }
+  await prisma.terminal.upsert({
+    where: { serialNumber: serial },
+    update: { assignedMerchantIds: [avisoComprobado.cuentaId] },
+    create: {
+      venueId,
+      name: 'fixture terminal',
+      serialNumber: serial,
+      type: 'TPV_ANDROID',
+      assignedMerchantIds: [avisoComprobado.cuentaId],
+    },
   })
 }
 
@@ -775,6 +823,7 @@ describe('Terminal relay uncertainty survives database commits', () => {
     expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({ status: 'UNKNOWN', paymentId: null })
   })
 
+  // A6 (21-oct): sólo para los que NO son soporte (MCP de un gerente, el POS). Soporte suelta la ranura: ver el bloque «A6 · S6».
   it('manual release without an execution-end proof preserves the terminal lock', async () => {
     const requestId = nextRequest()
     await prisma.terminalPaymentRequest.create({
@@ -789,7 +838,7 @@ describe('Terminal relay uncertainty survives database commits', () => {
       },
     })
     expect(
-      await terminalPaymentService.releaseUnknownRequest({ requestId, venueId, reason: 'Sandbox proof', actor: { source: 'SUPERADMIN' } }),
+      await terminalPaymentService.releaseUnknownRequest({ requestId, venueId, reason: 'Sandbox proof', actor: { source: 'MCP' } }),
     ).toMatchObject({ released: false, status: 'UNKNOWN' })
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
   })
@@ -1254,7 +1303,8 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
     const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
     clearTimeout(programadas.get(row.requestId)!)
     programadas.delete(row.requestId)
-    // A los 30 s la ventana decide: sin webhook, sin Payment y sin cajero ⇒ se libera.
+    // A los 30 s la ventana decide: sin webhook, sin Payment y sin cajero ⇒ se libera (A8: donde el aviso del banco está comprobado).
+    await conAvisoDelBancoComprobado()
     await prisma.$executeRaw`UPDATE "TerminalPaymentRequest" SET "updatedAt" = ${utcTs(new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))} WHERE "id" = ${row.id}`
     expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
     expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
@@ -1392,6 +1442,7 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
         venueId,
         socketId: 'fixture-socket',
         terminalPaymentAckVersion: ackVersion,
+        terminalPaymentExecutionVersion: ackVersion,
       }))
       const requestId = nextRequest()
       let vistoAlEmitir: Promise<unknown> | null = null
@@ -1422,6 +1473,7 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
       expect(enElEmit.deliveryProvenance.deliveries[0]).toMatchObject({
         protocol: ackVersion === 0 ? 'LEGACY' : 'DURABLE',
         ackVersion,
+        executionVersion: ackVersion,
         replay: false,
       })
       const pending = (terminalPaymentService as any).pendingPayments.get(requestId)
@@ -1736,9 +1788,13 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
     ])
   })
 
-  it('a NOT_FOUND contradiction (acknowledged row) is audited ONCE and not re-probed within the backoff window', async () => {
-    // Re-auditoría 11-sep (P2-2): la rama de contradicción no marcaba la espera ⇒ cada barrido de 30 s re-sondeaba y
-    // escribía otro 🚨 y otra fila de bitácora (≈2 880 al día por fila). La evidencia no cambia entre barridos.
+  it('a NOT_FOUND contradiction is audited ONCE and its 🚨 goes out ONCE per process; the SLOT row is re-probed next pass anyway, a non-slot row still waits', async () => {
+    // Re-auditoría 11-sep (P2-2): la evidencia no cambia entre barridos; sin freno, cada barrido de 30 s escribía otro 🚨 y
+    // otra fila de bitácora (≈2 880 al día por fila).
+    // 🔴 Ruling del controlador (20-oct, «ninguna duda sin salida», B0-2): la fila que OCUPA LA RANURA ya NO espera los
+    // 15 min — es la que el cajero tiene delante, y con E9 una SENT de socket muerto que contesta NOT_FOUND quedaba 15 min
+    // sin volver a preguntarse. El resto conserva la espera. Para no volver al ruido de P2-2, el 🚨 sale UNA vez por proceso
+    // y el asiento sigue siendo único.
     const durable = {
       protocol: 'DURABLE',
       ackVersion: 1,
@@ -1748,17 +1804,32 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
       at: new Date().toISOString(),
       replay: false,
     }
+    // No retiene la ranura (soltada por política) y es más vieja: la que sí la retiene es `row`.
+    const ajena = await auditRequest({
+      status: 'TIMED_OUT',
+      failureCode: 'AUTO_RELEASED',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      deliveryProvenance: { deliveries: [durable] },
+      createdAt: new Date(Date.now() - 60_000),
+    })
     const row = await auditRequest({
       status: 'UNKNOWN',
       acknowledgedAt: new Date(),
       orderId: null,
       deliveryProvenance: { deliveries: [durable] },
     })
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const contradicciones = (requestId: string) =>
+      errSpy.mock.calls.filter(([msg, meta]) => String(msg).includes('Probe contradiction') && (meta as any)?.requestId === requestId)
     for (let i = 0; i < 2; i++) await responder({ requestId: row.requestId, disposition: 'NOT_FOUND' })
+    await responder({ requestId: ajena.requestId, disposition: 'NOT_FOUND' })
     const asientos = (logAction as jest.Mock).mock.calls
       .map(([params]) => params as { action: string; entityId?: string })
       .filter(p => p.action === 'TERMINAL_PAYMENT_PROBE_CONTRADICTION' && p.entityId === row.id)
     expect(asientos).toHaveLength(1)
+    expect(contradicciones(row.requestId)).toHaveLength(1)
     expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNKNOWN')
     ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
       terminalId,
@@ -1770,12 +1841,24 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
     }))
     directEmit.mockClear()
     await (terminalPaymentService as any).probeUnresolvedForTerminal(fixture, venueId, 'fixture-socket')
+    const sondadas = directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe').map(([, payload]) => payload.requestId)
+    expect(sondadas).toContain(row.requestId)
+    expect(sondadas).not.toContain(ajena.requestId)
+    // La terminal contesta lo mismo en la pasada siguiente: ni otro 🚨 ni otro asiento.
+    await responder({ requestId: row.requestId, disposition: 'NOT_FOUND' })
+    expect(contradicciones(row.requestId)).toHaveLength(1)
     expect(
-      directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe').map(([, payload]) => payload.requestId),
-    ).not.toContain(row.requestId)
+      (logAction as jest.Mock).mock.calls.filter(
+        ([p]) =>
+          (p as { action: string }).action === 'TERMINAL_PAYMENT_PROBE_CONTRADICTION' && (p as { entityId?: string }).entityId === row.id,
+      ),
+    ).toHaveLength(1)
+    errSpy.mockRestore()
   })
 
-  it('a RESOLVED success whose Payment cannot be linked is not re-probed every sweep either', async () => {
+  it('a RESOLVED success whose Payment cannot be linked: the SLOT row is re-probed on the next sweep anyway', async () => {
+    // 🔴 Ruling del controlador (20-oct, «ninguna duda sin salida», B0-2): antes la espera de 15 min también frenaba a la
+    // fila que ocupa la ranura; ahora sólo frena a las demás (la prueba de arriba cubre que una que NO es la ranura espera).
     const row = await auditRequest({ status: 'TIMED_OUT', acknowledgedAt: new Date(), orderId: null })
     await responder({
       requestId: row.requestId,
@@ -1783,6 +1866,8 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
       finalResult: { requestId: row.requestId, status: 'success', paymentId: 'no-existe' },
     })
     expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true) // sin Payment ligable no se libera
+    // El `success` no ligable la deja UNKNOWN (no en la ventana): por eso sigue exenta tras la ronda 2 (sólo TIMED_OUT espera).
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNKNOWN')
     ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
       terminalId,
       venueId,
@@ -1793,9 +1878,48 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
     }))
     directEmit.mockClear()
     await (terminalPaymentService as any).probeUnresolvedForTerminal(fixture, venueId, 'fixture-socket')
-    expect(
-      directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe').map(([, payload]) => payload.requestId),
-    ).not.toContain(row.requestId)
+    expect(directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe').map(([, payload]) => payload.requestId)).toEqual([
+      row.requestId,
+    ])
+  })
+
+  it('P1 a SLOT row in the confirmation window (TIMED_OUT, no code) that answered a bare negative is NOT re-probed next pass, and the window releases it at 30 s as before', async () => {
+    // Ronda de arreglo 2 de A2 (20-oct, «ninguna duda sin salida»): la exención del backoff de la ranura NO aplica a una
+    // TIMED_OUT. Re-sondearla cada 30 s hacía que la terminal repitiera el negativo, `cerrarConNegativo` moviera `updatedAt`
+    // y la liberación de la ventana (exige `updatedAt` ≥ 30 s) dejara de ser determinista. UNKNOWN y SENT siguen exentas.
+    const row = await auditRequest({ status: 'UNKNOWN', acknowledgedAt: new Date(), orderId: null })
+    await responder({
+      requestId: row.requestId,
+      disposition: 'RESOLVED',
+      finalResult: { requestId: row.requestId, status: 'cancelled', errorMessage: 'U100 en la bandeja' },
+    })
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'TIMED_OUT',
+      failureCode: null,
+    })
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true) // la ventana retiene la ranura
+    const programadas = (terminalPaymentService as any).ventanasProgramadas as Map<string, NodeJS.Timeout>
+    clearTimeout(programadas.get(row.requestId)!)
+    programadas.delete(row.requestId)
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
+      terminalId,
+      venueId,
+      socketId: 'fixture-socket',
+      terminalPaymentAckVersion: 1,
+      identityVerified: true,
+      terminalPaymentProbeVersion: 1,
+    }))
+    directEmit.mockClear()
+    await (terminalPaymentService as any).probeUnresolvedForTerminal(fixture, venueId, 'fixture-socket')
+    expect(directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe')).toHaveLength(0)
+    // Nadie movió `updatedAt`: a los 30 s la ventana decide igual que antes (A8: donde el aviso del banco está comprobado).
+    await conAvisoDelBancoComprobado()
+    await prisma.$executeRaw`UPDATE "TerminalPaymentRequest" SET "updatedAt" = ${utcTs(new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000))} WHERE "id" = ${row.id}`
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('RELEASED')
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+    })
   })
 
   it('the probe is emitted only to an identity-verified terminal that announced the capability, and only for unresolved rows', async () => {
@@ -2253,6 +2377,122 @@ describe('Lápida de admisión: todo «no se creó» deja fila y la misma solici
     expect((segundo as TerminalBusyError).details).toEqual((primero as TerminalBusyError).details)
   })
 
+  // I1 (re-revisión de C1 de ANDROID, 22-oct): la terminal se revisa ANTES que la orden. Si lo que la ocupa es un cobro de
+  // la MISMA cuenta (el mesero la mandó desde su teléfono y quedó en duda; el cajero la cobra en la misma terminal desde la
+  // tablet), el POS tiene que leer ORDER: el cobro en duda es de ESTA venta y nunca se le invita a cobrarla en efectivo.
+  it('la terminal ocupada por un cobro de la MISMA orden contesta ORDER', async () => {
+    const orden = await nuevaOrden()
+    const terminalId = terminalDe('misma-orden')
+    const a = await auditRequest({
+      terminalId,
+      orderId: orden.id,
+      status: 'UNKNOWN',
+      amountCents: 35000,
+      senderDevice: 'Teléfono del mesero',
+      createdAt: new Date(Date.now() - 120_000),
+    })
+    const requestId = nextRequest()
+    const envio = { requestId, venueId, terminalId, orderId: orden.id, amountCents: 35000, requestedBy: fixture }
+    const primero = await enviar(envio)
+    // La MISMA orden desde OTRA terminal libre pasa por la rama de la orden ocupada: la respuesta tiene que ser la misma.
+    const desdeOtraTerminal = await enviar({
+      requestId: nextRequest(),
+      venueId,
+      terminalId: terminalDe('misma-orden-otra'),
+      orderId: orden.id,
+      amountCents: 35000,
+      requestedBy: fixture,
+    })
+    await resolver(a.id)
+    expect(await terminalPaymentService.getBusyTerminalIds(venueId, [terminalId])).not.toContain(terminalId) // la terminal ya está libre
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orden.id)).toBe(false) // y la orden también
+    const segundo = await enviar(envio)
+
+    expect(directEmit).not.toHaveBeenCalled()
+    const filas = await filasDe(requestId)
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'REJECTED_ORDER_BUSY',
+      orderId: orden.id,
+      terminalId,
+      deliveryProvenance: { deliveries: [] },
+    })
+    expect(filas[0].resultJson).toMatchObject({ details: { scope: 'ORDER' } })
+    expect(primero).toBeInstanceOf(TerminalBusyError)
+    expect(primero).toMatchObject({
+      statusCode: 409,
+      code: 'TERMINAL_BUSY',
+      details: {
+        requestId,
+        scope: 'ORDER',
+        blockingRequest: { requestId: a.requestId, amountCents: 35000, senderDevice: 'Teléfono del mesero' },
+      },
+    })
+    expect(desdeOtraTerminal).toBeInstanceOf(TerminalBusyError)
+    expect(desdeOtraTerminal).toMatchObject({ details: { scope: 'ORDER' } })
+    expect((primero as Error).message).toBe((desdeOtraTerminal as Error).message)
+    expect((primero as TerminalBusyError).details.blockingRequest).toEqual({
+      ...(desdeOtraTerminal as TerminalBusyError).details.blockingRequest,
+      ageSeconds: expect.any(Number),
+    })
+    // La réplica de la lápida (el MISMO requestId, ya con la terminal y la orden libres) repite ORDER, no TERMINAL.
+    expect(segundo).toBeInstanceOf(TerminalBusyError)
+    expect((segundo as Error).message).toBe((primero as Error).message)
+    expect((segundo as TerminalBusyError).details).toEqual((primero as TerminalBusyError).details)
+    expect((segundo as TerminalBusyError).details.scope).toBe('ORDER')
+  })
+
+  it('control: la terminal ocupada por un cobro de OTRA orden sigue con TERMINAL', async () => {
+    const ordenAjena = await nuevaOrden()
+    const orden = await nuevaOrden()
+    const terminalId = terminalDe('otra-orden')
+    const a = await auditRequest({ terminalId, orderId: ordenAjena.id, status: 'UNKNOWN', amountCents: 35000 })
+    const requestId = nextRequest()
+    const envio = { requestId, venueId, terminalId, orderId: orden.id, amountCents: 10000, requestedBy: fixture }
+    const primero = await enviar(envio)
+    await resolver(a.id)
+    const segundo = await enviar(envio)
+
+    expect(directEmit).not.toHaveBeenCalled()
+    const filas = await filasDe(requestId)
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_TERMINAL_BUSY', orderId: orden.id, terminalId })
+    expect(primero).toBeInstanceOf(TerminalBusyError)
+    expect(primero).toMatchObject({
+      statusCode: 409,
+      code: 'TERMINAL_BUSY',
+      details: { requestId, scope: 'TERMINAL', blockingRequest: { requestId: a.requestId, amountCents: 35000 } },
+    })
+    expect((primero as Error).message).toContain('está ocupada')
+    expect(segundo).toBeInstanceOf(TerminalBusyError)
+    expect((segundo as TerminalBusyError).details).toEqual((primero as TerminalBusyError).details)
+    expect((segundo as TerminalBusyError).details.scope).toBe('TERMINAL')
+  })
+
+  it.each([
+    { caso: 'el cobro que la ocupa sí tiene orden', conOrden: true },
+    { caso: 'el cobro que la ocupa tampoco tiene orden', conOrden: false },
+  ])('control: sin orderId sigue con TERMINAL ($caso)', async ({ conOrden }) => {
+    const terminalId = terminalDe(`sin-orden-${conOrden ? 'a' : 'b'}`)
+    const a = await auditRequest({ terminalId, orderId: conOrden ? (await nuevaOrden()).id : null, status: 'UNKNOWN' })
+    const requestId = nextRequest()
+    const envio = { requestId, venueId, terminalId, amountCents: 10000, requestedBy: fixture }
+    const primero = await enviar(envio)
+    await resolver(a.id)
+    const segundo = await enviar(envio)
+
+    expect(directEmit).not.toHaveBeenCalled()
+    const filas = await filasDe(requestId)
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_TERMINAL_BUSY', orderId: null, terminalId })
+    expect(primero).toBeInstanceOf(TerminalBusyError)
+    expect(primero).toMatchObject({ details: { requestId, scope: 'TERMINAL', blockingRequest: { requestId: a.requestId } } })
+    expect(segundo).toBeInstanceOf(TerminalBusyError)
+    expect((segundo as TerminalBusyError).details).toEqual((primero as TerminalBusyError).details)
+    expect((segundo as TerminalBusyError).details.scope).toBe('TERMINAL')
+  })
+
   it.each([
     {
       caso: 'cancelada',
@@ -2595,5 +2835,512 @@ describe('el predicado de bloqueo y el desenlace canónico no pueden divergir', 
       })
       expect(tocadas).toEqual([])
     }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// B0-2 + E9 (20-oct, «ninguna duda de un cobro sin salida»): la sonda tomaba SIEMPRE las 25 filas más antiguas sin
+// cursor, y la que de verdad retiene la terminal (la más nueva) no llegaba nunca a preguntarse. Y una fila SENT
+// entregada a un socket que ya murió (la app se cayó a media venta) no se sondeaba al reconectar: sólo el reloj de
+// 5 min la sacaba de ahí.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+describe('B0-2 · la sonda no se atasca y alcanza la fila en vuelo de un socket viejo', () => {
+  let n = 0
+  // Una terminal por prueba: el cursor de la sonda vive en memoria por terminal y no debe cruzarse entre pruebas.
+  const terminalNueva = () => `${fixture}-b02-${++n}`
+  const sondadas = () =>
+    directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe').map(([, payload]) => payload.requestId)
+  const sondear = (terminalId: string) => terminalPaymentService.probeUnresolvedForTerminal(terminalId, venueId, 'fixture-socket')
+  const entrega = (socketId: string) => ({
+    protocol: 'DURABLE',
+    ackVersion: 1,
+    cancelDispositionVersion: 1,
+    probeVersion: 1,
+    socketId,
+    at: new Date().toISOString(),
+    replay: false,
+  })
+
+  /** `cuantas` filas viejas sin desenlace que NO retienen la ranura (soltadas por política), en orden de creación. */
+  async function filasViejas(terminalId: string, cuantas: number): Promise<string[]> {
+    const base = Date.now() - 3_600_000
+    const ids = Array.from({ length: cuantas }, () => nextRequest())
+    await prisma.terminalPaymentRequest.createMany({
+      data: ids.map((requestId, i) => ({
+        requestId,
+        venueId,
+        terminalId,
+        status: TerminalPaymentRequestStatus.TIMED_OUT,
+        failureCode: 'AUTO_RELEASED',
+        amountCents: 10000,
+        expiresAt: new Date(0),
+        createdAt: new Date(base + i * 1000),
+      })),
+    })
+    return ids
+  }
+
+  beforeEach(() => {
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
+      terminalId,
+      venueId,
+      socketId: 'fixture-socket',
+      terminalPaymentAckVersion: 1,
+      identityVerified: true,
+      terminalPaymentProbeVersion: 1,
+    }))
+  })
+
+  it('P1 con 30 filas viejas sin desenlace la que ocupa la ranura se sondea en la primera pasada', async () => {
+    const terminalId = terminalNueva()
+    await filasViejas(terminalId, 30)
+    const bloqueadora = await auditRequest({ terminalId, status: 'UNKNOWN', acknowledgedAt: new Date(), orderId: null })
+    expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(true)
+
+    await sondear(terminalId)
+    // Primero la que retiene la terminal: es la que el cajero tiene delante.
+    expect(sondadas()[0]).toBe(bloqueadora.requestId)
+    expect(sondadas().filter(id => id === bloqueadora.requestId)).toHaveLength(1)
+  })
+
+  it('P1 una fila SENT entregada a OTRO socket se sondea al reconectar la terminal', async () => {
+    // E9: la app murió con la fila SENT; la terminal vuelve con otro socket.
+    const deSocketMuerto = terminalNueva()
+    const enVuelo = await auditRequest({
+      terminalId: deSocketMuerto,
+      status: 'SENT',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      expiresAt: new Date(Date.now() + 120_000),
+      deliveryProvenance: { deliveries: [entrega('s-viejo')] },
+    })
+    expect(await sondear(deSocketMuerto)).toBe(1)
+    expect(sondadas()).toEqual([enVuelo.requestId])
+
+    // Si su ÚLTIMA entrega ya fue a este mismo socket, sigue en vuelo aquí: la gobierna el replay, no la sonda.
+    directEmit.mockClear()
+    const vivaAqui = terminalNueva()
+    await auditRequest({
+      terminalId: vivaAqui,
+      status: 'SENT',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      expiresAt: new Date(Date.now() + 120_000),
+      deliveryProvenance: { deliveries: [entrega('s-viejo'), entrega('fixture-socket')] },
+    })
+    expect(await sondear(vivaAqui)).toBe(0)
+    expect(sondadas()).toEqual([])
+  })
+
+  it('F3 al reconectar, con la sonda ANTES que la reentrega la SENT del socket muerto entra al lote; si la reentrega grabara primero, la sonda la saltaría', async () => {
+    // Codex servidor r1 · F3 (21-oct): el orden que fija `socketManager` al conectar (sonda → reentrega), con el servicio real.
+    const terminalId = terminalNueva()
+    const enVuelo = await auditRequest({
+      terminalId,
+      status: 'SENT',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      expiresAt: new Date(Date.now() + 120_000),
+      deliveryProvenance: { deliveries: [entrega('s-viejo')] },
+    })
+    const eventos = () =>
+      directEmit.mock.calls
+        .filter(([event]) => event === 'terminal:payment_probe' || event === 'terminal:payment_request')
+        .map(([event, payload]) => [event, payload.requestId])
+
+    expect(await sondear(terminalId)).toBe(1)
+    await terminalPaymentService.replayPendingForTerminal(terminalId, venueId, 'fixture-socket')
+    expect(eventos()).toEqual([
+      ['terminal:payment_probe', enVuelo.requestId],
+      ['terminal:payment_request', enVuelo.requestId],
+    ])
+    // La reentrega ya grabó su procedencia hacia ESTE socket: una sonda posterior la excluye (A2). Por eso el orden importa.
+    const procedencia = (await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: enVuelo.id } })).deliveryProvenance as {
+      deliveries: { socketId: string }[]
+    }
+    expect(procedencia.deliveries.at(-1)?.socketId).toBe('fixture-socket')
+    directEmit.mockClear()
+    expect(await sondear(terminalId)).toBe(0)
+  })
+
+  it('P2 las filas ya sondeadas ceden el turno a las nunca sondeadas', async () => {
+    const terminalId = terminalNueva()
+    const ids = await filasViejas(terminalId, 30)
+
+    await sondear(terminalId)
+    expect(sondadas()).toEqual(ids.slice(0, 25))
+
+    directEmit.mockClear()
+    await sondear(terminalId)
+    expect(sondadas()).toEqual(ids.slice(25))
+
+    // Agotadas, vuelve a empezar por las más antiguas.
+    directEmit.mockClear()
+    await sondear(terminalId)
+    expect(sondadas()).toEqual(ids.slice(0, 25))
+  })
+})
+
+describe('S1 · la terminal cerró la solicitud y no tiene ejecución viva (A3)', () => {
+  // La TPV nueva contesta ACTIVE (para servidores viejos) + los dos campos; sólo cuenta si anunció la capacidad.
+  const conCapacidad = { socketId: 'fixture-socket', terminalId: fixture, venueId, terminalPaymentExecutionVersion: 1 }
+  const sinCapacidad = { socketId: 'fixture-socket', terminalId: fixture, venueId }
+  const cerrada = { disposition: 'ACTIVE', executionAlive: false, closedForExecution: true }
+  type Fila = { requestId: string }
+  const sonda = (row: Fila, terminal: object = conCapacidad, campos: object = cerrada) =>
+    (terminalPaymentService as any).handleProbeResultFromSocket({ requestId: row.requestId, ...campos }, terminal)
+  const cancelacion = (row: Fila, terminal: object = conCapacidad, campos: object = cerrada) =>
+    (terminalPaymentService as any).handleCancelDispositionFromSocket({ requestId: row.requestId, ...campos }, terminal)
+  const leer = (id: string) => prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id } })
+  // Un ACTIVE anterior, sellado hace un momento: el veto de la declaración del cajero.
+  const activaAntes = () => new Date(Date.now() - 5_000)
+  const ACCION = 'TERMINAL_PAYMENT_EXECUTION_CLOSED'
+  const asientos = (rowId: string) => prisma.activityLog.findMany({ where: { venueId, action: ACCION, entityId: rowId } })
+  const avisosDeCierre = () =>
+    (logger.info as jest.Mock).mock.calls.filter(([msg]) => String(msg).includes('cerró la solicitud y no tiene ejecución viva'))
+  let gancho: jest.SpyInstance
+  beforeEach(() => {
+    gancho = jest.spyOn(terminalPaymentService as any, 'programarLiberacionTrasCierre')
+  })
+  afterEach(async () => {
+    gancho.mockRestore()
+    await prisma.activityLog.deleteMany({ where: { venueId, action: ACCION } })
+  })
+
+  it('P1 ACTIVE con executionAlive=false y closedForExecution=true de una terminal con capacidad desmiente el ACTIVE previo', async () => {
+    const row = await auditRequest({
+      status: 'UNKNOWN',
+      failureCode: 'ACK_TIMEOUT',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      probeActiveAt: activaAntes(),
+    })
+    expect(sondaReportoActiva(await leer(row.id))).toBe(true)
+
+    expect(await sonda(row)).toBe(true)
+    const despues = await leer(row.id)
+    expect(despues.executionClosedAt).not.toBeNull()
+    expect(sondaReportoActiva(despues)).toBe(false)
+    // El ACTIVE no se vuelve a sellar: la respuesta desmiente, no confirma.
+    expect(despues.probeActiveAt!.getTime()).toBe(row.probeActiveAt!.getTime())
+    // Una UNKNOWN se queda UNKNOWN con su código: sólo cambia de estado lo que estaba en vuelo.
+    expect(despues).toMatchObject({ status: 'UNKNOWN', failureCode: 'ACK_TIMEOUT' })
+    expect(gancho).toHaveBeenCalledTimes(1)
+    expect(gancho).toHaveBeenCalledWith(row.requestId, venueId)
+    // Bitácora: quién acreditó el cese (socket y versión del handshake) y el estado antes → después. Sin PII.
+    const [asiento] = await asientos(row.id)
+    expect(asiento).toMatchObject({ entity: 'TerminalPaymentRequest', staffId: null })
+    expect(asiento.data).toEqual({
+      requestId: row.requestId,
+      terminalId: row.terminalId,
+      origen: 'PROBE',
+      socketId: 'fixture-socket',
+      executionVersion: 1,
+      priorStatus: 'UNKNOWN',
+      status: 'UNKNOWN',
+    })
+
+    // La TPV repite la misma respuesta en cada sonda (la ranura se sondea cada pasada): no hay nada que cambiar, así que
+    // no se escribe la fila (ni la marca, ni el sello, ni `updatedAt`), ni otro asiento, ni otro aviso, ni otro gancho.
+    expect(await sonda(row)).toBe(true)
+    const repetida = await leer(row.id)
+    expect(repetida.executionClosedAt!.getTime()).toBe(despues.executionClosedAt!.getTime())
+    expect(repetida.probeResolvedAt!.getTime()).toBe(despues.probeResolvedAt!.getTime())
+    expect(repetida.updatedAt.getTime()).toBe(despues.updatedAt.getTime())
+    expect(await asientos(row.id)).toHaveLength(1)
+    expect(avisosDeCierre()).toHaveLength(1)
+    expect(gancho).toHaveBeenCalledTimes(1)
+  })
+
+  it('P1 los mismos campos de una terminal SIN capacidad no cambian nada', async () => {
+    const row = await auditRequest({ status: 'UNKNOWN', acknowledgedAt: new Date(), orderId: null, probeActiveAt: activaAntes() })
+    expect(await sonda(row, sinCapacidad)).toBe(true)
+    let despues = await leer(row.id)
+    // Exactamente como hoy: ACTIVE sella la observación y el veto sigue puesto.
+    expect(despues.executionClosedAt).toBeNull()
+    expect(despues.probeResolvedAt).toBeNull()
+    expect(despues.probeActiveAt!.getTime()).toBeGreaterThan(row.probeActiveAt!.getTime())
+    expect(sondaReportoActiva(despues)).toBe(true)
+
+    // Con capacidad pero sin los DOS campos, tampoco hay evidencia.
+    expect(await sonda(row, conCapacidad, { disposition: 'ACTIVE', executionAlive: false })).toBe(true)
+    despues = await leer(row.id)
+    expect(despues.executionClosedAt).toBeNull()
+    expect(despues.probeResolvedAt).toBeNull()
+
+    // Ni por la disposición del cancel: la fila se queda en cancelación, con la disposición de siempre.
+    // (Otra terminal: la ranura de la primera sigue ocupada por la UNKNOWN.)
+    const otra = `${fixture}-s1`
+    const enCancelacion = await auditRequest({ terminalId: otra, status: 'CANCEL_REQUESTED', acknowledgedAt: new Date(), orderId: null })
+    expect(await cancelacion(enCancelacion, { ...sinCapacidad, terminalId: otra })).toBe(true)
+    expect(await leer(enCancelacion.id)).toMatchObject({
+      status: 'CANCEL_REQUESTED',
+      cancelDisposition: 'ACTIVE',
+      failureCode: null,
+      executionClosedAt: null,
+    })
+    expect(gancho).not.toHaveBeenCalled()
+    expect(await prisma.activityLog.count({ where: { venueId, action: ACCION } })).toBe(0)
+  })
+
+  it('P1 una fila SENT con esa evidencia pasa a UNKNOWN/EXECUTION_CLOSED', async () => {
+    // E9: la app murió con la fila SENT; la terminal volvió con otro socket y contesta la sonda.
+    const row = await auditRequest({
+      status: 'SENT',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      expiresAt: new Date(Date.now() + 120_000),
+    })
+    expect(await sonda(row)).toBe(true)
+    const despues = await leer(row.id)
+    expect(despues).toMatchObject({ status: 'UNKNOWN', failureCode: 'EXECUTION_CLOSED', paymentId: null })
+    expect(despues.executionClosedAt).not.toBeNull()
+    expect(desenlaceCanonico(despues).outcome).toBe('UNRESOLVED')
+    expect(gancho).toHaveBeenCalledWith(row.requestId, venueId)
+    expect((await asientos(row.id)).map(a => a.data)).toEqual([expect.objectContaining({ priorStatus: 'SENT', status: 'UNKNOWN' })])
+
+    // Dos respuestas con evidencia ⇒ UN asiento, y la segunda no mueve `updatedAt` (ya no hay estado que cambiar).
+    expect(await sonda(row)).toBe(true)
+    expect((await leer(row.id)).updatedAt.getTime()).toBe(despues.updatedAt.getTime())
+    expect(await asientos(row.id)).toHaveLength(1)
+  })
+
+  it('P1 una fila CANCEL_REQUESTED con esa evidencia pasa a UNKNOWN/EXECUTION_CLOSED y programa la liberación de los 10 s (gancho de A4)', async () => {
+    // E4: la tablet canceló con el SDK activo y la app murió; al volver, la terminal contesta la sonda.
+    const row = await auditRequest({ status: 'CANCEL_REQUESTED', acknowledgedAt: new Date(), orderId: null })
+    expect(await sonda(row)).toBe(true)
+    const despues = await leer(row.id)
+    expect(despues).toMatchObject({ status: 'UNKNOWN', failureCode: 'EXECUTION_CLOSED' })
+    expect(despues.executionClosedAt).not.toBeNull()
+    expect(gancho).toHaveBeenCalledTimes(1)
+    expect(gancho).toHaveBeenCalledWith(row.requestId, venueId)
+  })
+
+  it('P2 la disposición del cancel con esa evidencia también marca executionClosedAt', async () => {
+    const row = await auditRequest({
+      status: 'CANCEL_REQUESTED',
+      acknowledgedAt: new Date(),
+      orderId: null,
+      probeActiveAt: activaAntes(),
+    })
+    expect(await cancelacion(row)).toBe(true)
+    const despues = await leer(row.id)
+    expect(despues.executionClosedAt).not.toBeNull()
+    expect(sondaReportoActiva(despues)).toBe(false)
+    expect(despues).toMatchObject({ status: 'UNKNOWN', failureCode: 'EXECUTION_CLOSED', cancelDisposition: 'ACTIVE' })
+    expect(gancho).toHaveBeenCalledWith(row.requestId, venueId)
+    expect((await asientos(row.id)).map(a => a.data)).toEqual([
+      expect.objectContaining({ origen: 'CANCEL_DISPOSITION', priorStatus: 'CANCEL_REQUESTED', status: 'UNKNOWN' }),
+    ])
+  })
+})
+
+/**
+ * A6 («ninguna duda de un cobro de la tablet sin salida», S4 + S6, 21-oct).
+ *
+ *  · S4: el reloj de 20 min de la ranura cuenta desde que la terminal VOLVIÓ; un hueco de latido ya no lo reinicia (mientras no
+ *    late no se suelta, pero al volver no empieza de cero).
+ *  · S6: soporte de Avoqado (la ruta de SUPERADMIN o su MCP) suelta LA TERMINAL de una fila UNKNOWN sin SQL — lo mismo que el
+ *    reloj, antes de tiempo: `TIMED_OUT / MANUAL_RELEASE` + bitácora con quién y por qué. La VENTA sigue cercada (UNRESOLVED) y
+ *    con evidencia de dinero no se suelta nada: concilia o retiene como hoy. Es lo que se hizo a mano en Amaena (20-oct).
+ */
+describe('A6 · S4 el reloj de 20 min no se reinicia · S6 soporte suelta la TERMINAL, no la venta', () => {
+  const ACCION = 'TERMINAL_PAYMENT_MANUAL_RELEASED'
+  const MOTIVO = 'Amaena: la PAX se reinició a media venta y la tablet no puede cobrar'
+  let soporteId: string
+  const leer = (id: string) => prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id } })
+  const asientos = (rowId: string) => prisma.activityLog.findMany({ where: { venueId, action: ACCION, entityId: rowId } })
+  const soltarComoSoporte = (requestId: string) =>
+    terminalPaymentService.releaseUnknownRequest({
+      requestId,
+      venueId,
+      actor: { staffId: soporteId, source: 'SUPERADMIN' },
+      reason: MOTIVO,
+    })
+  function resFalso() {
+    const res: any = {}
+    res.status = jest.fn(() => res)
+    res.json = jest.fn(() => res)
+    return res
+  }
+
+  beforeAll(async () => {
+    soporteId = (
+      await prisma.staff.create({ data: { email: `${fixture}-soporte@example.test`, firstName: 'Soporte', lastName: 'Avoqado' } })
+    ).id
+  })
+  afterEach(async () => {
+    await prisma.activityLog.deleteMany({ where: { venueId, action: ACCION } })
+  })
+  afterAll(async () => {
+    await prisma.activityLog.deleteMany({ where: { staffId: soporteId } })
+    await prisma.staff.deleteMany({ where: { id: soporteId } })
+  })
+
+  it('P1 un hueco de latido de 5 min ya no reinicia el reloj de 20 min', async () => {
+    const terminalId = `${fixture}-hueco`
+    const t0 = new Date()
+    await prisma.terminal.create({ data: { venueId, name: 'hueco', serialNumber: terminalId, type: 'TPV_ANDROID', lastHeartbeat: t0 } })
+    const vencida = new Date(t0.getTime() - 60 * 60_000)
+    const row = await auditRequest({ terminalId, status: 'UNKNOWN', expiresAt: vencida, createdAt: vencida })
+
+    // (1) La terminal vuelve: se estampa su regreso.
+    await terminalPaymentService.reconcileUnknownRequests(t0)
+    const volvio = (await leer(row.id)).terminalReturnedAt
+    expect(volvio).not.toBeNull()
+
+    // (2) Seis minutos sin latir (el último fue en t0): el estampado SE CONSERVA. Mientras no late, no se suelta.
+    await terminalPaymentService.reconcileUnknownRequests(new Date(t0.getTime() + 6 * 60_000))
+    const enElHueco = await leer(row.id)
+    expect(enElHueco.terminalReturnedAt?.getTime()).toBe(volvio!.getTime())
+    expect(enElHueco.status).toBe('UNKNOWN')
+
+    // (3) Vuelve a latir: a los 20 min de la PRIMERA vuelta se suelta la ranura, sin empezar de cero.
+    const a21 = new Date(t0.getTime() + 21 * 60_000)
+    await prisma.terminal.update({ where: { serialNumber: terminalId }, data: { lastHeartbeat: a21 } })
+    expect((await terminalPaymentService.reconcileUnknownRequests(a21)).released).toBe(1)
+    expect(await leer(row.id)).toMatchObject({ status: 'TIMED_OUT', failureCode: 'AUTO_RELEASED' })
+  })
+
+  it('P1 superadmin suelta la ranura de una fila UNKNOWN: TIMED_OUT/MANUAL_RELEASE, bitácora, la orden sigue cercada', async () => {
+    const terminalId = `${fixture}-soporte`
+    const row = await auditRequest({ terminalId, status: 'UNKNOWN' })
+    expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(true)
+
+    expect(await soltarComoSoporte(row.requestId)).toMatchObject({ released: true, status: 'TIMED_OUT' })
+
+    const fila = await leer(row.id)
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: 'MANUAL_RELEASE', paymentId: null })
+    // Se suelta CAPACIDAD, no la obligación: el desenlace sigue pendiente.
+    expect(desenlaceCanonico(fila).outcome).toBe('UNRESOLVED')
+    // La RANURA queda libre en los dos regímenes.
+    expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(false)
+    await encenderRegimenEstricto()
+    expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(false)
+
+    // Bitácora con QUIÉN y POR QUÉ.
+    const [asiento, ...otros] = await asientos(row.id)
+    expect(otros).toHaveLength(0)
+    expect(asiento).toMatchObject({ staffId: soporteId, entity: 'TerminalPaymentRequest' })
+    expect(asiento.data).toMatchObject({ requestId: row.requestId, terminalId, orderId, amountCents: 10000, reason: MOTIVO })
+
+    // La VENTA sigue cercada: otro cobro de esa orden, en cualquier terminal, rebota sin tocar el aparato.
+    directEmit.mockImplementation((_event, _payload, callback) => callback(new Error('lost ACK')))
+    await expect(
+      terminalPaymentService.sendPaymentToTerminal({
+        requestId: nextRequest(),
+        venueId,
+        terminalId: `${fixture}-otra`,
+        orderId,
+        amountCents: 10000,
+        requestedBy: fixture,
+      }),
+    ).rejects.toBeInstanceOf(TerminalBusyError)
+    expect(directEmit).not.toHaveBeenCalled()
+
+    // Repetirlo no escribe otro asiento: ya no está UNKNOWN.
+    expect(await soltarComoSoporte(row.requestId)).toMatchObject({ released: false, status: 'TIMED_OUT' })
+    expect(await asientos(row.id)).toHaveLength(1)
+  })
+
+  it('P1 superadmin no suelta una fila con Payment ligado: concilia', async () => {
+    // (a) El Payment exacto de ESTA terminal: concilia a COMPLETED, nunca MANUAL_RELEASE.
+    const row = await auditRequest({ status: 'UNKNOWN' })
+    const pago = await auditPayment({ processorData: { terminalPaymentRequestId: row.requestId } })
+    expect(await soltarComoSoporte(row.requestId)).toMatchObject({ released: false, status: 'COMPLETED', paymentId: pago.id })
+    expect(await leer(row.id)).toMatchObject({ status: 'COMPLETED', paymentId: pago.id })
+    expect(await asientos(row.id)).toHaveLength(0)
+
+    // (b) Un Payment ligado que NO se puede atribuir a esta terminal (lo cobró otro aparato): no concilia, y el veto de dinero
+    //     del CAS lo retiene — sigue UNKNOWN, la terminal sigue apartada y no hay asiento de liberación.
+    const terminalId = `${fixture}-ligado`
+    const row2 = await auditRequest({ terminalId, status: 'UNKNOWN' })
+    await auditPayment({ processorData: { terminalPaymentRequestId: row2.requestId } }, `${fixture}-otro-aparato`)
+    expect(await soltarComoSoporte(row2.requestId)).toMatchObject({ released: false, status: 'UNKNOWN', heldByMoneyEvidence: true })
+    expect(await leer(row2.id)).toMatchObject({ status: 'UNKNOWN', failureCode: null })
+    expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(true)
+    expect(await asientos(row2.id)).toHaveLength(0)
+
+    // (c) La terminal AFIRMÓ que cobró (sin Payment todavía): también es rastro de dinero, no se suelta.
+    const row3 = await auditRequest({
+      terminalId: `${fixture}-afirmo`,
+      status: 'UNKNOWN',
+      resultJson: { claimedSuccess: { authorizationCode: '123456' } },
+    })
+    expect(await soltarComoSoporte(row3.requestId)).toMatchObject({ released: false, status: 'UNKNOWN', heldByMoneyEvidence: true })
+    expect(await leer(row3.id)).toMatchObject({ status: 'UNKNOWN', failureCode: null })
+    expect(await asientos(row3.id)).toHaveLength(0)
+  })
+
+  it('P1 la ruta de SUPERADMIN pone el origen desde el servidor y devuelve released', async () => {
+    const { releaseTerminalPaymentRequest } = await import('@/controllers/dashboard/terminals.superadmin.controller')
+    const row = await auditRequest({ terminalId: `${fixture}-ruta-sa`, status: 'UNKNOWN' })
+    const res = resFalso()
+    const next = jest.fn()
+    await releaseTerminalPaymentRequest(
+      { params: { requestId: row.requestId }, body: { venueId, reason: MOTIVO }, authContext: { userId: soporteId } } as any,
+      res,
+      next,
+    )
+    expect(next).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true, released: true, status: 'TIMED_OUT' }))
+    expect((await asientos(row.id)).map(a => a.staffId)).toEqual([soporteId])
+  })
+
+  it('P2 el detalle de superadmin de la terminal dice qué cobro la aparta (para el botón del panel, E1) y deja de decirlo al soltarla', async () => {
+    const { getTerminalById } = await import('@/services/dashboard/terminals.superadmin.service')
+    const serialNumber = `AVQD-${fixture}-detalle`.toUpperCase() // forma de producción; la solicitud lleva la llave normalizada
+    const terminal = await prisma.terminal.create({ data: { venueId, name: 'detalle', serialNumber, type: 'TPV_ANDROID' } })
+    expect((await getTerminalById(terminal.id)).blockingPaymentRequest).toBeNull()
+
+    const row = await auditRequest({ terminalId: `${fixture}-detalle`, status: 'UNKNOWN', amountCents: 7475 })
+    expect((await getTerminalById(terminal.id)).blockingPaymentRequest).toMatchObject({
+      requestId: row.requestId,
+      venueId,
+      amount: 74.75, // PESOS
+      status: 'UNKNOWN',
+      ageMinutes: expect.any(Number),
+    })
+
+    await soltarComoSoporte(row.requestId)
+    expect((await getTerminalById(terminal.id)).blockingPaymentRequest).toBeNull()
+  })
+
+  // Fix round 1 (revisión A6, menor 1): cuando soporte no puede soltar la fila, el servicio dice si la terminal SIGUE apartada,
+  // con el mismo espejo del predicado de bloqueo que la admisión (el texto de la ruta depende de esto).
+  it('P1 Fix1 una fila que soporte no puede soltar dice si la terminal sigue apartada, sin tocar nada', async () => {
+    const casos: Array<[Record<string, unknown>, boolean]> = [
+      [{ status: 'SENT' }, true],
+      [{ status: 'CANCEL_REQUESTED' }, true],
+      [{ status: 'TIMED_OUT', failureCode: 'BANK_APPROVED_AWAITING_PAYMENT' }, true],
+      [{ status: 'TIMED_OUT', failureCode: 'MANUAL_RELEASE' }, false],
+    ]
+    for (const [i, [estado, aparta]] of casos.entries()) {
+      const terminalId = `${fixture}-fix1-${i}`
+      const row = await auditRequest({ terminalId, ...estado })
+      expect(await soltarComoSoporte(row.requestId)).toMatchObject({ released: false, status: estado.status, slotHeld: aparta })
+      expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(aparta)
+      expect(await leer(row.id)).toMatchObject(estado)
+      expect(await asientos(row.id)).toHaveLength(0)
+    }
+  })
+
+  it('P1 un cliente MOBILE que manda source: SUPERADMIN en el cuerpo no obtiene la rama de soporte', async () => {
+    const { releaseTerminalPayment } = await import('@/controllers/mobile/terminal-payment.mobile.controller')
+    const terminalId = `${fixture}-movil`
+    const row = await auditRequest({ terminalId, status: 'UNKNOWN' })
+    const res = resFalso()
+    await releaseTerminalPayment(
+      {
+        params: { venueId, requestId: row.requestId },
+        body: { reason: MOTIVO, source: 'SUPERADMIN', actor: { staffId: soporteId, source: 'SUPERADMIN' } },
+        authContext: { userId: soporteId },
+      } as any,
+      res,
+    )
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ released: false, status: 'UNKNOWN' }))
+    expect(await leer(row.id)).toMatchObject({ status: 'UNKNOWN', failureCode: null })
+    expect(await terminalPaymentService.isTerminalBusy(terminalId, venueId)).toBe(true)
+    expect(await asientos(row.id)).toHaveLength(0)
   })
 })

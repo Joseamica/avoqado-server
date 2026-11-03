@@ -15,8 +15,10 @@
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
 import { reconcileUncharged, reconcileBankDeclined, UnchargedReconciliationError } from '@/services/tpv/uncharged-reconciliation.service'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 const resolucionFija = '11111111-1111-4111-8111-111111111111'
 
@@ -26,6 +28,12 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
   let venueId: string
   let staffCajeroId: string
   let staffMeseroId: string
+  let staffGerenteId: string
+  const PIN_GERENTE = '918273'
+  const PIN_OTRO_VENUE = '564738'
+  const PIN_GERENTE_2 = '736291'
+  const PIN_GERENTE_INACTIVO = '615243'
+  const PIN_MESERO_CON_PIN = '827364'
   const sufijo = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const terminalId = `t-uncharged-${sufijo}`.toLowerCase().slice(0, 40)
 
@@ -71,6 +79,74 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       },
     })
     staffMeseroId = mesero.id
+
+    // A5 · E7: el gerente que autoriza con su PIN, y el de OTRO negocio cuyo PIN no vale aquí.
+    const gerente = await prisma.staff.create({
+      data: {
+        email: `unch-gerente-${sufijo}@test.com`,
+        firstName: 'Gerente',
+        lastName: 'Con PIN',
+        phone: '5551110002',
+        organizations: { create: { organizationId: org.id, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId: venue.id, role: 'MANAGER', active: true, pin: PIN_GERENTE } },
+      },
+    })
+    staffGerenteId = gerente.id
+    // Fix round 1: un gerente DADO DE BAJA en este venue (su PIN ya no autoriza) y un mesero CON PIN pero sin el permiso.
+    await prisma.staff.create({
+      data: {
+        email: `unch-gerente-baja-${sufijo}@test.com`,
+        firstName: 'Gerente',
+        lastName: 'De Baja',
+        phone: '5551110005',
+        organizations: { create: { organizationId: org.id, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId: venue.id, role: 'MANAGER', active: false, pin: PIN_GERENTE_INACTIVO } },
+      },
+    })
+    await prisma.staff.create({
+      data: {
+        email: `unch-mesero-pin-${sufijo}@test.com`,
+        firstName: 'Mesero',
+        lastName: 'Con PIN',
+        phone: '5551110006',
+        organizations: { create: { organizationId: org.id, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId: venue.id, role: 'WAITER', active: true, pin: PIN_MESERO_CON_PIN } },
+      },
+    })
+    // Fix round 0: un SEGUNDO gerente con su propio PIN válido en el MISMO venue.
+    await prisma.staff.create({
+      data: {
+        email: `unch-gerente2-${sufijo}@test.com`,
+        firstName: 'Gerente',
+        lastName: 'Segundo',
+        phone: '5551110004',
+        organizations: { create: { organizationId: org.id, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId: venue.id, role: 'MANAGER', active: true, pin: PIN_GERENTE_2 } },
+      },
+    })
+    const otroVenue = await prisma.venue.create({
+      data: {
+        name: `Uncharged Otro ${sufijo}`,
+        slug: `uncharged-otro-${sufijo}`,
+        organizationId: org.id,
+        address: 'Test',
+        city: 'Test',
+        state: 'Test',
+        country: 'MX',
+        zipCode: '12345',
+        timezone: 'America/Mexico_City',
+      },
+    })
+    await prisma.staff.create({
+      data: {
+        email: `unch-gerente-otro-${sufijo}@test.com`,
+        firstName: 'Gerente',
+        lastName: 'De Otro Negocio',
+        phone: '5551110003',
+        organizations: { create: { organizationId: org.id, role: 'MEMBER', isPrimary: true, isActive: true } },
+        venues: { create: { venueId: otroVenue.id, role: 'MANAGER', active: true, pin: PIN_OTRO_VENUE } },
+      },
+    })
   })
 
   /** Una fila como la del incidente: UNKNOWN, la terminal ya volvió, sin pago. */
@@ -866,6 +942,449 @@ describe('la declaración del cajero libera la venta Y la ranura, contra Postgre
       expect(r.reason).toBe('NOT_FOUND')
       const fila = await prisma.terminalPaymentRequest.findUnique({ where: { requestId } })
       expect(fila?.status).toBe('UNKNOWN')
+    })
+  })
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // A5 (20-oct, «ninguna duda de un cobro de la tablet sin salida», S3): la declaración alcanza E2, E3, E5 y E7.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  describe('A5 · la declaración alcanza E2, E3, E5 y E7', () => {
+    const svc = terminalPaymentService as any
+    const cuerpo = (requestId: string, extra: Record<string, unknown> = {}) => ({
+      requestId,
+      resolutionId: randomUUID(),
+      statement: 'UNCHARGED_VERIFIED' as const,
+      statementVersion: 1,
+      ...extra,
+    })
+    const comoCajero = (requestId: string) => ({ venueId, requestId, actorStaffId: staffCajeroId, source: 'MOBILE' })
+    const comoMesero = (requestId: string) => ({ venueId, requestId, actorStaffId: staffMeseroId, source: 'MOBILE' })
+    /** El botón del POS: `/release` con la declaración. */
+    const declararPorElPos = (requestId: string, actorStaffId: string, extra: Record<string, unknown> = {}) =>
+      terminalPaymentService.releaseUnknownRequest({
+        requestId,
+        venueId,
+        actor: { staffId: actorStaffId, source: 'MOBILE' },
+        reason: 'Liberada desde el POS',
+        declaration: cuerpo(requestId, extra),
+      })
+    const filasDe = (requestId: string) => prisma.terminalPaymentRequest.findMany({ where: { requestId } })
+    async function ordenAbierta() {
+      return prisma.order.create({
+        data: {
+          venueId,
+          orderNumber: `A5-${sufijo}-${Math.random().toString(36).slice(2, 8)}`,
+          type: 'TAKEOUT',
+          source: 'TPV',
+          status: 'CONFIRMED',
+          paymentStatus: 'PENDING',
+          subtotal: 65,
+          taxAmount: 0,
+          total: 65,
+          createdById: staffCajeroId,
+        },
+      })
+    }
+    /** El ACK perdido de Testarudo: entregada por el protocolo DURABLE a una terminal que SÍ sabe acusar, y sin acuse. */
+    const ackPerdido = () => ({
+      failureCode: 'ACK_TIMEOUT',
+      acknowledgedAt: null,
+      lastDeliveredAt: new Date(),
+      deliveryProvenance: {
+        deliveries: [
+          {
+            protocol: 'DURABLE',
+            ackVersion: 1,
+            cancelDispositionVersion: 1,
+            probeVersion: 1,
+            socketId: 'socket-a5',
+            at: new Date().toISOString(),
+            replay: false,
+          },
+        ],
+      },
+    })
+    /** El asiento de la sonda va por `void logAction` (fuera de la respuesta): se espera a que aterrice. */
+    async function esperarAsiento({ action, requestIdEnData }: { action: string; requestIdEnData: string }) {
+      for (let i = 0; i < 100; i++) {
+        const asiento = await prisma.activityLog.findFirst({
+          where: { venueId, action, data: { path: ['requestId'], equals: requestIdEnData } },
+          select: { id: true },
+        })
+        if (asiento) return
+        await new Promise(r => setTimeout(r, 50))
+      }
+      throw new Error(`el asiento ${action} de ${requestIdEnData} nunca llegó`)
+    }
+
+    it('P1 E2: con la sonda NOT_FOUND tras la entrega el cajero puede declarar', async () => {
+      const requestId = await sembrarFilaAtorada(ackPerdido())
+      // Antes de la sonda: el silencio de una terminal que SÍ sabe acusar es información (Codex r4) y no se declara.
+      await expect(reconcileUncharged(comoCajero(requestId), cuerpo(requestId))).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+
+      // La terminal (2.12.5: payload VIEJO, sin campos nuevos ni capacidad) contesta NOT_FOUND. Deja su lápida ANTES de contestar,
+      // así que esa solicitud ya no se puede ejecutar ahí: el cajero puede mirar la pantalla y declarar. La auditoría de la sonda
+      // va por `logAction`, que la integración simula: aquí escribe de verdad (es la evidencia que lee la declaración).
+      ;(logAction as jest.Mock).mockImplementation(jest.requireActual('@/services/dashboard/activity-log.service').logAction)
+      try {
+        expect(
+          await svc.handleProbeResultFromSocket({ requestId, disposition: 'NOT_FOUND' }, { socketId: 'socket-a5', terminalId, venueId }),
+        ).toBe(true)
+        await esperarAsiento({ action: 'TERMINAL_PAYMENT_PROBE_UNACCREDITED', requestIdEnData: requestId })
+      } finally {
+        ;(logAction as jest.Mock).mockImplementation(() => undefined)
+      }
+
+      const r = await reconcileUncharged(comoCajero(requestId), cuerpo(requestId))
+      expect(r.kind).toBe('UNCHARGED_VERIFIED')
+      const despues = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })
+      expect(despues).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
+      // Habilita la DECLARACIÓN humana, nunca el certificado nuevo de la TPV (Codex plan-r1-2).
+      expect(despues.executionClosedAt).toBeNull()
+    })
+
+    it('P1 E3: declarar un requestId que no existe deja lápida y contesta released', async () => {
+      const requestId = randomUUID()
+      const r = await declararPorElPos(requestId, staffCajeroId)
+      expect(r).toMatchObject({
+        requestId,
+        released: true,
+        status: 'FAILED',
+        outcome: 'NOT_CHARGED',
+        outcomeEvidence: 'OPERATOR_RECONCILED',
+      })
+
+      const filas = await filasDe(requestId)
+      expect(filas).toHaveLength(1)
+      const [lapida] = filas
+      expect(lapida).toMatchObject({
+        venueId,
+        terminalId: '', // los POS publicados no mandan la terminal (Codex r1-5)
+        status: 'FAILED',
+        failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+        amountCents: 0,
+        tipCents: 0,
+        paymentId: null,
+        orderId: null,
+      })
+      // Id de Prisma (`@default(cuid())`, cuid v1): nunca uno inventado.
+      expect(lapida.id).toMatch(/^c[a-z0-9]{24}$/)
+      expect(lapida.expiresAt.getTime()).toBeLessThanOrEqual(Date.now())
+      expect(lapida.resultJson).toMatchObject({ status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED', tombstone: true })
+      expect(lapida.operatorReconciliation).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: staffCajeroId, by: 'SESSION' })
+      expect(r.resolution?.id).toBe((lapida.operatorReconciliation as { id: string }).id)
+      const asientos = await prisma.activityLog.findMany({
+        where: { venueId, action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: lapida.id },
+      })
+      expect(asientos).toHaveLength(1)
+      expect(asientos[0].staffId).toBe(staffCajeroId)
+      expect(asientos[0].data).toMatchObject({ requestId, tombstone: true })
+
+      // El GET del POS dice «no se cobró» (antes era un 404 eterno).
+      expect(await terminalPaymentService.getPaymentStatus(requestId, venueId)).toMatchObject({
+        status: 'FAILED',
+        outcome: 'NOT_CHARGED',
+        outcomeEvidence: 'OPERATOR_RECONCILED',
+      })
+
+      // Con la terminal en el cuerpo se guarda su llave normalizada.
+      const conTerminal = randomUUID()
+      await declararPorElPos(conTerminal, staffCajeroId, { terminalId: 'AVQD-N860W173397' })
+      expect((await filasDe(conTerminal))[0].terminalId).toBe('n860w173397')
+
+      // 🔴 Una llave que no es la de un POS (no es UUID) no deja lápida: se rechaza como hoy.
+      await expect(declararPorElPos('basura-sin-formato', staffCajeroId)).rejects.toMatchObject({
+        code: 'ATTEMPT_NOT_FOUND',
+        statusCode: 404,
+      })
+      expect(await filasDe('basura-sin-formato')).toHaveLength(0)
+    })
+
+    it('P1 E3: el POST tardío con esa llave contesta no se cobró sin validar el contrato y no crea otra fila', async () => {
+      const requestId = randomUUID()
+      // La lápida tal como la deja la declaración (E3): monto 0 y sin terminal, a propósito distinto del POST original.
+      await prisma.terminalPaymentRequest.create({
+        data: {
+          requestId,
+          venueId,
+          terminalId: '',
+          status: 'FAILED',
+          failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+          amountCents: 0,
+          tipCents: 0,
+          expiresAt: new Date(),
+          resultJson: {
+            requestId,
+            status: 'failed',
+            outcomeEvidence: 'OPERATOR_RECONCILED',
+            tombstone: true,
+            errorMessage: 'El cajero revisó la terminal y confirmó que este cobro no pasó. Se puede volver a cobrar.',
+          },
+        },
+      })
+
+      // El POST que nunca había llegado (502, corte) aparece después, con su contrato original.
+      const r = await terminalPaymentService.sendPaymentToTerminal({
+        requestId,
+        venueId,
+        terminalId,
+        amountCents: 6500,
+        tipCents: 975,
+        requestedBy: staffCajeroId,
+      })
+      expect(r).toMatchObject({ requestId, status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
+
+      const filas = await filasDe(requestId)
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE', amountCents: 0 })
+    })
+
+    it('P1 E5: una CANCELLED sin ACCEPTED sobre una orden abierta ya es declarable', async () => {
+      const orden = await ordenAbierta()
+      const requestId = await sembrarFilaAtorada({ status: 'CANCELLED', cancelDisposition: null, orderId: orden.id })
+      expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orden.id)).toBe(true)
+
+      const r = await reconcileUncharged(comoCajero(requestId), cuerpo(requestId))
+      expect(r.previousRequest).toEqual({ status: 'CANCELLED', failureCode: null })
+      expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })).toMatchObject({
+        status: 'FAILED',
+        failureCode: 'OPERATOR_RECONCILED_NO_CHARGE',
+        cancelDisposition: null,
+      })
+      // La venta queda libre para volver a cobrarse.
+      expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orden.id)).toBe(false)
+    })
+
+    it('P1 E5: con un Payment ligado sigue sin poder declararse', async () => {
+      const orden = await ordenAbierta()
+      const requestId = await sembrarFilaAtorada({ status: 'CANCELLED', cancelDisposition: null, orderId: orden.id })
+      await prisma.payment.create({
+        data: {
+          venueId,
+          orderId: orden.id,
+          amount: 65,
+          tipAmount: 9.75,
+          method: 'CREDIT_CARD',
+          status: 'COMPLETED',
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: 65,
+          terminalPaymentRequestId: requestId,
+        },
+      })
+      await expect(reconcileUncharged(comoCajero(requestId), cuerpo(requestId))).rejects.toMatchObject({ code: 'POSITIVE_EVIDENCE_EXISTS' })
+      expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })).toMatchObject({
+        status: 'CANCELLED',
+        operatorReconciliation: null,
+      })
+    })
+
+    it('P2 E5: FAILED sin evidencia sí se declara; un FAILED ya acreditado (rechazo del banco) y CANCELLED/ACCEPTED no', async () => {
+      const sinEvidencia = await sembrarFilaAtorada({ status: 'FAILED', failureCode: 'TPV_ERROR' })
+      await expect(reconcileUncharged(comoCajero(sinEvidencia), cuerpo(sinEvidencia))).resolves.toMatchObject({
+        previousRequest: { status: 'FAILED', failureCode: 'TPV_ERROR' },
+      })
+      // El rechazo del banco YA es un desenlace (NOT_CHARGED): no hay nada que declarar.
+      const yaResuelta = await sembrarFilaAtorada({ status: 'FAILED', failureCode: 'BANK_DECLINED' })
+      await expect(reconcileUncharged(comoCajero(yaResuelta), cuerpo(yaResuelta))).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+      const aceptada = await sembrarFilaAtorada({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED' })
+      await expect(reconcileUncharged(comoCajero(aceptada), cuerpo(aceptada))).rejects.toMatchObject({ code: 'ATTEMPT_NOT_ELIGIBLE' })
+    })
+
+    it('P1 E7: un mesero sin PIN recibe SUPERVISOR_AUTHORIZATION_REQUIRED; con el PIN de un gerente declara y la bitácora dice SUPERVISOR_PIN', async () => {
+      const requestId = await sembrarFilaAtorada()
+      await expect(reconcileUncharged(comoMesero(requestId), cuerpo(requestId))).rejects.toMatchObject({
+        code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        statusCode: 403,
+      })
+      // Un PIN que no es de nadie con el permiso, igual.
+      await expect(reconcileUncharged(comoMesero(requestId), cuerpo(requestId, { supervisorPin: '000000' }))).rejects.toMatchObject({
+        code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        statusCode: 403,
+      })
+      expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })).status).toBe('UNKNOWN')
+
+      const r = await reconcileUncharged(comoMesero(requestId), cuerpo(requestId, { supervisorPin: PIN_GERENTE }))
+      expect(r).toMatchObject({ kind: 'UNCHARGED_VERIFIED', staffId: staffGerenteId, by: 'SUPERVISOR_PIN', sessionStaffId: staffMeseroId })
+
+      const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })
+      expect(fila).toMatchObject({ status: 'FAILED', failureCode: 'OPERATOR_RECONCILED_NO_CHARGE' })
+      expect(fila.operatorReconciliation).toMatchObject({ staffId: staffGerenteId, by: 'SUPERVISOR_PIN', sessionStaffId: staffMeseroId })
+      const [asiento] = await prisma.activityLog.findMany({
+        where: { venueId, action: 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED', entityId: fila.id },
+      })
+      expect(asiento.staffId).toBe(staffGerenteId)
+      expect(asiento.data).toMatchObject({ by: 'SUPERVISOR_PIN', sessionStaffId: staffMeseroId })
+      // 🔴 El PIN nunca se guarda: ni en la fila ni en la bitácora.
+      expect(JSON.stringify(fila)).not.toContain(PIN_GERENTE)
+      expect(JSON.stringify(asiento)).not.toContain(PIN_GERENTE)
+    })
+
+    it('P1 Fix0: la MISMA declaración reenviada con OTRO PIN válido de gerente es la misma (no 409), y el PIN no queda en ningún lado', async () => {
+      // Ruling del controlador (pre-revisión): el PIN NUNCA se guarda, tampoco como hash (un hash de 4-6 dígitos se revierte por
+      // fuerza bruta). Por eso no entra a `bodyHash`: la misma declaración autorizada por otro gerente es LA MISMA declaración.
+      const requestId = await sembrarFilaAtorada()
+      const declaracion = cuerpo(requestId)
+      const primera = await reconcileUncharged(comoMesero(requestId), { ...declaracion, supervisorPin: PIN_GERENTE })
+      const segunda = await reconcileUncharged(comoMesero(requestId), { ...declaracion, supervisorPin: PIN_GERENTE_2 })
+      expect(segunda).toEqual(primera)
+      // La autorización se sigue evaluando en CADA intento: la réplica sin permiso ni PIN es 403.
+      await expect(reconcileUncharged(comoMesero(requestId), declaracion)).rejects.toMatchObject({
+        code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        statusCode: 403,
+      })
+
+      const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })
+      // El hash es el del cuerpo SIN el PIN.
+      expect((fila.operatorReconciliation as { bodyHash: string }).bodyHash).toBe(
+        createHash('sha256').update(JSON.stringify(declaracion)).digest('hex'),
+      )
+      const asientos = await prisma.activityLog.findMany({ where: { venueId } })
+      for (const pin of [PIN_GERENTE, PIN_GERENTE_2]) {
+        expect(JSON.stringify(fila)).not.toContain(pin)
+        expect(JSON.stringify(asientos)).not.toContain(pin)
+      }
+    })
+
+    it('P1 Fix1 (I-2): con SÓLO la auditoría NOT_FOUND tras la entrega, el rechazo del BANCO no libera; la declaración humana sí', async () => {
+      // Decisión «B» del founder: el NOT_FOUND de la TPV vieja habilita la DECLARACIÓN humana, nunca una liberación automática.
+      // El rechazo del banco entra al MISMO núcleo, así que esa vía no puede abrirle `constaQueSalio`.
+      const requestId = await sembrarFilaAtorada(ackPerdido())
+      ;(logAction as jest.Mock).mockImplementation(jest.requireActual('@/services/dashboard/activity-log.service').logAction)
+      try {
+        expect(
+          await svc.handleProbeResultFromSocket({ requestId, disposition: 'NOT_FOUND' }, { socketId: 'socket-a5', terminalId, venueId }),
+        ).toBe(true)
+        await esperarAsiento({ action: 'TERMINAL_PAYMENT_PROBE_UNACCREDITED', requestIdEnData: requestId })
+      } finally {
+        ;(logAction as jest.Mock).mockImplementation(() => undefined)
+      }
+
+      // El núcleo, como lo llama el webhook: con UN solo intento (el del rechazo) sigue sin constar que salió.
+      await expect(
+        reconcileUncharged(
+          { venueId, requestId, actorStaffId: null, source: 'WEBHOOK' },
+          {
+            requestId,
+            resolutionId: randomUUID(),
+            statement: 'BANK_DECLINED',
+            statementVersion: 1,
+            bank: { origen: 'ANGELPAY', eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}` },
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'TERMINAL_NEVER_ANSWERED' })
+      // Y por la puerta del webhook: no cierra.
+      const r = await reconcileBankDeclined({
+        venueId,
+        requestId,
+        origen: 'ANGELPAY',
+        evidencia: { eventLogId: `evt-${randomUUID()}`, attemptId: `att-${requestId}`, codigo: '05' },
+      })
+      expect(r).toEqual({ closed: false, reason: 'NOT_ELIGIBLE' })
+      expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })).toMatchObject({
+        status: 'UNKNOWN',
+        failureCode: 'ACK_TIMEOUT',
+      })
+
+      // La persona que miró la pantalla sí puede declarar.
+      await expect(reconcileUncharged(comoCajero(requestId), cuerpo(requestId))).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    })
+
+    it('P1 Fix1: el PIN de un gerente DADO DE BAJA o de alguien SIN el permiso no autoriza: 403, sin lápida ni liberación', async () => {
+      for (const pin of [PIN_GERENTE_INACTIVO, PIN_MESERO_CON_PIN]) {
+        // Sobre una solicitud que no existe: no deja lápida.
+        const sinFila = randomUUID()
+        await expect(declararPorElPos(sinFila, staffMeseroId, { supervisorPin: pin })).rejects.toMatchObject({
+          code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+          statusCode: 403,
+        })
+        expect(await filasDe(sinFila)).toHaveLength(0)
+        // Sobre una fila elegible: no la libera.
+        const requestId = await sembrarFilaAtorada()
+        await expect(reconcileUncharged(comoMesero(requestId), cuerpo(requestId, { supervisorPin: pin }))).rejects.toMatchObject({
+          code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+          statusCode: 403,
+        })
+        expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { requestId } })).toMatchObject({
+          status: 'UNKNOWN',
+          operatorReconciliation: null,
+        })
+        await prisma.terminalPaymentRequest.deleteMany({ where: { requestId } })
+      }
+      // CONTROL: el PIN de un gerente activo SÍ deja la lápida, a su nombre y con quién operaba el POS.
+      const conGerente = randomUUID()
+      await expect(declararPorElPos(conGerente, staffMeseroId, { supervisorPin: PIN_GERENTE })).resolves.toMatchObject({ released: true })
+      expect((await filasDe(conGerente))[0].operatorReconciliation).toMatchObject({
+        staffId: staffGerenteId,
+        by: 'SUPERVISOR_PIN',
+        sessionStaffId: staffMeseroId,
+        tombstone: true,
+      })
+    })
+
+    it('P1 E3: sin permiso ni PIN NO se crea lápida (403)', async () => {
+      const requestId = randomUUID()
+      await expect(declararPorElPos(requestId, staffMeseroId)).rejects.toMatchObject({ statusCode: 403 })
+      expect(await filasDe(requestId)).toHaveLength(0)
+    })
+
+    it('P1 E3: con el PIN de un gerente de OTRO venue NO se crea lápida', async () => {
+      const requestId = randomUUID()
+      await expect(declararPorElPos(requestId, staffMeseroId, { supervisorPin: PIN_OTRO_VENUE })).rejects.toMatchObject({
+        code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+        statusCode: 403,
+      })
+      expect(await filasDe(requestId)).toHaveLength(0)
+    })
+
+    it('P1 E3: carrera lápida contra admisión: gana una y la otra relee', async () => {
+      const requestId = randomUUID()
+      const terminalDeLaCarrera = `${terminalId}-r`.slice(0, 40)
+      // La ADMISIÓN del POST inserta su fila y todavía no confirma: la declaración no la ve al buscar, intenta su lápida, choca
+      // con la llave única y espera. Cuando la admisión confirma, la lápida no entra y la declaración RELEE: sigue el camino
+      // normal sobre la fila viva, que todavía no sale hacia la terminal (procedencia `[]` ⇒ TERMINAL_NEVER_ANSWERED, lo mismo
+      // que contesta hoy sobre una PENDING). Nunca dos filas, nunca un error de transacción abortada.
+      let soltar!: () => void
+      const retenida = new Promise<void>(r => (soltar = r))
+      let avisar!: (pid: number) => void
+      const insertada = new Promise<number>(r => (avisar = r))
+      const admision = prisma.$transaction(
+        async tx => {
+          await tx.terminalPaymentRequest.create({
+            data: {
+              requestId,
+              venueId,
+              terminalId: terminalDeLaCarrera,
+              status: 'PENDING',
+              amountCents: 6500,
+              tipCents: 975,
+              expiresAt: new Date(Date.now() + 5 * 60_000),
+              deliveryProvenance: { deliveries: [] },
+            },
+          })
+          const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`
+          avisar(Number(pid))
+          await retenida
+        },
+        { timeout: 30_000 },
+      )
+      const pidDeLaAdmision = await insertada
+      const declaracion = reconcileUncharged(comoCajero(requestId), cuerpo(requestId)).then(
+        () => 'DECLARADA',
+        (e: UnchargedReconciliationError) => e.code,
+      )
+      // Se COMPRUEBA el cruce en Postgres (no se supone por tiempos): el INSERT de la lápida espera a la admisión.
+      const espera = await esperarBloqueado(prisma, {
+        bloqueadoPor: [pidDeLaAdmision],
+        consulta: /INSERT INTO "public"\."TerminalPaymentRequest"/,
+      })
+      soltar()
+      expect(espera).not.toBeNull()
+      await admision
+      expect(await declaracion).toBe('TERMINAL_NEVER_ANSWERED')
+      const filas = await filasDe(requestId)
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ status: 'PENDING', amountCents: 6500, operatorReconciliation: null })
     })
   })
 })

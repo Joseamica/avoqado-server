@@ -16,6 +16,7 @@
  * Consecuencia asumida y declarada: una solicitud con `ACTIVE` sin desmentir **no se puede declarar**, ni
  * siquiera pasado mucho tiempo. Es el lado seguro: quien la destrabe tendrá que conseguir que la terminal
  * conteste, no esperar a que el reloj le dé la razón.
+ * Con una excepción, por compatibilidad con las TPV publicadas: ver `sondaVetaLaDeclaracion`.
  */
 
 /**
@@ -54,4 +55,22 @@ export function sondaReportoActiva(
   if (!resuelta) return true
   // Sólo una respuesta posterior al ACTIVE lo levanta.
   return resuelta.getTime() <= activa.getTime()
+}
+
+/**
+ * ¿El ACTIVE veta que una PERSONA declare «no se cobró»?
+ *
+ * 🔴 Compatibilidad (Codex, versiones viejas, 3-nov): la TPV publicada contesta ACTIVE mientras su intento siga en duda, y
+ * espera NOT_CHARGED para soltarlo; no sabe certificar el cese. Antes la ventana de 30 s cerraba esa venta sola; desde A8, sin
+ * aviso comprobado del banco, sólo suelta la ranura. Con esa TPV y la ranura ya suelta, el veto dejaba la venta sin poder
+ * declararse nunca. Su ACTIVE deja de vetar SÓLO ahí: la TPV que sí sabe certificar, y la ranura apartada, siguen igual.
+ */
+export function sondaVetaLaDeclaracion(
+  row: Parameters<typeof sondaReportoActiva>[0] & { deliveryProvenance?: unknown },
+  ranuraYaSuelta: boolean,
+): boolean {
+  if (!sondaReportoActiva(row)) return false
+  if (!ranuraYaSuelta) return true
+  const entregas = (row.deliveryProvenance as { deliveries?: { executionVersion?: number }[] } | null)?.deliveries
+  return Array.isArray(entregas) && entregas.some(e => Number(e?.executionVersion) >= 1)
 }

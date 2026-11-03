@@ -25,6 +25,12 @@ describe('angelpayValidators', () => {
   })
 
   describe('isNumericMerchantId', () => {
+    it.each(['1', '2147483647', '00001'])('accepts SDK id %s', value => {
+      expect(isNumericMerchantId(value)).toBe(true)
+    })
+    it.each(['0', '000', '-1', '+1', '2147483648', '99999999999999999999999999', ' 1', '1 ', '1.0'])('rejects SDK id %s', value => {
+      expect(isNumericMerchantId(value)).toBe(false)
+    })
     it('accepts a non-empty numeric string', () => {
       expect(isNumericMerchantId('9814275')).toBe(true)
     })

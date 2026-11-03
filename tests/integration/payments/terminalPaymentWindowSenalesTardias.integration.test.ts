@@ -50,6 +50,9 @@ let otra: { id: string; serialNumber: string }
 beforeAll(async () => {
   exigirBaseDesechable()
   f = await crearFixture('vsenales')
+  // A8 (21-oct): estas pruebas parten de una solicitud que la ventana LIBERÓ («no se cobró»), y eso sólo pasa donde el aviso del
+  // banco está comprobado (el caso de Testarudo). Sin esto la ventana soltaría sólo la ranura.
+  await f.conAvisoDelBancoComprobado()
   duena = await prisma.staff.create({
     data: {
       email: `${f.fixture}-duena@example.test`,
@@ -784,6 +787,142 @@ const evidencia = async (args: { id: string; orderId: string; requestId: string;
     },
     select: { id: true },
   })
+
+describe('D9 · colisión tardía identificada sólo por la llave del intento', () => {
+  async function registrarColision(ventaId: string, attemptId: string) {
+    const referencia = `REF-${randomUUID().slice(0, 12)}`
+    await cobroPrevioQueContradice(ventaId, referencia)
+    const vinculo = await exigir(prisma.terminalPaymentAttemptLink.findUnique({ where: { attemptId } }))
+    await prisma.terminalPaymentAttemptLink.delete({ where: { attemptId } })
+    // El vínculo llega después del COMMIT real de la colisión: con él ya publicado la referencia legacy es otro cargo.
+    const transaccionReal = prisma.$transaction.bind(prisma)
+    const llegadaDelVinculo = jest.spyOn(prisma, '$transaction').mockImplementation((async (...args: any[]) => {
+      const resultado = await (transaccionReal as any)(...args)
+      if (resultado?.status === 'PENDING' && resultado?.idempotencyKey === attemptId) {
+        await prisma.terminalPaymentAttemptLink.create({
+          data: {
+            attemptId,
+            requestId: vinculo.requestId,
+            venueId: vinculo.venueId,
+            terminalId: vinculo.terminalId,
+          },
+        })
+      }
+      return resultado
+    }) as any)
+    let respuesta: Awaited<ReturnType<typeof recordOrderPayment>>
+    try {
+      respuesta = await recordOrderPayment(
+        f.venueId,
+        ventaId,
+        { ...f.registroDeLaTerminal({ attemptId, ref: referencia }), authorizationNumber: null },
+        duena.id,
+      )
+    } finally {
+      llegadaDelVinculo.mockRestore()
+    }
+    const pago = await exigir(prisma.payment.findUnique({ where: { id: respuesta.id } }))
+    expect(pago).toMatchObject({ status: 'PENDING', idempotencyKey: attemptId, terminalPaymentRequestId: null })
+    expect(pago.processorData).toMatchObject({ reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION' } })
+    expect(pago.processorData).not.toHaveProperty('terminalPaymentRequestId')
+    return pago
+  }
+
+  it('D9 REST resuelve el vínculo exacto sin puntero y re-retiene antes de responder', async () => {
+    const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
+    const pago = await registrarColision(venta.id, attemptId)
+    const r = await retenida(solicitud.requestId, venta.id)
+    expect(r.paymentId).toBeNull()
+    expect(r.resultJson).toMatchObject({ referenceCollisionAfterRelease: { paymentId: pago.id, origen: 'REST' } })
+    expect(await asientos(r.id, COLISION)).toHaveLength(1)
+  })
+
+  it('D9 gancho diferido: watchdog recoge la llave fuera de 30 min y audita exactamente una vez sin inventar cobrado', async () => {
+    const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
+    const diferida = jest.spyOn(terminalPaymentService, 'retenerSolicitudLiberadaPorColisionDeReferencia').mockResolvedValueOnce('DEFERRED')
+    let pagoId: string
+    try {
+      pagoId = (await registrarColision(venta.id, attemptId)).id
+      expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW' })
+    } finally {
+      diferida.mockRestore()
+    }
+    await envejecer(solicitud.id, 45)
+    const barrido = await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(barrido.heldWithoutPayment).toBeGreaterThanOrEqual(1)
+    const r = await retenida(solicitud.requestId, venta.id)
+    expect(r).toMatchObject({ paymentId: null, status: 'TIMED_OUT' })
+    expect(r.resultJson).toMatchObject({ referenceCollisionAfterRelease: { paymentId: pagoId!, origen: 'BARRIDO_SENALES' } })
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await asientos(r.id, COLISION)).toHaveLength(1)
+    expect(await exigir(prisma.payment.findUnique({ where: { id: pagoId! } }))).toMatchObject({
+      status: 'PENDING',
+      terminalPaymentRequestId: null,
+    })
+  })
+
+  it('D9 control: otra llave ligada a otra solicitud no retiene ésta', async () => {
+    const { solicitud, venta } = await liberadaPorLaVentana()
+    const ajena = await f.solicitud({
+      orderId: null,
+      terminalId: otra.serialNumber,
+      status: 'FAILED',
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+    })
+    const intentoAjeno = randomUUID()
+    await prisma.terminalPaymentAttemptLink.create({
+      data: { attemptId: intentoAjeno, requestId: ajena.requestId, venueId: f.venueId, terminalId: otra.serialNumber },
+    })
+    await registrarColision(venta.id, intentoAjeno)
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', paymentId: null })
+    expect(await asientos(solicitud.id, COLISION)).toHaveLength(0)
+  })
+
+  it('D9 control: la llave propia con evidencia de otra terminal no retiene la venta', async () => {
+    const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
+    await prisma.payment.create({
+      data: {
+        venueId: f.venueId,
+        orderId: venta.id,
+        source: 'TPV',
+        terminalId: otra.id,
+        amount: 100,
+        method: 'CREDIT_CARD',
+        status: 'PENDING',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: 100,
+        idempotencyKey: attemptId,
+        processorData: { reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION' } },
+      },
+    })
+    await terminalPaymentService.reconcileUnknownRequests(new Date())
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', paymentId: null })
+    expect(await asientos(solicitud.id, COLISION)).toHaveLength(0)
+  })
+
+  it('D9 control: una invocación de otro venue no modifica la solicitud', async () => {
+    const { solicitud, venta, attemptId } = await liberadaPorLaVentana()
+    const diferida = jest.spyOn(terminalPaymentService, 'retenerSolicitudLiberadaPorColisionDeReferencia').mockResolvedValueOnce('DEFERRED')
+    let pagoId: string
+    try {
+      pagoId = (await registrarColision(venta.id, attemptId)).id
+    } finally {
+      diferida.mockRestore()
+    }
+    expect(
+      await terminalPaymentService.retenerSolicitudLiberadaPorColisionDeReferencia({
+        requestId: solicitud.requestId,
+        venueId: 'otro-venue',
+        paymentId: pagoId!,
+        capturedBySerial: f.serial,
+        origen: 'REST',
+      }),
+    ).toBe('NOT_APPLICABLE')
+    expect(await fila(solicitud.requestId)).toMatchObject({ status: 'FAILED', failureCode: 'NO_EVIDENCE_AFTER_WINDOW', paymentId: null })
+  })
+})
 
 describe('Ronda 5 · P1-B: el selector surfacea TODAS las evidencias acotadas, no sólo la primera', () => {
   it('🔴 la secuencia de Codex: E1 ajena PRIMERO + E2 legítima ⇒ la red retiene por E2, y la ajena sigue gritando una vez', async () => {

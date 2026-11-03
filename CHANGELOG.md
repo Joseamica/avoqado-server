@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- AngelPay: las respuestas JSON HTTP omiten la clave de firma del webhook, también en cuentas anidadas, sin modificar sus datos persistidos ni las credenciales SDK solicitadas.
+
 - Wallet: el servidor abre los sellos de los negocios al arrancar, antes de abrir el puerto (`precalentarSellos`). La primera tarjeta de Apple, actualización de passkit o franja de Google tras cada despliegue ya no congela el hilo 1-3 s (3,088 ms el 21-oct-2026, alerta «Server congelado ≥3 s»). Nunca tumba el arranque y tiene tope de 15 s.
 - Lealtad: anular una venta sin cobrar le devuelve al cliente su premio de sellos y sus puntos canjeados, por cualquier camino (POS, «Cerrar sin cobrar» y «Eliminar» del panel, editar el estado, anular todo en la terminal, vales, rechazar/vencer/cancelar un pedido en línea, MCP y la cola sin red). Hace con cada canje lo mismo que «quitar el descuento»: el descuento sale de la venta, así que un reintento, un «quitar descuento» tardío o un cobro capturado que la reviva nunca regalan el beneficio dos veces. Una venta anulada ya no acepta canjes nuevos, y la limpieza automática anula (en vez de borrar) una venta vacía que traía canjes. Nueva entrada de bitácora `ORDER_CANCEL_LOYALTY_RETURNED`. Sin migraciones.
 
@@ -49,6 +51,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   servidor rechazaba (Testarudo, 17-sep: cinco 400 y el reembolso 4.7 h después por otro camino). Nada se quita del contrato.
 
 ### Added
+
+- Cobros POS → TPV: la terminal declara «no se cobró» desde su banner con `POST /tpv/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration`, la misma declaración, con las mismas puertas y el mismo núcleo que la del POS; la bitácora dice `source: TPV` y, a diferencia del POS, esta ruta nunca libera a secas.
 
 - **Ventana de confirmación de 30 s para negativos sin evidencia (`NO_EVIDENCE_AFTER_WINDOW`), aprobación tardía con alarma y
   correo, declaración del cajero sin PIN con permiso (`payments:resolve-no-instrument`) — cobro remoto, 16-sep-2026.** Plan:

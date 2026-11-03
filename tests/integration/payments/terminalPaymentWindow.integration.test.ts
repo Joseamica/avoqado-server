@@ -55,7 +55,38 @@ beforeAll(async () => {
     },
   })
   orderId = order.id
+  // A8 (21-oct): la ventana sólo escribe «no se cobró» donde el aviso del banco de TODAS las cuentas con las que pudo cobrar la
+  // terminal está comprobado; si no, suelta sólo la ranura. Estas pruebas fijan el caso de Testarudo (aviso comprobado): una cuenta
+  // AngelPay del negocio, activa y con avisos recibidos (sin cobros con tarjeta suyos), asignada a las terminales de sus filas.
+  const angelpay = await prisma.paymentProvider.upsert({
+    where: { code: 'ANGELPAY' },
+    update: {},
+    create: { code: 'ANGELPAY', name: 'AngelPay', type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+  })
+  const acceso = await prisma.angelPayUserAccount.create({
+    data: { venueId, email: `${fixture}@angelpay.test`, environment: 'QA', status: 'ACTIVE' },
+  })
+  const cuenta = await prisma.merchantAccount.create({
+    data: {
+      providerId: angelpay.id,
+      externalMerchantId: `${fixture}-aviso`,
+      alias: 'AngelPay con aviso comprobado',
+      credentialsEncrypted: {},
+      angelpayUserAccountId: acceso.id,
+      angelpayWebhookLastReceivedAt: new Date(Date.now() - 60_000),
+    },
+  })
+  avisoComprobado = { cuentaId: cuenta.id, accesoId: acceso.id }
+  for (const serial of [fixture, ...[0, 1, 2, 3, 4, 5].map(i => `${fixture}-m${i}`)]) {
+    await prisma.terminal.upsert({
+      where: { serialNumber: serial },
+      update: { assignedMerchantIds: [cuenta.id] },
+      create: { venueId, name: 'fixture terminal', serialNumber: serial, type: 'TPV_ANDROID', assignedMerchantIds: [cuenta.id] },
+    })
+  }
 })
+/** A8: la cuenta AngelPay con el aviso comprobado que siembra `beforeAll` (se borra en `afterAll`). */
+let avisoComprobado: { cuentaId: string; accesoId: string } | undefined
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -89,6 +120,10 @@ afterAll(async () => {
   await prisma.activityLog.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.terminal.deleteMany({ where: { venueId } })
+  if (avisoComprobado) {
+    await prisma.merchantAccount.deleteMany({ where: { id: avisoComprobado.cuentaId } })
+    await prisma.angelPayUserAccount.deleteMany({ where: { id: avisoComprobado.accesoId } })
+  }
   await prisma.venue.deleteMany({ where: { id: venueId } })
   await prisma.organization.deleteMany({ where: { id: fixture } })
 })
@@ -2500,5 +2535,184 @@ describe('Revisión final · A: la tablet espera a la ventana y recibe su desenl
     expect(http.body).not.toHaveProperty('terminalResult')
     expect((await filasDe(requestId))[0]).toMatchObject({ status: 'UNKNOWN' })
     expect(esperas().has(requestId)).toBe(false)
+  })
+})
+
+/**
+ * B0-1 (20-oct, «ninguna duda de un cobro de la tablet sin salida»): UN SOLO juego de vetos de dinero. La ventana miraba MENOS que
+ * la declaración del cajero: sólo el APROBADO del venue propio y el Payment COMPLETED ligado. Le faltaban la contradicción de
+ * procedencia (un aprobado del MISMO intento recibido bajo OTRO negocio, `LINK_VENUE_MISMATCH`, que no crea Payment) y la evidencia
+ * de conciliación (el Payment PENDING `POSSIBLE_SECOND_CAPTURE` / `POSSIBLE_REFERENCE_COLLISION`): con cualquiera de las dos la
+ * ventana liberaba a los 30 s y el POS decía «puedes volver a cobrar» con dinero de por medio.
+ */
+describe('B0-1 · la ventana mira los MISMOS vetos de dinero que la declaración del cajero', () => {
+  const otroVenueId = `${fixture}-otro`
+  const vencida = () => new Date(Date.now() - UNPROVEN_NEGATIVE_WINDOW_MS - 1_000)
+  const conVinculo = async () => {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: vencida() })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    return { row, attemptId }
+  }
+  /** El aprobado del MISMO intento que el webhook recibió bajo OTRO negocio: queda ERROR/LINK_VENUE_MISMATCH y no nace Payment. */
+  const aprobadoEnOtroVenue = (attemptId: string) =>
+    prisma.providerEventLog.create({
+      data: {
+        ...eventoAprobado(attemptId, `tx-${randomUUID().slice(0, 8)}`),
+        venueId: otroVenueId,
+        status: 'ERROR',
+        errorReason: 'LINK_VENUE_MISMATCH',
+      },
+    })
+  const liberaciones = (id: string) =>
+    prisma.activityLog.count({ where: { venueId, action: 'TERMINAL_PAYMENT_RELEASED_AFTER_WINDOW', entityId: id } })
+  const retenciones = (id: string) =>
+    prisma.activityLog.findMany({ where: { venueId, action: 'TERMINAL_PAYMENT_WINDOW_HELD_BY_UNBOUND_PAYMENT', entityId: id } })
+
+  beforeAll(async () => {
+    await prisma.venue.create({ data: { id: otroVenueId, organizationId: fixture, name: otroVenueId, slug: otroVenueId } })
+  })
+  afterEach(async () => {
+    await prisma.providerEventLog.deleteMany({ where: { venueId: otroVenueId } })
+  })
+  afterAll(async () => {
+    await prisma.venue.deleteMany({ where: { id: otroVenueId } })
+  })
+
+  it('P1 la ventana NO libera si el aprobado del intento cayó en OTRO venue (LINK_VENUE_MISMATCH)', async () => {
+    const { row, attemptId } = await conVinculo()
+    await aprobadoEnOtroVenue(attemptId)
+    const r = await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')
+    expect(r).not.toBe('RELEASED')
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', paymentId: null })
+    expect(await liberaciones(row.id)).toBe(0)
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    // Se RETIENE con el mismo marcador y asiento que un Payment sin ligar (revisión humana), UNA vez.
+    expect(r).toBe('HELD_BY_UNBOUND_PAYMENT')
+    expect(fila.failureCode).toBe('PAYMENT_UNBOUND_AWAITING_REVIEW')
+    const asientos = await retenciones(row.id)
+    expect(asientos).toHaveLength(1)
+    expect(asientos[0].data).toMatchObject({ requestId: row.requestId, reason: 'PROVENANCE_CONTRADICTION', origen: 'WATCHDOG' })
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
+    expect(await retenciones(row.id)).toHaveLength(1)
+    // Fix round 1: a los 20 min el aviso dice QUÉ la retuvo — no un «Payment ligado» que no existe.
+    await conUpdatedAt(fila, new Date(Date.now() - 21 * 60_000))
+    ;(sendOpsAlert as jest.Mock).mockClear()
+    await terminalPaymentService.releaseUnprovenNegativesAfterWindow(new Date())
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1)
+    const correo = (sendOpsAlert as jest.Mock).mock.calls[0][0] as { subject: string; lines: string[] }
+    const texto = `${correo.subject} ${correo.lines.join(' ')}`
+    expect(texto).toContain('el banco aprobó ese intento en otro negocio o terminal')
+    expect(texto).toContain('revisar en el procesador antes de cobrar otra vez')
+    expect(texto).not.toContain('Payment ligado')
+  })
+
+  it('P1 la ventana NO libera con un Payment PENDING de conciliación (POSSIBLE_SECOND_CAPTURE)', async () => {
+    const row = await auditRequest({ ...negativoSinEvidencia(), updatedAt: vencida() })
+    await auditPayment({
+      status: 'PENDING',
+      terminalPaymentRequestId: row.requestId,
+      processorData: { deviceSerialNumber: fixture, reconciliation: { kind: 'POSSIBLE_SECOND_CAPTURE', requestId: row.requestId } },
+    })
+    const r = await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')
+    expect(r).not.toBe('RELEASED')
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', paymentId: null })
+    expect(await liberaciones(row.id)).toBe(0)
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    expect(r).toBe('HELD_BY_UNBOUND_PAYMENT')
+    expect(fila.failureCode).toBe('PAYMENT_UNBOUND_AWAITING_REVIEW')
+    const asientos = await retenciones(row.id)
+    expect(asientos).toHaveLength(1)
+    expect(asientos[0].data).toMatchObject({ requestId: row.requestId, reason: 'RECONCILIATION_EVIDENCE' })
+  })
+
+  // Fix round 1 (ruling del controlador): B0-1 aplica a TODO «no se cobró», también al negativo ACREDITADO de la terminal
+  // (`cerrarConNegativo`), cuyo CAS sólo miraba el APROBADO propio. Con evidencia de dinero no se cierra FAILED: se degrada a la
+  // ventana (TIMED_OUT con el sobre de la terminal) y la ventana la retiene, como ya hace con una aprobación conocida.
+  const declinada = (requestId: string) =>
+    terminalPaymentService.handlePaymentResultFromSocket(
+      { requestId, status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED', errorMessage: 'Declinada por el banco' },
+      { socketId: 'fixture-socket', terminalId: fixture, venueId },
+    )
+  const quedaEnLaVentanaYSeRetiene = async (id: string, motivo: string) => {
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id } })
+    expect(fila.status).not.toBe('FAILED')
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
+    expect((fila.resultJson as any).status).toBe('timeout')
+    expect((fila.resultJson as any).terminalResult).toMatchObject({ status: 'failed', outcomeEvidence: 'PROCESSOR_DECLINED' })
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    await conUpdatedAt(fila, vencida())
+    expect(await terminalPaymentService.releaseUnprovenNegative(fila.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_UNBOUND_PAYMENT')
+    expect((await retenciones(id))[0].data).toMatchObject({ reason: motivo })
+  }
+
+  it('P1 un negativo ACREDITADO de la terminal con un Payment PENDING de conciliación NO cierra «no se cobró»', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    await auditPayment({
+      status: 'PENDING',
+      terminalPaymentRequestId: row.requestId,
+      processorData: { deviceSerialNumber: fixture, reconciliation: { kind: 'POSSIBLE_SECOND_CAPTURE', requestId: row.requestId } },
+    })
+    await declinada(row.requestId)
+    await quedaEnLaVentanaYSeRetiene(row.id, 'RECONCILIATION_EVIDENCE')
+  })
+
+  it('P1 un negativo ACREDITADO de la terminal con un aprobado del intento en OTRO venue NO cierra «no se cobró»', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    await aprobadoEnOtroVenue(attemptId)
+    await declinada(row.requestId)
+    await quedaEnLaVentanaYSeRetiene(row.id, 'PROVENANCE_CONTRADICTION')
+  })
+
+  // Codex servidor r1 · F1 (21-oct): la colisión de referencia guardada con la llave del intento y SIN puntero a la solicitud
+  // (el vínculo llegó después) no la veía el veto único; la declaración del cajero sí la rechazaba. Ahora la ven todos.
+  const colisionPorLaLlave = (attemptId: string) =>
+    auditPayment({
+      status: 'PENDING',
+      idempotencyKey: attemptId,
+      processorData: { deviceSerialNumber: fixture, reconciliation: { kind: 'POSSIBLE_REFERENCE_COLLISION' } },
+    })
+
+  it('F1 la ventana NO libera con un Payment PENDING de colisión identificado SÓLO por la llave del intento', async () => {
+    const { row, attemptId } = await conVinculo()
+    await colisionPorLaLlave(attemptId)
+    const r = await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')
+    expect(r).toBe('HELD_BY_UNBOUND_PAYMENT')
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: 'PAYMENT_UNBOUND_AWAITING_REVIEW', paymentId: null })
+    expect(await liberaciones(row.id)).toBe(0)
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)).toBe(true)
+    expect((await retenciones(row.id))[0].data).toMatchObject({ requestId: row.requestId, reason: 'RECONCILIATION_EVIDENCE' })
+  })
+
+  it('F1 un negativo ACREDITADO de la terminal con esa colisión por la llave NO cierra «no se cobró»: se degrada a la ventana', async () => {
+    const row = await auditRequest({ status: 'SENT' })
+    const attemptId = `att-${randomUUID()}`
+    await prisma.terminalPaymentAttemptLink.create({ data: { attemptId, requestId: row.requestId, venueId, terminalId: fixture } })
+    await colisionPorLaLlave(attemptId)
+    await declinada(row.requestId)
+    await quedaEnLaVentanaYSeRetiene(row.id, 'RECONCILIATION_EVIDENCE')
+  })
+
+  it('P1 un aprobado de OTRO venue que se persiste por fuera ENTRE la lectura de los vetos y el CAS ⇒ el CAS lo veta (NOT_ELIGIBLE, nada escrito) y la siguiente pasada la retiene', async () => {
+    const { row, attemptId } = await conVinculo()
+    // El INSERT del evento de otro negocio no toma ningún candado: cabe entre la lectura de los vetos y el UPDATE.
+    const spy = interceptarSiguienteTx('"contradiccionDeProcedencia"', async () => {
+      await aprobadoEnOtroVenue(attemptId)
+    })
+    try {
+      expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('NOT_ELIGIBLE')
+    } finally {
+      spy.mockRestore()
+    }
+    const fila = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(fila).toMatchObject({ status: 'TIMED_OUT', failureCode: null, paymentId: null })
+    expect(fila.updatedAt.getTime()).toBe(row.updatedAt.getTime()) // sólo el veto del CAS pudo frenarla
+    expect(await liberaciones(row.id)).toBe(0)
+    expect(await terminalPaymentService.releaseUnprovenNegative(row.requestId, venueId, 'WATCHDOG')).toBe('HELD_BY_UNBOUND_PAYMENT')
   })
 })

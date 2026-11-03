@@ -89,6 +89,10 @@ router.post('/full-setup-angelpay', merchantAccountController.fullSetupAngelPayM
 // doesn't capture "verify-apikey" as an :id.
 router.post('/verify-apikey', merchantAccountController.verifyAngelPayApiKey)
 
+// POST /api/v1/superadmin/merchant-accounts/:id/angelpay/webhook
+// Da de alta el aviso del banco de una cuenta AngelPay SIN secreto. Con secreto contesta «ya tiene», sin tocar nada ni llamar a nadie.
+router.post('/:id/angelpay/webhook', merchantAccountController.registerAngelPayWebhook)
+
 // POST /api/v1/superadmin/merchant-accounts/:id/blumon/refetch
 // Rotate OAuth/RSA/DUKPT credentials from Blumon for an EXISTING MerchantAccount.
 // Preserves account id + all linked Payment/Settlement history. If Blumon API

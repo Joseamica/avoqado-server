@@ -30,6 +30,7 @@ import * as syncTpvController from '../controllers/tpv/sync.tpv.controller'
 import * as tableController from '../controllers/tpv/table.tpv.controller'
 import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
 import * as terminalPaymentTpvController from '../controllers/tpv/terminal-payment.tpv.controller'
+import { declararSinCobroDesdeLaTerminal } from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
 import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
 import * as trainingController from '../controllers/tpv/training.tpv.controller'
@@ -47,7 +48,8 @@ import { MASTER_ADMIN_PRINCIPAL_ID } from '../lib/authPrincipals'
 import { NO_INSTRUMENT_PERMISSION } from '../services/tpv/no-instrument-resolution.service'
 import { noInstrumentPinRateLimiter, pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
-import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
+import { requireVenueMembership, validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
+import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { activateTerminalSchema } from '../schemas/activation.schema'
@@ -3728,6 +3730,91 @@ router.post(
   validateVenueAccess,
   ...noInstrumentPinRateLimiter, // sólo cuenta los cuerpos CON supervisorPin
   terminalPaymentTpvController.resolveNoInstrument,
+)
+
+/**
+ * Por aquí sólo se DECLARA. `permisoDeLiberacion` también deja a un gerente liberar a secas, y eso no le toca a un botón de la terminal:
+ * sin la declaración exacta ni se llega al limitador ni al permiso, así que un cuerpo así tampoco gasta la cubeta del PIN.
+ */
+const exigirDeclaracionSinCobro = (req: Request, res: Response, next: NextFunction) => {
+  if ((req.body as { statement?: unknown } | undefined)?.statement === 'UNCHARGED_VERIFIED') return next()
+  return res.status(400).json({
+    success: false,
+    released: false,
+    code: 'UNCHARGED_STATEMENT_REQUIRED',
+    message: 'Esta ruta sólo acepta la declaración de que el cobro no pasó.',
+  })
+}
+
+/**
+ * @openapi
+ * /api/v1/tpv/venues/{venueId}/terminal-payment/requests/{requestId}/uncharged-declaration:
+ *   post:
+ *     tags: [TPV - Terminal Payment]
+ *     summary: «No se cobró» desde el banner de la terminal (botón del banner verde, 3-nov)
+ *     description: >
+ *       La MISMA declaración de `POST /mobile/venues/{venueId}/terminal-payment/{requestId}/release`, con las mismas puertas y el
+ *       mismo núcleo (`reconcileUncharged`), para un cobro que mandó el POS y quedó en duda. Lo único distinto es el origen: la
+ *       bitácora y la fila dicen `source: TPV`. Una persona revisó y afirma que no se cobró: si el banco avisa después que sí, se
+ *       registra y salta la alerta, como hoy. A diferencia de la ruta del POS no libera a secas: exige `statement`.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [resolutionId, statement, statementVersion]
+ *             properties:
+ *               resolutionId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: La terminal lo deriva de la solicitud; repetir la misma declaración es idempotente
+ *               statement:
+ *                 type: string
+ *                 enum: [UNCHARGED_VERIFIED]
+ *               statementVersion:
+ *                 type: integer
+ *                 enum: [1]
+ *               supervisorPin:
+ *                 type: string
+ *                 description: Sólo cuando la sesión NO tiene `payments:reconcile-uncharged` — el PIN de alguien que sí lo tiene. Nunca se guarda
+ *     responses:
+ *       200:
+ *         description: "{ success, released, status, requestId, paymentId, outcome, outcomeEvidence, resolution, message }. `released: false` = apareció dinero: no se liberó"
+ *       400:
+ *         description: "{ code: UNCHARGED_STATEMENT_REQUIRED } — el cuerpo no trae la declaración; no libera nada"
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: "{ code: SUPERVISOR_AUTHORIZATION_REQUIRED | NOT_ALLOWED } o la negación de `checkPermission`; quien no es del negocio ni llega al limitador"
+ *       404:
+ *         description: "{ code: ATTEMPT_NOT_FOUND } — no acredita nada sobre el cobro"
+ *       409:
+ *         description: "{ code: POSITIVE_EVIDENCE_EXISTS | TERMINAL_NEVER_ANSWERED | EXECUTION_STILL_ACTIVE | RESOLUTION_CONFLICT | ATTEMPT_NOT_ELIGIBLE, message } — el mensaje está escrito para el cajero"
+ *       429:
+ *         description: Demasiados intentos de autorización — sólo cuenta las llamadas CON supervisorPin (mismos topes que el PIN de gerente)
+ */
+router.post(
+  '/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration',
+  authenticateTokenMiddleware,
+  requireVenueMembership, // antes de la cubeta: un token de otro negocio no gasta la del PIN de gerente de éste
+  exigirDeclaracionSinCobro,
+  ...noInstrumentPinRateLimiter, // sólo cuenta los cuerpos CON supervisorPin
+  permisoDeLiberacion,
+  declararSinCobroDesdeLaTerminal,
 )
 
 // ==========================================

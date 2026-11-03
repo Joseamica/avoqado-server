@@ -15,11 +15,13 @@
 import prisma from '@/utils/prismaClient'
 import { createMerchantAccount } from '@/services/superadmin/merchantAccount.service'
 import { assertVenueHasCompatibleTerminal } from '@/lib/providerDeviceCompatibility'
-import { IncompatibleDeviceError, ValidationError } from '@/errors/AppError'
+import { IncompatibleDeviceError } from '@/errors/AppError'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
     paymentProvider: {
       findUnique: jest.fn(),
     },
@@ -54,6 +56,7 @@ const mockedAssert = assertVenueHasCompatibleTerminal as jest.Mock
 describe('createMerchantAccount — device compatibility + AngelPay branch', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma as any).$transaction.mockImplementation((cb: any) => cb(prisma))
     // Default happy paths for plumbing not under test
     mockedPrisma.merchantAccount.findFirst.mockResolvedValue(null)
     mockedPrisma.merchantAccount.create.mockImplementation(async ({ data, include }) => ({
@@ -103,7 +106,7 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
         externalMerchantId: 'not-a-number',
         venueId: 'venue-1',
       } as any),
-    ).rejects.toThrow(/numeric/)
+    ).rejects.toThrow(/dígitos/)
 
     expect(mockedPrisma.merchantAccount.create).not.toHaveBeenCalled()
   })

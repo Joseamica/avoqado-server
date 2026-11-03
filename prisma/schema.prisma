@@ -6116,6 +6116,10 @@ model TerminalPaymentRequest {
   /// La respuesta POSTERIOR de la sonda que resolvió ese intento (RESOLVED / NOT_FOUND / RECEIVED_CANCELLED).
   /// Es lo ÚNICO que levanta el veto de `probeActiveAt`: el transcurso del tiempo no desmiente una ejecución.
   probeResolvedAt         DateTime?
+  /// La TERMINAL acreditó que cerró la ejecución de esta solicitud y no le queda ejecución viva (sonda o disposición del
+  /// cancel con `executionAlive=false` + `closedForExecution=true`, TPV con `terminalPaymentExecutionVersion >= 1`).
+  /// Columna propia por la misma razón que `probeActiveAt`. La escriben A3–A5 de «ninguna duda de un cobro sin salida».
+  executionClosedAt       DateTime?
   expiresAt               DateTime
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt

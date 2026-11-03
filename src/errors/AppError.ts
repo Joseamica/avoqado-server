@@ -208,14 +208,16 @@ export interface TerminalBusyBlockingRequest {
 }
 
 export class TerminalBusyError extends AppError {
-  public details: { blockingRequest: TerminalBusyBlockingRequest; requestId?: string }
+  public details: { blockingRequest: TerminalBusyBlockingRequest; requestId?: string; scope?: 'TERMINAL' | 'ORDER' }
   /**
    * `requestId` = la solicitud RECHAZADA (la del POS), no la que bloquea. Sólo viaja cuando el servidor dejó su
    * lápida (H.5/H.6): es la correlación con la que el POS sabe que ESE cobro no se creó.
+   * `scope` (A5, 20-oct; opcional, aditivo): `TERMINAL` = el APARATO está ocupado; `ORDER` = la VENTA tiene un cobro
+   * pendiente de confirmar (en cualquier terminal). El POS nuevo decide por él qué ofrecer; los viejos lo ignoran.
    */
-  constructor(message: string, blockingRequest: TerminalBusyBlockingRequest, requestId?: string) {
+  constructor(message: string, blockingRequest: TerminalBusyBlockingRequest, requestId?: string, scope?: 'TERMINAL' | 'ORDER') {
     super(message, 409, true, 'TERMINAL_BUSY')
-    this.details = requestId ? { blockingRequest, requestId } : { blockingRequest }
+    this.details = { blockingRequest, ...(requestId ? { requestId } : {}), ...(scope ? { scope } : {}) }
   }
 }
 

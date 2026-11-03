@@ -183,6 +183,16 @@ describe('reconcileUncharged — autorización', () => {
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ statusCode: 403 })
   })
 
+  it('P1 A5 (Codex plan-r1-8): la AUTORIZACIÓN va antes de BUSCAR la fila: un mesero sin PIN no lee ni crea nada', async () => {
+    montar(filaDelIncidente(), MESERO)
+    await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
+      code: 'SUPERVISOR_AUTHORIZATION_REQUIRED',
+      statusCode: 403,
+    })
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentRequest.createMany).not.toHaveBeenCalled()
+  })
+
   it('🔴 la autorización se comprueba ANTES que la elegibilidad: no filtra el estado del cobro', async () => {
     montar(filaDelIncidente({ paymentId: 'pay-9' }), MESERO)
     await expect(reconcileUncharged({ ...identidad, actorStaffId: 'staff-waiter' }, declaracion())).rejects.toMatchObject({
@@ -321,6 +331,45 @@ describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
   it('🔴 pero la SONDA diciendo que el cobro sigue corriendo sigue vetando: eso sí es evidencia', async () => {
     montar(filaDelIncidente({ terminalReturnedAt: null, probeActiveAt: new Date() }), CAJERO, null)
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+  })
+
+  // Codex, versiones viejas (3-nov): la TPV publicada contesta ACTIVE mientras su intento siga en duda y espera NOT_CHARGED para
+  // soltarlo; no sabe certificar el cese. Con la ranura ya suelta, sin esta salida nadie podía declarar esa venta nunca.
+  describe('el ACTIVE de una TPV que no sabe certificar, con la ranura ya suelta', () => {
+    const entregaVieja = { protocol: 'DURABLE', ackVersion: 1, cancelDispositionVersion: 2, probeVersion: 1, at: new Date().toISOString() }
+
+    it.each(['AUTO_RELEASED', 'MANUAL_RELEASE'])('🔴 con %s ya no veta a la persona que miró la terminal', async failureCode => {
+      montar(
+        filaDelIncidente({
+          status: 'TIMED_OUT',
+          failureCode,
+          probeActiveAt: new Date(),
+          deliveryProvenance: { deliveries: [entregaVieja] },
+        }),
+        CAJERO,
+        null,
+      )
+      await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    })
+
+    it('🔴 si la ranura sigue apartada, el ACTIVE sigue vetando', async () => {
+      montar(filaDelIncidente({ probeActiveAt: new Date(), deliveryProvenance: { deliveries: [entregaVieja] } }), CAJERO, null)
+      await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    })
+
+    it('🔴 la TPV que sí sabe certificar sigue vetando: su ACTIVE sin cese significa que de verdad sigue corriendo', async () => {
+      montar(
+        filaDelIncidente({
+          status: 'TIMED_OUT',
+          failureCode: 'AUTO_RELEASED',
+          probeActiveAt: new Date(),
+          deliveryProvenance: { deliveries: [{ ...entregaVieja, executionVersion: 1 }] },
+        }),
+        CAJERO,
+        null,
+      )
+      await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    })
   })
 })
 
