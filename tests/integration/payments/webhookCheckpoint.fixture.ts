@@ -70,7 +70,7 @@ async function purgarFixturesHuerfanos(prefijo: string): Promise<void> {
     await prisma.angelPayUserAccount.deleteMany({ where: { venueId } })
     await prisma.staffVenue.deleteMany({ where: { venueId } })
     await prisma.staffOrganization.deleteMany({ where: { organizationId: id } })
-    await prisma.staff.deleteMany({ where: { email: `${id}-cajero@example.test` } })
+    await prisma.staff.deleteMany({ where: { email: { in: [`${id}-cajero@example.test`, `${id}-backoffice@example.test`] } } })
     await prisma.terminal.deleteMany({ where: { venueId } })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     await prisma.organization.deleteMany({ where: { id } })
@@ -90,6 +90,19 @@ export interface IntentoRest {
   amount?: number
   tip?: number
   tarjeta?: { cardBrand?: string; maskedPan?: string; entryMode?: string; last4?: string; typeOfCard?: string; bank?: string }
+}
+
+/**
+ * Quien edita una verificación de venta es el back-office: un OWNER de verdad en la tienda del fixture (aprueba con
+ * `sale-verifications:approve`). El cajero compartido no aprueba desde A4 y no se le cambia el rol: otras suites dependen de
+ * él. La suite que lo crea borra a la persona después de `destruir()` (que ya se lleva su fila de la tienda).
+ */
+export async function crearBackOffice(f: { fixture: string; venueId: string }): Promise<string> {
+  const staff = await prisma.staff.create({
+    data: { email: `${f.fixture}-backoffice@example.test`, firstName: 'Back', lastName: 'Office', active: true },
+  })
+  await prisma.staffVenue.create({ data: { staffId: staff.id, venueId: f.venueId, role: 'OWNER', active: true } })
+  return staff.id
 }
 
 export async function crearFixture(prefijo: string) {

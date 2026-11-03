@@ -127,7 +127,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow, { requireLinkingNumber: false })
 
     expect(result).toMatchObject({ ok: true, saleStatus: 'REJECTED' })
     const svData = svDataOf(tx)
@@ -146,7 +146,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow)
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow, { requireLinkingNumber: false })
 
     // Ésta es la razón de ser de la tarea: hoy el dashboard sigue diciendo que
     // el SIM lo tiene el supervisor. Marcarlo vendido es lo que arregla eso.
@@ -163,7 +163,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow)
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow, { requireLinkingNumber: false })
 
     const orderData = (tx.order.create as jest.Mock).mock.calls[0][0].data
     expect(orderData.posRawData).toMatchObject({ manualSerializedSale: true, manualSaleStatus: 'REJECTED' })
@@ -174,7 +174,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow)
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow, { requireLinkingNumber: false })
 
     expect(logActionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -193,7 +193,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, { ...rejectedRow, saleStatus: raw })
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, { ...rejectedRow, saleStatus: raw }, { requireLinkingNumber: false })
 
     expect(svDataOf(tx).status).toBe('REJECTED')
   })
@@ -203,7 +203,12 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, { ...rejectedRow, rejectionNote: undefined })
+    const result = await createOneManualSale(
+      ORG_ID,
+      ACTOR_STAFF_ID,
+      { ...rejectedRow, rejectionNote: undefined },
+      { requireLinkingNumber: false },
+    )
 
     expect(result.ok).toBe(true)
     expect(svDataOf(tx).reviewNotes).toBeNull()
@@ -214,7 +219,12 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, { ...rejectedRow, saleStatus: 'Pendiente' })
+    const result = await createOneManualSale(
+      ORG_ID,
+      ACTOR_STAFF_ID,
+      { ...rejectedRow, saleStatus: 'Pendiente' },
+      { requireLinkingNumber: false },
+    )
 
     // Nunca asumir "aprobada" ante un valor raro: filtraría a Walmart una venta
     // que el operador quiso marcar como perdida.
@@ -229,11 +239,16 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, {
-      ...rejectedRow,
-      saleStatus: 'Aprobada',
-      rejectionNote: 'texto que no aplica',
-    })
+    await createOneManualSale(
+      ORG_ID,
+      ACTOR_STAFF_ID,
+      {
+        ...rejectedRow,
+        saleStatus: 'Aprobada',
+        rejectionNote: 'texto que no aplica',
+      },
+      { requireLinkingNumber: false },
+    )
 
     const svData = svDataOf(tx)
     expect(svData.status).toBe('COMPLETED')
@@ -249,7 +264,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const legacyRow: ManualSaleRowInput = { ...rejectedRow }
     delete legacyRow.saleStatus
     delete legacyRow.rejectionNote
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, legacyRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, legacyRow, { requireLinkingNumber: false })
 
     expect(result).toMatchObject({ ok: true, saleStatus: 'COMPLETED' })
     expect(svDataOf(tx).status).toBe('COMPLETED')
@@ -261,7 +276,7 @@ describe('manualSale — venta RECHAZADA subida fuera del TPV', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow)
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, rejectedRow, { requireLinkingNumber: false })
 
     const payData = (tx.payment.create as jest.Mock).mock.calls[0][0].data
     expect(new Prisma.Decimal(payData.amount).toString()).toBe('0')
@@ -283,6 +298,7 @@ describe('manualSale — bulk con estatus por fila', () => {
       ACTOR_STAFF_ID,
       [rejectedRow, { ...rejectedRow, iccid: '8952140064479469126F', saleStatus: 'Aprobada' }],
       false,
+      { requireLinkingNumber: false },
     )
 
     expect(result.crear).toHaveLength(2)
@@ -299,6 +315,7 @@ describe('manualSale — bulk con estatus por fila', () => {
         { ...rejectedRow, iccid: '8952140064479469127F' },
       ],
       false,
+      { requireLinkingNumber: false },
     )
 
     expect(result.error).toHaveLength(1)

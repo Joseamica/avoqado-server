@@ -93,4 +93,10 @@ export const DATABASE_JOB_SCHEDULES = {
   // trabaja de 8:30 a 11:00 — la primera vuelta manda y las demás retoman lo que quedó a medias. Segundo :33, libre entre
   // el watchdog de catálogo (:32) y las altas a medio pago (:34, cada 10 min).
   crmDailyDigest: '33 */15 8-11 * * 1-5',
+  // «Por cobrar» (SUPERADMIN): el correo diario al founder y, una vez al día por proceso, la generación de las fechas por cobrar de
+  // todos los cobros. Cada 15 min todo el día (CDMX): el servicio sólo manda desde las 9:00 y a cualquier hora termina lo que un
+  // proceso muerto dejó a medias. Sólo trabaja en producción o, fuera de ella, con PLATFORM_CHARGES_SANDBOX=true: en un servidor local
+  // sin la bandera la vuelta no hace nada. Segundo :39, libre en todo este archivo (en `origin/develop` y en los demás worktrees
+  // también): los vecinos más cercanos son :38 (watchdog de pagos) y :40 (vencimiento de pedidos en línea), los dos cada 30 s.
+  platformChargeDigest: '39 */15 * * * *',
 } as const

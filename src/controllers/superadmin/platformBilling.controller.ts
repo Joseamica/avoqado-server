@@ -31,8 +31,12 @@ import {
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
 import type { BillingCustomerKind } from '@/services/superadmin/platform-billing/types'
 
-/** Map a typed PlatformBillingError to an HTTP status; otherwise defer to the global handler. */
-function handleBillingError(error: unknown, res: Response, next: NextFunction): void {
+/**
+ * Map a typed PlatformBillingError to an HTTP status; otherwise defer to the global handler (que respeta el código de un `AppError`:
+ * un `ConflictError` de «Por cobrar» sigue siendo 409 y un `BadRequestError` del perfil fiscal de otro cliente, 400).
+ * Exportada: «Por cobrar» (`platformCharges.controller.ts`) traduce sus errores con la misma función.
+ */
+export function handleBillingError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof PlatformBillingError) {
     // PROVIDER = falla real del PAC (timeout, 5xx, llave) → 502. Todo lo demás es dato
     // corregible por el operador → 422, para que la UI lo trate como validación y no

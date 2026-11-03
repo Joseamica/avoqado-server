@@ -12,7 +12,7 @@ import prisma from '@/utils/prismaClient'
 import { editOrgSaleVerification } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import * as moduloDelProtocolo from '@/services/shared/cobroDelProtocolo'
-import { crearFixture, exigirBaseDesechable, type Fixture, exigir } from './webhookCheckpoint.fixture'
+import { crearBackOffice, crearFixture, exigirBaseDesechable, type Fixture, exigir } from './webhookCheckpoint.fixture'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   const sm = { getServer: jest.fn(), getBroadcastingService: jest.fn(() => null), broadcastToUser: jest.fn() }
@@ -21,16 +21,21 @@ jest.mock('@/communication/sockets/managers/socketManager', () => {
 jest.mock('@/services/alerts/opsAlert.service', () => ({ sendOpsAlert: jest.fn() }))
 
 let f: Fixture
+let backOfficeId = ''
 beforeAll(async () => {
   exigirBaseDesechable()
   f = await crearFixture('ventapt')
+  backOfficeId = await crearBackOffice(f)
 })
 afterEach(async () => {
   jest.restoreAllMocks()
   await prisma.saleVerification.deleteMany({ where: { venueId: f.venueId } })
   await f.limpiar()
 })
-afterAll(() => f.destruir())
+afterAll(async () => {
+  await f.destruir() // borra su StaffVenue con la tienda
+  await prisma.staff.deleteMany({ where: { id: backOfficeId } })
+})
 
 const d = (n: number) => new Prisma.Decimal(n)
 
@@ -83,7 +88,7 @@ async function ventaDeSim(
 }
 
 const editar = (sv: { id: string }, cambios: Record<string, unknown>) =>
-  editOrgSaleVerification(f.fixture, { saleVerificationId: sv.id, editedById: f.staffId, reason: 'corrección de prueba D2', ...cambios })
+  editOrgSaleVerification(f.fixture, { saleVerificationId: sv.id, editedById: backOfficeId, reason: 'corrección de prueba D2', ...cambios })
 
 const cuenta = async (orderId: string) => {
   const o = await exigir(prisma.order.findUnique({ where: { id: orderId }, include: { items: true } }))

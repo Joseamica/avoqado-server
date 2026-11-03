@@ -39,11 +39,15 @@ const SUF = `cambio-marcas-${process.pid}-${Date.now()}`
 let organizationId: string
 let venueId: string
 let staffId: string
+/** Quien edita la verificación: el back-office, OWNER de verdad en la tienda (aprueba). El cajero de la venta no aprueba desde A4. */
+let backOfficeId: string
 let ecTenderId: string
 let n = 0
 
 beforeAll(async () => {
   ;({ organizationId, venueId, staffId } = await crearNegocioDePrueba('cambio-marcas'))
+  backOfficeId = (await prisma.staff.create({ data: { email: `${SUF}-backoffice@staff.test`, firstName: 'Back', lastName: 'Office' } })).id
+  await prisma.staffVenue.create({ data: { staffId: backOfficeId, venueId, role: 'OWNER', active: true } })
   ecTenderId = (await ensureExchangeCreditTender(prisma, venueId)).id
 })
 
@@ -370,7 +374,7 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
     await rechazo(
       editOrgSaleVerification(organizationId, {
         saleVerificationId: sv.id,
-        editedById: staffId,
+        editedById: backOfficeId,
         amount: 250,
         paymentForm: 'CASH',
         reason: 'Corrección EC',
@@ -395,7 +399,7 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
     })
     const edit = editOrgSaleVerification(organizationId, {
       saleVerificationId: sv.id,
-      editedById: staffId,
+      editedById: backOfficeId,
       amount: 90,
       reason: 'Efectivo manual',
       status: 'COMPLETED',
@@ -421,7 +425,7 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
     await rechazo(
       editOrgSaleVerification(organizationId, {
         saleVerificationId: sv.id,
-        editedById: staffId,
+        editedById: backOfficeId,
         amount: 250,
         paymentForm: 'OTHER',
         status: 'COMPLETED',
