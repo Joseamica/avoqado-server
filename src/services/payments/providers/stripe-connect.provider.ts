@@ -512,6 +512,15 @@ export class StripeConnectProvider implements IEcommerceProvider {
     }
   }
 
+  /**
+   * S5 (pedidos en línea): vence la página de pago abierta en la cuenta conectada del cargo. Stripe sólo vence una sesión `open`;
+   * vencida o completada responde `StripeInvalidRequestError`, que sale tal cual para que quien llama lo distinga de la falta de red.
+   */
+  async expireAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, checkoutSessionId: string): Promise<void> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+    await this.stripe.checkout.sessions.expire(checkoutSessionId, {}, { stripeAccount: connectAccountId })
+  }
+
   /** Fase 2 (T10): una devolución leída de la cuenta conectada (la del cargo). */
   async getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState> {
     const connectAccountId = this.requireConnectAccountId(merchant)

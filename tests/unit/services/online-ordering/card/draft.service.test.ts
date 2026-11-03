@@ -205,6 +205,21 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
     expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
   })
 
+  it('S7 (Codex plan r2 #5): una repetición con la página de pago ya vencida no manda checkoutUrl; vigente, la misma URL', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(charge({ checkoutExpiresAt: NOW }) as any)
+    await expect(createCardOnlineDraft(input(), PUEDE_CREAR)).resolves.toMatchObject({
+      replay: true,
+      checkoutUrl: '',
+      status: 'AWAITING_PAYMENT',
+    })
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(charge({ checkoutExpiresAt: new Date(NOW.getTime() + 1) }) as any)
+    await expect(createCardOnlineDraft(input(), PUEDE_CREAR)).resolves.toMatchObject({
+      replay: true,
+      checkoutUrl: 'https://checkout.stripe.test/cs_1',
+    })
+    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
+  })
+
   it('Codex r3 #1: la repetición vale aunque el borrador ya tenga cuenta (no 409)', async () => {
     prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(charge({ status: 'AUTHORIZED', onlineOrderId: 'oo1' }) as any)
     prismaMock.order.findUnique.mockResolvedValue({ id: 'ord1' } as any)

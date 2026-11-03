@@ -12,6 +12,7 @@ export const DEFAULT_CONFIG: OnlineOrderingConfig = {
   minOrderAmount: 0,
   defaultPrepMinutes: 15,
   acceptsPayAtPickup: true,
+  // A (founder, 2-nov): pasa a `true` con S1b, que sale junto con la tienda nueva (Codex plan r1 #7).
   acceptsCardOnline: false,
   manualPause: false,
   pausedUntil: null,
@@ -122,14 +123,20 @@ export async function updateSettings(
     // decide sobre el estado leído bajo el candado; los requisitos son datos del negocio (fuera de este candado) pero se leen con
     // el `tx` (r5: nunca el cliente raíz aquí dentro) y si falta algo la transacción se deshace sin escribir.
     if (!current.enabled && patch.enabled === true) await assertStoreRequirements(venueId, tx)
-    // Fase 2: sólo al PASAR de apagada a prendida se exige una cuenta Stripe que cobre hoy (el panel manda el formulario entero:
-    // repetir `true` con la cuenta caída no debe bloquear otros cambios). Se lee con el `tx`, como los requisitos de arriba.
-    if (!current.acceptsCardOnline && patch.acceptsCardOnline === true && !(await findCardMerchant(tx, venueId))) {
-      throw new BadRequestError('Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.', 'CARD_PAYMENT_NOT_ACCEPTED')
-    }
+    // A (founder, 2-nov): el switch de tarjeta es la PREFERENCIA del negocio y viene prendido; prenderlo no exige Stripe (la tienda
+    // ofrece tarjeta sólo con un comercio cobrable, `getInfo`). Lo que sí se exige es no dejar la tienda sin cómo cobrar.
     const merged = { ...current, ...patch }
-    if (merged.enabled && !merged.acceptsPayAtPickup && !merged.acceptsCardOnline) {
-      throw new BadRequestError('Activa al menos un medio de pago para recibir pedidos.', 'NO_PAYMENT_MODE')
+    if (merged.enabled && !merged.acceptsPayAtPickup) {
+      if (!merged.acceptsCardOnline) throw new BadRequestError('Activa al menos un medio de pago para recibir pedidos.', 'NO_PAYMENT_MODE')
+      // Sólo tarjeta: se consulta Stripe al ENCENDER la tienda o al QUITAR pagar al recoger (el panel manda el formulario entero:
+      // repetir los mismos valores con la cuenta caída no bloquea otros cambios; la tienda ya se ve en pausa por sí sola).
+      const llegaASoloTarjeta = (patch.enabled === true && !current.enabled) || (patch.acceptsPayAtPickup === false && current.acceptsPayAtPickup)
+      if (llegaASoloTarjeta && !(await findCardMerchant(tx, venueId))) {
+        throw new BadRequestError(
+          'Sin «Pagar al recoger» la tienda sólo cobraría con tarjeta, y tu cuenta de Stripe todavía no puede cobrar: déjalo prendido o conecta tu Stripe en Ligas de pago.',
+          'NO_PAYMENT_MODE',
+        )
+      }
     }
 
     const data: Prisma.OnlineOrderingSettingsUncheckedUpdateInput = {}

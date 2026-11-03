@@ -333,10 +333,18 @@ describe('fase 2: cardStatus en la bandeja', () => {
     unaSola(row('A', 'PENDING_ACCEPTANCE')) // sin `charge`: paga al recoger
     const o = (await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]
     for (const k of LLAVES_ANTES) expect(o).toHaveProperty(k)
-    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card'].sort())
+    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason'].sort())
     expect(o.cardStatus).toBeNull()
+    expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()
     expect(o.paymentMode).toBe('PAY_AT_PICKUP')
+  })
+
+  it('apps (2-nov): la bandeja dice POR QUÉ se rechazó (PAYMENT_FAILED = «No se pudo cobrar la tarjeta»), en el mismo select', async () => {
+    unaSola(row('A', 'REJECTED', { paymentMode: 'CARD_ONLINE', rejectReason: 'PAYMENT_FAILED', charge: cargo('CAPTURE_FAILED') }))
+    expect((await listInbox({ venueId: 'v1', filter: 'done', now: NOW })).orders[0].rejectReason).toBe('PAYMENT_FAILED')
+    const lista = prismaMock.onlineOrder.findMany.mock.calls.map((c: unknown[]) => c[0] as any).find((a: any) => !esSincronizacion(a))
+    expect(lista.select.rejectReason).toBe(true)
   })
 
   it('getInboxOrder también lleva cardStatus', async () => {

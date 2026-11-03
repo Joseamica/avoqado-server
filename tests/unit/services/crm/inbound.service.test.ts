@@ -137,15 +137,18 @@ describe('saveLandingEntry', () => {
     create.mockReset()
     create.mockRejectedValueOnce(new Error('connection reset')).mockResolvedValueOnce({ id: 'centrylnd0000000000000001' })
 
-    await expect(saveLandingEntry({ ...FORM, email: ' Ana@Cafe.MX', businessType: 'Cafe\u0000tería' })).resolves.toEqual({
+    const formAt = new Date(Date.now() - 2_000)
+    await expect(saveLandingEntry({ ...FORM, email: ' Ana@Cafe.MX', businessType: 'Cafe\u0000tería' }, formAt)).resolves.toEqual({
       entryId: 'centrylnd0000000000000001',
     })
     expect(create).toHaveBeenCalledTimes(2)
-    // The key is the signup's own normalization of the email; the payload is the CLEAN form.
+    // The key is the signup's own normalization of the email; the payload is the CLEAN form. The retry keeps the FORM's
+    // moment, not its own (D7, Codex r4 H1).
     expect(create.mock.calls[1][0].data).toEqual({
       source: 'LANDING',
       externalKey: EMAIL,
       payload: expect.objectContaining({ businessType: 'Cafetería', companyName: 'Café Ana' }),
+      receivedAt: formAt,
     })
 
     // Twice down: no entry, no throw, and the clean form goes to the log (the internal email is the other copy).

@@ -68,6 +68,8 @@ describe('crm team routes', () => {
       { route: 'POST /accounts/:id/win', keys: editar },
       { route: 'POST /accounts/:id/archive', keys: editar },
       { route: 'POST /accounts/:id/reactivate', keys: editar },
+      // «Eliminar» (D7): the key is the door; the service lets only the real superadmin through.
+      { route: 'POST /accounts/:id/delete', keys: admin },
       { route: 'POST /accounts/:id/notes', keys: editar },
       { route: 'POST /accounts/:id/activities', keys: editar },
       // Task 9: what is live, «Clientes» and the reports with «Ver negocios»; the CSV with its own key.
