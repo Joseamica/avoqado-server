@@ -43,7 +43,6 @@ import {
   repeatOf,
   sourceDetailOf,
   teamOrganizationId,
-  SIGNUP_GRACE_MS,
 } from './inbound.service'
 import { ErasedIdentityError } from './erase.service'
 import { esCorreoDePrueba } from './internalEmail'
@@ -306,6 +305,12 @@ type SignupMark = {
   active: boolean | null
 }
 
+/** The form's moment a signup's mark keeps (`formAt`), when it is a valid date. */
+function formSentAt(data: Record<string, unknown>): Date | null {
+  const at = typeof data.formAt === 'string' ? new Date(data.formAt) : null
+  return at && !Number.isNaN(at.getTime()) ? at : null
+}
+
 /**
  * Gives every landing signup its CRM account (spec §5.3): the initial load of the signups from before the CRM, and the
  * signup whose entry could not be saved. They never kept the form's qualification, so the account says it is not
@@ -421,10 +426,10 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
             },
             contact: { ...person, isPrimary: true },
           },
-          // When its form was sent, at the latest: a signup finishes within `SIGNUP_GRACE_MS` of it (what the landing
-          // waits for). Its mark alone would be too late — form, deletion, then the signup's mark (Codex r1 H2) — and no
-          // date at all would drop a NEW signup whose entry could not be saved (Codex r2 H2).
-          new Date(signup.createdAt.getTime() - SIGNUP_GRACE_MS),
+          // When its FORM was sent, which the mark keeps (D7): its own date would be too late — form, deletion, then the
+          // signup's mark (Codex r1 H2) — and no date at all would drop a new signup whose entry could not be saved
+          // (Codex r2 H2). A mark written before it kept that date is older than any deletion: its own date.
+          formSentAt(data) ?? signup.createdAt,
         )
         if (!isNew) {
           await addPersonTx(tx, account.id, person)

@@ -26,7 +26,7 @@ export const LANDING = 'LANDING'
 const MAX_TEXT = 500
 const MAX_LIST = 20
 /** Long enough for any signup to finish: an entry younger than this without an outcome waits for the sweep. */
-export const SIGNUP_GRACE_MS = 5 * 60_000
+const SIGNUP_GRACE_MS = 5 * 60_000
 /** Control characters and lone UTF-16 surrogates: PostgreSQL refuses `\u0000` and broken text in JSONB. */
 const UNSAFE = /[\p{Cc}\p{Cs}]/gu
 

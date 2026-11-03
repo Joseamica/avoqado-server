@@ -944,8 +944,9 @@ describe('backfillFromOnboarding', () => {
     expect(db.entries.filter(row => row.source === 'CARGA_INICIAL')).toHaveLength(0)
   })
 
-  it('eliminado_por_el_superadmin (D7): un alta de antes no lo revive; una de mucho después, sin entrada guardada, sí entra', async () => {
+  it('eliminado_por_el_superadmin (D7): un formulario de ANTES no lo revive aunque el alta termine después; uno de después sí', async () => {
     const deletedAt = new Date(Date.now() - 60 * MINUTE)
+    const at = (minutes: number) => new Date(deletedAt.getTime() + minutes * MINUTE)
     const { organization, person } = erasedHashes({
       keys: [{ source: 'LANDING', externalKey: EMAIL }],
       emails: [EMAIL],
@@ -955,16 +956,23 @@ describe('backfillFromOnboarding', () => {
     db.erased.push(...[organization!, ...person].map(keyHash => ({ keyHash, scope: ORG, erasedAt: deletedAt })))
     seedOrganization()
     const staff = seedStaff(EMAIL, {}, ORG)
-    // Its mark two minutes after the deletion: the form was sent before it (Codex r1 H2).
-    seedSignup(staff.id, ORG, { createdAt: new Date(deletedAt.getTime() + 2 * MINUTE) })
+    // An old mark, from before this field existed; and a form sent 30 s before the deletion whose signup took 6 minutes
+    // (Codex r1 H2, r3 H2): neither brings it back.
+    seedSignup(staff.id, ORG, { createdAt: at(-90) })
+    seedSignup(staff.id, ORG, {
+      createdAt: at(6),
+      data: { source: 'landing_restaurantes', organizationId: ORG, formAt: at(-0.5).toISOString() },
+    })
 
     await expect(backfillFromOnboarding()).resolves.toBe(0)
     expect(db.accounts).toHaveLength(0)
 
-    // The same person signs up again half an hour after the deletion and their landing entry could not be saved
-    // (Codex r2 H2): the backfill is the only way in, and it lets them in.
+    // A form one minute AFTER the deletion whose entry could not be saved (Codex r2 H2, r3 H1): the backfill lets it in.
     resetSweepCursors()
-    seedSignup(staff.id, ORG, { createdAt: new Date(deletedAt.getTime() + 30 * MINUTE) })
+    seedSignup(staff.id, ORG, {
+      createdAt: at(1.2),
+      data: { source: 'landing_restaurantes', organizationId: ORG, formAt: at(1).toISOString() },
+    })
     await expect(backfillFromOnboarding()).resolves.toBe(1)
     expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId: ORG })])
   })

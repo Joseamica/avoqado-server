@@ -474,7 +474,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       SOLO,
     {
       accountId,
-      confirmName: z.string().trim().min(1, 'Escribe el nombre del negocio').max(1000).describe('El nombre del negocio, tal como aparece'),
+      // No maximum: it is the whole name of the business, whatever its length (Codex r3 H3).
+      confirmName: z.string().trim().min(1, 'Escribe el nombre del negocio').describe('El nombre del negocio, tal como aparece'),
       confirm: z.boolean().optional().describe('true sólo en la SEGUNDA llamada, tras la autorización del usuario'),
     },
     async ({ accountId: id, confirmName, confirm }) =>

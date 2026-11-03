@@ -207,8 +207,14 @@ export const addNoteSchema = z.object({
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,
-  // As long as any name the CRM keeps (the landing and HubSpot keep up to 500; Codex r2 H3).
-  body: z.object({ confirmName: text(1000, 'Escribe el nombre del negocio') }),
+  // No maximum of its own: a writer may keep a name of any length, and it has to be typed whole (Codex r3 H3). The body
+  // parser's limit bounds it.
+  body: z.object({
+    confirmName: z
+      .string({ required_error: 'Escribe el nombre del negocio', invalid_type_error: 'Escribe el nombre del negocio' })
+      .trim()
+      .min(1, 'Escribe el nombre del negocio'),
+  }),
 })
 
 /** An activity's moment: an ISO 8601 instant with its offset (the screen sends UTC). */
