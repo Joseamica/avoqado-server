@@ -2,6 +2,7 @@
  * Zod schemas for `/api/v1/crm/*` (spec 2026-10-30). Messages ALWAYS in Spanish; shape and format only — the business
  * rules (which keys go together, who may give which key, who owns what) live in the services.
  */
+import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
 import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
@@ -449,3 +450,84 @@ export const createOptOutSchema = z.object({
       .max(254, 'El correo es demasiado largo'),
   }),
 })
+
+// ── Audiences of the mass-email campaigns (phase 2, plan task 4) ───────────────────────────────────────────────────────
+
+/** A filter is a handful of values; this only stops a body that wants to turn the SQL into a book. */
+const MAX_FILTER_VALUES = 50
+
+/** `giros` and `ciudades`: a list of short texts. Shape only; an unknown giro simply matches nobody. */
+const textFilter = (singular: string, plural: string) =>
+  z
+    .array(
+      z
+        .string({ invalid_type_error: `Cada ${singular} es un texto con letras` })
+        .trim()
+        .min(1, `Cada ${singular} es un texto con letras`)
+        .max(100, 'Máximo 100 caracteres'),
+      { invalid_type_error: `Los ${plural} van en una lista` },
+    )
+    .max(MAX_FILTER_VALUES, `Máximo ${MAX_FILTER_VALUES} ${plural}`)
+    .optional()
+
+const audienceRoles = z
+  .array(z.nativeEnum(StaffRole, { errorMap: () => ({ message: 'Ese rol no existe' }) }), {
+    required_error: 'Elige al menos un rol',
+    invalid_type_error: 'Elige al menos un rol',
+  })
+  .min(1, 'Elige al menos un rol')
+  .max(Object.keys(StaffRole).length, 'Hay roles repetidos')
+
+/**
+ * One public of a campaign. PROSPECTOS has no «source» filter on purpose: consent is born only in the landing today, so it
+ * would be a filter that filters nothing. `etapas` are CrmStage ids.
+ */
+const audienceSegmentSchema = z.discriminatedUnion(
+  'tipo',
+  [
+    z.object({
+      tipo: z.literal('PROSPECTOS'),
+      etapas: z
+        .array(z.string({ invalid_type_error: 'El id de la etapa no es válido' }).cuid('El id de la etapa no es válido'))
+        .max(MAX_FILTER_VALUES, `Máximo ${MAX_FILTER_VALUES} etapas`)
+        .optional(),
+    }),
+    z.object({
+      tipo: z.literal('CLIENTES'),
+      giros: textFilter('giro', 'giros'),
+      ciudades: textFilter('ciudad', 'ciudades'),
+      planes: z
+        .array(z.enum(['GRATIS', 'PRO', 'PREMIUM'], { errorMap: () => ({ message: 'Ese plan no existe' }) }))
+        .max(3, 'Hay planes repetidos')
+        .optional(),
+    }),
+    z.object({
+      tipo: z.literal('USUARIOS'),
+      roles: audienceRoles,
+      giros: textFilter('giro', 'giros'),
+      ciudades: textFilter('ciudad', 'ciudades'),
+      soloClientes: z.boolean({ invalid_type_error: 'Solo clientes es sí o no' }).optional(),
+    }),
+  ],
+  { errorMap: () => ({ message: 'Ese público no existe' }) },
+)
+
+/** Who a campaign goes to: 1 to 3 publics, ONE of each type. Who actually receives it is the service's, in SQL. */
+export const audienciaSchema = z
+  .object({
+    segmentos: z
+      .array(audienceSegmentSchema, { required_error: 'Elige a quién le mandas', invalid_type_error: 'Elige a quién le mandas' })
+      .min(1, 'Elige al menos un público')
+      .max(3, 'Máximo 3 públicos'),
+  })
+  .superRefine((audience, ctx) => {
+    const seen = new Set<string>()
+    audience.segmentos.forEach((segment, i) => {
+      if (seen.has(segment.tipo))
+        ctx.addIssue({ code: 'custom', path: ['segmentos', i, 'tipo'], message: 'Ese público ya está en la lista' })
+      seen.add(segment.tipo)
+    })
+  })
+
+export type Audiencia = z.infer<typeof audienciaSchema>
+export type Segmento = Audiencia['segmentos'][number]
