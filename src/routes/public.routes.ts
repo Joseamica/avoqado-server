@@ -598,6 +598,10 @@ const contactSchema = z.object({
     hutk: hutkSchema,
     pageUri: paginaSchema,
     pageName: z.string().trim().max(120).optional(),
+    // La casilla «Quiero recibir novedades de Avoqado por correo» y la versión del aviso de privacidad que se mostró.
+    // Sólo un booleano de verdad cuenta como sí; el CRM guarda el consentimiento al aplicar la entrada.
+    marketingConsent: z.boolean().optional(),
+    privacyNoticeVersion: z.string().trim().max(20, 'La versión del aviso es muy larga').optional(),
   }),
 })
 /**

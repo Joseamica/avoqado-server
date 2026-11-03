@@ -130,6 +130,18 @@ describe('sanitizeEntry', () => {
   })
 })
 
+describe('sanitizeEntry: booleans', () => {
+  it('conserva_los_booleanos_como_booleanos (Codex plan r1 #2): la casilla de novedades nunca se vuelve el texto «true»', () => {
+    expect(sanitizeEntry({ a: true, b: false })).toEqual({ a: true, b: false })
+    // Next to the texts, which are cleaned as always.
+    expect(sanitizeEntry({ marketingConsent: true, companyName: 'Café\u0000 Ana', employees: 3 })).toEqual({
+      marketingConsent: true,
+      companyName: 'Café Ana',
+      employees: '3',
+    })
+  })
+})
+
 describe('saveLandingEntry', () => {
   it('guardar_reintenta_una_vez_y_no_lanza', async () => {
     const create = prismaMock.crmInboundEntry.create
@@ -1177,5 +1189,141 @@ describe('ruling 65: one identity resolver for every writer (Codex exhaustiva #4
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: holder.id })
     expect(db.contacts).toEqual([expect.objectContaining({ accountId: holder.id, email: EMAIL, phoneE164: PHONE })])
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('unlinked'), expect.anything())
+  })
+})
+
+describe('la casilla «Quiero recibir novedades de Avoqado por correo» (CRM fase 2, tarea 6)', () => {
+  const BRENDA = 'brenda@cafe.mx'
+  const RECEIVED = new Date(Date.now() - 2 * MINUTE)
+  const consentEvents = () => eventsOf('FIELD_CHANGE').filter(event => event.data.campo === 'consentimiento')
+
+  /** The real path, as the controller walks it: the raw form is saved, the signup's outcome written, the entry applied. */
+  async function landingSubmit(form: Record<string, unknown>, over: { outcome?: SignupOutcome | null; receivedAt?: Date } = {}) {
+    const saved = await saveLandingEntry(form)
+    const entryId = saved!.entryId
+    // The form reached us a couple of minutes ago: the consent dates from then, never from the moment it was applied.
+    db.entries.find(entry => entry.id === entryId)!.receivedAt = over.receivedAt ?? RECEIVED
+    await recordSignupOutcome(entryId, over.outcome === undefined ? NEW_SIGNUP : over.outcome)
+    await applyEntry(entryId)
+    return entryId
+  }
+
+  it('una_entrada_con_la_casilla_deja_el_consentimiento_de_su_correo_con_la_fecha_de_recepcion', async () => {
+    const entryId = await landingSubmit({ ...FORM, email: ' Ana@Cafe.MX', marketingConsent: true, privacyNoticeVersion: '2026-11-01' })
+
+    // The box survived the cleaning as a boolean: the entry keeps `true`, not the text «true».
+    expect(db.entries[0].payload).toMatchObject({ marketingConsent: true, privacyNoticeVersion: '2026-11-01' })
+    expect(db.consents).toEqual([
+      {
+        id: expect.any(String),
+        createdAt: expect.any(Date),
+        email: EMAIL,
+        accountId: db.accounts[0].id,
+        entryId,
+        consentAt: RECEIVED,
+        source: 'LANDING',
+        noticeVersion: '2026-11-01',
+      },
+    ])
+    // Its trace in the account's timeline: what changed, never who (no email in it), once per entry.
+    expect(consentEvents()).toEqual([
+      expect.objectContaining({
+        accountId: db.accounts[0].id,
+        actorStaffId: null,
+        sourceKey: `consent:${entryId}`,
+        data: { campo: 'consentimiento' },
+      }),
+    ])
+    expect(JSON.stringify(consentEvents())).not.toContain('cafe.mx')
+  })
+
+  it('sin_version_en_la_entrada_guarda_la_del_aviso_vigente', async () => {
+    await landingSubmit({ ...FORM, marketingConsent: true })
+
+    expect(db.consents).toEqual([expect.objectContaining({ email: EMAIL, noticeVersion: '2026-10-02' })])
+  })
+
+  it.each([
+    { casilla: 'sin marcar (false)', form: { ...FORM, marketingConsent: false } },
+    { casilla: 'que el formulario no trae', form: FORM },
+  ])('una entrada $casilla no deja consentimiento ni evento', async ({ form }) => {
+    await landingSubmit(form)
+
+    expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+    expect(db.consents).toEqual([])
+    expect(consentEvents()).toEqual([])
+    expect(prismaMock.crmEmailConsent.upsert).not.toHaveBeenCalled()
+  })
+
+  it('una_segunda_entrada_sin_la_casilla_no_lo_borra: no marcarla no es darse de baja', async () => {
+    const first = await landingSubmit({ ...FORM, marketingConsent: true })
+    const [before] = db.consents.map(consent => ({ ...consent }))
+
+    await landingSubmit({ ...FORM, firstName: 'Ana María' }, { receivedAt: new Date(RECEIVED.getTime() + MINUTE), outcome: null })
+
+    expect(db.entries).toHaveLength(2)
+    expect(db.entries[1].appliedAt).toEqual(expect.any(Date))
+    expect(db.consents).toEqual([before])
+    expect(before.entryId).toBe(first)
+    expect(consentEvents()).toHaveLength(1)
+  })
+
+  it('un_segundo_consentimiento_del_mismo_correo_actualiza_la_fecha_y_la_cuenta, sin crear otra fila', async () => {
+    // A consent that came before the CRM had an account for this person (`accountId` null), and an older notice.
+    db.consents.push({
+      id: 'cconsent00000000000000001',
+      email: EMAIL,
+      accountId: null,
+      entryId: 'centryprev000000000000001',
+      consentAt: new Date(Date.now() - 40 * DAY),
+      source: 'LANDING',
+      noticeVersion: '2026-01-01',
+      createdAt: new Date(Date.now() - 40 * DAY),
+    })
+
+    const entryId = await landingSubmit({ ...FORM, marketingConsent: true })
+
+    expect(db.consents).toEqual([
+      expect.objectContaining({
+        id: 'cconsent00000000000000001',
+        email: EMAIL,
+        accountId: db.accounts[0].id,
+        entryId,
+        consentAt: RECEIVED,
+        noticeVersion: '2026-10-02',
+      }),
+    ])
+  })
+
+  it('aplicar_dos_veces_la_misma_entrada_deja_un_solo_evento: el reintento tras una caída no vuelve a escribir', async () => {
+    const saved = await saveLandingEntry({ ...FORM, marketingConsent: true })
+    const entryId = saved!.entryId
+    db.entries[0].receivedAt = RECEIVED
+    await recordSignupOutcome(entryId, NEW_SIGNUP)
+    // The first run writes everything and dies before marking the entry applied; the sweep runs it again.
+    prismaMock.crmInboundEntry.update.mockRejectedValueOnce(new Error('the process died before marking'))
+    await applyEntry(entryId)
+    expect(db.entries[0].appliedAt).toBeNull()
+
+    await applyEntry(entryId)
+
+    expect(db.entries[0].appliedAt).toEqual(expect.any(Date))
+    expect(prismaMock.crmEmailConsent.upsert).toHaveBeenCalledTimes(1)
+    expect(db.consents).toHaveLength(1)
+    expect(consentEvents()).toHaveLength(1)
+    expect(eventsOf('ENTRY_APPLIED')).toHaveLength(1)
+  })
+
+  it('la_entrada_de_Brenda_que_se_junta_por_telefono_con_la_cuenta_de_Ana_deja_el_consentimiento_de_Brenda_y_no_el_de_Ana', async () => {
+    // Ana's account (and her contact) exist already; Brenda shares her phone, so her entry lands on Ana's account.
+    const ana = seedAccount({ id: 'cacctana00000000000000001' })
+    db.contacts.push({ accountId: ana.id, name: 'Ana', email: EMAIL, phoneE164: '+525512345678', isPrimary: true })
+
+    const entryId = await landingSubmit({ ...FORM, firstName: 'Brenda', email: BRENDA, marketingConsent: true })
+
+    expect(db.accounts).toHaveLength(1)
+    expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: ana.id })
+    expect(db.consents).toEqual([expect.objectContaining({ email: BRENDA, accountId: ana.id, entryId, consentAt: RECEIVED })])
+    expect(db.consents.some(consent => consent.email === EMAIL)).toBe(false)
   })
 })

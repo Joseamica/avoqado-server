@@ -16,7 +16,7 @@ export const FAKE_LOST_STAGE_ID = 'cstageprd0000000000000001'
 const STAGE_KINDS: Record<string, string> = { [FAKE_STAGE_ID]: 'ABIERTA', [FAKE_LOST_STAGE_ID]: 'PERDIDA' }
 
 export function installCrmInboundFake(prismaMock: any) {
-  const db = { entries: [] as Row[], accounts: [] as Row[], contacts: [] as Row[], events: [] as Row[] }
+  const db = { entries: [] as Row[], accounts: [] as Row[], contacts: [] as Row[], events: [] as Row[], consents: [] as Row[] }
   let sequence = 0
   /** cuid v1 shape: 25 characters, starting with «c». */
   const nextId = (prefix: string) => `c${prefix}${String(++sequence).padStart(24 - prefix.length, '0')}`
@@ -66,6 +66,7 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmContact.findFirst,
     prismaMock.crmTimelineEvent.createMany,
     prismaMock.crmTimelineEvent.findUnique,
+    prismaMock.crmEmailConsent.upsert,
     prismaMock.staff.findUnique,
     prismaMock.crmTeam.findUnique,
     prismaMock.organization.findUnique,
@@ -186,6 +187,14 @@ export function installCrmInboundFake(prismaMock: any) {
   prismaMock.crmTimelineEvent.findUnique.mockImplementation(
     async ({ where }: Row) => db.events.find(event => event.sourceKey === where.sourceKey) ?? null,
   )
+
+  // The landing's consent box: one row per email (unique), created or brought up to date — never deleted.
+  prismaMock.crmEmailConsent.upsert.mockImplementation(async ({ where, create, update }: Row) => {
+    const row = db.consents.find(consent => consent.email === where.email)
+    if (row) Object.assign(row, update)
+    else db.consents.push({ id: nextId('cons'), createdAt: new Date(), ...create })
+    return { ...(row ?? db.consents[db.consents.length - 1]) }
+  })
 
   // Nobody with the entry's email owns an Organization, no sales-team organization, an Organization with a name, and
   // the pipeline already seeded.
