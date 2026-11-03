@@ -97,7 +97,7 @@ describe('exchange mobile endpoint', () => {
     const res = await post(body)
     expect(res.status).toBe(422)
     expect(res.body).toMatchObject({ code: 'EXCHANGE_SETTLEMENT_UNAVAILABLE', details: { reason: 'CARD_NEEDS_CONNECTION' } })
-    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body })
+    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body, posSinSoloSaldo: true })
   })
   it('completes with the HTTP actor and returns the exchange envelope', async () => {
     const exchange = { id: productId, status: 'COMPLETED' } as any
@@ -127,7 +127,21 @@ describe('exchange mobile endpoint', () => {
     expect(response.status).toBe(replay ? 200 : 201)
     expect(response.body).toEqual({ success: true, data: { exchange } })
     expect(mockCreate).toHaveBeenCalledTimes(1)
-    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body })
+    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body, posSinSoloSaldo: true })
+  })
+
+  // D1: la ruta del POS dice si la app es una publicada que no sabe de «Sólo saldo a favor» (ANDROID/WINDOWS ≤ 95, iOS ≤ 41, o sin
+  // cabeceras, como las peticiones de arriba). Sólo esta ruta lo marca.
+  it.each([
+    [{ 'x-device-platform': 'ANDROID', 'x-app-version-code': '95' }, true],
+    [{ 'x-device-platform': 'IOS', 'x-app-version-code': '41' }, true],
+    [{ 'x-device-platform': 'ANDROID', 'x-app-version-code': '96' }, false],
+    [{ 'x-device-platform': 'IOS', 'x-app-version-code': '42' }, false],
+  ])('D1: con las cabeceras %j le dice al servicio posSinSoloSaldo=%s', async (headers, vieja) => {
+    mockCreate.mockResolvedValue({ exchange: {}, replay: false } as Awaited<ReturnType<typeof service.createExchange>>)
+    const body = validBody()
+    expect((await request(app).post(`/venues/${venueId}/exchanges`).set(headers).send(body)).status).toBe(201)
+    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body, posSinSoloSaldo: vieja })
   })
 
   it.each(['NB4R2A0001234', '2841548417', 'c0000000000000000000000009'])(
@@ -178,7 +192,7 @@ describe('exchange mobile endpoint', () => {
     const response = await post(body)
     expect(response.status).toBe(status)
     expect(response.body).toEqual({ code, message: 'No se puede completar el cambio.', ...(details ? { details } : {}) })
-    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body })
+    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body, posSinSoloSaldo: true })
   })
 
   it.each([
@@ -273,6 +287,6 @@ describe('exchange mobile endpoint', () => {
     mockCreate.mockResolvedValue({ exchange: {}, replay: false } as Awaited<ReturnType<typeof service.createExchange>>)
     const body = { ...validBody(), settlement }
     expect((await post(body)).status).toBe(201)
-    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body })
+    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body, posSinSoloSaldo: true })
   })
 })

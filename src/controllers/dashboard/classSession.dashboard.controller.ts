@@ -137,7 +137,8 @@ export async function removeAttendee(req: Request, res: Response, next: NextFunc
   try {
     const venueId = resolveVenueId(req)
     const { sessionId, reservationId } = req.params
-    await classSessionService.removeAttendee(venueId, sessionId, reservationId)
+    const { userId } = (req as any).authContext
+    await classSessionService.removeAttendee(venueId, sessionId, reservationId, userId)
     res.status(204).send()
   } catch (error) {
     next(error)

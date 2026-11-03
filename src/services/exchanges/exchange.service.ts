@@ -64,6 +64,8 @@ export interface ExchangeTxInput {
   body: CreateExchangeBody
   requestHash: string
   originalOrderId: string
+  /** D1: sólo la ruta móvil lo prende, para un POS publicado que no sabe de «Sólo saldo a favor» (`posSinSoloSaldo.ts`). */
+  posSinSoloSaldo?: boolean
 }
 export interface SaleForExchange {
   /** Batch reads retain business refusals; the single-sale writer still throws for missing settlement evidence. */
@@ -173,6 +175,7 @@ export async function createExchange(input: {
   venueId: string
   actorStaffId: string
   body: CreateExchangeBody
+  posSinSoloSaldo?: boolean
 }): Promise<{ exchange: ExchangeResponse; replay: boolean }> {
   try {
     return await crearCambio(input)
@@ -186,6 +189,7 @@ async function crearCambio(input: {
   venueId: string
   actorStaffId: string
   body: CreateExchangeBody
+  posSinSoloSaldo?: boolean
 }): Promise<{ exchange: ExchangeResponse; replay: boolean }> {
   const { venueId, actorStaffId, body } = input
   if (body.staffId !== actorStaffId) throw new ExchangeError('ACTOR_MISMATCH', 'El cambio lo hace la persona con la sesión abierta.', 400)
