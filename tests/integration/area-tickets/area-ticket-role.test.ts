@@ -1,6 +1,7 @@
 import { FulfillmentMode, StaffRole, TerminalStatus, TerminalType } from '@prisma/client'
 
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { updateTerminal } from '@/services/dashboard/areaTicket.dashboard.service'
 import { setTerminalAreaRole } from '@/services/mobile/areaTicketRole.mobile.service'
 import { getAreaTicketSettings } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
@@ -127,5 +128,29 @@ describe('papel del aparato en los vales — contra Postgres real', () => {
     expect(after.terminal.canIssueAreaTickets).toBe(false)
     const row = await prisma.terminal.findUniqueOrThrow({ where: { id: terminalId } })
     expect(row.fulfillmentAreaId).toBeNull()
+  })
+
+  // D5 + Codex final #3: dos cambios a la vez (uno prende Emitir y otro Cobrar) no pueden dejar las dos casillas.
+  it('dos cambios simultáneos no dejan un aparato que emite y cobra', async () => {
+    const otra = await prisma.terminal.create({
+      data: {
+        venueId,
+        name: 'Tableta de prueba',
+        type: TerminalType.POS_ANDROID,
+        status: TerminalStatus.ACTIVE,
+        deviceUid: `otra-${suffix}`,
+      },
+    })
+
+    const results = await Promise.allSettled([
+      updateTerminal(venueId, otra.id, { canIssueAreaTickets: true, fulfillmentAreaId: activeAreaId }),
+      updateTerminal(venueId, otra.id, { canCheckoutAreaTickets: true }),
+    ])
+
+    const rejected = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[]
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0].reason).toMatchObject({ code: 'AREA_TICKET_ISSUE_AND_CHECKOUT' })
+    const row = await prisma.terminal.findUniqueOrThrow({ where: { id: otra.id } })
+    expect(row.canIssueAreaTickets && row.canCheckoutAreaTickets).toBe(false)
   })
 })

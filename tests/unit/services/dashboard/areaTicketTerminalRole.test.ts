@@ -12,6 +12,8 @@ const mockPrisma: any = {
   },
   fulfillmentArea: { findFirst: jest.fn() },
   scaleProfile: { findFirst: jest.fn() },
+  $queryRaw: jest.fn(),
+  $transaction: jest.fn(),
 }
 
 jest.mock('../../../../src/utils/prismaClient', () => ({ __esModule: true, default: mockPrisma }))
@@ -34,6 +36,8 @@ const CAJA = {
 describe('updateTerminal: papel del aparato (D3)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockPrisma.$queryRaw.mockResolvedValue([])
+    mockPrisma.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(mockPrisma))
     mockPrisma.terminal.findFirst.mockResolvedValue(CAJA)
     mockPrisma.terminal.update.mockResolvedValue({ id: CAJA.id })
     mockPrisma.fulfillmentArea.findFirst.mockResolvedValue({ id: 'area_cremeria' })
@@ -114,5 +118,16 @@ describe('updateTerminal: papel del aparato (D3)', () => {
     await updateTerminal('venue_1', CAJA.id, { canCheckoutAreaTickets: false })
 
     expect(mockPrisma.terminal.update).toHaveBeenCalled()
+  })
+
+  // Codex final #3: dos cambios a la vez (uno prende Emitir y otro Cobrar) leían los dos «apagado» y dejaban las dos.
+  it('toma el candado de la fila del aparato antes de leerla', async () => {
+    await updateTerminal('venue_1', CAJA.id, { canDeliverAreaTickets: true })
+
+    expect(mockPrisma.$transaction).toHaveBeenCalled()
+    const candado = mockPrisma.$queryRaw.mock.invocationCallOrder[0]
+    const lectura = mockPrisma.terminal.findFirst.mock.invocationCallOrder[0]
+    expect(candado).toBeLessThan(lectura)
+    expect(String(mockPrisma.$queryRaw.mock.calls[0][0].join('?'))).toContain('FOR UPDATE')
   })
 })

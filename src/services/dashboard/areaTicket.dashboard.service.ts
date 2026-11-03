@@ -342,79 +342,85 @@ export async function updateTerminal(
   performedBy?: string,
   opts: { source?: 'dashboard' | 'pos' } = {},
 ) {
-  const terminal = await prisma.terminal.findFirst({
-    where: { id: terminalId, venueId },
-    select: {
-      id: true,
-      fulfillmentAreaId: true,
-      canIssueAreaTickets: true,
-      canCheckoutAreaTickets: true,
-      canDeliverAreaTickets: true,
-      defaultWorkspace: true,
-    },
-  })
-  if (!terminal) throw new NotFoundError('Terminal no encontrada')
-  await Promise.all([assertArea(venueId, input.fulfillmentAreaId), assertScaleProfile(venueId, input.scaleProfileId)])
+  // D5 (Codex final #3): leer, decidir y escribir bajo el candado de la fila del aparato. Sin él, dos cambios a la vez
+  // (uno prende Emitir y otro Cobrar) leían los dos «apagado», pasaban la regla y dejaban las dos casillas.
+  const { terminal, updated } = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} AND "venueId" = ${venueId} FOR UPDATE`
+    const terminal = await tx.terminal.findFirst({
+      where: { id: terminalId, venueId },
+      select: {
+        id: true,
+        fulfillmentAreaId: true,
+        canIssueAreaTickets: true,
+        canCheckoutAreaTickets: true,
+        canDeliverAreaTickets: true,
+        defaultWorkspace: true,
+      },
+    })
+    if (!terminal) throw new NotFoundError('Terminal no encontrada')
+    await Promise.all([assertArea(venueId, input.fulfillmentAreaId), assertScaleProfile(venueId, input.scaleProfileId)])
 
-  // D5, opción A (founder, 2-nov-2026): un aparato emite vales O los cobra. Si emite, su botón siempre emite y rechaza los
-  // vales escaneados, así que «Cobrar» ahí no hacía nada. Sólo frena a quien PRENDE una de las dos: un aparato que ya
-  // tenía ambas sigue pudiendo cambiar lo demás o apagar una.
-  const prendeEmitirOCobrar = input.canIssueAreaTickets === true || input.canCheckoutAreaTickets === true
-  const quedaEmitiendo = input.canIssueAreaTickets ?? terminal.canIssueAreaTickets
-  const quedaCobrando = input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets
-  if (prendeEmitirOCobrar && quedaEmitiendo && quedaCobrando) {
-    throw new BadRequestError(
-      'Un aparato emite vales o los cobra, no las dos cosas. Para cobrar vales usa la caja.',
-      'AREA_TICKET_ISSUE_AND_CHECKOUT',
+    // D5, opción A (founder, 2-nov-2026): un aparato emite vales O los cobra. Si emite, su botón siempre emite y rechaza los
+    // vales escaneados, así que «Cobrar» ahí no hacía nada. Sólo frena a quien PRENDE una de las dos: un aparato que ya
+    // tenía ambas sigue pudiendo cambiar lo demás o apagar una.
+    const prendeEmitirOCobrar = input.canIssueAreaTickets === true || input.canCheckoutAreaTickets === true
+    const quedaEmitiendo = input.canIssueAreaTickets ?? terminal.canIssueAreaTickets
+    const quedaCobrando = input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets
+    if (prendeEmitirOCobrar && quedaEmitiendo && quedaCobrando) {
+      throw new BadRequestError(
+        'Un aparato emite vales o los cobra, no las dos cosas. Para cobrar vales usa la caja.',
+        'AREA_TICKET_ISSUE_AND_CHECKOUT',
+      )
+    }
+
+    const capabilityWasUpdated =
+      input.canIssueAreaTickets !== undefined || input.canCheckoutAreaTickets !== undefined || input.canDeliverAreaTickets !== undefined
+    const hasAreaTicketCapability =
+      (input.canIssueAreaTickets ?? terminal.canIssueAreaTickets) ||
+      (input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets) ||
+      (input.canDeliverAreaTickets ?? terminal.canDeliverAreaTickets)
+    const inferredWorkspace = capabilityWasUpdated
+      ? hasAreaTicketCapability
+        ? TerminalWorkspace.AREA_OPERATIONS
+        : terminal.defaultWorkspace === TerminalWorkspace.AREA_OPERATIONS
+          ? TerminalWorkspace.STANDARD_POS
+          : terminal.defaultWorkspace
+      : undefined
+
+    // Acotada al venue con el que se leyó: si la terminal se mudó en medio, no debe quedar en el otro negocio con el
+    // área y la báscula de éste (auditoría de Codex del spec «pantalla del cliente», 4ª ronda, 2026-09-17).
+    const updated = await writeScopedTerminal(
+      () =>
+        tx.terminal.update({
+          where: scopedTerminalWhere(terminalId, { venueId }),
+          data: {
+            fulfillmentAreaId: input.fulfillmentAreaId,
+            canIssueAreaTickets: input.canIssueAreaTickets,
+            canCheckoutAreaTickets: input.canCheckoutAreaTickets,
+            canDeliverAreaTickets: input.canDeliverAreaTickets,
+            // El dashboard presenta capacidades, no una opción técnica de workspace.
+            // Mantenerlos sincronizados evita que una terminal de cremería vuelva a
+            // abrir Mesas/POS estándar después de configurarla correctamente.
+            defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
+            scaleProfileId: input.scaleProfileId,
+            // D3: con esto el aparato deja de preguntar «¿Qué hará este aparato?».
+            areaRoleChosenAt: capabilityWasUpdated || input.fulfillmentAreaId !== undefined ? new Date() : undefined,
+          },
+          select: {
+            id: true,
+            name: true,
+            fulfillmentAreaId: true,
+            canIssueAreaTickets: true,
+            canCheckoutAreaTickets: true,
+            canDeliverAreaTickets: true,
+            defaultWorkspace: true,
+            scaleProfileId: true,
+          },
+        }),
+      'Terminal no encontrada',
     )
-  }
-
-  const capabilityWasUpdated =
-    input.canIssueAreaTickets !== undefined || input.canCheckoutAreaTickets !== undefined || input.canDeliverAreaTickets !== undefined
-  const hasAreaTicketCapability =
-    (input.canIssueAreaTickets ?? terminal.canIssueAreaTickets) ||
-    (input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets) ||
-    (input.canDeliverAreaTickets ?? terminal.canDeliverAreaTickets)
-  const inferredWorkspace = capabilityWasUpdated
-    ? hasAreaTicketCapability
-      ? TerminalWorkspace.AREA_OPERATIONS
-      : terminal.defaultWorkspace === TerminalWorkspace.AREA_OPERATIONS
-        ? TerminalWorkspace.STANDARD_POS
-        : terminal.defaultWorkspace
-    : undefined
-
-  // Acotada al venue con el que se leyó: si la terminal se mudó en medio, no debe quedar en el otro negocio con el
-  // área y la báscula de éste (auditoría de Codex del spec «pantalla del cliente», 4ª ronda, 2026-09-17).
-  const updated = await writeScopedTerminal(
-    () =>
-      prisma.terminal.update({
-        where: scopedTerminalWhere(terminalId, { venueId }),
-        data: {
-          fulfillmentAreaId: input.fulfillmentAreaId,
-          canIssueAreaTickets: input.canIssueAreaTickets,
-          canCheckoutAreaTickets: input.canCheckoutAreaTickets,
-          canDeliverAreaTickets: input.canDeliverAreaTickets,
-          // El dashboard presenta capacidades, no una opción técnica de workspace.
-          // Mantenerlos sincronizados evita que una terminal de cremería vuelva a
-          // abrir Mesas/POS estándar después de configurarla correctamente.
-          defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
-          scaleProfileId: input.scaleProfileId,
-          // D3: con esto el aparato deja de preguntar «¿Qué hará este aparato?».
-          areaRoleChosenAt: capabilityWasUpdated || input.fulfillmentAreaId !== undefined ? new Date() : undefined,
-        },
-        select: {
-          id: true,
-          name: true,
-          fulfillmentAreaId: true,
-          canIssueAreaTickets: true,
-          canCheckoutAreaTickets: true,
-          canDeliverAreaTickets: true,
-          defaultWorkspace: true,
-          scaleProfileId: true,
-        },
-      }),
-    'Terminal no encontrada',
-  )
+    return { terminal, updated }
+  })
   await logAction({
     staffId: performedBy ?? null,
     venueId,
