@@ -44,6 +44,8 @@ describe('crm team routes', () => {
     const ver = ['crm:ver']
     const editar = ['crm:editar']
     const admin = ['crm:admin']
+    const campanas = [['crm:campanas', 'crm:admin']]
+    const leerPlantillas = [['crm:contactar', 'crm:campanas', 'crm:admin']]
     const asked = routes().filter(({ route }) => !route.split(' ')[1].startsWith('/team'))
 
     expect(asked).toEqual([
@@ -83,6 +85,17 @@ describe('crm team routes', () => {
       { route: 'POST /activities/:id/done', keys: editar },
       // Ruling 55: «Reagendar», with the same key and scope as «Hecha».
       { route: 'POST /activities/:id/reschedule', keys: editar },
+      // Phase 2 (email): the templates are read by whoever uses them and written by whoever sends the campaigns — «Campañas
+      // masivas» stands alone, without «Ver negocios».
+      { route: 'GET /templates', keys: leerPlantillas },
+      { route: 'POST /templates', keys: campanas },
+      { route: 'POST /templates/preview', keys: leerPlantillas },
+      { route: 'POST /templates/test', keys: campanas },
+      { route: 'GET /templates/:id', keys: leerPlantillas },
+      { route: 'PATCH /templates/:id', keys: campanas },
+      { route: 'POST /templates/:id/archive', keys: campanas },
+      { route: 'POST /templates/:id/unarchive', keys: campanas },
+      { route: 'POST /uploads/image', keys: campanas },
       // «Importar lo de HubSpot» (task 8).
       { route: 'POST /import/hubspot/preview', keys: admin },
       { route: 'POST /import/hubspot/apply', keys: admin },

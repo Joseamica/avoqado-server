@@ -3,6 +3,7 @@
  * rules (which keys go together, who may give which key, who owns what) live in the services.
  */
 import { z } from 'zod'
+import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'
 
@@ -352,3 +353,87 @@ export const reportsSchema = z.object({ query: z.object({ desde: day('inicial'),
 
 /** GET /crm/export.csv — the list's own filters, without its paging: the service walks the pages. */
 export const exportAccountsSchema = z.object({ query: listAccountsSchema.shape.query.omit({ cursor: true, limit: true }) })
+
+// ── Email templates, preview, test and images (phase 2, plan task 2) ──────────────────────────────────────────────────
+
+const MAX_BLOCKS = 50
+/** A template is a handful of paragraphs; this cap only stops a body that wants to be a file. */
+const MAX_BLOCKS_BYTES = 100_000
+
+/** The first thing wrong with the blocks, in Spanish: the catalog's own messages are the library's English. */
+function blocksMessage(error: z.ZodError): string {
+  const issue = error.issues[0]
+  const index = typeof issue.path[0] === 'number' ? issue.path[0] + 1 : null
+  if (index === null) return 'Agrega al menos un bloque al correo'
+  const field = issue.path[1]
+  if (field === 'url') return `El bloque ${index} necesita una dirección válida que empiece con http:// o https://`
+  if (field === 'text' || field === 'label' || field === 'alt') return `El bloque ${index} no puede quedar vacío`
+  return `El bloque ${index} no es válido: elige un tipo de bloque que exista`
+}
+
+/**
+ * The blocks of an email, through the SAME catalog the businesses' campaigns use (`bloqueCampanaSchema`): nobody writes
+ * HTML, the server renders it, and a `javascript:` link never gets saved. Shape only; the variables are the service's.
+ */
+const emailBlocks = z.unknown().transform((value, ctx) => {
+  if (!Array.isArray(value)) {
+    ctx.addIssue({ code: 'custom', message: 'El contenido del correo debe ser una lista de bloques' })
+    return z.NEVER
+  }
+  if (value.length > MAX_BLOCKS) {
+    ctx.addIssue({ code: 'custom', message: `Máximo ${MAX_BLOCKS} bloques por correo` })
+    return z.NEVER
+  }
+  const parsed = bloquesCampanaSchema.safeParse(value)
+  if (!parsed.success) {
+    ctx.addIssue({ code: 'custom', message: blocksMessage(parsed.error) })
+    return z.NEVER
+  }
+  if (JSON.stringify(parsed.data).length > MAX_BLOCKS_BYTES) {
+    ctx.addIssue({ code: 'custom', message: 'El correo es demasiado largo' })
+    return z.NEVER
+  }
+  return parsed.data
+})
+const emailSubject = text(200, 'El asunto es obligatorio')
+const templateName = text(120, 'El nombre de la plantilla es obligatorio')
+
+/** GET /crm/templates. The page size has no upper bound here: the service caps it at 100. `archivadas=true` lists only those. */
+export const listTemplatesSchema = z.object({
+  query: z.object({
+    cursor: cuid.optional(),
+    limit: listAccountsSchema.shape.query.shape.limit,
+    archivadas: flagQuery,
+  }),
+})
+
+/** GET /crm/templates/:id, POST /crm/templates/:id/archive y /unarchive */
+export const templateIdSchema = z.object({ params: byId })
+
+/** POST /crm/templates */
+export const createTemplateSchema = z.object({
+  body: z.object({ name: templateName, subject: emailSubject, blocks: emailBlocks }),
+})
+
+/** PATCH /crm/templates/:id — only what changes. */
+export const updateTemplateSchema = z.object({
+  params: byId,
+  body: z
+    .object({ name: templateName.optional(), subject: emailSubject.optional(), blocks: emailBlocks.optional() })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+/**
+ * POST /crm/templates/preview. With `contexto`, the real data of that account (and of one of its contacts); without it, the
+ * example data. The service answers 404 for an account outside the caller's scope.
+ */
+export const previewTemplateSchema = z.object({
+  body: z.object({
+    subject: emailSubject,
+    blocks: emailBlocks,
+    contexto: z.object({ accountId: cuid, contactId: cuid.optional() }).optional(),
+  }),
+})
+
+/** POST /crm/templates/test — «Envíame una prueba». */
+export const sendTemplateTestSchema = z.object({ body: z.object({ subject: emailSubject, blocks: emailBlocks }) })

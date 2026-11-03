@@ -10,7 +10,8 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import multer from 'multer'
 import logger from '../config/logger'
 import * as crmController from '../controllers/crm/crm.controller'
-import { ValidationError } from '../errors/AppError'
+import * as crmEmailController from '../controllers/crm/crmEmail.controller'
+import { BadRequestError, ValidationError } from '../errors/AppError'
 import { CRM_KEYS } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { requireCrm } from '../middlewares/requireCrm.middleware'
@@ -25,21 +26,27 @@ import {
   createAccountSchema,
   createLostReasonSchema,
   createStageSchema,
+  createTemplateSchema,
   exportAccountsSchema,
   hideClientSchema,
   listAccountsSchema,
   listClientsSchema,
   listTeamSchema,
+  listTemplatesSchema,
   loseAccountSchema,
   moveStageSchema,
+  previewTemplateSchema,
   reassignAccountSchema,
   reportsSchema,
   removeTeamMemberSchema,
   rescheduleActivitySchema,
   searchOrganizationsSchema,
+  sendTemplateTestSchema,
+  templateIdSchema,
   updateLostReasonSchema,
   updateStageSchema,
   updateTeamMemberSchema,
+  updateTemplateSchema,
   winAccountSchema,
 } from '../schemas/crm.schema'
 
@@ -51,6 +58,10 @@ const ver = requireCrm('crm:ver')
 const editar = requireCrm('crm:editar')
 const admin = requireCrm('crm:admin')
 const exportar = requireCrm('crm:exportar')
+// «Campañas masivas» (`crm:campanas`) or the admin: whoever writes the templates and sends the campaigns. It stands alone, without «Ver negocios».
+const campanas = requireCrm(['crm:campanas', 'crm:admin'])
+// Whoever may use a template reads it: the seller who mails one by one, the campaign owner and the admin.
+const leerPlantillas = requireCrm(['crm:contactar', 'crm:campanas', 'crm:admin'])
 
 // Any key opens it: 403 only for whoever holds none.
 router.get('/me', requireCrm(CRM_KEYS), crmController.getMe)
@@ -113,6 +124,46 @@ router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmCo
 // Activities.
 router.post('/activities/:id/done', editar, validateRequest(completeActivitySchema), crmController.markActivityDone)
 router.post('/activities/:id/reschedule', editar, validateRequest(rescheduleActivitySchema), crmController.rescheduleActivityHandler)
+
+// Email templates (phase 2). Reading and the preview are for whoever uses them; writing, the test and the pictures are for «Campañas masivas».
+router.get('/templates', leerPlantillas, validateRequest(listTemplatesSchema), crmEmailController.listTemplates)
+router.post('/templates', campanas, validateRequest(createTemplateSchema), crmEmailController.createTemplate)
+router.post('/templates/preview', leerPlantillas, validateRequest(previewTemplateSchema), crmEmailController.previewTemplate)
+router.post('/templates/test', campanas, validateRequest(sendTemplateTestSchema), crmEmailController.sendTemplateTest)
+router.get('/templates/:id', leerPlantillas, validateRequest(templateIdSchema), crmEmailController.getTemplate)
+router.patch('/templates/:id', campanas, validateRequest(updateTemplateSchema), crmEmailController.updateTemplate)
+router.post('/templates/:id/archive', campanas, validateRequest(templateIdSchema), crmEmailController.archiveTemplate)
+router.post('/templates/:id/unarchive', campanas, validateRequest(templateIdSchema), crmEmailController.unarchiveTemplate)
+
+// A picture for an `image` block: in memory, at most 5 MB, only the three types `uploadAnnouncementImage` accepts.
+const IMAGE_MAX_BYTES = 5 * 1024 * 1024
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  // `+ 1`, as in the HubSpot upload: busboy cuts a file that REACHES the limit, so exactly 5 MB would not pass with the bare number.
+  limits: { fileSize: IMAGE_MAX_BYTES + 1, files: 1, fields: 0 },
+  // Another type is an error, not a skipped file: otherwise the answer would be «no image arrived».
+  fileFilter: (_req, file, accept) =>
+    IMAGE_TYPES.includes(file.mimetype) ? accept(null, true) : accept(new multer.MulterError('LIMIT_UNEXPECTED_FILE', file.fieldname)),
+})
+const readImage = preserveContext(imageUpload.single('file'))
+/** Whatever goes wrong reading the picture — too big, another type, a second file — is the file the client sent, never a 500. */
+function imageFile(req: Request, res: Response, next: NextFunction) {
+  readImage(req, res, (error?: unknown) => {
+    if (!error) return next()
+    const multerCode = error instanceof multer.MulterError ? error.code : null
+    if (!multerCode)
+      logger.warn('[CRM] The image upload could not be read', { error: error instanceof Error ? error.message : String(error) })
+    return next(
+      new BadRequestError(
+        multerCode === 'LIMIT_FILE_SIZE' ? 'La imagen puede pesar hasta 5 MB' : 'Sube una sola imagen PNG, JPG o WEBP',
+        'CRM_IMAGEN_INVALIDA',
+      ),
+    )
+  })
+}
+// The key first: whoever is not allowed never gets 5 MB read into memory.
+router.post('/uploads/image', campanas, imageFile, crmEmailController.uploadImage)
 
 // «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
 const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024
