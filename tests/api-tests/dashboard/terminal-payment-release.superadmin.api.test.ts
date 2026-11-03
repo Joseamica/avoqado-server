@@ -85,25 +85,25 @@ describe('POST superadmin /terminals/payment-requests/:requestId/release — sop
     [
       'en curso (SENT)',
       { released: false, status: 'SENT', slotHeld: true },
-      /sólo suelta cobros sin resultado.*SENT.*sigue apartada.*en curso/,
+      /sólo suelta cobros sin resultado.*en curso.*sigue apartada.*en curso/,
       /ya no aparta/,
     ],
     [
       'cancelándose',
       { released: false, status: 'CANCEL_REQUESTED', slotHeld: true },
-      /CANCEL_REQUESTED.*sigue apartada.*en curso/,
+      /cancelándose.*sigue apartada.*en curso/,
       /ya no aparta/,
     ],
     [
       'TIMED_OUT histórica retenida sin reloj acreditado',
       { released: false, status: 'TIMED_OUT', slotHeld: true },
-      /TIMED_OUT.*sigue apartada.*revis|TIMED_OUT.*sigue apartada.*concili/,
+      /vencido sin respuesta.*sigue apartada.*revis|vencido sin respuesta.*sigue apartada.*concili/,
       /ya no aparta|se suelta sola|a más tardar|20|en unos minutos/,
     ],
     [
       'sin desenlace en estricto',
       { released: false, status: 'FAILED', slotHeld: true },
-      /FAILED.*sigue apartada.*no se cobró/,
+      /fallido.*sigue apartada.*no se cobró/,
       /ya no aparta/,
     ],
     // A4b (21-oct): la ranura ya se soltó (el reloj, soporte o el cese acreditado) pero la VENTA sigue en duda: lo dice, sin
@@ -111,10 +111,10 @@ describe('POST superadmin /terminals/payment-requests/:requestId/release — sop
     [
       'ya no aparta y la venta sigue en duda',
       { released: false, status: 'TIMED_OUT', slotHeld: false },
-      /ya no aparta la terminal.*TIMED_OUT.*venta sigue pendiente de confirmar/,
+      /ya no aparta la terminal.*venció sin respuesta.*venta sigue pendiente de confirmar/,
       /sigue apartada|no se cobró/,
     ],
-    ['ya no aparta (resuelta)', { released: false, status: 'FAILED', slotHeld: false }, /ya no aparta la terminal.*FAILED/, /pendiente/],
+    ['ya no aparta (resuelta)', { released: false, status: 'FAILED', slotHeld: false }, /ya no aparta la terminal.*fallido/, /pendiente/],
   ])('P1 Fix1 texto según el resultado: %s', async (_caso, resultado, dice, noDice) => {
     soltar.mockResolvedValueOnce({ requestId, ...resultado })
     const res = await api()
