@@ -685,25 +685,30 @@ export async function checkRedemptionEligibility(venueId: string, customerId: st
  * (`FOR UPDATE`) and, if it is no longer in that status (someone corrected it meanwhile), nothing
  * is written and `skipped: 'STATUS_CHANGED'` is returned. Omitted ⇒ no status check (cancellation).
  *
- * Safe to call outside a transaction — all writes run in one transaction.
+ * Safe to call outside a transaction — all writes run in one transaction. With `db`, everything runs in the caller's
+ * transaction instead: if it fails, the caller's change rolls back too and can be retried (D13). It sums the REDEEMs without
+ * subtracting earlier refunds, so a caller must make sure it runs once: the status change it shares the transaction with does.
  */
-export async function refundCreditsForReservation(args: {
-  venueId: string
-  reservationId: string
-  startsAt: Date
-  policy: {
-    creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'
-    creditFreeRefundHoursBefore: number
-    creditLateRefundPercent: number
-  }
-  reasonPrefix?: string
-  onlyIfReservationStatus?: ReservationStatus
-}): Promise<{ creditsRefunded: number; policyApplied: string; skipped?: 'STATUS_CHANGED' }> {
+export async function refundCreditsForReservation(
+  args: {
+    venueId: string
+    reservationId: string
+    startsAt: Date
+    policy: {
+      creditRefundMode: 'NEVER' | 'ALWAYS' | 'TIME_BASED'
+      creditFreeRefundHoursBefore: number
+      creditLateRefundPercent: number
+    }
+    reasonPrefix?: string
+    onlyIfReservationStatus?: ReservationStatus
+  },
+  db?: Prisma.TransactionClient,
+): Promise<{ creditsRefunded: number; policyApplied: string; skipped?: 'STATUS_CHANGED' }> {
   const { venueId, reservationId, startsAt, policy, reasonPrefix, onlyIfReservationStatus } = args
 
   // Find the original REDEEM transaction(s) for this reservation.
   // We sum their negative quantities to know how many credits were spent on it.
-  const redeems = await prisma.creditTransaction.findMany({
+  const redeems = await (db ?? prisma).creditTransaction.findMany({
     where: { venueId, reservationId, type: 'REDEEM' },
   })
 
@@ -741,10 +746,10 @@ export async function refundCreditsForReservation(args: {
   // Refund proportionally per redeem transaction (rounded down — never refund more than spent).
   // For a single REDEEM with quantity=-3 and refundPercent=50 → refund 1 (floor of 1.5).
   let totalRefunded = 0
-  const statusChanged = await prisma.$transaction(async db => {
+  const aplicar = async (conexion: Prisma.TransactionClient) => {
     if (onlyIfReservationStatus) {
       // Same row lock any status change takes: a correction either committed before (we see it) or waits for us.
-      const rows = await db.$queryRaw<{ status: ReservationStatus }[]>`
+      const rows = await conexion.$queryRaw<{ status: ReservationStatus }[]>`
         SELECT status FROM "Reservation" WHERE id = ${reservationId} AND "venueId" = ${venueId} FOR UPDATE`
       if (rows[0]?.status !== onlyIfReservationStatus) return true
     }
@@ -753,11 +758,11 @@ export async function refundCreditsForReservation(args: {
       if (refundQty <= 0) continue
       if (!tx.creditItemBalanceId) continue
 
-      await db.creditItemBalance.update({
+      await conexion.creditItemBalance.update({
         where: { id: tx.creditItemBalanceId },
         data: { remainingQuantity: { increment: refundQty } },
       })
-      await db.creditTransaction.create({
+      await conexion.creditTransaction.create({
         data: {
           venueId,
           customerId: tx.customerId,
@@ -770,14 +775,15 @@ export async function refundCreditsForReservation(args: {
         },
       })
       // If the purchase was marked EXHAUSTED but now has balance again, restore ACTIVE.
-      await db.creditPackPurchase.updateMany({
+      await conexion.creditPackPurchase.updateMany({
         where: { id: tx.creditPackPurchaseId, status: CreditPurchaseStatus.EXHAUSTED },
         data: { status: CreditPurchaseStatus.ACTIVE },
       })
       totalRefunded += refundQty
     }
     return false
-  })
+  }
+  const statusChanged = db ? await aplicar(db) : await prisma.$transaction(aplicar)
 
   if (statusChanged) {
     logger.info(

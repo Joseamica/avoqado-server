@@ -150,6 +150,7 @@ describe('Phase 2 push hooks integration', () => {
     prismaMock.externalBusyBlock.findFirst.mockReset().mockResolvedValue(null)
     prismaMock.reservation.findUnique.mockResolvedValue(null)
     prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.calendarSyncOutbox.create.mockImplementation((args: any) => ({
       id: `outbox-${args.data.operation}-${args.data.targetConnectionId}`,
     }))
@@ -441,7 +442,7 @@ describe('Phase 2 push hooks integration', () => {
         createdBy: null,
         reservations: [],
       })
-      prismaMock.reservation.updateMany.mockResolvedValue({ count: 3 } as any)
+      prismaMock.reservation.updateManyAndReturn.mockResolvedValue([])
 
       await classSessionService.cancelClassSession(VENUE_ID, 'class-1')
 
@@ -591,10 +592,10 @@ describe('Phase 2 push hooks integration', () => {
       mockPushEnabled()
       mockConnectionLookup({ staff: STAFF_CONN_ID, venue: null })
       prismaMock.reservation.findFirst.mockResolvedValue(buildReservation({ status: 'CONFIRMED', classSessionId: 'class-1' }))
-      prismaMock.reservation.update.mockResolvedValue(buildReservation({ status: 'CANCELLED', classSessionId: 'class-1' }))
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(buildReservation({ status: 'CANCELLED', classSessionId: 'class-1' }))
       prismaMock.classSession.findUnique.mockResolvedValue(buildClassSession())
 
-      await classSessionService.removeAttendee(VENUE_ID, 'class-1', 'res-1')
+      await classSessionService.removeAttendee(VENUE_ID, 'class-1', 'res-1', STAFF_ID)
 
       const calls = prismaMock.calendarSyncOutbox.create.mock.calls
       expect(calls).toHaveLength(1)
