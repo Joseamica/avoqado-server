@@ -668,6 +668,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CrmTimelineEvent: 'CRM (equipo de ventas de Avoqado)',
   CrmInboundEntry: 'CRM (equipo de ventas de Avoqado)',
   CrmDigestSend: 'CRM (equipo de ventas de Avoqado)',
+  CrmWhatsappMessage: 'CRM (equipo de ventas de Avoqado)',
+  CrmErased: 'CRM (equipo de ventas de Avoqado)',
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import { MercadoPagoProvider } from '@/services/payments/providers/mercado-pago.
 import { getStripeChargeBoundsCents } from '@/services/payments/providers/money'
 
 const mockStripe = {
-  checkout: { sessions: { create: jest.fn(), retrieve: jest.fn() } },
+  checkout: { sessions: { create: jest.fn(), retrieve: jest.fn(), expire: jest.fn() } },
   paymentIntents: { retrieve: jest.fn(), capture: jest.fn(), cancel: jest.fn() },
 }
 
@@ -268,6 +268,23 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
     })
   })
 
+  describe('expireAuthorizationCheckout (S5: el comensal abandona el pago)', () => {
+    it('vence la sesión en la cuenta conectada', async () => {
+      mockStripe.checkout.sessions.expire.mockResolvedValue({ id: 'cs_1', status: 'expired' })
+
+      await expect(provider.expireAuthorizationCheckout(merchant as any, 'cs_1')).resolves.toBeUndefined()
+
+      expect(mockStripe.checkout.sessions.expire).toHaveBeenCalledWith('cs_1', {}, { stripeAccount: 'acct_x' })
+    })
+
+    it('el error de Stripe sale tal cual (quien llama distingue «ya no se puede» de «sin respuesta»)', async () => {
+      const original = stripeError('checkout_session_not_expirable')
+      mockStripe.checkout.sessions.expire.mockRejectedValue(original)
+
+      await expect(provider.expireAuthorizationCheckout(merchant as any, 'cs_1')).rejects.toBe(original)
+    })
+  })
+
   describe('sin connectAccountId lanza BadRequestError', () => {
     it.each([
       [
@@ -285,6 +302,7 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
           }),
       ],
       ['getAuthorization', (p: StripeConnectProvider) => p.getAuthorization(merchantSinCuenta as any, { paymentIntentId: 'pi_1' })],
+      ['expireAuthorizationCheckout', (p: StripeConnectProvider) => p.expireAuthorizationCheckout(merchantSinCuenta as any, 'cs_1')],
       [
         'capture',
         (p: StripeConnectProvider) =>
@@ -303,11 +321,12 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
     it.each([
       ['BlumonProvider', new BlumonProvider()],
       ['MercadoPagoProvider', new MercadoPagoProvider()],
-    ])('%s lanza ProviderCapabilityError en los cuatro métodos', async (_n, other) => {
+    ])('%s lanza ProviderCapabilityError en los métodos de apartar y cobrar', async (_n, other) => {
       await expect(other.createAuthorizationCheckout({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.getAuthorization({} as any, { paymentIntentId: 'x' })).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.capture({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
       await expect(other.voidAuthorization({} as any, {} as any)).rejects.toBeInstanceOf(ProviderCapabilityError)
+      await expect(other.expireAuthorizationCheckout({} as any, 'cs_1')).rejects.toBeInstanceOf(ProviderCapabilityError)
     })
   })
 

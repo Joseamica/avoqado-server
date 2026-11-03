@@ -128,6 +128,10 @@ export class BlumonProvider implements IEcommerceProvider {
     throw new ProviderCapabilityError(PROVIDER_CODE, 'voidAuthorization')
   }
 
+  async expireAuthorizationCheckout(_merchant: EcommerceMerchantWithProvider, _checkoutSessionId: string): Promise<void> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'expireAuthorizationCheckout')
+  }
+
   async getRefund(_merchant: EcommerceMerchantWithProvider, _refundId: string): Promise<RefundState> {
     throw new ProviderCapabilityError(PROVIDER_CODE, 'getRefund')
   }

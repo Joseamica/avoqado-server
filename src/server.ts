@@ -106,6 +106,7 @@ import { initializeSocketServer, shutdownSocketServer } from './communication/so
 import { initializeFirebase } from './config/firebase'
 import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
+import { precalentarSellos } from './services/wallet/precalentarSellos'
 import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
 // Import Stripe feature sync startup
 import { ensureFeaturesAreSyncedToStripe } from './startup/stripe-sync.startup'
@@ -764,6 +765,11 @@ const startApplication = async (retries = 3) => {
       const isDevEnv = NODE_ENV === 'development'
       const maxAttempts = isDevEnv ? 10 : 1
       const retryDelayMs = 500
+
+      // Los sellos de las tarjetas de Wallet se abren AQUÍ, antes de abrir el puerto: sin esto la primera
+      // descarga tras cada despliegue congelaba el hilo 1-3 s con un cliente esperando (21-oct-2026).
+      // Nunca lanza y tiene tope de tiempo. En desarrollo no: cada recarga de tsx bajaría las imágenes.
+      if (!isDevEnv) await precalentarSellos()
 
       const listenWithRetry = (attempt = 1) => {
         // Success + error handlers are scoped to THIS attempt only — we remove

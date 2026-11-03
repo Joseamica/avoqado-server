@@ -1,6 +1,10 @@
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ issueRefund: jest.fn() }))
 jest.mock('@/services/mobile/refund.mobile.service', () => ({ createRefund: jest.fn() }))
 jest.mock('@/services/tpv/refund.tpv.service', () => ({ recordRefund: jest.fn() }))
+jest.mock('@/services/storeCredit/storeCreditTender', () => ({
+  ...jest.requireActual('@/services/storeCredit/storeCreditTender'),
+  storeCreditAvailable: () => true,
+}))
 
 import * as dashboardController from '@/controllers/dashboard/refund.dashboard.controller'
 import * as mobileController from '@/controllers/mobile/refund.mobile.controller'
@@ -35,6 +39,27 @@ describe('controladores de refund — centavos enteros seguros', () => {
     dashboardIssueRefund.mockResolvedValue({ refundId: 'refund-1' })
     mobileCreateRefund.mockResolvedValue({ refundId: 'refund-1' })
     tpvRecordRefund.mockResolvedValue({ id: 'refund-1' })
+  })
+
+  it('«Sólo saldo a favor»: el panel manda la regla al servicio, para que corra con el cobro bloqueado', async () => {
+    const res = response()
+
+    await dashboardController.issueRefund(request({ amount: 100, reason: 'RETURNED_GOODS' }), res, jest.fn())
+
+    expect(dashboardIssueRefund).toHaveBeenCalledWith(expect.objectContaining({ reglasBajoCandado: expect.any(Function) }))
+    const { reglasBajoCandado } = dashboardIssueRefund.mock.calls[0][0]
+    const tx = { venueSettings: { findUnique: jest.fn().mockResolvedValue({ storeCreditOnly: true }) } }
+    await expect(reglasBajoCandado(tx, { original: { tenderSystemKind: null } })).rejects.toMatchObject({ code: 'STORE_CREDIT_ONLY' })
+    expect(tx.venueSettings.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1' } }))
+  })
+
+  it('🔴 Codex r1 #2: un motivo fuera del catálogo no se cuela: 400 antes del servicio', async () => {
+    for (const reason of ['RETURNED_GOODS ', 'returned_goods', 'lo que sea']) {
+      const res = response()
+      await dashboardController.issueRefund(request({ amount: 100, reason }), res, jest.fn())
+      expect(res.status).toHaveBeenCalledWith(400)
+    }
+    expect(dashboardIssueRefund).not.toHaveBeenCalled()
   })
 
   it('dashboard rechaza amount fraccionario con 400 antes del servicio', async () => {

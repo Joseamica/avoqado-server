@@ -143,7 +143,7 @@ describe('Menú del aparato: el recorrido del SERVIDOR', () => {
     const todo = lista.body.everything
     expect(todo).toEqual({ categories: 6, products: 6 })
     const fila = (id: string) => lista.body.terminals.find((t: any) => t.id === id)
-    // Ruling 11: sin versión mínima publicada la app ignora el filtro → `sees` es todo y lo filtrado va en `seesAfterUpdate`.
+    // Ruling 11: un aparato que no reporta versión no aplica el filtro → `sees` es todo y lo filtrado va en `seesAfterUpdate`.
     expect(fila(aparato.android.id)).toMatchObject({
       menus: [{ id: menuA, name: 'Menú A' }],
       needsAppUpdate: true,

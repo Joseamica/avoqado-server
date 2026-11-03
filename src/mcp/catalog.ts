@@ -108,6 +108,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   crm_advance_stage: 'write',
   crm_add_note: 'write',
   crm_add_activity: 'write',
+  crm_delete_account: 'write',
   crm_pending: 'read',
   crm_pipeline_summary: 'read',
   create_product: 'write',
