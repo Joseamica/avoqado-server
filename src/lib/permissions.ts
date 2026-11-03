@@ -604,6 +604,8 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'giftCards:sell': ['giftCards:sell', 'giftCards:read'],
   'giftCards:redeem': ['giftCards:redeem', 'giftCards:read'],
   'giftCards:manage': ['giftCards:manage', 'giftCards:read'],
+  // Mover el interruptor (founder, 3-nov-2026): administrador para arriba. No concede administrar, vender ni cobrar.
+  'giftCards:enable': ['giftCards:enable', 'giftCards:read'],
 
   // ===========================
   // ESTIMATES / PRESUPUESTOS
@@ -1143,7 +1145,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
-    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
+    // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9). Sin `giftCards:enable`: el gerente no mueve
+    // el interruptor (founder, 3-nov-2026). ADMIN y OWNER lo traen por su comodín.
+    'giftCards:read',
+    'giftCards:sell',
+    'giftCards:redeem',
+    'giftCards:manage',
     'referral:read', // Referral Program: read-only access
     'referral:override-existing-customer', // Referral Program: can override existing-customer guard
     'referral:fulfill-courtesy', // Referral Program: can mark a FREE_PRODUCT courtesy as delivered
@@ -1180,6 +1187,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'serialized-inventory:create', // Can register (Alta de Productos)
     // Back-office sale verification review (PlayTelecom / Walmart)
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
+    'sale-verifications:approve', // Decidir (aprobar/rechazar) la venta; `review` sólo la ve. PlayTelecom puede negarlo por rol
     // SIM custody — MANAGER = "Supervisor" in PlayTelecom role labels
     'sim-custody:assign-to-promoter', // Supervisor assigns SIMs to Promoter
     'sim-custody:collect-from-promoter', // Owning-supervisor reclaims from Promoter
@@ -1264,6 +1272,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'referral:fulfill-courtesy',
     'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
+    'sale-verifications:approve', // Decidir (aprobar/rechazar) la venta; `review` sólo la ve. PlayTelecom puede negarlo por rol
     'inventory:org-manage', // Manage org-level item categories & serialized items
     // Commission System (can manage but NOT payout - OWNER only)
     'commissions:read',
@@ -1473,6 +1482,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'serialized-inventory:create', // Can register (Alta de Productos)
     'serialized-inventory:change-category', // Bulk-change category of non-sold SIMs
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
+    'sale-verifications:approve', // Decidir (aprobar/rechazar) la venta; `review` sólo la ve. PlayTelecom puede negarlo por rol
     'sale-verifications:reopen', // Can revert an approved sale back to PENDING for re-review (OWNER only)
     'sale-verifications:edit', // Can edit/correct any sale (amount, forma de pago, tipo, estado) — OWNER only
     'manual-sales:create', // Can bulk-create SIM sales made outside the TPV (PlayTelecom / Walmart)
@@ -2110,7 +2120,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   ],
   // Tarjetas de regalo (fase 1a). `sell` y `redeem` son de MOSTRADOR; `manage` (ajustar, bloquear, reponer, cancelar una
   // venta) es de gerencia. Sin esta entrada `giftCards:*` no se expande y el editor de roles no puede asignarlos.
-  giftCards: ['giftCards:read', 'giftCards:sell', 'giftCards:redeem', 'giftCards:manage'],
+  giftCards: ['giftCards:read', 'giftCards:sell', 'giftCards:redeem', 'giftCards:manage', 'giftCards:enable'],
   // Referral Program (was missing from the catalog entirely — pre-existing
   // CATALOG_GAP for the 5 perms below; adding this key fixes all of them
   // as a side effect of registering the new `referral:fulfill-courtesy`).
@@ -2158,7 +2168,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // Serialized Inventory (SIMs, jewelry, etc.)
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create', 'serialized-inventory:change-category'],
   // Sale Verifications back-office review (PlayTelecom / Walmart documentation flow)
-  'sale-verifications': ['sale-verifications:review', 'sale-verifications:reopen', 'sale-verifications:edit'],
+  'sale-verifications': ['sale-verifications:review', 'sale-verifications:approve', 'sale-verifications:reopen', 'sale-verifications:edit'],
   // Manual Sales (bulk-create SIM sales made outside the TPV — PlayTelecom / Walmart)
   'manual-sales': ['manual-sales:create'],
   // SIM custody (PlayTelecom chain-of-custody: Admin → Supervisor → Promoter)

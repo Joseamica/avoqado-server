@@ -30,6 +30,7 @@ import * as syncTpvController from '../controllers/tpv/sync.tpv.controller'
 import * as tableController from '../controllers/tpv/table.tpv.controller'
 import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
 import * as terminalPaymentTpvController from '../controllers/tpv/terminal-payment.tpv.controller'
+import { declararSinCobroDesdeLaTerminal } from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
 import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
 import * as trainingController from '../controllers/tpv/training.tpv.controller'
@@ -47,7 +48,8 @@ import { MASTER_ADMIN_PRINCIPAL_ID } from '../lib/authPrincipals'
 import { NO_INSTRUMENT_PERMISSION } from '../services/tpv/no-instrument-resolution.service'
 import { noInstrumentPinRateLimiter, pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
-import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
+import { requireVenueMembership, validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
+import { permisoDeLiberacion } from '../middlewares/permisoDeLiberacion.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { activateTerminalSchema } from '../schemas/activation.schema'
@@ -69,6 +71,10 @@ import {
   createAndAddCustomerSchema,
   createOrderWithItemsSchema,
   createProofOfSaleSchema,
+  setVerificationNumberSchema,
+  terminalVerificationPageSchema,
+  checkLinkingNumberSchema,
+  verificationStatusesSchema,
   createSaleVerificationSchema,
   getAvailableDiscountsSchema,
   getCryptoPaymentStatusSchema,
@@ -3726,6 +3732,91 @@ router.post(
   terminalPaymentTpvController.resolveNoInstrument,
 )
 
+/**
+ * Por aquí sólo se DECLARA. `permisoDeLiberacion` también deja a un gerente liberar a secas, y eso no le toca a un botón de la terminal:
+ * sin la declaración exacta ni se llega al limitador ni al permiso, así que un cuerpo así tampoco gasta la cubeta del PIN.
+ */
+const exigirDeclaracionSinCobro = (req: Request, res: Response, next: NextFunction) => {
+  if ((req.body as { statement?: unknown } | undefined)?.statement === 'UNCHARGED_VERIFIED') return next()
+  return res.status(400).json({
+    success: false,
+    released: false,
+    code: 'UNCHARGED_STATEMENT_REQUIRED',
+    message: 'Esta ruta sólo acepta la declaración de que el cobro no pasó.',
+  })
+}
+
+/**
+ * @openapi
+ * /api/v1/tpv/venues/{venueId}/terminal-payment/requests/{requestId}/uncharged-declaration:
+ *   post:
+ *     tags: [TPV - Terminal Payment]
+ *     summary: «No se cobró» desde el banner de la terminal (botón del banner verde, 3-nov)
+ *     description: >
+ *       La MISMA declaración de `POST /mobile/venues/{venueId}/terminal-payment/{requestId}/release`, con las mismas puertas y el
+ *       mismo núcleo (`reconcileUncharged`), para un cobro que mandó el POS y quedó en duda. Lo único distinto es el origen: la
+ *       bitácora y la fila dicen `source: TPV`. Una persona revisó y afirma que no se cobró: si el banco avisa después que sí, se
+ *       registra y salta la alerta, como hoy. A diferencia de la ruta del POS no libera a secas: exige `statement`.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [resolutionId, statement, statementVersion]
+ *             properties:
+ *               resolutionId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: La terminal lo deriva de la solicitud; repetir la misma declaración es idempotente
+ *               statement:
+ *                 type: string
+ *                 enum: [UNCHARGED_VERIFIED]
+ *               statementVersion:
+ *                 type: integer
+ *                 enum: [1]
+ *               supervisorPin:
+ *                 type: string
+ *                 description: Sólo cuando la sesión NO tiene `payments:reconcile-uncharged` — el PIN de alguien que sí lo tiene. Nunca se guarda
+ *     responses:
+ *       200:
+ *         description: "{ success, released, status, requestId, paymentId, outcome, outcomeEvidence, resolution, message }. `released: false` = apareció dinero: no se liberó"
+ *       400:
+ *         description: "{ code: UNCHARGED_STATEMENT_REQUIRED } — el cuerpo no trae la declaración; no libera nada"
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: "{ code: SUPERVISOR_AUTHORIZATION_REQUIRED | NOT_ALLOWED } o la negación de `checkPermission`; quien no es del negocio ni llega al limitador"
+ *       404:
+ *         description: "{ code: ATTEMPT_NOT_FOUND } — no acredita nada sobre el cobro"
+ *       409:
+ *         description: "{ code: POSITIVE_EVIDENCE_EXISTS | TERMINAL_NEVER_ANSWERED | EXECUTION_STILL_ACTIVE | RESOLUTION_CONFLICT | ATTEMPT_NOT_ELIGIBLE, message } — el mensaje está escrito para el cajero"
+ *       429:
+ *         description: Demasiados intentos de autorización — sólo cuenta las llamadas CON supervisorPin (mismos topes que el PIN de gerente)
+ */
+router.post(
+  '/venues/:venueId/terminal-payment/requests/:requestId/uncharged-declaration',
+  authenticateTokenMiddleware,
+  requireVenueMembership, // antes de la cubeta: un token de otro negocio no gasta la del PIN de gerente de éste
+  exigirDeclaracionSinCobro,
+  ...noInstrumentPinRateLimiter, // sólo cuenta los cuerpos CON supervisorPin
+  permisoDeLiberacion,
+  declararSinCobroDesdeLaTerminal,
+)
+
 // ==========================================
 // SEND RECEIPT BY WHATSAPP
 // ==========================================
@@ -5920,6 +6011,13 @@ router.get(
  *
  *       - If verification exists: Appends photos to existing record
  *       - If no verification: Creates new verification with COMPLETED status
+ *
+ *       Terminal nueva (manda `captureSeq` con `captureDeviceId`, `idempotencyKey` y `capturedAt`): sólo escribe en
+ *       PENDING/FAILED, una captura vieja del mismo aparato no pisa a una nueva y no pisa un número del back-office.
+ *       Con el interruptor del número apagado, la foto se guarda y los números salen `DISABLED` (no es error).
+ *       Un portado en una venta que no es de portabilidad no se guarda (`NOT_PORTABILIDAD`). El reintento de una
+ *       captura que ya entró contesta `SUPERSEDED_BY_NEWER` aunque la venta ya se haya aprobado o rechazado.
+ *       Las terminales publicadas (sin `captureSeq`) siguen exactamente igual.
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -5943,6 +6041,15 @@ router.get(
  *                   format: uri
  *                 minItems: 1
  *                 description: Firebase Storage URLs of uploaded photos
+ *               verificationId: { type: string, format: cuid }
+ *               replaceIndex: { type: integer, minimum: 0, maximum: 1 }
+ *               photoLabel: { type: string, enum: [Vinculacion, Portabilidad] }
+ *               linkingNumber: { type: string, description: 'Número de vinculación, 9 o 10 dígitos (sólo con captureSeq)' }
+ *               portedNumber: { type: string, description: 'Número portado, 9 o 10 dígitos (sólo con captureSeq)' }
+ *               idempotencyKey: { type: string }
+ *               captureSeq: { type: integer, minimum: 0 }
+ *               captureDeviceId: { type: string }
+ *               capturedAt: { type: string, format: date-time }
  *     responses:
  *       200:
  *         description: Proof-of-sale uploaded successfully
@@ -5956,12 +6063,22 @@ router.get(
  *                 verificationId:
  *                   type: string
  *                   format: cuid
+ *                 status:
+ *                   type: string
  *                 message:
  *                   type: string
+ *                 outcome: { type: string, enum: [APPLIED, SUPERSEDED_BY_NEWER, SALE_ALREADY_APPROVED], description: 'Sólo con captureSeq' }
+ *                 photoOutcome: { type: string, enum: [APPLIED, SUPERSEDED_BY_NEWER] }
+ *                 linkingNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED] }
+ *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED, NOT_PORTABILIDAD], description: 'NOT_PORTABILIDAD: la venta no es de portabilidad y el portado no se guardó' }
+ *                 linkingDuplicate: { type: boolean, description: 'El número guardado ya está en otra venta de la organización' }
+ *                 portedDuplicate: { type: boolean }
  *       400:
- *         description: Invalid request data
+ *         description: Invalid request data; SALE_REJECTED, CAPTURE_REQUIRED (número sin captureSeq, o captureSeq incompleto) o INVALID_LINKING_NUMBER
  *       404:
  *         description: Payment or staff not found
+ *       409:
+ *         description: VERIFICATION_MOVED (la venta cambió de tienda; reintentar)
  */
 router.post(
   '/verification/proof-of-sale',
@@ -5973,21 +6090,201 @@ router.post(
 
 /**
  * @openapi
+ * /tpv/verification/{verificationId}/number:
+ *   post:
+ *     tags:
+ *       - TPV - Sale Verification
+ *     summary: Corregir sólo el número de vinculación o el portado (terminal nueva)
+ *     description: |
+ *       Mismas reglas que proof-of-sale para el número (sólo PENDING o FAILED; no pisa lo del back-office; una captura
+ *       vieja del mismo aparato no pisa a una nueva). Nunca toca las fotos. Una venta FAILED vuelve a PENDING con la nota
+ *       del back-office. Con el interruptor apagado responde 422 antes de revisar el número.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: verificationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [slot, number, idempotencyKey, captureSeq, captureDeviceId, capturedAt]
+ *             properties:
+ *               slot: { type: string, enum: [VINCULACION, PORTABILIDAD] }
+ *               number: { type: string, description: '9 o 10 dígitos (se quitan espacios, guiones, puntos y paréntesis)' }
+ *               idempotencyKey: { type: string }
+ *               captureSeq: { type: integer, minimum: 0 }
+ *               captureDeviceId: { type: string }
+ *               capturedAt: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Número guardado (o por qué no)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 message: { type: string }
+ *                 verificationId: { type: string }
+ *                 status: { type: string }
+ *                 outcome: { type: string, enum: [APPLIED, SUPERSEDED_BY_NEWER, SALE_ALREADY_APPROVED] }
+ *                 linkingNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE] }
+ *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, NOT_PORTABILIDAD], description: 'NOT_PORTABILIDAD: la venta no es de portabilidad y el portado no se guardó' }
+ *                 linkingDuplicate: { type: boolean }
+ *                 portedDuplicate: { type: boolean }
+ *       400:
+ *         description: INVALID_LINKING_NUMBER, SALE_REJECTED o cuerpo incompleto
+ *       403:
+ *         description: MODULE_DISABLED (la tienda del token no tiene SERIALIZED_INVENTORY)
+ *       404:
+ *         description: La venta no es de la organización del token
+ *       409:
+ *         description: VERIFICATION_MOVED (la venta cambió de tienda; reintentar)
+ *       422:
+ *         description: LINKING_NUMBER_DISABLED (interruptor de la organización apagado)
+ */
+router.post(
+  '/verification/:verificationId/number',
+  authenticateTokenMiddleware,
+  checkPermission('payments:create'),
+  validateRequest(setVerificationNumberSchema),
+  saleVerificationController.setVerificationNumber,
+)
+
+/**
+ * @openapi
  * /tpv/verification/pending:
  *   get:
  *     summary: Get pending verifications for the authenticated staff
+ *     description: |
+ *       Todas las PENDING del promotor en la organización del token, 200 por página: primero las que les falta una
+ *       foto, luego de la más vieja a la más nueva. `total` y `nextCursor` son nuevos; la terminal vieja lee `data`.
  *     tags: [TPV - Sale Verification]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *         description: El nextCursor de la página anterior
  *     responses:
  *       200:
- *         description: List of pending verifications
+ *         description: '{ success, data, total, nextCursor } con linkingNumber, portedNumber, …Locked y alerts por venta'
+ *       400:
+ *         description: INVALID_CURSOR
  */
 router.get(
   '/verification/pending',
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
+  validateRequest(terminalVerificationPageSchema),
   saleVerificationController.getPendingVerifications,
+)
+
+// Las tres literales van ANTES de `/verification/:verificationId`, o ésa las atrapa como si fueran un id.
+
+/**
+ * @openapi
+ * /tpv/verification/actionable:
+ *   get:
+ *     summary: Las PENDING y FAILED del promotor (la lista que la TPV nueva guarda para trabajar sin señal)
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: '{ success, data, total, nextCursor }, cada venta en el formato del detalle'
+ *       400:
+ *         description: INVALID_CURSOR
+ *       403:
+ *         description: MODULE_DISABLED (la tienda del token no tiene SERIALIZED_INVENTORY)
+ */
+router.get(
+  '/verification/actionable',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(terminalVerificationPageSchema),
+  saleVerificationController.getActionableVerifications,
+)
+
+/**
+ * @openapi
+ * /tpv/verification/number-check:
+ *   get:
+ *     summary: ¿El número de vinculación o portado ya está en otra venta de la organización?
+ *     description: Sólo dice si está repetido, nunca con qué venta. Con su verificationId, la venta no choca consigo misma.
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: number
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: kind
+ *         required: true
+ *         schema: { type: string, enum: [linking, ported] }
+ *       - in: query
+ *         name: verificationId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: '{ success, duplicate }'
+ *       400:
+ *         description: INVALID_LINKING_NUMBER (9 o 10 dígitos)
+ *       403:
+ *         description: MODULE_DISABLED o LINKING_NUMBER_DISABLED (interruptor apagado)
+ *       404:
+ *         description: La verificación no es del promotor en esta organización
+ */
+router.get(
+  '/verification/number-check',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(checkLinkingNumberSchema),
+  saleVerificationController.checkLinkingNumber,
+)
+
+/**
+ * @openapi
+ * /tpv/verification/status:
+ *   get:
+ *     summary: Estado de la verificación de cada pago (hasta 100), dentro de la organización del token
+ *     description: NONE si el pago no tiene verificación o no es de la organización. La TPV quita una tarjeta guardada sólo con COMPLETED o REJECTED.
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: paymentIds
+ *         required: true
+ *         schema: { type: string }
+ *         description: Ids separados por comas
+ *     responses:
+ *       200:
+ *         description: '{ success, data: [{ paymentId, status }] }'
+ *       400:
+ *         description: Sin ids o más de 100
+ *       403:
+ *         description: MODULE_DISABLED
+ */
+router.get(
+  '/verification/status',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(verificationStatusesSchema),
+  saleVerificationController.getVerificationStatuses,
 )
 
 /**

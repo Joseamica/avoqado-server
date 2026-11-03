@@ -121,6 +121,25 @@ const envSchema = z.object({
   // job lo compara contra 'true', y así queda simétrico con DISABLE_RABBITMQ
   // (`src/server.ts`), que usa el mismo criterio.
   MARKETING_KILL_SWITCH: z.string().optional(),
+  // ── CRM propio · fase 2 (correo). Las campañas de PLATAFORMA (Avoqado a sus prospectos, clientes y usuarios) salen por
+  // su propio subdominio, aparte del de las campañas de los negocios. `MARKETING_KILL_SWITCH` las apaga también.
+  CRM_CAMPAIGN_FROM: z.string().default('Avoqado <novedades@novedades.avoqado.io>'),
+  CRM_CAMPAIGN_REPLY_TO: z.string().default('hola@avoqado.io'),
+  // Primeros intentos por día (hora de Ciudad de México): calentamiento del subdominio. Se sube a mano.
+  // 🔴 `.catch(300)` (Ruling 3): uno mal escrito («1,000», «mil») vale el default seguro en vez de hacer `process.exit` de TODA la API.
+  CRM_CAMPAIGN_DAILY_CAP: z.coerce.number().int().min(0).default(300).catch(300),
+  // 🔴 Fuera de producción sólo sale correo a estas direcciones (lista separada por comas, en minúsculas). Vacía = no sale
+  // nada: la base local trae correos de gente real. Se lee EN CADA ENVÍO desde `process.env`
+  // (`services/crm/email/testAllowlist.ts`), no de este objeto congelado: aquí queda declarada y documentada.
+  CRM_CORREO_PRUEBAS: z.string().optional(),
+  // Gmail del vendedor (app OAuth de Google «External»). Sin las cuatro, «Mi Gmail» dice «Falta configurar la app de
+  // Google» y nada truena. La llave es PROPIA de esta integración: hex de 32 bytes (`openssl rand -hex 32`).
+  // 🔴 Texto opcional SIN `.url()` ni `.length(64)` a propósito (Ruling 3): una mal escrita haría `process.exit` de TODA la
+  // API. La URI (http/https) y la llave (64 hex) se validan donde se usan: `services/crm/email/gmailOAuth.service.ts`.
+  CRM_GMAIL_CLIENT_ID: z.string().optional(),
+  CRM_GMAIL_CLIENT_SECRET: z.string().optional(),
+  CRM_GMAIL_REDIRECT_URI: z.string().optional(),
+  CRM_GMAIL_TOKEN_KEY: z.string().optional(),
   ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
   // Recipient for the weekly "new activated/paid venues" report (see
   // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and

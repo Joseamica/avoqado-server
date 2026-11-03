@@ -237,7 +237,12 @@ const prismaMock: any = {
   // Platform billing CFDI (Avoqado factura a sus propios clientes)
   platformEmisor: createMockModel(),
   billingTaxProfile: createMockModel(),
-  platformCfdi: createMockModel(),
+  // `fields`: «Por cobrar» cuenta las PPD sin liquidar comparando columna contra columna (`amountPaidCents < totalCents`).
+  platformCfdi: Object.assign(createMockModel(), { fields: { totalCents: { name: 'totalCents' } } }),
+  // «Por cobrar» (recordatorios manuales de cobro con factura, SUPERADMIN)
+  platformCharge: createMockModel(),
+  platformChargeOccurrence: createMockModel(),
+  platformChargeDigest: createMockModel(),
   // Token budget models
   chatbotTokenBudget: createMockModel(),
   tokenUsageRecord: createMockModel(),
@@ -553,6 +558,17 @@ const prismaMock: any = {
   crmTimelineEvent: createMockModel(),
   crmInboundEntry: createMockModel(),
   crmDigestSend: createMockModel(),
+  // CRM fase 2 (correo): plantillas, campañas, bajas, consentimiento, Gmail del vendedor y correos de la ficha.
+  crmEmailTemplate: createMockModel(),
+  crmCampaign: createMockModel(),
+  crmCampaignDelivery: createMockModel(),
+  crmEmailOptOut: createMockModel(),
+  crmEmailConsent: createMockModel(),
+  crmGmailConnection: createMockModel(),
+  crmGmailAccountSeen: createMockModel(),
+  crmEmailMessage: createMockModel(),
+  // La supresión global de correo (rebotes y quejas): `isBlocked` la lee antes de cualquier envío del CRM.
+  emailSuppression: createMockModel(),
   crmWhatsappMessage: createMockModel(),
   crmErased: createMockModel(),
   // Add $connect and $disconnect for connection management

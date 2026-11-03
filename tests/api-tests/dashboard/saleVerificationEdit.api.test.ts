@@ -230,7 +230,8 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
     // SaleVerification flipped to COMPLETED.
     expect(prismaMock.saleVerification.update).toHaveBeenCalledTimes(1)
     const svUpdateArgs = prismaMock.saleVerification.update.mock.calls[0][0]
-    expect(svUpdateArgs.where).toEqual({ id: SALE_ID })
+    // Codex r1 C1: el cambio de estado va condicionado al estado leído (FAILED); si otro lo cambió, 409.
+    expect(svUpdateArgs.where).toEqual({ id: SALE_ID, status: 'FAILED' })
     expect(svUpdateArgs.data.status).toBe('COMPLETED')
 
     // Audit row written with the reason + before/after.

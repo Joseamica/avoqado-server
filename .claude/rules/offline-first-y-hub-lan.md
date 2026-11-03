@@ -39,7 +39,8 @@ CLEAR_TABLE · SPLIT_ORDER · SPLIT_BY_SEAT · MERGE_ORDERS · KDS_TICKET_MARK
 
 `KDS_TICKET_MARK` (etapa 3 del KDS, 27-sep): el server lo conoce primero; Android e iOS lo agregan en las fases 3.4/3.5.
 
-Agregar uno = tocar server + Android + iOS + el MCP `pos_sync_status`, en el MISMO cambio. Un tipo que el server no conoce se rechaza con
+Agregar uno = tocar server + Android + el MCP `pos_sync_status`, en el MISMO cambio, y anotarlo en la ficha de iOS (iOS va después). Nunca se renombra ni se quita uno que iOS
+ya use. Un tipo que el server no conoce se rechaza con
 `UNKNOWN_INTENT_TYPE` (no se pierde, cae en cuarentena).
 
 ### 2.2 Tres estados de ack, y el del medio es el que la gente olvida

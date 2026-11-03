@@ -27,7 +27,7 @@ import { hasPermission } from '@/lib/permissions'
 import { liberarCancelacionSchema } from '@/schemas/common/giftCard.common.schema'
 import { validateRequest } from '@/middlewares/validation'
 import { checkCortesiaPermissionIfPresent } from '@/middlewares/cortesiaPidePermiso.middleware'
-import { lookupSchema, payGiftCardSchema } from '@/schemas/mobile/giftCard.mobile.schema'
+import { lookupSchema, payGiftCardSchema, turnOnSchema } from '@/schemas/mobile/giftCard.mobile.schema'
 import { generateOpaqueToken } from '@/services/giftCards/giftCardCode'
 
 interface Ruta {
@@ -61,8 +61,11 @@ const VENDER = '/venues/:venueId/gift-cards/orders'
 const CONSULTAR = '/venues/:venueId/gift-cards/lookup'
 const COBRAR = '/venues/:venueId/orders/:orderId/pay-gift-card'
 const REGRESAR = '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel'
+const PRENDER = '/venues/:venueId/gift-cards/settings/turn-on'
 const RUTAS: Array<[string, string, string]> = [
   ['get', '/venues/:venueId/gift-cards/settings', 'giftCards:read'],
+  // Founder, 3-nov-2026: administrador para arriba prende también desde el POS.
+  ['post', PRENDER, 'giftCards:enable'],
   ['post', VENDER, 'giftCards:sell'],
   // A3 (cierre): POST con el código en el CUERPO; en la URL lo escribían sin tapar la bitácora y la base.
   ['post', CONSULTAR, 'giftCards:read'],
@@ -91,12 +94,37 @@ describe('rutas del POS de tarjetas de regalo', () => {
     expect(r!.permiso).toBe(permiso)
   })
 
-  it('🔴 sólo VENDER pide el plan (R9): cobrar, consultar, regresar y cancelar siguen al bajar de plan', () => {
+  it('🔴 sólo VENDER y PRENDER piden el plan (R9): cobrar, consultar, regresar y cancelar siguen al bajar de plan', () => {
     for (const [metodo, ruta] of RUTAS)
       expect({ ruta, plan: inspeccionar(metodo, ruta)!.plan }).toEqual({
         ruta,
-        plan: metodo === 'post' && ruta === VENDER ? 'GIFT_CARDS' : undefined,
+        plan: metodo === 'post' && (ruta === VENDER || ruta === PRENDER) ? 'GIFT_CARDS' : undefined,
       })
+  })
+
+  it('🔴 prender valida, luego pide el permiso y al final el plan: nadie sin permiso se entera del plan', () => {
+    const capa = (mobileRouter as any).stack.find(
+      (l: any) => l.route?.path === PRENDER && l.route.stack.some((c: any) => c.method === 'post'),
+    )
+    const h = capa.route.stack.map((c: any) => c.handle)
+    const permiso = h.findIndex((x: any) => x?.requiredPermission === 'giftCards:enable')
+    const plan = h.findIndex((x: any) => x?.featureCode === 'GIFT_CARDS')
+    expect(h.indexOf(authenticateTokenMiddleware)).toBeLessThan(permiso)
+    expect(permiso).toBeGreaterThan(-1)
+    expect(plan).toBeGreaterThan(permiso)
+  })
+
+  it('prender exige aceptar los términos con un true de verdad; un campo de más no entra al servicio', async () => {
+    const app = express()
+    app.use(express.json())
+    app.post('/venues/:venueId/x', validateRequest(turnOnSchema), (req, res) => res.json(req.body))
+    const B = '/venues/cmtwfpana001ic996lz8q2uuq/x'
+    expect((await request(app).post(B).send({})).status).toBe(400)
+    expect((await request(app).post(B).send({ aceptaTerminos: false })).status).toBe(400)
+    expect((await request(app).post(B).send({ aceptaTerminos: 'true' })).status).toBe(400)
+    const bien = await request(app).post(B).send({ aceptaTerminos: true, enabled: false })
+    expect(bien.status).toBe(200)
+    expect(bien.body).toEqual({ aceptaTerminos: true })
   })
 
   it('sólo la consulta por código lleva el límite de intentos por aparato e IP', () => {
@@ -129,12 +157,20 @@ describe('rutas del POS de tarjetas de regalo', () => {
     for (const [metodo, ruta, permiso] of RUTAS)
       expect({ ruta, puede: hasPermission(StaffRole.CASHIER, null, inspeccionar(metodo, ruta)!.permiso!) }).toEqual({
         ruta,
-        puede: permiso !== 'giftCards:manage',
+        puede: permiso !== 'giftCards:manage' && permiso !== 'giftCards:enable',
       })
   })
 
-  it.each([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER])('%s pasa todas', role => {
+  it.each([StaffRole.ADMIN, StaffRole.OWNER])('%s pasa todas', role => {
     for (const [metodo, ruta] of RUTAS) expect(hasPermission(role, null, inspeccionar(metodo, ruta)!.permiso!)).toBe(true)
+  })
+
+  it('el gerente pasa todas, menos prender', () => {
+    for (const [metodo, ruta] of RUTAS)
+      expect({ ruta, puede: hasPermission(StaffRole.MANAGER, null, inspeccionar(metodo, ruta)!.permiso!) }).toEqual({
+        ruta,
+        puede: ruta !== PRENDER,
+      })
   })
 
   it('el mesero no pasa ninguna (el spec sólo se las da al cajero)', () => {

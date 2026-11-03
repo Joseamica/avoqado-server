@@ -86,6 +86,15 @@ describe('N1: el script de reasignación no carga Prisma antes de elegir la base
   })
 })
 
+describe('número de vinculación (A10): los scripts del lanzamiento eligen la base antes de cargar Prisma', () => {
+  it.each(['scripts/importar-numeros-de-vinculacion.ts', 'scripts/negar-aprobar-a-supervisores.ts'])(
+    '🔴 ningún import ESTÁTICO de %s alcanza src/utils/prismaClient',
+    script => {
+      expect(caminoHasta(join(RAIZ, script), PRISMA)).toBeNull()
+    },
+  )
+})
+
 describe('cierre r1: sin ciclo entre los servicios de turnos', () => {
   it('🔴 shift.dashboard.service no alcanza shift.tpv.service (que ya lo importa)', () => {
     expect(

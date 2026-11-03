@@ -37,6 +37,8 @@ const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
   PartnerAPIKey: 'llaves de socios: ' + DE_ORGANIZACION,
   Invoice: 'facturas de Avoqado a la organización: un demo no contrata plan',
   PlatformCfdi: 'facturas de Avoqado a la organización: un demo no contrata plan',
+  PlatformCharge:
+    'cobros recurrentes de Avoqado a un cliente («Por cobrar»): sólo lo escriben las rutas de superadmin (/superadmin/platform-charges); el usuario demo no es superadmin',
   HybridRedemption: 'facturación híbrida: ' + CERRADO,
   LaunchCampaignRedemption: 'campañas del alta: no parten de un negocio demo',
   OnboardingProgress: 'alta: cerrada al usuario demo',
@@ -47,6 +49,8 @@ const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
   ItemCategory: 'categorías de artículos (inventario por número de serie): ' + CERRADO,
   SerializedItem: 'inventario por número de serie: ' + CERRADO,
   SimRegistrationRequest: 'registro de SIMs (PlayTelecom): ' + CERRADO,
+  HistoricalLinkingNumber:
+    'histórico de números de vinculación (PlayTelecom): sólo lo carga el script de Avoqado con el «sí, en prod» del founder; ninguna ruta lo escribe',
   CashOutCommissionRate: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   CashOutScheduleDay: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   PromoterBankAccount: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,

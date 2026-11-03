@@ -329,6 +329,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   SimRegistrationRequest: 'Serialized Inventory',
   SimRegistrationRequestItem: 'Serialized Inventory',
   SaleVerification: 'Serialized Inventory',
+  HistoricalLinkingNumber: 'Serialized Inventory',
 
   // 9. Orders, KDS & Cash
   Order: 'Orders, KDS & Cash',
@@ -458,6 +459,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PlatformEmisor: 'Facturación (CFDI)',
   BillingTaxProfile: 'Facturación (CFDI)',
   PlatformCfdi: 'Facturación (CFDI)',
+  // «Por cobrar»: recordatorios manuales de cobro con factura (SUPERADMIN); alimentan a PlatformCfdi
+  PlatformCharge: 'Facturación (CFDI)',
+  PlatformChargeOccurrence: 'Facturación (CFDI)',
+  PlatformChargeDigest: 'Facturación (CFDI)',
 
   // 13. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',
@@ -664,6 +669,14 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CrmTimelineEvent: 'CRM (equipo de ventas de Avoqado)',
   CrmInboundEntry: 'CRM (equipo de ventas de Avoqado)',
   CrmDigestSend: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailTemplate: 'CRM (equipo de ventas de Avoqado)',
+  CrmCampaign: 'CRM (equipo de ventas de Avoqado)',
+  CrmCampaignDelivery: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailOptOut: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailConsent: 'CRM (equipo de ventas de Avoqado)',
+  CrmGmailConnection: 'CRM (equipo de ventas de Avoqado)',
+  CrmGmailAccountSeen: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailMessage: 'CRM (equipo de ventas de Avoqado)',
   CrmWhatsappMessage: 'CRM (equipo de ventas de Avoqado)',
   CrmErased: 'CRM (equipo de ventas de Avoqado)',
 }

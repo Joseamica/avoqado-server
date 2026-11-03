@@ -128,7 +128,7 @@ describe('manualSale.service — createOneManualSale', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow, { requireLinkingNumber: false })
 
     expect(result).toEqual({
       ok: true,
@@ -205,7 +205,7 @@ describe('manualSale.service — createOneManualSale', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, { ...baseRow, saleType: 'Portabilidad' })
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, { ...baseRow, saleType: 'Portabilidad' }, { requireLinkingNumber: false })
 
     const svData = (tx.saleVerification.create as jest.Mock).mock.calls[0][0].data
     expect(svData.isPortabilidad).toBe(true)
@@ -216,7 +216,7 @@ describe('manualSale.service — createOneManualSale', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+    await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow, { requireLinkingNumber: false })
 
     // ActivityLog dual-write with MANUAL_SALE_CREATED.
     expect(logActionMock).toHaveBeenCalledTimes(1)
@@ -244,7 +244,7 @@ describe('manualSale.service — createOneManualSale', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow, { requireLinkingNumber: false })
 
     expect(result).toEqual({ ok: false, error: 'ICCID ya vendido' })
     // Nothing created; nothing sold; no audit.
@@ -263,7 +263,7 @@ describe('manualSale.service — createOneManualSale', () => {
     const tx = makeTxClient()
     wireTx(tx)
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow, { requireLinkingNumber: false })
 
     expect(result).toEqual({ ok: false, error: 'Tienda no encontrada' })
     expect(tx.order.create).not.toHaveBeenCalled()
@@ -280,7 +280,7 @@ describe('manualSale.service — createOneManualSale', () => {
       .mockRejectedValueOnce(new Error('Server has closed the connection.'))
       .mockImplementationOnce(async (cb: any) => cb(tx))
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow, { requireLinkingNumber: false })
 
     expect(result.ok).toBe(true)
     expect(prismaMock.$transaction as jest.Mock).toHaveBeenCalledTimes(2)
@@ -290,7 +290,7 @@ describe('manualSale.service — createOneManualSale', () => {
     stubResolversHappy()
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValue(new Error('some unexpected bug in the code'))
 
-    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow, { requireLinkingNumber: false })
 
     expect(result).toEqual({ ok: false, error: 'No se pudo registrar la venta' })
     expect(prismaMock.$transaction as jest.Mock).toHaveBeenCalledTimes(1)

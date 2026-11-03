@@ -17,6 +17,7 @@ datasource db {
 
 model Organization {
   documentRequests DocumentRequest[]
+  historicalLinkingNumbers HistoricalLinkingNumber[]
   id    String       @id @default(cuid())
   name  String
   slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
@@ -5079,6 +5080,16 @@ model SaleVerification {
   reviewNotes      String? // Free-text feedback from back-office reviewer
   rejectionReasons SaleVerificationRejectionReason[] @default([])
 
+  // Número de vinculación / portado (PlayTelecom; sólo dígitos, 9-10). Quién lo escribió y cuándo.
+  linkingNumber       String?
+  linkingNumberSource SaleVerificationNumberSource?
+  linkingNumberSetAt  DateTime?
+  portedNumber        String?
+  portedNumberSource  SaleVerificationNumberSource?
+  portedNumberSetAt   DateTime?
+  // { destino: { captureDeviceId: maxSeq } } — descarta capturas viejas de una terminal
+  appliedCaptureSeqs Json @default("{}")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -5088,6 +5099,31 @@ model SaleVerification {
   @@index([status])
   @@index([createdAt])
   @@index([reviewedById])
+  @@index([linkingNumber])
+  @@index([portedNumber])
+}
+
+enum SaleVerificationNumberSource {
+  TPV
+  BACKOFFICE
+  EXTERNAL_SALE
+  IMPORT
+}
+
+/// Números de vinculación de ventas históricas (importados), para detectar repetidos.
+model HistoricalLinkingNumber {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  iccid          String
+  number         String
+  saleDate       DateTime?
+  sourceStatus   String?
+  importBatch    String
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, iccid, number])
+  @@index([organizationId, number])
 }
 
 model VenueTransaction {
@@ -5759,6 +5795,9 @@ model Terminal {
   canCheckoutAreaTickets Boolean           @default(false)
   canDeliverAreaTickets  Boolean           @default(false)
   defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
+  /// D3 (2-nov-2026): cuándo se eligió el papel de este aparato en los vales (en el panel o en el propio aparato).
+  /// null = nunca se eligió; sólo un aparato `selfRegistered` con null pregunta «¿Qué hará este aparato?» al entrar.
+  areaRoleChosenAt       DateTime?
 
   /// Capacidades observadas del display del cliente. Son null hasta que el
   /// dispositivo anuncie soporte; capabilitiesObservedAt permite invalidar
@@ -6077,6 +6116,10 @@ model TerminalPaymentRequest {
   /// La respuesta POSTERIOR de la sonda que resolvió ese intento (RESOLVED / NOT_FOUND / RECEIVED_CANCELLED).
   /// Es lo ÚNICO que levanta el veto de `probeActiveAt`: el transcurso del tiempo no desmiente una ejecución.
   probeResolvedAt         DateTime?
+  /// La TERMINAL acreditó que cerró la ejecución de esta solicitud y no le queda ejecución viva (sonda o disposición del
+  /// cancel con `executionAlive=false` + `closedForExecution=true`, TPV con `terminalPaymentExecutionVersion >= 1`).
+  /// Columna propia por la misma razón que `probeActiveAt`. La escriben A3–A5 de «ninguna duda de un cobro sin salida».
+  executionClosedAt       DateTime?
   expiresAt               DateTime
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt
@@ -18885,6 +18928,10 @@ model PlatformCfdi {
   type                 PlatformCfdiType @default(INGRESO)
   parentPlatformCfdiId String? // si type=PAGO: la factura de ingreso (PPD) que liquida
 
+  // «Por cobrar»: la ocurrencia de un cobro recurrente que originó esta factura (null = hecha a mano en «Facturas CFDI»)
+  platformChargeOccurrenceId String?
+  platformChargeOccurrence   PlatformChargeOccurrence? @relation(fields: [platformChargeOccurrenceId], references: [id], onDelete: SetNull)
+
   // destinatario (denormalizado para listado/filtro); STANDALONE → ambos null
   organizationId String?
   venueId        String?
@@ -18945,7 +18992,95 @@ model PlatformCfdi {
   @@index([status])
   @@index([type])
   @@index([parentPlatformCfdiId])
+  @@index([platformChargeOccurrenceId])
   @@index([createdAt])
+}
+
+// ==========================================
+// «POR COBRAR» — recordatorios manuales de cobro con factura (herramienta interna del SUPERADMIN)
+// Spec: docs/superpowers/specs/2026-11-02-por-cobrar-superadmin-design.md (§4). Dinero en centavos enteros, como PlatformCfdi,
+// porque alimenta directo al CFDI. Ids de personas sin llave foránea, igual que PlatformCfdi.createdById.
+// ==========================================
+
+enum PlatformChargeFrequency {
+  WEEKLY
+  BIWEEKLY // quincenal: dos días fijos al mes (spec §3.1)
+  MONTHLY
+}
+
+enum PlatformChargeInvoiceMode {
+  AUTOMATIC // al marcar pagado, se timbra sola
+  MANUAL // el botón «Facturar» de la fila pagada
+}
+
+enum PlatformChargeOccurrenceStatus {
+  PENDING
+  PAID
+  SKIPPED
+}
+
+/// Un cobro recurrente a un cliente de Avoqado, fuera de Stripe (renta de terminal, licencia…). Fechas de calendario de CDMX,
+/// sin hora: `anchorDate` es la primera fecha y de ella salen las ocurrencias. Editarlo sólo cambia lo futuro.
+model PlatformCharge {
+  id                  String                    @id @default(cuid())
+  customerType        BillingCustomerType
+  organizationId      String?
+  venueId             String?
+  customerName        String // lo que se ve en el panel y el correo
+  billingTaxProfileId String? // obligatorio al guardar con AUTOMATIC
+  frequency           PlatformChargeFrequency
+  anchorDate          DateTime                  @db.Date
+  concepts            Json // [{ description, amountCents, ivaMode, satProductKey, satUnitKey }]
+  invoiceMode         PlatformChargeInvoiceMode
+  pausedAt            DateTime?
+  createdById         String
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+
+  occurrences PlatformChargeOccurrence[]
+
+  @@index([pausedAt, id])
+}
+
+/// Un periodo por cobrar de un cobro: foto de conceptos y totales al generarse (editar el cobro no cambia lo ya generado).
+model PlatformChargeOccurrence {
+  id       String         @id @default(cuid())
+  chargeId String
+  charge   PlatformCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+  dueDate  DateTime       @db.Date
+
+  concepts      Json // foto al generarse
+  subtotalCents Int
+  taxCents      Int
+  totalCents    Int
+  invoiceMode   PlatformChargeInvoiceMode // foto al generarse
+
+  status      PlatformChargeOccurrenceStatus @default(PENDING)
+  paidAt      DateTime?
+  paidById    String?
+  skippedAt   DateTime?
+  skippedById String?
+  invoiceSeq  Int                            @default(0) // sube sólo cuando está comprobado que el intento anterior no dejó factura viva
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices PlatformCfdi[]
+
+  @@unique([chargeId, dueDate])
+  @@index([status, dueDate, id])
+  @@index([status, paidAt, id])
+}
+
+/// El correo diario de «Por cobrar»: una fila por día de CDMX, para mandarlo una sola vez y repetir exactamente el mismo.
+model PlatformChargeDigest {
+  day        String   @id // YYYY-MM-DD de CDMX
+  status     String // APARTADO | ENVIADO | FALLO
+  attempts   Int      @default(0)
+  reservedAt DateTime @default(now())
+  content    Json // el correo tal cual, para repetir exactamente el mismo
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 /// Offline-first (Fase 1, Corte D — spec Avoqado/docs/plans/offline-first-pos-fase1.md):
@@ -20881,6 +21016,8 @@ model CrmAccount {
   activities     CrmActivity[]
   timelineEvents CrmTimelineEvent[]
   inboundEntries CrmInboundEntry[]
+  emailMessages  CrmEmailMessage[]
+  emailConsents  CrmEmailConsent[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -20913,6 +21050,8 @@ model CrmContact {
   isPrimary Boolean    @default(false)
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
+
+  emailMessages CrmEmailMessage[]
 
   @@index([accountId])
   @@index([phoneE164])
@@ -21037,6 +21176,171 @@ model CrmDigestSend {
   updatedAt  DateTime @updatedAt
 
   @@unique([staffId, day, kind])
+}
+
+// ==========================================
+// CRM · fase 2: correo (plan 2026-11-02). Plantillas, campañas masivas desde el subdominio de novedades, la baja, el
+// consentimiento de la landing y el Gmail de cada vendedor. Igual que arriba: estados y tipos son String validados con
+// zod, nunca enums de Postgres.
+// ==========================================
+
+/// Plantilla de correo del equipo: asunto y bloques (los mismos que las campañas de los negocios, `bloqueCampanaSchema`),
+/// con las variables {{nombre}}, {{negocio}} y {{vendedor}}. No se borra: se archiva.
+model CrmEmailTemplate {
+  id          String    @id @default(cuid())
+  name        String
+  subject     String
+  blocks      Json
+  createdById String // Staff, sin FK como los demás actores del CRM
+  updatedById String
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  campaigns CrmCampaign[]
+
+  @@index([archivedAt, updatedAt])
+}
+
+/// Una campaña masiva de Avoqado. `subject` y `blocks` son una COPIA de la plantilla al crearla: editar o archivar la
+/// plantilla después no cambia lo que ya se probó. status: BORRADOR | ENVIANDO | ENVIADA | CANCELADA.
+model CrmCampaign {
+  id           String            @id @default(cuid())
+  name         String
+  templateId   String?
+  template     CrmEmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  subject      String
+  blocks       Json
+  audience     Json // { segmentos: [...] }, validado con zod
+  status       String            @default("BORRADOR")
+  // Huella del contenido (asunto + bloques) cuya prueba a sí mismo ya salió: sin ella no se manda.
+  testSentHash String?
+  total        Int               @default(0)
+  createdById  String
+  enqueuedAt   DateTime?
+  finishedAt   DateTime?
+  cancelledAt  DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  deliveries CrmCampaignDelivery[]
+
+  @@index([status, createdAt])
+}
+
+/// Un destinatario de una campaña: la cola durable (se reclama con SKIP LOCKED, como la de los negocios). Una fila por
+/// persona y campaña. status: PENDIENTE | ENVIANDO | ENVIADO | REINTENTO | FALLIDO | OMITIDO | DESCONOCIDO.
+model CrmCampaignDelivery {
+  id              String      @id @default(cuid())
+  campaignId      String
+  campaign        CrmCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  email           String // normalizado (minúsculas)
+  name            String?
+  reason          String // PROSPECTO | CLIENTE | USUARIO: por qué le llega, y qué dice el pie
+  reasonVenueName String? // «Te llega porque usas Avoqado en {negocio}»
+  vars            Json // { nombre, negocio } ya resueltos al encolar
+  accountId       String? // id plano, SIN FK: borrar una cuenta del CRM no toca el historial de una campaña
+
+  status        String    @default("PENDIENTE")
+  skipReason    String?
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime?
+  leaseUntil    DateTime?
+  // La fecha del PRIMER intento: se escribe al reclamar, antes de la red, y nadie la cambia. Cuenta el tope diario y marca
+  // la ventana de 23 h para reintentar (Resend recuerda la llave de idempotencia 24 h).
+  sendAttemptAt DateTime?
+  resendId      String?
+  lastError     String?
+  sentAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@unique([campaignId, email])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([resendId])
+  @@index([campaignId, status])
+  @@index([sendAttemptAt])
+}
+
+/// Quien pidió no recibir más correos de Avoqado (la baja de un clic, una queja o el admin). En la fase 2 es para
+/// siempre: una casilla marcada después no la deshace. source: UN_CLIC | QUEJA | ADMIN.
+model CrmEmailOptOut {
+  id           String   @id @default(cuid())
+  email        String   @unique // normalizado (minúsculas)
+  source       String
+  actorStaffId String?
+  createdAt    DateTime @default(now())
+}
+
+/// El consentimiento de una PERSONA, por su correo (no de una cuenta: la landing puede juntar varias por teléfono).
+/// Una sola verdad: `CrmAccount.consent*` queda como estaba y nadie lo escribe.
+model CrmEmailConsent {
+  id            String      @id @default(cuid())
+  email         String      @unique // normalizado (minúsculas)
+  accountId     String? // sólo para filtrar por etapa
+  account       CrmAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  entryId       String // la CrmInboundEntry que lo trajo
+  consentAt     DateTime // cuando se RECIBIÓ la entrada
+  source        String // LANDING
+  noticeVersion String
+  createdAt     DateTime    @default(now())
+
+  @@index([accountId])
+}
+
+/// El Gmail que un vendedor conectó para mandar correo uno a uno y leer las respuestas. Una conexión por persona.
+/// status: ACTIVA | REVOCADA. `version` sube cada vez que se guardan credenciales nuevas: toda escritura tardía de quien
+/// usó las viejas (REVOCADA por invalid_grant, lastError, desconectar) va con `where: { staffId, version }`, así un error
+/// de las credenciales viejas no apaga las nuevas.
+model CrmGmailConnection {
+  id                     String    @id @default(cuid())
+  staffId                String    @unique
+  googleEmail            String
+  refreshTokenCiphertext Bytes // AES-256-GCM con CRM_GMAIL_TOKEN_KEY; vacío al desconectar
+  scopes                 String // los que Google concedió, tal cual (separados por espacio)
+  status                 String    @default("ACTIVA")
+  connectedAt            DateTime  @default(now())
+  revokedAt              DateTime?
+  lastError              String?
+  version                Int       @default(1)
+  updatedAt              DateTime  @updatedAt
+}
+
+/// Las cuentas de Google distintas que alguna vez se han conectado (para el tope de 100 de por vida de una app sin
+/// verificar). Sólo se agrega.
+model CrmGmailAccountSeen {
+  id          String   @id @default(cuid())
+  googleEmail String   @unique
+  firstSeenAt DateTime @default(now())
+}
+
+/// Un correo uno a uno de la ficha, en cualquier dirección: el que mandó el vendedor desde su Gmail y las respuestas que
+/// llegaron. direction: SALIDA | ENTRADA. status: ENVIANDO | ENVIADO | DESCONOCIDO | FALLIDO | RECIBIDO.
+model CrmEmailMessage {
+  id              String      @id @default(cuid())
+  accountId       String
+  account         CrmAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contactId       String?
+  contact         CrmContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  staffId         String
+  direction       String
+  fromEmail       String
+  toEmail         String
+  clientRequestId String?     @unique // el clic: dos clics con el mismo id son un solo correo
+  rfcMessageId    String?     @unique // el Message-ID que pusimos, para reconocerlo en el hilo
+  gmailMessageId  String?     @unique
+  gmailThreadId   String?
+  subject         String
+  snippet         String?
+  status          String
+  lastCheckedAt   DateTime?
+  error           String?
+  sentAt          DateTime?
+  createdAt       DateTime    @default(now())
+
+  @@index([gmailThreadId])
+  @@index([staffId, direction, status, sentAt])
+  @@index([accountId, createdAt])
+  @@index([contactId]) // borrar un contacto pone aquí null: sin el índice, cada borrado recorre la tabla
 }
 
 /// Cada mensaje del WhatsApp de ventas (coexistencia: el founder sigue en la app de su celular). Lo escribe SÓLO el webhook

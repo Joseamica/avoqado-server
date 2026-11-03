@@ -132,7 +132,7 @@ describe('manualSale.service — bulkManualSales', () => {
     it('classifies an available ICCID into crear', async () => {
       stubResolversHappy()
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false, { requireLinkingNumber: false })
 
       expect(result.crear).toEqual([{ index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', saleStatus: 'COMPLETED' }])
       expect(result.omitir).toEqual([])
@@ -144,7 +144,7 @@ describe('manualSale.service — bulkManualSales', () => {
       stubResolversHappy()
       resolveIccidMock.mockResolvedValue({ error: 'ICCID ya vendido' })
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false, { requireLinkingNumber: false })
 
       expect(result.omitir).toEqual([
         { index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'ICCID ya vendido' },
@@ -157,7 +157,7 @@ describe('manualSale.service — bulkManualSales', () => {
       stubResolversHappy()
       resolveStaffByCodeMock.mockResolvedValue({ error: 'Vendedor no encontrado' })
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false, { requireLinkingNumber: false })
 
       expect(result.error).toEqual([
         { index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Vendedor no encontrado' },
@@ -169,7 +169,7 @@ describe('manualSale.service — bulkManualSales', () => {
     it('does not write anything during preview (resolvers are called, no tx/create)', async () => {
       stubResolversHappy()
 
-      await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false)
+      await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], false, { requireLinkingNumber: false })
 
       expect(prismaMock.$transaction).not.toHaveBeenCalled()
       expect(resolveIccidMock).toHaveBeenCalledTimes(1)
@@ -199,7 +199,7 @@ describe('manualSale.service — bulkManualSales', () => {
 
       const rows = [row({ iccid: 'ICCID-GOOD-1' }), row({ iccid: 'ICCID-SOLD-1' }), row({ iccid: 'ICCID-GOOD-2' })]
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, true)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, true, { requireLinkingNumber: false })
 
       expect(result.created).toBe(2)
       expect(result.crear).toEqual([
@@ -217,7 +217,7 @@ describe('manualSale.service — bulkManualSales', () => {
       stubResolversHappy()
       resolveVenueMock.mockResolvedValue({ error: 'Tienda no encontrada' })
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], true)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row()], true, { requireLinkingNumber: false })
 
       expect(result.error).toEqual([
         { index: 0, iccid: '8952140064323812041F', storeName: 'BAE MUÑOZ SLP (898)', motivo: 'Tienda no encontrada' },
@@ -235,7 +235,9 @@ describe('manualSale.service — bulkManualSales', () => {
       })
       stubResolversHappy()
 
-      await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row({ iccid: 'ICCID-1' }), row({ iccid: 'ICCID-2' })], true)
+      await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row({ iccid: 'ICCID-1' }), row({ iccid: 'ICCID-2' })], true, {
+        requireLinkingNumber: false,
+      })
 
       // bulkManualSales itself must never open its own OUTER $transaction that
       // wraps both rows — each row gets its own INDEPENDENT $transaction call
@@ -252,7 +254,7 @@ describe('manualSale.service — bulkManualSales', () => {
 
       const rows = [row({ iccid: '  abc123  ' }), row({ iccid: 'ABC123', storeName: 'Other Store' })]
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, false)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, false, { requireLinkingNumber: false })
 
       // First occurrence (index 0) goes through the normal resolver classification.
       expect(result.crear).toEqual([{ index: 0, iccid: '  abc123  ', storeName: 'BAE MUÑOZ SLP (898)', saleStatus: 'COMPLETED' }])
@@ -268,7 +270,7 @@ describe('manualSale.service — bulkManualSales', () => {
 
       const rows = [row({ iccid: 'dup-1' }), row({ iccid: 'DUP-1' })]
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, true)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, rows, true, { requireLinkingNumber: false })
 
       expect(result.created).toBe(1)
       expect(result.omitir).toEqual([
@@ -292,7 +294,7 @@ describe('manualSale.service — bulkManualSales', () => {
     it('preview: la fila va a error con motivo en español y las demás siguen', async () => {
       stubResolversHappy()
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row(), sinTienda()], false)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [row(), sinTienda()], false, { requireLinkingNumber: false })
 
       expect(result.crear).toHaveLength(1)
       expect(result.error).toEqual([{ index: 1, iccid: '8952140064323812099F', storeName: '', motivo: 'Falta el nombre de la tienda' }])
@@ -303,7 +305,7 @@ describe('manualSale.service — bulkManualSales', () => {
       wireTxPerCall()
       stubResolversHappy()
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [sinTienda(), row()], true)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [sinTienda(), row()], true, { requireLinkingNumber: false })
 
       expect(result.created).toBe(1)
       expect(result.error.map(e => e.index)).toEqual([0])
@@ -314,7 +316,7 @@ describe('manualSale.service — bulkManualSales', () => {
       stubResolversHappy()
       const { amount: _omitido, ...sinMonto } = row()
 
-      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [sinMonto], false)
+      const result = await bulkManualSales(ORG_ID, ACTOR_STAFF_ID, [sinMonto], false, { requireLinkingNumber: false })
 
       expect(result.error[0].motivo).toBe('Falta el monto de venta')
     })

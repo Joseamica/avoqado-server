@@ -12,6 +12,7 @@ jest.mock('@/services/giftCards/giftCardLedger', () => ({
 jest.mock('@/services/giftCards/giftCardSettings.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSettings.service'),
   assertGiftCardsSellable: jest.fn(),
+  assertPuedePrender: jest.fn(),
 }))
 jest.mock('@/services/giftCards/giftCardLimits', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardLimits'),
@@ -20,13 +21,14 @@ jest.mock('@/services/giftCards/giftCardLimits', () => ({
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { operarSobreDeGerenteEnTx } from '@/services/giftCards/giftCardLedger'
-import { assertGiftCardsSellable } from '@/services/giftCards/giftCardSettings.service'
+import { assertGiftCardsSellable, assertPuedePrender } from '@/services/giftCards/giftCardSettings.service'
 import { topePorOperacion } from '@/services/giftCards/giftCardLimits'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import {
   auditarTarjetas,
   CAPACIDADES_DEL_POS,
   estadoDeVentaDeTarjetas,
+  estadoParaPrender,
   negocioHaActivadoTarjetas,
   negocioTieneTarjetas,
   operarSobreDeGerente,
@@ -37,6 +39,26 @@ const m = (f: unknown) => f as jest.Mock
 beforeEach(() => {
   jest.clearAllMocks()
   m(topePorOperacion).mockReturnValue(new Prisma.Decimal('70000'))
+})
+
+describe('estadoParaPrender', () => {
+  it('se puede', async () => {
+    m(assertPuedePrender).mockResolvedValueOnce(undefined)
+    await expect(estadoParaPrender('v1')).resolves.toEqual({ allowed: true, code: null, message: null, howToEnable: null })
+  })
+
+  it.each([
+    ['GIFT_CARDS_NOT_IN_PLAN', 'PLAN'],
+    ['GIFT_CARD_KEYS_MISSING', 'CONTACT_AVOQADO'],
+  ])('%s dice por qué y cuál es la salida (%s)', async (code, como) => {
+    m(assertPuedePrender).mockRejectedValueOnce(new GiftCardError(code as never, `mensaje de ${code}`, 403))
+    await expect(estadoParaPrender('v1')).resolves.toEqual({ allowed: false, code, message: `mensaje de ${code}`, howToEnable: como })
+  })
+
+  it('un error que no es de tarjetas no se disfraza de «no se puede»', async () => {
+    m(assertPuedePrender).mockRejectedValueOnce(new Error('base caída'))
+    await expect(estadoParaPrender('v1')).rejects.toThrow('base caída')
+  })
 })
 
 describe('bitácora', () => {

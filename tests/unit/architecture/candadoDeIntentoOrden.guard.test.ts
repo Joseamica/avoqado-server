@@ -88,7 +88,13 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)',
       txDelNegativo,
     )
-    antes(s, 'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)', 'sinAprobadoVinculadoSql(requestId, venueId)', txDelNegativo)
+    // B0-1 (20-oct): el NOT EXISTS de APROBADO va hoy dentro del juego único de vetos de dinero (`sinVetoDeDineroSql`).
+    antes(
+      s,
+      'await this.aprobacionBancariaConocida(tx, venueId, attemptIds)',
+      'sinVetoDeDineroSql({ requestId, venueId, attemptIds, terminalId: fila.terminalId })',
+      txDelNegativo,
+    )
     expect(s.slice(txDelNegativo, indice(s, 'async closeRowFromPaymentTx(', cierre))).toMatch(/OPCIONES_DE_TRANSACCION_DEL_INTENTO/)
     // La PUBLICACIÓN del vínculo: candado de la solicitud → candado del intento → INSERT del vínculo.
     const publicacion = indice(s, 'async handleAttemptOpenedFromSocket(')
@@ -122,6 +128,29 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     const fallback = indice(w, 'if (!esEsperaDeCandadoVencida(error)) throw error', ingreso)
     antes(w, 'terminalPaymentAttemptLink.findUnique(', 'await candadoDeSolicitud(tx, ', fallback)
     antes(w, 'await candadoDeSolicitud(tx, ', 'insertar(tx, marca)', fallback)
+  })
+
+  it('S2 (A4b, 21-oct) · el destrabe tras el cese acreditado toma el candado de la solicitud ANTES del CAS y sólo suelta la RANURA', () => {
+    const s = leer('services/terminal-payment.service.ts')
+    const s2 = indice(s, 'async soltarRanuraTrasCierre(')
+    const cuerpo = s.slice(s2, indice(s, 'async liberarTrasCierreDeEjecucion(', s2))
+    // Bajo el candado de la solicitud (el que toma la declaración del cajero), en READ COMMITTED con espera acotada.
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'UPDATE "TerminalPaymentRequest"', s2)
+    antes(s, 'UPDATE "TerminalPaymentRequest"', 'tx.activityLog.create(', s2)
+    expect(cuerpo).toMatch(/OPCIONES_DE_TRANSACCION_DEL_INTENTO\)/)
+    // Founder, 21-oct: el MISMO estado y código del destrabe de 20 min; nunca un negativo financiero («no se cobró») por silencio.
+    expect(cuerpo).toMatch(/SET "status" = 'TIMED_OUT', "failureCode" = 'AUTO_RELEASED'/)
+    expect(cuerpo).not.toMatch(/'FAILED'|NO_BANK_TRACE|NO_EVIDENCE/)
+  })
+
+  it('S6 (A6, 21-oct) · soporte suelta la terminal con solicitud → vínculos → intentos ANTES de los vetos de dinero y del CAS', () => {
+    const s = leer('services/terminal-payment.service.ts')
+    const s6 = indice(s, 'private async soltarRanuraPorSoporte(')
+    antes(s, 'await candadoDeSolicitud(tx, requestId)', 'tx.terminalPaymentAttemptLink.findMany(', s6)
+    antes(s, 'tx.terminalPaymentAttemptLink.findMany(', 'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)', s6)
+    antes(s, 'for (const attemptId of attemptIds) await candadoDeIntento(tx, attemptId)', 'sinVetoDeDineroSql(', s6)
+    antes(s, 'sinVetoDeDineroSql(', 'UPDATE "TerminalPaymentRequest"', s6)
+    expect(s.slice(s6, indice(s, 'async printReceiptOnTerminal(', s6))).toMatch(/OPCIONES_DE_TRANSACCION_DEL_INTENTO\)/)
   })
 
   it('Ronda 2 (17-sep, P1) · la re-retención de una solicitud LIBERADA (por aprobación o por un cobro sin ligar) vive en UN núcleo con el orden de la ventana, y nunca corre dentro de una transacción ajena', () => {
@@ -235,7 +264,7 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(cuerpo).toMatch(/r\."collisionEvidenceCursor" AS "cursorDeEvidencias"/)
     // La fila con cursor entra aunque su página venga vacía: es la única forma de REINICIARLO al agotar el conjunto.
     expect(cuerpo).toMatch(
-      /ligado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\} OR r\."collisionEvidenceCursor" IS NOT NULL\)/,
+      /ligado\."id" IS NOT NULL OR aprobado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\} OR r\."collisionEvidenceCursor" IS NOT NULL\)/,
     )
     // El MISMO recorrido: un solo keyset, un solo tope de lotes, un solo horizonte.
     expect(cuerpo).toMatch(/for \(let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote\+\+\)/)
@@ -401,7 +430,10 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // SIN LIGAR usa esa MISMA transacción (el núcleo `reRetenerSolicitudLiberada`), así que siguen siendo CUATRO.
       // Conciliación operable (Codex 5P1, 21-sep): y CINCO con `entregarBajoCandado` — la EMISIÓN de la solicitud a la
       // terminal va bajo el mismo `candadoDeSolicitud` que toma la declaración del cajero (marca durable antes, emit dentro).
-      'services/terminal-payment.service.ts': 5,
+      // S2 (A4b, 21-oct): y SEIS con `soltarRanuraTrasCierre` — el destrabe de la ranura tras el cese acreditado, bajo el candado
+      // de la solicitud (CAS → asiento). S6 (A6, 21-oct): y SIETE con `soltarRanuraPorSoporte` — soporte suelta la terminal en el
+      // orden de la ventana (solicitud → vínculos → intentos → vetos → CAS → asiento).
+      'services/terminal-payment.service.ts': 7,
       // Codex R14-1: el INGRESO del evento también es una transacción del protocolo (candado del intento → createdAt
       // monótono → INSERT), así que son TRES en el webhook: ingreso, publicación del vínculo y escritor por identidad débil.
       // Codex R15-1: y CUATRO con la recuperación de los ingresos sin candado desde S4 (`ordenarIngresosSinCandado`, transacción
@@ -411,7 +443,8 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // el evento; no toma el candado del intento (el ingreso acaba de vencerlo) y un lock_timeout sólo salta el toque.
       // Codex r1 (P1-C): y SEIS con el INSERT del fallback bajo el candado de la SOLICITUD (transacción propia: candado de la
       // solicitud → insertar), antes del toque; si ese candado también vence, se inserta sin candado como antes (residuo declarado).
-      'services/tpv/angelpay-webhook.service.ts': 6,
+      // Hallazgo D3 (22-oct): y SIETE con el aviso durable del aprobado sin folio, bajo el candado del intento.
+      'services/tpv/angelpay-webhook.service.ts': 7,
       'services/tpv/registroRepetido.ts': 1,
       // Plan 16-sep, Task 4: la declaración del cajero decide sobre un intento (candado del intento → Order → solicitud → CAS).
       'services/tpv/no-instrument-resolution.service.ts': 1,

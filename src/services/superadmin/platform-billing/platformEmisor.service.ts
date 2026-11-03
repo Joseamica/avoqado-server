@@ -15,7 +15,15 @@ import { encryptProviderKey } from '@/services/fiscal/fiscalKey.service'
 import type { PlatformEmisor } from '@prisma/client'
 import type { UpsertEmisorInput } from './types'
 
-export type PlatformBillingErrorCode = 'NO_EMISOR' | 'NO_PROFILE' | 'NO_CFDI' | 'CSD_INACTIVE' | 'VALIDATION' | 'PROVIDER'
+export type PlatformBillingErrorCode =
+  | 'NO_EMISOR'
+  | 'NO_PROFILE'
+  | 'NO_CFDI'
+  | 'CSD_INACTIVE'
+  | 'VALIDATION'
+  | 'PROVIDER'
+  /** «Por cobrar»: el cliente no tiene datos fiscales con los que facturar (la UI abre el diálogo para capturarlos). */
+  | 'NEEDS_FISCAL_DATA'
 
 /** Typed error so the controller can map to HTTP status codes (422 vs 502 vs 404). */
 export class PlatformBillingError extends Error {
@@ -24,6 +32,11 @@ export class PlatformBillingError extends Error {
     public readonly code: PlatformBillingErrorCode = 'VALIDATION',
     /** Campo del formulario culpable, cuando se pudo identificar. La UI lo usa para marcarlo. */
     public readonly field?: string,
+    /**
+     * `inFlight`: el documento pudo quedar en camino, y volver a timbrar debe llevar la MISMA llave.
+     * `cfdiId`: la fila del intento; corregir y timbrar otra vez la reemplaza.
+     */
+    public readonly attempt?: { inFlight?: boolean; cfdiId?: string },
   ) {
     super(message)
     this.name = 'PlatformBillingError'

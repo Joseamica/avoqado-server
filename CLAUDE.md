@@ -130,6 +130,15 @@ Equipo de ventas», que vive en su **propia organización vacía**, del mismo no
 miembros leen las pantallas de esa organización. `/api/v1/crm` está **fuera** del guardia del superadmin a propósito: sólo
 lo abren las llaves `crm:*` de `PlatformAccess`, releídas en cada petición (`requireCrm`).
 
+## CRM propio · correo (fase 2)
+
+- 🔴 **Fuera de producción no sale correo a nadie real:** si `NODE_ENV !== 'production'`, sólo a las direcciones de `CRM_CORREO_PRUEBAS`
+  (vacía = no sale nada). Una sola función: `puedeMandarFueraDeProduccion` (`src/services/crm/email/testAllowlist.ts`).
+- 🔴 **La liga de baja de «Envíame una prueba» es REAL:** si quien prueba la usa, su correo queda bloqueado y hoy no hay ruta para
+  revertirlo. Para probar la baja usa una dirección de `CRM_CORREO_PRUEBAS` que no sea la tuya.
+- `MARKETING_KILL_SWITCH=true` también detiene las campañas del CRM.
+- Variables, jobs, Gmail, webhook de Resend y herramientas MCP: `.claude/rules/crm-correo.md` (carga sola al tocar esos archivos).
+
 ## Commands
 
 ```bash
@@ -208,6 +217,8 @@ canary checklist is in `.claude/rules/bounded-queries-and-server-load.md`.
 - `playtelecom-vertical.md` - PlayTelecom white-label vertical: who's who (Bait/Walmart), generic vs bespoke, gotchas
 - `blumon-seriales-virtuales.md` - 🔴 el dígito extra en `MerchantAccount.blumonSerialNumber` NO es typo: es multi-merchant deliberado. "¿Es
   nuestro?" = `Terminal` OR `MerchantAccount`, nunca solo una
+- `crm-correo.md` - CRM propio, correo (fase 2): variables `CRM_*`, jobs, Gmail del vendedor, orden del webhook de Resend, MCP de lectura
+  (path-conditional: `src/services/crm/email/**`, `src/jobs/crm-*`, `src/mcp/tools/crm.ts`)
 
 ### On-demand guides (`docs/guides/`)
 
@@ -289,7 +300,8 @@ the controller. Full rule + examples: `.claude/rules/critical-warnings.md`. (Bac
 ## 🔴 Offline-first (reducer de intents) — LEE `.claude/rules/offline-first-y-hub-lan.md`
 
 Este repo es la FUENTE DE VERDAD del contrato: `SyncIntentType` en `src/services/mobile/sync.mobile.service.ts` (15 tipos hoy). Agregar o
-cambiar uno obliga a tocar Android, iOS y el MCP `pos_sync_status` en el MISMO cambio — un nombre desalineado falla en silencio.
+cambiar uno obliga a tocar Android y el MCP `pos_sync_status` en el MISMO cambio, y a anotarlo en la ficha de iOS (iOS va después: `../AGENTS.md`). Un nombre desalineado
+falla en silencio: nunca se renombra ni se quita un tipo que iOS ya use.
 
 Tres cosas que no se negocian:
 

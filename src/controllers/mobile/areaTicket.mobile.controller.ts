@@ -214,7 +214,6 @@ export const assignDevicePartition = async (req: Request, res: Response, next: N
     const result = await areaTicketService.assignDevicePartition(venueId, {
       deviceUid,
       staffId: readStaffId(req, req.body),
-      fulfillmentAreaId: typeof req.body?.fulfillmentAreaId === 'string' ? req.body.fulfillmentAreaId : null,
     })
 
     res.status(200).json({ success: true, device: result })

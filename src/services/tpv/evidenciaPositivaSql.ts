@@ -12,12 +12,16 @@
  *    solicitud por CUALQUIERA de sus tres identidades: el puntero `terminalPaymentRequestId`, la etiqueta legacy
  *    `processorData.terminalPaymentRequestId` o la llave de intento (`idempotencyKey` = `attemptId` de un vínculo actual).
  *
+ * Desde B0-1 (20-oct) los tres CAS llevan el MISMO fragmento, `sinVetoDeDineroSql`: estos dos más la evidencia de conciliación,
+ * la contradicción de procedencia y el dinero con la llave de un intento (`hayDineroDeEstosIntentosSql`, Codex servidor r1).
+ *
  * Un UPDATE que devuelve 0 es «no elegible»: nunca «nada que hacer». `pagosLigados` es la misma pregunta como lectura (la
  * guarda G1 de la ventana): si hay un Payment ligado que no se pudo LIGAR, la fila se retiene con marca, nunca en silencio.
  */
 import { Prisma } from '@prisma/client'
 import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 import { estadoBancarioSql } from './estadoBancario'
+import { llaveDeIntento } from './candadoDeIntento'
 
 /** Una cadena como PARÁMETRO ligado (`$n`), para que las envolturas públicas sigan recibiendo `string`. */
 const bind = (valor: string): Prisma.Sql => Prisma.sql`${valor}`
@@ -35,10 +39,10 @@ const columna = (alias: string, nombre: string): Prisma.Sql => {
 const vinculosSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql =>
   Prisma.sql`SELECT l."attemptId" FROM "TerminalPaymentAttemptLink" l WHERE l."requestId" = ${requestId} AND l."venueId" = ${venueId}`
 
-const aprobadoVinculadoSql = (requestId: string, venueId: string): Prisma.Sql => Prisma.sql`
-      SELECT 1 FROM "ProviderEventLog" e
+const aprobadoVinculadoSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql => Prisma.sql`
+      SELECT e."id", e."attemptId" FROM "ProviderEventLog" e
       WHERE e."provider" = 'PAYMENT_PROCESSOR' AND e."venueId" = ${venueId} AND e."type" = 'send_transaction'
-        AND e."attemptId" IN (${vinculosSql(bind(requestId), bind(venueId))})
+        AND e."attemptId" IN (${vinculosSql(requestId, venueId)})
         AND ${estadoBancarioSql(Prisma.sql`e."payload"->'payload'->'status'`)} = 'APROBADO'`
 
 /**
@@ -120,6 +124,21 @@ export function hayDineroDeSusIntentosSql(requestId: string, venueId: string): P
         AND EXISTS (${dineroConLaLlaveSql(columna('l', 'attemptId'))}))`
 }
 
+/**
+ * 🔴 Codex servidor r1 (F1, 21-oct): la MISMA regla de la llave sobre una LISTA de intentos, con la llave canónica
+ * (`llaveDeIntento`). Es lo que la declaración del cajero ya rechazaba (`hayPagoDeLaSolicitud`, por intento y sin limitar a
+ * COMPLETED) y el veto único no veía: un Payment PENDING de colisión de referencia guardado con la llave del intento y SIN
+ * puntero a la solicitud (el vínculo llegó después). Va dentro de `sinVetoDeDineroSql`, así que lo ven todos los caminos.
+ */
+export function hayDineroDeEstosIntentosSql(attemptIds: string[]): Prisma.Sql {
+  const llaves = [...new Set(attemptIds.map(llaveDeIntento).filter((a): a is string => Boolean(a)))]
+  if (llaves.length === 0) return Prisma.sql`FALSE`
+  return Prisma.sql`(${Prisma.join(
+    llaves.map(llave => Prisma.sql`EXISTS (${dineroConLaLlaveSql(bind(llave))})`),
+    ' OR ',
+  )})`
+}
+
 /** La LECTURA de esa regla (la comprobación previa del POST, los dos caminos). */
 export function hayDineroConEstaLlaveSql(attemptId: string): Prisma.Sql {
   return Prisma.sql`EXISTS (${dineroConEstaLlaveSql(attemptId)})`
@@ -167,7 +186,7 @@ export function sinEventoQueVetaSql(attemptId: string, venueId: string, terminal
 
 /** «No consta un APROBADO de ningún intento vinculado HOY a la solicitud» (Codex r2 P1-A: el `NOT EXISTS` del negativo acreditado). */
 export function sinAprobadoVinculadoSql(requestId: string, venueId: string): Prisma.Sql {
-  return Prisma.sql`NOT EXISTS (${aprobadoVinculadoSql(requestId, venueId)})`
+  return Prisma.sql`NOT EXISTS (${aprobadoVinculadoSql(bind(requestId), bind(venueId))})`
 }
 
 /**
@@ -176,7 +195,12 @@ export function sinAprobadoVinculadoSql(requestId: string, venueId: string): Pri
  * después sin que naciera el Payment: es exactamente lo que `sinAprobadoVinculadoSql` habría vetado un instante antes.
  */
 export function hayAprobadoVinculadoSql(requestId: string, venueId: string): Prisma.Sql {
-  return Prisma.sql`EXISTS (${aprobadoVinculadoSql(requestId, venueId)})`
+  return Prisma.sql`EXISTS (${aprobadoVinculadoSql(bind(requestId), bind(venueId))})`
+}
+
+/** D3: el mismo veto correlacionado, con una pista para el núcleo; éste revalida los vínculos actuales en su CAS. */
+export function aprobadoVinculadoDeLaFilaSql(alias: string): Prisma.Sql {
+  return aprobadoVinculadoSql(columna(alias, 'requestId'), columna(alias, 'venueId'))
 }
 
 /** «No hay Payment con tarjeta COMPLETED ligado a la solicitud por puntero, etiqueta legacy o llave de intento». */
@@ -214,10 +238,16 @@ export function pagoLigadoDeLaFilaSql(alias: string): Prisma.Sql {
  * COMPLETED), y es exactamente por eso que una solicitud liberada se quedaba intacta con una colisión encima. La fila la
  * escribe el SERVIDOR dentro de la transacción del registro, así que es evidencia durable y no un dato del cuerpo del
  * cliente; quién puede usarla para re-retener lo decide aparte la identidad acreditada del llamador (regla T10).
+ * D9: también la llave de un intento vinculado, aunque el registro no trajera puntero; cada rama conserva su índice.
  */
 const evidenciaDeConciliacionSql = (requestId: Prisma.Sql, venueId: Prisma.Sql): Prisma.Sql => Prisma.sql`
       SELECT p."id" FROM "Payment" p
       WHERE p."venueId" = ${venueId} AND p."status" = 'PENDING' AND p."terminalPaymentRequestId" = ${requestId}
+        AND p."processorData"->'reconciliation'->>'kind' IN ('POSSIBLE_REFERENCE_COLLISION', 'POSSIBLE_SECOND_CAPTURE')
+      UNION
+      SELECT p."id" FROM "Payment" p
+      WHERE p."venueId" = ${venueId} AND p."status" = 'PENDING'
+        AND regexp_replace(p."idempotencyKey", ${PATRON_SQL_TRIM_COMO_JS}, '', 'g') IN (${vinculosSql(requestId, venueId)})
         AND p."processorData"->'reconciliation'->>'kind' IN ('POSSIBLE_REFERENCE_COLLISION', 'POSSIBLE_SECOND_CAPTURE')`
 
 export function hayEvidenciaDeConciliacionSql(requestId: string, venueId: string): Prisma.Sql {
@@ -235,9 +265,39 @@ export function evidenciaDeConciliacionDeLaFilaSql(alias: string): Prisma.Sql {
   return evidenciaDeConciliacionSql(columna(alias, 'requestId'), columna(alias, 'venueId'))
 }
 
-/** Las dos a la vez: el CAS de la LIBERACIÓN por ventana y el de la DECLARACIÓN del cajero. */
-export function sinEvidenciaPositivaSql(requestId: string, venueId: string): Prisma.Sql {
-  return Prisma.sql`${sinAprobadoVinculadoSql(requestId, venueId)} AND ${sinPagoLigadoSql(requestId, venueId)}`
+/**
+ * 🔴 P1 de Codex (18-sep): las contradicciones de PROCEDENCIA también vetan (movida aquí desde la declaración del cajero el
+ * 20-oct, B0-1). Un evento del procesador para un intento de esta solicitud que llegó a OTRO venue, que contradice el vínculo,
+ * que trae el serial de OTRA terminal, o que el banco APROBÓ aunque no naciera `Payment`. Sobre TODOS los intentos dados, con
+ * la llave canónica (`llaveDeIntento`): un intento sin llave aceptable no tiene eventos con los que contradecir.
+ */
+export function contradiccionDeProcedenciaSql(attemptIds: string[], venueId: string, terminalId: string): Prisma.Sql {
+  const llaves = attemptIds.map(llaveDeIntento).filter((a): a is string => Boolean(a))
+  if (llaves.length === 0) return Prisma.sql`FALSE`
+  return Prisma.sql`EXISTS (
+    SELECT e."id" FROM "ProviderEventLog" e
+    WHERE e."attemptId" IN (${Prisma.join(llaves)}) AND e."provider" = 'PAYMENT_PROCESSOR'
+      AND (e."venueId" IS DISTINCT FROM ${venueId}
+        OR e."errorReason" IN ('LINK_TERMINAL_MISMATCH', 'LINK_VENUE_MISMATCH')
+        OR (nullif(regexp_replace(coalesce(e."payload"->'payload'->>'terminalSerial', ''), ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '') IS NOT NULL
+          AND lower(regexp_replace(regexp_replace(e."payload"->'payload'->>'terminalSerial', ${PATRON_SQL_TRIM_COMO_JS}, '', 'g'), '^AVQD-', '', 'i')) <> ${terminalId})
+        OR ${estadoBancarioSql(Prisma.sql`coalesce(e."payload"->'payload'->'status', e."payload"->'status')`)} = 'APROBADO')
+  )`
+}
+
+/**
+ * 🔴 B0-1 (20-oct): UN SOLO juego de vetos de dinero, en el `WHERE` de todo UPDATE que libere o declare «no se cobró» (la
+ * ventana, la declaración del cajero, la de «no se presentó tarjeta» y los caminos nuevos). Es la CONJUNCIÓN de los que ya
+ * existían: ningún APROBADO vinculado del venue · ningún Payment COMPLETED ligado · ninguna evidencia de conciliación PENDING ·
+ * ninguna contradicción de procedencia de sus intentos · ningún Payment con la llave de sus intentos (F1, Codex servidor r1:
+ * cualquier estado y negocio). Antes la ventana sólo llevaba los dos primeros y liberaba con un aprobado del mismo intento
+ * recibido bajo otro negocio o con un Payment PENDING de segunda captura encima.
+ */
+export function sinVetoDeDineroSql(p: { requestId: string; venueId: string; attemptIds: string[]; terminalId: string }): Prisma.Sql {
+  return Prisma.sql`${sinAprobadoVinculadoSql(p.requestId, p.venueId)} AND ${sinPagoLigadoSql(p.requestId, p.venueId)}
+        AND NOT ${hayEvidenciaDeConciliacionSql(p.requestId, p.venueId)}
+        AND NOT ${contradiccionDeProcedenciaSql(p.attemptIds, p.venueId, p.terminalId)}
+        AND NOT ${hayDineroDeEstosIntentosSql(p.attemptIds)}`
 }
 
 /** Los Payments ligados a la solicitud (los que `sinPagoLigadoSql` vetaría), los más antiguos primero; acotado. */
@@ -258,6 +318,6 @@ export async function porQueHayEvidenciaPositiva(
   venueId: string,
 ): Promise<'APROBADO_VINCULADO' | 'PAYMENT_LIGADO' | 'NINGUNA'> {
   const [fila] = await db.$queryRaw<{ aprobado: boolean; pago: boolean }[]>`
-    SELECT EXISTS (${aprobadoVinculadoSql(requestId, venueId)}) AS "aprobado", EXISTS (${pagoLigadoSql(bind(requestId), bind(venueId))}) AS "pago"`
+    SELECT EXISTS (${aprobadoVinculadoSql(bind(requestId), bind(venueId))}) AS "aprobado", EXISTS (${pagoLigadoSql(bind(requestId), bind(venueId))}) AS "pago"`
   return fila?.aprobado ? 'APROBADO_VINCULADO' : fila?.pago ? 'PAYMENT_LIGADO' : 'NINGUNA'
 }

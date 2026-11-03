@@ -282,7 +282,8 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     expect(mockedSendOpsAlert).not.toHaveBeenCalled()
   })
 
-  it('marked, grace elapsed, but the terminal went dark again (no heartbeat in the alive window) → stamp reset, NOT released', async () => {
+  // S4 (A6, 21-oct): antes el estampado se BORRABA y el reloj de 20 min empezaba de cero con cada hueco de latido.
+  it('marked, grace elapsed, but the terminal went dark again (no heartbeat in the alive window) → stamp KEPT, NOT released', async () => {
     const returnedAt = new Date(NOW.getTime() - GRACE_MS - 60_000)
     tpr().findMany.mockResolvedValueOnce([unknownRow({ terminalReturnedAt: returnedAt })])
     terminalWithHeartbeat(new Date(NOW.getTime() - ALIVE_WINDOW_MS - 1_000)) // last seen just outside the window
@@ -290,14 +291,7 @@ describe('reconcileUnknownRequests — the terminal must be BACK before anything
     const summary = await terminalPaymentService.reconcileUnknownRequests(NOW)
 
     expect(summary.released).toBe(0)
-    expect(summary.reset).toBe(1)
-    expect(tpr().updateMany).toHaveBeenCalledTimes(1)
-    expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ id: 'row-u', status: 'UNKNOWN', terminalReturnedAt: returnedAt }),
-        data: { terminalReturnedAt: null },
-      }),
-    )
+    expect(tpr().updateMany).not.toHaveBeenCalled()
     expect(mockedLogAction).not.toHaveBeenCalled()
     expect(mockedSendOpsAlert).not.toHaveBeenCalled()
   })

@@ -24,6 +24,10 @@ const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
   'cfdiReconcile.job.ts': 'el correo de la factura pasa por cfdiEmail.enviar, que revisa el negocio de la factura (capa 2)',
   'crm-daily-digest.job.ts':
     'sólo escribe al equipo de ventas de Avoqado (quien tiene crm:ver) sus propios pendientes del CRM; nunca a personas de un negocio',
+  'crm-campaign-sender.job.ts':
+    'campañas de plataforma de Avoqado: CLIENTES y USUARIOS sólo leen negocios reales (REAL_VENUE_SQL deja fuera LIVE_DEMO y demoExpiresAt); PROSPECTOS sólo a quien marcó la casilla de la landing',
+  'crm-gmail-replies.job.ts':
+    'no manda nada: busca en «Enviados» y lee respuestas del Gmail de cada vendedor de Avoqado; el uno a uno sólo lo manda un vendedor desde la ficha',
   'crm-sweep.job.ts':
     'sólo avisa al equipo de ventas de Avoqado (quien tiene crm:editar) de un prospecto de la landing; nunca escribe a personas de un negocio',
   'customer-approval-outbox.job.ts': 'cada fila corre con conNegocio en customerApprovalOutbox.service',
@@ -36,6 +40,8 @@ const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
   'plan-access-reconciliation.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
   'plan-renewal-reminder.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
   'plan-winback.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
+  'platform-charge-digest.job.ts':
+    'sólo le escribe a jose@avoqado.io (el founder) lo que los clientes le deben a Avoqado por «Por cobrar»; nunca a personas de un negocio',
   'reservation-deposit-reconciliation.job.ts': 'depósitos con Stripe Connect; el demo no tiene cuenta de cobro (capa 1)',
   'shopify-worker.job.ts': 'Shopify; conectarlo está bloqueado en el demo (capa 1 y shopify.connect.service)',
   'stripe-webhook-reconciliation.job.ts': 'eventos de Stripe de suscripciones; el demo no puede contratar (capa 1)',

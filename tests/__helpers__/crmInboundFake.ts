@@ -21,6 +21,7 @@ export function installCrmInboundFake(prismaMock: any) {
     accounts: [] as Row[],
     contacts: [] as Row[],
     events: [] as Row[],
+    consents: [] as Row[],
     erased: [] as Row[],
     logs: [] as Row[],
   }
@@ -75,6 +76,7 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmContact.findFirst,
     prismaMock.crmTimelineEvent.createMany,
     prismaMock.crmTimelineEvent.findUnique,
+    prismaMock.crmEmailConsent.upsert,
     prismaMock.crmAccount.delete,
     prismaMock.crmContact.findMany,
     prismaMock.crmInboundEntry.deleteMany,
@@ -211,6 +213,14 @@ export function installCrmInboundFake(prismaMock: any) {
     async ({ where }: Row) => db.events.find(event => event.sourceKey === where.sourceKey) ?? null,
   )
 
+  // The landing's consent box: one row per email (unique), created or brought up to date — never deleted.
+  prismaMock.crmEmailConsent.upsert.mockImplementation(async ({ where, create, update }: Row) => {
+    const row = db.consents.find(consent => consent.email === where.email)
+    if (row) Object.assign(row, update)
+    else db.consents.push({ id: nextId('cons'), createdAt: new Date(), ...create })
+    return { ...(row ?? db.consents[db.consents.length - 1]) }
+  })
+
   // «Eliminar» (D7): the account goes with its people and its timeline (onDelete: Cascade), and its entries are deleted by
   // `accountId` or by `id`.
   prismaMock.crmAccount.delete.mockImplementation(async ({ where }: Row) => {
@@ -219,6 +229,8 @@ export function installCrmInboundFake(prismaMock: any) {
     const [row] = db.accounts.splice(index, 1)
     db.contacts = db.contacts.filter(contact => contact.accountId !== row.id)
     db.events = db.events.filter(event => event.accountId !== row.id)
+    // Its consent rows too: `CrmEmailConsent.accountId` is onDelete: Cascade in the schema.
+    db.consents = db.consents.filter(consent => consent.accountId !== row.id)
     for (const entry of db.entries) if (entry.accountId === row.id) entry.accountId = null
     return { ...row }
   })

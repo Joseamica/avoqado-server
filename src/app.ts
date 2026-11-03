@@ -81,6 +81,8 @@ import { AvoqadoJwtPayload } from './security' // Assuming this is where the typ
 import { CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT_MB } from './utils/containerLimits'
 
 const app: Express = express()
+// AngelPay's webhook signing key is never an SDK credential returned over HTTP.
+app.set('json replacer', (key: string, value: unknown) => (key === 'angelpayWebhookSecret' ? undefined : value))
 
 // --- Container-aware CPU + Event Loop monitoring (module-level) ---
 const eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 })

@@ -44,6 +44,17 @@ describe('manualSaleRowSchema', () => {
       }),
     ).toThrow(/ICCID/i)
   })
+
+  // Las columnas «Número de vinculación» y «Número portado» (A8). Zod quita las llaves que no conoce: sin declararlas,
+  // el número nunca llegaría al servicio. Opcionales: el formato y si son obligatorias lo decide el servicio con el
+  // interruptor de la organización.
+  it('conserva linkingNumber y portedNumber, y acepta filas sin ellos', () => {
+    const base = { iccid: '8952140063677014972F', storeName: 'X', saleDate: '2026-10-24', saleType: 'Portabilidad', amount: 150 }
+    const parsed = manualSaleRowSchema.parse({ ...base, linkingNumber: '55 1234-5678', portedNumber: '5587654321' })
+    expect(parsed.linkingNumber).toBe('55 1234-5678')
+    expect(parsed.portedNumber).toBe('5587654321')
+    expect(manualSaleRowSchema.parse(base).linkingNumber).toBeUndefined()
+  })
 })
 
 describe('bulkManualSalesSchema', () => {

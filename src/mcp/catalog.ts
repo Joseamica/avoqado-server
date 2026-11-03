@@ -111,6 +111,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   crm_delete_account: 'write',
   crm_pending: 'read',
   crm_pipeline_summary: 'read',
+  // Correo del CRM (fase 2): sólo lectura. Mandar una campaña o un correo NO es una herramienta: es masivo y no se deshace.
+  crm_list_email_templates: 'read',
+  crm_campaign_status: 'read',
   create_product: 'write',
   create_product_with_variants: 'write',
   create_products: 'write',
@@ -231,6 +234,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_payment_effects: 'read',
   list_payment_links: 'read',
   list_payments: 'read',
+  list_platform_charges_due: 'read',
   get_cash_payment_by_key: 'read',
   list_prices: 'read',
   list_print_stations: 'read',

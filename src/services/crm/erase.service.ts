@@ -20,6 +20,9 @@ import type { CrmAccess } from './access.service'
 /** More people than any account has; past it the deletion refuses instead of leaving some of them out of the tombstone. */
 const CONTACTS_CAP = 2000
 
+/** Why a campaign delivery of a deleted person did not go out: the deletion and the sender write the same words. */
+export const MOTIVO_PERSONA_ELIMINADA = 'persona eliminada'
+
 type ErasedKind = 'KEY' | 'ORG' | 'EMAIL' | 'PHONE'
 const hashOf = (kind: ErasedKind, value: string) => crypto.createHash('sha256').update(`${kind}:${value}`).digest('hex')
 const normalEmail = (email: string) => email.trim().toLowerCase()
@@ -51,26 +54,51 @@ export class ErasedIdentityError extends Error {
 }
 
 /**
- * Throws `ErasedIdentityError` when this identity belongs to a deleted account and what the writer read was said at or
- * before the deletion — or when it cannot tell when (`seenAt` undefined: a HubSpot file, a chat without its date, an old
- * signup). Its Organization always counts; its key, email or phone only with a tombstone compatible with it — without an
+ * When this identity's account was deleted, if what was read at `seenAt` was said at or before the deletion — or when it
+ * cannot tell when (`seenAt` undefined: a HubSpot file, a chat without its date, an old signup). `null` = nothing stops it.
+ * Its Organization always counts; its key, email or phone only with a tombstone compatible with it — without an
  * Organization, or the same — the resolver's rule (`candidateTx`): another business that shares a phone is not this
- * person. Called by `accountForTx` only when it found nobody and is about to create, inside the writer's transaction.
+ * person. One indexed lookup (`keyHash`). The campaign sender asks it at the edge of each send, too.
  */
-export async function assertNotErasedTx(tx: Prisma.TransactionClient, who: ErasedIdentity, seenAt?: Date): Promise<void> {
+export async function erasedAtTx(tx: Prisma.TransactionClient, who: ErasedIdentity, seenAt?: Date): Promise<Date | null> {
   const { organization, person } = erasedHashes(who)
   const scoped = who.organizationId ? { scope: { in: ['', who.organizationId] } } : {}
   const which: Prisma.CrmErasedWhereInput[] = [
     ...(organization ? [{ keyHash: organization }] : []),
     ...(person.length ? [{ keyHash: { in: person }, ...scoped }] : []),
   ]
-  if (!which.length) return
+  if (!which.length) return null
   const hit = await tx.crmErased.findFirst({
     where: { OR: which, ...(seenAt ? { erasedAt: { gte: seenAt } } : {}) },
     select: { erasedAt: true },
     orderBy: { erasedAt: 'desc' },
   })
-  if (hit) throw new ErasedIdentityError(hit.erasedAt)
+  return hit?.erasedAt ?? null
+}
+
+/**
+ * La lápida de un envío ya encolado cuenta desde un minuto antes de que se leyó su público: una eliminación toma su hora antes de
+ * terminar (su transacción no pasa de los 5 s de Prisma), y un encolado que empezó en ese hueco pudo leer el público de antes.
+ */
+export const MARGEN_DE_LA_LAPIDA_MS = 60_000
+
+/**
+ * ¿Este correo se eliminó del CRM (D7) desde que se leyó el público que lo trae (`leidoEn`, con el minuto de margen)? Quien se
+ * eliminó antes y volvió después no cuenta; sin fecha, cuenta cualquier eliminación. Lo preguntan al borde de cada envío el remitente
+ * del CRM y el marketing viejo del superadmin. Si la base falla, lanza: nadie manda a ciegas.
+ */
+export async function correoEliminadoDesde(email: string, leidoEn: Date | null): Promise<boolean> {
+  const desde = leidoEn ? new Date(leidoEn.getTime() - MARGEN_DE_LA_LAPIDA_MS) : undefined
+  return (await erasedAtTx(prisma, { keys: [], emails: [email], phones: [], organizationId: null }, desde)) !== null
+}
+
+/**
+ * Throws `ErasedIdentityError` when `erasedAtTx` finds the deletion. Called by `accountForTx` only when it found nobody
+ * and is about to create, inside the writer's transaction.
+ */
+export async function assertNotErasedTx(tx: Prisma.TransactionClient, who: ErasedIdentity, seenAt?: Date): Promise<void> {
+  const erasedAt = await erasedAtTx(tx, who, seenAt)
+  if (erasedAt) throw new ErasedIdentityError(erasedAt)
 }
 
 /** «Ana  López» and «ana lópez» are the same name; an accent is not. */
@@ -127,6 +155,17 @@ export async function deleteAccount(access: CrmAccess, id: string, confirmName: 
     // counts from now — never back: only an earlier date moves (Codex r2 H1).
     await tx.crmErased.createMany({ data: hashes.map(keyHash => ({ keyHash, scope, erasedAt: now })), skipDuplicates: true })
     await tx.crmErased.updateMany({ where: { keyHash: { in: hashes }, scope, erasedAt: { lt: now } }, data: { erasedAt: now } })
+    // Campaign email (I1 of the email phase's final review): the queue has no foreign key and a consent can hang from another
+    // account, or none, so the cascade below leaves both. What was never claimed (PENDIENTE) for this account or these people
+    // stays in the history as OMITIDO, and their consent goes (PROSPECTOS stops reaching them). One statement each, bounded
+    // by CONTACTS_CAP emails. A row already claimed (ENVIANDO, or REINTENTO: an earlier try may have reached Resend) is the
+    // sender's: it checks the tombstone before sending, and on a retry leaves it DESCONOCIDO, never «omitida».
+    const emails = [...new Set(contacts.flatMap(contact => (contact.email ? [normalEmail(contact.email)] : [])))]
+    await tx.crmCampaignDelivery.updateMany({
+      where: { status: 'PENDIENTE', OR: [{ accountId: id }, ...(emails.length ? [{ email: { in: emails } }] : [])] },
+      data: { status: 'OMITIDO', skipReason: MOTIVO_PERSONA_ELIMINADA, nextAttemptAt: null },
+    })
+    if (emails.length) await tx.crmEmailConsent.deleteMany({ where: { email: { in: emails } } })
     await tx.crmInboundEntry.deleteMany({ where: { accountId: id } })
     await tx.crmAccount.delete({ where: { id } })
     // In the same transaction, not `logAction` (best effort, outside it): an account is never gone without who deleted it

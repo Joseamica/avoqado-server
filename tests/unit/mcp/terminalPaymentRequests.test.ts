@@ -549,4 +549,16 @@ describe('Ventana de confirmación (Task 5): la liberación por ventana y la dec
     expect(descripcion).toMatch(/OPERATOR is human testimony/i)
     expect(descripcion).toMatch(/releasedAfterWindow/)
   })
+
+  it('A8: la descripción dice que sin el aviso del banco comprobado la ventana sólo suelta la terminal y la venta sigue en duda', () => {
+    let descripcion = ''
+    const server = {
+      tool: (n: string, d: string) => {
+        if (n === 'terminal_payment_requests') descripcion = d
+      },
+    }
+    registerTerminalTools(server as any, ambito as any)
+    expect(descripcion).toMatch(/notification \(webhook\) of every account that terminal could charge with is proven/)
+    expect(descripcion).toMatch(/frees only the terminal for other sales and the charge stays UNRESOLVED/)
+  })
 })

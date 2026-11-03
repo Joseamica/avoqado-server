@@ -27,7 +27,11 @@ jest.mock('@/utils/prismaClient', () => ({
       findUnique: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
+      findUniqueOrThrow: jest.fn(),
     },
+    $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
     terminal: {
       findUnique: jest.fn(),
     },
@@ -47,6 +51,8 @@ const mockedPrisma = prisma as unknown as {
     findUnique: jest.Mock
     create: jest.Mock
     update: jest.Mock
+    updateMany: jest.Mock
+    findUniqueOrThrow: jest.Mock
   }
   terminal: { findUnique: jest.Mock }
 }
@@ -54,6 +60,8 @@ const mockedPrisma = prisma as unknown as {
 describe('AngelPayUserAccountService', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma as any).$transaction.mockImplementation((cb: any) => cb(prisma))
+    mockedPrisma.angelPayUserAccount.updateMany.mockResolvedValue({ count: 1 })
   })
 
   // ============================================================
@@ -253,12 +261,13 @@ describe('AngelPayUserAccountService', () => {
 
   describe('markValidated()', () => {
     it('updates lastValidatedAt + externalUserId + clears lastValidationErr', async () => {
-      mockedPrisma.angelPayUserAccount.update.mockImplementation(({ data }: any) => ({ id: 'a1', ...data }))
+      mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue({ id: 'a1', venueId: 'venue-1' })
+      mockedPrisma.angelPayUserAccount.findUniqueOrThrow.mockResolvedValue({ id: 'a1', externalUserId: 42 })
 
       await markAngelPayUserAccountValidated('a1', 42)
 
-      const updateArg = mockedPrisma.angelPayUserAccount.update.mock.calls[0][0]
-      expect(updateArg.where).toEqual({ id: 'a1' })
+      const updateArg = mockedPrisma.angelPayUserAccount.updateMany.mock.calls[0][0]
+      expect(updateArg.where).toEqual({ id: 'a1', OR: [{ externalUserId: null }, { externalUserId: 42 }] })
       expect(updateArg.data.externalUserId).toBe(42)
       expect(updateArg.data.lastValidationErr).toBeNull()
       expect(updateArg.data.lastValidatedAt).toBeInstanceOf(Date)

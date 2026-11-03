@@ -2097,7 +2097,8 @@ describe('TerminalPaymentService — lápida de admisión: contención, choque d
     const error = await errorDe(send({ terminalId: 'T-DUP', requestId: 'REQ-DUP' }))
     expect(error).toBeInstanceOf(TerminalBusyError)
     expect(error.message).toBe(lapidaGanadora.resultJson.message)
-    expect(error.details).toEqual(lapidaGanadora.resultJson.details)
+    // A5: la réplica de una lápida vieja (sin `scope` guardado) lo deriva de su motivo.
+    expect(error.details).toEqual({ ...lapidaGanadora.resultJson.details, scope: 'TERMINAL' })
     expect(tpr().create).toHaveBeenCalledTimes(1) // sólo la lápida que chocó: ninguna fila que ocupe la terminal
     expect(directEmit).not.toHaveBeenCalled()
   })
@@ -2171,6 +2172,68 @@ describe('TerminalPaymentService — lápida de admisión: contención, choque d
       expect(directEmit).not.toHaveBeenCalled()
     },
   )
+
+  it('P2 el 409 de la orden trae details.scope ORDER y el de la terminal TERMINAL', async () => {
+    // A5 (contrato SERVIDOR → POS): el POS distingue «esta VENTA tiene un cobro pendiente» de «esta TERMINAL está ocupada».
+    // VIVO, terminal: el bloqueador se ve bajo el candado de la terminal.
+    tpr().findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      requestId: 'REQ-T',
+      venueId: 'venue-1',
+      amountCents: 5000,
+      senderDevice: null,
+      createdAt: new Date(),
+      status: 'UNKNOWN',
+    })
+    const terminal = await errorDe(send({ terminalId: 'T-SC1', requestId: 'REQ-SC1' }))
+    expect(terminal).toBeInstanceOf(TerminalBusyError)
+    expect(terminal.details).toMatchObject({ scope: 'TERMINAL', requestId: 'REQ-SC1', blockingRequest: { requestId: 'REQ-T' } })
+    // …y la lápida guarda el mismo `details` (la réplica lo reproduce igual).
+    expect(tpr().create.mock.calls[0][0].data.resultJson.details).toMatchObject({ scope: 'TERMINAL' })
+
+    // VIVO, orden: la terminal está libre, pero la VENTA tiene un cobro sin desenlace (en otra terminal).
+    tpr().create.mockClear()
+    tpr()
+      .findFirst.mockResolvedValueOnce(null) // la fila propia
+      .mockResolvedValueOnce(null) // nadie ocupa la terminal
+      .mockResolvedValueOnce(null) // la fila propia, otra vez bajo el candado de la orden
+      .mockResolvedValueOnce({
+        requestId: 'REQ-O',
+        venueId: 'venue-1',
+        amountCents: 5000,
+        senderDevice: null,
+        createdAt: new Date(),
+        status: 'UNKNOWN',
+      })
+    const orden = await errorDe(send({ terminalId: 'T-SC2', requestId: 'REQ-SC2', orderId: 'order-sc' }))
+    expect(orden).toBeInstanceOf(TerminalBusyError)
+    expect(orden.details).toMatchObject({ scope: 'ORDER', requestId: 'REQ-SC2', blockingRequest: { requestId: 'REQ-O' } })
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({
+      failureCode: 'REJECTED_ORDER_BUSY',
+      resultJson: { details: { scope: 'ORDER' } },
+    })
+
+    // RÉPLICA de lápidas viejas (sin `scope` guardado): se deriva del motivo.
+    for (const [failureCode, scope] of [
+      ['REJECTED_ORDER_BUSY', 'ORDER'],
+      ['REJECTED_TERMINAL_BUSY', 'TERMINAL'],
+    ] as const) {
+      tpr().findFirst.mockResolvedValueOnce({
+        requestId: `REQ-R-${scope}`,
+        venueId: 'venue-1',
+        terminalId: 't-r',
+        amountCents: 10000,
+        tipCents: 0,
+        orderId: null,
+        status: 'FAILED',
+        failureCode,
+        resultJson: null,
+      })
+      const replica = await errorDe(send({ terminalId: 'T-R', requestId: `REQ-R-${scope}` }))
+      expect(replica).toBeInstanceOf(TerminalBusyError)
+      expect(replica.details.scope).toBe(scope)
+    }
+    expect(directEmit).not.toHaveBeenCalled()
+  })
 
   it('una copia con OTRO contrato sobre una lápida es conflicto de solicitud: no hereda el rechazo ajeno', async () => {
     tpr().findFirst.mockResolvedValueOnce({

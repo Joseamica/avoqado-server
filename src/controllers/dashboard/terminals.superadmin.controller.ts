@@ -16,8 +16,9 @@ import {
 import { terminalPaymentService } from '../../services/terminal-payment.service'
 
 /**
- * Free a terminal stuck BUSY by an UNKNOWN POS→terminal charge (manual path; the watchdog
- * also frees it on its own once the terminal is back — see reconcileUnknownRequests).
+ * A6 · S6: support frees the TERMINAL (not the sale) stuck BUSY by an UNKNOWN POS→terminal charge — what the watchdog does
+ * on its own 20 min after the terminal is back, now. The source SUPERADMIN comes from this route (superadmin-only
+ * middleware), never from the body; the staff from the authenticated token. The sale stays blocked until its outcome is known.
  *
  * @route POST /api/v1/dashboard/superadmin/terminals/payment-requests/:requestId/release
  * @body { venueId, reason }
@@ -41,15 +42,48 @@ export const releaseTerminalPaymentRequest = async (req: Request, res: Response,
       released: r.released,
       status: r.status,
       paymentId: r.paymentId ?? null,
-      message: r.released
-        ? 'Terminal liberada'
-        : r.status === 'COMPLETED'
-          ? 'No se liberó: existe un pago con tarjeta de ese cobro; se cerró como cobrado'
-          : 'No se liberó: falta confirmar el resultado y que la terminal haya terminado. Consulta el cobro en la terminal.',
+      message: mensajeDeSoporte(r),
     })
   } catch (error) {
     next(error)
   }
+}
+
+/** Soporte lee esto en el panel: el estado en palabras, nunca el nombre del enum. */
+const estadoEnLlano = (status: string | null): string =>
+  (
+    ({
+      PENDING: 'pendiente',
+      SENT: 'en curso',
+      CANCEL_REQUESTED: 'cancelándose',
+      TIMED_OUT: 'vencido sin respuesta',
+      FAILED: 'fallido',
+      CANCELLED: 'cancelado',
+      COMPLETED: 'cobrado',
+      UNKNOWN: 'sin resultado',
+    }) as Record<string, string>
+  )[status ?? ''] ?? status ?? 'sin estado'
+
+/** A6 · fix 1: el texto dice la verdad según el resultado — soltada, retenida por dinero, o una fila que soporte no suelta. */
+
+function mensajeDeSoporte(r: { released: boolean; status: string | null; heldByMoneyEvidence?: boolean; slotHeld?: boolean }): string {
+  if (r.released) return 'Terminal liberada. La venta sigue protegida: no se puede volver a cobrar hasta confirmar qué pasó con ese cobro.'
+  if (r.status === 'COMPLETED') return 'No se liberó: existe un pago con tarjeta de ese cobro; se cerró como cobrado'
+  if (r.heldByMoneyEvidence)
+    return 'No se liberó: ese cobro dejó rastro de dinero (aviso del banco, un pago ligado o la terminal dice que cobró). Hay que conciliarlo primero.'
+  if (r.status === 'UNKNOWN')
+    return 'No se liberó: falta confirmar el resultado y que la terminal haya terminado. Consulta el cobro en la terminal.'
+  // A4b: TIMED_OUT sin apartar = la ranura ya se soltó (el reloj, soporte o el cese acreditado), pero la VENTA sigue en duda.
+  if (!r.slotHeld && r.status === 'TIMED_OUT')
+    return 'No hace falta: este cobro ya no aparta la terminal (ya venció sin respuesta). Esa venta sigue pendiente de confirmar si se cobró: que el negocio lo confirme desde el POS, o concilia el cobro.'
+  if (!r.slotHeld) return `No hace falta: este cobro ya no aparta la terminal (está ${estadoEnLlano(r.status)}).`
+  const queHacer =
+    r.status === 'PENDING' || r.status === 'SENT' || r.status === 'CANCEL_REQUESTED'
+      ? 'El cobro sigue en curso: espera a que la terminal conteste; si no contesta, en unos minutos queda sin resultado y entonces se puede soltar.'
+      : r.status === 'TIMED_OUT'
+        ? 'Hay que revisar y conciliar ese cobro antes de confirmar su resultado.'
+        : 'Falta confirmar si se cobró: que el negocio declare desde el POS «Ya revisé la terminal: no se cobró», o concilia el cobro.'
+  return `No se liberó: esta acción sólo suelta cobros sin resultado y éste está ${estadoEnLlano(r.status)}; la terminal sigue apartada. ${queHacer}`
 }
 
 /**

@@ -33,9 +33,11 @@ router.get('/by-supervisor', checkPermission('sale-verifications:review'), ctrl.
 router.get('/by-store', checkPermission('sale-verifications:review'), ctrl.getSalesByStore)
 router.get('/by-promoter', checkPermission('sale-verifications:review'), ctrl.getSalesByPromoter)
 router.get('/by-promoter-daily', checkPermission('sale-verifications:review'), ctrl.getSalesByPromoterDaily)
+router.get('/linking-number-status', checkPermission('sale-verifications:review'), ctrl.getLinkingNumberStatus)
 
 router.patch('/:id/review', checkPermission('sale-verifications:review'), ctrl.reviewOrgSaleVerification)
 router.post('/:id/reopen', checkPermission('sale-verifications:reopen'), ctrl.reopenOrgSaleVerification)
+router.patch('/:id/numbers', checkPermission('sale-verifications:edit'), ctrl.setOrgSaleVerificationNumbers)
 router.patch('/:id', checkPermission('sale-verifications:edit'), ctrl.editOrgSaleVerification)
 
 export default router

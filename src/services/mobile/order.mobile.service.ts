@@ -131,6 +131,7 @@ import {
   summarizeRefunds,
   type RefundState,
 } from '../shared/orderBalance'
+import { avisarEfectivoConTarjetaEnDuda } from '../shared/avisoDeEfectivoConTarjetaEnDuda'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
@@ -4942,6 +4943,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       staffId: effectiveStaffId ?? null,
     })
   }
+
+  // D10-B: efectivo nuevo (en vivo o de la cola) sobre una venta con la tarjeta en duda. Después del commit y sin esperarlo.
+  void avisarEfectivoConTarjetaEnDuda(payment)
 
   // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
   avisarSiLlegoConProblema(payment.posRawData, balance)

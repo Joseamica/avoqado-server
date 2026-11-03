@@ -4,6 +4,8 @@ import prisma from '../../utils/prismaClient'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { logAction } from './activity-log.service'
+import { staffHasPermissionInVenue } from '../../middlewares/checkPermission.middleware'
+import { ForbiddenError } from '../../errors/AppError'
 
 // ============================================================
 // Sale Verification Dashboard Service
@@ -645,6 +647,9 @@ export async function reviewSaleVerification(
     throw createServiceError('Sale verification does not belong to this venue', 403)
   }
 
+  // `review` abre la pantalla; DECIDIR pide `approve`, revisado contra la tienda de la venta (la org y el MCP delegan aquí).
+  await assertCanApproveSale(params.reviewedById, existing.venueId)
+
   if (existing.status !== 'PENDING') {
     return resolveAlreadyReviewed(existing.id, venueId, params)
   }
@@ -722,4 +727,11 @@ export async function reviewSaleVerification(
   }
 
   return toReviewResponse(updated)
+}
+
+/** Aprobar o rechazar una venta exige `sale-verifications:approve` en la sucursal de la venta. */
+export async function assertCanApproveSale(staffId: string, venueId: string): Promise<void> {
+  if (!(await staffHasPermissionInVenue({ staffId, venueId, permission: 'sale-verifications:approve' }))) {
+    throw new ForbiddenError('No tienes permiso para aprobar ni rechazar ventas', 'SALE_APPROVE_FORBIDDEN')
+  }
 }

@@ -50,6 +50,9 @@ const B = '/venues/v1/gift-cards'
 const CASOS: Array<[string, string, Record<string, unknown> | undefined, string, string]> = [
   ['get', `${B}/settings`, undefined, 'giftCards:read', 'getSettings'],
   ['put', `${B}/settings`, { suggestedAmounts: [500, 1000] }, 'giftCards:manage', 'updateSettings'],
+  // Founder, 3-nov-2026: mover el interruptor es de administrador para arriba; los montos siguen siendo de gerente.
+  ['put', `${B}/settings`, { enabled: true, aceptaTerminos: true }, 'giftCards:enable', 'updateSettings'],
+  ['put', `${B}/settings`, { enabled: false }, 'giftCards:enable', 'updateSettings'],
   ['get', `${B}/summary?from=2026-10-01&to=2026-10-14`, undefined, 'giftCards:read', 'summary'],
   ['get', `${B}/aging?at=2026-10-14`, undefined, 'giftCards:read', 'aging'],
   ['get', `${B}/pending-accounting?from=2026-10-01&to=2026-10-14`, undefined, 'giftCards:read', 'pendingAccounting'],
@@ -101,8 +104,18 @@ describe('rutas del dashboard de tarjetas de regalo', () => {
     },
   )
 
+  it('🔴 quien manda el interruptor y montos en la misma petición necesita los dos permisos', async () => {
+    const r = await request(app).put(`${B}/settings`).send({ enabled: false, minAmount: 150 })
+    expect(r.status).toBe(200)
+    expect(mockPermisos).toEqual([
+      ['giftCards:manage', 'v1'],
+      ['giftCards:enable', 'v1'],
+    ])
+  })
+
   it('🔴 sólo PRENDER pide el plan (R9); sin plan, el 403 lo explica en español con su código', async () => {
-    for (const [metodo, url, cuerpo] of CASOS) await (request(app) as any)[metodo](url).send(cuerpo ?? {})
+    for (const [metodo, url, cuerpo] of CASOS.filter(([, , c]) => c?.enabled !== true))
+      await (request(app) as any)[metodo](url).send(cuerpo ?? {})
     expect(mockPlanes).toEqual([])
     expect((await request(app).put(`${B}/settings`).send({ enabled: true, aceptaTerminos: true })).status).toBe(200)
     expect(mockPlanes).toEqual(['GIFT_CARDS'])
