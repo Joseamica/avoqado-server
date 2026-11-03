@@ -404,6 +404,7 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
     return {
       ...account,
       credentialsEncrypted: undefined, // Don't expose encrypted data
+      angelpayWebhookSecret: undefined, // la clave de firma del aviso nunca sale; el json replacer de app.ts es la segunda capa
       venueConfigsPrimary: undefined,
       venueConfigsSecondary: undefined,
       venueConfigsTertiary: undefined,
@@ -526,6 +527,7 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
       terminals: assignedTerminals.length,
     },
     credentialsEncrypted: undefined, // Don't expose encrypted data
+    angelpayWebhookSecret: undefined, // la clave de firma del aviso nunca sale; el json replacer de app.ts es la segunda capa
     credentials: decryptedCredentials, // Only if requested
     hasCredentials: !!(account.credentialsEncrypted as any)?.encrypted,
     // D11: mismo campo que la lista.
