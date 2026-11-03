@@ -213,6 +213,9 @@ async function ecoTardioConCandado(
   ahora: Date,
 ): Promise<ResultadoRotacion | null> {
   if (!r0.consumedAt || !r0.rotatedToId || r0.revokedAt) return null
+  // 🔴 R0 tiene que SEGUIR vigente con el candado puesto (Codex, código r1 #1): pudo pasar la validación del JWT con un
+  // segundo de vida y vencer mientras esperaba en la fila del candado. Vencido, cae a la ruta de hoy (revoca).
+  if (r0.expiresAt <= ahora) return null
   // Sin llave no se puede dejar el eco de 60 s de N: un segundo R0 concurrente acabaría revocando. Se queda como hoy.
   if (!sucesorCifradoDisponible()) return null
   // «Fuera de los 60 s»: si la ventana sigue abierta y aun así no hubo eco legible (cifrado que no descifra), no es esto.

@@ -249,6 +249,60 @@ describe('D19 · eco tardío: la respuesta de la renovación se perdió minutos 
     expect(await rotateGrant('tok-N-c1', 'tok-N2-c1', enUnaSemana())).toEqual({ sucesor: 'tok-N2-c1', sessionId, familyId })
   })
 
+  it('1b · R0 ya vencido al entrar (con S sin usar): NO acuña N y cae a la ruta de hoy (revoca)', async () => {
+    const { familyId, r0, s } = await cadenaConRespuestaPerdida('c1b')
+    await pasaronMinutos(r0, 5)
+    await prisma.refreshGrant.update({ where: { tokenHash: hashToken(r0) }, data: { expiresAt: new Date(Date.now() - 1_000) } })
+
+    expect(await rotateGrant(r0, 'tok-N-c1b', enUnaSemana())).toEqual({ reutilizado: true })
+
+    expect(await existe('tok-N-c1b')).toBe(false)
+    expect((await grant(s))!.consumedAt).toBeNull() // S no se anuló
+    expect(await vivos(familyId)).toBe(0)
+    expect(await sesion()).toMatchObject({ revokedReason: 'refresh_reuse_detected' })
+  })
+
+  it('1c · 🔴 R0 vence MIENTRAS espera el candado (Codex, código r1 #1): NO acuña N y cae a la ruta de hoy (revoca)', async () => {
+    const { familyId, r0, s } = await cadenaConRespuestaPerdida('c1c')
+    await pasaronMinutos(r0, 5)
+    // Le queda un segundo y medio: la lectura sin candado lo ve VIGENTE…
+    const vence = new Date(Date.now() + 1_500)
+    await prisma.refreshGrant.update({ where: { tokenHash: hashToken(r0) }, data: { expiresAt: vence } })
+
+    // …pero otra operación de la familia tiene el candado.
+    let soltar: () => void = () => undefined
+    const suelto = new Promise<void>(r => (soltar = r))
+    let avisar: (pid: number) => void = () => undefined
+    const pidDelRetenedor = new Promise<number>(r => (avisar = r))
+    const retenedor = prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('refreshGrant:' || ${familyId}, 0))::text`
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        avisar(Number(pid))
+        await suelto
+      },
+      { timeout: 20_000 },
+    )
+    let renovacion: Promise<unknown> | undefined
+    try {
+      const pid = await aTiempo(pidDelRetenedor, 10_000, 'el retenedor no tomó el candado')
+      renovacion = rotateGrant(r0, 'tok-N-c1c', enUnaSemana())
+      renovacion.catch(() => undefined)
+      expect(await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: SQL_DEL_CANDADO, ms: 5_000 })).not.toBeNull()
+      // R0 vence mientras la renovación sigue en la fila del candado.
+      await new Promise(r => setTimeout(r, Math.max(0, vence.getTime() - Date.now()) + 250))
+    } finally {
+      soltar()
+      await retenedor
+    }
+
+    expect(await renovacion).toEqual({ reutilizado: true })
+    expect(await existe('tok-N-c1c')).toBe(false)
+    expect((await grant(s))!.consumedAt).toBeNull() // S no se anuló
+    expect(await vivos(familyId)).toBe(0)
+    expect(await sesion()).toMatchObject({ revokedReason: 'refresh_reuse_detected' })
+  })
+
   it('2 · R0 a las 25 h: fuera del tope de 24 h se revocan familia y sesión, como hoy', async () => {
     const { familyId, r0 } = await cadenaConRespuestaPerdida('c2')
     await pasaronMinutos(r0, 25 * 60, { purgado: true })
@@ -463,16 +517,30 @@ describe('D19 · eco tardío: la respuesta de la renovación se perdió minutos 
     expect((await sesion()).revokedAt).toBeNull()
   })
 
-  it('10 · dos respuestas perdidas seguidas: sale N2 y N queda anulado (el tope sigue contando desde el consumo de R0)', async () => {
+  it('10 · dos respuestas perdidas seguidas: N2 y N anulado; el tope de 24 h cuenta desde el consumo ORIGINAL de R0, que nunca se reescribe, y cruzado revoca', async () => {
     const { familyId, r0, s } = await cadenaConRespuestaPerdida('c10')
-    await pasaronMinutos(r0, 5)
+    // UNA sola escritura del consumo de R0 en toda la prueba: le faltan 8 s para cumplir 24 h. Lo de abajo sólo vence
+    // el eco de 60 s de R0; si la recuperación reiniciara el consumo, las comparaciones con `original` lo delatan.
+    const MARGEN_MS = 8_000
+    const TOPE_MS = 24 * 60 * MIN
+    await prisma.refreshGrant.update({
+      where: { tokenHash: hashToken(r0) },
+      data: { consumedAt: new Date(Date.now() - TOPE_MS + MARGEN_MS), successorEnc: null, successorEncExpiresAt: null },
+    })
+    const original = (await grant(r0))!.consumedAt!
+    const consumoDeR0 = async () => (await grant(r0))!.consumedAt
+    const vencerSoloElEcoDeR0 = () =>
+      prisma.refreshGrant.update({ where: { tokenHash: hashToken(r0) }, data: { successorEncExpiresAt: new Date(Date.now() - 1_000) } })
+
+    // 1ª recuperación: la respuesta con S se perdió.
     expect(await rotateGrant(r0, 'tok-N-c10', enUnaSemana())).toMatchObject({ sucesor: 'tok-N-c10' })
+    expect(await consumoDeR0()).toEqual(original)
 
-    // La respuesta con N también se perdió; el aparato vuelve 20 minutos después, todavía con R0.
-    await pasaronMinutos(r0, 25)
+    // 2ª recuperación: la respuesta con N TAMBIÉN se perdió; el aparato sigue con R0.
+    await vencerSoloElEcoDeR0()
     const segunda = await rotateGrant(r0, 'tok-N2-c10', enUnaSemana())
-
-    expect(segunda).toEqual({ sucesor: 'tok-N2-c10', sessionId, familyId, ecoTardio: { minutosDesdeElConsumo: 25 } })
+    expect(segunda).toEqual({ sucesor: 'tok-N2-c10', sessionId, familyId, ecoTardio: { minutosDesdeElConsumo: 24 * 60 } })
+    expect(await consumoDeR0()).toEqual(original)
     const [gR0, gS, gN, gN2] = await Promise.all([grant(r0), grant(s), grant('tok-N-c10'), grant('tok-N2-c10')])
     for (const anulado of [gS!, gN!]) {
       expect(anulado.consumedAt).not.toBeNull()
@@ -482,6 +550,17 @@ describe('D19 · eco tardío: la respuesta de la renovación se perdió minutos 
     expect(gN2).toMatchObject({ consumedAt: null, revokedAt: null })
     expect((await sesion()).revokedAt).toBeNull()
     expect(await vivos(familyId)).toBe(4)
+
+    // Se cumple el tope ACUMULADO, contado desde el consumo original (sin reescribirlo)…
+    await new Promise(r => setTimeout(r, Math.max(0, original.getTime() + TOPE_MS - Date.now()) + 250))
+    await vencerSoloElEcoDeR0()
+
+    // …y el mismo R0 ya no recupera nada: revoca familia y sesión, como hoy.
+    expect(await rotateGrant(r0, 'tok-N3-c10', enUnaSemana())).toEqual({ reutilizado: true })
+    expect(await existe('tok-N3-c10')).toBe(false)
+    expect(await consumoDeR0()).toEqual(original)
+    expect(await vivos(familyId)).toBe(0)
+    expect(await sesion()).toMatchObject({ revokedReason: 'refresh_reuse_detected' })
   })
 
   it('11 · esperar el candado más que el presupuesto de la transacción es FALLA OPERATIVA (503): ni reuso ni éxito', async () => {

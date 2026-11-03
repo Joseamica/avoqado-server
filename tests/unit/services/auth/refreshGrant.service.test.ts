@@ -307,6 +307,25 @@ describe('D19 · eco tardío: R0 fuera de los 60 s con S sin usar', () => {
     expect(sessionService.revokeSession).toHaveBeenCalledWith('s1', 'refresh_reuse_detected', tx)
   })
 
+  it.each([
+    ['venció MIENTRAS esperaba el candado (la lectura sin candado lo vio vigente)', true],
+    ['ya estaba vencido al entrar', false],
+  ])('🔴 R0 %s: NO acuña N; cae a la ruta de hoy (revoca familia y sesión)', async (_caso, vigenteSinCandado) => {
+    const { r0 } = cadena(5)
+    const vencido = { ...r0, expiresAt: new Date(Date.now() - 1000) }
+    prismaMock.refreshGrant.findUnique.mockResolvedValue(vigenteSinCandado ? r0 : vencido)
+    tx.refreshGrant.findUnique.mockImplementation(async ({ where }: any) =>
+      where.tokenHash ? vencido : where.id === 's' ? grantVigente({ id: 's', tokenHash: hashToken('tok-s') }) : null,
+    )
+
+    await expect(rotateGrant('tok-viejo', 'tok-N', new Date())).resolves.toEqual({ reutilizado: true })
+
+    expect(tx.refreshGrant.create).not.toHaveBeenCalled()
+    // S no se anula: ninguna escritura sobre él.
+    expect(tx.refreshGrant.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: 's' }) }))
+    esperaRevocacion()
+  })
+
   it('sin SESSION_SUCCESSOR_ENC_KEY no hay eco tardío (no podría dejar el eco de 60 s de N): se comporta como hoy', async () => {
     const llave = jest.spyOn(successorCrypto, 'sucesorCifradoDisponible').mockReturnValue(false)
     try {
