@@ -22,6 +22,9 @@ import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, listAccounts, listLostReasons, listStages, lose, moveStage } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
 import { applyEntry } from '@/services/crm/inbound.service'
+import { NotFoundError } from '@/errors/AppError'
+import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
+import { listTemplates } from '@/services/crm/email/templates.service'
 import { getReports } from '@/services/crm/reports.service'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
@@ -43,6 +46,16 @@ jest.mock('@/services/crm/accounts.service', () => ({
 }))
 jest.mock('@/services/crm/activities.service', () => ({ addActivity: jest.fn() }))
 jest.mock('@/services/crm/reports.service', () => ({ getReports: jest.fn() }))
+// The email phase: the tools only read through these two, which are tested on their own.
+jest.mock('@/services/crm/email/templates.service', () => ({
+  ...jest.requireActual('@/services/crm/email/templates.service'),
+  listTemplates: jest.fn(),
+}))
+jest.mock('@/services/crm/email/campaigns.service', () => ({
+  ...jest.requireActual('@/services/crm/email/campaigns.service'),
+  listCampaigns: jest.fn(),
+  getCampaign: jest.fn(),
+}))
 
 const cuid = (prefix: string) => `c${prefix}`.padEnd(25, '0')
 
@@ -54,6 +67,8 @@ const CRM_TOOLS = [
   'crm_add_activity',
   'crm_pending',
   'crm_pipeline_summary',
+  'crm_list_email_templates',
+  'crm_campaign_status',
 ]
 const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_find_account: 'read',
@@ -63,6 +78,8 @@ const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_add_activity: 'write',
   crm_pending: 'read',
   crm_pipeline_summary: 'read',
+  crm_list_email_templates: 'read',
+  crm_campaign_status: 'read',
 }
 const WRITES = CRM_TOOLS.filter(name => EFFECTS[name] === 'write')
 
@@ -97,6 +114,8 @@ const ARGS: Record<string, Record<string, unknown>> = {
   crm_add_activity: { accountId: ACC, type: 'LLAMADA', title: 'Llamarle', dueAt: '2026-11-03T10:00:00-06:00' },
   crm_pending: {},
   crm_pipeline_summary: {},
+  crm_list_email_templates: {},
+  crm_campaign_status: {},
 }
 
 /** What the services answer for an account. */
@@ -166,7 +185,7 @@ beforeEach(() => {
 // ── Who sees them ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 describe('CRM MCP — catalogs', () => {
-  it('catalogo_libre_las_trae: the free catalog lists the seven for a SUPERADMIN, through server.ts and the real protocol', async () => {
+  it('catalogo_libre_las_trae: the free catalog lists all of them for a SUPERADMIN, through server.ts and the real protocol', async () => {
     expect(catalogFor({ isSuperAdmin: true })).toEqual(expect.arrayContaining(CRM_TOOLS))
 
     const c = await connect('manual')
@@ -234,7 +253,18 @@ describe('CRM MCP — access', () => {
     scope.isSuperAdmin = false
     for (const name of CRM_TOOLS) expect({ name, ...(await call(name)) }).toMatchObject({ name, ok: false })
     expect(getCrmAccess).not.toHaveBeenCalled()
-    for (const service of [listAccounts, getPending, moveStage, lose, addNote, addActivity, getReports])
+    for (const service of [
+      listAccounts,
+      getPending,
+      moveStage,
+      lose,
+      addNote,
+      addActivity,
+      getReports,
+      listTemplates,
+      listCampaigns,
+      getCampaign,
+    ])
       expect(service).not.toHaveBeenCalled()
     expect(auditMcpWrite).not.toHaveBeenCalled()
   })
@@ -246,7 +276,18 @@ describe('CRM MCP — access', () => {
       const answer = await call(name)
       expect({ name, ok: answer.ok, error: typeof answer.error }).toEqual({ name, ok: false, error: 'string' })
     }
-    for (const service of [listAccounts, getPending, moveStage, lose, addNote, addActivity, getReports])
+    for (const service of [
+      listAccounts,
+      getPending,
+      moveStage,
+      lose,
+      addNote,
+      addActivity,
+      getReports,
+      listTemplates,
+      listCampaigns,
+      getCampaign,
+    ])
       expect(service).not.toHaveBeenCalled()
   })
 
@@ -893,6 +934,202 @@ describe('crm_find_account, crm_pending and crm_pipeline_summary', () => {
       })
     } finally {
       jest.useRealTimers()
+    }
+  })
+})
+
+// ── Email: templates and campaign status (phase 2, plan task 8) ──────────────────────────────────────────────────────
+
+describe('CRM MCP — email (read only)', () => {
+  const TPL = cuid('tpl1')
+  const CAMP = cuid('camp1')
+  const BLOCKS = [{ type: 'texto', text: 'Cuerpo del correo para {{nombre}}' }]
+
+  const campaignView = (over: Record<string, unknown> = {}) => ({
+    id: CAMP,
+    name: 'Novedades de noviembre',
+    templateId: TPL,
+    subject: 'Lo nuevo de Avoqado',
+    blocks: BLOCKS,
+    audience: { segmentos: [{ tipo: 'PROSPECTOS' }, { tipo: 'CLIENTES', planes: ['PRO'] }] },
+    status: 'ENVIANDO',
+    total: 40,
+    createdById: SUPER.staffId,
+    enqueuedAt: new Date('2026-11-03T16:00:00.000Z'),
+    finishedAt: null,
+    cancelledAt: null,
+    createdAt: new Date('2026-11-03T15:00:00.000Z'),
+    updatedAt: new Date('2026-11-03T16:00:00.000Z'),
+    pruebaVigente: true,
+    contadores: { ENVIADO: 25, PENDIENTE: 9, REINTENTO: 2, FALLIDO: 3, OMITIDO: 1 },
+    ...over,
+  })
+
+  it('crm_list_email_templates: name, subject and date, paginated, never the blocks', async () => {
+    ;(listTemplates as jest.Mock).mockResolvedValue({
+      rows: [
+        {
+          id: TPL,
+          name: 'Bienvenida',
+          subject: 'Hola {{nombre}}',
+          blocks: BLOCKS,
+          archivedAt: null,
+          createdById: SUPER.staffId,
+          updatedById: SUPER.staffId,
+          createdAt: new Date('2026-11-02T15:00:00.000Z'),
+          updatedAt: new Date('2026-11-03T16:00:00.000Z'),
+        },
+      ],
+      nextCursor: cuid('tpl2'),
+      total: 61,
+    })
+    const answer = await setup().call('crm_list_email_templates', { limit: 1, cursor: cuid('tpl0'), archivadas: false })
+    expect(listTemplates).toHaveBeenCalledWith({ limit: 1, cursor: cuid('tpl0'), archivadas: false })
+    expect(answer).toEqual({
+      ok: true,
+      total: 61,
+      hayMas: true,
+      siguiente: cuid('tpl2'),
+      plantillas: [
+        {
+          id: TPL,
+          nombre: 'Bienvenida',
+          asunto: 'Hola {{nombre}}',
+          creada: '2026-11-02 09:00',
+          actualizada: '2026-11-03 10:00',
+          archivada: false,
+        },
+      ],
+    })
+    // The subject is there; the text of the blocks is not.
+    expect(JSON.stringify(answer)).not.toContain(BLOCKS[0].text)
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('crm_list_email_templates: the last page says there is no more', async () => {
+    ;(listTemplates as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
+    expect(await setup().call('crm_list_email_templates', {})).toEqual({
+      ok: true,
+      total: 0,
+      hayMas: false,
+      siguiente: null,
+      plantillas: [],
+    })
+  })
+
+  it('crm_campaign_status: the list carries the counters by state, zeros included, and never the content or the test hash', async () => {
+    ;(listCampaigns as jest.Mock).mockResolvedValue({
+      rows: [campaignView(), campaignView({ id: cuid('camp2'), contadores: {}, status: 'BORRADOR' })],
+      nextCursor: null,
+      total: 2,
+    })
+    const answer = await setup().call('crm_campaign_status', { status: 'ENVIANDO', limit: 20 })
+    expect(listCampaigns).toHaveBeenCalledWith({ status: 'ENVIANDO', limit: 20 })
+    expect(getCampaign).not.toHaveBeenCalled()
+    expect(answer).toMatchObject({ ok: true, total: 2, hayMas: false, siguiente: null })
+    expect(answer.campanas[0]).toEqual({
+      id: CAMP,
+      nombre: 'Novedades de noviembre',
+      estado: 'ENVIANDO',
+      asunto: 'Lo nuevo de Avoqado',
+      publicos: ['PROSPECTOS', 'CLIENTES'],
+      total: 40,
+      pruebaVigente: true,
+      contadores: { pendientes: 9, enCurso: 0, enviados: 25, reintentos: 2, fallidos: 3, omitidos: 1, desconocidos: 0 },
+      creada: '2026-11-03 09:00',
+      encolada: '2026-11-03 10:00',
+      terminada: null,
+      cancelada: null,
+    })
+    expect(answer.campanas[1].contadores).toEqual({
+      pendientes: 0,
+      enCurso: 0,
+      enviados: 0,
+      reintentos: 0,
+      fallidos: 0,
+      omitidos: 0,
+      desconocidos: 0,
+    })
+    expect(JSON.stringify(answer)).not.toContain(BLOCKS[0].text)
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('crm_campaign_status with an id: that campaign alone, and DESCONOCIDO is counted apart (Resend took it, we did not save it)', async () => {
+    ;(getCampaign as jest.Mock).mockResolvedValue(
+      campaignView({ status: 'ENVIADA', contadores: { ENVIADO: 38, DESCONOCIDO: 2 }, finishedAt: new Date('2026-11-03T18:00:00.000Z') }),
+    )
+    const answer = await setup().call('crm_campaign_status', { campaignId: CAMP })
+    expect(getCampaign).toHaveBeenCalledWith(CAMP)
+    expect(listCampaigns).not.toHaveBeenCalled()
+    expect(answer).toMatchObject({
+      ok: true,
+      campana: { id: CAMP, estado: 'ENVIADA', terminada: '2026-11-03 12:00', contadores: { enviados: 38, desconocidos: 2, pendientes: 0 } },
+    })
+  })
+
+  it('crm_campaign_status: a campaign that does not exist comes back ok:false with its code, not as a crash', async () => {
+    ;(getCampaign as jest.Mock).mockRejectedValue(new NotFoundError('Esa campaña no existe', 'CRM_CAMPANA_NOT_FOUND'))
+    expect(await setup().call('crm_campaign_status', { campaignId: CAMP })).toEqual({
+      ok: false,
+      error: 'Esa campaña no existe',
+      code: 'CRM_CAMPANA_NOT_FOUND',
+    })
+  })
+
+  it('keys: templates open with «Mandar correo», «Campañas masivas» or «Administrar»; campaigns only with the last two', async () => {
+    ;(listTemplates as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
+    ;(listCampaigns as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
+    const none = { ...ADMIN, contactar: false, campanas: false, admin: false }
+    const only = (key: 'contactar' | 'campanas' | 'admin') => ({ ...none, [key]: true })
+    const reads = async (access: CrmAccess) => {
+      ;(getCrmAccess as jest.Mock).mockResolvedValue(access)
+      const { call } = setup()
+      return {
+        plantillas: (await call('crm_list_email_templates', {})).ok,
+        campanas: (await call('crm_campaign_status', {})).ok,
+      }
+    }
+    expect(await reads(only('contactar') as CrmAccess)).toEqual({ plantillas: true, campanas: false })
+    expect(await reads(only('campanas') as CrmAccess)).toEqual({ plantillas: true, campanas: true })
+    expect(await reads(only('admin') as CrmAccess)).toEqual({ plantillas: true, campanas: true })
+    expect(await reads(none)).toEqual({ plantillas: false, campanas: false })
+    // The refusal names the keys, in the words of the screens.
+    const { call } = setup()
+    expect(await call('crm_campaign_status', {})).toMatchObject({ ok: false, error: expect.stringContaining('crm:campanas') })
+    expect(await call('crm_list_email_templates', {})).toMatchObject({ ok: false, error: expect.stringContaining('crm:contactar') })
+  })
+
+  it('they say that sending is not here: a campaign or an email is irreversible and mass, so only a person sends it from the screens', () => {
+    const { descriptions } = setup()
+    for (const name of ['crm_list_email_templates', 'crm_campaign_status']) {
+      expect(descriptions[name]).toMatch(/no (manda|envía)/i)
+      expect(descriptions[name]).toMatch(/SUPERADMIN|pantalla/i)
+    }
+  })
+
+  it('real protocol: the page is capped at 100, a hostile limit or a bad id is refused before any service runs', async () => {
+    ;(listTemplates as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
+    const c = await connect('manual')
+    try {
+      for (const [name, args] of [
+        ['crm_list_email_templates', { limit: 500 }],
+        ['crm_list_email_templates', { limit: 0 }],
+        ['crm_list_email_templates', { cursor: 'no-es-un-id' }],
+        ['crm_campaign_status', { limit: 101 }],
+        ['crm_campaign_status', { campaignId: 'no-es-un-id' }],
+        ['crm_campaign_status', { status: 'ENVIADOS' }],
+      ] as const) {
+        expect({ name, args, isError: (await c.client.callTool({ name, arguments: args })).isError }).toEqual({ name, args, isError: true })
+      }
+      expect(listTemplates).not.toHaveBeenCalled()
+      expect(listCampaigns).not.toHaveBeenCalled()
+      expect(getCampaign).not.toHaveBeenCalled()
+
+      const ok = await c.client.callTool({ name: 'crm_list_email_templates', arguments: { limit: 100 } })
+      expect(ok.isError).toBeFalsy()
+      expect(listTemplates).toHaveBeenCalledWith({ limit: 100 })
+    } finally {
+      await c.close()
     }
   })
 })
