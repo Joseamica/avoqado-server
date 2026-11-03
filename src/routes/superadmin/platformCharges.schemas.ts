@@ -115,13 +115,18 @@ const confirmedReceptor = z
   .optional()
 
 export const payOccurrenceSchema = z.object({
-  body: z.object({
-    invoice: z.boolean({
-      required_error: 'Indica si se timbra la factura ahora',
-      invalid_type_error: 'invoice debe ser verdadero o falso',
+  body: z
+    .object({
+      invoice: z.boolean({
+        required_error: 'Indica si se timbra la factura ahora',
+        invalid_type_error: 'invoice debe ser verdadero o falso',
+      }),
+      receptor: confirmedReceptor,
+    })
+    .refine(({ invoice, receptor }) => !invoice || receptor !== undefined, {
+      message: 'Para timbrar hace falta confirmar a quién se le factura',
+      path: ['receptor'],
     }),
-    receptor: confirmedReceptor,
-  }),
 })
 
 /** Facturar, reintentar o consultar el estado: los dos campos son para corregir el perfil fiscal o las claves del SAT. */

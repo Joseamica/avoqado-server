@@ -109,7 +109,7 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
   it('«Ya me pagó»: la casilla va SIEMPRE explícita (omitirla no puede volver manual una automática) y debe ser booleana', () => {
     expect(errores(payOccurrenceSchema, body({}))).toEqual(['Indica si se timbra la factura ahora'])
     expect(errores(payOccurrenceSchema, body({ invoice: 'true' }))).toEqual(['invoice debe ser verdadero o falso'])
-    expect(errores(payOccurrenceSchema, body({ invoice: true }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: false }))).toEqual([])
     expect(errores(payOccurrenceSchema, body({ invoice: false }))).toEqual([])
   })
 
@@ -131,7 +131,8 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
     const receptor = { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA', regimenFiscal: '601', codigoPostal: '06000' }
     expect(errores(invoiceOccurrenceSchema, body({ receptor }))).toEqual([])
     expect(errores(payOccurrenceSchema, body({ invoice: true, receptor }))).toEqual([])
-    expect(errores(payOccurrenceSchema, body({ invoice: true }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: false }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: true }))).toEqual(['Para timbrar hace falta confirmar a quién se le factura'])
     expect(errores(payOccurrenceSchema, body({ invoice: true, receptor: { rfc: 'LUN010101AAA' } }))).toEqual([
       'La razón social del receptor es requerida',
       'El régimen fiscal del receptor es requerido',

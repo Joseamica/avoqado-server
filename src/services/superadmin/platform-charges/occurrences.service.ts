@@ -325,7 +325,7 @@ export async function payOccurrence(
   let invoice: PayInvoiceResult | null = null
   if (paid && input.invoice) {
     try {
-      invoice = { ok: true, cfdi: await invoiceOccurrence(id, input.receptor ? { actorId, receptor: input.receptor } : { actorId }) }
+      invoice = { ok: true, cfdi: await invoiceOccurrence(id, { actorId, receptor: input.receptor }) }
     } catch (error) {
       invoice = invoiceFailure(error, id)
     }

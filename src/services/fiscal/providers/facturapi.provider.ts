@@ -143,7 +143,7 @@ export class FacturapiProvider implements FiscalProvider {
    * ("SA DE CV", "S DE RL") — el SAT lo prefiere fuera, pero hay contribuyentes registrados
    * CON él en el padrón, así que quitarlo automáticamente rompería a esos.
    */
-  private static normalizeReceptorName(nombre: string): string {
+  static normalizeReceptorName(nombre: string): string {
     return nombre.trim().replace(/\s+/g, ' ').toUpperCase()
   }
 

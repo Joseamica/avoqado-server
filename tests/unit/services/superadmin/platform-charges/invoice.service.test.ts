@@ -269,6 +269,11 @@ beforeEach(() => {
   instalarElDoble()
 })
 
+/** Lo que el operador ve al pedir la factura: el perfil de ahora. Sin esto no se timbra. */
+const enPantalla = (p: Fila | null | undefined = mundo.profile) => {
+  return p ? { rfc: p.rfc, razonSocial: p.razonSocial, regimenFiscal: p.regimenFiscal, codigoPostal: p.codigoPostal } : undefined
+}
+
 const sinEscrituras = () => {
   expect(prismaMock.platformCfdi.create).not.toHaveBeenCalled()
   expect(prismaMock.platformCfdi.update).not.toHaveBeenCalled()
@@ -402,7 +407,7 @@ describe('resolverIntento — CANCELLED: se pregunta por la cancelación', () =>
       mundo.rows = [filaCancelada()]
       pac.getCancellationStatus.mockResolvedValue({ status: estado, cancelledAt: new Date() })
 
-      await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+      await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
       expect(pac.getCancellationStatus).toHaveBeenCalledWith('fa-1')
       expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled() // la cancelada se conserva: es el rastro fiscal
@@ -560,7 +565,7 @@ describe('resolverIntento — con facturapiId (el PAC aceptó pero no timbró)',
     mundo.rows = [enVuelo()]
     pac.getInvoice.mockResolvedValue({ ...PAC_VALIDO, status: 'canceled' })
 
-    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
     expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
     expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', cancelStatus: 'canceled' })
@@ -572,7 +577,7 @@ describe('resolverIntento — con facturapiId (el PAC aceptó pero no timbró)',
     mundo.rows = [enVuelo()] // STAMPING con facturapiId, sin UUID ni folio todavía
     pac.getInvoice.mockResolvedValue({ ...PAC_VALIDO, status: 'canceled', uuid: 'UUID-1', serie: 'B', folio: '118' })
 
-    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
     expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', facturapiId: 'fa-1', uuid: 'UUID-1', serie: 'B', folio: '118' })
   })
@@ -681,7 +686,7 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
 
     mundo.rows[0].createdAt = hace(2.1)
     pac.findByExternalId.mockResolvedValue(null)
-    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
     expect(pac.findByExternalId).toHaveBeenCalledWith(LLAVE)
   })
@@ -723,7 +728,7 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
     it('null (el PAC no tiene nada con esa llave): cierra — borra la fila y sube invoiceSeq — y da NONE', async () => {
       pac.findByExternalId.mockResolvedValue(null)
 
-      await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+      await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
       expect(mundo.rows).toHaveLength(0)
       expect(mundo.occurrence.invoiceSeq).toBe(1)
@@ -732,7 +737,7 @@ describe('resolverIntento — STAMPING sin facturapiId', () => {
     it('canceled: cierra, y la fila se queda CANCELLED con su UUID: ese documento existe ante el SAT y el contador tiene que verlo', async () => {
       pac.findByExternalId.mockResolvedValue(resumen({ status: 'canceled', uuid: 'UUID-1', serie: 'B', folio: '118' }))
 
-      await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+      await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
       expect(mundo.rows).toHaveLength(1)
       expect(mundo.rows[0]).toMatchObject({ status: 'CANCELLED', uuid: 'UUID-1', serie: 'B', folio: '118' })
@@ -959,7 +964,7 @@ describe('resolverIntento — un PAC que no contesta no deja la petición colgad
     mundo.rows = [fila({ status: 'STAMP_FAILED' })]
     pac.findByExternalId.mockResolvedValue(null)
 
-    await expect(resolverIntento('occ-1')).resolves.toMatchObject({ kind: 'NONE' })
+    await expect(resolverIntento('occ-1')).resolves.toEqual({ kind: 'NONE' })
 
     expect(jest.getTimerCount()).toBe(0)
   })
@@ -1131,7 +1136,12 @@ describe('resolverIntento — la bitácora de lo que borra, cancela o devuelve a
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('invoiceOccurrence — qué se exige antes de facturar', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
 
   it('exige que esté PAID: una PENDING es 409 ANTES de consultar al PAC o cerrar intentos (aunque haya un fallido esperando)', async () => {
     mundo.occurrence.status = 'PENDING'
@@ -1231,7 +1241,12 @@ describe('invoiceOccurrence — qué se exige antes de facturar', () => {
 })
 
 describe('invoiceOccurrence — timbrar', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
 
   it('con una factura ya VIVA la regresa sin timbrar, sin crear fila y sin bitácora', async () => {
     mundo.rows = [fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1', folio: '118' })]
@@ -1361,7 +1376,7 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   it('conceptKeys reescribe la foto de la ocurrencia, conserva los montos, y el PAC recibe las claves nuevas', async () => {
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { actorId: 'staff-1', conceptKeys: claves })
+    await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: claves })
 
     expect(mundo.occurrence.concepts).toEqual([
       { description: 'Renta de terminal', amountCents: 50000, ivaMode: 'WITHOUT_IVA', satProductKey: '81112402', satUnitKey: 'H87' },
@@ -1379,7 +1394,7 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   it('la corrección de claves deja rastro: PLATFORM_CHARGE_UPDATED con la ocurrencia', async () => {
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { actorId: 'staff-1', conceptKeys: claves })
+    await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: claves })
 
     expect(mockLogAction).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1393,7 +1408,9 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   })
 
   it('un conceptKeys de largo distinto al de los conceptos es 422 y no se escribe ni se timbra nada', async () => {
-    const error = await invoiceOccurrence('occ-1', { actorId: 'staff-1', conceptKeys: [claves[0]] }).catch((e: unknown) => e)
+    const error = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: [claves[0]] }).catch(
+      (e: unknown) => e,
+    )
 
     expect(error).toBeInstanceOf(PlatformBillingError)
     expect((error as PlatformBillingError).code).toBe('VALIDATION') // el controlador lo manda como 422
@@ -1407,7 +1424,9 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   it('con la factura ya VIVA y otras claves: 409, y no se reescribe una foto que ya se timbró', async () => {
     mundo.rows = [fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1' })]
 
-    await expect(invoiceOccurrence('occ-1', { actorId: 'staff-1', conceptKeys: claves })).rejects.toBeInstanceOf(ConflictError)
+    await expect(invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: claves })).rejects.toBeInstanceOf(
+      ConflictError,
+    )
 
     expect(mundo.occurrence.concepts).toEqual(CONCEPTOS)
     expect(prismaMock.platformChargeOccurrence.update).not.toHaveBeenCalled()
@@ -1417,7 +1436,7 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
     mundo.profile = { ...(mundo.profile as Fila), id: 'perfil-2', rfc: 'NVO010101BBB' }
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { actorId: 'staff-1', billingTaxProfileId: 'perfil-2' })
+    await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), billingTaxProfileId: 'perfil-2' })
 
     expect(mundo.charge.billingTaxProfileId).toBe('perfil-2')
     expect(pac.createInvoice.mock.calls[0][0].receptor).toMatchObject({ rfc: 'NVO010101BBB' })
@@ -1428,7 +1447,11 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   })
 
   it('un perfil que no existe NO se guarda en el cobro: NO_PROFILE y nada se timbra', async () => {
-    const error = await invoiceOccurrence('occ-1', { actorId: 'staff-1', billingTaxProfileId: 'perfil-fantasma' }).catch((e: unknown) => e)
+    const error = await invoiceOccurrence('occ-1', {
+      actorId: 'staff-1',
+      receptor: enPantalla(),
+      billingTaxProfileId: 'perfil-fantasma',
+    }).catch((e: unknown) => e)
 
     expect(error).toBeInstanceOf(PlatformBillingError)
     expect((error as PlatformBillingError).code).toBe('NO_PROFILE')
@@ -1439,7 +1462,7 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   it('el mismo perfil que ya tiene el cobro no reescribe nada ni ensucia la bitácora', async () => {
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { actorId: 'staff-1', billingTaxProfileId: 'perfil-1' })
+    await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), billingTaxProfileId: 'perfil-1' })
 
     expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
     expect(mockLogAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PLATFORM_CHARGE_UPDATED' }))
@@ -1447,7 +1470,12 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
 })
 
 describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro (spec §6, «Cambios mínimos»)', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
   const claves = [
     { satProductKey: '81112402', satUnitKey: 'H87' },
     { satProductKey: '43232612', satUnitKey: 'E48' },
@@ -1523,7 +1551,7 @@ describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro 
     mundo.extraProfiles = [perfilAjeno({ id: 'perfil-nuevo', rfc: 'NVO010101BBB', organizationId: 'org-1' })]
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-nuevo' })
+    await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-nuevo', receptor: enPantalla(mundo.extraProfiles?.[0]) })
 
     expect(mundo.charge.billingTaxProfileId).toBe('perfil-nuevo')
     expect(pac.createInvoice.mock.calls[0][0].receptor).toMatchObject({ rfc: 'NVO010101BBB' })
@@ -1534,7 +1562,7 @@ describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro 
     mundo.extraProfiles = [perfilAjeno({ id: 'perfil-externo', customerType: 'STANDALONE', organizationId: null })]
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-externo' })
+    await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-externo', receptor: enPantalla(mundo.extraProfiles?.[0]) })
 
     expect(mundo.charge.billingTaxProfileId).toBe('perfil-externo')
     expect(pac.createInvoice).toHaveBeenCalledTimes(1)
@@ -1555,7 +1583,7 @@ describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro 
     })
     pac.createInvoice.mockResolvedValue(PAC_VALIDO)
 
-    await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-2' })
+    await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-2', receptor: enPantalla(mundo.extraProfiles?.[0]) })
 
     expect(mundo.charge.billingTaxProfileId).toBe('perfil-2') // se guardó lo que se pidió, no se dio por ya guardado
     expect(mockLogAction).toHaveBeenCalledWith(
@@ -1565,7 +1593,12 @@ describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro 
 })
 
 describe('invoiceOccurrence — lo que cambia a media operación y no debe timbrarse a ciegas', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
 
   it('🔴 si otra pestaña corrige el RFC (el cobro pasa a otro perfil) después de elegir el perfil: 409, la fila no nace y NO se llama al PAC', async () => {
     ganchos.alBuscarPerfil = () => {
@@ -1618,30 +1651,12 @@ describe('invoiceOccurrence — lo que cambia a media operación y no debe timbr
       expect(mundo.rows).toHaveLength(0)
     })
 
-    it('🔴 «Consultar estado» no trae datos: si el intento se perdió y el perfil ya es otro, lo cierra y NO le timbra a quien nadie vio', async () => {
-      pac.createInvoice.mockRejectedValueOnce(new Error('ETIMEDOUT'))
-      await expect(invoiceOccurrence('occ-1', input)).rejects.toBeInstanceOf(PlatformBillingError)
-      mundo.rows[0].createdAt = hace(3)
-      pac.findByExternalId.mockResolvedValue(null)
-      ;(mundo.profile as Fila).rfc = 'BBB010101BBB'
+    it('🔴 lo guardado en minúsculas y lo confirmado en mayúsculas son el mismo nombre en el CFDI: no pide cancelar una factura correcta', async () => {
+      mundo.rows.push(fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1', receptorNombre: 'Estetica  Luna sa de cv' }))
 
-      const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+      await expect(invoiceOccurrence('occ-1', { ...input, receptor: EN_PANTALLA })).resolves.toMatchObject({ id: 'cfdi-1' })
 
-      expect(error).toBeInstanceOf(ConflictError)
-      expect((error as ConflictError).message).toMatch(/datos fiscales/)
-      expect(pac.createInvoice).toHaveBeenCalledTimes(1) // sólo el intento perdido
-      // Queda cerrado y con la llave siguiente libre: la fila ofrece «Facturar», donde el dato nuevo se ve y se confirma.
-      expect(mundo.rows).toHaveLength(0)
-      expect(mundo.occurrence.invoiceSeq).toBe(1)
-    })
-
-    it('«Consultar estado» con un intento perdido y el mismo perfil: vuelve a timbrar sin preguntar', async () => {
-      pac.createInvoice.mockRejectedValueOnce(new Error('ETIMEDOUT')).mockResolvedValue(PAC_VALIDO)
-      await expect(invoiceOccurrence('occ-1', input)).rejects.toBeInstanceOf(PlatformBillingError)
-      mundo.rows[0].createdAt = hace(3)
-      pac.findByExternalId.mockResolvedValue(null)
-
-      await expect(invoiceOccurrence('occ-1', input)).resolves.toMatchObject({ status: 'STAMPED', idempotencyKey: 'por-cobrar:occ-1:1' })
+      expect(pac.createInvoice).not.toHaveBeenCalled()
     })
 
     it('con la corrección que acaba de confirmar, un intento cerrado con otros datos no estorba', async () => {
@@ -1739,6 +1754,59 @@ describe('invoiceOccurrence — lo que cambia a media operación y no debe timbr
   })
 })
 
+describe('invoiceOccurrence — 🔴 «Consultar estado» (sin `receptor`) sólo consulta: sin datos confirmados no se timbra', () => {
+  const consulta = { actorId: 'staff-1' }
+  const perderElIntento = async () => {
+    pac.createInvoice.mockRejectedValueOnce(new Error('ETIMEDOUT'))
+    await expect(invoiceOccurrence('occ-1', { ...consulta, receptor: enPantalla() })).rejects.toBeInstanceOf(PlatformBillingError)
+    mundo.rows[0].createdAt = hace(3)
+    pac.createInvoice.mockClear()
+  }
+
+  it('el PAC no tiene nada: cierra el intento, no timbra y dice que use «Facturar» (aunque el perfil no haya cambiado)', async () => {
+    await perderElIntento()
+    pac.findByExternalId.mockResolvedValue(null)
+
+    const error = await invoiceOccurrence('occ-1', consulta).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_NOT_CONFIRMED' })
+    expect((error as ConflictError).message).toMatch(/«Facturar»/)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    // Queda cerrado y con la llave siguiente libre: «Facturar» puede timbrar.
+    expect(mundo.rows).toHaveLength(0)
+    expect(mundo.occurrence.invoiceSeq).toBe(1)
+  })
+
+  it('una segunda consulta desde otra pestaña, con el intento ya cerrado y otro RFC en el perfil: tampoco timbra', async () => {
+    await perderElIntento()
+    pac.findByExternalId.mockResolvedValue(null)
+    await invoiceOccurrence('occ-1', consulta).catch(() => undefined)
+    ;(mundo.profile as Fila).rfc = 'BBB010101BBB'
+
+    await expect(invoiceOccurrence('occ-1', consulta)).rejects.toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_NOT_CONFIRMED' })
+
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(mundo.rows).toHaveLength(0)
+  })
+
+  it('sin ningún intento: no hay nada que consultar y no timbra', async () => {
+    await expect(invoiceOccurrence('occ-1', consulta)).rejects.toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_NOT_CONFIRMED' })
+
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(mundo.rows).toHaveLength(0)
+  })
+
+  it('el PAC sí la tiene: la adopta, que para eso se consulta', async () => {
+    await perderElIntento()
+    pac.findByExternalId.mockResolvedValue(resumen())
+
+    await expect(invoiceOccurrence('occ-1', consulta)).resolves.toMatchObject({ status: 'STAMPED' })
+
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+  })
+})
+
 describe('invoiceOccurrence — una corrección que llega con la factura ya viva', () => {
   const input = { actorId: 'staff-1' }
   const VIVA = () =>
@@ -1833,7 +1901,12 @@ describe('invoiceOccurrence — una corrección que llega con la factura ya viva
 })
 
 describe('invoiceOccurrence — la carrera «Facturar» contra «Deshacer» (reserveCheck)', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
 
   it('si entre preparar y reservar la ocurrencia vuelve a PENDING: 409, la fila no nace y NO se llama al PAC', async () => {
     ganchos.alBuscarPerfil = () => {
@@ -1912,7 +1985,12 @@ describe('invoiceOccurrence — la carrera «Facturar» contra «Deshacer» (res
 })
 
 describe('invoiceOccurrence — jamás dos facturas por un pago', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
 
   it('si el PAC contesta SIN timbre: devuelve la fila STAMPING (no lanza), y las consultas siguientes la terminan sin timbrar otra', async () => {
     pac.createInvoice.mockResolvedValue(PAC_PENDIENTE)
@@ -2053,7 +2131,12 @@ describe('invoiceOccurrence — jamás dos facturas por un pago', () => {
 })
 
 describe('invoiceOccurrence — una falla del PAC que deja la factura «en camino» se lo dice así al operador (spec §6, «Por qué así»)', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
   const EN_CAMINO = 'La factura pudo quedar en camino: consulta su estado en 2 minutos y no la timbres otra vez.'
 
   it('un corte de red: el mensaje empieza con el aviso y SIGUE con el detalle del proveedor; el código sigue siendo PROVIDER (502)', async () => {
@@ -2142,7 +2225,12 @@ describe('invoiceOccurrence — una falla del PAC que deja la factura «en camin
 })
 
 describe('invoiceOccurrence — modo de prueba de QA (PLATFORM_CHARGES_SANDBOX)', () => {
-  const input = { actorId: 'staff-1' }
+  const input = {
+    actorId: 'staff-1',
+    get receptor() {
+      return enPantalla()
+    },
+  }
   let restaurarEntorno: () => void
   beforeEach(() => {
     restaurarEntorno = guardarEntorno()

@@ -46,6 +46,9 @@ import prisma from '@/utils/prismaClient'
 jest.setTimeout(180_000)
 
 const suffix = `pc${Date.now()}`
+/** Lo que el operador ve en pantalla: los datos del perfil del cobro. Sin esto no se timbra. */
+const RECEPTOR = { rfc: 'XAXX010101000', razonSocial: 'PUBLICO EN GENERAL', regimenFiscal: '616', codigoPostal: '06000' }
+
 const BASE = '/api/v1/superadmin/platform-charges'
 
 const NOW = new Date('2026-11-02T18:00:00.000Z') // 12:00 en CDMX · lunes 2-nov-2026
@@ -569,7 +572,7 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
       billingTaxProfileId: cobro.body.data.billingTaxProfileId,
       totalCents: TOTAL,
       willInvoice: true,
-      receptor: { rfc: 'XAXX010101000', razonSocial: 'PUBLICO EN GENERAL' },
+      receptor: RECEPTOR,
       pendingPpdCount: 0,
     })
 
@@ -588,7 +591,7 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
     expect(pagada.status).toBe(200)
     expect(pagada.body.data.occurrence).toMatchObject({ id, status: 'PAID', invoiceMode: 'MANUAL', bucket: null })
     expect(pagada.body.data.invoice).toBeNull()
-    const otraVez = await post(`/occurrences/${id}/pay`, { invoice: true })
+    const otraVez = await post(`/occurrences/${id}/pay`, { invoice: true, receptor: RECEPTOR })
     expect(otraVez.status).toBe(200)
     expect(otraVez.body.data.invoice).toBeNull()
     expect(pac.createInvoice).not.toHaveBeenCalled()
@@ -596,7 +599,7 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
     expect(await bitacoras('PLATFORM_CHARGE_PAID', chargeId, 1)).toHaveLength(1) // repetir no repite la bitácora
 
     // «Facturar» (el botón de una pagada sin factura): timbra con la llave por-cobrar:<id>:0 y la fila queda viva.
-    const facturada = await post(`/occurrences/${id}/invoice`, {})
+    const facturada = await post(`/occurrences/${id}/invoice`, { receptor: RECEPTOR })
     expect(facturada.status).toBe(200)
     expect(facturada.body.data.cfdi).toMatchObject({ status: 'STAMPED', serie: 'A', folio: '118', idempotencyKey: `por-cobrar:${id}:0` })
     expect(facturada.body.data.occurrence).toMatchObject({
@@ -629,12 +632,47 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
       new ProviderHttpError(422, 'invoice_stamping_validation_error', 'El campo Rfc del receptor no se encuentra en el listado del SAT.'),
     )
 
-    const res = await post(`/occurrences/${ocurrencia.id}/pay`, { invoice: true })
+    const res = await post(`/occurrences/${ocurrencia.id}/pay`, { invoice: true, receptor: RECEPTOR })
 
     expect(res.status).toBe(200)
     expect(res.body.data.occurrence.status).toBe('PAID')
     expect(res.body.data.invoice).toMatchObject({ ok: false, code: 'VALIDATION', field: 'rfc' })
     expect(res.body.data.occurrence.invoice).toMatchObject({ status: 'STAMP_FAILED' })
+  })
+
+  it('🔴 «Consultar estado» (sin datos) sólo consulta: con el intento perdido lo cierra y no timbra; «Facturar» con lo que se ve, sí', async () => {
+    const cobro = await nuevoCobro({ frequency: 'MONTHLY', anchorDate: '2026-11-02' })
+    const [ocurrencia] = await ocurrenciasDe(cobro.id)
+    await post(`/occurrences/${ocurrencia.id}/pay`, { invoice: false })
+    pac.createInvoice.mockRejectedValueOnce(new Error('ECONNRESET'))
+    await post(`/occurrences/${ocurrencia.id}/invoice`, { receptor: RECEPTOR })
+    await prisma.platformCfdi.updateMany({
+      where: { platformChargeOccurrenceId: ocurrencia.id },
+      data: { createdAt: new Date(Date.now() - 3 * 60_000) },
+    })
+    pac.findByExternalId.mockResolvedValue(null)
+    pac.createInvoice.mockClear()
+
+    const consulta = await post(`/occurrences/${ocurrencia.id}/invoice`, {})
+
+    expect(consulta.status).toBe(409)
+    expect(consulta.body.message).toMatch(/usa «Facturar»/)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(await facturasDe(ocurrencia.id)).toHaveLength(0)
+
+    const facturada = await post(`/occurrences/${ocurrencia.id}/invoice`, { receptor: RECEPTOR })
+    expect(facturada.status).toBe(200)
+    expect(facturada.body.data.cfdi).toMatchObject({ status: 'STAMPED', receptorRfc: 'XAXX010101000' })
+  })
+
+  it('pagar con factura sin decir a quién se confirmó es 400 y no marca nada', async () => {
+    const cobro = await nuevoCobro({ frequency: 'MONTHLY', anchorDate: '2026-11-02' })
+    const [ocurrencia] = await ocurrenciasDe(cobro.id)
+
+    const res = await post(`/occurrences/${ocurrencia.id}/pay`, { invoice: true })
+
+    expect(res.status).toBe(400)
+    expect((await ocurrenciasDe(cobro.id))[0].status).toBe('PENDING')
   })
 
   it('un corte de red al timbrar es 502 y dice «pudo quedar en camino… no la timbres otra vez»; el reintento inmediato es un 409', async () => {
@@ -643,7 +681,7 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
     await post(`/occurrences/${ocurrencia.id}/pay`, { invoice: false })
     pac.createInvoice.mockRejectedValueOnce(new Error('ECONNRESET'))
 
-    const corte = await post(`/occurrences/${ocurrencia.id}/invoice`, {})
+    const corte = await post(`/occurrences/${ocurrencia.id}/invoice`, { receptor: RECEPTOR })
 
     expect(corte.status).toBe(502)
     expect(corte.body).toMatchObject({ success: false, code: 'PROVIDER' })
@@ -652,7 +690,7 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
     const [fila] = await facturasDe(ocurrencia.id)
     expect(fila).toMatchObject({ status: 'STAMPING', lastError: 'ECONNRESET' })
 
-    const reintento = await post(`/occurrences/${ocurrencia.id}/invoice`, {})
+    const reintento = await post(`/occurrences/${ocurrencia.id}/invoice`, { receptor: RECEPTOR })
     expect(reintento.status).toBe(409)
     expect(reintento.body.message).toMatch(/se está timbrando/)
     expect(pac.createInvoice).toHaveBeenCalledTimes(1)
@@ -690,10 +728,10 @@ describe('dos pestañas a la vez (el candado del cobro de verdad bloquea a la ot
     const ocurrencia = await porFecha(cobro.id, '2026-11-02')
     const aparcada = aparcarLaTransaccion(1)
     try {
-      const primera = payOccurrence(ocurrencia.id, { invoice: true }, superId, NOW)
+      const primera = payOccurrence(ocurrencia.id, { invoice: true, receptor: RECEPTOR }, superId, NOW)
       const pid = await aTiempo(aparcada.pid, 60_000, 'la primera marcó PAID y quedó aparcada con su candado')
 
-      const segunda = payOccurrence(ocurrencia.id, { invoice: true }, superId, NOW)
+      const segunda = payOccurrence(ocurrencia.id, { invoice: true, receptor: RECEPTOR }, superId, NOW)
       await esperaElCandado(pid)
       aparcada.soltar()
 
@@ -720,8 +758,8 @@ describe('dos pestañas a la vez (el candado del cobro de verdad bloquea a la ot
 
       const resultados = settle(
         await Promise.allSettled([
-          payOccurrence(ocurrencia.id, { invoice: true }, superId, NOW),
-          payOccurrence(ocurrencia.id, { invoice: true }, superId, NOW),
+          payOccurrence(ocurrencia.id, { invoice: true, receptor: RECEPTOR }, superId, NOW),
+          payOccurrence(ocurrencia.id, { invoice: true, receptor: RECEPTOR }, superId, NOW),
         ]),
       )
 
@@ -743,7 +781,7 @@ describe('dos pestañas a la vez (el candado del cobro de verdad bloquea a la ot
       enProveedor.resolver() // la reserva YA se confirmó (la fila STAMPING existe) y el timbrado está en vuelo
       return respuesta.promesa
     })
-    const facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId })
+    const facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId, receptor: RECEPTOR })
     await aTiempo(enProveedor.promesa, 60_000, 'Facturar llegó al proveedor falso, ya con su fila STAMPING reservada')
     expect((await facturasDe(ocurrencia.id))[0]).toMatchObject({ status: 'STAMPING', idempotencyKey: `por-cobrar:${ocurrencia.id}:0` })
 
@@ -777,7 +815,7 @@ describe('dos pestañas a la vez (el candado del cobro de verdad bloquea a la ot
     let facturando: Promise<unknown> | undefined
     let deshaciendo: Promise<unknown> | undefined
     try {
-      facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId })
+      facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId, receptor: RECEPTOR })
       const pid = await aTiempo(aparcada.pid, 60_000, 'la reserva creó su fila y quedó aparcada, sin commit, con el candado del cobro')
 
       deshaciendo = reopenOccurrence(ocurrencia.id, superId, NOW)
@@ -814,7 +852,7 @@ describe('dos pestañas a la vez (el candado del cobro de verdad bloquea a la ot
       deshaciendo = reopenOccurrence(ocurrencia.id, superId, NOW)
       const pid = await aTiempo(aparcada.pid, 60_000, '«Deshacer» ya escribió PENDING y quedó aparcado con el candado, sin commit')
 
-      facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId })
+      facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId, receptor: RECEPTOR })
       facturando.catch(() => undefined)
       await esperaElCandado(pid) // «Facturar» pasó su primera comprobación de PAID (lo confirmado todavía es PAID) y espera el candado
       aparcada.soltar()
@@ -842,7 +880,7 @@ describe('dos pestañas a la vez (el candado del cobro de verdad bloquea a la ot
     const retenida = retenerLaTransaccion(2) // la 1 prepara la foto; la 2 es la reserva: se detiene ANTES de empezar
     let facturando: Promise<unknown> | undefined
     try {
-      facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId })
+      facturando = invoiceOccurrence(ocurrencia.id, { actorId: superId, receptor: RECEPTOR })
       facturando.catch(() => undefined)
       await aTiempo(retenida.llego, 60_000, '«Facturar» terminó de preparar su foto y está por reservar la factura')
 
@@ -1031,7 +1069,7 @@ describe('«Deshacer» frente a una factura que falló o que quedó en camino (e
     const cobro = await nuevoCobro({ frequency: 'MONTHLY', anchorDate: '2026-11-02' })
     const ocurrencia = await porFecha(cobro.id, '2026-11-02')
     pac.createInvoice.mockRejectedValueOnce(error)
-    const resultado = await payOccurrence(ocurrencia.id, { invoice: true }, superId, NOW)
+    const resultado = await payOccurrence(ocurrencia.id, { invoice: true, receptor: RECEPTOR }, superId, NOW)
     expect(resultado.invoice).toMatchObject({ ok: false })
     expect(resultado.occurrence.status).toBe('PAID') // el cobro sigue pagado
     return { cobro, ocurrencia }
@@ -1358,7 +1396,7 @@ describe.each(['UTC', 'America/Mexico_City'])('fechas, listas y tarjetas con la 
 
     expect(conDeuda.pendingPpdCount).toBe(2)
     expect(conDeuda.willInvoice).toBe(false) // aunque la ocurrencia sea automática: «no timbres otra y registra el pago allá»
-    expect(conDeuda.receptor).toEqual({ rfc: 'XAXX010101000', razonSocial: 'PUBLICO EN GENERAL' })
+    expect(conDeuda.receptor).toEqual(RECEPTOR)
 
     // Liquidadas las dos, ya no hay aviso y vuelve a timbrar.
     await prisma.platformCfdi.updateMany({
