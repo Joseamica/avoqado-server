@@ -6105,6 +6105,16 @@ class TerminalPaymentService {
           source: actor.source,
           resolutionId: resolution.id,
         })
+        // La declaración ya no sale sólo del POS: desde la terminal, el POS puede seguir esperando el resultado, y se quedaría hasta
+        // cinco minutos con el desenlace ya escrito. Mismo patrón que el rechazo del banco y «no presentó tarjeta»: después del commit y
+        // sin depender de ello, porque el POS también lo lee por el GET.
+        await this.resolverEsperaDelPos(requestId, venueId).catch(err =>
+          logger.warn('⚠️ [TerminalPayment] declarada, pero no se pudo contestar al POS que esperaba: lo lee por el GET', {
+            requestId,
+            venueId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        )
       }
       // 🔴 P2-12 residual (Codex r2): el contrato del plan promete `requestId`, `outcome` y `outcomeEvidence`
       // en la respuesta, y sólo iban `released` y `status`. El POS los necesita para decidir sin re-preguntar.

@@ -265,6 +265,60 @@ describe('la declaración «no se cobró» desde la terminal', () => {
     ).toBe(1)
   })
 
+  it('P1 el POS que sigue esperando el cobro recibe la respuesta en el acto: la venta se libera allá sin esperar a que venza', async () => {
+    const { solicitud } = await ventaEnDuda()
+    const esperas = (terminalPaymentService as any).pendingPayments as Map<string, unknown>
+    const vencimiento = setTimeout(() => undefined, 60_000)
+    const respuestaAlPos = new Promise<Record<string, unknown>>(resolve => {
+      esperas.set(solicitud.requestId, { resolve, reject: () => undefined, timeout: vencimiento, venueId: f.venueId })
+    })
+    try {
+      const res = await declarar(solicitud.requestId, token(f.staffId, 'CASHIER'), { ...SIN_COBRO, resolutionId: randomUUID() })
+      expect(res.status).toBe(200)
+
+      const contestada = await Promise.race([respuestaAlPos, new Promise(listo => setTimeout(() => listo('sigue esperando'), 2_000))])
+
+      expect(contestada).toMatchObject({ requestId: solicitud.requestId, status: 'failed', outcomeEvidence: 'OPERATOR_RECONCILED' })
+      expect(esperas.has(solicitud.requestId)).toBe(false)
+    } finally {
+      clearTimeout(vencimiento)
+      esperas.delete(solicitud.requestId)
+    }
+  })
+
+  it('P1 con dinero la espera no se contesta como «no se cobró»', async () => {
+    const venta = await f.nuevaVenta(100)
+    const solicitud = await f.solicitud({
+      orderId: venta.id,
+      status: 'TIMED_OUT',
+      failureCode: 'AUTO_RELEASED',
+      acknowledgedAt: new Date(Date.now() - 120_000),
+      expiresAt: new Date(Date.now() - 60_000),
+      resultJson: { status: 'success', paymentId: 'afirma-que-cobro' },
+    })
+    const esperas = (terminalPaymentService as any).pendingPayments as Map<string, unknown>
+    const vencimiento = setTimeout(() => undefined, 60_000)
+    let contestada = false
+    esperas.set(solicitud.requestId, {
+      resolve: () => {
+        contestada = true
+      },
+      reject: () => undefined,
+      timeout: vencimiento,
+      venueId: f.venueId,
+    })
+    try {
+      const res = await declarar(solicitud.requestId, token(f.staffId, 'CASHIER'), { ...SIN_COBRO, resolutionId: randomUUID() })
+
+      expect(res.status).toBe(409)
+      expect(contestada).toBe(false)
+      expect(esperas.has(solicitud.requestId)).toBe(true)
+    } finally {
+      clearTimeout(vencimiento)
+      esperas.delete(solicitud.requestId)
+    }
+  })
+
   it('P1 sin `statement` no libera, tampoco a un gerente que sí podría liberar por el POS', async () => {
     const { solicitud } = await ventaEnDuda()
 
