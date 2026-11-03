@@ -13,6 +13,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
 import logger from '@/config/logger'
 import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
+import { erasedHashes } from '@/services/crm/erase.service'
 import { applyEntry } from '@/services/crm/inbound.service'
 import {
   applyPending,
@@ -941,6 +942,39 @@ describe('backfillFromOnboarding', () => {
     }
     expect(notifyNewProspect).not.toHaveBeenCalled()
     expect(db.entries.filter(row => row.source === 'CARGA_INICIAL')).toHaveLength(0)
+  })
+
+  it('eliminado_por_el_superadmin (D7): un formulario de ANTES no lo revive aunque el alta termine después; uno de después sí', async () => {
+    const deletedAt = new Date(Date.now() - 60 * MINUTE)
+    const at = (minutes: number) => new Date(deletedAt.getTime() + minutes * MINUTE)
+    const { organization, person } = erasedHashes({
+      keys: [{ source: 'LANDING', externalKey: EMAIL }],
+      emails: [EMAIL],
+      phones: [],
+      organizationId: ORG,
+    })
+    db.erased.push(...[organization!, ...person].map(keyHash => ({ keyHash, scope: ORG, erasedAt: deletedAt })))
+    seedOrganization()
+    const staff = seedStaff(EMAIL, {}, ORG)
+    // An old mark, from before this field existed; and a form sent 30 s before the deletion whose signup took 6 minutes
+    // (Codex r1 H2, r3 H2): neither brings it back.
+    seedSignup(staff.id, ORG, { createdAt: at(-90) })
+    seedSignup(staff.id, ORG, {
+      createdAt: at(6),
+      data: { source: 'landing_restaurantes', organizationId: ORG, formAt: at(-0.5).toISOString() },
+    })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+    expect(db.accounts).toHaveLength(0)
+
+    // A form one minute AFTER the deletion whose entry could not be saved (Codex r2 H2, r3 H1): the backfill lets it in.
+    resetSweepCursors()
+    seedSignup(staff.id, ORG, {
+      createdAt: at(1.2),
+      data: { source: 'landing_restaurantes', organizationId: ORG, formAt: at(1).toISOString() },
+    })
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+    expect(db.accounts).toEqual([expect.objectContaining({ externalKey: EMAIL, organizationId: ORG })])
   })
 
   it('aviso_de_la_carga_inicial_se_recupera (Codex exhaustiva #12): a notice that did not go out is retried with its key', async () => {
