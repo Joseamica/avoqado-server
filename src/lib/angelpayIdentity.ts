@@ -9,5 +9,5 @@ export const angelPayIdentityConflict = () =>
 
 // All login edits, links and deletes take this lock BEFORE reading eligibility.
 export async function lockAngelPayVenue(tx: Prisma.TransactionClient, venueId: string): Promise<void> {
-  await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`angelpay-identity:${venueId}`}, 0))`
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`angelpay-identity:${venueId}`}, 0))::text`
 }
