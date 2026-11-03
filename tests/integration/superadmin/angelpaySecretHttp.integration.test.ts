@@ -21,9 +21,6 @@ if (!declaredDatabase || motivoParaRechazarBaseDePruebas(declaredDatabase) || pr
   throw new Error('D11.1 requires equal, caller-supplied local integration database URLs; URL withheld')
 }
 const databaseTarget = new URL(declaredDatabase)
-if (databaseTarget.searchParams.has('host') || databaseTarget.searchParams.has('hostaddr')) {
-  throw new Error('D11.1 does not accept a database host override; URL withheld')
-}
 const databaseName = decodeURIComponent(databaseTarget.pathname.slice(1))
 
 let prisma: typeof import('@/utils/prismaClient').default

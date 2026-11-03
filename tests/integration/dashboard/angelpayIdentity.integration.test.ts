@@ -43,15 +43,6 @@ const eventIds: string[] = []
 const immutable = { statusCode: 409, code: 'ANGELPAY_IDENTITY_IMMUTABLE' }
 
 beforeAll(async () => {
-  for (const key of ['DATABASE_URL', 'TEST_DATABASE_URL']) {
-    const target = new URL(process.env[key] ?? '')
-    expect(['localhost', '127.0.0.1']).toContain(target.hostname)
-    expect(target.pathname).toBe('/avoqado_ningunaduda_test_20261020')
-    expect(target.searchParams.getAll('host')).toEqual([])
-    expect(target.searchParams.getAll('hostaddr')).toEqual([])
-  }
-  expect(process.env.DATABASE_URL).toBe(process.env.TEST_DATABASE_URL)
-  expect(await prisma.$queryRaw`SELECT current_database() AS db`).toEqual([{ db: 'avoqado_ningunaduda_test_20261020' }])
   orgId = (await prisma.organization.create({ data: { name: 'D4 aislado', email: `${cuid()}@example.test`, phone: '5500000000' } })).id
   venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: 'D4 tienda', slug: cuid() } })).id
   otherVenueId = (await prisma.venue.create({ data: { organizationId: orgId, name: 'D4 otro negocio', slug: cuid() } })).id

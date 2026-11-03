@@ -7656,6 +7656,8 @@ class TerminalPaymentService {
 
     // B0-2 · 2. El resto, por lotes con cursor: cada pasada sigue donde se quedó la anterior y al agotarse vuelve a empezar.
     const cursor = requestId ? undefined : this.probeCursors.get(key)
+    // La ranura cuenta dentro del lote: una pasada nunca pregunta por más de PROBE_BATCH filas.
+    const tope = requestId ? 1 : PROBE_BATCH - (deLaRanura ? 1 : 0)
     const rows = await prisma.terminalPaymentRequest.findMany({
       where: {
         terminalId: key,
@@ -7672,11 +7674,11 @@ class TerminalPaymentService {
       },
       select,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: requestId ? 1 : PROBE_BATCH,
+      take: tope,
     })
     if (!requestId) {
       const last = rows[rows.length - 1]
-      if (rows.length === PROBE_BATCH && last) this.probeCursors.set(key, { createdAt: last.createdAt, id: last.id })
+      if (rows.length === tope && last) this.probeCursors.set(key, { createdAt: last.createdAt, id: last.id })
       else this.probeCursors.delete(key)
     }
 

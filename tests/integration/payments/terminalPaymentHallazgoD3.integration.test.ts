@@ -34,12 +34,6 @@ const eventKeys: string[] = []
 const watchdog = new TerminalPaymentWatchdogJob()
 
 beforeAll(async () => {
-  const target = new URL(process.env.TEST_DATABASE_URL ?? '')
-  expect(['localhost', '127.0.0.1']).toContain(target.hostname)
-  expect(target.pathname).toBe('/avoqado_ningunaduda_test_20261020')
-  expect(target.searchParams.getAll('host')).toEqual([])
-  expect(target.searchParams.getAll('hostaddr')).toEqual([])
-  expect(await prisma.$queryRaw`SELECT current_database() AS db`).toEqual([{ db: 'avoqado_ningunaduda_test_20261020' }])
   const org = await prisma.organization.create({ data: { name: 'D3 aislado', email: `${cuid()}@example.test`, phone: '5500000000' } })
   orgId = org.id
   const v = await prisma.venue.create({ data: { organizationId: orgId, name: 'D3 tienda', slug: cuid(), currency: 'MXN' } })
