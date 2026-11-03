@@ -93,7 +93,8 @@ interface PacDocument {
 export const intentKey = (occurrence: Pick<PlatformChargeOccurrence, 'id' | 'invoiceSeq'>): string =>
   `por-cobrar:${occurrence.id}:${occurrence.invoiceSeq}`
 const conflict = (message: string, code: string) => new ConflictError(message, code)
-const occurrenceNotFound = () => new NotFoundError('Cobro no encontrado', 'PLATFORM_CHARGE_OCCURRENCE_NOT_FOUND')
+const occurrenceNotFound = () =>
+  new NotFoundError('Esta fecha de cobro ya no existe porque el cobro se editó: revisa la lista', 'PLATFORM_CHARGE_OCCURRENCE_NOT_FOUND')
 const notPaid = () => conflict('El cobro no está marcado como pagado; márcalo como pagado antes de facturar', 'PLATFORM_CHARGE_NOT_PAID')
 const changed = () => conflict('La factura cambió mientras se revisaba; consulta de nuevo', 'PLATFORM_CHARGE_INVOICE_CHANGED')
 const stillProcessing = () =>

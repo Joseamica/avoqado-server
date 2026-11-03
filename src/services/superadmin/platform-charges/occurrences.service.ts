@@ -125,7 +125,8 @@ export interface ListOccurrencesFilters {
 
 // ── Errores y textos ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-const occurrenceNotFound = () => new NotFoundError('Cobro no encontrado', 'PLATFORM_CHARGE_OCCURRENCE_NOT_FOUND')
+const occurrenceNotFound = () =>
+  new NotFoundError('Esta fecha de cobro ya no existe porque el cobro se editó: revisa la lista', 'PLATFORM_CHARGE_OCCURRENCE_NOT_FOUND')
 const conflict = (message: string, code: string) => new ConflictError(message, code)
 
 /** «la factura A-118», o «la factura» si aún no tiene serie y folio. */
