@@ -51,6 +51,8 @@ const SOLO_AVOQADO = 'Sólo el equipo de Avoqado puede usar el CRM de ventas.'
 const GANAR = 'Para ganarlo usa la ficha en el SUPERADMIN: pide ligar su negocio de Avoqado.'
 const VOLVIO = 'Volvió a escribir por WhatsApp'
 const SOLO = 'Sólo para el equipo de Avoqado.'
+/** How far ahead of our clock a message's date may be (another device's clock) and still count as a message. */
+const FUTURE_SKEW_MS = 5 * 60_000
 
 /** Mexico City, like every date of the CRM. */
 const fecha = (date: Date | null, format = 'yyyy-MM-dd HH:mm') => (date ? formatInVenueTimezone(date, DEFAULT_TIMEZONE, format) : null)
@@ -206,8 +208,9 @@ async function upsertWhatsapp(access: CrmAccess, input: WhatsappInput): Promise<
           },
           contact: { name, phoneE164: input.phone, isPrimary: true },
         },
-        // D7: a chat re-read from before the superadmin deleted this business does not create it again; a newer message does.
-        input.ultimoMensajeAt,
+        // D7: a chat re-read from before the superadmin deleted this business does not create it again; a newer message
+        // does. A date in the future proves no new message: it counts as none (Codex r4 H3).
+        input.ultimoMensajeAt && input.ultimoMensajeAt.getTime() <= now.getTime() + FUTURE_SKEW_MS ? input.ultimoMensajeAt : undefined,
       )
       // Its own WhatsApp business (by its key) is never ambiguous; anything else must be what the check verified — the one
       // business with this phone, or none. Thrown, so a creation rolls back too.

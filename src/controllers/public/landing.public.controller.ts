@@ -188,7 +188,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
 
     // CRM propio (spec 2026-10-30 §5.3): el formulario crudo se guarda ANTES que todo lo demás. Nunca lanza: si la base
     // no responde, el alta sigue como siempre y la copia es el correo interno.
-    const entradaCrm = await saveLandingEntry(req.body || {})
+    const entradaCrm = await saveLandingEntry(req.body || {}, formAt)
 
     const logoUrl = 'https://avoqado.io/isotipo.svg'
     const nombre = `${String(firstName)} ${String(lastName)}`.trim()

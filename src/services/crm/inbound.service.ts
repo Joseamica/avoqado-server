@@ -73,12 +73,15 @@ export function sanitizeEntry(raw: Record<string, unknown>): CleanEntry {
  * blip must not cost the entry, and a database that is down must not hold up the signup. Never throws; twice down →
  * `null`, and the clean form goes to the log (the internal email to onboarding is the other copy).
  */
-export async function saveLandingEntry(payload: Record<string, unknown>): Promise<{ entryId: string } | null> {
+export async function saveLandingEntry(payload: Record<string, unknown>, receivedAt = new Date()): Promise<{ entryId: string } | null> {
   let entry: CleanEntry = {}
   try {
     entry = sanitizeEntry(payload)
     const externalKey = typeof entry.email === 'string' ? entry.email.toLowerCase().trim() : ''
-    const write = () => prisma.crmInboundEntry.create({ data: { source: LANDING, externalKey, payload: entry }, select: { id: true } })
+    // `receivedAt` is when the FORM came (the controller's clock, the one a deletion stamps with), never when this write
+    // went in: a retry after a blip — with a deletion in between — must not make an old form new (D7, Codex r4 H1).
+    const write = () =>
+      prisma.crmInboundEntry.create({ data: { source: LANDING, externalKey, payload: entry, receivedAt }, select: { id: true } })
     const { id } = await write().catch(write)
     return { entryId: id }
   } catch (error) {

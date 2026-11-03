@@ -418,7 +418,8 @@ describe('crm_upsert_whatsapp_prospect', () => {
     jest.setSystemTime(THU)
     const { call } = setup()
 
-    for (const ultimoMensajeAt of [MSG_1, undefined]) {
+    // An old chat, a chat without its date, or one dated tomorrow (it proves no new message; Codex r4 H3).
+    for (const ultimoMensajeAt of [MSG_1, undefined, '2026-11-06T11:20:00-06:00']) {
       expect(await call('crm_upsert_whatsapp_prospect', { phoneE164: PHONE, name: 'Tacos Lupe', ultimoMensajeAt })).toMatchObject({
         ok: false,
         error: expect.stringContaining('se eliminó del CRM'),
