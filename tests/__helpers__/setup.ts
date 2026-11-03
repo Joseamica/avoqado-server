@@ -553,6 +553,7 @@ const prismaMock: any = {
   crmTimelineEvent: createMockModel(),
   crmInboundEntry: createMockModel(),
   crmDigestSend: createMockModel(),
+  crmWhatsappMessage: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
