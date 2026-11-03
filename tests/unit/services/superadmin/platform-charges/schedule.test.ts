@@ -3,6 +3,7 @@ import {
   addDays,
   calendarDayToDb,
   dbToCalendarDay,
+  isSamePeriodAsMarked,
   monthBoundsInMexico,
   occurrenceDatesBetween,
   todayInMexico,
@@ -360,5 +361,42 @@ describe('platform-charges/schedule — monthBoundsInMexico (NEW)', () => {
 
   it('rechaza algo que no es un día de calendario', () => {
     expect(() => monthBoundsInMexico('2026-13-01')).toThrow(/Día de calendario inválido/)
+  })
+})
+
+describe('platform-charges/schedule — isSamePeriodAsMarked (NEW)', () => {
+  it.each<[PlatformChargeFrequency, string, string, boolean, string]>([
+    ['MONTHLY', '2026-11-03', '2026-11-04', true, 'se movió a mañana'],
+    ['MONTHLY', '2026-11-03', '2026-11-20', true, 'se movió más tarde, en el mismo mes'],
+    ['MONTHLY', '2026-11-03', '2026-12-01', false, 'se movió a antes: el mes que viene sí toca'],
+    ['MONTHLY', '2026-10-31', '2026-11-01', true, 'cruza de mes, pero es un día después de lo pagado'],
+    ['BIWEEKLY', '2026-11-03', '2026-11-05', true, 'dos días después'],
+    ['BIWEEKLY', '2026-11-03', '2026-11-15', false, 'ya es la otra quincena'],
+    ['WEEKLY', '2026-11-03', '2026-11-05', true, 'dos días después'],
+    ['WEEKLY', '2026-11-03', '2026-11-09', false, 'ya es la otra semana'],
+    ['MONTHLY', '2026-11-03', '2026-11-03', false, 'la misma fecha la cuida la llave única'],
+    ['MONTHLY', '2026-11-03', '2026-10-20', false, 'lo anterior a lo marcado no se toca'],
+  ])('%s: marcado el %s, ¿el %s es del mismo periodo? %s (%s)', (frecuencia, marcado, dia, esperado) => {
+    expect(isSamePeriodAsMarked(frecuencia, marcado, dia)).toBe(esperado)
+  })
+
+  it('🔴 el calendario normal nunca se salta: con cualquier ancla y durante 3 años, dos fechas seguidas jamás cuentan como el mismo periodo', () => {
+    const frecuencias: PlatformChargeFrequency[] = ['WEEKLY', 'BIWEEKLY', 'MONTHLY']
+    for (const frecuencia of frecuencias) {
+      for (let d = 1; d <= 31; d++) {
+        const ancla = `2026-01-${String(d).padStart(2, '0')}`
+        const fechas = occurrenceDatesBetween(frecuencia, ancla, ancla, '2028-12-31')
+        expect(fechas.length).toBeGreaterThan(30)
+        fechas.slice(1).forEach((fecha, i) => {
+          expect([frecuencia, ancla, fechas[i], fecha, isSamePeriodAsMarked(frecuencia, fechas[i], fecha)]).toEqual([
+            frecuencia,
+            ancla,
+            fechas[i],
+            fecha,
+            false,
+          ])
+        })
+      }
+    }
   })
 })

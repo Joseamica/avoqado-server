@@ -29,6 +29,7 @@ import { assertTaxProfileOfCustomer } from './charges.service'
 import { lockCharge, withChargeLock } from './lock'
 import { chargesSandbox } from './sandbox'
 import { conceptToCfdiLine } from './totals'
+import type { PlatformCfdiLineInput } from '@/services/superadmin/platform-billing/types'
 import type { ChargeConcept } from './types'
 
 export { chargesSandbox }
@@ -541,16 +542,49 @@ async function translateStampFailure(error: unknown, key: string): Promise<unkno
   return new PlatformBillingError(`${IN_FLIGHT_NOTICE} ${error.message}`, error.code, error.field)
 }
 
-/** Lo que corre en la MISMA transacción que crea la fila STAMPING: toma el candado y exige PAID e `invoiceSeq` igual; si no, 409. */
+/**
+ * Lo que corre en la MISMA transacción que crea la fila STAMPING: toma el candado y exige PAID, `invoiceSeq` igual y que el cobro siga
+ * con el perfil elegido; si no, 409. 🔴 El perfil se elige antes del candado: otra pestaña pudo corregir el RFC del cobro en medio, y
+ * facturarle al contribuyente anterior sólo se deshace cancelando ante el SAT.
+ */
 async function reserveCheck(
   tx: Prisma.TransactionClient,
   occurrence: Pick<Occurrence, 'id' | 'chargeId'>,
   invoiceSeq: number,
+  billingTaxProfileId: string,
 ): Promise<void> {
   await lockCharge(tx, occurrence.chargeId)
   const fresh = await tx.platformChargeOccurrence.findUnique({ where: { id: occurrence.id }, select: { status: true, invoiceSeq: true } })
   if (!fresh || fresh.status !== 'PAID') throw notPaid()
   if (fresh.invoiceSeq !== invoiceSeq) throw changed()
+  const charge = await tx.platformCharge.findUnique({ where: { id: occurrence.chargeId }, select: { billingTaxProfileId: true } })
+  if (charge?.billingTaxProfileId && charge.billingTaxProfileId !== billingTaxProfileId) {
+    throw conflict('Los datos fiscales de este cobro acaban de cambiar: vuelve a intentarlo', 'PLATFORM_CHARGE_INVOICE_PROFILE_CHANGED')
+  }
+}
+
+/**
+ * 🔴 Con una factura viva no se timbra, así que la corrección que venía en la llamada no se aplica. Regresarla como si nada le diría
+ * al founder «timbrada» con el RFC o la clave de antes. Si los datos son los mismos (un reintento), o no venía corrección
+ * («Consultar estado»), se regresa la factura.
+ */
+async function assertLiveHasRequestedData(cfdi: PlatformCfdi, input: InvoiceOccurrenceInput, billingTaxProfileId: string): Promise<void> {
+  if (input.billingTaxProfileId === undefined && !input.conceptKeys) return
+  const profile = await prisma.billingTaxProfile.findUnique({
+    where: { id: billingTaxProfileId },
+    select: { rfc: true, razonSocial: true },
+  })
+  const sameReceptor = profile?.rfc === cfdi.receptorRfc && profile?.razonSocial === cfdi.receptorNombre
+  const lines = Array.isArray(cfdi.lines) ? (cfdi.lines as unknown as PlatformCfdiLineInput[]) : []
+  const sameKeys = (input.conceptKeys ?? []).every(
+    (key, i) => lines[i]?.satProductKey === key.satProductKey && lines[i]?.satUnitKey === key.satUnitKey,
+  )
+  if (sameReceptor && sameKeys) return
+  const name = [cfdi.serie, cfdi.folio].filter(Boolean).join('-')
+  throw conflict(
+    `La factura ${name} ya está timbrada con otros datos: cancélala en Facturas CFDI para corregirla`,
+    'PLATFORM_CHARGE_INVOICE_LIVE',
+  )
 }
 
 /**
@@ -571,7 +605,10 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
   const billingTaxProfileId = await resolveProfileId(occurrence.charge, input.billingTaxProfileId)
 
   const attempt = await resolverIntento(occurrenceId, input.actorId)
-  if (attempt.kind === 'LIVE') return attempt.cfdi
+  if (attempt.kind === 'LIVE') {
+    await assertLiveHasRequestedData(attempt.cfdi, input, billingTaxProfileId)
+    return attempt.cfdi
+  }
 
   // El modo de prueba se decide ANTES de escribir nada: con una configuración que se negaría a timbrar, tampoco se reescribe la foto.
   const emisor = await getActivePlatformEmisor()
@@ -592,7 +629,7 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
       sandbox,
       totals: { subtotalCents: snapshot.subtotalCents, discountCents: 0, taxCents: snapshot.taxCents, totalCents: snapshot.totalCents },
       platformChargeOccurrenceId: occurrence.id,
-      reserveCheck: tx => reserveCheck(tx, occurrence, snapshot.invoiceSeq),
+      reserveCheck: tx => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId),
     })
   } catch (error) {
     throw await translateStampFailure(error, key)

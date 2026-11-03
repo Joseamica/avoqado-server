@@ -57,6 +57,18 @@ export function monthBoundsInMexico(day: CalendarDay): { from: Date; to: Date } 
 }
 
 /** El día como lo lee y lo escribe Prisma en una columna `@db.Date`: medianoche UTC. */
+/**
+ * 🔴 No se modelan periodos: una fecha cuenta como periodo nuevo sólo si ya pasaron 3/4 del periodo desde lo último pagado u omitido.
+ * Sin esto, mover a mañana una mensualidad pagada hoy la volvería a cobrar. El calendario normal nunca cae aquí: su menor distancia es
+ * de 28 días (mensual) y 12 (quincenal, en febrero con ancla 31). `ponytail:` es una regla de distancia, no de periodos; si algún
+ * cobro necesita otra cosa, se modela el periodo.
+ */
+const MIN_DAYS_AFTER_MARKED: Record<PlatformChargeFrequency, number> = { WEEKLY: 5, BIWEEKLY: 11, MONTHLY: 23 }
+
+export function isSamePeriodAsMarked(frequency: PlatformChargeFrequency, marked: CalendarDay, day: CalendarDay): boolean {
+  return day > marked && day < addDays(marked, MIN_DAYS_AFTER_MARKED[frequency])
+}
+
 export function calendarDayToDb(day: CalendarDay): Date {
   return new Date(toUtcMs(day))
 }

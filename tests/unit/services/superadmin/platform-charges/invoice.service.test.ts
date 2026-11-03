@@ -329,6 +329,33 @@ describe('chargesSandbox — el modo de prueba del flujo (spec §6, «Modo de pr
     expect(() => chargesSandbox(CON_LLAVE)).toThrow(PlatformBillingError)
     expect(() => chargesSandbox(CON_LLAVE)).toThrow(/llave/)
   })
+
+  it('con la variable y una llave de PRODUCCIÓN en FACTURAPI_TEST_KEY se niega: la llave decide el ambiente, no el nombre de la variable', () => {
+    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+    process.env.NODE_ENV = 'test'
+    const antes = process.env.FACTURAPI_TEST_KEY
+    process.env.FACTURAPI_TEST_KEY = 'sk_live_de_verdad'
+    try {
+      expect(() => chargesSandbox(SIN_LLAVE)).toThrow(PlatformBillingError)
+      expect(() => chargesSandbox(SIN_LLAVE)).toThrow(/llave de producción/)
+    } finally {
+      if (antes === undefined) delete process.env.FACTURAPI_TEST_KEY
+      else process.env.FACTURAPI_TEST_KEY = antes
+    }
+  })
+
+  it('una llave de pruebas en FACTURAPI_TEST_KEY no estorba', () => {
+    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+    process.env.NODE_ENV = 'test'
+    const antes = process.env.FACTURAPI_TEST_KEY
+    process.env.FACTURAPI_TEST_KEY = 'sk_test_x'
+    try {
+      expect(chargesSandbox(SIN_LLAVE)).toBe(true)
+    } finally {
+      if (antes === undefined) delete process.env.FACTURAPI_TEST_KEY
+      else process.env.FACTURAPI_TEST_KEY = antes
+    }
+  })
 })
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1373,10 +1400,10 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
     expect(prismaMock.platformChargeOccurrence.update).not.toHaveBeenCalled()
   })
 
-  it('con la factura ya VIVA los conceptKeys se ignoran: no se reescribe una foto que ya se timbró', async () => {
+  it('con la factura ya VIVA y otras claves: 409, y no se reescribe una foto que ya se timbró', async () => {
     mundo.rows = [fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1' })]
 
-    await invoiceOccurrence('occ-1', { actorId: 'staff-1', conceptKeys: claves })
+    await expect(invoiceOccurrence('occ-1', { actorId: 'staff-1', conceptKeys: claves })).rejects.toBeInstanceOf(ConflictError)
 
     expect(mundo.occurrence.concepts).toEqual(CONCEPTOS)
     expect(prismaMock.platformChargeOccurrence.update).not.toHaveBeenCalled()
@@ -1530,6 +1557,120 @@ describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro 
     expect(mockLogAction).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'PLATFORM_CHARGE_UPDATED', data: expect.objectContaining({ billingTaxProfileId: 'perfil-2' }) }),
     )
+  })
+})
+
+describe('invoiceOccurrence — lo que cambia a media operación y no debe timbrarse a ciegas', () => {
+  const input = { actorId: 'staff-1' }
+
+  it('🔴 si otra pestaña corrige el RFC (el cobro pasa a otro perfil) después de elegir el perfil: 409, la fila no nace y NO se llama al PAC', async () => {
+    ganchos.alBuscarPerfil = () => {
+      mundo.charge.billingTaxProfileId = 'perfil-2'
+    }
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toMatch(/datos fiscales/)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(mundo.rows).toHaveLength(0)
+  })
+
+  it('🔴 si en modo de prueba alguien guarda una llave real después de decidir el modo: se niega, la fila no nace y NO se llama al PAC', async () => {
+    const restaurar = guardarEntorno()
+    process.env.PLATFORM_CHARGES_SANDBOX = 'true'
+    process.env.NODE_ENV = 'test'
+    let lecturas = 0
+    prismaMock.platformEmisor.findFirst.mockImplementation(async () => {
+      lecturas += 1
+      return { ...mundo.emisor, providerKeyEnc: lecturas > 1 ? 'enc-llave-real' : null }
+    })
+    try {
+      const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(PlatformBillingError)
+      expect((error as PlatformBillingError).message).toMatch(/llave/)
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+      expect(mundo.rows).toHaveLength(0)
+    } finally {
+      restaurar()
+    }
+  })
+})
+
+describe('invoiceOccurrence — una corrección que llega con la factura ya viva', () => {
+  const input = { actorId: 'staff-1' }
+  const VIVA = () =>
+    fila({
+      status: 'STAMPED',
+      facturapiId: 'fa-1',
+      uuid: 'UUID-1',
+      serie: 'A',
+      folio: '118',
+      lines: [
+        { description: 'Renta de terminal', satProductKey: '81112401', satUnitKey: 'E48', quantity: 1, unitPriceCents: 50000 },
+        { description: 'Licencia', satProductKey: '43232611', satUnitKey: 'E48', quantity: 1, unitPriceCents: 99900 },
+      ],
+    })
+  const CLAVES = [
+    { satProductKey: '81112401', satUnitKey: 'E48' },
+    { satProductKey: '43232611', satUnitKey: 'E48' },
+  ]
+  const OTRO_PERFIL = {
+    id: 'perfil-2',
+    customerType: 'ORGANIZATION',
+    organizationId: 'org-1',
+    venueId: null,
+    rfc: 'OTR010101AAA',
+    razonSocial: 'OTRA RAZON SOCIAL',
+  }
+
+  beforeEach(() => {
+    mundo.rows.push(VIVA())
+  })
+
+  it('🔴 con otro RFC: 409 que dice cuál factura, en vez de regresarla como si la corrección hubiera entrado', async () => {
+    mundo.extraProfiles.push(OTRO_PERFIL as any)
+
+    const error = await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: 'perfil-2' }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toBe(
+      'La factura A-118 ya está timbrada con otros datos: cancélala en Facturas CFDI para corregirla',
+    )
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(mundo.rows).toHaveLength(1)
+  })
+
+  it('🔴 mismo perfil pero con la razón social corregida (organización o negocio guardan en la misma fila): también es 409', async () => {
+    ;(mundo.profile as Fila).razonSocial = 'RAZON CORREGIDA'
+
+    await expect(invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: (mundo.profile as Fila).id })).rejects.toBeInstanceOf(
+      ConflictError,
+    )
+  })
+
+  it('🔴 con otra clave del SAT: 409', async () => {
+    const error = await invoiceOccurrence('occ-1', {
+      ...input,
+      conceptKeys: [{ satProductKey: '81112402', satUnitKey: 'H87' }, CLAVES[1]],
+    }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toMatch(/otros datos/)
+  })
+
+  it('con los mismos datos (un reintento) la regresa sin timbrar', async () => {
+    const cfdi = await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: (mundo.profile as Fila).id, conceptKeys: CLAVES })
+
+    expect(cfdi).toMatchObject({ id: 'cfdi-1', status: 'STAMPED' })
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+  })
+
+  it('«Consultar estado» (sin corrección) la regresa aunque el perfil haya cambiado después', async () => {
+    ;(mundo.profile as Fila).razonSocial = 'RAZON CORREGIDA'
+
+    await expect(invoiceOccurrence('occ-1', input)).resolves.toMatchObject({ id: 'cfdi-1', status: 'STAMPED' })
   })
 })
 

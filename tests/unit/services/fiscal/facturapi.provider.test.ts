@@ -493,6 +493,15 @@ describe('FacturapiProvider', () => {
     expect(result).toBeNull()
   })
 
+  it.each([[{}], [null], [{ data: 'no es una lista' }]])(
+    'findByExternalId lanza con una respuesta ilegible (%j): no es lo mismo que «no existe», que autoriza a timbrar otra vez',
+    async respuesta => {
+      mockList.mockResolvedValue(respuesta)
+      const provider = new FacturapiProvider('sk_test_x')
+      await expect(provider.findByExternalId('cfdi-order-x')).rejects.toThrow(/ilegible/)
+    },
+  )
+
   it('findByExternalId prefers the first valid result when mixed statuses are returned', async () => {
     mockList.mockResolvedValue({
       page: 1,

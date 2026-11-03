@@ -32,5 +32,12 @@ export function chargesSandbox(emisor: Pick<PlatformEmisor, 'providerKeyEnc'>): 
       'VALIDATION',
     )
   }
+  // La llave decide el ambiente, no el nombre de la variable: una de producción aquí timbraría de verdad.
+  if (process.env.FACTURAPI_TEST_KEY?.startsWith('sk_live_')) {
+    throw new PlatformBillingError(
+      'PLATFORM_CHARGES_SANDBOX está activa pero FACTURAPI_TEST_KEY es una llave de producción, y con ella se timbraría de verdad aunque sea una prueba; «Por cobrar» se niega a facturar. Usa la llave de pruebas de Facturapi.',
+      'VALIDATION',
+    )
+  }
   return true
 }

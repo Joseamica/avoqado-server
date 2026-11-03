@@ -187,6 +187,7 @@ function instalarOcurrencias(inicial: Fila[]): Fila[] {
   ocurrencias.findFirst.mockImplementation(async ({ where, orderBy }: any) => {
     const halladas = filas.filter(f => cumple(f, where))
     if (orderBy?.dueDate === 'asc') halladas.sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime())
+    if (orderBy?.dueDate === 'desc') halladas.sort((a, b) => b.dueDate.getTime() - a.dueDate.getTime())
     return halladas[0] ?? null
   })
   return filas
@@ -569,7 +570,7 @@ describe('platform-charges/charges.service — createCharge (NEW)', () => {
     await createCharge(entrada(), 'staff-1', AHORA)
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
-    expect(dentroDeLaTransaccion(eventos)).toEqual(['leer perfil', 'crear cobro', 'candado', 'crear fechas'])
+    expect(dentroDeLaTransaccion(eventos)).toEqual(['leer perfil', 'crear cobro', 'candado', 'revisar marcadas', 'crear fechas'])
     expect(eventos[eventos.length - 1]).toBe('bitácora')
     expect(mockLogAction).toHaveBeenCalledTimes(1)
   })
@@ -672,6 +673,65 @@ describe('platform-charges/charges.service — updateCharge (NEW)', () => {
     expect(resumen(filas)).toEqual(['2026-10-26:PENDING', '2026-11-02:PENDING'])
   })
 
+  describe('🔴 mover la fecha con lo de este periodo ya pagado u omitido: no se vuelve a cobrar', () => {
+    // Hoy es 2-nov. La mensualidad del día 2 ya se marcó y el cobro se mueve a otro día.
+    const dadaLaDeHoyMarcada = (status: 'PAID' | 'SKIPPED' = 'PAID') =>
+      instalarOcurrencias([fila('2026-11-02', status === 'PAID' ? { status, paidAt: AHORA, paidById: 'staff-9' } : { status })])
+    const tareaDiaria = async (dia: string, row: ReturnType<typeof cobro>) => {
+      prismaMock.platformCharge.findMany.mockResolvedValueOnce([{ id: 'cobro-1' }])
+      prismaMock.platformCharge.findUnique.mockResolvedValue(row)
+      await generateAllActive(new Date(`${dia}T18:00:00.000Z`))
+    }
+
+    it.each(['PAID', 'SKIPPED'] as const)('mensualidad %s hoy que se mueve a mañana: no vuelve a salir', async status => {
+      const filas = dadaLaDeHoyMarcada(status)
+      dadoElCobro(cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') }))
+
+      await updateCharge('cobro-1', { anchorDate: '2026-10-03' }, 'staff-1', AHORA)
+
+      expect(resumen(filas)).toEqual([`2026-11-02:${status}`])
+    })
+
+    it('la tarea diaria tampoco la regresa, y la del mes siguiente sí nace', async () => {
+      const filas = dadaLaDeHoyMarcada()
+      const movido = cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-03') })
+
+      await tareaDiaria('2026-11-03', movido)
+      expect(resumen(filas)).toEqual(['2026-11-02:PAID'])
+
+      await tareaDiaria('2026-11-28', movido)
+      expect(resumen(filas)).toEqual(['2026-11-02:PAID', '2026-12-03:PENDING'])
+    })
+
+    it('moverla a un día anterior: la siguiente, que ya es de otro periodo, sí nace', async () => {
+      const filas = dadaLaDeHoyMarcada()
+
+      await tareaDiaria('2026-11-28', cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-01') }))
+
+      expect(resumen(filas)).toEqual(['2026-11-02:PAID', '2026-12-01:PENDING'])
+    })
+
+    it('semanal pagada hoy que se mueve dos días: sale hasta la otra semana', async () => {
+      const filas = dadaLaDeHoyMarcada()
+      dadoElCobro(cobro({ frequency: 'WEEKLY', anchorDate: calendarDayToDb('2026-10-05') }))
+
+      await updateCharge('cobro-1', { anchorDate: '2026-10-07' }, 'staff-1', AHORA)
+      expect(resumen(filas)).toEqual(['2026-11-02:PAID'])
+
+      await tareaDiaria('2026-11-05', cobro({ frequency: 'WEEKLY', anchorDate: calendarDayToDb('2026-10-07') }))
+      expect(resumen(filas)).toEqual(['2026-11-02:PAID', '2026-11-11:PENDING'])
+    })
+
+    it('lo PENDIENTE no cuenta como marcado: lo de hoy sin pagar no frena la fecha nueva', async () => {
+      const filas = instalarOcurrencias([fila('2026-11-02')])
+      dadoElCobro(cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') }))
+
+      await updateCharge('cobro-1', { anchorDate: '2026-10-03' }, 'staff-1', AHORA)
+
+      expect(resumen(filas)).toEqual(['2026-11-02:PENDING', '2026-11-03:PENDING'])
+    })
+  })
+
   describe('🔴 cambiar anchorDate o frequency con una ocurrencia futura ya marcada', () => {
     // Mensual el día 5: el 5-nov (futura) ya se marcó pagada. Hoy es 2-nov.
     const MENSUAL_CON_5_NOV = (estado: 'PAID' | 'SKIPPED' = 'PAID') => [
@@ -741,7 +801,8 @@ describe('platform-charges/charges.service — updateCharge (NEW)', () => {
       dadoElCobro()
 
       await expect(updateCharge('cobro-1', { anchorDate: '2026-10-07' }, 'staff-1', AHORA)).resolves.toBeDefined()
-      expect(resumen(filas)).toEqual(['2026-10-26:PAID', '2026-11-02:SKIPPED', '2026-11-04:PENDING'])
+      // No hay 409. La del 4-nov no nace porque el 2-nov ya se omitió lo de esta semana; la siguiente es la del 11.
+      expect(resumen(filas)).toEqual(['2026-10-26:PAID', '2026-11-02:SKIPPED'])
     })
 
     it('una PENDING futura no estorba: se borra y se regenera con el calendario nuevo', async () => {
@@ -1166,7 +1227,7 @@ describe('platform-charges/charges.service — resumeCharge (NEW)', () => {
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     const dentro = dentroDeLaTransaccion(eventos)
-    expect(dentro).toEqual(['candado', 'leer cobro', 'actualizar cobro', 'crear fechas'])
+    expect(dentro).toEqual(['candado', 'leer cobro', 'actualizar cobro', 'revisar marcadas', 'crear fechas'])
     expect(eventos[eventos.length - 1]).toBe('bitácora')
   })
 
@@ -1304,7 +1365,7 @@ describe('platform-charges/charges.service — generateAllActive (NEW)', () => {
     expect(filas.every(f => f.chargeId === 'b')).toBe(true)
     expect(resumen(filas)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING'])
     // «a»: candado y relectura, y al ver que ya está pausado no escribe nada. «b»: candado, relectura y fechas.
-    expect(eventos).toEqual(['tx:inicio', 'candado', 'leer cobro', 'tx:fin', 'candado', 'leer cobro', 'crear fechas'])
+    expect(eventos).toEqual(['tx:inicio', 'candado', 'leer cobro', 'tx:fin', 'candado', 'leer cobro', 'revisar marcadas', 'crear fechas'])
   })
 
   it('un cobro cuyos datos no se pueden calcular se registra como error y NO detiene a los demás', async () => {

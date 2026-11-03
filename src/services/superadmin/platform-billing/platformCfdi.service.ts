@@ -218,6 +218,8 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
   if (!emisor) throw new PlatformBillingError('No hay emisor de plataforma configurado', 'NO_EMISOR')
 
   const sandbox = input.sandbox ?? false
+  // 🔴 «Por cobrar» decidió `sandbox` con OTRA lectura del emisor: si entre las dos alguien guardó una llave real, con ella se timbraría de verdad.
+  if (sandbox && input.platformChargeOccurrenceId != null) chargesSandbox(emisor)
   if (!sandbox && emisor.csdStatus !== 'ACTIVE') {
     throw new PlatformBillingError('El emisor no tiene un CSD activo; sube el sello digital antes de timbrar', 'CSD_INACTIVE')
   }

@@ -17,7 +17,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import { lockCharge, withChargeLock } from './lock'
-import { addDays, calendarDayToDb, dbToCalendarDay, occurrenceDatesBetween, todayInMexico } from './schedule'
+import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
 import { computeChargeTotals } from './totals'
 import type { CalendarDay, ChargeConcept } from './types'
 
@@ -305,7 +305,8 @@ const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSO
 /**
  * Crea las ocurrencias del cobro con fecha en `[from, to]` (nunca antes del ancla), cada una con la foto de conceptos, totales y
  * modo de factura de ESTE momento. Idempotente: la llave única `[chargeId, dueDate]` con `skipDuplicates` respeta lo que ya existe
- * (incluido lo ya pagado u omitido). Devuelve cuántas creó. Debe correr dentro del candado del cobro.
+ * (incluido lo ya pagado u omitido), y no crea una fecha del mismo periodo que lo último marcado (`isSamePeriodAsMarked`). Devuelve
+ * cuántas creó. Debe correr dentro del candado del cobro.
  */
 async function generateOccurrences(
   tx: Prisma.TransactionClient,
@@ -314,7 +315,15 @@ async function generateOccurrences(
   to: CalendarDay,
 ): Promise<number> {
   const state = stateOf(charge)
-  const dates = occurrenceDatesBetween(state.frequency, state.anchorDate, from, to)
+  const candidates = occurrenceDatesBetween(state.frequency, state.anchorDate, from, to)
+  if (candidates.length === 0) return 0
+  const lastMarked = await tx.platformChargeOccurrence.findFirst({
+    where: { chargeId: charge.id, status: { in: ['PAID', 'SKIPPED'] } },
+    orderBy: { dueDate: 'desc' },
+    select: { dueDate: true },
+  })
+  const marked = lastMarked ? dbToCalendarDay(lastMarked.dueDate) : null
+  const dates = marked ? candidates.filter(day => !isSamePeriodAsMarked(state.frequency, marked, day)) : candidates
   if (dates.length === 0) return 0
   const { subtotalCents, taxCents, totalCents } = computeChargeTotals(state.concepts)
   const { count } = await tx.platformChargeOccurrence.createMany({
