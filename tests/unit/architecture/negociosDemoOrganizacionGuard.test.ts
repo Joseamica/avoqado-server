@@ -37,6 +37,8 @@ const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
   PartnerAPIKey: 'llaves de socios: ' + DE_ORGANIZACION,
   Invoice: 'facturas de Avoqado a la organización: un demo no contrata plan',
   PlatformCfdi: 'facturas de Avoqado a la organización: un demo no contrata plan',
+  PlatformCharge:
+    'cobros recurrentes de Avoqado a un cliente («Por cobrar»): sólo lo escriben las rutas de superadmin (/superadmin/platform-charges); el usuario demo no es superadmin',
   HybridRedemption: 'facturación híbrida: ' + CERRADO,
   LaunchCampaignRedemption: 'campañas del alta: no parten de un negocio demo',
   OnboardingProgress: 'alta: cerrada al usuario demo',
