@@ -950,6 +950,8 @@ async function transitionReservation(
   by: string | null,
   reason?: string,
   extraData?: Partial<Prisma.ReservationUpdateInput>,
+  /** Corre en la MISMA transacción que el cambio de estado: si falla, la reserva no cambia y se puede reintentar. */
+  enLaMismaTransaccion?: (tx: Prisma.TransactionClient, updated: { id: string; startsAt: Date }) => Promise<void>,
 ) {
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId },
@@ -1010,6 +1012,8 @@ async function transitionReservation(
       where: { id: reservationId },
       include: RESERVATION_INCLUDE,
     })
+
+    await enLaMismaTransaccion?.(tx, updated)
 
     // ---- Google Calendar push outbox (Phase 2) ----
     // Only CANCELLED transitions need a gcal push from this code path. Other
@@ -1170,42 +1174,58 @@ export async function cancelReservation(
   cancelledBy: string, // Staff ID, "CUSTOMER", or "SYSTEM"
   reason?: string,
 ) {
-  const updated = await transitionReservation(venueId, reservationId, 'CANCELLED', cancelledBy, reason, {
-    cancelledBy,
-    cancellationReason: reason,
-  })
-
-  // Apply venue cancellation policy: refund credits if applicable.
-  // Wrapped in try/catch — a refund failure must never block the cancellation itself
-  // (the reservation IS cancelled regardless; refund is a best-effort follow-up).
+  // La clase del paquete se devuelve en la MISMA transacción que la cancelación (D13, 2-nov-2026): si falla, la reserva sigue
+  // viva y se puede reintentar. Antes iba después: un fallo la dejaba cancelada, sin su clase y sin forma de repetirlo.
   let refundResult: { creditsRefunded: number; policyApplied: string } = {
     creditsRefunded: 0,
     policyApplied: 'no-credits-used',
   }
-  try {
-    const settings = await getReservationSettings(venueId)
-    const creditPackService = await import('./creditPack.public.service')
-    refundResult = await creditPackService.refundCreditsForReservation({
-      venueId,
-      reservationId: updated.id,
-      startsAt: updated.startsAt,
-      policy: {
-        creditRefundMode: settings.cancellation.creditRefundMode,
-        creditFreeRefundHoursBefore: settings.cancellation.creditFreeRefundHoursBefore,
-        creditLateRefundPercent: settings.cancellation.creditLateRefundPercent,
-      },
-      reasonPrefix: cancelledBy === 'CUSTOMER' ? 'Customer cancellation' : 'Staff cancellation',
-    })
-  } catch (err) {
-    logger.error(`❌ [CREDIT REFUND] Failed for reservation ${updated.confirmationCode}`, err)
-  }
+  const creditPackService = await import('./creditPack.public.service')
+  const updated = await transitionReservation(
+    venueId,
+    reservationId,
+    'CANCELLED',
+    cancelledBy,
+    reason,
+    {
+      cancelledBy,
+      cancellationReason: reason,
+    },
+    async (tx, cancelada) => {
+      const settings = await getReservationSettings(venueId, tx)
+      refundResult = await creditPackService.refundCreditsForReservation(
+        {
+          venueId,
+          reservationId: cancelada.id,
+          startsAt: cancelada.startsAt,
+          policy: {
+            creditRefundMode: settings.cancellation.creditRefundMode,
+            creditFreeRefundHoursBefore: settings.cancellation.creditFreeRefundHoursBefore,
+            creditLateRefundPercent: settings.cancellation.creditLateRefundPercent,
+          },
+          reasonPrefix: cancelledBy === 'CUSTOMER' ? 'Customer cancellation' : 'Staff cancellation',
+        },
+        tx,
+      )
+    },
+  )
 
-  await handleReservationDepositCancellation(updated.id, venueId)
+  // El depósito pasa por Stripe y no cabe en la transacción: la reserva YA se canceló, un fallo aquí no puede contestar que no.
+  try {
+    await handleReservationDepositCancellation(updated.id, venueId)
+  } catch (err) {
+    logger.error(`❌ [RESERVATION DEPOSIT] Failed for reservation ${updated.confirmationCode}`, err)
+  }
 
   return Object.assign(updated, refundResult)
 }
 
-async function handleReservationDepositCancellation(reservationId: string, venueId: string): Promise<void> {
+/** `sinRetener`: lo canceló el negocio, no la clienta (una clase entera), así que nunca se queda con su depósito. */
+export async function handleReservationDepositCancellation(
+  reservationId: string,
+  venueId: string,
+  opciones: { sinRetener?: boolean } = {},
+): Promise<void> {
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId },
     select: {
@@ -1230,7 +1250,7 @@ async function handleReservationDepositCancellation(reservationId: string, venue
   const settings = await getReservationSettings(venueId)
   const minHoursBeforeStart = settings.cancellation.minHoursBeforeStart ?? 0
   const hoursUntilStart = (reservation.startsAt.getTime() - Date.now()) / 3_600_000
-  const shouldForfeit = settings.cancellation.forfeitDeposit && hoursUntilStart < minHoursBeforeStart
+  const shouldForfeit = !opciones.sinRetener && settings.cancellation.forfeitDeposit && hoursUntilStart < minHoursBeforeStart
 
   if (shouldForfeit) {
     await prisma.reservation.update({
