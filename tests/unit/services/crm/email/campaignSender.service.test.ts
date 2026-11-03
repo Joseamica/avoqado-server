@@ -374,13 +374,13 @@ describe('correrEnvioDeCampanas — el trabajo', () => {
 })
 
 /**
- * El cupo de Resend (promesa `docs/audit/2026-11-03-cupo-de-resend/promesa.md`): con 80 de 100 en el día las campañas esperan a la
- * medianoche de Ciudad de México para dejarle lugar al login y a los recibos. Lo que vuelve a la cola no gasta un intento (no debe
+ * El cupo de Resend (promesa `docs/audit/2026-11-03-cupo-de-resend/promesa.md`): con 80 de 100 en el día las campañas esperan a que
+ * Resend reinicie su día (medianoche UTC, las 18:00 de Ciudad de México) para dejarle lugar al login y a los recibos. Lo que vuelve a la cola no gasta un intento (no debe
  * acercarse al agotamiento del Ruling 11) y nunca sale dos veces: el lease y el CAS de siempre.
  */
 describe('el cupo de Resend', () => {
-  /** La medianoche de CDMX que sigue a AHORA (2-nov, 12:00 en CDMX). */
-  const MEDIANOCHE = new Date('2026-11-03T06:00:00.000Z')
+  /** Cuando Resend reinicia el día tras AHORA (2-nov, 12:00 en CDMX): la medianoche UTC, las 18:00 de CDMX del mismo 2-nov. */
+  const MEDIANOCHE = new Date('2026-11-03T00:00:00.000Z')
   const VACIO = { ENVIADO: 0, REINTENTO: 0, FALLIDO: 0, OMITIDO: 0, DESCONOCIDO: 0 }
 
   beforeEach(() => {
@@ -401,9 +401,9 @@ describe('el cupo de Resend', () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('cupo de Resend'))
   })
 
-  it('al cruzar el 80 a media vuelta la siguiente no sale: lo reclamado vuelve sin gastar intento, para la medianoche', async () => {
-    // Libre al empezar y antes del primer correo; ese correo cruza el 80.
-    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
+  it('al cruzar el 80 a media vuelta la siguiente no sale: lo reclamado vuelve sin gastar intento, para el reinicio del cupo', async () => {
+    // Libre al empezar, antes del primer correo y justo antes de mandarlo; ese correo cruza el 80.
+    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
     prismaMock.$queryRaw.mockResolvedValue([{ id: DELIVERY }, { id: 'cotra000000000000000000001' }, { id: 'cotra000000000000000000002' }])
 
     await correrEnvioDeCampanas({ ahora: AHORA, pausaMs: 0 })
@@ -436,6 +436,18 @@ describe('el cupo de Resend', () => {
     expect(resumen).toEqual({ ...VACIO, ENVIADO: 2 })
     const devoluciones = prismaMock.crmCampaignDelivery.updateMany.mock.calls.filter(([arg]) => arg.where?.id?.in)
     expect(devoluciones).toHaveLength(0)
+  })
+
+  it('la pausa que llega durante la espera o las relecturas frena el correo JUSTO antes de mandarlo, sin gastar el intento', async () => {
+    // Libre al revisar la vuelta; un login cruza el 80 mientras se espera y se releen la baja y la lápida.
+    pausa.mockReturnValue(true)
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(send).not.toHaveBeenCalled()
+    expect(escrito()).toEqual({
+      where: CAS,
+      data: { leaseUntil: null, status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: MEDIANOCHE },
+    })
   })
 
   it('un 429 de cupo en el PRIMER intento: vuelve PENDIENTE sin gastar el intento ni su lugar del día', async () => {

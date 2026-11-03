@@ -4,7 +4,9 @@
  * se avisa, cuándo se pausan las campañas y que el medidor nunca le rompa un correo a nadie (login, recibos).
  *
  * Cada `cargar()` es un PROCESO nuevo (el módulo con su memoria vacía, como tras un reinicio); la fila del aviso es una sola
- * para todos, como en Postgres, y su CAS se simula aquí: se mueve sólo si el valor es otro.
+ * para todos, como en Postgres: se lee antes de avisar y se anota DESPUÉS del log y del correo.
+ *
+ * 🔴 El día es el de Resend, UTC: su cupo diario se reinicia a la medianoche UTC, las 18:00 de Ciudad de México.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 
@@ -71,16 +73,10 @@ beforeEach(() => {
   mockSendEmail.mockReset().mockResolvedValue(true)
   for (const fn of Object.values(mockLogger)) fn.mockReset()
   fila = null
-  prismaMock.emailQuotaAlert.createMany.mockReset().mockImplementation(async () => {
-    if (fila) return { count: 0 }
-    fila = { dailyAlertDay: null, monthlyAlertMonth: null, exhaustedAlertDay: null }
-    return { count: 1 }
-  })
-  prismaMock.emailQuotaAlert.updateMany.mockReset().mockImplementation(async ({ data }: { data: Record<string, string> }) => {
-    const [[columna, valor]] = Object.entries(data)
-    if (!fila || fila[columna] === valor) return { count: 0 }
-    fila[columna] = valor
-    return { count: 1 }
+  prismaMock.emailQuotaAlert.findUnique.mockReset().mockImplementation(async () => fila)
+  prismaMock.emailQuotaAlert.upsert.mockReset().mockImplementation(async ({ update }: { update: Record<string, string> }) => {
+    fila = { dailyAlertDay: null, monthlyAlertMonth: null, exhaustedAlertDay: null, ...fila, ...update }
+    return fila
   })
   process.env.CRM_CORREO_PRUEBAS = 'jose@avoqado.io'
   delete process.env.RESEND_DAILY_QUOTA
@@ -111,11 +107,27 @@ describe('el aviso del día', () => {
       expect.objectContaining({ to: 'jose@avoqado.io', subject: expect.stringContaining('80 de 100') }),
     )
     expect(p.campanasPausadasPorCupo()).toBe(true)
-    // El CAS: sólo mueve la columna del día si guarda otro día (o nada).
-    expect(prismaMock.emailQuotaAlert.updateMany).toHaveBeenCalledWith({
-      where: { id: 'resend', OR: [{ dailyAlertDay: null }, { dailyAlertDay: { not: '2026-11-03' } }] },
-      data: { dailyAlertDay: '2026-11-03' },
-    })
+    // El correo lleva una llave por aviso: si sale dos veces (dos procesos, o un reinicio antes de anotarlo), Resend lo manda una.
+    expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'cupo-resend-diario-2026-11-03' }))
+    // 🔴 Se anota DESPUÉS del log y del correo: si el proceso muere antes de anotarlo, el siguiente lo vuelve a intentar.
+    expect(fila?.dailyAlertDay).toBe('2026-11-03')
+    const anotado = prismaMock.emailQuotaAlert.upsert.mock.invocationCallOrder[0]
+    expect(mockLogger.error.mock.invocationCallOrder[0]).toBeLessThan(anotado)
+    expect(mockSendEmail.mock.invocationCallOrder[0]).toBeLessThan(anotado)
+  })
+
+  it('la pausa dura hasta las 18:00 de CDMX (medianoche UTC, cuando Resend reinicia el día), no hasta la medianoche de CDMX', async () => {
+    // 3-nov a las 19:00 en CDMX: para Resend ya es el 4-nov.
+    jest.setSystemTime(new Date('2026-11-04T01:00:00.000Z'))
+    const p = cargar()
+    await mandar(p.fetch, conCupo(85))
+
+    expect(fila?.dailyAlertDay).toBe('2026-11-04')
+    // La medianoche de CDMX no cambia el día de Resend: con el cupo todavía ocupado, las campañas siguen pausadas.
+    expect(p.campanasPausadasPorCupo(new Date('2026-11-04T06:00:00.000Z'))).toBe(true)
+    expect(p.campanasPausadasPorCupo(new Date('2026-11-04T23:59:59.999Z'))).toBe(true)
+    expect(p.campanasPausadasPorCupo(new Date('2026-11-05T00:00:00.000Z'))).toBe(false)
+    expect(p.reinicioDelCupoDiario(new Date('2026-11-04T01:00:00.000Z'))).toEqual(new Date('2026-11-05T00:00:00.000Z'))
   })
 
   it('otro día vuelve a avisar; la pausa de ayer no pasa a hoy', async () => {
@@ -182,11 +194,13 @@ describe('el 429 de cupo agotado', () => {
     expect(fila?.exhaustedAlertDay).toBe('2026-11-03')
   })
 
-  it('monthly_quota_exceeded pausa el resto del mes, no el mes siguiente', async () => {
+  it('monthly_quota_exceeded pausa hasta que Resend reinicia el día y entonces se vuelve a probar (no publica cuándo reinicia el mes)', async () => {
     const p = cargar()
     await mandar(p.fetch, agotado('monthly_quota_exceeded'))
     expect(p.campanasPausadasPorCupo()).toBe(true)
-    expect(p.campanasPausadasPorCupo(new Date('2026-11-20T18:00:00.000Z'))).toBe(true)
+    expect(p.campanasPausadasPorCupo(new Date('2026-11-03T23:59:59.999Z'))).toBe(true)
+    // Al día siguiente sale UN correo de prueba: si Resend vuelve a decir 429, se pausa otra vez.
+    expect(p.campanasPausadasPorCupo(MANANA)).toBe(false)
     expect(p.campanasPausadasPorCupo(OTRO_MES)).toBe(false)
   })
 
@@ -250,8 +264,8 @@ describe('lo que el medidor no mira', () => {
   })
 })
 
-describe('una vez por día aunque haya dos procesos o un reinicio (CAS sobre la fila)', () => {
-  it('dos procesos que cruzan el 80 a la vez dan UN solo aviso', async () => {
+describe('una vez por día aunque haya dos procesos o un reinicio (la fila, y la llave del correo)', () => {
+  it('dos procesos que cruzan el 80 a la vez mandan el aviso con la MISMA llave: Resend lo manda una vez', async () => {
     const a = cargar()
     const b = cargar()
     falsa.mockResolvedValueOnce(conCupo(80)).mockResolvedValueOnce(conCupo(80))
@@ -259,8 +273,8 @@ describe('una vez por día aunque haya dos procesos o un reinicio (CAS sobre la 
     await Promise.all([a.fetch(RESEND), b.fetch(RESEND)])
     await asentar()
 
-    expect(avisos()).toHaveLength(1)
-    expect(mockSendEmail).toHaveBeenCalledTimes(1)
+    const llaves = new Set(mockSendEmail.mock.calls.map(([opciones]) => opciones.idempotencyKey))
+    expect(llaves).toEqual(new Set(['cupo-resend-diario-2026-11-03']))
     // Los dos procesos pausan sus campañas: la pausa es de cada uno, el aviso es de la cuenta.
     expect(a.campanasPausadasPorCupo()).toBe(true)
     expect(b.campanasPausadasPorCupo()).toBe(true)
@@ -294,15 +308,38 @@ describe('una vez por día aunque haya dos procesos o un reinicio (CAS sobre la 
     expect(avisos()).toHaveLength(1)
   })
 
-  it('si el correo del aviso falla, el log ya quedó y nada truena', async () => {
+  it('si el correo del aviso falla, el log ya quedó, no se anota (el siguiente proceso lo reintenta) y nada truena', async () => {
     mockSendEmail.mockRejectedValue(new Error('Resend caído'))
     const p = cargar()
     await mandar(p.fetch, conCupo(80))
     expect(avisos()).toHaveLength(1)
+    expect(fila?.dailyAlertDay ?? null).toBeNull()
+
+    mockSendEmail.mockReset().mockResolvedValue(false)
+    const otro = cargar()
+    await mandar(otro.fetch, conCupo(81))
+    expect(fila?.dailyAlertDay ?? null).toBeNull()
   })
 
-  it('si la base no contesta al reclamar el aviso, se avisa igual (mejor uno de más que uno perdido)', async () => {
-    prismaMock.emailQuotaAlert.updateMany.mockRejectedValue(new Error('se cayó la base'))
+  it('si el proceso muere tras avisar y antes de anotarlo, el siguiente vuelve a avisar con la MISMA llave', async () => {
+    prismaMock.emailQuotaAlert.upsert.mockRejectedValueOnce(new Error('el proceso murió'))
+    const antes = cargar()
+    await mandar(antes.fetch, conCupo(80))
+    expect(fila?.dailyAlertDay ?? null).toBeNull()
+
+    const despues = cargar()
+    await mandar(despues.fetch, conCupo(82))
+
+    expect(avisos()).toHaveLength(2)
+    expect(mockSendEmail.mock.calls.map(([o]) => o.idempotencyKey)).toEqual([
+      'cupo-resend-diario-2026-11-03',
+      'cupo-resend-diario-2026-11-03',
+    ])
+    expect(fila?.dailyAlertDay).toBe('2026-11-03')
+  })
+
+  it('si la base no contesta al leer el aviso, se avisa igual (mejor uno de más que uno perdido)', async () => {
+    prismaMock.emailQuotaAlert.findUnique.mockRejectedValue(new Error('se cayó la base'))
     const p = cargar()
     await mandar(p.fetch, conCupo(80))
     expect(avisos()).toHaveLength(1)

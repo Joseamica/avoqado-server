@@ -7,11 +7,14 @@
  * `monthly_quota_exceeded` al agotarse. El SDK 6.3.0 tira las cabeceras de la respuesta, por eso el medidor envuelve el `fetch`
  * global: los cuatro clientes de Resend del servidor pasan por él.
  *
+ *  - 🔴 El día es el de Resend: UTC. Su cupo diario se reinicia a la medianoche UTC, las 18:00 de Ciudad de México (no hay
+ *    horario de verano desde 2022). El mes, el mes UTC (Resend no publica cuándo reinicia el suyo).
  *  - Al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` (lo ve Better Stack) y un correo a
- *    jose@avoqado.io. Una vez por día por tipo (el del mes, una vez por mes) aunque el servidor se reinicie: CAS sobre la fila
- *    `EmailQuotaAlert`.
- *  - Con el 80 % del día, o un 429 de cupo, se pausan SÓLO las campañas del CRM (`campanasPausadasPorCupo`) hasta el día
- *    siguiente de CDMX (el 429 del mes, hasta el mes siguiente). El login y los recibos nunca se frenan.
+ *    jose@avoqado.io con una llave por aviso. La fila `EmailQuotaAlert` se ANOTA después del log y del correo: si el proceso
+ *    muere antes, el siguiente vuelve a avisar y la llave hace que Resend no lo mande dos veces.
+ *  - Con el 80 % del día, o un 429 de cupo, se pausan SÓLO las campañas del CRM (`campanasPausadasPorCupo`) hasta que Resend
+ *    reinicia el día (`reinicioDelCupoDiario`). El 429 del mes también: al día siguiente sale un correo de prueba y, si Resend
+ *    vuelve a decir 429, se pausa otra vez. El login y los recibos nunca se frenan.
  *  - Nunca cambia la petición ni la respuesta y nunca lanza: un fallo del medidor jamás tumba un correo.
  *
  * Sin efectos al importarse: el `fetch` se envuelve sólo con `instalarMedidorDeCupoResend()`, que llama `server.ts`.
@@ -38,16 +41,18 @@ type Aviso = 'diario' | 'mensual' | 'agotado'
 type ErrorDeCupo = 'daily_quota_exceeded' | 'monthly_quota_exceeded'
 const COLUMNA = { diario: 'dailyAlertDay', mensual: 'monthlyAlertMonth', agotado: 'exhaustedAlertDay' } as const
 
-/** El día de Ciudad de México, `YYYY-MM-DD` (el mes son sus primeros 7). */
-const FORMATO_DIA = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Mexico_City', year: 'numeric', month: '2-digit', day: '2-digit' })
-const diaDe = (fecha: Date) => FORMATO_DIA.format(fecha)
+/** El día de Resend (UTC), `YYYY-MM-DD` (el mes son sus primeros 7). */
+const diaDe = (fecha: Date) => fecha.toISOString().slice(0, 10)
+
+/** Cuando Resend reinicia el cupo del día: la medianoche UTC siguiente (las 18:00 de CDMX). Ahí vuelven las campañas. */
+export const reinicioDelCupoDiario = (ahora: Date) =>
+  new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate() + 1))
 
 // ── Lo que este proceso ya vio ──
 /** Lo más alto que Resend dijo en el día y en el mes. */
 let visto = { dia: '', usadoDia: 0, mes: '', usadoMes: 0 }
-/** El día (o el mes) en que Resend contestó «se acabó el cupo». */
+/** El día en que Resend contestó «se acabó el cupo» (del día o del mes). */
 let agotadoDia = ''
-let agotadoMes = ''
 /** La clave del último aviso de cada tipo que este proceso ya intentó: el correo del aviso, que también pasa por aquí, no avisa otra vez. */
 const intentado: Record<Aviso, string> = { diario: '', mensual: '', agotado: '' }
 let dijoDePago = false
@@ -74,12 +79,12 @@ const cuotaDiaria = () => cuota('RESEND_DAILY_QUOTA', CUOTA_DIARIA)
 const cuotaMensual = () => cuota('RESEND_MONTHLY_QUOTA', CUOTA_MENSUAL)
 
 /**
- * ¿Se pausan HOY (CDMX) las campañas del CRM? Sí si hoy Resend ya dijo 80 % o más del día, si hoy contestó «se acabó el cupo
- * del día» o si este mes contestó «se acabó el cupo del mes». Sólo mira la memoria: nunca toca la red ni la base.
+ * ¿Se pausan HOY (día de Resend, UTC) las campañas del CRM? Sí si hoy Resend ya dijo 80 % o más del día, o si hoy contestó «se
+ * acabó el cupo» (del día o del mes). Sólo mira la memoria: nunca toca la red ni la base.
  */
 export function campanasPausadasPorCupo(ahora = new Date()): boolean {
   const hoy = diaDe(ahora)
-  return (visto.dia === hoy && visto.usadoDia >= umbral(cuotaDiaria())) || agotadoDia === hoy || agotadoMes === hoy.slice(0, 7)
+  return (visto.dia === hoy && visto.usadoDia >= umbral(cuotaDiaria())) || agotadoDia === hoy
 }
 
 /** Envuelve el `fetch` global UNA vez (idempotente). */
@@ -144,8 +149,7 @@ async function medir(input: unknown, respuesta: Response): Promise<void> {
   if (mensual !== null) {
     visto = { ...visto, mes, usadoMes: visto.mes === mes ? Math.max(visto.usadoMes, mensual) : mensual }
   }
-  if (agotado === 'daily_quota_exceeded') agotadoDia = hoy
-  if (agotado === 'monthly_quota_exceeded') agotadoMes = mes
+  if (agotado) agotadoDia = hoy
 
   // Los avisos no detienen el correo que los disparó: corren aparte y nunca lanzan.
   if (agotado && tocaIntentar('agotado', hoy)) {
@@ -164,8 +168,8 @@ async function medir(input: unknown, respuesta: Response): Promise<void> {
       asunto: `Resend: van ${diario} de ${cDia} correos hoy`,
       cuerpo:
         `La cuenta de Resend lleva ${diario} de ${cDia} correos de hoy (cuentan también los recibidos). Las campañas del CRM se ` +
-        'pausaron hasta la medianoche de Ciudad de México para dejar lugar al login y a los recibos, que siguen saliendo. Si pasa ' +
-        'seguido, conviene subir de plan en Resend.',
+        'pausaron hasta las 18:00 de Ciudad de México, cuando Resend reinicia el cupo del día, para dejar lugar al login y a los ' +
+        'recibos, que siguen saliendo. Si pasa seguido, conviene subir de plan en Resend.',
       datos: { usado: diario, cuota: cDia, dia: hoy },
     })
   }
@@ -188,39 +192,63 @@ function tocaIntentar(tipo: Aviso, clave: string): boolean {
   return true
 }
 
-/** ¿Este proceso gana el aviso? CAS sobre la fila: sólo uno la mueve a `clave`, aunque crucen dos a la vez o tras un reinicio. */
-async function reclamarAviso(tipo: Aviso, clave: string): Promise<boolean> {
-  const columna = COLUMNA[tipo]
-  await prisma.emailQuotaAlert.createMany({ data: [{ id: FILA }], skipDuplicates: true })
-  const { count } = await prisma.emailQuotaAlert.updateMany({
-    where: { id: FILA, OR: [{ [columna]: null }, { [columna]: { not: clave } }] } as Prisma.EmailQuotaAlertWhereInput,
-    data: { [columna]: clave },
-  })
-  return count === 1
+/** ¿Este aviso ya se dio por completo (log y correo)? Se anota sólo después de darlo. */
+async function yaAvisado(tipo: Aviso, clave: string): Promise<boolean> {
+  try {
+    const fila = await prisma.emailQuotaAlert.findUnique({ where: { id: FILA }, select: { [COLUMNA[tipo]]: true } })
+    return (fila as Record<string, string | null> | null)?.[COLUMNA[tipo]] === clave
+  } catch (error) {
+    // Sin la fila no se sabe si otro ya avisó: mejor un aviso de más que uno perdido.
+    logger.warn('[Resend] No se pudo leer el aviso del cupo en la base; se avisa igual', {
+      tipo,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
 }
 
+async function anotarAviso(tipo: Aviso, clave: string): Promise<void> {
+  const dato = { [COLUMNA[tipo]]: clave }
+  try {
+    await prisma.emailQuotaAlert.upsert({
+      where: { id: FILA },
+      create: { id: FILA, ...dato } as Prisma.EmailQuotaAlertCreateInput,
+      update: dato,
+    })
+  } catch (error) {
+    // Sin anotarlo, el siguiente proceso vuelve a avisar: el correo lleva la misma llave y Resend no lo manda dos veces.
+    logger.warn('[Resend] No se pudo anotar el aviso del cupo', { tipo, error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+/**
+ * Leer → log → correo → anotar. Si el proceso muere antes de anotar, el siguiente vuelve a avisar: un log de más y el mismo
+ * correo, que Resend no repite por su llave (`cupo-resend-<tipo>-<clave>`, 24 h). Dos procesos a la vez, igual.
+ * ponytail: tras 24 h la llave vence; sólo el aviso del mes podría salir dos veces, y sólo si el proceso muere en esa ventana.
+ */
 async function avisar(
   tipo: Aviso,
   clave: string,
   aviso: { asunto: string; cuerpo: string; datos: Record<string, unknown> },
 ): Promise<void> {
-  let gano = true
-  try {
-    gano = await reclamarAviso(tipo, clave)
-  } catch (error) {
-    // Sin la fila no se sabe si otro ya avisó: mejor un aviso de más que uno perdido.
-    logger.warn('[Resend] No se pudo reclamar el aviso del cupo en la base; se avisa igual', {
-      tipo,
-      error: error instanceof Error ? error.message : String(error),
-    })
-  }
-  if (!gano) return
+  if (await yaAvisado(tipo, clave)) return
   // 🔴 Primero el log: si el correo no sale (con el cupo agotado no puede), el aviso ya quedó en Better Stack.
   logger.error(`[Resend] ${aviso.asunto}`, aviso.datos)
-  if (!puedeMandarFueraDeProduccion(AVISAR_A)) return
-  try {
-    await emailService.sendEmail({ to: AVISAR_A, subject: aviso.asunto, html: `<p>${aviso.cuerpo}</p>`, text: aviso.cuerpo })
-  } catch (error) {
-    logger.warn('[Resend] No salió el correo del aviso del cupo', { tipo, error: error instanceof Error ? error.message : String(error) })
+  if (puedeMandarFueraDeProduccion(AVISAR_A)) {
+    let salio = false
+    try {
+      salio = await emailService.sendEmail({
+        to: AVISAR_A,
+        subject: aviso.asunto,
+        html: `<p>${aviso.cuerpo}</p>`,
+        text: aviso.cuerpo,
+        idempotencyKey: `cupo-resend-${tipo}-${clave}`,
+      })
+    } catch (error) {
+      logger.warn('[Resend] No salió el correo del aviso del cupo', { tipo, error: error instanceof Error ? error.message : String(error) })
+    }
+    // Sin el correo no se anota: el siguiente proceso lo reintenta con la misma llave.
+    if (!salio) return
   }
+  await anotarAviso(tipo, clave)
 }

@@ -19,15 +19,15 @@ Las campañas masivas salen por Resend desde `novedades.avoqado.io`; el uno a un
 Si `NODE_ENV !== 'production'`, sólo se manda a las direcciones de `CRM_CORREO_PRUEBAS` (separadas por comas, en minúsculas; vacía = no sale
 nada). Las demás quedan `OMITIDO` con «fuera de la lista de prueba», y en el Gmail la API responde 422. Es **una** función,
 `puedeMandarFueraDeProduccion` (`testAllowlist.ts`), y también la usan los avisos del CRM (`digest.service.ts`), los dos correos del
-formulario de la landing y el marketing viejo del superadmin (`marketing.superadmin.service.ts`, que además respeta `isBlocked`).
-`av-db-25` trae correos de gente real.
+formulario de la landing y el marketing viejo del superadmin (`marketing.superadmin.service.ts`, que además respeta `isBlocked`). `av-db-25`
+trae correos de gente real.
 
 ## «Eliminar» (D7) y las campañas
 
-`deleteAccount` deja `OMITIDO` «persona eliminada» lo que esperaba en la cola para esa cuenta o sus correos, y borra su
-`CrmEmailConsent` aunque cuelgue de otra cuenta o de ninguna. El remitente vuelve a mirar al borde: cuenta que ya no existe, o
-correo en la lápida desde un minuto antes de encolar (`correoEliminadoDesde`, `erase.service.ts`). El marketing viejo del superadmin
-hace la misma pregunta desde que empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
+`deleteAccount` deja `OMITIDO` «persona eliminada» lo que esperaba en la cola para esa cuenta o sus correos, y borra su `CrmEmailConsent`
+aunque cuelgue de otra cuenta o de ninguna. El remitente vuelve a mirar al borde: cuenta que ya no existe, o correo en la lápida desde un
+minuto antes de encolar (`correoEliminadoDesde`, `erase.service.ts`). El marketing viejo del superadmin hace la misma pregunta desde que
+empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 
@@ -76,17 +76,21 @@ CRM_GMAIL_TOKEN_KEY=
 ## 🔴 El cupo de Resend (`src/services/email/resendQuota.ts`, 3-nov)
 
 Seguimos en el plan gratis: 100 correos al día y 3,000 al mes para TODO el servidor (login, recibos, avisos y campañas; cuentan también los
-recibidos). `instalarMedidorDeCupoResend()` (en `server.ts`, también en `DEMO_MODE`) envuelve el `fetch` global porque el SDK 6.3.0 tira las
-cabeceras: lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respuesta de `api.resend.com`, y el `name` de un 429
-(`daily_quota_exceeded` / `monthly_quota_exceeded`). Nunca cambia ni frena un correo, y nunca lanza.
+recibidos). 🔴 El día de Resend es UTC: su cupo diario se reinicia a la medianoche UTC, **las 18:00 de CDMX** (su documentación, «account
+quotas and limits»). Todo lo del cupo cuenta ese día; el tope de las campañas (`CRM_CAMPAIGN_DAILY_CAP`) sigue contando el de CDMX.
+`instalarMedidorDeCupoResend()` (en `server.ts`, también en `DEMO_MODE`) envuelve el `fetch` global porque el SDK 6.3.0 tira las cabeceras:
+lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respuesta de `api.resend.com`, y el `name` de un 429 (`daily_quota_exceeded` /
+`monthly_quota_exceeded`). Nunca cambia ni frena un correo, y nunca lanza.
 
 - **Aviso** al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` y un correo a jose@avoqado.io (fuera de
-  producción, sólo si está en `CRM_CORREO_PRUEBAS`). Una vez por día (el del mes, una vez por mes) aunque el servidor se reinicie: CAS sobre
-  la fila `EmailQuotaAlert` (`id = 'resend'`).
-- **Pausa, sólo de las campañas del CRM**, con 80 en el día o un 429 de cupo (el del mes, hasta el mes siguiente): el remitente no reclama,
-  y lo reclamado que ya no salió vuelve a la cola **sin gastar un intento**, con `nextAttemptAt` en la medianoche de CDMX (un primer intento
-  vuelve PENDIENTE y suelta su lugar del día; un reintento conserva su `sendAttemptAt`). El detalle de la campaña y `crm_campaign_status` lo
-  dicen con `pausadaPorCupo`. El login y los recibos nunca se pausan.
+  producción, sólo si está en `CRM_CORREO_PRUEBAS`) con la llave `cupo-resend-<tipo>-<día o mes>`. Se lee la fila `EmailQuotaAlert`
+  (`id = 'resend'`) antes y se ANOTA después del log y del correo: si el proceso muere en medio, el siguiente vuelve a avisar y Resend no
+  repite el correo por su llave (24 h). Un correo que no salió no se anota.
+- **Pausa, sólo de las campañas del CRM**, con 80 en el día o un 429 de cupo (también el del mes: Resend no publica cuándo reinicia el mes,
+  así que al día siguiente sale un correo de prueba y, si vuelve el 429, se pausa otra vez): el remitente no reclama, revisa la pausa otra
+  vez justo antes de cada envío, y lo reclamado que ya no salió vuelve a la cola **sin gastar un intento**, con `nextAttemptAt` en
+  `reinicioDelCupoDiario` (un primer intento vuelve PENDIENTE y suelta su lugar del día; un reintento conserva su `sendAttemptAt`). El
+  detalle de la campaña y `crm_campaign_status` lo dicen con `pausadaPorCupo`. El login y los recibos nunca se pausan.
 - Sin `x-resend-daily-quota` en una respuesta exitosa, la cuenta ya es de pago: se dice una vez y no hay pausa diaria. Al subir de plan, pon
   `RESEND_MONTHLY_QUOTA` (y `RESEND_DAILY_QUOTA` si aplica), o el aviso del mes saldría al 80 % de 3,000.
 - La pausa vive en la memoria del proceso: tras un reinicio se rearma con la primera respuesta de Resend.
@@ -117,8 +121,8 @@ que los otros dos no reclamaron. Si el carril 3 truena con un aviso que cambia u
 ## Los avisos internos (`digest.service.ts`) no son marketing
 
 «Nuevo prospecto», «Volvió un prospecto» y el resumen diario van al equipo de ventas de Avoqado. Los frena un rebote duro o una queja
-(`bloqueoPorReputacion` mira SÓLO `EmailSuppression`: una queja registra supresión y baja, y `isBlocked` contestaría `BAJA`), **no** la
-baja de marketing. Si la consulta falla, no salen y se reintentan (el aviso dice `false`; la fila del resumen queda `FALLO` con intentos por
+(`bloqueoPorReputacion` mira SÓLO `EmailSuppression`: una queja registra supresión y baja, y `isBlocked` contestaría `BAJA`), **no** la baja
+de marketing. Si la consulta falla, no salen y se reintentan (el aviso dice `false`; la fila del resumen queda `FALLO` con intentos por
 gastar).
 
 ## MCP (`src/mcp/tools/crm.ts`)
@@ -127,6 +131,6 @@ gastar).
 Mandar una campaña o un correo por MCP no existe a propósito: es masivo y no se deshace. En `crm_campaign_status`, `desconocidos` quiere
 decir «no sabemos si salieron»: Resend lo aceptó y no se guardó el resultado, pasaron más de 23 h desde el primer intento, se agotaron los
 seis intentos (Ruling 11: la fila no guarda si alguno llegó a Resend), Resend rechazó un **reintento** (el intento anterior pudo salir)
-**o** Resend ya tenía la llave con otro contenido. Nunca se lee como entregado; `FALLIDO` sólo cuando se sabe que no salió: un rechazo en
-el primer intento. En «Envíame una prueba», un 5xx de Resend (`application_error`, `internal_server_error`, `service_unavailable`) o la
-llave en conflicto también es «no sabemos si salió».
+**o** Resend ya tenía la llave con otro contenido. Nunca se lee como entregado; `FALLIDO` sólo cuando se sabe que no salió: un rechazo en el
+primer intento. En «Envíame una prueba», un 5xx de Resend (`application_error`, `internal_server_error`, `service_unavailable`) o la llave
+en conflicto también es «no sabemos si salió».

@@ -37,7 +37,6 @@ import { procesarAvisoCrm } from '@/services/crm/email/campaignWebhook.service'
 import { contentHash } from '@/services/crm/email/templates.service'
 import emailService from '@/services/email.service'
 import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
-import { venueStartOfDay } from '@/utils/datetime'
 import prisma from '@/utils/prismaClient'
 
 const send = emailService.sendEmailWithResult as jest.Mock
@@ -341,14 +340,15 @@ describe('el tope diario', () => {
 })
 
 // El cupo de Resend (3-nov): con 80 de 100 en el día, lo reclamado que ya no se manda vuelve a la cola sin gastar un intento y
-// para la medianoche de CDMX. Contra la base real: el CAS por el lease de la vuelta, y que nada de lo devuelto sale antes.
+// para cuando Resend reinicia su día (medianoche UTC, las 18:00 de CDMX). Contra la base real: el CAS por el lease de la vuelta,
+// y que nada de lo devuelto sale antes.
 describe('el cupo de Resend', () => {
   /** 3-nov-2026, 12:00 en CDMX: fijo, para que la ventana de 23 h nunca dependa de la hora en que corre la prueba. */
   const T0 = new Date('2026-11-03T18:00:00.000Z')
-  const MEDIANOCHE = venueStartOfDay('America/Mexico_City', new Date(T0.getTime() + 24 * HORA))
+  /** Cuando Resend reinicia el día tras T0: la medianoche UTC, las 18:00 de CDMX del mismo 3-nov. */
+  const MEDIANOCHE = new Date('2026-11-04T00:00:00.000Z')
 
-  it('🔴 la pausa a media vuelta devuelve lo reclamado sin gastar intento; nada sale antes de la medianoche y luego sale una vez', async () => {
-    expect(MEDIANOCHE).toEqual(new Date('2026-11-04T06:00:00.000Z'))
+  it('🔴 la pausa a media vuelta devuelve lo reclamado sin gastar intento; nada sale antes del reinicio del cupo y luego sale una vez', async () => {
     const campaignId = await campanaEnviando()
     const primerIntento = new Date(T0.getTime() - 2 * HORA)
     const ids = [
@@ -363,8 +363,8 @@ describe('el cupo de Resend', () => {
     })
     ids.push(reintento.id)
     process.env.CRM_CORREO_PRUEBAS = ['cupo-a', 'cupo-b', 'cupo-c'].map(correo).join(',')
-    // Libre al empezar y antes del primer correo; ese correo cruza el 80.
-    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
+    // Libre al empezar, antes del primer correo y justo antes de mandarlo; ese correo cruza el 80.
+    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
 
     await correrEnvioDeCampanas({ ahora: T0, pausaMs: 0 })
 
@@ -379,12 +379,12 @@ describe('el cupo de Resend', () => {
       else expect(fila).toMatchObject({ status: 'PENDIENTE', attempts: 0, sendAttemptAt: null })
     }
 
-    // Sin pausa (p. ej. el proceso se reinició y su memoria está vacía), antes de la medianoche nada de lo devuelto sale.
+    // Sin pausa (p. ej. el proceso se reinició y su memoria está vacía), antes del reinicio del cupo nada de lo devuelto sale.
     pausa.mockReturnValue(false)
     await correrEnvioDeCampanas({ ahora: new Date(T0.getTime() + 60_000), pausaMs: 0 })
     expect(send).toHaveBeenCalledTimes(1)
 
-    // A la medianoche sale lo devuelto, una vez cada una y con su llave.
+    // Al reiniciarse el cupo sale lo devuelto, una vez cada una y con su llave.
     await correrEnvioDeCampanas({ ahora: new Date(MEDIANOCHE.getTime() + 60_000), pausaMs: 0 })
     expect(
       send.mock.calls

@@ -142,7 +142,7 @@ async function contadoresDe(ids: string[]): Promise<Map<string, Record<string, n
 
 /**
  * Lo que ve la pantalla: sin la huella cruda, con «¿ya te mandaste la prueba de esta versión?», los contadores y si la campaña
- * espera al cupo de Resend (`pausadaPorCupo`, campo nuevo y opcional: hasta la medianoche de CDMX, sólo si sigue enviando).
+ * espera al cupo de Resend (`pausadaPorCupo`, campo nuevo y opcional: hasta las 18:00 de CDMX, cuando Resend reinicia su día; sólo si sigue enviando).
  */
 function vista(fila: Fila, contadores: Record<string, number> = {}) {
   const { testSentHash, ...resto } = fila

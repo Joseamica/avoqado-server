@@ -683,7 +683,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       'reintentos, fallidos, omitidos y desconocidos: no sabemos si salieron, porque Resend los aceptó y no alcanzamos a guardarlo, ' +
       'porque pasaron más de 23 h desde el primer intento, porque se agotaron los intentos sin confirmación o porque se rechazó ' +
       'un reintento cuando el intento anterior pudo salir; los fallidos son sólo ' +
-      'los que se sabe que no salieron). pausadaPorCupo dice si la campaña espera a la medianoche de Ciudad de México porque ' +
+      'los que se sabe que no salieron). pausadaPorCupo dice si la campaña espera a las 18:00 de Ciudad de México porque ' +
       'el cupo diario de correos está por acabarse (el login y los recibos siguen saliendo). Sin ' +
       'campaignId lista las campañas, de 50 en 50 (hasta 100) con el total, y status filtra por estado; con campaignId trae ' +
       'esa campaña. No trae el contenido del correo. Sólo lectura: esta herramienta no manda correos ni campañas (es masivo y ' +
