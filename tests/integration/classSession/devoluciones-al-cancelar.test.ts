@@ -80,6 +80,41 @@ describe('D10, D13 y D14 · lo que regresa al cancelar un lugar en una clase (in
   const saldo = async (balanceId: string) =>
     (await prisma.creditItemBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { remainingQuantity: true } })).remainingQuantity
   const devoluciones = (reservationId: string) => prisma.creditTransaction.count({ where: { reservationId, type: 'REFUND' } })
+  /**
+   * Corre `pasos` EN ORDEN mientras otra transacción tiene la fila de la reserva: arranca uno, espera a que ya esté bloqueado,
+   * arranca el siguiente; cuando todos esperan, suelta. Devuelve cuántos llegaron a esperar a la vez: la prueba de que hubo cruce.
+   * Misma técnica que tests/integration/reservations/undo-no-show.test.ts.
+   */
+  const enCarrera = async (reservationId: string, pasos: Array<() => Promise<unknown>>) => {
+    let enCurso: Promise<PromiseSettledResult<unknown>>[] = []
+    let esperando = 0
+    await prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id = ${reservationId} FOR UPDATE`
+        const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`
+        const bloqueadas = async () => {
+          // `pg_stat_activity` se congela dentro de una transacción: hay que soltar la foto en cada vuelta.
+          await tx.$executeRaw`SELECT pg_stat_clear_snapshot()`
+          const [{ n: total }] = await tx.$queryRaw<{ n: number }[]>`
+            WITH RECURSIVE bloqueadas(pid) AS (
+              SELECT a.pid FROM pg_stat_activity a WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+              UNION
+              SELECT a.pid FROM pg_stat_activity a JOIN bloqueadas b ON b.pid = ANY(pg_blocking_pids(a.pid))
+            )
+            SELECT count(*)::int AS n FROM bloqueadas`
+          return total
+        }
+        for (const paso of pasos) {
+          enCurso = [...enCurso, Promise.allSettled([paso()]).then(([r]) => r)]
+          const limite = Date.now() + 10_000
+          while ((esperando = await bloqueadas()) < enCurso.length && Date.now() < limite) await new Promise(r => setTimeout(r, 25))
+        }
+      },
+      { timeout: 40_000 },
+    )
+    return { resultados: await Promise.all(enCurso), esperando }
+  }
+
   const conPolitica = async (creditRefundMode: 'NEVER' | 'TIME_BASED', fn: () => Promise<void>) => {
     await prisma.reservationSettings.update({ where: { venueId: venueId! }, data: { creditRefundMode } })
     try {
@@ -396,18 +431,27 @@ describe('D10, D13 y D14 · lo que regresa al cancelar un lugar en una clase (in
       expect((await reserva(reservationId)).refundFailedReason).toContain('Stripe Connect')
     })
 
-    it('🔴 cancelar la clase mientras alguien la quita de la lista: la clase regresa una sola vez', async () => {
-      const { sessionId, reservationId, balanceId } = await inscrita(48)
+    it.each([
+      ['quitarla llega primero', true],
+      ['cancelar la clase llega primero', false],
+    ])(
+      '🔴 se cruzan cancelar la clase y quitar a alguien (%s): la clase queda cancelada y regresa una sola vez',
+      async (_caso, quitarPrimero) => {
+        const { sessionId, reservationId, balanceId } = await inscrita(48)
+        const quitar = () => removeAttendee(venueId!, sessionId, reservationId, staffId!)
+        const cancelar = () => cancelClassSession(venueId!, sessionId, staffId!)
 
-      await Promise.allSettled([
-        removeAttendee(venueId!, sessionId, reservationId, staffId!),
-        cancelClassSession(venueId!, sessionId, staffId!),
-      ])
+        const { resultados, esperando } = await enCarrera(reservationId, quitarPrimero ? [quitar, cancelar] : [cancelar, quitar])
 
-      expect((await reserva(reservationId)).status).toBe('CANCELLED')
-      expect(await saldo(balanceId)).toBe(5)
-      expect(await devoluciones(reservationId)).toBe(1)
-    })
+        expect(esperando).toBe(2) // sí se cruzaron: las dos esperaban la misma fila
+        expect(resultados[quitarPrimero ? 1 : 0].status).toBe('fulfilled') // cancelar la clase nunca pierde
+        const clase = await prisma.classSession.findUniqueOrThrow({ where: { id: sessionId }, select: { status: true } })
+        expect(clase.status).toBe('CANCELLED')
+        expect((await reserva(reservationId)).status).toBe('CANCELLED')
+        expect(await saldo(balanceId)).toBe(5)
+        expect(await devoluciones(reservationId)).toBe(1)
+      },
+    )
 
     it('una clase sin reservas se cancela igual', async () => {
       const startsAt = new Date(Date.now() + 48 * H)
