@@ -19,7 +19,7 @@ import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchan
 import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { esPedidoDePlataforma, MENSAJE_ORDEN_DE_PLATAFORMA } from '../shared/ordenImportada'
-import AppError, { BadRequestError, ForbiddenError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ForbiddenError } from '../../errors/AppError'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
   assertCanApproveSale,
@@ -1560,6 +1560,7 @@ export async function editOrgSaleVerification(
       paymentId: true,
       status: true,
       isPortabilidad: true,
+      portedNumber: true,
       reviewNotes: true,
       rejectionReasons: true,
       payment: { select: { id: true, amount: true, method: true, orderId: true } },
@@ -1604,7 +1605,7 @@ export async function editOrgSaleVerification(
     }
   }
 
-  const updated = await prisma.$transaction(async tx => {
+  const { sv: updated, statusBefore } = await prisma.$transaction(async tx => {
     // 1. Payment (monto / forma de pago). Only rewrite `method` when the user
     // actually changed the payment-form bucket — otherwise an unrelated edit would
     // silently flip e.g. DEBIT_CARD → CREDIT_CARD (both render as "Tarjeta").
@@ -1696,6 +1697,8 @@ export async function editOrgSaleVerification(
     // 2. SaleVerification (tipo de venta + estado + metadata de revisión).
     // Only touch reviewer metadata when the status actually TRANSITIONS — editing
     // data on an already-COMPLETED sale must not rewrite who/when it was approved.
+    // Codex r1 C1: sin `status` pedido, el estado no se escribe (lo de la fila ahora, no lo leído antes de la transacción).
+    const statusRequested = params.status != null
     const statusChanged = nextStatus !== existing.status
     // El sello de revisor sólo se reescribe cuando el estado TRANSICIONA — editar
     // el monto de una venta ya revisada no debe cambiar quién/cuándo la revisó.
@@ -1715,19 +1718,37 @@ export async function editOrgSaleVerification(
                 // columna «Razón» del dashboard salía en «—». Gana el comentario explícito; si no, el motivo de la edición.
                 { ...reviewerStamp, reviewNotes: params.reviewNotes?.trim() || trimmedReason, rejectionReasons: [] }
 
-    const sv = await tx.saleVerification.update({
-      where: { id: existing.id },
-      data: {
-        ...(params.isPortabilidad != null ? { isPortabilidad: params.isPortabilidad } : {}),
-        status: nextStatus,
-        ...reviewMeta,
-      },
-      include: {
-        staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
-        reviewedBy: { select: { id: true, firstName: true, lastName: true } },
-        payment: { select: { id: true, amount: true, method: true, status: true, createdAt: true } },
-      },
-    })
+    // Portabilidad → línea nueva: el portado ya no es de esta venta (si no, nadie lo podría borrar y seguiría avisando).
+    const clearsPorted = existing.isPortabilidad && params.isPortabilidad === false
+    // Lo que depende del estado leído (el estado pedido o la nota de una FAILED) sólo se escribe si la fila sigue en él:
+    // una reapertura a la vez no termina aprobada sin `approve`. Si cambió, 409 y la transacción entera se deshace.
+    const casStatus = statusRequested || nextStatus === 'FAILED'
+    const sv = await tx.saleVerification
+      .update({
+        where: { id: existing.id, ...(casStatus ? { status: existing.status } : {}) },
+        data: {
+          ...(params.isPortabilidad != null ? { isPortabilidad: params.isPortabilidad } : {}),
+          ...(clearsPorted ? { portedNumber: null, portedNumberSource: null, portedNumberSetAt: null } : {}),
+          ...(statusRequested ? { status: nextStatus } : {}),
+          ...reviewMeta,
+        },
+        include: {
+          staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
+          reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+          payment: { select: { id: true, amount: true, method: true, status: true, createdAt: true } },
+        },
+      })
+      .catch((err: unknown) => {
+        if (casStatus && err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+          throw new ConflictError('La venta cambió mientras la editabas; vuelve a abrirla', 'SALE_VERIFICATION_CHANGED', {
+            saleVerificationId: existing.id,
+            expectedStatus: existing.status,
+          })
+        }
+        throw err
+      })
+    // Sin estado pedido, la bitácora dice el de la fila (la edición no lo movió).
+    const statusBefore = statusRequested ? existing.status : sv.status
 
     // 3. Audit (financial edit → DB record, not just logs)
     await tx.activityLog.create({
@@ -1739,12 +1760,13 @@ export async function editOrgSaleVerification(
         entityId: existing.id,
         data: {
           reason: trimmedReason,
-          before,
+          before: { ...before, status: statusBefore, ...(clearsPorted ? { portedNumber: existing.portedNumber } : {}) },
           after: {
-            status: nextStatus,
+            status: sv.status,
             isPortabilidad: params.isPortabilidad ?? existing.isPortabilidad,
             amount: params.amount ?? before.amount,
             method: methodChanged ? PAYMENT_FORM_TO_METHOD[params.paymentForm!] : before.method,
+            ...(clearsPorted ? { portedNumber: null } : {}),
           },
           // Queda escrito que el dinero cambió por la excepción de efectivo manual, no por una corrección acreditada.
           ...(viaExcepcionEfectivoManual ? { viaExcepcionEfectivoManual: true } : {}),
@@ -1753,12 +1775,12 @@ export async function editOrgSaleVerification(
       },
     })
 
-    return sv
+    return { sv, statusBefore }
   }, ORDER_LOCK_WAIT_BUDGET)
 
   logger.info(
     `[SALE_VERIFICATION_EDIT] verification=${existing.id} org=${orgId} by=${params.editedById} ` +
-      `status=${before.status}->${nextStatus} amount=${before.amount}->${params.amount ?? before.amount} ` +
+      `status=${statusBefore}->${updated.status} amount=${before.amount}->${params.amount ?? before.amount} ` +
       `reason="${trimmedReason.replace(/"/g, '\\"')}"`,
   )
 
