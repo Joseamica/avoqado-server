@@ -14,12 +14,13 @@
 import { Prisma } from '@prisma/client'
 import MailComposer from 'nodemailer/lib/mail-composer'
 import logger from '../../../config/logger'
-import { ConflictError, NotFoundError, ServiceUnavailableError, ValidationError } from '../../../errors/AppError'
+import { ConflictError, ServiceUnavailableError, ValidationError } from '../../../errors/AppError'
 import prisma from '../../../utils/prismaClient'
 import { logAction } from '../../dashboard/activity-log.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { normalizeEmail } from '../../marketing/emailSuppression.service'
-import { scopeWhere, type CrmAccess } from '../access.service'
+import type { CrmAccess } from '../access.service'
+import { touchNoEarlierTx } from '../accounts.service'
 import { addEvent } from '../timeline.service'
 import {
   anotarError,
@@ -35,13 +36,15 @@ import {
   statusHttp,
 } from './gmailOAuth.service'
 import { isBlocked } from './optOut.service'
-import { armarCorreo, assertSinVariablesDesconocidas, nombreDelActor } from './templates.service'
+import { armarCorreo, assertSinVariablesDesconocidas, cuentaYContactoEnAlcance, nombreDelActor } from './templates.service'
 import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from './testAllowlist'
 
 /** Gmail no contestó (timeout, red, 5xx): se busca en la siguiente vuelta. */
 export const ERROR_SIN_RESPUESTA = 'Gmail no contestó'
 /** 24 h buscándolo sin encontrarlo: DESCONOCIDO para siempre («revisa tus Enviados»). Nunca «no salió». */
 export const ERROR_NO_ENCONTRADO = 'no se encontró en Enviados'
+/** Algo falló ANTES de llamar a Gmail (armar el correo, leer la conexión): sabemos que no salió. */
+export const ERROR_NO_PREPARADO = 'No se pudo preparar el envío'
 const FINALES = [ERROR_CUENTA_REEMPLAZADA, ERROR_NO_ENCONTRADO]
 
 const TIMEOUT_MS = 30_000
@@ -111,16 +114,11 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
   const previo = await prisma.crmEmailMessage.findUnique({ where: { clientRequestId }, select: PREVIO_SELECT })
   if (previo) return respuestaDe(previo, actor, accountId)
 
-  // 1. La cuenta en el alcance de quien manda (si no, 404 como si no existiera) y el contacto con correo.
-  const account = await prisma.crmAccount.findFirst({
-    where: { AND: [{ id: accountId }, scopeWhere(actor, 'ver')] },
-    select: { name: true, contacts: { where: { id: contactId }, take: 1, select: { id: true, name: true, email: true } } },
-  })
-  if (!account) throw new NotFoundError('Ese negocio no existe', 'CRM_CUENTA_NOT_FOUND')
-  const contact = account.contacts[0]
-  if (!contact) throw new NotFoundError('Ese contacto no existe', 'CRM_CONTACTO_NOT_FOUND')
-  const toEmail = contact.email?.trim() ? normalizeEmail(contact.email) : null
-  if (!toEmail) throw new ValidationError('Ese contacto no tiene correo', 'CRM_CONTACTO_SIN_CORREO')
+  // 1. La cuenta en el alcance de quien manda (si no, 404 como si no existiera) y el contacto con correo: la MISMA lectura
+  // que la vista previa con datos reales.
+  const { account, contact } = await cuentaYContactoEnAlcance(actor, accountId, contactId)
+  const toEmail = contact?.email?.trim() ? normalizeEmail(contact.email) : null
+  if (!contact || !toEmail) throw new ValidationError('Ese contacto no tiene correo', 'CRM_CONTACTO_SIN_CORREO')
 
   const conexion = await prisma.crmGmailConnection.findUnique({ where: { staffId: actor.staffId }, select: { status: true } })
   if (!conexion) throw new ConflictError('Conecta tu Gmail en «Mi Gmail» para mandar correo', 'CRM_GMAIL_NO_CONECTADO')
@@ -177,6 +175,8 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
         data: { messageId: id, contactId },
         sourceKey: `email:${id}`,
       })
+      // Mandar un correo es un toque (la regla de `accounts.service.ts`): «Estancado» cuenta desde aquí. Nunca hacia atrás.
+      await touchNoEarlierTx(tx, accountId, new Date())
       return { fila, id, rfcMessageId }
     })
   } catch (error) {
@@ -190,24 +190,36 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
   if ('previo' in reserva) return respuestaDe(reserva.previo, actor, accountId)
   const { fila, id, rfcMessageId } = reserva
 
-  // 3. El MIME: del vendedor, a la persona, con nuestro Message-ID (con él se reconoce en el hilo y en «Enviados»).
-  const raw = (
-    await new MailComposer({
-      from: { name: vendedor ?? '', address: fila.googleEmail },
-      to: { name: contact.name, address: toEmail },
-      subject: correo.subject,
-      html: correo.html,
-      text: correo.text,
-      messageId: rfcMessageId,
-    })
-      .compile()
-      .build()
-  ).toString('base64url')
+  // 3. El MIME (del vendedor, a la persona, con nuestro Message-ID: con él se reconoce en el hilo y en «Enviados») y el
+  // cliente de Gmail, ANTES de llamar a Gmail: si algo de esto falla, sabemos que no salió (FALLIDO, no «no sabemos»).
+  let raw: string
+  let gmail: ReturnType<typeof clienteGmail>
+  try {
+    raw = (
+      await new MailComposer({
+        from: { name: vendedor ?? '', address: fila.googleEmail },
+        to: { name: contact.name, address: toEmail },
+        subject: correo.subject,
+        html: correo.html,
+        text: correo.text,
+        messageId: rfcMessageId,
+      })
+        .compile()
+        .build()
+    ).toString('base64url')
+    gmail = clienteGmail(fila.refreshTokenCiphertext)
+  } catch (error) {
+    logger.error('[CRM] The Gmail send could not be prepared', { messageId: id, error: mensajeDe(error) })
+    await cerrarIncierto(id, 'FALLIDO', ERROR_NO_PREPARADO)
+    throw new ServiceUnavailableError(
+      'No se pudo preparar el correo, así que no salió. Intenta de nuevo o reconecta tu Gmail',
+      'CRM_GMAIL_NO_PREPARADO',
+    )
+  }
 
   // 4. A Gmail. Nunca se reintenta solo: lo incierto queda DESCONOCIDO y lo busca la reconciliación.
   let enviado: { id?: string | null; threadId?: string | null }
   try {
-    const gmail = clienteGmail(fila.refreshTokenCiphertext)
     enviado = (await gmail.users.messages.send({ userId: 'me', requestBody: { raw } }, { timeout: TIMEOUT_MS })).data
   } catch (error) {
     return resolverFalla(error, { id, staffId: actor.staffId, version: fila.version })
@@ -247,12 +259,20 @@ async function resolverFalla(error: unknown, envio: { id: string; staffId: strin
     throw reconecta()
   }
   const status = statusHttp(error)
-  // Un 4xx es Gmail diciendo que NO lo aceptó (validación, permisos, límite): no salió, con su motivo.
+  // Un 4xx es Gmail diciendo que NO lo aceptó (validación, permisos, límite): no salió. El texto de Google (en inglés) va
+  // sólo al log; la ficha y la persona leen el motivo en español.
   if (status !== undefined && status >= 400 && status < 500) {
     const e = error as { response?: { data?: { error?: { message?: unknown } } } }
-    const motivo = String(e.response?.data?.error?.message ?? mensajeDe(error)).slice(0, 200)
-    await cerrarIncierto(envio.id, 'FALLIDO', motivo)
-    throw new ValidationError(`Gmail no aceptó el correo: ${motivo}`, 'CRM_GMAIL_RECHAZADO')
+    logger.warn('[CRM] Gmail rejected the send', {
+      messageId: envio.id,
+      status,
+      google: String(e.response?.data?.error?.message ?? mensajeDe(error)),
+    })
+    await cerrarIncierto(envio.id, 'FALLIDO', `Gmail no lo aceptó (${status})`)
+    throw new ValidationError(
+      'Gmail no aceptó el correo, así que no salió. Revisa la dirección del contacto o intenta más tarde',
+      'CRM_GMAIL_RECHAZADO',
+    )
   }
   // Sin respuesta (timeout, red) o un 5xx: Gmail pudo haberlo mandado. No sabemos.
   logger.warn('[CRM] Gmail did not answer the send', { messageId: envio.id, status, error: mensajeDe(error) })
@@ -261,6 +281,53 @@ async function resolverFalla(error: unknown, envio: { id: string; staffId: strin
 }
 
 // ── Reconciliar lo que no sabemos si salió ────────────────────────────────────────────────────────────────────────────
+
+interface Pendiente {
+  id: string
+  rfcMessageId: string | null
+  status: string
+  createdAt: Date
+}
+
+async function reconciliarUno(gmail: ReturnType<typeof clienteGmail>, pendiente: Pendiente, ahora: Date): Promise<void> {
+  const rfc = pendiente.rfcMessageId!.replace(/^<|>$/g, '')
+  let hallado: { id?: string | null; threadId?: string | null } | undefined
+  try {
+    const { data } = await gmail.users.messages.list(
+      { userId: 'me', q: `in:sent rfc822msgid:${rfc}`, maxResults: 1 },
+      { timeout: TIMEOUT_MS },
+    )
+    hallado = data.messages?.[0]
+  } catch (error) {
+    if (esInvalidGrant(error)) throw error
+    // Una búsqueda que falla cuenta como «no encontrado esta vuelta»: el pendiente sigue su camino hacia las 24 h.
+    logger.warn('[CRM] The Gmail search of an uncertain send failed', { messageId: pendiente.id, error: mensajeDe(error) })
+  }
+
+  if (hallado?.id) {
+    await prisma.crmEmailMessage.updateMany({
+      where: { id: pendiente.id, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
+      data: {
+        status: 'ENVIADO',
+        gmailMessageId: hallado.id,
+        gmailThreadId: hallado.threadId ?? null,
+        sentAt: pendiente.createdAt,
+        error: null,
+      },
+    })
+  } else if (pendiente.createdAt.getTime() <= ahora.getTime() - 24 * 60 * MIN) {
+    await prisma.crmEmailMessage.updateMany({
+      where: { id: pendiente.id, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
+      data: { status: 'DESCONOCIDO', error: ERROR_NO_ENCONTRADO },
+    })
+  } else if (pendiente.status === 'ENVIANDO') {
+    // Un proceso que murió a media petición: la ficha ya dice «no sabemos si salió», y se sigue buscando.
+    await prisma.crmEmailMessage.updateMany({
+      where: { id: pendiente.id, status: 'ENVIANDO' },
+      data: { status: 'DESCONOCIDO', error: ERROR_SIN_RESPUESTA },
+    })
+  }
+}
 
 /**
  * Lo llama el trabajo de respuestas cada 5 min. Revisa los DESCONOCIDO y los ENVIANDO de hace más de 10 min (un proceso que
@@ -298,31 +365,13 @@ export async function reconciliarDesconocidos(ahora: Date = new Date()): Promise
 
       const gmail = clienteGmail(conexion.refreshTokenCiphertext)
       for (const pendiente of pendientes) {
-        const rfc = pendiente.rfcMessageId!.replace(/^<|>$/g, '')
-        const { data } = await gmail.users.messages.list({ userId: 'me', q: `in:sent rfc822msgid:${rfc}`, maxResults: 1 })
-        const hallado = data.messages?.[0]
-        if (hallado?.id) {
-          await prisma.crmEmailMessage.updateMany({
-            where: { id: pendiente.id, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
-            data: {
-              status: 'ENVIADO',
-              gmailMessageId: hallado.id,
-              gmailThreadId: hallado.threadId ?? null,
-              sentAt: pendiente.createdAt,
-              error: null,
-            },
-          })
-        } else if (pendiente.createdAt.getTime() <= ahora.getTime() - 24 * 60 * MIN) {
-          await prisma.crmEmailMessage.updateMany({
-            where: { id: pendiente.id, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
-            data: { status: 'DESCONOCIDO', error: ERROR_NO_ENCONTRADO },
-          })
-        } else if (pendiente.status === 'ENVIANDO') {
-          // Un proceso que murió a media petición: la ficha ya dice «no sabemos si salió», y se sigue buscando.
-          await prisma.crmEmailMessage.updateMany({
-            where: { id: pendiente.id, status: 'ENVIANDO' },
-            data: { status: 'DESCONOCIDO', error: ERROR_SIN_RESPUESTA },
-          })
+        // Cada pendiente por su cuenta: uno que falla siempre no tapa a los otros 19 ni su propio cierre a las 24 h. Sólo
+        // `invalid_grant` corta la conexión entera.
+        try {
+          await reconciliarUno(gmail, pendiente, ahora)
+        } catch (error) {
+          if (esInvalidGrant(error)) throw error
+          logger.warn('[CRM] Could not reconcile an uncertain Gmail send', { messageId: pendiente.id, error: mensajeDe(error) })
         }
       }
     } catch (error) {

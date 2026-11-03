@@ -308,7 +308,8 @@ export function mensajeDe(error: unknown): string {
  */
 export async function marcarRevocada(staffId: string, version: number, ahora: Date): Promise<void> {
   const { count } = await prisma.crmGmailConnection.updateMany({
-    where: { staffId, version },
+    // ACTIVA: un `invalid_grant` tardío después de «Desconectar» (que no sube la versión) no escribe un aviso falso.
+    where: { staffId, version, status: 'ACTIVA' },
     data: { status: 'REVOCADA', revokedAt: ahora, lastError: 'invalid_grant' },
   })
   if (count === 1) {

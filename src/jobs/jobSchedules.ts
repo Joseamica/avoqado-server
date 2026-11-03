@@ -97,7 +97,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // 11… lo comparte con el monitor de POS, que sólo lee conexiones). Su entrada es un COUNT por el índice de `sendAttemptAt`.
   crmCampaignSender: '17 * * * * *',
   // CRM propio, fase 2 (tarea 7): reconciliar los envíos inciertos del Gmail del vendedor y leer sus respuestas. Cada 5 min
-  // (minutos :00, :05…) en el segundo :41, el valor del plan. ⚠️ Ese instante lo comparte con la reconciliación de Blumon
-  // (:11 y :41 de cada minuto). Su entrada es la lista de conexiones ACTIVAS (~10 filas), con el reintento de conexión.
-  crmGmailReplies: '41 */5 * * * *',
+  // (minutos :00, :05…) en el segundo :42, libre en todos los minutos (entre :41 —Blumon y la lealtad— y :43, el worker de
+  // AngelPay). Su entrada es la lista de conexiones ACTIVAS (~10 filas), con el reintento de conexión.
+  crmGmailReplies: '42 */5 * * * *',
 } as const

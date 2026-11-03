@@ -79,15 +79,21 @@ beforeEach(() => {
     prismaMock.crmEmailMessage.createManyAndReturn,
     prismaMock.crmEmailMessage.updateMany,
     prismaMock.crmTimelineEvent.createMany,
+    prismaMock.crmAccount.updateMany,
   ])
     fn.mockReset()
+  prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
 
   prismaMock.crmGmailConnection.findMany.mockResolvedValue([conexion()])
   prismaMock.crmGmailConnection.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.$queryRaw.mockResolvedValue([{ threadId: 'th-1' }])
   prismaMock.crmEmailMessage.findFirst.mockResolvedValue({ accountId: ACCOUNT, contactId: CONTACT })
   prismaMock.crmEmailMessage.createManyAndReturn.mockImplementation(async ({ data }: any) =>
-    data.map((d: any, i: number) => ({ id: `cmsgrecibido${i}000000000001`.slice(0, 25), gmailMessageId: d.gmailMessageId })),
+    data.map((d: any, i: number) => ({
+      id: `cmsgrecibido${i}000000000001`.slice(0, 25),
+      gmailMessageId: d.gmailMessageId,
+      sentAt: d.sentAt,
+    })),
   )
   prismaMock.crmEmailMessage.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
@@ -108,12 +114,10 @@ describe('sincronizarRespuestas: lo que contestan', () => {
   it('guarda la respuesta como ENTRADA RECIBIDO con su evento (sólo ids) y el mensaje propio no cuenta', async () => {
     await sincronizarRespuestas(NOW)
 
-    expect(mockThreadsGet).toHaveBeenCalledWith({
-      userId: 'me',
-      id: 'th-1',
-      format: 'metadata',
-      metadataHeaders: ['From', 'To', 'Subject', 'Message-ID'],
-    })
+    expect(mockThreadsGet).toHaveBeenCalledWith(
+      { userId: 'me', id: 'th-1', format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Message-ID'] },
+      { timeout: 30_000 },
+    )
     const { data, skipDuplicates } = prismaMock.crmEmailMessage.createManyAndReturn.mock.calls[0][0]
     expect(skipDuplicates).toBe(true)
     expect(data).toEqual([
@@ -150,6 +154,29 @@ describe('sincronizarRespuestas: lo que contestan', () => {
       where: { staffId: STAFF, direction: 'SALIDA', gmailThreadId: 'th-1' },
       data: { lastCheckedAt: NOW },
     })
+  })
+
+  it('🔴 una respuesta es un toque: «Estancado» cuenta desde la más nueva de las recién guardadas, nunca hacia atrás', async () => {
+    const vieja = mensaje('gm-vieja', 'Brenda <brenda@cafe.mx>', { internalDate: String(NOW.getTime() - 40 * 86_400_000) })
+    const nueva = mensaje('gm-nueva', 'Brenda <brenda@cafe.mx>', { internalDate: String(NOW.getTime() - 60_000) })
+    mockThreadsGet.mockResolvedValue({ data: { id: 'th-1', messages: [propio(), vieja, nueva] } })
+
+    await sincronizarRespuestas(NOW)
+
+    const masNueva = new Date(NOW.getTime() - 60_000)
+    // El mismo ayudante del módulo: sólo mueve `lastTouchAt` si el que tiene es ANTERIOR; una respuesta vieja que apenas se
+    // leyó nunca le quita a la cuenta un toque más reciente.
+    expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
+      where: { id: ACCOUNT, lastTouchAt: { lt: masNueva } },
+      data: { lastTouchAt: masNueva },
+    })
+  })
+
+  it('una respuesta ya guardada no vuelve a tocar la cuenta', async () => {
+    prismaMock.crmEmailMessage.createManyAndReturn.mockResolvedValue([])
+    await sincronizarRespuestas(NOW)
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled()
   })
 
   it('🔴 una respuesta leída dos veces deja un solo EMAIL_RECEIVED', async () => {
@@ -243,7 +270,7 @@ describe('sincronizarRespuestas: los errores son por hilo y por conexión', () =
     await sincronizarRespuestas(NOW)
 
     expect(prismaMock.crmGmailConnection.updateMany).toHaveBeenCalledWith({
-      where: { staffId: STAFF, version: 2 },
+      where: { staffId: STAFF, version: 2, status: 'ACTIVA' },
       data: { status: 'REVOCADA', revokedAt: NOW, lastError: 'invalid_grant' },
     })
     expect(prismaMock.crmEmailMessage.createManyAndReturn).toHaveBeenCalledTimes(1)
@@ -254,7 +281,7 @@ describe('sincronizarRespuestas: los errores son por hilo y por conexión', () =
     mockThreadsGet.mockRejectedValue(invalidGrant())
     prismaMock.crmGmailConnection.updateMany.mockResolvedValue({ count: 0 })
     await sincronizarRespuestas(NOW)
-    expect(prismaMock.crmGmailConnection.updateMany.mock.calls[0][0].where).toEqual({ staffId: STAFF, version: 2 })
+    expect(prismaMock.crmGmailConnection.updateMany.mock.calls[0][0].where).toEqual({ staffId: STAFF, version: 2, status: 'ACTIVA' })
   })
 
   it('una conexión cuyo token no se puede leer se registra y no frena a la siguiente', async () => {

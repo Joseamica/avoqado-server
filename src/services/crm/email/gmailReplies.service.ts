@@ -15,6 +15,7 @@ import logger from '../../../config/logger'
 import { utcTs } from '../../../utils/sqlDates'
 import prisma from '../../../utils/prismaClient'
 import { normalizeEmail } from '../../marketing/emailSuppression.service'
+import { touchNoEarlierTx } from '../accounts.service'
 import { addEvent } from '../timeline.service'
 import {
   anotarError,
@@ -29,6 +30,7 @@ import {
 } from './gmailOAuth.service'
 
 const MIN = 60_000
+const TIMEOUT_MS = 30_000
 const METADATA = ['From', 'To', 'Subject', 'Message-ID']
 
 /** Un `invalid_grant` corta la conexión entera: todos sus hilos fallarían igual. */
@@ -41,6 +43,8 @@ class CredencialesRevocadas extends Error {}
  */
 async function hilosPorRevisar(conexion: ConexionActiva, ahora: Date): Promise<string[]> {
   const hace = (ms: number) => utcTs(new Date(ahora.getTime() - ms))
+  // ponytail: el GROUP BY vuelve a agregar TODO lo ENVIADO del vendedor cada 5 min (filtrado por índice, salida tope 50);
+  // con decenas de miles de envíos por vendedor, pasar a users.history.list desde un historyId guardado.
   const filas = await prisma.$queryRaw<Array<{ threadId: string }>>(Prisma.sql`
     SELECT t."threadId" FROM (
       SELECT "gmailThreadId" AS "threadId",
@@ -74,7 +78,12 @@ const esPropio = (mensaje: gmail_v1.Schema$Message, googleEmail: string) =>
   direccionDe(encabezado(mensaje, 'From')) === googleEmail || (mensaje.labelIds ?? []).some(label => label === 'SENT' || label === 'DRAFT')
 
 /** Guarda las respuestas nuevas de un hilo y sus eventos, sólo si el hilo sigue teniendo alguna SALIDA. */
-async function guardarRespuestas(conexion: ConexionActiva, threadId: string, mensajes: gmail_v1.Schema$Message[]): Promise<void> {
+async function guardarRespuestas(
+  conexion: ConexionActiva,
+  threadId: string,
+  mensajes: gmail_v1.Schema$Message[],
+  ahora: Date,
+): Promise<void> {
   const respuestas = mensajes.filter(m => m.id && !esPropio(m, conexion.googleEmail))
   if (!respuestas.length) return
 
@@ -104,7 +113,7 @@ async function guardarRespuestas(conexion: ConexionActiva, threadId: string, men
         sentAt: m.internalDate ? new Date(Number(m.internalDate)) : null,
       })),
       skipDuplicates: true,
-      select: { id: true, gmailMessageId: true },
+      select: { id: true, gmailMessageId: true, sentAt: true },
     })
     for (const nueva of nuevas) {
       // Sólo ids: el extracto se lee del mensaje al pintar la ficha.
@@ -115,6 +124,12 @@ async function guardarRespuestas(conexion: ConexionActiva, threadId: string, men
         data: { messageId: nueva.id },
         sourceKey: `gmail:${nueva.gmailMessageId}`,
       })
+    }
+    // Una respuesta es un toque (como la entrada de la landing): «Estancado» cuenta desde la más nueva. Nunca hacia atrás:
+    // una respuesta vieja que apenas se leyó no le quita a la cuenta un toque más reciente.
+    if (nuevas.length) {
+      const masNueva = Math.max(...nuevas.map(nueva => nueva.sentAt?.getTime() ?? ahora.getTime()))
+      await touchNoEarlierTx(tx, salida.accountId, new Date(masNueva))
     }
   })
 }
@@ -129,8 +144,11 @@ async function sincronizarConexion(conexion: ConexionActiva, ahora: Date): Promi
 
   for (const threadId of hilos) {
     try {
-      const { data } = await gmail.users.threads.get({ userId: 'me', id: threadId, format: 'metadata', metadataHeaders: METADATA })
-      await guardarRespuestas(conexion, threadId, data.messages ?? [])
+      const { data } = await gmail.users.threads.get(
+        { userId: 'me', id: threadId, format: 'metadata', metadataHeaders: METADATA },
+        { timeout: TIMEOUT_MS },
+      )
+      await guardarRespuestas(conexion, threadId, data.messages ?? [], ahora)
       await marcarRevisado(conexion, threadId, { lastCheckedAt: ahora })
     } catch (error) {
       if (esInvalidGrant(error)) throw new CredencialesRevocadas()

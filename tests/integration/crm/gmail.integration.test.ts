@@ -195,6 +195,7 @@ describe('🔴 mandarCorreo reserva mientras completarConexion cambia de A a B',
     }
 
     const clientRequestId = `cruce-${suffix}`
+    const antesDeMandar = new Date()
     const envio = settle(
       mandarCorreo(seller(staffId), {
         accountId,
@@ -226,6 +227,9 @@ describe('🔴 mandarCorreo reserva mientras completarConexion cambia de A a B',
       expect(mensaje.fromEmail).toBe(B)
     }
     // Y la conexión quedó en B, en otra versión.
+    // Mandar es un toque: «Estancado» cuenta desde la reserva.
+    const cuenta = await prisma.crmAccount.findUniqueOrThrow({ where: { id: accountId }, select: { lastTouchAt: true } })
+    expect(cuenta.lastTouchAt.getTime()).toBeGreaterThanOrEqual(antesDeMandar.getTime())
     const fila = await prisma.crmGmailConnection.findUniqueOrThrow({ where: { staffId } })
     expect(fila).toMatchObject({ googleEmail: B, status: 'ACTIVA', version: 2 })
   })
@@ -297,7 +301,8 @@ describe('qué hilos lee el trabajo de respuestas', () => {
             id: `resp-${id}`,
             labelIds: ['INBOX'],
             snippet: 'Sí me interesa',
-            internalDate: String(ahora.getTime()),
+            // La respuesta del hilo «31 días» es VIEJA (de hace 40 días) y se lee DESPUÉS de la de «nunca», que es de ahora.
+            internalDate: String(id === hilo('31-dias') ? ahora.getTime() - 40 * DIA : ahora.getTime()),
             payload: {
               headers: [
                 { name: 'From', value: `Brenda <${contact.email}>` },
@@ -309,7 +314,14 @@ describe('qué hilos lee el trabajo de respuestas', () => {
       },
     }))
 
+    // La cuenta llevaba 50 días sin tocar.
+    await prisma.crmAccount.update({ where: { id: accountId }, data: { lastTouchAt: new Date(ahora.getTime() - 50 * DIA) } })
+
     await sincronizarRespuestas(ahora)
+
+    // 🔴 Una respuesta es un toque, y nunca hacia atrás: la de ahora movió «Estancado» y la vieja, leída después, no lo regresó.
+    const tocada = await prisma.crmAccount.findUniqueOrThrow({ where: { id: accountId }, select: { lastTouchAt: true } })
+    expect(tocada.lastTouchAt.getTime()).toBe(ahora.getTime())
 
     const pedidos = mockThreadsGet.mock.calls.map(([args]) => args.id).filter((id: string) => id.endsWith(suffix))
     expect(pedidos).toEqual([hilo('nunca'), hilo('31-dias')])

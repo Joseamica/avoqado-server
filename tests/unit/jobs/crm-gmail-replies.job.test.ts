@@ -20,8 +20,12 @@ beforeEach(() => {
   sincronizar.mockReset().mockResolvedValue(undefined)
 })
 
-it('cada 5 min en el segundo :41', () => {
-  expect(DATABASE_JOB_SCHEDULES.crmGmailReplies).toBe('41 */5 * * * *')
+it('cada 5 min en el segundo :42, que no usa ningún otro job de la base', () => {
+  expect(DATABASE_JOB_SCHEDULES.crmGmailReplies).toBe('42 */5 * * * *')
+  const otros = Object.entries(DATABASE_JOB_SCHEDULES)
+    .filter(([nombre]) => nombre !== 'crmGmailReplies')
+    .flatMap(([, patron]) => patron.split(' ')[0].split(','))
+  expect(otros).not.toContain('42')
 })
 
 it('reconcilia y luego lee respuestas, con la misma hora', async () => {

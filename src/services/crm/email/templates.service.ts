@@ -197,25 +197,33 @@ export async function nombreDelActor(staffId: string): Promise<string | null> {
 }
 
 /**
- * Los datos REALES de una cuenta (y de uno de sus contactos), sólo si cae dentro del alcance de quien pide: si no, 404, igual
- * que si no existiera. Sin contacto, el principal; sin ninguno, `nombre` cae en el negocio.
+ * Una cuenta (y uno de sus contactos) sólo si cae dentro del alcance de «Ver» de quien pide: si no, 404, igual que si no
+ * existiera. Sin `contactId`, el principal (o ninguno). La MISMA lectura para la vista previa y para lo que sale por Gmail,
+ * así lo que se ve es lo que se manda.
  */
-async function varsDelContexto(actor: CrmAccess, contexto: { accountId: string; contactId?: string }): Promise<Vars> {
+export async function cuentaYContactoEnAlcance(actor: CrmAccess, accountId: string, contactId?: string) {
   const account = await prisma.crmAccount.findFirst({
-    where: { AND: [{ id: contexto.accountId }, scopeWhere(actor, 'ver')] },
+    where: { AND: [{ id: accountId }, scopeWhere(actor, 'ver')] },
     select: {
       name: true,
       contacts: {
-        where: contexto.contactId ? { id: contexto.contactId } : {},
+        where: contactId ? { id: contactId } : {},
         orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
         take: 1,
-        select: { name: true },
+        select: { id: true, name: true, email: true },
       },
     },
   })
   if (!account) throw new NotFoundError('Ese negocio no existe', 'CRM_CUENTA_NOT_FOUND')
-  if (contexto.contactId && !account.contacts.length) throw new NotFoundError('Ese contacto no existe', 'CRM_CONTACTO_NOT_FOUND')
-  return { nombre: account.contacts[0]?.name ?? null, negocio: account.name }
+  const contact = account.contacts[0] ?? null
+  if (contactId && !contact) throw new NotFoundError('Ese contacto no existe', 'CRM_CONTACTO_NOT_FOUND')
+  return { account: { name: account.name }, contact }
+}
+
+/** Los datos REALES del contexto de la vista previa. Sin ningún contacto, `nombre` cae en el negocio. */
+async function varsDelContexto(actor: CrmAccess, contexto: { accountId: string; contactId?: string }): Promise<Vars> {
+  const { account, contact } = await cuentaYContactoEnAlcance(actor, contexto.accountId, contexto.contactId)
+  return { nombre: contact?.name ?? null, negocio: account.name }
 }
 
 export async function previewTemplate(

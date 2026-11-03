@@ -27,8 +27,10 @@ jest.mock('googleapis', () => ({
 
 import { prismaMock } from '@tests/__helpers__/setup'
 import { createTokenCipher } from '@/lib/token-encryption'
+import logger from '@/config/logger'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { mandarCorreo, reconciliarDesconocidos } from '@/services/crm/email/gmailSend.service'
+import * as templates from '@/services/crm/email/templates.service'
 
 const STAFF = 'cstaffrafa000000000000001'
 const ACCOUNT = 'caccountbr0000000000000001'
@@ -101,6 +103,7 @@ beforeEach(() => {
     prismaMock.crmEmailMessage.update,
     prismaMock.crmEmailMessage.updateMany,
     prismaMock.crmAccount.findFirst,
+    prismaMock.crmAccount.updateMany,
     prismaMock.crmGmailConnection.findUnique,
     prismaMock.crmGmailConnection.findMany,
     prismaMock.crmGmailConnection.updateMany,
@@ -126,6 +129,7 @@ beforeEach(() => {
   prismaMock.crmEmailMessage.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
   prismaMock.crmGmailConnection.updateMany.mockResolvedValue({ count: 1 })
+  prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
   mockSend.mockResolvedValue({ data: { id: 'gm-1', threadId: 'th-1' } })
 })
 
@@ -183,6 +187,15 @@ describe('mandarCorreo: el camino feliz', () => {
     })
     expect(orden(prismaMock.crmTimelineEvent.createMany)).toBeLessThan(orden(mockSend))
 
+    // 🔴 Mandar es un toque: «Estancado» cuenta desde aquí, con el ayudante que nunca lo mueve hacia atrás, en la reserva.
+    expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledWith({
+      where: { id: ACCOUNT, lastTouchAt: { lt: expect.any(Date) } },
+      data: { lastTouchAt: expect.any(Date) },
+    })
+    const toque = prismaMock.crmAccount.updateMany.mock.calls[0][0]
+    expect(toque.where.lastTouchAt.lt).toBe(toque.data.lastTouchAt)
+    expect(orden(prismaMock.crmAccount.updateMany)).toBeLessThan(orden(mockSend))
+
     // 4. El MIME: del vendedor, a la persona, con nuestro Message-ID y SIN el pie de las campañas.
     expect(mockSend).toHaveBeenCalledTimes(1)
     expect(mockSend.mock.calls[0][0].userId).toBe('me')
@@ -199,6 +212,15 @@ describe('mandarCorreo: el camino feliz', () => {
       where: { id: MSG, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
       data: { status: 'ENVIADO', gmailMessageId: 'gm-1', gmailThreadId: 'th-1', sentAt: expect.any(Date), error: null },
     })
+  })
+})
+
+describe('mandarCorreo: la misma lectura que la vista previa', () => {
+  it('lee la cuenta y el contacto con la MISMA función que la vista previa con datos reales', async () => {
+    const lectura = jest.spyOn(templates, 'cuentaYContactoEnAlcance')
+    await mandarCorreo(actor(), input())
+    expect(lectura).toHaveBeenCalledWith(actor(), ACCOUNT, CONTACT)
+    lectura.mockRestore()
   })
 })
 
@@ -296,6 +318,19 @@ describe('mandarCorreo: a quién no se le escribe', () => {
 })
 
 describe('mandarCorreo: cuando Gmail no contesta o falla', () => {
+  it('🔴 si no se puede preparar el envío (token ilegible), queda FALLIDO «No se pudo preparar el envío» y Gmail no se llama', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([filaBloqueada({ refreshTokenCiphertext: Buffer.from('basura') })])
+    await expect(mandarCorreo(actor(), input())).rejects.toMatchObject({ statusCode: 503, code: 'CRM_GMAIL_NO_PREPARADO' })
+    expect(mockSend).not.toHaveBeenCalled()
+    expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith({
+      where: { id: MSG, status: 'ENVIANDO' },
+      data: { status: 'FALLIDO', error: 'No se pudo preparar el envío' },
+    })
+    // Sabemos que no salió: nunca «no sabemos si salió».
+    const estados = prismaMock.crmEmailMessage.updateMany.mock.calls.map((c: any[]) => c[0].data.status)
+    expect(estados).not.toContain('DESCONOCIDO')
+  })
+
   it('🔴 un timeout deja DESCONOCIDO (nunca reintenta solo) y el evento de la ficha ya existía', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ETIMEDOUT' }))
     await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO' })
@@ -318,23 +353,31 @@ describe('mandarCorreo: cuando Gmail no contesta o falla', () => {
     expect(mockSend).toHaveBeenCalledTimes(1)
   })
 
-  it('un 4xx de validación de Google es FALLIDO con su motivo (no salió) y un 422', async () => {
+  it('un 4xx de validación de Google es FALLIDO (no salió) y un 422 en español; el texto de Google va sólo al log', async () => {
     mockSend.mockRejectedValue(httpError(400))
-    await expect(mandarCorreo(actor(), input())).rejects.toMatchObject({
+    const error = await mandarCorreo(actor(), input()).catch((e: { statusCode: number; message: string }) => e)
+    expect(error).toMatchObject({
       statusCode: 422,
-      message: 'Gmail no aceptó el correo: Invalid To header',
+      message: 'Gmail no aceptó el correo, así que no salió. Revisa la dirección del contacto o intenta más tarde',
     })
     expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith({
       where: { id: MSG, status: 'ENVIANDO' },
-      data: { status: 'FALLIDO', error: 'Invalid To header' },
+      data: { status: 'FALLIDO', error: 'Gmail no lo aceptó (400)' },
     })
+    // Lo que ve la persona (la respuesta y la ficha) no trae el inglés de Google; el log sí, para diagnosticar.
+    expect(JSON.stringify(error)).not.toContain('Invalid To header')
+    expect(JSON.stringify(prismaMock.crmEmailMessage.updateMany.mock.calls)).not.toContain('Invalid To header')
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[CRM] Gmail rejected the send',
+      expect.objectContaining({ status: 400, google: 'Invalid To header' }),
+    )
   })
 
   it('🔴 invalid_grant: FALLIDO, la conexión REVOCADA sólo si sigue en la versión que se usó, y un 409 «Reconecta tu Gmail»', async () => {
     mockSend.mockRejectedValue(invalidGrant())
     await expect(mandarCorreo(actor(), input())).rejects.toMatchObject({ statusCode: 409, message: 'Reconecta tu Gmail' })
     expect(prismaMock.crmGmailConnection.updateMany).toHaveBeenCalledWith({
-      where: { staffId: STAFF, version: 2 },
+      where: { staffId: STAFF, version: 2, status: 'ACTIVA' },
       data: { status: 'REVOCADA', revokedAt: expect.any(Date), lastError: 'invalid_grant' },
     })
     expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith({
@@ -349,7 +392,8 @@ describe('mandarCorreo: cuando Gmail no contesta o falla', () => {
     prismaMock.crmGmailConnection.updateMany.mockResolvedValue({ count: 0 })
     await expect(mandarCorreo(actor(), input())).rejects.toMatchObject({ statusCode: 409 })
     const where = prismaMock.crmGmailConnection.updateMany.mock.calls[0][0].where
-    expect(where).toEqual({ staffId: STAFF, version: 2 })
+    // Y sólo si sigue ACTIVA: tras «Desconectar» (que no sube la versión) no se escribe una revocación falsa.
+    expect(where).toEqual({ staffId: STAFF, version: 2, status: 'ACTIVA' })
   })
 })
 
@@ -378,7 +422,9 @@ describe('reconciliarDesconocidos: lo que no sabemos si salió', () => {
     mockList.mockResolvedValue({ data: { messages: [{ id: 'gm-9', threadId: 'th-9' }] } })
     await reconciliarDesconocidos(NOW)
 
-    expect(mockList).toHaveBeenCalledWith(expect.objectContaining({ userId: 'me', q: `in:sent rfc822msgid:crm.${MSG}@avoqado.io` }))
+    expect(mockList).toHaveBeenCalledWith(expect.objectContaining({ userId: 'me', q: `in:sent rfc822msgid:crm.${MSG}@avoqado.io` }), {
+      timeout: 30_000,
+    })
     expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith({
       where: { id: MSG, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
       data: { status: 'ENVIADO', gmailMessageId: 'gm-9', gmailThreadId: 'th-9', sentAt: pendiente().createdAt, error: null },
@@ -462,13 +508,52 @@ describe('reconciliarDesconocidos: lo que no sabemos si salió', () => {
     mockList.mockRejectedValueOnce(invalidGrant()).mockResolvedValueOnce({ data: { messages: [{ id: 'gm-2', threadId: 'th-2' }] } })
     await reconciliarDesconocidos(NOW)
     expect(prismaMock.crmGmailConnection.updateMany).toHaveBeenCalledWith({
-      where: { staffId: STAFF, version: 2 },
+      where: { staffId: STAFF, version: 2, status: 'ACTIVA' },
       data: { status: 'REVOCADA', revokedAt: NOW, lastError: 'invalid_grant' },
     })
     expect(mockList).toHaveBeenCalledTimes(2)
     expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'ENVIADO', gmailMessageId: 'gm-2' }) }),
     )
+  })
+
+  it('🔴 un pendiente cuya búsqueda falla siempre no tapa a los demás, y a las 24 h igual se cierra', async () => {
+    const OTRO_MSG = 'cmessage00000000000000002'
+    prismaMock.crmEmailMessage.findMany.mockResolvedValue([
+      pendiente({ status: 'DESCONOCIDO', createdAt: new Date(NOW.getTime() - 25 * 60 * MIN) }),
+      pendiente({ id: OTRO_MSG, rfcMessageId: `<crm.${OTRO_MSG}@avoqado.io>` }),
+    ])
+    mockList.mockRejectedValueOnce(httpError(500, {})).mockResolvedValueOnce({ data: { messages: [{ id: 'gm-3', threadId: 'th-3' }] } })
+
+    await reconciliarDesconocidos(NOW)
+
+    expect(mockList).toHaveBeenCalledTimes(2)
+    expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith({
+      where: { id: MSG, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
+      data: { status: 'DESCONOCIDO', error: 'no se encontró en Enviados' },
+    })
+    expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: OTRO_MSG, status: { in: ['ENVIANDO', 'DESCONOCIDO'] } },
+        data: expect.objectContaining({ status: 'ENVIADO' }),
+      }),
+    )
+    // Un pendiente roto no es un error de la conexión.
+    expect(prismaMock.crmGmailConnection.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('un error al guardar un pendiente tampoco frena al siguiente', async () => {
+    const OTRO_MSG = 'cmessage00000000000000002'
+    prismaMock.crmEmailMessage.findMany.mockResolvedValue([
+      pendiente(),
+      pendiente({ id: OTRO_MSG, rfcMessageId: `<crm.${OTRO_MSG}@avoqado.io>` }),
+    ])
+    mockList.mockResolvedValue({ data: { messages: [{ id: 'gm-4', threadId: 'th-4' }] } })
+    prismaMock.crmEmailMessage.updateMany.mockRejectedValueOnce(new Error('P2034')).mockResolvedValueOnce({ count: 1 })
+    await reconciliarDesconocidos(NOW)
+    expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledTimes(2)
+    expect(prismaMock.crmEmailMessage.updateMany.mock.calls[1][0].where.id).toBe(OTRO_MSG)
+    expect(prismaMock.crmGmailConnection.updateMany).not.toHaveBeenCalled()
   })
 
   it('sin la app configurada no hace nada', async () => {
