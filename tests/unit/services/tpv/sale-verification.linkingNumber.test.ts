@@ -230,14 +230,40 @@ describe('terminal nueva (con captureSeq)', () => {
     expect(w.sv).toMatchObject({ status: 'PENDING', rejectionReasons: [], reviewNotes: null, photos: [VINC] })
   })
 
-  it('FAILED + sólo número (ruta del número) ⇒ también vuelve a PENDING, sin tocar las fotos', async () => {
+  // A11b punto 5: corregir sólo el número no borra lo que el back-office pidió corregir.
+  it('FAILED + sólo número (ruta del número) ⇒ vuelve a PENDING con la nota y los motivos, sin tocar las fotos', async () => {
     w.sv = sale({ status: 'FAILED', photos: [VINC], rejectionReasons: ['DUPLICATE_LINKING'], reviewNotes: 'repetido', reviewedAt: NOW })
 
     const result = await numberOnly('55 1234-5678', capture(2))
 
     expect(result).toMatchObject({ status: 'PENDING', outcome: 'APPLIED', linkingNumberOutcome: 'APPLIED' })
-    expect(w.sv).toMatchObject({ status: 'PENDING', rejectionReasons: [], reviewNotes: null, photos: [VINC], linkingNumber: '5512345678' })
-    expect(tx.saleVerification.update.mock.calls[0][0].data).not.toHaveProperty('photos')
+    expect(w.sv).toMatchObject({
+      status: 'PENDING',
+      rejectionReasons: ['DUPLICATE_LINKING'],
+      reviewNotes: 'repetido',
+      photos: [VINC],
+      linkingNumber: '5512345678',
+    })
+    const data = tx.saleVerification.update.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('photos')
+    expect(data).not.toHaveProperty('reviewNotes')
+    expect(data).not.toHaveProperty('rejectionReasons')
+  })
+
+  it('FAILED + proof-of-sale con la foto vieja (SUPERSEDED) y número nuevo ⇒ PENDING con la nota del back-office', async () => {
+    w.sv = sale({
+      status: 'FAILED',
+      photos: [VINC],
+      appliedCaptureSeqs: { PHOTO_VINCULACION: { 'device-1': 5 } },
+      rejectionReasons: ['DUPLICATE_LINKING'],
+      reviewNotes: 'repetido',
+      reviewedAt: NOW,
+    })
+
+    const result = await proof(['https://x/vieja.jpg'], { capture: capture(3), linkingNumber: '5512345678' })
+
+    expect(result).toMatchObject({ status: 'PENDING', photoOutcome: 'SUPERSEDED_BY_NEWER', linkingNumberOutcome: 'APPLIED' })
+    expect(w.sv).toMatchObject({ status: 'PENDING', photos: [VINC], rejectionReasons: ['DUPLICATE_LINKING'], reviewNotes: 'repetido' })
   })
 
   it('número sin marcador ⇒ se escribe con fuente TPV y su hora, sin bitácora (no había uno)', async () => {
@@ -405,6 +431,12 @@ describe('terminal nueva (con captureSeq)', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled()
   })
 
+  it('con el interruptor apagado, un número mal escrito también responde 422 LINKING_NUMBER_DISABLED (no 400)', async () => {
+    ;(isLinkingNumberEnabledForOrg as jest.Mock).mockResolvedValue(false)
+
+    await expect(numberOnly('+52 55 1234 5678', capture(1))).rejects.toMatchObject({ statusCode: 422, code: 'LINKING_NUMBER_DISABLED' })
+  })
+
   it('la respuesta trae linkingDuplicate/portedDuplicate de isNumberDuplicate', async () => {
     w.sv = sale({ isPortabilidad: true })
     ;(isNumberDuplicate as jest.Mock).mockImplementation(async (_org: string, n: string) => n === '5512345678')
@@ -414,6 +446,76 @@ describe('terminal nueva (con captureSeq)', () => {
     expect(result).toMatchObject({ linkingDuplicate: true, portedDuplicate: false })
     expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5512345678', { verificationId: VER, iccid: ICCID })
     expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5587654321', { verificationId: VER, iccid: ICCID })
+  })
+})
+
+// A11b punto 4b: un portado en una venta que no es de portabilidad no se guarda (luego nadie lo podría borrar).
+describe('portado en una venta que no es portabilidad', () => {
+  it('proof-of-sale: la foto y la vinculación entran; el portado no se guarda y sale NOT_PORTABILIDAD', async () => {
+    const result = await proof([VINC], { capture: capture(1), linkingNumber: '5512345678', portedNumber: '557777777' })
+
+    expect(result).toMatchObject({ outcome: 'APPLIED', linkingNumberOutcome: 'APPLIED', portedNumberOutcome: 'NOT_PORTABILIDAD' })
+    expect(w.sv).toMatchObject({ photos: [VINC], linkingNumber: '5512345678', portedNumber: null, portedNumberSource: null })
+    expect(w.sv!.appliedCaptureSeqs).not.toHaveProperty('PORTED')
+    expect(isNumberDuplicate).not.toHaveBeenCalledWith(ORG, '557777777', expect.anything())
+  })
+
+  it('la ruta del número: NOT_PORTABILIDAD y nada se escribe', async () => {
+    const result = await numberOnly('557777777', capture(1), 'PORTABILIDAD')
+
+    expect(result).toMatchObject({ outcome: 'SUPERSEDED_BY_NEWER', portedNumberOutcome: 'NOT_PORTABILIDAD' })
+    expect(tx.saleVerification.update).not.toHaveBeenCalled()
+  })
+
+  it('la venta cobrada sin verificación usa la portabilidad de la orden', async () => {
+    w.sv = null
+    const result = await proof([PORT], { capture: capture(1), portedNumber: '5587654321' }, 'Portabilidad')
+
+    expect(result).toMatchObject({ outcome: 'APPLIED', portedNumberOutcome: 'NOT_PORTABILIDAD' })
+    expect(tx.saleVerification.create.mock.calls[0][0].data).toMatchObject({ isPortabilidad: false })
+    expect(tx.saleVerification.create.mock.calls[0][0].data).not.toHaveProperty('portedNumber')
+  })
+})
+
+// A11b punto 6: la terminal reintenta una captura que sí entró (no supo la respuesta) y entretanto la venta se aprobó.
+describe('reintento de una captura ya aplicada', () => {
+  it('se aprobó después ⇒ SUPERSEDED_BY_NEWER (ya aplicada), no SALE_ALREADY_APPROVED', async () => {
+    await expect(proof([VINC], { capture: capture(7), linkingNumber: '5512345678' })).resolves.toMatchObject({ outcome: 'APPLIED' })
+    w.sv = { ...w.sv!, status: 'COMPLETED' } // el back-office la aprueba
+
+    const retry = await proof([VINC], { capture: capture(7), linkingNumber: '5512345678' })
+
+    expect(retry).toMatchObject({
+      status: 'COMPLETED',
+      outcome: 'SUPERSEDED_BY_NEWER',
+      photoOutcome: 'SUPERSEDED_BY_NEWER',
+      linkingNumberOutcome: 'SUPERSEDED_BY_NEWER',
+    })
+    expect(tx.saleVerification.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('se rechazó después ⇒ también SUPERSEDED_BY_NEWER, no 400 SALE_REJECTED', async () => {
+    await proof([VINC], { capture: capture(7) })
+    w.sv = { ...w.sv!, status: 'REJECTED' }
+
+    await expect(proof([VINC], { capture: capture(7) })).resolves.toMatchObject({ outcome: 'SUPERSEDED_BY_NEWER' })
+  })
+
+  it('una captura NUEVA sobre la venta aprobada sigue saliendo SALE_ALREADY_APPROVED', async () => {
+    await proof([VINC], { capture: capture(7) })
+    w.sv = { ...w.sv!, status: 'COMPLETED' }
+
+    await expect(proof([VINC], { capture: capture(8) })).resolves.toMatchObject({ outcome: 'SALE_ALREADY_APPROVED' })
+  })
+
+  it('si un número de la petición no había entrado, no es reintento: la venta aprobada no se toca', async () => {
+    await proof([VINC], { capture: capture(7) })
+    w.sv = { ...w.sv!, status: 'COMPLETED' }
+
+    await expect(proof([VINC], { capture: capture(7), linkingNumber: '5512345678' })).resolves.toMatchObject({
+      outcome: 'SALE_ALREADY_APPROVED',
+    })
+    expect(w.sv!.linkingNumber).toBeNull()
   })
 })
 

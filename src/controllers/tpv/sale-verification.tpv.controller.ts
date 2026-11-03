@@ -2,6 +2,17 @@ import { Request, Response } from 'express'
 import * as saleVerificationService from '../../services/tpv/sale-verification.service'
 import logger from '../../config/logger'
 import { SaleVerificationStatus } from '@prisma/client'
+import AppError from '../../errors/AppError'
+
+/** Como el controlador de organización: sólo el `code` de un AppError viaja (nunca el de Prisma, p. ej. P2002). */
+function sendError(res: Response, what: string, error: any): void {
+  logger.error(`[SALE VERIFICATION CONTROLLER] Error ${what}: ${error?.message}`)
+  res.status(error?.statusCode || 500).json({
+    success: false,
+    message: error?.message || 'Internal server error',
+    ...(error instanceof AppError && error.code ? { code: error.code } : {}),
+  })
+}
 
 // ============================================================
 // Sale Verification Controller
@@ -35,12 +46,7 @@ export async function createSaleVerification(req: Request, res: Response): Promi
       message: 'Sale verification created successfully',
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error creating verification: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'creating verification', error)
   }
 }
 
@@ -70,12 +76,7 @@ export async function listSaleVerifications(req: Request, res: Response): Promis
       pagination: result.pagination,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error listing verifications: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'listing verifications', error)
   }
 }
 
@@ -96,12 +97,7 @@ export async function getSaleVerification(req: Request, res: Response): Promise<
       data: verification,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'getting verification', error)
   }
 }
 
@@ -130,12 +126,7 @@ export async function getVerificationByPaymentId(req: Request, res: Response): P
       data: verification,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification by payment: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'getting verification by payment', error)
   }
 }
 
@@ -163,12 +154,7 @@ export async function updateVerificationStatus(req: Request, res: Response): Pro
       message: 'Verification status updated successfully',
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error updating verification status: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'updating verification status', error)
   }
 }
 
@@ -200,12 +186,7 @@ export async function getPendingVerifications(req: Request, res: Response): Prom
       ...page,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting pending verifications: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'getting pending verifications', error)
   }
 }
 
@@ -237,12 +218,7 @@ export async function getVerificationDetail(req: Request, res: Response): Promis
       data: verification,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification detail: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'getting verification detail', error)
   }
 }
 
@@ -254,11 +230,6 @@ function terminalAuth(req: Request, res: Response): { venueId: string; orgId: st
   if (venueId && orgId && staffId) return { venueId, orgId, staffId }
   res.status(401).json({ success: false, message: 'Unauthorized - Missing authentication context' })
   return null
-}
-
-function sendError(res: Response, what: string, error: any): void {
-  logger.error(`[SALE VERIFICATION CONTROLLER] Error ${what}: ${error.message}`)
-  res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error', code: error.code })
 }
 
 /**
@@ -358,12 +329,7 @@ export async function createProofOfSale(req: Request, res: Response): Promise<vo
       ...result, // verificationId y status (como hoy) + los desenlaces de la terminal nueva
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error creating proof-of-sale: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'creating proof-of-sale', error)
   }
 }
 
@@ -418,11 +384,6 @@ export async function setVerificationNumber(req: Request, res: Response): Promis
       ...result,
     })
   } catch (error: any) {
-    logger.error(`[SALE VERIFICATION CONTROLLER] Error setting verification number: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-      code: error.code,
-    })
+    sendError(res, 'setting verification number', error)
   }
 }

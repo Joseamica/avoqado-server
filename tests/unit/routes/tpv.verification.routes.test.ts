@@ -157,3 +157,30 @@ describe('pending y el detalle no exigen el módulo (terminales publicadas)', ()
     expect(isModuleEnabled).not.toHaveBeenCalled()
   })
 })
+
+// A11b punto 8: como el controlador de organización, sólo viaja el `code` de un AppError; el de Prisma (P2002…) no.
+describe('el code de un error que no es AppError no sale en la respuesta', () => {
+  const dePrisma = () => Object.assign(new Error('Unique constraint failed on the fields: (`paymentId`)'), { code: 'P2002' })
+
+  it('POST /:id/number ⇒ 500 sin code', async () => {
+    isModuleEnabled.mockResolvedValue(true)
+    ;(prisma as any).$transaction.mockRejectedValue(dePrisma())
+
+    const r = await request(server)
+      .post(`/tpv/verification/${SV}/number`)
+      .send({ slot: 'VINCULACION', number: '5512345678', ...captura })
+
+    expect(r.status).toBe(500)
+    expect(r.body).toMatchObject({ success: false })
+    expect(r.body).not.toHaveProperty('code')
+  })
+
+  it('GET pending ⇒ 500 sin code', async () => {
+    queryRaw.mockRejectedValue(dePrisma())
+
+    const r = await request(server).get('/tpv/verification/pending')
+
+    expect(r.status).toBe(500)
+    expect(r.body).not.toHaveProperty('code')
+  })
+})

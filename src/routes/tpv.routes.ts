@@ -5928,6 +5928,8 @@ router.get(
  *       Terminal nueva (manda `captureSeq` con `captureDeviceId`, `idempotencyKey` y `capturedAt`): sólo escribe en
  *       PENDING/FAILED, una captura vieja del mismo aparato no pisa a una nueva y no pisa un número del back-office.
  *       Con el interruptor del número apagado, la foto se guarda y los números salen `DISABLED` (no es error).
+ *       Un portado en una venta que no es de portabilidad no se guarda (`NOT_PORTABILIDAD`). El reintento de una
+ *       captura que ya entró contesta `SUPERSEDED_BY_NEWER` aunque la venta ya se haya aprobado o rechazado.
  *       Las terminales publicadas (sin `captureSeq`) siguen exactamente igual.
  *     security:
  *       - bearerAuth: []
@@ -5981,7 +5983,7 @@ router.get(
  *                 outcome: { type: string, enum: [APPLIED, SUPERSEDED_BY_NEWER, SALE_ALREADY_APPROVED], description: 'Sólo con captureSeq' }
  *                 photoOutcome: { type: string, enum: [APPLIED, SUPERSEDED_BY_NEWER] }
  *                 linkingNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED] }
- *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED] }
+ *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED, NOT_PORTABILIDAD], description: 'NOT_PORTABILIDAD: la venta no es de portabilidad y el portado no se guardó' }
  *                 linkingDuplicate: { type: boolean, description: 'El número guardado ya está en otra venta de la organización' }
  *                 portedDuplicate: { type: boolean }
  *       400:
@@ -6008,7 +6010,8 @@ router.post(
  *     summary: Corregir sólo el número de vinculación o el portado (terminal nueva)
  *     description: |
  *       Mismas reglas que proof-of-sale para el número (sólo PENDING o FAILED; no pisa lo del back-office; una captura
- *       vieja del mismo aparato no pisa a una nueva). Nunca toca las fotos. Una venta FAILED vuelve a PENDING.
+ *       vieja del mismo aparato no pisa a una nueva). Nunca toca las fotos. Una venta FAILED vuelve a PENDING con la nota
+ *       del back-office. Con el interruptor apagado responde 422 antes de revisar el número.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -6045,7 +6048,7 @@ router.post(
  *                 status: { type: string }
  *                 outcome: { type: string, enum: [APPLIED, SUPERSEDED_BY_NEWER, SALE_ALREADY_APPROVED] }
  *                 linkingNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE] }
- *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE] }
+ *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, NOT_PORTABILIDAD], description: 'NOT_PORTABILIDAD: la venta no es de portabilidad y el portado no se guardó' }
  *                 linkingDuplicate: { type: boolean }
  *                 portedDuplicate: { type: boolean }
  *       400:

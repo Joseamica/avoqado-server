@@ -273,6 +273,24 @@ describe('GET tpv/verification/pending', () => {
     expect(JSON.stringify(data)).not.toContain('matches')
   })
 
+  // Codex r1 C3: un negocio con el interruptor apagado no recibe alertas ni se le buscan repetidos (pendientes y detalle).
+  it('con el interruptor apagado: alertas vacías y sin buscar repetidos', async () => {
+    ;(isLinkingNumberEnabledForOrg as jest.Mock).mockResolvedValue(false)
+    db.keys = [key(1)]
+    db.total = 1
+    db.rows.set('sv-001', row('sv-001', { linkingNumber: '5512345678', linkingNumberSource: 'TPV' }))
+    ;(prisma.saleVerification.findFirst as jest.Mock).mockResolvedValue(row('sv-001', { linkingNumber: '5512345678' }))
+    ;(findDuplicatesForSales as jest.Mock).mockResolvedValue(new Map([['sv-001', { linking: { total: 1, matches: [] } }]]))
+
+    const { data } = await getPendingVerifications(ORG, PROMOTER)
+    const detail = await getVerificationForCorrection(ORG, PROMOTER, 'sv-001')
+
+    expect(data[0].alerts).toEqual([])
+    expect(detail.alerts).toEqual([])
+    expect(findDuplicatesForSales).not.toHaveBeenCalled()
+    expect(isLinkingNumberEnabledForOrg).toHaveBeenCalledWith(ORG)
+  })
+
   it('sin pendientes: lista vacía, total 0, sin cursor y sin hidratar', async () => {
     const page = await getPendingVerifications(ORG, PROMOTER)
     expect(page).toEqual({ data: [], total: 0, nextCursor: null })
