@@ -25,7 +25,7 @@ import {
   evaluateRolePermission,
   resolveUserRoleForVenue,
 } from '@/middlewares/checkPermission.middleware'
-import { permisoDeLiberacion } from '@/routes/mobile.routes'
+import { permisoDeLiberacion } from '@/middlewares/permisoDeLiberacion.middleware'
 import logger from '@/config/logger'
 
 const checkPermissionMock = checkPermission as unknown as jest.Mock
