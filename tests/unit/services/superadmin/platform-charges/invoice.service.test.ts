@@ -1576,6 +1576,57 @@ describe('invoiceOccurrence — lo que cambia a media operación y no debe timbr
     expect(mundo.rows).toHaveLength(0)
   })
 
+  it('🔴 si otra pestaña corrige el RFC en la MISMA fila del perfil justo antes de reservar: 409, la fila no nace y NO se llama al PAC', async () => {
+    // Organización o negocio: corregir sobrescribe la misma fila, así que el id no cambia. Lecturas del perfil: preparar la foto, timbrar y reservar.
+    let lecturas = 0
+    ganchos.alBuscarPerfil = () => {
+      lecturas += 1
+      if (lecturas === 3) (mundo.profile as Fila).rfc = 'BBB010101BBB'
+    }
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toMatch(/datos fiscales/)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(mundo.rows).toHaveLength(0)
+  })
+
+  it('🔴 dos correcciones a la vez: la que encuentra la factura de la otra con otros datos recibe 409, no un éxito falso', async () => {
+    const otras = [
+      { satProductKey: '81112402', satUnitKey: 'H87' },
+      { satProductKey: '43232612', satUnitKey: 'E48' },
+    ]
+    // La otra pestaña timbra después de que ésta pasó por «¿ya hay fila?» bajo el candado, y antes de que entre a timbrar.
+    ganchos.alBuscarPerfil = () => {
+      if (mundo.rows.length === 0) {
+        mundo.rows.push(
+          fila({
+            status: 'STAMPED',
+            facturapiId: 'fa-1',
+            uuid: 'UUID-1',
+            serie: 'A',
+            folio: '118',
+            receptorRegimen: '601',
+            receptorCp: '06000',
+            usoCfdi: 'G03',
+            lines: [
+              { description: 'Renta de terminal', satProductKey: '81112401', satUnitKey: 'E48', quantity: 1, unitPriceCents: 50000 },
+              { description: 'Licencia', satProductKey: '43232611', satUnitKey: 'E48', quantity: 1, unitPriceCents: 99900 },
+            ],
+          }),
+        )
+      }
+    }
+
+    const error = await invoiceOccurrence('occ-1', { ...input, conceptKeys: otras }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toMatch(/otros datos/)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    expect(mundo.rows).toHaveLength(1)
+  })
+
   it('🔴 si en modo de prueba alguien guarda una llave real después de decidir el modo: se niega, la fila no nace y NO se llama al PAC', async () => {
     const restaurar = guardarEntorno()
     process.env.PLATFORM_CHARGES_SANDBOX = 'true'
@@ -1607,6 +1658,9 @@ describe('invoiceOccurrence — una corrección que llega con la factura ya viva
       uuid: 'UUID-1',
       serie: 'A',
       folio: '118',
+      receptorRegimen: '601',
+      receptorCp: '06000',
+      usoCfdi: 'G03',
       lines: [
         { description: 'Renta de terminal', satProductKey: '81112401', satUnitKey: 'E48', quantity: 1, unitPriceCents: 50000 },
         { description: 'Licencia', satProductKey: '43232611', satUnitKey: 'E48', quantity: 1, unitPriceCents: 99900 },
@@ -1648,6 +1702,20 @@ describe('invoiceOccurrence — una corrección que llega con la factura ya viva
     await expect(invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: (mundo.profile as Fila).id })).rejects.toBeInstanceOf(
       ConflictError,
     )
+  })
+
+  it.each([
+    ['el código postal', { codigoPostal: '07000' }],
+    ['el régimen', { regimenFiscal: '612' }],
+    ['el uso del CFDI', { defaultUsoCfdi: 'S01' }],
+    ['el RFC', { rfc: 'OTR010101AAA' }],
+  ])('🔴 corregir sólo %s, en la misma fila del perfil: también es 409', async (_n, cambio) => {
+    Object.assign(mundo.profile as Fila, cambio)
+
+    const error = await invoiceOccurrence('occ-1', { ...input, billingTaxProfileId: (mundo.profile as Fila).id }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toMatch(/otros datos/)
   })
 
   it('🔴 con otra clave del SAT: 409', async () => {

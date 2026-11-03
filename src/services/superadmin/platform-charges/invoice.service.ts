@@ -542,44 +542,63 @@ async function translateStampFailure(error: unknown, key: string): Promise<unkno
   return new PlatformBillingError(`${IN_FLIGHT_NOTICE} ${error.message}`, error.code, error.field)
 }
 
+/** Lo que del perfil fiscal queda escrito en el CFDI. 🔴 Un solo lugar: lo que aquí falte se puede corregir sin que nadie lo note. */
+const RECEPTOR_FIELDS = { rfc: true, razonSocial: true, regimenFiscal: true, codigoPostal: true, defaultUsoCfdi: true } as const
+type ReceptorOfProfile = Prisma.BillingTaxProfileGetPayload<{ select: typeof RECEPTOR_FIELDS }>
+type ReceptorOfRow = Pick<
+  Prisma.PlatformCfdiUncheckedCreateInput,
+  'receptorRfc' | 'receptorNombre' | 'receptorRegimen' | 'receptorCp' | 'usoCfdi'
+>
+
+function sameReceptor(profile: ReceptorOfProfile | null, row: ReceptorOfRow): boolean {
+  return (
+    profile !== null &&
+    profile.rfc === row.receptorRfc &&
+    profile.razonSocial === row.receptorNombre &&
+    profile.regimenFiscal === row.receptorRegimen &&
+    profile.codigoPostal === row.receptorCp &&
+    profile.defaultUsoCfdi === row.usoCfdi
+  )
+}
+
 /**
  * Lo que corre en la MISMA transacción que crea la fila STAMPING: toma el candado y exige PAID, `invoiceSeq` igual y que el cobro siga
- * con el perfil elegido; si no, 409. 🔴 El perfil se elige antes del candado: otra pestaña pudo corregir el RFC del cobro en medio, y
- * facturarle al contribuyente anterior sólo se deshace cancelando ante el SAT.
+ * con el perfil elegido y con los datos que se van a timbrar; si no, 409. 🔴 El perfil se elige y se lee antes del candado: otra pestaña
+ * pudo corregirlo en medio (STANDALONE cambia de fila; organización o negocio sobrescriben la misma), y facturarle al contribuyente
+ * anterior sólo se deshace cancelando ante el SAT.
  */
 async function reserveCheck(
   tx: Prisma.TransactionClient,
   occurrence: Pick<Occurrence, 'id' | 'chargeId'>,
   invoiceSeq: number,
   billingTaxProfileId: string,
+  row: ReceptorOfRow,
 ): Promise<void> {
   await lockCharge(tx, occurrence.chargeId)
   const fresh = await tx.platformChargeOccurrence.findUnique({ where: { id: occurrence.id }, select: { status: true, invoiceSeq: true } })
   if (!fresh || fresh.status !== 'PAID') throw notPaid()
   if (fresh.invoiceSeq !== invoiceSeq) throw changed()
   const charge = await tx.platformCharge.findUnique({ where: { id: occurrence.chargeId }, select: { billingTaxProfileId: true } })
-  if (charge?.billingTaxProfileId && charge.billingTaxProfileId !== billingTaxProfileId) {
+  const profile = await tx.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
+  if ((charge?.billingTaxProfileId && charge.billingTaxProfileId !== billingTaxProfileId) || !sameReceptor(profile, row)) {
     throw conflict('Los datos fiscales de este cobro acaban de cambiar: vuelve a intentarlo', 'PLATFORM_CHARGE_INVOICE_PROFILE_CHANGED')
   }
 }
 
 /**
- * 🔴 Con una factura viva no se timbra, así que la corrección que venía en la llamada no se aplica. Regresarla como si nada le diría
- * al founder «timbrada» con el RFC o la clave de antes. Si los datos son los mismos (un reintento), o no venía corrección
- * («Consultar estado»), se regresa la factura.
+ * 🔴 Con una factura que ya existe no se timbra, así que la corrección que venía en la llamada no se aplica. Regresarla como si nada le
+ * diría al founder «timbrada» con los datos de antes. Va en las dos salidas: cuando `resolverIntento` la encuentra y cuando aparece
+ * después, por las salidas de idempotencia de `issuePlatformCfdi` (otra pestaña la timbró en medio). Si los datos son los mismos (un
+ * reintento), o no venía corrección («Consultar estado»), se regresa la factura.
  */
 async function assertLiveHasRequestedData(cfdi: PlatformCfdi, input: InvoiceOccurrenceInput, billingTaxProfileId: string): Promise<void> {
   if (input.billingTaxProfileId === undefined && !input.conceptKeys) return
-  const profile = await prisma.billingTaxProfile.findUnique({
-    where: { id: billingTaxProfileId },
-    select: { rfc: true, razonSocial: true },
-  })
-  const sameReceptor = profile?.rfc === cfdi.receptorRfc && profile?.razonSocial === cfdi.receptorNombre
+  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
   const lines = Array.isArray(cfdi.lines) ? (cfdi.lines as unknown as PlatformCfdiLineInput[]) : []
   const sameKeys = (input.conceptKeys ?? []).every(
     (key, i) => lines[i]?.satProductKey === key.satProductKey && lines[i]?.satUnitKey === key.satUnitKey,
   )
-  if (sameReceptor && sameKeys) return
+  if (sameReceptor(profile, cfdi) && sameKeys) return
   const name = [cfdi.serie, cfdi.folio].filter(Boolean).join('-')
   throw conflict(
     `La factura ${name} ya está timbrada con otros datos: cancélala en Facturas CFDI para corregirla`,
@@ -629,11 +648,12 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
       sandbox,
       totals: { subtotalCents: snapshot.subtotalCents, discountCents: 0, taxCents: snapshot.taxCents, totalCents: snapshot.totalCents },
       platformChargeOccurrenceId: occurrence.id,
-      reserveCheck: tx => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId),
+      reserveCheck: (tx, row) => reserveCheck(tx, occurrence, snapshot.invoiceSeq, billingTaxProfileId, row),
     })
   } catch (error) {
     throw await translateStampFailure(error, key)
   }
+  await assertLiveHasRequestedData(cfdi, input, billingTaxProfileId)
   if (cfdi.status === 'STAMPED') auditIssued(cfdi, input.actorId, false)
   return cfdi
 }

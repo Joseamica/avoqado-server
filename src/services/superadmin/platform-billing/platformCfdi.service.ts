@@ -265,7 +265,7 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
     row = reserveCheck
       ? // La comprobación y la reserva son UNA transacción: lo que la comprobación vio es lo que existe cuando nace la fila.
         await prisma.$transaction(async tx => {
-          await reserveCheck(tx)
+          await reserveCheck(tx, data)
           return tx.platformCfdi.create({ data })
         })
       : await prisma.platformCfdi.create({ data })

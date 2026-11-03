@@ -105,7 +105,7 @@ export interface IssuePlatformCfdiInput {
    * «Por cobrar»: comprobación que corre en la MISMA transacción que crea la fila STAMPING, antes de crearla. Si lanza, no hay fila
    * ni llamada al PAC. Es lo que cierra la carrera «Facturar» contra «Deshacer» (ver `invoice.service.ts`).
    */
-  reserveCheck?: (tx: Prisma.TransactionClient) => Promise<void>
+  reserveCheck?: (tx: Prisma.TransactionClient, row: Prisma.PlatformCfdiUncheckedCreateInput) => Promise<void>
 }
 
 export interface ListPlatformCfdisFilters {
