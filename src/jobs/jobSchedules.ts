@@ -93,4 +93,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // trabaja de 8:30 a 11:00 — la primera vuelta manda y las demás retoman lo que quedó a medias. Segundo :33, libre entre
   // el watchdog de catálogo (:32) y las altas a medio pago (:34, cada 10 min).
   crmDailyDigest: '33 */15 8-11 * * 1-5',
+  // CRM propio, fase 2 (tarea 5): el remitente de las campañas masivas. Cada minuto en el segundo :17 (en los minutos 1, 6,
+  // 11… lo comparte con el monitor de POS, que sólo lee conexiones). Su entrada es un COUNT por el índice de `sendAttemptAt`.
+  crmCampaignSender: '17 * * * * *',
 } as const

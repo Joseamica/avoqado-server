@@ -22,8 +22,10 @@ import {
   addActivitySchema,
   addNoteSchema,
   addTeamMemberSchema,
+  campaignIdSchema,
   completeActivitySchema,
   createAccountSchema,
+  createCampaignSchema,
   createLostReasonSchema,
   createOptOutSchema,
   createStageSchema,
@@ -31,6 +33,7 @@ import {
   exportAccountsSchema,
   hideClientSchema,
   listAccountsSchema,
+  listCampaignsSchema,
   listClientsSchema,
   listTeamSchema,
   listTemplatesSchema,
@@ -42,8 +45,10 @@ import {
   removeTeamMemberSchema,
   rescheduleActivitySchema,
   searchOrganizationsSchema,
+  sendCampaignSchema,
   sendTemplateTestSchema,
   templateIdSchema,
+  updateCampaignSchema,
   updateLostReasonSchema,
   updateStageSchema,
   updateTeamMemberSchema,
@@ -135,6 +140,16 @@ router.get('/templates/:id', leerPlantillas, validateRequest(templateIdSchema), 
 router.patch('/templates/:id', campanas, validateRequest(updateTemplateSchema), crmEmailController.updateTemplate)
 router.post('/templates/:id/archive', campanas, validateRequest(templateIdSchema), crmEmailController.archiveTemplate)
 router.post('/templates/:id/unarchive', campanas, validateRequest(templateIdSchema), crmEmailController.unarchiveTemplate)
+
+// Mass-email campaigns (phase 2): all of it for «Campañas masivas» or the admin. Sending is confirmed with the preview's token.
+router.get('/campaigns', campanas, validateRequest(listCampaignsSchema), crmEmailController.listCampaigns)
+router.post('/campaigns', campanas, validateRequest(createCampaignSchema), crmEmailController.createCampaign)
+router.get('/campaigns/:id', campanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
+router.patch('/campaigns/:id', campanas, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
+router.post('/campaigns/:id/preview', campanas, validateRequest(campaignIdSchema), crmEmailController.previewCampaign)
+router.post('/campaigns/:id/test', campanas, validateRequest(campaignIdSchema), crmEmailController.sendCampaignTest)
+router.post('/campaigns/:id/send', campanas, validateRequest(sendCampaignSchema), crmEmailController.sendCampaign)
+router.post('/campaigns/:id/cancel', campanas, validateRequest(campaignIdSchema), crmEmailController.cancelCampaign)
 
 // A picture for an `image` block: in memory, at most 5 MB, only the three types `uploadAnnouncementImage` accepts.
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024

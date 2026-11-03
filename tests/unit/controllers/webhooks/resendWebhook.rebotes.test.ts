@@ -14,6 +14,8 @@ const mockPrisma = {
   campaignDelivery: { findFirst: jest.fn(), update: jest.fn() },
   customerCampaignDelivery: { findFirst: jest.fn(), update: jest.fn() },
   emailSuppression: { upsert: jest.fn() },
+  // El carril del CRM (tarea 5) va después de los otros dos; aquí ningún correo es de una campaña del CRM.
+  crmCampaignDelivery: { findFirst: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
 }
 
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: mockPrisma }))
@@ -81,6 +83,8 @@ beforeEach(() => {
   mockPrisma.customerCampaignDelivery.update.mockResolvedValue({})
   mockPrisma.campaignDelivery.update.mockResolvedValue({})
   mockPrisma.emailSuppression.upsert.mockResolvedValue({})
+  mockPrisma.crmCampaignDelivery.findFirst.mockResolvedValue(null)
+  mockPrisma.crmCampaignDelivery.findUnique.mockResolvedValue(null)
 })
 
 afterAll(() => {

@@ -95,6 +95,15 @@ describe('crm team routes', () => {
       { route: 'PATCH /templates/:id', keys: campanas },
       { route: 'POST /templates/:id/archive', keys: campanas },
       { route: 'POST /templates/:id/unarchive', keys: campanas },
+      // The mass-email campaigns (task 5): all of it for «Campañas masivas» or the admin.
+      { route: 'GET /campaigns', keys: campanas },
+      { route: 'POST /campaigns', keys: campanas },
+      { route: 'GET /campaigns/:id', keys: campanas },
+      { route: 'PATCH /campaigns/:id', keys: campanas },
+      { route: 'POST /campaigns/:id/preview', keys: campanas },
+      { route: 'POST /campaigns/:id/test', keys: campanas },
+      { route: 'POST /campaigns/:id/send', keys: campanas },
+      { route: 'POST /campaigns/:id/cancel', keys: campanas },
       { route: 'POST /uploads/image', keys: campanas },
       // «Dar de baja este correo» (la oposición): sólo el administrador del CRM.
       { route: 'POST /opt-outs', keys: admin },

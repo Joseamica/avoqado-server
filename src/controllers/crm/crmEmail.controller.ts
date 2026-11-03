@@ -2,6 +2,7 @@ import { Request, Response } from 'express'
 import { BadRequestError } from '../../errors/AppError'
 import { uploadAnnouncementImage } from '../../services/announcements/announcementImage.service'
 import { optOut } from '../../services/crm/email/optOut.service'
+import * as campaigns from '../../services/crm/email/campaigns.service'
 import * as templates from '../../services/crm/email/templates.service'
 
 // Email templates, preview, «Envíame una prueba» and images (phase 2). `req.crmAccess` is the caller's own keys, read by
@@ -62,4 +63,47 @@ export async function uploadImage(req: Request, res: Response): Promise<void> {
 export async function createOptOut(req: Request, res: Response): Promise<void> {
   await optOut(req.body.email, 'ADMIN', req.crmAccess!.staffId)
   res.json({ data: { ok: true } })
+}
+
+// Mass-email campaigns (phase 2, plan task 5). Every route is for «Campañas masivas» (`crm:campanas`) or the admin.
+
+/** GET /api/v1/crm/campaigns */
+export async function listCampaigns(req: Request, res: Response): Promise<void> {
+  const { rows, nextCursor, total } = await campaigns.listCampaigns(req.query as unknown as campaigns.ListCampaignsQuery)
+  res.json({ data: rows, meta: { total, nextCursor } })
+}
+
+/** GET /api/v1/crm/campaigns/:id — with its counters by delivery status. */
+export async function getCampaign(req: Request, res: Response): Promise<void> {
+  res.json({ data: await campaigns.getCampaign(req.params.id) })
+}
+
+/** POST /api/v1/crm/campaigns — a draft from a template. */
+export async function createCampaign(req: Request, res: Response): Promise<void> {
+  res.status(201).json({ data: await campaigns.createCampaign(req.crmAccess!, req.body) })
+}
+
+/** PATCH /api/v1/crm/campaigns/:id — only while it is a draft. */
+export async function updateCampaign(req: Request, res: Response): Promise<void> {
+  res.json({ data: await campaigns.updateCampaign(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** POST /api/v1/crm/campaigns/:id/preview — how many get it now, and the token to confirm exactly that. */
+export async function previewCampaign(req: Request, res: Response): Promise<void> {
+  res.json({ data: await campaigns.previewSend(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/campaigns/:id/test — «Envíame una prueba» of this version. A refusal is a 200 with `ok: false` and why. */
+export async function sendCampaignTest(req: Request, res: Response): Promise<void> {
+  res.json({ data: await campaigns.sendCampaignTest(req.crmAccess!, req.params.id) })
+}
+
+/** POST /api/v1/crm/campaigns/:id/send — «Mandar a N personas». */
+export async function sendCampaign(req: Request, res: Response): Promise<void> {
+  res.json({ data: await campaigns.enqueueCampaign(req.crmAccess!, req.params.id, req.body.token) })
+}
+
+/** POST /api/v1/crm/campaigns/:id/cancel */
+export async function cancelCampaign(req: Request, res: Response): Promise<void> {
+  res.json({ data: await campaigns.cancelCampaign(req.crmAccess!, req.params.id) })
 }

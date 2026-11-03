@@ -451,3 +451,84 @@ describe('POST /crm/uploads/image', () => {
     expect(res.body.message).toBe('El archivo no es una imagen válida')
   })
 })
+
+describe('/crm/campaigns — sólo «Campañas masivas» o el administrador', () => {
+  const CAMPAIGN = 'ccampaign0000000000000001'
+  const campana = {
+    id: CAMPAIGN,
+    name: 'Novedades de noviembre',
+    templateId: TEMPLATE,
+    subject: 'Hola {{nombre}}',
+    blocks: [{ type: 'paragraph', text: 'Hola {{nombre}}' }],
+    audience: { segmentos: [] },
+    status: 'BORRADOR',
+    testSentHash: null,
+    total: 0,
+    createdById: STAFF,
+    enqueuedAt: null,
+    finishedAt: null,
+    cancelledAt: null,
+    createdAt: new Date('2026-11-02T10:00:00Z'),
+    updatedAt: new Date('2026-11-02T10:00:00Z'),
+  }
+  const rutas: Array<[string, () => request.Test]> = [
+    ['GET /campaigns', () => request(app).get('/crm/campaigns')],
+    ['POST /campaigns', () => request(app).post('/crm/campaigns').send({ name: 'x', templateId: TEMPLATE })],
+    ['GET /campaigns/:id', () => request(app).get(`/crm/campaigns/${CAMPAIGN}`)],
+    ['PATCH /campaigns/:id', () => request(app).patch(`/crm/campaigns/${CAMPAIGN}`).send({ name: 'Otra' })],
+    ['POST /campaigns/:id/preview', () => request(app).post(`/crm/campaigns/${CAMPAIGN}/preview`)],
+    ['POST /campaigns/:id/test', () => request(app).post(`/crm/campaigns/${CAMPAIGN}/test`)],
+    ['POST /campaigns/:id/send', () => request(app).post(`/crm/campaigns/${CAMPAIGN}/send`).send({ token: 'x.y' })],
+    ['POST /campaigns/:id/cancel', () => request(app).post(`/crm/campaigns/${CAMPAIGN}/cancel`)],
+  ]
+
+  beforeEach(() => {
+    for (const fn of [
+      prismaMock.crmCampaign.create,
+      prismaMock.crmCampaign.findUnique,
+      prismaMock.crmCampaign.findMany,
+      prismaMock.crmCampaign.count,
+      prismaMock.crmCampaignDelivery.groupBy,
+    ])
+      fn.mockReset()
+    prismaMock.crmCampaign.create.mockResolvedValue(campana)
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(campana)
+    prismaMock.crmCampaign.findMany.mockResolvedValue([campana])
+    prismaMock.crmCampaign.count.mockResolvedValue(1)
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue([])
+  })
+
+  it.each(rutas)('🔴 quien sólo manda correo uno a uno recibe 403 en %s y no se toca nada', async (_ruta, llamar) => {
+    soloContactar()
+    const res = await llamar()
+    expect(res.status).toBe(403)
+    expect(prismaMock.crmCampaign.create).not.toHaveBeenCalled()
+    expect(prismaMock.crmCampaign.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('con «Campañas masivas» crea el borrador desde la plantilla y lee la lista con su total', async () => {
+    soloCampanas()
+
+    const creada = await request(app).post('/crm/campaigns').send({ name: 'Novedades de noviembre', templateId: TEMPLATE })
+    expect(creada.status).toBe(201)
+    expect(creada.body.data).toMatchObject({ id: CAMPAIGN, status: 'BORRADOR', pruebaVigente: false, contadores: {} })
+    expect(creada.body.data).not.toHaveProperty('testSentHash')
+    expect(prismaMock.crmCampaign.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ subject: 'Hola {{nombre}}', createdById: STAFF }) }),
+    )
+
+    const lista = await request(app).get('/crm/campaigns?limit=500')
+    expect(lista.status).toBe(200)
+    expect(lista.body.meta).toEqual({ total: 1, nextCursor: null })
+    // El tope de 100 lo pone el servidor, pida lo que pida el cliente.
+    expect(prismaMock.crmCampaign.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 101 }))
+  })
+
+  it('un público mal formado se rechaza al guardar, en español', async () => {
+    soloCampanas()
+    const res = await request(app)
+      .patch(`/crm/campaigns/${CAMPAIGN}`)
+      .send({ audience: { segmentos: [{ tipo: 'CLIENTES' }, { tipo: 'CLIENTES' }] } })
+    expect(res.status).toBe(400)
+  })
+})

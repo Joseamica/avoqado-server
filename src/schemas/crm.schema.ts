@@ -531,3 +531,48 @@ export const audienciaSchema = z
 
 export type Audiencia = z.infer<typeof audienciaSchema>
 export type Segmento = Audiencia['segmentos'][number]
+
+// ── Mass-email campaigns (phase 2, plan task 5) ────────────────────────────────────────────────────────────────────────
+
+const campaignName = text(120, 'El nombre de la campaña es obligatorio')
+
+/** GET /crm/campaigns. The page size has no upper bound here: the service caps it at 100. */
+export const listCampaignsSchema = z.object({
+  query: z.object({
+    cursor: cuid.optional(),
+    limit: listAccountsSchema.shape.query.shape.limit,
+    status: z.enum(['BORRADOR', 'ENVIANDO', 'ENVIADA', 'CANCELADA'], { errorMap: () => ({ message: 'Ese estado no existe' }) }).optional(),
+  }),
+})
+
+/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/preview, /test and /cancel */
+export const campaignIdSchema = z.object({ params: byId })
+
+/** POST /crm/campaigns — from a template: its subject and blocks are copied. */
+export const createCampaignSchema = z.object({
+  body: z.object({ name: campaignName, templateId: z.string({ required_error: 'Elige una plantilla' }).cuid('La plantilla no es válida') }),
+})
+
+/** PATCH /crm/campaigns/:id — only what changes, only while it is a draft (the service answers 409 otherwise). */
+export const updateCampaignSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      name: campaignName.optional(),
+      subject: emailSubject.optional(),
+      blocks: emailBlocks.optional(),
+      audience: audienciaSchema.optional(),
+    })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+/** POST /crm/campaigns/:id/send — the token the preview gave, which ties what was seen to what is sent. */
+export const sendCampaignSchema = z.object({
+  params: byId,
+  body: z.object({
+    token: z
+      .string({ required_error: 'Falta la confirmación', invalid_type_error: 'Falta la confirmación' })
+      .min(1, 'Falta la confirmación')
+      .max(2000, 'La confirmación no es válida'),
+  }),
+})

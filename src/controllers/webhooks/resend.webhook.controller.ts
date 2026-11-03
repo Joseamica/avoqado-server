@@ -16,6 +16,7 @@ import { Webhook } from 'svix'
 import logger from '@/config/logger'
 import * as marketingService from '../../services/superadmin/marketing.superadmin.service'
 import { procesarAvisoDeResend } from '../../services/marketing/campaignWebhook.service'
+import { procesarAvisoCrm } from '../../services/crm/email/campaignWebhook.service'
 import { recordSuppression } from '../../services/marketing/emailSuppression.service'
 import { FALLO_FINAL_DE_CORREO, marcarEntregaFallidaPorMensaje } from '../../services/giftCards/giftCardDelivery.service'
 
@@ -146,14 +147,15 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
       }
     }
 
-    // Handle the event — DOS carriles distintos comparten este webhook:
+    // Handle the event — TRES carriles distintos comparten este webhook:
     //   1. Marketing de superadmin (Avoqado → los venues), que es el que ya estaba.
     //   2. Campañas de un negocio a SUS clientes (fase 1B).
+    //   3. Campañas de plataforma del CRM (fase 2 del CRM).
     // Se prueba primero el de superadmin para no cambiar en nada su comportamiento; sólo
     // cuando dice que la entrega no es suya se intenta el nuestro. «No es suya» incluye ahora los rebotes y quejas de una
     // entrega que no tiene `CampaignDelivery` (antes los daba por manejados y el carril de clientes no los veía nunca). La
-    // supresión de la dirección ya se hizo arriba, para todos los carriles. Un carril nuevo (el CRM, tarea 5) se agrega
-    // aquí abajo, después de `procesarAvisoDeResend`.
+    // supresión de la dirección ya se hizo arriba, para todos los carriles. El del CRM va al final: sólo ve lo que los otros dos
+    // dijeron que no es suyo.
     let result: Awaited<ReturnType<typeof marketingService.handleResendWebhook>>
     try {
       result = await marketingService.handleResendWebhook(event)
@@ -180,6 +182,18 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
         // exactamente lo que queremos.
         logger.error('📧 [Resend Webhook] Falló el procesamiento de una campaña a clientes:', error)
         return res.status(500).json({ success: false, error: 'Error procesando el aviso de campaña' })
+      }
+
+      // 3. Campañas de plataforma del CRM (Avoqado a sus prospectos, clientes y usuarios). Igual que el carril de clientes:
+      // si falla, 500 para que Resend reintente; un rebote o una queja perdidos dejarían la delivery como si hubiera llegado.
+      try {
+        const crm = await procesarAvisoCrm(event as any)
+        if (crm.manejado) {
+          return res.status(200).json({ success: true, handled: true, reason: 'Campaña del CRM' })
+        }
+      } catch (error) {
+        logger.error('📧 [Resend Webhook] Falló el procesamiento de una campaña del CRM:', error)
+        return res.status(500).json({ success: false, error: 'Error procesando el aviso de una campaña del CRM' })
       }
     }
 

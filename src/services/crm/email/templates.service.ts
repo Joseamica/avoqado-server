@@ -80,8 +80,8 @@ export async function getTemplate(id: string) {
 
 // ── Escribir ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Una variable fuera de la lista cerrada se rechaza AL GUARDAR: «Variable desconocida: {{precio}}». */
-function assertSinVariablesDesconocidas(asunto: string, bloques: BloqueCampana[]): void {
+/** Una variable fuera de la lista cerrada se rechaza AL GUARDAR: «Variable desconocida: {{precio}}». También la campaña. */
+export function assertSinVariablesDesconocidas(asunto: string, bloques: BloqueCampana[]): void {
   const desconocidas = variablesDesconocidasEn(asunto, bloques)
   if (!desconocidas.length) return
   const lista = desconocidas.map(nombre => `{{${nombre}}}`).join(', ')
