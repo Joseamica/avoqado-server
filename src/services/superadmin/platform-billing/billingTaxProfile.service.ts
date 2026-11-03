@@ -12,7 +12,7 @@ import type { BillingTaxProfile } from '@prisma/client'
 import logger from '@/config/logger'
 import { buildStoragePath, deleteFileFromStorage, uploadFileToStorage } from '@/services/storage.service'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
-import type { SatValidationResult } from '@/services/fiscal/providers/fiscal-provider.interface'
+import { CustomerDataRejectedError, type SatValidationResult } from '@/services/fiscal/providers/fiscal-provider.interface'
 import { getActivePlatformEmisor, PlatformBillingError } from './platformEmisor.service'
 import type { BillingCustomerKind, TaxProfileWithValidation, UpsertTaxProfileInput } from './types'
 
@@ -79,7 +79,8 @@ export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput, verd
   })
 }
 
-type SatAnswer = { customerId: string; validation: SatValidationResult }
+/** `customerId: null` = el rechazo llegó al dar de alta al cliente, antes de que hubiera uno. */
+type SatAnswer = { customerId: string | null; validation: SatValidationResult }
 
 /**
  * Le pregunta al SAT por estos datos, vía el PAC y sin gastar timbre.
@@ -99,6 +100,8 @@ async function askSat(data: FiscalData & Pick<BillingTaxProfile, 'email' | 'fact
     })
     return { customerId, validation: await provider.validateCustomerTaxInfo(customerId) }
   } catch (err) {
+    // 🔴 El alta del cliente ya es una respuesta: un RFC que no existe se rechaza ahí, sin llegar a `validateCustomerTaxInfo`.
+    if (err instanceof CustomerDataRejectedError) return { customerId: null, validation: err.validation }
     logger.warn(`[platform-billing] no se pudo validar ${label}: ${err instanceof Error ? err.message : String(err)}`)
     return null
   }
@@ -108,7 +111,7 @@ async function askSat(data: FiscalData & Pick<BillingTaxProfile, 'email' | 'fact
  * Guarda lo que escribió el SUPERADMIN sólo si el SAT no lo rechaza. Un rechazo no escribe nada: lo que estaba bien sigue
  * igual, y un cliente externo no acumula filas con RFC malos. Si el SAT no contesta sí se guarda, sin presumir «Verificado».
  *
- * `upsertCustomer` sí deja el dato rechazado en el cliente de Facturapi, y no importa: cada timbrado manda el receptor completo.
+ * Lo que `validateCustomerTaxInfo` rechaza sí se queda en el cliente de Facturapi, y no importa: cada timbrado manda el receptor completo.
  *
  * ponytail: dos pestañas guardando el mismo cliente en el mismo instante se pueden cruzar en ese cliente de Facturapi, y un
  * dato malo quedaría «Verificado» hasta que el SAT lo rechace al timbrar. Evitarlo pide un cliente de usar y tirar por intento.
@@ -141,7 +144,7 @@ export async function saveBillingTaxProfileIfSatAccepts(
 
   // Sin respuesta: lo ya verificado sigue verificado mientras sean los mismos datos. Un perfil nuevo nace PENDING por el default.
   const verdict: TaxVerdict = sat
-    ? { facturapiCustomerId: sat.customerId, validationStatus: 'VALID', validatedAt: new Date() }
+    ? { facturapiCustomerId: sat.customerId ?? undefined, validationStatus: 'VALID', validatedAt: new Date() }
     : existing && !isDeepStrictEqual(fiscalDataOf(existing), typed)
       ? { validationStatus: 'PENDING', validatedAt: null }
       : {}
@@ -160,7 +163,7 @@ async function recordVerdict(profile: BillingTaxProfile, { customerId, validatio
     const { count } = await prisma.billingTaxProfile.updateMany({
       where: { id: profile.id, ...fiscalDataOf(profile) },
       data: {
-        facturapiCustomerId: customerId,
+        facturapiCustomerId: customerId ?? undefined,
         validationStatus: validation.valid ? 'VALID' : 'INVALID',
         validatedAt: new Date(),
       },

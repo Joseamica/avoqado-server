@@ -19,6 +19,7 @@ import {
   upsertBillingTaxProfile,
   validateBillingTaxProfile,
 } from '@/services/superadmin/platform-billing/billingTaxProfile.service'
+import { CustomerDataRejectedError, type SatValidationResult } from '@/services/fiscal/providers/fiscal-provider.interface'
 import logger from '@/config/logger'
 
 const mockUpload = uploadFileToStorage as jest.Mock
@@ -204,6 +205,24 @@ describe('validateBillingTaxProfile (fase 2)', () => {
     await expect(validateBillingTaxProfile('nope')).rejects.toMatchObject({ code: 'NO_PROFILE' })
   })
 
+  it('🔴 «Revalidar» con un RFC que el proveedor rechaza: lo marca INVALID sin perder el cliente de Facturapi que ya tenía', async () => {
+    const RECHAZO: SatValidationResult = { valid: false, errors: [{ field: 'rfc', message: 'El RFC no existe' }] }
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE as never)
+    prismaMock.platformEmisor.findFirst.mockResolvedValue(EMISOR as never)
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 1 } as never)
+    mockResolve.mockReturnValue({
+      upsertCustomer: jest.fn().mockRejectedValue(new CustomerDataRejectedError(RECHAZO)),
+      validateCustomerTaxInfo: jest.fn(),
+    })
+
+    const res = await validateBillingTaxProfile('p1')
+
+    expect(res.validation).toEqual(RECHAZO)
+    const { data } = prismaMock.billingTaxProfile.updateMany.mock.calls[0][0]
+    expect(data.validationStatus).toBe('INVALID')
+    expect(data.facturapiCustomerId).toBeUndefined()
+  })
+
   it('el veredicto sólo se escribe sobre los datos que se revisaron', async () => {
     prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE as never)
     prismaMock.platformEmisor.findFirst.mockResolvedValue(EMISOR as never)
@@ -308,6 +327,19 @@ describe('saveBillingTaxProfileIfSatAccepts: primero el SAT, después se guarda'
     const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, customerType: 'STANDALONE', venueId: undefined, displayName: 'Cliente' })
 
     expect(res).toEqual({ saved: false, profile: null, validation: RECHAZO, markedInvalid: false })
+    expect(escribio()).toBe(0)
+  })
+
+  it('🔴 un RFC que el proveedor rechaza al dar de alta el cliente es un rechazo, no «el SAT no contestó»: no se guarda', async () => {
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(BUENO as never)
+    mockResolve.mockReturnValue({
+      upsertCustomer: jest.fn().mockRejectedValue(new CustomerDataRejectedError(RECHAZO as SatValidationResult)),
+      validateCustomerTaxInfo: jest.fn(),
+    })
+
+    const res = await saveBillingTaxProfileIfSatAccepts(TECLEADO)
+
+    expect(res).toEqual({ saved: false, profile: BUENO, validation: RECHAZO, markedInvalid: false })
     expect(escribio()).toBe(0)
   })
 

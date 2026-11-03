@@ -9,6 +9,7 @@ import {
   CreateOrgParams,
   CreateOrgResult,
   CreditNoteParams,
+  CustomerDataRejectedError,
   FiscalProvider,
   GlobalInvoiceParams,
   InvoiceSearchResult,
@@ -176,18 +177,39 @@ export class FacturapiProvider implements FiscalProvider {
 
     if (params.existingCustomerId) {
       try {
-        const updated = await this.client.customers.update(params.existingCustomerId, payload)
-        return updated.id
+        return await this.sendCustomer('PUT', `/customers/${encodeURIComponent(params.existingCustomerId)}`, payload)
       } catch (err) {
-        // El Customer guardado pudo borrarse en Facturapi (o venir de otra organización).
-        // Cualquier fallo al actualizar se resuelve creando uno nuevo; el id se re-persiste.
-        const msg = err instanceof Error ? err.message : String(err)
-        if (!/404|not found/i.test(msg)) throw err
+        // El Customer guardado pudo borrarse en Facturapi (o venir de otra organización): se crea uno nuevo; el id se re-persiste.
+        if (!(err instanceof ProviderHttpError && err.status === 404)) throw err
       }
     }
 
-    const created = await this.client.customers.create(payload)
-    return created.id
+    return this.sendCustomer('POST', '/customers', payload)
+  }
+
+  /**
+   * El SDK descarta status, código y campo, y sin ellos un RFC que no existe se confunde con una caída. Medido en modo de prueba el
+   * 3-nov-2026: un dato malo contesta 400 con su `path` (`tax_id_not_found`, `tax_system_not_allowed_for_tax_id`, `invalid_request`).
+   */
+  private async sendCustomer(method: 'POST' | 'PUT', ruta: string, payload: unknown): Promise<string> {
+    const response = await fetch(`https://www.facturapi.io/v2${ruta}`, {
+      method,
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    })
+    const body = await response.json()
+    if (response.status === 400 && typeof body?.path === 'string') {
+      throw new CustomerDataRejectedError({
+        valid: false,
+        errors: [{ field: FacturapiProvider.mapValidationPath(body.path), message: body.message ?? 'El SAT no reconoce este dato' }],
+      })
+    }
+    if (!response.ok) {
+      throw new ProviderHttpError(response.status, typeof body?.code === 'string' ? body.code : null, body?.message ?? `Facturapi HTTP ${response.status}`)
+    }
+    if (typeof body?.id !== 'string') throw new Error('Respuesta ilegible de Facturapi')
+    return body.id
   }
 
   async validateCustomerTaxInfo(customerId: string): Promise<SatValidationResult> {
