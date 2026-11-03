@@ -20,8 +20,8 @@ const optionalId = z.string({ invalid_type_error: 'El identificador no es válid
 const customerType = z.enum(['ORGANIZATION', 'VENUE', 'STANDALONE'], {
   errorMap: () => ({ message: 'El tipo de cliente debe ser ORGANIZATION, VENUE o STANDALONE' }),
 })
-const frequency = z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY'], {
-  errorMap: () => ({ message: 'La periodicidad debe ser WEEKLY, BIWEEKLY o MONTHLY' }),
+const frequency = z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'ONE_TIME'], {
+  errorMap: () => ({ message: 'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME' }),
 })
 const invoiceMode = z.enum(['AUTOMATIC', 'MANUAL'], {
   errorMap: () => ({ message: 'El modo de factura debe ser AUTOMATIC o MANUAL' }),

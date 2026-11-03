@@ -1,9 +1,10 @@
 /**
  * «Por cobrar» — cobros recurrentes y su generador de ocurrencias (spec 2026-11-02-por-cobrar-superadmin §3.3 y §3.4).
  *
- * Un **cobro** (`PlatformCharge`) es lo que Avoqado le cobra a un cliente fuera de Stripe, cada semana, quincena o mes. De él
- * salen las **ocurrencias** (`PlatformChargeOccurrence`): un periodo por cobrar con su foto de conceptos, totales y modo de
- * factura. Editar el cobro cambia sólo lo futuro: lo vencido, lo de hoy y lo ya marcado conservan su foto.
+ * Un **cobro** (`PlatformCharge`) es lo que Avoqado le cobra a un cliente fuera de Stripe, cada semana, quincena o mes, o de una sola
+ * vez. De él salen las **ocurrencias** (`PlatformChargeOccurrence`): un periodo por cobrar con su foto de conceptos, totales y modo de
+ * factura. Editar el cobro cambia sólo lo futuro: lo vencido, lo de hoy y lo ya marcado conservan su foto. Uno de una sola vez
+ * (`ONE_TIME`) tiene UNA fecha, que nace con el alta: no se genera, no se pausa y, mientras esté sin pagar y sin factura, se edita en su lugar.
  *
  * - Toda escritura de un cobro y de sus ocurrencias corre en UNA transacción corta que antes toma el candado de su fila
  *   (`withChargeLock`) y ahí adentro vuelve a leer lo que va a decidir. Facturapi y el correo nunca se llaman ahí.
@@ -19,7 +20,7 @@ import prisma from '@/utils/prismaClient'
 import { lockCharge, withChargeLock } from './lock'
 import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
 import { computeChargeTotals } from './totals'
-import type { CalendarDay, ChargeConcept } from './types'
+import { LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
 
 /** El generador mira de hoy a hoy+7: lo que vence en la semana ya aparece en la pantalla y en el correo. */
 const GENERATE_AHEAD_DAYS = 7
@@ -91,11 +92,23 @@ const FIELDS: readonly Field[] = [
 const RESCHEDULE_FIELDS: readonly Field[] = ['frequency', 'anchorDate', 'concepts', 'invoiceMode']
 /** Lo que obliga a volver a revisar a quién le cobramos y con qué datos fiscales. */
 const CUSTOMER_FIELDS: readonly Field[] = ['customerType', 'organizationId', 'venueId', 'billingTaxProfileId', 'invoiceMode']
+/** De un cobro de una sola vez, lo que vive en SU única fecha: cuándo cae (el ancla) y su foto de conceptos y modo de factura. */
+const ONE_TIME_DATE_FIELDS: readonly Field[] = ['anchorDate', 'concepts', 'invoiceMode']
 
 // ── Errores y texto ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 const invalid = (message: string, code = 'PLATFORM_CHARGE_INVALID') => new BadRequestError(message, code)
 const chargeNotFound = () => new NotFoundError('Cobro no encontrado', 'PLATFORM_CHARGE_NOT_FOUND')
+const oneTimeFixed = () =>
+  invalid(
+    'Un cobro de una sola vez no se puede volver recurrente, ni uno recurrente de una sola vez. Da de alta un cobro nuevo.',
+    'PLATFORM_CHARGE_ONE_TIME_FIXED',
+  )
+const oneTimeNoPause = () =>
+  invalid(
+    'Un cobro de una sola vez no se puede pausar ni reanudar. Si ya no se va a cobrar, omite su fecha.',
+    'PLATFORM_CHARGE_ONE_TIME_NO_PAUSE',
+  )
 
 const cleanText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
 const cleanId = (value: unknown): string | null => cleanText(value) || null
@@ -183,7 +196,9 @@ function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean): Part
     out.customerName = name
   }
   if (given('frequency')) {
-    if (!FREQUENCIES.has(input.frequency as string)) throw invalid('Elige la periodicidad del cobro: semanal, quincenal o mensual')
+    if (!FREQUENCIES.has(input.frequency as string)) {
+      throw invalid('Elige la periodicidad del cobro: semanal, quincenal, mensual o de una sola vez')
+    }
     out.frequency = input.frequency
   }
   if (given('anchorDate')) {
@@ -306,7 +321,8 @@ const sameValue = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSO
  * Crea las ocurrencias del cobro con fecha en `[from, to]` (nunca antes del ancla), cada una con la foto de conceptos, totales y
  * modo de factura de ESTE momento. Idempotente: la llave única `[chargeId, dueDate]` con `skipDuplicates` respeta lo que ya existe
  * (incluido lo ya pagado u omitido), y no crea una fecha del mismo periodo que lo último marcado (`isSamePeriodAsMarked`). Devuelve
- * cuántas creó. Debe correr dentro del candado del cobro.
+ * cuántas creó. Debe correr dentro del candado del cobro. Un cobro de una sola vez pide siempre `[ancla, ancla]`: su única fecha
+ * nace de una vez, aunque sea lejana, sin importar el rango que se le pase.
  */
 async function generateOccurrences(
   tx: Prisma.TransactionClient,
@@ -315,7 +331,8 @@ async function generateOccurrences(
   to: CalendarDay,
 ): Promise<number> {
   const state = stateOf(charge)
-  const candidates = occurrenceDatesBetween(state.frequency, state.anchorDate, from, to)
+  const [rangeFrom, rangeTo] = state.frequency === 'ONE_TIME' ? [state.anchorDate, state.anchorDate] : [from, to]
+  const candidates = occurrenceDatesBetween(state.frequency, state.anchorDate, rangeFrom, rangeTo)
   if (candidates.length === 0) return 0
   const lastMarked = await tx.platformChargeOccurrence.findFirst({
     where: { chargeId: charge.id, status: { in: ['PAID', 'SKIPPED'] } },
@@ -357,6 +374,68 @@ async function assertNoMarkedFuture(tx: Prisma.TransactionClient, chargeId: stri
       'PLATFORM_CHARGE_FUTURE_MARKED',
     )
   }
+}
+
+/**
+ * Un cobro de una sola vez edita su única fecha EN SU LUGAR (la misma fila, el mismo `id`): lo recurrente borra y regenera lo futuro,
+ * pero aquí no hay serie, y borrar la fila soltaría en silencio la factura que cuelga de ella. Sólo se edita mientras la fecha esté sin
+ * pagar, sin omitir y sin factura viva; si no, 409 con la razón y qué hacer. Con factura viva manda la factura: aun pagada, «Deshacer»
+ * el pago se bloquea mientras exista. 🔴 Todo se comprueba ANTES de escribir. Debe correr dentro del candado del cobro.
+ *
+ * Lo que no es de la fecha (nombre, cliente, perfil fiscal) sólo cambia el cobro y no pregunta por la fecha.
+ */
+async function updateOneTime(tx: Prisma.TransactionClient, id: string, next: ChargeState, changed: Field[]): Promise<PlatformCharge> {
+  const editsDate = changed.some(field => ONE_TIME_DATE_FIELDS.includes(field))
+  const date = editsDate
+    ? await tx.platformChargeOccurrence.findFirst({
+        where: { chargeId: id },
+        orderBy: { dueDate: 'asc' },
+        select: { id: true, status: true },
+      })
+    : null
+
+  if (date) {
+    const live = await tx.platformCfdi.findFirst({
+      where: { platformChargeOccurrenceId: date.id, status: { in: LIVE_INVOICE_STATUSES } },
+      select: { id: true },
+    })
+    if (live) {
+      throw new ConflictError(
+        'Este cobro ya tiene una factura. Quítala o cancélala para poder editarlo.',
+        'PLATFORM_CHARGE_ONE_TIME_HAS_INVOICE',
+      )
+    }
+    if (date.status === 'PAID') {
+      throw new ConflictError(
+        'Este cobro ya está marcado como pagado. Deshaz el pago para poder editarlo.',
+        'PLATFORM_CHARGE_ONE_TIME_PAID',
+      )
+    }
+    if (date.status === 'SKIPPED') {
+      throw new ConflictError('Este cobro está omitido. Deshaz la omisión para poder editarlo.', 'PLATFORM_CHARGE_ONE_TIME_SKIPPED')
+    }
+  }
+
+  const updated = await tx.platformCharge.update({ where: { id }, data: dbFields(next) })
+  if (!editsDate) return updated
+  if (!date) {
+    // No debería pasar (la fecha nace con el alta), pero un cobro sin su fecha no se cobraría nunca: editarlo la vuelve a crear.
+    await generateOccurrences(tx, updated, next.anchorDate, next.anchorDate)
+    return updated
+  }
+  const { subtotalCents, taxCents, totalCents } = computeChargeTotals(next.concepts)
+  await tx.platformChargeOccurrence.update({
+    where: { id: date.id },
+    data: {
+      dueDate: calendarDayToDb(next.anchorDate),
+      concepts: next.concepts as unknown as Prisma.InputJsonValue,
+      subtotalCents,
+      taxCents,
+      totalCents,
+      invoiceMode: next.invoiceMode,
+    },
+  })
+  return updated
 }
 
 function audit(action: string, charge: PlatformCharge, actorId: string, data: Prisma.InputJsonValue): void {
@@ -412,6 +491,8 @@ export async function createCharge(input: ChargeInput, actorId: string, now: Dat
  * Edita un cobro: sólo cambia lo futuro. Si cambió algo que afecta las fechas (calendario, conceptos o modo), borra las PENDING
  * con fecha mayor a hoy y las regenera de hoy a hoy+7 con la foto nueva; lo vencido y lo de hoy conservan la suya. Cambiar el
  * ancla o la periodicidad con una ocurrencia futura ya marcada es un 409. Si no cambió nada, no escribe nada.
+ *
+ * Una sola vez (`ONE_TIME`): no se cambia de o a esa periodicidad (400) y su única fecha se edita en su lugar (`updateOneTime`).
  */
 export async function updateCharge(
   id: string,
@@ -430,8 +511,10 @@ export async function updateCharge(
     const changed = FIELDS.filter(field => !sameValue(current[field], next[field]))
     if (changed.length === 0) return { charge: row, changed }
 
+    if (changed.includes('frequency') && (current.frequency === 'ONE_TIME' || next.frequency === 'ONE_TIME')) throw oneTimeFixed()
     if (changed.includes('anchorDate')) assertAnchorInWindow(next.anchorDate, today)
     if (changed.some(field => CUSTOMER_FIELDS.includes(field))) await assertCustomerAndProfile(tx, next)
+    if (next.frequency === 'ONE_TIME') return { charge: await updateOneTime(tx, id, next, changed), changed }
     if (changed.includes('anchorDate') || changed.includes('frequency')) await assertNoMarkedFuture(tx, id, today)
 
     const updated = await tx.platformCharge.update({ where: { id }, data: dbFields(next) })
@@ -470,6 +553,7 @@ export async function pauseCharge(
   const outcome = await withChargeLock(id, async tx => {
     const row = await tx.platformCharge.findUnique({ where: { id } })
     if (!row) throw chargeNotFound()
+    if (row.frequency === 'ONE_TIME') throw oneTimeNoPause()
     const wasActive = row.pausedAt === null
     let charge = row
     let removedFuture = 0
@@ -512,6 +596,7 @@ export async function resumeCharge(id: string, actorId: string, now: Date = new 
   const outcome = await withChargeLock(id, async tx => {
     const row = await tx.platformCharge.findUnique({ where: { id } })
     if (!row) throw chargeNotFound()
+    if (row.frequency === 'ONE_TIME') throw oneTimeNoPause()
     if (row.pausedAt === null) return { charge: row, resumed: false, created: 0 }
     const charge = await tx.platformCharge.update({ where: { id }, data: { pausedAt: null } })
     const created = await generateOccurrences(tx, charge, today, addDays(today, GENERATE_AHEAD_DAYS))
@@ -563,7 +648,7 @@ export async function listCharges(
  * Genera, para todo cobro activo, las ocurrencias de hoy a hoy+7 (spec §3.3; lo llama la tarea diaria). Idempotente. Lee los ids
  * activos de 100 en 100 ordenados por `id` y procesa cada cobro en SU transacción: dentro del candado vuelve a leerlo, así que uno
  * pausado o editado después de la lectura de la página no recibe fechas viejas. Un cobro que falla se registra y no detiene a los
- * demás; un error al leer la lista sí se propaga.
+ * demás; un error al leer la lista sí se propaga. Los de una sola vez no se leen: su única fecha nació con el alta.
  *
  * ponytail: una caída del servidor de más de 7 días dejaría fechas sin generar; no vale un marcador de avance.
  * ponytail: un cobro a la vez, cada uno en su transacción corta; con miles de cobros activos se agruparían en lotes.
@@ -575,7 +660,10 @@ export async function generateAllActive(now: Date): Promise<void> {
 
   for (;;) {
     const page = await prisma.platformCharge.findMany({
-      where: after === undefined ? { pausedAt: null } : { pausedAt: null, id: { gt: after } },
+      where:
+        after === undefined
+          ? { pausedAt: null, frequency: { not: 'ONE_TIME' } }
+          : { pausedAt: null, frequency: { not: 'ONE_TIME' }, id: { gt: after } },
       orderBy: { id: 'asc' },
       take: GENERATOR_PAGE_SIZE,
       select: { id: true },

@@ -74,7 +74,7 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
       expect.arrayContaining([
         'El tipo de cliente debe ser ORGANIZATION, VENUE o STANDALONE',
         'Escribe el nombre del cliente',
-        'La periodicidad debe ser WEEKLY, BIWEEKLY o MONTHLY',
+        'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME',
         'La fecha debe tener el formato AAAA-MM-DD',
         'El IVA del concepto debe ser WITHOUT_IVA o WITH_IVA',
         'El monto debe estar en centavos enteros',
@@ -82,6 +82,16 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
         'El modo de factura debe ser AUTOMATIC o MANUAL',
       ]),
     )
+  })
+
+  it('«una sola vez» (ONE_TIME) es una periodicidad válida al dar de alta y al editar; las demás siguen pasando', () => {
+    for (const frequency of ['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'ONE_TIME']) {
+      expect(errores(createChargeSchema, body({ ...COBRO, frequency }))).toEqual([])
+      expect(errores(updateChargeSchema, body({ frequency }))).toEqual([])
+    }
+    expect(errores(createChargeSchema, body({ ...COBRO, frequency: 'one_time' }))).toEqual([
+      'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME',
+    ])
   })
 
   it('campos que faltan: también en español (nunca el «Required» de Zod)', () => {

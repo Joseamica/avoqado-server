@@ -218,6 +218,56 @@ describe('platform-charges/schedule — occurrenceDatesBetween (NEW)', () => {
   })
 })
 
+describe('platform-charges/schedule — ONE_TIME, una sola vez (NEW)', () => {
+  it('su única fecha es el ancla, si cae en el rango', () => {
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-11-01', '2026-11-30')).toEqual(['2026-11-20'])
+  })
+
+  it.each([
+    ['el rango termina antes del ancla', '2026-10-01', '2026-11-19'],
+    ['el rango empieza después del ancla', '2026-11-21', '2026-12-31'],
+    ['un rango de un solo día que no es el ancla', '2026-11-19', '2026-11-19'],
+  ])('con el ancla fuera del rango no da nada: %s', (_caso, desde, hasta) => {
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-20', desde, hasta)).toEqual([])
+  })
+
+  it('nunca repite: ni un rango de dos años, ni un ancla del día 10, trae más fechas que el ancla (no es una serie)', () => {
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-01-01', '2028-12-31')).toEqual(['2026-11-20'])
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-10', '2026-11-01', '2026-11-30')).toEqual(['2026-11-10'])
+    expect(occurrenceDatesBetween('ONE_TIME', '2027-01-31', '2027-01-01', '2027-04-30')).toEqual(['2027-01-31'])
+  })
+
+  it('los dos extremos del rango son inclusivos', () => {
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-11-20', '2026-11-30')).toEqual(['2026-11-20'])
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-11-01', '2026-11-20')).toEqual(['2026-11-20'])
+  })
+
+  it('el rango [ancla, ancla] con que el servicio la genera da el ancla, por lejana que sea (nunca otra fecha)', () => {
+    for (const ancla of ['2026-10-03', '2027-05-21', '2028-02-29', '2027-01-31']) {
+      expect(occurrenceDatesBetween('ONE_TIME', ancla, ancla, ancla)).toEqual([ancla])
+    }
+  })
+
+  it('un rango al revés (desde > hasta) no trae nada', () => {
+    expect(occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-11-30', '2026-11-01')).toEqual([])
+  })
+
+  it('rechaza un ancla o un extremo que no es un día de calendario, igual que las demás periodicidades', () => {
+    expect(() => occurrenceDatesBetween('ONE_TIME', '2026-02-30', '2026-02-01', '2026-03-01')).toThrow(/Día de calendario inválido/)
+    expect(() => occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-11-31', '2026-12-01')).toThrow(/Día de calendario inválido/)
+    expect(() => occurrenceDatesBetween('ONE_TIME', '2026-11-20', '2026-11-01', 'mañana')).toThrow(/Día de calendario inválido/)
+  })
+
+  it.each<[string, string]>([
+    ['2026-11-03', '2026-11-04'], // un día después
+    ['2026-11-03', '2026-11-20'], // más tarde
+    ['2026-11-03', '2026-11-03'], // la misma fecha
+    ['2026-11-03', '2026-10-20'], // antes
+  ])('isSamePeriodAsMarked: marcado el %s, el %s NUNCA es «del mismo periodo» (no hay periodos)', (marcado, dia) => {
+    expect(isSamePeriodAsMarked('ONE_TIME', marcado, dia)).toBe(false)
+  })
+})
+
 describe('platform-charges/schedule — propiedades que no se pueden romper (REGRESSION)', () => {
   const FRECUENCIAS: PlatformChargeFrequency[] = ['WEEKLY', 'BIWEEKLY', 'MONTHLY']
   // Un ancla por cada día del mes (también los que febrero no tiene) y por dos años distintos (uno bisiesto).
