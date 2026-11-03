@@ -264,7 +264,7 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(cuerpo).toMatch(/r\."collisionEvidenceCursor" AS "cursorDeEvidencias"/)
     // La fila con cursor entra aunque su página venga vacía: es la única forma de REINICIARLO al agotar el conjunto.
     expect(cuerpo).toMatch(
-      /ligado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\} OR r\."collisionEvidenceCursor" IS NOT NULL\)/,
+      /ligado\."id" IS NOT NULL OR aprobado\."id" IS NOT NULL OR colision\."ids" IS NOT NULL OR \$\{hayAfirmacion\} OR r\."collisionEvidenceCursor" IS NOT NULL\)/,
     )
     // El MISMO recorrido: un solo keyset, un solo tope de lotes, un solo horizonte.
     expect(cuerpo).toMatch(/for \(let lote = 0; lote < LOTES_MAXIMOS_DE_LIBERADAS; lote\+\+\)/)
@@ -443,7 +443,8 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
       // el evento; no toma el candado del intento (el ingreso acaba de vencerlo) y un lock_timeout sólo salta el toque.
       // Codex r1 (P1-C): y SEIS con el INSERT del fallback bajo el candado de la SOLICITUD (transacción propia: candado de la
       // solicitud → insertar), antes del toque; si ese candado también vence, se inserta sin candado como antes (residuo declarado).
-      'services/tpv/angelpay-webhook.service.ts': 6,
+      // Hallazgo D3 (22-oct): y SIETE con el aviso durable del aprobado sin folio, bajo el candado del intento.
+      'services/tpv/angelpay-webhook.service.ts': 7,
       'services/tpv/registroRepetido.ts': 1,
       // Plan 16-sep, Task 4: la declaración del cajero decide sobre un intento (candado del intento → Order → solicitud → CAS).
       'services/tpv/no-instrument-resolution.service.ts': 1,

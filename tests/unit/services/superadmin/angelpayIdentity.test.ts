@@ -22,6 +22,7 @@ jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBr
 jest.mock('@/lib/providerDeviceCompatibility', () => ({
   assertVenueHasCompatibleTerminal: jest.fn(),
   assertMerchantTerminalCompatible: jest.fn(),
+  assertNuevaLlaveEnLosNegociosDelComercio: jest.fn(),
 }))
 jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
   angelPayIntegrationsApiClient: { auth: jest.fn(), registerWebhook: jest.fn() },
