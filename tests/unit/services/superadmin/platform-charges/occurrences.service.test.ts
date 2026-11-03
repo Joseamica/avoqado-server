@@ -679,6 +679,10 @@ describe('platform-charges/occurrences — payPreview', () => {
 
     expect(preview).toEqual({
       customerName: 'Estética Luna',
+      customerType: 'ORGANIZATION',
+      organizationId: 'org-1',
+      venueId: null,
+      billingTaxProfileId: 'perfil-1',
       concepts: CONCEPTOS,
       ...TOTALES,
       willInvoice: true,
@@ -724,7 +728,7 @@ describe('platform-charges/occurrences — payPreview', () => {
 
     const preview = await payPreview('occ-1')
 
-    expect(preview).toMatchObject({ receptor: null, willInvoice: false, pendingPpdCount: 0 })
+    expect(preview).toMatchObject({ receptor: null, billingTaxProfileId: null, willInvoice: false, pendingPpdCount: 0 })
     expect(prismaMock.platformCfdi.count).not.toHaveBeenCalled()
   })
 

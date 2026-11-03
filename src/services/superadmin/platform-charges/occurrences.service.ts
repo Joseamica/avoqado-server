@@ -13,6 +13,7 @@
  */
 import type {
   PlatformCfdi,
+  PlatformCharge,
   PlatformChargeFrequency,
   PlatformChargeInvoiceMode,
   PlatformChargeOccurrenceStatus,
@@ -89,6 +90,11 @@ export interface ChargeSummary {
 
 export interface PayPreview {
   customerName: string
+  /** De quién es el cobro y qué perfil usaría la factura: SUPERADMIN los necesita para enseñar y corregir sus datos fiscales. */
+  customerType: PlatformCharge['customerType']
+  organizationId: string | null
+  venueId: string | null
+  billingTaxProfileId: string | null
   concepts: ChargeConcept[]
   subtotalCents: number
   taxCents: number
@@ -443,6 +449,10 @@ export async function payPreview(occurrenceId: string): Promise<PayPreview> {
 
   return {
     customerName: row.charge.customerName,
+    customerType: row.charge.customerType,
+    organizationId: row.charge.organizationId,
+    venueId: row.charge.venueId,
+    billingTaxProfileId: profile ? profileId : null,
     concepts: conceptsOf(row.concepts),
     subtotalCents: row.subtotalCents,
     taxCents: row.taxCents,

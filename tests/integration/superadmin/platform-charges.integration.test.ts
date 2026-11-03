@@ -563,6 +563,10 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
     expect(vista.status).toBe(200)
     expect(vista.body.data).toMatchObject({
       customerName: nombre,
+      customerType: cobro.body.data.customerType,
+      organizationId: cobro.body.data.organizationId,
+      venueId: cobro.body.data.venueId,
+      billingTaxProfileId: cobro.body.data.billingTaxProfileId,
       totalCents: TOTAL,
       willInvoice: true,
       receptor: { rfc: 'XAXX010101000', razonSocial: 'PUBLICO EN GENERAL' },
