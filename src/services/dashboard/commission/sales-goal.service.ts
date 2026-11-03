@@ -200,6 +200,8 @@ const sqlRenglonDe = (staffId: string) => Prisma.sql`(
  * periodo en que se hace, igual que la meta por importe resta el dinero. Por persona, la pieza se le resta a quien tiene el renglón, no a
  * quien cobró el pago del que salió la devolución: un Cambio puede devolver un producto ajeno. La devolución por importe no dice cuáles
  * fueron: no resta piezas. El renglón de un vale que se volvió a cobrar en otra cuenta ya es de la otra (`releasedAreaTicketLineId`).
+ * De un renglón no se devuelve más de lo que tiene: una devolución a mano y el ajuste posterior de Uber nombran la misma pieza. El tope es
+ * por periodo; si esas dos caen en periodos distintos, cada uno resta la suya (ponytail: exacto pediría leer el historial del renglón).
  */
 async function piezasDesde(db: Prisma.TransactionClient, venueId: string, staffId: string | null, desde: Date): Promise<number> {
   const deQuien = staffId ? Prisma.sql`AND ${sqlRenglonDe(staffId)}` : Prisma.empty
@@ -216,19 +218,26 @@ async function piezasDesde(db: Prisma.TransactionClient, venueId: string, staffI
           ${deQuien}
       ) AS "vendidas",
       (
-        SELECT SUM(CASE WHEN jsonb_typeof(r->'quantity') = 'number' THEN (r->>'quantity')::numeric ELSE 0 END)
-        FROM "Payment" p
-        CROSS JOIN LATERAL jsonb_array_elements(
-          CASE WHEN jsonb_typeof(p."processorData"->'refundedItems') = 'array' THEN p."processorData"->'refundedItems' ELSE '[]'::jsonb END
-        ) r
-        JOIN "OrderItem" oi ON oi."id" = r->>'orderItemId'
-        JOIN "Order" cuenta ON cuenta."id" = oi."orderId" AND cuenta."venueId" = p."venueId" AND cuenta."status" = 'COMPLETED'
-        WHERE p."venueId" = ${venueId}
-          AND p."type" = 'REFUND'
-          AND p."status" = 'COMPLETED'
-          AND p."createdAt" >= ${utcTs(desde)}
-          AND oi."releasedAreaTicketLineId" IS NULL
-          ${deQuien}
+        SELECT SUM(LEAST(d."piezas", d."renglon"))
+        FROM (
+          SELECT
+            oi."id",
+            oi."quantity" AS "renglon",
+            SUM(CASE WHEN jsonb_typeof(r->'quantity') = 'number' THEN (r->>'quantity')::numeric ELSE 0 END) AS "piezas"
+          FROM "Payment" p
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE WHEN jsonb_typeof(p."processorData"->'refundedItems') = 'array' THEN p."processorData"->'refundedItems' ELSE '[]'::jsonb END
+          ) r
+          JOIN "OrderItem" oi ON oi."id" = r->>'orderItemId'
+          JOIN "Order" cuenta ON cuenta."id" = oi."orderId" AND cuenta."venueId" = p."venueId" AND cuenta."status" = 'COMPLETED'
+          WHERE p."venueId" = ${venueId}
+            AND p."type" = 'REFUND'
+            AND p."status" = 'COMPLETED'
+            AND p."createdAt" >= ${utcTs(desde)}
+            AND oi."releasedAreaTicketLineId" IS NULL
+            ${deQuien}
+          GROUP BY oi."id", oi."quantity"
+        ) d
       ) AS "devueltas"
   `
   return Number(fila?.vendidas ?? 0) - Number(fila?.devueltas ?? 0)

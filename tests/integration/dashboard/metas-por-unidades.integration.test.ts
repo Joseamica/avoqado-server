@@ -7,6 +7,7 @@
  *     npx jest --selectProjects integration --testPathPattern metas-por-unidades
  */
 
+import { Prisma } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
@@ -19,6 +20,7 @@ const CUARENTA_DIAS = 40 * 24 * 60 * 60 * 1000 // siempre antes del inicio de es
 
 let orgId: string
 let venueId: string
+let otraTienda: string
 let beto: string
 let ana: string
 let carla: string
@@ -26,12 +28,12 @@ let carla: string
 let orderSeq = 0
 async function cuenta(
   renglones: Array<{ piezas: number; peso?: number; valeRevendido?: boolean }>,
-  opciones: { status?: 'COMPLETED' | 'CANCELLED'; createdAt?: Date } = {},
+  opciones: { status?: 'COMPLETED' | 'CANCELLED'; createdAt?: Date; tienda?: string } = {},
 ) {
   orderSeq += 1
   return prisma.order.create({
     data: {
-      venueId,
+      venueId: opciones.tienda ?? venueId,
       orderNumber: `D10-${orderSeq}-${suffix}`,
       createdAt: opciones.createdAt ?? new Date(),
       type: 'DINE_IN',
@@ -62,11 +64,18 @@ async function cuenta(
 async function cobro(
   orden: { id: string },
   quien: string,
-  opciones: { productos?: string[]; status?: 'COMPLETED' | 'FAILED'; createdAt?: Date } = {},
+  opciones: {
+    productos?: string[]
+    status?: 'COMPLETED' | 'FAILED'
+    createdAt?: Date
+    tienda?: string
+    processorData?: Prisma.InputJsonValue
+  } = {},
 ) {
   const pago = await prisma.payment.create({
     data: {
-      venueId,
+      venueId: opciones.tienda ?? venueId,
+      processorData: opciones.processorData,
       orderId: orden.id,
       processedById: quien,
       amount: 10,
@@ -94,12 +103,12 @@ async function devolucion(
   orden: { id: string },
   original: { id: string },
   opera: string,
-  refundedItems?: Array<{ orderItemId: string; quantity: number; amountCents: number }>,
-  opciones: { status?: 'COMPLETED' | 'FAILED'; createdAt?: Date } = {},
+  refundedItems?: unknown,
+  opciones: { status?: 'COMPLETED' | 'FAILED'; createdAt?: Date; tienda?: string } = {},
 ) {
   await prisma.payment.create({
     data: {
-      venueId,
+      venueId: opciones.tienda ?? venueId,
       orderId: orden.id,
       processedById: opera,
       amount: -5,
@@ -112,7 +121,7 @@ async function devolucion(
       feePercentage: 0,
       feeAmount: 0,
       netAmount: -5,
-      processorData: { originalPaymentId: original.id, ...(refundedItems ? { refundedItems } : {}) },
+      processorData: { originalPaymentId: original.id, ...(refundedItems ? { refundedItems } : {}) } as unknown as Prisma.InputJsonValue,
     },
   })
 }
@@ -134,6 +143,12 @@ beforeAll(async () => {
     select: { id: true },
   })
   venueId = tienda.id
+  otraTienda = (
+    await prisma.venue.create({
+      data: { organizationId: orgId, name: `Sur ${suffix}`, slug: `sur-${suffix}`, timezone: 'America/Mexico_City', status: 'ACTIVE' },
+      select: { id: true },
+    })
+  ).id
   const persona = async (nombre: string) =>
     (
       await prisma.staff.create({
@@ -203,6 +218,25 @@ beforeAll(async () => {
   await devolucion(i, cobroIBeto, ana, [{ orderItemId: i.items[1].id, quantity: 1, amountCents: 500 }])
   await devolucion(i, cobroIAna, ana, [{ orderItemId: i.items[1].id, quantity: 0, amountCents: 500 }])
 
+  // K: Uber: la misma pieza se devuelve a mano por artículos y luego Uber la retira. Las dos filas la nombran; de un renglón no se devuelve de más.
+  const k = await cuenta([{ piezas: 1 }, { piezas: 1 }])
+  const cobroK = await cobro(k, beto)
+  await devolucion(k, cobroK, ana, [{ orderItemId: k.items[0].id, quantity: 1, amountCents: 500 }])
+  await devolucion(k, cobroK, ana, [{ orderItemId: k.items[0].id, quantity: 1, amountCents: 500 }])
+
+  // L: lo que no debe restar ni tumbar la consulta: un cobro normal que trae `refundedItems`, y datos raros en `processorData`.
+  const l = await cuenta([{ piezas: 1 }])
+  const cobroL = await cobro(l, beto, {
+    processorData: { refundedItems: [{ orderItemId: l.items[0].id, quantity: 1, amountCents: 500 }] },
+  })
+  await devolucion(l, cobroL, ana, 'no es una lista')
+  await devolucion(l, cobroL, ana, [{ orderItemId: l.items[0].id, quantity: 'una', amountCents: 500 }])
+
+  // M: otra tienda: ni sus piezas ni su devolución cuentan aquí.
+  const m = await cuenta([{ piezas: 6 }], { tienda: otraTienda })
+  const cobroM = await cobro(m, beto, { tienda: otraTienda })
+  await devolucion(m, cobroM, ana, [{ orderItemId: m.items[0].id, quantity: 1, amountCents: 500 }], { tienda: otraTienda })
+
   // J: un vale que se volvió a cobrar en otra cuenta, y esta reabrió con dinero tardío: su renglón ya es de la otra cuenta, y no cuenta.
   const j = await cuenta([{ piezas: 2, valeRevendido: true }, { piezas: 1 }])
   const cobroJ = await cobro(j, ana)
@@ -215,26 +249,28 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  if (!venueId) return
-  await prisma.paymentAllocation.deleteMany({ where: { payment: { venueId } } })
-  await prisma.payment.deleteMany({ where: { venueId } })
-  await prisma.order.deleteMany({ where: { venueId } })
-  await prisma.staffVenue.deleteMany({ where: { venueId } })
-  await prisma.venue.deleteMany({ where: { id: venueId } })
+  const tiendas = [venueId, otraTienda].filter(Boolean)
+  if (tiendas.length === 0) return
+  await prisma.paymentAllocation.deleteMany({ where: { payment: { venueId: { in: tiendas } } } })
+  await prisma.payment.deleteMany({ where: { venueId: { in: tiendas } } })
+  await prisma.order.deleteMany({ where: { venueId: { in: tiendas } } })
+  await prisma.staffVenue.deleteMany({ where: { venueId: { in: tiendas } } })
+  await prisma.venue.deleteMany({ where: { id: { in: tiendas } } })
   await prisma.staff.deleteMany({ where: { id: { in: [beto, ana, carla].filter(Boolean) } } })
   await prisma.organization.deleteMany({ where: { id: orgId } })
 })
 
 describe('D10: el avance de una meta por unidades', () => {
   it('la meta de la sucursal cuenta piezas y resta las devoluciones que nombran productos', async () => {
-    // A 4 + B 3 + C 3 + D 2 + E 2 + F 1 + I 2 + J 1 = 18, menos 2 de A, 1 de E, 1 de H y 1 de I.
-    // G no cuenta, la devolución de B no dice qué productos y la de J es del renglón que ya no cuenta.
-    expect(unidades(await getEffectiveGoals(venueId), null)).toBe(13)
+    // A 4 + B 3 + C 3 + D 2 + E 2 + F 1 + I 2 + J 1 + K 2 + L 1 = 21, menos 2 de A, 1 de E, 1 de H, 1 de I y 1 de K.
+    // G y M no cuentan, la devolución de B no dice qué productos y la de J es del renglón que ya no cuenta.
+    expect(unidades(await getEffectiveGoals(venueId), null)).toBe(15)
   })
 
   it('a Beto: sus piezas, los productos que pagó, la cuenta entre dos, y la devolución de lo que él cobró aunque la operara Ana', async () => {
-    // A 4 + C 1 + D 1 + E 2 + F 1 + I 1 = 10, menos 2 de A y 1 de E. La devolución de I salió de su cobro, pero el producto lo cobró Ana.
-    expect(unidades(await getEffectiveGoals(venueId), beto)).toBe(7)
+    // A 4 + C 1 + D 1 + E 2 + F 1 + I 1 + K 2 + L 1 = 13, menos 2 de A, 1 de E y 1 de K. La devolución de I salió de su cobro, pero el
+    // producto lo cobró Ana.
+    expect(unidades(await getEffectiveGoals(venueId), beto)).toBe(9)
   })
 
   it('a Ana: lo suyo, sin la devolución que operó sobre una venta ajena ni el cobro que le falló', async () => {
@@ -262,6 +298,6 @@ describe('D10: el avance de una meta por unidades', () => {
     const resumen = body.salesGoals.map(
       (m: { staffId: string | null; currentSales: string }) => `${m.staffId === null ? 'sucursal' : 'personal'} ${m.currentSales}`,
     )
-    expect(resumen.sort()).toEqual(['personal 7', 'sucursal 13'])
+    expect(resumen.sort()).toEqual(['personal 9', 'sucursal 15'])
   })
 })
