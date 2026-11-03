@@ -1,7 +1,8 @@
 import { SaleVerificationStatus, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
-import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { utcTs } from '../../utils/sqlDates'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import {
   canTerminalWriteNumber,
@@ -13,7 +14,7 @@ import {
   type CaptureDestination,
 } from '../playtelecom/linkingNumber.rules'
 import { isLinkingNumberEnabledForOrg } from '../playtelecom/linkingNumber.flag'
-import { isNumberDuplicate } from '../playtelecom/linkingNumber.duplicates'
+import { findDuplicatesForSales, isNumberDuplicate } from '../playtelecom/linkingNumber.duplicates'
 
 // ============================================================
 // Sale Verification Service
@@ -55,6 +56,9 @@ interface SaleVerificationResponse {
   updatedAt: Date
 }
 
+/** Al promotor sólo se le avisa que está repetido; la lista de choques es del back-office. */
+export type TerminalNumberAlert = 'LINKING_DUPLICATE' | 'PORTED_DUPLICATE'
+
 interface PendingVerificationResponse {
   id: string
   paymentId: string
@@ -65,6 +69,12 @@ interface PendingVerificationResponse {
   isPortabilidad: boolean
   photos: string[]
   requiredPhotos: number
+  // Número de vinculación (spec §5.3.3): nuevos; las terminales publicadas no los leen.
+  linkingNumber: string | null
+  portedNumber: string | null
+  linkingNumberLocked: boolean
+  portedNumberLocked: boolean
+  alerts: TerminalNumberAlert[]
 }
 
 interface ListSaleVerificationsParams {
@@ -379,55 +389,192 @@ export async function createPendingSaleVerification(data: {
   return mapToResponse(verification)
 }
 
-/**
- * Get pending verifications for a specific staff member
- * Used by the TPV "Pendientes Verificacion" screen
- */
-export async function getPendingVerifications(venueId: string, staffId: string): Promise<PendingVerificationResponse[]> {
-  logger.info(`📸 [SALE VERIFICATION SERVICE] Getting pending verifications for staff ${staffId} in venue ${venueId}`)
-
-  const verifications = await prisma.saleVerification.findMany({
-    where: {
-      venueId,
-      staffId,
-      status: 'PENDING',
-    },
-    include: {
-      payment: {
-        select: {
-          id: true,
-          amount: true,
-          createdAt: true,
-          order: {
-            select: {
-              orderNumber: true,
-            },
-          },
-        },
-      },
-    },
-    orderBy: { createdAt: 'desc' },
-  })
-
-  logger.info(`✅ [SALE VERIFICATION SERVICE] Found ${verifications.length} pending verifications`)
-
-  return verifications.map(v => ({
-    id: v.id,
-    paymentId: v.paymentId,
-    amount: v.payment.amount.toNumber(),
-    orderNumber: v.payment.order?.orderNumber ?? null,
-    date: v.createdAt.toISOString(),
-    serialNumbers: v.serialNumbers,
-    isPortabilidad: v.isPortabilidad,
-    photos: v.photos, // Preserves index positions (may contain empty strings for unfilled slots)
-    requiredPhotos: v.isPortabilidad ? 2 : 1,
-  }))
-}
+// ============================================================
+// Lecturas de la TPV (spec §5.3.1 y §5.3.3): «Pendientes», el detalle, la lista para trabajar sin señal, el estado
+// por pago y el repetido. Todas buscan dentro de la organización del token: el job de SIM de evento mueve la venta de
+// tienda (`playtelecomEventSimReassignment.job.ts`), siempre dentro de la misma organización.
+// ============================================================
 
 interface VerificationDetailResponse extends PendingVerificationResponse {
   status: SaleVerificationStatus
   rejectionReasons: string[]
   reviewNotes: string | null
+}
+
+export interface TerminalPage<T> {
+  data: T[]
+  /** Todas las que hay, no sólo las de esta página. */
+  total: number
+  /** null: ya no hay más. */
+  nextCursor: string | null
+}
+
+/** Tope de servidor por página (spec §5.3.3): una terminal vieja sólo lee la primera. */
+const TERMINAL_PAGE_SIZE = 200
+const TERMINAL_LISTS = {
+  pending: ['PENDING'],
+  actionable: ['PENDING', 'FAILED'],
+} as const satisfies Record<string, readonly SaleVerificationStatus[]>
+const TERMINAL_INCLUDE = { payment: { select: { amount: true, order: { select: { orderNumber: true } } } } } as const
+type TerminalRow = Prisma.SaleVerificationGetPayload<{ include: typeof TERMINAL_INCLUDE }>
+/** Las tres llaves del orden: foto faltante primero (0), de la más vieja a la más nueva, y el id para desempatar. */
+type TerminalKey = { complete: number; createdAt: Date; id: string }
+
+const encodeTerminalCursor = (k: TerminalKey): string =>
+  Buffer.from(JSON.stringify([k.complete, k.createdAt.toISOString(), k.id])).toString('base64url')
+
+function decodeTerminalCursor(cursor: string): TerminalKey {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    parsed = null
+  }
+  if (Array.isArray(parsed) && parsed.length === 3) {
+    const [complete, iso, id] = parsed
+    const createdAt = typeof iso === 'string' ? new Date(iso) : null
+    // La fecha debe ser exactamente la que pusimos (ISO completo): así nunca cae en un día corrido por la zona del host.
+    if ((complete === 0 || complete === 1) && createdAt && !isNaN(createdAt.getTime()) && createdAt.toISOString() === iso) {
+      if (typeof id === 'string' && id.length > 0 && id.length <= 64) return { complete, createdAt, id }
+    }
+  }
+  throw new BadRequestError('El cursor no es válido; vuelve a cargar la lista', 'INVALID_CURSOR')
+}
+
+/** Las de la TPV nueva sólo existen donde hay SERIALIZED_INVENTORY (sólo PlayTelecom). */
+async function assertSerializedInventoryVenue(venueId: string): Promise<void> {
+  if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+    throw new ForbiddenError(
+      'Esta función necesita el módulo de inventario serializado en esta tienda. Pídeselo a Avoqado.',
+      'MODULE_DISABLED',
+    )
+  }
+}
+
+/**
+ * Una página del promotor, con el orden GLOBAL antes del límite (spec §5.3.3): las que les falta una foto (ranuras no
+ * vacías < las requeridas) primero, luego de la más vieja a la más nueva, luego id. Los ids salen del SQL y el cursor
+ * guarda sus tres llaves; después se hidratan con Prisma en ese mismo orden.
+ */
+async function terminalPage(
+  list: keyof typeof TERMINAL_LISTS,
+  orgId: string,
+  staffId: string,
+  cursor: string | undefined,
+): Promise<{ rows: TerminalRow[]; total: number; nextCursor: string | null }> {
+  const after = cursor === undefined ? null : decodeTerminalCursor(cursor)
+  const statuses: SaleVerificationStatus[] = [...TERMINAL_LISTS[list]]
+  const scope = Prisma.sql`v."organizationId" = ${orgId} AND sv."staffId" = ${staffId} AND sv.status::text = ANY(${statuses}::text[])`
+
+  const [keys, counted] = await Promise.all([
+    prisma.$queryRaw<TerminalKey[]>(Prisma.sql`
+      SELECT complete, created_at AS "createdAt", id FROM (
+        SELECT sv.id, sv."createdAt" AS created_at,
+               CASE WHEN cardinality(array_remove(coalesce(sv.photos, '{}'::text[]), '')) < CASE WHEN sv."isPortabilidad" THEN 2 ELSE 1 END
+                    THEN 0 ELSE 1 END AS complete
+        FROM "SaleVerification" sv
+        JOIN "Venue" v ON v.id = sv."venueId"
+        WHERE ${scope}
+      ) mine
+      ${after ? Prisma.sql`WHERE (complete, created_at, id) > (${after.complete}::int, ${utcTs(after.createdAt)}, ${after.id})` : Prisma.empty}
+      ORDER BY complete, created_at, id
+      LIMIT ${TERMINAL_PAGE_SIZE + 1}`),
+    prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`
+      SELECT count(*)::int AS total
+      FROM "SaleVerification" sv
+      JOIN "Venue" v ON v.id = sv."venueId"
+      WHERE ${scope}`),
+  ])
+
+  const page = keys.slice(0, TERMINAL_PAGE_SIZE)
+  const found = page.length
+    ? await prisma.saleVerification.findMany({
+        where: { id: { in: page.map(k => k.id) }, staffId, status: { in: statuses }, venue: { organizationId: orgId } },
+        include: TERMINAL_INCLUDE,
+        take: page.length,
+      })
+    : []
+  const byId = new Map(found.map(v => [v.id, v]))
+  return {
+    // Una que cambió de estado entre las dos lecturas se cae de la página; el cursor sigue siendo el de la última llave.
+    rows: page.map(k => byId.get(k.id)).filter((v): v is TerminalRow => v !== undefined),
+    total: Number(counted[0]?.total ?? 0),
+    nextCursor: keys.length > TERMINAL_PAGE_SIZE ? encodeTerminalCursor(page[page.length - 1]) : null,
+  }
+}
+
+/** Lo que la terminal ve: lo de hoy + el número, si está bloqueado y si está repetido (sin decir con qué venta). */
+async function toTerminalDetails(orgId: string, rows: TerminalRow[]): Promise<VerificationDetailResponse[]> {
+  if (rows.length === 0) return []
+  const duplicates = await findDuplicatesForSales(
+    orgId,
+    rows.map(v => ({
+      key: v.id,
+      verificationId: v.id,
+      iccid: v.serialNumbers[0] ?? null,
+      linkingNumber: v.linkingNumber,
+      portedNumber: v.portedNumber,
+    })),
+  )
+  // La terminal no pisa lo que escribió el back-office, la importación o Ventas externas.
+  const locked = (n: string | null, source: TerminalRow['linkingNumberSource']) => n !== null && !canTerminalWriteNumber(source)
+  return rows.map(v => {
+    const d = duplicates.get(v.id)
+    const alerts: TerminalNumberAlert[] = []
+    if (d?.linking) alerts.push('LINKING_DUPLICATE')
+    if (d?.ported) alerts.push('PORTED_DUPLICATE')
+    return {
+      id: v.id,
+      paymentId: v.paymentId,
+      amount: v.payment.amount.toNumber(),
+      orderNumber: v.payment.order?.orderNumber ?? null,
+      date: v.createdAt.toISOString(),
+      serialNumbers: v.serialNumbers,
+      isPortabilidad: v.isPortabilidad,
+      photos: v.photos, // Preserves index positions (may contain empty strings for unfilled slots)
+      requiredPhotos: v.isPortabilidad ? 2 : 1,
+      linkingNumber: v.linkingNumber,
+      portedNumber: v.portedNumber,
+      linkingNumberLocked: locked(v.linkingNumber, v.linkingNumberSource),
+      portedNumberLocked: locked(v.portedNumber, v.portedNumberSource),
+      alerts,
+      status: v.status,
+      rejectionReasons: v.rejectionReasons,
+      reviewNotes: v.reviewNotes,
+    }
+  })
+}
+
+/**
+ * Get pending verifications for a specific staff member
+ * Used by the TPV "Pendientes Verificacion" screen. Sigue listando todas las PENDING del promotor (también las
+ * completas); ahora en la organización del token, con tope de 200, `total` y `nextCursor`.
+ */
+export async function getPendingVerifications(
+  orgId: string,
+  staffId: string,
+  cursor?: string,
+): Promise<TerminalPage<PendingVerificationResponse>> {
+  logger.info(`📸 [SALE VERIFICATION SERVICE] Getting pending verifications for staff ${staffId} in organization ${orgId}`)
+  const { rows, total, nextCursor } = await terminalPage('pending', orgId, staffId, cursor)
+  const details = await toTerminalDetails(orgId, rows)
+  logger.info(`✅ [SALE VERIFICATION SERVICE] Found ${details.length} pending verifications (total: ${total})`)
+  return { data: details.map(({ status: _s, rejectionReasons: _r, reviewNotes: _n, ...pending }) => pending), total, nextCursor }
+}
+
+/**
+ * GET tpv/verification/actionable — las PENDING y FAILED («Revisar») del promotor en el formato del detalle: lo que la
+ * TPV nueva guarda para trabajar sin señal (spec §5.5).
+ */
+export async function getActionableVerifications(
+  venueId: string,
+  orgId: string,
+  staffId: string,
+  cursor?: string,
+): Promise<TerminalPage<VerificationDetailResponse>> {
+  await assertSerializedInventoryVenue(venueId)
+  const { rows, total, nextCursor } = await terminalPage('actionable', orgId, staffId, cursor)
+  return { data: await toTerminalDetails(orgId, rows), total, nextCursor }
 }
 
 /**
@@ -437,44 +584,73 @@ interface VerificationDetailResponse extends PendingVerificationResponse {
  * the promoter taps a rejected sale and re-uploads the documentation photos.
  */
 export async function getVerificationForCorrection(
-  venueId: string,
+  orgId: string,
   staffId: string,
   verificationId: string,
 ): Promise<VerificationDetailResponse> {
   logger.info(`📸 [SALE VERIFICATION SERVICE] Getting verification ${verificationId} for correction (staff ${staffId})`)
 
   const v = await prisma.saleVerification.findFirst({
-    where: { id: verificationId, venueId, staffId },
-    include: {
-      payment: {
-        select: {
-          id: true,
-          amount: true,
-          createdAt: true,
-          order: { select: { orderNumber: true } },
-        },
-      },
-    },
+    where: { id: verificationId, staffId, venue: { organizationId: orgId } },
+    include: TERMINAL_INCLUDE,
   })
 
   if (!v) {
-    throw new NotFoundError(`Verification ${verificationId} not found for staff ${staffId} in venue ${venueId}`)
+    throw new NotFoundError(`Verification ${verificationId} not found for staff ${staffId} in organization ${orgId}`)
   }
 
-  return {
-    id: v.id,
-    paymentId: v.paymentId,
-    amount: v.payment.amount.toNumber(),
-    orderNumber: v.payment.order?.orderNumber ?? null,
-    date: v.createdAt.toISOString(),
-    serialNumbers: v.serialNumbers,
-    isPortabilidad: v.isPortabilidad,
-    photos: v.photos, // Preserves index positions (may contain empty strings for unfilled slots)
-    requiredPhotos: v.isPortabilidad ? 2 : 1,
-    status: v.status,
-    rejectionReasons: v.rejectionReasons,
-    reviewNotes: v.reviewNotes,
+  const [detail] = await toTerminalDetails(orgId, [v])
+  return detail
+}
+
+/**
+ * GET tpv/verification/status — el estado de la verificación de cada pago, dentro de la organización del token. Es la
+ * prueba positiva con la que la TPV quita una tarjeta guardada; `NONE` = sin verificación o de otra organización.
+ */
+export async function getVerificationStatuses(
+  venueId: string,
+  orgId: string,
+  paymentIds: string[],
+): Promise<Array<{ paymentId: string; status: SaleVerificationStatus | 'NONE' }>> {
+  await assertSerializedInventoryVenue(venueId)
+  const found = await prisma.saleVerification.findMany({
+    where: { paymentId: { in: paymentIds }, venue: { organizationId: orgId } },
+    select: { paymentId: true, status: true },
+    take: paymentIds.length, // paymentId es único: una por pago como mucho (el schema ya topó a 100)
+  })
+  const byPayment = new Map(found.map(v => [v.paymentId, v.status]))
+  return paymentIds.map(paymentId => ({ paymentId, status: byPayment.get(paymentId) ?? 'NONE' }))
+}
+
+/**
+ * GET tpv/verification/number-check — ¿el número ya está en otra venta de la organización (o en el histórico con otro
+ * ICCID)? Con su `verificationId`, la venta no choca consigo misma. No dice con cuál choca: eso es del back-office.
+ */
+export async function checkTerminalNumber(p: {
+  venueId: string
+  orgId: string
+  staffId: string
+  number: string
+  kind: 'linking' | 'ported'
+  verificationId?: string
+}): Promise<{ duplicate: boolean }> {
+  await assertSerializedInventoryVenue(p.venueId)
+  if (!(await isLinkingNumberEnabledForOrg(p.orgId))) {
+    throw new ForbiddenError('El número de vinculación no está activo en esta organización', 'LINKING_NUMBER_DISABLED')
   }
+  const digits = toTerminalDigits(p.kind, p.number)
+
+  let iccid: string | undefined
+  if (p.verificationId) {
+    const own = await prisma.saleVerification.findFirst({
+      where: { id: p.verificationId, staffId: p.staffId, venue: { organizationId: p.orgId } },
+      select: { serialNumbers: true },
+    })
+    if (!own) throw new NotFoundError(`Verification ${p.verificationId} not found for staff ${p.staffId} in organization ${p.orgId}`)
+    iccid = own.serialNumbers[0]
+  }
+
+  return { duplicate: await isNumberDuplicate(p.orgId, digits, { verificationId: p.verificationId, iccid }) }
 }
 
 // ============================================================
@@ -910,6 +1086,8 @@ export async function createOrUpdateProofOfSale(
  * número de proof-of-sale; nunca toca las fotos. Una venta FAILED vuelve a PENDING para que el back-office la vea.
  */
 export async function setNumberFromTerminal(p: {
+  /** La tienda del token: sin SERIALIZED_INVENTORY, 403. */
+  venueId: string
   orgId: string
   staffId: string
   verificationId: string
@@ -917,6 +1095,7 @@ export async function setNumberFromTerminal(p: {
   number: string
   capture: TerminalCapture
 }): Promise<ProofOfSaleResult> {
+  await assertSerializedInventoryVenue(p.venueId)
   const field: NumberField = p.slot === 'VINCULACION' ? 'linking' : 'ported'
   const digits = toTerminalDigits(field, p.number)
   if (!(await isLinkingNumberEnabledForOrg(p.orgId))) {

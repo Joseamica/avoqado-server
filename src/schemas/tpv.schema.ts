@@ -906,6 +906,50 @@ export const createProofOfSaleSchema = z.object({
     }),
 })
 
+/** GET tpv/verification/pending y /actionable: la terminal vieja no manda nada; la nueva, el cursor opaco de la página anterior. */
+export const terminalVerificationPageSchema = z.object({
+  query: z.object({
+    cursor: z
+      .string()
+      .min(1, { message: 'El cursor no puede ir vacío.' })
+      .max(512, { message: 'El cursor es demasiado largo.' })
+      .optional(),
+  }),
+})
+
+/** GET tpv/verification/number-check — el número se normaliza y valida en el servicio (9 o 10 dígitos). */
+export const checkLinkingNumberSchema = z.object({
+  query: z.object({
+    number: terminalNumber.min(1, { message: 'El número es requerido.' }),
+    kind: z.enum(['linking', 'ported'], { message: 'kind debe ser linking o ported.' }),
+    verificationId: z.string().cuid({ message: 'El ID de verificación debe ser un CUID válido.' }).optional(),
+  }),
+})
+
+/** GET tpv/verification/status?paymentIds=a,b,c — hasta 100 pagos distintos por llamada. */
+export const verificationStatusesSchema = z.object({
+  query: z.object({
+    paymentIds: z
+      .string({ required_error: 'paymentIds es requerido.', invalid_type_error: 'paymentIds va separado por comas.' })
+      .transform(s =>
+        Array.from(
+          new Set(
+            s
+              .split(',')
+              .map(id => id.trim())
+              .filter(Boolean),
+          ),
+        ),
+      )
+      .pipe(
+        z
+          .array(z.string().max(64, { message: 'Cada paymentId mide como mucho 64 caracteres.' }))
+          .min(1, { message: 'Manda al menos un paymentId.' })
+          .max(100, { message: 'Son como mucho 100 paymentIds por llamada.' }),
+      ),
+  }),
+})
+
 /** POST tpv/verification/:verificationId/number — corregir sólo el número desde la terminal (nunca toca fotos). */
 export const setVerificationNumberSchema = z.object({
   params: z.object({

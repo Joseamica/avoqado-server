@@ -70,6 +70,9 @@ import {
   createOrderWithItemsSchema,
   createProofOfSaleSchema,
   setVerificationNumberSchema,
+  terminalVerificationPageSchema,
+  checkLinkingNumberSchema,
+  verificationStatusesSchema,
   createSaleVerificationSchema,
   getAvailableDiscountsSchema,
   getCryptoPaymentStatusSchema,
@@ -6009,6 +6012,8 @@ router.post(
  *         description: outcome APPLIED, SUPERSEDED_BY_NEWER o SALE_ALREADY_APPROVED, con linkingNumberOutcome/portedNumberOutcome
  *       400:
  *         description: INVALID_LINKING_NUMBER o SALE_REJECTED
+ *       403:
+ *         description: MODULE_DISABLED (la tienda del token no tiene SERIALIZED_INVENTORY)
  *       404:
  *         description: La venta no es de la organización del token
  *       409:
@@ -6029,18 +6034,129 @@ router.post(
  * /tpv/verification/pending:
  *   get:
  *     summary: Get pending verifications for the authenticated staff
+ *     description: |
+ *       Todas las PENDING del promotor en la organización del token, 200 por página: primero las que les falta una
+ *       foto, luego de la más vieja a la más nueva. `total` y `nextCursor` son nuevos; la terminal vieja lee `data`.
  *     tags: [TPV - Sale Verification]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *         description: El nextCursor de la página anterior
  *     responses:
  *       200:
- *         description: List of pending verifications
+ *         description: '{ success, data, total, nextCursor } con linkingNumber, portedNumber, …Locked y alerts por venta'
+ *       400:
+ *         description: INVALID_CURSOR
  */
 router.get(
   '/verification/pending',
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
+  validateRequest(terminalVerificationPageSchema),
   saleVerificationController.getPendingVerifications,
+)
+
+// Las tres literales van ANTES de `/verification/:verificationId`, o ésa las atrapa como si fueran un id.
+
+/**
+ * @openapi
+ * /tpv/verification/actionable:
+ *   get:
+ *     summary: Las PENDING y FAILED del promotor (la lista que la TPV nueva guarda para trabajar sin señal)
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: cursor
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: '{ success, data, total, nextCursor }, cada venta en el formato del detalle'
+ *       400:
+ *         description: INVALID_CURSOR
+ *       403:
+ *         description: MODULE_DISABLED (la tienda del token no tiene SERIALIZED_INVENTORY)
+ */
+router.get(
+  '/verification/actionable',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(terminalVerificationPageSchema),
+  saleVerificationController.getActionableVerifications,
+)
+
+/**
+ * @openapi
+ * /tpv/verification/number-check:
+ *   get:
+ *     summary: ¿El número de vinculación o portado ya está en otra venta de la organización?
+ *     description: Sólo dice si está repetido, nunca con qué venta. Con su verificationId, la venta no choca consigo misma.
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: number
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: kind
+ *         required: true
+ *         schema: { type: string, enum: [linking, ported] }
+ *       - in: query
+ *         name: verificationId
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: '{ success, duplicate }'
+ *       400:
+ *         description: INVALID_LINKING_NUMBER (9 o 10 dígitos)
+ *       403:
+ *         description: MODULE_DISABLED o LINKING_NUMBER_DISABLED (interruptor apagado)
+ *       404:
+ *         description: La verificación no es del promotor en esta organización
+ */
+router.get(
+  '/verification/number-check',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(checkLinkingNumberSchema),
+  saleVerificationController.checkLinkingNumber,
+)
+
+/**
+ * @openapi
+ * /tpv/verification/status:
+ *   get:
+ *     summary: Estado de la verificación de cada pago (hasta 100), dentro de la organización del token
+ *     description: NONE si el pago no tiene verificación o no es de la organización. La TPV quita una tarjeta guardada sólo con COMPLETED o REJECTED.
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: paymentIds
+ *         required: true
+ *         schema: { type: string }
+ *         description: Ids separados por comas
+ *     responses:
+ *       200:
+ *         description: '{ success, data: [{ paymentId, status }] }'
+ *       400:
+ *         description: Sin ids o más de 100
+ *       403:
+ *         description: MODULE_DISABLED
+ */
+router.get(
+  '/verification/status',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(verificationStatusesSchema),
+  saleVerificationController.getVerificationStatuses,
 )
 
 /**

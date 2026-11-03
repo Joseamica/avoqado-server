@@ -177,7 +177,7 @@ const proof = (
 ) => createOrUpdateProofOfSale(VENUE_A, PAYMENT, photoUrls, staffId, VER, undefined, label, { orgId: ORG, ...opts })
 
 const numberOnly = (number: string, cap: TerminalCapture, slot: 'VINCULACION' | 'PORTABILIDAD' = 'VINCULACION', staffId = PROMOTER) =>
-  setNumberFromTerminal({ orgId: ORG, staffId, verificationId: VER, slot, number, capture: cap })
+  setNumberFromTerminal({ venueId: VENUE_A, orgId: ORG, staffId, verificationId: VER, slot, number, capture: cap })
 
 describe('terminal publicada (sin captureSeq): exactamente lo de hoy', () => {
   it('una foto sobre una venta COMPLETED la guarda y la regresa a PENDING', async () => {
@@ -454,6 +454,7 @@ describe('venta movida por el job de SIM de evento', () => {
     await expect(proof([VINC], { capture: capture(1), orgId: OTHER_ORG })).rejects.toMatchObject({ statusCode: 404 })
     await expect(
       setNumberFromTerminal({
+        venueId: VENUE_A,
         orgId: OTHER_ORG,
         staffId: PROMOTER,
         verificationId: VER,
