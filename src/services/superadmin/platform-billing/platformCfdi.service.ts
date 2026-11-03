@@ -624,9 +624,12 @@ async function removeFailed(tx: Prisma.TransactionClient, id: string): Promise<P
   return row
 }
 
-/** Escribe sólo si la fila sigue como se leyó antes de preguntarle al PAC. */
+/**
+ * Escribe sólo si la fila sigue como se leyó antes de preguntarle al PAC. Por `updatedAt` y no sólo por estado: mientras una consulta
+ * espera, la fila pudo ir y volver (se rechazó una cancelación y se pidió otra), y esa respuesta vieja no es de este trámite.
+ */
 async function writeIfUnchanged(row: PlatformCfdi, data: Prisma.PlatformCfdiUncheckedUpdateManyInput): Promise<PlatformCfdi> {
-  const { count } = await prisma.platformCfdi.updateMany({ where: { id: row.id, status: row.status }, data })
+  const { count } = await prisma.platformCfdi.updateMany({ where: { id: row.id, status: row.status, updatedAt: row.updatedAt }, data })
   const fresh = await prisma.platformCfdi.findUnique({ where: { id: row.id } })
   if (count === 0 || !fresh) throw conflict('Esta factura acaba de cambiar: vuelve a consultarla', 'PLATFORM_CFDI_CHANGED')
   return fresh

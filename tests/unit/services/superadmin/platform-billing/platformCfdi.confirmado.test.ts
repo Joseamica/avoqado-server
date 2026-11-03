@@ -113,9 +113,14 @@ beforeEach(() => {
     return f ? { ...f } : null
   })
   prismaMock.platformCfdi.updateMany.mockImplementation(async ({ where, data }: any) => {
-    const f = filas.find(x => x.id === where.id && (where.status?.in ? where.status.in.includes(x.status) : x.status === where.status))
+    const f = filas.find(
+      x =>
+        x.id === where.id &&
+        (where.status?.in ? where.status.in.includes(x.status) : x.status === where.status) &&
+        (!where.updatedAt || +x.updatedAt === +where.updatedAt),
+    )
     if (!f) return { count: 0 }
-    Object.assign(f, data)
+    Object.assign(f, data, { updatedAt: new Date() })
     return { count: 1 }
   })
   prismaMock.platformCfdi.update.mockImplementation(async ({ where, data }: any) => {
@@ -321,6 +326,19 @@ describe('«Consultar estado»: le pregunta al PAC y nunca emite', () => {
     pac.getCancellationStatus.mockResolvedValue({ status: respuesta, cancelledAt: null })
 
     await expect(refreshPlatformCfdi('c1')).resolves.toMatchObject({ status: estado })
+  })
+
+  it('🔴 una respuesta vieja no pisa una cancelación NUEVA, aunque la fila haya vuelto al mismo estado', async () => {
+    filas.push(fila({ status: 'CANCEL_REQUESTED', cancelStatus: 'pending', uuid: 'UUID-1', facturapiId: 'fa-1' }))
+    pac.getCancellationStatus.mockImplementationOnce(async () => {
+      // Mientras esta consulta espera, otra pestaña consultó (no procedió) y volvió a cancelar: otro trámite, con el mismo estado.
+      filas[0].updatedAt = new Date()
+      return { status: 'rejected', cancelledAt: null }
+    })
+
+    await expect(refreshPlatformCfdi('c1')).rejects.toMatchObject({ code: 'PLATFORM_CFDI_CHANGED' })
+
+    expect(filas[0].status).toBe('CANCEL_REQUESTED')
   })
 
   it('🔴 recién pedida (menos de 2 min) y el PAC dice «none»: la petición puede seguir en vuelo, no se regresa a timbrada', async () => {
