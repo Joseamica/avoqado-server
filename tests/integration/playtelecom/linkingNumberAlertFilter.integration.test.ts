@@ -7,6 +7,7 @@
  *     npx jest --selectProjects=integration --runInBand --runTestsByPath tests/integration/playtelecom/linkingNumberAlertFilter.integration.test.ts
  */
 import { randomUUID } from 'crypto'
+import cuid from 'cuid'
 import type { SaleVerificationNumberSource } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import {
@@ -17,8 +18,8 @@ import {
 import { computeNumberAlerts, type NumberAlertCode } from '@/services/playtelecom/linkingNumber.rules'
 
 const tag = `vinculacion-${randomUUID()}`
-const ORG = `${tag}-org`
-const OTHER_ORG = `${tag}-otra`
+const ORG = cuid()
+const OTHER_ORG = cuid()
 // Octubre en la hora del negocio, con los mismos extremos que `parseRange` (fin en 23:59:59.999 local).
 const range = { from: new Date('2026-10-01T06:00:00.000Z'), to: new Date('2026-11-01T05:59:59.999Z') }
 const ids: Record<string, string> = {}
@@ -78,7 +79,7 @@ async function venta(nombre: string, v: Venta) {
 beforeAll(async () => {
   for (const org of [ORG, OTHER_ORG]) {
     await prisma.organization.create({ data: { id: org, name: tag, email: `${org}@example.test`, phone: '5500000000' } })
-    venueIds.push((await prisma.venue.create({ data: { organizationId: org, name: `Tienda ${org}`, slug: org } })).id)
+    venueIds.push((await prisma.venue.create({ data: { organizationId: org, name: `Tienda ${org}`, slug: `${tag}-${org}` } })).id)
   }
   staffId = (await prisma.staff.create({ data: { email: `${tag}@example.test`, firstName: 'Ana', lastName: 'Promotora' } })).id
 
@@ -99,12 +100,16 @@ beforeAll(async () => {
   await venta('s8', { isPortabilidad: true, linking: '5522222222', ported: '5522222222', photos: ['f1', 'f2'] })
   await venta('s9', { linking: '5533333333', photos: ['f1'] }) // + 5 históricos sin fecha
   await venta('s10', { linking: '5512345678', photos: ['f1'], paidAt: new Date('2026-09-15T18:00:00.000Z') }) // fuera del rango
+  // A(X,n) + histórico(X,n) + B(Y,n): el histórico de su propio ICCID no es repetido de A, pero B sí lo es (y A de B).
+  await venta('a', { linking: '5544444444', photos: ['f1'], iccid: 'ICC-X' })
+  await venta('b', { linking: '5544444444', photos: ['f1'], iccid: 'ICC-Y' })
 
   await prisma.historicalLinkingNumber.createMany({
     data: [
       { organizationId: ORG, iccid: 'ICC6', number: '5599999999', importBatch: tag },
       { organizationId: ORG, iccid: 'ICC-OTRA', number: '5511111111', importBatch: tag, saleDate: new Date('2026-05-01T18:00:00Z') },
       ...['H1', 'H2', 'H3', 'H4', 'H5'].map(iccid => ({ organizationId: ORG, iccid, number: '5533333333', importBatch: tag })),
+      { organizationId: ORG, iccid: 'ICC-X', number: '5544444444', importBatch: tag },
     ],
   })
 })
@@ -171,10 +176,10 @@ const nombres = (lista: string[]) => lista.map(id => Object.keys(ids).find(n => 
 
 describe('filtro de alertas del número = alertas de la fila', () => {
   it.each<[NumberAlertFilter, string[]]>([
-    ['duplicate', ['s1', 's2', 's7', 's9']],
+    ['duplicate', ['a', 'b', 's1', 's2', 's7', 's9']],
     ['not10', ['s3']],
     ['missing', ['s4', 's5']],
-    ['any', ['s1', 's2', 's3', 's4', 's5', 's7', 's9']],
+    ['any', ['a', 'b', 's1', 's2', 's3', 's4', 's5', 's7', 's9']],
   ])('%s: el SQL y la fila dan las mismas ventas', async (kind, esperadas) => {
     const filas = await alertasDeLaFila()
 
@@ -200,6 +205,18 @@ describe('findDuplicatesForSales contra Postgres', () => {
       { kind: 'HISTORICAL', date: null },
       { kind: 'HISTORICAL', date: null },
     ])
+  })
+
+  it('A(X,n) + histórico(X,n) + B(Y,n): para A sólo B es repetido (su propio histórico no); B sí choca con A', async () => {
+    const res = await findDuplicatesForSales(ORG, [
+      { key: 'a', verificationId: ids.a, iccid: 'ICC-X', linkingNumber: '5544444444', portedNumber: null },
+      { key: 'b', verificationId: ids.b, iccid: 'ICC-Y', linkingNumber: '5544444444', portedNumber: null },
+    ])
+
+    expect(res.get('a')?.linking).toEqual({ total: 1, matches: [expect.objectContaining({ kind: 'SALE', verificationId: ids.b })] })
+    const b = res.get('b')?.linking
+    expect(b).toBeDefined()
+    expect(b?.matches).toContainEqual(expect.objectContaining({ kind: 'SALE', verificationId: ids.a }))
   })
 
   it('cuenta la venta fuera del rango y nunca la de otra organización', async () => {

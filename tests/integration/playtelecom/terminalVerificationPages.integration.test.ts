@@ -27,7 +27,7 @@ const OTHER_ORG = cuid()
 let venueA = ''
 let venueB = ''
 let venueOther = ''
-const staff: Record<'p1' | 'p2' | 'p3', string> = { p1: '', p2: '', p3: '' }
+const staff: Record<'p1' | 'p2' | 'p3' | 'p4', string> = { p1: '', p2: '', p3: '', p4: '' }
 const ids: Record<string, { sv: string; payment: string }> = {}
 let paymentWithoutVerification = ''
 
@@ -93,7 +93,7 @@ beforeAll(async () => {
   venueA = (await prisma.venue.create({ data: { organizationId: ORG, name: `${tag} A`, slug: `${tag}-a` } })).id
   venueB = (await prisma.venue.create({ data: { organizationId: ORG, name: `${tag} B`, slug: `${tag}-b` } })).id
   venueOther = (await prisma.venue.create({ data: { organizationId: OTHER_ORG, name: `${tag} C`, slug: `${tag}-c` } })).id
-  for (const k of ['p1', 'p2', 'p3'] as const) {
+  for (const k of ['p1', 'p2', 'p3', 'p4'] as const) {
     staff[k] = (await prisma.staff.create({ data: { email: `${tag}-${k}@example.test`, firstName: k, lastName: 'Promotor' } })).id
   }
 
@@ -161,6 +161,19 @@ beforeAll(async () => {
     { name: 'p3-rechazada', venueId: venueA, staffId: staff.p3, status: 'REJECTED', createdAt: at('2026-10-02T16:00:00Z') },
     { name: 'p3-otra-org', venueId: venueOther, staffId: staff.p3, createdAt: at('2026-10-01T15:00:00Z') },
   ])
+  // p4: 199 completas en minutos distintos y, justo en el corte de página (posiciones 200 y 201), dos a la misma hora.
+  const corte = at('2026-10-01T15:00:00Z', 199)
+  await ventas([
+    ...Array.from({ length: 199 }, (_, i) => ({
+      name: `p4-${i}`,
+      venueId: venueA,
+      staffId: staff.p4,
+      createdAt: at('2026-10-01T15:00:00Z', i),
+    })),
+    { name: 'p4-corte-a', venueId: venueA, staffId: staff.p4, createdAt: corte },
+    { name: 'p4-corte-b', venueId: venueA, staffId: staff.p4, createdAt: corte },
+  ])
+
   const order = await prisma.order.create({ data: { venueId: venueA, orderNumber: randomUUID(), subtotal: 100, taxAmount: 0, total: 100 } })
   paymentWithoutVerification = (
     await prisma.payment.create({
@@ -235,6 +248,27 @@ describe('pending: tope de 200, total y cursor', () => {
     expect(page.total).toBe(3)
     expect(page.data[0]).toMatchObject({ linkingNumber: '5512345678', linkingNumberLocked: false, alerts: [] })
     expect(page.data[0]).not.toHaveProperty('status')
+  })
+})
+
+describe('empate de hora justo en el corte de página', () => {
+  it('la 200 y la 201 tienen el mismo createdAt: el id desempata y el cursor trae la que falta, sin repetir ni perder', async () => {
+    const [primeroEnId, segundoEnId] = [ids['p4-corte-a'].sv, ids['p4-corte-b'].sv].sort()
+
+    const first = await getPendingVerifications(ORG, staff.p4)
+    expect(first.total).toBe(201)
+    expect(first.data).toHaveLength(200)
+    expect(first.data[199].id).toBe(primeroEnId)
+
+    const second = await getPendingVerifications(ORG, staff.p4, first.nextCursor!)
+    expect(idsOf(second)).toEqual([segundoEnId])
+    expect(second.nextCursor).toBeNull()
+
+    expect([...idsOf(first), ...idsOf(second)]).toEqual([
+      ...Array.from({ length: 199 }, (_, i) => ids[`p4-${i}`].sv),
+      primeroEnId,
+      segundoEnId,
+    ])
   })
 })
 
