@@ -2,7 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
-import { ConflictError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
+import AppError, { ConflictError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
 
 /** Qué candados corrieron, en orden: cada simulacro de abajo se anota aquí (prueba el CABLEADO de cada ruta). */
@@ -81,12 +81,13 @@ jest.mock('@/services/online-ordering/order.service', () => ({
   __esModule: true,
   createOnlineOrder: jest.fn(),
   getTrackingByToken: jest.fn(),
+  abandonCardPayment: jest.fn(),
 }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({ __esModule: true, cancelOnlineOrderByCustomer: jest.fn() }))
 
 import router from '@/routes/public/onlineOrdering.public.routes'
 import publicRoutes from '@/routes/public.routes'
-import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
+import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
@@ -115,6 +116,7 @@ const post = (o: { key?: string | null; customer?: boolean; auth?: string; paylo
 /** P1-06: el controlador le pasa al servicio lo que exige un pedido NUEVO (negocio operativo y plan). */
 const PIDE_LO_DE_UN_PEDIDO_NUEVO = expect.objectContaining({ assertCanCreate: expect.any(Function) })
 const cancel = (token = TOKEN) => request(app).post(`/venues/flautas/ordering/orders/${token}/cancel`)
+const abandon = (token = TOKEN) => request(app).post(`/venues/flautas/ordering/orders/${token}/abandon-payment`)
 
 beforeEach(() => {
   mockRan.length = 0
@@ -497,6 +499,42 @@ describe('API pública de pedidos en línea', () => {
     expect(raro.status).toBe(500)
     expect(raro.body).toEqual({ success: false, error: 'No se pudo cancelar tu pedido' })
   })
+
+  describe('S5: abandonar un pago (regreso de Stripe con ?pago=cancelado)', () => {
+    it('responde el seguimiento (la misma forma que GET, sin venueId) y nunca llama a cancelar', async () => {
+      ;(abandonCardPayment as jest.Mock).mockResolvedValue({
+        venueId: 'v1',
+        orderNumber: '',
+        status: 'PAYMENT_NOT_COMPLETED',
+        cardStatus: null,
+      })
+      const r = await abandon()
+      expect(r.status).toBe(200)
+      expect(r.body).toEqual({ success: true, data: { orderNumber: '', status: 'PAYMENT_NOT_COMPLETED', cardStatus: null } })
+      expect(abandonCardPayment).toHaveBeenCalledWith({ venueId: 'v1', trackingToken: TOKEN })
+      expect(cancelOnlineOrderByCustomer).not.toHaveBeenCalled()
+    })
+
+    it('sin pedido ni borrador de ese negocio ⇒ 404 ORDER_NOT_FOUND', async () => {
+      ;(abandonCardPayment as jest.Mock).mockResolvedValue(null)
+      const r = await abandon()
+      expect(r.status).toBe(404)
+      expect(r.body).toEqual({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    })
+
+    it('sin respuesta de Stripe al vencer la página ⇒ 502 CARD_PROVIDER_UNAVAILABLE con su texto (la tienda reintenta)', async () => {
+      ;(abandonCardPayment as jest.Mock).mockRejectedValue(
+        new AppError('No pudimos cerrar la página de pago. Intenta de nuevo en un momento.', 502, true, 'CARD_PROVIDER_UNAVAILABLE'),
+      )
+      const r = await abandon()
+      expect(r.status).toBe(502)
+      expect(r.body).toMatchObject({
+        success: false,
+        code: 'CARD_PROVIDER_UNAVAILABLE',
+        error: 'No pudimos cerrar la página de pago. Intenta de nuevo en un momento.',
+      })
+    })
+  })
 })
 
 describe('cableado: qué candados corre cada ruta', () => {
@@ -535,6 +573,11 @@ describe('cableado: qué candados corre cada ruta', () => {
     mockRan.length = 0
     expect((await cancel()).status).toBe(200)
     expect(mockRan).toEqual(['plain'])
+    // S5: abandonar el pago tampoco exige plan ni negocio operativo (el comensal ya pidió).
+    ;(abandonCardPayment as jest.Mock).mockResolvedValue({ venueId: 'v1', orderNumber: '' })
+    mockRan.length = 0
+    expect((await abandon()).status).toBe(200)
+    expect(mockRan).toEqual(['plain'])
   })
 
   it('A9: un slug con bytes de control, espacios o demasiado largo es 400 ANTES de buscar el negocio, en todas las rutas', async () => {
@@ -546,6 +589,7 @@ describe('cableado: qué candados corre cada ruta', () => {
         () => request(app).post(`/venues/${slug}/ordering/orders`).set('Idempotency-Key', KEY).set('x-test-customer', '1').send(body),
         () => request(app).get(`/venues/${slug}/ordering/orders/${TOKEN}`),
         () => request(app).post(`/venues/${slug}/ordering/orders/${TOKEN}/cancel`),
+        () => request(app).post(`/venues/${slug}/ordering/orders/${TOKEN}/abandon-payment`),
       ]) {
         const r = await llamar()
         expect(r.status).toBe(400)
@@ -565,9 +609,11 @@ describe('cableado: qué candados corre cada ruta', () => {
   it('un token mal formado se rechaza ANTES de buscar el negocio (no cuesta una consulta)', async () => {
     expect((await request(app).get('/venues/flautas/ordering/orders/corto')).status).toBe(400)
     expect((await cancel('corto')).status).toBe(400)
+    expect((await abandon('corto')).status).toBe(400)
     expect(mockRan).toEqual([])
     expect(getTrackingByToken).not.toHaveBeenCalled()
     expect(cancelOnlineOrderByCustomer).not.toHaveBeenCalled()
+    expect(abandonCardPayment).not.toHaveBeenCalled()
   })
 })
 

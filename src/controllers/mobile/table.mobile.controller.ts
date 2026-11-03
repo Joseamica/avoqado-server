@@ -229,6 +229,8 @@ export async function moveOrder(req: Request, res: Response): Promise<void> {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Internal server error',
+      // Aditivo: el código de un rechazo nuestro (p. ej. 409 ONLINE_ORDER_PAID_BY_CARD); un 5xx no expone el suyo.
+      code: error.statusCode < 500 ? error.code : undefined,
     })
   }
 }

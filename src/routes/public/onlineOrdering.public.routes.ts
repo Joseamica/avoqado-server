@@ -67,5 +67,13 @@ router.post(
 // valida ANTES de buscar el negocio: uno mal formado no cuesta una consulta.
 router.get('/orders/:trackingToken', readLimit, validateRequest(trackingSchema), resolveVenueBySlug, ctrl.getOrder)
 router.post('/orders/:trackingToken/cancel', cancelLimit, validateRequest(trackingSchema), resolveVenueBySlug, ctrl.postCancel)
+// S5: regresar de Stripe sin pagar (`?pago=cancelado`). Aparte de cancelar (nunca cancela un pedido), con su mismo limitador.
+router.post(
+  '/orders/:trackingToken/abandon-payment',
+  cancelLimit,
+  validateRequest(trackingSchema),
+  resolveVenueBySlug,
+  ctrl.postAbandonPayment,
+)
 
 export default router

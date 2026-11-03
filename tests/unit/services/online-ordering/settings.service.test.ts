@@ -389,16 +389,14 @@ describe('settings.service', () => {
     }
     const AVISO_TARJETA = 'Conecta tu cuenta de Stripe en Ligas de pago para aceptar tarjeta.'
 
-    it('prender sin comercio Stripe cobrable es 400 CARD_PAYMENT_NOT_ACCEPTED, no guarda ni audita', async () => {
+    it('A (founder, 2-nov): prender sin comercio Stripe cobrable SÍ guarda la preferencia y audita; cobra cuando Stripe pueda', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: false }) as any)
       prismaMock.ecommerceMerchant.findMany.mockResolvedValue([{ ...MERCHANT, chargesEnabled: false }] as any)
-      await expect(updateSettings('v1', { acceptsCardOnline: true }, 'staff1')).rejects.toMatchObject({
-        statusCode: 400,
-        code: 'CARD_PAYMENT_NOT_ACCEPTED',
-        message: AVISO_TARJETA,
-      })
-      expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
-      expect(logAction).not.toHaveBeenCalled()
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      await expect(updateSettings('v1', { acceptsCardOnline: true }, 'staff1')).resolves.toMatchObject({ acceptsCardOnline: true })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ONLINE_ORDERING_CARD_TOGGLED', data: { from: false, to: true } }),
+      )
     })
 
     it('prender con comercio cobrable guarda y audita ONLINE_ORDERING_CARD_TOGGLED { from, to }', async () => {
@@ -438,16 +436,18 @@ describe('settings.service', () => {
       expect(actions).toEqual(['ONLINE_ORDERING_SETTINGS_UPDATED'])
     })
 
-    it('con tarjeta prendida se puede quitar pagar al recoger (la tarjeta cuenta como medio de pago)', async () => {
+    it('con tarjeta prendida y Stripe cobrable se puede quitar pagar al recoger (la tarjeta cuenta como medio de pago)', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([MERCHANT] as any)
       prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsCardOnline: true, acceptsPayAtPickup: false }) as any)
       await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 'staff1')).resolves.toMatchObject({ acceptsPayAtPickup: false })
     })
 
-    it('encendida con pagar al recoger apagado y tarjeta prendida: se permite', async () => {
+    it('encendida con pagar al recoger apagado y tarjeta prendida con Stripe cobrable: se permite', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
         row({ enabled: false, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
       )
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([MERCHANT] as any)
       prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(
         row({ enabled: true, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
       )
@@ -462,7 +462,34 @@ describe('settings.service', () => {
       expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
     })
 
-    it('getSettings devuelve acceptsCardOnline; sin fila es false', async () => {
+    it('A: quitar pagar al recoger con la tarjeta prendida pero SIN Stripe cobrable es 400 NO_PAYMENT_MODE y no escribe', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([{ ...MERCHANT, chargesEnabled: false }] as any)
+      await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 'staff1')).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'NO_PAYMENT_MODE',
+        message: 'Sin «Pagar al recoger» la tienda sólo cobraría con tarjeta, y tu cuenta de Stripe todavía no puede cobrar: déjalo prendido o conecta tu Stripe en Ligas de pago.',
+      })
+      expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    })
+
+    it('A: encender con pagar al recoger apagado y la tarjeta prendida SIN Stripe cobrable es 400 NO_PAYMENT_MODE', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+        row({ enabled: false, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
+      )
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([] as any)
+      await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({ statusCode: 400, code: 'NO_PAYMENT_MODE' })
+      expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    })
+
+    it('A: otro cambio con la cuenta Stripe caída (sólo tarjeta) no consulta Stripe ni bloquea: la tienda ya se ve en pausa por sí sola', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsPayAtPickup: false, acceptsCardOnline: true }) as any)
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsPayAtPickup: false, acceptsCardOnline: true, minOrderAmount: 60 }) as any)
+      await expect(updateSettings('v1', { minOrderAmount: 60, acceptsPayAtPickup: false, acceptsCardOnline: true }, 'staff1')).resolves.toBeTruthy()
+      expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
+    })
+
+    it('getSettings devuelve acceptsCardOnline; sin fila es false hasta S1b (sale con la tienda nueva)', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
       await expect(getSettings('v1')).resolves.toMatchObject({ acceptsCardOnline: true })
       expect(DEFAULT_CONFIG.acceptsCardOnline).toBe(false)

@@ -74,6 +74,7 @@ jest.mock('@/controllers/dashboard/onlineOrdering.dashboard.controller', () => {
     listCardRefundsHandler: respond,
     refundCardHandler: respond,
     resolveCardRefundHandler: respond,
+    getOnlineOrderHandler: respond,
   }
 })
 
@@ -153,6 +154,11 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
       const r = await request(app)[method](`${P}/${path}`)
       expect({ path, ...r.body }).toEqual({ path, perms: [perm], plans: [], schemas: [schema] })
     }
+  })
+
+  it('S3 (clientes): el panel lee UN pedido por su cuenta con orders:read y su esquema, sin plan (devolver después de 24 h)', async () => {
+    const r = await request(app).get(`${P}/orders/ord1`)
+    expect(r.body).toEqual({ perms: ['orders:read'], plans: [], schemas: ['orderActionSchema'] })
   })
 
   it('no existe «soltar la impresión» (R20)', async () => {

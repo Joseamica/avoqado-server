@@ -27,7 +27,9 @@ import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
-import { confirmCardAuthorization } from './card/confirm.service'
+import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
+import { chargeMerchant, findCardMerchant } from './card/merchant'
+import { getProvider } from '@/services/payments/provider-registry'
 
 export interface CreateOnlineOrderInput {
   venueId: string
@@ -453,7 +455,15 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       })
     }
     if (!state.config.acceptsPayAtPickup) {
-      throw new BadRequestError('Este negocio no acepta pagar al recoger.', 'PAYMENT_MODE_NOT_ACCEPTED')
+      // S8: la tienda vieja abierta en una pestaña muestra este texto ante un código que no conoce. Si la tarjeta SÍ está disponible
+      // (misma regla que `paymentModes.cardOnline` de GET /info), le dice qué hacer. El código no cambia.
+      const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, input.venueId)) !== null
+      throw new BadRequestError(
+        cardOnline
+          ? 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.'
+          : 'Este negocio no acepta pagar al recoger.',
+        'PAYMENT_MODE_NOT_ACCEPTED',
+      )
     }
 
     // 4. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).
@@ -557,26 +567,36 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   }
 }
 
-/** Fase 2: el borrador de tarjeta todavía no es pedido: espera el pago, o ya no se pagó (vencido o liberado). */
-export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETED'
-export const cardDraftTrackingStatus = (status: OnlineOrderChargeStatus): CardDraftTrackingStatus =>
-  status === OnlineOrderChargeStatus.PENDING_AUTH ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
+type DraftCharge = { status: OnlineOrderChargeStatus; lastError: string | null }
+/** S4 (Codex plan r2 #3): un borrador que sigue `PENDING_AUTH` pero ya se cobró fuera de Avoqado (`capturedOutside`). */
+const draftCapturedOutside = (c: DraftCharge) => c.status === OnlineOrderChargeStatus.PENDING_AUTH && c.lastError === CAPTURED_OUTSIDE
 
-/** Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar; liberar ya decidido cuenta como liberado. */
-export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASED'
+/** Fase 2: el borrador de tarjeta todavía no es pedido: espera el pago, o ya no se pagó (vencido, liberado o cobrado fuera). */
+export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETED'
+export const cardDraftTrackingStatus = (c: DraftCharge): CardDraftTrackingStatus =>
+  c.status === OnlineOrderChargeStatus.PENDING_AUTH && !draftCapturedOutside(c) ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
+
+/**
+ * Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar. S4 (Codex plan r1 #3): `RELEASING` = la liberación
+ * aún no termina (puede fallar o resultar cobrada a mano): nunca se dice «liberada» antes de tiempo.
+ */
+export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASING' | 'RELEASED'
 const PUBLIC_CARD_STATUS: Partial<Record<OnlineOrderChargeStatus, PublicCardStatus>> = {
   AUTHORIZED: 'AUTHORIZED',
   CAPTURING: 'CONFIRMING',
   CAPTURED: 'CAPTURED',
-  RELEASING: 'RELEASED',
+  RELEASING: 'RELEASING',
   RELEASED: 'RELEASED',
 }
+/** S4: el borrador también dice la verdad de su tarjeta (p. ej. `CAPTURED` sin pedido). */
+const draftCardStatus = (c: DraftCharge): PublicCardStatus | null =>
+  draftCapturedOutside(c) ? 'CAPTURED' : (PUBLIC_CARD_STATUS[c.status] ?? null)
 
 export interface PublicTracking {
   orderNumber: string
   status: OnlineOrderStatus | CardDraftTrackingStatus
   paymentMode: OnlineOrderPaymentMode
-  /** Fase 2: estado de la tarjeta; `null` al recoger y en el borrador. */
+  /** Fase 2: estado de la tarjeta; `null` al recoger y en el borrador que espera el pago. */
   cardStatus?: PublicCardStatus | null
   venueId: string
   venueName: string
@@ -637,12 +657,57 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
   return draftTracking(token)
 }
 
+/**
+ * S5 (Codex plan r1 #5, r2 #2): el comensal regresó de Stripe sin pagar (`?pago=cancelado`). 🔴 Nunca cancela ni libera un pedido:
+ * si el token ya es pedido (otra pestaña pagó), sólo responde su seguimiento. Con un borrador que espera el pago, vence su página
+ * en la cuenta conectada de la FOTO del cargo y corre la MISMA confirmación, que relee la sesión: vencida ⇒ `ABANDONED`; completada
+ * y apartada ⇒ nace el pedido. Repetir da lo mismo. `null` si el token no es de este negocio.
+ */
+export async function abandonCardPayment(i: { venueId: string; trackingToken: string }): Promise<PublicTracking | null> {
+  const charge = await prisma.onlineOrderCharge.findFirst({
+    where: { trackingToken: i.trackingToken, venueId: i.venueId },
+    select: { id: true, status: true, lastError: true, checkoutSessionId: true, ecommerceMerchantId: true, merchantSnapshot: true },
+  })
+  if (charge?.checkoutSessionId && cardDraftTrackingStatus(charge) === 'AWAITING_PAYMENT') {
+    const merchant = chargeMerchant(charge)
+    let expiredByUs = false
+    try {
+      await getProvider(merchant).expireAuthorizationCheckout(merchant, charge.checkoutSessionId)
+      expiredByUs = true
+    } catch (error: any) {
+      // Stripe contestó que ya no se puede (vencida o completada): la confirmación decide. Sin respuesta, la página puede seguir
+      // abierta y el comensal todavía podría pagar: no se afirma nada (el borrador sigue PENDING_AUTH) y la tienda reintenta.
+      if (error?.type !== 'StripeInvalidRequestError') {
+        logger.warn('[OnlineOrdering] no se pudo vencer la página de pago abandonada', { chargeId: charge.id, error: error?.message })
+        throw new AppError('No pudimos cerrar la página de pago. Intenta de nuevo en un momento.', 502, true, 'CARD_PROVIDER_UNAVAILABLE')
+      }
+    }
+    if (expiredByUs) {
+      // Codex servidor r1 #1: Stripe ya la venció. Evidencia local ANTES de confirmar (CAS: sólo si sigue esperando), para que la
+      // repetición del POST (S7) no vuelva a mandar esa URL aunque la confirmación de abajo falle.
+      await prisma.onlineOrderCharge.updateMany({
+        where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
+        data: { checkoutExpiresAt: new Date() },
+      })
+    }
+    try {
+      await confirmCardAuthorization(charge.id)
+    } catch (error) {
+      // Igual que el seguimiento: si la confirmación truena, el borrador sigue esperando y el conciliador lo retoma.
+      logger.warn('[OnlineOrdering] el abandono no pudo confirmar la tarjeta (sigue esperando)', { chargeId: charge.id, error })
+    }
+  }
+  const tracking = (await orderTracking(i.trackingToken)) ?? (await draftTracking(i.trackingToken))
+  return tracking?.venueId === i.venueId ? tracking : null
+}
+
 /** El borrador de tarjeta (sin pedido todavía): renglones y total del carrito guardado, sin folio. */
 async function draftTracking(token: string): Promise<PublicTracking | null> {
   const c = await prisma.onlineOrderCharge.findUnique({
     where: { trackingToken: token },
     select: {
       status: true,
+      lastError: true,
       request: true,
       amount: true,
       checkoutExpiresAt: true,
@@ -655,9 +720,9 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
   const quote = (c.request as unknown as { quote: QuoteSnapshot }).quote
   return {
     orderNumber: '', // el folio nace con el pedido
-    status: cardDraftTrackingStatus(c.status),
+    status: cardDraftTrackingStatus(c),
     paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
-    cardStatus: null,
+    cardStatus: draftCardStatus(c),
     venueId: c.venueId,
     venueName: c.venue.name,
     venueSlug: c.venue.slug,

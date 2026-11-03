@@ -1,8 +1,9 @@
 import type { NextFunction, Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
-import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { cardRefundKey } from '@/schemas/online-ordering.schema'
 import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
+import { getInboxOrder } from '@/services/online-ordering/inbox.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
@@ -76,6 +77,21 @@ export const listMenuProductsHandler = async (req: Request, res: Response, next:
 }
 
 /** Fase 2 (T10): las devoluciones a la tarjeta de un pedido (estado, y si falló después, «Devolver por otro medio»). */
+/**
+ * S3 (clientes, Codex plan r1 #2): UN pedido en línea por el id de su cuenta, con la forma de la bandeja. El detalle de la cuenta del
+ * panel lo usa para «Devolver a la tarjeta» después de que la bandeja (24 h) ya no lo muestra. 404 si no es pedido en línea.
+ */
+export const getOnlineOrderHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const data = await getInboxOrder({ venueId, orderId })
+    if (!data) throw new NotFoundError('Esta cuenta no es un pedido en línea.')
+    return res.json({ success: true, data })
+  } catch (e) {
+    return next(e)
+  }
+}
+
 export const listCardRefundsHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
@@ -106,7 +122,7 @@ function cardRefundIdempotencyKey(req: Request): string {
 export const refundCardHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, reason, note } = req.body
+    const { amount, reason, note, expectedLatestRefundId } = req.body
     const idempotencyKey = cardRefundIdempotencyKey(req)
     const data = await refundCardOnlineOrder({
       venueId,
@@ -116,6 +132,7 @@ export const refundCardHandler = async (req: Request, res: Response, next: NextF
       staffId: requireStaff(req),
       idempotencyKey,
       note: note ?? null,
+      expectedLatestRefundId,
     })
     return res.json({ success: true, data })
   } catch (e) {
