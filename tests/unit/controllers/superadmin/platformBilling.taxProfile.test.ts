@@ -1,4 +1,4 @@
-/** PUT /superadmin/billing/tax-profiles: lo que el SAT rechazó no se guardó, así que tampoco se registra. */
+/** PUT /superadmin/billing/tax-profiles: lo que el SAT rechazó no se guardó, así que no se registra como guardado. */
 jest.mock('@/services/superadmin/platform-billing/billingTaxProfile.service', () => ({
   ...jest.requireActual('@/services/superadmin/platform-billing/billingTaxProfile.service'),
   saveBillingTaxProfileIfSatAccepts: jest.fn(),
@@ -27,7 +27,7 @@ describe('upsertTaxProfile', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('🔴 el SAT rechaza: contesta el perfil como estaba con su veredicto, y no registra nada', async () => {
-    save.mockResolvedValue({ saved: false, profile: PERFIL, validation: RECHAZO })
+    save.mockResolvedValue({ saved: false, profile: PERFIL, validation: RECHAZO, markedInvalid: false })
 
     const { json } = await put({ customerType: 'VENUE' })
 
@@ -36,12 +36,23 @@ describe('upsertTaxProfile', () => {
   })
 
   it('🔴 un externo rechazado que no existía contesta `data: null`', async () => {
-    save.mockResolvedValue({ saved: false, profile: null, validation: RECHAZO })
+    save.mockResolvedValue({ saved: false, profile: null, validation: RECHAZO, markedInvalid: false })
 
     const { json } = await put({ customerType: 'STANDALONE' })
 
     expect(json).toEqual({ success: true, data: null, validation: RECHAZO })
     expect(log).not.toHaveBeenCalled()
+  })
+
+  it('🔴 los mismos datos dejaron de estar verificados: eso sí se registra, con quién provocó la revisión', async () => {
+    save.mockResolvedValue({ saved: false, profile: PERFIL, validation: RECHAZO, markedInvalid: true })
+
+    await put({ customerType: 'VENUE' })
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: 'staff1', venueId: 'venue1', action: 'PLATFORM_TAXPROFILE_SAT_REJECTED', entityId: 'v1' }),
+    )
   })
 
   it('lo guardado se registra, con quién lo hizo', async () => {

@@ -166,12 +166,12 @@ export async function upsertTaxProfile(req: Request, res: Response, next: NextFu
   try {
     const { userId } = (req as any).authContext
     const result = await saveBillingTaxProfileIfSatAccepts({ ...req.body, performedById: userId })
-    // Lo que el SAT rechazó no se guardó: no hay nada que registrar.
-    if (result.saved) {
+    // Lo que el SAT rechazó no se guardó. Sí se registra si lo rechazado eran los datos ya guardados, que dejan de estar «Verificados».
+    if (result.profile && (result.saved || result.markedInvalid)) {
       void logAction({
         staffId: userId,
         venueId: result.profile.venueId,
-        action: 'PLATFORM_TAXPROFILE_UPSERTED',
+        action: result.saved ? 'PLATFORM_TAXPROFILE_UPSERTED' : 'PLATFORM_TAXPROFILE_SAT_REJECTED',
         entity: 'BillingTaxProfile',
         entityId: result.profile.id,
         data: { customerType: result.profile.customerType, rfc: result.profile.rfc },

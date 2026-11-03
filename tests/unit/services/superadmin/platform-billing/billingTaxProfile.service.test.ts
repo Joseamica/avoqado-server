@@ -273,7 +273,7 @@ describe('saveBillingTaxProfileIfSatAccepts: primero el SAT, después se guarda'
 
     const res = await saveBillingTaxProfileIfSatAccepts(TECLEADO)
 
-    expect(res).toEqual({ saved: false, profile: BUENO, validation: RECHAZO })
+    expect(res).toEqual({ saved: false, profile: BUENO, validation: RECHAZO, markedInvalid: false })
     expect(escribio()).toBe(0)
   })
 
@@ -285,9 +285,20 @@ describe('saveBillingTaxProfileIfSatAccepts: primero el SAT, después se guarda'
 
     const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, rfc: BUENO.rfc })
 
-    expect(res).toEqual({ saved: false, profile: YA_INVALIDO, validation: RECHAZO })
+    expect(res).toEqual({ saved: false, profile: YA_INVALIDO, validation: RECHAZO, markedInvalid: true })
     expect(prismaMock.billingTaxProfile.updateMany.mock.calls[0][0].data).toEqual(expect.objectContaining({ validationStatus: 'INVALID' }))
     expect(prismaMock.billingTaxProfile.upsert).not.toHaveBeenCalled()
+  })
+
+  it('volver a intentar con datos ya marcados INVALID no es un cambio de estado: no hay nada nuevo que registrar', async () => {
+    const YA_INVALIDO = { ...BUENO, validationStatus: 'INVALID' }
+    prismaMock.billingTaxProfile.findUnique.mockResolvedValue(YA_INVALIDO as never)
+    prismaMock.billingTaxProfile.updateMany.mockResolvedValue({ count: 1 } as never)
+    mockResolve.mockReturnValue(pac(RECHAZO))
+
+    const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, rfc: BUENO.rfc })
+
+    expect(res).toEqual(expect.objectContaining({ saved: false, markedInvalid: false }))
   })
 
   it('🔴 cliente externo con un RFC rechazado: no deja ninguna fila nueva, y no hay perfil que regresar', async () => {
@@ -296,7 +307,7 @@ describe('saveBillingTaxProfileIfSatAccepts: primero el SAT, después se guarda'
 
     const res = await saveBillingTaxProfileIfSatAccepts({ ...TECLEADO, customerType: 'STANDALONE', venueId: undefined, displayName: 'Cliente' })
 
-    expect(res).toEqual({ saved: false, profile: null, validation: RECHAZO })
+    expect(res).toEqual({ saved: false, profile: null, validation: RECHAZO, markedInvalid: false })
     expect(escribio()).toBe(0)
   })
 
