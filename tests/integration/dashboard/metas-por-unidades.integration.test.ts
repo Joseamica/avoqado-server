@@ -25,7 +25,7 @@ let carla: string
 
 let orderSeq = 0
 async function cuenta(
-  renglones: Array<{ piezas: number; peso?: number }>,
+  renglones: Array<{ piezas: number; peso?: number; valeRevendido?: boolean }>,
   opciones: { status?: 'COMPLETED' | 'CANCELLED'; createdAt?: Date } = {},
 ) {
   orderSeq += 1
@@ -46,6 +46,7 @@ async function cuenta(
           productName: `Producto ${i + 1}`,
           quantity: r.piezas,
           weightQuantity: r.peso,
+          releasedAreaTicketLineId: r.valeRevendido ? `vale-${suffix}` : undefined,
           unitPrice: 10,
           discountAmount: 0,
           taxAmount: 0,
@@ -94,6 +95,7 @@ async function devolucion(
   original: { id: string },
   opera: string,
   refundedItems?: Array<{ orderItemId: string; quantity: number; amountCents: number }>,
+  opciones: { status?: 'COMPLETED' | 'FAILED'; createdAt?: Date } = {},
 ) {
   await prisma.payment.create({
     data: {
@@ -103,7 +105,8 @@ async function devolucion(
       amount: -5,
       tipAmount: 0,
       method: 'CASH',
-      status: 'COMPLETED',
+      status: opciones.status ?? 'COMPLETED',
+      createdAt: opciones.createdAt ?? new Date(),
       type: 'REFUND',
       splitType: 'FULLPAYMENT',
       feePercentage: 0,
@@ -154,6 +157,8 @@ beforeAll(async () => {
   const b = await cuenta([{ piezas: 2 }, { piezas: 1, peso: 0.35 }])
   const cobroB = await cobro(b, ana)
   await devolucion(b, cobroB, ana)
+  // Un cobro viejo puede no traer tipo: sigue siendo una venta.
+  await prisma.payment.update({ where: { id: cobroB.id }, data: { type: null } })
 
   // C: cuenta por producto: Beto paga 1 pieza y Ana el renglón de 2.
   const c = await cuenta([{ piezas: 1 }, { piezas: 2 }])
@@ -165,10 +170,11 @@ beforeAll(async () => {
   await cobro(d, beto, { productos: [d.items[0].id] })
   await cobro(d, ana)
 
-  // E: por importe entre dos: no hay dato de qué pagó cada quien, así que cuenta para los dos.
+  // E: por importe entre dos: no hay dato de qué pagó cada quien, así que cuenta para los dos. Una devolución de 1 pieza les resta a los dos.
   const e = await cuenta([{ piezas: 1 }, { piezas: 1 }])
   await cobro(e, beto)
-  await cobro(e, ana)
+  const cobroE = await cobro(e, ana)
+  await devolucion(e, cobroE, ana, [{ orderItemId: e.items[0].id, quantity: 1, amountCents: 500 }])
 
   // F: Ana intenta cobrar el producto y falla; Beto cobra la cuenta.
   const f = await cuenta([{ piezas: 1 }])
@@ -185,6 +191,22 @@ beforeAll(async () => {
   const h = await cuenta([{ piezas: 4 }], { createdAt: hace40 })
   const cobroH = await cobro(h, carla, { createdAt: hace40 })
   await devolucion(h, cobroH, ana, [{ orderItemId: h.items[0].id, quantity: 1, amountCents: 500 }])
+  // No restan: una devolución de hace 40 días y una que no se completó.
+  await devolucion(h, cobroH, ana, [{ orderItemId: h.items[0].id, quantity: 1, amountCents: 500 }], { createdAt: hace40 })
+  await devolucion(h, cobroH, ana, [{ orderItemId: h.items[0].id, quantity: 1, amountCents: 500 }], { status: 'FAILED' })
+
+  // I: cuenta por producto. Un Cambio devuelve el producto que cobró Ana, pero sale primero del cobro de Beto (la fila de Ana lleva 0).
+  // La pieza se le resta a Ana, que es quien lo cobró.
+  const i = await cuenta([{ piezas: 1 }, { piezas: 1 }])
+  const cobroIBeto = await cobro(i, beto, { productos: [i.items[0].id] })
+  const cobroIAna = await cobro(i, ana, { productos: [i.items[1].id] })
+  await devolucion(i, cobroIBeto, ana, [{ orderItemId: i.items[1].id, quantity: 1, amountCents: 500 }])
+  await devolucion(i, cobroIAna, ana, [{ orderItemId: i.items[1].id, quantity: 0, amountCents: 500 }])
+
+  // J: un vale que se volvió a cobrar en otra cuenta, y esta reabrió con dinero tardío: su renglón ya es de la otra cuenta, y no cuenta.
+  const j = await cuenta([{ piezas: 2, valeRevendido: true }, { piezas: 1 }])
+  const cobroJ = await cobro(j, ana)
+  await devolucion(j, cobroJ, ana, [{ orderItemId: j.items[0].id, quantity: 1, amountCents: 500 }])
 
   await createSalesGoal(venueId, { staffId: beto, goal: 10, goalType: 'QUANTITY', period: 'WEEKLY' })
   await createSalesGoal(venueId, { staffId: ana, goal: 10, goalType: 'QUANTITY', period: 'WEEKLY' })
@@ -205,17 +227,18 @@ afterAll(async () => {
 
 describe('D10: el avance de una meta por unidades', () => {
   it('la meta de la sucursal cuenta piezas y resta las devoluciones que nombran productos', async () => {
-    // A 4 + B 3 + C 3 + D 2 + E 2 + F 1 = 15 piezas, menos 2 de A y 1 de H. G no cuenta y la devolución de B no dice qué productos.
-    expect(unidades(await getEffectiveGoals(venueId), null)).toBe(12)
+    // A 4 + B 3 + C 3 + D 2 + E 2 + F 1 + I 2 + J 1 = 18, menos 2 de A, 1 de E, 1 de H y 1 de I.
+    // G no cuenta, la devolución de B no dice qué productos y la de J es del renglón que ya no cuenta.
+    expect(unidades(await getEffectiveGoals(venueId), null)).toBe(13)
   })
 
-  it('a Beto: sus piezas, los productos que pagó, la cuenta entre dos, y la devolución de su venta aunque la operara Ana', async () => {
-    // A 4 + C 1 + D 1 + E 2 + F 1 = 9, menos 2.
+  it('a Beto: sus piezas, los productos que pagó, la cuenta entre dos, y la devolución de lo que él cobró aunque la operara Ana', async () => {
+    // A 4 + C 1 + D 1 + E 2 + F 1 + I 1 = 10, menos 2 de A y 1 de E. La devolución de I salió de su cobro, pero el producto lo cobró Ana.
     expect(unidades(await getEffectiveGoals(venueId), beto)).toBe(7)
   })
 
   it('a Ana: lo suyo, sin la devolución que operó sobre una venta ajena ni el cobro que le falló', async () => {
-    // B 3 + C 2 + D 1 + E 2 = 8. El producto por peso cuenta 1.
+    // B 3 + C 2 + D 1 + E 2 + I 1 + J 1 = 10, menos 1 de E y 1 de I. El producto por peso cuenta 1.
     expect(unidades(await getEffectiveGoals(venueId), ana)).toBe(8)
   })
 
@@ -239,6 +262,6 @@ describe('D10: el avance de una meta por unidades', () => {
     const resumen = body.salesGoals.map(
       (m: { staffId: string | null; currentSales: string }) => `${m.staffId === null ? 'sucursal' : 'personal'} ${m.currentSales}`,
     )
-    expect(resumen.sort()).toEqual(['personal 7', 'sucursal 12'])
+    expect(resumen.sort()).toEqual(['personal 7', 'sucursal 13'])
   })
 })

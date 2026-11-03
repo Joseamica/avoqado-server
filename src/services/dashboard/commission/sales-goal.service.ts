@@ -169,52 +169,69 @@ export async function ventasDeLaPersonaDesde(
   return Number(fila?.total ?? 0) || 0
 }
 
-// Un cobro que de verdad cobró: ni la devolución ni el que no se completó.
-const COBRO_COMPLETADO: Prisma.PaymentWhereInput = { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }
+// Un cobro que de verdad cobró: ni la devolución ni el que no se completó. Alias `c`.
+const SQL_COBRO_REAL = Prisma.sql`c."status" = 'COMPLETED' AND (c."type" IS NULL OR c."type" <> 'REFUND')`
 
 /**
- * D10: las piezas de una meta por unidades, desde una fecha: las vendidas menos las devueltas. Un producto por peso cuenta 1
- * (`quantity`). Una devolución resta sólo si nombra sus productos (`refundedItems`, lo mismo que suman las devoluciones para no devolver
- * de más), en el periodo en que se hace y a quien hizo la venta, igual que la meta por importe resta el dinero. La devolución por importe
- * no dice cuáles fueron: no resta piezas.
+ * D10: el renglón `oi` es de esta persona. Cobrado por producto: de quien lo pagó. Sin reparto por producto: de quien cobró la cuenta; por
+ * importe entre dos no hay dato de qué pagó cada quien, así que es de los dos.
+ */
+const sqlRenglonDe = (staffId: string) => Prisma.sql`(
+  EXISTS (
+    SELECT 1 FROM "PaymentAllocation" a JOIN "Payment" c ON c."id" = a."paymentId"
+    WHERE a."orderItemId" = oi."id" AND c."processedById" = ${staffId} AND ${SQL_COBRO_REAL}
+  )
+  OR (
+    NOT EXISTS (
+      SELECT 1 FROM "PaymentAllocation" a JOIN "Payment" c ON c."id" = a."paymentId"
+      WHERE a."orderItemId" = oi."id" AND ${SQL_COBRO_REAL}
+    )
+    AND EXISTS (
+      SELECT 1 FROM "Payment" c
+      WHERE c."orderId" = oi."orderId" AND c."processedById" = ${staffId} AND ${SQL_COBRO_REAL}
+        AND NOT EXISTS (SELECT 1 FROM "PaymentAllocation" a WHERE a."paymentId" = c."id" AND a."orderItemId" IS NOT NULL)
+    )
+  )
+)`
+
+/**
+ * D10: las piezas de una meta por unidades, desde una fecha: las vendidas menos las devueltas. Un producto por peso cuenta 1 (`quantity`).
+ * Una devolución resta sólo si nombra sus productos (`refundedItems`, lo mismo que suman las devoluciones para no devolver de más), en el
+ * periodo en que se hace, igual que la meta por importe resta el dinero. Por persona, la pieza se le resta a quien tiene el renglón, no a
+ * quien cobró el pago del que salió la devolución: un Cambio puede devolver un producto ajeno. La devolución por importe no dice cuáles
+ * fueron: no resta piezas. El renglón de un vale que se volvió a cobrar en otra cuenta ya es de la otra (`releasedAreaTicketLineId`).
  */
 async function piezasDesde(db: Prisma.TransactionClient, venueId: string, staffId: string | null, desde: Date): Promise<number> {
-  const suyo = { ...COBRO_COMPLETADO, processedById: staffId ?? undefined }
-  const vendidas = await db.orderItem.aggregate({
-    where: {
-      order: { venueId, status: 'COMPLETED', createdAt: { gte: desde } },
-      ...(staffId
-        ? {
-            OR: [
-              // Cobrado por producto: el renglón es de quien lo pagó.
-              { paymentAllocations: { some: { payment: suyo } } },
-              // Sin reparto por producto: de quien cobró la cuenta. Por importe entre dos no hay dato de qué pagó cada quien: de los dos.
-              {
-                paymentAllocations: { none: { payment: COBRO_COMPLETADO } },
-                order: { payments: { some: { ...suyo, allocations: { none: { orderItemId: { not: null } } } } } },
-              },
-            ],
-          }
-        : {}),
-    },
-    _sum: { quantity: true },
-  })
-
-  const [devueltas] = await db.$queryRaw<Array<{ piezas: Prisma.Decimal | null }>>`
-    SELECT SUM(CASE WHEN jsonb_typeof(r->'quantity') = 'number' THEN (r->>'quantity')::numeric ELSE 0 END) AS "piezas"
-    FROM "Payment" p
-    ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
-    JOIN "Order" cuenta ON cuenta."id" = p."orderId" AND cuenta."status" = 'COMPLETED'
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE WHEN jsonb_typeof(p."processorData"->'refundedItems') = 'array' THEN p."processorData"->'refundedItems' ELSE '[]'::jsonb END
-    ) r
-    WHERE p."venueId" = ${venueId}
-      AND p."type" = 'REFUND'
-      AND p."status" = 'COMPLETED'
-      AND p."createdAt" >= ${utcTs(desde)}
-      ${staffId ? Prisma.sql`AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} = ${staffId}` : Prisma.empty}
+  const deQuien = staffId ? Prisma.sql`AND ${sqlRenglonDe(staffId)}` : Prisma.empty
+  const [fila] = await db.$queryRaw<Array<{ vendidas: bigint | null; devueltas: Prisma.Decimal | null }>>`
+    SELECT
+      (
+        SELECT SUM(oi."quantity")
+        FROM "OrderItem" oi
+        JOIN "Order" cuenta ON cuenta."id" = oi."orderId"
+        WHERE cuenta."venueId" = ${venueId}
+          AND cuenta."status" = 'COMPLETED'
+          AND cuenta."createdAt" >= ${utcTs(desde)}
+          AND oi."releasedAreaTicketLineId" IS NULL
+          ${deQuien}
+      ) AS "vendidas",
+      (
+        SELECT SUM(CASE WHEN jsonb_typeof(r->'quantity') = 'number' THEN (r->>'quantity')::numeric ELSE 0 END)
+        FROM "Payment" p
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE WHEN jsonb_typeof(p."processorData"->'refundedItems') = 'array' THEN p."processorData"->'refundedItems' ELSE '[]'::jsonb END
+        ) r
+        JOIN "OrderItem" oi ON oi."id" = r->>'orderItemId'
+        JOIN "Order" cuenta ON cuenta."id" = oi."orderId" AND cuenta."venueId" = p."venueId" AND cuenta."status" = 'COMPLETED'
+        WHERE p."venueId" = ${venueId}
+          AND p."type" = 'REFUND'
+          AND p."status" = 'COMPLETED'
+          AND p."createdAt" >= ${utcTs(desde)}
+          AND oi."releasedAreaTicketLineId" IS NULL
+          ${deQuien}
+      ) AS "devueltas"
   `
-  return (vendidas._sum.quantity ?? 0) - (Number(devueltas?.piezas ?? 0) || 0)
+  return Number(fila?.vendidas ?? 0) - Number(fila?.devueltas ?? 0)
 }
 
 /**
