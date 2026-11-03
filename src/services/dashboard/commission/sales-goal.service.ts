@@ -169,10 +169,58 @@ export async function ventasDeLaPersonaDesde(
   return Number(fila?.total ?? 0) || 0
 }
 
+// Un cobro que de verdad cobró: ni la devolución ni el que no se completó.
+const COBRO_COMPLETADO: Prisma.PaymentWhereInput = { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }
+
+/**
+ * D10: las piezas de una meta por unidades, desde una fecha: las vendidas menos las devueltas. Un producto por peso cuenta 1
+ * (`quantity`). Una devolución resta sólo si nombra sus productos (`refundedItems`, lo mismo que suman las devoluciones para no devolver
+ * de más), en el periodo en que se hace y a quien hizo la venta, igual que la meta por importe resta el dinero. La devolución por importe
+ * no dice cuáles fueron: no resta piezas.
+ */
+async function piezasDesde(db: Prisma.TransactionClient, venueId: string, staffId: string | null, desde: Date): Promise<number> {
+  const suyo = { ...COBRO_COMPLETADO, processedById: staffId ?? undefined }
+  const vendidas = await db.orderItem.aggregate({
+    where: {
+      order: { venueId, status: 'COMPLETED', createdAt: { gte: desde } },
+      ...(staffId
+        ? {
+            OR: [
+              // Cobrado por producto: el renglón es de quien lo pagó.
+              { paymentAllocations: { some: { payment: suyo } } },
+              // Sin reparto por producto: de quien cobró la cuenta. Por importe entre dos no hay dato de qué pagó cada quien: de los dos.
+              {
+                paymentAllocations: { none: { payment: COBRO_COMPLETADO } },
+                order: { payments: { some: { ...suyo, allocations: { none: { orderItemId: { not: null } } } } } },
+              },
+            ],
+          }
+        : {}),
+    },
+    _sum: { quantity: true },
+  })
+
+  const [devueltas] = await db.$queryRaw<Array<{ piezas: Prisma.Decimal | null }>>`
+    SELECT SUM(CASE WHEN jsonb_typeof(r->'quantity') = 'number' THEN (r->>'quantity')::numeric ELSE 0 END) AS "piezas"
+    FROM "Payment" p
+    ${SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION}
+    JOIN "Order" cuenta ON cuenta."id" = p."orderId" AND cuenta."status" = 'COMPLETED'
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE WHEN jsonb_typeof(p."processorData"->'refundedItems') = 'array' THEN p."processorData"->'refundedItems' ELSE '[]'::jsonb END
+    ) r
+    WHERE p."venueId" = ${venueId}
+      AND p."type" = 'REFUND'
+      AND p."status" = 'COMPLETED'
+      AND p."createdAt" >= ${utcTs(desde)}
+      ${staffId ? Prisma.sql`AND ${SQL_VENDEDOR_DEL_MOVIMIENTO} = ${staffId}` : Prisma.empty}
+  `
+  return (vendidas._sum.quantity ?? 0) - (Number(devueltas?.piezas ?? 0) || 0)
+}
+
 /**
  * Calculate current sales for a goal based on period and goal type
  * - AMOUNT: sums Payment.amount (currency total)
- * - QUANTITY: counts order items (units/products sold)
+ * - QUANTITY: las piezas vendidas menos las devueltas (`piezasDesde`)
  *
  * CRITICAL: Uses venue timezone for date boundaries (not UTC).
  * "Today" means today in the venue's timezone, not UTC.
@@ -216,23 +264,7 @@ export async function calculateCurrentSales(
     whereClause.processedById = staffId
   }
 
-  if (goalType === 'QUANTITY') {
-    // Count order items (units sold) from completed orders in this venue/period
-    const count = await db.orderItem.count({
-      where: {
-        order: {
-          venueId,
-          status: 'COMPLETED',
-          createdAt: { gte: startDate },
-          // D7: sus ventas, igual que por importe. Ni la devolución que operó sobre una venta ajena ni un cobro que no se completó.
-          ...(staffId
-            ? { payments: { some: { processedById: staffId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } } }
-            : {}),
-        },
-      },
-    })
-    return count
-  }
+  if (goalType === 'QUANTITY') return piezasDesde(db, venueId, staffId, startDate)
 
   // AMOUNT: sum of payment amounts. D4: la meta de UNA persona usa la regla del vendedor del movimiento (sus devoluciones, no las que
   // operó); la del negocio suma todo como siempre.
