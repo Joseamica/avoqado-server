@@ -6,6 +6,7 @@
  * corren el día entero: `critical-warnings.md`, «A bare YYYY-MM-DD is a RUNTIME-TZ trap»).
  */
 import type { PlatformChargeFrequency } from '@prisma/client'
+import { fromZonedTime } from 'date-fns-tz'
 import { formatInVenueTimezone } from '@/utils/datetime'
 import type { CalendarDay } from './types'
 
@@ -40,6 +41,19 @@ export function addDays(day: CalendarDay, n: number): CalendarDay {
 /** El día de calendario de CDMX en este instante: las 23:30 de CDMX siguen siendo «hoy» aunque en UTC ya sea mañana. */
 export function todayInMexico(now: Date): CalendarDay {
   return formatInVenueTimezone(now, MEXICO_CITY_TZ, 'yyyy-MM-dd')
+}
+
+/**
+ * El mes de calendario de CDMX al que pertenece `day`, como instantes: `[from, to)`, de la medianoche de CDMX del día 1 a la del día 1
+ * del mes siguiente. Sirve para filtrar columnas de INSTANTE (`paidAt`) por «este mes». Se arma con un texto sin desfase, que
+ * `fromZonedTime` lee en CDMX sin importar la zona del proceso (nunca `new Date('YYYY-MM-DD')`).
+ */
+export function monthBoundsInMexico(day: CalendarDay): { from: Date; to: Date } {
+  const [year, month] = parts(day)
+  const midnight = (y: number, m: number): Date => fromZonedTime(`${pad(y, 4)}-${pad(m)}-01T00:00:00.000`, MEXICO_CITY_TZ)
+  return month === 12
+    ? { from: midnight(year, 12), to: midnight(year + 1, 1) }
+    : { from: midnight(year, month), to: midnight(year, month + 1) }
 }
 
 /** El día como lo lee y lo escribe Prisma en una columna `@db.Date`: medianoche UTC. */

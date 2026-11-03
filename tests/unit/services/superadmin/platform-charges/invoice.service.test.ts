@@ -1753,6 +1753,95 @@ describe('invoiceOccurrence — jamás dos facturas por un pago', () => {
   })
 })
 
+describe('invoiceOccurrence — una falla del PAC que deja la factura «en camino» se lo dice así al operador (spec §6, «Por qué así»)', () => {
+  const input = { actorId: 'staff-1' }
+  const EN_CAMINO = 'La factura pudo quedar en camino: consulta su estado en 2 minutos y no la timbres otra vez.'
+
+  it('un corte de red: el mensaje empieza con el aviso y SIGUE con el detalle del proveedor; el código sigue siendo PROVIDER (502)', async () => {
+    pac.createInvoice.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(PlatformBillingError)
+    expect(error).toMatchObject({ code: 'PROVIDER' })
+    expect((error as PlatformBillingError).message).toBe(`${EN_CAMINO} Error al timbrar el CFDI: ECONNRESET`)
+    expect(mundo.rows[0]).toMatchObject({ status: 'STAMPING', lastError: 'ECONNRESET' }) // la fila sigue siendo el reclamo
+  })
+
+  it('un 5xx del PAC (tampoco es un rechazo confirmado) se traduce igual', async () => {
+    pac.createInvoice.mockRejectedValueOnce(new ProviderHttpError(503, null, 'Service Unavailable'))
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({ code: 'PROVIDER' })
+    expect((error as PlatformBillingError).message).toMatch(new RegExp(`^${EN_CAMINO}`))
+    expect((error as PlatformBillingError).message).toContain('Service Unavailable')
+    expect(mundo.rows[0].status).toBe('STAMPING')
+  })
+
+  it('un rechazo CONFIRMADO del PAC con código PROVIDER (la fila queda STAMP_FAILED) NO se traduce: ahí no quedó nada en camino', async () => {
+    pac.createInvoice.mockRejectedValueOnce(new ProviderHttpError(400, 'invalid_request', 'Petición inválida'))
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(mundo.rows[0].status).toBe('STAMP_FAILED')
+    expect(error).toBeInstanceOf(PlatformBillingError)
+    expect(error).toMatchObject({ code: 'PROVIDER' })
+    expect((error as PlatformBillingError).message).toBe('Error al timbrar el CFDI: Petición inválida')
+    expect((error as PlatformBillingError).message).not.toContain('en camino')
+  })
+
+  it('un dato corregible (RFC malo, VALIDATION) sale tal cual, con su campo: nada que esperar', async () => {
+    pac.createInvoice.mockRejectedValueOnce(
+      new ProviderHttpError(422, 'invoice_stamping_validation_error', 'El campo Rfc del receptor no se encuentra en el listado del SAT.'),
+    )
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({ code: 'VALIDATION', field: 'rfc' })
+    expect((error as PlatformBillingError).message).not.toContain('en camino')
+  })
+
+  it('un error que NO es un rechazo confirmado pero donde el SAT sí nombró el campo (VALIDATION) sale con su mensaje y su campo, no con el aviso, aunque la fila quede STAMPING', async () => {
+    // Un 503 no es un rechazo confirmado (la fila sigue siendo el reclamo), pero el mensaje dice qué dato corregir: eso es lo que se lee.
+    pac.createInvoice.mockRejectedValueOnce(
+      new ProviderHttpError(503, null, 'El campo Rfc del receptor no se encuentra en el listado del SAT.'),
+    )
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(mundo.rows[0].status).toBe('STAMPING')
+    expect(error).toMatchObject({ code: 'VALIDATION', field: 'rfc' })
+    expect((error as PlatformBillingError).message).not.toContain('en camino')
+  })
+
+  it('un 409 «se está timbrando» (el reintento inmediato) no se vuelve a traducir: ya es el aviso correcto', async () => {
+    pac.createInvoice.mockRejectedValueOnce(new Error('ECONNRESET'))
+    await invoiceOccurrence('occ-1', input).catch(() => undefined)
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect((error as ConflictError).message).toMatch(/se está timbrando/)
+    expect((error as ConflictError).message).not.toContain('en camino')
+  })
+
+  it('si la lectura de la fila falla justo ahora, se queda con el aviso conservador (el documento pudo quedar en camino)', async () => {
+    pac.createInvoice.mockRejectedValueOnce(new Error('ECONNRESET'))
+    const lectura = prismaMock.platformCfdi.findUnique.getMockImplementation()!
+    // Sólo la lectura del estado de la fila, la de DESPUÉS del fallo, se cae; todas las demás pasan.
+    prismaMock.platformCfdi.findUnique.mockImplementation(async (args: any) => {
+      if (args?.select?.status) throw new Error('la base no contestó')
+      return lectura(args)
+    })
+
+    const error = await invoiceOccurrence('occ-1', input).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({ code: 'PROVIDER' })
+    expect((error as PlatformBillingError).message).toMatch(new RegExp(`^${EN_CAMINO}`))
+  })
+})
+
 describe('invoiceOccurrence — modo de prueba de QA (PLATFORM_CHARGES_SANDBOX)', () => {
   const input = { actorId: 'staff-1' }
   let restaurarEntorno: () => void

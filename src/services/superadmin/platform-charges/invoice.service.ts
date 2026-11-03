@@ -45,6 +45,8 @@ const STAMPING_GRACE_MS = 2 * 60_000
 const PAC_QUERY_TIMEOUT_MS = 30_000
 /** c_FormaPago 03 (transferencia): «Por cobrar» cobra por SPEI y factura siempre PUE. */
 const PAYMENT_FORM_TRANSFER = '03'
+/** Lo que lee el operador cuando el timbrado falló sin que el PAC lo rechazara: el documento pudo quedar en camino. */
+const IN_FLIGHT_NOTICE = 'La factura pudo quedar en camino: consulta su estado en 2 minutos y no la timbres otra vez.'
 
 /** Lo que `resolverIntento` concluye: no hay intento (se puede timbrar con la llave actual) o hay una factura VIVA. */
 export type InvoiceAttempt = { kind: 'NONE' } | { kind: 'LIVE'; cfdi: PlatformCfdi }
@@ -72,7 +74,8 @@ interface PacDocument {
 
 // ── Errores y textos ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-const intentKey = (occurrence: Pick<PlatformChargeOccurrence, 'id' | 'invoiceSeq'>): string =>
+/** La llave del intento actual de una ocurrencia: la fila de `PlatformCfdi` con esta llave es el reclamo (y lo que «Deshacer» revisa). */
+export const intentKey = (occurrence: Pick<PlatformChargeOccurrence, 'id' | 'invoiceSeq'>): string =>
   `por-cobrar:${occurrence.id}:${occurrence.invoiceSeq}`
 const conflict = (message: string, code: string) => new ConflictError(message, code)
 const occurrenceNotFound = () => new NotFoundError('Cobro no encontrado', 'PLATFORM_CHARGE_OCCURRENCE_NOT_FOUND')
@@ -415,9 +418,10 @@ export async function resolverIntento(occurrenceId: string, actorId?: string): P
 
 /**
  * Perfil fiscal con el que se factura: el de la llamada, el del cobro o —para una organización o un negocio— el del cliente
- * (spec §5). Sin ninguno, 422 NEEDS_FISCAL_DATA. 🔴 `getBillingTaxProfileForCustomer` usa el Prisma global: va ANTES del candado.
+ * (spec §5); `null` si no hay ninguno. Lo comparten el diálogo de «Ya me pagó» (para enseñar a quién se timbraría) y el timbrado.
+ * 🔴 `getBillingTaxProfileForCustomer` usa el Prisma global: va ANTES del candado.
  */
-async function resolveProfileId(charge: PlatformCharge, requested?: string): Promise<string> {
+export async function findProfileId(charge: PlatformCharge, requested?: string): Promise<string | null> {
   if (requested) return requested
   if (charge.billingTaxProfileId) return charge.billingTaxProfileId
   const { customerType } = charge
@@ -426,6 +430,13 @@ async function resolveProfileId(charge: PlatformCharge, requested?: string): Pro
     const profile = await getBillingTaxProfileForCustomer(customerType, ownerId)
     if (profile) return profile.id
   }
+  return null
+}
+
+/** `findProfileId`, y sin perfil: 422 NEEDS_FISCAL_DATA. */
+async function resolveProfileId(charge: PlatformCharge, requested?: string): Promise<string> {
+  const profileId = await findProfileId(charge, requested)
+  if (profileId) return profileId
   throw new PlatformBillingError('Captura los datos fiscales del cliente para poder facturarle', 'NEEDS_FISCAL_DATA')
 }
 
@@ -512,6 +523,24 @@ async function prepareSnapshot(occurrence: PlatformChargeOccurrence, input: Invo
   return snapshot
 }
 
+/**
+ * 🔴 La traducción de una falla del timbrado (UN solo lugar, alrededor de `issuePlatformCfdi`). Una falla que no es un rechazo
+ * confirmado del PAC (timeout, corte de red, 5xx) deja la fila STAMPING —el documento pudo quedar en camino— y sale como
+ * `PlatformBillingError` PROVIDER. Quien la lee es un operador que podría volver a timbrar: se le dice qué hacer y SIGUE el
+ * detalle del proveedor. Salen tal cual, sin el aviso: un rechazo confirmado que se clasificó PROVIDER (la fila quedó STAMP_FAILED y
+ * se reintenta al momento: ahí no quedó nada en camino y el aviso mentiría) y un dato corregible que el SAT nombró (VALIDATION, con
+ * su campo: eso es lo que hay que leer y corregir). El estado de la fila se lee para saberlo; si esa lectura falla, se queda con el
+ * aviso conservador (no poder confirmar que no hay nada en camino es justo cuando hay que avisar).
+ */
+async function translateStampFailure(error: unknown, key: string): Promise<unknown> {
+  if (!(error instanceof PlatformBillingError) || error.code !== 'PROVIDER') return error
+  const row = await prisma.platformCfdi
+    .findUnique({ where: { idempotencyKey: key }, select: { status: true } })
+    .catch(() => ({ status: 'STAMPING' as const }))
+  if (row?.status !== 'STAMPING') return error
+  return new PlatformBillingError(`${IN_FLIGHT_NOTICE} ${error.message}`, error.code, error.field)
+}
+
 /** Lo que corre en la MISMA transacción que crea la fila STAMPING: toma el candado y exige PAID e `invoiceSeq` igual; si no, 409. */
 async function reserveCheck(
   tx: Prisma.TransactionClient,
@@ -550,18 +579,24 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
   const sandbox = chargesSandbox(emisor)
 
   const snapshot = await prepareSnapshot(occurrence, input, billingTaxProfileId)
-  const cfdi = await issuePlatformCfdi({
-    billingTaxProfileId,
-    lines: snapshot.concepts.map(conceptToCfdiLine),
-    formaPago: PAYMENT_FORM_TRANSFER,
-    metodoPago: 'PUE',
-    idempotencyKey: intentKey(snapshot),
-    performedById: input.actorId,
-    sandbox,
-    totals: { subtotalCents: snapshot.subtotalCents, discountCents: 0, taxCents: snapshot.taxCents, totalCents: snapshot.totalCents },
-    platformChargeOccurrenceId: occurrence.id,
-    reserveCheck: tx => reserveCheck(tx, occurrence, snapshot.invoiceSeq),
-  })
+  const key = intentKey(snapshot)
+  let cfdi: PlatformCfdi
+  try {
+    cfdi = await issuePlatformCfdi({
+      billingTaxProfileId,
+      lines: snapshot.concepts.map(conceptToCfdiLine),
+      formaPago: PAYMENT_FORM_TRANSFER,
+      metodoPago: 'PUE',
+      idempotencyKey: key,
+      performedById: input.actorId,
+      sandbox,
+      totals: { subtotalCents: snapshot.subtotalCents, discountCents: 0, taxCents: snapshot.taxCents, totalCents: snapshot.totalCents },
+      platformChargeOccurrenceId: occurrence.id,
+      reserveCheck: tx => reserveCheck(tx, occurrence, snapshot.invoiceSeq),
+    })
+  } catch (error) {
+    throw await translateStampFailure(error, key)
+  }
   if (cfdi.status === 'STAMPED') auditIssued(cfdi, input.actorId, false)
   return cfdi
 }

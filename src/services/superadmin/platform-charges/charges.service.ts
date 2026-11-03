@@ -506,6 +506,16 @@ export async function resumeCharge(id: string, actorId: string, now: Date = new 
   return outcome.charge
 }
 
+/** Página y tamaño ya acotados: el servidor impone el default (50) y el tope (100), nunca confía en lo que pida el cliente. */
+export function pageParams(filters: { page?: number; pageSize?: number }): { page: number; pageSize: number } {
+  const whole = (value: unknown, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback
+  return {
+    page: Math.max(whole(filters.page, 1), 1),
+    pageSize: Math.min(Math.max(whole(filters.pageSize, DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE),
+  }
+}
+
 /**
  * Los cobros, de tantos en tantos: el servidor impone el tope de página, el orden es estable (`id` desempata) y el total sale de
  * un `count` con el mismo filtro. La búsqueda por nombre y el estado corren en la base, antes de paginar.
@@ -519,10 +529,7 @@ export async function listCharges(
   const term = cleanText(filters.q)
   if (term) where.customerName = { contains: term, mode: 'insensitive' }
 
-  const whole = (value: unknown, fallback: number): number =>
-    typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : fallback
-  const page = Math.max(whole(filters.page, 1), 1)
-  const pageSize = Math.min(Math.max(whole(filters.pageSize, DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE)
+  const { page, pageSize } = pageParams(filters)
 
   const [rows, total] = await Promise.all([
     prisma.platformCharge.findMany({

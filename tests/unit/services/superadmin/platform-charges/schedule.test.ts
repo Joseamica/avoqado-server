@@ -3,6 +3,7 @@ import {
   addDays,
   calendarDayToDb,
   dbToCalendarDay,
+  monthBoundsInMexico,
   occurrenceDatesBetween,
   todayInMexico,
 } from '@/services/superadmin/platform-charges/schedule'
@@ -326,5 +327,38 @@ describe('platform-charges/schedule — calendarDayToDb / dbToCalendarDay (NEW)'
 
   it('calendarDayToDb rechaza algo que no es un día de calendario', () => {
     expect(() => calendarDayToDb('2026-02-30')).toThrow(/Día de calendario inválido/)
+  })
+})
+
+describe('platform-charges/schedule — monthBoundsInMexico (NEW)', () => {
+  it('noviembre de 2026: de la medianoche de CDMX del 1-nov (06:00 UTC) a la del 1-dic', () => {
+    const { from, to } = monthBoundsInMexico('2026-11-17')
+
+    expect(from.toISOString()).toBe('2026-11-01T06:00:00.000Z')
+    expect(to.toISOString()).toBe('2026-12-01T06:00:00.000Z')
+  })
+
+  it('diciembre cruza de año: el fin es el 1-ene del año siguiente', () => {
+    const { from, to } = monthBoundsInMexico('2026-12-31')
+
+    expect(from.toISOString()).toBe('2026-12-01T06:00:00.000Z')
+    expect(to.toISOString()).toBe('2027-01-01T06:00:00.000Z')
+  })
+
+  it('el primero y el último día del mes caen en el mismo mes', () => {
+    expect(monthBoundsInMexico('2026-02-01')).toEqual(monthBoundsInMexico('2026-02-28'))
+  })
+
+  it('un 31 de octubre a las 23:30 de CDMX (ya es 1-nov en UTC) todavía es octubre: el mes se saca del día de CDMX, no del instante', () => {
+    const hoy = todayInMexico(new Date('2026-11-01T05:30:00Z'))
+    const { from, to } = monthBoundsInMexico(hoy)
+
+    expect(hoy).toBe('2026-10-31')
+    expect(from.toISOString()).toBe('2026-10-01T06:00:00.000Z')
+    expect(to.toISOString()).toBe('2026-11-01T06:00:00.000Z')
+  })
+
+  it('rechaza algo que no es un día de calendario', () => {
+    expect(() => monthBoundsInMexico('2026-13-01')).toThrow(/Día de calendario inválido/)
   })
 })
