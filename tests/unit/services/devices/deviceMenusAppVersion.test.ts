@@ -13,9 +13,16 @@ describe('appliesDeviceMenus (qué app ya aplica el menú del aparato)', () => {
     expect(appliesDeviceMenus('POS_ANDROID', 'v2.25.24')).toBe(false) // sin prefijo numérico no se adivina
   })
 
-  it('minimaNullEsNoAplica: ninguna app lo aplica todavía', () => {
-    expect(DEVICE_MENUS_MIN_APP_VERSION).toEqual({ POS_ANDROID: null, POS_IOS: null, POS_DESKTOP: null })
-    expect(appliesDeviceMenus('POS_ANDROID', '9.9.9')).toBe(false)
+  it('versionesPublicadas: ANDROID y WINDOWS desde la 2.25.26; iOS todavía no', () => {
+    expect(DEVICE_MENUS_MIN_APP_VERSION).toEqual({ POS_ANDROID: '2.25.26', POS_IOS: null, POS_DESKTOP: '2.25.26' })
+    expect(appliesDeviceMenus('POS_ANDROID', '2.25.26')).toBe(true)
+    expect(appliesDeviceMenus('POS_ANDROID', '2.25.25')).toBe(false)
+    expect(appliesDeviceMenus('POS_DESKTOP', '2.25.26-escritorio')).toBe(true)
+    expect(appliesDeviceMenus('POS_DESKTOP', '2.25.25-escritorio')).toBe(false)
+  })
+
+  it('minimaNullEsNoAplica: esa app todavía no lo aplica', () => {
+    DEVICE_MENUS_MIN_APP_VERSION.POS_IOS = null
     expect(appliesDeviceMenus('POS_IOS', '9.9.9')).toBe(false)
     // Un tipo que no es POS_* nunca lo aplica.
     expect(appliesDeviceMenus('TPV_ANDROID', '9.9.9')).toBe(false)

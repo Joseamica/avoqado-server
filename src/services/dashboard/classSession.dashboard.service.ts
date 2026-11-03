@@ -22,8 +22,8 @@ import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-cons
 import logger from '../../config/logger'
 import { assertOrganizationStaffAvailability } from './appointmentStaffAssignment.service'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
-import { cancelPassBookingFromVenue } from '@/services/aggregators/core/venueCancellation'
 import { passesForSessions } from '@/services/aggregators/passCapacity.service'
+import { cancelReservation, handleReservationDepositCancellation } from './reservation.dashboard.service'
 import { PROVIDER_LABEL, type Provider } from '@/services/aggregators/core/types'
 
 // ==========================================
@@ -646,71 +646,102 @@ export async function cancelClassSession(venueId: string, sessionId: string, act
   if (!session) throw new NotFoundError('Sesión no encontrada')
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
-  const { cancelled, pushRowIds } = await prisma.$transaction(async tx => {
-    // Reclamar la transición (spec fase 3 §7.2): sólo UNA solicitud pasa la clase a CANCELLED y su instante es el que queda.
-    // Otra que llegó a la vez espera el candado de la fila, ya no cumple la condición y sale con 409 sin tocar nada.
-    const now = new Date()
-    const reclamadas = await tx.$executeRaw`
+  const { refundCreditsForReservation } = await import('./creditPack.public.service')
+  const { cancelled, pushRowIds, conDeposito } = await prisma.$transaction(
+    async tx => {
+      // Reclamar la transición (spec fase 3 §7.2): sólo UNA solicitud pasa la clase a CANCELLED y su instante es el que queda.
+      // Otra que llegó a la vez espera el candado de la fila, ya no cumple la condición y sale con 409 sin tocar nada.
+      const now = new Date()
+      const reclamadas = await tx.$executeRaw`
       UPDATE "ClassSession"
       SET status = 'CANCELLED', "cancelledAt" = ${utcTs(now)}, "updatedAt" = ${utcTs(now)}
       WHERE id = ${sessionId} AND "venueId" = ${venueId} AND status <> 'CANCELLED'`
-    if (reclamadas === 0) throw new ConflictError('La sesión ya está cancelada')
+      if (reclamadas === 0) throw new ConflictError('La sesión ya está cancelada')
 
-    // Cancel all active reservations for this session
-    await tx.reservation.updateMany({
-      where: {
-        classSessionId: sessionId,
-        status: { in: ['PENDING', 'CONFIRMED'] },
-      },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: now,
-        cancelledBy: 'SYSTEM',
-        cancellationReason: 'Sesión cancelada por el establecimiento',
-      },
-    })
-
-    const cancelled = await tx.classSession.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE })
-
-    // ---- Google Calendar push outbox (Phase 2 — spec §14.3) ----
-    // ONE CANCEL row per target connection — NOT one per attendee reservation.
-    // Per-attendee reservations were bulk-cancelled above; they never had
-    // their own pushed events (the class is the calendar entity).
-    const targets = await resolveClassSessionPushTargets(tx, {
-      venueId,
-      assignedStaffId: cancelled.assignedStaffId ?? null,
-    })
-    let pushRowIds: string[] = []
-    if (targets.length > 0) {
-      const ahora = new Date()
-      for (const target of targets) {
-        const syncKey = buildSyncKey({
-          kind: 'class',
-          classSessionId: cancelled.id,
-          connectionId: target.id,
-        })
-        await collapseSupersededOps(tx, syncKey, ahora)
-      }
-      pushRowIds = await enqueuePush(tx, {
-        source: { kind: 'class', classSessionId: cancelled.id },
-        venueId,
-        operation: 'CANCEL',
-        targetConnectionIds: targets.map(t => t.id),
+      // Cancel all active reservations for this session
+      const canceladas = await tx.reservation.updateManyAndReturn({
+        where: {
+          classSessionId: sessionId,
+          status: { in: ['PENDING', 'CONFIRMED'] },
+        },
+        data: {
+          status: 'CANCELLED',
+          cancelledAt: now,
+          cancelledBy: 'SYSTEM',
+          cancellationReason: 'Sesión cancelada por el establecimiento',
+        },
+        select: { id: true, depositStatus: true },
       })
-    }
-    await enqueuePassSessionSync(tx, venueId, cancelled.id)
-    // Con quién canceló y dentro de la transacción (spec fase 3 §7.2): una cancelación nunca queda sin su rastro.
-    await writeLegacyActivityAuditTx(tx, {
-      staffId: actorStaffId ?? null,
-      venueId,
-      action: 'CLASS_SESSION_CANCELLED',
-      entity: 'ClassSession',
-      entityId: sessionId,
-      data: { cancelledAt: now.toISOString() },
-    })
 
-    return { cancelled, pushRowIds }
-  })
+      // Canceló el negocio, no la clienta: cada quien recupera su clase aunque la política diga otra cosa, y dentro de esta
+      // transacción, para que un fallo deje la clase sin cancelar y se pueda reintentar (D14, 2-nov-2026).
+      let creditsRefunded = 0
+      for (const reserva of canceladas) {
+        const devolucion = await refundCreditsForReservation(
+          {
+            venueId,
+            reservationId: reserva.id,
+            startsAt: session.startsAt,
+            policy: { creditRefundMode: 'ALWAYS', creditFreeRefundHoursBefore: 0, creditLateRefundPercent: 100 },
+            reasonPrefix: 'Class cancelled by venue',
+          },
+          tx,
+        )
+        creditsRefunded += devolucion.creditsRefunded
+      }
+
+      const cancelled = await tx.classSession.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE })
+
+      // ---- Google Calendar push outbox (Phase 2 — spec §14.3) ----
+      // ONE CANCEL row per target connection — NOT one per attendee reservation.
+      // Per-attendee reservations were bulk-cancelled above; they never had
+      // their own pushed events (the class is the calendar entity).
+      const targets = await resolveClassSessionPushTargets(tx, {
+        venueId,
+        assignedStaffId: cancelled.assignedStaffId ?? null,
+      })
+      let pushRowIds: string[] = []
+      if (targets.length > 0) {
+        const ahora = new Date()
+        for (const target of targets) {
+          const syncKey = buildSyncKey({
+            kind: 'class',
+            classSessionId: cancelled.id,
+            connectionId: target.id,
+          })
+          await collapseSupersededOps(tx, syncKey, ahora)
+        }
+        pushRowIds = await enqueuePush(tx, {
+          source: { kind: 'class', classSessionId: cancelled.id },
+          venueId,
+          operation: 'CANCEL',
+          targetConnectionIds: targets.map(t => t.id),
+        })
+      }
+      await enqueuePassSessionSync(tx, venueId, cancelled.id)
+      // Con quién canceló y dentro de la transacción (spec fase 3 §7.2): una cancelación nunca queda sin su rastro.
+      await writeLegacyActivityAuditTx(tx, {
+        staffId: actorStaffId ?? null,
+        venueId,
+        action: 'CLASS_SESSION_CANCELLED',
+        entity: 'ClassSession',
+        entityId: sessionId,
+        data: { cancelledAt: now.toISOString(), creditsRefunded },
+      })
+
+      return { cancelled, pushRowIds, conDeposito: canceladas.filter(r => r.depositStatus === 'PAID') }
+    },
+    { timeout: 30_000 },
+  )
+
+  // El depósito pasa por Stripe y no cabe en la transacción: la clase YA se canceló, un fallo aquí no puede contestar que no.
+  for (const reserva of conDeposito) {
+    try {
+      await handleReservationDepositCancellation(reserva.id, venueId, { sinRetener: true })
+    } catch (err) {
+      logger.error(`❌ [RESERVATION DEPOSIT] Failed for reservation ${reserva.id} of cancelled class ${sessionId}`, err)
+    }
+  }
 
   if (pushRowIds.length > 0) {
     publishPushNotification(pushRowIds).catch(err =>
@@ -847,7 +878,12 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
 
 // ---- Remove attendee ----
 
-export async function removeAttendee(venueId: string, sessionId: string, reservationId: string) {
+/**
+ * Quitar a alguien de la lista de una clase ES cancelar su reserva: su clase del paquete y su depósito siguen la política del
+ * negocio, dos peticiones a la vez no devuelven dos veces y queda a nombre de quien lo quitó (D10, 2-nov-2026). Antes escribía
+ * CANCELLED por su cuenta y nada regresaba.
+ */
+export async function removeAttendee(venueId: string, sessionId: string, reservationId: string, staffId: string) {
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId, classSessionId: sessionId },
   })
@@ -855,44 +891,7 @@ export async function removeAttendee(venueId: string, sessionId: string, reserva
   if (['CANCELLED', 'COMPLETED', 'NO_SHOW'].includes(reservation.status)) {
     throw new BadRequestError('Esta reservación ya no puede ser cancelada')
   }
+  if (reservation.status === 'CHECKED_IN') throw new BadRequestError('Ya llegó a la clase: no se puede quitar.')
 
-  // Wrap cancel + outbox enqueue in a single transaction so the roster bump
-  // commits atomically with the attendee CANCELLED state.
-  return prisma.$transaction(async tx => {
-    const updated = await tx.reservation.update({
-      where: { id: reservationId },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: new Date(),
-        cancelledBy: 'STAFF',
-      },
-    })
-
-    // ---- Google Calendar push outbox (Phase 2 — spec §14.2) ----
-    // Don't emit per-attendee CANCEL — the class is the calendar event.
-    // UPDATE_ROSTER (debounced 30s) keeps the description list current.
-    const classMeta = await tx.classSession.findUnique({
-      where: { id: sessionId },
-      select: { assignedStaffId: true },
-    })
-    if (classMeta) {
-      const classTargets = await resolveClassSessionPushTargets(tx, {
-        venueId,
-        assignedStaffId: classMeta.assignedStaffId ?? null,
-      })
-      if (classTargets.length > 0) {
-        await enqueuePush(tx, {
-          source: { kind: 'class', classSessionId: sessionId },
-          venueId,
-          operation: 'UPDATE_ROSTER',
-          targetConnectionIds: classTargets.map(t => t.id),
-          debounceUntil: new Date(Date.now() + 30_000),
-        })
-      }
-    }
-    await cancelPassBookingFromVenue(tx, reservationId)
-    await enqueuePassSessionSync(tx, venueId, sessionId)
-
-    return updated
-  })
+  return cancelReservation(venueId, reservationId, staffId, 'Quitado de la clase por el negocio')
 }

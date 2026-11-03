@@ -80,6 +80,19 @@ beforeEach(() => {
 })
 
 describe('submitContact → CRM', () => {
+  it('el_alta_lleva_la_hora_del_formulario (D7): la marca del alta dice cuándo llegó, no cuándo terminó', async () => {
+    mockSignup.mockResolvedValue(NEW_SIGNUP)
+    const before = Date.now()
+
+    await submit()
+
+    const { formAt } = mockSignup.mock.calls[0][0]
+    expect(formAt).toBeInstanceOf(Date)
+    expect(formAt.getTime()).toBeGreaterThanOrEqual(before)
+    // Taken before the entry is saved: never later than the entry's own date.
+    expect(formAt.getTime()).toBeLessThanOrEqual(db.entries[0].receivedAt.getTime())
+  })
+
   it('falla_el_crm_el_alta_queda', async () => {
     mockSignup.mockResolvedValue(NEW_SIGNUP)
     // `applyEntry` itself never throws; this proves the controller's own guard holds if it ever did.
@@ -91,7 +104,7 @@ describe('submitContact → CRM', () => {
     expect(next).not.toHaveBeenCalled()
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual(USUAL_ANSWER)
-    // The signup ran once, with exactly the arguments it always had.
+    // The signup ran once, with exactly the arguments it always had — plus when the form came (D7).
     expect(mockSignup).toHaveBeenCalledTimes(1)
     expect(mockSignup).toHaveBeenCalledWith({
       email: EMAIL,
@@ -102,6 +115,7 @@ describe('submitContact → CRM', () => {
       source: 'landing_restaurantes',
       utm: undefined,
       launchCampaignCode: undefined,
+      formAt: expect.any(Date),
     })
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('CRM'), expect.objectContaining({ entryId: db.entries[0].id }))
     // The raw entry went in BEFORE the signup, and holds the signup's real outcome for the sweep.

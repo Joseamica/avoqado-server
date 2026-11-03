@@ -23,9 +23,11 @@ import {
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
-import { createOnlineOrder, getTrackingByToken, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
+import { abandonCardPayment, createOnlineOrder, getTrackingByToken, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
+import { listOrders as listMobileOrders } from '@/services/mobile/order.mobile.service'
+import { moveOrderToTable } from '@/services/tpv/table.tpv.service'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base desechable o la propia de la fase.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -76,6 +78,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
   let authSpy: jest.SpyInstance
   let voidSpy: jest.SpyInstance
   let captureSpy: jest.SpyInstance
+  let expireSpy: jest.SpyInstance
   let piSeq = 0
   /** Lo que `getAuthorization` contesta con la tarjeta apartada por `cents`. */
   const authorized = (cents = 25_000) => ({
@@ -206,6 +209,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     authSpy = jest.spyOn(StripeConnectProvider.prototype, 'getAuthorization')
     voidSpy = jest.spyOn(StripeConnectProvider.prototype, 'voidAuthorization')
     captureSpy = jest.spyOn(StripeConnectProvider.prototype, 'capture')
+    expireSpy = jest.spyOn(StripeConnectProvider.prototype, 'expireAuthorizationCheckout')
   })
 
   beforeEach(async () => {
@@ -216,6 +220,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     voidSpy.mockImplementation(async (_m: any, p: any) => ({ ...authorized(), paymentIntentId: p.paymentIntentId, piStatus: 'canceled' }))
     captureSpy.mockReset()
     captureSpy.mockImplementation(async (_m: any, p: any) => capturedState(p))
+    expireSpy.mockReset()
+    expireSpy.mockResolvedValue(undefined)
     delete process.env.STRIPE_MIN_CHARGE_MXN_CENTS
     await expireLiveDrafts()
     await beat()
@@ -226,6 +232,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     authSpy?.mockRestore()
     voidSpy?.mockRestore()
     captureSpy?.mockRestore()
+    expireSpy?.mockRestore()
     // Limpieza acotada: sin venueId NO se borra nada (una limpieza sin filtro vaciaría tablas enteras).
     if (!venueId) return
     const v = { venueId }
@@ -295,6 +302,40 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(again).toEqual({ ...first, replay: true })
     expect(spy).toHaveBeenCalledTimes(1)
     expect(await prisma.onlineOrderCharge.count({ where: { venueId: venueId!, idempotencyKey: key } })).toBe(1)
+  })
+
+  it('S7 (clientes, Codex plan r2 #5): repetir con la página de pago ya vencida no manda checkoutUrl; vigente, la misma', async () => {
+    const key = nextKey()
+    const phone = nextPhone()
+    const first = await draft({ key, phone })
+    const { checkoutExpiresAt } = await chargeOf(key)
+    await expect(draft({ key, phone, now: new Date(checkoutExpiresAt.getTime() - 1) })).resolves.toEqual({ ...first, replay: true })
+    await expect(draft({ key, phone, now: checkoutExpiresAt })).resolves.toEqual({
+      ...first,
+      checkoutUrl: '',
+      status: 'AWAITING_PAYMENT',
+      replay: true,
+    })
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('S8: sin pagar al recoger y con la tarjeta disponible, pagar al recoger pide recargar para pagar con tarjeta (mismo código)', async () => {
+    await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { acceptsPayAtPickup: false } })
+    try {
+      await expect(pickup(nextKey())).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.',
+      })
+      await prisma.ecommerceMerchant.update({ where: { id: merchantId }, data: { chargesEnabled: false } })
+      await expect(pickup(nextKey())).rejects.toMatchObject({
+        code: 'PAYMENT_MODE_NOT_ACCEPTED',
+        message: 'Este negocio no acepta pagar al recoger.',
+      })
+    } finally {
+      await prisma.ecommerceMerchant.update({ where: { id: merchantId }, data: { chargesEnabled: true } })
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { acceptsPayAtPickup: true } })
+    }
   })
 
   it('misma llave con otro carrito → 409 IDEMPOTENCY_KEY_CONFLICT', async () => {
@@ -754,6 +795,158 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(after.attempts).toBe(1)
   })
 
+  it('S2 (clientes, Codex plan r1 #1): «Cuentas abiertas» de las apps no lista la tarjeta apartada; ya cobrada, sí', async () => {
+    const { orderId } = await authorizedOrder()
+    const ids = async (search?: string) => (await listMobileOrders(venueId!, { page: 1, pageSize: 100, search })).data.map(o => o.id)
+    const { orderNumber } = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { orderNumber: true } })
+    expect(await ids()).not.toContain(orderId)
+    expect(await ids(orderNumber)).not.toContain(orderId)
+    await accept(orderId)
+    expect(await ids()).toContain(orderId)
+  })
+
+  it('S2 (clientes, Codex plan r2 #1): mover a una mesa la tarjeta sin cobrar → 409 y no mueve nada; pagar al recoger sí se mueve', async () => {
+    const mesa = await prisma.table.create({
+      data: { venueId: venueId!, number: `S2-${RUN}-${++seq}`, capacity: 4, qrCode: `itest-card-s2-${RUN}-${seq}` },
+    })
+    const { orderId } = await authorizedOrder()
+    await expect(moveOrderToTable(venueId!, orderId, mesa.id)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ONLINE_ORDER_PAID_BY_CARD',
+    })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).tableId).toBeNull()
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: mesa.id } })).toMatchObject({ status: 'AVAILABLE', currentOrderId: null })
+
+    // Pagar al recoger (sin cargo) sí se mueve. Se arma directo: los topes del negocio no son lo que se prueba aquí.
+    const key = nextKey()
+    await draft({ key })
+    const req = (await chargeOf(key)).request as any
+    const pickupOrder = await prisma.$transaction(tx =>
+      writeOnlineOrderInTx(tx, {
+        venueId: venueId!,
+        externalId: `web:s2-move-${RUN}-${seq}`,
+        orderNumber: `WM${seq}`,
+        quote: req.quote,
+        customer: req.customer,
+        customerId: null,
+        note: null,
+        paymentMode: 'PAY_AT_PICKUP',
+        trackingToken: `${'m'.repeat(20)}${RUN}${seq}`.slice(0, 32),
+        requestHash: `s2-move-${seq}`,
+        acceptDeadlineAt: new Date(Date.now() + 10 * MIN),
+        whatsappConsent: false,
+      }),
+    )
+    await moveOrderToTable(venueId!, pickupOrder.orderId, mesa.id)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: pickupOrder.orderId } })).tableId).toBe(mesa.id)
+  })
+
+  // ── S5: el comensal abandona el pago (regresa de Stripe con ?pago=cancelado) ──
+  const abandon = (trackingToken: string, venue = venueId!) => abandonCardPayment({ venueId: venue, trackingToken })
+  const notExpirable = () =>
+    Object.assign(new Error('Only Checkout Sessions with a status of open can be expired.'), { type: 'StripeInvalidRequestError' })
+  const expiredSession = () => ({
+    ...authorized(),
+    sessionStatus: 'expired',
+    paymentIntentId: null,
+    piStatus: null,
+    amountCapturableCents: 0,
+  })
+
+  it('S5 (clientes, Codex plan r1 #5 y r2 #2): página abierta → la vence en la cuenta conectada de la FOTO del cargo y queda PAYMENT_NOT_COMPLETED; repetir da lo mismo', async () => {
+    const key = nextKey()
+    const r = await draft({ key })
+    const c = await chargeOf(key)
+    authSpy.mockResolvedValue(expiredSession())
+    await prisma.ecommerceMerchant.update({
+      where: { id: merchantId },
+      data: { providerCredentials: { connectAccountId: 'acct_itest_B' } },
+    })
+    let t: Awaited<ReturnType<typeof abandon>>
+    try {
+      t = await abandon(r.trackingToken)
+    } finally {
+      await prisma.ecommerceMerchant.update({
+        where: { id: merchantId },
+        data: { providerCredentials: { connectAccountId: 'acct_itest_1' } },
+      })
+    }
+    expect(t).toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: null, paymentMode: 'CARD_ONLINE', venueId, canCancel: false })
+    expect(expireSpy).toHaveBeenCalledTimes(1)
+    expect(expireSpy.mock.calls[0][0].providerCredentials).toEqual({ connectAccountId: 'acct_itest_1' })
+    expect(expireSpy.mock.calls[0][1]).toBe(c.checkoutSessionId)
+    const after = await chargeOf(key)
+    expect(after.status).toBe('ABANDONED')
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+
+    // Repetir: el mismo seguimiento, sin Stripe y sin escribir.
+    await expect(abandon(r.trackingToken)).resolves.toEqual(t)
+    expect(expireSpy).toHaveBeenCalledTimes(1)
+    expect(authSpy).toHaveBeenCalledTimes(1)
+    expect((await chargeOf(key)).updatedAt).toEqual(after.updatedAt)
+  })
+
+  it('S5: Stripe dice que la página ya se completó → corre la misma confirmación y nace el pedido (nunca se pierde un pago)', async () => {
+    const key = nextKey()
+    const r = await draft({ key })
+    expireSpy.mockRejectedValueOnce(notExpirable())
+    authSpy.mockResolvedValue(authorized())
+    await expect(abandon(r.trackingToken)).resolves.toMatchObject({ status: 'PENDING_ACCEPTANCE', cardStatus: 'AUTHORIZED' })
+    expect((await chargeOf(key)).status).toBe('AUTHORIZED')
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
+    expect(voidSpy).not.toHaveBeenCalled()
+  })
+
+  it('S5 fix r1 (Codex servidor r1 #1): Stripe vence la página, la confirmación falla y se repite el POST → checkoutUrl vacío, sigue PENDING_AUTH', async () => {
+    const key = nextKey()
+    const phone = nextPhone()
+    const r = await draft({ key, phone })
+    authSpy.mockRejectedValue(lost())
+    await expect(abandon(r.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', cardStatus: null })
+    expect(expireSpy).toHaveBeenCalledTimes(1)
+    expect(authSpy).toHaveBeenCalledTimes(1)
+
+    await expect(draft({ key, phone })).resolves.toMatchObject({
+      trackingToken: r.trackingToken,
+      checkoutUrl: '',
+      status: 'AWAITING_PAYMENT',
+      replay: true,
+    })
+    expect((await chargeOf(key)).status).toBe('PENDING_AUTH')
+
+    // Si Stripe dijo que no se podía vencer, no se toca el vencimiento: manda la relectura.
+    const k2 = nextKey()
+    await draft({ key: k2 })
+    const before = await chargeOf(k2)
+    expireSpy.mockRejectedValueOnce(notExpirable())
+    await abandon(before.trackingToken)
+    expect((await chargeOf(k2)).checkoutExpiresAt).toEqual(before.checkoutExpiresAt)
+  })
+
+  it('S5: el token ya es un pedido (otra pestaña completó el pago) → responde el seguimiento sin cancelar, liberar ni preguntar a Stripe', async () => {
+    const { charge, orderId, trackingToken } = await authorizedOrder()
+    const stripeReads = authSpy.mock.calls.length
+    await expect(abandon(trackingToken)).resolves.toMatchObject({ status: 'PENDING_ACCEPTANCE', cardStatus: 'AUTHORIZED', canCancel: true })
+    expect(expireSpy).not.toHaveBeenCalled()
+    expect(voidSpy).not.toHaveBeenCalled()
+    expect(authSpy).toHaveBeenCalledTimes(stripeReads)
+    expect((await onlineOf(orderId)).status).toBe('PENDING_ACCEPTANCE')
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('AUTHORIZED')
+  })
+
+  it('S5: sin respuesta de Stripe al vencer la página → 502 CARD_PROVIDER_UNAVAILABLE y el borrador sigue PENDING_AUTH; el token de otro negocio no toca nada', async () => {
+    const key = nextKey()
+    const r = await draft({ key })
+    expireSpy.mockRejectedValueOnce(lost())
+    await expect(abandon(r.trackingToken)).rejects.toMatchObject({ statusCode: 502, code: 'CARD_PROVIDER_UNAVAILABLE' })
+    expect((await chargeOf(key)).status).toBe('PENDING_AUTH')
+    expect(authSpy).not.toHaveBeenCalled()
+
+    await expect(abandon(r.trackingToken, 'c000000000000000000000000')).resolves.toBeNull()
+    expect(expireSpy).toHaveBeenCalledTimes(1)
+    expect((await chargeOf(key)).status).toBe('PENDING_AUTH')
+  })
+
   it('doble aceptar en paralelo captura una sola vez', async () => {
     const { orderId } = await authorizedOrder()
     const outcomes = await Promise.all([accept(orderId), accept(orderId)])
@@ -838,6 +1031,37 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     voidSpy.mockImplementation(async (_m: any, p: any) => ({ ...authorized(), paymentIntentId: p.paymentIntentId, piStatus: 'canceled' }))
     await expect(releaseCharge(charge.id)).resolves.toBe('RELEASED')
     expect(voidSpy.mock.calls[1][1].idempotencyKey).toBe(`online-order:${orderId}:release`)
+  })
+
+  it('S4 (clientes, Codex plan r1 #3 y r2 #3): el seguimiento no afirma «no se cobró» con el dinero en duda', async () => {
+    // Pedido rechazado cuya liberación falló: la tarjeta sigue apartada ⇒ RELEASING, no RELEASED.
+    const { orderId, trackingToken } = await authorizedOrder()
+    voidSpy.mockRejectedValue(lost())
+    await reject(orderId)
+    await expect(getTrackingByToken(trackingToken)).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
+
+    // Borrador normal: espera el pago, sin estado de tarjeta.
+    const k1 = nextKey()
+    const r1 = await draft({ key: k1 })
+    await expect(getTrackingByToken(r1.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT', cardStatus: null })
+
+    // Borrador que terminó CAPTURED sin pedido (se iba a liberar y ya estaba cobrado a mano).
+    await prisma.onlineOrderCharge.update({
+      where: { id: (await chargeOf(k1)).id },
+      data: { status: 'CAPTURED', lastError: 'CAPTURED_OUTSIDE', paymentIntentId: `pi_s4_${RUN}` },
+    })
+    await expect(getTrackingByToken(r1.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'CAPTURED' })
+
+    // Borrador PENDING_AUTH cobrado fuera de Avoqado: lo mismo, y sin volver a preguntarle a Stripe.
+    const k2 = nextKey()
+    const r2 = await draft({ key: k2 })
+    await prisma.onlineOrderCharge.update({
+      where: { id: (await chargeOf(k2)).id },
+      data: { lastError: 'CAPTURED_OUTSIDE', updatedAt: new Date(Date.now() - 10_000) },
+    })
+    const stripeReads = authSpy.mock.calls.length
+    await expect(getTrackingByToken(r2.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'CAPTURED' })
+    expect(authSpy).toHaveBeenCalledTimes(stripeReads)
   })
 
   it('un cargo RELEASING sin pedido (liberación tardía) se libera con la clave del cargo', async () => {
@@ -1046,8 +1270,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       await expect(reconcile()).resolves.toMatchObject({ scanned: 0 })
       expect(await chargeById(d.id)).toMatchObject({ status: 'PENDING_AUTH' })
       expect(voidSpy).not.toHaveBeenCalled()
-      // El comensal sigue viendo «esperando el pago» (no existe un estado «en revisión»).
-      await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT' })
+      // S4 (Codex plan r2 #3): el comensal ya no ve «esperando el pago»: el pago no se completó por aquí y su tarjeta SÍ se cobró.
+      await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', cardStatus: 'CAPTURED' })
     } finally {
       errorSpy.mockRestore()
     }

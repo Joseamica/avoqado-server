@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express'
 import * as exchangeService from '../../services/exchanges/exchange.service'
+import { esPosSinSoloSaldo } from '../../services/storeCredit/posSinSoloSaldo'
 
 export async function cancelExchange(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -35,6 +36,7 @@ export async function createExchange(req: Request, res: Response, next: NextFunc
       venueId: req.params.venueId,
       actorStaffId: req.authContext!.userId,
       body: req.body,
+      posSinSoloSaldo: esPosSinSoloSaldo(req.headers),
     })
     res.status(replay ? 200 : 201).json({ success: true, data: { exchange } })
   } catch (error) {

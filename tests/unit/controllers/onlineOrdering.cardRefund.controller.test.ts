@@ -26,11 +26,40 @@ app.use((err: any, _req: any, res: any, _next: any) => res.status(err.statusCode
 
 const URL_ = '/venues/cvenue000000000000000001/online-ordering/orders/corder000000000000000001/card-refund'
 const KEY = 'llave-del-panel-0001'
-const body = (o: Record<string, unknown> = {}) => ({ amount: '125.50', reason: 'CANCELLED_ORDER', ...o })
+const body = (o: Record<string, unknown> = {}) => ({ amount: '125.50', reason: 'CANCELLED_ORDER', expectedLatestRefundId: null, ...o })
 
 beforeEach(() => {
   mockRefund.mockReset()
   mockRefund.mockResolvedValue({ status: 'RECORDED', cardRefundStatus: 'RECORDED', cardRefundId: 'cr1', refundId: 'p1', replay: false })
+})
+
+describe('POST …/card-refund: lo último que vio el operador', () => {
+  it('es obligatorio: sin él → 400 sin llamar al servicio', async () => {
+    const { expectedLatestRefundId: _sinVista, ...sinVista } = body()
+    const r = await request(app).post(URL_).set('Idempotency-Key', KEY).send(sinVista)
+    expect(r.status).toBe(400)
+    expect(r.body.message).toContain('Falta la última devolución que viste')
+    expect(mockRefund).not.toHaveBeenCalled()
+  })
+
+  it.each([[123], ['']])('un valor raro (%j) → 400 en español', async vista => {
+    const r = await request(app)
+      .post(URL_)
+      .set('Idempotency-Key', KEY)
+      .send(body({ expectedLatestRefundId: vista }))
+    expect(r.status).toBe(400)
+    expect(r.body.message).toContain('La última devolución que viste')
+    expect(mockRefund).not.toHaveBeenCalled()
+  })
+
+  it.each([[null], ['cr-la-ultima-que-vio']])('llega tal cual al servicio: %s', async vista => {
+    const r = await request(app)
+      .post(URL_)
+      .set('Idempotency-Key', KEY)
+      .send(body({ expectedLatestRefundId: vista }))
+    expect(r.status).toBe(200)
+    expect(mockRefund.mock.calls[0][0].expectedLatestRefundId).toBe(vista)
+  })
 })
 
 describe('POST …/card-refund: llave y monto', () => {

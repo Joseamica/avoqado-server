@@ -73,6 +73,9 @@ export interface LandingSignupInput {
   utm?: Record<string, string>
   /** Campaña ligera reclamada (spec 2026-09-17 § 3.5). Mal formado ⇒ el alta sigue sin campaña. */
   launchCampaignCode?: string
+  /** Cuándo llegó el formulario. Queda en la marca del alta: el CRM no revive con un formulario de ANTES de que el
+   *  superadmin eliminara ese negocio, aunque el alta termine después (D7, Codex r3). */
+  formAt?: Date
 }
 
 export interface LandingSignupResult {
@@ -448,7 +451,7 @@ export async function checkEmailVerificationStatus(email: string): Promise<{ ema
  * `emailVerified` no se toca. Apagado, todo lo de arriba queda byte por byte como siempre.
  */
 export async function signupFromLanding(input: LandingSignupInput): Promise<LandingSignupResult> {
-  const { email, firstName = '', lastName = '', organizationName = '', phone, source, utm, launchCampaignCode } = input
+  const { email, firstName = '', lastName = '', organizationName = '', phone, source, utm, launchCampaignCode, formAt } = input
   const normalizedEmail = email.toLowerCase().trim()
   const conCodigo = altaLandingConCodigo()
 
@@ -592,6 +595,7 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
           organizationId: organization.id,
           ...(utmLimpio ? { utm: utmLimpio } : {}),
           ...(campanaReclamada ? { launchCampaignCode: campanaReclamada.code } : {}),
+          ...(formAt ? { formAt: formAt.toISOString() } : {}),
         },
       },
     })

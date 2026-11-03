@@ -25,6 +25,7 @@ import {
   createAccountSchema,
   createLostReasonSchema,
   createStageSchema,
+  deleteAccountSchema,
   exportAccountsSchema,
   hideClientSchema,
   listAccountsSchema,
@@ -94,6 +95,8 @@ router.post('/accounts/:id/lose', editar, validateRequest(loseAccountSchema), cr
 router.post('/accounts/:id/win', editar, validateRequest(winAccountSchema), crmController.winAccount)
 router.post('/accounts/:id/archive', editar, validateRequest(accountIdSchema), crmController.archiveAccount)
 router.post('/accounts/:id/reactivate', editar, validateRequest(accountIdSchema), crmController.reactivateAccount)
+// «Eliminar», forever (D7): the real superadmin only — founder, 2-nov — which the service checks; the key is the door.
+router.post('/accounts/:id/delete', admin, validateRequest(deleteAccountSchema), crmController.deleteAccount)
 router.post('/accounts/:id/notes', editar, validateRequest(addNoteSchema), crmController.addNote)
 router.post('/accounts/:id/activities', editar, validateRequest(addActivitySchema), crmController.createActivity)
 

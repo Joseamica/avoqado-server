@@ -624,7 +624,13 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
     venueId,
     status: { not: 'DELETED' },
     // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
-    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO],
+    // Pedidos en línea fase 2 (S2, Codex plan r1 #1): una tarjeta en línea apartada sin cobrar no sale en «Cuentas abiertas»: desde
+    // aquí la caja podría encolar efectivo sin red que el cliente ya pagó con tarjeta (también en las apps publicadas). Ya cobrada,
+    // la cuenta está PAID y sale como siempre. La bandeja «Pedidos en línea» la muestra.
+    AND: [
+      WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO,
+      { NOT: { onlineOrder: { is: { paymentMode: 'CARD_ONLINE', charge: { isNot: { status: 'CAPTURED' } } } } } },
+    ],
   }
 
   // Filter by status if provided

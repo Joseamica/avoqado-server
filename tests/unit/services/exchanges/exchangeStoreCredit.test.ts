@@ -18,7 +18,13 @@ jest.mock('@/services/storeCredit/storeCreditTender', () => ({
   storeCreditAvailable: () => mockDisponible(),
 }))
 
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '../../../__helpers__/setup'
+import * as exchangeRulesModule from '@/services/exchanges/exchangeRules'
+import * as exchangeSale from '@/services/exchanges/exchangeSale'
+import * as accountingAt from '@/services/exchanges/exchangeAccountingAt'
+import * as paymentShiftClaim from '@/services/shared/paymentShiftClaim'
+import * as precios from '@/services/mobile/precioQueVioElCliente'
 import {
   allocateAcrossPayments,
   modesForExchangeCredit,
@@ -312,6 +318,15 @@ describe('createExchange con STORE_CREDIT: afuera sólo lo que no cambia entre e
     expect(mockExecute).not.toHaveBeenCalled()
   })
 
+  it('D1: la marca del POS que no sabe de «Sólo saldo a favor» llega a la transacción; sin ella, no llega', async () => {
+    mockExecute.mockResolvedValue({ reserved: { id: 'ex-1' } })
+    const b = body({ method: 'CASH', customerId: undefined })
+    await createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: b, posSinSoloSaldo: true })
+    expect(mockExecute).toHaveBeenLastCalledWith(expect.objectContaining({ posSinSoloSaldo: true }))
+    await createExchange({ venueId: 'v1', actorStaffId: 'staff-1', body: b })
+    expect(mockExecute.mock.lastCall![0]).not.toHaveProperty('posSinSoloSaldo')
+  })
+
   it('regresión: devolver en efectivo no pide clienta ni prepara medios', async () => {
     mockExecute.mockResolvedValue({ reserved: { id: 'ex-1' } })
     await createExchange({
@@ -488,6 +503,92 @@ describe('prepareExchangeInTx (S10, I1): lo que cambia entre el envío y el reen
       code: 'EXCHANGES_DISABLED',
     })
     expect(tx.exchange.findUnique).toHaveBeenCalled()
+  })
+
+  /**
+   * 🔴 D1: con «Sólo saldo a favor» prendido, un POS publicado que no sabe del interruptor (la ruta móvil lo marca: ANDROID/WINDOWS ≤ 95,
+   * iOS ≤ 41, o sin cabeceras) devuelve la diferencia en efectivo como antes; sin la marca (app nueva) rige igual que hoy. Una venta en
+   * efectivo de $500 por una prenda de $300: $200 a favor, pedidos en efectivo, sin pieza con Defecto.
+   */
+  describe('D1: «Sólo saldo a favor» y el POS que no sabe de él', () => {
+    const espias: jest.SpyInstance[] = []
+    beforeEach(() => {
+      ;(tx as any).venueSettings = { findUnique: jest.fn(async () => ({ storeCreditOnly: true })) }
+      espias.push(
+        jest.spyOn(paymentShiftClaim, 'lockExistingOrderForPayment').mockResolvedValue(true as never),
+        jest.spyOn(accountingAt, 'exchangeAccountingAt').mockResolvedValue(new Date('2026-10-31T18:00:00Z')),
+        jest.spyOn(precios, 'resolverPreciosDeLineas').mockResolvedValue([{ unitPriceCents: 30000 }] as never),
+        jest.spyOn(exchangeSale, 'loadSaleForExchange').mockResolvedValue({
+          order: { id: 'order-1', orderNumber: 'A-1', status: 'COMPLETED', paymentStatus: 'PAID', source: 'POS', type: 'COUNTER' },
+          lines: [
+            {
+              id: 'item-1',
+              productId: 'prod-viejo',
+              productName: 'Playera M',
+              quantity: 1,
+              orderPromotionId: null,
+              giftCardId: null,
+              serialized: false,
+              product: { type: 'REGULAR', soldByWeight: false, priceCents: 50000, deletedAt: null, productGroupId: null },
+            },
+          ],
+          charged: { atribuible: true, motivo: null, renglones: [], cobradoCents: new Map([['item-1', 50000]]) },
+          returnedByLine: new Map(),
+          chainByPaymentId: new Map(),
+          catalogProducts: new Map([
+            [
+              'prod-1',
+              {
+                id: 'prod-1',
+                name: 'Playera S',
+                deletedAt: null,
+                active: true,
+                type: 'REGULAR',
+                soldByWeight: false,
+                productGroupId: null,
+                price: new Prisma.Decimal(300),
+              },
+            ],
+          ]),
+          payments: [
+            {
+              id: 'pay-1',
+              createdAt: new Date('2026-10-31T17:00:00Z'),
+              amountCents: 50000,
+              tipCents: 0,
+              processorData: {},
+              refunds: [],
+              money: money(),
+              rootPaymentId: 'pay-1',
+              rootMoney: money(),
+            },
+          ],
+        } as never),
+      )
+    })
+    afterEach(() => espias.splice(0).forEach(s => s.mockRestore()))
+    const enEfectivo = () => cuerpo({ method: 'CASH', customerId: undefined })
+
+    it('app nueva (sin la marca): efectivo → 400 STORE_CREDIT_ONLY y sólo se ofrece el saldo a favor, como hoy', async () => {
+      await expect(preparar(enEfectivo())).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'STORE_CREDIT_ONLY',
+        details: { payoutOptions: [expect.objectContaining({ method: 'STORE_CREDIT' })] },
+      })
+    })
+
+    it('🔴 app vieja (posSinSoloSaldo): no rechaza por el interruptor y no recorta los medios', async () => {
+      let medios: unknown
+      const reparto = jest.spyOn(exchangeRulesModule, 'allocateAcrossPayments').mockImplementationOnce(capacidades => {
+        medios = capacidades.map(c => c.modes)
+        throw new Error('ALTO_DESPUES_DE_LA_REGLA')
+      })
+      espias.push(reparto)
+      await expect(prepareExchangeInTx(tx as never, { ...entrada(enEfectivo()), posSinSoloSaldo: true })).rejects.toThrow(
+        'ALTO_DESPUES_DE_LA_REGLA',
+      )
+      expect(medios).toEqual([expect.objectContaining({ CASH: 'SAME', STORE_CREDIT: 'CHOSEN' })])
+    })
   })
 
   it('con la sucursal sin ventas → VENUE_SALES_DISABLED (403), leído con la transacción', async () => {

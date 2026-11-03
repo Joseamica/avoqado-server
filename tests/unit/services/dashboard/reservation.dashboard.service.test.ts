@@ -161,6 +161,8 @@ describe('Reservation Dashboard Service', () => {
     jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(makeReservationSettings())
     // resetAllMocks borra el default del setup: sin conexiones de pases, el gancho de sincronización no escribe nada.
     prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
+    // Cancelar devuelve el paquete dentro de su transacción: sin canjes, no hay nada que devolver.
+    prismaMock.creditTransaction.findMany.mockResolvedValue([])
     prismaMock.$transaction.mockImplementation(async (arg: any) => {
       if (typeof arg === 'function') return arg(prismaMock)
       return arg
@@ -2100,6 +2102,19 @@ describe('Reservation Dashboard Service', () => {
 
         const result = await cancelReservation(VENUE_ID, 'res-1', STAFF_ID)
         expect(result.status).toBe('CANCELLED')
+      })
+
+      it('si falla resolver el depósito, la reserva ya cancelada no se contesta como error (Codex r1 #2 de D10)', async () => {
+        const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+        prismaMock.reservation.findFirst
+          .mockResolvedValueOnce(createMockReservation({ status: 'CONFIRMED' })) // la transición
+          .mockRejectedValueOnce(new Error('base caída')) // el depósito
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'CANCELLED' }))
+
+        const result = await cancelReservation(VENUE_ID, 'res-1', STAFF_ID)
+
+        expect(result.status).toBe('CANCELLED')
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[RESERVATION DEPOSIT]'), expect.any(Error))
       })
 
       it('should reject COMPLETED -> CANCELLED (terminal state)', async () => {

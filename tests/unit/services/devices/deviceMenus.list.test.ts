@@ -56,7 +56,7 @@ function catalogo(opts: { aparatos: any[]; total?: number; asignaciones?: Array<
 
 const TODOS = { categories: 4, products: 10 }
 
-/** Hoy ninguna app aplica el menú del aparato (versión mínima null); aquí se finge que ANDROID 2.25.20 ya lo aplica. */
+/** La 2.25.20 de estas pruebas es menor que la mínima real; aquí se finge que ANDROID 2.25.20 ya lo aplica. */
 const versionesOriginales = { ...DEVICE_MENUS_MIN_APP_VERSION }
 const androidYaLoAplica = () => (DEVICE_MENUS_MIN_APP_VERSION.POS_ANDROID = '2.25.20')
 afterEach(() => Object.assign(DEVICE_MENUS_MIN_APP_VERSION, versionesOriginales))
@@ -267,7 +267,7 @@ describe('listDeviceMenus', () => {
       model: 'T2',
       version: '2.25.20',
       areaName: 'Cremería',
-      needsAppUpdate: true, // ninguna app lo aplica todavía (versión mínima null)
+      needsAppUpdate: true, // la 2.25.20 es menor que la versión mínima
       menus: [],
       sees: TODOS,
       seesAfterUpdate: null,

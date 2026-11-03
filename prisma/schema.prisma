@@ -21039,6 +21039,24 @@ model CrmInboundEntry {
   @@index([noticeSentAt, receivedAt]) // el barrido sólo lee los avisos pendientes de las últimas 24 h
 }
 
+/// La lápida de un negocio que el superadmin ELIMINÓ del CRM (D7, founder 2-nov: «al instante, pero solo superadmin»).
+/// Una fila por cada clave con la que un escritor automático lo volvería a crear — su llave de entrada, su Organization,
+/// cada correo y cada teléfono de sus contactos — guardada como `sha256("<CLASE>:<valor>")`, NUNCA el valor. `accountForTx`
+/// la lee sólo cuando no encontró a la persona y está por crear: lo que se dijo antes de `erasedAt` ya no crea nada; lo que
+/// la persona dice DESPUÉS (una entrada nueva de la landing, un mensaje nuevo) sí. Sin relaciones a propósito: la cuenta ya
+/// no existe.
+model CrmErased {
+  id       String   @id @default(cuid())
+  keyHash  String
+  // La Organization del negocio eliminado ('' = ninguna). Su llave, correo o teléfono sólo detienen a un escritor
+  // compatible con ella — sin Organization, o la misma —, la regla del resolver: otro negocio que comparte un teléfono
+  // no es esta persona (Codex r1 H3). Su Organization misma detiene siempre.
+  scope    String   @default("")
+  erasedAt DateTime
+
+  @@unique([keyHash, scope])
+}
+
 /// El aviso diario de cada persona: se APARTA antes de mandarlo (la llave única impide mandarlo dos veces) y guarda el
 /// contenido para reintentar igual.
 model CrmDigestSend {
@@ -21054,4 +21072,24 @@ model CrmDigestSend {
   updatedAt  DateTime @updatedAt
 
   @@unique([staffId, day, kind])
+}
+
+/// Cada mensaje del WhatsApp de ventas (coexistencia: el founder sigue en la app de su celular). Lo escribe SÓLO el webhook
+/// de Meta y nunca se contesta desde aquí. Entra crudo; la ficha del CRM lo liga al negocio por el teléfono al leerlo.
+model CrmWhatsappMessage {
+  id            String   @id @default(cuid())
+  wamid         String   @unique // el id de Meta: un reenvío o el historial repetido no duplican
+  phoneNumberId String // nuestro número que lo recibió o lo mandó
+  contactPhone  String // el prospecto, en E.164
+  contactName   String? // su nombre de perfil, si Meta lo mandó
+  direction     String // ENTRA | SALE
+  origin        String // MENSAJE | ECO (lo mandó el founder desde la app) | HISTORIAL
+  type          String
+  body          String? // el texto, o el pie de una foto
+  sentAt        DateTime
+  raw           Json
+  receivedAt    DateTime @default(now())
+
+  @@index([contactPhone, sentAt])
+  @@index([phoneNumberId, sentAt])
 }
