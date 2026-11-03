@@ -1469,6 +1469,88 @@ describe('invoiceOccurrence — conceptKeys y perfil (la foto se corrige sin toc
   })
 })
 
+describe('invoiceOccurrence — una fila SIN FACTURA (NONE) ya pagada se factura después, con las claves del SAT del diálogo', () => {
+  /** Como queda guardado un cobro sin factura: las claves del SAT vacías. */
+  const SIN_CLAVES = CONCEPTOS.map(c => ({ ...c, satProductKey: '', satUnitKey: '' }))
+  const claves = [
+    { satProductKey: '43211509', satUnitKey: 'H87' },
+    { satProductKey: '86101601', satUnitKey: 'E48' },
+  ]
+
+  beforeEach(() => {
+    mundo.occurrence.invoiceMode = 'NONE'
+    mundo.occurrence.concepts = SIN_CLAVES.map(c => ({ ...c }))
+    mundo.charge.invoiceMode = 'NONE'
+    mundo.charge.concepts = SIN_CLAVES
+  })
+
+  it('con conceptKeys timbra: el PAC recibe las claves, la foto las guarda, los montos no cambian y el modo sigue NONE', async () => {
+    pac.createInvoice.mockResolvedValue(PAC_VALIDO)
+
+    const cfdi = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: claves })
+
+    expect(cfdi).toMatchObject({ status: 'STAMPED', uuid: 'UUID-1' })
+    const items = pac.createInvoice.mock.calls[0][0].items
+    expect(items.map((i: Fila) => [i.satProductKey, i.satUnitKey, i.unitPriceCents])).toEqual([
+      ['43211509', 'H87', 50000],
+      ['86101601', 'E48', 49900],
+    ])
+    expect(mundo.occurrence.concepts.map((c: Fila) => [c.satProductKey, c.satUnitKey])).toEqual([
+      ['43211509', 'H87'],
+      ['86101601', 'E48'],
+    ])
+    expect(mundo.occurrence).toMatchObject({ ...TOTALES, invoiceMode: 'NONE' })
+    expect(mundo.rows).toHaveLength(1)
+    expect(mundo.rows[0]).toMatchObject({ ...TOTALES, status: 'STAMPED', platformChargeOccurrenceId: 'occ-1' })
+  })
+
+  it('sin claves es 422 (VALIDATION): no se escribe nada, no se crea la fila y el PAC no recibe nada', async () => {
+    const error = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla() }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(PlatformBillingError)
+    expect((error as PlatformBillingError).code).toBe('VALIDATION') // el controlador lo manda como 422
+    expect((error as PlatformBillingError).message).toBe('Cada concepto necesita su clave del SAT y su unidad para poder facturar')
+    expect(mundo.occurrence.concepts).toEqual(SIN_CLAVES)
+    expect(mundo.rows).toHaveLength(0)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    sinEscrituras()
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('con una clave en blanco entre las que llegan: también 422 y no escribe nada (una clave de espacios no es una clave)', async () => {
+    const aMedias = [claves[0], { satProductKey: '   ', satUnitKey: 'E48' }]
+
+    const error = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla(), conceptKeys: aMedias }).catch(
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(PlatformBillingError)
+    expect((error as PlatformBillingError).code).toBe('VALIDATION')
+    expect(mundo.occurrence.concepts).toEqual(SIN_CLAVES)
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+    sinEscrituras()
+  })
+
+  it('las claves se exigen sólo cuando va a TIMBRAR: con la factura ya VIVA la regresa sin pedirlas', async () => {
+    mundo.rows = [fila({ status: 'STAMPED', facturapiId: 'fa-1', uuid: 'UUID-1', folio: '118' })]
+
+    const cfdi = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla() })
+
+    expect(cfdi).toMatchObject({ id: 'cfdi-1', status: 'STAMPED' })
+    expect(pac.createInvoice).not.toHaveBeenCalled()
+  })
+
+  it('los otros modos con claves de siempre no cambian: una AUTOMATIC con sus claves timbra sin pedir conceptKeys', async () => {
+    mundo.occurrence.invoiceMode = 'AUTOMATIC'
+    mundo.occurrence.concepts = CONCEPTOS.map(c => ({ ...c }))
+    pac.createInvoice.mockResolvedValue(PAC_VALIDO)
+
+    const cfdi = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: enPantalla() })
+
+    expect(cfdi).toMatchObject({ status: 'STAMPED' })
+  })
+})
+
 describe('invoiceOccurrence — el perfil fiscal debe ser del cliente del cobro (spec §6, «Cambios mínimos»)', () => {
   const input = {
     actorId: 'staff-1',

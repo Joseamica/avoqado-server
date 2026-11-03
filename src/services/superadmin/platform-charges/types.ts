@@ -27,9 +27,9 @@ export interface ChargeConcept {
   /** Centavos enteros, mayor a 0. */
   amountCents: number
   ivaMode: ChargeIvaMode
-  /** c_ClaveProdServ del SAT. */
+  /** c_ClaveProdServ del SAT. Vacía en un cobro sin factura (`NONE`): se pide al facturar. */
   satProductKey: string
-  /** c_ClaveUnidad del SAT. */
+  /** c_ClaveUnidad del SAT. Vacía en un cobro sin factura (`NONE`): se pide al facturar. */
   satUnitKey: string
 }
 

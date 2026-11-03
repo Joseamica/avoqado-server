@@ -456,6 +456,12 @@ async function prepareSnapshot(occurrence: PlatformChargeOccurrence, input: Invo
       }))
     }
 
+    // 🔴 Un cobro sin factura (NONE) guarda sus claves del SAT vacías: para timbrar tienen que llegar en esta llamada (el diálogo «Facturar»).
+    // Se comprueba con lo que se va a timbrar, antes de escribir nada y de llamar al PAC: una clave en blanco sólo la rechazaría el SAT.
+    if (concepts.some(concept => !concept.satProductKey?.trim() || !concept.satUnitKey?.trim())) {
+      throw new PlatformBillingError('Cada concepto necesita su clave del SAT y su unidad para poder facturar', 'VALIDATION')
+    }
+
     // Ya pasó todo lo que podía rechazar: ahora se escribe.
     if (conceptKeys) {
       await tx.platformChargeOccurrence.update({

@@ -99,7 +99,7 @@ export interface PayPreview {
   subtotalCents: number
   taxCents: number
   totalCents: number
-  /** La casilla «Timbrar factura ahora» sale marcada. */
+  /** La casilla «Timbrar factura ahora» sale marcada: sólo en AUTOMATIC. MANUAL y NONE (sin factura) salen sin marcar. */
   willInvoice: boolean
   /** A quién se le timbraría; `null` si no hay datos fiscales con qué hacerlo. Regresa en `pay`: sólo se timbra lo que se vio. */
   receptor: ConfirmedReceptor | null

@@ -23,8 +23,8 @@ const customerType = z.enum(['ORGANIZATION', 'VENUE', 'STANDALONE'], {
 const frequency = z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'ONE_TIME'], {
   errorMap: () => ({ message: 'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME' }),
 })
-const invoiceMode = z.enum(['AUTOMATIC', 'MANUAL'], {
-  errorMap: () => ({ message: 'El modo de factura debe ser AUTOMATIC o MANUAL' }),
+const invoiceMode = z.enum(['AUTOMATIC', 'MANUAL', 'NONE'], {
+  errorMap: () => ({ message: 'El modo de factura debe ser AUTOMATIC, MANUAL o NONE' }),
 })
 const ivaMode = z.enum(['WITHOUT_IVA', 'WITH_IVA'], {
   errorMap: () => ({ message: 'El IVA del concepto debe ser WITHOUT_IVA o WITH_IVA' }),
@@ -41,8 +41,10 @@ const concept = z.object({
     .number({ required_error: 'El monto del concepto es requerido', invalid_type_error: 'El monto del concepto debe ser un número' })
     .int('El monto debe estar en centavos enteros'),
   ivaMode,
-  satProductKey: text('La clave del SAT del concepto es requerida'),
-  satUnitKey: text('La unidad del SAT del concepto es requerida'),
+  // Opcionales en la FORMA: un cobro sin factura (NONE) no las pide y el formulario las manda vacías («»). Que MANUAL o AUTOMATIC sí las
+  // necesiten es regla de negocio y la decide el servicio con el modo que queda tras combinar los cambios (`assertConceptKeys`).
+  satProductKey: z.string({ invalid_type_error: 'La clave del SAT del concepto debe ser texto' }).optional(),
+  satUnitKey: z.string({ invalid_type_error: 'La unidad del SAT del concepto debe ser texto' }).optional(),
 })
 
 const concepts = z.array(concept, {

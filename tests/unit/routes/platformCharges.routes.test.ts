@@ -79,7 +79,7 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
         'El IVA del concepto debe ser WITHOUT_IVA o WITH_IVA',
         'El monto debe estar en centavos enteros',
         'La descripción del concepto es requerida',
-        'El modo de factura debe ser AUTOMATIC o MANUAL',
+        'El modo de factura debe ser AUTOMATIC, MANUAL o NONE',
       ]),
     )
   })
@@ -91,6 +91,40 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
     }
     expect(errores(createChargeSchema, body({ ...COBRO, frequency: 'one_time' }))).toEqual([
       'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME',
+    ])
+  })
+
+  it('sin factura: «NONE» es un modo válido, y las claves del SAT pueden omitirse o venir vacías (el formulario manda «»)', () => {
+    const omitidas = { description: 'Venta de equipo', amountCents: 1000000, ivaMode: 'WITH_IVA' }
+    const vacias = { ...omitidas, satProductKey: '', satUnitKey: '' }
+    for (const concepto of [omitidas, vacias]) {
+      expect(errores(createChargeSchema, body({ ...COBRO, invoiceMode: 'NONE', concepts: [concepto] }))).toEqual([])
+      expect(errores(updateChargeSchema, body({ invoiceMode: 'NONE', concepts: [concepto] }))).toEqual([])
+      // Zod sólo ve la FORMA: que MANUAL o AUTOMATIC necesiten claves lo decide el servicio, con el modo que queda tras combinar.
+      expect(errores(createChargeSchema, body({ ...COBRO, concepts: [concepto] }))).toEqual([])
+    }
+    expect(errores(updateChargeSchema, body({ invoiceMode: 'NONE' }))).toEqual([])
+  })
+
+  it('las claves vacías que manda el formulario llegan al servicio tal cual («»), y las omitidas siguen omitidas', () => {
+    const vacias = createChargeSchema.safeParse(
+      body({ ...COBRO, invoiceMode: 'NONE', concepts: [{ ...RENTA, satProductKey: '', satUnitKey: '' }] }),
+    )
+    const omitidas = createChargeSchema.safeParse(
+      body({ ...COBRO, invoiceMode: 'NONE', concepts: [{ description: 'Venta', amountCents: 100, ivaMode: 'WITH_IVA' }] }),
+    )
+
+    expect(vacias.success && vacias.data.body.concepts[0]).toMatchObject({ satProductKey: '', satUnitKey: '' })
+    expect(omitidas.success && omitidas.data.body.concepts[0]).toEqual({ description: 'Venta', amountCents: 100, ivaMode: 'WITH_IVA' })
+  })
+
+  it('unas claves que no son texto se rechazan en español, y las demás reglas del concepto siguen igual', () => {
+    expect(errores(createChargeSchema, body({ ...COBRO, concepts: [{ ...RENTA, satProductKey: 123, satUnitKey: ['E48'] }] }))).toEqual([
+      'La clave del SAT del concepto debe ser texto',
+      'La unidad del SAT del concepto debe ser texto',
+    ])
+    expect(errores(createChargeSchema, body({ ...COBRO, concepts: [{ ...RENTA, amountCents: 10.5 }] }))).toEqual([
+      'El monto debe estar en centavos enteros',
     ])
   })
 

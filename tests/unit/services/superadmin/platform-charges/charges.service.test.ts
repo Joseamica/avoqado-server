@@ -10,7 +10,7 @@ import {
   resumeCharge,
   updateCharge,
 } from '@/services/superadmin/platform-charges/charges.service'
-import type { ChargeInput } from '@/services/superadmin/platform-charges/charges.service'
+import type { ChargeConceptInput, ChargeInput } from '@/services/superadmin/platform-charges/charges.service'
 import { addDays, calendarDayToDb } from '@/services/superadmin/platform-charges/schedule'
 import type { ChargeConcept } from '@/services/superadmin/platform-charges/types'
 
@@ -1579,6 +1579,176 @@ describe('platform-charges/charges.service — listCharges (NEW)', () => {
     prismaMock.platformCharge.count.mockResolvedValue(0)
 
     await expect(listCharges({ q: 'nadie' })).resolves.toEqual({ rows: [], total: 0, page: 1, pageSize: 50 })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/charges.service — sin factura (NONE) y las claves del SAT (NEW)', () => {
+  const FALTAN_CLAVES = 'Cada concepto necesita su clave del SAT y su unidad'
+  // $10,000.00 con IVA: a mano, subtotal 862,069 + IVA 137,931 = 1,000,000 centavos.
+  const VENTA = { description: 'Venta de equipo', amountCents: 1_000_000, ivaMode: 'WITH_IVA' as const }
+  const TOTALES_VENTA = { subtotalCents: 862069, taxCents: 137931, totalCents: 1_000_000 }
+  const SIN_CLAVES: ChargeConceptInput[] = [VENTA]
+  /** Lo que manda el formulario de alta cuando no se llenan: las dos claves como texto vacío. */
+  const CLAVES_VACIAS: ChargeConceptInput[] = [{ ...VENTA, satProductKey: '', satUnitKey: '' }]
+  /** Como queda guardado un cobro sin factura: las claves vacías. */
+  const GUARDADO_SIN_CLAVES = { ...VENTA, satProductKey: '', satUnitKey: '' }
+  const SIN_FACTURA = (over: Partial<ChargeInput> = {}) =>
+    entrada({ invoiceMode: 'NONE', frequency: 'MONTHLY', anchorDate: '2026-11-02', billingTaxProfileId: undefined, ...over })
+
+  describe('createCharge', () => {
+    it.each([
+      ['las claves omitidas', SIN_CLAVES],
+      ['las claves vacías («»), como las manda el formulario', CLAVES_VACIAS],
+      ['las claves con sólo espacios', [{ ...VENTA, satProductKey: '   ', satUnitKey: ' ' }]],
+    ] as [string, ChargeConceptInput[]][])(
+      'NONE con %s: se guarda con las claves vacías, y la fecha nace con la misma foto',
+      async (_caso, concepts) => {
+        await createCharge(SIN_FACTURA({ concepts }), 'staff-1', AHORA)
+
+        expect(prismaMock.platformCharge.create.mock.calls[0][0].data).toMatchObject({
+          invoiceMode: 'NONE',
+          concepts: [GUARDADO_SIN_CLAVES],
+        })
+        const { data } = prismaMock.platformChargeOccurrence.createMany.mock.calls[0][0]
+        expect(data).toEqual([
+          {
+            chargeId: 'cobro-nuevo',
+            dueDate: new Date('2026-11-02T00:00:00.000Z'),
+            concepts: [GUARDADO_SIN_CLAVES],
+            ...TOTALES_VENTA,
+            invoiceMode: 'NONE',
+          },
+        ])
+      },
+    )
+
+    it('NONE con claves: se conservan (sin espacios de sobra); nadie las borra', async () => {
+      await createCharge(SIN_FACTURA({ concepts: [{ ...VENTA, satProductKey: ' 43211509 ', satUnitKey: 'H87' }] }), 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.create.mock.calls[0][0].data.concepts).toEqual([
+        { ...VENTA, satProductKey: '43211509', satUnitKey: 'H87' },
+      ])
+    })
+
+    it('NONE no necesita perfil fiscal: se guarda sin él y ni siquiera lo busca', async () => {
+      await createCharge(SIN_FACTURA({ concepts: SIN_CLAVES }), 'staff-1', AHORA)
+
+      expect(prismaMock.billingTaxProfile.findUnique).not.toHaveBeenCalled()
+      expect(prismaMock.platformCharge.create.mock.calls[0][0].data.billingTaxProfileId).toBeNull()
+    })
+
+    it.each([
+      ['MANUAL', 'MANUAL' as const],
+      ['AUTOMATIC', 'AUTOMATIC' as const],
+    ])('con %s las claves SÍ se exigen: 400 «Cada concepto necesita su clave del SAT y su unidad»', async (_nombre, invoiceMode) => {
+      const sinClaves: [string, ChargeConceptInput[]][] = [
+        ['omitidas', SIN_CLAVES],
+        ['vacías', CLAVES_VACIAS],
+        ['sólo espacios', [{ ...VENTA, satProductKey: '  ', satUnitKey: '  ' }]],
+        ['sólo falta la unidad', [{ ...VENTA, satProductKey: '43211509' }]],
+        ['sólo falta la clave del producto', [{ ...VENTA, satUnitKey: 'H87' }]],
+        [
+          'falta en el segundo concepto',
+          [
+            { ...VENTA, satProductKey: '43211509', satUnitKey: 'H87' },
+            { ...VENTA, description: 'Otro' },
+          ],
+        ],
+      ]
+      for (const [caso, concepts] of sinClaves) {
+        const error = await createCharge(entrada({ invoiceMode, billingTaxProfileId: 'perfil-1', concepts }), 'staff-1', AHORA).catch(
+          (e: unknown) => e,
+        )
+
+        expect([caso, error]).toEqual([caso, expect.any(BadRequestError)])
+        expect((error as BadRequestError).message).toBe(FALTAN_CLAVES)
+        expect((error as BadRequestError).statusCode).toBe(400)
+      }
+      expect(prismaMock.$transaction).not.toHaveBeenCalled() // se rechaza antes de abrir una transacción
+      ningunaEscritura()
+    })
+  })
+
+  describe('updateCharge — las claves se exigen con el modo que QUEDA tras combinar lo que llega con lo guardado', () => {
+    const cobroSinFactura = (over: Record<string, unknown> = {}) =>
+      cobro({ invoiceMode: 'NONE', billingTaxProfileId: null, concepts: [GUARDADO_SIN_CLAVES], ...over })
+
+    it('de NONE a MANUAL sin mandar conceptos, con los guardados sin claves: 400 dentro del candado y sin escribir nada', async () => {
+      instalarOcurrencias([fila('2026-11-09', { concepts: [GUARDADO_SIN_CLAVES], invoiceMode: 'NONE' })])
+      dadoElCobro(cobroSinFactura())
+      const eventos = trazar()
+
+      const error = await updateCharge('cobro-1', { invoiceMode: 'MANUAL' }, 'staff-1', AHORA).catch((e: unknown) => e)
+
+      expect(error).toBeInstanceOf(BadRequestError)
+      expect((error as BadRequestError).message).toBe(FALTAN_CLAVES)
+      expect(dentroDeLaTransaccion(eventos)).toEqual(['candado', 'leer cobro']) // lo guardado se leyó dentro del candado; nada se escribió
+      expect(eventos).not.toContain('bitácora')
+      ningunaEscritura()
+    })
+
+    it('de NONE a AUTOMATIC con las claves vacías también: 400 de las claves, antes de buscar el perfil fiscal', async () => {
+      dadoElCobro(cobroSinFactura())
+
+      await expect(
+        updateCharge('cobro-1', { invoiceMode: 'AUTOMATIC', billingTaxProfileId: 'perfil-1' }, 'staff-1', AHORA),
+      ).rejects.toThrow(FALTAN_CLAVES)
+
+      expect(prismaMock.billingTaxProfile.findUnique).not.toHaveBeenCalled()
+      ningunaEscritura()
+    })
+
+    it('de NONE a MANUAL MANDANDO conceptos con claves (el formulario completo) pasa', async () => {
+      instalarOcurrencias([])
+      dadoElCobro(cobroSinFactura())
+      const conClaves = [{ ...VENTA, satProductKey: '43211509', satUnitKey: 'H87' }]
+
+      await updateCharge('cobro-1', { invoiceMode: 'MANUAL', concepts: conClaves }, 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.update).toHaveBeenCalledWith({
+        where: { id: 'cobro-1' },
+        data: expect.objectContaining({ invoiceMode: 'MANUAL', concepts: conClaves }),
+      })
+    })
+
+    it('de MANUAL a NONE conserva las claves que ya tenía, y lo futuro nace sin factura', async () => {
+      const filas = instalarOcurrencias([fila('2026-11-09')])
+      dadoElCobro(cobro({ invoiceMode: 'MANUAL' }))
+
+      await updateCharge('cobro-1', { invoiceMode: 'NONE' }, 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.update.mock.calls[0][0].data).toMatchObject({ invoiceMode: 'NONE', concepts: [RENTA, LICENCIA] })
+      expect(porDia(filas)['2026-11-09']).toMatchObject({ invoiceMode: 'NONE', concepts: [RENTA, LICENCIA] })
+    })
+
+    it('en un cobro MANUAL, mandar conceptos sin claves es 400; en uno NONE, pasa y se guardan vacías', async () => {
+      instalarOcurrencias([])
+      dadoElCobro(cobro({ invoiceMode: 'MANUAL' }))
+      await expect(updateCharge('cobro-1', { concepts: SIN_CLAVES }, 'staff-1', AHORA)).rejects.toThrow(FALTAN_CLAVES)
+      ningunaEscritura()
+
+      dadoElCobro(cobroSinFactura())
+      await updateCharge('cobro-1', { concepts: [{ ...VENTA, amountCents: 5000 }] }, 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.update.mock.calls[0][0].data.concepts).toEqual([{ ...GUARDADO_SIN_CLAVES, amountCents: 5000 }])
+    })
+
+    it('cambiar el nombre de un cobro sin factura (claves vacías guardadas) no vuelve a pedir claves', async () => {
+      instalarOcurrencias([])
+      dadoElCobro(cobroSinFactura())
+
+      await expect(updateCharge('cobro-1', { customerName: 'Otro nombre' }, 'staff-1', AHORA)).resolves.toBeDefined()
+    })
+
+    it('un cobro sin factura reenviado igual (el formulario completo, con las claves vacías) no cambia nada ni exige nada', async () => {
+      instalarOcurrencias([])
+      dadoElCobro(cobroSinFactura())
+
+      await updateCharge('cobro-1', { invoiceMode: 'NONE', concepts: CLAVES_VACIAS, billingTaxProfileId: null as never }, 'staff-1', AHORA)
+
+      ningunaEscritura()
+    })
   })
 })
 

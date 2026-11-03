@@ -41,6 +41,13 @@ const FREQUENCIES = new Set<string>(Object.values(PlatformChargeFrequency))
 const INVOICE_MODES = new Set<string>(Object.values(PlatformChargeInvoiceMode))
 const IVA_MODES = new Set<string>(['WITHOUT_IVA', 'WITH_IVA'])
 
+/**
+ * Un concepto como llega: las claves del SAT pueden faltar (un cobro sin factura no las pide y el formulario las manda vacías).
+ * `normalizeConcepts` las deja como texto, vacío si no vinieron, y `assertConceptKeys` las exige según el modo de factura del cobro.
+ */
+export type ChargeConceptInput = Omit<ChargeConcept, 'satProductKey' | 'satUnitKey'> &
+  Partial<Pick<ChargeConcept, 'satProductKey' | 'satUnitKey'>>
+
 export interface ChargeInput {
   customerType: BillingCustomerType
   organizationId?: string
@@ -50,7 +57,7 @@ export interface ChargeInput {
   frequency: PlatformChargeFrequency
   /** Primera fecha de cobro: día de calendario de CDMX. */
   anchorDate: CalendarDay
-  concepts: ChargeConcept[]
+  concepts: ChargeConceptInput[]
   invoiceMode: PlatformChargeInvoiceMode
 }
 
@@ -137,7 +144,11 @@ const pickConcept = (c: ChargeConcept): ChargeConcept => ({
   satUnitKey: c.satUnitKey,
 })
 
-/** Valida y limpia los conceptos. Lo que se guarda en la base se calcula después con ellos: aquí no puede colarse nada raro. */
+/**
+ * Valida y limpia los conceptos. Lo que se guarda en la base se calcula después con ellos: aquí no puede colarse nada raro. Las claves
+ * del SAT salen como texto limpio, vacío si faltan: si hacen falta o no depende del modo de factura con el que queda el cobro, y eso
+ * se comprueba después de combinar con lo guardado (`assertConceptKeys`), no aquí.
+ */
 function normalizeConcepts(raw: unknown): ChargeConcept[] {
   if (!Array.isArray(raw) || raw.length === 0) throw invalid('Agrega al menos un concepto al cobro')
   if (raw.length > MAX_CONCEPTS) throw invalid(`Un cobro puede tener hasta ${MAX_CONCEPTS} conceptos`)
@@ -155,7 +166,6 @@ function normalizeConcepts(raw: unknown): ChargeConcept[] {
     if (typeof ivaMode !== 'string' || !IVA_MODES.has(ivaMode)) throw invalid('Elige si el monto de cada concepto trae IVA o no')
     const satProductKey = cleanText(c.satProductKey)
     const satUnitKey = cleanText(c.satUnitKey)
-    if (!satProductKey || !satUnitKey) throw invalid('Cada concepto necesita su clave del SAT y su unidad')
     return { description, amountCents, ivaMode: ivaMode as ChargeConcept['ivaMode'], satProductKey, satUnitKey }
   })
 
@@ -173,6 +183,18 @@ function assertAnchorInWindow(anchor: CalendarDay, today: CalendarDay): void {
   // 'YYYY-MM-DD' con ceros a la izquierda se ordena como el calendario: comparar los textos es comparar los días.
   if (anchor < addDays(today, -ANCHOR_WINDOW_DAYS) || anchor > addDays(today, ANCHOR_WINDOW_DAYS)) {
     throw invalid(`La fecha de inicio debe estar a menos de ${ANCHOR_WINDOW_DAYS} días de hoy`)
+  }
+}
+
+/**
+ * Las claves del SAT sólo se exigen si el cobro puede facturarse (AUTOMATIC o MANUAL); uno sin factura (NONE) las guarda vacías. Se
+ * comprueban con el modo que QUEDA tras combinar lo que llega con lo guardado: pasar de NONE a MANUAL sin mandar conceptos, con los
+ * guardados sin claves, tiene que fallar. Por eso va aparte de `normalizeConcepts` y, al editar, corre dentro del candado.
+ */
+function assertConceptKeys(state: Pick<ChargeState, 'invoiceMode' | 'concepts'>): void {
+  if (state.invoiceMode === 'NONE') return
+  if (state.concepts.some(concept => !concept.satProductKey || !concept.satUnitKey)) {
+    throw invalid('Cada concepto necesita su clave del SAT y su unidad')
   }
 }
 
@@ -466,6 +488,7 @@ export async function createCharge(input: ChargeInput, actorId: string, now: Dat
     venueId: fields.venueId ?? null,
     billingTaxProfileId: fields.billingTaxProfileId ?? null,
   }
+  assertConceptKeys(state)
   assertAnchorInWindow(state.anchorDate, today)
 
   const charge = await prisma.$transaction(async tx => {
@@ -512,6 +535,7 @@ export async function updateCharge(
     if (changed.length === 0) return { charge: row, changed }
 
     if (changed.includes('frequency') && (current.frequency === 'ONE_TIME' || next.frequency === 'ONE_TIME')) throw oneTimeFixed()
+    if (changed.includes('concepts') || changed.includes('invoiceMode')) assertConceptKeys(next)
     if (changed.includes('anchorDate')) assertAnchorInWindow(next.anchorDate, today)
     if (changed.some(field => CUSTOMER_FIELDS.includes(field))) await assertCustomerAndProfile(tx, next)
     if (next.frequency === 'ONE_TIME') return { charge: await updateOneTime(tx, id, next, changed), changed }

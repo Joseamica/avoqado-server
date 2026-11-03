@@ -53,6 +53,9 @@ const CONCEPTOS = [
 /** $500 sin IVA + $499 con IVA, a mano: A=50000, B=49900 → subtotal 93017, IVA 14883, total 107900 (= 58000 + 49900). */
 const TOTALES = { subtotalCents: 93017, taxCents: 14883, totalCents: 107900 }
 
+/** Como queda guardado un cobro sin factura (NONE): las claves del SAT vacías. */
+const SIN_CLAVES = [{ description: 'Venta de equipo', amountCents: 1000000, ivaMode: 'WITH_IVA', satProductKey: '', satUnitKey: '' }]
+
 const hace = (minutos: number) => new Date(AHORA.getTime() - minutos * 60_000)
 
 function ocurrencia(over: Fila = {}): Fila {
@@ -382,6 +385,20 @@ describe('platform-charges/occurrences — payOccurrence', () => {
       where: { id: 'occ-1' },
       data: { status: 'PAID', paidAt: AHORA, paidById: 'staff-1' },
     })
+  })
+
+  it('sin la casilla sobre una SIN FACTURA (NONE): sigue NONE, no se convierte en MANUAL y no se factura', async () => {
+    Object.assign(mundo.occ, { invoiceMode: 'NONE', concepts: SIN_CLAVES })
+
+    const r = await payOccurrence('occ-1', { invoice: false }, 'staff-1', AHORA)
+
+    expect(prismaMock.platformChargeOccurrence.update).toHaveBeenCalledWith({
+      where: { id: 'occ-1' },
+      data: { status: 'PAID', paidAt: AHORA, paidById: 'staff-1' }, // el modo no se toca
+    })
+    expect(r.occurrence.invoiceMode).toBe('NONE')
+    expect(r.invoice).toBeNull()
+    expect(mockInvoice).not.toHaveBeenCalled()
   })
 
   it('con la casilla sobre una MANUAL: también factura (el modo no cambia)', async () => {
@@ -733,6 +750,20 @@ describe('platform-charges/occurrences — payPreview', () => {
     Object.assign(mundo.occ, { invoiceMode: 'MANUAL' })
 
     expect(await payPreview('occ-1')).toMatchObject({ willInvoice: false, pendingPpdCount: 0 })
+  })
+
+  it('un cobro SIN FACTURA (NONE) nunca timbra: willInvoice es false aunque tenga perfil y ningún PPD pendiente', async () => {
+    Object.assign(mundo.occ, { invoiceMode: 'NONE', concepts: SIN_CLAVES, subtotalCents: 862069, taxCents: 137931, totalCents: 1000000 })
+
+    const preview = await payPreview('occ-1')
+
+    expect(preview).toMatchObject({
+      willInvoice: false,
+      pendingPpdCount: 0,
+      concepts: SIN_CLAVES,
+      totalCents: 1000000,
+      receptor: { rfc: 'LUN010101AAA' }, // el perfil sigue ahí: la fila pagada aún puede facturarse con «Facturar»
+    })
   })
 
   it('sin perfil fiscal (nada con qué facturar): receptor null, no timbra y ni siquiera cuenta PPD', async () => {
