@@ -1442,6 +1442,7 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
         venueId,
         socketId: 'fixture-socket',
         terminalPaymentAckVersion: ackVersion,
+        terminalPaymentExecutionVersion: ackVersion,
       }))
       const requestId = nextRequest()
       let vistoAlEmitir: Promise<unknown> | null = null
@@ -1472,6 +1473,7 @@ describe('Sonda de conciliación: la terminal aporta la evidencia, nunca el relo
       expect(enElEmit.deliveryProvenance.deliveries[0]).toMatchObject({
         protocol: ackVersion === 0 ? 'LEGACY' : 'DURABLE',
         ackVersion,
+        executionVersion: ackVersion,
         replay: false,
       })
       const pending = (terminalPaymentService as any).pendingPayments.get(requestId)

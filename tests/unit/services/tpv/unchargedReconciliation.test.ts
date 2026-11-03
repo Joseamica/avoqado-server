@@ -332,6 +332,45 @@ describe('19-sep — la declaración NO depende de relojes ni latidos', () => {
     montar(filaDelIncidente({ terminalReturnedAt: null, probeActiveAt: new Date() }), CAJERO, null)
     await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
   })
+
+  // Codex, versiones viejas (3-nov): la TPV publicada contesta ACTIVE mientras su intento siga en duda y espera NOT_CHARGED para
+  // soltarlo; no sabe certificar el cese. Con la ranura ya suelta, sin esta salida nadie podía declarar esa venta nunca.
+  describe('el ACTIVE de una TPV que no sabe certificar, con la ranura ya suelta', () => {
+    const entregaVieja = { protocol: 'DURABLE', ackVersion: 1, cancelDispositionVersion: 2, probeVersion: 1, at: new Date().toISOString() }
+
+    it.each(['AUTO_RELEASED', 'MANUAL_RELEASE'])('🔴 con %s ya no veta a la persona que miró la terminal', async failureCode => {
+      montar(
+        filaDelIncidente({
+          status: 'TIMED_OUT',
+          failureCode,
+          probeActiveAt: new Date(),
+          deliveryProvenance: { deliveries: [entregaVieja] },
+        }),
+        CAJERO,
+        null,
+      )
+      await expect(reconcileUncharged(identidad, declaracion())).resolves.toMatchObject({ kind: 'UNCHARGED_VERIFIED' })
+    })
+
+    it('🔴 si la ranura sigue apartada, el ACTIVE sigue vetando', async () => {
+      montar(filaDelIncidente({ probeActiveAt: new Date(), deliveryProvenance: { deliveries: [entregaVieja] } }), CAJERO, null)
+      await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    })
+
+    it('🔴 la TPV que sí sabe certificar sigue vetando: su ACTIVE sin cese significa que de verdad sigue corriendo', async () => {
+      montar(
+        filaDelIncidente({
+          status: 'TIMED_OUT',
+          failureCode: 'AUTO_RELEASED',
+          probeActiveAt: new Date(),
+          deliveryProvenance: { deliveries: [{ ...entregaVieja, executionVersion: 1 }] },
+        }),
+        CAJERO,
+        null,
+      )
+      await expect(reconcileUncharged(identidad, declaracion())).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+    })
+  })
 })
 
 describe('RONDA 4 — sólo se declara sobre un cobro que la terminal RECIBIÓ', () => {

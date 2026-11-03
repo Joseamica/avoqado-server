@@ -489,6 +489,8 @@ export type TerminalDeliveryRecord = {
   ackVersion: number
   cancelDispositionVersion: number
   probeVersion: number
+  /** ¿Sabe certificar el cese? Ausente en las entregas anteriores a este campo: esas TPV no saben. */
+  executionVersion?: number
   socketId: string
   at: string
   replay: boolean
@@ -1010,7 +1012,11 @@ export function proyectarEstado(row: FilaProyectable): TerminalPaymentStatus {
     paymentId: row.paymentId ?? null,
     senderDevice: row.senderDevice,
     lateResult: row.lateResult,
-    cancelDisposition: proyectarCancelDisposition(row.cancelDisposition, desenlace),
+    // Revisión de iOS (3-nov): con la ranura ya suelta, «el cobro sigue activo» es falso. La venta sigue en duda por `outcome`.
+    cancelDisposition: proyectarCancelDisposition(
+      fueSoltadaPorPolitica(row) && row.cancelDisposition === 'ACTIVE' ? null : row.cancelDisposition,
+      desenlace,
+    ),
     // Una lápida (`REJECTED_…`) sale FAILED y con su motivo: NO se traduce a UNKNOWN, sí prueba que no se creó.
     failureCode: row.failureCode ?? null,
     outcome: desenlace.outcome,
@@ -2350,7 +2356,12 @@ class TerminalPaymentService {
   private async recordDelivery(
     requestId: string,
     venueId: string,
-    entry: { terminalPaymentAckVersion?: number; terminalPaymentCancelDispositionVersion?: number; terminalPaymentProbeVersion?: number },
+    entry: {
+      terminalPaymentAckVersion?: number
+      terminalPaymentCancelDispositionVersion?: number
+      terminalPaymentProbeVersion?: number
+      terminalPaymentExecutionVersion?: number
+    },
     socketId: string,
     replay: boolean,
   ): Promise<boolean> {
@@ -2360,6 +2371,7 @@ class TerminalPaymentService {
       ackVersion,
       cancelDispositionVersion: entry.terminalPaymentCancelDispositionVersion ?? 0,
       probeVersion: entry.terminalPaymentProbeVersion ?? 0,
+      executionVersion: entry.terminalPaymentExecutionVersion ?? 0,
       socketId,
       at: new Date().toISOString(),
       replay,
@@ -7672,7 +7684,9 @@ class TerminalPaymentService {
           : {
               AND: [
                 SIN_DESENLACE_ACREDITADO,
-                ...(cursor ? [{ OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }] : []),
+                ...(cursor
+                  ? [{ OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] }]
+                  : []),
               ],
             }),
       },

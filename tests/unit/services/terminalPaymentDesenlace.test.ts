@@ -441,6 +441,24 @@ describe('proyectarEstado — lo que ven las apps', () => {
     ).toBe('ACCEPTED')
   })
 
+  // Revisión de iOS (3-nov): con la ranura ya suelta, «El cobro sigue activo» debajo de «La terminal ya está libre» es falso.
+  it.each(['AUTO_RELEASED', 'MANUAL_RELEASE'])(
+    '🔴 con la ranura ya suelta (%s) el ACTIVE se proyecta null y la venta sigue en duda',
+    failureCode => {
+      expect(proyectar({ status: S.TIMED_OUT, failureCode, cancelDisposition: 'ACTIVE' })).toMatchObject({
+        status: S.TIMED_OUT,
+        failureCode,
+        cancelDisposition: null,
+        outcome: 'UNRESOLVED',
+      })
+    },
+  )
+
+  it('🔴 con la ranura apartada el ACTIVE se sigue viendo', () => {
+    expect(proyectar({ status: S.TIMED_OUT, failureCode: null, cancelDisposition: 'ACTIVE' }).cancelDisposition).toBe('ACTIVE')
+    expect(proyectar({ status: S.UNKNOWN, cancelDisposition: 'ACTIVE' }).cancelDisposition).toBe('ACTIVE')
+  })
+
   it('🔴 un ACTIVE viejo encima de un desenlace final se proyecta null (si no, la app dice «sigue activo» PARA SIEMPRE)', () => {
     // Cancel rechazado por la terminal (ACTIVE) y luego rechazo del banco: el cobro ya terminó.
     const rechazado = proyectar({

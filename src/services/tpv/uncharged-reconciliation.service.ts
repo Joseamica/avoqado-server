@@ -34,7 +34,7 @@ import { PIN_REGEX } from '../../schemas/common/pin.schema'
 import { normalizeTerminalId } from '../../communication/sockets/terminal-registry'
 import { candadoDeIntento, candadoDeSolicitud, llaveDeIntento, OPCIONES_DE_TRANSACCION_DEL_INTENTO } from './candadoDeIntento'
 import { contradiccionDeProcedenciaSql, sinVetoDeDineroSql } from './evidenciaPositivaSql'
-import { sondaReportoActiva } from './sondaActiva'
+import { sondaReportoActiva, sondaVetaLaDeclaracion } from './sondaActiva'
 import logger from '../../config/logger'
 
 export const RECONCILE_UNCHARGED_PERMISSION = 'payments:reconcile-uncharged'
@@ -71,6 +71,16 @@ const schema = z
   })
   .strict()
 
+/**
+ * La ranura ya se soltó (la ventana sin aviso comprobado, el reloj, soporte o el cese certificado). Mismo criterio que
+ * `fueSoltadaPorPolitica`; no se importa de `terminal-payment.service` porque ese archivo carga éste (import dinámico).
+ */
+function ranuraYaSuelta(row: { status: TerminalPaymentRequestStatus; failureCode?: string | null }): boolean {
+  return (
+    row.status === TerminalPaymentRequestStatus.TIMED_OUT && (row.failureCode === 'AUTO_RELEASED' || row.failureCode === 'MANUAL_RELEASE')
+  )
+}
+
 export class UnchargedReconciliationError extends Error {
   constructor(
     readonly code: string,
@@ -91,7 +101,7 @@ export class UnchargedReconciliationError extends Error {
                   ? 'Esta declaración ya se registró con otros datos. Vuelve a consultar el cobro.'
                   : code === 'ATTEMPT_NOT_FOUND'
                     ? 'No encontré ese cobro en este negocio.'
-                    : 'No se pudo declarar este cobro. Conserva el pendiente y consulta su resultado.',
+                    : 'Este cobro todavía no se puede declarar. Vuelve a consultar en un momento.',
     )
   }
 }
@@ -591,7 +601,7 @@ export async function reconcileUncharged(
       (!porElBanco && (await sondaNoLaEncontroTrasEntregarla(tx, row.id, identity.venueId)))
     if (!constaQueSalio) throw new UnchargedReconciliationError('TERMINAL_NEVER_ANSWERED')
 
-    if (sondaReportoActiva(row)) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
+    if (sondaVetaLaDeclaracion(row, ranuraYaSuelta(row))) throw new UnchargedReconciliationError('EXECUTION_STILL_ACTIVE')
 
     const sobre =
       row.resultJson && typeof row.resultJson === 'object' && !Array.isArray(row.resultJson)
@@ -720,6 +730,8 @@ export async function reconcileUncharged(
           resolutionId: saved.id,
           source: identity.source,
           previousStatus: row.status,
+          // Compatibilidad: la TPV vieja seguía diciendo ACTIVE. Queda dicho quién decidió por encima de eso.
+          ...(sondaReportoActiva(row) ? { terminalReportabaActiva: true } : {}),
           // A5 · E7: con PIN, `staffId` es el GERENTE que autorizó; aquí queda también quién operaba el POS.
           ...quien,
         },

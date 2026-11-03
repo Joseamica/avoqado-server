@@ -507,4 +507,33 @@ describe('A8 · la ventana dice «no se cobró» SÓLO donde el aviso del banco 
     expect(await ventana(d.solicitud.requestId)).toBe('RELEASED')
     await negativoFinanciero(d.solicitud.requestId, d.venta.id)
   })
+
+  // Codex, versiones viejas (3-nov): la TPV publicada contesta ACTIVE mientras su intento siga en duda, espera NOT_CHARGED para
+  // soltarlo y no sabe certificar el cese. Sin esta salida, esa venta no se podía declarar nunca.
+  it('10 · TPV publicada: su ACTIVE tras soltar sólo la ranura no le quita la salida a la persona; la TPV que sí certifica sigue vetando', async () => {
+    await cuentas([f.merchantId], [])
+    const terminal = { socketId: 'socket-de-la-terminal', terminalId: f.llaveTerminal, venueId: f.venueId }
+
+    const vieja = await enLaVentana()
+    expect(await ventana(vieja.solicitud.requestId)).toBe('SLOT_RELEASED_UNPROVEN_WEBHOOK')
+    expect(await svc.handleProbeResultFromSocket({ requestId: vieja.solicitud.requestId, disposition: 'ACTIVE' }, terminal)).toBe(true)
+    const conActive = await fila(vieja.solicitud.requestId)
+    expect(conActive.probeActiveAt).not.toBeNull()
+    expect(conActive.status).toBe('TIMED_OUT')
+
+    await declarar(vieja.solicitud.requestId, f.staffId)
+
+    const declarada = await fila(vieja.solicitud.requestId)
+    expect(declarada.status).toBe('FAILED')
+    expect(declarada.failureCode).toBe('OPERATOR_RECONCILED_NO_CHARGE')
+    // Lo que la TPV vieja lee para soltar su intento.
+    expect(await consultar(vieja.solicitud.requestId)).toMatchObject({ outcome: 'NOT_CHARGED', outcomeEvidence: 'OPERATOR_RECONCILED' })
+    const [asiento] = await asientos(declarada.id, 'TERMINAL_PAYMENT_OPERATOR_RECONCILED_UNCHARGED')
+    expect(asiento.data).toMatchObject({ terminalReportabaActiva: true })
+
+    const nueva = await enLaVentana({ deliveryProvenance: { deliveries: [{ ...entrega(), executionVersion: 1 }] } })
+    expect(await ventana(nueva.solicitud.requestId)).toBe('SLOT_RELEASED_UNPROVEN_WEBHOOK')
+    expect(await svc.handleProbeResultFromSocket({ requestId: nueva.solicitud.requestId, disposition: 'ACTIVE' }, terminal)).toBe(true)
+    await expect(declarar(nueva.solicitud.requestId, f.staffId)).rejects.toMatchObject({ code: 'EXECUTION_STILL_ACTIVE' })
+  })
 })
