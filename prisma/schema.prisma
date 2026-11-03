@@ -18921,6 +18921,10 @@ model PlatformCfdi {
   type                 PlatformCfdiType @default(INGRESO)
   parentPlatformCfdiId String? // si type=PAGO: la factura de ingreso (PPD) que liquida
 
+  // «Por cobrar»: la ocurrencia de un cobro recurrente que originó esta factura (null = hecha a mano en «Facturas CFDI»)
+  platformChargeOccurrenceId String?
+  platformChargeOccurrence   PlatformChargeOccurrence? @relation(fields: [platformChargeOccurrenceId], references: [id], onDelete: SetNull)
+
   // destinatario (denormalizado para listado/filtro); STANDALONE → ambos null
   organizationId String?
   venueId        String?
@@ -18981,7 +18985,95 @@ model PlatformCfdi {
   @@index([status])
   @@index([type])
   @@index([parentPlatformCfdiId])
+  @@index([platformChargeOccurrenceId])
   @@index([createdAt])
+}
+
+// ==========================================
+// «POR COBRAR» — recordatorios manuales de cobro con factura (herramienta interna del SUPERADMIN)
+// Spec: docs/superpowers/specs/2026-11-02-por-cobrar-superadmin-design.md (§4). Dinero en centavos enteros, como PlatformCfdi,
+// porque alimenta directo al CFDI. Ids de personas sin llave foránea, igual que PlatformCfdi.createdById.
+// ==========================================
+
+enum PlatformChargeFrequency {
+  WEEKLY
+  BIWEEKLY // quincenal: dos días fijos al mes (spec §3.1)
+  MONTHLY
+}
+
+enum PlatformChargeInvoiceMode {
+  AUTOMATIC // al marcar pagado, se timbra sola
+  MANUAL // el botón «Facturar» de la fila pagada
+}
+
+enum PlatformChargeOccurrenceStatus {
+  PENDING
+  PAID
+  SKIPPED
+}
+
+/// Un cobro recurrente a un cliente de Avoqado, fuera de Stripe (renta de terminal, licencia…). Fechas de calendario de CDMX,
+/// sin hora: `anchorDate` es la primera fecha y de ella salen las ocurrencias. Editarlo sólo cambia lo futuro.
+model PlatformCharge {
+  id                  String                    @id @default(cuid())
+  customerType        BillingCustomerType
+  organizationId      String?
+  venueId             String?
+  customerName        String // lo que se ve en el panel y el correo
+  billingTaxProfileId String? // obligatorio al guardar con AUTOMATIC
+  frequency           PlatformChargeFrequency
+  anchorDate          DateTime                  @db.Date
+  concepts            Json // [{ description, amountCents, ivaMode, satProductKey, satUnitKey }]
+  invoiceMode         PlatformChargeInvoiceMode
+  pausedAt            DateTime?
+  createdById         String
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+
+  occurrences PlatformChargeOccurrence[]
+
+  @@index([pausedAt, id])
+}
+
+/// Un periodo por cobrar de un cobro: foto de conceptos y totales al generarse (editar el cobro no cambia lo ya generado).
+model PlatformChargeOccurrence {
+  id       String         @id @default(cuid())
+  chargeId String
+  charge   PlatformCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+  dueDate  DateTime       @db.Date
+
+  concepts      Json // foto al generarse
+  subtotalCents Int
+  taxCents      Int
+  totalCents    Int
+  invoiceMode   PlatformChargeInvoiceMode // foto al generarse
+
+  status      PlatformChargeOccurrenceStatus @default(PENDING)
+  paidAt      DateTime?
+  paidById    String?
+  skippedAt   DateTime?
+  skippedById String?
+  invoiceSeq  Int                            @default(0) // sube sólo cuando está comprobado que el intento anterior no dejó factura viva
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices PlatformCfdi[]
+
+  @@unique([chargeId, dueDate])
+  @@index([status, dueDate, id])
+  @@index([status, paidAt, id])
+}
+
+/// El correo diario de «Por cobrar»: una fila por día de CDMX, para mandarlo una sola vez y repetir exactamente el mismo.
+model PlatformChargeDigest {
+  day        String   @id // YYYY-MM-DD de CDMX
+  status     String // APARTADO | ENVIADO | FALLO
+  attempts   Int      @default(0)
+  reservedAt DateTime @default(now())
+  content    Json // el correo tal cual, para repetir exactamente el mismo
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 /// Offline-first (Fase 1, Corte D — spec Avoqado/docs/plans/offline-first-pos-fase1.md):

@@ -15,7 +15,15 @@ import { encryptProviderKey } from '@/services/fiscal/fiscalKey.service'
 import type { PlatformEmisor } from '@prisma/client'
 import type { UpsertEmisorInput } from './types'
 
-export type PlatformBillingErrorCode = 'NO_EMISOR' | 'NO_PROFILE' | 'NO_CFDI' | 'CSD_INACTIVE' | 'VALIDATION' | 'PROVIDER'
+export type PlatformBillingErrorCode =
+  | 'NO_EMISOR'
+  | 'NO_PROFILE'
+  | 'NO_CFDI'
+  | 'CSD_INACTIVE'
+  | 'VALIDATION'
+  | 'PROVIDER'
+  /** «Por cobrar»: el cliente no tiene datos fiscales con los que facturar (la UI abre el diálogo para capturarlos). */
+  | 'NEEDS_FISCAL_DATA'
 
 /** Typed error so the controller can map to HTTP status codes (422 vs 502 vs 404). */
 export class PlatformBillingError extends Error {

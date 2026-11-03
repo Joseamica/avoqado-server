@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **465 models / 413 enums / ~21,000 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
+`prisma/schema.prisma` is **468 models / 416 enums / ~21,100 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -29,7 +29,7 @@ primary domain.
 | 10  | **Payments & Fees**                     | The payment record itself + allocations, receipts, fee schedules.                                              | `BankStatement`, `BankStatementLine`, `DigitalReceipt`, `FeeSchedule`, `FeeTier`, `IdempotencyRequest`, `MerchantRoutingRule`, `Payment`, `PaymentAllocation`, `PaymentEffect`, `TransactionCost`, `VenueTenderType`, `VenueTenderTypeRevision`, `VenueTransaction`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | 11  | **Payment Providers & Settlement**      | Blumon / Stripe / MercadoPago / AngelPay merchant accounts, webhooks, settlement.                              | `Aggregator`, `AngelPayUserAccount`, `CheckoutSession`, `EcommerceMerchant`, `FinancialAccount`, `FinancialConnection`, `FinancialProvider`, `MercadoPagoWebhookEvent`, `MerchantAccount`, `MerchantRevenueShare`, `OrganizationPaymentConfig`, `OrganizationPayoutConfig`, `PaymentProvider`, `ProcessedStripeEvent`, `ProcessorReliabilityMetric`, `ProviderCostStructure`, `ProviderEventLog`, `RateCorrectionBatch`, `RateCorrectionEntry`, `SettlementConfiguration`, `SettlementConfirmation`, `SettlementIncident`, `SettlementSimulation`, `StripeWebhookEvent`, `VenuePaymentConfig`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 12  | **Payment Links**                       | Pay-by-link: links, line items, attribution.                                                                   | `PaymentLink`, `PaymentLinkAttribution`, `PaymentLinkItem`, `PaymentLinkItemModifier`, `VenuePaymentLinkSettings`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| 13  | **Facturación (CFDI)**                  | Mexican CFDI 4.0 e-invoicing: fiscal emisores + CSD, per-merchant config, issued CFDIs, receptor tax profiles. | `AccountingPeriodLock`, `AccountMapping`, `BillingTaxProfile`, `Cfdi`, `CfdiGlobalOrden`, `CustomerTaxProfile`, `Employee`, `Expense`, `FiscalEmisor`, `FiscalLossCarryforward`, `FixedAsset`, `FixedAssetDepreciation`, `JournalEntry`, `JournalLine`, `LedgerAccount`, `MerchantFiscalConfig`, `OrderItemSelloIva`, `PayrollLine`, `PayrollRun`, `PlatformCfdi`, `PlatformEmisor`, `SalesRetention`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 13  | **Facturación (CFDI)**                  | Mexican CFDI 4.0 e-invoicing: fiscal emisores + CSD, per-merchant config, issued CFDIs, receptor tax profiles. | `AccountingPeriodLock`, `AccountMapping`, `BillingTaxProfile`, `Cfdi`, `CfdiGlobalOrden`, `CustomerTaxProfile`, `Employee`, `Expense`, `FiscalEmisor`, `FiscalLossCarryforward`, `FixedAsset`, `FixedAssetDepreciation`, `JournalEntry`, `JournalLine`, `LedgerAccount`, `MerchantFiscalConfig`, `OrderItemSelloIva`, `PayrollLine`, `PayrollRun`, `PlatformCfdi`, `PlatformCharge`, `PlatformChargeDigest`, `PlatformChargeOccurrence`, `PlatformEmisor`, `SalesRetention`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | 14  | **Pricing, Costs & Venue Lending**      | MCC pricing structures, monthly profit, and SOFOM-style venue credit assessment.                               | `CreditAssessmentHistory`, `CreditOffer`, `MonthlyVenueProfit`, `OrganizationPricingStructure`, `PricingPolicy`, `VenueCreditAssessment`, `VenuePricingStructure`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 15  | **Discounts, Loyalty & Credit Packs**   | Discounts/coupons, loyalty points, and prepaid credit-pack bundles.                                            | `CouponCode`, `CouponRedemption`, `CreditItemBalance`, `CreditPack`, `CreditPackItem`, `CreditPackPurchase`, `CreditTransaction`, `CustomerDiscount`, `CustomerOrderMetric`, `Discount`, `GiftCard`, `GiftCardActivity`, `GiftCardSettings`, `LoyaltyConfig`, `LoyaltyTransaction`, `Promotion`, `PromotionGroup`, `PromotionOption`, `Referral`, `ReferralProgramConfig`, `ReferralRewardGrant`, `ReferralTierReward`, `ReferralTierUnlock`, `StampCard`, `StampEvent`, `StampReward`, `UpsellAcceptance`, `UpsellAiRun`, `UpsellImpression`, `UpsellRule`, `WalletCardDesign`, `WalletPass`, `WalletPassRegistration`                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 16  | **Commissions & Sales Goals**           | Sales-rep commission tiers, payouts, clawbacks, org goals (CommandCenter).                                     | `CashOutCommissionRate`, `CashOutScheduleDay`, `CashOutWithdrawal`, `ClassSessionPayState`, `CommissionCalculation`, `CommissionClawback`, `CommissionConfig`, `CommissionMilestone`, `CommissionOverride`, `CommissionPayout`, `CommissionSummary`, `CommissionTier`, `MilestoneAchievement`, `OrganizationGoal`, `OrganizationSalesGoalConfig`, `PerformanceGoal`, `PromoterBankAccount`, `PromoterCommissionEntry`, `ServiceEarning`, `ServicePayPeriod`, `ServicePayTable`, `ServicePayTableCell`, `ServicePayTableVersion`, `StaffPayLevel`, `StaffPayLevelAssignment`, `StaffPayStatement`, `StaffPayTipWindow`, `StaffPayVenueWindow`, `VenueCommission`                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -125,7 +125,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `ChatTrainingData` → `schema.prisma:L10902`
 - `CheckoutSession` → `schema.prisma:L6798`
 - `ClassSession` → `schema.prisma:L15013`
-- `ClassSessionPayState` → `schema.prisma:L19931`
+- `ClassSessionPayState` → `schema.prisma:L20023`
 - `CommissionCalculation` → `schema.prisma:L13749`
 - `CommissionClawback` → `schema.prisma:L13926`
 - `CommissionConfig` → `schema.prisma:L13508`
@@ -146,18 +146,18 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CreditPackItem` → `schema.prisma:L15849`
 - `CreditPackPurchase` → `schema.prisma:L15866`
 - `CreditTransaction` → `schema.prisma:L15940`
-- `CrmAccount` → `schema.prisma:L20867`
-- `CrmActivity` → `schema.prisma:L20980`
-- `CrmContact` → `schema.prisma:L20940`
-- `CrmDigestSend` → `schema.prisma:L21062`
-- `CrmErased` → `schema.prisma:L21048`
-- `CrmHiddenClient` → `schema.prisma:L20858`
-- `CrmInboundEntry` → `schema.prisma:L21017`
-- `CrmLostReason` → `schema.prisma:L20970`
-- `CrmStage` → `schema.prisma:L20958`
-- `CrmTeam` → `schema.prisma:L20845`
-- `CrmTimelineEvent` → `schema.prisma:L21002`
-- `CrmWhatsappMessage` → `schema.prisma:L21079`
+- `CrmAccount` → `schema.prisma:L20959`
+- `CrmActivity` → `schema.prisma:L21072`
+- `CrmContact` → `schema.prisma:L21032`
+- `CrmDigestSend` → `schema.prisma:L21154`
+- `CrmErased` → `schema.prisma:L21140`
+- `CrmHiddenClient` → `schema.prisma:L20950`
+- `CrmInboundEntry` → `schema.prisma:L21109`
+- `CrmLostReason` → `schema.prisma:L21062`
+- `CrmStage` → `schema.prisma:L21050`
+- `CrmTeam` → `schema.prisma:L20937`
+- `CrmTimelineEvent` → `schema.prisma:L21094`
+- `CrmWhatsappMessage` → `schema.prisma:L21171`
 - `Customer` → `schema.prisma:L8019`
 - `CustomerApprovalDelivery` → `schema.prisma:L10599`
 - `CustomerApprovalOutbox` → `schema.prisma:L10574`
@@ -180,12 +180,12 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `DeviceToken` → `schema.prisma:L9884`
 - `DigitalReceipt` → `schema.prisma:L5010`
 - `Discount` → `schema.prisma:L9246`
-- `DocumentRequest` → `schema.prisma:L20687`
-- `DocumentRequestDelivery` → `schema.prisma:L20751`
-- `DocumentRequestFile` → `schema.prisma:L20729`
-- `DocumentRequestSubmission` → `schema.prisma:L20771`
-- `DocumentRequestSubmissionFile` → `schema.prisma:L20784`
-- `DocumentRequestVenueLink` → `schema.prisma:L20793`
+- `DocumentRequest` → `schema.prisma:L20779`
+- `DocumentRequestDelivery` → `schema.prisma:L20843`
+- `DocumentRequestFile` → `schema.prisma:L20821`
+- `DocumentRequestSubmission` → `schema.prisma:L20863`
+- `DocumentRequestSubmissionFile` → `schema.prisma:L20876`
+- `DocumentRequestVenueLink` → `schema.prisma:L20885`
 - `EcommerceMerchant` → `schema.prisma:L6609`
 - `EmailQuotaLedger` → `schema.prisma:L8383`
 - `EmailSuppression` → `schema.prisma:L8371`
@@ -193,8 +193,8 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `Employee` → `schema.prisma:L18548`
 - `Estimate` → `schema.prisma:L16251`
 - `EstimateItem` → `schema.prisma:L16279`
-- `Exchange` → `schema.prisma:L19556`
-- `ExchangeCreditLink` → `schema.prisma:L19598`
+- `Exchange` → `schema.prisma:L19648`
+- `ExchangeCreditLink` → `schema.prisma:L19690`
 - `Expense` → `schema.prisma:L18335`
 - `ExternalBusyBlock` → `schema.prisma:L15312`
 - `Feature` → `schema.prisma:L5174`
@@ -252,11 +252,11 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `JournalLine` → `schema.prisma:L18273`
 - `KdsOrder` → `schema.prisma:L16581`
 - `KdsOrderItem` → `schema.prisma:L16648`
-- `KioskCheckInAttempt` → `schema.prisma:L19208`
-- `KioskCheckInChallenge` → `schema.prisma:L19162`
-- `KioskOutreachOutbox` → `schema.prisma:L19229`
-- `LaunchCampaign` → `schema.prisma:L19653`
-- `LaunchCampaignRedemption` → `schema.prisma:L19770`
+- `KioskCheckInAttempt` → `schema.prisma:L19300`
+- `KioskCheckInChallenge` → `schema.prisma:L19254`
+- `KioskOutreachOutbox` → `schema.prisma:L19321`
+- `LaunchCampaign` → `schema.prisma:L19745`
+- `LaunchCampaignRedemption` → `schema.prisma:L19862`
 - `LearnedPatterns` → `schema.prisma:L11012`
 - `LedgerAccount` → `schema.prisma:L18136`
 - `LiveDemoSession` → `schema.prisma:L890`
@@ -289,11 +289,11 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `NotificationTemplate` → `schema.prisma:L9860`
 - `OAuthState` → `schema.prisma:L1638`
 - `OnboardingProgress` → `schema.prisma:L1656`
-- `OnlineOrder` → `schema.prisma:L20492`
-- `OnlineOrderCardRefund` → `schema.prisma:L20621`
-- `OnlineOrderCardRefundReversal` → `schema.prisma:L20664`
-- `OnlineOrderCharge` → `schema.prisma:L20545`
-- `OnlineOrderingSettings` → `schema.prisma:L20466`
+- `OnlineOrder` → `schema.prisma:L20584`
+- `OnlineOrderCardRefund` → `schema.prisma:L20713`
+- `OnlineOrderCardRefundReversal` → `schema.prisma:L20756`
+- `OnlineOrderCharge` → `schema.prisma:L20637`
+- `OnlineOrderingSettings` → `schema.prisma:L20558`
 - `Order` → `schema.prisma:L4089`
 - `OrderAction` → `schema.prisma:L4672`
 - `OrderCustomer` → `schema.prisma:L4353`
@@ -304,7 +304,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `OrderItemModifier` → `schema.prisma:L4654`
 - `OrderItemSelloIva` → `schema.prisma:L17993`
 - `OrderKeyRelease` → `schema.prisma:L4079`
-- `OrderPromotion` → `schema.prisma:L19125`
+- `OrderPromotion` → `schema.prisma:L19217`
 - `OrderServiceCharge` → `schema.prisma:L9731`
 - `Organization` → `schema.prisma:L18`
 - `OrganizationAttendanceConfig` → `schema.prisma:L14088`
@@ -320,7 +320,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PartnerAPIKey` → `schema.prisma:L6752`
 - `Payment` → `schema.prisma:L4705`
 - `PaymentAllocation` → `schema.prisma:L4989`
-- `PaymentEffect` → `schema.prisma:L19499`
+- `PaymentEffect` → `schema.prisma:L19591`
 - `PaymentLink` → `schema.prisma:L15986`
 - `PaymentLinkAttribution` → `schema.prisma:L16108`
 - `PaymentLinkItem` → `schema.prisma:L16063`
@@ -331,16 +331,19 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PerformanceGoal` → `schema.prisma:L14023`
 - `PermissionOverride` → `schema.prisma:L1511`
 - `PermissionSet` → `schema.prisma:L1534`
-- `PlatformAccess` → `schema.prisma:L20823`
-- `PlatformAnnouncement` → `schema.prisma:L19289`
-- `PlatformAnnouncementClick` → `schema.prisma:L19354`
-- `PlatformAnnouncementDelivery` → `schema.prisma:L19391`
+- `PlatformAccess` → `schema.prisma:L20915`
+- `PlatformAnnouncement` → `schema.prisma:L19381`
+- `PlatformAnnouncementClick` → `schema.prisma:L19446`
+- `PlatformAnnouncementDelivery` → `schema.prisma:L19483`
 - `PlatformCfdi` → `schema.prisma:L18916`
+- `PlatformCharge` → `schema.prisma:L19017`
+- `PlatformChargeDigest` → `schema.prisma:L19069`
+- `PlatformChargeOccurrence` → `schema.prisma:L19039`
 - `PlatformEmisor` → `schema.prisma:L18856`
 - `PlatformSettings` → `schema.prisma:L6729`
 - `PosCommand` → `schema.prisma:L9914`
 - `PosConnectionStatus` → `schema.prisma:L1049`
-- `PosSyncIntent` → `schema.prisma:L18994`
+- `PosSyncIntent` → `schema.prisma:L19086`
 - `PricingPolicy` → `schema.prisma:L2985`
 - `Printer` → `schema.prisma:L16706`
 - `PrintGateway` → `schema.prisma:L16763`
@@ -363,9 +366,9 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PromoterBankAccount` → `schema.prisma:L18739`
 - `PromoterCommissionEntry` → `schema.prisma:L18758`
 - `PromoterLocationPing` → `schema.prisma:L4041`
-- `Promotion` → `schema.prisma:L19047`
-- `PromotionGroup` → `schema.prisma:L19086`
-- `PromotionOption` → `schema.prisma:L19102`
+- `Promotion` → `schema.prisma:L19139`
+- `PromotionGroup` → `schema.prisma:L19178`
+- `PromotionOption` → `schema.prisma:L19194`
 - `ProviderCostStructure` → `schema.prisma:L7403`
 - `ProviderEventLog` → `schema.prisma:L7032`
 - `PurchaseOrder` → `schema.prisma:L2692`
@@ -377,7 +380,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `RawMaterial` → `schema.prisma:L2448`
 - `RawMaterialMovement` → `schema.prisma:L3038`
 - `RawMaterialPresentation` → `schema.prisma:L2524`
-- `ReceiptLayout` → `schema.prisma:L19619`
+- `ReceiptLayout` → `schema.prisma:L19711`
 - `Recipe` → `schema.prisma:L2544`
 - `RecipeLine` → `schema.prisma:L2568`
 - `Referral` → `schema.prisma:L9094`
@@ -385,7 +388,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `ReferralRewardGrant` → `schema.prisma:L9185`
 - `ReferralTierReward` → `schema.prisma:L9157`
 - `ReferralTierUnlock` → `schema.prisma:L9230`
-- `RefreshGrant` → `schema.prisma:L19478`
+- `RefreshGrant` → `schema.prisma:L19570`
 - `Reservation` → `schema.prisma:L14666`
 - `ReservationGoogleEventMapping` → `schema.prisma:L15751`
 - `ReservationModifier` → `schema.prisma:L14876`
@@ -401,25 +404,25 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `SerializedItem` → `schema.prisma:L13139`
 - `SerializedItemCustodyEvent` → `schema.prisma:L13306`
 - `ServiceCharge` → `schema.prisma:L9702`
-- `ServiceEarning` → `schema.prisma:L19993`
-- `ServicePayPeriod` → `schema.prisma:L19969`
-- `ServicePayTable` → `schema.prisma:L19877`
-- `ServicePayTableCell` → `schema.prisma:L19919`
-- `ServicePayTableVersion` → `schema.prisma:L19894`
-- `Session` → `schema.prisma:L19457`
+- `ServiceEarning` → `schema.prisma:L20085`
+- `ServicePayPeriod` → `schema.prisma:L20061`
+- `ServicePayTable` → `schema.prisma:L19969`
+- `ServicePayTableCell` → `schema.prisma:L20011`
+- `ServicePayTableVersion` → `schema.prisma:L19986`
+- `Session` → `schema.prisma:L19549`
 - `SettlementConfiguration` → `schema.prisma:L7707`
 - `SettlementConfirmation` → `schema.prisma:L7820`
 - `SettlementIncident` → `schema.prisma:L7771`
 - `SettlementSimulation` → `schema.prisma:L7742`
 - `Shift` → `schema.prisma:L3601`
-- `ShopifyConnectIntent` → `schema.prisma:L20317`
-- `ShopifyImportIssue` → `schema.prisma:L20371`
-- `ShopifyInboundEvent` → `schema.prisma:L20293`
-- `ShopifyLocationLink` → `schema.prisma:L20165`
-- `ShopifyReviewItem` → `schema.prisma:L20339`
-- `ShopifyStockOutbox` → `schema.prisma:L20263`
-- `ShopifyStore` → `schema.prisma:L20136`
-- `ShopifyVariantLink` → `schema.prisma:L20213`
+- `ShopifyConnectIntent` → `schema.prisma:L20409`
+- `ShopifyImportIssue` → `schema.prisma:L20463`
+- `ShopifyInboundEvent` → `schema.prisma:L20385`
+- `ShopifyLocationLink` → `schema.prisma:L20257`
+- `ShopifyReviewItem` → `schema.prisma:L20431`
+- `ShopifyStockOutbox` → `schema.prisma:L20355`
+- `ShopifyStore` → `schema.prisma:L20228`
+- `ShopifyVariantLink` → `schema.prisma:L20305`
 - `SimRegistrationRequest` → `schema.prisma:L13344`
 - `SimRegistrationRequestItem` → `schema.prisma:L13366`
 - `SlotHold` → `schema.prisma:L14959`
@@ -429,11 +432,11 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `StaffOnboardingState` → `schema.prisma:L17558`
 - `StaffOrganization` → `schema.prisma:L1410`
 - `StaffPasskey` → `schema.prisma:L1437`
-- `StaffPayLevel` → `schema.prisma:L19841`
-- `StaffPayLevelAssignment` → `schema.prisma:L19859`
-- `StaffPayStatement` → `schema.prisma:L20025`
-- `StaffPayTipWindow` → `schema.prisma:L20390`
-- `StaffPayVenueWindow` → `schema.prisma:L20407`
+- `StaffPayLevel` → `schema.prisma:L19933`
+- `StaffPayLevelAssignment` → `schema.prisma:L19951`
+- `StaffPayStatement` → `schema.prisma:L20117`
+- `StaffPayTipWindow` → `schema.prisma:L20482`
+- `StaffPayVenueWindow` → `schema.prisma:L20499`
 - `StaffPosition` → `schema.prisma:L3867`
 - `StaffSchedule` → `schema.prisma:L14899`
 - `StaffScheduleException` → `schema.prisma:L14911`

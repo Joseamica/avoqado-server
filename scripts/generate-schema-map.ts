@@ -459,6 +459,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PlatformEmisor: 'Facturación (CFDI)',
   BillingTaxProfile: 'Facturación (CFDI)',
   PlatformCfdi: 'Facturación (CFDI)',
+  // «Por cobrar»: recordatorios manuales de cobro con factura (SUPERADMIN); alimentan a PlatformCfdi
+  PlatformCharge: 'Facturación (CFDI)',
+  PlatformChargeOccurrence: 'Facturación (CFDI)',
+  PlatformChargeDigest: 'Facturación (CFDI)',
 
   // 13. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',

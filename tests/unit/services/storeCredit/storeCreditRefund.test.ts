@@ -37,6 +37,7 @@ import {
   issuePosRefund,
   opcionDeSaldoAFavor,
   soloSaldoLoImpide,
+  exigirSoloSaldoFueraDelPos,
   type PosRefundInput,
 } from '@/services/storeCredit/storeCreditRefund.service'
 import { getTransactionDetail, getTransactions } from '@/services/mobile/transaction.mobile.service'
@@ -297,6 +298,32 @@ describe('Reembolso del POS a saldo a favor', () => {
     expect(entregado.aSaldoAFavor).toBeUndefined()
     expect(prepararMock).not.toHaveBeenCalled()
     expect(prismaMock.giftCardActivity.findMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('«Sólo saldo a favor» fuera del POS (panel y MCP)', () => {
+  const cliente = (storeCreditOnly: boolean | null) => ({ venueSettings: { findUnique: jest.fn().mockResolvedValue({ storeCreditOnly }) } })
+  const base = { venueId: 'v', reason: 'RETURNED_GOODS', pagadoConSaldo: false }
+
+  it('mercancía devuelta u «Otro», prendido y con llaves: rechaza y manda al POS', async () => {
+    for (const reason of ['RETURNED_GOODS', 'OTHER']) {
+      await expect(exigirSoloSaldoFueraDelPos(cliente(true) as never, { ...base, reason })).rejects.toMatchObject({
+        code: 'STORE_CREDIT_ONLY',
+        message: expect.stringContaining('POS'),
+      })
+    }
+  })
+
+  it('cobro por error, fraude o cancelada; apagado; o lo pagado con saldo: pasa', async () => {
+    for (const reason of ['ACCIDENTAL_CHARGE', 'FRAUDULENT_CHARGE', 'CANCELLED_ORDER']) {
+      await expect(exigirSoloSaldoFueraDelPos(cliente(true) as never, { ...base, reason })).resolves.toBeUndefined()
+    }
+    await expect(exigirSoloSaldoFueraDelPos(cliente(false) as never, base)).resolves.toBeUndefined()
+    await expect(exigirSoloSaldoFueraDelPos(cliente(true) as never, { ...base, pagadoConSaldo: true })).resolves.toBeUndefined()
+  })
+
+  it('un refundMethod explícito de dinero también se rechaza', async () => {
+    await expect(exigirSoloSaldoFueraDelPos(cliente(true) as never, { ...base, refundMethod: 'CASH' })).rejects.toMatchObject({ code: 'STORE_CREDIT_ONLY' })
   })
 })
 
