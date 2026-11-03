@@ -335,11 +335,18 @@ export async function updateAreaSettlementRoute(
   return area
 }
 
-export async function updateTerminal(venueId: string, terminalId: string, input: UpdateAreaTicketTerminalInput, performedBy?: string) {
+export async function updateTerminal(
+  venueId: string,
+  terminalId: string,
+  input: UpdateAreaTicketTerminalInput,
+  performedBy?: string,
+  opts: { source?: 'dashboard' | 'pos' } = {},
+) {
   const terminal = await prisma.terminal.findFirst({
     where: { id: terminalId, venueId },
     select: {
       id: true,
+      fulfillmentAreaId: true,
       canIssueAreaTickets: true,
       canCheckoutAreaTickets: true,
       canDeliverAreaTickets: true,
@@ -348,6 +355,19 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
   })
   if (!terminal) throw new NotFoundError('Terminal no encontrada')
   await Promise.all([assertArea(venueId, input.fulfillmentAreaId), assertScaleProfile(venueId, input.scaleProfileId)])
+
+  // D5, opción A (founder, 2-nov-2026): un aparato emite vales O los cobra. Si emite, su botón siempre emite y rechaza los
+  // vales escaneados, así que «Cobrar» ahí no hacía nada. Sólo frena a quien PRENDE una de las dos: un aparato que ya
+  // tenía ambas sigue pudiendo cambiar lo demás o apagar una.
+  const prendeEmitirOCobrar = input.canIssueAreaTickets === true || input.canCheckoutAreaTickets === true
+  const quedaEmitiendo = input.canIssueAreaTickets ?? terminal.canIssueAreaTickets
+  const quedaCobrando = input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets
+  if (prendeEmitirOCobrar && quedaEmitiendo && quedaCobrando) {
+    throw new BadRequestError(
+      'Un aparato emite vales o los cobra, no las dos cosas. Para cobrar vales usa la caja.',
+      'AREA_TICKET_ISSUE_AND_CHECKOUT',
+    )
+  }
 
   const capabilityWasUpdated =
     input.canIssueAreaTickets !== undefined || input.canCheckoutAreaTickets !== undefined || input.canDeliverAreaTickets !== undefined
@@ -379,6 +399,8 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
           // abrir Mesas/POS estándar después de configurarla correctamente.
           defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
           scaleProfileId: input.scaleProfileId,
+          // D3: con esto el aparato deja de preguntar «¿Qué hará este aparato?».
+          areaRoleChosenAt: capabilityWasUpdated || input.fulfillmentAreaId !== undefined ? new Date() : undefined,
         },
         select: {
           id: true,
@@ -399,7 +421,17 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
     action: 'AREA_TICKET_TERMINAL_UPDATED',
     entity: 'Terminal',
     entityId: updated.id,
-    data: { changes: input } as unknown as Prisma.InputJsonValue,
+    data: {
+      changes: input,
+      before: {
+        fulfillmentAreaId: terminal.fulfillmentAreaId,
+        canIssueAreaTickets: terminal.canIssueAreaTickets,
+        canCheckoutAreaTickets: terminal.canCheckoutAreaTickets,
+        canDeliverAreaTickets: terminal.canDeliverAreaTickets,
+        defaultWorkspace: terminal.defaultWorkspace,
+      },
+      source: opts.source ?? 'dashboard',
+    } as unknown as Prisma.InputJsonValue,
   })
   return updated
 }
