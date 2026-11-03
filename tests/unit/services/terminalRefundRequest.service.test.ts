@@ -247,6 +247,24 @@ describe('requestRefundOnTerminal — «Sólo saldo a favor»', () => {
     expect(emit).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 D1: un POS publicado que no sabe del interruptor (posSinSoloSaldo) devuelve en la terminal sin excepción, como antes', async () => {
+    soloSaldo()
+    ackWith('opened')
+
+    const result = await terminalPaymentService.requestRefundOnTerminal(baseRequest({ posSinSoloSaldo: true }))
+
+    expect(result.status).toBe('opened')
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
+
+  it('D1: un POS nuevo (posSinSoloSaldo: false) sin excepción sigue rechazando STORE_CREDIT_ONLY', async () => {
+    soloSaldo()
+    await expect(terminalPaymentService.requestRefundOnTerminal(baseRequest({ posSinSoloSaldo: false }))).rejects.toMatchObject({
+      code: 'STORE_CREDIT_ONLY',
+    })
+    expect(emit).not.toHaveBeenCalled()
+  })
+
   it('regresión: sin sólo saldo, una petición vieja sin el campo sigue igual', async () => {
     ackWith('opened')
 

@@ -136,7 +136,7 @@ function parseFormFactor(value: string | undefined): DeviceFormFactor | undefine
   return (Object.values(DeviceFormFactor) as string[]).includes(upper) ? (upper as DeviceFormFactor) : undefined
 }
 
-function parsePlatform(value: string | undefined): DevicePlatformHeader | undefined {
+export function parsePlatform(value: string | undefined): DevicePlatformHeader | undefined {
   if (!value) return undefined
   const upper = value.toUpperCase() as DevicePlatformHeader
   return VALID_PLATFORMS.includes(upper) ? upper : undefined
@@ -148,7 +148,7 @@ function parsePlatform(value: string | undefined): DevicePlatformHeader | undefi
  * se ignora, nunca truena (esto cuelga del camino del cobro). Una cabecera repetida (arreglo, o «55, 56» como la junta Node)
  * es ambigua: se ignora, a diferencia de las de texto, que toman la primera.
  */
-function parseVersionCode(raw: string | string[] | undefined): number | undefined {
+export function parseVersionCode(raw: string | string[] | undefined): number | undefined {
   if (typeof raw !== 'string') return undefined
   const value = raw.trim()
   if (!/^[1-9]\d{0,9}$/.test(value)) return undefined
