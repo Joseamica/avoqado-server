@@ -20571,8 +20571,9 @@ model OnlineOrderingSettings {
   minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
   defaultPrepMinutes Int       @default(15)
   acceptsPayAtPickup Boolean   @default(true)
-  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Apagado por default.
-  acceptsCardOnline  Boolean   @default(false)
+  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Prendido por default (founder, 2-nov): la tienda lo ofrece
+  /// sólo con un Stripe cobrable, y cada negocio lo puede apagar.
+  acceptsCardOnline  Boolean   @default(true)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
