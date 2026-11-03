@@ -416,6 +416,29 @@ describe('online_ordering_configure', () => {
     expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), despues)
   })
 
+  it('S1b: un `false` explícito con la tarjeta ya apagada pide confirmar y queda anotado: el relleno no debe prenderle la tarjeta', async () => {
+    mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: false })
+    const preview = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { acceptsCardOnline: false } }))
+    expect(preview).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(preview.preview.cambios).toEqual([
+      { campo: 'acceptsCardOnline', de: false, a: false, resumen: 'Aceptar pago con tarjeta: no → no' },
+    ])
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+
+    mockUpdateSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: false })
+    const done = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { acceptsCardOnline: false }, confirm: true }))
+    expect(done).toMatchObject({ ok: true })
+    expect(done.sinCambios).toBeUndefined()
+    expect(mockUpdateSettings).toHaveBeenCalledWith('v1', { acceptsCardOnline: false }, 's1')
+  })
+
+  it('un `true` repetido sigue sin escribir nada: no hay decisión que conservar', async () => {
+    mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: true })
+    const r = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { acceptsCardOnline: true }, confirm: true }))
+    expect(r).toMatchObject({ ok: true, sinCambios: true })
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
+  })
+
   it('fase 2: acepta `acceptsCardOnline`; la vista previa dice «Aceptar pago con tarjeta: no → sí» y no escribe nada', async () => {
     mockGetSettings.mockResolvedValue({ ...AJUSTES, acceptsCardOnline: false })
     const preview = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { acceptsCardOnline: true } }))
