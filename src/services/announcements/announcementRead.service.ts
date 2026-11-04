@@ -1,4 +1,4 @@
-import { PlatformAnnouncementStatus, NotificationType, PosAppNoticeKind, type PlatformAnnouncement } from '@prisma/client'
+import { Prisma, PlatformAnnouncementStatus, NotificationType, PosAppNoticeKind, type PlatformAnnouncement } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -155,8 +155,10 @@ async function avisoDeActualizarSinTumbar(staffId: string, app: HomeAppIdentity,
   try {
     return await avisoDeActualizar(staffId, app, ahora)
   } catch (error) {
+    // El mensaje como texto: en producción winston escribe `json()` sin `format.errors()`, y un `Error` crudo sale `{}`.
     logger.warn('Inicio de la app: no se pudo leer el aviso de actualizar; sigue el inicio de siempre', {
-      error,
+      error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof Prisma.PrismaClientKnownRequestError && { code: error.code }),
       platform: app.platform,
       versionCode: app.versionCode,
       versionName: app.versionName,

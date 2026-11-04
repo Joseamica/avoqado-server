@@ -29,7 +29,8 @@ export const getDetail = async (req: Request, res: Response, next: NextFunction)
  * interrumpe. Reemplaza al endpoint `/banner`, que sólo daba la mitad.
  *
  * Actualizador del POS (r7, spec §4.7.3): la app que pregunta sale de sus cabeceras. Si está debajo de un aviso de
- * actualizar, ése ocupa el banner y la ventana; el DASHBOARD no manda esas cabeceras y sigue igual.
+ * actualizar, ése ocupa sólo los lugares que llena (el que deja vacío lo llenan los anuncios de hoy); el DASHBOARD no manda
+ * esas cabeceras y sigue igual.
  */
 export const home = async (req: Request, res: Response, next: NextFunction) => {
   try {

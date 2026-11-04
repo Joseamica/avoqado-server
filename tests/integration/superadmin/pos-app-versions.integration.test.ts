@@ -602,6 +602,47 @@ describe('impacto en iOS (por nombre: el primer ::int[] con un arreglo de JS)', 
     expect(despues.byVersion.find(g => g.versionName === '9999999.1')).toBeDefined()
   })
 
+  // Las apps de iOS SÍ guardan su número de compilación (`systemInfo.versionCode`), pero en iOS sólo se muestra (§4.1): una
+  // versión publicada en dos compilaciones es UN renglón de `byVersion`, sin número.
+  it('1.15.11 en las compilaciones 40 y 41 es UN renglón sin número, y las versiones salen de la más nueva a la más vieja', async () => {
+    const negocio = await nuevoNegocio('iPads compilaciones')
+    const antes = await impacto('IOS', CON_116)
+    const de1511Antes = antes.byVersion.filter(g => g.versionName === '1.15.11')
+    expect(de1511Antes.length).toBeLessThanOrEqual(1)
+
+    await nuevaTerminal({ venueId: negocio.id, type: 'POS_IOS', version: '1.15.11', systemInfo: { versionCode: 40 } })
+    await nuevaTerminal({ venueId: negocio.id, type: 'POS_IOS', version: '1.15.11', systemInfo: { versionCode: 41 } })
+    // 1.15.2 es más vieja que 1.15.11 aunque como texto vaya después: el orden es por número, parte por parte.
+    await nuevaTerminal({ venueId: negocio.id, type: 'POS_IOS', version: '1.15.2', systemInfo: { versionCode: 39 } })
+    await nuevaTerminal({ venueId: negocio.id, type: 'POS_IOS', version: '1.16.0', systemInfo: { versionCode: 42 } })
+    // Un nombre que no se puede leer va a unknownVersion aunque traiga número: en iOS el número no decide.
+    await nuevaTerminal({ venueId: negocio.id, type: 'POS_IOS', version: '1.y', systemInfo: { versionCode: 43 } })
+
+    const despues = await impacto('IOS', CON_116)
+    expect(diferencia(antes, despues)).toEqual({ totalSeen: 5, unknownVersion: 1, below: 3, venuesBelow: 1 })
+    expect(renglon(despues, negocio.id)).toMatchObject({ records: 3 })
+    expect(despues.byVersionTruncated).toBe(false)
+
+    const de1511 = despues.byVersion.filter(g => g.versionName === '1.15.11')
+    expect(de1511).toHaveLength(1)
+    expect(de1511[0].versionCode).toBeNull()
+    expect(de1511[0].records - (de1511Antes[0]?.records ?? 0)).toBe(2)
+    expect(de1511[0].venues - (de1511Antes[0]?.venues ?? 0)).toBe(1)
+    // Ningún renglón de iOS trae número de compilación.
+    expect(despues.byVersion.every(g => g.versionCode === null)).toBe(true)
+
+    // La más nueva primero, por el nombre leído número por número; las que no se pueden leer, al final.
+    const nombres = despues.byVersion.map(g => g.versionName)
+    const lugar = (nombre: string) => {
+      const i = nombres.indexOf(nombre)
+      expect([nombre, i >= 0]).toEqual([nombre, true])
+      return i
+    }
+    expect(lugar('1.16.0')).toBeLessThan(lugar('1.15.11'))
+    expect(lugar('1.15.11')).toBeLessThan(lugar('1.15.2'))
+    expect(lugar('1.15.2')).toBeLessThan(lugar('1.y'))
+  })
+
   it('en iOS el impacto no se calcula con versionCode: 400', async () => {
     const res = await api().get(`${BASE}/IOS/impact?versionCode=100&days=7`).set('Authorization', `Bearer ${superToken}`)
     expect([res.status, res.body.code]).toEqual([400, 'POS_APP_VERSION_POLICY_INVALID'])

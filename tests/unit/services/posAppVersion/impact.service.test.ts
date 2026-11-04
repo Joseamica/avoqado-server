@@ -159,6 +159,24 @@ describe('getImpact — la fila de Postgres se vuelve ImpactView', () => {
     expect(vista.venuesBelowList).toEqual([])
   })
 
+  it('iOS: el renglón de byVersion sale sin número de compilación aunque la fila lo trajera (§4.1: en iOS sólo decide el nombre)', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([
+      { result: resultado({ byVersion: [version(0, { versionCode: 41, versionName: '1.15.11', records: BigInt(2), venues: 1 })] }) },
+    ])
+
+    const vista = await getImpact({ platform: 'IOS', candidate: { versionName: '1.16' }, days: 7 })
+
+    expect(vista.byVersion).toEqual([{ versionCode: null, versionName: '1.15.11', records: 2, venues: 1, lastSeenAt: VISTO }])
+  })
+
+  it('ANDROID: el renglón de byVersion conserva su número de compilación', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ result: resultado({ byVersion: [version(0, { versionCode: 95 })] }) }])
+
+    const vista = await getImpact({ platform: 'ANDROID', candidate: null, days: 7 })
+
+    expect(vista.byVersion[0].versionCode).toBe(95)
+  })
+
   it('una fecha que llega como Date sale en ISO', async () => {
     prismaMock.$queryRaw.mockResolvedValueOnce([{ result: resultado({ byVersion: [version(0, { lastSeenAt: new Date(VISTO) })] }) }])
 
@@ -224,6 +242,37 @@ describe('getImpact — la sentencia', () => {
     // Una sola sentencia: un WITH, nada de varias consultas separadas por «;».
     expect(texto.trim().startsWith('WITH')).toBe(true)
     expect(texto).not.toContain(';')
+  })
+
+  // byVersion: en ANDROID cada compilación es un renglón; en iOS el renglón es el nombre (1.15.11 en las compilaciones 40 y
+  // 41 es UNO), porque en iOS el número sólo se muestra (§4.1). La más nueva primero, por el campo que decide.
+  it('ANDROID: byVersion agrupa por compilación, nombre y clave, y ordena por compilación, clave y nombre', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ result: resultado() }])
+
+    await getImpact({ platform: 'ANDROID', candidate: { versionCode: 100 }, days: 7 })
+
+    const texto = sentencia().sql
+    expect(texto).toContain('SELECT "versionCode", "versionName", "nameKey",\n')
+    expect(texto.match(/GROUP BY [^\n]*/g)).toEqual(['GROUP BY "versionCode", "versionName", "nameKey"', 'GROUP BY "venueId", "venueName"'])
+    expect(texto).toContain('ORDER BY "versionCode" DESC NULLS LAST, "nameKey" DESC NULLS LAST, "versionName" DESC NULLS LAST\n')
+    expect(texto).toContain(
+      `ORDER BY g."versionCode" DESC NULLS LAST, g."nameKey" DESC NULLS LAST, g."versionName" DESC NULLS LAST), '[]'::json)`,
+    )
+  })
+
+  it('iOS: byVersion agrupa sólo por nombre y clave, manda el número en NULL y ordena por clave y nombre', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ result: resultado() }])
+
+    await getImpact({ platform: 'IOS', candidate: { versionName: '1.16' }, days: 7 })
+
+    const texto = sentencia().sql
+    expect(texto).toContain('SELECT NULL::bigint AS "versionCode", "versionName", "nameKey",\n')
+    expect(texto.match(/GROUP BY [^\n]*/g)).toEqual(['GROUP BY "versionName", "nameKey"', 'GROUP BY "venueId", "venueName"'])
+    expect(texto).toContain('ORDER BY "nameKey" DESC NULLS LAST, "versionName" DESC NULLS LAST\n')
+    expect(texto).toContain(`ORDER BY g."nameKey" DESC NULLS LAST, g."versionName" DESC NULLS LAST), '[]'::json)`)
+    // El número de compilación no entra al grupo ni al orden (sí se sigue leyendo en `vistos`, como en ANDROID).
+    expect(texto).not.toMatch(/GROUP BY [^\n]*"versionCode"/)
+    expect(texto).not.toContain('"versionCode" DESC')
   })
 
   it('el valor de la candidata nunca va pegado al texto', async () => {

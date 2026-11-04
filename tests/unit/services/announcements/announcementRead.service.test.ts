@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import {
   getAnnouncementForStaff,
@@ -470,7 +471,25 @@ describe('announcementRead.service', () => {
       expect(r.banner?.id).toBe('normal-1')
       expect(r.modal?.id).toBe('normal-1')
       expect(logger.warn).toHaveBeenCalledTimes(1)
-      expect((logger.warn as jest.Mock).mock.calls[0][1]).toEqual(expect.objectContaining({ error: expect.anything() }))
+      // El error va como TEXTO: en producción winston (`json()` sin `format.errors()`) escribe un `Error` crudo como `{}`.
+      const campos = (logger.warn as jest.Mock).mock.calls[0][1]
+      expect(campos).toEqual({ error: 'la base no contestó', platform: 'ANDROID', versionCode: 95, versionName: undefined })
+      expect(JSON.stringify(campos)).toContain('"error":"la base no contestó"')
+    })
+
+    it('si el fallo es de Prisma, el log lleva también su código', async () => {
+      mockAnnMany.mockImplementation(async (args: any) => {
+        if (args.where.posAppPlatform) {
+          throw new Prisma.PrismaClientKnownRequestError("Can't reach database server", { code: 'P1001', clientVersion: 'test' })
+        }
+        return [normal]
+      })
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('normal-1')
+      expect(logger.warn).toHaveBeenCalledTimes(1)
+      expect((logger.warn as jest.Mock).mock.calls[0][1]).toEqual(
+        expect.objectContaining({ error: "Can't reach database server", code: 'P1001', platform: 'ANDROID', versionCode: 95 }),
+      )
     })
 
     it('si la lectura del cierre del aviso falla, sale el camino de hoy y se avisa en el log una vez', async () => {

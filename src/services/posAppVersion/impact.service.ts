@@ -43,12 +43,33 @@ const DIAS_MAX = 90
  * Por plataforma, fijos en el código (nunca del usuario):
  * - el tipo de `Terminal` que cuenta;
  * - el campo que decide si un registro queda debajo (ANDROID: el número de compilación; iOS: el nombre rellenado a 4 partes);
- * - el campo que desempata al ordenar las versiones vistas.
+ * - cómo se arma cada renglón de `byVersion`: qué columnas lleva, por qué se agrupa y en qué orden sale (la más nueva primero).
+ *
+ * 🔴 En iOS el renglón es el NOMBRE, no la compilación (§4.1: en iOS el número sólo se muestra). Las apps de iOS sí guardan
+ * su `CFBundleVersion` en `systemInfo.versionCode`, así que agrupar también por él partiría una misma versión (1.15.11 como
+ * compilaciones 40 y 41) en varios renglones. Por eso en iOS el número sale `NULL` y no entra al grupo ni al orden.
  */
 const POR_PLATAFORMA = {
-  ANDROID: { tipo: 'POS_ANDROID', decide: Prisma.raw('"versionCode"'), desempata: Prisma.raw('"nameKey"') },
-  IOS: { tipo: 'POS_IOS', decide: Prisma.raw('"nameKey"'), desempata: Prisma.raw('"versionCode"') },
+  ANDROID: {
+    tipo: 'POS_ANDROID',
+    decide: Prisma.raw('"versionCode"'),
+    columnasDelRenglon: Prisma.raw('"versionCode", "versionName", "nameKey"'),
+    agruparPor: Prisma.raw('"versionCode", "versionName", "nameKey"'),
+    ordenDelRenglon: ['"versionCode"', '"nameKey"', '"versionName"'],
+  },
+  IOS: {
+    tipo: 'POS_IOS',
+    decide: Prisma.raw('"nameKey"'),
+    columnasDelRenglon: Prisma.raw('NULL::bigint AS "versionCode", "versionName", "nameKey"'),
+    agruparPor: Prisma.raw('"versionName", "nameKey"'),
+    ordenDelRenglon: ['"nameKey"', '"versionName"'],
+  },
 } as const
+
+/** El orden de los renglones de `byVersion`, con o sin el alias de la subconsulta. Sólo constantes de `POR_PLATAFORMA`. */
+function ordenDeLasVersiones(columnas: readonly string[], alias: '' | 'g.'): Prisma.Sql {
+  return Prisma.raw(columnas.map(c => `${alias}${c} DESC NULLS LAST`).join(', '))
+}
 
 /** La hora de la columna es reloj UTC sin zona: se formatea igual que `Date.toISOString()`. */
 const ISO_UTC = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`
@@ -84,6 +105,9 @@ export async function getImpact(input: {
   //   cualquier carácter y una versión «1x16» tumbaría TODA la consulta en el `::int[]`.
   // - La ventana se mide con `now() AT TIME ZONE 'UTC'`: `lastHeartbeat` guarda el reloj UTC sin zona, y un `now()` a secas
   //   se compararía en la zona de la sesión (la local es America/Mexico_City: 6 horas corrido).
+  // Y una decisión a propósito en la exclusión de demos (`v."status" <> 'LIVE_DEMO'`): LIVE_DEMO es la demo pública y
+  // anónima, no un cliente. Los negocios TRIAL sí cuentan: son prospectos reales en su alta, y contarlos equivoca el conteo
+  // hacia arriba, como pide §4.4.
   const consulta = Prisma.sql`WITH vistos AS (
   SELECT t."venueId", v."name" AS "venueName", t."lastHeartbeat",
          t."version" AS "versionName",
@@ -114,13 +138,13 @@ SELECT json_build_object(
              'records', g.cuantos,
              'venues', g.negocios,
              'lastSeenAt', to_char(g.ultima_vez, ${Prisma.raw(ISO_UTC)}))
-           ORDER BY g.${conf.decide} DESC NULLS LAST, g.${conf.desempata} DESC NULLS LAST, g."versionName" DESC NULLS LAST), '[]'::json)
+           ORDER BY ${ordenDeLasVersiones(conf.ordenDelRenglon, 'g.')}), '[]'::json)
     FROM (
-      SELECT "versionCode", "versionName", "nameKey",
+      SELECT ${conf.columnasDelRenglon},
              count(*) AS cuantos, count(DISTINCT "venueId") AS negocios, max("lastHeartbeat") AS ultima_vez
       FROM clasificados
-      GROUP BY "versionCode", "versionName", "nameKey"
-      ORDER BY ${conf.decide} DESC NULLS LAST, ${conf.desempata} DESC NULLS LAST, "versionName" DESC NULLS LAST
+      GROUP BY ${conf.agruparPor}
+      ORDER BY ${ordenDeLasVersiones(conf.ordenDelRenglon, '')}
       LIMIT ${Prisma.raw(String(TOPE_DE_LISTA + 1))}
     ) g
   ),
@@ -164,7 +188,8 @@ SELECT json_build_object(
     unknownVersion: aNumero(r.unknownVersion) ?? 0,
     venuesBelow: candidata ? (aNumero(r.venuesBelow) ?? 0) : null,
     byVersion: versiones.slice(0, TOPE_DE_LISTA).map(g => ({
-      versionCode: aNumero(g.versionCode),
+      // En iOS el renglón es el nombre: el número no se muestra aunque la fila lo trajera (§4.1).
+      versionCode: platform === 'IOS' ? null : aNumero(g.versionCode),
       versionName: typeof g.versionName === 'string' ? g.versionName : null,
       records: aNumero(g.records) ?? 0,
       venues: aNumero(g.venues) ?? 0,
