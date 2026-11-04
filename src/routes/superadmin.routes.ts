@@ -41,6 +41,7 @@ import terminalOrderSuperadminRoutes from './superadmin/terminalOrder.routes'
 import subscriptionRoutes from './superadmin/subscription.routes'
 import billingRoutes from './superadmin/billing.routes'
 import platformChargesRoutes from './superadmin/platformCharges.routes'
+import posAppVersionsRoutes from './superadmin/posAppVersions.routes'
 import reportsRoutes from './superadmin/reports.routes'
 import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'
 import masterCatalogRoutes from './superadmin/masterCatalog.routes'
@@ -95,6 +96,8 @@ router.use('/subscriptions', subscriptionRoutes)
 router.use('/billing', billingRoutes) // Platform billing CFDI (Avoqado factura a sus propios clientes)
 // «Por cobrar» (spec 2026-11-02): cobros recurrentes de Avoqado a un cliente, con recordatorio y factura. Hereda el guardia de SUPERADMIN.
 router.use('/platform-charges', platformChargesRoutes)
+// Actualizador del POS (versiones mínimas por plataforma). Hereda el guardia de SUPERADMIN del padre.
+router.use('/pos-app-versions', posAppVersionsRoutes)
 router.use('/reports', reportsRoutes)
 router.use('/delivery-activation', deliveryActivationRoutes) // Task 4/7 delivery-activation-backend: cola de ops + avanzar status
 router.use('/master-catalog', masterCatalogRoutes)
