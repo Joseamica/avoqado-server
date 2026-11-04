@@ -121,6 +121,10 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
       'Rappi, Uber, Deliverect, Shopify y TotalPass/Wellhub: conectarlos está cerrado en un demo y la semilla no conecta ninguno',
     ],
   ),
+  [
+    'services/crm/email/gmail',
+    'Gmail del vendedor de Avoqado (CRM interno, con crm:contactar): escribe a contactos del CRM, nunca desde un demo',
+  ],
   ['services/integrations/hubspot.client.ts', 'CRM de Avoqado: sólo la landing y el alta directa, nunca desde un negocio demo'],
   ...[
     'services/dashboard/assistant.dashboard.service.ts',

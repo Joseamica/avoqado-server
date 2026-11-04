@@ -66,7 +66,9 @@ import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
 import { customerApprovalOutboxJob } from './jobs/customer-approval-outbox.job'
 import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnouncements.job'
 import { announcementOutboxJob } from './jobs/announcementOutbox.job'
+import { crmCampaignSenderJob } from './jobs/crm-campaign-sender.job'
 import { crmDailyDigestJob } from './jobs/crm-daily-digest.job'
+import { crmGmailRepliesJob } from './jobs/crm-gmail-replies.job'
 import { crmSweepJob } from './jobs/crm-sweep.job'
 import { platformChargeDigestJob } from './jobs/platform-charge-digest.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
@@ -106,6 +108,7 @@ import { initializeSocketServer, shutdownSocketServer } from './communication/so
 import { initializeFirebase } from './config/firebase'
 import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
+import { instalarMedidorDeCupoResend } from './services/email/resendQuota'
 import { precalentarSellos } from './services/wallet/precalentarSellos'
 import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
 // Import Stripe feature sync startup
@@ -317,6 +320,8 @@ const gracefulShutdown = async (signal: string) => {
       // CRM propio: barrido de reparación y primer dinero, y el aviso diario de pendientes
       crmSweepJob.stop()
       crmDailyDigestJob.stop()
+      crmCampaignSenderJob.stop()
+      crmGmailRepliesJob.stop()
       // «Por cobrar»: el correo diario al founder y la generación de fechas por cobrar
       platformChargeDigestJob.stop()
 
@@ -414,6 +419,11 @@ process.on('unhandledRejection', (reason, promise) => {
 // --- Application Startup Logic ---
 const startApplication = async (retries = 3) => {
   try {
+    // El medidor del cupo de Resend (`services/email/resendQuota.ts`): lee cuántos correos lleva la cuenta en cada respuesta,
+    // avisa al 80 % y pausa sólo las campañas del CRM. Es pasivo (nunca frena ni cambia un correo), por eso va también en
+    // DEMO_MODE, y antes que cualquier cosa que pueda mandar correo.
+    instalarMedidorDeCupoResend()
+
     // Initialize Firebase Admin SDK (for storage file deletion)
     try {
       initializeFirebase()
@@ -681,6 +691,10 @@ const startApplication = async (retries = 3) => {
       crmSweepJob.start()
       // CRM propio: «Tus pendientes de hoy» a cada vendedor (lunes a viernes, 8:30; hasta las 11:00 retoma lo que quedó a medias)
       crmDailyDigestJob.start()
+      // CRM propio: el remitente de las campañas masivas (cada minuto, con el tope diario; MARKETING_KILL_SWITCH lo apaga)
+      crmCampaignSenderJob.start()
+      // CRM propio: el Gmail del vendedor — busca lo que no sabemos si salió y trae las respuestas a la ficha (cada 5 min)
+      crmGmailRepliesJob.start()
       // «Por cobrar»: el correo diario al founder (desde las 9:00; cada 15 min retoma lo que quedó a medias) y, una vez al día por
       // proceso, la generación de las fechas por cobrar. Va en el mismo bloque que el resto: con DEMO_MODE=true no corre. Fuera de
       // producción sólo trabaja con PLATFORM_CHARGES_SANDBOX=true (si no, la vuelta no hace nada).

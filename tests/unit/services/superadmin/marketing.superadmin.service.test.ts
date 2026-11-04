@@ -491,7 +491,9 @@ describe('Marketing Service', () => {
           bounceType: 'Permanent',
           bounceSubType: 'Suppressed',
         })
-        expect(result.handled).toBe(true)
+        // `false` a propósito (CRM fase 2, tarea 1): con `true` el controlador lo daba por manejado y el carril de campañas a
+        // clientes no veía nunca el rebote. La supresión de la dirección la hace el controlador antes de este carril.
+        expect(result).toEqual({ handled: false, reason: 'Reputation event without CampaignDelivery' })
       })
 
       it('says WHY the recipient was undeliverable so the log is actionable', async () => {
@@ -521,7 +523,7 @@ describe('Marketing Service', () => {
 
         expect(logger.warn).toHaveBeenCalled()
         expect((logger.warn as jest.Mock).mock.calls[0][0]).toMatch(/complaint|queja/i)
-        expect(result.handled).toBe(true)
+        expect(result).toEqual({ handled: false, reason: 'Reputation event without CampaignDelivery' })
       })
 
       it('stays quiet for opens and clicks — those are not worth a line per transactional email', async () => {

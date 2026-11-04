@@ -11,6 +11,8 @@ import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import emailService from '../email.service'
 import { effectiveKeys, getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
 import { getPending, type Pending, type PendingSection } from './accounts.service'
+import { bloqueoPorReputacion } from './email/optOut.service'
+import { puedeMandarFueraDeProduccion } from './email/testAllowlist'
 
 // ponytail: the sales team is a handful of people; past 200 key rows the oldest 200 get the emails (logged).
 const TEAM_CAP = 200
@@ -27,6 +29,15 @@ interface Recipient {
   id: string
   email: string
 }
+
+/**
+ * ¿Hay que dejar de escribirle a esta dirección para cuidar la reputación del remitente? Sólo un rebote duro o una queja
+ * (`EmailSuppression`: «REBOTE» / «QUEJA»). 🔴 La BAJA de marketing (`CrmEmailOptOut`) NO cuenta: estos correos son avisos de trabajo
+ * al equipo de ventas de Avoqado, no marketing. Va DIRECTO a la supresión: `isBlocked` contesta «BAJA» primero, y una queja
+ * registra supresión Y baja (Codex código r2 P1). Si la consulta falla LANZA: quien llama lo trata como un envío fallido que se
+ * reintenta, nunca como «no está bloqueado».
+ */
+const frenadoPorReputacion = (email: string) => bloqueoPorReputacion(email)
 
 /**
  * Everyone who holds `key` (rulings 21 and 26): each active key row whose EFFECTIVE keys include it, resolved to its
@@ -239,13 +250,47 @@ async function notifyTeam(
         select: { id: true, name: true, giro: true, ventasRango: true, sucursales: true, modulos: true, qualificationAvailable: true },
       }))
     if (!account) return true
-    const recipients = await team('editar')
-    if (!recipients.length) return true
+    // 🔴 Fuera de producción sólo le llega a quien esté en la lista de prueba. Quien se omite cuenta como «nada que mandar»
+    // (igual que un equipo sin «Editar»): devolver false haría que el barrido reintente el aviso 5 veces para nada.
+    const onTheList = (await team('editar')).filter(person => {
+      if (puedeMandarFueraDeProduccion(person.email)) return true
+      logger.info('[CRM] A prospect notice was not sent: the address is outside the test list', { accountId, notice, staffId: person.id })
+      return false
+    })
+    // 🔴 Un rebote duro o una queja frenan el aviso (igual que la lista de prueba: cuenta como «nada que mandar»); la baja de
+    // marketing no. Si NO se pudo revisar, no se manda a esa persona y el aviso dice false: el barrido lo reintenta, y su llave por
+    // persona hace que a los demás no se les repita.
+    // ponytail: una consulta por persona en paralelo; el equipo son unas cuantas personas (TEAM_CAP lo acota).
+    const checks = await Promise.allSettled(onTheList.map(person => frenadoPorReputacion(person.email)))
+    let all = true
+    const recipients = onTheList.filter((person, index) => {
+      const check = checks[index]
+      if (check.status === 'rejected') {
+        all = false
+        logger.warn('[CRM] A prospect notice was not sent: the address could not be checked for bounces and complaints', {
+          accountId,
+          notice,
+          staffId: person.id,
+          error: errorText(check.reason),
+        })
+        return false
+      }
+      if (check.value) {
+        logger.info('[CRM] A prospect notice was not sent: the address bounced or complained', {
+          accountId,
+          notice,
+          staffId: person.id,
+          motivo: check.value,
+        })
+        return false
+      }
+      return true
+    })
+    if (!recipients.length) return all
     const email = prospectEmail(account, notice)
     const results = await Promise.allSettled(
       recipients.map(person => emailService.sendEmailWithResult({ ...email, to: person.email, idempotencyKey: keyFor(person.id) })),
     )
-    let all = true
     results.forEach((result, index) => {
       if (result.status === 'fulfilled' && result.value.ok) return
       all = false
@@ -350,9 +395,15 @@ async function digestFor(access: CrmAccess, now: Date): Promise<Omit<DigestConte
   }
 }
 
-/** Closes a row we hold for good: «FALLO» with no tries left, so no later run retakes it. */
+/**
+ * Closes a row we hold for good: «FALLO» with no tries left, so no later run retakes it. Its content goes too (D1): it
+ * names people, and a row that will never be resent has no use for it.
+ */
 const closeForGood = (id: string, now: Date) =>
-  prisma.crmDigestSend.updateMany({ where: { id, reservedAt: now }, data: { status: 'FALLO', attempts: MAX_ATTEMPTS } })
+  prisma.crmDigestSend.updateMany({
+    where: { id, reservedAt: now },
+    data: { status: 'FALLO', attempts: MAX_ATTEMPTS, content: Prisma.DbNull },
+  })
 
 /**
  * Sends a reserved row's email with the person's key for the day and marks the row — only while it is still ours (a run
@@ -360,26 +411,57 @@ const closeForGood = (id: string, now: Date) =>
  * this mark, the row stays reserved, a later run retakes it and sends the SAME content with the SAME key: Resend
  * recognizes it and does not deliver it again. A refusal that will not change (`transient: false`: an undeliverable
  * address, a demo) closes the row instead of using up the tries; a throw counts as passing, like the email service's own.
+ * An address with a hard bounce or a complaint (`frenadoPorReputacion`) closes the row for good too; if that lookup throws,
+ * it counts as a failed send (nothing goes out, the row keeps its tries).
  */
 async function deliver(row: { id: string; staffId: string }, day: string, content: DigestContent, now: Date): Promise<void> {
+  // 🔴 Fuera de producción sólo sale a la lista de prueba. La fila se cierra con el estado que ya existe para «esto no va a
+  // salir nunca» (FALLO sin intentos que gastar): ningún tick posterior la retoma ni la cuenta como pendiente.
+  if (!puedeMandarFueraDeProduccion(content.to)) {
+    logger.info('[CRM] A daily digest was not sent: the address is outside the test list', { staffId: row.staffId, day })
+    await closeForGood(row.id, now)
+    return
+  }
   let ok = false
   let permanent = false
+  let suppressed: 'REBOTE' | 'QUEJA' | false = false
   try {
-    const result = await emailService.sendEmailWithResult({ ...content, idempotencyKey: `crm-aviso:${row.staffId}:${day}` })
-    ok = result.ok
-    permanent = !ok && result.transient === false
-    if (!ok)
-      logger.warn('[CRM] A daily digest did not go out', { staffId: row.staffId, day, error: result.errorCode ?? 'not sent', permanent })
+    // 🔴 Un rebote duro o una queja frenan el resumen y cierran la fila para siempre; la baja de marketing no. Si la consulta
+    // truena cae al `catch` de abajo, igual que un envío fallido: no sale y la fila sigue con intentos por gastar.
+    suppressed = await frenadoPorReputacion(content.to)
+    if (!suppressed) {
+      const result = await emailService.sendEmailWithResult({ ...content, idempotencyKey: `crm-aviso:${row.staffId}:${day}` })
+      ok = result.ok
+      permanent = !ok && result.transient === false
+      if (!ok)
+        logger.warn('[CRM] A daily digest did not go out', { staffId: row.staffId, day, error: result.errorCode ?? 'not sent', permanent })
+    }
   } catch (error) {
     logger.warn('[CRM] A daily digest did not go out', { staffId: row.staffId, day, error: errorText(error) })
+  }
+  if (suppressed) {
+    logger.info('[CRM] A daily digest was not sent: the address bounced or complained', { staffId: row.staffId, day, motivo: suppressed })
+    await closeForGood(row.id, now)
+    return
   }
   if (permanent) {
     await closeForGood(row.id, now)
     return
   }
-  await prisma.crmDigestSend.updateMany({
-    where: { id: row.id, reservedAt: now },
-    data: ok ? { status: 'ENVIADO' } : { status: 'FALLO', attempts: { increment: 1 } },
+  // 🔴 One transaction (Codex A r2): the last try used up and its content cleared land together, or neither does (the row
+  // stays reserved and a later run retakes it with the same key).
+  await prisma.$transaction(async tx => {
+    await tx.crmDigestSend.updateMany({
+      where: { id: row.id, reservedAt: now },
+      // Sent: its content (it names people) is no longer needed to repeat it (D1). A failure keeps it to resend the same email.
+      data: ok ? { status: 'ENVIADO', content: Prisma.DbNull } : { status: 'FALLO', attempts: { increment: 1 } },
+    })
+    // The last try used up: it will never be resent, so its content goes too (D1).
+    if (!ok)
+      await tx.crmDigestSend.updateMany({
+        where: { id: row.id, reservedAt: now, status: 'FALLO', attempts: { gte: MAX_ATTEMPTS } },
+        data: { content: Prisma.DbNull },
+      })
   })
 }
 
@@ -482,6 +564,11 @@ async function sendNew(day: string, now: Date): Promise<void> {
 export async function runDailyDigest(now = new Date()): Promise<void> {
   const [day, weekday, time] = formatInVenueTimezone(now, DEFAULT_TIMEZONE, 'yyyy-MM-dd i HH:mm').split(' ')
   if (Number(weekday) > 5 || time < WINDOW_FROM || time > WINDOW_TO) return
+  // 🔴 D1: a row from an earlier day is never resent (`retakeLeftovers` only takes today's), so its content (it names people)
+  // goes. A failure here does not hold up today's digest.
+  await prisma.crmDigestSend
+    .updateMany({ where: { day: { lt: day }, content: { not: Prisma.DbNull } }, data: { content: Prisma.DbNull } })
+    .catch(error => logger.warn('[CRM] Could not clear the content of old daily digests', { day, error: errorText(error) }))
   await retakeLeftovers(day, now)
   await sendNew(day, now)
 }

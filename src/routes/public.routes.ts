@@ -35,6 +35,7 @@ import * as venueChatController from '../controllers/public/venueChat.public.con
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
 import * as customerEmailController from '../controllers/public/customerEmail.public.controller'
+import { getPlatformUnsubscribePage, postPlatformUnsubscribe } from '../controllers/public/platformUnsubscribe.public.controller'
 import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
@@ -597,6 +598,10 @@ const contactSchema = z.object({
     hutk: hutkSchema,
     pageUri: paginaSchema,
     pageName: z.string().trim().max(120).optional(),
+    // La casilla «Quiero recibir novedades de Avoqado por correo» y la versión del aviso de privacidad que se mostró.
+    // Sólo un booleano de verdad cuenta como sí; el CRM guarda el consentimiento al aplicar la entrada.
+    marketingConsent: z.boolean().optional(),
+    privacyNoticeVersion: z.string().trim().max(20, 'La versión del aviso es muy larga').optional(),
   }),
 })
 /**
@@ -823,6 +828,12 @@ router.post(
   express.urlencoded({ extended: true }),
   customerEmailController.postBirthdateCapture,
 )
+
+// ---- Baja one-click de los correos de AVOQUADO (campañas del CRM; token propio firmado por correo, no auth) ----
+// Mismo límite POR TOKEN que la de clientes, por la misma razón (Gmail/Yahoo salen de pocas IPs compartidas). El GET sólo
+// muestra la pregunta; el POST da de baja y es el destino del clic de RFC 8058.
+router.get('/avoqado/unsubscribe', readLimit, getPlatformUnsubscribePage)
+router.post('/avoqado/unsubscribe', customerUnsubLimit, postPlatformUnsubscribe)
 
 // ---- Aviso de privacidad del NEGOCIO — enlace desde el pie de cada correo (Fase 1C, T7) ----
 // Sin auth: cualquiera puede leer un aviso de privacidad, y así lo exige la propia LFPDPPP.

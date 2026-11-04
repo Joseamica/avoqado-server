@@ -117,7 +117,7 @@ export interface MigrationBlocker {
 
 export interface MigrationWarning {
   // 'OPEN_SHIFT' reserved for Phase 2 (open-shift soft check) — not emitted yet.
-  code: 'UNSYNCED_DATA' | 'OPEN_SHIFT'
+  code: 'UNSYNCED_DATA' | 'OPEN_SHIFT' | 'LEGACY_APP_NEEDS_SESSION'
   message: string
 }
 
@@ -453,6 +453,28 @@ export async function migratePreflight(
     code: 'UNSYNCED_DATA',
     message: 'Confirma en la TPV que no hay cobros, reembolsos ni ventas pendientes de sincronizar antes de migrar.',
   })
+
+  // 🔴 D1 (3-nov-2026, PlayTelecom TPV 2841653101): la app vieja (protocolo de comandos < 2) sólo recibe el borrado si
+  // alguien tiene la sesión abierta en ella. Migrada en la pantalla de PIN, nadie puede entrar después —la terminal ya es
+  // de la sucursal destino— y la migración se queda esperando. Entregárselo sin identidad abre otros huecos (Codex r2:
+  // respuesta perdida sin salida, apps 2.12.2–2.12.6 que no ejecutan desde el PIN, confirmación falsificable), así que se
+  // dice ANTES de migrar. Es aviso y no bloqueo: la terminal puede ya tener a alguien dentro.
+  if (terminal.type === 'TPV_ANDROID' && (terminal.commandProtocolVersion ?? 0) < 2) {
+    const origen = originVenue?.name ?? 'la sucursal actual'
+    const alguienConPin = await prisma.staffVenue.findFirst({
+      where: { venueId: terminal.venueId, pin: { not: null }, active: true, staff: { active: true } },
+      select: { id: true },
+    })
+    warnings.push({
+      code: 'LEGACY_APP_NEEDS_SESSION',
+      message: alguienConPin
+        ? `Esta terminal tiene una versión vieja de la app: sólo recibe el borrado si alguien tiene la sesión abierta en ella. ` +
+          `Antes de migrar, que alguien entre con su PIN de ${origen} y la deje en la pantalla de inicio, con internet.`
+        : `Esta terminal tiene una versión vieja de la app: sólo recibe el borrado si alguien tiene la sesión abierta en ella, ` +
+          `y en ${origen} nadie tiene PIN. Antes de migrar, ponle un PIN a alguien en ${origen} (Equipo), que entre con él ` +
+          `en la terminal y la deje en la pantalla de inicio, con internet.`,
+    })
+  }
 
   return {
     canProceed: blockers.length === 0,
@@ -837,6 +859,11 @@ export interface MigrateStatusResult {
   onlineUnderNewVenue: boolean
   confirmed: boolean
   elapsedMs: number
+  /**
+   * El borrado se entregó con el protocolo viejo (app de la TPV anterior al protocolo 2): sólo llega con alguien dentro de
+   * sesión y nunca se confirma solo (D1, 3-nov-2026). El asistente lo usa para decir qué hacer, en vez de culpar a la red.
+   */
+  legacyApp: boolean
 }
 
 export async function migrateStatus(terminalId: string, commandId: string): Promise<MigrateStatusResult> {
@@ -863,7 +890,8 @@ export async function migrateStatus(terminalId: string, commandId: string): Prom
 
   return {
     commandStatus: command.status,
-    cancellable: canCancelWipe(command),
+    // Misma vigencia que exige `migrateCancel`: ofrecer cancelar una orden vencida manda a un rechazo (Codex r4, 3-nov).
+    cancellable: canCancelWipe(command) && (!command.expiresAt || command.expiresAt.getTime() > now),
     resultMessage: command.resultMessage,
     commandDelivered,
     reboundAfterWipe,
@@ -871,5 +899,8 @@ export async function migrateStatus(terminalId: string, commandId: string): Prom
     onlineUnderNewVenue,
     confirmed,
     elapsedMs: now - t0.getTime(),
+    // De la ORDEN, no de la terminal: una 2.12.x registra el protocolo 2 a mitad de la migración, pero su borrado nació
+    // sin `_deliveryProtocol: 2` y `deviceReboundAfter` nunca lo acredita (Codex r3, 3-nov).
+    legacyApp: (command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol !== 2,
   }
 }

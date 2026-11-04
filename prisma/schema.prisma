@@ -8400,6 +8400,20 @@ model EmailQuotaLedger {
   @@unique([venueId, period])
 }
 
+/// El aviso del cupo de la cuenta de Resend (`services/email/resendQuota.ts`): UNA fila (`id = "resend"`). Cada columna
+/// guarda el último día o mes que ya se avisó; el aviso se reclama con un CAS sobre ella, así sale una vez aunque el
+/// servidor se reinicie. Días y meses de Ciudad de México.
+model EmailQuotaAlert {
+  id                String   @id @default("resend")
+  /// YYYY-MM-DD: ya se avisó que el día llegó al 80 % del cupo diario
+  dailyAlertDay     String?
+  /// YYYY-MM: ya se avisó que el mes llegó al 80 % del cupo mensual
+  monthlyAlertMonth String?
+  /// YYYY-MM-DD: ya se avisó que Resend contestó «se acabó el cupo» (429)
+  exhaustedAlertDay String?
+  updatedAt         DateTime @updatedAt
+}
+
 model Consumer {
   id String @id @default(cuid())
 
@@ -20577,8 +20591,9 @@ model OnlineOrderingSettings {
   minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
   defaultPrepMinutes Int       @default(15)
   acceptsPayAtPickup Boolean   @default(true)
-  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Apagado por default.
-  acceptsCardOnline  Boolean   @default(false)
+  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Prendido por default (founder, 2-nov): la tienda lo ofrece
+  /// sólo con un Stripe cobrable, y cada negocio lo puede apagar.
+  acceptsCardOnline  Boolean   @default(true)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
@@ -21021,6 +21036,8 @@ model CrmAccount {
   activities     CrmActivity[]
   timelineEvents CrmTimelineEvent[]
   inboundEntries CrmInboundEntry[]
+  emailMessages  CrmEmailMessage[]
+  emailConsents  CrmEmailConsent[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21053,6 +21070,8 @@ model CrmContact {
   isPrimary Boolean    @default(false)
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
+
+  emailMessages CrmEmailMessage[]
 
   @@index([accountId])
   @@index([phoneE164])
@@ -21177,6 +21196,171 @@ model CrmDigestSend {
   updatedAt  DateTime @updatedAt
 
   @@unique([staffId, day, kind])
+}
+
+// ==========================================
+// CRM · fase 2: correo (plan 2026-11-02). Plantillas, campañas masivas desde el subdominio de novedades, la baja, el
+// consentimiento de la landing y el Gmail de cada vendedor. Igual que arriba: estados y tipos son String validados con
+// zod, nunca enums de Postgres.
+// ==========================================
+
+/// Plantilla de correo del equipo: asunto y bloques (los mismos que las campañas de los negocios, `bloqueCampanaSchema`),
+/// con las variables {{nombre}}, {{negocio}} y {{vendedor}}. No se borra: se archiva.
+model CrmEmailTemplate {
+  id          String    @id @default(cuid())
+  name        String
+  subject     String
+  blocks      Json
+  createdById String // Staff, sin FK como los demás actores del CRM
+  updatedById String
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  campaigns CrmCampaign[]
+
+  @@index([archivedAt, updatedAt])
+}
+
+/// Una campaña masiva de Avoqado. `subject` y `blocks` son una COPIA de la plantilla al crearla: editar o archivar la
+/// plantilla después no cambia lo que ya se probó. status: BORRADOR | ENVIANDO | ENVIADA | CANCELADA.
+model CrmCampaign {
+  id           String            @id @default(cuid())
+  name         String
+  templateId   String?
+  template     CrmEmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  subject      String
+  blocks       Json
+  audience     Json // { segmentos: [...] }, validado con zod
+  status       String            @default("BORRADOR")
+  // Huella del contenido (asunto + bloques) cuya prueba a sí mismo ya salió: sin ella no se manda.
+  testSentHash String?
+  total        Int               @default(0)
+  createdById  String
+  enqueuedAt   DateTime?
+  finishedAt   DateTime?
+  cancelledAt  DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  deliveries CrmCampaignDelivery[]
+
+  @@index([status, createdAt])
+}
+
+/// Un destinatario de una campaña: la cola durable (se reclama con SKIP LOCKED, como la de los negocios). Una fila por
+/// persona y campaña. status: PENDIENTE | ENVIANDO | ENVIADO | REINTENTO | FALLIDO | OMITIDO | DESCONOCIDO.
+model CrmCampaignDelivery {
+  id              String      @id @default(cuid())
+  campaignId      String
+  campaign        CrmCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  email           String // normalizado (minúsculas)
+  name            String?
+  reason          String // PROSPECTO | CLIENTE | USUARIO: por qué le llega, y qué dice el pie
+  reasonVenueName String? // «Te llega porque usas Avoqado en {negocio}»
+  vars            Json // { nombre, negocio } ya resueltos al encolar
+  accountId       String? // id plano, SIN FK: borrar una cuenta del CRM no toca el historial de una campaña
+
+  status        String    @default("PENDIENTE")
+  skipReason    String?
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime?
+  leaseUntil    DateTime?
+  // La fecha del PRIMER intento: se escribe al reclamar, antes de la red, y nadie la cambia. Cuenta el tope diario y marca
+  // la ventana de 23 h para reintentar (Resend recuerda la llave de idempotencia 24 h).
+  sendAttemptAt DateTime?
+  resendId      String?
+  lastError     String?
+  sentAt        DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@unique([campaignId, email])
+  @@index([status, nextAttemptAt, leaseUntil])
+  @@index([resendId])
+  @@index([campaignId, status])
+  @@index([sendAttemptAt])
+}
+
+/// Quien pidió no recibir más correos de Avoqado (la baja de un clic, una queja o el admin). En la fase 2 es para
+/// siempre: una casilla marcada después no la deshace. source: UN_CLIC | QUEJA | ADMIN.
+model CrmEmailOptOut {
+  id           String   @id @default(cuid())
+  email        String   @unique // normalizado (minúsculas)
+  source       String
+  actorStaffId String?
+  createdAt    DateTime @default(now())
+}
+
+/// El consentimiento de una PERSONA, por su correo (no de una cuenta: la landing puede juntar varias por teléfono).
+/// Una sola verdad: `CrmAccount.consent*` queda como estaba y nadie lo escribe.
+model CrmEmailConsent {
+  id            String      @id @default(cuid())
+  email         String      @unique // normalizado (minúsculas)
+  accountId     String? // sólo para filtrar por etapa
+  account       CrmAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  entryId       String // la CrmInboundEntry que lo trajo
+  consentAt     DateTime // cuando se RECIBIÓ la entrada
+  source        String // LANDING
+  noticeVersion String
+  createdAt     DateTime    @default(now())
+
+  @@index([accountId])
+}
+
+/// El Gmail que un vendedor conectó para mandar correo uno a uno y leer las respuestas. Una conexión por persona.
+/// status: ACTIVA | REVOCADA. `version` sube cada vez que se guardan credenciales nuevas: toda escritura tardía de quien
+/// usó las viejas (REVOCADA por invalid_grant, lastError, desconectar) va con `where: { staffId, version }`, así un error
+/// de las credenciales viejas no apaga las nuevas.
+model CrmGmailConnection {
+  id                     String    @id @default(cuid())
+  staffId                String    @unique
+  googleEmail            String
+  refreshTokenCiphertext Bytes // AES-256-GCM con CRM_GMAIL_TOKEN_KEY; vacío al desconectar
+  scopes                 String // los que Google concedió, tal cual (separados por espacio)
+  status                 String    @default("ACTIVA")
+  connectedAt            DateTime  @default(now())
+  revokedAt              DateTime?
+  lastError              String?
+  version                Int       @default(1)
+  updatedAt              DateTime  @updatedAt
+}
+
+/// Las cuentas de Google distintas que alguna vez se han conectado (para el tope de 100 de por vida de una app sin
+/// verificar). Sólo se agrega.
+model CrmGmailAccountSeen {
+  id          String   @id @default(cuid())
+  googleEmail String   @unique
+  firstSeenAt DateTime @default(now())
+}
+
+/// Un correo uno a uno de la ficha, en cualquier dirección: el que mandó el vendedor desde su Gmail y las respuestas que
+/// llegaron. direction: SALIDA | ENTRADA. status: ENVIANDO | ENVIADO | DESCONOCIDO | FALLIDO | RECIBIDO.
+model CrmEmailMessage {
+  id              String      @id @default(cuid())
+  accountId       String
+  account         CrmAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  contactId       String?
+  contact         CrmContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  staffId         String
+  direction       String
+  fromEmail       String
+  toEmail         String
+  clientRequestId String?     @unique // el clic: dos clics con el mismo id son un solo correo
+  rfcMessageId    String?     @unique // el Message-ID que pusimos, para reconocerlo en el hilo
+  gmailMessageId  String?     @unique
+  gmailThreadId   String?
+  subject         String
+  snippet         String?
+  status          String
+  lastCheckedAt   DateTime?
+  error           String?
+  sentAt          DateTime?
+  createdAt       DateTime    @default(now())
+
+  @@index([gmailThreadId])
+  @@index([staffId, direction, status, sentAt])
+  @@index([accountId, createdAt])
+  @@index([contactId]) // borrar un contacto pone aquí null: sin el índice, cada borrado recorre la tabla
 }
 
 /// Cada mensaje del WhatsApp de ventas (coexistencia: el founder sigue en la app de su celular). Lo escribe SÓLO el webhook

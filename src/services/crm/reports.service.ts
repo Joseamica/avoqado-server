@@ -237,7 +237,8 @@ export async function exportAccountsCsv(access: CrmAccess, filtros: ExportFilter
     venueId: null,
     action: 'CRM_EXPORT',
     entity: 'CrmAccount',
-    data: { filas, total, truncado, filtros: filtros as Prisma.InputJsonObject },
+    // 🔴 Lo que se escribió en el buscador no se guarda (D1): puede ser el nombre, el correo o el teléfono de una persona.
+    data: { filas, total, truncado, filtros: { ...filtros, ...(filtros.q ? { q: '[búsqueda]' } : {}) } as Prisma.InputJsonObject },
   })
   return { csv: lines.join('\r\n'), filas, total, truncado }
 }

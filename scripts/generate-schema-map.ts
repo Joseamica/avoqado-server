@@ -620,6 +620,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   WhatsappInboundEvent: 'Notifications, WhatsApp & Marketing',
   MarketingCampaign: 'Notifications, WhatsApp & Marketing',
   CampaignDelivery: 'Notifications, WhatsApp & Marketing',
+  EmailQuotaAlert: 'Notifications, WhatsApp & Marketing',
 
   // 19. AI Chatbot (Text-to-SQL)
   ChatConversation: 'AI Chatbot (Text-to-SQL)',
@@ -669,6 +670,14 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CrmTimelineEvent: 'CRM (equipo de ventas de Avoqado)',
   CrmInboundEntry: 'CRM (equipo de ventas de Avoqado)',
   CrmDigestSend: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailTemplate: 'CRM (equipo de ventas de Avoqado)',
+  CrmCampaign: 'CRM (equipo de ventas de Avoqado)',
+  CrmCampaignDelivery: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailOptOut: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailConsent: 'CRM (equipo de ventas de Avoqado)',
+  CrmGmailConnection: 'CRM (equipo de ventas de Avoqado)',
+  CrmGmailAccountSeen: 'CRM (equipo de ventas de Avoqado)',
+  CrmEmailMessage: 'CRM (equipo de ventas de Avoqado)',
   CrmWhatsappMessage: 'CRM (equipo de ventas de Avoqado)',
   CrmErased: 'CRM (equipo de ventas de Avoqado)',
 }

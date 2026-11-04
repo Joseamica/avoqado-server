@@ -15,7 +15,7 @@ import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { GiftCardError, type GiftCardErrorCode } from './giftCardErrors'
 import { operarSobreDeGerenteEnTx, type OperacionDeGerente } from './giftCardLedger'
 import { topePorOperacion } from './giftCardLimits'
-import { assertGiftCardsSellable } from './giftCardSettings.service'
+import { assertGiftCardsSellable, assertPuedePrender } from './giftCardSettings.service'
 import type { ResultadoDeReenvio } from './giftCardCuenta.service'
 
 export type GiftCardAuditAction =
@@ -178,6 +178,25 @@ const COMO_PRENDER: Partial<Record<GiftCardErrorCode, NonNullable<EstadoDeVenta[
   GIFT_CARDS_DISABLED: 'DASHBOARD_SETTINGS',
   GIFT_CARDS_NOT_IN_PLAN: 'PLAN',
   GIFT_CARD_KEYS_MISSING: 'CONTACT_AVOQADO',
+}
+
+export interface EstadoParaPrender {
+  allowed: boolean
+  code: GiftCardErrorCode | null
+  message: string | null
+  howToEnable: NonNullable<EstadoDeVenta['howToEnable']> | null
+}
+
+/** Si estas tarjetas apagadas se pueden prender, y si no, por qué. Lo lee la hoja del POS para ofrecer «Prender» (founder, 3-nov-2026). */
+export async function estadoParaPrender(venueId: string): Promise<EstadoParaPrender> {
+  try {
+    await assertPuedePrender(venueId)
+    return { allowed: true, code: null, message: null, howToEnable: null }
+  } catch (error) {
+    if (!(error instanceof GiftCardError)) throw error
+    const code = error.code as GiftCardErrorCode
+    return { allowed: false, code, message: error.message, howToEnable: COMO_PRENDER[code] ?? null }
+  }
 }
 
 /**

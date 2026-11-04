@@ -2,7 +2,9 @@
  * Zod schemas for `/api/v1/crm/*` (spec 2026-10-30). Messages ALWAYS in Spanish; shape and format only — the business
  * rules (which keys go together, who may give which key, who owns what) live in the services.
  */
+import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
+import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'
 
@@ -365,3 +367,241 @@ export const reportsSchema = z.object({ query: z.object({ desde: day('inicial'),
 
 /** GET /crm/export.csv — the list's own filters, without its paging: the service walks the pages. */
 export const exportAccountsSchema = z.object({ query: listAccountsSchema.shape.query.omit({ cursor: true, limit: true }) })
+
+// ── Email templates, preview, test and images (phase 2, plan task 2) ──────────────────────────────────────────────────
+
+const MAX_BLOCKS = 50
+/** A template is a handful of paragraphs; this cap only stops a body that wants to be a file. */
+const MAX_BLOCKS_BYTES = 100_000
+
+/** The first thing wrong with the blocks, in Spanish: the catalog's own messages are the library's English. */
+function blocksMessage(error: z.ZodError): string {
+  const issue = error.issues[0]
+  const index = typeof issue.path[0] === 'number' ? issue.path[0] + 1 : null
+  if (index === null) return 'Agrega al menos un bloque al correo'
+  const field = issue.path[1]
+  if (field === 'url') return `El bloque ${index} necesita una dirección válida que empiece con http:// o https://`
+  if (field === 'text' || field === 'label' || field === 'alt') return `El bloque ${index} no puede quedar vacío`
+  return `El bloque ${index} no es válido: elige un tipo de bloque que exista`
+}
+
+/**
+ * The blocks of an email, through the SAME catalog the businesses' campaigns use (`bloqueCampanaSchema`): nobody writes
+ * HTML, the server renders it, and a `javascript:` link never gets saved. Shape only; the variables are the service's.
+ */
+const emailBlocks = z.unknown().transform((value, ctx) => {
+  if (!Array.isArray(value)) {
+    ctx.addIssue({ code: 'custom', message: 'El contenido del correo debe ser una lista de bloques' })
+    return z.NEVER
+  }
+  if (value.length > MAX_BLOCKS) {
+    ctx.addIssue({ code: 'custom', message: `Máximo ${MAX_BLOCKS} bloques por correo` })
+    return z.NEVER
+  }
+  const parsed = bloquesCampanaSchema.safeParse(value)
+  if (!parsed.success) {
+    ctx.addIssue({ code: 'custom', message: blocksMessage(parsed.error) })
+    return z.NEVER
+  }
+  if (JSON.stringify(parsed.data).length > MAX_BLOCKS_BYTES) {
+    ctx.addIssue({ code: 'custom', message: 'El correo es demasiado largo' })
+    return z.NEVER
+  }
+  return parsed.data
+})
+const emailSubject = text(200, 'El asunto es obligatorio')
+const templateName = text(120, 'El nombre de la plantilla es obligatorio')
+
+/** GET /crm/templates. The page size has no upper bound here: the service caps it at 100. `archivadas=true` lists only those. */
+export const listTemplatesSchema = z.object({
+  query: z.object({
+    cursor: cuid.optional(),
+    limit: listAccountsSchema.shape.query.shape.limit,
+    archivadas: flagQuery,
+  }),
+})
+
+/** GET /crm/templates/:id, POST /crm/templates/:id/archive y /unarchive */
+export const templateIdSchema = z.object({ params: byId })
+
+/** POST /crm/templates */
+export const createTemplateSchema = z.object({
+  body: z.object({ name: templateName, subject: emailSubject, blocks: emailBlocks }),
+})
+
+/** PATCH /crm/templates/:id — only what changes. */
+export const updateTemplateSchema = z.object({
+  params: byId,
+  body: z
+    .object({ name: templateName.optional(), subject: emailSubject.optional(), blocks: emailBlocks.optional() })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+/**
+ * POST /crm/templates/preview. With `contexto`, the real data of that account (and of one of its contacts); without it, the
+ * example data. The service answers 404 for an account outside the caller's scope.
+ */
+export const previewTemplateSchema = z.object({
+  body: z.object({
+    subject: emailSubject,
+    blocks: emailBlocks,
+    contexto: z.object({ accountId: cuid, contactId: cuid.optional() }).optional(),
+  }),
+})
+
+/** POST /crm/templates/test — «Envíame una prueba». */
+export const sendTemplateTestSchema = z.object({ body: z.object({ subject: emailSubject, blocks: emailBlocks }) })
+
+/**
+ * POST /crm/accounts/:id/emails — «Mandar correo» desde el Gmail del vendedor. `clientRequestId` lo genera el diálogo al
+ * abrirse (un UUID): dos clics con el mismo son UN correo.
+ */
+export const sendAccountEmailSchema = z.object({
+  params: byId,
+  body: z.object({
+    contactId: cuid,
+    subject: emailSubject,
+    blocks: emailBlocks,
+    clientRequestId: z
+      .string({ required_error: 'Falta el identificador del envío', invalid_type_error: 'El identificador del envío no es válido' })
+      .regex(/^[A-Za-z0-9_-]{8,100}$/, 'El identificador del envío no es válido'),
+  }),
+})
+
+/** POST /crm/opt-outs — «Dar de baja este correo» (la oposición). El correo se guarda en minúsculas, como el del equipo. */
+export const createOptOutSchema = z.object({
+  body: z.object({
+    email: z
+      .string({ required_error: 'El correo es obligatorio', invalid_type_error: 'El correo es obligatorio' })
+      .trim()
+      .toLowerCase()
+      .email('El correo no es válido')
+      .max(254, 'El correo es demasiado largo'),
+  }),
+})
+
+// ── Audiences of the mass-email campaigns (phase 2, plan task 4) ───────────────────────────────────────────────────────
+
+/** A filter is a handful of values; this only stops a body that wants to turn the SQL into a book. */
+const MAX_FILTER_VALUES = 50
+
+/** `giros` and `ciudades`: a list of short texts. Shape only; an unknown giro simply matches nobody. */
+const textFilter = (singular: string, plural: string) =>
+  z
+    .array(
+      z
+        .string({ invalid_type_error: `Cada ${singular} es un texto con letras` })
+        .trim()
+        .min(1, `Cada ${singular} es un texto con letras`)
+        .max(100, 'Máximo 100 caracteres'),
+      { invalid_type_error: `Los ${plural} van en una lista` },
+    )
+    .max(MAX_FILTER_VALUES, `Máximo ${MAX_FILTER_VALUES} ${plural}`)
+    .optional()
+
+const audienceRoles = z
+  .array(z.nativeEnum(StaffRole, { errorMap: () => ({ message: 'Ese rol no existe' }) }), {
+    required_error: 'Elige al menos un rol',
+    invalid_type_error: 'Elige al menos un rol',
+  })
+  .min(1, 'Elige al menos un rol')
+  .max(Object.keys(StaffRole).length, 'Hay roles repetidos')
+
+/**
+ * One public of a campaign. PROSPECTOS has no «source» filter on purpose: consent is born only in the landing today, so it
+ * would be a filter that filters nothing. `etapas` are CrmStage ids.
+ */
+const audienceSegmentSchema = z.discriminatedUnion(
+  'tipo',
+  [
+    z.object({
+      tipo: z.literal('PROSPECTOS'),
+      etapas: z
+        .array(z.string({ invalid_type_error: 'El id de la etapa no es válido' }).cuid('El id de la etapa no es válido'))
+        .max(MAX_FILTER_VALUES, `Máximo ${MAX_FILTER_VALUES} etapas`)
+        .optional(),
+    }),
+    z.object({
+      tipo: z.literal('CLIENTES'),
+      giros: textFilter('giro', 'giros'),
+      ciudades: textFilter('ciudad', 'ciudades'),
+      planes: z
+        .array(z.enum(['GRATIS', 'PRO', 'PREMIUM'], { errorMap: () => ({ message: 'Ese plan no existe' }) }))
+        .max(3, 'Hay planes repetidos')
+        .optional(),
+    }),
+    z.object({
+      tipo: z.literal('USUARIOS'),
+      roles: audienceRoles,
+      giros: textFilter('giro', 'giros'),
+      ciudades: textFilter('ciudad', 'ciudades'),
+      soloClientes: z.boolean({ invalid_type_error: 'Solo clientes es sí o no' }).optional(),
+    }),
+  ],
+  { errorMap: () => ({ message: 'Ese público no existe' }) },
+)
+
+/** Who a campaign goes to: 1 to 3 publics, ONE of each type. Who actually receives it is the service's, in SQL. */
+export const audienciaSchema = z
+  .object({
+    segmentos: z
+      .array(audienceSegmentSchema, { required_error: 'Elige a quién le mandas', invalid_type_error: 'Elige a quién le mandas' })
+      .min(1, 'Elige al menos un público')
+      .max(3, 'Máximo 3 públicos'),
+  })
+  .superRefine((audience, ctx) => {
+    const seen = new Set<string>()
+    audience.segmentos.forEach((segment, i) => {
+      if (seen.has(segment.tipo))
+        ctx.addIssue({ code: 'custom', path: ['segmentos', i, 'tipo'], message: 'Ese público ya está en la lista' })
+      seen.add(segment.tipo)
+    })
+  })
+
+export type Audiencia = z.infer<typeof audienciaSchema>
+export type Segmento = Audiencia['segmentos'][number]
+
+// ── Mass-email campaigns (phase 2, plan task 5) ────────────────────────────────────────────────────────────────────────
+
+const campaignName = text(120, 'El nombre de la campaña es obligatorio')
+
+/** GET /crm/campaigns. The page size has no upper bound here: the service caps it at 100. */
+export const listCampaignsSchema = z.object({
+  query: z.object({
+    cursor: cuid.optional(),
+    limit: listAccountsSchema.shape.query.shape.limit,
+    status: z.enum(['BORRADOR', 'ENVIANDO', 'ENVIADA', 'CANCELADA'], { errorMap: () => ({ message: 'Ese estado no existe' }) }).optional(),
+  }),
+})
+
+/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/preview, /test and /cancel */
+export const campaignIdSchema = z.object({ params: byId })
+
+/** POST /crm/campaigns — from a template: its subject and blocks are copied. */
+export const createCampaignSchema = z.object({
+  body: z.object({ name: campaignName, templateId: z.string({ required_error: 'Elige una plantilla' }).cuid('La plantilla no es válida') }),
+})
+
+/** PATCH /crm/campaigns/:id — only what changes, only while it is a draft (the service answers 409 otherwise). */
+export const updateCampaignSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      name: campaignName.optional(),
+      subject: emailSubject.optional(),
+      blocks: emailBlocks.optional(),
+      audience: audienciaSchema.optional(),
+    })
+    .refine(somethingToChange, 'No hay nada que cambiar'),
+})
+
+/** POST /crm/campaigns/:id/send — the token the preview gave, which ties what was seen to what is sent. */
+export const sendCampaignSchema = z.object({
+  params: byId,
+  body: z.object({
+    token: z
+      .string({ required_error: 'Falta la confirmación', invalid_type_error: 'Falta la confirmación' })
+      .min(1, 'Falta la confirmación')
+      .max(2000, 'La confirmación no es válida'),
+  }),
+})

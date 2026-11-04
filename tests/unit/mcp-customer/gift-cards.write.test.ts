@@ -53,6 +53,7 @@ jest.mock('@/mcp/guard', () => ({
     requirePermission: (perm: string, v: string) => {
       mockPermiso(perm, v)
       if (v === 'sin-permiso') throw new Error(`Forbidden: missing ${perm}`)
+      if (v === 'sin-prender' && perm === 'giftCards:enable') throw new Error(`Forbidden: missing ${perm}`)
     },
   }),
 }))
@@ -536,11 +537,35 @@ describe('update_gift_card_settings', () => {
       const r = await llamar('update_gift_card_settings', { venueId: 'v1', enabled: true, ...(confirm ? { confirm } : {}) })
       expect(r).toEqual({
         ok: false,
-        error: 'Las tarjetas de regalo se prenden desde el panel (Ajustes › Tarjetas de regalo), porque hay que aceptar los términos.',
+        error: 'Las tarjetas de regalo se prenden desde el panel o el punto de venta, porque hay que aceptar los términos.',
       })
     }
     expect(mockGuardar).not.toHaveBeenCalled()
     expect(mockAjustes).not.toHaveBeenCalled()
+  })
+
+  it('🔴 apagar pide además giftCards:enable, como el panel; cambiar montos no', async () => {
+    mockAjustes.mockResolvedValue(AJUSTES)
+    mockPermiso.mockClear()
+    await llamar('update_gift_card_settings', { venueId: 'v1', enabled: false })
+    expect(mockPermiso.mock.calls).toEqual([
+      ['giftCards:manage', 'v1'],
+      ['giftCards:enable', 'v1'],
+    ])
+    mockPermiso.mockClear()
+    await llamar('update_gift_card_settings', { venueId: 'v1', minAmount: 150 })
+    expect(mockPermiso.mock.calls).toEqual([['giftCards:manage', 'v1']])
+  })
+
+  it('🔴 con giftCards:manage pero sin giftCards:enable no apaga, y sí cambia montos', async () => {
+    mockAjustes.mockResolvedValue(AJUSTES)
+    await expect(llamar('update_gift_card_settings', { venueId: 'sin-prender', enabled: false, confirm: true })).rejects.toThrow(
+      'Forbidden',
+    )
+    expect(mockGuardar).not.toHaveBeenCalled()
+    await expect(llamar('update_gift_card_settings', { venueId: 'sin-prender', minAmount: 150 })).resolves.toMatchObject({
+      requiresConfirmation: true,
+    })
   })
 
   it('valida con el esquema del panel antes de leer (centavos de más, nada que guardar)', async () => {

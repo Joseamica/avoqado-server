@@ -27,9 +27,23 @@ const STAFF_D = 'cstaffsld0000000000000001'
 const STAFF_F = 'cstaffslf0000000000000001'
 const STAFF_G = 'cstaffslg0000000000000001'
 
+// 🔴 Fuera de producción sólo sale a la lista de prueba (`testAllowlist`). Estas pruebas son del contenido, las llaves y la cola, así
+// que ponen en la lista a todos los vendedores que usan; las de la lista misma van al final de cada bloque.
+const EN_LA_LISTA = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'x'].map(letra => `${letra}@avoqado.io`).join(',')
+const LISTA_ORIGINAL = process.env.CRM_CORREO_PRUEBAS
+afterAll(() => {
+  if (LISTA_ORIGINAL === undefined) delete process.env.CRM_CORREO_PRUEBAS
+  else process.env.CRM_CORREO_PRUEBAS = LISTA_ORIGINAL
+})
+
 let keyRows: Array<Record<string, unknown>>
 /** Staff ids that already hold a claimed row somewhere (`PlatformAccess.staffId`). */
 let holders: string[]
+/** `EmailSuppression` (rebote duro o queja) y `CrmEmailOptOut` (baja de marketing), por correo en minúsculas. */
+let suprimidos: Map<string, 'HARD_BOUNCE' | 'COMPLAINT'>
+let bajas: Set<string>
+/** Correos cuya consulta de bloqueo truena (se cayó la base). */
+let consultaFalla: Set<string>
 
 /** A key row as `PlatformAccess` stores it. */
 const row = (over: Record<string, unknown>) => ({
@@ -46,6 +60,7 @@ const row = (over: Record<string, unknown>) => ({
 })
 
 beforeEach(() => {
+  process.env.CRM_CORREO_PRUEBAS = EN_LA_LISTA
   prismaMock.crmAccount.findUnique.mockReset()
   prismaMock.platformAccess.findMany.mockReset()
   prismaMock.staff.findMany.mockReset()
@@ -75,6 +90,18 @@ beforeEach(() => {
     { id: STAFF_D, email: 'd@avoqado.io', active: true, emailVerified: false },
   ])
   send.mockResolvedValue({ ok: true, transient: false })
+  suprimidos = new Map()
+  bajas = new Set()
+  consultaFalla = new Set()
+  prismaMock.crmEmailOptOut.findUnique.mockReset().mockImplementation(async ({ where }: { where: { email: string } }) => {
+    if (consultaFalla.has(where.email)) throw new Error('se cayó la base')
+    return bajas.has(where.email) ? { id: 'cbajaoptout000000000001' } : null
+  })
+  prismaMock.emailSuppression.findUnique.mockReset().mockImplementation(async ({ where }: { where: { email: string } }) => {
+    if (consultaFalla.has(where.email)) throw new Error('se cayó la base')
+    const reason = suprimidos.get(where.email)
+    return reason ? { reason } : null
+  })
 })
 
 describe('notifyNewProspect', () => {
@@ -156,6 +183,98 @@ describe('notifyNewProspect', () => {
     prismaMock.platformAccess.findMany.mockResolvedValueOnce([])
     await notifyNewProspect(ACCOUNT)
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+describe('fuera de producción: el aviso de prospecto sólo sale a la lista de prueba', () => {
+  it('sólo le llega a quien está en la lista, y la entrada no se reintenta por eso (true)', async () => {
+    process.env.CRM_CORREO_PRUEBAS = 'b@avoqado.io'
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['b@avoqado.io'])
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('outside the test list'),
+      expect.objectContaining({ accountId: ACCOUNT, staffId: STAFF_A }),
+    )
+  })
+
+  it('con la lista vacía no sale nada y cuenta como «nada que mandar»: el barrido no lo reintenta 5 veces', async () => {
+    process.env.CRM_CORREO_PRUEBAS = ''
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    await expect(notifyReturningProspect(ACCOUNT, 'centry000000000000000001')).resolves.toBe(true)
+
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('en producción sale a todos, con la lista vacía: el comportamiento de hoy', async () => {
+    const env = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    process.env.CRM_CORREO_PRUEBAS = ''
+    try {
+      await notifyNewProspect(ACCOUNT)
+    } finally {
+      process.env.NODE_ENV = env
+    }
+
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['a@avoqado.io', 'b@avoqado.io'])
+  })
+})
+
+describe('los avisos internos y las bajas (Codex r1, P1): un rebote o una queja los frenan, la baja de marketing no', () => {
+  it('REBOTE o QUEJA: a quien rebotó no se le manda, a los demás sí; sin nadie que reciba cuenta como «nada que mandar» (true)', async () => {
+    suprimidos.set('a@avoqado.io', 'HARD_BOUNCE')
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['b@avoqado.io'])
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('[CRM]'),
+      expect.objectContaining({ accountId: ACCOUNT, staffId: STAFF_A, motivo: 'REBOTE' }),
+    )
+
+    send.mockClear()
+    suprimidos.set('b@avoqado.io', 'COMPLAINT')
+    await expect(notifyReturningProspect(ACCOUNT, 'centry000000000000000001')).resolves.toBe(true)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('la BAJA de marketing (CrmEmailOptOut) NO frena el aviso: es trabajo del equipo, no marketing', async () => {
+    bajas.add('a@avoqado.io')
+    bajas.add('b@avoqado.io')
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    await expect(notifyReturningProspect(ACCOUNT, 'centry000000000000000001')).resolves.toBe(true)
+
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['a@avoqado.io', 'b@avoqado.io', 'a@avoqado.io', 'b@avoqado.io'])
+  })
+
+  // Codex código r2 P1: una queja registra supresión Y baja; una baja vieja más un rebote nuevo, igual. La baja no tapa la supresión.
+  it.each([
+    ['baja + rebote', 'HARD_BOUNCE', 'REBOTE'],
+    ['baja + queja', 'COMPLAINT', 'QUEJA'],
+  ] as const)('%s: la supresión frena el aviso aunque también haya baja', async (_caso, reason, motivo) => {
+    bajas.add('a@avoqado.io')
+    suprimidos.set('a@avoqado.io', reason)
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(true)
+    expect(send.mock.calls.map(([email]) => email.to)).toEqual(['b@avoqado.io'])
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A, motivo }))
+  })
+
+  it('si la consulta del bloqueo falla, a esa persona no se le manda y el aviso dice false para que el barrido lo reintente', async () => {
+    consultaFalla.add('a@avoqado.io')
+
+    await expect(notifyNewProspect(ACCOUNT)).resolves.toBe(false)
+
+    // A la otra persona sí salió, con su llave: el reintento sólo repite a A.
+    expect(send.mock.calls.map(([email]) => [email.to, email.idempotencyKey])).toEqual([
+      ['b@avoqado.io', `crm-nuevo:${ACCOUNT}:${STAFF_B}`],
+    ])
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[CRM]'),
+      expect.objectContaining({ accountId: ACCOUNT, staffId: STAFF_A }),
+    )
   })
 })
 
@@ -306,9 +425,11 @@ describe('runDailyDigest', () => {
       const value = row[field]
       if (cond instanceof Date) return value instanceof Date && value.getTime() === cond.getTime()
       if (cond && typeof cond === 'object') {
-        const op = cond as { in?: unknown[]; lt?: number | Date }
+        const op = cond as { in?: unknown[]; lt?: number | Date | string; gte?: number; not?: unknown }
         if (op.in) return op.in.includes(value)
-        if (op.lt !== undefined) return (value as number | Date) < op.lt
+        if (op.lt !== undefined) return (value as number | Date | string) < op.lt
+        if (op.gte !== undefined) return (value as number) >= op.gte
+        if ('not' in op) return op.not === Prisma.DbNull ? value !== null : value !== op.not
       }
       return value === cond
     })
@@ -372,12 +493,59 @@ describe('runDailyDigest', () => {
         }
         const hit = sends.filter(s => matches({ ...s }, where))
         for (const s of hit) {
-          const { attempts, ...rest } = data as { attempts?: number | { increment: number } }
+          const { attempts, ...rest } = data as { attempts?: number | { increment: number }; content?: unknown }
+          if (rest.content === Prisma.DbNull) rest.content = null
           Object.assign(s, rest)
           if (attempts !== undefined) s.attempts = typeof attempts === 'number' ? attempts : s.attempts + attempts.increment
         }
         return { count: hit.length }
       })
+  })
+
+  it('el_resumen_no_guarda_contenido_que_ya_no_se_repite (D1, M3): ENVIADO y cerrado quedan sin contenido; el de días anteriores se vacía; el de hoy en FALLO lo conserva', async () => {
+    const guardado = { to: 'x@avoqado.io', subject: 'Tus pendientes', html: '<p>Café Ana</p>', text: 'Café Ana' }
+    sends.push(
+      {
+        id: 'cdigestsd0000000000000080',
+        staffId: 'cstaffold000000000000001',
+        day: '2026-10-30',
+        kind: 'DIARIO',
+        status: 'FALLO',
+        attempts: 1,
+        reservedAt: at(-3 * 24 * 60),
+        content: guardado,
+      },
+      {
+        id: 'cdigestsd0000000000000081',
+        staffId: 'cstaffold000000000000002',
+        day: DAY,
+        kind: 'DIARIO',
+        status: 'FALLO',
+        attempts: 1,
+        reservedAt: at(-1),
+        content: guardado,
+      },
+    )
+    send.mockImplementation(async (o: { to: string }) => (o.to === 'a@avoqado.io' ? { ok: true } : { ok: false, transient: true }))
+    accessOf.mockImplementation(async (staffId: string) =>
+      staffId === STAFF_A || staffId === 'cstaffold000000000000002' ? access(staffId) : null,
+    )
+
+    await runDailyDigest(T0)
+
+    const porId = (id: string) => sends.find(s => s.id === id)!
+    // El de otro día ya no se repite: se vacía.
+    expect(porId('cdigestsd0000000000000080').content).toBeNull()
+    // El de hoy que falló todavía puede repetirse: conserva su contenido y sus intentos.
+    expect(porId('cdigestsd0000000000000081')).toEqual(expect.objectContaining({ status: 'FALLO', content: guardado }))
+    // El que salió hoy queda sin contenido.
+    expect(sends.find(s => s.staffId === STAFF_A)).toEqual(expect.objectContaining({ status: 'ENVIADO', content: null }))
+  })
+
+  it('el_resumen_cerrado_para_siempre_no_guarda_su_contenido (D1, M3)', async () => {
+    process.env.CRM_CORREO_PRUEBAS = 'otra@avoqado.io'
+    await runDailyDigest(T0)
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, status: 'FALLO', attempts: 3, content: null })])
   })
 
   it('dos_corridas_un_envio: two runs at once reserve ONE row and send ONE email; the next tick sends nothing', async () => {
@@ -471,8 +639,29 @@ describe('runDailyDigest', () => {
 
     expect(send).toHaveBeenCalledTimes(3)
     expect(new Set(send.mock.calls.map(([email]) => email.idempotencyKey))).toEqual(new Set([KEY_A]))
-    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
+    // Sin intentos que gastar ya no se repite: no guarda su contenido (D1, Codex A r1).
+    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3, content: null })])
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A }))
+  })
+
+  it('gastar el último intento y vaciar el contenido van en UNA transacción (Codex A r2): si la segunda escritura falla, no queda la primera sola', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit' })
+    for (const minutes of [0, 15]) await runDailyDigest(at(minutes))
+    ;(prismaMock.$transaction as jest.Mock).mockClear()
+    await runDailyDigest(at(30))
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    const writes = prismaMock.crmDigestSend.updateMany.mock.calls.slice(-2).map(([arg]: any[]) => arg)
+    expect(writes[0].data).toEqual({ status: 'FALLO', attempts: { increment: 1 } })
+    expect(writes[1]).toEqual(expect.objectContaining({ data: { content: Prisma.DbNull } }))
+  })
+
+  it('un fallo que todavía tiene intentos conserva su contenido para repetir el mismo correo', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit' })
+    await runDailyDigest(T0)
+    expect(sends).toEqual([
+      expect.objectContaining({ status: 'FALLO', attempts: 1, content: expect.objectContaining({ to: 'a@avoqado.io' }) }),
+    ])
   })
 
   it('dos_retomas_un_envio: two runs retaking the same stale row at once send it ONCE (the CAS on its reservation)', async () => {
@@ -553,6 +742,118 @@ describe('runDailyDigest', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
+  it('fuera_de_la_lista: fuera de producción el aviso diario no sale, y su fila se cierra para siempre (FALLO sin intentos que gastar)', async () => {
+    process.env.CRM_CORREO_PRUEBAS = 'otra@avoqado.io'
+
+    await runDailyDigest(T0)
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, day: DAY, status: 'FALLO', attempts: 3 })])
+
+    // Ningún tick posterior la retoma ni la vuelve a reservar.
+    await runDailyDigest(at(15))
+    await runDailyDigest(at(45))
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toHaveLength(1)
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('outside the test list'),
+      expect.objectContaining({ staffId: STAFF_A }),
+    )
+  })
+
+  it('fuera_de_la_lista_al_retomar: una fila apartada que un tick posterior retoma tampoco sale fuera de la lista', async () => {
+    sends.push({
+      id: 'cdigestsd0000000000000099',
+      staffId: STAFF_A,
+      day: DAY,
+      kind: 'DIARIO',
+      status: 'APARTADO',
+      attempts: 0,
+      reservedAt: at(-11),
+      content: { to: 'a@avoqado.io', subject: 's', html: '<p>guardado</p>', text: 'guardado' },
+    })
+    process.env.CRM_CORREO_PRUEBAS = 'otra@avoqado.io'
+
+    await runDailyDigest(T0)
+
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
+  })
+
+  it('rebote_o_queja_frena_el_resumen: una dirección suprimida no recibe el resumen y su fila se cierra para siempre', async () => {
+    suprimidos.set('a@avoqado.io', 'COMPLAINT')
+
+    await runDailyDigest(T0)
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, day: DAY, status: 'FALLO', attempts: 3 })])
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('[CRM]'),
+      expect.objectContaining({ staffId: STAFF_A, motivo: 'QUEJA' }),
+    )
+
+    // Ningún tick posterior la retoma, aunque la dirección se limpie.
+    suprimidos.clear()
+    await runDailyDigest(at(15))
+    await runDailyDigest(at(45))
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toHaveLength(1)
+  })
+
+  it('rebote_frena_el_resumen_al_retomar: una fila apartada que se retoma tras un rebote tampoco sale', async () => {
+    sends.push({
+      id: 'cdigestsd0000000000000098',
+      staffId: STAFF_A,
+      day: DAY,
+      kind: 'DIARIO',
+      status: 'APARTADO',
+      attempts: 0,
+      reservedAt: at(-11),
+      content: { to: 'a@avoqado.io', subject: 's', html: '<p>guardado</p>', text: 'guardado' },
+    })
+    suprimidos.set('a@avoqado.io', 'HARD_BOUNCE')
+
+    await runDailyDigest(T0)
+
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
+  })
+
+  it.each([
+    ['baja + rebote', 'HARD_BOUNCE', 'REBOTE'],
+    ['baja + queja', 'COMPLAINT', 'QUEJA'],
+  ] as const)('%s_frena_el_resumen: la baja no tapa la supresión (Codex código r2 P1)', async (_caso, reason, motivo) => {
+    bajas.add('a@avoqado.io')
+    suprimidos.set('a@avoqado.io', reason)
+
+    await runDailyDigest(T0)
+
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, status: 'FALLO', attempts: 3 })])
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A, motivo }))
+  })
+
+  it('la_baja_de_marketing_no_frena_el_resumen: quien se dio de baja de una campaña sigue recibiendo su resumen', async () => {
+    bajas.add('a@avoqado.io')
+
+    await runDailyDigest(T0)
+
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, status: 'ENVIADO' })])
+  })
+
+  it('consulta_de_bloqueo_falla_se_reintenta: si no se puede revisar, no sale ni se cierra; el siguiente tick lo manda una vez', async () => {
+    consultaFalla.add('a@avoqado.io')
+
+    await runDailyDigest(T0)
+    expect(send).not.toHaveBeenCalled()
+    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 1 })])
+
+    consultaFalla.clear()
+    await runDailyDigest(at(15))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0][0].idempotencyKey).toBe(KEY_A)
+    expect(sends).toEqual([expect.objectContaining({ status: 'ENVIADO' })])
+  })
+
   it('error_permanente_no_reintenta: a refusal that will not change (an undeliverable address) closes the row at once', async () => {
     send.mockResolvedValue({ ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' })
     await runDailyDigest(T0)
@@ -628,6 +929,12 @@ describe('runDailyDigest', () => {
     expect(prismaMock.crmActivity.count).toHaveBeenCalledWith({
       where: { doneAt: null, assigneeStaffId: null, account: { AND: [expect.anything(), { archivedAt: null }] } },
     })
-    expect(sends[0].content).toEqual({ to: 'a@avoqado.io', subject: email.subject, html: email.html, text: email.text })
+    // Reserved with the content it then sent (so a retake repeats the same email); once sent it no longer keeps it (D1).
+    expect(prismaMock.crmDigestSend.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ content: { to: 'a@avoqado.io', subject: email.subject, html: email.html, text: email.text } }),
+      }),
+    )
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'ENVIADO', content: null }))
   })
 })

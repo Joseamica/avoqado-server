@@ -9,6 +9,7 @@ import {
   type LandingSignupResult,
 } from '../../services/onboarding/signup.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '../../services/crm/inbound.service'
+import { puedeMandarFueraDeProduccion } from '../../services/crm/email/testAllowlist'
 import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../services/onboarding/campanaDelCorreo.service'
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
@@ -165,6 +166,18 @@ function fila(label: string, value: unknown): string {
           <td style="width:160px;padding:10px 14px;border-bottom:1px solid #e5e7eb;color:#666;font-size:13px;">${escapeHtml(label)}</td>
           <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;color:#000;font-size:14px;">${escapeHtml(v)}</td>
         </tr>`
+}
+
+/**
+ * 🔴 Los dos correos del formulario (la confirmación a quien lo llenó y el aviso interno a onboarding) salen por aquí.
+ * En producción es `emailService.sendEmail` tal cual. Fuera de producción sólo sale a la lista de prueba, para que llenar el
+ * formulario en local no le escriba a nadie real; y lo que no sale cuenta como «nada que mandar» (true), no como una falla:
+ * si no, el formulario respondería 502 «No se pudo notificar al equipo» sólo porque onboarding no está en la lista.
+ */
+async function enviarSiLaListaLoPermite(options: Parameters<typeof emailService.sendEmail>[0]): Promise<boolean> {
+  if (puedeMandarFueraDeProduccion(options.to)) return emailService.sendEmail(options)
+  logger.info('[CONTACT_SUBMIT] Correo no enviado: la dirección está fuera de la lista de prueba', { subject: options.subject })
+  return true
 }
 
 export async function submitContact(req: Request, res: Response, next: NextFunction) {
@@ -579,7 +592,7 @@ Política de Privacidad: https://avoqado.io/privacy
     const [internosOk, confirmSent, crmOk] = await Promise.all([
       Promise.all(
         internos.map(to =>
-          emailService.sendEmail({
+          enviarSiLaListaLoPermite({
             to,
             subject: `${yaEsCliente ? 'Cliente existente' : 'Nuevo prospecto'} - ${String(companyName)}`,
             html: internalHtml,
@@ -587,7 +600,7 @@ Política de Privacidad: https://avoqado.io/privacy
           }),
         ),
       ),
-      emailService.sendEmail({
+      enviarSiLaListaLoPermite({
         to: String(email),
         subject: yaEsCliente ? 'Ya tienes cuenta en Avoqado' : 'Ya quedó tu registro en Avoqado',
         html: confirmHtml,

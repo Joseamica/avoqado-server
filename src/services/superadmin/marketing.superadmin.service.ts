@@ -16,6 +16,9 @@ import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { classifyUndeliverable, isDeliverableRecipient } from '@/utils/undeliverableEmail'
 import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
 import { omitirPorDemo } from '../demo/candadoDemo'
+import { correoEliminadoDesde, MOTIVO_PERSONA_ELIMINADA } from '../crm/erase.service'
+import { isBlocked } from '../crm/email/optOut.service'
+import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from '../crm/email/testAllowlist'
 
 // Initialize Resend
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -602,6 +605,7 @@ export async function processPendingDeliveries() {
           subject: true,
           bodyHtml: true,
           bodyText: true,
+          startedAt: true,
         },
       }),
     {
@@ -666,6 +670,34 @@ export async function processPendingDeliveries() {
         if (motivoDemo === 'sin confirmar') continue // sigue PENDING: se reintenta en la siguiente pasada
         if (motivoDemo) {
           await prisma.campaignDelivery.update({ where: { id: delivery.id }, data: { status: DeliveryStatus.FAILED } })
+          continue
+        }
+
+        // Quien se dio de baja, rebotó o se quejó ya no recibe nada de Avoqado, tampoco por aquí (promesa del CRM, fase 2:
+        // `CrmEmailOptOut` ∪ `EmailSuppression`), ni quien se eliminó del CRM desde que empezó la campaña (lápida D7, la misma
+        // pregunta que el remitente del CRM), y fuera de producción sólo salen las direcciones de prueba. Justo antes de mandar.
+        // FAILED con su motivo, como los demo: no fue un fallo de envío.
+        let motivo: string | false
+        try {
+          motivo =
+            (await isBlocked(delivery.recipientEmail)) ||
+            ((await correoEliminadoDesde(delivery.recipientEmail, campaign.startedAt)) && MOTIVO_PERSONA_ELIMINADA) ||
+            (!puedeMandarFueraDeProduccion(delivery.recipientEmail) && MOTIVO_FUERA_DE_LA_LISTA)
+        } catch (error) {
+          // Un error de la base nunca se lee como «no está bloqueado»: sigue PENDING y se reintenta en la siguiente pasada.
+          logger.error('📧 [Marketing] Could not check the opt-outs; delivery left PENDING', {
+            campaignId: campaign.id,
+            deliveryId: delivery.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          continue
+        }
+        if (motivo) {
+          await prisma.campaignDelivery.update({
+            where: { id: delivery.id },
+            data: { status: DeliveryStatus.FAILED, error: `Omitido: ${motivo}` },
+          })
+          logger.info('📧 [Marketing] Skipped a blocked recipient', { campaignId: campaign.id, deliveryId: delivery.id, motivo })
           continue
         }
 
@@ -807,6 +839,9 @@ const REPUTATION_EVENTS: ResendEventType[] = ['email.bounced', 'email.complained
 export async function handleResendWebhook(payload: ResendWebhookPayload) {
   const { type, data } = payload
   const resendId = data.email_id
+  // Sin id no es de este carril: `findFirst({ where: { resendId: undefined } })` no filtra y traería CUALQUIER entrega, que se marcaría
+  // con un aviso ajeno, y el `handled: true` le escondería el aviso a los carriles de abajo (el CRM lo encuentra por su tag).
+  if (!resendId) return { handled: false, reason: 'Webhook without email_id' }
 
   // Find the delivery by resendId
   const delivery = await prisma.campaignDelivery.findFirst({
@@ -838,7 +873,10 @@ export async function handleResendWebhook(payload: ResendWebhookPayload) {
         bounceMessage: data.bounce?.message ?? null,
       })
 
-      return { handled: true, reason: 'Transactional reputation event logged' }
+      // 🔴 `handled: false` a propósito. Con `true` el controlador daba el aviso por atendido y los demás carriles (campañas a
+      // clientes del negocio, y los que vengan) no lo veían NUNCA: sus rebotes y quejas no marcaban su entrega. La supresión de
+      // la dirección ya la hizo el controlador antes de llamar a este carril (anotado en errores-despues-de-listo.md, 2-nov).
+      return { handled: false, reason: 'Reputation event without CampaignDelivery' }
     }
 
     // Not a marketing campaign email - ignore

@@ -16,6 +16,7 @@ import { DEFAULT_TIMEZONE, venueEndOfDay, venueStartOfDay } from '../../utils/da
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { normalizeEmail } from '../marketing/emailSuppression.service'
 import { getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
 import { movePendingActivitiesTx, type OwnerChangeReason } from './ownership'
 import { addEvent } from './timeline.service'
@@ -552,6 +553,13 @@ const ACTIVITIES_CAP = 50
 // ponytail: the ficha shows the newest 100 events and says how many there are; a «ver anteriores» page by cursor when an
 // account's history outgrows it.
 const TIMELINE_CAP = 100
+const EMAIL_KINDS = new Set(['EMAIL_SENT', 'EMAIL_RECEIVED'])
+
+/** The `messageId` an email event carries, as a one-or-none list. */
+function messageIdOf(data: Prisma.JsonValue): string[] {
+  const messageId = data && typeof data === 'object' && !Array.isArray(data) ? data.messageId : undefined
+  return typeof messageId === 'string' ? [messageId] : []
+}
 
 /** Names of these people in one query. */
 export async function staffNames(ids: Array<string | null>): Promise<Map<string, string>> {
@@ -573,7 +581,10 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
   const account = await prisma.crmAccount.findFirst({ where: { AND: [{ id }, scopeWhere(access, 'ver')] }, select: DETAIL_SELECT })
   if (!account) throw accountNotFound()
 
-  const [activities, activitiesTotal, events, eventsTotal] = await Promise.all([
+  // Each contact's consent comes from `CrmEmailConsent`, by the person's email (Codex plan r2 H4): ONE query for this
+  // account's contacts. `CrmAccount.consent*` is still returned as it was (no field leaves an API response).
+  const contactEmails = [...new Set(account.contacts.flatMap(contact => (contact.email?.trim() ? [normalizeEmail(contact.email)] : [])))]
+  const [activities, activitiesTotal, events, eventsTotal, consents] = await Promise.all([
     prisma.crmActivity.findMany({
       where: { accountId: id, doneAt: null },
       select: { id: true, type: true, title: true, dueAt: true, assigneeStaffId: true },
@@ -588,8 +599,29 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
       take: TIMELINE_CAP,
     }),
     prisma.crmTimelineEvent.count({ where: { accountId: id } }),
+    contactEmails.length
+      ? prisma.crmEmailConsent.findMany({
+          where: { email: { in: contactEmails } },
+          select: { email: true, consentAt: true, noticeVersion: true },
+          take: contactEmails.length,
+        })
+      : [],
   ])
-  const names = await staffNames([...activities.map(activity => activity.assigneeStaffId), ...events.map(event => event.actorStaffId)])
+  // The page's email events carry only ids (Codex plan r1 #11): their subject, snippet and status come from
+  // `CrmEmailMessage`, in ONE query bounded by the page.
+  const emailIds = [...new Set(events.flatMap(event => (EMAIL_KINDS.has(event.kind) ? messageIdOf(event.data) : [])))]
+  const [names, emails] = await Promise.all([
+    staffNames([...activities.map(activity => activity.assigneeStaffId), ...events.map(event => event.actorStaffId)]),
+    emailIds.length
+      ? prisma.crmEmailMessage.findMany({
+          where: { id: { in: emailIds }, accountId: id },
+          select: { id: true, subject: true, snippet: true, direction: true, status: true, error: true, fromEmail: true },
+          take: emailIds.length,
+        })
+      : [],
+  ])
+  const emailById = new Map(emails.map(({ id: messageId, ...email }) => [messageId, email]))
+  const consentByEmail = new Map(consents.map(consent => [consent.email, consent]))
   const person = (staffId: string | null) => (staffId ? { id: staffId, name: names.get(staffId) ?? null } : null)
 
   const { sucursales, modulos, sourceDetail, referidoPor, stageEnteredAt, lostReason, lostNote, wonAt, lostAt, firstMoneySource } = account
@@ -611,13 +643,20 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
       source: account.consentSource,
     },
     qualificationAvailable: account.qualificationAvailable,
-    contacts: account.contacts,
+    contacts: account.contacts.map(contact => {
+      const consent = contact.email?.trim() ? consentByEmail.get(normalizeEmail(contact.email)) : undefined
+      return { ...contact, consentAt: consent?.consentAt ?? null, noticeVersion: consent?.noticeVersion ?? null }
+    }),
     activities: {
       rows: activities.map(({ assigneeStaffId, ...activity }) => ({ ...activity, assignee: person(assigneeStaffId) })),
       total: activitiesTotal,
     },
     timeline: {
-      events: events.map(({ actorStaffId, ...event }) => ({ ...event, actor: person(actorStaffId) })),
+      events: events.map(({ actorStaffId, ...event }) => {
+        const [messageId] = EMAIL_KINDS.has(event.kind) ? messageIdOf(event.data) : []
+        const email = messageId ? emailById.get(messageId) : undefined
+        return { ...event, actor: person(actorStaffId), ...(email ? { email } : {}) }
+      }),
       total: eventsTotal,
     },
   }

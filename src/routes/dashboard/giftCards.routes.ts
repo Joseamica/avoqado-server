@@ -6,7 +6,7 @@
  * `/:giftCardId` para que «settings», «summary», «aging», «pending-accounting», «export.csv» y «orders» nunca se lean como un
  * id. Nada aquí pide el plan salvo prender (R9): un negocio que bajó de plan sigue viendo, ajustando y cancelando lo vendido.
  */
-import { Router } from 'express'
+import { Router, type NextFunction, type Request, type Response } from 'express'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { exigirPlanSiPrende } from '@/middlewares/giftCardsPlan.middleware'
@@ -18,14 +18,24 @@ import { liberarCancelacionSchema, operationKeyOnOrderSchema, soloVenueSchema } 
 
 const router = Router({ mergeParams: true })
 
+const pideAdministrar = checkPermission('giftCards:manage')
+const pidePrender = checkPermission('giftCards:enable')
+
+/**
+ * Ajustes: el permiso depende de lo que trae el cuerpo ya validado (permissions-policy.md, «Endpoints with sub-actions»). El
+ * interruptor es de `giftCards:enable` (founder, 3-nov-2026: administrador para arriba) y los montos, de `giftCards:manage`. Con
+ * las dos cosas pide las dos; `aceptaTerminos` acompaña al interruptor y solo no cambia nada.
+ */
+function permisoDeAjustes(req: Request, res: Response, next: NextFunction) {
+  const { enabled, aceptaTerminos: _terminos, ...montos } = req.body as Record<string, unknown>
+  const mueveInterruptor = enabled !== undefined
+  if (!mueveInterruptor) return pideAdministrar(req, res, next)
+  if (Object.keys(montos).length === 0) return pidePrender(req, res, next)
+  return pideAdministrar(req, res, err => (err ? next(err) : pidePrender(req, res, next)))
+}
+
 router.get('/settings', validateRequest(soloVenueSchema), checkPermission('giftCards:read'), ctrl.getSettings)
-router.put(
-  '/settings',
-  validateRequest(s.updateSettingsSchema),
-  checkPermission('giftCards:manage'),
-  exigirPlanSiPrende,
-  ctrl.updateSettings,
-)
+router.put('/settings', validateRequest(s.updateSettingsSchema), permisoDeAjustes, exigirPlanSiPrende, ctrl.updateSettings)
 router.get('/summary', validateRequest(s.summarySchema), checkPermission('giftCards:read'), ctrl.summary)
 router.get('/aging', validateRequest(s.agingSchema), checkPermission('giftCards:read'), ctrl.aging)
 router.get('/pending-accounting', validateRequest(s.pendingAccountingSchema), checkPermission('giftCards:read'), ctrl.pendingAccounting)

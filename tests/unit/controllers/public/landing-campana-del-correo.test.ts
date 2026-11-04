@@ -17,6 +17,10 @@ jest.mock('@/services/email.service', () => ({
   default: { sendEmail: jest.fn() },
 }))
 
+// Fuera de producción sólo sale a la lista de prueba (`testAllowlist`); esta prueba es de otra cosa, así que no estorba.
+// La lista misma se prueba en landing.listaDePrueba.test.ts, sin este mock.
+jest.mock('@/services/crm/email/testAllowlist', () => ({ puedeMandarFueraDeProduccion: () => true }))
+
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() },

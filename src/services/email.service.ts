@@ -56,6 +56,17 @@ interface EmailOptions {
  */
 export interface EmailOptionsWithSender extends EmailOptions {
   from?: string
+  /**
+   * La última pregunta antes de llamar a Resend, sin nada asíncrono en medio: si devuelve un código, no se manda y vuelve
+   * como fallo transitorio con ese código. Las campañas del CRM la usan para la pausa del cupo (`resendQuota.ts`): una
+   * respuesta del login que cruce el 80 mientras este método esperaba ya no deja salir la campaña.
+   */
+  antesDeMandar?: () => string | null
+  /**
+   * A dónde responde quien contesta el correo. Las campañas de plataforma salen de `novedades@novedades.avoqado.io`, un
+   * buzón que nadie lee, y piden las respuestas en `hola@avoqado.io`. Sin él no viaja nada: el payload queda como antes.
+   */
+  replyTo?: string
   tags?: Array<{ name: string; value: string }>
 }
 
@@ -507,6 +518,7 @@ class EmailService {
         html: options.html || undefined,
         text: options.text || 'Please view this email in an HTML-compatible email client.',
         ...(options.headers && { headers: options.headers }),
+        ...(options.replyTo && { replyTo: options.replyTo }),
         ...(options.tags?.length && { tags: options.tags }),
         ...(options.attachments?.length && {
           attachments: options.attachments.map(a => ({
@@ -517,6 +529,8 @@ class EmailService {
         }),
       }
 
+      const frenado = options.antesDeMandar?.()
+      if (frenado) return { ok: false, transient: true, errorCode: frenado }
       const result = await resend.emails.send(emailPayload, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined)
 
       if (result.error) {
