@@ -641,6 +641,30 @@ describe('linkInvoice — anexar a una fecha sin pagar', () => {
       expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
     })
 
+    it('🔴 pagada SIN timbrar (la fecha ya es MANUAL y el cobro sigue AUTOMATIC): anexar con el mismo total no escribe la fecha pero SÍ alinea el cobro; quitar y «Deshacer» dejan los dos en MANUAL (Codex r3, hallazgo 2)', async () => {
+      mundo.occ.totalCents = TOTALES_A19.totalCents
+      await payOccurrence('occ-1', { invoice: false }, 'staff-1', AHORA) // pagar sin timbrar vuelve manual la FECHA; el cobro no se toca
+      expect(mundo.occ.invoiceMode).toBe('MANUAL')
+      expect(mundo.charge.invoiceMode).toBe('AUTOMATIC')
+      prismaMock.platformChargeOccurrence.update.mockClear()
+
+      await anexar()
+
+      expect(prismaMock.platformChargeOccurrence.update).not.toHaveBeenCalled() // la fecha no cambió: no hay nada que escribirle
+      expect(prismaMock.platformCharge.update).toHaveBeenCalledWith({
+        where: { id: 'cobro-1' },
+        data: { concepts: CONCEPTOS_DEL_COBRO, invoiceMode: 'MANUAL' },
+      })
+      expect(mundo.charge.invoiceMode).toBe('MANUAL')
+
+      await unlinkInvoice('occ-1', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)
+      await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(mundo.occ).toMatchObject({ status: 'PENDING', invoiceMode: 'MANUAL' }) // «Deshacer» devuelve el modo del COBRO, que ya es MANUAL
+      expect(mundo.charge.invoiceMode).toBe('MANUAL')
+      expect(mundo.charge.concepts).toEqual(mundo.occ.concepts)
+    })
+
     it('una anexada que se rechaza no deja el cobro a medias: no se escribe nada', async () => {
       mundo.cfdis = [factura({ discountCents: 100 })]
 

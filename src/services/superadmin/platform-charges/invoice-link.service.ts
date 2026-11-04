@@ -224,12 +224,13 @@ export async function attachInvoiceInTx(
 
   // AUTOMATIC y NONE pasan a MANUAL: deshacer el vínculo no debe timbrar solo ni esconder «Facturar».
   const data: Prisma.PlatformChargeOccurrenceUpdateInput = occurrence.invoiceMode === 'MANUAL' ? photo : { ...photo, invoiceMode: 'MANUAL' }
-  if (Object.keys(data).length === 0) return occurrence
-  const updated = await tx.platformChargeOccurrence.update({ where: { id: occurrence.id }, data })
+  // Sin nada que escribirle a la fecha (ya MANUAL y sin foto) no se escribe, pero se sigue: el cobro de una sola vez puede decir otra cosa.
+  const updated =
+    Object.keys(data).length === 0 ? occurrence : await tx.platformChargeOccurrence.update({ where: { id: occurrence.id }, data })
 
-  // 🔴 Un cobro de UNA SOLA VEZ y su única fecha dicen lo mismo: el editor carga los conceptos del cobro, y si se quedaran en lo anterior, guardar sólo
-  // otra fecha mostraría un monto distinto del que está pendiente. Quitar no cambia nada: la fecha y el cobro ya quedaron iguales. Un cobro recurrente
-  // sí conserva lo suyo: el vínculo es de esa fecha.
+  // 🔴 Un cobro de UNA SOLA VEZ y su única fecha dicen lo mismo: el editor carga los conceptos y el modo del cobro, y si se quedaran en lo anterior, guardar
+  // sólo otra fecha mostraría un monto distinto del pendiente, y «Deshacer» devolvería a la fecha el modo viejo. Quitar no cambia nada: la fecha y el cobro
+  // ya quedaron iguales. Un cobro recurrente sí conserva lo suyo: el vínculo es de esa fecha.
   if (
     charge.frequency === 'ONE_TIME' &&
     (updated.invoiceMode !== charge.invoiceMode || JSON.stringify(updated.concepts) !== JSON.stringify(charge.concepts))

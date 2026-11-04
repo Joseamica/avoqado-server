@@ -936,7 +936,10 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
     })
 
     const updated = await prisma.$transaction(async tx => {
-      const rep = await tx.platformCfdi.update({
+      // Primero el padre y después el complemento: el mismo orden que la reserva. Al revés, la confirmación (que retiene al complemento) y un reintento con
+      // la misma llave (que retiene al padre y espera al complemento por la llave repetida) se esperarían en cruz, y Postgres abortaría una.
+      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: amountCents } } })
+      return tx.platformCfdi.update({
         where: { id: row.id },
         data: {
           status: 'STAMPED',
@@ -947,8 +950,6 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
           stampedAt: stamped.stampedAt,
         },
       })
-      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: amountCents } } })
-      return rep
     })
     return updated
   } catch (err) {

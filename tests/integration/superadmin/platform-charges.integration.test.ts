@@ -3247,4 +3247,124 @@ describe('16 · auditoría r2 de anexar: confirmar el importe, quitar la factura
       expect(intacto.concepts).toEqual([RENTA, LICENCIA])
     })
   })
+
+  describe('6 · la confirmación de un complemento y su reintento con la MISMA llave no se esperan en cruz (Codex r3, hallazgo 1)', () => {
+    it('la confirmación a media transacción con su primer UPDATE hecho, y el reintento detrás: uno espera al otro, nadie se aborta, el complemento queda STAMPED y el padre suma UNA vez', async () => {
+      const padre = await nuevaFactura({ metodoPago: 'PPD' })
+      const entrada = pagoDe(padre.id) // la misma llave para las dos peticiones
+      const original = prisma.$transaction.bind(prisma) as (...a: unknown[]) => Promise<unknown>
+      const soltarReintento = diferido<void>()
+      const llegoElReintento = diferido<void>()
+      const soltarConfirmacion = diferido<void>()
+      const pidDeLaConfirmacion = diferido<number>()
+      let vistas = 0
+      // Sólo la prueba espía `prisma.$transaction` (nada en producción): 1 = la reserva del REINTENTO, que se detiene ANTES de empezar (ya pasó su
+      // consulta de «¿ya existe esa llave?»); 2 = la reserva de la confirmación; 3 = su confirmación después del PAC, que se detiene DESPUÉS de su primer UPDATE.
+      const espia = jest.spyOn(prisma, '$transaction').mockImplementation((async (arg: unknown, opciones?: Record<string, unknown>) => {
+        if (typeof arg !== 'function') return original(arg, opciones)
+        vistas += 1
+        const abiertas = { ...(opciones ?? {}), timeout: 60_000, maxWait: 60_000 }
+        if (vistas === 1) {
+          llegoElReintento.resolver()
+          await soltarReintento.promesa
+          return original(arg, abiertas)
+        }
+        if (vistas !== 3) return original(arg, abiertas)
+        const cuerpo = arg as (tx: any) => Promise<unknown>
+        return original(async (tx: any) => {
+          let escrituras = 0
+          const modelo = new Proxy(tx.platformCfdi, {
+            get(destino, nombre) {
+              const valor = destino[nombre]
+              if (nombre !== 'update') return typeof valor === 'function' ? valor.bind(destino) : valor
+              return async (...args: unknown[]) => {
+                const resultado = await destino.update(...args)
+                escrituras += 1
+                if (escrituras === 1) {
+                  const [{ pid }] = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`
+                  pidDeLaConfirmacion.resolver(Number(pid))
+                  await soltarConfirmacion.promesa
+                }
+                return resultado
+              }
+            },
+          })
+          return cuerpo(new Proxy(tx, { get: (destino, nombre) => (nombre === 'platformCfdi' ? modelo : destino[nombre]) }))
+        }, abiertas)
+      }) as never)
+
+      let resultados: PromiseSettledResult<unknown>[] = []
+      try {
+        const reintento = registerPlatformPayment(entrada)
+        reintento.catch(() => undefined)
+        await aTiempo(llegoElReintento.promesa, 60_000, 'el reintento leyó todo y está por reservar')
+
+        const confirmacion = registerPlatformPayment(entrada)
+        confirmacion.catch(() => undefined)
+        const pid = await aTiempo(
+          pidDeLaConfirmacion.promesa,
+          60_000,
+          'la confirmación timbró y quedó a media transacción, con su primer UPDATE hecho',
+        )
+
+        soltarReintento.resolver()
+        // El reintento llegó a su reserva y alguien lo bloquea: la confirmación (con el padre tomado, o con el complemento tomado si el orden fuera el otro).
+        const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /(UPDATE|INSERT) .*"PlatformCfdi"/, ms: 60_000 })
+        expect(espera).not.toBeNull() // el cruce SE PROVOCÓ
+        expect(espera!.waitEventType).toBe('Lock')
+        soltarConfirmacion.resolver()
+
+        resultados = await aTiempo(
+          Promise.allSettled([confirmacion, reintento]),
+          90_000,
+          'las dos peticiones terminaron (o Postgres abortó una)',
+        )
+      } finally {
+        soltarReintento.resolver()
+        soltarConfirmacion.resolver()
+        espia.mockRestore()
+      }
+
+      const [confirmada, reintentada] = resultados as [
+        PromiseSettledResult<{ id: string; status: string }>,
+        PromiseSettledResult<{ id: string; status: string }>,
+      ]
+      expect([confirmada.status, reintentada.status]).toEqual(['fulfilled', 'fulfilled']) // con el orden cruzado, Postgres aborta una (deadlock)
+      expect((confirmada as PromiseFulfilledResult<{ id: string; status: string }>).value.status).toBe('STAMPED')
+      expect((reintentada as PromiseFulfilledResult<{ id: string; status: string }>).value.id).toBe(
+        (confirmada as PromiseFulfilledResult<{ id: string; status: string }>).value.id,
+      ) // el reintento devuelve la fila que ya existe
+
+      const filas = await prisma.platformCfdi.findMany({ where: { idempotencyKey: entrada.idempotencyKey }, take: 5 })
+      creado.cfdis.push(...filas.map(f => f.id))
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ type: 'PAGO', status: 'STAMPED', parentPlatformCfdiId: padre.id })
+      expect(filas[0].uuid).not.toBeNull()
+      expect((await facturaDe(padre.id)).amountPaidCents).toBe(TOTAL) // el padre suma UNA vez, aunque el PAC sí timbró
+      expect((pac as unknown as { createPaymentComplement: jest.Mock }).createPaymentComplement).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('7 · una sola vez pagado SIN timbrar: anexar, quitar y «Deshacer» no reviven el modo anterior (Codex r3, hallazgo 2)', () => {
+    it('la fecha ya es MANUAL y el cobro AUTOMATIC: anexar una factura del MISMO total alinea el cobro; tras quitar y deshacer, los dos siguen en MANUAL', async () => {
+      const cobro = await nuevoCobro({ frequency: 'ONE_TIME', anchorDate: '2026-11-02', invoiceMode: 'AUTOMATIC' })
+      const fecha = await porFecha(cobro.id, '2026-11-02')
+      const factura = await nuevaFactura() // [RENTA, LICENCIA]: el mismo total que la fecha
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+      expect((await porFecha(cobro.id, '2026-11-02')).invoiceMode).toBe('MANUAL')
+      expect((await getCharge(cobro.id)).invoiceMode).toBe('AUTOMATIC')
+
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      expect((await getCharge(cobro.id)).invoiceMode).toBe('MANUAL') // la fecha no cambió, y aun así el cobro se alineó
+
+      await unlinkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      await reopenOccurrence(fecha.id, superId, NOW)
+
+      const fechaFinal = await porFecha(cobro.id, '2026-11-02')
+      const cobroFinal = await getCharge(cobro.id)
+      expect(fechaFinal).toMatchObject({ status: 'PENDING', invoiceMode: 'MANUAL', totalCents: TOTAL })
+      expect(cobroFinal.invoiceMode).toBe('MANUAL') // el editor y la fecha dicen lo mismo
+      expect(cobroFinal.concepts).toEqual(fechaFinal.concepts)
+    })
+  })
 })

@@ -526,6 +526,8 @@ describe('platformCfdi.service', () => {
             eventos.push('tocar al padre')
             return vinculo
           }
+          if (args.data.amountPaidCents) eventos.push('sumar al padre')
+          if (args.data.status === 'STAMPED') eventos.push('marcar el complemento')
           return { id: args.where.id, ...args.data }
         })
         prismaMock.$transaction.mockImplementation(async (callback: any) => {
@@ -597,6 +599,26 @@ describe('platformCfdi.service', () => {
           select: { platformChargeOccurrenceId: true, chargeLinkedAt: true },
         })
         expect(eventos.slice(0, 5)).toEqual(['tx:inicio', 'tocar al padre', 'reservar el complemento', 'tx:fin', 'PAC'])
+      })
+
+      it('🔴 la confirmación (después del PAC) toma primero al padre y luego al complemento, en UNA transacción: el mismo orden que la reserva (Codex r3, hallazgo 1)', async () => {
+        // Reserva: padre → complemento. Si la confirmación fuera complemento → padre, dos peticiones con la misma llave se esperarían en cruz
+        // (la confirmación retiene al complemento y espera al padre; el reintento retiene al padre y espera al complemento por la llave repetida).
+        preparar({ platformChargeOccurrenceId: null, chargeLinkedAt: null }, null)
+
+        await registerPlatformPayment({ ...baseInput, idempotencyKey: 'orden-confirmacion' })
+
+        expect(eventos).toEqual([
+          'tx:inicio',
+          'tocar al padre',
+          'reservar el complemento',
+          'tx:fin',
+          'PAC',
+          'tx:inicio',
+          'sumar al padre',
+          'marcar el complemento',
+          'tx:fin',
+        ])
       })
 
       it('la reserva sigue siendo idéntica: la misma fila STAMPING con su llave y su paymentInfo', async () => {
