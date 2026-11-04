@@ -148,6 +148,28 @@ describe('el aviso del día', () => {
     expect(p.campanasPausadasPorCupo()).toBe(false)
   })
 
+  it('con el reloj de aquí atrasado unos segundos, la lectura de Resend del día nuevo SÍ pausa (un solo reloj: el de Resend)', async () => {
+    // Aquí son las 23:59:50 del 3-nov; Resend ya va en el 4-nov y dice 80.
+    jest.setSystemTime(new Date('2026-11-03T23:59:50.000Z'))
+    const p = cargar()
+    await mandar(p.fetch, respuesta(200, { 'x-resend-daily-quota': '80', date: 'Wed, 04 Nov 2026 00:00:20 GMT' }))
+    expect(p.campanasPausadasPorCupo()).toBe(true)
+    expect(p.campanasPausadasPorCupo(new Date('2026-11-04T23:59:59.999Z'))).toBe(true)
+    expect(p.campanasPausadasPorCupo(new Date('2026-11-05T00:00:00.000Z'))).toBe(false)
+  })
+
+  it('con el reloj de aquí atrasado, un 429 de cupo del día nuevo tampoco intenta el correo del aviso', async () => {
+    jest.setSystemTime(new Date('2026-11-03T23:59:50.000Z'))
+    const p = cargar()
+    await mandar(
+      p.fetch,
+      respuesta(429, { 'x-resend-daily-quota': '100', date: 'Wed, 04 Nov 2026 00:00:20 GMT' }, { name: 'daily_quota_exceeded' }),
+    )
+    expect(p.campanasPausadasPorCupo()).toBe(true)
+    expect(mockSendEmail).not.toHaveBeenCalled()
+    expect(fila?.exhaustedAlertDay).toBe('2026-11-04')
+  })
+
   it('otro día vuelve a avisar; la pausa de ayer no pasa a hoy', async () => {
     const p = cargar()
     await mandar(p.fetch, conCupo(80))

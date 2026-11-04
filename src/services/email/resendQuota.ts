@@ -8,7 +8,8 @@
  * global: los cuatro clientes de Resend del servidor pasan por él.
  *
  *  - 🔴 El día es el de Resend: UTC. Su cupo diario se reinicia a la medianoche UTC, las 18:00 de Ciudad de México (no hay
- *    horario de verano desde 2022). El mes, el mes UTC (Resend no publica cuándo reinicia el suyo).
+ *    horario de verano desde 2022). El mes, el mes UTC (Resend no publica cuándo reinicia el suyo). Se lee con la hora de Resend
+ *    (cabecera `Date`), y la pausa se guarda como un INSTANTE, no como un día: un reloj de aquí desfasado no la salta.
  *  - Al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` (lo ve Better Stack) y un correo a
  *    jose@avoqado.io con una llave por aviso. La fila `EmailQuotaAlert` se ANOTA después del log y del correo: si el proceso
  *    muere antes, el siguiente vuelve a avisar y la llave hace que Resend no lo mande dos veces. Con el cupo agotado el
@@ -50,10 +51,13 @@ export const reinicioDelCupoDiario = (ahora: Date) =>
   new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), ahora.getUTCDate() + 1))
 
 // ── Lo que este proceso ya vio ──
-/** Lo más alto que Resend dijo en el día y en el mes. */
-let visto = { dia: '', usadoDia: 0, mes: '', usadoMes: 0 }
-/** El día en que Resend contestó «se acabó el cupo» (del día o del mes). */
-let agotadoDia = ''
+/**
+ * 🔴 Hasta qué INSTANTE se pausan las campañas, y hasta cuál se sabe agotado el cupo: la medianoche UTC siguiente a la hora de la
+ * respuesta de Resend (su cabecera `Date`) que vio el 80 % del día o un 429 de cupo. Un instante y no un día: así no importa que
+ * el reloj de aquí y el de Resend difieran unos segundos al cruzar la medianoche. Sólo crecen.
+ */
+let pausaHasta = 0
+let agotadoHasta = 0
 /**
  * El último aviso de cada tipo en este proceso: su clave y desde cuándo se puede reintentar. `Infinity` = en vuelo o ya dado
  * (el correo del aviso, que también pasa por aquí, no avisa otra vez); un correo que no salió deja `ahora + REINTENTO_MS`.
@@ -93,12 +97,11 @@ const cuotaDiaria = () => cuota('RESEND_DAILY_QUOTA', CUOTA_DIARIA)
 const cuotaMensual = () => cuota('RESEND_MONTHLY_QUOTA', CUOTA_MENSUAL)
 
 /**
- * ¿Se pausan HOY (día de Resend, UTC) las campañas del CRM? Sí si hoy Resend ya dijo 80 % o más del día, o si hoy contestó «se
- * acabó el cupo» (del día o del mes). Sólo mira la memoria: nunca toca la red ni la base.
+ * ¿Están pausadas las campañas del CRM? Sí hasta la medianoche UTC del día de Resend en que dijo 80 % o más del día, o
+ * contestó «se acabó el cupo» (del día o del mes). Sólo mira la memoria: nunca toca la red ni la base.
  */
 export function campanasPausadasPorCupo(ahora = new Date()): boolean {
-  const hoy = diaDe(ahora)
-  return (visto.dia === hoy && visto.usadoDia >= umbral(cuotaDiaria())) || agotadoDia === hoy
+  return ahora.getTime() < pausaHasta
 }
 
 /** Envuelve el `fetch` global UNA vez (idempotente). */
@@ -146,34 +149,36 @@ async function errorDeCupo(respuesta: Response): Promise<ErrorDeCupo | undefined
 }
 
 /**
- * El día en que Resend contó: su cabecera `Date`. Una respuesta de las 23:59:59 UTC que llega pasada la medianoche es del día
+ * La hora en que Resend contó: su cabecera `Date`. Una respuesta de las 23:59:59 UTC que llega pasada la medianoche es del día
  * viejo; contarla en el nuevo pausaría las campañas todo el día con el cupo ya renovado. Sin cabecera, la hora de aquí.
  */
-function diaDeLaRespuesta(respuesta: Response): string {
+function horaDeLaRespuesta(respuesta: Response): Date {
   const fecha = new Date(respuesta.headers.get('date') ?? '')
-  return diaDe(Number.isNaN(fecha.getTime()) ? new Date() : fecha)
+  return Number.isNaN(fecha.getTime()) ? new Date() : fecha
 }
 
 async function medir(input: unknown, respuesta: Response): Promise<void> {
   if (hostDe(input) !== HOST) return
-  const hoy = diaDeLaRespuesta(respuesta)
+  const hora = horaDeLaRespuesta(respuesta)
+  const hoy = diaDe(hora)
   const mes = hoy.slice(0, 7)
+  const reinicio = reinicioDelCupoDiario(hora).getTime()
   const diario = numero(respuesta.headers.get('x-resend-daily-quota'))
   const mensual = numero(respuesta.headers.get('x-resend-monthly-quota'))
   // Se espera ANTES de devolver la respuesta: así la pausa ya está puesta cuando el remitente pregunta por el siguiente correo.
   const agotado = respuesta.status === 429 ? await errorDeCupo(respuesta) : undefined
 
-  // Una respuesta de un día ya pasado (llegó tarde) no se mezcla con el día que ya se está viendo.
+  // Una lectura de un día ya pasado (llegó tarde) da un reinicio ya pasado: no pausa nada.
   if (diario !== null) {
-    if (hoy >= visto.dia) visto = { ...visto, dia: hoy, usadoDia: visto.dia === hoy ? Math.max(visto.usadoDia, diario) : diario }
+    if (diario >= umbral(cuotaDiaria())) pausaHasta = Math.max(pausaHasta, reinicio)
   } else if (respuesta.ok && !dijoDePago) {
     dijoDePago = true
     logger.info('[Resend] La respuesta no trae x-resend-daily-quota: la cuenta es de pago, sin pausa diaria de campañas')
   }
-  if (mensual !== null && mes >= visto.mes) {
-    visto = { ...visto, mes, usadoMes: visto.mes === mes ? Math.max(visto.usadoMes, mensual) : mensual }
+  if (agotado) {
+    pausaHasta = Math.max(pausaHasta, reinicio)
+    agotadoHasta = Math.max(agotadoHasta, reinicio)
   }
-  if (agotado && hoy >= agotadoDia) agotadoDia = hoy
 
   // Los avisos no detienen el correo que los disparó: corren aparte y nunca lanzan.
   if (agotado && tocaIntentar('agotado', hoy)) {
@@ -265,7 +270,7 @@ async function avisar(
     logueado[tipo] = clave
     logger.error(`[Resend] ${aviso.asunto}`, aviso.datos)
   }
-  if (agotadoDia !== diaDe(new Date()) && puedeMandarFueraDeProduccion(AVISAR_A)) {
+  if (Date.now() >= agotadoHasta && puedeMandarFueraDeProduccion(AVISAR_A)) {
     let salio = false
     try {
       salio = await emailService.sendEmail({

@@ -77,10 +77,11 @@ CRM_GMAIL_TOKEN_KEY=
 
 Seguimos en el plan gratis: 100 correos al día y 3,000 al mes para TODO el servidor (login, recibos, avisos y campañas; cuentan también los
 recibidos). 🔴 El día de Resend es UTC: su cupo diario se reinicia a la medianoche UTC, **las 18:00 de CDMX** (su documentación, «account
-quotas and limits»). Todo lo del cupo cuenta ese día; el tope de las campañas (`CRM_CAMPAIGN_DAILY_CAP`) sigue contando el de CDMX.
-`instalarMedidorDeCupoResend()` (en `server.ts`, también en `DEMO_MODE`) envuelve el `fetch` global porque el SDK 6.3.0 tira las cabeceras:
-lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respuesta de `api.resend.com`, y el `name` de un 429 (`daily_quota_exceeded` /
-`monthly_quota_exceeded`). Nunca cambia ni frena un correo, y nunca lanza.
+quotas and limits»). Todo lo del cupo cuenta ese día, leído con la hora de Resend (su cabecera `Date`); la pausa se guarda como un instante
+(la medianoche UTC siguiente), así un reloj de aquí desfasado no la salta. El tope de las campañas (`CRM_CAMPAIGN_DAILY_CAP`) sigue contando
+el de CDMX. `instalarMedidorDeCupoResend()` (en `server.ts`, también en `DEMO_MODE`) envuelve el `fetch` global porque el SDK 6.3.0 tira las
+cabeceras: lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respuesta de `api.resend.com`, y el `name` de un 429
+(`daily_quota_exceeded` / `monthly_quota_exceeded`). Nunca cambia ni frena un correo, y nunca lanza.
 
 - **Aviso** al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` (una vez por clave en el proceso) y un correo a
   jose@avoqado.io (fuera de producción, sólo si está en `CRM_CORREO_PRUEBAS`) con la llave `cupo-resend-<tipo>-<día o mes>`. 🔴 Asunto y
