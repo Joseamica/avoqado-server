@@ -82,15 +82,18 @@ quotas and limits»). Todo lo del cupo cuenta ese día; el tope de las campañas
 lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respuesta de `api.resend.com`, y el `name` de un 429 (`daily_quota_exceeded` /
 `monthly_quota_exceeded`). Nunca cambia ni frena un correo, y nunca lanza.
 
-- **Aviso** al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` y un correo a jose@avoqado.io (fuera de
-  producción, sólo si está en `CRM_CORREO_PRUEBAS`) con la llave `cupo-resend-<tipo>-<día o mes>`. Se lee la fila `EmailQuotaAlert`
+- **Aviso** al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` (una vez por clave en el proceso) y un correo a
+  jose@avoqado.io (fuera de producción, sólo si está en `CRM_CORREO_PRUEBAS`) con la llave `cupo-resend-<tipo>-<día o mes>`. 🔴 Asunto y
+  cuerpo llevan el umbral, nunca el número del momento: la misma llave con otro contenido da 409 en Resend. Se lee la fila `EmailQuotaAlert`
   (`id = 'resend'`) antes y se ANOTA después del log y del correo: si el proceso muere en medio, el siguiente vuelve a avisar y Resend no
-  repite el correo por su llave (24 h). Un correo que no salió no se anota.
+  repite el correo (24 h). Un correo que no salió se reintenta con la siguiente respuesta pasados 10 min. Con el cupo agotado no se intenta
+  el correo (no puede salir): queda el log y se anota.
 - **Pausa, sólo de las campañas del CRM**, con 80 en el día o un 429 de cupo (también el del mes: Resend no publica cuándo reinicia el mes,
-  así que al día siguiente sale un correo de prueba y, si vuelve el 429, se pausa otra vez): el remitente no reclama, revisa la pausa otra
-  vez justo antes de cada envío, y lo reclamado que ya no salió vuelve a la cola **sin gastar un intento**, con `nextAttemptAt` en
-  `reinicioDelCupoDiario` (un primer intento vuelve PENDIENTE y suelta su lugar del día; un reintento conserva su `sendAttemptAt`). El
-  detalle de la campaña y `crm_campaign_status` lo dicen con `pausadaPorCupo`. El login y los recibos nunca se pausan.
+  así que al día siguiente sale un correo de prueba y, si vuelve el 429, se pausa otra vez): el remitente no reclama, vuelve a preguntar
+  justo antes de Resend (`antesDeMandar` de `sendEmailWithResult`, sin `await` en medio), y lo reclamado que ya no salió vuelve a la cola
+  **sin gastar un intento**, con `nextAttemptAt` en `reinicioDelCupoDiario` (un primer intento vuelve PENDIENTE y suelta su lugar del día;
+  un reintento conserva su `sendAttemptAt`). El detalle de la campaña y `crm_campaign_status` lo dicen con `pausadaPorCupo`. El login y los
+  recibos nunca se pausan.
 - Sin `x-resend-daily-quota` en una respuesta exitosa, la cuenta ya es de pago: se dice una vez y no hay pausa diaria. Al subir de plan, pon
   `RESEND_MONTHLY_QUOTA` (y `RESEND_DAILY_QUOTA` si aplica), o el aviso del mes saldría al 80 % de 3,000.
 - La pausa vive en la memoria del proceso: tras un reinicio se rearma con la primera respuesta de Resend.
