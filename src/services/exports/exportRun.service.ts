@@ -79,8 +79,7 @@ const defaults: DepsExportRun = {
   // Las mismas dos reglas que `createNotification` (`notification.dashboard.service.ts:85-96`), leídas ANTES de gastar un intento.
   campanitaSegunPreferencia: async (staffId, venueId) => {
     const p = await getUserNotificationPreferences(staffId, venueId, 'EXPORT_READY')
-    if (!p.enabled) return 'apagada'
-    return isInQuietHours(p.quietStart || undefined, p.quietEnd || undefined) ? 'silencio' : 'mandar'
+    return campanitaDesdePreferencia(p, isInQuietHours(p.quietStart || undefined, p.quietEnd || undefined))
   },
   enviarCorreo: (to, data) => emailService.sendExportResultEmail(to, data),
   // El enlace abre el DASHBOARD (pide sesión y permiso); nunca una liga de Storage.
@@ -126,6 +125,18 @@ function estable(v: unknown): unknown {
 }
 
 /** Identidad del pedido: la MISMA sucursal, exporte, formato, columnas y filtros (Codex r1 #2: sin sucursal, A y B se mezclaban). */
+/**
+ * Codex código r1 P2: el DASHBOARD apaga el canal «Web» guardando `channels` sin IN_APP con `enabled: true`; eso también
+ * apaga la campanita. Sin canales guardados, el default de la preferencia es IN_APP.
+ */
+export function campanitaDesdePreferencia(
+  p: { enabled: boolean; channels?: NotificationChannel[] | null },
+  enSilencio: boolean,
+): 'mandar' | 'apagada' | 'silencio' {
+  if (!p.enabled || (Array.isArray(p.channels) && !p.channels.includes(NotificationChannel.IN_APP))) return 'apagada'
+  return enSilencio ? 'silencio' : 'mandar'
+}
+
 export function huellaDe(i: { venueId: string; kind: string; formato: string; columnas: string[]; filtros: unknown }): string {
   return createHash('sha256')
     .update(JSON.stringify(estable({ ...i, columnas: [...i.columnas].sort() })))

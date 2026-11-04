@@ -110,8 +110,10 @@ export async function pedirExporte(req: Request, res: Response, next: NextFuncti
     const body = (req.body ?? {}) as { format?: unknown; columns?: unknown; filters?: unknown }
     if (body.format !== 'csv' && body.format !== 'xlsx') throw new BadRequestError('format debe ser csv o xlsx')
     // Sólo ids conocidos, en el orden pedido y sin repetir: se guardan en la fila y en la huella del pedido.
+    // Codex código r1 P1: lineal con Set (indexOf por elemento era cuadrático: 40k basura retenían el hilo ~2 s).
+    const conocidas = new Set(exp.columnas.map(c => c.id))
     const columnas = Array.isArray(body.columns)
-      ? body.columns.filter((c, i, a): c is string => typeof c === 'string' && a.indexOf(c) === i && exp.columnas.some(x => x.id === c))
+      ? [...new Set(body.columns.filter((c): c is string => typeof c === 'string' && conocidas.has(c)))]
       : exp.columnas.map(c => c.id)
     if (columnas.length === 0) throw new BadRequestError('No valid columns requested for export')
     await responderPedido(req, res, exp, { formato: body.format, columnas, filtrosCrudos: body.filters })

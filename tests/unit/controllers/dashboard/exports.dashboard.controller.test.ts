@@ -117,6 +117,15 @@ describe('exports.dashboard.controller', () => {
     expect(r.statusCode).toBe(202)
     expect((exportRunService.pedir as jest.Mock).mock.calls[0][0].columnas).toEqual(['paymentId'])
   })
+  it('🔴 40,000 columnas basura no retienen el hilo: filtrar es lineal (Codex código r1 P1)', async () => {
+    ;(exportRunService.pedir as jest.Mock).mockResolvedValue({ tipo: 'encolado', runId: 'run5', formato: 'csv', reutilizado: false })
+    const basura = Array.from({ length: 40_000 }, (_, i) => `x${i}`)
+    const r = res()
+    const t0 = performance.now()
+    await pedirExporte(req({ body: { format: 'csv', columns: [...basura, 'paymentId'], filters: filtros } }), r, jest.fn())
+    expect(performance.now() - t0).toBeLessThan(200) // cuadrático tardaba ~2 s
+    expect((exportRunService.pedir as jest.Mock).mock.calls[0][0].columnas).toEqual(['paymentId'])
+  })
   it('formato pdf ⇒ 400', async () => {
     const next = jest.fn()
     await pedirExporte(req({ body: { format: 'pdf', columns: ['paymentId'], filters: filtros } }), res(), next)

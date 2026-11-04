@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream'
-import { crearExportRunService, huellaDe, ESPERA_MAX_POR_MEMORIA_MS } from '@/services/exports/exportRun.service'
+import { crearExportRunService, huellaDe, ESPERA_MAX_POR_MEMORIA_MS, campanitaDesdePreferencia } from '@/services/exports/exportRun.service'
 import { fakeExportador, fakeLibro, fakePrisma } from './fakes'
 
 const DIA = 24 * 3600 * 1000
@@ -81,6 +81,19 @@ async function armar(ctx: ReturnType<typeof montar>, p: any = pedido) {
   await ctx.svc.procesar(r.runId, reclamo!.attempt)
   return r.runId as string
 }
+
+describe('campanita según la preferencia (Codex código r1 P2)', () => {
+  it('🔴 apagar el canal «Web» (channels sin IN_APP, enabled: true) apaga la campanita', () => {
+    expect(campanitaDesdePreferencia({ enabled: true, channels: [] }, false)).toBe('apagada')
+    expect(campanitaDesdePreferencia({ enabled: true, channels: ['EMAIL'] as any }, false)).toBe('apagada')
+  })
+  it('apagada del todo, en silencio, o con IN_APP', () => {
+    expect(campanitaDesdePreferencia({ enabled: false, channels: ['IN_APP'] as any }, false)).toBe('apagada')
+    expect(campanitaDesdePreferencia({ enabled: true, channels: ['IN_APP'] as any }, true)).toBe('silencio')
+    expect(campanitaDesdePreferencia({ enabled: true, channels: ['IN_APP', 'EMAIL'] as any }, false)).toBe('mandar')
+    expect(campanitaDesdePreferencia({ enabled: true }, false)).toBe('mandar') // sin canales guardados: el default es IN_APP
+  })
+})
 
 describe('exportRunService — pedir', () => {
   it('chico ⇒ directo, sin pedido', async () => {
