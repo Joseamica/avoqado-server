@@ -456,6 +456,15 @@ describe('runDailyDigest', () => {
     exportar: false,
     ventas: false,
     admin,
+    // Un admin de antes, como lo deja la migración de las llaves finas (L2): las 3 de administración y las 4 de correo.
+    cerrar: false,
+    bajas: admin,
+    plantillas: admin,
+    preparar: admin,
+    mandar: admin,
+    verCampanas: admin,
+    equipo: admin,
+    configurar: admin,
   })
 
   beforeEach(() => {

@@ -14,9 +14,27 @@ const cuid = z.string({ required_error: 'Falta el id' }).cuid('El id no es váli
 const name = (missing: string) =>
   z.string({ required_error: missing, invalid_type_error: missing }).trim().min(1, missing).max(100, 'Máximo 100 caracteres')
 
-/** A person's seven CRM keys, all of them every time: the screen sends the whole set, never a partial one. */
+/**
+ * A person's 13 CRM keys (plan 2026-11-04), all of them every time: the screen sends the whole set, never a partial one.
+ * Sin `campanas` ni `admin`: sólo los manda la pantalla vieja, y la rechaza `assertFormaNuevaDeLlaves` (409) antes de este
+ * esquema (L10).
+ */
 export const crmKeysSchema = z.object(
-  { ver: scope, editar: scope, contactar: flag, campanas: flag, exportar: flag, ventas: flag, admin: flag },
+  {
+    ver: scope,
+    editar: scope,
+    cerrar: flag,
+    contactar: flag,
+    exportar: flag,
+    ventas: flag,
+    bajas: flag,
+    plantillas: flag,
+    preparar: flag,
+    mandar: flag,
+    verCampanas: flag,
+    equipo: flag,
+    configurar: flag,
+  },
   { required_error: 'Faltan las llaves', invalid_type_error: 'Faltan las llaves' },
 )
 

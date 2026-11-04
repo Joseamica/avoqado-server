@@ -41,6 +41,14 @@ const access = (staffId: string, over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
   ...over,
 })
 

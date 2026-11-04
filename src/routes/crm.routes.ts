@@ -18,6 +18,7 @@ import { autenticacionOpcional } from '../middlewares/autenticacionOpcional.midd
 import { requireCrm } from '../middlewares/requireCrm.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { preserveContext } from '../observability/preserveContext'
+import { assertFormaNuevaDeLlaves } from '../services/crm/teamVenue.service'
 import {
   accountIdSchema,
   addActivitySchema,
@@ -82,8 +83,13 @@ router.get('/me', requireCrm(CRM_KEYS), crmController.getMe)
 
 // «Equipo de ventas»: who holds which key. The guard goes first, so nobody without `crm:admin` learns anything here.
 router.get('/team', admin, validateRequest(listTeamSchema), crmController.listTeam)
-router.post('/team', admin, validateRequest(addTeamMemberSchema), crmController.addTeam)
-router.patch('/team/:id', admin, validateRequest(updateTeamMemberSchema), crmController.updateTeam)
+// L10: la pantalla vieja (manda `campanas`/`admin`) recibe 409 «recarga la página» antes del esquema, sin escribir nada.
+const sinPantallaVieja = (req: Request, _res: Response, next: NextFunction) => {
+  assertFormaNuevaDeLlaves(req.body)
+  next()
+}
+router.post('/team', admin, sinPantallaVieja, validateRequest(addTeamMemberSchema), crmController.addTeam)
+router.patch('/team/:id', admin, sinPantallaVieja, validateRequest(updateTeamMemberSchema), crmController.updateTeam)
 router.delete('/team/:id', admin, validateRequest(removeTeamMemberSchema), crmController.removeTeam)
 // The ficha's owner selector (ruling 13). The service hands the names only to whoever can reassign.
 router.get('/team/options', requireCrm(['crm:admin', 'crm:editar']), crmController.teamOptions)

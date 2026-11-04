@@ -39,6 +39,14 @@ const actor = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: true,
+  preparar: true,
+  mandar: true,
+  verCampanas: true,
+  equipo: false,
+  configurar: false,
   ...over,
 })
 

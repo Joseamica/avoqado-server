@@ -108,6 +108,14 @@ const ADMIN: CrmAccess = {
   exportar: true,
   ventas: true,
   admin: true,
+  cerrar: true,
+  bajas: true,
+  plantillas: true,
+  preparar: true,
+  mandar: true,
+  verCampanas: true,
+  equipo: true,
+  configurar: true,
 }
 
 /** A plausible call of every tool. */
@@ -322,7 +330,8 @@ describe('CRM MCP — access', () => {
 
 describe('crm_delete_account (D7)', () => {
   it('sin «Administrar» se niega y la nombra; un admin del equipo que no es el superadmin, tampoco', async () => {
-    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, admin: false })
+    // «Administrar» son las 3 de administración (plan 2026-11-04): sin ellas, sin la llave.
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, admin: false, equipo: false, configurar: false, bajas: false })
     expect(await setup().call('crm_delete_account', { ...ARGS.crm_delete_account, confirm: true })).toMatchObject({
       ok: false,
       error: expect.stringContaining('crm:admin'),
@@ -1205,8 +1214,23 @@ describe('CRM MCP — email (read only)', () => {
   it('keys: templates open with «Mandar correo», «Campañas masivas» or «Administrar»; campaigns only with the last two', async () => {
     ;(listTemplates as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
     ;(listCampaigns as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
-    const none = { ...ADMIN, contactar: false, campanas: false, admin: false }
-    const only = (key: 'contactar' | 'campanas' | 'admin') => ({ ...none, [key]: true })
+    // Sin ninguna, y cada llave de antes como la deja la migración de las llaves finas (L2): `campanas` = las 4 de correo
+    // masivo; `admin` = esas 4 y las 3 de administración.
+    const correo = { plantillas: true, preparar: true, mandar: true, verCampanas: true }
+    const administracion = { equipo: true, configurar: true, bajas: true }
+    const none = {
+      ...ADMIN,
+      contactar: false,
+      campanas: false,
+      admin: false,
+      ...{ plantillas: false, preparar: false, mandar: false, verCampanas: false, equipo: false, configurar: false, bajas: false },
+    }
+    const only = (key: 'contactar' | 'campanas' | 'admin') =>
+      key === 'contactar'
+        ? { ...none, contactar: true }
+        : key === 'campanas'
+          ? { ...none, campanas: true, ...correo }
+          : { ...none, campanas: true, admin: true, ...correo, ...administracion }
     const reads = async (access: CrmAccess) => {
       ;(getCrmAccess as jest.Mock).mockResolvedValue(access)
       const { call } = setup()

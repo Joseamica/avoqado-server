@@ -14,7 +14,16 @@ import type { CrmKeysInput } from '../../schemas/crm.schema'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { inviteTeamMember } from '../dashboard/team.dashboard.service'
-import { effectiveKeys, getCrmAccess, type CrmAccess, type CrmKeyColumns, type CrmKeys, type CrmScope } from './access.service'
+import {
+  CRM_KEY_SELECT,
+  effectiveKeys,
+  getCrmAccess,
+  legacyFlags,
+  type CrmAccess,
+  type CrmKeyColumns,
+  type CrmKeys,
+  type CrmScope,
+} from './access.service'
 import { moveOpenAccountsTx } from './ownership'
 
 export const CRM_TEAM_VENUE_SLUG = 'avoqado-equipo-ventas'
@@ -194,9 +203,10 @@ export async function addTeamMember(actor: CrmAccess, input: { email: string; fi
 
   const row = await prisma.platformAccess.upsert({
     where: { email },
+    // Un INSERT no pasa por el disparador de L11: no hay versión que subir.
     create: { email, ...keyColumns(input.keys), createdById: actor.staffId },
     // `staffId: null`: the keys go to whoever holds this email NOW; the next verified person to use them claims them.
-    update: { ...keyColumns(input.keys), active: true, staffId: null },
+    update: { ...keyColumns(input.keys), ...SUBE_VERSION, active: true, staffId: null },
   })
 
   // A provisional account (made by an earlier invitation that was never accepted) cannot log in: it gets invited again.
@@ -260,7 +270,8 @@ export async function updateTeamMember(actor: CrmAccess, id: string, keys: CrmKe
   const row = await prisma.platformAccess.findFirst({ where: { id, active: true } })
   if (!row) throw new NotFoundError('Esa persona no está en el equipo de ventas', 'CRM_TEAM_MEMBER_NOT_FOUND')
   const current = effectiveKeys(row)
-  if (expectedKeys && (Object.keys(KEY_OF) as Array<keyof CrmKeys>).some(field => current[field] !== expectedKeys[field]))
+  // Las 13 que se dan (L10): el espejo `campanas`/`admin` no se compara, la pantalla nueva no lo manda.
+  if (expectedKeys && (Object.keys(KEY_OF) as Array<keyof CrmKeysInput>).some(field => current[field] !== expectedKeys[field]))
     throw keysChanged()
   assertKeysGoTogether(keys)
   assertCanGive(actor, row, keys)
@@ -268,21 +279,13 @@ export async function updateTeamMember(actor: CrmAccess, id: string, keys: CrmKe
   const updated = expectedKeys
     ? (
         await prisma.platformAccess.updateManyAndReturn({
-          where: {
-            id,
-            active: true,
-            verScope: row.verScope,
-            editarScope: row.editarScope,
-            contactar: row.contactar,
-            campanas: row.campanas,
-            exportar: row.exportar,
-            ventas: row.ventas,
-            admin: row.admin,
-          },
-          data: keyColumns(keys),
+          // Las 15 columnas de llaves tal como se leyeron: también una escritura de la versión vieja de en medio (que no
+          // sube la versión pero cambia el espejo o apaga las finas) hace fallar el CAS.
+          where: { id, active: true, ...columnasLeidas(row) },
+          data: { ...keyColumns(keys), ...SUBE_VERSION },
         })
       )[0]
-    : await prisma.platformAccess.update({ where: { id }, data: keyColumns(keys) })
+    : await prisma.platformAccess.update({ where: { id }, data: { ...keyColumns(keys), ...SUBE_VERSION } })
   if (!updated) throw keysChanged()
   void logAction({
     staffId: actor.staffId,
@@ -353,20 +356,39 @@ export async function removeTeamMember(actor: CrmAccess, id: string, opts: { rea
   return { id, released }
 }
 
-const KEY_OF: Record<keyof CrmKeys, CrmKey> = {
+const KEY_OF: Record<keyof CrmKeysInput, CrmKey> = {
   ver: 'crm:ver',
   editar: 'crm:editar',
+  cerrar: 'crm:cerrar',
   contactar: 'crm:contactar',
-  campanas: 'crm:campanas',
   exportar: 'crm:exportar',
   ventas: 'crm:ventas',
-  admin: 'crm:admin',
+  bajas: 'crm:bajas',
+  plantillas: 'crm:plantillas',
+  preparar: 'crm:preparar',
+  mandar: 'crm:mandar',
+  verCampanas: 'crm:ver-campanas',
+  equipo: 'crm:equipo',
+  configurar: 'crm:configurar',
 }
-const label = (field: keyof CrmKeys) => `«${CRM_KEY_LABELS[KEY_OF[field]]}»`
+const label = (field: keyof CrmKeysInput) => `«${CRM_KEY_LABELS[KEY_OF[field]]}»`
 
 /**
- * Ruling 9: «Editar», «Mandar correo», «Exportar» and «Ver ventas» only work on top of «Ver negocios», and nobody edits
- * what they cannot see. Saved anyway, they would be keys that do nothing — or a PATCH on accounts the person does not see.
+ * L10: sólo la pantalla VIEJA del SUPERADMIN manda `campanas` o `admin` al escribir llaves (en `keys` o en
+ * `expectedKeys`, de 7 campos o con los 15 que copió de la respuesta); la nueva nunca. No se traduce: se le pide recargar y
+ * no se escribe nada. Va ANTES del esquema, que pide las 13 y le contestaría un 400 sin decir qué hacer.
+ */
+export function assertFormaNuevaDeLlaves(body: unknown): void {
+  const partes =
+    body && typeof body === 'object' ? [(body as Record<string, unknown>).keys, (body as Record<string, unknown>).expectedKeys] : []
+  const vieja = partes.some(parte => !!parte && typeof parte === 'object' && ('campanas' in parte || 'admin' in parte))
+  if (vieja) throw new ConflictError('El editor de llaves cambió. Recarga la página y vuelve a intentarlo.', 'CRM_LLAVES_PANTALLA_VIEJA')
+}
+
+/**
+ * Ruling 9 and L1: «Editar», «Mandar correo», «Exportar» and «Ver ventas» only work on top of «Ver negocios», and nobody
+ * edits what they cannot see; «Cerrar negocios» only on top of «Editar». The mail and admin keys stand alone («Bajas de
+ * correo» too). Saved anyway, they would be keys that do nothing — or a PATCH on accounts the person does not see.
  */
 function assertKeysGoTogether(keys: CrmKeysInput) {
   if (!keys.ver) {
@@ -378,34 +400,82 @@ function assertKeysGoTogether(keys: CrmKeysInput) {
   if (keys.editar === 'todos' && keys.ver === 'propios') {
     throw new ValidationError('«Editar» en todos necesita «Ver negocios» en todos', 'CRM_EDIT_WIDER_THAN_VIEW')
   }
+  if (keys.cerrar && !keys.editar) {
+    throw new ValidationError(`Sin «Editar» no se puede dar: ${label('cerrar')}`, 'CRM_KEY_NEEDS_EDITAR')
+  }
 }
 
 const rank = (scope: CrmScope | null) => (scope === 'todos' ? 2 : scope === 'propios' ? 1 : 0)
 
+/** Lo que cuenta como alcance de cada llave con alcance. «Cerrar negocios» trabaja en el de «Editar» (L12). */
+type ConAlcance = { ver: CrmScope | null; editar: CrmScope | null; cerrar: boolean }
+const ALCANCE = {
+  ver: (keys: ConAlcance) => keys.ver,
+  editar: (keys: ConAlcance) => keys.editar,
+  cerrar: (keys: ConAlcance) => (keys.cerrar ? keys.editar : null),
+} as const
+const SIN_ALCANCE = [
+  'contactar',
+  'exportar',
+  'ventas',
+  'bajas',
+  'plantillas',
+  'preparar',
+  'mandar',
+  'verCampanas',
+  'equipo',
+  'configurar',
+] as const
+
 /**
- * Nobody gives a key they do not hold (spec §5.1, like the venue role editor). Only what the change TURNS ON or WIDENS
- * counts: keeping a key the person already had is not giving it, so an admin can still edit someone with more keys. A
- * key stored without «Ver negocios» never worked, so waking it up counts as giving it (`effectiveKeys`).
+ * Nobody gives a key they do not hold (spec §5.1, like the venue role editor; L12 for the 8 new ones). Only what the change
+ * TURNS ON or WIDENS counts: keeping a key the person already had is not giving it, so an admin can still edit someone with
+ * more keys. A key stored without the key it needs never worked, so waking it up counts as giving it (`effectiveKeys`).
+ * Widening only «Editar» of someone who already closes widens «Cerrar negocios» too, and counts as giving it.
  */
 function assertCanGive(actor: CrmAccess, current: CrmKeyColumns | null, next: CrmKeysInput) {
   const had = current ? effectiveKeys(current) : null
   const given: string[] = []
-  for (const field of ['ver', 'editar'] as const) {
-    if (rank(next[field]) > rank(had?.[field] ?? null) && rank(next[field]) > rank(actor[field]))
-      given.push(`${label(field)} en ${next[field]}`)
+  for (const field of Object.keys(ALCANCE) as Array<keyof typeof ALCANCE>) {
+    const scope = ALCANCE[field](next)
+    if (rank(scope) > rank(had ? ALCANCE[field](had) : null) && rank(scope) > rank(ALCANCE[field](actor)))
+      given.push(`${label(field)} en ${scope}`)
   }
-  for (const field of ['contactar', 'campanas', 'exportar', 'ventas', 'admin'] as const) {
+  for (const field of SIN_ALCANCE) {
     if (next[field] && !had?.[field] && !actor[field]) given.push(label(field))
   }
   if (given.length) throw new ForbiddenError(`No puedes dar llaves que tú no tienes: ${given.join(', ')}`, 'CRM_KEY_ESCALATION')
 }
 
-const keyColumns = (keys: CrmKeysInput): CrmKeyColumns => ({
-  verScope: keys.ver,
-  editarScope: keys.editar,
-  contactar: keys.contactar,
-  campanas: keys.campanas,
-  exportar: keys.exportar,
-  ventas: keys.ventas,
-  admin: keys.admin,
-})
+/**
+ * L11: el código nuevo sube `llavesVersion` en cada escritura que debe conservar las finas; el disparador de la base apaga
+ * las 8 en todo UPDATE que no la sube (lo que escribe la versión vieja).
+ */
+const SUBE_VERSION = { llavesVersion: { increment: 1 } } as const
+
+/** Las 15 columnas de llaves de una fila tal como se leyó, para el compare-and-set. */
+const columnasLeidas = (row: CrmKeyColumns): CrmKeyColumns => {
+  const columnas = {} as Record<keyof CrmKeyColumns, CrmKeyColumns[keyof CrmKeyColumns]>
+  for (const columna of Object.keys(CRM_KEY_SELECT) as Array<keyof CrmKeyColumns>) columnas[columna] = row[columna]
+  return columnas as CrmKeyColumns
+}
+
+/** Las 13 tal como llegaron, más el espejo `campanas`/`admin` de L11 (falla cerrado) para la versión vieja. */
+const keyColumns = (keys: CrmKeysInput): CrmKeyColumns => {
+  const columns = {
+    verScope: keys.ver,
+    editarScope: keys.editar,
+    cerrar: keys.cerrar,
+    contactar: keys.contactar,
+    exportar: keys.exportar,
+    ventas: keys.ventas,
+    bajas: keys.bajas,
+    plantillas: keys.plantillas,
+    preparar: keys.preparar,
+    mandar: keys.mandar,
+    verCampanas: keys.verCampanas,
+    equipo: keys.equipo,
+    configurar: keys.configurar,
+  }
+  return { ...columns, ...legacyFlags(effectiveKeys({ ...columns, campanas: false, admin: false })) }
+}

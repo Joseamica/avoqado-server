@@ -109,6 +109,14 @@ describe('contadores de las campañas', () => {
       exportar: true,
       ventas: true,
       admin: true,
+      cerrar: true,
+      bajas: true,
+      plantillas: true,
+      preparar: true,
+      mandar: true,
+      verCampanas: true,
+      equipo: true,
+      configurar: true,
     })
     const handlers: Record<string, (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>> = {}
     const server = { tool: (name: string, _d: string, _s: unknown, handler: (typeof handlers)[string]) => void (handlers[name] = handler) }
@@ -167,6 +175,14 @@ describe('pausadaPorCupo — la campaña espera al cupo de Resend', () => {
       exportar: true,
       ventas: true,
       admin: true,
+      cerrar: true,
+      bajas: true,
+      plantillas: true,
+      preparar: true,
+      mandar: true,
+      verCampanas: true,
+      equipo: true,
+      configurar: true,
     })
     prismaMock.crmCampaign.findUnique.mockResolvedValue(fila(CAMP_A, TOTAL_A) as never)
     prismaMock.crmCampaign.findMany.mockResolvedValue([fila(CAMP_A, TOTAL_A)] as never)

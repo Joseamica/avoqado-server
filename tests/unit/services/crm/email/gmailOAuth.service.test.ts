@@ -91,6 +91,14 @@ const seller = {
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
 }
 
 /** Lo que contesta Google cuando la persona marcó las dos casillas. */

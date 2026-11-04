@@ -19,17 +19,30 @@ export interface CrmAccess {
   isSuperadmin: boolean
   ver: CrmScope | null
   editar: CrmScope | null
+  /** «Cerrar negocios»: ganar, perder y reabrir. Sólo con «Editar», y en su alcance (L1). */
+  cerrar: boolean
   contactar: boolean
-  campanas: boolean
   exportar: boolean
   ventas: boolean
-  admin: boolean
+  /** «Bajas de correo». Va sola (L1). */
+  bajas: boolean
+  plantillas: boolean
+  preparar: boolean
+  mandar: boolean
+  /** «Ver campañas». También la traen «Preparar campañas» y «Mandar campañas» (L1). */
+  verCampanas: boolean
+  equipo: boolean
+  configurar: boolean
+  /** Espejo de L11 para la pantalla vieja: tiene las 4 de correo masivo. Sólo se lee; nunca autoriza nada. */
+  readonly campanas: boolean
+  /** Espejo de L11 para la pantalla vieja: tiene las 3 de administración Y las 4 de correo masivo. Sólo se lee. */
+  readonly admin: boolean
 }
 
-/** A person's seven keys, without who holds them. */
+/** A person's keys, without who holds them: las 13 que se dan, más el espejo `campanas`/`admin`. */
 export type CrmKeys = Omit<CrmAccess, 'staffId' | 'isSuperadmin'>
 
-/** The key columns of a `PlatformAccess` row. */
+/** The key columns of a `PlatformAccess` row. `campanas` y `admin` son el espejo para la versión vieja: no se leen aquí. */
 export interface CrmKeyColumns {
   verScope: string | null
   editarScope: string | null
@@ -38,26 +51,77 @@ export interface CrmKeyColumns {
   exportar: boolean
   ventas: boolean
   admin: boolean
+  plantillas: boolean
+  preparar: boolean
+  mandar: boolean
+  verCampanas: boolean
+  equipo: boolean
+  configurar: boolean
+  bajas: boolean
+  cerrar: boolean
+}
+
+/** Las columnas de llaves que se leen de `PlatformAccess` (las 15, espejo incluido). */
+export const CRM_KEY_SELECT = {
+  verScope: true,
+  editarScope: true,
+  contactar: true,
+  campanas: true,
+  exportar: true,
+  ventas: true,
+  admin: true,
+  plantillas: true,
+  preparar: true,
+  mandar: true,
+  verCampanas: true,
+  equipo: true,
+  configurar: true,
+  bajas: true,
+  cerrar: true,
+} as const satisfies Record<keyof CrmKeyColumns, true>
+
+type LlavesSueltas = Pick<CrmKeys, 'plantillas' | 'preparar' | 'mandar' | 'verCampanas' | 'equipo' | 'configurar' | 'bajas'>
+
+/**
+ * El espejo de L11 para la versión vieja (columnas `campanas`/`admin`, y los campos del mismo nombre de `/crm/me` y
+ * `/crm/team`). Falla cerrado: `campanas` sólo con las 4 de correo masivo; `admin` sólo con las 3 de administración Y las
+ * 4 de correo, porque el `admin` viejo también entraba a campañas.
+ */
+export function legacyFlags(keys: LlavesSueltas): { campanas: boolean; admin: boolean } {
+  const campanas = keys.plantillas && keys.preparar && keys.mandar && keys.verCampanas
+  return { campanas, admin: campanas && keys.equipo && keys.configurar && keys.bajas }
 }
 
 /** A stored scope the code does not know counts as no key: fail closed. */
 const asScope = (value: string | null): CrmScope | null => (value === 'propios' || value === 'todos' ? value : null)
 
 /**
- * What a row really grants, like `getEffectiveRolePermissions` for venue roles: `editar`, `contactar`, `exportar` and
- * `ventas` only count on top of `ver`, so a row with `contactar` and no `ver` comes back with `contactar: false`. The
- * guard, the scope filter, the console and the «who may give which key» check all read this one answer.
+ * What a row really grants, like `getEffectiveRolePermissions` for venue roles (L1): `editar`, `contactar`, `exportar` and
+ * `ventas` only count on top of `ver`, and `cerrar` on top of `editar`; `preparar` and `mandar` bring `verCampanas`; the rest
+ * stand alone. Las columnas viejas `campanas`/`admin` no se leen: el espejo sale de las finas (sin reconciliar al leer,
+ * L11). The guard, the scope filter, the console and the «who may give which key» check all read this one answer.
  */
 export function effectiveKeys(row: CrmKeyColumns): CrmKeys {
   const ver = asScope(row.verScope)
+  const editar = ver ? asScope(row.editarScope) : null
+  const sueltas: LlavesSueltas = {
+    plantillas: row.plantillas,
+    preparar: row.preparar,
+    mandar: row.mandar,
+    verCampanas: row.verCampanas || row.preparar || row.mandar,
+    equipo: row.equipo,
+    configurar: row.configurar,
+    bajas: row.bajas,
+  }
   return {
     ver,
-    editar: ver ? asScope(row.editarScope) : null,
+    editar,
+    cerrar: !!editar && row.cerrar,
     contactar: !!ver && row.contactar,
-    campanas: row.campanas,
     exportar: !!ver && row.exportar,
     ventas: !!ver && row.ventas,
-    admin: row.admin,
+    ...sueltas,
+    ...legacyFlags(sueltas),
   }
 }
 
@@ -75,10 +139,18 @@ export async function getCrmAccess(staffId: string): Promise<CrmAccess | null> {
       isSuperadmin: true,
       ver: 'todos',
       editar: 'todos',
+      cerrar: true,
       contactar: true,
-      campanas: true,
       exportar: true,
       ventas: true,
+      bajas: true,
+      plantillas: true,
+      preparar: true,
+      mandar: true,
+      verCampanas: true,
+      equipo: true,
+      configurar: true,
+      campanas: true,
       admin: true,
     }
   }
@@ -86,17 +158,7 @@ export async function getCrmAccess(staffId: string): Promise<CrmAccess | null> {
   const row = await prisma.platformAccess.findUnique({
     // PlatformAccess.email is always stored lowercase; Staff.email may carry the capitals the person typed.
     where: { email: staff.email.toLowerCase(), active: true },
-    select: {
-      id: true,
-      staffId: true,
-      verScope: true,
-      editarScope: true,
-      contactar: true,
-      campanas: true,
-      exportar: true,
-      ventas: true,
-      admin: true,
-    },
+    select: { id: true, staffId: true, ...CRM_KEY_SELECT },
   })
   if (!row || !(await holdsRow(row, staffId, staff.emailVerified))) return null
 
@@ -114,10 +176,11 @@ async function holdsRow(row: { id: string; staffId: string | null }, staffId: st
   if (!emailVerified) return false
   try {
     // Compare-and-set: two people can never both claim the row. Matching our own id too keeps it idempotent when the same
-    // person's first two requests race.
+    // person's first two requests race. `llavesVersion` sube (L11): sin eso, el disparador de la base apagaría las finas,
+    // como hace con el reclamo de la versión vieja. Las dos pestañas del mismo primer acceso la suben cada una.
     const { count } = await prisma.platformAccess.updateMany({
       where: { id: row.id, active: true, OR: [{ staffId: null }, { staffId }] },
-      data: { staffId },
+      data: { staffId, llavesVersion: { increment: 1 } },
     })
     return count === 1
   } catch (error) {
@@ -134,7 +197,11 @@ async function holdsRow(row: { id: string; staffId: string | null }, staffId: st
   }
 }
 
-/** Whether `access` holds `key`. `access` already carries the dependency rule (see `getCrmAccess`). */
+/**
+ * Whether `access` holds `key`. `access` already carries the dependency rule (see `getCrmAccess`). `crm:campanas` y
+ * `crm:admin` ya no los pide ninguna ruta nueva, pero nunca se quitan: «cualquiera de las 4 de correo masivo» y «las 3 de
+ * administración» (Global Constraints del plan 2026-11-04).
+ */
 export function hasCrmKey(access: CrmAccess, key: CrmKey): boolean {
   switch (key) {
     case 'crm:ver':
@@ -144,13 +211,29 @@ export function hasCrmKey(access: CrmAccess, key: CrmKey): boolean {
     case 'crm:contactar':
       return access.contactar
     case 'crm:campanas':
-      return access.campanas
+      return access.plantillas || access.preparar || access.mandar || access.verCampanas
     case 'crm:exportar':
       return access.exportar
     case 'crm:ventas':
       return access.ventas
     case 'crm:admin':
-      return access.admin
+      return access.equipo && access.configurar && access.bajas
+    case 'crm:plantillas':
+      return access.plantillas
+    case 'crm:preparar':
+      return access.preparar
+    case 'crm:mandar':
+      return access.mandar
+    case 'crm:ver-campanas':
+      return access.verCampanas
+    case 'crm:equipo':
+      return access.equipo
+    case 'crm:configurar':
+      return access.configurar
+    case 'crm:bajas':
+      return access.bajas
+    case 'crm:cerrar':
+      return access.cerrar
   }
 }
 

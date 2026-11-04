@@ -606,6 +606,14 @@ describe('landing → CRM against Postgres', () => {
         exportar: false,
         ventas: false,
         admin: false,
+        cerrar: false,
+        bajas: false,
+        plantillas: false,
+        preparar: false,
+        mandar: false,
+        verCampanas: false,
+        equipo: false,
+        configurar: false,
       }
 
       await Promise.allSettled([win(seller, prospect.id, { organizationId: organization.id }), applyEntry(entry!.entryId)])

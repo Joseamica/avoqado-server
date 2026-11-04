@@ -52,7 +52,29 @@ describe('crm team routes', () => {
     expect(asked).toEqual([
       // Google's return from «Conectar mi Gmail» (task 7): the ONE route without a key, on purpose — see the next test.
       { route: 'GET /gmail/callback', keys: [] },
-      { route: 'GET /me', keys: [['crm:ver', 'crm:editar', 'crm:contactar', 'crm:campanas', 'crm:exportar', 'crm:ventas', 'crm:admin']] },
+      // Cualquier llave abre «/me», también las 8 finas (plan 2026-11-04): quien sólo tiene «Plantillas» entra.
+      {
+        route: 'GET /me',
+        keys: [
+          [
+            'crm:ver',
+            'crm:editar',
+            'crm:contactar',
+            'crm:campanas',
+            'crm:exportar',
+            'crm:ventas',
+            'crm:admin',
+            'crm:plantillas',
+            'crm:preparar',
+            'crm:mandar',
+            'crm:ver-campanas',
+            'crm:equipo',
+            'crm:configurar',
+            'crm:bajas',
+            'crm:cerrar',
+          ],
+        ],
+      },
       { route: 'GET /pending', keys: ver },
       // An admin without «Ver negocios» still edits the stages and the reasons.
       { route: 'GET /stages', keys: [['crm:ver', 'crm:admin']] },

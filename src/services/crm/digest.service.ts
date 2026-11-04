@@ -9,7 +9,7 @@ import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import emailService from '../email.service'
-import { effectiveKeys, getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
+import { CRM_KEY_SELECT, effectiveKeys, getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
 import { getPending, type Pending, type PendingSection } from './accounts.service'
 import { bloqueoPorReputacion } from './email/optOut.service'
 import { puedeMandarFueraDeProduccion } from './email/testAllowlist'
@@ -48,17 +48,7 @@ const frenadoPorReputacion = (email: string) => bloqueoPorReputacion(email)
 async function team(key: 'ver' | 'editar'): Promise<Recipient[]> {
   const rows = await prisma.platformAccess.findMany({
     where: { active: true, verScope: { not: null }, ...(key === 'editar' ? { editarScope: { not: null } } : {}) },
-    select: {
-      email: true,
-      staffId: true,
-      verScope: true,
-      editarScope: true,
-      contactar: true,
-      campanas: true,
-      exportar: true,
-      ventas: true,
-      admin: true,
-    },
+    select: { email: true, staffId: true, ...CRM_KEY_SELECT },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: TEAM_CAP,
   })
