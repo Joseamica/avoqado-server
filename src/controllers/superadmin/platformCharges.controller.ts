@@ -34,12 +34,34 @@ export async function getSummary(_req: Request, res: Response, next: NextFunctio
   }
 }
 
-/** GET /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&page=&pageSize= */
+/** Los filtros de la lista y de los grupos, ya validados por zod: sólo los que existen, nada más de lo que llegue por la URL. */
+function occurrenceFiltersOf(req: Request): occurrencesService.OccurrenceFilters {
+  const { view, q, frequency, invoice, customerType, from, to, customer } = req.query as occurrencesService.OccurrenceFilters
+  return { view, q, frequency, invoice, customerType, from, to, customer }
+}
+
+/** GET /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&frequency=&invoice=&customerType=&from=&to=&customer=&page=&pageSize= */
 export async function listOccurrences(req: Request, res: Response, next: NextFunction) {
   try {
-    const { view, q, page, pageSize } = req.query as occurrencesService.ListOccurrencesFilters
-    const result = await occurrencesService.listOccurrences({ view, q, page, pageSize })
-    res.json({ success: true, data: result.rows, meta: { total: result.total, page: result.page, pageSize: result.pageSize } })
+    const { page, pageSize } = req.query as occurrencesService.ListOccurrencesFilters
+    const result = await occurrencesService.listOccurrences({ ...occurrenceFiltersOf(req), page, pageSize })
+    res.json({
+      success: true,
+      data: result.rows,
+      // `sumCents`: lo que suman TODOS los cobros del filtro (no sólo esta página).
+      meta: { total: result.total, page: result.page, pageSize: result.pageSize, sumCents: result.sumCents },
+    })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** GET /api/v1/superadmin/platform-charges/occurrences/groups?groupBy=customer|month|frequency|invoice&…los mismos filtros */
+export async function groupOccurrences(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { groupBy } = req.query as { groupBy: occurrencesService.OccurrenceGroupBy }
+    const result = await occurrencesService.groupOccurrences(occurrenceFiltersOf(req), groupBy)
+    res.json({ success: true, data: result.groups, meta: { groupBy, truncated: result.truncated } })
   } catch (error) {
     handleBillingError(error, res, next)
   }

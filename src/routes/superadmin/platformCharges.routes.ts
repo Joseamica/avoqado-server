@@ -4,6 +4,7 @@ import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as controller from '@/controllers/superadmin/platformCharges.controller'
 import {
   createChargeSchema,
+  groupOccurrencesSchema,
   invoiceOccurrenceSchema,
   linkInvoiceSchema,
   listChargesSchema,
@@ -24,7 +25,8 @@ import {
  * `/summary`, `/occurrences…` e `/invoice-candidates` van ANTES de `/:id`.
  *
  *   GET   /api/v1/superadmin/platform-charges/summary
- *   GET   /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&page=&pageSize=
+ *   GET   /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&frequency=&invoice=&customerType=&from=&to=&customer=&page=&pageSize=
+ *   GET   /api/v1/superadmin/platform-charges/occurrences/groups?groupBy=customer|month|frequency|invoice&…los mismos filtros
  *   GET   /api/v1/superadmin/platform-charges/occurrences/:id/pay-preview
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/pay        { invoice }
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/skip
@@ -45,6 +47,12 @@ const router = Router()
 // Pantalla: tarjetas y filas
 router.get('/summary', checkPermission('platform-billing:view'), controller.getSummary)
 router.get('/occurrences', validateRequest(listOccurrencesSchema), checkPermission('platform-billing:view'), controller.listOccurrences)
+router.get(
+  '/occurrences/groups',
+  validateRequest(groupOccurrencesSchema),
+  checkPermission('platform-billing:view'),
+  controller.groupOccurrences,
+)
 router.get('/occurrences/:id/pay-preview', checkPermission('platform-billing:view'), controller.getPayPreview)
 router.post(
   '/occurrences/:id/pay',

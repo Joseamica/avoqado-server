@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import {
   createChargeSchema,
+  groupOccurrencesSchema,
   invoiceOccurrenceSchema,
   linkInvoiceSchema,
   listChargesSchema,
@@ -280,6 +281,120 @@ describe('platformCharges.schemas — lo que entra por la URL', () => {
   })
 })
 
+describe('platformCharges.schemas — filtros y grupos de la lista', () => {
+  /** Lo que sale de zod para la URL, o `null` si no pasó. */
+  const consulta = (schema: { safeParse: (x: unknown) => any }, q: unknown) => {
+    const r = schema.safeParse(query(q))
+    return r.success ? (r.data.query as Record<string, unknown>) : null
+  }
+
+  it('sin filtros nada cambia: la salida no trae llaves de más', () => {
+    expect(consulta(listOccurrencesSchema, {})).toEqual({})
+    expect(consulta(listOccurrencesSchema, { view: 'paid', q: 'luna' })).toEqual({ view: 'paid', q: 'luna' })
+  })
+
+  it('🔴 los filtros de varios valores aceptan UN formato por parámetro repetido o separado por comas, y salen siempre como arreglo sin repetidos', () => {
+    const esperado = { frequency: ['WEEKLY', 'MONTHLY'] }
+
+    expect(consulta(listOccurrencesSchema, { frequency: ['WEEKLY', 'MONTHLY'] })).toEqual(esperado) // frequency=WEEKLY&frequency=MONTHLY
+    expect(consulta(listOccurrencesSchema, { frequency: 'WEEKLY,MONTHLY' })).toEqual(esperado) // frequency=WEEKLY,MONTHLY
+    expect(consulta(listOccurrencesSchema, { frequency: ['WEEKLY,MONTHLY', 'WEEKLY'] })).toEqual(esperado) // mezclados y repetidos
+    expect(consulta(listOccurrencesSchema, { frequency: ' WEEKLY , MONTHLY ' })).toEqual(esperado) // con espacios
+    expect(consulta(listOccurrencesSchema, { frequency: 'ONE_TIME' })).toEqual({ frequency: ['ONE_TIME'] }) // uno solo
+  })
+
+  it('los tres filtros de varios valores: periodicidad, factura y tipo de cliente', () => {
+    expect(
+      consulta(listOccurrencesSchema, {
+        frequency: 'WEEKLY',
+        invoice: 'STAMPED,PROBLEM,PENDING,NONE',
+        customerType: ['ORGANIZATION', 'VENUE,STANDALONE'],
+      }),
+    ).toEqual({
+      frequency: ['WEEKLY'],
+      invoice: ['STAMPED', 'PROBLEM', 'PENDING', 'NONE'],
+      customerType: ['ORGANIZATION', 'VENUE', 'STANDALONE'],
+    })
+  })
+
+  it('un valor vacío (el filtro sin elegir) es «sin filtro»: un arreglo vacío, no un error', () => {
+    expect(consulta(listOccurrencesSchema, { frequency: '', invoice: [''], customerType: ',' })).toEqual({
+      frequency: [],
+      invoice: [],
+      customerType: [],
+    })
+  })
+
+  it('un valor que no existe se rechaza en español, con el valor bueno y el malo mezclados también', () => {
+    expect(errores(listOccurrencesSchema, query({ frequency: 'DIARIO' }))).toEqual([
+      'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME',
+    ])
+    expect(errores(listOccurrencesSchema, query({ frequency: 'WEEKLY,DIARIO' }))).toEqual([
+      'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME',
+    ])
+    expect(errores(listOccurrencesSchema, query({ invoice: 'FACTURADO' }))).toEqual([
+      'El estado de la factura debe ser STAMPED, PROBLEM, PENDING o NONE',
+    ])
+    expect(errores(listOccurrencesSchema, query({ customerType: 'NADIE' }))).toEqual([
+      'El tipo de cliente debe ser ORGANIZATION, VENUE o STANDALONE',
+    ])
+  })
+
+  it('fechas AAAA-MM-DD y el nombre exacto del cliente (recortado, con tope); la validez del día y el orden son del servicio', () => {
+    expect(consulta(listOccurrencesSchema, { from: '2026-11-01', to: '2026-11-30', customer: '  Café Ana  ' })).toEqual({
+      from: '2026-11-01',
+      to: '2026-11-30',
+      customer: 'Café Ana',
+    })
+    expect(errores(listOccurrencesSchema, query({ from: '01/11/2026' }))).toEqual(['La fecha debe tener el formato AAAA-MM-DD'])
+    expect(errores(listOccurrencesSchema, query({ to: '2026-11-01T00:00:00Z' }))).toEqual(['La fecha debe tener el formato AAAA-MM-DD'])
+    expect(errores(listOccurrencesSchema, query({ customer: 'x'.repeat(121) }))).toEqual(['El nombre del cliente es demasiado largo'])
+    // Una fecha con la forma correcta pero que no existe, o «desde» después de «hasta», pasa la FORMA: el servicio responde 400.
+    expect(errores(listOccurrencesSchema, query({ from: '2026-02-30' }))).toEqual([])
+    expect(errores(listOccurrencesSchema, query({ from: '2026-11-10', to: '2026-11-09' }))).toEqual([])
+  })
+
+  it('agrupar: groupBy es obligatorio y uno de cuatro; acepta los mismos filtros y la vista, y no recibe página', () => {
+    expect(errores(groupOccurrencesSchema, query({}))).toEqual(['Elige cómo agrupar: customer, month, frequency o invoice'])
+    expect(errores(groupOccurrencesSchema, query({ groupBy: 'cliente' }))).toEqual([
+      'Elige cómo agrupar: customer, month, frequency o invoice',
+    ])
+    for (const groupBy of ['customer', 'month', 'frequency', 'invoice'])
+      expect(errores(groupOccurrencesSchema, query({ groupBy }))).toEqual([])
+
+    expect(
+      consulta(groupOccurrencesSchema, {
+        groupBy: 'month',
+        view: 'paid',
+        q: 'luna',
+        frequency: 'MONTHLY',
+        invoice: ['PENDING', 'NONE'],
+        customerType: 'ORGANIZATION',
+        from: '2026-11-01',
+        to: '2026-11-30',
+        customer: 'Café Ana',
+        page: '3',
+        pageSize: '10',
+      }),
+    ).toEqual({
+      groupBy: 'month',
+      view: 'paid',
+      q: 'luna',
+      frequency: ['MONTHLY'],
+      invoice: ['PENDING', 'NONE'],
+      customerType: ['ORGANIZATION'],
+      from: '2026-11-01',
+      to: '2026-11-30',
+      customer: 'Café Ana',
+    }) // page y pageSize se descartan: un grupo no se pagina
+  })
+
+  it('las candidatas y las demás listas no cambian: no traen estos filtros', () => {
+    expect(consulta(listChargesSchema, { frequency: 'WEEKLY', from: '2026-11-01' })).toEqual({})
+    expect(consulta(listInvoiceCandidatesSchema, { frequency: 'WEEKLY' })).toEqual({})
+  })
+})
+
 describe('platformCharges.schemas — anexar una factura', () => {
   it('anexar pide cuál factura, con mensaje en español; lo demás del cuerpo se descarta', () => {
     expect(errores(linkInvoiceSchema, body({}))).toEqual(['Elige la factura que vas a anexar'])
@@ -339,6 +454,7 @@ describe('platformCharges.routes — permisos y orden', () => {
       [
         'GET /summary',
         'GET /occurrences',
+        'GET /occurrences/groups',
         'GET /occurrences/:id/pay-preview',
         'POST /occurrences/:id/pay',
         'POST /occurrences/:id/skip',
@@ -372,6 +488,15 @@ describe('platformCharges.routes — permisos y orden', () => {
     expect(una('POST', '/occurrences/:id/invoice-link').bloque).toContain('validateRequest(linkInvoiceSchema)')
     expect(una('GET', '/invoice-candidates').bloque).toContain('validateRequest(listInvoiceCandidatesSchema)')
     expect(una('DELETE', '/occurrences/:id/invoice-link').bloque).not.toContain('validateRequest(')
+  })
+
+  it('los grupos validan su consulta y se registran ANTES de cualquier /occurrences/:id', () => {
+    const grupos = rutas.findIndex(r => r.metodo === 'GET' && r.ruta === '/occurrences/groups')
+    const primeraDeUnaFecha = rutas.findIndex(r => /^\/occurrences\/:id/.test(r.ruta))
+
+    expect(grupos).toBeGreaterThan(-1)
+    expect(rutas[grupos].bloque).toContain('validateRequest(groupOccurrencesSchema)')
+    expect(grupos).toBeLessThan(primeraDeUnaFecha)
   })
 
   it('leer un cobro (GET /:id) no recibe cuerpo ni consulta: no valida nada, sólo pide platform-billing:view', () => {

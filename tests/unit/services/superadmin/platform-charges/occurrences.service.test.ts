@@ -15,8 +15,12 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { PlatformBillingError } from '@/services/superadmin/platform-billing/platformEmisor.service'
 import { findProfileId, invoiceOccurrence, resolverIntento } from '@/services/superadmin/platform-charges/invoice.service'
 import {
+  groupOccurrences,
+  invoiceCategoryWhere,
   invoiceOccurrenceView,
   listOccurrences,
+  MAX_GROUP_ROWS,
+  occurrenceWhere,
   payOccurrence,
   payPreview,
   reopenOccurrence,
@@ -1139,12 +1143,12 @@ describe('platform-charges/occurrences — listOccurrences', () => {
 
   beforeEach(() => {
     findMany().mockResolvedValue([])
-    prismaMock.platformChargeOccurrence.count.mockResolvedValue(0)
+    prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { totalCents: null } })
   })
 
   it('«open»: sólo las PENDING, de la más próxima a la más lejana con el id de desempate, y cada fila con su bucket del día de CDMX', async () => {
     findMany().mockResolvedValue([fila('2026-10-30'), fila('2026-11-02'), fila('2026-11-05')])
-    prismaMock.platformChargeOccurrence.count.mockResolvedValue(3)
+    prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { totalCents: null } })
 
     const r = await listOccurrences({ view: 'open' }, AHORA)
 
@@ -1224,15 +1228,19 @@ describe('platform-charges/occurrences — listOccurrences', () => {
     expect(r.page).toBe(1)
   })
 
-  it('el total sale de un count con EL MISMO filtro (el de la búsqueda también), no del largo de la página', async () => {
+  it('el total sale de un aggregate con EL MISMO filtro (el de la búsqueda también), no del largo de la página', async () => {
     findMany().mockResolvedValue([fila('2026-11-05')])
-    prismaMock.platformChargeOccurrence.count.mockResolvedValue(137)
+    prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 137 }, _sum: { totalCents: 1 } })
 
     const r = await listOccurrences({ view: 'open', q: 'luna', page: 2, pageSize: 1 }, AHORA)
 
     expect(r.rows).toHaveLength(1)
     expect(r.total).toBe(137)
-    expect(prismaMock.platformChargeOccurrence.count).toHaveBeenCalledWith({ where: llamada().where })
+    expect(prismaMock.platformChargeOccurrence.aggregate).toHaveBeenCalledWith({
+      where: llamada().where,
+      _count: { _all: true },
+      _sum: { totalCents: true },
+    })
   })
 
   it('«q» filtra por el nombre del cliente en la base (sin importar mayúsculas), con el texto recortado', async () => {
@@ -1482,5 +1490,527 @@ describe('platform-charges/occurrences — invoiceOccurrenceView (POST /occurren
     mockInvoice.mockRejectedValue(new ConflictError('El SAT la sigue procesando; consulta el estado en unos minutos'))
 
     await expect(invoiceOccurrenceView('occ-1', { actorId: 'staff-1' }, AHORA)).rejects.toBeInstanceOf(ConflictError)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/occurrences — 🔴 filtros: UN armador de where para la lista, la suma y los grupos (NEW)', () => {
+  // Qué NO prueba un doble en memoria: que Prisma y Postgres entiendan estos filtros de relación (`some`/`none`) ni que el plan de consulta sea bueno
+  // con muchos datos (eso es de la integración contra Postgres y de EXPLAIN). Aquí se prueba la lógica: qué `where` se arma y que las cuatro
+  // categorías de factura no se traslapen ni dejen a nadie fuera, evaluando el `where` contra filas en memoria.
+  const dia = calendarDayToDb
+
+  describe('cada filtro arma su where', () => {
+    it('sin filtros: sólo el estado de la vista (como siempre)', () => {
+      expect(occurrenceWhere({})).toEqual({ status: 'PENDING' })
+      expect(occurrenceWhere({ view: 'paid' })).toEqual({ status: 'PAID' })
+    })
+
+    it('periodicidad y tipo de cliente: varios valores con `in`, sobre el cobro; un arreglo vacío no filtra', () => {
+      expect(occurrenceWhere({ frequency: ['WEEKLY', 'MONTHLY'] })).toEqual({
+        status: 'PENDING',
+        charge: { frequency: { in: ['WEEKLY', 'MONTHLY'] } },
+      })
+      expect(occurrenceWhere({ customerType: ['VENUE'] })).toEqual({ status: 'PENDING', charge: { customerType: { in: ['VENUE'] } } })
+      expect(occurrenceWhere({ frequency: [], customerType: [], invoice: [] })).toEqual({ status: 'PENDING' })
+    })
+
+    it('«q» (contiene, sin mayúsculas), periodicidad y tipo de cliente comparten el mismo filtro del cobro', () => {
+      expect(occurrenceWhere({ q: ' luna ', frequency: ['ONE_TIME'], customerType: ['ORGANIZATION'] })).toEqual({
+        status: 'PENDING',
+        charge: {
+          customerName: { contains: 'luna', mode: 'insensitive' },
+          frequency: { in: ['ONE_TIME'] },
+          customerType: { in: ['ORGANIZATION'] },
+        },
+      })
+    })
+
+    it('«customer» es el nombre EXACTO (sin «contiene» ni mayúsculas distintas) y se suma a «q» sin pisarla', () => {
+      expect(occurrenceWhere({ customer: 'Café Ana' })).toEqual({ status: 'PENDING', AND: [{ charge: { customerName: 'Café Ana' } }] })
+      expect(occurrenceWhere({ q: 'caf', customer: 'Café Ana' })).toEqual({
+        status: 'PENDING',
+        charge: { customerName: { contains: 'caf', mode: 'insensitive' } },
+        AND: [{ charge: { customerName: 'Café Ana' } }],
+      })
+      expect(occurrenceWhere({ customer: '   ' })).toEqual({ status: 'PENDING' })
+    })
+
+    it('fechas: días de calendario sobre la fecha de cobro, los dos extremos incluidos (columna @db.Date, sin zona)', () => {
+      expect(occurrenceWhere({ from: '2026-11-01', to: '2026-11-30' })).toEqual({
+        status: 'PENDING',
+        dueDate: { gte: dia('2026-11-01'), lte: dia('2026-11-30') },
+      })
+      expect(occurrenceWhere({ from: '2026-11-01' })).toEqual({ status: 'PENDING', dueDate: { gte: dia('2026-11-01') } })
+      expect(occurrenceWhere({ to: '2026-11-30' })).toEqual({ status: 'PENDING', dueDate: { lte: dia('2026-11-30') } })
+      expect(occurrenceWhere({ from: '2026-11-05', to: '2026-11-05' })).toEqual({
+        status: 'PENDING',
+        dueDate: { gte: dia('2026-11-05'), lte: dia('2026-11-05') },
+      })
+    })
+
+    it.each([
+      ['«from» después de «to»', { from: '2026-11-10', to: '2026-11-09' }, 'PLATFORM_CHARGE_INVALID_DATE_RANGE'],
+      ['un día que no existe', { from: '2026-02-30' }, 'PLATFORM_CHARGE_INVALID_DATE'],
+      ['un instante en vez de un día', { to: '2026-11-01T00:00:00Z' }, 'PLATFORM_CHARGE_INVALID_DATE'],
+    ])('%s: 400 y sin tocar la base', async (_caso, filtros, codigo) => {
+      const error = (await listOccurrences(filtros, AHORA).catch((e: unknown) => e)) as BadRequestError
+
+      expect(error).toBeInstanceOf(BadRequestError)
+      expect(error.statusCode).toBe(400)
+      expect(error.code).toBe(codigo)
+      expect(prismaMock.platformChargeOccurrence.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.platformChargeOccurrence.aggregate).not.toHaveBeenCalled()
+      expect(() => occurrenceWhere(filtros)).toThrow(BadRequestError)
+    })
+
+    it('una vista que no existe es 400 también aquí (los grupos usan el mismo armador)', () => {
+      expect(() => occurrenceWhere({ view: 'todo' as never })).toThrow(BadRequestError)
+    })
+
+    it('«factura» con varios valores se une con OR de las categorías', () => {
+      expect(occurrenceWhere({ invoice: ['STAMPED', 'PROBLEM'] })).toEqual({
+        status: 'PENDING',
+        AND: [{ OR: [invoiceCategoryWhere('STAMPED'), invoiceCategoryWhere('PROBLEM')] }],
+      })
+      expect(occurrenceWhere({ invoice: ['NONE'] })).toEqual({ status: 'PENDING', AND: [{ OR: [invoiceCategoryWhere('NONE')] }] })
+    })
+  })
+
+  describe('🔴 las cuatro categorías de factura no se traslapan y no dejan fuera a nadie', () => {
+    type Modo = 'AUTOMATIC' | 'MANUAL' | 'NONE'
+    type Fila = { invoiceMode: Modo; invoices: { status: string }[] }
+
+    /** Un intérprete del subconjunto de Prisma que usan estos filtros: AND, OR, `invoiceMode` y `invoices: { some | none: { status: { in } } }`. Lo demás lanza. */
+    function cumple(fila: Fila, donde: Record<string, any>): boolean {
+      return Object.entries(donde).every(([campo, cond]) => {
+        if (campo === 'AND') return (cond as Record<string, any>[]).every(c => cumple(fila, c))
+        if (campo === 'OR') return (cond as Record<string, any>[]).some(c => cumple(fila, c))
+        if (campo === 'invoiceMode') {
+          if (typeof cond === 'string') return fila.invoiceMode === cond
+          if (Object.keys(cond).join() === 'not') return fila.invoiceMode !== cond.not
+          throw new Error('el intérprete no entiende este filtro de invoiceMode')
+        }
+        if (campo === 'invoices') {
+          const operador = Object.keys(cond).join()
+          if (operador !== 'some' && operador !== 'none') throw new Error('el intérprete sólo entiende invoices some y none')
+          const alguna = fila.invoices.some(f => (cond[operador].status.in as string[]).includes(f.status))
+          return operador === 'some' ? alguna : !alguna
+        }
+        throw new Error(`el intérprete no entiende el campo ${campo}`)
+      })
+    }
+    const CATEGORIAS = ['STAMPED', 'PROBLEM', 'PENDING', 'NONE'] as const
+    const categoriasDe = (fila: Fila) => CATEGORIAS.filter(categoria => cumple(fila, invoiceCategoryWhere(categoria)))
+
+    const modos: Modo[] = ['AUTOMATIC', 'MANUAL', 'NONE']
+    const conFactura = (estados: string[]) => modos.map(invoiceMode => [invoiceMode, estados] as const)
+    // Cada combinación de modo y estado de factura, con lo que debe salir.
+    const TABLA: ReadonlyArray<readonly [Modo, string[], (typeof CATEGORIAS)[number]]> = [
+      ['AUTOMATIC', [], 'PENDING'],
+      ['MANUAL', [], 'PENDING'],
+      ['NONE', [], 'NONE'],
+      ...conFactura(['STAMPED']).map(([m, e]) => [m, e, 'STAMPED'] as const),
+      ...conFactura(['CANCEL_REQUESTED']).map(([m, e]) => [m, e, 'STAMPED'] as const), // sigue vigente mientras el SAT no la acepte
+      ...conFactura(['STAMPING']).map(([m, e]) => [m, e, 'PROBLEM'] as const),
+      ...conFactura(['STAMP_FAILED']).map(([m, e]) => [m, e, 'PROBLEM'] as const),
+      ['AUTOMATIC', ['CANCELLED'], 'PENDING'], // una cancelada ya no es factura
+      ['MANUAL', ['CANCELLED'], 'PENDING'],
+      ['NONE', ['CANCELLED'], 'NONE'],
+      ['AUTOMATIC', ['DRAFT'], 'PENDING'],
+      ['NONE', ['DRAFT'], 'NONE'],
+      // Varias facturas en una fecha: gana la de arriba (STAMPED > PROBLEM > NONE > PENDING).
+      ['AUTOMATIC', ['STAMP_FAILED', 'STAMPED'], 'STAMPED'],
+      ['MANUAL', ['CANCELLED', 'STAMPED'], 'STAMPED'],
+      ['AUTOMATIC', ['STAMPING', 'CANCEL_REQUESTED'], 'STAMPED'],
+      ['AUTOMATIC', ['CANCELLED', 'STAMP_FAILED'], 'PROBLEM'],
+      ['NONE', ['CANCELLED', 'STAMPING'], 'PROBLEM'], // un intento en camino pesa más que el modo «sin factura»
+      ['NONE', ['STAMPED'], 'STAMPED'], // se timbró aunque no debía: es una factura
+    ]
+
+    it.each(TABLA.map(([modo, estados, esperada]) => [modo, estados.join('+') || 'sin factura', esperada, { modo, estados }] as const))(
+      '%s con %s cae sólo en %s',
+      (_modo, _estados, esperada, { modo, estados }) => {
+        const fila: Fila = { invoiceMode: modo, invoices: estados.map(status => ({ status })) }
+
+        expect(categoriasDe(fila)).toEqual([esperada])
+      },
+    )
+
+    it('el producto completo de modos × estados (y pares de estados): cada fila cae en EXACTAMENTE una categoría', () => {
+      const estados = ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING', 'STAMP_FAILED', 'CANCELLED', 'DRAFT']
+      const combinaciones: string[][] = [[], ...estados.map(e => [e]), ...estados.flatMap(a => estados.map(b => [a, b]))]
+      let revisadas = 0
+
+      for (const invoiceMode of modos) {
+        for (const combo of combinaciones) {
+          const fila: Fila = { invoiceMode, invoices: combo.map(status => ({ status })) }
+          expect({ invoiceMode, combo, categorias: categoriasDe(fila).length }).toEqual({ invoiceMode, combo, categorias: 1 })
+          revisadas++
+        }
+      }
+      expect(revisadas).toBe(3 * (1 + 6 + 36))
+    })
+
+    it('el armador de categorías es UNO: el filtro de la lista y los grupos usan la misma función', () => {
+      // El filtro con varios valores se arma con las mismas categorías, no con una copia.
+      const donde = occurrenceWhere({ invoice: ['PENDING'] }) as { AND: { OR: unknown[] }[] }
+      expect(donde.AND[0].OR[0]).toEqual(invoiceCategoryWhere('PENDING'))
+    })
+  })
+
+  describe('listOccurrences: el total y sumCents salen de UNA pasada con el mismo where', () => {
+    const filtros = { view: 'open' as const, frequency: ['MONTHLY' as const], invoice: ['PENDING' as const], from: '2026-11-01' }
+
+    beforeEach(() => {
+      prismaMock.platformChargeOccurrence.findMany.mockResolvedValue([])
+      prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { totalCents: null } })
+    })
+
+    it('la lista y UN aggregate (conteo y suma) usan el mismo where; no hay un count aparte, y la suma es de TODO el filtro, no de la página', async () => {
+      prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 137 }, _sum: { totalCents: 98765432 } })
+
+      const r = await listOccurrences({ ...filtros, page: 2, pageSize: 10 }, AHORA)
+
+      const donde = occurrenceWhere(filtros)
+      expect(prismaMock.platformChargeOccurrence.findMany.mock.calls[0][0].where).toEqual(donde)
+      expect(prismaMock.platformChargeOccurrence.aggregate).toHaveBeenCalledTimes(1)
+      expect(prismaMock.platformChargeOccurrence.aggregate).toHaveBeenCalledWith({
+        where: donde,
+        _count: { _all: true },
+        _sum: { totalCents: true },
+      })
+      expect(prismaMock.platformChargeOccurrence.count).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ total: 137, sumCents: 98765432, page: 2, pageSize: 10 })
+    })
+
+    it('sin cobros la suma es 0 (un entero, nunca null) y el total, 0', async () => {
+      expect(await listOccurrences(filtros, AHORA)).toMatchObject({ total: 0, sumCents: 0 })
+    })
+
+    it('el tope de página no recorta la suma: con pageSize 1 sigue siendo la del filtro completo', async () => {
+      prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 9 }, _sum: { totalCents: 500 } })
+
+      const r = await listOccurrences({ ...filtros, pageSize: 1 }, AHORA)
+
+      expect(r).toMatchObject({ total: 9, sumCents: 500 })
+      expect(prismaMock.platformChargeOccurrence.aggregate.mock.calls[0][0]).not.toHaveProperty('take')
+    })
+  })
+
+  describe('groupOccurrences: se agrupa en la base, nunca sobre un recorte ni trayendo las fechas', () => {
+    const groupBy = () => prismaMock.platformChargeOccurrence.groupBy
+    const aggregate = () => prismaMock.platformChargeOccurrence.aggregate
+    const sinFilas = () => expect(prismaMock.platformChargeOccurrence.findMany).not.toHaveBeenCalled()
+
+    beforeEach(() => {
+      prismaMock.platformChargeOccurrence.findMany.mockReset()
+      groupBy().mockReset().mockResolvedValue([])
+      aggregate()
+        .mockReset()
+        .mockResolvedValue({ _count: { _all: 0 }, _sum: { totalCents: null } })
+      prismaMock.platformCharge.findMany.mockReset().mockResolvedValue([])
+    })
+
+    describe('por cliente', () => {
+      const porCobro = (chargeId: string, count: number, totalCents: number) => ({
+        chargeId,
+        _count: { _all: count },
+        _sum: { totalCents },
+      })
+      const cobroDe = (id: string, customerName = 'Café Ana') => ({ id, customerName })
+
+      it('un groupBy por cobro con EL MISMO where y el nombre de esos cobros en UNA lectura aparte, acotada a ellos', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 2, 300), porCobro('c2', 1, 50)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1'), cobroDe('c2', 'Luna')])
+        const filtros = { frequency: ['MONTHLY' as const], from: '2026-11-01' }
+
+        await groupOccurrences(filtros, 'customer')
+
+        expect(groupBy()).toHaveBeenCalledTimes(1)
+        expect(groupBy().mock.calls[0][0]).toMatchObject({
+          by: ['chargeId'],
+          where: occurrenceWhere(filtros),
+          _count: { _all: true },
+          _sum: { totalCents: true },
+          orderBy: { chargeId: 'asc' },
+          take: MAX_GROUP_ROWS + 1,
+        })
+        expect(prismaMock.platformCharge.findMany).toHaveBeenCalledTimes(1)
+        expect(prismaMock.platformCharge.findMany.mock.calls[0][0]).toMatchObject({
+          where: { id: { in: ['c1', 'c2'] } },
+          select: { id: true, customerName: true },
+          take: 2,
+        })
+        sinFilas()
+      })
+
+      it('🔴 dos cobros con el mismo nombre se suman en UN grupo: la llave y la etiqueta son el nombre', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 2, 300), porCobro('c2', 1, 50), porCobro('c3', 4, 1000)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1'), cobroDe('c2'), cobroDe('c3', 'Luna')])
+
+        const { groups, truncated } = await groupOccurrences({}, 'customer')
+
+        expect(groups).toEqual([
+          { key: 'Café Ana', label: 'Café Ana', count: 3, totalCents: 350 },
+          { key: 'Luna', label: 'Luna', count: 4, totalCents: 1000 },
+        ])
+        expect(truncated).toBe(false)
+      })
+
+      it('el criterio es el nombre exacto, el mismo del filtro «customer»: nombres distintos son grupos distintos y el mismo nombre se funde', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 1, 100), porCobro('c2', 1, 200), porCobro('c3', 1, 400)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([
+          cobroDe('c1', 'Panadería Aurora'),
+          cobroDe('c2', 'Panadería La Aurora'), // otra forma de escribir el nombre: otro grupo, como lo filtra «customer»
+          cobroDe('c3', 'Panadería Aurora'),
+        ])
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups).toEqual([
+          { key: 'Panadería Aurora', label: 'Panadería Aurora', count: 2, totalCents: 500 },
+          { key: 'Panadería La Aurora', label: 'Panadería La Aurora', count: 1, totalCents: 200 },
+        ])
+      })
+
+      it('🔴 el clic en un grupo cuadra: filtrar por «customer» con la llave del grupo da la misma cuenta y la misma suma que el grupo', async () => {
+        // Un mundo en memoria: los cobros con su nombre y las fechas de cada uno.
+        const nombres: Record<string, string> = {
+          c1: 'Panadería Aurora',
+          c2: 'Panadería La Aurora',
+          c3: 'Panadería Aurora',
+          c4: 'Tienda Brisa',
+        }
+        const fechas = [
+          { chargeId: 'c1', totalCents: 100 },
+          { chargeId: 'c1', totalCents: 50 },
+          { chargeId: 'c2', totalCents: 30 },
+          { chargeId: 'c3', totalCents: 7 },
+          { chargeId: 'c4', totalCents: 1000 },
+          { chargeId: 'c4', totalCents: 5 },
+        ]
+        groupBy().mockImplementation(async () =>
+          Object.keys(nombres).map(id => {
+            const propias = fechas.filter(f => f.chargeId === id)
+            return porCobro(
+              id,
+              propias.length,
+              propias.reduce((suma, f) => suma + f.totalCents, 0),
+            )
+          }),
+        )
+        prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) =>
+          where.id.in.map((id: string) => cobroDe(id, nombres[id])),
+        )
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups.map(g => g.key)).toEqual(['Panadería Aurora', 'Panadería La Aurora', 'Tienda Brisa'])
+        for (const group of groups) {
+          // Lo que filtra la base con esa llave: el nombre exacto del cobro.
+          const filtrado = (occurrenceWhere({ customer: group.key }).AND as any[])[0].charge.customerName
+          const delFiltro = fechas.filter(f => nombres[f.chargeId] === filtrado)
+          expect({ key: group.key, count: delFiltro.length, totalCents: delFiltro.reduce((suma, f) => suma + f.totalCents, 0) }).toEqual({
+            key: group.key,
+            count: group.count,
+            totalCents: group.totalCents,
+          })
+        }
+        expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(fechas.length) // y los grupos suman todo
+      })
+
+      it('de la A a la Z por etiqueta, con acentos en su lugar', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 1, 1), porCobro('c2', 1, 1), porCobro('c3', 1, 1)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1', 'Zeta'), cobroDe('c2', 'Ángel'), cobroDe('c3', 'Ana')])
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups.map(g => g.key)).toEqual(['Ana', 'Ángel', 'Zeta'])
+      })
+
+      it('sin cobros no lee los cobros: grupos vacíos', async () => {
+        const r = await groupOccurrences({}, 'customer')
+
+        expect(r).toEqual({ groups: [], truncated: false })
+        expect(prismaMock.platformCharge.findMany).not.toHaveBeenCalled()
+      })
+
+      it('🔴 con más cobros que el tope no se trunca en silencio: sólo lee hasta el tope y lo dice con truncated', async () => {
+        const filas = Array.from({ length: MAX_GROUP_ROWS + 1 }, (_, i) => porCobro(`c${String(i).padStart(6, '0')}`, 1, 100))
+        groupBy().mockResolvedValue(filas)
+        prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) => where.id.in.map((id: string) => cobroDe(id, id)))
+
+        const { groups, truncated } = await groupOccurrences({}, 'customer')
+
+        expect(truncated).toBe(true)
+        expect(groups).toHaveLength(MAX_GROUP_ROWS)
+        expect(prismaMock.platformCharge.findMany.mock.calls[0][0].take).toBe(MAX_GROUP_ROWS)
+      })
+
+      it('un cobro que ya no está (se borró entre las dos lecturas) no tumba la lista ni se pierde su dinero: va como «Cobro que ya no existe»', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 1, 100), porCobro('c-borrado', 2, 500)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1')])
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups.reduce((suma, g) => suma + g.totalCents, 0)).toBe(600)
+        expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(3)
+      })
+    })
+
+    describe('por mes', () => {
+      const porDia = (day: string, count: number, totalCents: number) => ({
+        dueDate: calendarDayToDb(day),
+        _count: { _all: count },
+        _sum: { totalCents },
+      })
+
+      it('un groupBy por fecha de cobro con EL MISMO where; los días se juntan por mes en el servidor, de más viejo a más nuevo', async () => {
+        groupBy().mockResolvedValue([
+          porDia('2026-10-30', 1, 100),
+          porDia('2026-11-02', 2, 200),
+          porDia('2026-11-30', 1, 50),
+          porDia('2026-12-01', 3, 1000),
+          porDia('2027-01-15', 1, 7),
+        ])
+        const filtros = { invoice: ['PENDING' as const] }
+
+        const { groups, truncated } = await groupOccurrences(filtros, 'month')
+
+        expect(groupBy().mock.calls[0][0]).toMatchObject({
+          by: ['dueDate'],
+          where: occurrenceWhere(filtros),
+          _count: { _all: true },
+          _sum: { totalCents: true },
+          orderBy: { dueDate: 'asc' },
+          take: MAX_GROUP_ROWS + 1,
+        })
+        expect(groups).toEqual([
+          { key: '2026-10', label: 'octubre 2026', count: 1, totalCents: 100 },
+          { key: '2026-11', label: 'noviembre 2026', count: 3, totalCents: 250 },
+          { key: '2026-12', label: 'diciembre 2026', count: 3, totalCents: 1000 },
+          { key: '2027-01', label: 'enero 2027', count: 1, totalCents: 7 },
+        ])
+        expect(truncated).toBe(false)
+        sinFilas()
+      })
+
+      it('el último y el primer día del mes caen en SU mes (columna sin zona: sin corrimientos)', async () => {
+        groupBy().mockResolvedValue([porDia('2026-11-01', 1, 1), porDia('2026-11-30', 1, 1), porDia('2026-12-01', 1, 1)])
+
+        const { groups } = await groupOccurrences({}, 'month')
+
+        expect(groups.map(g => [g.key, g.count])).toEqual([
+          ['2026-11', 2],
+          ['2026-12', 1],
+        ])
+      })
+
+      it('🔴 con más días que el tope: no trunca en silencio', async () => {
+        groupBy().mockResolvedValue(
+          Array.from({ length: MAX_GROUP_ROWS + 1 }, (_, i) => ({
+            dueDate: new Date(Date.UTC(2020, 0, 1 + i)),
+            _count: { _all: 1 },
+            _sum: { totalCents: 1 },
+          })),
+        )
+
+        const { groups, truncated } = await groupOccurrences({}, 'month')
+
+        expect(truncated).toBe(true)
+        expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(MAX_GROUP_ROWS)
+      })
+
+      it('sin cobros: grupos vacíos', async () => {
+        expect(await groupOccurrences({}, 'month')).toEqual({ groups: [], truncated: false })
+      })
+    })
+
+    describe('por periodicidad y por factura: un aggregate por categoría', () => {
+      /** Contesta cada aggregate según LA categoría que filtra (la reconoce en el where) y apunta con qué se le preguntó. */
+      function responder(porCategoria: Record<string, [number, number]>, reconocer: (donde: any) => string) {
+        aggregate().mockImplementation(async ({ where }: any) => {
+          const [count, totalCents] = porCategoria[reconocer(where)] ?? [0, 0]
+          return { _count: { _all: count }, _sum: { totalCents: count === 0 ? null : totalCents } }
+        })
+      }
+
+      it('periodicidad: cuatro aggregates con el where del filtro Y la periodicidad; sólo salen los grupos con cobros, en orden fijo', async () => {
+        const filtros = { from: '2026-11-01' }
+        responder({ MONTHLY: [3, 900], ONE_TIME: [1, 100], WEEKLY: [0, 0] }, donde => donde.AND[1].charge.frequency)
+
+        const { groups, truncated } = await groupOccurrences(filtros, 'frequency')
+
+        expect(aggregate()).toHaveBeenCalledTimes(4)
+        for (const [{ where }] of aggregate().mock.calls) {
+          expect(where.AND[0]).toEqual(occurrenceWhere(filtros))
+          expect(Object.keys(where.AND[1])).toEqual(['charge'])
+        }
+        expect(groups).toEqual([
+          { key: 'MONTHLY', label: 'Mensual', count: 3, totalCents: 900 },
+          { key: 'ONE_TIME', label: 'Una sola vez', count: 1, totalCents: 100 },
+        ])
+        expect(truncated).toBe(false)
+        expect(groupBy()).not.toHaveBeenCalled()
+        sinFilas()
+      })
+
+      it('factura: un aggregate por categoría con el where del filtro Y la categoría (la MISMA función del filtro), en el orden STAMPED, PROBLEM, PENDING, NONE', async () => {
+        const filtros = { frequency: ['MONTHLY' as const] }
+        const categoria = (donde: any) =>
+          (['STAMPED', 'PROBLEM', 'PENDING', 'NONE'] as const).find(
+            c => JSON.stringify(donde.AND[1]) === JSON.stringify(invoiceCategoryWhere(c)),
+          )!
+        responder({ STAMPED: [5, 5000], PENDING: [2, 200], NONE: [1, 10] }, categoria)
+
+        const { groups } = await groupOccurrences(filtros, 'invoice')
+
+        expect(aggregate()).toHaveBeenCalledTimes(4)
+        for (const [{ where }] of aggregate().mock.calls) expect(where.AND[0]).toEqual(occurrenceWhere(filtros))
+        expect(groups).toEqual([
+          { key: 'STAMPED', label: 'Facturado', count: 5, totalCents: 5000 },
+          { key: 'PENDING', label: 'Por facturar', count: 2, totalCents: 200 },
+          { key: 'NONE', label: 'Sin factura', count: 1, totalCents: 10 },
+        ])
+        sinFilas()
+      })
+
+      it('sin cobros: grupos vacíos', async () => {
+        expect(await groupOccurrences({}, 'invoice')).toEqual({ groups: [], truncated: false })
+        expect(await groupOccurrences({}, 'frequency')).toEqual({ groups: [], truncated: false })
+      })
+    })
+
+    describe('lo que comparten', () => {
+      it('«groupBy» que no existe: 400, sin tocar la base', async () => {
+        const error = (await groupOccurrences({}, 'cliente' as never).catch((e: unknown) => e)) as BadRequestError
+
+        expect(error).toBeInstanceOf(BadRequestError)
+        expect(error.code).toBe('PLATFORM_CHARGE_INVALID_GROUP_BY')
+        expect(groupBy()).not.toHaveBeenCalled()
+        expect(aggregate()).not.toHaveBeenCalled()
+      })
+
+      it.each(['customer', 'month', 'frequency', 'invoice'] as const)(
+        '«from» después de «to» es 400 también al agrupar por %s',
+        async dimension => {
+          await expect(groupOccurrences({ from: '2026-11-10', to: '2026-11-09' }, dimension)).rejects.toBeInstanceOf(BadRequestError)
+
+          expect(groupBy()).not.toHaveBeenCalled()
+          expect(aggregate()).not.toHaveBeenCalled()
+        },
+      )
+
+      it.each(['customer', 'month', 'frequency', 'invoice'] as const)(
+        'por %s respeta la vista pedida (los grupos son de las pagadas, no de las pendientes)',
+        async dimension => {
+          await groupOccurrences({ view: 'paid' }, dimension)
+
+          const [llamada] = [...groupBy().mock.calls, ...aggregate().mock.calls].map(([args]: any) => args)
+          expect(JSON.stringify(llamada.where)).toContain('"status":"PAID"')
+        },
+      )
+    })
   })
 })

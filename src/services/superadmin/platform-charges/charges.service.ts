@@ -137,7 +137,8 @@ export const shortDayEs = (day: CalendarDay): string => `${Number(day.slice(8, 1
 
 // ── Validación de lo que llega ──────────────────────────────────────────────────────────────────────────────────────────────
 
-function isCalendarDay(value: unknown): value is CalendarDay {
+/** ¿Es un día real del calendario `AAAA-MM-DD`? (el módulo entero habla en esos días; también lo usan los filtros de fechas de la lista) */
+export function isCalendarDay(value: unknown): value is CalendarDay {
   if (typeof value !== 'string') return false
   try {
     addDays(value, 0) // lanza si no es un día real del calendario (un 30 de febrero, un instante, vacío)
@@ -210,10 +211,10 @@ function assertConceptKeys(state: Pick<ChargeState, 'invoiceMode' | 'concepts'>)
 }
 
 /**
- * Valida y limpia sólo lo que se mande (en un alta, todo): lo inválido se rechaza ANTES de abrir una transacción. `conceptsFromInvoice`: los
+ * Valida y limpia sólo lo que se mande (en un alta, todo): lo inválido se rechaza ANTES de abrir una transacción. `conceptsComeFromInvoice`: los
  * conceptos no vienen del cuerpo sino de la factura, que se lee dentro de la transacción: aquí no se piden ni se miran.
  */
-function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean, conceptsFromInvoice = false): Partial<ChargeState> {
+function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean, conceptsComeFromInvoice = false): Partial<ChargeState> {
   const out: Partial<ChargeState> = {}
   const given = (key: keyof ChargeInput): boolean => requireAll || input[key] !== undefined
 
@@ -241,7 +242,7 @@ function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean, conce
     if (!isCalendarDay(input.anchorDate)) throw invalid('La fecha de inicio no es válida')
     out.anchorDate = input.anchorDate
   }
-  if (given('concepts') && !conceptsFromInvoice) out.concepts = normalizeConcepts(input.concepts)
+  if (given('concepts') && !conceptsComeFromInvoice) out.concepts = normalizeConcepts(input.concepts)
   if (given('invoiceMode')) {
     if (!INVOICE_MODES.has(input.invoiceMode as string)) {
       throw invalid('Elige si el cobro se factura automáticamente, con un botón o sin factura')
