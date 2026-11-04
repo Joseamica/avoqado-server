@@ -12,6 +12,7 @@ import { logAction } from './dashboard/activity-log.service'
 import { assertCanAddSeatsBulk } from './access/seatCap.service'
 import { motivoContrasenaInvalida } from '../utils/contrasenaNueva'
 import { esCorreoDemo } from './demo/candadoDemo'
+import { esCuentaProvisional } from './cuentaProvisional'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -124,22 +125,6 @@ export async function getInvitationByToken(token: string) {
     // PIN requirement: when true, the accepting user MUST provide a PIN
     requirePin: invitation.requirePin || false,
   }
-}
-
-/**
- * La cuenta PROVISIONAL que crea la propia invitación al invitar un correo sin cuenta
- * (`team.dashboard.service`): inactiva, sin verificar, sin contraseña, sin Google y nunca usada.
- * Ésa sí fija su contraseña al aceptar — es la persona nueva terminando su alta. Cualquier otra
- * cuenta sin contraseña es REAL (Google, PIN) y sólo acepta desde su propia sesión.
- */
-function esCuentaProvisional(staff: {
-  active: boolean
-  emailVerified: boolean
-  password: string | null
-  googleId: string | null
-  lastLoginAt: Date | null
-}): boolean {
-  return !staff.active && !staff.emailVerified && !staff.password && !staff.googleId && !staff.lastLoginAt
 }
 
 export async function acceptInvitation(
