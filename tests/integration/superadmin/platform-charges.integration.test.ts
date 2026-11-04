@@ -11,6 +11,11 @@
  * Las fechas se prueban con la sesión de Postgres en UTC (la de producción) y en America/Mexico_City (la de la Mac): `dueDate` y
  * `paidAt` no pueden correrse un día según la zona.
  *
+ * Desde el 3-nov-2026 también cubre «Por cobrar» desde una factura (spec 2026-11-03-por-cobrar-desde-factura-y-filtros): anexar y quitar
+ * una factura de «Facturas CFDI» (el UPDATE condicional por versión y estado, que otra conexión puede invalidar a media operación), el alta
+ * desde ella con su rollback, ONE_TIME y NONE en una base migrada, las candidatas y los filtros y grupos de la lista. Cada prueba de esa
+ * parte se comprobó contra una mutación del código (quitar la condición, el candado o el filtro que protege): sin ella, la prueba falla.
+ *
  * Run with:
  *   TEST_DATABASE_URL='postgresql://postgres:<password>@localhost:5432/avoqado_por_cobrar_test_<fecha>' \
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/superadmin/platform-charges.integration.test.ts --ci
@@ -21,6 +26,7 @@ jest.unmock('@/services/dashboard/activity-log.service')
 jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({ resolveFiscalProvider: jest.fn() }))
 
 import { Prisma, StaffRole } from '@prisma/client'
+import type { PlatformCfdiStatus, PlatformChargeFrequency, PlatformChargeInvoiceMode } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import app from '@/app'
 import { aTiempo, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
@@ -30,8 +36,10 @@ import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
 import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
 import { createCharge, generateAllActive, pauseCharge, updateCharge } from '@/services/superadmin/platform-charges/charges.service'
 import type { ChargeInput } from '@/services/superadmin/platform-charges/charges.service'
+import { listInvoiceCandidates, linkInvoice, unlinkInvoice } from '@/services/superadmin/platform-charges/invoice-link.service'
 import { invoiceOccurrence } from '@/services/superadmin/platform-charges/invoice.service'
 import {
+  groupOccurrences,
   listOccurrences,
   payOccurrence,
   payPreview,
@@ -39,7 +47,9 @@ import {
   skipOccurrence,
   summarizeOccurrences,
 } from '@/services/superadmin/platform-charges/occurrences.service'
+import type { InvoiceCategory, OccurrenceFilters, OccurrenceGroupBy } from '@/services/superadmin/platform-charges/occurrences.service'
 import { calendarDayToDb, dbToCalendarDay, todayInMexico } from '@/services/superadmin/platform-charges/schedule'
+import { computeChargeTotals, conceptToCfdiLine } from '@/services/superadmin/platform-charges/totals'
 import type { ChargeConcept } from '@/services/superadmin/platform-charges/types'
 import prisma from '@/utils/prismaClient'
 
@@ -162,6 +172,16 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     // Toda limpieza va con ids que ESTE archivo creó: un `where` con un valor undefined vaciaría la tabla.
+    // Un cobro que el código creó cuando la prueba esperaba un rechazo (un defecto) no llegó a anotarse: es de ESTA corrida porque lo creó el
+    // superadmin de esta corrida (su id es único), así que también se borra.
+    if (superId) {
+      const sinAnotar = await prisma.platformCharge.findMany({
+        where: { createdById: superId, id: { notIn: creado.charges } },
+        select: { id: true },
+        take: 10_000,
+      })
+      creado.charges.push(...sinAnotar.map(c => c.id))
+    }
     if (ajusteOriginal) {
       const db = await nombreDeLaBase()
       await prisma.$executeRawUnsafe(
@@ -324,6 +344,7 @@ const post = (path: string, body: object = {}, token = superToken) =>
   api().post(`${BASE}${path}`).set('Authorization', `Bearer ${token}`).send(body)
 const patch = (path: string, body: object, token = superToken) =>
   api().patch(`${BASE}${path}`).set('Authorization', `Bearer ${token}`).send(body)
+const del = (path: string, token = superToken) => api().delete(`${BASE}${path}`).set('Authorization', `Bearer ${token}`)
 
 /** `logAction` va después del commit y sin esperar: se sondea un momento hasta que lleguen las filas esperadas. */
 async function filasDeBitacora(where: Prisma.ActivityLogWhereInput, esperadas: number) {
@@ -468,7 +489,7 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
 
     const lista = await get(`/occurrences?view=open&q=${encodeURIComponent(nombre)}`)
     expect(lista.status).toBe(200)
-    expect(lista.body.meta).toEqual({ total: 3, page: 1, pageSize: 50 })
+    expect(lista.body.meta).toEqual({ total: 3, page: 1, pageSize: 50, sumCents: 3 * TOTAL }) // la lista también suma TODO el filtro
     const filas = lista.body.data as Array<Record<string, any>>
     expect(filas.map(f => [f.dueDate, f.bucket])).toEqual([
       [ancla, 'OVERDUE'],
@@ -1427,5 +1448,1449 @@ describe.each(['UTC', 'America/Mexico_City'])('fechas, listas y tarjetas con la 
     expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({ status: 'PAID', paidById: superId, paidAt: NOW, skippedAt: null })
     await reopenOccurrence(ocurrencia.id, superId, NOW)
     expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({ status: 'PENDING', paidAt: null, paidById: null })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// «Por cobrar» DESDE UNA FACTURA (spec 2026-11-03-por-cobrar-desde-factura-y-filtros): anexar y quitar una factura que ya existe en «Facturas
+// CFDI», el alta desde ella, una sola vez, sin factura, los filtros y los grupos. Todo contra Postgres real: lo que aquí se demuestra
+// (la fila que otra conexión toma, un UPDATE condicional que se reevalúa al despertar, `some`/`none` de las relaciones, `distinct` + `take`,
+// los enums de una base migrada, una columna `date` bajo dos zonas) no lo puede demostrar un doble en memoria.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** Una factura de ingreso ya timbrada en «Facturas CFDI», con renglones que SÍ caben en el modelo del 16 % (y por eso sus totales cuadran). */
+let facturaN = 0
+async function nuevaFactura(over: Partial<Prisma.PlatformCfdiUncheckedCreateInput> = {}, conceptos: ChargeConcept[] = [RENTA, LICENCIA]) {
+  facturaN += 1
+  const fila = await prisma.platformCfdi.create({
+    data: {
+      platformEmisorId: creado.emisores[0],
+      type: 'INGRESO',
+      receptorRfc: RECEPTOR.rfc,
+      receptorNombre: RECEPTOR.razonSocial,
+      receptorRegimen: RECEPTOR.regimenFiscal,
+      receptorCp: RECEPTOR.codigoPostal,
+      usoCfdi: 'G03',
+      formaPago: '03',
+      metodoPago: 'PUE',
+      lines: conceptos.map(conceptToCfdiLine) as unknown as Prisma.InputJsonValue,
+      ...computeChargeTotals(conceptos),
+      status: 'STAMPED',
+      serie: 'F',
+      folio: String(5000 + facturaN),
+      uuid: `UUID-${suffix}-f${facturaN}`,
+      stampedAt: new Date('2026-11-01T12:00:00.000Z'),
+      createdAt: new Date('2026-11-01T12:00:00.000Z'),
+      createdById: superId,
+      ...over,
+    },
+  })
+  creado.cfdis.push(fila.id)
+  return fila
+}
+const facturaDe = (id: string) => prisma.platformCfdi.findUniqueOrThrow({ where: { id } })
+
+/** Un cobro mensual con UNA fecha (el 2-nov), AUTOMATIC y con perfil: anexar lo vuelve MANUAL y se nota. */
+async function cobroDeUnaFecha(over: Partial<ChargeInput> = {}) {
+  const cobro = await nuevoCobro({ frequency: 'MONTHLY', anchorDate: '2026-11-02', ...over })
+  return { cobro, fecha: await porFecha(cobro.id, '2026-11-02') }
+}
+
+/**
+ * OTRA conexión abre una transacción, cambia la fila de la factura y la deja SIN confirmar: la fila queda tomada y su `updatedAt` ya cambió.
+ * Es lo que hace «Facturas CFDI» al pedir una cancelación mientras «Por cobrar» está por escribir (`cancelPlatformCfdi` no toma el candado del
+ * cobro). `pid` es el backend de esa conexión; `confirmar` hace commit; `terminada` es la transacción.
+ */
+function otraConexionCambia(cfdiId: string, data: Prisma.PlatformCfdiUpdateInput) {
+  const puede = diferido<void>()
+  const lista = diferido<number>()
+  const terminada = prisma.$transaction(
+    async tx => {
+      await tx.platformCfdi.update({ where: { id: cfdiId }, data })
+      const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`
+      lista.resolver(Number(pid))
+      await puede.promesa
+    },
+    { timeout: 60_000, maxWait: 60_000 },
+  )
+  terminada.catch(error => lista.rechazar(error))
+  return { pid: lista.promesa, confirmar: () => puede.resolver(), terminada }
+}
+
+/** Espera a que alguien esté bloqueado en una fila de la factura por la transacción `pid`: el UPDATE condicional llegó y espera. */
+async function esperaLaFila(pid: number) {
+  const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /UPDATE .*"PlatformCfdi"/, ms: 60_000 })
+  expect(espera).not.toBeNull() // el cruce SE PROVOCÓ: el UPDATE de la factura espera a la otra conexión
+  expect(espera!.waitEventType).toBe('Lock')
+}
+
+const vivasDe = (occurrenceId: string) =>
+  prisma.platformCfdi.count({
+    where: { platformChargeOccurrenceId: occurrenceId, status: { in: ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'] } },
+  })
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('anexar y quitar una factura: la escritura condicional y los cruces (Postgres real)', () => {
+  it('1 · dos pestañas anexan la MISMA factura a fechas de DOS cobros (candados distintos): una gana y la otra recibe 409 «ya es de otro cobro»', async () => {
+    const a = await cobroDeUnaFecha()
+    const b = await cobroDeUnaFecha()
+    const factura = await nuevaFactura()
+    const aparcada = aparcarLaTransaccion(1)
+    try {
+      const ganadora = linkInvoice(a.fecha.id, { cfdiId: factura.id }, superId, NOW)
+      ganadora.catch(() => undefined)
+      const pid = await aTiempo(
+        aparcada.pid,
+        60_000,
+        'la ganadora ya anexó la factura y quedó aparcada, sin commit, con la fila de la factura tomada',
+      )
+
+      // La otra pestaña es de OTRO cobro: no comparte candado, pasa todas sus comprobaciones leyendo la factura aún suelta y llega a escribirla.
+      const perdedora = Promise.resolve(post(`/occurrences/${b.fecha.id}/invoice-link`, { cfdiId: factura.id }))
+      await esperaLaFila(pid)
+      aparcada.soltar()
+
+      await ganadora
+      const res = await perdedora
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_LINK_TAKEN' })
+      expect(res.body.message).toMatch(/ya es de otro cobro/)
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+
+    // Queda ligada a UNA sola fecha, la de la ganadora; la otra no cambió en nada (la transacción se deshizo).
+    expect(await facturaDe(factura.id)).toMatchObject({ platformChargeOccurrenceId: a.fecha.id, status: 'STAMPED' })
+    expect((await facturaDe(factura.id)).chargeLinkedAt).not.toBeNull()
+    expect(await prisma.platformCfdi.count({ where: { id: factura.id, platformChargeOccurrenceId: { not: null } } })).toBe(1)
+    expect(await prisma.platformCfdi.count({ where: { platformChargeOccurrenceId: b.fecha.id } })).toBe(0)
+    expect((await porFecha(a.cobro.id, '2026-11-02')).invoiceMode).toBe('MANUAL') // la ganadora la volvió manual
+    expect((await porFecha(b.cobro.id, '2026-11-02')).invoiceMode).toBe('AUTOMATIC') // la perdedora quedó como estaba
+    expect(await bitacoras('PLATFORM_CHARGE_INVOICE_LINKED', a.cobro.id, 1)).toHaveLength(1)
+    expect(await prisma.activityLog.count({ where: { action: 'PLATFORM_CHARGE_INVOICE_LINKED', entityId: b.cobro.id } })).toBe(0)
+  })
+
+  it('1 · disparadas juntas (sin detener nada), varias veces: SIEMPRE una gana y la otra recibe «ya es de otro cobro»; la factura queda en una sola fecha', async () => {
+    for (let i = 0; i < 4; i++) {
+      const a = await cobroDeUnaFecha()
+      const b = await cobroDeUnaFecha()
+      const factura = await nuevaFactura()
+
+      const { cumplidas, rechazadas } = settle(
+        await Promise.allSettled([
+          linkInvoice(a.fecha.id, { cfdiId: factura.id }, superId, NOW),
+          linkInvoice(b.fecha.id, { cfdiId: factura.id }, superId, NOW),
+        ]),
+      )
+
+      expect(cumplidas).toHaveLength(1)
+      expect(rechazadas).toHaveLength(1)
+      expect(rechazadas[0]).toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_TAKEN' })
+      const ligadas = await prisma.platformCfdi.findMany({
+        where: { id: factura.id },
+        select: { platformChargeOccurrenceId: true },
+        take: 2,
+      })
+      expect([a.fecha.id, b.fecha.id]).toContain(ligadas[0].platformChargeOccurrenceId)
+      expect((await vivasDe(a.fecha.id)) + (await vivasDe(b.fecha.id))).toBe(1)
+    }
+  })
+
+  describe('2 · el UPDATE condicional por versión (`updatedAt`, columna timestamp(3)) y por estado', () => {
+    it('un anexado normal, sin cruces, SÍ escribe: aunque la versión de la factura traiga microsegundos que la columna redondea', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+      const factura = await nuevaFactura()
+      // Una versión escrita con SQL a mano, con microsegundos: la columna es timestamp(3) y la redondea a milisegundos, como la lee Prisma.
+      await prisma.$executeRaw`UPDATE "PlatformCfdi" SET "updatedAt" = '2026-11-02 10:00:00.123456' WHERE id = ${factura.id}`
+      const [{ texto }] = await prisma.$queryRaw<{ texto: string }[]>`
+        SELECT to_char("updatedAt", 'YYYY-MM-DD HH24:MI:SS.US') AS texto FROM "PlatformCfdi" WHERE id = ${factura.id}`
+      expect(texto).toBe('2026-11-02 10:00:00.123000') // la columna ya redondeó: lo que Prisma lee es lo que Postgres compara
+      const instante = new Date('2026-11-02T18:00:00.123Z')
+
+      const vista = await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, instante)
+
+      expect(vista.invoice).toMatchObject({ id: factura.id, status: 'STAMPED', linked: true })
+      const ligada = await facturaDe(factura.id)
+      expect(ligada.platformChargeOccurrenceId).toBe(fecha.id) // el UPDATE condicional escribió (no devolvió 0 filas)
+      expect(ligada.chargeLinkedAt).toEqual(instante) // y el instante se guardó al milisegundo
+      expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({ invoiceMode: 'MANUAL', totalCents: TOTAL })
+    })
+
+    it.each<[string, Prisma.PlatformCfdiUpdateInput, boolean]>([
+      ['cambia un dato de la factura (sólo su versión)', { lastError: 'otra pestaña la tocó' }, true],
+      ['pide cancelarla (su estado y su versión)', { status: 'CANCEL_REQUESTED' }, false],
+    ])(
+      'otra conexión %s DESPUÉS de leerla y ANTES de escribir: 409 «acaba de cambiar» y no liga NADA',
+      async (_caso, cambio, reintentoFunciona) => {
+        const { cobro, fecha } = await cobroDeUnaFecha()
+        const factura = await nuevaFactura()
+        const otra = otraConexionCambia(factura.id, cambio)
+        let anexando: Promise<unknown> | undefined
+        try {
+          const pid = await aTiempo(otra.pid, 60_000, 'la otra conexión cambió la factura y la dejó sin confirmar')
+          // «Por cobrar» lee la factura (aún con la versión vieja, la otra no confirmó) y llega a su UPDATE condicional, que espera la fila.
+          anexando = linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+          anexando.catch(() => undefined)
+          await esperaLaFila(pid)
+          otra.confirmar() // la otra conexión confirma: el UPDATE despierta y VUELVE a evaluar su condición contra la versión nueva
+          await otra.terminada
+
+          await expect(anexando).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_CHANGED' })
+        } finally {
+          otra.confirmar()
+          await otra.terminada.catch(() => undefined)
+        }
+
+        // No ligó nada: ni la factura, ni la fecha (conserva su modo y sus números), ni la bitácora.
+        expect(await facturaDe(factura.id)).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+        expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({ invoiceMode: 'AUTOMATIC', totalCents: TOTAL })
+        expect(await prisma.activityLog.count({ where: { action: 'PLATFORM_CHARGE_INVOICE_LINKED', entityId: cobro.id } })).toBe(0)
+
+        // Y tras revisarla, reintentar: con sólo un dato distinto sí se anexa; una cancelación en trámite ya no es «vigente».
+        if (reintentoFunciona) {
+          await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+          expect((await facturaDe(factura.id)).platformChargeOccurrenceId).toBe(fecha.id)
+        } else {
+          await expect(linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)).rejects.toMatchObject({
+            statusCode: 409,
+            code: 'PLATFORM_CHARGE_INVOICE_LINK_NOT_STAMPED',
+          })
+        }
+      },
+    )
+  })
+
+  describe('3 · anexar mientras otra pestaña timbra la MISMA fecha (el candado del cobro lo serializa)', () => {
+    it('«Facturar» reservando, detenida con su candado: anexar espera, ve la factura en camino y recibe 409; queda UNA sola viva y la suelta sigue libre', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+      const suelta = await nuevaFactura()
+      // La transacción 1 de «Facturar» prepara la foto; la 2 es la RESERVA (crea la fila STAMPING): ésa se detiene con el candado tomado.
+      const aparcada = aparcarLaTransaccion(2)
+      let facturando: Promise<unknown> | undefined
+      try {
+        facturando = invoiceOccurrence(fecha.id, { actorId: superId, receptor: RECEPTOR })
+        facturando.catch(() => undefined)
+        const pid = await aTiempo(aparcada.pid, 60_000, 'la reserva creó su fila STAMPING y quedó aparcada, sin commit')
+
+        const anexando = linkInvoice(fecha.id, { cfdiId: suelta.id }, superId, NOW)
+        anexando.catch(() => undefined)
+        await esperaElCandado(pid) // anexar llegó segunda: espera el candado del cobro
+        aparcada.soltar()
+
+        await expect(anexando).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_HAS_LIVE' })
+        expect(((await facturando) as { status: string }).status).toBe('STAMPED')
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+
+      expect(await vivasDe(fecha.id)).toBe(1) // no hay dos facturas vivas en la fecha
+      expect(await facturasDe(fecha.id)).toHaveLength(1)
+      expect(await facturaDe(suelta.id)).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null }) // la candidata sigue libre
+      expect(pac.createInvoice).toHaveBeenCalledTimes(1)
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PAID')
+    })
+
+    it('ANEXAR primero, detenido con su candado: «Facturar» espera, ve la anexada y recibe 409 «ya tiene anexada»; el PAC jamás se llama', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+      const factura = await nuevaFactura()
+      const aparcada = aparcarLaTransaccion(1)
+      let anexando: Promise<unknown> | undefined
+      let facturando: Promise<unknown> | undefined
+      try {
+        anexando = linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+        anexando.catch(() => undefined)
+        const pid = await aTiempo(aparcada.pid, 60_000, 'anexar escribió la factura y quedó aparcado con el candado, sin commit')
+
+        // «Facturar» aún no ve la anexada (sin commit): llega hasta la foto y espera el candado.
+        facturando = invoiceOccurrence(fecha.id, { actorId: superId, receptor: RECEPTOR })
+        facturando.catch(() => undefined)
+        await esperaElCandado(pid)
+        aparcada.soltar()
+
+        await anexando
+        await expect(facturando).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINKED' })
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+      expect(await vivasDe(fecha.id)).toBe(1)
+      expect((await facturasDe(fecha.id)).map(f => f.id)).toEqual([factura.id]) // la única fila de la fecha es la anexada
+    })
+
+    it('anexar entra ENTRE la foto y la reserva de «Facturar»: la reserva (reserveCheck, bajo el candado) ve la anexada, no deja fila y NO llama al PAC', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+      const factura = await nuevaFactura()
+      const retenida = retenerLaTransaccion(2) // la 1 prepara la foto; la 2 es la reserva: se detiene ANTES de empezar
+      let facturando: Promise<unknown> | undefined
+      try {
+        facturando = invoiceOccurrence(fecha.id, { actorId: superId, receptor: RECEPTOR })
+        facturando.catch(() => undefined)
+        await aTiempo(retenida.llego, 60_000, '«Facturar» terminó de preparar su foto y está por reservar la factura')
+
+        await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW) // anexar entra completo en el hueco y confirma
+        expect((await facturaDe(factura.id)).platformChargeOccurrenceId).toBe(fecha.id)
+        retenida.soltar()
+
+        await expect(facturando).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINKED' })
+      } finally {
+        retenida.soltar()
+        retenida.restaurar()
+      }
+
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+      expect((await facturasDe(fecha.id)).map(f => f.id)).toEqual([factura.id]) // la fila de la reserva no nació
+    })
+  })
+
+  describe('4 · con una anexada viva, «Facturar» devuelve ESA factura y no llama al PAC', () => {
+    it('con perfil fiscal en el cobro: devuelve la anexada, ni consulta ni timbra, y «Ya me pagó» con la casilla marcada sólo marca pagado', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      const factura = await nuevaFactura()
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+
+      const devuelta = await invoiceOccurrence(fecha.id, { actorId: superId, receptor: RECEPTOR })
+
+      expect(devuelta.id).toBe(factura.id)
+      expect(devuelta.status).toBe('STAMPED')
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+      expect(pac.findByExternalId).not.toHaveBeenCalled()
+      expect(await facturasDe(fecha.id)).toHaveLength(1)
+
+      // «Ya me pagó» con «Timbrar ahora» sobre OTRA fecha con anexada: marca pagado, y la factura que regresa es la anexada, sin timbrar.
+      const otra = await cobroDeUnaFecha()
+      const segunda = await nuevaFactura()
+      await linkInvoice(otra.fecha.id, { cfdiId: segunda.id }, superId, NOW)
+      const pagada = await payOccurrence(otra.fecha.id, { invoice: true, receptor: RECEPTOR }, superId, NOW)
+      expect(pagada.occurrence.status).toBe('PAID')
+      expect(pagada.invoice).toMatchObject({ ok: true, cfdi: { id: segunda.id } })
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+    })
+
+    it('SIN perfil fiscal en el cobro (externo): devuelve la anexada sin pedir datos; sin anexada, el mismo cobro sí exige datos fiscales (NEEDS_FISCAL_DATA)', async () => {
+      const sinPerfil = async () => {
+        const cobro = await createCharge(
+          {
+            customerType: 'STANDALONE',
+            customerName: unico('Externo sin perfil'),
+            frequency: 'MONTHLY',
+            anchorDate: '2026-11-02',
+            concepts: [RENTA, LICENCIA],
+            invoiceMode: 'MANUAL',
+          },
+          superId,
+          NOW,
+        )
+        creado.charges.push(cobro.id)
+        expect(cobro.billingTaxProfileId).toBeNull()
+        const fecha = await porFecha(cobro.id, '2026-11-02')
+        await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+        return fecha
+      }
+      const conAnexada = await sinPerfil()
+      const factura = await nuevaFactura()
+      await linkInvoice(conAnexada.id, { cfdiId: factura.id }, superId, NOW)
+
+      const devuelta = await invoiceOccurrence(conAnexada.id, { actorId: superId }) // sin receptor y sin perfil: no se necesitan
+
+      expect(devuelta.id).toBe(factura.id)
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+
+      const sinAnexada = await sinPerfil()
+      await expect(invoiceOccurrence(sinAnexada.id, { actorId: superId, receptor: RECEPTOR })).rejects.toMatchObject({
+        code: 'NEEDS_FISCAL_DATA',
+      })
+      expect(pac.createInvoice).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('5 · una fecha futura con factura anexada sobrevive a editar y a pausar, con su FK', () => {
+    /** Semanal con ancla hoy: la de hoy y la del 9-nov (futura, sin pagar) con una factura ANEXADA. */
+    async function cobroConFuturaAnexada() {
+      const cobro = await nuevoCobro({ frequency: 'WEEKLY', anchorDate: '2026-11-02', invoiceMode: 'MANUAL' })
+      expect(await resumen(cobro.id)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING'])
+      const futura = await porFecha(cobro.id, '2026-11-09')
+      const factura = await nuevaFactura()
+      await linkInvoice(futura.id, { cfdiId: factura.id }, superId, NOW)
+      return { cobro, futura, factura }
+    }
+    const sigueLigada = async (facturaId: string, fechaId: string) => {
+      const fila = await facturaDe(facturaId)
+      expect(fila).toMatchObject({ platformChargeOccurrenceId: fechaId, status: 'STAMPED' })
+      expect(fila.chargeLinkedAt).not.toBeNull()
+    }
+
+    it('editar los conceptos regenera lo futuro SIN borrar la fecha anexada (la misma fila, el mismo id, la misma FK); una futura sin factura sí se borra y se regenera', async () => {
+      const { cobro, futura, factura } = await cobroConFuturaAnexada()
+      const control = await nuevoCobro({ frequency: 'WEEKLY', anchorDate: '2026-11-02', invoiceMode: 'MANUAL' })
+      const controlVieja = await porFecha(control.id, '2026-11-09')
+
+      await updateCharge(cobro.id, { concepts: [RENTA] }, superId, NOW)
+      await updateCharge(control.id, { concepts: [RENTA] }, superId, NOW)
+
+      // El deleteMany de Postgres respetó `invoices: { none: {} }`: la anexada sigue, con su id y su FK (SetNull la habría soltado).
+      expect(await resumen(cobro.id)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING'])
+      expect((await porFecha(cobro.id, '2026-11-09')).id).toBe(futura.id)
+      await sigueLigada(factura.id, futura.id)
+      // Y no es que el borrado no hiciera nada: la futura SIN factura del cobro de control se borró y nació otra con la foto nueva.
+      expect(await prisma.platformChargeOccurrence.findUnique({ where: { id: controlVieja.id } })).toBeNull()
+      expect(await porFecha(control.id, '2026-11-09')).toMatchObject({ status: 'PENDING', totalCents: 58000 })
+    })
+
+    it('editar el CALENDARIO con esa fecha es 409 «tiene una factura anexada; quítala para cambiar la fecha», y no cambia nada', async () => {
+      const { cobro, futura, factura } = await cobroConFuturaAnexada()
+
+      await expect(updateCharge(cobro.id, { anchorDate: '2026-11-03' }, superId, NOW)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PLATFORM_CHARGE_FUTURE_INVOICED',
+        message: 'El cobro del 9 nov tiene una factura anexada; quítala para cambiar la fecha',
+      })
+
+      expect((await prisma.platformCharge.findUniqueOrThrow({ where: { id: cobro.id } })).anchorDate.toISOString()).toBe(
+        '2026-11-02T00:00:00.000Z',
+      )
+      expect(await resumen(cobro.id)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING'])
+      await sigueLigada(factura.id, futura.id)
+    })
+
+    it('pausar borra las futuras SIN factura y deja la anexada con su FK', async () => {
+      const { cobro, futura, factura } = await cobroConFuturaAnexada()
+      const control = await nuevoCobro({ frequency: 'WEEKLY', anchorDate: '2026-11-02', invoiceMode: 'MANUAL' })
+
+      await pauseCharge(cobro.id, { skipOverdue: false }, superId, NOW)
+      await pauseCharge(control.id, { skipOverdue: false }, superId, NOW)
+
+      expect((await prisma.platformCharge.findUniqueOrThrow({ where: { id: cobro.id } })).pausedAt).not.toBeNull()
+      expect(await resumen(cobro.id)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING'])
+      expect((await porFecha(cobro.id, '2026-11-09')).id).toBe(futura.id)
+      await sigueLigada(factura.id, futura.id)
+      expect(await resumen(control.id)).toEqual(['2026-11-02:PENDING']) // la del control, sin factura, sí se borró
+    })
+  })
+
+  describe('6 · lo que enseña la fila: la factura VIVA, aunque haya cancelaciones más nuevas', () => {
+    const base = new Date('2026-11-01T10:00:00.000Z').getTime()
+    const minutos = (n: number) => new Date(base + n * 60_000)
+    /** Una factura de la fecha con su llave de intento (única por fecha) y una hora de creación exacta. */
+    const deLaFecha = (
+      occurrenceId: string,
+      k: number,
+      status: PlatformCfdiStatus,
+      minuto: number,
+      over: Partial<Prisma.PlatformCfdiUncheckedCreateInput> = {},
+    ) =>
+      nuevaFactura({
+        platformChargeOccurrenceId: occurrenceId,
+        status,
+        idempotencyKey: `por-cobrar:${occurrenceId}:${k}`,
+        uuid: ['STAMPED', 'CANCEL_REQUESTED'].includes(status) ? `UUID-${suffix}-${occurrenceId}-${k}` : null,
+        createdAt: minutos(minuto),
+        ...over,
+      })
+
+    it('una anexada vigente MÁS VIEJA que once canceladas: la fila y la lista enseñan la anexada', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha({ invoiceMode: 'MANUAL' })
+      const viva = await deLaFecha(fecha.id, 0, 'STAMPED', 0, { chargeLinkedAt: minutos(1) })
+      for (let i = 1; i <= 11; i++) await deLaFecha(fecha.id, i, 'CANCELLED', 10 + i)
+      // La trampa existe de verdad: la más nueva de la fecha es una cancelada (así la habría leído `take: 1` a secas).
+      const masNueva = await prisma.platformCfdi.findFirstOrThrow({
+        where: { platformChargeOccurrenceId: fecha.id },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      })
+      expect(masNueva.status).toBe('CANCELLED')
+
+      const lista = await get(`/occurrences?view=open&q=${encodeURIComponent(cobro.customerName)}`)
+
+      expect(lista.status).toBe(200)
+      expect(lista.body.data).toHaveLength(1)
+      expect(lista.body.data[0].invoice).toMatchObject({ id: viva.id, status: 'STAMPED', linked: true })
+    })
+
+    it('una lista de VARIAS fechas trae la viva de CADA una (distinct + take reales), con varias vivas en una fecha y una página de sólo dos', async () => {
+      const cobro = await nuevoCobro({ frequency: 'WEEKLY', anchorDate: '2026-10-19', invoiceMode: 'MANUAL' })
+      expect(await resumen(cobro.id)).toEqual(['2026-10-19:PENDING', '2026-10-26:PENDING', '2026-11-02:PENDING', '2026-11-09:PENDING'])
+      const [f1019, f1026, f1102, f1109] = await ocurrenciasDe(cobro.id)
+
+      // 19-oct: TRES vivas (no deberían existir, y aun así no pueden quitarle su lugar a otra fecha): gana la más nueva.
+      await deLaFecha(f1019.id, 0, 'STAMPED', 0, { chargeLinkedAt: minutos(1) })
+      await deLaFecha(f1019.id, 1, 'CANCEL_REQUESTED', 5)
+      const mas = await deLaFecha(f1019.id, 2, 'STAMPING', 9)
+      for (let i = 3; i < 6; i++) await deLaFecha(f1019.id, i, 'CANCELLED', 20 + i)
+      // 26-oct: UNA viva anexada, más vieja que dos intentos fallidos.
+      const viva1026 = await deLaFecha(f1026.id, 0, 'CANCEL_REQUESTED', 2, { chargeLinkedAt: minutos(3) })
+      await deLaFecha(f1026.id, 1, 'STAMP_FAILED', 30)
+      await deLaFecha(f1026.id, 2, 'STAMP_FAILED', 31)
+      // 2-nov: sólo canceladas (sin viva: sale la más nueva). 9-nov: nada.
+      await deLaFecha(f1102.id, 0, 'CANCELLED', 40)
+      const nueva1102 = await deLaFecha(f1102.id, 1, 'CANCELLED', 41)
+
+      const filtros = { view: 'open' as const, q: cobro.customerName }
+      const pagina1 = await listOccurrences({ ...filtros, page: 1, pageSize: 2 }, NOW)
+      const pagina2 = await listOccurrences({ ...filtros, page: 2, pageSize: 2 }, NOW)
+      const completa = await listOccurrences({ ...filtros, pageSize: 100 }, NOW)
+
+      expect(pagina1.rows.map(r => [r.id, r.invoice?.id])).toEqual([
+        [f1019.id, mas.id],
+        [f1026.id, viva1026.id],
+      ])
+      expect(pagina1.rows[1].invoice).toMatchObject({ status: 'CANCEL_REQUESTED', linked: true })
+      expect(pagina2.rows.map(r => [r.id, r.invoice?.id ?? null])).toEqual([
+        [f1102.id, nueva1102.id],
+        [f1109.id, null],
+      ])
+      expect(completa.rows.map(r => r.invoice?.id ?? null)).toEqual([mas.id, viva1026.id, nueva1102.id, null])
+    })
+  })
+
+  describe('7 · omitir con una anexada viva', () => {
+    it('omitir esa fecha es 409 «tiene anexada la factura»; pausar con «omitir lo vencido» la deja PENDING y omite las demás', async () => {
+      const cobro = await nuevoCobro({ frequency: 'WEEKLY', anchorDate: '2026-10-19', invoiceMode: 'MANUAL' })
+      expect(await resumen(cobro.id)).toEqual(['2026-10-19:PENDING', '2026-10-26:PENDING', '2026-11-02:PENDING', '2026-11-09:PENDING'])
+      const [f1019, f1026] = await ocurrenciasDe(cobro.id)
+      const anexada = await nuevaFactura()
+      await linkInvoice(f1026.id, { cfdiId: anexada.id }, superId, NOW)
+      // Una timbrada DESDE «Por cobrar» (sin `chargeLinkedAt`) no cuenta como anexada: esa sí se omite como siempre.
+      await nuevaFactura({ platformChargeOccurrenceId: f1019.id })
+
+      const omitir = await post(`/occurrences/${f1026.id}/skip`)
+      expect(omitir.status).toBe(409)
+      expect(omitir.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_LINKED' })
+      expect(omitir.body.message).toMatch(/tiene anexada la factura F-\d+; quítala antes de omitirla/)
+      expect((await porFecha(cobro.id, '2026-10-26')).status).toBe('PENDING')
+
+      await pauseCharge(cobro.id, { skipOverdue: true }, superId, NOW)
+
+      expect(await resumen(cobro.id)).toEqual(['2026-10-19:SKIPPED', '2026-10-26:PENDING', '2026-11-02:SKIPPED']) // la de la anexada sigue por cobrar; la futura sin factura se borró
+      expect((await facturaDe(anexada.id)).platformChargeOccurrenceId).toBe(f1026.id)
+      const [pausa] = await bitacoras('PLATFORM_CHARGE_PAUSED', cobro.id, 1)
+      expect(pausa.data).toMatchObject({ skipOverdue: true, removedFuture: 1, skippedOverdue: 2 })
+    })
+
+    it('anexar primero, detenido con su candado: omitir espera, ve la anexada y recibe 409', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha({ invoiceMode: 'MANUAL' })
+      const factura = await nuevaFactura()
+      const aparcada = aparcarLaTransaccion(1)
+      let anexando: Promise<unknown> | undefined
+      let omitiendo: Promise<unknown> | undefined
+      try {
+        anexando = linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+        anexando.catch(() => undefined)
+        const pid = await aTiempo(aparcada.pid, 60_000, 'anexar quedó aparcado con el candado, sin commit')
+
+        omitiendo = skipOccurrence(fecha.id, superId, NOW)
+        omitiendo.catch(() => undefined)
+        await esperaElCandado(pid)
+        aparcada.soltar()
+
+        await anexando
+        await expect(omitiendo).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINKED' })
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PENDING')
+      expect((await facturaDe(factura.id)).platformChargeOccurrenceId).toBe(fecha.id)
+    })
+  })
+
+  describe('8 · quitar lo anexado', () => {
+    it('con la cancelación en trámite (CANCEL_REQUESTED) es 409 «sigue en trámite ante el SAT» y la factura sigue ligada', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      const factura = await nuevaFactura()
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      await prisma.platformCfdi.update({ where: { id: factura.id }, data: { status: 'CANCEL_REQUESTED' } })
+
+      const res = await del(`/occurrences/${fecha.id}/invoice-link`)
+
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_CANCEL_PENDING' })
+      expect(res.body.message).toMatch(/sigue en trámite ante el SAT/)
+      const fila = await facturaDe(factura.id)
+      expect(fila).toMatchObject({ platformChargeOccurrenceId: fecha.id, status: 'CANCEL_REQUESTED' })
+      expect(fila.chargeLinkedAt).not.toBeNull()
+    })
+
+    it('una STAMPED: la factura queda LIBRE, la fecha conserva sus números y su modo, y después se anexa a OTRO cobro', async () => {
+      const unConcepto: ChargeConcept[] = [
+        { description: 'Venta de equipo', amountCents: 20000, ivaMode: 'WITHOUT_IVA', satProductKey: '43211509', satUnitKey: 'H87' },
+      ]
+      const factura = await nuevaFactura({}, unConcepto) // 20,000 + 3,200 de IVA = 23,200 (no es lo que traía la fecha)
+      const a = await cobroDeUnaFecha()
+      const b = await cobroDeUnaFecha()
+      await linkInvoice(a.fecha.id, { cfdiId: factura.id }, superId, NOW)
+      const anexada = await porFecha(a.cobro.id, '2026-11-02')
+      expect(anexada).toMatchObject({ subtotalCents: 20000, taxCents: 3200, totalCents: 23200, invoiceMode: 'MANUAL' }) // tomó lo que dice la factura
+      expect(anexada.concepts).toEqual(unConcepto)
+
+      const vista = await unlinkInvoice(a.fecha.id, superId, NOW)
+
+      expect(vista.invoice).toBeNull()
+      expect(await facturaDe(factura.id)).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null, status: 'STAMPED' }) // libre y vigente
+      expect(await porFecha(a.cobro.id, '2026-11-02')).toMatchObject({
+        subtotalCents: 20000,
+        taxCents: 3200,
+        totalCents: 23200,
+        invoiceMode: 'MANUAL',
+      }) // conserva sus números
+      const [quitada] = await bitacoras('PLATFORM_CHARGE_INVOICE_UNLINKED', a.cobro.id, 1)
+      expect(quitada.data).toMatchObject({ platformCfdiId: factura.id, status: 'STAMPED', occurrenceId: a.fecha.id })
+
+      // Libre: aparece otra vez entre las candidatas del cliente y se anexa a la fecha de otro cobro.
+      const candidatas = await listInvoiceCandidates({ customerType: 'STANDALONE', rfc: RECEPTOR.rfc, q: factura.folio ?? undefined })
+      expect(candidatas.rows.map(c => c.id)).toContain(factura.id)
+      await linkInvoice(b.fecha.id, { cfdiId: factura.id }, superId, NOW)
+      expect((await facturaDe(factura.id)).platformChargeOccurrenceId).toBe(b.fecha.id)
+      expect(await porFecha(b.cobro.id, '2026-11-02')).toMatchObject({ totalCents: 23200, invoiceMode: 'MANUAL' })
+    })
+
+    it('si «Facturas CFDI» pide cancelarla después de leerla, el UPDATE condicional de quitar da 0 filas: 409 «acaba de cambiar» y sigue ligada', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      const factura = await nuevaFactura()
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      const otra = otraConexionCambia(factura.id, { status: 'CANCEL_REQUESTED' })
+      try {
+        const pid = await aTiempo(otra.pid, 60_000, 'la otra conexión pidió la cancelación y la dejó sin confirmar')
+        const quitando = unlinkInvoice(fecha.id, superId, NOW) // la lee STAMPED (la otra no confirmó) y su UPDATE espera la fila
+        quitando.catch(() => undefined)
+        await esperaLaFila(pid)
+        otra.confirmar()
+        await otra.terminada
+
+        await expect(quitando).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_CHANGED' })
+        await expect(quitando).rejects.toThrow(/No se pudo quitar/)
+      } finally {
+        otra.confirmar()
+        await otra.terminada.catch(() => undefined)
+      }
+      expect(await facturaDe(factura.id)).toMatchObject({ platformChargeOccurrenceId: fecha.id, status: 'CANCEL_REQUESTED' })
+    })
+
+    it('una factura timbrada DESDE «Por cobrar» (sin marca de anexada) no se quita: 409, y sigue en su fecha', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      const desdeAqui = await nuevaFactura({ platformChargeOccurrenceId: fecha.id })
+
+      await expect(unlinkInvoice(fecha.id, superId, NOW)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PLATFORM_CHARGE_INVOICE_NOT_LINKED',
+      })
+      expect((await facturaDe(desdeAqui.id)).platformChargeOccurrenceId).toBe(fecha.id)
+    })
+
+    it('«Deshacer» una fecha pagada con anexada pide quitarla primero; tras quitarla, regresa a pendiente con el modo del cobro', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha() // AUTOMATIC
+      const factura = await nuevaFactura()
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW) // PAID, y pasa a MANUAL
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+
+      await expect(reopenOccurrence(fecha.id, superId, NOW)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PLATFORM_CHARGE_INVOICE_LINKED',
+        message: 'Quita primero la factura F-' + (factura.folio ?? ''),
+      })
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PAID')
+
+      await unlinkInvoice(fecha.id, superId, NOW)
+      const vista = await reopenOccurrence(fecha.id, superId, NOW)
+
+      expect(vista).toMatchObject({ status: 'PENDING', paidAt: null, invoiceMode: 'AUTOMATIC', invoice: null })
+    })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('alta desde una factura: POST /platform-charges con invoiceId, por HTTP (todo en una transacción)', () => {
+  const hoy = () => todayInMexico(new Date())
+  const masDias = (dia: string, n: number) => new Date(calendarDayToDb(dia).getTime() + n * 86_400_000).toISOString().slice(0, 10)
+  const cuerpo = (nombre: string, over: Record<string, unknown> = {}) => ({
+    customerType: 'STANDALONE',
+    customerName: nombre,
+    anchorDate: hoy(),
+    ...over,
+  })
+  const UN_CONCEPTO: ChargeConcept[] = [
+    { description: 'Suscripción anual', amountCents: 123456, ivaMode: 'WITHOUT_IVA', satProductKey: '81112501', satUnitKey: 'E48' },
+  ]
+  /** 123,456 × 16 % = 19,752.96 → 19,753 de IVA; total 143,209 (a mano, no con la fórmula del código). */
+  const SUBTOTAL = 123456
+  const IVA = 19753
+  const TOTAL_FACTURA = 143209
+
+  async function altaDesdeFactura() {
+    const perfil = await nuevoPerfil()
+    const factura = await nuevaFactura({ billingTaxProfileId: perfil.id }, UN_CONCEPTO)
+    const nombre = unico('Cobro desde factura')
+    const res = await post(
+      '/',
+      cuerpo(nombre, {
+        invoiceId: factura.id,
+        // Lo que el cuerpo diga de esto se ignora: lo deriva el servidor de la factura.
+        billingTaxProfileId: (await nuevoPerfil({ rfc: 'XEXX010101000' })).id,
+        frequency: 'WEEKLY',
+        invoiceMode: 'AUTOMATIC',
+        concepts: [
+          { description: 'IGNORAR ESTE CONCEPTO', amountCents: 999, ivaMode: 'WITH_IVA', satProductKey: '11111111', satUnitKey: 'H87' },
+        ],
+      }),
+    )
+    expect(res.status).toBe(201)
+    const chargeId: string = res.body.data.id
+    creado.charges.push(chargeId)
+    return { res, chargeId, factura, perfil, nombre }
+  }
+
+  it('9 · nace UNA SOLA VEZ y MANUAL, con una sola fecha ligada que toma los totales y los conceptos de la factura; lo que el cuerpo diga de ellos se ignora', async () => {
+    const { res, chargeId, factura, perfil, nombre } = await altaDesdeFactura()
+
+    expect(res.body.data).toMatchObject({ frequency: 'ONE_TIME', invoiceMode: 'MANUAL', anchorDate: hoy(), billingTaxProfileId: perfil.id })
+    const fechas = await ocurrenciasDe(chargeId)
+    expect(fechas).toHaveLength(1) // una sola fecha, aunque el cuerpo pidió WEEKLY
+    expect(dbToCalendarDay(fechas[0].dueDate)).toBe(hoy())
+    expect(fechas[0]).toMatchObject({
+      status: 'PENDING',
+      invoiceMode: 'MANUAL',
+      subtotalCents: SUBTOTAL,
+      taxCents: IVA,
+      totalCents: TOTAL_FACTURA,
+    })
+    expect(fechas[0].concepts).toEqual(UN_CONCEPTO) // los de la factura, no «IGNORAR ESTE CONCEPTO»
+    expect(factura).toMatchObject({ subtotalCents: SUBTOTAL, taxCents: IVA, totalCents: TOTAL_FACTURA })
+    const cobro = await prisma.platformCharge.findUniqueOrThrow({ where: { id: chargeId } })
+    expect(cobro.concepts).toEqual(UN_CONCEPTO)
+    expect(cobro).toMatchObject({ frequency: 'ONE_TIME', invoiceMode: 'MANUAL', billingTaxProfileId: perfil.id })
+
+    // La factura quedó ligada a esa fecha, marcada como anexada (se puede quitar).
+    const ligada = await facturaDe(factura.id)
+    expect(ligada.platformChargeOccurrenceId).toBe(fechas[0].id)
+    expect(ligada.chargeLinkedAt).not.toBeNull()
+
+    // Lo que ve la pantalla: el cobro por su id y la fila con su factura y la suma del filtro.
+    const uno = await get(`/${chargeId}`)
+    expect(uno.status).toBe(200)
+    expect(uno.body.data).toMatchObject({ id: chargeId, frequency: 'ONE_TIME', anchorDate: hoy() })
+    const lista = await get(`/occurrences?view=open&q=${encodeURIComponent(nombre)}`)
+    expect(lista.body.meta).toMatchObject({ total: 1, sumCents: TOTAL_FACTURA })
+    expect(lista.body.data[0].invoice).toMatchObject({ id: factura.id, status: 'STAMPED', linked: true })
+
+    // La bitácora: el alta (con la factura) y el anexado, ya con el cobro confirmado.
+    const [alta] = await bitacoras('PLATFORM_CHARGE_CREATED', chargeId, 1)
+    expect(alta.data).toMatchObject({ frequency: 'ONE_TIME', invoiceMode: 'MANUAL', invoiceId: factura.id })
+    const [anexo] = await bitacoras('PLATFORM_CHARGE_INVOICE_LINKED', chargeId, 1)
+    expect(anexo.data).toMatchObject({ platformCfdiId: factura.id, occurrenceId: fechas[0].id, totalCents: TOTAL_FACTURA })
+  })
+
+  it('9 · editar ese cobro: 409 mientras tenga la factura; tras quitarla, edita su única fecha EN SU LUGAR (mismo id) y conserva los números de la factura; no se vuelve recurrente ni se pausa', async () => {
+    const { chargeId, factura } = await altaDesdeFactura()
+    const [fecha] = await ocurrenciasDe(chargeId)
+
+    const conFactura = await patch(`/${chargeId}`, { anchorDate: masDias(hoy(), 3) })
+    expect(conFactura.status).toBe(409)
+    expect(conFactura.body).toMatchObject({ code: 'PLATFORM_CHARGE_ONE_TIME_HAS_INVOICE' })
+    expect(dbToCalendarDay((await ocurrenciasDe(chargeId))[0].dueDate)).toBe(hoy())
+
+    const quitada = await del(`/occurrences/${fecha.id}/invoice-link`)
+    expect(quitada.status).toBe(200)
+    expect((await facturaDe(factura.id)).platformChargeOccurrenceId).toBeNull()
+
+    const editada = await patch(`/${chargeId}`, { anchorDate: masDias(hoy(), 3) })
+    expect(editada.status).toBe(200)
+    const [despues] = await ocurrenciasDe(chargeId)
+    expect(despues.id).toBe(fecha.id) // en su lugar: ni borró ni regeneró la fila
+    expect(dbToCalendarDay(despues.dueDate)).toBe(masDias(hoy(), 3))
+    expect(despues).toMatchObject({ subtotalCents: SUBTOTAL, taxCents: IVA, totalCents: TOTAL_FACTURA }) // sólo cambió la fecha
+
+    const recurrente = await patch(`/${chargeId}`, { frequency: 'WEEKLY' })
+    expect(recurrente.status).toBe(400)
+    expect(recurrente.body).toMatchObject({ code: 'PLATFORM_CHARGE_ONE_TIME_FIXED' })
+    const pausa = await post(`/${chargeId}/pause`, { skipOverdue: false })
+    expect(pausa.status).toBe(400)
+    expect(pausa.body).toMatchObject({ code: 'PLATFORM_CHARGE_ONE_TIME_NO_PAUSE' })
+  })
+
+  describe('10 · rollback real: si la factura no se puede anexar, NO queda ningún cobro ni fecha', () => {
+    const SIN_IVA_EXENTA = [
+      {
+        description: 'Renglón exento',
+        satProductKey: '81112501',
+        satUnitKey: 'E48',
+        quantity: 1,
+        unitPriceCents: 10000,
+        taxExempt: true,
+      },
+    ]
+    interface Caso {
+      factura: { id: string }
+      extra?: Record<string, unknown>
+      status: number
+      code: string
+      /** Lo que la factura debe seguir teniendo tras el rechazo. */
+      ligadaA?: string | null
+    }
+    const casos: Array<[string, () => Promise<Caso>]> = [
+      [
+        'la factura ya es de OTRO cobro',
+        async () => {
+          const ocupada = await cobroDeUnaFecha({ invoiceMode: 'MANUAL' })
+          const factura = await nuevaFactura()
+          await linkInvoice(ocupada.fecha.id, { cfdiId: factura.id }, superId, NOW)
+          return { factura, status: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_TAKEN', ligadaA: ocupada.fecha.id }
+        },
+      ],
+      [
+        'es de OTRO cliente',
+        async () => ({
+          factura: await nuevaFactura({ organizationId: `org-b-${suffix}`, receptorRfc: 'XEXX010101000' }),
+          extra: { customerType: 'ORGANIZATION', organizationId: `org-a-${suffix}` },
+          status: 409,
+          code: 'PLATFORM_CHARGE_INVOICE_LINK_OTHER_CUSTOMER',
+        }),
+      ],
+      [
+        'ya tiene PAGOS (amountPaidCents)',
+        async () => ({
+          factura: await nuevaFactura({ amountPaidCents: 5000 }),
+          status: 409,
+          code: 'PLATFORM_CHARGE_INVOICE_LINK_HAS_PAYMENTS',
+        }),
+      ],
+      [
+        'ya tiene un complemento de pago VIVO (aunque amountPaidCents siga en 0)',
+        async () => {
+          const factura = await nuevaFactura()
+          await nuevaFactura({ type: 'PAGO', parentPlatformCfdiId: factura.id, status: 'STAMPED' })
+          return { factura, status: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_HAS_PAYMENTS' }
+        },
+      ],
+      [
+        'no está timbrada (cancelada)',
+        async () => ({
+          factura: await nuevaFactura({ status: 'CANCELLED' }),
+          status: 409,
+          code: 'PLATFORM_CHARGE_INVOICE_LINK_NOT_STAMPED',
+        }),
+      ],
+      [
+        'no cabe en lo que «Por cobrar» sabe calcular (un renglón exento)',
+        async () => ({
+          factura: await nuevaFactura({
+            lines: SIN_IVA_EXENTA as unknown as Prisma.InputJsonValue,
+            subtotalCents: 10000,
+            taxCents: 0,
+            totalCents: 10000,
+          }),
+          status: 409,
+          code: 'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
+        }),
+      ],
+      [
+        'la factura ya no existe',
+        async () => ({ factura: { id: 'cnoexiste0000000000000000' }, status: 404, code: 'PLATFORM_CHARGE_INVOICE_LINK_NOT_FOUND' }),
+      ],
+    ]
+
+    it.each(casos)('%s: 409/404 y la base queda EXACTAMENTE como estaba', async (_nombre, armar) => {
+      const caso = await armar()
+      const nombre = unico('Cobro que se deshace')
+      const contar = async () => ({
+        cobros: await prisma.platformCharge.count({ where: { createdById: superId } }),
+        fechas: await prisma.platformChargeOccurrence.count({ where: { charge: { createdById: superId } } }),
+      })
+      const antes = await contar()
+      const facturaAntes = await prisma.platformCfdi.findUnique({ where: { id: caso.factura.id } })
+
+      const res = await post('/', cuerpo(nombre, { invoiceId: caso.factura.id, ...(caso.extra ?? {}) }))
+
+      expect(res.status).toBe(caso.status)
+      expect(res.body).toMatchObject({ code: caso.code })
+      expect(await contar()).toEqual(antes) // ni un cobro ni una fecha: la transacción se deshizo entera
+      expect(await prisma.platformCharge.count({ where: { customerName: nombre } })).toBe(0)
+      const facturaDespues = await prisma.platformCfdi.findUnique({ where: { id: caso.factura.id } })
+      expect(facturaDespues).toEqual(facturaAntes) // y la factura, intacta (ni vínculo ni versión nueva)
+      if (caso.ligadaA !== undefined) expect(facturaDespues?.platformChargeOccurrenceId).toBe(caso.ligadaA)
+    })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('11 · una sola vez (ONE_TIME) y sin factura (NONE): los enums de una base migrada de verdad', () => {
+  it('se guardan y se leen como enums de Postgres; la fecha nace con el alta aunque sea lejana o vencida; el generador diario NO toca un ONE_TIME', async () => {
+    const [{ frecuencias }] = await prisma.$queryRaw<{ frecuencias: string[] }[]>`
+      SELECT array_agg(e::text) AS frecuencias FROM unnest(enum_range(NULL::"PlatformChargeFrequency")) e`
+    const [{ modos }] = await prisma.$queryRaw<{ modos: string[] }[]>`
+      SELECT array_agg(e::text) AS modos FROM unnest(enum_range(NULL::"PlatformChargeInvoiceMode")) e`
+    expect(frecuencias).toContain('ONE_TIME')
+    expect(modos).toContain('NONE')
+
+    const sinClaves = { description: 'Venta de equipo', amountCents: 100000, ivaMode: 'WITH_IVA' as const } // sin claves del SAT: NONE no las pide
+    const lejana = await nuevoCobro({ frequency: 'ONE_TIME', anchorDate: '2026-12-20', invoiceMode: 'NONE', concepts: [sinClaves] })
+    const vencida = await nuevoCobro({ frequency: 'ONE_TIME', anchorDate: '2026-10-20', invoiceMode: 'NONE', concepts: [sinClaves] })
+
+    // Lo que Postgres guardó, leído como texto de su enum (no lo que Prisma cree).
+    for (const cobro of [lejana, vencida]) {
+      const [guardado] = await prisma.$queryRaw<{ frecuencia: string; modo: string }[]>`
+        SELECT frequency::text AS frecuencia, "invoiceMode"::text AS modo FROM "PlatformCharge" WHERE id = ${cobro.id}`
+      expect(guardado).toEqual({ frecuencia: 'ONE_TIME', modo: 'NONE' })
+      const fechas = await prisma.$queryRaw<{ modo: string }[]>`
+        SELECT "invoiceMode"::text AS modo FROM "PlatformChargeOccurrence" WHERE "chargeId" = ${cobro.id}`
+      expect(fechas).toEqual([{ modo: 'NONE' }])
+    }
+    expect(await prisma.platformCharge.findUniqueOrThrow({ where: { id: lejana.id } })).toMatchObject({
+      frequency: 'ONE_TIME',
+      invoiceMode: 'NONE',
+    })
+
+    // Su única fecha nació con el alta: la lejana (más allá de hoy+7) y la vencida; con los conceptos sin claves y los totales del 16 %.
+    expect(await resumen(lejana.id)).toEqual(['2026-12-20:PENDING'])
+    expect(await resumen(vencida.id)).toEqual(['2026-10-20:PENDING'])
+    const [fechaLejana] = await ocurrenciasDe(lejana.id)
+    expect(fechaLejana.concepts).toEqual([{ ...sinClaves, satProductKey: '', satUnitKey: '' }])
+    expect(fechaLejana).toMatchObject({ subtotalCents: 86207, taxCents: 13793, totalCents: 100000, invoiceMode: 'NONE' })
+    expect((await payPreview(fechaLejana.id)).willInvoice).toBe(false) // sin factura: la casilla de «Ya me pagó» sale sin marcar
+
+    // El generador diario no recorre un ONE_TIME: ni toca su fila ni la vuelve a crear si falta. Uno semanal, de control, sí se regenera.
+    const semanal = await nuevoCobro({ frequency: 'WEEKLY', anchorDate: '2026-11-02', invoiceMode: 'MANUAL' })
+    await generateAllActive(NOW)
+    const [intacta] = await ocurrenciasDe(lejana.id)
+    expect(intacta).toMatchObject({ id: fechaLejana.id })
+    expect(intacta.updatedAt).toEqual(fechaLejana.updatedAt)
+    expect(await resumen(vencida.id)).toEqual(['2026-10-20:PENDING'])
+
+    await prisma.platformChargeOccurrence.deleteMany({ where: { chargeId: { in: [lejana.id, vencida.id, semanal.id] } } })
+    await generateAllActive(NOW)
+    expect(await resumen(semanal.id)).toEqual(['2026-11-02:PENDING', '2026-11-09:PENDING']) // el recurrente sí se regeneró
+    expect(await resumen(lejana.id)).toEqual([]) // el ONE_TIME, no
+    expect(await resumen(vencida.id)).toEqual([])
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Un conjunto de fechas que cubre los tres modos (AUTOMATIC, MANUAL y NONE) y TODAS las combinaciones de factura que importan. La categoría
+// de cada una está escrita a mano aquí, con la regla de la spec (STAMPED, PROBLEM, NONE, PENDING, en ese orden), no calculada con el código.
+type Categoria = InvoiceCategory
+interface Semilla {
+  cobro: 'A' | 'B' | 'C' | 'D'
+  dia: string
+  modo: PlatformChargeInvoiceMode
+  facturas: PlatformCfdiStatus[]
+  categoria: Categoria
+}
+const SEMILLAS: Semilla[] = [
+  // A (mensual): un renglón por combinación
+  { cobro: 'A', dia: '2026-01-15', modo: 'AUTOMATIC', facturas: [], categoria: 'PENDING' },
+  { cobro: 'A', dia: '2026-02-15', modo: 'MANUAL', facturas: [], categoria: 'PENDING' },
+  { cobro: 'A', dia: '2026-03-15', modo: 'NONE', facturas: [], categoria: 'NONE' },
+  { cobro: 'A', dia: '2026-04-15', modo: 'MANUAL', facturas: ['STAMPED'], categoria: 'STAMPED' },
+  { cobro: 'A', dia: '2026-05-15', modo: 'AUTOMATIC', facturas: ['CANCEL_REQUESTED'], categoria: 'STAMPED' },
+  { cobro: 'A', dia: '2026-06-15', modo: 'MANUAL', facturas: ['STAMPING'], categoria: 'PROBLEM' },
+  { cobro: 'A', dia: '2026-07-15', modo: 'AUTOMATIC', facturas: ['STAMP_FAILED'], categoria: 'PROBLEM' },
+  { cobro: 'A', dia: '2026-08-15', modo: 'MANUAL', facturas: ['CANCELLED'], categoria: 'PENDING' }, // una cancelada no cuenta como factura
+  { cobro: 'A', dia: '2026-09-15', modo: 'NONE', facturas: ['CANCELLED'], categoria: 'NONE' },
+  { cobro: 'A', dia: '2026-10-15', modo: 'AUTOMATIC', facturas: ['STAMPED', 'STAMP_FAILED'], categoria: 'STAMPED' }, // lo timbrado manda sobre un intento fallido
+  { cobro: 'A', dia: '2026-11-15', modo: 'MANUAL', facturas: ['STAMPING', 'CANCELLED'], categoria: 'PROBLEM' },
+  { cobro: 'A', dia: '2026-12-15', modo: 'NONE', facturas: ['STAMPED'], categoria: 'STAMPED' }, // una fecha sin factura que ya se facturó
+  { cobro: 'A', dia: '2027-01-15', modo: 'NONE', facturas: ['STAMPING'], categoria: 'PROBLEM' }, // un intento en camino manda sobre el modo NONE
+  { cobro: 'A', dia: '2027-02-15', modo: 'MANUAL', facturas: ['DRAFT'], categoria: 'PENDING' }, // un borrador no es factura
+  { cobro: 'A', dia: '2027-03-15', modo: 'NONE', facturas: ['DRAFT'], categoria: 'NONE' },
+  {
+    cobro: 'A',
+    dia: '2027-04-15',
+    modo: 'AUTOMATIC',
+    facturas: ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING', 'STAMP_FAILED', 'CANCELLED', 'DRAFT'],
+    categoria: 'STAMPED',
+  },
+  // B (semanal): pegadas a fin de mes
+  { cobro: 'B', dia: '2026-01-31', modo: 'MANUAL', facturas: [], categoria: 'PENDING' },
+  { cobro: 'B', dia: '2026-02-28', modo: 'MANUAL', facturas: ['STAMPED'], categoria: 'STAMPED' },
+  { cobro: 'B', dia: '2026-03-01', modo: 'NONE', facturas: [], categoria: 'NONE' },
+  // C (una sola vez, de una ORGANIZACIÓN)
+  { cobro: 'C', dia: '2026-12-31', modo: 'MANUAL', facturas: ['STAMPING'], categoria: 'PROBLEM' },
+  // D (quincenal, con el MISMO NOMBRE que A: se suman en un solo grupo por cliente)
+  { cobro: 'D', dia: '2027-01-01', modo: 'AUTOMATIC', facturas: [], categoria: 'PENDING' },
+  { cobro: 'D', dia: '2028-02-29', modo: 'MANUAL', facturas: ['STAMPED'], categoria: 'STAMPED' }, // el 29 de un año bisiesto
+]
+interface FilaSembrada extends Semilla {
+  id: string
+  total: number
+  nombre: string
+  frecuencia: PlatformChargeFrequency
+  tipo: 'STANDALONE' | 'ORGANIZATION'
+}
+
+/** Un cobro sembrado a mano (sin pasar por el generador): para ocurrencias de fechas y estados exactos. */
+async function cobroDeSemilla(nombre: string, over: Partial<Prisma.PlatformChargeUncheckedCreateInput> = {}) {
+  const billingTaxProfileId = 'billingTaxProfileId' in over ? over.billingTaxProfileId : (await nuevoPerfil()).id
+  const cobro = await prisma.platformCharge.create({
+    data: {
+      customerType: 'STANDALONE',
+      customerName: nombre,
+      frequency: 'MONTHLY',
+      anchorDate: calendarDayToDb('2026-01-01'),
+      concepts: [RENTA] as unknown as Prisma.InputJsonValue,
+      invoiceMode: 'MANUAL',
+      createdById: superId,
+      ...over,
+      billingTaxProfileId,
+    },
+  })
+  creado.charges.push(cobro.id)
+  return cobro
+}
+const fechaDeSemilla = (
+  chargeId: string,
+  dia: string,
+  totalCents: number,
+  over: Partial<Prisma.PlatformChargeOccurrenceUncheckedCreateInput> = {},
+) =>
+  prisma.platformChargeOccurrence.create({
+    data: {
+      chargeId,
+      dueDate: calendarDayToDb(dia),
+      concepts: [RENTA] as unknown as Prisma.InputJsonValue,
+      subtotalCents: totalCents,
+      taxCents: 0,
+      totalCents,
+      invoiceMode: 'MANUAL',
+      ...over,
+    },
+  })
+
+/** Siembra los cuatro cobros y todas las fechas de `SEMILLAS` con sus facturas. `prefijo` termina en «|» para que la búsqueda no choque con otro. */
+async function sembrarFiltros(prefijo: string): Promise<FilaSembrada[]> {
+  const defs = {
+    A: { nombre: `${prefijo} Alfa`, frecuencia: 'MONTHLY', tipo: 'STANDALONE' },
+    B: { nombre: `${prefijo} Beta`, frecuencia: 'WEEKLY', tipo: 'STANDALONE' },
+    C: { nombre: `${prefijo} Gamma`, frecuencia: 'ONE_TIME', tipo: 'ORGANIZATION' },
+    D: { nombre: `${prefijo} Alfa`, frecuencia: 'BIWEEKLY', tipo: 'STANDALONE' },
+  } as const
+  const cobros = {} as Record<'A' | 'B' | 'C' | 'D', { id: string }>
+  for (const clave of ['A', 'B', 'C', 'D'] as const) {
+    const d = defs[clave]
+    cobros[clave] = await cobroDeSemilla(
+      d.nombre,
+      d.tipo === 'ORGANIZATION'
+        ? { frequency: d.frecuencia, customerType: 'ORGANIZATION', organizationId: `org-sembrada-${suffix}`, billingTaxProfileId: null }
+        : { frequency: d.frecuencia },
+    )
+  }
+
+  const filas: FilaSembrada[] = []
+  for (const [i, semilla] of SEMILLAS.entries()) {
+    const total = 1000 + 111 * i // cada fecha, un total distinto: una suma equivocada no puede cuadrar de casualidad
+    const fecha = await fechaDeSemilla(cobros[semilla.cobro].id, semilla.dia, total, { invoiceMode: semilla.modo })
+    for (const [k, status] of semilla.facturas.entries()) {
+      await nuevaFactura({
+        platformChargeOccurrenceId: fecha.id,
+        status,
+        idempotencyKey: `por-cobrar:${fecha.id}:${k}`,
+        uuid: status === 'STAMPED' || status === 'CANCEL_REQUESTED' ? `UUID-${suffix}-${fecha.id}-${k}` : null,
+        createdAt: new Date(Date.UTC(2026, 10, 1, 12, k)),
+      })
+    }
+    const d = defs[semilla.cobro]
+    filas.push({ ...semilla, id: fecha.id, total, nombre: d.nombre, frecuencia: d.frecuencia, tipo: d.tipo })
+  }
+  return filas
+}
+const suma = (filas: FilaSembrada[]) => filas.reduce((s, f) => s + f.total, 0)
+const ids = (xs: Array<{ id: string }>) => xs.map(x => x.id).sort()
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('candidatas para anexar: sólo facturas de ingreso, timbradas y sin cobro, del cliente que se pide', () => {
+  it('trae las que se pueden anexar (de la más nueva a la más vieja), con su total, y deja fuera las demás; busca por folio, serie-folio y RFC; el tope lo pone el servidor', async () => {
+    const rfc = 'ZZ' + String(Date.now()).slice(-9)
+    const minuto = (n: number) => new Date(Date.UTC(2026, 10, 1, 8, n))
+    const propia = (over: Partial<Prisma.PlatformCfdiUncheckedCreateInput>) => nuevaFactura({ receptorRfc: rfc, ...over })
+    const a = await propia({ serie: 'A', folio: '19', createdAt: minuto(30) })
+    const b = await propia({ serie: 'A', folio: '18', createdAt: minuto(20) })
+    const conPagos = await propia({ serie: 'B', folio: '7', amountPaidCents: 1000, createdAt: minuto(10) })
+    const conComplemento = await propia({ serie: 'B', folio: '8', createdAt: minuto(9) })
+    await propia({ type: 'PAGO', parentPlatformCfdiId: conComplemento.id, createdAt: minuto(9) })
+    const conComplementoCancelado = await propia({ serie: 'B', folio: '9', createdAt: minuto(8) })
+    await propia({ type: 'PAGO', parentPlatformCfdiId: conComplementoCancelado.id, status: 'CANCELLED', uuid: null, createdAt: minuto(8) })
+    const exenta = await propia({
+      serie: 'C',
+      folio: '1',
+      createdAt: minuto(7),
+      lines: [
+        {
+          description: 'Renglón exento',
+          satProductKey: '81112501',
+          satUnitKey: 'E48',
+          quantity: 1,
+          unitPriceCents: 10000,
+          taxExempt: true,
+        },
+      ] as unknown as Prisma.InputJsonValue,
+      subtotalCents: 10000,
+      taxCents: 0,
+      totalCents: 10000,
+    })
+    // Las que NO son candidatas:
+    const ocupada = await cobroDeUnaFecha({ invoiceMode: 'MANUAL' })
+    await propia({ platformChargeOccurrenceId: ocupada.fecha.id, chargeLinkedAt: minuto(1) }) // ya anexada a un cobro
+    await propia({ status: 'CANCELLED' })
+    await propia({ status: 'STAMPING', uuid: null })
+    await propia({ status: 'DRAFT', uuid: null })
+    await propia({ uuid: null }) // «timbrada» sin UUID: una fila mal escrita
+    await propia({ type: 'PAGO' }) // un complemento no es una factura que se cobre
+
+    const todas = await listInvoiceCandidates({ customerType: 'STANDALONE', rfc, pageSize: 100 })
+
+    expect(todas.rows.map(c => c.id)).toEqual([a.id, b.id, conPagos.id, conComplemento.id, conComplementoCancelado.id, exenta.id])
+    expect(todas).toMatchObject({ total: 6, page: 1, pageSize: 100 })
+    const porId = new Map(todas.rows.map(c => [c.id, c]))
+    expect(porId.get(a.id)).toMatchObject({ serie: 'A', folio: '19', totalCents: TOTAL, hasPayments: false })
+    expect(porId.get(a.id)!.concepts).toEqual([RENTA, LICENCIA])
+    expect(porId.get(a.id)!.descriptions).toEqual([RENTA.description, LICENCIA.description])
+    expect(porId.get(conPagos.id)!.hasPayments).toBe(true) // amountPaidCents > 0
+    expect(porId.get(conComplemento.id)!.hasPayments).toBe(true) // un complemento vivo
+    expect(porId.get(conComplementoCancelado.id)!.hasPayments).toBe(false) // uno cancelado no cuenta
+    expect(porId.get(exenta.id)!.concepts).toBeNull() // no cabe en el modelo del 16 %
+
+    const pagina2 = await listInvoiceCandidates({ customerType: 'STANDALONE', rfc, page: 2, pageSize: 2 })
+    expect(pagina2.rows.map(c => c.id)).toEqual([conPagos.id, conComplemento.id])
+    expect(pagina2).toMatchObject({ total: 6, page: 2, pageSize: 2 })
+    expect((await listInvoiceCandidates({ customerType: 'STANDALONE', rfc, pageSize: 500 })).pageSize).toBe(100)
+
+    for (const [q, esperada] of [
+      ['A-19', a],
+      ['a19', a],
+      ['A18', b],
+      ['B-7', conPagos],
+    ] as const) {
+      expect((await listInvoiceCandidates({ customerType: 'STANDALONE', rfc, q })).rows.map(c => c.id)).toEqual([esperada.id])
+    }
+
+    // Por organización: sólo las de ESA organización (o de su RFC); un cliente que no existe no se lleva las de todos.
+    const org = `org-cand-${suffix}`
+    const deLaOrg = await nuevaFactura({ organizationId: org, receptorRfc: 'XEXX010101000' })
+    expect((await listInvoiceCandidates({ customerType: 'ORGANIZATION', organizationId: org })).rows.map(c => c.id)).toEqual([deLaOrg.id])
+    expect((await listInvoiceCandidates({ customerType: 'ORGANIZATION', organizationId: `${org}-x` })).rows).toEqual([])
+    // Sin decir de qué cliente es, NO se listan las de todos.
+    await expect(listInvoiceCandidates({ customerType: 'ORGANIZATION' })).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PLATFORM_CHARGE_INVOICE_CANDIDATES_NEEDS_CUSTOMER',
+    })
+    await expect(listInvoiceCandidates({})).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PLATFORM_CHARGE_INVOICE_CANDIDATES_NEEDS_CUSTOMER',
+    })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('15 · las rutas nuevas, por HTTP con el guardia real (llegan a SU handler, no a una ruta /:id equivocada)', () => {
+  const NUEVAS: Array<['get' | 'post' | 'delete', string]> = [
+    ['get', '/occurrences/groups?groupBy=customer'],
+    ['get', '/invoice-candidates?rfc=XAXX010101000'],
+    ['post', '/occurrences/x/invoice-link'],
+    ['delete', '/occurrences/x/invoice-link'],
+    ['get', '/x'],
+  ]
+
+  it('sin token es 401 y un DUEÑO recibe 403, en cada ruta nueva', async () => {
+    for (const [metodo, ruta] of NUEVAS) {
+      const sinToken = await api()[metodo](`${BASE}${ruta}`).send({})
+      expect([metodo, ruta, sinToken.status]).toEqual([metodo, ruta, 401])
+      const comoDueno = await api()[metodo](`${BASE}${ruta}`).set('Authorization', `Bearer ${ownerToken}`).send({})
+      expect([metodo, ruta, comoDueno.status]).toEqual([metodo, ruta, 403])
+    }
+  })
+
+  it('/occurrences/groups, /invoice-candidates y /:id contestan lo suyo (cada una con su forma y sus 400/404), y una fecha que no existe no es un grupo', async () => {
+    const prefijo = unico('Rutas') + '|'
+    const filas = await sembrarFiltros(prefijo)
+    const cobro = await nuevoCobro({ frequency: 'MONTHLY', anchorDate: '2026-11-02' })
+    const rfc = 'ZZ' + String(Date.now()).slice(-9)
+    const factura = await nuevaFactura({ receptorRfc: rfc })
+
+    const grupos = await get(`/occurrences/groups?groupBy=invoice&view=open&q=${encodeURIComponent(prefijo)}`)
+    expect(grupos.status).toBe(200)
+    expect(grupos.body).toMatchObject({ success: true, meta: { groupBy: 'invoice', truncated: false } })
+    for (const grupo of grupos.body.data) expect(Object.keys(grupo).sort()).toEqual(['count', 'key', 'label', 'totalCents'])
+    const porCategoria = Object.fromEntries(grupos.body.data.map((g: { key: string; count: number }) => [g.key, g.count]))
+    const esperado = (categoria: Categoria) => filas.filter(f => f.categoria === categoria).length
+    expect(porCategoria).toEqual({
+      STAMPED: esperado('STAMPED'),
+      PROBLEM: esperado('PROBLEM'),
+      PENDING: esperado('PENDING'),
+      NONE: esperado('NONE'),
+    })
+
+    const sinGrupo = await get('/occurrences/groups')
+    expect(sinGrupo.status).toBe(400)
+    expect(sinGrupo.body.message).toMatch(/Elige cómo agrupar/)
+
+    // Sin cliente es el 400 de las candidatas (con una ruta /:id sería un 404 «Cobro no encontrado»).
+    const sinCliente = await get('/invoice-candidates')
+    expect(sinCliente.status).toBe(400)
+    expect(sinCliente.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_CANDIDATES_NEEDS_CUSTOMER' })
+    const candidatas = await get(`/invoice-candidates?customerType=STANDALONE&rfc=${rfc}`)
+    expect(candidatas.status).toBe(200)
+    expect(candidatas.body.meta).toEqual({ total: 1, page: 1, pageSize: 50 })
+    expect(candidatas.body.data[0]).toMatchObject({ id: factura.id, totalCents: TOTAL, hasPayments: false, receptorRfc: rfc })
+
+    const uno = await get(`/${cobro.id}`)
+    expect(uno.status).toBe(200)
+    expect(uno.body.data).toMatchObject({ id: cobro.id, frequency: 'MONTHLY', anchorDate: '2026-11-02' })
+    const noExiste = await get('/cnoexiste0000000000000000')
+    expect(noExiste.status).toBe(404)
+    expect(noExiste.body).toMatchObject({ code: 'PLATFORM_CHARGE_NOT_FOUND' })
+
+    // Anexar y quitar por HTTP: 404 si la fecha no existe; y el recorrido completo con la factura de arriba.
+    expect((await post('/occurrences/cnoexiste0000000000000000/invoice-link', { cfdiId: factura.id })).status).toBe(404)
+    expect((await post(`/occurrences/${filas[0].id}/invoice-link`, {})).status).toBe(400) // sin cfdiId
+    const fecha = await porFecha(cobro.id, '2026-11-02')
+    const delCliente = await nuevaFactura() // la de arriba es de otro RFC: ésta es del perfil del cobro
+    const anexada = await post(`/occurrences/${fecha.id}/invoice-link`, { cfdiId: delCliente.id })
+    expect(anexada.status).toBe(200)
+    expect(anexada.body.data).toMatchObject({ id: fecha.id, invoiceMode: 'MANUAL', invoice: { id: delCliente.id, linked: true } })
+    const quitada = await del(`/occurrences/${fecha.id}/invoice-link`)
+    expect(quitada.status).toBe(200)
+    expect(quitada.body.data.invoice).toBeNull()
+  })
+
+  it('«desde» después de «hasta» es 400 en la lista y en los grupos, y un día que no existe también; los filtros de varios valores llegan por la URL de las dos formas', async () => {
+    const prefijo = unico('Urls') + '|'
+    const filas = await sembrarFiltros(prefijo)
+    const q = `q=${encodeURIComponent(prefijo)}`
+
+    for (const ruta of ['/occurrences?', '/occurrences/groups?groupBy=month&']) {
+      const alReves = await get(`${ruta}from=2026-12-01&to=2026-01-01`)
+      expect([ruta, alReves.status]).toEqual([ruta, 400])
+      expect(alReves.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVALID_DATE_RANGE' })
+      const inexistente = await get(`${ruta}from=2026-02-30`)
+      expect([ruta, inexistente.status]).toEqual([ruta, 400])
+      expect(inexistente.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVALID_DATE' })
+      const mal = await get(`${ruta}from=ayer`)
+      expect([ruta, mal.status]).toEqual([ruta, 400])
+      expect(mal.body.message).toMatch(/AAAA-MM-DD/)
+    }
+
+    const de = (pasa: (f: FilaSembrada) => boolean) => ({ total: filas.filter(pasa).length, sumCents: suma(filas.filter(pasa)) })
+    const esperadaCategoria = de(f => f.categoria === 'STAMPED' || f.categoria === 'PROBLEM')
+    for (const url of [
+      `/occurrences?${q}&invoice=STAMPED&invoice=PROBLEM`,
+      `/occurrences?${q}&invoice=STAMPED,PROBLEM`,
+      `/occurrences?${q}&invoice=STAMPED,PROBLEM,PROBLEM`,
+    ]) {
+      const res = await get(url)
+      expect([url, res.status]).toEqual([url, 200])
+      expect(res.body.meta).toMatchObject({ total: esperadaCategoria.total, sumCents: esperadaCategoria.sumCents })
+    }
+    const periodicidad = await get(`/occurrences?${q}&frequency=WEEKLY,ONE_TIME&customerType=ORGANIZATION,STANDALONE`)
+    expect(periodicidad.body.meta).toMatchObject(de(f => f.frecuencia === 'WEEKLY' || f.frecuencia === 'ONE_TIME'))
+    const organizacion = await get(`/occurrences?${q}&customerType=ORGANIZATION`)
+    expect(organizacion.body.meta).toMatchObject(de(f => f.tipo === 'ORGANIZATION'))
+    const sinNada = await get(`/occurrences?${q}&invoice=&frequency=`) // vacío = sin filtro
+    expect(sinNada.body.meta.total).toBe(filas.length)
+    const malaCategoria = await get(`/occurrences?${q}&invoice=CASI`)
+    expect(malaCategoria.status).toBe(400)
+    expect(malaCategoria.body.message).toMatch(/El estado de la factura debe ser/)
+    const porCliente = await get(`/occurrences?${q}&customer=${encodeURIComponent(`${prefijo} Beta`)}`)
+    expect(porCliente.body.meta).toMatchObject(de(f => f.nombre === `${prefijo} Beta`))
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Con la sesión de Postgres en UTC (la de producción) y en America/Mexico_City (la de la Mac), como el bloque de arriba: `dueDate` es una
+// columna `date` y un filtro o un grupo por mes no puede correrla un día según la zona. Termina en CDMX, igual que el de arriba.
+describe.each(['UTC', 'America/Mexico_City'])('filtros, grupos y fechas con la sesión de Postgres en %s', zona => {
+  beforeAll(() => fijarZonaDeSesion(zona))
+
+  const CATEGORIAS: Categoria[] = ['STAMPED', 'PROBLEM', 'PENDING', 'NONE']
+  const lista = (extra: Partial<OccurrenceFilters>, prefijo: string, pageSize = 100) =>
+    listOccurrences({ view: 'open', q: prefijo, ...extra, pageSize }, NOW)
+
+  it('la sesión de la base es la que se pidió (la prueba no se engaña sola)', async () => {
+    const [{ tz }] = await prisma.$queryRaw<{ tz: string }[]>`SELECT current_setting('TimeZone') AS tz`
+    expect(tz).toBe(zona)
+  })
+
+  it('12 · cada fecha cae en EXACTAMENTE una categoría de factura (some/none en Postgres) y las cuatro suman el total; coincide con un SQL escrito a mano', async () => {
+    const prefijo = unico('Categorías') + '|'
+    const filas = await sembrarFiltros(prefijo)
+    const todo = await lista({}, prefijo)
+    expect(todo.total).toBe(filas.length)
+    expect(todo.sumCents).toBe(suma(filas))
+
+    const categoriasDe = new Map<string, Categoria[]>()
+    let cuenta = 0
+    for (const categoria of CATEGORIAS) {
+      const r = await lista({ invoice: [categoria] }, prefijo)
+      const esperadas = filas.filter(f => f.categoria === categoria)
+      expect(ids(r.rows)).toEqual(ids(esperadas))
+      expect(r).toMatchObject({ total: esperadas.length, sumCents: suma(esperadas) })
+      cuenta += r.total
+      for (const fila of r.rows) categoriasDe.set(fila.id, [...(categoriasDe.get(fila.id) ?? []), categoria])
+    }
+    expect(cuenta).toBe(todo.total) // las cuatro suman el total: ninguna fecha se queda fuera
+    expect(categoriasDe.size).toBe(filas.length)
+    for (const [, categorias] of categoriasDe) expect(categorias).toHaveLength(1) // y ninguna cuenta dos veces
+    // Cada categoría del conjunto está de verdad cubierta (si no, la prueba no probaría nada de ella).
+    for (const categoria of CATEGORIAS) expect(filas.filter(f => f.categoria === categoria).length).toBeGreaterThanOrEqual(3)
+
+    // Un SQL escrito a mano, con EXISTS, que NO pasa por Prisma: contesta lo mismo que la lista.
+    const sql = await prisma.$queryRaw<{ id: string; categoria: string }[]>`
+      SELECT o.id,
+        CASE
+          WHEN EXISTS (SELECT 1 FROM "PlatformCfdi" c WHERE c."platformChargeOccurrenceId" = o.id AND c.status::text IN ('STAMPED', 'CANCEL_REQUESTED')) THEN 'STAMPED'
+          WHEN EXISTS (SELECT 1 FROM "PlatformCfdi" c WHERE c."platformChargeOccurrenceId" = o.id AND c.status::text IN ('STAMPING', 'STAMP_FAILED')) THEN 'PROBLEM'
+          WHEN o."invoiceMode"::text = 'NONE' THEN 'NONE'
+          ELSE 'PENDING'
+        END AS categoria
+      FROM "PlatformChargeOccurrence" o
+      JOIN "PlatformCharge" ch ON ch.id = o."chargeId"
+      WHERE ch."customerName" LIKE ${prefijo + '%'}`
+    expect(sql).toHaveLength(filas.length)
+    expect(Object.fromEntries(sql.map(r => [r.id, r.categoria]))).toEqual(Object.fromEntries(filas.map(f => [f.id, f.categoria])))
+
+    // Varias categorías se unen con OR, sin repetir.
+    const dos = await lista({ invoice: ['STAMPED', 'PROBLEM'] }, prefijo)
+    const esperadasDos = filas.filter(f => f.categoria === 'STAMPED' || f.categoria === 'PROBLEM')
+    expect(ids(dos.rows)).toEqual(ids(esperadasDos))
+    expect(dos.total).toBe(esperadasDos.length)
+  })
+
+  it('13 · cada grupo (por cliente, mes, periodicidad y factura) cuadra en cuenta y suma con la lista filtrada por ESE grupo, y los grupos suman el total del filtro', async () => {
+    const prefijo = unico('Grupos') + '|'
+    const filas = await sembrarFiltros(prefijo)
+    const ultimoDia = (mes: string) => new Date(Date.UTC(Number(mes.slice(0, 4)), Number(mes.slice(5, 7)), 0)).getUTCDate()
+    const claveDe: Record<OccurrenceGroupBy, (f: FilaSembrada) => string> = {
+      customer: f => f.nombre,
+      month: f => f.dia.slice(0, 7),
+      frequency: f => f.frecuencia,
+      invoice: f => f.categoria,
+    }
+    /** El filtro que equivale a «estar en este grupo»; los extremos de mes respetan lo que el caso ya acotaba. */
+    const filtroDeGrupo = (por: OccurrenceGroupBy, clave: string, caso: Partial<OccurrenceFilters>): Partial<OccurrenceFilters> => {
+      if (por === 'customer') return { customer: clave }
+      if (por === 'frequency') return { frequency: [clave as PlatformChargeFrequency] }
+      if (por === 'invoice') return { invoice: [clave as Categoria] }
+      const desde = `${clave}-01`
+      const hasta = `${clave}-${String(ultimoDia(clave)).padStart(2, '0')}`
+      return { from: caso.from && caso.from > desde ? caso.from : desde, to: caso.to && caso.to < hasta ? caso.to : hasta }
+    }
+    const casos: Array<{ nombre: string; filtros: Partial<OccurrenceFilters>; pasa: (f: FilaSembrada) => boolean }> = [
+      { nombre: 'sin más filtros', filtros: {}, pasa: () => true },
+      {
+        nombre: 'periodicidad y fechas',
+        filtros: { frequency: ['MONTHLY', 'BIWEEKLY'], from: '2026-04-01', to: '2027-12-31' },
+        pasa: f => (f.frecuencia === 'MONTHLY' || f.frecuencia === 'BIWEEKLY') && f.dia >= '2026-04-01' && f.dia <= '2027-12-31',
+      },
+      { nombre: 'factura', filtros: { invoice: ['PROBLEM', 'NONE'] }, pasa: f => f.categoria === 'PROBLEM' || f.categoria === 'NONE' },
+      { nombre: 'tipo de cliente', filtros: { customerType: ['STANDALONE'] }, pasa: f => f.tipo === 'STANDALONE' },
+    ]
+
+    for (const caso of casos) {
+      const filtros = { view: 'open' as const, q: prefijo, ...caso.filtros }
+      const delFiltro = filas.filter(caso.pasa)
+      const total = await listOccurrences({ ...filtros, pageSize: 1 }, NOW)
+      expect([caso.nombre, total.total, total.sumCents]).toEqual([caso.nombre, delFiltro.length, suma(delFiltro)])
+
+      for (const por of Object.keys(claveDe) as OccurrenceGroupBy[]) {
+        const donde = `${caso.nombre} · por ${por}`
+        const { groups, truncated } = await groupOccurrences(filtros, por)
+
+        const esperado = new Map<string, { count: number; totalCents: number }>()
+        for (const f of delFiltro) {
+          const g = esperado.get(claveDe[por](f)) ?? { count: 0, totalCents: 0 }
+          esperado.set(claveDe[por](f), { count: g.count + 1, totalCents: g.totalCents + f.total })
+        }
+        expect([donde, truncated]).toEqual([donde, false])
+        expect([donde, Object.fromEntries(groups.map(g => [g.key, { count: g.count, totalCents: g.totalCents }]))]).toEqual([
+          donde,
+          Object.fromEntries(esperado),
+        ])
+        // Los grupos suman EXACTAMENTE el total del filtro (nada se pierde ni se cuenta dos veces).
+        expect([donde, groups.reduce((s, g) => s + g.count, 0), groups.reduce((s, g) => s + g.totalCents, 0)]).toEqual([
+          donde,
+          total.total,
+          total.sumCents,
+        ])
+        // Y cada grupo cuadra con la lista filtrada por ese grupo (el clic en un grupo enseña lo que el grupo sumó).
+        for (const grupo of groups) {
+          const delGrupo = await listOccurrences({ ...filtros, ...filtroDeGrupo(por, grupo.key, caso.filtros), pageSize: 1 }, NOW)
+          expect([donde, grupo.key, delGrupo.total, delGrupo.sumCents]).toEqual([donde, grupo.key, grupo.count, grupo.totalCents])
+        }
+      }
+    }
+
+    // Detalles de cada agrupación (sin más filtros).
+    const todos = { view: 'open' as const, q: prefijo }
+    const porCliente = (await groupOccurrences(todos, 'customer')).groups
+    const alfa = porCliente.find(g => g.key === `${prefijo} Alfa`)!
+    expect(alfa).toMatchObject({ label: `${prefijo} Alfa`, count: filas.filter(f => f.cobro === 'A' || f.cobro === 'D').length }) // dos cobros con el mismo nombre = un grupo
+    expect(porCliente.map(g => g.label)).toEqual([...porCliente.map(g => g.label)].sort((x, y) => x.localeCompare(y, 'es')))
+    const porMes = (await groupOccurrences(todos, 'month')).groups
+    expect(porMes.map(g => g.key)).toEqual([...porMes.map(g => g.key)].sort()) // de más viejo a más nuevo
+    expect(porMes.find(g => g.key === '2026-01')!.label).toBe('enero 2026')
+    expect(porMes.find(g => g.key === '2028-02')!.label).toBe('febrero 2028')
+    const porPeriodicidad = (await groupOccurrences(todos, 'frequency')).groups
+    expect(Object.fromEntries(porPeriodicidad.map(g => [g.key, g.label]))).toEqual({
+      MONTHLY: 'Mensual',
+      WEEKLY: 'Semanal',
+      BIWEEKLY: 'Quincenal',
+      ONE_TIME: 'Una sola vez',
+    })
+    await expect(groupOccurrences(todos, 'dia' as OccurrenceGroupBy)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PLATFORM_CHARGE_INVALID_GROUP_BY',
+    })
+  })
+
+  it('14 · «desde» y «hasta» (los dos extremos incluidos) y el grupo por mes: el último día del mes cae en su mes, también el 29 de un año bisiesto, y la fecha guardada no se corre un día', async () => {
+    const prefijo = unico('Fechas') + '|'
+    const filas = await sembrarFiltros(prefijo)
+
+    const rangos: Array<[string | undefined, string | undefined]> = [
+      ['2026-02-01', '2026-02-28'], // un mes entero, de su día 1 a su último día
+      ['2026-01-31', '2026-01-31'], // un solo día: el último de enero
+      [undefined, '2026-01-31'], // sólo «hasta», en el último día de enero
+      ['2028-02-29', undefined], // sólo «desde», en el 29 de un año bisiesto
+      ['2026-12-31', '2027-01-01'], // el cambio de año
+      ['2026-03-01', '2026-03-01'], // el primer día de marzo no es del 28 de febrero
+      ['2027-01-01', undefined],
+    ]
+    for (const [desde, hasta] of rangos) {
+      const donde = `${desde ?? '…'} → ${hasta ?? '…'}`
+      const r = await lista({ ...(desde ? { from: desde } : {}), ...(hasta ? { to: hasta } : {}) }, prefijo)
+      const esperadas = filas.filter(f => (!desde || f.dia >= desde) && (!hasta || f.dia <= hasta))
+      expect([donde, ids(r.rows)]).toEqual([donde, ids(esperadas)])
+      expect([donde, r.total, r.sumCents]).toEqual([donde, esperadas.length, suma(esperadas)])
+      expect(esperadas.length).toBeGreaterThan(0) // el rango toca algo: la prueba no pasa «por vacía»
+    }
+    expect((await lista({ from: '2026-01-31', to: '2026-01-31' }, prefijo)).rows.map(r => r.dueDate)).toEqual(['2026-01-31'])
+    expect((await lista({ from: '2026-02-01', to: '2026-02-28' }, prefijo)).rows.map(r => r.dueDate)).toEqual(['2026-02-15', '2026-02-28'])
+
+    // Por mes: lo de cada fin de mes cae en SU mes (con la oracle escrita a mano de arriba y con los números a la vista).
+    const { groups } = await groupOccurrences({ view: 'open', q: prefijo }, 'month')
+    const porMes = Object.fromEntries(groups.map(g => [g.key, g.count]))
+    expect(porMes).toMatchObject({ '2026-01': 2, '2026-02': 2, '2026-03': 2, '2026-12': 2, '2027-01': 2, '2028-02': 1 })
+    const esperadoPorMes = new Map<string, number>()
+    for (const f of filas) esperadoPorMes.set(f.dia.slice(0, 7), (esperadoPorMes.get(f.dia.slice(0, 7)) ?? 0) + 1)
+    expect(porMes).toEqual(Object.fromEntries(esperadoPorMes))
+
+    // La fecha guardada es la del calendario, sea cual sea la zona de la sesión: leída con SQL (como texto) y por la lista.
+    const guardadas = await prisma.$queryRaw<{ id: string; dia: string }[]>`
+      SELECT o.id, to_char(o."dueDate", 'YYYY-MM-DD') AS dia
+      FROM "PlatformChargeOccurrence" o JOIN "PlatformCharge" ch ON ch.id = o."chargeId"
+      WHERE ch."customerName" LIKE ${prefijo + '%'}`
+    expect(Object.fromEntries(guardadas.map(g => [g.id, g.dia]))).toEqual(Object.fromEntries(filas.map(f => [f.id, f.dia])))
+    const todas = await lista({}, prefijo)
+    expect(Object.fromEntries(todas.rows.map(r => [r.id, r.dueDate]))).toEqual(Object.fromEntries(filas.map(f => [f.id, f.dia])))
+
+    // «Desde» después de «hasta», y un día que no existe, son 400 también aquí (no los decide la zona).
+    await expect(lista({ from: '2026-12-01', to: '2026-01-01' }, prefijo)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PLATFORM_CHARGE_INVALID_DATE_RANGE',
+    })
+    await expect(lista({ to: '2026-02-30' }, prefijo)).rejects.toMatchObject({ statusCode: 400, code: 'PLATFORM_CHARGE_INVALID_DATE' })
   })
 })
