@@ -21,14 +21,19 @@ export const LIVE_INVOICE_STATUSES: PlatformCfdiStatus[] = ['STAMPED', 'CANCEL_R
 /** De la más nueva a la más vieja, con `id` de desempate: la que gana entre varias facturas de una fecha. */
 export const NEWEST_INVOICE_FIRST: Prisma.PlatformCfdiOrderByWithRelationInput[] = [{ createdAt: 'desc' }, { id: 'desc' }]
 
+/** «Anexada y viva» sin decir de qué fecha: para filtrar por la relación `invoices` de una fecha (`invoices: { none: LINKED_LIVE }`). */
+export const LINKED_LIVE = {
+  chargeLinkedAt: { not: null },
+  status: { in: LIVE_INVOICE_STATUSES },
+} satisfies Prisma.PlatformCfdiWhereInput
+
 /**
  * 🔴 La factura ANEXADA a una fecha y todavía viva. Viene de «Facturas CFDI» con otra llave, así que `resolverIntento`, que busca por la
  * llave del intento, no la ve: lo que timbra o deshace pregunta aparte por ella.
  */
 export const linkedLiveWhere = (occurrenceId: string): Prisma.PlatformCfdiWhereInput => ({
   platformChargeOccurrenceId: occurrenceId,
-  chargeLinkedAt: { not: null },
-  status: { in: LIVE_INVOICE_STATUSES },
+  ...LINKED_LIVE,
 })
 
 /** `WITHOUT_IVA`: el monto no trae IVA y se le suma el 16 %. `WITH_IVA`: el monto ya lo trae. */

@@ -144,10 +144,10 @@ function cumpleCampos(f: Fila, where: Record<string, any>): boolean {
   return Object.entries(where).every(([campo, condicion]) => {
     if (campo === 'OR') return (condicion as Record<string, any>[]).some(rama => cumpleCampos(f, rama))
     if (campo === 'invoices') {
-      const tiene = facturasDelMundo.some(x => x.platformChargeOccurrenceId === f.id)
-      if ('none' in condicion) return !tiene
-      if ('some' in condicion) return tiene
-      throw new Error('el doble sólo entiende invoices none y some')
+      const operador = 'none' in condicion ? 'none' : 'some' in condicion ? 'some' : null
+      if (!operador) throw new Error('el doble sólo entiende invoices none y some')
+      const tiene = facturasDelMundo.some(x => x.platformChargeOccurrenceId === f.id && cumpleFactura(x, condicion[operador]))
+      return operador === 'none' ? !tiene : tiene
     }
     const valor = (f as any)[campo]
     if (condicion === null || typeof condicion !== 'object' || condicion instanceof Date) {
@@ -220,6 +220,20 @@ interface Factura {
   id: string
   platformChargeOccurrenceId: string
   status: string
+  /** Con fecha: se anexó desde «Facturas CFDI» (se puede quitar). Sin ella: se timbró desde «Por cobrar». */
+  chargeLinkedAt?: Date | null
+}
+
+/** Lo que el doble entiende de un filtro sobre una factura: `status in` y `chargeLinkedAt: { not: null }`. Lo demás lo rechaza. */
+function cumpleFactura(f: Factura, where: Record<string, any>): boolean {
+  return Object.entries(where).every(([campo, condicion]) => {
+    if (campo === 'status') return condicion.in.includes(f.status)
+    if (campo === 'chargeLinkedAt') {
+      if (condicion?.not !== null) throw new Error('el doble sólo entiende chargeLinkedAt: { not: null }')
+      return Boolean(f.chargeLinkedAt)
+    }
+    throw new Error(`el doble no entiende el filtro de factura ${campo}`)
+  })
 }
 
 /**
@@ -230,11 +244,8 @@ function instalarFacturas(facturas: Factura[]) {
   facturasDelMundo = facturas
   prismaMock.platformCfdi.findFirst.mockImplementation(async ({ where }: any) => {
     if (where.platformChargeOccurrenceId === undefined) throw new Error('el doble exige la fecha: ninguna consulta puede cruzar fechas')
-    return (
-      facturas.find(
-        f => f.platformChargeOccurrenceId === where.platformChargeOccurrenceId && (!where.status?.in || where.status.in.includes(f.status)),
-      ) ?? null
-    )
+    const { platformChargeOccurrenceId, ...filtro } = where
+    return facturas.find(f => f.platformChargeOccurrenceId === platformChargeOccurrenceId && cumpleFactura(f, filtro)) ?? null
   })
 }
 
@@ -1264,6 +1275,74 @@ describe('platform-charges/charges.service — pauseCharge (NEW)', () => {
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/charges.service — 🔴 pauseCharge con skipOverdue no omite una fecha con factura ANEXADA viva', () => {
+  // Omitirla escondería de la lista una factura real que alguien debe, y después «Deshacer» pide quitarla: un callejón. Pausar no es omitir.
+  const VENCIDA = '2026-10-26'
+  const OCURRENCIAS = () => [fila(VENCIDA), fila('2026-11-02'), fila('2026-11-09')]
+  const anexada = (over: Partial<Factura> = {}): Factura => ({
+    id: 'cfdi-19',
+    platformChargeOccurrenceId: `o-${VENCIDA}`,
+    status: 'STAMPED',
+    chargeLinkedAt: AHORA,
+    ...over,
+  })
+
+  it.each(['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'])(
+    '%s: esa fecha sigue por cobrar; las demás vencidas y la de hoy sí se omiten, y las futuras sin factura se borran',
+    async status => {
+      const filas = instalarOcurrencias(OCURRENCIAS())
+      instalarFacturas([anexada({ status })])
+      dadoElCobro()
+
+      await pauseCharge('cobro-1', { skipOverdue: true }, 'staff-1', AHORA)
+
+      expect(resumen(filas)).toEqual([`${VENCIDA}:PENDING`, '2026-11-02:SKIPPED'])
+      expect(porDia(filas)[VENCIDA]).toMatchObject({ skippedAt: null, skippedById: null })
+      expect(porDia(filas)['2026-11-02']).toMatchObject({ skippedAt: AHORA, skippedById: 'staff-1' })
+    },
+  )
+
+  it('la bitácora cuenta sólo lo que de verdad omitió', async () => {
+    instalarOcurrencias(OCURRENCIAS())
+    instalarFacturas([anexada()])
+    dadoElCobro()
+
+    await pauseCharge('cobro-1', { skipOverdue: true }, 'staff-1', AHORA)
+
+    expect(mockLogAction.mock.calls[0][0].data).toEqual({ skipOverdue: true, removedFuture: 1, skippedOverdue: 1 })
+  })
+
+  it('pausar de nuevo con skipOverdue tampoco la omite', async () => {
+    const filas = instalarOcurrencias([fila(VENCIDA), fila('2026-11-02')])
+    instalarFacturas([anexada()])
+    dadoElCobro(cobro({ pausedAt: AHORA }))
+
+    await pauseCharge('cobro-1', { skipOverdue: true }, 'staff-1', AHORA)
+
+    expect(resumen(filas)).toEqual([`${VENCIDA}:PENDING`, '2026-11-02:SKIPPED'])
+  })
+
+  it('una anexada ya CANCELADA no la protege: es lo mismo que una fecha sin factura y se omite', async () => {
+    const filas = instalarOcurrencias(OCURRENCIAS())
+    instalarFacturas([anexada({ status: 'CANCELLED' })])
+    dadoElCobro()
+
+    await pauseCharge('cobro-1', { skipOverdue: true }, 'staff-1', AHORA)
+
+    expect(resumen(filas)).toEqual([`${VENCIDA}:SKIPPED`, '2026-11-02:SKIPPED'])
+  })
+
+  it('sólo las ANEXADAS: una factura timbrada desde «Por cobrar» se comporta como hoy y la fecha se omite', async () => {
+    const filas = instalarOcurrencias(OCURRENCIAS())
+    instalarFacturas([anexada({ chargeLinkedAt: null })])
+    dadoElCobro()
+
+    await pauseCharge('cobro-1', { skipOverdue: true }, 'staff-1', AHORA)
+
+    expect(resumen(filas)).toEqual([`${VENCIDA}:SKIPPED`, '2026-11-02:SKIPPED'])
+  })
+})
+
 describe('platform-charges/charges.service — resumeCharge (NEW)', () => {
   const PAUSADO_DESDE_EL_13_OCT = () => cobro({ pausedAt: new Date('2026-10-13T16:00:00.000Z') })
 
@@ -2299,9 +2378,10 @@ describe('platform-charges/charges.service — 🔴 una fecha con factura sobrev
     totalCents: 23200,
     invoiceMode: 'MANUAL',
   }
-  const dadasLasFechas = (estado = 'STAMPED') => {
+  // `chargeLinkedAt`: con fecha es una factura ANEXADA (se puede quitar); `null`, una timbrada desde «Por cobrar» (sólo se cancela).
+  const dadasLasFechas = (estado = 'STAMPED', chargeLinkedAt: Date | null = AHORA) => {
     const filas = instalarOcurrencias([fila('2026-10-26'), fila('2026-11-02'), fila(CON_FACTURA, DE_LA_FACTURA)])
-    instalarFacturas([{ id: 'cfdi-1', platformChargeOccurrenceId: `o-${CON_FACTURA}`, status: estado }])
+    instalarFacturas([{ id: 'cfdi-1', platformChargeOccurrenceId: `o-${CON_FACTURA}`, status: estado, chargeLinkedAt }])
     dadoElCobro()
     return filas
   }
@@ -2395,17 +2475,46 @@ describe('platform-charges/charges.service — 🔴 una fecha con factura sobrev
       expect(error).toBeInstanceOf(ConflictError)
       expect((error as ConflictError).statusCode).toBe(409)
       expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_FUTURE_INVOICED')
-      expect((error as ConflictError).message).toBe('El cobro del 9 nov ya tiene factura; quítala para cambiar la fecha')
+      expect((error as ConflictError).message).toBe('El cobro del 9 nov tiene una factura anexada; quítala para cambiar la fecha')
       expect(JSON.stringify(filas)).toBe(antes)
       ningunaEscritura()
     })
 
+    it.each([
+      ['la fecha', { anchorDate: '2026-10-07' }],
+      ['la periodicidad', { frequency: 'MONTHLY' as const }],
+    ])(
+      '🔴 cambiar %s con una timbrada desde «Por cobrar»: el mismo código, pero el mensaje dice la verdad (no se quita: espera a que pase esa fecha)',
+      async (_que, cambio) => {
+        const filas = dadasLasFechas('STAMPED', null)
+        const antes = JSON.stringify(filas)
+
+        const error = await updateCharge('cobro-1', cambio, 'staff-1', AHORA).catch((e: unknown) => e)
+
+        expect(error).toBeInstanceOf(ConflictError)
+        expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_FUTURE_INVOICED')
+        expect((error as ConflictError).message).toBe(
+          'El cobro del 9 nov ya tiene una factura timbrada desde aquí; el calendario se puede cambiar cuando pase esa fecha',
+        )
+        expect(JSON.stringify(filas)).toBe(antes)
+        ningunaEscritura()
+      },
+    )
+
+    it('una anexada ya CANCELADA se quita, así que el mensaje sigue diciendo «quítala»', async () => {
+      dadasLasFechas('CANCELLED')
+
+      await expect(updateCharge('cobro-1', { frequency: 'MONTHLY' }, 'staff-1', AHORA)).rejects.toThrow(
+        'El cobro del 9 nov tiene una factura anexada; quítala para cambiar la fecha',
+      )
+    })
+
     it('nombra la más próxima, sea marcada o con factura', async () => {
       instalarOcurrencias([fila('2026-11-16', { status: 'PAID' }), fila(CON_FACTURA)])
-      instalarFacturas([{ id: 'cfdi-1', platformChargeOccurrenceId: `o-${CON_FACTURA}`, status: 'STAMPED' }])
+      instalarFacturas([{ id: 'cfdi-1', platformChargeOccurrenceId: `o-${CON_FACTURA}`, status: 'STAMPED', chargeLinkedAt: AHORA }])
       dadoElCobro()
 
-      await expect(updateCharge('cobro-1', { frequency: 'MONTHLY' }, 'staff-1', AHORA)).rejects.toThrow(/9 nov ya tiene factura/)
+      await expect(updateCharge('cobro-1', { frequency: 'MONTHLY' }, 'staff-1', AHORA)).rejects.toThrow(/9 nov tiene una factura anexada/)
     })
 
     it('una futura ya marcada conserva su mensaje, tenga o no factura', async () => {
@@ -2423,13 +2532,13 @@ describe('platform-charges/charges.service — 🔴 una fecha con factura sobrev
       // Mensual del día 2; hoy es 2-nov. Moverla al día 5 generaría el 5-nov y dejaría el 2-nov con su factura: dos cobros en noviembre.
       const mensual = cobro({ frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-02') })
       const filas = instalarOcurrencias([fila('2026-11-02', DE_LA_FACTURA)])
-      instalarFacturas([{ id: 'cfdi-1', platformChargeOccurrenceId: 'o-2026-11-02', status: 'STAMPED' }])
+      instalarFacturas([{ id: 'cfdi-1', platformChargeOccurrenceId: 'o-2026-11-02', status: 'STAMPED', chargeLinkedAt: AHORA }])
       dadoElCobro(mensual)
 
       const error = await updateCharge('cobro-1', { anchorDate: '2026-10-05' }, 'staff-1', AHORA).catch((e: unknown) => e)
 
       expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_FUTURE_INVOICED')
-      expect((error as ConflictError).message).toBe('El cobro del 2 nov ya tiene factura; quítala para cambiar la fecha')
+      expect((error as ConflictError).message).toBe('El cobro del 2 nov tiene una factura anexada; quítala para cambiar la fecha')
       expect(filas).toHaveLength(1)
       ningunaEscritura()
     })

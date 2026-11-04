@@ -1125,6 +1125,56 @@ describe('linkInvoice — 🔴 una factura que no cabe en el modelo del 16 % nun
     queNoSeAnexo()
   })
 
+  const MENSAJE_GENERAL =
+    /no cabe en lo que «Por cobrar» sabe calcular \(IVA del 16 %, sin descuentos ni exentos, con los totales al centavo\).*Sólo se anexa si los totales coinciden/
+
+  it('🔴 el 409 no afirma una causa que puede ser falsa: dice qué sabe calcular «Por cobrar» y que sólo se anexa si los totales coinciden', async () => {
+    mundo.cfdis = [exenta()]
+
+    const error = await rechazo(anexar())
+
+    expect(error.message).toMatch(MENSAJE_GENERAL)
+    expect(error.message).not.toMatch(/trae un renglón exento/)
+  })
+
+  it.each([
+    [
+      'más renglones que el tope de un cobro',
+      () => ({
+        lines: Array.from({ length: 21 }, (_, i) => ({ description: `Renglón ${i}`, quantity: 1, unitPriceCents: 100, ...SAT })),
+        subtotalCents: 2100,
+        taxCents: 336,
+        totalCents: 2436,
+      }),
+    ],
+    [
+      'un monto fuera de rango',
+      () => ({
+        lines: [{ description: 'Enorme', quantity: 1, unitPriceCents: 1_000_000_000, ...SAT }],
+        subtotalCents: 1_000_000_000,
+        taxCents: 160_000_000,
+        totalCents: 1_160_000_000,
+      }),
+    ],
+    [
+      'totales que no se recalculan',
+      () => ({
+        lines: [{ description: 'Curso', quantity: 1, unitPriceCents: 10000, ...SAT }],
+        subtotalCents: 10000,
+        taxCents: 1599, // el 16 % de 10000 es 1600
+        totalCents: 11599,
+      }),
+    ],
+  ])('con %s: el mismo código y el mismo texto general', async (_causa, campos) => {
+    mundo.cfdis = [factura(campos())]
+
+    const error = await rechazo(anexar())
+
+    expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
+    expect(error.message).toMatch(MENSAJE_GENERAL)
+    queNoSeAnexo()
+  })
+
   it('con el mismo total se anexa y la fecha CONSERVA sus conceptos, subtotal e IVA; sólo cambia el modo', async () => {
     const propios = { subtotalCents: 8621, taxCents: 1379, totalCents: 10000 }
     Object.assign(mundo.occ, propios)
@@ -1215,7 +1265,8 @@ describe('unlinkInvoice — quitar lo anexado', () => {
 
     await quitar()
 
-    expect(eventos).toEqual(['tx:inicio', 'candado', 'soltar la factura', 'tx:fin', 'bitácora'])
+    // `updateMany`: quitar es una escritura condicional por estado y versión, la misma que usa anexar.
+    expect(eventos).toEqual(['tx:inicio', 'candado', 'tomar la factura', 'tx:fin', 'bitácora'])
     expect(mockLogAction).toHaveBeenCalledWith({
       staffId: 'staff-1',
       venueId: null,
@@ -1281,6 +1332,68 @@ describe('unlinkInvoice — quitar lo anexado', () => {
 
   it('una fecha que no existe es 404', async () => {
     await expect(unlinkInvoice('no-existe', 'staff-1', AHORA)).rejects.toBeInstanceOf(NotFoundError)
+  })
+
+  describe('🔴 con la cancelación en trámite ante el SAT', () => {
+    // Si el SAT la rechaza vuelve a estar vigente, y ya suelta la fecha se podría facturar otra vez: dos facturas de la misma venta.
+    it('CANCEL_REQUESTED: 409 PLATFORM_CHARGE_INVOICE_CANCEL_PENDING, no se suelta nada y no se registra', async () => {
+      mundo.cfdis = [anexada({ status: 'CANCEL_REQUESTED' })]
+
+      const error = await rechazo(quitar())
+
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_CANCEL_PENDING')
+      expect(error.message).toBe('La cancelación de la factura A-19 sigue en trámite ante el SAT; quítala cuando el SAT conteste')
+      expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: 'occ-1', status: 'CANCEL_REQUESTED' })
+      expect(mundo.cfdis[0].chargeLinkedAt).not.toBeNull()
+      nadieEscribio()
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+
+    it('cuando el SAT contesta y la cancelación se acepta (CANCELLED), ya se puede quitar', async () => {
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      await quitar()
+
+      expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+    })
+  })
+
+  describe('🔴 la escritura de quitar es condicional: cancelar no toma el candado del cobro', () => {
+    it('«Facturas CFDI» pidió cancelarla entre la lectura y la escritura: 0 filas, PLATFORM_CHARGE_INVOICE_LINK_CHANGED, sigue anexada y no se registra', async () => {
+      mundo.cfdis = [anexada()]
+      ganchos.antesDeTomarla = () => {
+        mundo.cfdis[0].status = 'CANCEL_REQUESTED' // cambia el estado y deja `updatedAt` igual: la frena la condición de estado
+      }
+
+      const error = await rechazo(quitar())
+
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_CHANGED')
+      expect(error.message).toMatch(/quitar/) // no dice «anexar»: la acción era otra
+      expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: 'occ-1', status: 'CANCEL_REQUESTED' })
+      expect(mundo.cfdis[0].chargeLinkedAt).not.toBeNull()
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+
+    it('la fila se escribió aunque conserve su estado (se fue a CANCEL_REQUESTED y volvió): por updatedAt, también 0 filas', async () => {
+      mundo.cfdis = [anexada()]
+      ganchos.antesDeTomarla = () => {
+        mundo.cfdis[0].updatedAt = new Date(mundo.cfdis[0].updatedAt.getTime() + 5)
+      }
+
+      expect((await rechazo(quitar())).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_CHANGED')
+      expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: 'occ-1' })
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+
+    it('la factura que desaparece en medio tampoco se da por quitada', async () => {
+      mundo.cfdis = [anexada()]
+      ganchos.antesDeTomarla = () => {
+        mundo.cfdis = []
+      }
+
+      expect((await rechazo(quitar())).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_CHANGED')
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
   })
 })
 

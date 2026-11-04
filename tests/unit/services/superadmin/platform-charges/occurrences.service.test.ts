@@ -553,6 +553,74 @@ describe('platform-charges/occurrences — skipOccurrence', () => {
 
     sinEscrituras()
   })
+
+  describe('🔴 con una factura ANEXADA viva: omitirla escondería de la lista una factura real que alguien debe', () => {
+    const anexada = (over: Fila = {}) =>
+      factura({ id: 'cfdi-19', folio: '19', idempotencyKey: 'hecha-a-mano-19', chargeLinkedAt: hace(5), ...over })
+
+    it.each(['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'])(
+      '%s: 409 «Esta fecha tiene anexada la factura A-19; quítala antes de omitirla» y no se escribe nada',
+      async status => {
+        mundo.cfdis = [anexada({ status, serie: 'A' })]
+        const eventos = trazar()
+
+        const error = await skipOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+        expect(error).toBeInstanceOf(ConflictError)
+        expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_INVOICE_LINKED')
+        expect((error as ConflictError).message).toBe('Esta fecha tiene anexada la factura A-19; quítala antes de omitirla')
+        expect(eventos).toContain('candado') // se decide bajo el candado, con lo releído
+        expect(mundo.occ.status).toBe('PENDING')
+        sinEscrituras()
+      },
+    )
+
+    it('la que se anexó entre la lectura y el candado también la frena: se busca DENTRO del candado', async () => {
+      prismaMock.platformChargeOccurrence.findUnique
+        .mockImplementationOnce(async () => ({ chargeId: 'cobro-1' }))
+        .mockImplementationOnce(async () => {
+          mundo.cfdis = [anexada()]
+          return { ...mundo.occ, charge: { venueId: null, organizationId: 'org-1' } }
+        })
+
+      await expect(skipOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('quítala antes de omitirla')
+      sinEscrituras()
+    })
+
+    it('una anexada sin serie ni folio dice «la factura», sin inventar el nombre', async () => {
+      mundo.cfdis = [anexada({ serie: null, folio: null })]
+
+      await expect(skipOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow(
+        'Esta fecha tiene anexada la factura; quítala antes de omitirla',
+      )
+    })
+
+    it('una anexada ya CANCELADA no frena: se omite', async () => {
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      const view = await skipOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(view.status).toBe('SKIPPED')
+      expect(mundo.occ).toMatchObject({ status: 'SKIPPED', skippedById: 'staff-1' })
+    })
+
+    it('una timbrada desde «Por cobrar» (sin marca de anexada) se comporta como hoy: se omite', async () => {
+      mundo.cfdis = [factura()]
+
+      const view = await skipOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(view.status).toBe('SKIPPED')
+    })
+
+    it('una PAGADA con anexada conserva su 409 de «deshazlo antes de omitirlo»', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mundo.cfdis = [anexada()]
+
+      const error = await skipOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+      expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_OCCURRENCE_PAID')
+    })
+  })
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1345,7 +1413,8 @@ describe('platform-charges/occurrences — listOccurrences', () => {
       mundo.occ.id = OCC
       mundo.cfdis = [viejaViva(), ...Array.from({ length: 11 }, (_, i) => cancelada(i))]
 
-      const vista = await skipOccurrence(OCC, 'staff-1', AHORA)
+      // «Ya me pagó» sin timbrar: omitir y deshacer se niegan con una anexada viva, pero las tres regresan la misma vista de la fecha.
+      const { occurrence: vista } = await payOccurrence(OCC, { invoice: false }, 'staff-1', AHORA)
 
       expect(vista.invoice).toMatchObject({ id: 'viva', linked: true })
     })

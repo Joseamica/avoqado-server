@@ -34,9 +34,10 @@ const taken = (cfdi: Named) =>
     `No se puede anexar ${invoiceName(cfdi)}: ya es de otro cobro. Si se anexó por error, quítala de ese cobro`,
     'PLATFORM_CHARGE_INVOICE_LINK_TAKEN',
   )
-const changed = (cfdi: Named) =>
+/** `action`: lo que se intentaba, para que el texto no diga «anexar» cuando era quitar. */
+const changed = (cfdi: Named, action: 'anexar' | 'quitar' = 'anexar') =>
   conflict(
-    `No se pudo anexar ${invoiceName(cfdi)}: acaba de cambiar. Revísala en Facturas CFDI y vuelve a intentarlo`,
+    `No se pudo ${action} ${invoiceName(cfdi)}: acaba de cambiar. Revísala en Facturas CFDI y vuelve a intentarlo`,
     'PLATFORM_CHARGE_INVOICE_LINK_CHANGED',
   )
 const hasLive = (cfdi: Named) =>
@@ -149,9 +150,12 @@ async function datePhotoOf(
     }
   }
   if (sameTotal) return {} // no cabe en el modelo: la fecha conserva sus conceptos, y el total ya es el de la factura
+  // `conceptsFromInvoice` da `null` por varias causas (exento, otra tasa, descuento, más renglones del tope, montos fuera de rango o totales
+  // que no recalculan): el texto no afirma ninguna.
   throw conflict(
-    `No se puede anexar ${invoiceName(cfdi)}: trae un renglón exento, otra tasa o un descuento, y su total (${formatMoney(cfdi.totalCents)}) ` +
-      `no es el de esta fecha (${formatMoney(occurrence.totalCents)}). Sólo se anexa si los totales coinciden`,
+    `No se puede anexar ${invoiceName(cfdi)}: no cabe en lo que «Por cobrar» sabe calcular (IVA del 16 %, sin descuentos ni exentos, con los ` +
+      `totales al centavo), y su total (${formatMoney(cfdi.totalCents)}) no es el de esta fecha (${formatMoney(occurrence.totalCents)}). ` +
+      'Sólo se anexa si los totales coinciden',
     'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
   )
 }
@@ -268,6 +272,8 @@ export async function linkInvoice(
  * `DELETE /occurrences/:id/invoice-link`: suelta lo anexado; la fecha conserva sus números y su modo, y el cobro vuelve a poder facturarse.
  * 🔴 Sólo lo que tiene `chargeLinkedAt`: una factura timbrada desde «Por cobrar» nunca se quita, se cancela. Quita la viva y, si no hay,
  * la más nueva: una anexada ya cancelada también sale en la fila.
+ * 🔴 Con la cancelación en trámite (`CANCEL_REQUESTED`) es 409: si el SAT la rechaza vuelve a estar vigente, y ya suelta se podría facturar la
+ * fecha otra vez. Y la escritura es condicional por estado y versión, como la de anexar: cancelar no toma el candado del cobro.
  */
 export async function unlinkInvoice(occurrenceId: string, actorId: string, now: Date = new Date()): Promise<OccurrenceView> {
   const { chargeId } = await probe(occurrenceId)
@@ -286,7 +292,18 @@ export async function unlinkInvoice(occurrenceId: string, actorId: string, now: 
         'PLATFORM_CHARGE_INVOICE_NOT_LINKED',
       )
     }
-    await tx.platformCfdi.update({ where: { id: cfdi.id }, data: { platformChargeOccurrenceId: null, chargeLinkedAt: null } })
+    if (cfdi.status === 'CANCEL_REQUESTED') {
+      throw conflict(
+        `La cancelación de ${invoiceName(cfdi)} sigue en trámite ante el SAT; quítala cuando el SAT conteste`,
+        'PLATFORM_CHARGE_INVOICE_CANCEL_PENDING',
+      )
+    }
+    // 🔴 Condicional: si «Facturas CFDI» pidió cancelarla (o la tocó) después de leerla, 0 filas y no se suelta a ciegas.
+    const { count } = await tx.platformCfdi.updateMany({
+      where: { id: cfdi.id, status: cfdi.status, updatedAt: cfdi.updatedAt },
+      data: { platformChargeOccurrenceId: null, chargeLinkedAt: null },
+    })
+    if (count === 0) throw changed(cfdi, 'quitar')
     return { occurrence, cfdi }
   })
 

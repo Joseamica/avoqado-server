@@ -365,7 +365,11 @@ export async function payOccurrence(
 
 // ── Omitir y deshacer ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** «Omitir» (spec §3.5): `PENDING → SKIPPED`. Sobre una pagada es 409; repetirlo sobre una ya omitida contesta éxito sin escribir. */
+/**
+ * «Omitir» (spec §3.5): `PENDING → SKIPPED`. Sobre una pagada es 409; repetirlo sobre una ya omitida contesta éxito sin escribir.
+ * 🔴 Con una factura ANEXADA viva también es 409: omitir escondería de la lista una factura real que alguien debe, y después «Deshacer» pide
+ * quitarla (un callejón). Una timbrada desde «Por cobrar» se comporta como siempre.
+ */
 export async function skipOccurrence(id: string, actorId: string, now: Date = new Date()): Promise<OccurrenceView> {
   const { chargeId } = await probe(id)
 
@@ -374,6 +378,15 @@ export async function skipOccurrence(id: string, actorId: string, now: Date = ne
     if (row.status === 'SKIPPED') return null
     if (row.status === 'PAID') {
       throw conflict('Este cobro ya está marcado como pagado; deshazlo antes de omitirlo', 'PLATFORM_CHARGE_OCCURRENCE_PAID')
+    }
+    // Dentro del candado: otra pestaña pudo anexarla después de que se leyó la lista.
+    const linked = await tx.platformCfdi.findFirst({
+      where: linkedLiveWhere(id),
+      orderBy: NEWEST_INVOICE_FIRST,
+      select: { serie: true, folio: true },
+    })
+    if (linked) {
+      throw conflict(`Esta fecha tiene anexada ${invoiceName(linked)}; quítala antes de omitirla`, 'PLATFORM_CHARGE_INVOICE_LINKED')
     }
     const updated = await tx.platformChargeOccurrence.update({
       where: { id },

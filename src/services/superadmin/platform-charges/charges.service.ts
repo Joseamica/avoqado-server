@@ -20,7 +20,7 @@ import prisma from '@/utils/prismaClient'
 import { lockCharge, withChargeLock } from './lock'
 import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
 import { computeChargeTotals, hasSatKeys } from './totals'
-import { LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
+import { LINKED_LIVE, LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
 
 /** El generador mira de hoy a hoy+7: lo que vence en la semana ya aparece en la pantalla y en el correo. */
 const GENERATE_AHEAD_DAYS = 7
@@ -406,12 +406,23 @@ async function assertNoMarkedFuture(
       ],
     },
     orderBy: { dueDate: 'asc' },
-    select: { dueDate: true, status: true },
+    select: { id: true, dueDate: true, status: true },
   })
   if (!blocking) return
   const day = shortDayEs(dbToCalendarDay(blocking.dueDate))
   if (blocking.status === 'PENDING') {
-    throw new ConflictError(`El cobro del ${day} ya tiene factura; quítala para cambiar la fecha`, 'PLATFORM_CHARGE_FUTURE_INVOICED')
+    // Dos casos, un mismo código: una ANEXADA se quita (aun cancelada), y una timbrada desde «Por cobrar» no se quita nunca. El mensaje no
+    // puede mandar a quitar lo que no se quita.
+    const linked = await tx.platformCfdi.findFirst({
+      where: { platformChargeOccurrenceId: blocking.id, chargeLinkedAt: { not: null } },
+      select: { id: true },
+    })
+    throw new ConflictError(
+      linked
+        ? `El cobro del ${day} tiene una factura anexada; quítala para cambiar la fecha`
+        : `El cobro del ${day} ya tiene una factura timbrada desde aquí; el calendario se puede cambiar cuando pase esa fecha`,
+      'PLATFORM_CHARGE_FUTURE_INVOICED',
+    )
   }
   throw new ConflictError(`Ya marcaste el cobro del ${day}; deshazlo para cambiar la fecha`, 'PLATFORM_CHARGE_FUTURE_MARKED')
 }
@@ -610,9 +621,11 @@ export async function pauseCharge(
       ).count
     }
     if (options.skipOverdue === true) {
+      // 🔴 Una fecha con factura ANEXADA viva no se omite: se escondería de la lista una factura real que alguien debe, y «Deshacer» pediría
+      // quitarla. Sigue por cobrar. Sólo las anexadas: una timbrada desde «Por cobrar» se omite como siempre.
       skippedOverdue = (
         await tx.platformChargeOccurrence.updateMany({
-          where: { chargeId: id, status: 'PENDING', dueDate: { lte: todayDb } },
+          where: { chargeId: id, status: 'PENDING', dueDate: { lte: todayDb }, invoices: { none: LINKED_LIVE } },
           data: { status: 'SKIPPED', skippedAt: now, skippedById: actorId },
         })
       ).count
