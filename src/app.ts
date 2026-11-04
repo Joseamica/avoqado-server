@@ -1,5 +1,5 @@
 import express, { Express, Request as ExpressRequest, Response as ExpressResponse, NextFunction } from 'express'
-// Crash guardrail (defense in depth). Express 4 does NOT forward a REJECTED promise from an
+// Crash guardrail (defense in depth, humo 2). Express 4 does NOT forward a REJECTED promise from an
 // async route/middleware to next(err): the rejection escapes as a process-level
 // unhandledRejection and crashes the server via server.ts's gracefulShutdown — the exact
 // 2026-06-23 incident where a transient DB error (P1017/P2024) in the bare-async
