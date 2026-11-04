@@ -149,3 +149,64 @@ it('only confirms a completed migration after an authenticated new app session',
   m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', commandSessionId: 'new-boot', lastHeartbeat: new Date() })
   expect((await migrateStatus('term-1', 'cmd-1')).confirmed).toBe(true)
 })
+
+// D1 (3-nov-2026): el asistente necesita saber si el borrado es del protocolo viejo para decir qué hacer si se queda
+// esperando. Se lee de la ORDEN: una terminal que registra el protocolo 2 a mitad de la migración sigue con un borrado
+// viejo, que `deviceReboundAfter` nunca acredita (Codex r3).
+describe('migrateStatus — legacyApp', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const orden = (payload: unknown) =>
+    m.tpvCommandQueue.findUnique.mockResolvedValue({
+      id: 'cmd-1',
+      terminalId: 'term-1',
+      venueId: 'venue-new',
+      commandType: 'FACTORY_RESET',
+      status: 'COMPLETED',
+      payload,
+      createdAt: T0,
+    })
+
+  it('borrado sin protocolo de entrega → app vieja', async () => {
+    orden({ migration: { fromVenueId: 'a', toVenueId: 'venue-new' } })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', lastHeartbeat: null, commandProtocolVersion: null })
+    expect((await migrateStatus('term-1', 'cmd-1')).legacyApp).toBe(true)
+  })
+
+  it('la terminal ya registró el protocolo 2, pero el borrado nació viejo → sigue siendo app vieja', async () => {
+    orden({ migration: { fromVenueId: 'a', toVenueId: 'venue-new' } })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', lastHeartbeat: null, commandProtocolVersion: 2 })
+    expect((await migrateStatus('term-1', 'cmd-1')).legacyApp).toBe(true)
+  })
+
+  it('borrado entregado con el protocolo 2 → no es app vieja', async () => {
+    orden({ _deliveryProtocol: 2, migration: { fromVenueId: 'a', toVenueId: 'venue-new' } })
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', lastHeartbeat: null, commandProtocolVersion: 2 })
+    expect((await migrateStatus('term-1', 'cmd-1')).legacyApp).toBe(false)
+  })
+})
+
+// Codex r4 (3-nov): `migrateCancel` exige que la orden siga vigente; el estado no puede ofrecer cancelar una vencida.
+describe('migrateStatus — cancellable respeta el vencimiento', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const orden = (expiresAt: Date | null) =>
+    m.tpvCommandQueue.findUnique.mockResolvedValue({
+      id: 'cmd-1',
+      terminalId: 'term-1',
+      venueId: 'venue-new',
+      commandType: 'FACTORY_RESET',
+      status: 'PENDING',
+      payload: { migration: { fromVenueId: 'a', toVenueId: 'venue-new' } },
+      createdAt: T0,
+      expiresAt,
+    })
+
+  it.each([
+    ['vencida hace 1 día', new Date(Date.now() - 86_400_000), false],
+    ['vigente 1 día más', new Date(Date.now() + 86_400_000), true],
+    ['sin vencimiento', null, true],
+  ])('PENDING %s: cancellable según su vigencia', async (_caso, expiresAt, esperado) => {
+    orden(expiresAt)
+    m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', lastHeartbeat: null })
+    expect((await migrateStatus('term-1', 'cmd-1')).cancellable).toBe(esperado)
+  })
+})
