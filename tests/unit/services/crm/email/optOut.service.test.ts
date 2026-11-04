@@ -135,9 +135,16 @@ describe('optOut', () => {
         venueId: null,
         action: 'CRM_EMAIL_OPT_OUT',
         entity: 'CrmEmailOptOut',
-        data: expect.objectContaining({ source: 'ADMIN', email: 'ana@example.com' }),
+        data: { source: 'ADMIN' },
       }),
     )
+  })
+
+  it('🔴 la_bitacora_de_la_baja_no_lleva_el_correo (D1, H3): la fila de bajas ya dice cuál y cuándo', async () => {
+    baseEnMemoria()
+    await optOut('ana@example.com', 'UN_CLIC')
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_EMAIL_OPT_OUT', data: { source: 'UN_CLIC' } }))
+    expect(JSON.stringify(jest.mocked(logAction).mock.calls)).not.toContain('ana@example.com')
   })
 
   it('un clic anónimo se registra sin staff', async () => {

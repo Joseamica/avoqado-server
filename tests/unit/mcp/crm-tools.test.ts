@@ -928,6 +928,16 @@ describe('crm_add_note and crm_add_activity', () => {
     expect(auditMcpWrite).toHaveBeenCalledTimes(1)
   })
 
+  it('la_bitacora_de_una_actividad_por_mcp_no_lleva_su_titulo (D1, H2): el título puede nombrar a la persona', async () => {
+    const { call } = setup()
+    const dueAt = new Date('2026-11-03T16:00:00.000Z')
+    ;(addActivity as jest.Mock).mockResolvedValue({ id: cuid('act'), type: 'LLAMADA', title: 'Llamarle', dueAt })
+    prismaMock.crmActivity.findFirst.mockResolvedValueOnce(null)
+    await call('crm_add_activity')
+    expect(auditMcpWrite).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify((auditMcpWrite as jest.Mock).mock.calls)).not.toContain('Llamarle')
+  })
+
   it('a refusal written for the operator comes back as ok:false with its code', async () => {
     const { NotFoundError } = jest.requireActual('@/errors/AppError')
     prismaMock.crmTimelineEvent.findFirst.mockResolvedValueOnce(null)
