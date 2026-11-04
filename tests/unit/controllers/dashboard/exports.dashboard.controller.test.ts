@@ -106,6 +106,17 @@ describe('exports.dashboard.controller', () => {
     await pedirExporte(req({ params: { kind: 'nope' } }), res(), next)
     expect(next.mock.calls[0][0]?.statusCode).toBe(404)
   })
+  it('columnas: sólo las conocidas, en su orden y sin repetir, llegan a `pedir` (la huella no se ensucia)', async () => {
+    ;(exportRunService.pedir as jest.Mock).mockResolvedValue({ tipo: 'encolado', runId: 'run4', formato: 'csv', reutilizado: false })
+    const r = res()
+    await pedirExporte(
+      req({ body: { format: 'csv', columns: ['paymentId', 'basura', 'paymentId', 'x'.repeat(50)], filters: filtros } }),
+      r,
+      jest.fn(),
+    )
+    expect(r.statusCode).toBe(202)
+    expect((exportRunService.pedir as jest.Mock).mock.calls[0][0].columnas).toEqual(['paymentId'])
+  })
   it('formato pdf ⇒ 400', async () => {
     const next = jest.fn()
     await pedirExporte(req({ body: { format: 'pdf', columns: ['paymentId'], filters: filtros } }), res(), next)
