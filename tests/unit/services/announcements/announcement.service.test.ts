@@ -1,14 +1,21 @@
 import { PlatformAnnouncementStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import { resolveAudience } from '../../../../src/services/announcements/audience.service'
-import { publishAnnouncement, scheduleAnnouncement } from '../../../../src/services/announcements/announcement.service'
+import {
+  publishAnnouncement,
+  scheduleAnnouncement,
+  listAnnouncements,
+  updateAnnouncement,
+  archiveAnnouncement,
+} from '../../../../src/services/announcements/announcement.service'
+import { NotFoundError } from '../../../../src/errors/AppError'
 
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    platformAnnouncement: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+    platformAnnouncement: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     notification: { createMany: jest.fn() },
-    platformAnnouncementDelivery: { createMany: jest.fn(), count: jest.fn() },
+    platformAnnouncementDelivery: { createMany: jest.fn(), count: jest.fn(), groupBy: jest.fn() },
   },
 }))
 jest.mock('../../../../src/services/announcements/audience.service', () => ({
@@ -27,6 +34,8 @@ const mockCreateMany = prisma.notification.createMany as unknown as jest.Mock
 const mockAudience = resolveAudience as unknown as jest.Mock
 const mockDelivCreate = prisma.platformAnnouncementDelivery.createMany as unknown as jest.Mock
 const mockDelivCount = prisma.platformAnnouncementDelivery.count as unknown as jest.Mock
+const mockFindMany = prisma.platformAnnouncement.findMany as unknown as jest.Mock
+const mockGroupBy = prisma.platformAnnouncementDelivery.groupBy as unknown as jest.Mock
 
 const anuncio = {
   id: 'a1',
@@ -163,5 +172,90 @@ describe('scheduleAnnouncement — maquina de estados (P2 de la auditoria)', () 
   it('un anuncio ARCHIVADO tampoco se puede programar', async () => {
     mockFind.mockResolvedValue({ ...anuncio, status: PlatformAnnouncementStatus.ARCHIVED })
     await expect(scheduleAnnouncement('a1', new Date('2026-09-10'))).rejects.toThrow(/archivado/i)
+  })
+})
+
+// Actualizador del POS (r7, spec §4.7.5): los avisos de actualizar los crea y archiva «Versiones del POS». El compositor no
+// los lista ni los toca: para él no existen (404), así nadie edita o reparte por error un aviso que no tiene audiencia.
+describe('el compositor no ve ni toca los avisos de actualizar', () => {
+  const aviso = {
+    ...anuncio,
+    id: 'aviso-android',
+    status: PlatformAnnouncementStatus.PUBLISHED,
+    publishedAt: new Date('2026-11-04'),
+    deliveredAt: new Date('2026-11-04'),
+    audienceRoles: [],
+    posAppPlatform: 'ANDROID',
+    posAppNoticeKind: 'REQUIRED',
+    posAppBelowVersionCode: 100,
+    posAppBelowVersionName: null,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockUpdate.mockResolvedValue({})
+    mockUpdateMany.mockResolvedValue({ count: 1 })
+    mockFindMany.mockResolvedValue([])
+    mockGroupBy.mockResolvedValue([])
+  })
+
+  // ===== CASOS NUEVOS =====
+  it('listAnnouncements filtra posAppPlatform: null', async () => {
+    await listAnnouncements()
+    expect(mockFindMany.mock.calls[0][0].where).toEqual({ posAppPlatform: null })
+  })
+
+  it('updateAnnouncement sobre un aviso da NotFoundError y no escribe', async () => {
+    mockFind.mockResolvedValue({ ...aviso, status: PlatformAnnouncementStatus.DRAFT })
+    await expect(updateAnnouncement('aviso-android', { title: 'Otro' })).rejects.toBeInstanceOf(NotFoundError)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('publishAnnouncement sobre un aviso da NotFoundError y no encola', async () => {
+    mockFind.mockResolvedValue({ ...aviso, deliveredAt: null })
+    await expect(publishAnnouncement('aviso-android')).rejects.toBeInstanceOf(NotFoundError)
+    expect(mockUpdateMany).not.toHaveBeenCalled()
+    expect(mockDelivCreate).not.toHaveBeenCalled()
+  })
+
+  it('scheduleAnnouncement sobre un aviso da NotFoundError y no escribe', async () => {
+    mockFind.mockResolvedValue({ ...aviso, deliveredAt: null })
+    await expect(scheduleAnnouncement('aviso-android', new Date('2026-12-01'))).rejects.toBeInstanceOf(NotFoundError)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('archiveAnnouncement sobre un aviso da NotFoundError y no escribe', async () => {
+    mockFind.mockResolvedValue(aviso)
+    await expect(archiveAnnouncement('aviso-android')).rejects.toBeInstanceOf(NotFoundError)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  // ===== REGRESION: los anuncios normales siguen igual =====
+  it('listAnnouncements sigue ordenando por fecha de creación y devolviendo el alcance', async () => {
+    mockFindMany.mockResolvedValue([{ ...anuncio, posAppPlatform: null }])
+    mockGroupBy.mockResolvedValueOnce([{ announcementId: 'a1', venueId: 'v1' }]).mockResolvedValueOnce([
+      { announcementId: 'a1', staffId: 's1' },
+      { announcementId: 'a1', staffId: 's2' },
+    ])
+    const r = await listAnnouncements()
+    expect(mockFindMany.mock.calls[0][0].orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    expect(r).toEqual([expect.objectContaining({ id: 'a1', reachedVenues: 1, reachedPeople: 2 })])
+  })
+
+  it('un anuncio normal se sigue archivando', async () => {
+    mockFind.mockResolvedValue({ ...anuncio, posAppPlatform: null })
+    await archiveAnnouncement('a1')
+    expect(mockUpdate).toHaveBeenCalledWith({ where: { id: 'a1' }, data: { status: PlatformAnnouncementStatus.ARCHIVED } })
+  })
+
+  it('un anuncio normal en borrador se sigue editando', async () => {
+    mockFind.mockResolvedValue({ ...anuncio, posAppPlatform: null })
+    await updateAnnouncement('a1', { title: 'Nuevo' })
+    expect(mockUpdate).toHaveBeenCalled()
+  })
+
+  it('un id que no existe sigue dando NotFoundError', async () => {
+    mockFind.mockResolvedValue(null)
+    await expect(archiveAnnouncement('no-existe')).rejects.toBeInstanceOf(NotFoundError)
   })
 })

@@ -34,6 +34,15 @@ function rastro(action: string, id: string, performedBy?: string, data?: Record<
   })
 }
 
+/**
+ * Actualizador del POS (r7, spec §4.7.5): un anuncio con `posAppPlatform` es un aviso de actualizar. Lo crea y lo archiva
+ * «Versiones del POS» dentro de la transacción de su política; para el compositor no existe (404). Así nadie lo edita, lo
+ * reparte a una audiencia ni lo archiva por fuera de su política, que se quedaría apuntando a un anuncio que ya no sale.
+ */
+function esAvisoDeActualizar(anuncio: { posAppPlatform: unknown }): boolean {
+  return anuncio.posAppPlatform !== null && anuncio.posAppPlatform !== undefined
+}
+
 /** Tamaño del lote de reparto. Miles de filas en un solo createMany bloquean la tabla. */
 const LOTE = 500
 
@@ -54,7 +63,7 @@ const LOTE = 500
  */
 export async function publishAnnouncement(id: string, performedBy?: string): Promise<{ delivered: number; alreadyPublished: boolean }> {
   const anuncio = await prisma.platformAnnouncement.findUnique({ where: { id } })
-  if (!anuncio) throw new NotFoundError('Anuncio no encontrado')
+  if (!anuncio || esAvisoDeActualizar(anuncio)) throw new NotFoundError('Anuncio no encontrado')
 
   if (anuncio.status === PlatformAnnouncementStatus.ARCHIVED) {
     throw new BadRequestError('Un anuncio archivado no se puede publicar')
@@ -154,6 +163,8 @@ export interface AnnouncementInput {
  */
 export async function listAnnouncements() {
   const anuncios = await prisma.platformAnnouncement.findMany({
+    // Los avisos de actualizar del POS no son del compositor: viven en «Versiones del POS».
+    where: { posAppPlatform: null },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   })
   if (anuncios.length === 0) return []
@@ -208,7 +219,7 @@ export async function createAnnouncement(input: AnnouncementInput, createdBy: st
  */
 export async function updateAnnouncement(id: string, input: Partial<AnnouncementInput>, performedBy?: string) {
   const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
-  if (!actual) throw new NotFoundError('Anuncio no encontrado')
+  if (!actual || esAvisoDeActualizar(actual)) throw new NotFoundError('Anuncio no encontrado')
   if (actual.status !== PlatformAnnouncementStatus.DRAFT && actual.status !== PlatformAnnouncementStatus.SCHEDULED) {
     throw new BadRequestError('Sólo se puede editar un anuncio en borrador o programado')
   }
@@ -226,7 +237,7 @@ export async function updateAnnouncement(id: string, input: Partial<Announcement
 /** Programa el reparto para más tarde. El job lo publica cuando llegue la hora. */
 export async function scheduleAnnouncement(id: string, scheduledFor: Date, performedBy?: string) {
   const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
-  if (!actual) throw new NotFoundError('Anuncio no encontrado')
+  if (!actual || esAvisoDeActualizar(actual)) throw new NotFoundError('Anuncio no encontrado')
   if (actual.deliveredAt) throw new BadRequestError('Este anuncio ya se repartió')
   if (actual.status === PlatformAnnouncementStatus.ARCHIVED) {
     throw new BadRequestError('Un anuncio archivado no se puede programar')
@@ -247,7 +258,7 @@ export async function scheduleAnnouncement(id: string, scheduledFor: Date, perfo
 /** Lo retira sin borrarlo: deja de salir como banner y deja de contarse como activo. */
 export async function archiveAnnouncement(id: string, performedBy?: string) {
   const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
-  if (!actual) throw new NotFoundError('Anuncio no encontrado')
+  if (!actual || esAvisoDeActualizar(actual)) throw new NotFoundError('Anuncio no encontrado')
   const archivado = await prisma.platformAnnouncement.update({
     where: { id },
     data: { status: PlatformAnnouncementStatus.ARCHIVED },

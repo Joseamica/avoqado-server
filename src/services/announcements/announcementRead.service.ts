@@ -1,6 +1,8 @@
-import { PlatformAnnouncementStatus, NotificationType } from '@prisma/client'
+import { PlatformAnnouncementStatus, NotificationType, PosAppNoticeKind, type PlatformAnnouncement } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { ForbiddenError } from '../../errors/AppError'
+import { isBelow } from '../posAppVersion/decide'
+import type { HomeAppIdentity } from '../posAppVersion/appIdentity'
 
 const ENTITY = 'PlatformAnnouncement'
 
@@ -19,12 +21,27 @@ const ENTITY = 'PlatformAnnouncement'
  *    función PRO, la compra, y al subir de plan perdería justo el aviso que lo convenció.
  *
  * El acuse resuelve las dos: no es fabricable y es histórico.
+ *
+ * 🔴 La única excepción es el aviso de actualizar del POS (spec §4.7.4): un anuncio con `posAppPlatform` no tiene acuses
+ * (nace ya «repartido» y el inicio lo elige por la versión de la app), así que lo lee cualquier empleado autenticado
+ * mientras esté `PUBLISHED`. Su contenido no es sensible, y así una app vieja puede abrirlo, tocar [Actualizar] y cerrarlo.
+ * Archivado da 403, como un anuncio sin acuse, aunque por algún motivo tuviera uno.
+ *
+ * Las dos lecturas van EN PARALELO: un anuncio normal no espera una consulta de más. La del anuncio es por su id y sólo
+ * trae esas dos columnas, no el contenido.
  */
 async function puedeLeer(announcementId: string, staffId: string): Promise<boolean> {
-  const acuse = await prisma.platformAnnouncementDelivery.findFirst({
-    where: { announcementId, staffId },
-    select: { id: true },
-  })
+  const [anuncio, acuse] = await Promise.all([
+    prisma.platformAnnouncement.findFirst({
+      where: { id: announcementId },
+      select: { posAppPlatform: true, status: true },
+    }),
+    prisma.platformAnnouncementDelivery.findFirst({
+      where: { announcementId, staffId },
+      select: { id: true },
+    }),
+  ])
+  if (anuncio?.posAppPlatform) return anuncio.status === PlatformAnnouncementStatus.PUBLISHED
   return Boolean(acuse)
 }
 
@@ -79,6 +96,57 @@ export async function recordDismiss(announcementId: string, staffId: string, ven
   })
 }
 
+type InicioDelHome = { banner: PlatformAnnouncement | null; modal: PlatformAnnouncement | null }
+
+/**
+ * El aviso de actualizar que le toca a esta app en el inicio, o `null` para seguir con el camino de hoy (spec §4.7.3).
+ *
+ * - «Bloquear» (`REQUIRED`) cuya versión deja a la app debajo: el banner es el aviso aunque lo haya cerrado (es lo más
+ *   fuerte que una app vieja puede mostrar); la ventana respeta el cierre e interrumpe una vez.
+ * - Si no, «Avisar» (`RECOMMENDED`) sin cerrar: banner y ventana según su forma, como un anuncio normal.
+ * - «Avisar» cerrado, o la app al día: `null`.
+ *
+ * Sin acuses: estos anuncios nacen ya «repartidos» y no son de nadie en particular. Lo que decide es la versión.
+ */
+async function avisoDeActualizar(staffId: string, app: HomeAppIdentity, ahora: Date): Promise<InicioDelHome | null> {
+  // A lo más hay dos vivos por plataforma (uno por nivel). El tope tolera un duplicado pasajero; gana el más reciente.
+  const avisos = await prisma.platformAnnouncement.findMany({
+    where: {
+      posAppPlatform: app.platform,
+      status: PlatformAnnouncementStatus.PUBLISHED,
+      OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
+    },
+    orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
+    take: 4,
+  })
+  if (avisos.length === 0) return null
+
+  const instalada = { versionCode: app.versionCode, versionName: app.versionName }
+  const debajo = (a: PlatformAnnouncement) =>
+    isBelow(app.platform, instalada, { versionCode: a.posAppBelowVersionCode, versionName: a.posAppBelowVersionName })
+  const bloquear = avisos.find(a => a.posAppNoticeKind === PosAppNoticeKind.REQUIRED && debajo(a)) ?? null
+  const avisar = avisos.find(a => a.posAppNoticeKind === PosAppNoticeKind.RECOMMENDED && debajo(a)) ?? null
+  if (!bloquear && !avisar) return null
+
+  const ids = [bloquear, avisar].filter((a): a is PlatformAnnouncement => a !== null).map(a => a.id)
+  // Lo que apaga la ventana es haberla CERRADO (`dismissedAt`), igual que en los anuncios normales. El unique
+  // (anuncio, persona) deja a lo más una fila por id.
+  const cerrados = await prisma.platformAnnouncementClick.findMany({
+    where: { staffId, announcementId: { in: ids }, dismissedAt: { not: null } },
+    select: { announcementId: true },
+    take: ids.length,
+  })
+  const yaCerrado = new Set(cerrados.map(c => c.announcementId))
+
+  if (bloquear) {
+    return { banner: bloquear, modal: yaCerrado.has(bloquear.id) ? null : bloquear }
+  }
+  if (avisar && !yaCerrado.has(avisar.id)) {
+    return { banner: avisar.showAsBanner ? avisar : null, modal: avisar.showAsModal ? avisar : null }
+  }
+  return null
+}
+
 /**
  * Lo que el inicio del dashboard necesita de una sola llamada: el banner y la ventana.
  *
@@ -90,11 +158,24 @@ export async function recordDismiss(announcementId: string, staffId: string, ven
  *    cerrar ventanas sin leerlas.
  *
  * Los dos pasan por el acuse de recibo: sin él no se enseña nada.
+ *
+ * 🔴 Actualizador del POS (r7, spec §4.7.3): `app` es la app que pregunta, leída de sus cabeceras SÓLO por la ruta
+ * (`readHomeAppIdentity`). Si viene y está debajo de un aviso de actualizar de su plataforma, ese aviso ocupa el lugar del
+ * banner y de la ventana (`avisoDeActualizar`). Sin `app` (el DASHBOARD, o una app que no se puede comparar) todo sigue
+ * como siempre, y el camino de hoy nunca enseña un aviso de actualizar (`posAppPlatform: null`).
  */
-export async function getActiveForHome(staffId: string) {
+export async function getActiveForHome(staffId: string, app?: HomeAppIdentity | null) {
   const ahora = new Date()
+
+  if (app) {
+    const aviso = await avisoDeActualizar(staffId, app, ahora)
+    if (aviso) return aviso
+  }
+
   const activos = await prisma.platformAnnouncement.findMany({
     where: {
+      // Los avisos de actualizar no tienen acuses y sólo los elige la versión de la app (arriba).
+      posAppPlatform: null,
       status: PlatformAnnouncementStatus.PUBLISHED,
       OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
       AND: [{ OR: [{ showAsBanner: true }, { showAsModal: true }] }],

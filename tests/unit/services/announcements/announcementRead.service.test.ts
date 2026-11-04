@@ -3,6 +3,7 @@ import {
   getAnnouncementForStaff,
   recordOpen,
   recordCta,
+  recordDismiss,
   listAnnouncementsForStaff,
   getActiveForHome,
 } from '../../../../src/services/announcements/announcementRead.service'
@@ -12,7 +13,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     notification: { findMany: jest.fn() },
-    platformAnnouncement: { findUnique: jest.fn(), findMany: jest.fn() },
+    platformAnnouncement: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
     platformAnnouncementClick: { upsert: jest.fn(), findMany: jest.fn() },
     platformAnnouncementDelivery: { findFirst: jest.fn(), findMany: jest.fn() },
   },
@@ -21,6 +22,8 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 const mockNotifMany = prisma.notification.findMany as unknown as jest.Mock
 const mockAnn = prisma.platformAnnouncement.findUnique as unknown as jest.Mock
 const mockAnnMany = prisma.platformAnnouncement.findMany as unknown as jest.Mock
+// Lo que `puedeLeer` lee del anuncio (si es un aviso de actualizar y su estado), aparte del contenido.
+const mockAnnFirst = prisma.platformAnnouncement.findFirst as unknown as jest.Mock
 const mockAcuse = prisma.platformAnnouncementDelivery.findFirst as unknown as jest.Mock
 const mockAcuseMany = prisma.platformAnnouncementDelivery.findMany as unknown as jest.Mock
 const mockClick = prisma.platformAnnouncementClick.upsert as unknown as jest.Mock
@@ -30,6 +33,8 @@ describe('announcementRead.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockClick.mockResolvedValue({})
+    // Por omisión, un anuncio normal (sin `posAppPlatform`): el candado de hoy, por acuse.
+    mockAnnFirst.mockResolvedValue({ posAppPlatform: null, status: 'PUBLISHED' })
   })
 
   describe('autorizacion por ACUSE DE RECIBO', () => {
@@ -223,6 +228,284 @@ describe('announcementRead.service', () => {
       await listAnnouncementsForStaff('s1', { limit: 10, unreadOnly: false })
       expect(mockNotifMany.mock.calls[0][0].where.entityId).toEqual({ in: ['a1'] })
       expect(mockNotifMany.mock.calls[0][0].where.type).toBe('ANNOUNCEMENT')
+    })
+  })
+
+  // Actualizador del POS (r7, spec §4.7.3): el aviso de actualizar sale en el inicio de las apps de hoy, elegido por la
+  // versión que trae la app, sin acuses. Ocupa el lugar del banner y de la ventana de ese momento.
+  describe('getActiveForHome — el aviso de actualizar, por la versión de la app', () => {
+    const bloquear = (over: Record<string, unknown> = {}) => ({
+      id: 'bloq-android-100',
+      title: 'Actualiza Avoqado cuanto antes',
+      body: 'Esta versión ya no debe usarse. Actualizar toma un minuto.',
+      priority: 'URGENT',
+      status: 'PUBLISHED',
+      showAsBanner: true,
+      showAsModal: true,
+      expiresAt: null,
+      publishedAt: new Date('2026-11-04'),
+      posAppPlatform: 'ANDROID',
+      posAppNoticeKind: 'REQUIRED',
+      posAppBelowVersionCode: 100,
+      posAppBelowVersionName: null,
+      ...over,
+    })
+    const avisar = (over: Record<string, unknown> = {}) =>
+      bloquear({
+        id: 'avisar-android-110',
+        title: 'Hay una versión nueva de Avoqado',
+        priority: 'HIGH',
+        showAsModal: false,
+        posAppNoticeKind: 'RECOMMENDED',
+        posAppBelowVersionCode: 110,
+        ...over,
+      })
+    const avisarIos = (over: Record<string, unknown> = {}) =>
+      avisar({
+        id: 'avisar-ios-1.16',
+        posAppPlatform: 'IOS',
+        posAppBelowVersionCode: null,
+        posAppBelowVersionName: '1.16',
+        ...over,
+      })
+    // Un anuncio normal, con su acuse, que hoy sale como banner y ventana.
+    const normal = {
+      id: 'normal-1',
+      title: 'Cambian los precios',
+      priority: 'NORMAL',
+      showAsBanner: true,
+      showAsModal: true,
+      publishedAt: new Date('2026-11-01'),
+      posAppPlatform: null,
+    }
+
+    /** La base: los avisos para la consulta de avisos (`posAppPlatform` = la plataforma), los normales para la de hoy. */
+    const servir = (avisos: unknown[], normales: unknown[] = [normal]) =>
+      mockAnnMany.mockImplementation(async (args: any) => (args.where.posAppPlatform ? avisos : normales))
+    /** Los cierres de esta persona: sólo los ids que se pidieron y están en la lista. */
+    const cerrados = (ids: string[]) =>
+      mockClickMany.mockImplementation(async (args: any) =>
+        ids.filter(id => (args.where.announcementId?.in ?? []).includes(id)).map(announcementId => ({ announcementId })),
+      )
+
+    const android = (versionCode: number) => ({ platform: 'ANDROID' as const, versionCode })
+    const ios = (versionName: string) => ({ platform: 'IOS' as const, versionName })
+
+    beforeEach(() => {
+      mockAnnMany.mockReset()
+      mockClickMany.mockReset()
+      mockAcuseMany.mockReset()
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'normal-1' }])
+      cerrados([])
+    })
+
+    // ===== CASOS NUEVOS =====
+    it('ANDROID 95 con «Bloquear» debajo de 100, ya cerrado: el banner vuelve, la ventana no', async () => {
+      servir([bloquear()])
+      cerrados(['bloq-android-100'])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('bloq-android-100')
+      expect(r.modal).toBeNull()
+      // Ocupa los dos lugares: el camino de hoy ni se consulta.
+      expect(mockAcuseMany).not.toHaveBeenCalled()
+      expect(mockAnnMany).toHaveBeenCalledTimes(1)
+    })
+
+    it('ANDROID 95 con «Bloquear» debajo de 100, sin cerrar: banner y ventana son el aviso', async () => {
+      servir([bloquear()])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('bloq-android-100')
+      expect(r.modal?.id).toBe('bloq-android-100')
+    })
+
+    it('ANDROID 100 (igual a la mínima) no está debajo: sigue el camino de hoy', async () => {
+      servir([bloquear()])
+      const r = await getActiveForHome('s1', android(100))
+      expect(r.banner?.id).toBe('normal-1')
+      expect(r.modal?.id).toBe('normal-1')
+      const deHoy = mockAnnMany.mock.calls.find(c => c[0].where.posAppPlatform === null)
+      expect(deHoy).toBeDefined()
+    })
+
+    it('sin app (el DASHBOARD): sólo el camino de hoy, y su consulta excluye los avisos de actualizar', async () => {
+      servir([bloquear()])
+      const r = await getActiveForHome('s1', null)
+      expect(r.banner?.id).toBe('normal-1')
+      expect(mockAnnMany).toHaveBeenCalledTimes(1)
+      expect(mockAnnMany.mock.calls[0][0].where.posAppPlatform).toBeNull()
+    })
+
+    it('con la firma de antes (un solo argumento) también excluye los avisos de actualizar', async () => {
+      servir([bloquear()])
+      await getActiveForHome('s1')
+      expect(mockAnnMany).toHaveBeenCalledTimes(1)
+      expect(mockAnnMany.mock.calls[0][0].where.posAppPlatform).toBeNull()
+    })
+
+    it('iOS «1.15.11» con «Avisar» «1.16» como banner: el banner es el aviso y no hay ventana', async () => {
+      servir([avisarIos({ showAsModal: false })])
+      const r = await getActiveForHome('s1', ios('1.15.11'))
+      expect(r.banner?.id).toBe('avisar-ios-1.16')
+      // Ocupa también el lugar de la ventana: la del anuncio normal no sale.
+      expect(r.modal).toBeNull()
+    })
+
+    it('iOS «1.16» con «Avisar» «1.16» no está debajo: sigue el camino de hoy', async () => {
+      servir([avisarIos()])
+      const r = await getActiveForHome('s1', ios('1.16.0'))
+      expect(r.banner?.id).toBe('normal-1')
+    })
+
+    it('«Avisar» como ventana: banner y ventana son el aviso', async () => {
+      servir([avisar({ showAsModal: true })])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('avisar-android-110')
+      expect(r.modal?.id).toBe('avisar-android-110')
+    })
+
+    it('«Avisar» cerrado no vuelve: sigue el camino de hoy', async () => {
+      servir([avisar({ showAsModal: true })])
+      cerrados(['avisar-android-110'])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('normal-1')
+      expect(r.modal?.id).toBe('normal-1')
+    })
+
+    // Review Focus 5: con un anuncio normal con acuse y un «Avisar» a la vez, gana el aviso.
+    it('un anuncio normal con acuse y un «Avisar» a la vez: gana el aviso', async () => {
+      servir([avisar({ showAsModal: true })], [normal])
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'normal-1' }])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('avisar-android-110')
+      expect(r.modal?.id).toBe('avisar-android-110')
+    })
+
+    it('debajo de los dos niveles: gana «Bloquear»', async () => {
+      servir([avisar({ showAsModal: true }), bloquear()])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('bloq-android-100')
+      expect(r.modal?.id).toBe('bloq-android-100')
+    })
+
+    it('«Bloquear» cerrado pero no «Avisar»: el banner sigue siendo «Bloquear» y no hay ventana', async () => {
+      servir([avisar({ showAsModal: true }), bloquear()])
+      cerrados(['bloq-android-100'])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('bloq-android-100')
+      expect(r.modal).toBeNull()
+    })
+
+    it('debajo sólo de «Avisar» (ANDROID 100 con «Bloquear» 100 y «Avisar» 110): sale «Avisar»', async () => {
+      servir([bloquear(), avisar()])
+      const r = await getActiveForHome('s1', android(100))
+      expect(r.banner?.id).toBe('avisar-android-110')
+      expect(r.modal).toBeNull()
+    })
+
+    it('la consulta de avisos pide su plataforma, publicados, vigentes y con tope', async () => {
+      servir([])
+      await getActiveForHome('s1', android(95))
+      const args = mockAnnMany.mock.calls[0][0]
+      expect(args.where.posAppPlatform).toBe('ANDROID')
+      expect(args.where.status).toBe('PUBLISHED')
+      expect(args.where.OR).toEqual([{ expiresAt: null }, { expiresAt: { gt: expect.any(Date) } }])
+      expect(args.take).toBeGreaterThan(0)
+      expect(args.take).toBeLessThanOrEqual(4)
+    })
+
+    it('los cierres se leen de esta persona, por dismissedAt, para esos avisos y con tope', async () => {
+      servir([bloquear()])
+      await getActiveForHome('s1', android(95))
+      const args = mockClickMany.mock.calls[0][0]
+      expect(args.where.staffId).toBe('s1')
+      expect(args.where.dismissedAt).toEqual({ not: null })
+      expect(args.where.announcementId).toEqual({ in: ['bloq-android-100'] })
+      expect(args.take).toBeGreaterThan(0)
+    })
+
+    // ===== REGRESION =====
+    it('sin avisos de su plataforma, el camino de hoy queda igual (acuse y cierre)', async () => {
+      servir([])
+      mockAcuseMany.mockResolvedValue([])
+      const r = await getActiveForHome('s1', android(95))
+      // Sin acuse, el anuncio normal no se enseña: nada cambió para los anuncios de hoy.
+      expect(r).toEqual({ banner: null, modal: null })
+    })
+  })
+
+  // Spec §4.7.4: una app vieja tiene que poder abrir, tocar y cerrar el aviso de actualizar, que no tiene acuse.
+  describe('puedeLeer — el aviso de actualizar se lee sin acuse mientras esté publicado', () => {
+    const avisoAndroid = { id: 'aviso-1', title: 'Actualiza Avoqado cuanto antes', posAppPlatform: 'ANDROID', status: 'PUBLISHED' }
+
+    // ===== CASOS NUEVOS =====
+    it('un aviso publicado sin acuse se lee', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: 'ANDROID', status: 'PUBLISHED' })
+      mockAcuse.mockResolvedValue(null)
+      mockAnn.mockResolvedValue(avisoAndroid)
+      await expect(getAnnouncementForStaff('aviso-1', 's1')).resolves.toMatchObject({ id: 'aviso-1' })
+    })
+
+    it('un aviso archivado da 403', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: 'ANDROID', status: 'ARCHIVED' })
+      mockAcuse.mockResolvedValue(null)
+      await expect(getAnnouncementForStaff('aviso-1', 's1')).rejects.toBeInstanceOf(ForbiddenError)
+      expect(mockAnn).not.toHaveBeenCalled()
+    })
+
+    it('un aviso archivado da 403 aunque existiera un acuse', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: 'IOS', status: 'ARCHIVED' })
+      mockAcuse.mockResolvedValue({ id: 'd1' })
+      await expect(getAnnouncementForStaff('aviso-1', 's1')).rejects.toBeInstanceOf(ForbiddenError)
+    })
+
+    it('cerrar un aviso publicado sin acuse registra el cierre', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: 'ANDROID', status: 'PUBLISHED' })
+      mockAcuse.mockResolvedValue(null)
+      await recordDismiss('aviso-1', 's1', 'v1')
+      expect(mockClick).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { announcementId_staffId: { announcementId: 'aviso-1', staffId: 's1' } },
+          create: expect.objectContaining({ dismissedAt: expect.any(Date) }),
+        }),
+      )
+    })
+
+    it('el botón de un aviso publicado sin acuse se registra', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: 'ANDROID', status: 'PUBLISHED' })
+      mockAcuse.mockResolvedValue(null)
+      await recordCta('aviso-1', 's1')
+      expect(mockClick).toHaveBeenCalled()
+    })
+
+    it('el estado se lee por el id del anuncio, sólo esas columnas', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: 'ANDROID', status: 'PUBLISHED' })
+      mockAnn.mockResolvedValue(avisoAndroid)
+      await getAnnouncementForStaff('aviso-1', 's1')
+      expect(mockAnnFirst).toHaveBeenCalledWith({
+        where: { id: 'aviso-1' },
+        select: { posAppPlatform: true, status: true },
+      })
+    })
+
+    // ===== REGRESION: los anuncios normales siguen pidiendo acuse =====
+    it('un anuncio normal publicado sin acuse sigue dando 403', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: null, status: 'PUBLISHED' })
+      mockAcuse.mockResolvedValue(null)
+      await expect(getAnnouncementForStaff('a1', 's9')).rejects.toBeInstanceOf(ForbiddenError)
+    })
+
+    it('un anuncio normal con acuse se sigue leyendo, aunque esté archivado (como hoy)', async () => {
+      mockAnnFirst.mockResolvedValue({ posAppPlatform: null, status: 'ARCHIVED' })
+      mockAcuse.mockResolvedValue({ id: 'd1' })
+      mockAnn.mockResolvedValue({ id: 'a1' })
+      await expect(getAnnouncementForStaff('a1', 's1')).resolves.toMatchObject({ id: 'a1' })
+    })
+
+    it('un id que no existe sin acuse da 403, como hoy', async () => {
+      mockAnnFirst.mockResolvedValue(null)
+      mockAcuse.mockResolvedValue(null)
+      await expect(recordOpen('no-existe', 's1')).rejects.toBeInstanceOf(ForbiddenError)
+      expect(mockClick).not.toHaveBeenCalled()
     })
   })
 })
