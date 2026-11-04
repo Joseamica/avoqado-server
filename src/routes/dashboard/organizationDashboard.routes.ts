@@ -43,6 +43,8 @@ import {
   orgMigrateDiscardSchema,
 } from '../../schemas/dashboard/orgTerminals.schema'
 import prisma from '../../utils/prismaClient'
+import { duplicateVenueSchema, venueDuplicationOptionsSchema } from '../../schemas/dashboard/venueDuplication.schema'
+import * as venueDuplicationService from '../../services/organization-dashboard/venueDuplication.service'
 
 const router = Router()
 
@@ -1748,6 +1750,50 @@ router.post(
         success: true,
         data: result,
       })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ---------------------------------------------------------------------------
+// «Duplicar tienda»: sólo el dueño de la organización. Los errores del servicio son AppError tipados
+// (module_disabled 403, VENUE_NAME_TAKEN / SUPERVISOR_NOT_IN_ORG / TEMPLATE_* 400, NotFound 404): los traduce el
+// manejador de errores global.
+// ---------------------------------------------------------------------------
+
+/** GET /:orgId/venue-duplication/options — tiendas modelo y supervisores posibles (`enabled:false` si el módulo está apagado). */
+router.get(
+  '/:orgId/venue-duplication/options',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(venueDuplicationOptionsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await venueDuplicationService.getVenueDuplicationOptions(req.params.orgId)
+      res.json({ success: true, data })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/** POST /:orgId/venue-duplication — crea la tienda nueva. El orgId es el de la URL; el actor, el del token. */
+router.post(
+  '/:orgId/venue-duplication',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(duplicateVenueSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const data = await venueDuplicationService.duplicateVenue({
+        ...req.body,
+        orgId: req.params.orgId,
+        actorStaffId: (req as any).authContext.userId,
+      })
+      res.status(201).json({ success: true, data })
     } catch (error) {
       next(error)
     }

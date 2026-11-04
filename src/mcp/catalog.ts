@@ -316,6 +316,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   receive_inter_venue_transfer: 'write',
   recent_orders: 'read',
   record_manual_payment: 'write',
+  duplicate_venue: 'write',
   record_serialized_sale: 'write',
   redeem_credit: 'write',
   redeem_loyalty_on_check: 'write',
