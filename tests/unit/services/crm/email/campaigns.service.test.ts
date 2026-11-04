@@ -9,8 +9,10 @@ import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
 import { cancelCampaign, getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
+import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
+jest.mock('@/services/email/resendQuota', () => ({ campanasPausadasPorCupo: jest.fn(() => false) }))
 jest.mock('@/services/crm/access.service', () => ({
   ...jest.requireActual('@/services/crm/access.service'),
   getCrmAccess: jest.fn(),
@@ -126,6 +128,57 @@ describe('contadores de las campañas', () => {
     expect(a.contadores).toEqual({ pendientes: 5, enCurso: 2, enviados: 20, reintentos: 3, fallidos: 4, omitidos: 1, desconocidos: 5 })
     expect(suma(a.contadores)).toBe(a.total)
     expect(suma(b.contadores)).toBe(b.total)
+  })
+})
+
+// El cupo de Resend (3-nov): con 80 de 100 en el día, las campañas ENVIANDO esperan a la medianoche de CDMX. La pantalla y el MCP
+// lo dicen con un campo NUEVO y opcional (`pausadaPorCupo`): ningún campo existente cambia.
+describe('pausadaPorCupo — la campaña espera al cupo de Resend', () => {
+  const pausa = campanasPausadasPorCupo as jest.Mock
+  beforeEach(() => {
+    pausa.mockReset().mockReturnValue(false)
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue(GRUPOS as never)
+  })
+
+  it('una campaña ENVIANDO con el cupo en pausa dice pausadaPorCupo: true; sin pausa, false', async () => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(fila(CAMP_A, TOTAL_A) as never)
+    expect((await getCampaign(CAMP_A)).pausadaPorCupo).toBe(false)
+    pausa.mockReturnValue(true)
+    const campana = await getCampaign(CAMP_A)
+    expect(campana.pausadaPorCupo).toBe(true)
+    expect(campana.contadores).toEqual(CUENTA_A)
+  })
+
+  it('una campaña que ya no envía (ENVIADA, CANCELADA) nunca está «en pausa»', async () => {
+    pausa.mockReturnValue(true)
+    prismaMock.crmCampaign.findUnique.mockResolvedValue({ ...fila(CAMP_B, 3), status: 'ENVIADA' } as never)
+    expect((await getCampaign(CAMP_B)).pausadaPorCupo).toBe(false)
+  })
+
+  it('crm_campaign_status lo trae en el detalle y en la lista', async () => {
+    pausa.mockReturnValue(true)
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({
+      staffId: STAFF,
+      isSuperadmin: true,
+      ver: 'todos',
+      editar: 'todos',
+      contactar: true,
+      campanas: true,
+      exportar: true,
+      ventas: true,
+      admin: true,
+    })
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(fila(CAMP_A, TOTAL_A) as never)
+    prismaMock.crmCampaign.findMany.mockResolvedValue([fila(CAMP_A, TOTAL_A)] as never)
+    prismaMock.crmCampaign.count.mockResolvedValue(1)
+    const handlers: Record<string, (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>> = {}
+    const server = { tool: (name: string, _d: string, _s: unknown, handler: (typeof handlers)[string]) => void (handlers[name] = handler) }
+    registerCrmTools(server as unknown as McpServer, { staffId: STAFF, isSuperAdmin: true, scopes: ['mcp:read'] } as McpScope)
+
+    const detalle = JSON.parse((await handlers.crm_campaign_status({ campaignId: CAMP_A })).content[0].text)
+    const lista = JSON.parse((await handlers.crm_campaign_status({})).content[0].text)
+    expect(detalle.campana.pausadaPorCupo).toBe(true)
+    expect(lista.campanas[0].pausadaPorCupo).toBe(true)
   })
 })
 

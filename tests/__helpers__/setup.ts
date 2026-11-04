@@ -576,6 +576,8 @@ const prismaMock: any = {
   emailSuppression: createMockModel(),
   crmWhatsappMessage: createMockModel(),
   crmErased: createMockModel(),
+  // La fila del aviso del cupo de Resend (`services/email/resendQuota.ts`): el CAS que avisa una vez por día.
+  emailQuotaAlert: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

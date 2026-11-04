@@ -9,6 +9,8 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     refreshGrant: { findUnique: jest.fn(), updateMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn() },
     session: { updateMany: jest.fn() },
+    // D19: toda transacción que muta grants toma primero el candado de la familia (`pg_advisory_xact_lock`).
+    $queryRaw: jest.fn(),
     $transaction: jest.fn(),
   },
 }))

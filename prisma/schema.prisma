@@ -8400,6 +8400,20 @@ model EmailQuotaLedger {
   @@unique([venueId, period])
 }
 
+/// El aviso del cupo de la cuenta de Resend (`services/email/resendQuota.ts`): UNA fila (`id = "resend"`). Cada columna
+/// guarda el último día o mes que ya se avisó; el aviso se reclama con un CAS sobre ella, así sale una vez aunque el
+/// servidor se reinicie. Días y meses de Ciudad de México.
+model EmailQuotaAlert {
+  id                String   @id @default("resend")
+  /// YYYY-MM-DD: ya se avisó que el día llegó al 80 % del cupo diario
+  dailyAlertDay     String?
+  /// YYYY-MM: ya se avisó que el mes llegó al 80 % del cupo mensual
+  monthlyAlertMonth String?
+  /// YYYY-MM-DD: ya se avisó que Resend contestó «se acabó el cupo» (429)
+  exhaustedAlertDay String?
+  updatedAt         DateTime @updatedAt
+}
+
 model Consumer {
   id String @id @default(cuid())
 

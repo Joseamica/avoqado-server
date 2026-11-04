@@ -7,13 +7,22 @@
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import { env } from '@/config/env'
-import { BACKOFF_MS, correrEnvioDeCampanas, enviarDelivery } from '@/services/crm/email/campaignSender.service'
+import logger from '@/config/logger'
+import { BACKOFF_MS, correrEnvioDeCampanas, enviarDelivery, LEASE_MS } from '@/services/crm/email/campaignSender.service'
 import emailService from '@/services/email.service'
+import { campanasPausadasPorCupo, finDeLaPausaPorCupo } from '@/services/email/resendQuota'
 import { verifyPlatformUnsubscribeToken } from '@/utils/platformUnsubscribeToken'
 
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendEmailWithResult: jest.fn() } }))
+jest.mock('@/services/email/resendQuota', () => ({
+  ...jest.requireActual('@/services/email/resendQuota'),
+  campanasPausadasPorCupo: jest.fn(() => false),
+  finDeLaPausaPorCupo: jest.fn(jest.requireActual('@/services/email/resendQuota').finDeLaPausaPorCupo),
+}))
 
 const send = emailService.sendEmailWithResult as jest.Mock
+const pausa = campanasPausadasPorCupo as jest.Mock
+const finDeLaPausa = finDeLaPausaPorCupo as jest.Mock
 
 const DELIVERY = 'cdeliverycrm0000000000001'
 const ACCOUNT = 'caccountcrm00000000000001'
@@ -66,6 +75,7 @@ beforeEach(() => {
   prismaMock.crmErased.findFirst.mockResolvedValue(null)
   prismaMock.crmAccount.findUnique.mockResolvedValue({ id: ACCOUNT })
   send.mockResolvedValue({ ok: true, resendId: 're_123', transient: false })
+  pausa.mockReset().mockReturnValue(false)
   process.env.CRM_CORREO_PRUEBAS = 'ana@cafeteria.mx'
 })
 
@@ -362,5 +372,127 @@ describe('correrEnvioDeCampanas — el trabajo', () => {
     expect(prismaMock.crmCampaignDelivery.count).not.toHaveBeenCalled()
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     expect(send).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * El cupo de Resend (promesa `docs/audit/2026-11-03-cupo-de-resend/promesa.md`): con 80 de 100 en el día las campañas esperan a que
+ * Resend reinicie su día (medianoche UTC, las 18:00 de Ciudad de México) para dejarle lugar al login y a los recibos. Lo que vuelve a la cola no gasta un intento (no debe
+ * acercarse al agotamiento del Ruling 11) y nunca sale dos veces: el lease y el CAS de siempre.
+ */
+describe('el cupo de Resend', () => {
+  /** Cuando Resend reinicia el día tras AHORA (2-nov, 12:00 en CDMX): la medianoche UTC, las 18:00 de CDMX del mismo 2-nov. */
+  const MEDIANOCHE = new Date('2026-11-03T00:00:00.000Z')
+  const VACIO = { ENVIADO: 0, REINTENTO: 0, FALLIDO: 0, OMITIDO: 0, DESCONOCIDO: 0 }
+
+  beforeEach(() => {
+    prismaMock.crmCampaignDelivery.count.mockReset().mockResolvedValue(0)
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.crmCampaign.updateMany.mockReset().mockResolvedValue({ count: 0 })
+    ;(logger.info as jest.Mock).mockClear()
+  })
+
+  it('pausado por el cupo: la vuelta no reclama nada (ni el conteo, ni la cola) y lo dice en el log', async () => {
+    pausa.mockReturnValue(true)
+
+    await expect(correrEnvioDeCampanas({ ahora: AHORA, pausaMs: 0 })).resolves.toEqual(VACIO)
+
+    expect(prismaMock.crmCampaignDelivery.count).not.toHaveBeenCalled()
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('cupo de Resend'))
+  })
+
+  it('al cruzar el 80 a media vuelta la siguiente no sale: lo reclamado vuelve sin gastar intento, para el reinicio del cupo', async () => {
+    // Libre al empezar y antes del primer correo; ese correo cruza el 80.
+    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
+    prismaMock.$queryRaw.mockResolvedValue([{ id: DELIVERY }, { id: 'cotra000000000000000000001' }, { id: 'cotra000000000000000000002' }])
+
+    await correrEnvioDeCampanas({ ahora: AHORA, pausaMs: 0 })
+
+    expect(send).toHaveBeenCalledTimes(1)
+    // CAS por el lease de ESTA vuelta: si otro ya la reclamó, no se toca.
+    const nuestras = {
+      id: { in: ['cotra000000000000000000001', 'cotra000000000000000000002'] },
+      status: 'ENVIANDO',
+      leaseUntil: new Date(AHORA.getTime() + LEASE_MS),
+    }
+    // Un primer intento nunca llegó a la red: vuelve PENDIENTE y suelta su lugar del día.
+    expect(prismaMock.crmCampaignDelivery.updateMany).toHaveBeenCalledWith({
+      where: { ...nuestras, attempts: 1 },
+      data: { status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, leaseUntil: null, nextAttemptAt: MEDIANOCHE },
+    })
+    // Un reintento conserva su primer intento (la ventana de 23 h y la llave siguen): sólo se le regresa el intento.
+    expect(prismaMock.crmCampaignDelivery.updateMany).toHaveBeenCalledWith({
+      where: { ...nuestras, attempts: { gt: 1 } },
+      data: { status: 'REINTENTO', attempts: { decrement: 1 }, leaseUntil: null, nextAttemptAt: MEDIANOCHE },
+    })
+  })
+
+  it('sin pausa, la vuelta manda todo lo reclamado como hoy y no devuelve nada a la cola', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: DELIVERY }, { id: DELIVERY }])
+
+    const resumen = await correrEnvioDeCampanas({ ahora: AHORA, pausaMs: 0 })
+
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(resumen).toEqual({ ...VACIO, ENVIADO: 2 })
+    const devoluciones = prismaMock.crmCampaignDelivery.updateMany.mock.calls.filter(([arg]: any[]) => arg.where?.id?.in)
+    expect(devoluciones).toHaveLength(0)
+  })
+
+  it('la pausa que llega durante la espera, las relecturas o el propio transporte frena el correo JUSTO antes de Resend, sin gastar el intento', async () => {
+    // El transporte pregunta `antesDeMandar` después de su último await; para entonces un login ya cruzó el 80.
+    send.mockImplementation(async (o: { antesDeMandar?: () => string | null }) => {
+      pausa.mockReturnValue(true)
+      const frenado = o.antesDeMandar?.()
+      return frenado ? { ok: false, transient: true, errorCode: frenado } : { ok: true, resendId: 're_1', transient: false }
+    })
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(send.mock.calls[0][0].antesDeMandar()).toBe('cupo_en_pausa')
+    expect(escrito()).toEqual({
+      where: CAS,
+      data: { leaseUntil: null, status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: MEDIANOCHE },
+    })
+  })
+
+  it('lo devuelto vuelve cuando el medidor vio que Resend reinicia (su reloj), no en la medianoche del reloj de aquí', async () => {
+    // El reloj de aquí va adelantado: para Resend el día cambia 20 s antes que la medianoche UTC que daría AHORA.
+    const REINICIO_DE_RESEND = new Date('2026-11-02T23:59:40.000Z')
+    finDeLaPausa.mockReturnValueOnce(REINICIO_DE_RESEND)
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'daily_quota_exceeded' })
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(escrito().data).toMatchObject({ status: 'PENDIENTE', nextAttemptAt: REINICIO_DE_RESEND })
+    expect(finDeLaPausa).toHaveBeenCalledWith(AHORA)
+  })
+
+  it('un 429 de cupo en el PRIMER intento: vuelve PENDIENTE sin gastar el intento ni su lugar del día', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'daily_quota_exceeded' })
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(escrito()).toEqual({
+      where: CAS,
+      data: { leaseUntil: null, status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: MEDIANOCHE },
+    })
+  })
+
+  it('un 429 de cupo del mes en un reintento: vuelve REINTENTO con un intento menos y su primer intento intacto', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'monthly_quota_exceeded' })
+    prismaMock.crmCampaignDelivery.findUnique.mockResolvedValue(fila({ attempts: 3 }))
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(escrito()).toEqual({
+      where: { ...CAS, attempts: 3 },
+      data: { leaseUntil: null, status: 'REINTENTO', attempts: 2, nextAttemptAt: MEDIANOCHE },
+    })
+  })
+
+  it('el 429 de RITMO (rate_limit_exceeded) sigue como hoy: un reintento al minuto que sí gasta el intento', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit_exceeded' })
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(escrito().data).toMatchObject({ status: 'REINTENTO', nextAttemptAt: new Date(AHORA.getTime() + BACKOFF_MS[0]) })
+    expect(escrito().data).not.toHaveProperty('attempts')
   })
 })

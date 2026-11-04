@@ -74,6 +74,7 @@ export async function optOut(email: string, source: OrigenDeBaja, actorStaffId?:
     venueId: null,
     action: 'CRM_EMAIL_OPT_OUT',
     entity: 'CrmEmailOptOut',
-    data: { source, email: normalizado },
+    // 🔴 Sin el correo (D1): la fila de `CrmEmailOptOut` ya dice cuál y cuándo, y el borrado de la persona la limpia ahí.
+    data: { source },
   })
 }
