@@ -12,6 +12,7 @@ import { logAction } from './dashboard/activity-log.service'
 import { assertCanAddSeatsBulk } from './access/seatCap.service'
 import { motivoContrasenaInvalida } from '../utils/contrasenaNueva'
 import { esCorreoDemo } from './demo/candadoDemo'
+import { esCuentaProvisional } from './cuentaProvisional'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -124,22 +125,6 @@ export async function getInvitationByToken(token: string) {
     // PIN requirement: when true, the accepting user MUST provide a PIN
     requirePin: invitation.requirePin || false,
   }
-}
-
-/**
- * La cuenta PROVISIONAL que crea la propia invitación al invitar un correo sin cuenta
- * (`team.dashboard.service`): inactiva, sin verificar, sin contraseña, sin Google y nunca usada.
- * Ésa sí fija su contraseña al aceptar — es la persona nueva terminando su alta. Cualquier otra
- * cuenta sin contraseña es REAL (Google, PIN) y sólo acepta desde su propia sesión.
- */
-function esCuentaProvisional(staff: {
-  active: boolean
-  emailVerified: boolean
-  password: string | null
-  googleId: string | null
-  lastLoginAt: Date | null
-}): boolean {
-  return !staff.active && !staff.emailVerified && !staff.password && !staff.googleId && !staff.lastLoginAt
 }
 
 export async function acceptInvitation(
@@ -309,12 +294,28 @@ export async function acceptInvitation(
         // La membresía en ESTA organización nace (o se reactiva) al ACEPTAR — invitar ya no la crea.
         // Sólo si no es ya miembro activo: a un miembro activo no se le toca el rol.
         const yaEsMiembroActivo = existingStaff.organizations.some(o => o.organizationId === invitation.organizationId)
-        if (yaEsMiembroActivo && invitation.role === StaffRole.OWNER) {
+        // 🔴 La cuenta PROVISIONAL trae la membresía que le dejó la PRIMERA invitación al crearla (`inviteTeamMember`),
+        // aunque esa invitación se haya cancelado. Su rol nunca se ganó: al aceptar se toma el de ESTA invitación.
+        // Sin esto, invitado como dueño, cancelado y reinvitado como mesero quedaba dueño de la organización (Codex, 4-nov).
+        const esProvisional = esCuentaProvisional(existingStaff)
+        if (esProvisional) {
+          // Y lo único que gana al aceptar es ESTA organización: la membresía que le dejó otra invitación al crear la
+          // cuenta (cancelada o sin aceptar) se apaga, y renace si algún día acepta la suya. Sin esto, dueño en A con la
+          // invitación cancelada + aceptar mesero en B ⇒ seguía siendo dueño de A (Codex r3, 4-nov).
+          await tx.staffOrganization.updateMany({
+            where: { staffId: existingStaff.id, organizationId: { not: invitation.organizationId }, isActive: true },
+            data: { isActive: false, isPrimary: false },
+          })
+        }
+        if (yaEsMiembroActivo && (invitation.role === StaffRole.OWNER || esProvisional)) {
           // N2 (Codex): una invitación de DUEÑO (que sólo emite quien puede otorgarlo) promueve también
           // la membresía; sin esto quedaba OWNER en la sucursal y MEMBER en la organización.
           await tx.staffOrganization.update({
             where: { staffId_organizationId: { staffId: existingStaff.id, organizationId: invitation.organizationId } },
-            data: { role: OrgRole.OWNER },
+            data: {
+              role: invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER,
+              ...(esProvisional ? { isPrimary: true } : {}),
+            },
           })
         }
         if (!yaEsMiembroActivo) {
@@ -328,7 +329,8 @@ export async function acceptInvitation(
               staffId: staff.id,
               organizationId: invitation.organizationId,
               role: orgRoleForCrossOrg,
-              isPrimary: false,
+              // La provisional no tiene otra organización viva (se apagaron arriba): ésta es su primaria.
+              isPrimary: esProvisional,
               joinedById: invitation.invitedById ?? undefined,
             },
             tx, // inside the accept transaction: a 409 below rolls it back too
