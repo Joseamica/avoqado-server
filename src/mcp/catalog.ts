@@ -235,6 +235,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_payment_links: 'read',
   list_payments: 'read',
   list_platform_charges_due: 'read',
+  get_pos_app_version_policies: 'read',
   get_cash_payment_by_key: 'read',
   list_prices: 'read',
   list_print_stations: 'read',
