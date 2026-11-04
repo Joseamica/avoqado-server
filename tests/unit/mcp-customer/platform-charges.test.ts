@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { BadRequestError } from '@/errors/AppError'
 import { TOOL_EFFECTS } from '@/mcp/catalog'
 import { DIRECTORY_TOOLS } from '@/mcp/directory/catalog'
 import type { McpScope } from '@/mcp/scope'
@@ -62,8 +63,8 @@ function view(over: Partial<OccurrenceView> = {}): OccurrenceView {
   }
 }
 
-function page(rows: OccurrenceView[], over: { total?: number; page?: number; pageSize?: number } = {}) {
-  return { rows, total: rows.length, page: 1, pageSize: 25, ...over }
+function page(rows: OccurrenceView[], over: { total?: number; page?: number; pageSize?: number; sumCents?: number } = {}) {
+  return { rows, total: rows.length, page: 1, pageSize: 25, sumCents: rows.reduce((sum, row) => sum + row.totalCents, 0), ...over }
 }
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>
@@ -276,5 +277,142 @@ describe('list_platform_charges_due — lo acota el servidor y lo dice', () => {
     for (const hostile of [{ pageSize: 101 }, { pageSize: 0 }, { page: 0 }, { page: 1.5 }, { pageSize: -5 }]) {
       expect(input.safeParse(hostile).success).toBe(false)
     }
+  })
+})
+
+describe('list_platform_charges_due — filtros y suma (NEW)', () => {
+  const FILTROS = {
+    frequency: ['MONTHLY', 'ONE_TIME'],
+    invoice: ['PENDING', 'NONE'],
+    customerType: ['ORGANIZATION'],
+    from: '2026-11-01',
+    to: '2026-11-30',
+    customer: 'Café Ana',
+  }
+
+  it('la entrada acepta los filtros, todos opcionales, sin cambiar los defaults de hoy', () => {
+    const input = z.object(setup().registered.list_platform_charges_due.shape)
+
+    expect(input.parse({})).toEqual({ page: 1, pageSize: 25 })
+    expect(input.parse(FILTROS)).toEqual({ page: 1, pageSize: 25, ...FILTROS })
+  })
+
+  it('🔴 los valores que no existen o mal formados se rechazan en la entrada, antes de leer nada', () => {
+    const input = z.object(setup().registered.list_platform_charges_due.shape)
+
+    for (const hostile of [
+      { frequency: ['DIARIO'] },
+      { frequency: 'MONTHLY' }, // un arreglo, no un texto
+      { invoice: ['FACTURADO'] },
+      { customerType: ['NADIE'] },
+      { from: '01/11/2026' },
+      { to: '2026-11-01T00:00:00Z' },
+      { customer: 'x'.repeat(121) },
+    ]) {
+      expect(input.safeParse(hostile).success).toBe(false)
+    }
+  })
+
+  it('con filtros: se los pasa al servicio con la vista de pendientes, en el MISMO instante que el resumen', async () => {
+    await answer(setup().registered.list_platform_charges_due.handler, { page: 2, pageSize: 10, ...FILTROS })
+
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(list.mock.calls[0][0]).toEqual({ view: 'open', page: 2, pageSize: 10, ...FILTROS })
+    expect(list.mock.calls[0][1]).toBe(summarize.mock.calls[0][0])
+  })
+
+  it('🔴 devuelve la suma del filtro COMPLETO en pesos (no la de la página) y cuántos cobros son; los grupos de hoy no cambian', async () => {
+    list.mockResolvedValue(page([view({ totalCents: 100 })], { total: 7, sumCents: 123456, pageSize: 1 }))
+
+    const result = await answer(setup().registered.list_platform_charges_due.handler, { page: 1, pageSize: 1, ...FILTROS })
+
+    expect(result.filtrados).toEqual({ cantidad: 7, totalMxn: 1234.56 })
+    expect(result.vencido).toEqual({ cantidad: 2, totalMxn: 1738.84 }) // sigue siendo el de todos los pendientes
+    expect(result.notaFiltros).toMatch(/vencido, hoy y proximos7Dias/)
+    expect(JSON.stringify(result)).not.toMatch(/cents|123456/i)
+  })
+
+  it('con filtros la lista es la del filtro (sin el corte de 7 días) y «de» y «hayMas» cuentan sus cobros', async () => {
+    list.mockResolvedValue(
+      page(
+        [
+          view({ customerName: 'Cerca', dueDate: '2026-11-05', bucket: 'UPCOMING' }),
+          view({ id: 'coccmcp0000000000000002', customerName: 'Lejos', dueDate: '2026-12-20', bucket: 'UPCOMING' }), // a más de 7 días
+        ],
+        { total: 5, pageSize: 2 },
+      ),
+    )
+
+    const result = await answer(setup().registered.list_platform_charges_due.handler, { page: 1, pageSize: 2, ...FILTROS })
+
+    expect(result.cobros.map((row: { cliente: string }) => row.cliente)).toEqual(['Cerca', 'Lejos'])
+    expect(result).toEqual(expect.objectContaining({ mostrando: 2, de: 5, hayMas: true }))
+    expect(result.nota).toMatch(/page/)
+  })
+
+  it('sin cobros que cumplan el filtro: la suma es 0 y la lista, vacía; no es un error', async () => {
+    list.mockResolvedValue(page([], { total: 0, sumCents: 0 }))
+
+    const result = await answer(setup().registered.list_platform_charges_due.handler, { page: 1, pageSize: 25, frequency: ['WEEKLY'] })
+
+    expect(result).toEqual(
+      expect.objectContaining({ ok: true, filtrados: { cantidad: 0, totalMxn: 0 }, mostrando: 0, de: 0, hayMas: false, cobros: [] }),
+    )
+  })
+
+  it('🔴 sin filtros la respuesta es la de siempre: ni «filtrados» ni «notaFiltros», y el servicio recibe lo mismo de siempre', async () => {
+    const result = await answer(setup().registered.list_platform_charges_due.handler)
+
+    expect(result.filtrados).toBeUndefined()
+    expect(result.notaFiltros).toBeUndefined()
+    expect(list.mock.calls[0][0]).toEqual({ view: 'open', page: 1, pageSize: 25 })
+  })
+
+  it('un filtro vacío (arreglo vacío o texto en blanco) cuenta como sin filtro: respuesta de siempre', async () => {
+    const result = await answer(setup().registered.list_platform_charges_due.handler, {
+      page: 1,
+      pageSize: 25,
+      frequency: [],
+      invoice: [],
+      customerType: [],
+      customer: '   ',
+    })
+
+    expect(result.filtrados).toBeUndefined()
+    expect(list.mock.calls[0][0]).toEqual({ view: 'open', page: 1, pageSize: 25 })
+  })
+
+  it('un rechazo del servicio por el rango de fechas llega al asistente como mensaje claro, no como error interno', async () => {
+    list.mockRejectedValue(new BadRequestError('La fecha inicial no puede ser después de la final', 'PLATFORM_CHARGE_INVALID_DATE_RANGE'))
+
+    const result = await answer(setup().registered.list_platform_charges_due.handler, {
+      page: 1,
+      pageSize: 25,
+      from: '2026-11-10',
+      to: '2026-11-09',
+    })
+
+    expect(result).toEqual({ ok: false, error: 'La fecha inicial no puede ser después de la final' })
+  })
+
+  it('un error que no es de negocio NO se traga: sale tal cual, para que lo sanee y lo registre el instrumento del MCP', async () => {
+    list.mockRejectedValue(new Error('se cayó la base'))
+
+    await expect(setup().registered.list_platform_charges_due.handler({ page: 1, pageSize: 25, ...FILTROS })).rejects.toThrow(
+      'se cayó la base',
+    )
+  })
+
+  it('la descripción ya no dice sólo «recurrentes»: habla de cobros de una sola vez y de los filtros, y sigue siendo de sólo lectura y para Avoqado', () => {
+    const { description } = setup().registered.list_platform_charges_due
+
+    expect(description).toMatch(/una sola vez/)
+    expect(description).toMatch(/periodicidad/)
+    expect(description).toMatch(/factura/)
+    expect(description).toMatch(/Sólo lectura/)
+    expect(description).toMatch(/Sólo para el equipo de Avoqado/)
+    expect(description).not.toMatch(
+      /PlatformCharge|Occurrence|totalCents|dueDate|invoiceMode|paidAt|prisma|postgres|findMany|schema|\bsrc\//i,
+    )
   })
 })

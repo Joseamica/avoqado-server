@@ -42,6 +42,7 @@ import { rappiOrderPollJob } from './jobs/rappi-order-poll.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
+import { exportRunnerJob } from './jobs/export-runner.job'
 import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
 import { onlineOrderCardReconcilerJob } from './jobs/online-order-card-reconciler.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
@@ -184,6 +185,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
+      exportRunnerJob.stop()
       onlineOrderAcceptanceExpiryJob.stop()
       onlineOrderCardReconcilerJob.stop()
       terminalPaymentWatchdogJob.stop()
@@ -544,6 +546,7 @@ const startApplication = async (retries = 3) => {
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
+      exportRunnerJob.start()
       onlineOrderAcceptanceExpiryJob.start()
       onlineOrderCardReconcilerJob.start()
       terminalPaymentWatchdogJob.start()

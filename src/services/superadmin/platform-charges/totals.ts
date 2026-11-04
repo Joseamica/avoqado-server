@@ -17,7 +17,7 @@ import type { PlatformCfdiLineInput } from '@/services/superadmin/platform-billi
 import type { ChargeConcept, ChargeTotals } from './types'
 
 /** IVA fijo del 16 %: renta de equipo y licencias siempre lo causan, así que no hay «exento» ni otra tasa. */
-const IVA_RATE = 0.16
+export const IVA_RATE = 0.16
 
 /**
  * Tope de cada suma (A y B), en centavos: mil millones de pesos. Con él, 2·(A·2900 + B·2500) + 2900 queda ocho veces por debajo
@@ -54,6 +54,11 @@ export function computeChargeTotals(concepts: ChargeConcept[]): ChargeTotals {
   const subtotalCents = redondear(withoutIva * 2900 + withIva * 2500, 2900)
   const taxCents = redondear(withoutIva * 464 + withIva * 400, 2900)
   return { subtotalCents, taxCents, totalCents: subtotalCents + taxCents }
+}
+
+/** ¿Trae las dos claves del SAT? Una clave en blanco sólo la rechazaría el SAT al timbrar, y un concepto viejo de la base puede ni traerlas. */
+export function hasSatKeys(concept: Pick<ChargeConcept, 'satProductKey' | 'satUnitKey'>): boolean {
+  return Boolean(concept.satProductKey?.trim() && concept.satUnitKey?.trim())
 }
 
 /** El renglón del CFDI de un concepto: una unidad, al 16 %. Con IVA, el precio ya lo trae y el PAC saca la base (`taxIncluded`). */

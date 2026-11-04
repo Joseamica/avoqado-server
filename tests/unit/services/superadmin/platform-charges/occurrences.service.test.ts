@@ -15,8 +15,12 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { PlatformBillingError } from '@/services/superadmin/platform-billing/platformEmisor.service'
 import { findProfileId, invoiceOccurrence, resolverIntento } from '@/services/superadmin/platform-charges/invoice.service'
 import {
+  groupOccurrences,
+  invoiceCategoryWhere,
   invoiceOccurrenceView,
   listOccurrences,
+  MAX_GROUP_ROWS,
+  occurrenceWhere,
   payOccurrence,
   payPreview,
   reopenOccurrence,
@@ -52,6 +56,9 @@ const CONCEPTOS = [
 ]
 /** $500 sin IVA + $499 con IVA, a mano: A=50000, B=49900 → subtotal 93017, IVA 14883, total 107900 (= 58000 + 49900). */
 const TOTALES = { subtotalCents: 93017, taxCents: 14883, totalCents: 107900 }
+
+/** Como queda guardado un cobro sin factura (NONE): las claves del SAT vacías. */
+const SIN_CLAVES = [{ description: 'Venta de equipo', amountCents: 1000000, ivaMode: 'WITH_IVA', satProductKey: '', satUnitKey: '' }]
 
 const hace = (minutos: number) => new Date(AHORA.getTime() - minutos * 60_000)
 
@@ -99,6 +106,8 @@ function factura(over: Fila = {}): Fila {
     serie: 'A',
     folio: '118',
     uuid: 'UUID-1',
+    metodoPago: 'PUE',
+    chargeLinkedAt: null,
     ...TOTALES,
     lastError: null,
     emailSentAt: hace(10),
@@ -151,6 +160,33 @@ function instalar() {
   prismaMock.platformCfdi.findUnique.mockImplementation(
     async ({ where }: any) => mundo.cfdis.find(c => c.idempotencyKey === where.idempotencyKey) ?? null,
   )
+  // De la más nueva a la más vieja, con `id` de desempate, como el `orderBy` de la vista.
+  const nuevasPrimero = (filas: Fila[]) =>
+    [...filas].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || String(b.id).localeCompare(String(a.id)))
+  // La anexada viva de una fecha: se niega a contestar sin la fecha, y sólo entiende lo que el servicio pregunta.
+  prismaMock.platformCfdi.findFirst.mockImplementation(async ({ where }: any) => {
+    if (where.platformChargeOccurrenceId === undefined) throw new Error('el doble exige la fecha')
+    const halladas = mundo.cfdis.filter(
+      c =>
+        c.platformChargeOccurrenceId === where.platformChargeOccurrenceId &&
+        (where.chargeLinkedAt === undefined || c.chargeLinkedAt) &&
+        where.status.in.includes(c.status),
+    )
+    return nuevasPrimero(halladas)[0] ?? null
+  })
+  // Las vivas de una página: una por fecha (`distinct`) y con su tope, igual que en la base.
+  prismaMock.platformCfdi.findMany.mockImplementation(async ({ where, distinct, take }: any) => {
+    const halladas = nuevasPrimero(
+      mundo.cfdis.filter(
+        c => where.platformChargeOccurrenceId.in.includes(c.platformChargeOccurrenceId) && where.status.in.includes(c.status),
+      ),
+    )
+    const vistas = new Set<string>()
+    const unaPorFecha = distinct
+      ? halladas.filter(c => !vistas.has(c.platformChargeOccurrenceId) && Boolean(vistas.add(c.platformChargeOccurrenceId)))
+      : halladas
+    return unaPorFecha.slice(0, take)
+  })
   prismaMock.platformCfdi.count.mockImplementation(async () => mundo.ppd)
   prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where, select }: any) => {
     if (where.id !== PERFIL.id) return null
@@ -169,6 +205,8 @@ beforeEach(() => {
     prismaMock.platformChargeOccurrence.aggregate,
     prismaMock.platformChargeOccurrence.update,
     prismaMock.platformCfdi.findUnique,
+    prismaMock.platformCfdi.findFirst,
+    prismaMock.platformCfdi.findMany,
     prismaMock.platformCfdi.count,
     prismaMock.billingTaxProfile.findUnique,
     mockLogAction,
@@ -384,6 +422,20 @@ describe('platform-charges/occurrences — payOccurrence', () => {
     })
   })
 
+  it('sin la casilla sobre una SIN FACTURA (NONE): sigue NONE, no se convierte en MANUAL y no se factura', async () => {
+    Object.assign(mundo.occ, { invoiceMode: 'NONE', concepts: SIN_CLAVES })
+
+    const r = await payOccurrence('occ-1', { invoice: false }, 'staff-1', AHORA)
+
+    expect(prismaMock.platformChargeOccurrence.update).toHaveBeenCalledWith({
+      where: { id: 'occ-1' },
+      data: { status: 'PAID', paidAt: AHORA, paidById: 'staff-1' }, // el modo no se toca
+    })
+    expect(r.occurrence.invoiceMode).toBe('NONE')
+    expect(r.invoice).toBeNull()
+    expect(mockInvoice).not.toHaveBeenCalled()
+  })
+
   it('con la casilla sobre una MANUAL: también factura (el modo no cambia)', async () => {
     Object.assign(mundo.occ, { invoiceMode: 'MANUAL' })
     mockInvoice.mockResolvedValue(factura())
@@ -423,6 +475,80 @@ describe('platform-charges/occurrences — payOccurrence', () => {
 
     sinEscrituras()
     expect(mockInvoice).not.toHaveBeenCalled()
+  })
+
+  describe('🔴 «Ya me pagó» confirma un importe (Codex r2, hallazgo 1)', () => {
+    it('si el total que se confirmó ya no es el de la fecha: 409 PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED con el monto nuevo, y no se marca nada', async () => {
+      // El operador abrió el diálogo por $580.00; otra pestaña anexó una factura y la fecha ahora es de $1,079.00.
+      const error = await payOccurrence('occ-1', { invoice: true, expectedTotalCents: 58000 }, 'staff-1', AHORA).then(
+        () => {
+          throw new Error('se esperaba un rechazo y pasó')
+        },
+        (e: unknown) => e,
+      )
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect((error as ConflictError).statusCode).toBe(409)
+      expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED')
+      expect((error as ConflictError).message).toBe('El monto de este cobro cambió a $1,079.00; revísalo y confirma otra vez')
+      expect(mundo.occ).toMatchObject({ status: 'PENDING', paidAt: null, paidById: null, invoiceMode: 'AUTOMATIC' })
+      expect(mockInvoice).not.toHaveBeenCalled()
+      sinEscrituras()
+    })
+
+    it('con el total que sí es: paga como siempre', async () => {
+      const r = await payOccurrence('occ-1', { invoice: false, expectedTotalCents: 107900 }, 'staff-1', AHORA)
+
+      expect(mundo.occ).toMatchObject({ status: 'PAID', paidAt: AHORA, paidById: 'staff-1' })
+      expect(r.occurrence).toMatchObject({ status: 'PAID', totalCents: 107900 })
+    })
+
+    it('un total confirmado de cero también se compara (0 no es «sin campo»)', async () => {
+      await expect(payOccurrence('occ-1', { invoice: false, expectedTotalCents: 0 }, 'staff-1', AHORA)).rejects.toMatchObject({
+        code: 'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED',
+      })
+      sinEscrituras()
+    })
+
+    it('sin el campo, igual que hoy: paga el importe que haya', async () => {
+      await payOccurrence('occ-1', { invoice: false }, 'staff-1', AHORA)
+
+      expect(mundo.occ.status).toBe('PAID')
+    })
+
+    it('se compara con lo RELEÍDO bajo el candado: si el monto cambió entre la lectura y el candado, también es 409', async () => {
+      prismaMock.platformChargeOccurrence.findUnique
+        .mockImplementationOnce(async () => ({ chargeId: 'cobro-1' }))
+        .mockImplementationOnce(async () => {
+          mundo.occ.totalCents = 20000
+          return { ...mundo.occ, charge: { venueId: null, organizationId: 'org-1', invoiceMode: 'AUTOMATIC' } }
+        })
+
+      await expect(payOccurrence('occ-1', { invoice: false, expectedTotalCents: 107900 }, 'staff-1', AHORA)).rejects.toMatchObject({
+        code: 'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED',
+      })
+      sinEscrituras()
+    })
+
+    it('repetir sobre una ya PAGADA sigue siendo éxito aunque el total confirmado no coincida (la comparación va después de «pagada»)', async () => {
+      Object.assign(mundo.occ, PAGADA())
+
+      const r = await payOccurrence('occ-1', { invoice: true, expectedTotalCents: 1 }, 'staff-2', AHORA)
+
+      expect(r.occurrence).toMatchObject({ status: 'PAID' })
+      expect(r.invoice).toBeNull()
+      expect(mockInvoice).not.toHaveBeenCalled()
+      sinEscrituras()
+    })
+
+    it('una OMITIDA conserva su 409 «deshazlo primero» (la comparación va después de «omitida»)', async () => {
+      Object.assign(mundo.occ, OMITIDA())
+
+      await expect(payOccurrence('occ-1', { invoice: false, expectedTotalCents: 1 }, 'staff-1', AHORA)).rejects.toMatchObject({
+        code: 'PLATFORM_CHARGE_OCCURRENCE_SKIPPED',
+      })
+      sinEscrituras()
+    })
   })
 
   it('el estado que se decide es el RELEÍDO bajo el candado: si otra pestaña la pagó mientras tanto, esta ve «ya pagada» y no factura', async () => {
@@ -504,6 +630,74 @@ describe('platform-charges/occurrences — skipOccurrence', () => {
     await expect(skipOccurrence('occ-1', 'staff-1', AHORA)).rejects.toBeInstanceOf(ConflictError)
 
     sinEscrituras()
+  })
+
+  describe('🔴 con una factura ANEXADA viva: omitirla escondería de la lista una factura real que alguien debe', () => {
+    const anexada = (over: Fila = {}) =>
+      factura({ id: 'cfdi-19', folio: '19', idempotencyKey: 'hecha-a-mano-19', chargeLinkedAt: hace(5), ...over })
+
+    it.each(['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'])(
+      '%s: 409 «Esta fecha tiene anexada la factura A-19; quítala antes de omitirla» y no se escribe nada',
+      async status => {
+        mundo.cfdis = [anexada({ status, serie: 'A' })]
+        const eventos = trazar()
+
+        const error = await skipOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+        expect(error).toBeInstanceOf(ConflictError)
+        expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_INVOICE_LINKED')
+        expect((error as ConflictError).message).toBe('Esta fecha tiene anexada la factura A-19; quítala antes de omitirla')
+        expect(eventos).toContain('candado') // se decide bajo el candado, con lo releído
+        expect(mundo.occ.status).toBe('PENDING')
+        sinEscrituras()
+      },
+    )
+
+    it('la que se anexó entre la lectura y el candado también la frena: se busca DENTRO del candado', async () => {
+      prismaMock.platformChargeOccurrence.findUnique
+        .mockImplementationOnce(async () => ({ chargeId: 'cobro-1' }))
+        .mockImplementationOnce(async () => {
+          mundo.cfdis = [anexada()]
+          return { ...mundo.occ, charge: { venueId: null, organizationId: 'org-1' } }
+        })
+
+      await expect(skipOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('quítala antes de omitirla')
+      sinEscrituras()
+    })
+
+    it('una anexada sin serie ni folio dice «la factura», sin inventar el nombre', async () => {
+      mundo.cfdis = [anexada({ serie: null, folio: null })]
+
+      await expect(skipOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow(
+        'Esta fecha tiene anexada la factura; quítala antes de omitirla',
+      )
+    })
+
+    it('una anexada ya CANCELADA no frena: se omite', async () => {
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      const view = await skipOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(view.status).toBe('SKIPPED')
+      expect(mundo.occ).toMatchObject({ status: 'SKIPPED', skippedById: 'staff-1' })
+    })
+
+    it('una timbrada desde «Por cobrar» (sin marca de anexada) se comporta como hoy: se omite', async () => {
+      mundo.cfdis = [factura()]
+
+      const view = await skipOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(view.status).toBe('SKIPPED')
+    })
+
+    it('una PAGADA con anexada conserva su 409 de «deshazlo antes de omitirlo»', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mundo.cfdis = [anexada()]
+
+      const error = await skipOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+      expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_OCCURRENCE_PAID')
+    })
   })
 })
 
@@ -655,6 +849,87 @@ describe('platform-charges/occurrences — reopenOccurrence («Deshacer»)', () 
     expect(view.status).toBe('PENDING')
   })
 
+  describe('🔴 con una factura ANEXADA (Codex r1, hallazgo 1)', () => {
+    const anexada = (over: Fila = {}) =>
+      factura({ id: 'cfdi-19', folio: '19', idempotencyKey: 'hecha-a-mano-19', chargeLinkedAt: hace(5), ...over })
+
+    it.each(['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'])(
+      '%s, dentro del candado: 409 «Quita primero la factura A-19» y no se deshace',
+      async status => {
+        Object.assign(mundo.occ, PAGADA())
+        mundo.cfdis = [anexada({ status })]
+        const eventos = trazar()
+
+        const error = await reopenOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+        expect(error).toBeInstanceOf(ConflictError)
+        expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_INVOICE_LINKED')
+        expect((error as ConflictError).message).toBe('Quita primero la factura A-19')
+        expect(eventos).toContain('candado')
+        expect(mundo.occ.status).toBe('PAID')
+        sinEscrituras()
+      },
+    )
+
+    it('la que se anexa mientras se le pregunta al PAC también la frena: la búsqueda es dentro del candado', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mockResolver.mockImplementation(async () => {
+        mundo.cfdis = [anexada()]
+        return { kind: 'NONE' }
+      })
+
+      await expect(reopenOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('Quita primero la factura A-19')
+      sinEscrituras()
+    })
+
+    it('una omitida con anexada tampoco se deshace', async () => {
+      Object.assign(mundo.occ, OMITIDA())
+      mundo.cfdis = [anexada()]
+
+      await expect(reopenOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('Quita primero la factura A-19')
+      expect(mundo.occ.status).toBe('SKIPPED')
+    })
+
+    it('una anexada sin serie ni folio dice «la factura», sin inventar el nombre', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mundo.cfdis = [anexada({ serie: null, folio: null })]
+
+      await expect(reopenOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('Quita primero la factura')
+    })
+
+    it('con la timbrada desde aquí, el mensaje de hoy: esa no se quita, se cancela', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mundo.cfdis = [factura()]
+
+      const error = await reopenOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+      expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_HAS_INVOICE')
+      expect((error as ConflictError).message).toBe('Cancela primero la factura A-118 en Facturas CFDI')
+    })
+
+    it('una anexada cancelada ya no frena: se deshace y la fecha regresa al modo del cobro', async () => {
+      Object.assign(mundo.occ, PAGADA({ invoiceMode: 'MANUAL' }))
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(mundo.occ).toMatchObject({ status: 'PENDING', paidAt: null, invoiceMode: 'AUTOMATIC' })
+    })
+
+    it.each(['AUTOMATIC', 'NONE', 'MANUAL'])(
+      'tras quitarla, «Deshacer» restaura el modo del cobro (%s): anexar la había dejado en MANUAL sólo mientras estuvo anexada',
+      async modo => {
+        Object.assign(mundo.occ, PAGADA({ invoiceMode: 'MANUAL' }))
+        mundo.charge.invoiceMode = modo
+        mundo.cfdis = [] // ya se quitó: la factura no tiene vínculo con la fecha
+
+        await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+        expect(mundo.occ).toMatchObject({ status: 'PENDING', invoiceMode: modo })
+      },
+    )
+  })
+
   it('repetir sobre una ya PENDIENTE contesta éxito sin consultar al PAC ni escribir', async () => {
     const view = await reopenOccurrence('occ-1', 'staff-1', AHORA)
 
@@ -700,6 +975,7 @@ describe('platform-charges/occurrences — payPreview', () => {
       willInvoice: true,
       receptor: { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV', regimenFiscal: '601', codigoPostal: '06000' },
       pendingPpdCount: 0,
+      linkedInvoice: null,
     })
   })
 
@@ -729,10 +1005,73 @@ describe('platform-charges/occurrences — payPreview', () => {
     expect(preview).toMatchObject({ willInvoice: false, pendingPpdCount: 1, receptor: { rfc: 'LUN010101AAA' } })
   })
 
+  describe('🔴 con una factura anexada', () => {
+    const anexada = (over: Fila = {}) =>
+      factura({ id: 'cfdi-19', folio: '19', idempotencyKey: 'hecha-a-mano-19', chargeLinkedAt: hace(5), metodoPago: 'PPD', ...over })
+
+    it('trae linkedInvoice y willInvoice es false, aunque la fecha siga AUTOMÁTICA y haya receptor', async () => {
+      const a = anexada()
+      mundo.cfdis = [a]
+
+      const r = await payPreview('occ-1')
+
+      expect(r.willInvoice).toBe(false)
+      expect(r.linkedInvoice).toEqual({
+        id: 'cfdi-19',
+        status: 'STAMPED',
+        serie: 'A',
+        folio: '19',
+        uuid: 'UUID-1',
+        totalCents: 107900,
+        metodoPago: 'PPD',
+        linked: true,
+        lastError: null,
+        emailSentAt: a.emailSentAt,
+        createdAt: a.createdAt,
+      })
+    })
+
+    it('sin anexada, linkedInvoice es null y lo demás no cambia', async () => {
+      const r = await payPreview('occ-1')
+
+      expect(r.linkedInvoice).toBeNull()
+      expect(r.willInvoice).toBe(true)
+    })
+
+    it('la anexada cancelada ya no cuenta: vuelve a poder timbrar', async () => {
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      const r = await payPreview('occ-1')
+
+      expect(r.linkedInvoice).toBeNull()
+      expect(r.willInvoice).toBe(true)
+    })
+
+    it('una timbrada desde aquí no es anexada: linkedInvoice sigue en null', async () => {
+      mundo.cfdis = [factura()]
+
+      expect((await payPreview('occ-1')).linkedInvoice).toBeNull()
+    })
+  })
+
   it('una MANUAL no timbra por default, con o sin PPD', async () => {
     Object.assign(mundo.occ, { invoiceMode: 'MANUAL' })
 
     expect(await payPreview('occ-1')).toMatchObject({ willInvoice: false, pendingPpdCount: 0 })
+  })
+
+  it('un cobro SIN FACTURA (NONE) nunca timbra: willInvoice es false aunque tenga perfil y ningún PPD pendiente', async () => {
+    Object.assign(mundo.occ, { invoiceMode: 'NONE', concepts: SIN_CLAVES, subtotalCents: 862069, taxCents: 137931, totalCents: 1000000 })
+
+    const preview = await payPreview('occ-1')
+
+    expect(preview).toMatchObject({
+      willInvoice: false,
+      pendingPpdCount: 0,
+      concepts: SIN_CLAVES,
+      totalCents: 1000000,
+      receptor: { rfc: 'LUN010101AAA' }, // el perfil sigue ahí: la fila pagada aún puede facturarse con «Facturar»
+    })
   })
 
   it('sin perfil fiscal (nada con qué facturar): receptor null, no timbra y ni siquiera cuenta PPD', async () => {
@@ -878,12 +1217,12 @@ describe('platform-charges/occurrences — listOccurrences', () => {
 
   beforeEach(() => {
     findMany().mockResolvedValue([])
-    prismaMock.platformChargeOccurrence.count.mockResolvedValue(0)
+    prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { totalCents: null } })
   })
 
   it('«open»: sólo las PENDING, de la más próxima a la más lejana con el id de desempate, y cada fila con su bucket del día de CDMX', async () => {
     findMany().mockResolvedValue([fila('2026-10-30'), fila('2026-11-02'), fila('2026-11-05')])
-    prismaMock.platformChargeOccurrence.count.mockResolvedValue(3)
+    prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { totalCents: null } })
 
     const r = await listOccurrences({ view: 'open' }, AHORA)
 
@@ -963,15 +1302,19 @@ describe('platform-charges/occurrences — listOccurrences', () => {
     expect(r.page).toBe(1)
   })
 
-  it('el total sale de un count con EL MISMO filtro (el de la búsqueda también), no del largo de la página', async () => {
+  it('el total sale de un aggregate con EL MISMO filtro (el de la búsqueda también), no del largo de la página', async () => {
     findMany().mockResolvedValue([fila('2026-11-05')])
-    prismaMock.platformChargeOccurrence.count.mockResolvedValue(137)
+    prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 137 }, _sum: { totalCents: 1 } })
 
     const r = await listOccurrences({ view: 'open', q: 'luna', page: 2, pageSize: 1 }, AHORA)
 
     expect(r.rows).toHaveLength(1)
     expect(r.total).toBe(137)
-    expect(prismaMock.platformChargeOccurrence.count).toHaveBeenCalledWith({ where: llamada().where })
+    expect(prismaMock.platformChargeOccurrence.aggregate).toHaveBeenCalledWith({
+      where: llamada().where,
+      _count: { _all: true },
+      _sum: { totalCents: true },
+    })
   })
 
   it('«q» filtra por el nombre del cliente en la base (sin importar mayúsculas), con el texto recortado', async () => {
@@ -1021,10 +1364,141 @@ describe('platform-charges/occurrences — listOccurrences', () => {
         folio: null,
         uuid: null,
         totalCents: 107900,
+        metodoPago: 'PUE',
+        linked: false,
         lastError: 'ETIMEDOUT',
         emailSentAt: null,
         createdAt: f.createdAt,
       },
+    })
+  })
+
+  describe('🔴 la factura que enseña la fila: la viva y, si no hay, la más nueva (Review Focus 3, Codex r1 hallazgo 6)', () => {
+    const OCC = 'occ-2026-10-30'
+    const viejaViva = (over: Fila = {}) =>
+      factura({
+        id: 'viva',
+        platformChargeOccurrenceId: OCC,
+        idempotencyKey: 'hecha-a-mano',
+        chargeLinkedAt: hace(10),
+        serie: 'A',
+        folio: '19',
+        createdAt: hace(60 * 24 * 30),
+        ...over,
+      })
+    const cancelada = (i: number) =>
+      factura({
+        id: `cancelada-${i}`,
+        platformChargeOccurrenceId: OCC,
+        idempotencyKey: `por-cobrar:${OCC}:${i}`,
+        status: 'CANCELLED',
+        createdAt: hace(i + 1),
+      })
+    /** Como en la base: la relación `invoices` de la lista sólo trae la más nueva (`take: 1`). */
+    const filaConLaMasNueva = (id: string, cfdis: Fila[]) => {
+      const [masNueva] = cfdis
+        .filter(c => c.platformChargeOccurrenceId === id)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      return fila(id.replace('occ-', ''), { id, invoices: masNueva ? [masNueva] : [] })
+    }
+
+    it.each([
+      ['anexada STAMPED', { status: 'STAMPED' }],
+      ['anexada con la cancelación en trámite', { status: 'CANCEL_REQUESTED' }],
+      ['timbrándose', { status: 'STAMPING', chargeLinkedAt: null }],
+    ])('la viva (%s) aunque haya once canceladas más nuevas', async (_caso, over) => {
+      mundo.cfdis = [viejaViva(over), ...Array.from({ length: 11 }, (_, i) => cancelada(i))]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows[0].invoice).toMatchObject({ id: 'viva', status: over.status })
+    })
+
+    it('la anexada sale marcada, con su método de pago; una timbrada desde aquí, sin marca', async () => {
+      mundo.cfdis = [viejaViva({ metodoPago: 'PPD' }), cancelada(0)]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const anexada = await listOccurrences({ view: 'open' }, AHORA)
+      expect(anexada.rows[0].invoice).toMatchObject({ id: 'viva', linked: true, metodoPago: 'PPD' })
+
+      mundo.cfdis = [viejaViva({ chargeLinkedAt: null })]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const timbrada = await listOccurrences({ view: 'open' }, AHORA)
+      expect(timbrada.rows[0].invoice).toMatchObject({ id: 'viva', linked: false })
+    })
+
+    it('sin viva, la más nueva', async () => {
+      mundo.cfdis = [cancelada(5), cancelada(0), cancelada(3)]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows[0].invoice).toMatchObject({ id: 'cancelada-0', status: 'CANCELLED' })
+    })
+
+    it('una fecha con varias vivas no debería existir; si existe, gana la más nueva', async () => {
+      mundo.cfdis = [viejaViva(), viejaViva({ id: 'viva-nueva', createdAt: hace(5) }), cancelada(0)]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows[0].invoice?.id).toBe('viva-nueva')
+    })
+
+    it('las vivas de la página salen de UNA sola consulta aparte, acotada a sus filas, no una por fila', async () => {
+      const fechas = ['occ-2026-10-28', 'occ-2026-10-29', 'occ-2026-10-30']
+      mundo.cfdis = fechas.map((id, i) => viejaViva({ id: `viva-${i}`, platformChargeOccurrenceId: id }))
+      findMany().mockResolvedValue(fechas.map(id => fila(id.replace('occ-', ''), { id, invoices: [] })))
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows.map(r => r.invoice?.id)).toEqual(['viva-0', 'viva-1', 'viva-2'])
+      expect(prismaMock.platformCfdi.findMany).toHaveBeenCalledTimes(1)
+      const consulta = prismaMock.platformCfdi.findMany.mock.calls[0][0]
+      expect(consulta.where).toEqual({
+        platformChargeOccurrenceId: { in: fechas },
+        status: { in: ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'] },
+      })
+      expect(consulta.take).toBe(3)
+      expect(consulta.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    })
+
+    it('el `take` de la lista no se agranda: la relación sigue trayendo una sola', async () => {
+      await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(llamada().include.invoices.take).toBe(1)
+    })
+
+    it('dos vivas en una fecha no le quitan su factura a otra fecha de la página: el tope es por fecha', async () => {
+      const [a, b] = ['occ-2026-10-29', 'occ-2026-10-30']
+      mundo.cfdis = [
+        viejaViva({ id: 'a-nueva', platformChargeOccurrenceId: a, createdAt: hace(1) }),
+        viejaViva({ id: 'a-otra', platformChargeOccurrenceId: a, createdAt: hace(2) }),
+        viejaViva({ id: 'b-vieja', platformChargeOccurrenceId: b, createdAt: hace(3) }),
+      ]
+      findMany().mockResolvedValue([a, b].map(id => fila(id.replace('occ-', ''), { id, invoices: [] })))
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows.map(r => r.invoice?.id)).toEqual(['a-nueva', 'b-vieja'])
+    })
+
+    it('sin filas en la página no hace la consulta de las vivas', async () => {
+      await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(prismaMock.platformCfdi.findMany).not.toHaveBeenCalled()
+    })
+
+    it('la vista de UNA fecha (la que regresan pagar, omitir y deshacer) sigue la misma regla', async () => {
+      mundo.occ.id = OCC
+      mundo.cfdis = [viejaViva(), ...Array.from({ length: 11 }, (_, i) => cancelada(i))]
+
+      // «Ya me pagó» sin timbrar: omitir y deshacer se niegan con una anexada viva, pero las tres regresan la misma vista de la fecha.
+      const { occurrence: vista } = await payOccurrence(OCC, { invoice: false }, 'staff-1', AHORA)
+
+      expect(vista.invoice).toMatchObject({ id: 'viva', linked: true })
     })
   })
 
@@ -1053,7 +1527,7 @@ describe('platform-charges/occurrences — listOccurrences', () => {
     const { rows } = await listOccurrences({ view: 'open' }, AHORA)
 
     expect(Object.keys(rows[0].invoice!).sort()).toEqual(
-      ['createdAt', 'emailSentAt', 'folio', 'id', 'lastError', 'serie', 'status', 'totalCents', 'uuid'].sort(),
+      ['createdAt', 'emailSentAt', 'folio', 'id', 'lastError', 'linked', 'metodoPago', 'serie', 'status', 'totalCents', 'uuid'].sort(),
     )
   })
 })
@@ -1090,5 +1564,551 @@ describe('platform-charges/occurrences — invoiceOccurrenceView (POST /occurren
     mockInvoice.mockRejectedValue(new ConflictError('El SAT la sigue procesando; consulta el estado en unos minutos'))
 
     await expect(invoiceOccurrenceView('occ-1', { actorId: 'staff-1' }, AHORA)).rejects.toBeInstanceOf(ConflictError)
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/occurrences — 🔴 filtros: UN armador de where para la lista, la suma y los grupos (NEW)', () => {
+  // Qué NO prueba un doble en memoria: que Prisma y Postgres entiendan estos filtros de relación (`some`/`none`) ni que el plan de consulta sea bueno
+  // con muchos datos (eso es de la integración contra Postgres y de EXPLAIN). Aquí se prueba la lógica: qué `where` se arma y que las cuatro
+  // categorías de factura no se traslapen ni dejen a nadie fuera, evaluando el `where` contra filas en memoria.
+  const dia = calendarDayToDb
+
+  describe('cada filtro arma su where', () => {
+    it('sin filtros: sólo el estado de la vista (como siempre)', () => {
+      expect(occurrenceWhere({})).toEqual({ status: 'PENDING' })
+      expect(occurrenceWhere({ view: 'paid' })).toEqual({ status: 'PAID' })
+    })
+
+    it('periodicidad y tipo de cliente: varios valores con `in`, sobre el cobro; un arreglo vacío no filtra', () => {
+      expect(occurrenceWhere({ frequency: ['WEEKLY', 'MONTHLY'] })).toEqual({
+        status: 'PENDING',
+        charge: { frequency: { in: ['WEEKLY', 'MONTHLY'] } },
+      })
+      expect(occurrenceWhere({ customerType: ['VENUE'] })).toEqual({ status: 'PENDING', charge: { customerType: { in: ['VENUE'] } } })
+      expect(occurrenceWhere({ frequency: [], customerType: [], invoice: [] })).toEqual({ status: 'PENDING' })
+    })
+
+    it('«q» (contiene, sin mayúsculas), periodicidad y tipo de cliente comparten el mismo filtro del cobro', () => {
+      expect(occurrenceWhere({ q: ' luna ', frequency: ['ONE_TIME'], customerType: ['ORGANIZATION'] })).toEqual({
+        status: 'PENDING',
+        charge: {
+          customerName: { contains: 'luna', mode: 'insensitive' },
+          frequency: { in: ['ONE_TIME'] },
+          customerType: { in: ['ORGANIZATION'] },
+        },
+      })
+    })
+
+    it('«customer» es el nombre EXACTO (sin «contiene» ni mayúsculas distintas) y se suma a «q» sin pisarla', () => {
+      expect(occurrenceWhere({ customer: 'Café Ana' })).toEqual({ status: 'PENDING', AND: [{ charge: { customerName: 'Café Ana' } }] })
+      expect(occurrenceWhere({ q: 'caf', customer: 'Café Ana' })).toEqual({
+        status: 'PENDING',
+        charge: { customerName: { contains: 'caf', mode: 'insensitive' } },
+        AND: [{ charge: { customerName: 'Café Ana' } }],
+      })
+      expect(occurrenceWhere({ customer: '   ' })).toEqual({ status: 'PENDING' })
+    })
+
+    it('fechas: días de calendario sobre la fecha de cobro, los dos extremos incluidos (columna @db.Date, sin zona)', () => {
+      expect(occurrenceWhere({ from: '2026-11-01', to: '2026-11-30' })).toEqual({
+        status: 'PENDING',
+        dueDate: { gte: dia('2026-11-01'), lte: dia('2026-11-30') },
+      })
+      expect(occurrenceWhere({ from: '2026-11-01' })).toEqual({ status: 'PENDING', dueDate: { gte: dia('2026-11-01') } })
+      expect(occurrenceWhere({ to: '2026-11-30' })).toEqual({ status: 'PENDING', dueDate: { lte: dia('2026-11-30') } })
+      expect(occurrenceWhere({ from: '2026-11-05', to: '2026-11-05' })).toEqual({
+        status: 'PENDING',
+        dueDate: { gte: dia('2026-11-05'), lte: dia('2026-11-05') },
+      })
+    })
+
+    it.each([
+      ['«from» después de «to»', { from: '2026-11-10', to: '2026-11-09' }, 'PLATFORM_CHARGE_INVALID_DATE_RANGE'],
+      ['un día que no existe', { from: '2026-02-30' }, 'PLATFORM_CHARGE_INVALID_DATE'],
+      ['un instante en vez de un día', { to: '2026-11-01T00:00:00Z' }, 'PLATFORM_CHARGE_INVALID_DATE'],
+    ])('%s: 400 y sin tocar la base', async (_caso, filtros, codigo) => {
+      const error = (await listOccurrences(filtros, AHORA).catch((e: unknown) => e)) as BadRequestError
+
+      expect(error).toBeInstanceOf(BadRequestError)
+      expect(error.statusCode).toBe(400)
+      expect(error.code).toBe(codigo)
+      expect(prismaMock.platformChargeOccurrence.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.platformChargeOccurrence.aggregate).not.toHaveBeenCalled()
+      expect(() => occurrenceWhere(filtros)).toThrow(BadRequestError)
+    })
+
+    it('una vista que no existe es 400 también aquí (los grupos usan el mismo armador)', () => {
+      expect(() => occurrenceWhere({ view: 'todo' as never })).toThrow(BadRequestError)
+    })
+
+    it('«factura» con varios valores se une con OR de las categorías', () => {
+      expect(occurrenceWhere({ invoice: ['STAMPED', 'PROBLEM'] })).toEqual({
+        status: 'PENDING',
+        AND: [{ OR: [invoiceCategoryWhere('STAMPED'), invoiceCategoryWhere('PROBLEM')] }],
+      })
+      expect(occurrenceWhere({ invoice: ['NONE'] })).toEqual({ status: 'PENDING', AND: [{ OR: [invoiceCategoryWhere('NONE')] }] })
+    })
+  })
+
+  describe('🔴 las cuatro categorías de factura no se traslapan y no dejan fuera a nadie', () => {
+    type Modo = 'AUTOMATIC' | 'MANUAL' | 'NONE'
+    type Fila = { invoiceMode: Modo; invoices: { status: string }[] }
+
+    /** Un intérprete del subconjunto de Prisma que usan estos filtros: AND, OR, `invoiceMode` y `invoices: { some | none: { status: { in } } }`. Lo demás lanza. */
+    function cumple(fila: Fila, donde: Record<string, any>): boolean {
+      return Object.entries(donde).every(([campo, cond]) => {
+        if (campo === 'AND') return (cond as Record<string, any>[]).every(c => cumple(fila, c))
+        if (campo === 'OR') return (cond as Record<string, any>[]).some(c => cumple(fila, c))
+        if (campo === 'invoiceMode') {
+          if (typeof cond === 'string') return fila.invoiceMode === cond
+          if (Object.keys(cond).join() === 'not') return fila.invoiceMode !== cond.not
+          throw new Error('el intérprete no entiende este filtro de invoiceMode')
+        }
+        if (campo === 'invoices') {
+          const operador = Object.keys(cond).join()
+          if (operador !== 'some' && operador !== 'none') throw new Error('el intérprete sólo entiende invoices some y none')
+          const alguna = fila.invoices.some(f => (cond[operador].status.in as string[]).includes(f.status))
+          return operador === 'some' ? alguna : !alguna
+        }
+        throw new Error(`el intérprete no entiende el campo ${campo}`)
+      })
+    }
+    const CATEGORIAS = ['STAMPED', 'PROBLEM', 'PENDING', 'NONE'] as const
+    const categoriasDe = (fila: Fila) => CATEGORIAS.filter(categoria => cumple(fila, invoiceCategoryWhere(categoria)))
+
+    const modos: Modo[] = ['AUTOMATIC', 'MANUAL', 'NONE']
+    const conFactura = (estados: string[]) => modos.map(invoiceMode => [invoiceMode, estados] as const)
+    // Cada combinación de modo y estado de factura, con lo que debe salir.
+    const TABLA: ReadonlyArray<readonly [Modo, string[], (typeof CATEGORIAS)[number]]> = [
+      ['AUTOMATIC', [], 'PENDING'],
+      ['MANUAL', [], 'PENDING'],
+      ['NONE', [], 'NONE'],
+      ...conFactura(['STAMPED']).map(([m, e]) => [m, e, 'STAMPED'] as const),
+      ...conFactura(['CANCEL_REQUESTED']).map(([m, e]) => [m, e, 'STAMPED'] as const), // sigue vigente mientras el SAT no la acepte
+      ...conFactura(['STAMPING']).map(([m, e]) => [m, e, 'PROBLEM'] as const),
+      ...conFactura(['STAMP_FAILED']).map(([m, e]) => [m, e, 'PROBLEM'] as const),
+      ['AUTOMATIC', ['CANCELLED'], 'PENDING'], // una cancelada ya no es factura
+      ['MANUAL', ['CANCELLED'], 'PENDING'],
+      ['NONE', ['CANCELLED'], 'NONE'],
+      ['AUTOMATIC', ['DRAFT'], 'PENDING'],
+      ['NONE', ['DRAFT'], 'NONE'],
+      // Varias facturas en una fecha: gana la de arriba (STAMPED > PROBLEM > NONE > PENDING).
+      ['AUTOMATIC', ['STAMP_FAILED', 'STAMPED'], 'STAMPED'],
+      ['MANUAL', ['CANCELLED', 'STAMPED'], 'STAMPED'],
+      ['AUTOMATIC', ['STAMPING', 'CANCEL_REQUESTED'], 'STAMPED'],
+      ['AUTOMATIC', ['CANCELLED', 'STAMP_FAILED'], 'PROBLEM'],
+      ['NONE', ['CANCELLED', 'STAMPING'], 'PROBLEM'], // un intento en camino pesa más que el modo «sin factura»
+      ['NONE', ['STAMPED'], 'STAMPED'], // se timbró aunque no debía: es una factura
+    ]
+
+    it.each(TABLA.map(([modo, estados, esperada]) => [modo, estados.join('+') || 'sin factura', esperada, { modo, estados }] as const))(
+      '%s con %s cae sólo en %s',
+      (_modo, _estados, esperada, { modo, estados }) => {
+        const fila: Fila = { invoiceMode: modo, invoices: estados.map(status => ({ status })) }
+
+        expect(categoriasDe(fila)).toEqual([esperada])
+      },
+    )
+
+    it('el producto completo de modos × estados (y pares de estados): cada fila cae en EXACTAMENTE una categoría', () => {
+      const estados = ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING', 'STAMP_FAILED', 'CANCELLED', 'DRAFT']
+      const combinaciones: string[][] = [[], ...estados.map(e => [e]), ...estados.flatMap(a => estados.map(b => [a, b]))]
+      let revisadas = 0
+
+      for (const invoiceMode of modos) {
+        for (const combo of combinaciones) {
+          const fila: Fila = { invoiceMode, invoices: combo.map(status => ({ status })) }
+          expect({ invoiceMode, combo, categorias: categoriasDe(fila).length }).toEqual({ invoiceMode, combo, categorias: 1 })
+          revisadas++
+        }
+      }
+      expect(revisadas).toBe(3 * (1 + 6 + 36))
+    })
+
+    it('el armador de categorías es UNO: el filtro de la lista y los grupos usan la misma función', () => {
+      // El filtro con varios valores se arma con las mismas categorías, no con una copia.
+      const donde = occurrenceWhere({ invoice: ['PENDING'] }) as { AND: { OR: unknown[] }[] }
+      expect(donde.AND[0].OR[0]).toEqual(invoiceCategoryWhere('PENDING'))
+    })
+  })
+
+  describe('listOccurrences: el total y sumCents salen de UNA pasada con el mismo where', () => {
+    const filtros = { view: 'open' as const, frequency: ['MONTHLY' as const], invoice: ['PENDING' as const], from: '2026-11-01' }
+
+    beforeEach(() => {
+      prismaMock.platformChargeOccurrence.findMany.mockResolvedValue([])
+      prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { totalCents: null } })
+    })
+
+    it('la lista y UN aggregate (conteo y suma) usan el mismo where; no hay un count aparte, y la suma es de TODO el filtro, no de la página', async () => {
+      prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 137 }, _sum: { totalCents: 98765432 } })
+
+      const r = await listOccurrences({ ...filtros, page: 2, pageSize: 10 }, AHORA)
+
+      const donde = occurrenceWhere(filtros)
+      expect(prismaMock.platformChargeOccurrence.findMany.mock.calls[0][0].where).toEqual(donde)
+      expect(prismaMock.platformChargeOccurrence.aggregate).toHaveBeenCalledTimes(1)
+      expect(prismaMock.platformChargeOccurrence.aggregate).toHaveBeenCalledWith({
+        where: donde,
+        _count: { _all: true },
+        _sum: { totalCents: true },
+      })
+      expect(prismaMock.platformChargeOccurrence.count).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ total: 137, sumCents: 98765432, page: 2, pageSize: 10 })
+    })
+
+    it('sin cobros la suma es 0 (un entero, nunca null) y el total, 0', async () => {
+      expect(await listOccurrences(filtros, AHORA)).toMatchObject({ total: 0, sumCents: 0 })
+    })
+
+    it('el tope de página no recorta la suma: con pageSize 1 sigue siendo la del filtro completo', async () => {
+      prismaMock.platformChargeOccurrence.aggregate.mockResolvedValue({ _count: { _all: 9 }, _sum: { totalCents: 500 } })
+
+      const r = await listOccurrences({ ...filtros, pageSize: 1 }, AHORA)
+
+      expect(r).toMatchObject({ total: 9, sumCents: 500 })
+      expect(prismaMock.platformChargeOccurrence.aggregate.mock.calls[0][0]).not.toHaveProperty('take')
+    })
+  })
+
+  describe('groupOccurrences: se agrupa en la base, nunca sobre un recorte ni trayendo las fechas', () => {
+    const groupBy = () => prismaMock.platformChargeOccurrence.groupBy
+    const aggregate = () => prismaMock.platformChargeOccurrence.aggregate
+    const sinFilas = () => expect(prismaMock.platformChargeOccurrence.findMany).not.toHaveBeenCalled()
+
+    beforeEach(() => {
+      prismaMock.platformChargeOccurrence.findMany.mockReset()
+      groupBy().mockReset().mockResolvedValue([])
+      aggregate()
+        .mockReset()
+        .mockResolvedValue({ _count: { _all: 0 }, _sum: { totalCents: null } })
+      prismaMock.platformCharge.findMany.mockReset().mockResolvedValue([])
+    })
+
+    describe('por cliente', () => {
+      const porCobro = (chargeId: string, count: number, totalCents: number) => ({
+        chargeId,
+        _count: { _all: count },
+        _sum: { totalCents },
+      })
+      const cobroDe = (id: string, customerName = 'Café Ana') => ({ id, customerName })
+
+      it('un groupBy por cobro con EL MISMO where y el nombre de esos cobros en UNA lectura aparte, acotada a ellos', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 2, 300), porCobro('c2', 1, 50)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1'), cobroDe('c2', 'Luna')])
+        const filtros = { frequency: ['MONTHLY' as const], from: '2026-11-01' }
+
+        await groupOccurrences(filtros, 'customer')
+
+        expect(groupBy()).toHaveBeenCalledTimes(1)
+        expect(groupBy().mock.calls[0][0]).toMatchObject({
+          by: ['chargeId'],
+          where: occurrenceWhere(filtros),
+          _count: { _all: true },
+          _sum: { totalCents: true },
+          orderBy: { chargeId: 'asc' },
+          take: MAX_GROUP_ROWS + 1,
+        })
+        expect(prismaMock.platformCharge.findMany).toHaveBeenCalledTimes(1)
+        expect(prismaMock.platformCharge.findMany.mock.calls[0][0]).toMatchObject({
+          where: { id: { in: ['c1', 'c2'] } },
+          select: { id: true, customerName: true },
+          take: 2,
+        })
+        sinFilas()
+      })
+
+      it('🔴 dos cobros con el mismo nombre se suman en UN grupo: la llave y la etiqueta son el nombre', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 2, 300), porCobro('c2', 1, 50), porCobro('c3', 4, 1000)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1'), cobroDe('c2'), cobroDe('c3', 'Luna')])
+
+        const { groups, truncated } = await groupOccurrences({}, 'customer')
+
+        expect(groups).toEqual([
+          { key: 'Café Ana', label: 'Café Ana', count: 3, totalCents: 350 },
+          { key: 'Luna', label: 'Luna', count: 4, totalCents: 1000 },
+        ])
+        expect(truncated).toBe(false)
+      })
+
+      it('el criterio es el nombre exacto, el mismo del filtro «customer»: nombres distintos son grupos distintos y el mismo nombre se funde', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 1, 100), porCobro('c2', 1, 200), porCobro('c3', 1, 400)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([
+          cobroDe('c1', 'Panadería Aurora'),
+          cobroDe('c2', 'Panadería La Aurora'), // otra forma de escribir el nombre: otro grupo, como lo filtra «customer»
+          cobroDe('c3', 'Panadería Aurora'),
+        ])
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups).toEqual([
+          { key: 'Panadería Aurora', label: 'Panadería Aurora', count: 2, totalCents: 500 },
+          { key: 'Panadería La Aurora', label: 'Panadería La Aurora', count: 1, totalCents: 200 },
+        ])
+      })
+
+      it('🔴 el clic en un grupo cuadra: filtrar por «customer» con la llave del grupo da la misma cuenta y la misma suma que el grupo', async () => {
+        // Un mundo en memoria: los cobros con su nombre y las fechas de cada uno.
+        const nombres: Record<string, string> = {
+          c1: 'Panadería Aurora',
+          c2: 'Panadería La Aurora',
+          c3: 'Panadería Aurora',
+          c4: 'Tienda Brisa',
+        }
+        const fechas = [
+          { chargeId: 'c1', totalCents: 100 },
+          { chargeId: 'c1', totalCents: 50 },
+          { chargeId: 'c2', totalCents: 30 },
+          { chargeId: 'c3', totalCents: 7 },
+          { chargeId: 'c4', totalCents: 1000 },
+          { chargeId: 'c4', totalCents: 5 },
+        ]
+        groupBy().mockImplementation(async () =>
+          Object.keys(nombres).map(id => {
+            const propias = fechas.filter(f => f.chargeId === id)
+            return porCobro(
+              id,
+              propias.length,
+              propias.reduce((suma, f) => suma + f.totalCents, 0),
+            )
+          }),
+        )
+        prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) =>
+          where.id.in.map((id: string) => cobroDe(id, nombres[id])),
+        )
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups.map(g => g.key)).toEqual(['Panadería Aurora', 'Panadería La Aurora', 'Tienda Brisa'])
+        for (const group of groups) {
+          // Lo que filtra la base con esa llave: el nombre exacto del cobro.
+          const filtrado = (occurrenceWhere({ customer: group.key }).AND as any[])[0].charge.customerName
+          const delFiltro = fechas.filter(f => nombres[f.chargeId] === filtrado)
+          expect({ key: group.key, count: delFiltro.length, totalCents: delFiltro.reduce((suma, f) => suma + f.totalCents, 0) }).toEqual({
+            key: group.key,
+            count: group.count,
+            totalCents: group.totalCents,
+          })
+        }
+        expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(fechas.length) // y los grupos suman todo
+      })
+
+      it('de la A a la Z por etiqueta, con acentos en su lugar', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 1, 1), porCobro('c2', 1, 1), porCobro('c3', 1, 1)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1', 'Zeta'), cobroDe('c2', 'Ángel'), cobroDe('c3', 'Ana')])
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups.map(g => g.key)).toEqual(['Ana', 'Ángel', 'Zeta'])
+      })
+
+      it('sin cobros no lee los cobros: grupos vacíos', async () => {
+        const r = await groupOccurrences({}, 'customer')
+
+        expect(r).toEqual({ groups: [], truncated: false })
+        expect(prismaMock.platformCharge.findMany).not.toHaveBeenCalled()
+      })
+
+      it('🔴 con más cobros que el tope no suma sobre un recorte: grupos vacíos y truncated, sin leer siquiera los nombres', async () => {
+        // 5,001 cobros del MISMO cliente: recortar a 5,000 antes de juntarlos por nombre daría un grupo de 5,000 cuando el clic traería 5,001.
+        const filas = Array.from({ length: MAX_GROUP_ROWS + 1 }, (_, i) => porCobro(`c${String(i).padStart(6, '0')}`, 1, 100))
+        groupBy().mockResolvedValue(filas)
+        prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) => where.id.in.map((id: string) => cobroDe(id)))
+
+        const r = await groupOccurrences({}, 'customer')
+
+        expect(r).toEqual({ groups: [], truncated: true })
+        expect(prismaMock.platformCharge.findMany).not.toHaveBeenCalled()
+      })
+
+      it('justo en el tope sí agrupa: el recorte sólo se declara con un renglón de más', async () => {
+        const filas = Array.from({ length: MAX_GROUP_ROWS }, (_, i) => porCobro(`c${String(i).padStart(6, '0')}`, 1, 100))
+        groupBy().mockResolvedValue(filas)
+        prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) => where.id.in.map((id: string) => cobroDe(id, id)))
+
+        const { groups, truncated } = await groupOccurrences({}, 'customer')
+
+        expect(truncated).toBe(false)
+        expect(groups).toHaveLength(MAX_GROUP_ROWS)
+        expect(prismaMock.platformCharge.findMany.mock.calls[0][0].take).toBe(MAX_GROUP_ROWS)
+      })
+
+      it('un cobro que ya no está (se borró entre las dos lecturas) no tumba la lista ni se pierde su dinero: va como «Cobro que ya no existe»', async () => {
+        groupBy().mockResolvedValue([porCobro('c1', 1, 100), porCobro('c-borrado', 2, 500)])
+        prismaMock.platformCharge.findMany.mockResolvedValue([cobroDe('c1')])
+
+        const { groups } = await groupOccurrences({}, 'customer')
+
+        expect(groups.reduce((suma, g) => suma + g.totalCents, 0)).toBe(600)
+        expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(3)
+      })
+    })
+
+    describe('por mes', () => {
+      const porDia = (day: string, count: number, totalCents: number) => ({
+        dueDate: calendarDayToDb(day),
+        _count: { _all: count },
+        _sum: { totalCents },
+      })
+
+      it('un groupBy por fecha de cobro con EL MISMO where; los días se juntan por mes en el servidor, de más viejo a más nuevo', async () => {
+        groupBy().mockResolvedValue([
+          porDia('2026-10-30', 1, 100),
+          porDia('2026-11-02', 2, 200),
+          porDia('2026-11-30', 1, 50),
+          porDia('2026-12-01', 3, 1000),
+          porDia('2027-01-15', 1, 7),
+        ])
+        const filtros = { invoice: ['PENDING' as const] }
+
+        const { groups, truncated } = await groupOccurrences(filtros, 'month')
+
+        expect(groupBy().mock.calls[0][0]).toMatchObject({
+          by: ['dueDate'],
+          where: occurrenceWhere(filtros),
+          _count: { _all: true },
+          _sum: { totalCents: true },
+          orderBy: { dueDate: 'asc' },
+          take: MAX_GROUP_ROWS + 1,
+        })
+        expect(groups).toEqual([
+          { key: '2026-10', label: 'octubre 2026', count: 1, totalCents: 100 },
+          { key: '2026-11', label: 'noviembre 2026', count: 3, totalCents: 250 },
+          { key: '2026-12', label: 'diciembre 2026', count: 3, totalCents: 1000 },
+          { key: '2027-01', label: 'enero 2027', count: 1, totalCents: 7 },
+        ])
+        expect(truncated).toBe(false)
+        sinFilas()
+      })
+
+      it('el último y el primer día del mes caen en SU mes (columna sin zona: sin corrimientos)', async () => {
+        groupBy().mockResolvedValue([porDia('2026-11-01', 1, 1), porDia('2026-11-30', 1, 1), porDia('2026-12-01', 1, 1)])
+
+        const { groups } = await groupOccurrences({}, 'month')
+
+        expect(groups.map(g => [g.key, g.count])).toEqual([
+          ['2026-11', 2],
+          ['2026-12', 1],
+        ])
+      })
+
+      it('🔴 con más días que el tope no suma sobre un recorte: grupos vacíos y truncated', async () => {
+        groupBy().mockResolvedValue(
+          Array.from({ length: MAX_GROUP_ROWS + 1 }, (_, i) => ({
+            dueDate: new Date(Date.UTC(2020, 0, 1 + i)),
+            _count: { _all: 1 },
+            _sum: { totalCents: 1 },
+          })),
+        )
+
+        expect(await groupOccurrences({}, 'month')).toEqual({ groups: [], truncated: true })
+      })
+
+      it('justo en el tope sí agrupa todos los días', async () => {
+        groupBy().mockResolvedValue(
+          Array.from({ length: MAX_GROUP_ROWS }, (_, i) => ({
+            dueDate: new Date(Date.UTC(2020, 0, 1 + i)),
+            _count: { _all: 1 },
+            _sum: { totalCents: 1 },
+          })),
+        )
+
+        const { groups, truncated } = await groupOccurrences({}, 'month')
+
+        expect(truncated).toBe(false)
+        expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(MAX_GROUP_ROWS)
+      })
+
+      it('sin cobros: grupos vacíos', async () => {
+        expect(await groupOccurrences({}, 'month')).toEqual({ groups: [], truncated: false })
+      })
+    })
+
+    describe('por periodicidad y por factura: un aggregate por categoría', () => {
+      /** Contesta cada aggregate según LA categoría que filtra (la reconoce en el where) y apunta con qué se le preguntó. */
+      function responder(porCategoria: Record<string, [number, number]>, reconocer: (donde: any) => string) {
+        aggregate().mockImplementation(async ({ where }: any) => {
+          const [count, totalCents] = porCategoria[reconocer(where)] ?? [0, 0]
+          return { _count: { _all: count }, _sum: { totalCents: count === 0 ? null : totalCents } }
+        })
+      }
+
+      it('periodicidad: cuatro aggregates con el where del filtro Y la periodicidad; sólo salen los grupos con cobros, en orden fijo', async () => {
+        const filtros = { from: '2026-11-01' }
+        responder({ MONTHLY: [3, 900], ONE_TIME: [1, 100], WEEKLY: [0, 0] }, donde => donde.AND[1].charge.frequency)
+
+        const { groups, truncated } = await groupOccurrences(filtros, 'frequency')
+
+        expect(aggregate()).toHaveBeenCalledTimes(4)
+        for (const [{ where }] of aggregate().mock.calls) {
+          expect(where.AND[0]).toEqual(occurrenceWhere(filtros))
+          expect(Object.keys(where.AND[1])).toEqual(['charge'])
+        }
+        expect(groups).toEqual([
+          { key: 'MONTHLY', label: 'Mensual', count: 3, totalCents: 900 },
+          { key: 'ONE_TIME', label: 'Una sola vez', count: 1, totalCents: 100 },
+        ])
+        expect(truncated).toBe(false)
+        expect(groupBy()).not.toHaveBeenCalled()
+        sinFilas()
+      })
+
+      it('factura: un aggregate por categoría con el where del filtro Y la categoría (la MISMA función del filtro), en el orden STAMPED, PROBLEM, PENDING, NONE', async () => {
+        const filtros = { frequency: ['MONTHLY' as const] }
+        const categoria = (donde: any) =>
+          (['STAMPED', 'PROBLEM', 'PENDING', 'NONE'] as const).find(
+            c => JSON.stringify(donde.AND[1]) === JSON.stringify(invoiceCategoryWhere(c)),
+          )!
+        responder({ STAMPED: [5, 5000], PENDING: [2, 200], NONE: [1, 10] }, categoria)
+
+        const { groups } = await groupOccurrences(filtros, 'invoice')
+
+        expect(aggregate()).toHaveBeenCalledTimes(4)
+        for (const [{ where }] of aggregate().mock.calls) expect(where.AND[0]).toEqual(occurrenceWhere(filtros))
+        expect(groups).toEqual([
+          { key: 'STAMPED', label: 'Facturado', count: 5, totalCents: 5000 },
+          { key: 'PENDING', label: 'Por facturar', count: 2, totalCents: 200 },
+          { key: 'NONE', label: 'Sin factura', count: 1, totalCents: 10 },
+        ])
+        sinFilas()
+      })
+
+      it('sin cobros: grupos vacíos', async () => {
+        expect(await groupOccurrences({}, 'invoice')).toEqual({ groups: [], truncated: false })
+        expect(await groupOccurrences({}, 'frequency')).toEqual({ groups: [], truncated: false })
+      })
+    })
+
+    describe('lo que comparten', () => {
+      it('«groupBy» que no existe: 400, sin tocar la base', async () => {
+        const error = (await groupOccurrences({}, 'cliente' as never).catch((e: unknown) => e)) as BadRequestError
+
+        expect(error).toBeInstanceOf(BadRequestError)
+        expect(error.code).toBe('PLATFORM_CHARGE_INVALID_GROUP_BY')
+        expect(groupBy()).not.toHaveBeenCalled()
+        expect(aggregate()).not.toHaveBeenCalled()
+      })
+
+      it.each(['customer', 'month', 'frequency', 'invoice'] as const)(
+        '«from» después de «to» es 400 también al agrupar por %s',
+        async dimension => {
+          await expect(groupOccurrences({ from: '2026-11-10', to: '2026-11-09' }, dimension)).rejects.toBeInstanceOf(BadRequestError)
+
+          expect(groupBy()).not.toHaveBeenCalled()
+          expect(aggregate()).not.toHaveBeenCalled()
+        },
+      )
+
+      it.each(['customer', 'month', 'frequency', 'invoice'] as const)(
+        'por %s respeta la vista pedida (los grupos son de las pagadas, no de las pendientes)',
+        async dimension => {
+          await groupOccurrences({ view: 'paid' }, dimension)
+
+          const [llamada] = [...groupBy().mock.calls, ...aggregate().mock.calls].map(([args]: any) => args)
+          expect(JSON.stringify(llamada.where)).toContain('"status":"PAID"')
+        },
+      )
+    })
   })
 })

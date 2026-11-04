@@ -856,36 +856,58 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
   // Reserve the REP row (unique idempotencyKey) before calling the PAC.
   let row: PlatformCfdi
   try {
-    row = await prisma.platformCfdi.create({
-      data: {
-        platformEmisorId: emisor.id,
-        billingTaxProfileId: parent.billingTaxProfileId,
-        type: 'PAGO',
-        parentPlatformCfdiId: parent.id,
-        organizationId: parent.organizationId,
-        venueId: parent.venueId,
-        receptorRfc: parent.receptorRfc,
-        receptorNombre: parent.receptorNombre,
-        receptorRegimen: parent.receptorRegimen,
-        receptorCp: parent.receptorCp,
-        usoCfdi: 'CP01', // CFDI tipo P → uso "Pagos"
-        formaPago: input.formaPago,
-        subtotalCents: 0,
-        taxCents: 0,
-        totalCents: 0, // CFDI tipo P lleva Total 0; el importe vive en el complemento
-        status: 'STAMPING',
-        serie: parent.serie,
-        idempotencyKey: input.idempotencyKey,
-        createdById: input.performedById,
-        paymentInfo: {
-          fechaPago: input.paymentDate,
+    row = await prisma.$transaction(async tx => {
+      // 🔴 Un complemento no pasa sobre una factura anexada a un cobro sin pagar de «Por cobrar»: la fecha seguiría debiendo lo que ya se cobró. Tocar al
+      // padre lo serializa con «anexar» (que escribe sólo si su `updatedAt` leído sigue igual): si anexó antes, este `update` espera su candado de fila y
+      // devuelve el vínculo ya escrito; si reservamos antes, anexar ve que cambió. Nada del PAC va dentro de esta transacción.
+      const linked = await tx.platformCfdi.update({
+        where: { id: parent.id },
+        data: { updatedAt: new Date() },
+        select: { platformChargeOccurrenceId: true, chargeLinkedAt: true },
+      })
+      if (linked.chargeLinkedAt && linked.platformChargeOccurrenceId) {
+        const date = await tx.platformChargeOccurrence.findUnique({
+          where: { id: linked.platformChargeOccurrenceId },
+          select: { status: true },
+        })
+        if (date?.status === 'PENDING') {
+          throw new PlatformBillingError(
+            'Esta factura está anexada a un cobro sin pagar en «Por cobrar». Márcalo como pagado primero y después registra el complemento',
+            'VALIDATION',
+          )
+        }
+      }
+      return tx.platformCfdi.create({
+        data: {
+          platformEmisorId: emisor.id,
+          billingTaxProfileId: parent.billingTaxProfileId,
+          type: 'PAGO',
+          parentPlatformCfdiId: parent.id,
+          organizationId: parent.organizationId,
+          venueId: parent.venueId,
+          receptorRfc: parent.receptorRfc,
+          receptorNombre: parent.receptorNombre,
+          receptorRegimen: parent.receptorRegimen,
+          receptorCp: parent.receptorCp,
+          usoCfdi: 'CP01', // CFDI tipo P → uso "Pagos"
           formaPago: input.formaPago,
-          montoCents: amountCents,
-          parcialidad: installment,
-          saldoAnteriorCents,
-          saldoInsolutoCents,
-        } as unknown as Prisma.InputJsonValue,
-      },
+          subtotalCents: 0,
+          taxCents: 0,
+          totalCents: 0, // CFDI tipo P lleva Total 0; el importe vive en el complemento
+          status: 'STAMPING',
+          serie: parent.serie,
+          idempotencyKey: input.idempotencyKey,
+          createdById: input.performedById,
+          paymentInfo: {
+            fechaPago: input.paymentDate,
+            formaPago: input.formaPago,
+            montoCents: amountCents,
+            parcialidad: installment,
+            saldoAnteriorCents,
+            saldoInsolutoCents,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      })
     })
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -914,7 +936,10 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
     })
 
     const updated = await prisma.$transaction(async tx => {
-      const rep = await tx.platformCfdi.update({
+      // Primero el padre y después el complemento: el mismo orden que la reserva. Al revés, la confirmación (que retiene al complemento) y un reintento con
+      // la misma llave (que retiene al padre y espera al complemento por la llave repetida) se esperarían en cruz, y Postgres abortaría una.
+      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: amountCents } } })
+      return tx.platformCfdi.update({
         where: { id: row.id },
         data: {
           status: 'STAMPED',
@@ -925,8 +950,6 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
           stampedAt: stamped.stampedAt,
         },
       })
-      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: amountCents } } })
-      return rep
     })
     return updated
   } catch (err) {

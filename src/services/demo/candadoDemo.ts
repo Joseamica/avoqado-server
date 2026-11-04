@@ -304,6 +304,7 @@ export const PANEL_PERMITIDAS: ReadonlySet<string> = new Set([
   'customers',
   'discounts',
   'exchanges',
+  'exports', // pedir un exporte es una lectura: el archivo va al almacenamiento privado y el correo lo omite la capa 2
   'floor-plan',
   'fulfillment-areas',
   'gift-cards',

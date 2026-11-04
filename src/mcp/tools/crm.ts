@@ -608,7 +608,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         })
         if (already) return { ok: true, activityId: already.id, vence: fecha(already.dueAt), yaEstaba: true }
         const activity = await addActivity(access, id, { type, title, dueAt: due })
-        await audit('CRM_ACTIVITY_SCHEDULED', id, { activityId: activity.id, type, title })
+        // Sin el título (D1): puede nombrar a la persona; la actividad lo guarda y el borrado lo limpia ahí.
+        await audit('CRM_ACTIVITY_SCHEDULED', id, { activityId: activity.id, type })
         return { ok: true, activityId: activity.id, vence: fecha(activity.dueAt), yaEstaba: false }
       }),
   )

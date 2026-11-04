@@ -237,6 +237,18 @@ describe('exportAccountsCsv', () => {
     expect(lines[2]).toContain(',Sin dueño,')
   })
 
+  it('la_bitacora_del_export_no_guarda_lo_que_se_busco (D1, H3): la búsqueda va tapada; los demás filtros, como hoy', async () => {
+    prismaMock.crmAccount.findMany.mockResolvedValueOnce([])
+    prismaMock.crmAccount.count.mockResolvedValue(0)
+
+    await exportAccountsCsv(access(), { q: 'ana@cafe.mx', sinDueno: true }, NOW)
+
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CRM_EXPORT', data: expect.objectContaining({ filtros: { q: '[búsqueda]', sinDueno: true } }) }),
+    )
+    expect(JSON.stringify(jest.mocked(logAction).mock.calls)).not.toContain('ana@cafe.mx')
+  })
+
   it('exportar_nunca_lleva_telefono_ni_correo', async () => {
     await exportAccountsCsv(access(), {}, NOW)
     const { select } = prismaMock.crmAccount.findMany.mock.calls[0][0]
