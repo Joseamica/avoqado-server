@@ -1,14 +1,9 @@
 import { NextFunction, Request, Response } from 'express'
 import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import * as orderDashboardService from '../../services/dashboard/order.dashboard.service'
-import {
-  encodeExport,
-  sendExport,
-  parseColumnsParam,
-  parseFormatParam,
-  getRowCapForFormat,
-  type ExportColumnDef,
-} from '../../services/dashboard/export.helpers'
+import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '../../services/dashboard/export.helpers'
+import { ORDENES_COLUMNAS } from '../../services/exports/exportadores/ordenes.exportador'
+import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '../../services/exports/exportPolicy'
 import logger from '../../config/logger'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import { venueHasFeatureAccess, venueIsExemptFromPlanGating } from '../../services/access/basePlan.service'
@@ -250,6 +245,15 @@ export async function exportOrdersData(
     }
 
     const total = await orderDashboardService.countOrdersForExport(venueId, filters)
+    // Lo grande ya no se arma en esta petición (se pide en segundo plano). El PDF no cambia.
+    if (format !== 'pdf') {
+      const columnas =
+        requestedColumnIds.length > 0 ? ORDENES_COLUMNAS.filter(c => requestedColumnIds.includes(c.id)).length : ORDENES_COLUMNAS.length
+      if (decidirCarril({ filas: total, columnas: Math.max(columnas, 1), formato: format }).carril !== 'directo') {
+        res.status(413).json({ success: false, message: MENSAJE_GET_VIEJO_GRANDE })
+        return
+      }
+    }
     if (total > cap) {
       res.status(413).json({
         success: false,
@@ -262,36 +266,10 @@ export async function exportOrdersData(
     }
 
     const rows = await orderDashboardService.fetchOrdersForExport(venueId, filters, cap)
-    type Row = (typeof rows)[number]
-
-    const allColumns: ExportColumnDef<Row>[] = [
-      { id: 'createdAt', label: 'Fecha', value: r => r.createdAt?.toISOString() ?? '' },
-      { id: 'orderId', label: 'ID', value: r => r.id },
-      { id: 'orderNumber', label: 'Folio', value: r => r.orderNumber ?? '' },
-      { id: 'type', label: 'Tipo', value: r => r.type ?? '' },
-      {
-        id: 'customerName',
-        label: 'Cliente',
-        value: r => (r as any).customerName ?? '',
-      },
-      { id: 'tableName', label: 'Mesa', value: r => r.table?.number ?? '' },
-      {
-        id: 'waiterName',
-        label: 'Mesero',
-        value: r => {
-          const w = r.servedBy || r.createdBy
-          return w ? `${w.firstName ?? ''} ${w.lastName ?? ''}`.trim() : ''
-        },
-      },
-      { id: 'status', label: 'Estatus', value: r => r.status ?? '' },
-      { id: 'productsCount', label: 'Productos', value: r => r._count?.items ?? 0 },
-      { id: 'tipAmount', label: 'Propina', value: r => Number(r.tipAmount) || 0 },
-      { id: 'total', label: 'Total', value: r => Number(r.total) || 0 },
-    ]
 
     const encoded = await encodeExport(format, {
-      allColumns,
-      requestedColumnIds: requestedColumnIds.length > 0 ? requestedColumnIds : allColumns.map(c => c.id),
+      allColumns: ORDENES_COLUMNAS,
+      requestedColumnIds: requestedColumnIds.length > 0 ? requestedColumnIds : ORDENES_COLUMNAS.map(c => c.id),
       rows,
       title: 'Órdenes',
     })
