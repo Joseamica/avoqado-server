@@ -7,9 +7,12 @@
  */
 import prisma from '@/utils/prismaClient'
 import type { ExportColumnDef } from '@/services/dashboard/export.helpers'
+import cuid from 'cuid'
+import { fetchOrdersForExport } from '@/services/dashboard/order.dashboard.service'
 import { fetchPaymentsForExport } from '@/services/dashboard/payment.dashboard.service'
 import { fetchSalesSummaryDetailRows } from '@/services/dashboard/sales-summary.dashboard.service'
 import { cobros, COBROS_COLUMNAS } from '@/services/exports/exportadores/cobros.exportador'
+import { ordenes, ORDENES_COLUMNAS } from '@/services/exports/exportadores/ordenes.exportador'
 import { ventasDetalladas, VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import type { Cursor, Exportador } from '@/services/exports/exportadores/types'
 
@@ -40,6 +43,10 @@ export async function limpiarSemillas(
 const sufijo = `exp-${Date.now()}`
 const T = new Date('2025-10-15T18:00:00.000Z')
 const RANGO = { startDate: '2025-10-01T06:00:00.000Z', endDate: '2025-11-01T05:59:59.999Z' }
+// Órdenes: rango propio (noviembre) para no mezclarse con las semillas de cobros. 4 empates en TO, una FAST-, una que la búsqueda excluye y una posterior al corte.
+const TO = new Date('2025-11-10T18:00:00.000Z')
+const RANGO_ORD = { startDate: '2025-11-01T06:00:00.000Z', endDate: '2025-12-01T05:59:59.999Z' }
+const CORTE_ORD = new Date('2025-11-10T19:00:00.000Z')
 const s: Semillas = { orderIds: [], paymentIds: [] }
 
 beforeAll(async () => {
@@ -119,6 +126,33 @@ beforeAll(async () => {
     })
     s.paymentIds.push(pay.id)
   }
+
+  const ordSemillas: Array<{ n: string; at: Date }> = [
+    ...[1, 2, 3, 4].map(i => ({ n: `ORD-${sufijo}-${i}`, at: TO })),
+    { n: `FAST-ORD-${sufijo}`, at: new Date(+TO - 1000) },
+    { n: `OTRO-${sufijo}`, at: new Date(+TO - 2000) }, // la búsqueda `ORD-<sufijo>` la excluye
+    { n: `ORD-${sufijo}-TARDE`, at: new Date(+CORTE_ORD + 60_000) }, // creada después del corte
+  ]
+  for (const o of ordSemillas) {
+    const id = cuid() // cuid v1, como `@default(cuid())`
+    await prisma.order.create({
+      data: {
+        id,
+        venueId: s.venueId,
+        orderNumber: o.n,
+        type: 'DINE_IN' as any,
+        status: 'COMPLETED' as any,
+        createdAt: o.at,
+        subtotal: 10,
+        taxAmount: 0,
+        tipAmount: 1,
+        total: 10,
+        createdById: s.staffId,
+      },
+      select: { id: true },
+    })
+    s.orderIds.push(id)
+  }
 })
 
 afterAll(async () => {
@@ -160,6 +194,28 @@ describe('paridad de los exportadores contra los GET viejos (Postgres real)', ()
     expect(nuevo).toHaveLength(5)
     expect(porId(VENTAS_DETALLADAS_COLUMNAS, nuevo)).toEqual(porId(VENTAS_DETALLADAS_COLUMNAS, viejo))
     expect(await ventasDetalladas.contar(s.venueId!, filtros, new Date())).toBe(5)
+  })
+  it('órdenes: mismas filas y valores que el GET viejo; sin duplicados con 4 empates y páginas de 2; FAST y búsqueda filtran igual; el corte deja fuera la posterior', async () => {
+    const comparar = async (raw: Record<string, unknown>, esperadas: number) => {
+      const filtros = ordenes.parsearFiltros({ ...RANGO_ORD, ...raw })
+      const nuevo = await recorrer(ordenes, filtros, CORTE_ORD)
+      const viejo = (await fetchOrdersForExport(s.venueId!, filtros, 10_000)).filter(o => +o.createdAt <= +CORTE_ORD)
+      expect(nuevo).toHaveLength(esperadas)
+      expect(new Set(nuevo.map(f => f.id)).size).toBe(esperadas)
+      expect(porId(ORDENES_COLUMNAS, nuevo)).toEqual(porId(ORDENES_COLUMNAS, viejo))
+      expect(await ordenes.contar(s.venueId!, filtros, CORTE_ORD)).toBe(esperadas)
+      for (let i = 1; i < nuevo.length; i++) {
+        const [a, b] = [nuevo[i - 1], nuevo[i]]
+        expect(+a.createdAt > +b.createdAt || (+a.createdAt === +b.createdAt && a.id > b.id)).toBe(true)
+      }
+      return nuevo
+    }
+    await comparar({}, 6) // 4 empates + FAST + OTRO; la TARDE queda fuera por el corte
+    const fast = await comparar({ types: 'FAST' }, 1)
+    expect(fast[0].orderNumber).toBe(`FAST-ORD-${sufijo}`)
+    await comparar({ search: `ORD-${sufijo}` }, 1 + 4) // 4 empates + la FAST (su folio también lo contiene); OTRO queda fuera
+    // sin corte, la posterior sí sale
+    expect(await ordenes.contar(s.venueId!, ordenes.parsearFiltros(RANGO_ORD), new Date())).toBe(7)
   })
   it('el corte deja fuera lo que entró después de pedir el exporte', async () => {
     const corte = new Date(+T - 500)
