@@ -13,7 +13,8 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/services/email.service', () => ({
   __esModule: true,
-  default: { sendTeamInvitation: jest.fn().mockResolvedValue(true) },
+  // D3: invitar al equipo de ventas manda el correo del CRM (`sendCrmTeamInvitation`).
+  default: { sendTeamInvitation: jest.fn().mockResolvedValue(true), sendCrmTeamInvitation: jest.fn().mockResolvedValue(true) },
 }))
 jest.mock('@/services/dashboard/venueRoleConfig.dashboard.service', () => ({
   getRoleDisplayName: jest.fn().mockResolvedValue('Visor'),
