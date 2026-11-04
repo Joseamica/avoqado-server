@@ -3,14 +3,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as paymentDashboardService from '../../services/dashboard/payment.dashboard.service'
 import * as receiptDashboardService from '../../services/dashboard/receipt.dashboard.service'
-import {
-  encodeExport,
-  sendExport,
-  parseColumnsParam,
-  parseFormatParam,
-  getRowCapForFormat,
-  type ExportColumnDef,
-} from '../../services/dashboard/export.helpers'
+import { encodeExport, sendExport, parseColumnsParam, parseFormatParam, getRowCapForFormat } from '../../services/dashboard/export.helpers'
 
 import * as paymentSummaryService from '../../services/dashboard/paymentSummary.dashboard.service'
 import {
@@ -22,6 +15,8 @@ import {
   parseCsv,
 } from '../../services/dashboard/listSummary.shared'
 
+import { COBROS_COLUMNAS, type FilaCobro } from '../../services/exports/exportadores/cobros.exportador'
+import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '../../services/exports/exportPolicy'
 import prisma from '../../utils/prismaClient'
 import { loadExchangeLinksForOrders } from '../../services/exchanges/exchangeDetail'
 import { NotFoundError } from '../../errors/AppError'
@@ -336,6 +331,15 @@ export async function exportPaymentsData(
 
     // Pre-flight: count and bail if over the cap before pulling rows into memory.
     const total = await paymentDashboardService.countPaymentsForExport(venueId, filters)
+    // Codex r1 #1: lo grande ya no se arma en esta petición (alertas del 3-nov: 4,224 filas, 1.24-1.59 s de hilo). El PDF no cambia.
+    if (format !== 'pdf') {
+      const columnas =
+        requestedColumnIds.length > 0 ? COBROS_COLUMNAS.filter(c => requestedColumnIds.includes(c.id)).length : COBROS_COLUMNAS.length
+      if (decidirCarril({ filas: total, columnas: Math.max(columnas, 1), formato: format }).carril !== 'directo') {
+        res.status(413).json({ success: false, message: MENSAJE_GET_VIEJO_GRANDE })
+        return
+      }
+    }
     if (total > cap) {
       res.status(413).json({
         success: false,
@@ -348,55 +352,10 @@ export async function exportPaymentsData(
     }
 
     const rows = await paymentDashboardService.fetchPaymentsForExport(venueId, filters, cap)
-    type Row = (typeof rows)[number]
 
-    // Column registry — order here is the order in the output file.
-    const allColumns: ExportColumnDef<Row>[] = [
-      { id: 'createdAt', label: 'Fecha', value: r => r.createdAt?.toISOString() ?? '' },
-      { id: 'paymentId', label: 'ID', value: r => r.id },
-      {
-        id: 'waiterName',
-        label: 'Mesero',
-        value: r => (r.processedBy ? `${r.processedBy.firstName ?? ''} ${r.processedBy.lastName ?? ''}`.trim() : ''),
-      },
-      {
-        id: 'merchantAccount',
-        label: 'Cuenta Comercial',
-        value: r => r.merchantAccount?.displayName || r.merchantAccount?.externalMerchantId || r.ecommerceMerchant?.channelName || '',
-      },
-      { id: 'method', label: 'Método', value: r => r.method ?? '' },
-      { id: 'source', label: 'Origen', value: r => r.source ?? '' },
-      {
-        id: 'international',
-        label: 'Internacional',
-        value: r => {
-          const raw = (r as any)?.processorData?.isInternational
-          return raw === true || raw === 'true' ? 'Sí' : 'No'
-        },
-      },
-      { id: 'cardBrand', label: 'Marca', value: r => r.cardBrand ?? '' },
-      {
-        id: 'last4',
-        label: 'Últimos 4',
-        value: r => {
-          // Payment model stores maskedPan ("411111******1111") — derive last 4 digits for export.
-          const masked = r.maskedPan ?? ''
-          return masked ? masked.slice(-4) : ''
-        },
-      },
-      { id: 'amount', label: 'Subtotal', value: r => Number(r.amount) || 0 },
-      { id: 'tipAmount', label: 'Propina', value: r => Number(r.tipAmount) || 0 },
-      {
-        id: 'totalAmount',
-        label: 'Total',
-        value: r => (Number(r.amount) || 0) + (Number(r.tipAmount) || 0),
-      },
-      { id: 'status', label: 'Estatus', value: r => r.status ?? '' },
-    ]
-
-    const encoded = await encodeExport(format, {
-      allColumns,
-      requestedColumnIds: requestedColumnIds.length > 0 ? requestedColumnIds : allColumns.map(c => c.id),
+    const encoded = await encodeExport<FilaCobro>(format, {
+      allColumns: COBROS_COLUMNAS,
+      requestedColumnIds: requestedColumnIds.length > 0 ? requestedColumnIds : COBROS_COLUMNAS.map(c => c.id),
       rows,
       title: 'Pagos',
     })
