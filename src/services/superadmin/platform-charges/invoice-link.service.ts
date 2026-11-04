@@ -306,7 +306,7 @@ export async function unlinkInvoice(
     })
     if (!cfdi) {
       throw conflict(
-        'Esta fecha no tiene una factura anexada. Una factura timbrada desde «Por cobrar» no se quita: se cancela en Facturas CFDI',
+        'Esa factura ya no está anexada a esta fecha. Recarga para ver cómo quedó. Una factura timbrada desde «Por cobrar» no se quita: se cancela en Facturas CFDI',
         'PLATFORM_CHARGE_INVOICE_NOT_LINKED',
       )
     }

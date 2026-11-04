@@ -1421,6 +1421,10 @@ describe('unlinkInvoice — quitar lo anexado', () => {
     const error = await rechazo(quitar('cfdi-A'))
 
     expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_NOT_LINKED')
+    // El texto no dice que la fecha «no tiene» factura (sí tiene: la B): dice que ESA ya no está anexada y qué hacer.
+    expect(error.message).toBe(
+      'Esa factura ya no está anexada a esta fecha. Recarga para ver cómo quedó. Una factura timbrada desde «Por cobrar» no se quita: se cancela en Facturas CFDI',
+    )
     expect(mundo.cfdis.find(c => c.id === 'cfdi-B')).toMatchObject({ platformChargeOccurrenceId: 'occ-1' })
     expect(mundo.cfdis.find(c => c.id === 'cfdi-B')!.chargeLinkedAt).not.toBeNull()
     nadieEscribio()
