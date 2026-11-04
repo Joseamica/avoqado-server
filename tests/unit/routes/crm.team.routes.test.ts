@@ -105,7 +105,8 @@ describe('crm team routes', () => {
       { route: 'POST /accounts/:id/lose', keys: cerrar },
       { route: 'POST /accounts/:id/win', keys: cerrar },
       { route: 'POST /accounts/:id/archive', keys: editar },
-      { route: 'POST /accounts/:id/reactivate', keys: cerrar },
+      // «Regresar al embudo» desarchiva (no reabre un cierre): la misma llave que archivar.
+      { route: 'POST /accounts/:id/reactivate', keys: editar },
       // «Eliminar» (D7): «Configurar el CRM» es la puerta; el servicio sólo deja pasar al superadmin real (L7).
       { route: 'POST /accounts/:id/delete', keys: configurar },
       { route: 'POST /accounts/:id/notes', keys: editar },

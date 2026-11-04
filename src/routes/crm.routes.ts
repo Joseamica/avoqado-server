@@ -74,7 +74,8 @@ router.use(authenticateTokenMiddleware)
 const ver = requireCrm('crm:ver')
 const editar = requireCrm('crm:editar')
 const exportar = requireCrm('crm:exportar')
-// L9: ganar, perder y regresar al embudo. Sólo vale encima de «Editar» y en su alcance (L1). Reabrir por `stage` lo decide el servicio.
+// L9: ganar y perder. Sólo vale encima de «Editar» y en su alcance (L1). Reabrir por `stage` lo decide el servicio.
+// «Regresar al embudo» (`reactivate`) desarchiva, no reabre un cierre: pide «Editar», igual que archivar.
 const cerrar = requireCrm('crm:cerrar')
 // L6: el equipo de ventas y sus llaves.
 const equipo = requireCrm('crm:equipo')
@@ -138,7 +139,7 @@ router.post('/accounts/:id/stage', editar, validateRequest(moveStageSchema), crm
 router.post('/accounts/:id/lose', cerrar, validateRequest(loseAccountSchema), crmController.loseAccount)
 router.post('/accounts/:id/win', cerrar, validateRequest(winAccountSchema), crmController.winAccount)
 router.post('/accounts/:id/archive', editar, validateRequest(accountIdSchema), crmController.archiveAccount)
-router.post('/accounts/:id/reactivate', cerrar, validateRequest(accountIdSchema), crmController.reactivateAccount)
+router.post('/accounts/:id/reactivate', editar, validateRequest(accountIdSchema), crmController.reactivateAccount)
 // «Eliminar», forever (D7): the real superadmin only — founder, 2-nov — which the service checks; «Configurar» is the door (L7).
 router.post('/accounts/:id/delete', configurar, validateRequest(deleteAccountSchema), crmController.deleteAccount)
 router.post('/accounts/:id/notes', editar, validateRequest(addNoteSchema), crmController.addNote)

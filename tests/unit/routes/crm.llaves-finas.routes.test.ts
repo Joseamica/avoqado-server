@@ -298,7 +298,7 @@ describe('«Equipo y llaves» no da lo que no tiene (Review Focus 2, por HTTP)',
 })
 
 describe('«Editar» sin «Cerrar negocios» no reabre (Review Focus 4)', () => {
-  it('mover un PERDIDO a «Demo» por /stage es 403 «Cerrar negocios» y no lo reabre; ganar, perder y reabrir también piden la llave', async () => {
+  it('mover un PERDIDO a «Demo» por /stage es 403 «Cerrar negocios» y no lo reabre; ganar y perder también piden la llave', async () => {
     llaves({ verScope: 'propios', editarScope: 'propios' })
     prismaMock.crmStage.findUnique.mockResolvedValue({ id: DEMO, name: 'Demo', kind: 'ABIERTA' })
     prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
@@ -318,7 +318,6 @@ describe('«Editar» sin «Cerrar negocios» no reabre (Review Focus 4)', () => 
     for (const res of [
       await request(app).post(`/crm/accounts/${ACCOUNT}/win`).send({ organizationId: 'corgclient000000000000001' }),
       await request(app).post(`/crm/accounts/${ACCOUNT}/lose`).send({ lostReasonId: 'creasonpr0000000000000001' }),
-      await request(app).post(`/crm/accounts/${ACCOUNT}/reactivate`),
     ]) {
       expect(res.status).toBe(403)
       expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN', message: 'No tienes la llave «Cerrar negocios»' })

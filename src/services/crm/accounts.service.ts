@@ -840,8 +840,9 @@ export async function reassign(access: CrmAccess, id: string, staffId: string | 
 // ── The pipeline ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * «Cerrar negocios» (L9): ganar, perder y reabrir. La ruta ya la pide; aquí también, porque el MCP pierde por `lose` y
- * reabrir por `moveStage` sólo se sabe con la fila bloqueada. `cerrar` ya viene apagada sin «Editar» (`effectiveKeys`).
+ * «Cerrar negocios» (L9): ganar, perder y reabrir un GANADO o PERDIDO. La ruta ya la pide; aquí también, porque el MCP pierde
+ * por `lose` y reabrir por `moveStage` sólo se sabe con la fila bloqueada. `cerrar` ya viene apagada sin «Editar»
+ * (`effectiveKeys`). «Regresar al embudo» (`reactivate`) desarchiva y no la pide.
  */
 function assertCierra(access: CrmAccess, message = 'No tienes la llave «Cerrar negocios»') {
   if (!access.cerrar) throw new ForbiddenError(message, 'CRM_FORBIDDEN')
@@ -1044,9 +1045,11 @@ export async function archive(access: CrmAccess, id: string) {
   })
 }
 
-/** Back into the pipeline, freshly touched: it does not come back already stale. Pide «Cerrar negocios» (L9). */
+/**
+ * Back into the pipeline, freshly touched: it does not come back already stale. Desarchiva, no reabre un cierre: pide
+ * «Editar», igual que archivar (reabrir un GANADO o PERDIDO es `moveStage`, con «Cerrar negocios»).
+ */
 export async function reactivate(access: CrmAccess, id: string) {
-  assertCierra(access)
   const now = new Date()
   return prisma.$transaction(async tx => {
     const account = await touchEditableTx(tx, access, id, now)

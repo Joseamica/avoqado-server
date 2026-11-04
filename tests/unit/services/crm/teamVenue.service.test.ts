@@ -1030,7 +1030,8 @@ describe('la pantalla vieja se rechaza (L10)', () => {
     const parsed = updateTeamMemberSchema.parse({ params: { id: ROW_ID }, body }).body
     expect(parsed.keys).toEqual(keys({ bajas: true }))
     // Media forma nueva tampoco: sin una de las 13, 400.
-    const { mandar: _mandar, ...sinMandar } = keys()
+    const sinMandar = { ...keys() }
+    delete sinMandar.mandar
     expect(updateTeamMemberSchema.safeParse({ params: { id: ROW_ID }, body: { keys: sinMandar } }).success).toBe(false)
   })
 })

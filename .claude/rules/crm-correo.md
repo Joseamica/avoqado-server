@@ -42,7 +42,7 @@ empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 | `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                 |
 | `crm:configurar`                                            | etapas y motivos (leerlos también con `crm:ver`), ocultar clientes y ver los ocultos y el KYC, importar de HubSpot, la puerta de «Eliminar» (que sigue siendo sólo del superadmin real) |
 | `crm:bajas`                                                 | `POST /opt-outs`, sola                                                                                                                                                                  |
-| `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, regresar al embudo, y mover un GANADO o PERDIDO a una etapa abierta                                                                                                      |
+| `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, y mover un GANADO o PERDIDO a una etapa abierta. «Regresar al embudo» sólo desarchiva: pide «Editar», como archivar                                                      |
 
 🔴 `crm:campanas` y `crm:admin` (y `access.campanas`/`access.admin`) son sólo el espejo para la pantalla vieja: ninguna ruta, servicio ni
 herramienta del MCP decide con ellos (`tests/unit/routes/crm.team.routes.test.ts` lo revisa). 🔴 El disparador de `PlatformAccess` (L11)

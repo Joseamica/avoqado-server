@@ -1163,13 +1163,22 @@ describe('«Cerrar negocios» (L9): ganar, perder y reabrir', () => {
     })
   })
 
-  it('sin «Cerrar», ganar, perder y regresar al embudo son 403 antes de tocar nada (también desde el MCP, que llama a perder)', async () => {
+  it('sin «Cerrar», ganar y perder son 403 antes de tocar nada (también desde el MCP, que llama a perder)', async () => {
     const llave = { statusCode: 403, code: 'CRM_FORBIDDEN', message: 'No tienes la llave «Cerrar negocios»' }
     await expect(lose(sinCerrar(), ACCOUNT, { lostReasonId: REASON })).rejects.toMatchObject(llave)
     await expect(win(sinCerrar(), ACCOUNT, { organizationId: ORG })).rejects.toMatchObject(llave)
-    await expect(reactivate(sinCerrar(), ACCOUNT)).rejects.toMatchObject(llave)
     expect(prismaMock.crmLostReason.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+  })
+
+  it('«Regresar al embudo» desarchiva, no reabre un cierre: con «Editar» sin «Cerrar» sí funciona, igual que archivar', async () => {
+    editable(account({ archivedAt: daysAgo(2) }))
+    await reactivate(sinCerrar(), ACCOUNT)
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({ where: { id: ACCOUNT }, data: { archivedAt: null } })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [{ accountId: ACCOUNT, kind: 'REACTIVATED', actorStaffId: SELLER, data: {} }],
+      skipDuplicates: true,
+    })
   })
 })
