@@ -978,6 +978,15 @@ export async function refreshAccessToken(refreshToken: string, requestedVenueId?
       // ocurriendo ni con qué frecuencia.
       logger.info('🔐 [MOBILE AUTH] Refresh retransmitido (eco del mismo cliente)', { sessionId: session.id })
     }
+    if (resultado.ecoTardio) {
+      // D19: la respuesta de una renovación anterior se perdió (WiFi caído justo después de rotar) y el aparato volvió
+      // con su refresh viejo cuando su sucesor nunca se había usado: recibe uno nuevo y el cajero sigue trabajando. Se
+      // registra para MEDIR cuántas veces pasa y con cuánto tiempo sin red (y para notar abuso). Nunca tokens ni hashes.
+      logger.info('🔐 [MOBILE AUTH] Refresh tardío tras respuesta perdida', {
+        sessionId: session.id,
+        minutosDesdeElConsumo: resultado.ecoTardio.minutosDesdeElConsumo,
+      })
+    }
     newRefreshToken = resultado.sucesor
   }
 

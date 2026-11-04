@@ -16,6 +16,8 @@
  * 6. El filtro de venue no operativo (Task 7 / `32e44bd9`) sigue vivo — no se re-implementa,
  *    sólo se comprueba que este cambio no lo rompió.
  */
+import logger from '@/config/logger'
+import { ServiceUnavailableError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import * as jwtService from '@/jwt.service'
 import * as grants from '@/services/auth/refreshGrant.service'
@@ -165,5 +167,52 @@ describe('refresco: el filtro de venue no operativo sigue vivo (no se re-impleme
 
     await expect(refreshAccessToken('refresh-viejo', 'venue_suspendido')).rejects.toThrow(/operativo/i)
     expect(grants.rotateGrant).not.toHaveBeenCalled()
+  })
+})
+
+describe('D19 · eco tardío: la respuesta de la renovación se perdió minutos u horas antes', () => {
+  it('devuelve el N que acuñó el eco tardío y deja la línea de medición, sin tokens', async () => {
+    ;(grants.rotateGrant as jest.Mock).mockResolvedValue({
+      sucesor: 'refresh-N',
+      sessionId: SESSION_ID,
+      familyId: 'fam_1',
+      ecoTardio: { minutosDesdeElConsumo: 29 },
+    })
+
+    const r = await refreshAccessToken('refresh-R0')
+
+    // Misma forma de respuesta de siempre: las apps no se enteran de que fue un eco tardío.
+    expect(r).toEqual({ accessToken: 'access-nuevo', refreshToken: 'refresh-N', staffId: STAFF_ID, venueId: 'venue_actual' })
+    expect(logger.info).toHaveBeenCalledWith('🔐 [MOBILE AUTH] Refresh tardío tras respuesta perdida', {
+      sessionId: SESSION_ID,
+      minutosDesdeElConsumo: 29,
+    })
+    const todoLoLogueado = JSON.stringify([
+      ...(logger.info as jest.Mock).mock.calls,
+      ...(logger.warn as jest.Mock).mock.calls,
+      ...(logger.error as jest.Mock).mock.calls,
+    ])
+    for (const token of ['refresh-R0', 'refresh-N', 'refresh-nuevo', 'access-nuevo']) {
+      expect(todoLoLogueado).not.toContain(token)
+    }
+  })
+
+  it('una renovación normal NO deja la línea del eco tardío', async () => {
+    await refreshAccessToken('refresh-viejo')
+
+    expect(logger.info).not.toHaveBeenCalledWith('🔐 [MOBILE AUTH] Refresh tardío tras respuesta perdida', expect.anything())
+  })
+
+  it('🔴 una falla operativa de la rotación (503) sale como 5xx, nunca como «tu sesión ya no es válida» (401)', async () => {
+    ;(grants.rotateGrant as jest.Mock).mockRejectedValue(
+      new ServiceUnavailableError('No pudimos renovar tu sesión.', 'SESSION_REFRESH_RETRY'),
+    )
+
+    const error = await refreshAccessToken('refresh-viejo').then(
+      () => null,
+      e => e,
+    )
+
+    expect(error).toMatchObject({ statusCode: 503, code: 'SESSION_REFRESH_RETRY' })
   })
 })
