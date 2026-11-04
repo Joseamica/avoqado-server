@@ -372,6 +372,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_menu_item_active: 'write',
   set_menu_item_price: 'write',
   set_menu_usage: 'write',
+  set_area_ticket_comanda: 'write',
   set_merchant_routing_rule: 'write',
   set_prices_by_code: 'write',
   set_print_station_kitchen_display: 'write',

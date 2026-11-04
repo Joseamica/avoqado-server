@@ -18,7 +18,7 @@ import {
   Unit,
 } from '@prisma/client'
 
-import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import {
   CreateFulfillmentAreaInput,
   CreateScaleProfileInput,
@@ -246,6 +246,7 @@ export async function createArea(venueId: string, input: CreateFulfillmentAreaIn
       name: input.name,
       fulfillmentMode: (input.fulfillmentMode ?? 'IMMEDIATE') as FulfillmentMode,
       printStationId: input.printStationId ?? null,
+      sendsComanda: input.sendsComanda ?? true,
       active: input.active ?? true,
       displayOrder: input.displayOrder ?? 0,
     },
@@ -256,32 +257,68 @@ export async function createArea(venueId: string, input: CreateFulfillmentAreaIn
     action: 'FULFILLMENT_AREA_CREATED',
     entity: 'FulfillmentArea',
     entityId: area.id,
-    data: { name: area.name, fulfillmentMode: area.fulfillmentMode } as Prisma.InputJsonValue,
+    data: { name: area.name, fulfillmentMode: area.fulfillmentMode, sendsComanda: area.sendsComanda } as Prisma.InputJsonValue,
   })
   return area
 }
 
-export async function updateArea(venueId: string, areaId: string, input: UpdateFulfillmentAreaInput, performedBy?: string) {
+/** `source`/`terminalId`: D2, el POS (desde «¿Qué hará este aparato?») y el MCP también apagan o prenden la comanda del área. */
+export async function updateArea(
+  venueId: string,
+  areaId: string,
+  input: UpdateFulfillmentAreaInput,
+  performedBy?: string,
+  opts: {
+    source?: 'dashboard' | 'pos' | 'mcp'
+    terminalId?: string
+    /** D2 (Codex r2 #2): desde el POS, sólo se escribe si ESA terminal sigue emitiendo vales de esta área al escribir. */
+    soloSiEmite?: string
+    /** D2 (Codex r3): desde el MCP, sólo se escribe si el área sigue como la vio la vista previa (nombre y comanda). */
+    siSigueComo?: { name: string; sendsComanda: boolean }
+  } = {},
+) {
   const previous = await prisma.fulfillmentArea.findFirst({ where: { id: areaId, venueId } })
   if (!previous) throw new NotFoundError('Área no encontrada')
   await assertPrintStation(venueId, input.printStationId)
-  const area = await prisma.fulfillmentArea.update({
-    where: { id: areaId },
-    data: {
-      name: input.name,
-      fulfillmentMode: input.fulfillmentMode as FulfillmentMode | undefined,
-      printStationId: input.printStationId,
-      active: input.active,
-      displayOrder: input.displayOrder,
-    },
-  })
+  const data = {
+    name: input.name,
+    fulfillmentMode: input.fulfillmentMode as FulfillmentMode | undefined,
+    printStationId: input.printStationId,
+    sendsComanda: input.sendsComanda,
+    active: input.active,
+    displayOrder: input.displayOrder,
+  }
+  let area
+  if (opts.soloSiEmite || opts.siSigueComo) {
+    // La condición va en el MISMO UPDATE: si mientras viajaba el panel le quitó el área a esa terminal, o alguien cambió
+    // el área que se confirmó, no escribe nada.
+    const { count } = await prisma.fulfillmentArea.updateMany({
+      where: {
+        id: areaId,
+        venueId,
+        ...(opts.soloSiEmite && { terminals: { some: { id: opts.soloSiEmite, canIssueAreaTickets: true } } }),
+        ...(opts.siSigueComo && { name: opts.siSigueComo.name, sendsComanda: opts.siSigueComo.sendsComanda }),
+      },
+      data,
+    })
+    if (count === 0 && opts.soloSiEmite) throw new ForbiddenError('Este aparato no emite vales de esa área.', 'AREA_NOT_OF_THIS_DEVICE')
+    if (count === 0) throw new ConflictError('El área cambió desde la vista previa. Revísala otra vez.', 'AREA_CHANGED')
+    area = { ...previous, ...Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined)) }
+  } else {
+    area = await prisma.fulfillmentArea.update({ where: { id: areaId }, data })
+  }
   await logAction({
     staffId: performedBy ?? null,
     venueId,
     action: 'FULFILLMENT_AREA_UPDATED',
     entity: 'FulfillmentArea',
     entityId: area.id,
-    data: { changes: input } as unknown as Prisma.InputJsonValue,
+    data: {
+      changes: input,
+      ...(input.sendsComanda !== undefined && { previous: { sendsComanda: previous.sendsComanda } }),
+      ...(opts.source && { source: opts.source }),
+      ...(opts.terminalId && { terminalId: opts.terminalId }),
+    } as unknown as Prisma.InputJsonValue,
   })
   return area
 }

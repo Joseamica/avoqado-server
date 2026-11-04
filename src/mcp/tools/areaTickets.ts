@@ -1,8 +1,11 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
-import { sesionesPorConciliar } from '@/services/dashboard/areaTicket.dashboard.service'
-import { createGuard } from '../guard'
+import AppError from '@/errors/AppError'
+import { existingId } from '@/schemas/common/existingId.schema'
+import { sesionesPorConciliar, updateArea } from '@/services/dashboard/areaTicket.dashboard.service'
+import { operationHash } from '@/utils/operationHash'
+import { ScopeError, createGuard } from '../guard'
 import { text } from '../respond'
 import type { McpScope } from '../scope'
 
@@ -438,6 +441,59 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
         warning:
           'Solo lectura. Confirmar un cobro externo, o declarar que no se cobró, se hace en el dashboard o el POS del área — ningún tool de este MCP lo hace. No infieras que un vale de esta lista ya tiene cobro confirmado o asumido: si aparece aquí es justamente porque nadie lo ha resuelto todavía.',
       })
+    },
+  )
+
+  // D2 de vales (3-nov-2026): la misma decisión que el interruptor «Comanda» del panel y de la hoja del POS.
+  server.tool(
+    'set_area_ticket_comanda',
+    'Turn the kitchen ticket ("comanda") of a voucher area (vales por área) on or off. Off: the device that issues vouchers for that area prints only the voucher, with no kitchen ticket and no "No salió la comanda" warning (for areas where nobody prepares anything apart, like a deli counter). On is the default. By DEFAULT it only PREVIEWS (current → new): show it to the user and, after their OK, call again with confirm:true and the expectedSourceFingerprint the preview returns. This WRITES — requires area-tickets:configure.',
+    {
+      venueId: existingId().describe('Venue (must be in your scope)'),
+      areaId: existingId().describe('Voucher area (FulfillmentArea id; area_ticket_status lists them)'),
+      sendsComanda: z.boolean().describe('true = sends the kitchen ticket; false = only the voucher'),
+      expectedSourceFingerprint: z.string().max(128).optional().describe('Exact fingerprint returned by the preview'),
+      confirm: z.boolean().optional().describe('Must be true to actually save; without it you get a preview'),
+    },
+    async ({ venueId, areaId, sendsComanda, expectedSourceFingerprint, confirm }) => {
+      try {
+        guard.venueFilter(venueId)
+        guard.requirePermission('area-tickets:configure', venueId)
+        const area = await prisma.fulfillmentArea.findFirst({
+          where: { id: areaId, venueId },
+          select: { id: true, name: true, sendsComanda: true },
+        })
+        if (!area) return text({ ok: false, error: 'Esa área de vales no existe en este local.' })
+        const estado = (prendida: boolean) => (prendida ? 'manda comanda' : 'sólo el vale, sin comanda')
+        const fingerprint = operationHash({ tool: 'set_area_ticket_comanda', areaId, name: area.name, from: area.sendsComanda, sendsComanda })
+        if (!confirm)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            expectedSourceFingerprint: fingerprint,
+            preview: { area: area.name, current: estado(area.sendsComanda), new: estado(sendsComanda) },
+            message: `Esto cambiará «${area.name}» de «${estado(area.sendsComanda)}» a «${estado(sendsComanda)}», para todos sus aparatos. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+          })
+        if (expectedSourceFingerprint !== fingerprint)
+          return text({
+            ok: false,
+            needsInput: true,
+            question: 'El área o lo elegido cambió desde la vista previa. Pide la vista previa otra vez y confirma.',
+          })
+        // El servicio del panel deja la bitácora (FULFILLMENT_AREA_UPDATED) con quién y desde dónde.
+        // Lo confirmado y la escritura en UNA operación (Codex r3): si renombraron o cambiaron el área en medio, no escribe.
+        await updateArea(venueId, areaId, { sendsComanda }, scope.staffId, {
+          source: 'mcp',
+          siSigueComo: { name: area.name, sendsComanda: area.sendsComanda },
+        })
+        return text({ ok: true, area: area.name, sendsComanda, message: `Listo: «${area.name}» ${estado(sendsComanda)}.` })
+      } catch (err) {
+        if (err instanceof ScopeError) return text({ ok: false, error: err.message })
+        if (err instanceof AppError && err.code === 'AREA_CHANGED')
+          return text({ ok: false, needsInput: true, question: 'El área cambió desde la vista previa. Pide la vista previa otra vez y confirma.' })
+        if (!(err instanceof AppError) || !err.isOperational) throw err
+        return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+      }
     },
   )
 }

@@ -16938,6 +16938,8 @@ model FulfillmentArea {
   /// Cómo trabaja el área (§5.6). El texto que ve el operador NUNCA es el enum:
   /// HOLD_UNTIL_PAID se muestra como "Lo guardamos hasta que pague".
   fulfillmentMode FulfillmentMode @default(IMMEDIATE)
+  /// D2 de vales (3-nov-2026): apagada, la PC que emite vales de esta área saca sólo el vale (sin comanda ni aviso).
+  sendsComanda    Boolean         @default(true)
 
   /// Ruta de cobro externa (otro POS cobra en su propia caja) — §caja externa fase 1.
   /// Los cuatro campos nacen con el default que reproduce el comportamiento actual:

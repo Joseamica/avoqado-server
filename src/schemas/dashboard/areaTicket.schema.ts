@@ -42,6 +42,8 @@ const areaBody = z
     name: z.string().trim().min(1, 'El nombre del área es requerido').max(80, 'Máximo 80 caracteres').optional(),
     fulfillmentMode: z.enum(AREA_MODES).optional(),
     printStationId: z.string().min(1).nullable().optional(),
+    /** D2: apagada, la PC que emite vales de esta área saca sólo el vale. */
+    sendsComanda: z.boolean().optional(),
     active: z.boolean().optional(),
     displayOrder: z.number().int().min(0).max(10000).optional(),
   })

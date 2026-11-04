@@ -155,7 +155,7 @@ interface ReservationSpec {
 }
 
 const ticketInclude = {
-  fulfillmentArea: { select: { id: true, name: true, fulfillmentMode: true } },
+  fulfillmentArea: { select: { id: true, name: true, fulfillmentMode: true, sendsComanda: true } },
   sourceTerminal: { select: { id: true, name: true } },
   lines: {
     include: { orderItem: { select: { id: true } } },
@@ -454,7 +454,15 @@ export async function resolveTerminal(venueId: string, deviceUid: string | null 
         },
       },
       fulfillmentArea: {
-        select: { id: true, name: true, fulfillmentMode: true, active: true, settlementRoute: true, externalConfirmationMode: true },
+        select: {
+          id: true,
+          name: true,
+          fulfillmentMode: true,
+          sendsComanda: true,
+          active: true,
+          settlementRoute: true,
+          externalConfirmationMode: true,
+        },
       },
     },
   })
@@ -513,7 +521,7 @@ async function activeAreasForRoleChoice(venueId: string) {
   const [areas, areasTotal] = await Promise.all([
     prisma.fulfillmentArea.findMany({
       where,
-      select: { id: true, name: true },
+      select: { id: true, name: true, sendsComanda: true },
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
       take: AREA_ROLE_OPTIONS_MAX,
     }),

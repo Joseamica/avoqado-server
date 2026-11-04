@@ -91,6 +91,7 @@ import { cashPaymentByKeyParamsSchema } from '../schemas/mobile/paymentByKey.mob
 import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaRoleSchema } from '../schemas/mobile/areaTicketRole.schema'
+import { areaComandaSchema } from '../schemas/mobile/areaComanda.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
@@ -4300,6 +4301,18 @@ router.put(
   validateRequest(areaRoleSchema),
   checkPermission('area-tickets:configure'),
   areaTicketV7MobileController.setAreaRole,
+)
+
+/**
+ * PUT /api/v1/mobile/venues/:venueId/fulfillment-areas/:areaId/comanda
+ * D2 de vales: «Manda comanda a cocina» del área que ESTE aparato emite (X-Device-Id). Mismo permiso que el papel.
+ */
+router.put(
+  '/venues/:venueId/fulfillment-areas/:areaId/comanda',
+  authenticateTokenMiddleware,
+  validateRequest(areaComandaSchema),
+  checkPermission('area-tickets:configure'),
+  areaTicketV7MobileController.setAreaComanda,
 )
 
 // 🔴 `SCALE_INTEGRATION` es PREMIUM (basePlan.service.ts) y NADIE lo exigía:
