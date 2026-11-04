@@ -159,7 +159,11 @@ async function aceptarInvitacionDeCuentaProvisional(staffId: string, email: stri
     select: { token: true, requirePin: true },
     take: 2,
   })
-  if (vivas.length === 0) return null
+  if (vivas.length === 0) {
+    // Sin invitación viva: o nunca la hubo, o otro clic simultáneo ya la aceptó (Codex r2). Se relee.
+    const releida = await prisma.staff.findUnique({ where: { id: staffId }, include: STAFF_LOGIN_INCLUDE })
+    return releida?.active ? releida : null
+  }
   if (vivas.length > 1) {
     throw new ForbiddenError(
       'Tienes más de una invitación pendiente. Abre la que quieras desde su correo y acéptala llenando el formulario.',

@@ -172,6 +172,16 @@ describe('loginWithGoogle — cuenta provisional de una invitación', () => {
     expect(result.accessToken).toBe('access-token')
   })
 
+  it('si otro clic la aceptó antes de que éste buscara la invitación, entra igual (Codex r2)', async () => {
+    staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(aceptada())
+    invitationFindMany.mockResolvedValueOnce([])
+
+    const result = await loginWithGoogle('id-token', false)
+
+    expect(result.accessToken).toBe('access-token')
+    expect(acceptInvitation).not.toHaveBeenCalled()
+  })
+
   it('🔴 si aceptar falla y la cuenta sigue apagada (sin lugares, o la dieron de baja a media entrada), sale el error', async () => {
     staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(provisional())
     invitationFindMany.mockResolvedValueOnce([VIVA])

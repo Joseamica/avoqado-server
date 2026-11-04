@@ -294,12 +294,16 @@ export async function acceptInvitation(
         // La membresía en ESTA organización nace (o se reactiva) al ACEPTAR — invitar ya no la crea.
         // Sólo si no es ya miembro activo: a un miembro activo no se le toca el rol.
         const yaEsMiembroActivo = existingStaff.organizations.some(o => o.organizationId === invitation.organizationId)
-        if (yaEsMiembroActivo && invitation.role === StaffRole.OWNER) {
+        // 🔴 La cuenta PROVISIONAL trae la membresía que le dejó la PRIMERA invitación al crearla (`inviteTeamMember`),
+        // aunque esa invitación se haya cancelado. Su rol nunca se ganó: al aceptar se toma el de ESTA invitación.
+        // Sin esto, invitado como dueño, cancelado y reinvitado como mesero quedaba dueño de la organización (Codex, 4-nov).
+        const esProvisional = esCuentaProvisional(existingStaff)
+        if (yaEsMiembroActivo && (invitation.role === StaffRole.OWNER || esProvisional)) {
           // N2 (Codex): una invitación de DUEÑO (que sólo emite quien puede otorgarlo) promueve también
           // la membresía; sin esto quedaba OWNER en la sucursal y MEMBER en la organización.
           await tx.staffOrganization.update({
             where: { staffId_organizationId: { staffId: existingStaff.id, organizationId: invitation.organizationId } },
-            data: { role: OrgRole.OWNER },
+            data: { role: invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER },
           })
         }
         if (!yaEsMiembroActivo) {

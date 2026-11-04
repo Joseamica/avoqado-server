@@ -6,9 +6,9 @@
  * `acceptInvitation` del formulario. Lo que Google no puede completar (PIN, varias invitaciones) se rechaza sin prender
  * la cuenta: la invitación ya le dejó una membresía activa en la organización y prenderla le abriría la organización.
  */
-import { StaffRole } from '@prisma/client'
+import { OrgRole, StaffRole } from '@prisma/client'
 import prisma from '../../../src/utils/prismaClient'
-import { inviteTeamMember } from '../../../src/services/dashboard/team.dashboard.service'
+import { cancelInvitation, inviteTeamMember } from '../../../src/services/dashboard/team.dashboard.service'
 import { loginWithGoogle } from '../../../src/services/dashboard/googleOAuth.service'
 
 jest.mock('../../../src/services/email.service', () => ({
@@ -118,6 +118,25 @@ describe('aceptar una invitación por correo con Google', () => {
 
     expect((await prisma.staff.findUniqueOrThrow({ where: { id: staff.id } })).active).toBe(false)
     expect((await prisma.invitation.findUniqueOrThrow({ where: { id: invitacion.id } })).status).toBe('PENDING')
+  })
+
+  it('🔴 invitado como dueño, cancelado y reinvitado como mesero: al aceptar queda MIEMBRO, no dueño de la organización', async () => {
+    const email = `exdueno-${sufijo}@test.mx`
+    await inviteTeamMember(venueId, invitador, { email, firstName: 'Ex', lastName: 'Dueno', role: StaffRole.OWNER })
+    const staff = await prisma.staff.findUniqueOrThrow({ where: { email } })
+    ids.staff.push(staff.id)
+    const deDueno = await prisma.invitation.findFirstOrThrow({ where: { email, organizationId: orgId } })
+    await cancelInvitation(venueId, deDueno.id)
+    await inviteTeamMember(venueId, invitador, { email, firstName: 'Ex', lastName: 'Dueno', role: StaffRole.WAITER })
+
+    mockCorreoDeGoogle = email
+    await loginWithGoogle('id-token', false)
+
+    const membresia = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: staff.id, organizationId: orgId } },
+    })
+    expect(membresia.role).toBe(OrgRole.MEMBER)
+    expect((await prisma.staffVenue.findFirstOrThrow({ where: { staffId: staff.id, venueId } })).role).toBe(StaffRole.WAITER)
   })
 
   it('🔴 alguien dado de baja (su cuenta ya se usó) no se reactiva con Google aunque lo vuelvan a invitar', async () => {
