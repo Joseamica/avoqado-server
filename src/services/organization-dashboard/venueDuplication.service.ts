@@ -129,17 +129,20 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
 
       // Lo contratado pertenece a su tienda: si la modelo depende de ello, la nueva no tendría el mismo plan.
       const ahora = new Date()
-      const [featureActiva, contratoVigente] = await Promise.all([
+      // Contrato: cualquiera sin `endedAt` (aunque su cancelación ya pasó, su concesión puede seguir viva). Concesión:
+      // la misma condición de «viva» que `getContractBaseTier` (basePlan.service), con o sin contrato.
+      const [featureActiva, contratoSinTerminar, concesionViva] = await Promise.all([
         tx.venueFeature.findFirst({
           where: { venueId: modelo.id, active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: ahora } }] },
           select: { id: true },
         }),
-        tx.hybridContract.findFirst({
-          where: { venueId: modelo.id, endedAt: null, OR: [{ cancelAt: null }, { cancelAt: { gt: ahora } }] },
+        tx.hybridContract.findFirst({ where: { venueId: modelo.id, endedAt: null }, select: { id: true } }),
+        tx.capabilityGrant.findFirst({
+          where: { venueId: modelo.id, revokedAt: null, startsAt: { lte: ahora }, endsAt: { gt: ahora } },
           select: { id: true },
         }),
       ])
-      if (featureActiva || contratoVigente) {
+      if (featureActiva || contratoSinTerminar || concesionViva) {
         throw new BadRequestError('Esta tienda tiene un plan contratado; para duplicarla habla con Avoqado', 'TEMPLATE_HAS_PAID_PLAN')
       }
 
@@ -163,21 +166,21 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
       }
 
       const { id: _id, name: _name, ...columnas } = modelo
-      const { latitude, longitude, country, ...domicilio } = input.address
-      const venue = await tx.venue.create({
-        data: {
-          ...columnas,
-          ...domicilio,
-          country: country ?? columnas.country,
-          latitude,
-          longitude,
-          organizationId: orgId,
-          name: input.name.trim(),
-          slug: await slugLibre(tx, input.name),
-          status: VenueStatus.ACTIVE,
-          active: true,
-        },
-        select: { id: true, slug: true, name: true },
+      // Campo por campo: nada de la entrada fuera de la dirección llega a la tienda (plan, tarifa, Stripe…).
+      const a = input.address
+      const venue = await crearConSlugLibre(tx, input.name, {
+        ...columnas,
+        address: a.address,
+        city: a.city,
+        state: a.state,
+        zipCode: a.zipCode,
+        country: a.country ?? columnas.country,
+        latitude: a.latitude,
+        longitude: a.longitude,
+        organizationId: orgId,
+        name: input.name.trim(),
+        status: VenueStatus.ACTIVE,
+        active: true,
       })
 
       await copiarConfiguracion(tx, modelo.id, venue.id)
@@ -204,31 +207,55 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
   return { venueId: resultado.venue.id, slug: resultado.venue.slug, name: resultado.venue.name }
 }
 
-/** El slug de `createVenueForOrganization`: del nombre, y con sufijo si está tomado o reservado. */
-async function slugLibre(tx: Prisma.TransactionClient, nombre: string): Promise<string> {
+const slugTomado = (e: unknown) =>
+  (e as { code?: string }).code === 'P2002' && String((e as { meta?: { target?: unknown } }).meta?.target ?? '').includes('slug')
+
+/**
+ * Crea el `Venue` con el slug de `createVenueForOrganization` (del nombre; con sufijo si está tomado o reservado).
+ * El slug es único en TODA la plataforma y el candado es sólo de la organización: si otra tienda ya lo tiene (o lo
+ * toma a la vez), se regresa al punto de guardado y se prueba con sufijo, sin perder la transacción.
+ */
+async function crearConSlugLibre(
+  tx: Prisma.TransactionClient,
+  nombre: string,
+  data: Omit<Prisma.VenueUncheckedCreateInput, 'slug'>,
+): Promise<{ id: string; slug: string; name: string }> {
   const base = generateSlug(nombre) || 'tienda'
-  let slug = validateSlug(base).isValid ? base : `${base}-tienda`
-  while (await tx.venue.findUnique({ where: { slug }, select: { id: true } })) {
-    slug = `${base}-${Math.random().toString(36).substring(2, 6)}`
+  const primero = validateSlug(base).isValid ? base : `${base}-tienda`
+  for (let intento = 0; ; intento++) {
+    const slug = intento === 0 ? primero : `${base}-${Math.random().toString(36).substring(2, 6)}`
+    await tx.$executeRaw`SAVEPOINT crear_tienda`
+    try {
+      const venue = await tx.venue.create({ data: { ...data, slug }, select: { id: true, slug: true, name: true } })
+      await tx.$executeRaw`RELEASE SAVEPOINT crear_tienda`
+      return venue
+    } catch (error) {
+      if (intento >= 4 || !slugTomado(error)) throw error
+      await tx.$executeRaw`ROLLBACK TO SAVEPOINT crear_tienda`
+    }
   }
-  return slug
 }
 
 const FUERA_DE_LA_COPIA = new Set(['id', 'venueId', 'createdAt', 'updatedAt', 'enabledAt'])
+/** Columnas que son de la tienda modelo y no de su configuración: la nueva las deja en su default. */
+const NO_SE_COPIA: Partial<Record<Prisma.ModelName, readonly string[]>> = {
+  VenueSettings: ['googleReviewLink'], // la liga de reseñas de Google del lugar de la modelo
+}
+/** Columnas Json por modelo, leídas una vez del esquema: un Json nulo se escribe como DbNull. */
+const COLUMNAS_JSON = new Map(
+  Prisma.dmmf.datamodel.models.map(m => [m.name, new Set(m.fields.filter(f => f.type === 'Json').map(f => f.name))]),
+)
 
-/** Fila de configuración lista para otra tienda: sin id, venueId ni fechas de registro; los Json nulos como DbNull. */
-function copia(modelo: Prisma.ModelName, fila: Record<string, unknown>, venueId: string): any {
-  const json = new Set(
-    Prisma.dmmf.datamodel.models
-      .find(m => m.name === modelo)!
-      .fields.filter(f => f.type === 'Json')
-      .map(f => f.name),
-  )
+/** Fila de configuración lista para otra tienda: sin id, venueId ni fechas de registro. */
+function copia<T>(modelo: Prisma.ModelName, fila: object, venueId: string): T {
+  const json = COLUMNAS_JSON.get(modelo)
+  const fuera = NO_SE_COPIA[modelo] ?? []
   const datos: Record<string, unknown> = { venueId }
   for (const [k, v] of Object.entries(fila)) {
-    if (!FUERA_DE_LA_COPIA.has(k)) datos[k] = v === null && json.has(k) ? Prisma.DbNull : v
+    if (FUERA_DE_LA_COPIA.has(k) || fuera.includes(k)) continue
+    datos[k] = v === null && json?.has(k) ? Prisma.DbNull : v
   }
-  return datos
+  return datos as T
 }
 
 async function copiarConfiguracion(tx: Prisma.TransactionClient, desde: string, hacia: string): Promise<void> {
@@ -241,12 +268,23 @@ async function copiarConfiguracion(tx: Prisma.TransactionClient, desde: string, 
     tx.venueRoleConfig.findMany({ where }),
     tx.venueRolePermission.findMany({ where }),
   ])
-  if (settings) await tx.venueSettings.create({ data: copia('VenueSettings', settings, hacia) })
-  if (pago) await tx.venuePaymentConfig.create({ data: copia('VenuePaymentConfig', pago, hacia) })
-  if (modulos.length) await tx.venueModule.createMany({ data: modulos.map(f => copia('VenueModule', f, hacia)) })
-  if (tarifas.length) await tx.venuePricingStructure.createMany({ data: tarifas.map(f => copia('VenuePricingStructure', f, hacia)) })
-  if (puestos.length) await tx.venueRoleConfig.createMany({ data: puestos.map(f => copia('VenueRoleConfig', f, hacia)) })
-  if (permisos.length) await tx.venueRolePermission.createMany({ data: permisos.map(f => copia('VenueRolePermission', f, hacia)) })
+  if (settings) await tx.venueSettings.create({ data: copia<Prisma.VenueSettingsUncheckedCreateInput>('VenueSettings', settings, hacia) })
+  if (pago)
+    await tx.venuePaymentConfig.create({ data: copia<Prisma.VenuePaymentConfigUncheckedCreateInput>('VenuePaymentConfig', pago, hacia) })
+  if (modulos.length)
+    await tx.venueModule.createMany({ data: modulos.map(f => copia<Prisma.VenueModuleCreateManyInput>('VenueModule', f, hacia)) })
+  if (tarifas.length)
+    await tx.venuePricingStructure.createMany({
+      data: tarifas.map(f => copia<Prisma.VenuePricingStructureCreateManyInput>('VenuePricingStructure', f, hacia)),
+    })
+  if (puestos.length)
+    await tx.venueRoleConfig.createMany({
+      data: puestos.map(f => copia<Prisma.VenueRoleConfigCreateManyInput>('VenueRoleConfig', f, hacia)),
+    })
+  if (permisos.length)
+    await tx.venueRolePermission.createMany({
+      data: permisos.map(f => copia<Prisma.VenueRolePermissionCreateManyInput>('VenueRolePermission', f, hacia)),
+    })
 }
 
 /** OWNER/ADMIN activos de la modelo que siguen activos en la organización, con su PermissionSet clonado; más el supervisor. */
@@ -264,7 +302,10 @@ async function copiarGente(tx: Prisma.TransactionClient, orgId: string, desde: s
   const conjuntos = new Map<string, string>()
   const ids = [...new Set(filas.map(f => f.permissionSetId).filter((id): id is string => !!id))]
   for (const set of await tx.permissionSet.findMany({ where: { id: { in: ids }, venueId: desde } })) {
-    const clon = await tx.permissionSet.create({ data: copia('PermissionSet', set, hacia), select: { id: true } })
+    const clon = await tx.permissionSet.create({
+      data: copia<Prisma.PermissionSetUncheckedCreateInput>('PermissionSet', set, hacia),
+      select: { id: true },
+    })
     conjuntos.set(set.id, clon.id)
   }
 

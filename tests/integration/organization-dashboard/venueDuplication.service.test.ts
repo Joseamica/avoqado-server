@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import * as notificationService from '@/services/dashboard/notification.service'
 import { getVenueBaseTier } from '@/services/access/basePlan.service'
 import { getVenueSeatCap } from '@/services/access/seatCap.service'
+import { generateSlug } from '@/utils/slugify'
 import { duplicateVenue, getVenueDuplicationOptions } from '@/services/organization-dashboard/venueDuplication.service'
 
 const tag = `dup${randomUUID().slice(0, 8)}`
@@ -49,10 +50,9 @@ const hibridos: { campaign: string; publication: string; purchase: string; contr
 let n = 0
 
 const plano = (x: unknown) => JSON.parse(JSON.stringify(x))
-const sinLlaves = (fila: Record<string, unknown>) => {
-  const { id, venueId, createdAt, updatedAt, enabledAt, ...resto } = fila
-  return plano(resto)
-}
+const LLAVES_DE_REGISTRO = new Set(['id', 'venueId', 'createdAt', 'updatedAt', 'enabledAt'])
+const sinLlaves = (fila: Record<string, unknown>, fuera: string[] = []) =>
+  plano(Object.fromEntries(Object.entries(fila).filter(([k]) => !LLAVES_DE_REGISTRO.has(k) && !fuera.includes(k))))
 const direccion = {
   address: 'Av. Siempre Viva 742',
   city: 'Querétaro',
@@ -82,8 +82,8 @@ async function tienda(organizationId: string, name: string, data: Record<string,
   return (await prisma.venue.create({ data: { organizationId, name, slug: `${tag}-${++n}`, status: 'ACTIVE', ...data } })).id
 }
 
-/** Contrato híbrido vigente (sin `endedAt`), como en tests/integration/staffPay/acceso.feature.test.ts. */
-async function contratoVigente(venueId: string) {
+/** Contrato híbrido sin `endedAt`, como en tests/integration/staffPay/acceso.feature.test.ts. */
+async function contratoVigente(venueId: string, cancelAt: Date | null = null) {
   const key = `${tag}h${++n}`
   const terms = {
     currency: 'MXN',
@@ -142,6 +142,7 @@ async function contratoVigente(venueId: string) {
       planTier: 'PRO',
       startsAt: new Date(Date.now() - DIA),
       paidThrough: new Date(Date.now() + 10 * DIA),
+      cancelAt,
     },
   })
   hibridos.push({ campaign: campaign.id, publication: publication.id, purchase: purchase.id, contract: contract.id })
@@ -164,6 +165,8 @@ beforeAll(async () => {
   await staff('waiter', ORG_A)
   await staff('supervisor', ORG_A)
   await staff('supInactivo', ORG_A, 'MEMBER', false)
+  await staff('supApagado', ORG_A) // StaffOrganization activo, pero Staff.active=false
+  await prisma.staff.update({ where: { id: s.supApagado }, data: { active: false } })
   await staff('supOtraOrg', ORG_B)
   await staff('superadmin')
   await staff('ownerC', ORG_C, 'OWNER')
@@ -226,6 +229,7 @@ beforeAll(async () => {
       promoterLocationStartHour: 9,
       tipSuggestions: [10, 15],
       hiddenSidebarItems: ['/menu'],
+      googleReviewLink: 'https://search.google.com/local/writereview?placeid=modelo',
     },
   })
   await prisma.venueModule.create({
@@ -299,9 +303,10 @@ afterAll(async () => {
   const venues = (await prisma.venue.findMany({ where: { organizationId: { in: orgs } }, select: { id: true } })).map(v => v.id)
   // La compra COMPLETED es inmutable por trigger (`hybrid_purchase_immutable_quote`): se borra con los triggers
   // apagados sólo en esta transacción, como en tests/integration/staffPay/acceso.catchUp.test.ts.
-  if (hibridos.length)
+  if (venues.length)
     await prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL session_replication_role = replica`
+      await tx.capabilityGrant.deleteMany({ where: { venueId: { in: venues } } })
       await tx.hybridContract.deleteMany({ where: { id: { in: hibridos.map(h => h.contract) } } })
       await tx.hybridPurchase.deleteMany({ where: { id: { in: hibridos.map(h => h.purchase) } } })
       await tx.hybridOfferPublication.deleteMany({ where: { id: { in: hibridos.map(h => h.publication) } } })
@@ -326,10 +331,13 @@ afterAll(async () => {
 
 describe('duplicateVenue — qué copia', () => {
   let nueva = ''
+  let llave = ''
 
   beforeAll(async () => {
     jest.spyOn(notificationService, 'sendNotification').mockResolvedValue(null)
-    nueva = (await duplicateVenue(entrada({ name: 'BAE VALENTIN AMADOR (2973)' }))).venueId
+    const input = entrada({ name: 'BAE VALENTIN AMADOR (2973)' })
+    llave = input.idempotencyKey
+    nueva = (await duplicateVenue(input)).venueId
     jest.restoreAllMocks()
   })
 
@@ -352,28 +360,29 @@ describe('duplicateVenue — qué copia', () => {
     expect(v.phone).toBeNull() // fuera de la lista: nace en su default
 
     const settings = await Promise.all([modeloId, nueva].map(venueId => prisma.venueSettings.findUniqueOrThrow({ where: { venueId } })))
-    expect(sinLlaves(settings[1])).toEqual(sinLlaves(settings[0]))
+    // googleReviewLink es la liga de reseñas del lugar de la modelo: no se copia (abajo).
+    expect(sinLlaves(settings[1], ['googleReviewLink'])).toEqual(sinLlaves(settings[0], ['googleReviewLink']))
 
     const modulos = await Promise.all([modeloId, nueva].map(venueId => prisma.venueModule.findMany({ where: { venueId } })))
-    expect(modulos[1].map(sinLlaves)).toEqual(modulos[0].map(sinLlaves))
+    expect(modulos[1].map(f => sinLlaves(f))).toEqual(modulos[0].map(f => sinLlaves(f)))
 
     const pago = await prisma.venuePaymentConfig.findUniqueOrThrow({ where: { venueId: nueva } })
     expect(pago.primaryAccountId).toBe(merchantId)
     expect(sinLlaves(pago)).toEqual(sinLlaves(await prisma.venuePaymentConfig.findUniqueOrThrow({ where: { venueId: modeloId } })))
 
     const tarifas = await Promise.all([modeloId, nueva].map(venueId => prisma.venuePricingStructure.findMany({ where: { venueId } })))
-    expect(tarifas[1].map(sinLlaves)).toEqual(tarifas[0].map(sinLlaves))
+    expect(tarifas[1].map(f => sinLlaves(f))).toEqual(tarifas[0].map(f => sinLlaves(f)))
 
     const orden = { orderBy: { role: 'asc' as const } }
     const puestos = await Promise.all([modeloId, nueva].map(venueId => prisma.venueRoleConfig.findMany({ where: { venueId }, ...orden })))
     expect(puestos[1]).toHaveLength(3)
-    expect(puestos[1].map(sinLlaves)).toEqual(puestos[0].map(sinLlaves))
+    expect(puestos[1].map(f => sinLlaves(f))).toEqual(puestos[0].map(f => sinLlaves(f)))
 
     const permisos = await Promise.all(
       [modeloId, nueva].map(venueId => prisma.venueRolePermission.findMany({ where: { venueId }, ...orden })),
     )
     expect(permisos[1]).toHaveLength(1)
-    expect(permisos[1].map(sinLlaves)).toEqual(permisos[0].map(sinLlaves))
+    expect(permisos[1].map(f => sinLlaves(f))).toEqual(permisos[0].map(f => sinLlaves(f)))
   })
 
   it('no copia conexiones, suscripciones ni comisiones', async () => {
@@ -389,6 +398,8 @@ describe('duplicateVenue — qué copia', () => {
     })
     expect(await prisma.venueFeature.count({ where: { venueId: nueva } })).toBe(0)
     expect(await prisma.venueCommission.count({ where: { venueId: nueva } })).toBe(0)
+    const ajustes = await prisma.venueSettings.findUniqueOrThrow({ where: { venueId: nueva }, select: { googleReviewLink: true } })
+    expect(ajustes.googleReviewLink).toBeNull()
   })
 
   it('PermissionSet: el ADMIN copiado apunta a un clon propio de la tienda nueva', async () => {
@@ -422,7 +433,7 @@ describe('duplicateVenue — qué copia', () => {
   it('bitácora: VENUE_DUPLICATED con modelo, organización, llave y actor', async () => {
     const log = await prisma.activityLog.findFirstOrThrow({ where: { action: 'VENUE_DUPLICATED', entityId: nueva } })
     expect(log).toMatchObject({ staffId: s.owner, venueId: nueva, organizationId: ORG_A, entity: 'Venue' })
-    expect(log.data).toMatchObject({ templateVenueId: modeloId, organizationId: ORG_A, idempotencyKey: expect.any(String) })
+    expect(log.data).toMatchObject({ templateVenueId: modeloId, organizationId: ORG_A, idempotencyKey: llave })
   })
 })
 
@@ -455,6 +466,26 @@ describe('duplicateVenue — rechazos (ninguno crea tienda)', () => {
   it('modelo con un HybridContract vigente → TEMPLATE_HAS_PAID_PLAN', async () => {
     const modelo = await tienda(ORG_A, `CON CONTRATO (${8000 + ++n})`)
     await contratoVigente(modelo)
+    await rechaza(entrada({ templateVenueId: modelo }), { code: 'TEMPLATE_HAS_PAID_PLAN' })
+  })
+
+  it('modelo con un HybridContract sin endedAt aunque su cancelAt ya pasó → TEMPLATE_HAS_PAID_PLAN', async () => {
+    const modelo = await tienda(ORG_A, `CONTRATO CANCELADO (${8000 + ++n})`)
+    await contratoVigente(modelo, new Date(Date.now() - DIA))
+    await rechaza(entrada({ templateVenueId: modelo }), { code: 'TEMPLATE_HAS_PAID_PLAN' })
+  })
+
+  it('modelo con un CapabilityGrant vivo (sin contrato) → TEMPLATE_HAS_PAID_PLAN', async () => {
+    const modelo = await tienda(ORG_A, `CON CONCESION (${8000 + ++n})`)
+    await prisma.capabilityGrant.create({
+      data: {
+        venueId: modelo,
+        featureCode: 'SERVICE_PAY',
+        sourceId: `${tag}-grant`,
+        startsAt: new Date(Date.now() - 60_000),
+        endsAt: new Date(Date.now() + DIA),
+      },
+    })
     await rechaza(entrada({ templateVenueId: modelo }), { code: 'TEMPLATE_HAS_PAID_PLAN' })
   })
 
@@ -506,7 +537,7 @@ describe('duplicateVenue — rechazos (ninguno crea tienda)', () => {
     expect(await tiendasDe(ORG_B)).toBe(1)
   })
 
-  it.each(['supOtraOrg', 'supInactivo'])('supervisor %s → SUPERVISOR_NOT_IN_ORG', async clave => {
+  it.each(['supOtraOrg', 'supInactivo', 'supApagado'])('supervisor %s → SUPERVISOR_NOT_IN_ORG', async clave => {
     await rechaza(entrada({ supervisorStaffId: s[clave] }), { code: 'SUPERVISOR_NOT_IN_ORG', statusCode: 400 })
   })
 
@@ -517,6 +548,28 @@ describe('duplicateVenue — rechazos (ninguno crea tienda)', () => {
   it('mismo nombre sin número → «Ya hay una tienda con ese nombre»', async () => {
     await tienda(ORG_A, 'TIENDA SIN NUMERO')
     await rechaza(entrada({ name: '  tienda   sin número ' }), { code: 'VENUE_NAME_TAKEN', message: 'Ya hay una tienda con ese nombre' })
+  })
+})
+
+describe('duplicateVenue — entradas que no mandan', () => {
+  it('llaves de más en address no llegan a la tienda nueva (plan, tarifa, Stripe)', async () => {
+    const extra = { ...direccion, planTier: 'PREMIUM', seatCapExempt: false, feeValue: 0.5, stripeCustomerId: `cus_extra_${tag}` }
+    const { venueId } = await duplicateVenue(entrada({ address: extra as any }))
+    const [m, v] = await Promise.all([modeloId, venueId].map(id => prisma.venue.findUniqueOrThrow({ where: { id } })))
+    expect(plano({ planTier: v.planTier, seatCapExempt: v.seatCapExempt, feeValue: v.feeValue })).toEqual(
+      plano({ planTier: m.planTier, seatCapExempt: m.seatCapExempt, feeValue: m.feeValue }),
+    )
+    expect(v.stripeCustomerId).toBeNull()
+  })
+
+  it('el slug ya lo tiene una tienda de OTRA organización → crea con otro slug, sin 500', async () => {
+    const name = `SLUG TOMADO (${8000 + ++n})`
+    const ajena = await prisma.venue.create({ data: { organizationId: ORG_C, name: 'ajena', slug: generateSlug(name) } })
+    const { venueId, slug } = await duplicateVenue(entrada({ name }))
+    expect(slug).not.toBe(ajena.slug)
+    expect(slug.startsWith(ajena.slug)).toBe(true)
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).organizationId).toBe(ORG_A)
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: ajena.id } })).organizationId).toBe(ORG_C)
   })
 })
 
