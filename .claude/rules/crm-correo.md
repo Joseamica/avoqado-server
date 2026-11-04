@@ -29,6 +29,26 @@ aunque cuelgue de otra cuenta o de ninguna. El remitente vuelve a mirar al borde
 minuto antes de encolar (`correoEliminadoDesde`, `erase.service.ts`). El marketing viejo del superadmin hace la misma pregunta desde que
 empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 
+## Llaves del CRM (plan 2026-11-04, L4–L9): cada ruta pide la suya
+
+| Llave                                                       | Abre                                                                                                                                                                                    |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crm:plantillas`                                            | crear, editar, archivar y desarchivar plantillas, y su correo de prueba                                                                                                                 |
+| `crm:contactar` · `crm:plantillas` · `crm:preparar`         | leer plantillas (también `crm_list_email_templates`); `/templates/preview` además con `crm:ver-campanas`                                                                                |
+| `crm:plantillas` · `crm:preparar`                           | subir una imagen                                                                                                                                                                        |
+| `crm:ver-campanas` (la traen también `preparar` y `mandar`) | lista, detalle y conteo de campañas (también `crm_campaign_status`)                                                                                                                     |
+| `crm:preparar`                                              | crear y editar una campaña, y su prueba                                                                                                                                                 |
+| `crm:mandar`                                                | mandar y cancelar                                                                                                                                                                       |
+| `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                 |
+| `crm:configurar`                                            | etapas y motivos (leerlos también con `crm:ver`), ocultar clientes y ver los ocultos y el KYC, importar de HubSpot, la puerta de «Eliminar» (que sigue siendo sólo del superadmin real) |
+| `crm:bajas`                                                 | `POST /opt-outs`, sola                                                                                                                                                                  |
+| `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, regresar al embudo, y mover un GANADO o PERDIDO a una etapa abierta                                                                                                      |
+
+🔴 `crm:campanas` y `crm:admin` (y `access.campanas`/`access.admin`) son sólo el espejo para la pantalla vieja: ninguna ruta, servicio ni
+herramienta del MCP decide con ellos (`tests/unit/routes/crm.team.routes.test.ts` lo revisa). 🔴 El disparador de `PlatformAccess` (L11)
+apaga las 8 finas en todo `UPDATE` que no suba `llavesVersion`: código nuevo que escribe esa fila y debe conservarlas suma
+`llavesVersion: { increment: 1 }`; cualquier otra escritura las apaga.
+
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 
 `sendTestToSelf` firma `platformUnsubscribeUrl` con el correo de quien prueba. Si lo usa (Rafa, por ejemplo), su correo queda bloqueado y

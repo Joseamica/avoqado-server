@@ -487,7 +487,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
   server.tool(
     'crm_advance_stage',
     'Avanza un negocio del CRM a una etapa posterior, por su nombre (p. ej. «Demo»). Nunca retrocede ni mueve un negocio ' +
-      'cerrado. «Perdido» se puede desde cualquier etapa abierta y pide el motivo, de la lista que se devuelve; para ' +
+      'cerrado. «Perdido» se puede desde cualquier etapa abierta, pide la llave «Cerrar negocios» y el motivo, de la lista que se devuelve; para ' +
       '«Ganado» se usa la ficha del SUPERADMIN, que liga su negocio de Avoqado. Si el nombre no coincide, devuelve las ' +
       'opciones. ' +
       SOLO,
@@ -545,8 +545,9 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       confirm: z.boolean().optional().describe('true sólo en la SEGUNDA llamada, tras la autorización del usuario'),
     },
     async ({ accountId: id, confirmName, confirm }) =>
-      conLlave(scope, 'crm:admin', async access => {
-        requireWriteScopeAlways(scope, 'crm:admin', 'elimina un negocio del CRM de ventas')
+      // La misma puerta que la ruta (L7): «Configurar el CRM»; eliminar sigue siendo sólo del superadmin real.
+      conLlave(scope, 'crm:configurar', async access => {
+        requireWriteScopeAlways(scope, 'crm:configurar', 'elimina un negocio del CRM de ventas')
         if (!access.isSuperadmin) return { ok: false, error: 'Sólo el superadmin puede eliminar un negocio del CRM.' }
         if (confirm !== true) {
           const account = await prisma.crmAccount.findUnique({
@@ -671,7 +672,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       archivadas: z.boolean().optional().describe('true = sólo las archivadas; si no, sólo las vivas'),
     },
     async ({ cursor, limit, archivadas }) =>
-      conLlave(scope, ['crm:contactar', 'crm:campanas', 'crm:admin'], async () => {
+      // Las mismas llaves que leer plantillas en las pantallas (L4).
+      conLlave(scope, ['crm:contactar', 'crm:plantillas', 'crm:preparar'], async () => {
         const { rows, nextCursor, total } = await listTemplates({ cursor, limit, archivadas })
         return { ok: true, total, hayMas: nextCursor !== null, siguiente: nextCursor, plantillas: rows.map(plantilla) }
       }),
@@ -702,7 +704,8 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         .describe('Sólo las campañas en ese estado (sólo en la lista)'),
     },
     async ({ campaignId, cursor, limit, status }) =>
-      conLlave(scope, ['crm:campanas', 'crm:admin'], async () => {
+      // Las mismas que la lista y el detalle de campañas (L5): «Ver campañas», que también traen «Preparar» y «Mandar».
+      conLlave(scope, 'crm:ver-campanas', async () => {
         if (campaignId) return { ok: true, campana: campana(await getCampaign(campaignId)) }
         const { rows, nextCursor, total } = await listCampaigns({ cursor, limit, status })
         return { ok: true, total, hayMas: nextCursor !== null, siguiente: nextCursor, campanas: rows.map(campana) }

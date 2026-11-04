@@ -793,13 +793,13 @@ async function reassignedView(tx: Prisma.TransactionClient, access: CrmAccess, i
 }
 
 /**
- * Gives the account to someone on the team, or to nobody (`null`). Only with «Editar: todos» or as an admin, who reach
- * every account. The new owner must be able to EDIT accounts — with only «Ver» they would own accounts they cannot touch,
+ * Gives the account to someone on the team, or to nobody (`null`). Only with «Editar: todos» or «Equipo y llaves» (L6),
+ * who reach every account. The new owner must be able to EDIT accounts — with only «Ver» they would own accounts they cannot touch,
  * frozen until someone reassigns them (m-3). Its pending activities go with it (ruling 12).
  */
 export async function reassign(access: CrmAccess, id: string, staffId: string | null) {
-  if (!(access.admin || access.editar === 'todos')) {
-    throw new ForbiddenError('Sólo quien edita todos los negocios o administra el CRM puede cambiar el dueño', 'CRM_NO_PUEDE_REASIGNAR')
+  if (!(access.equipo || access.editar === 'todos')) {
+    throw new ForbiddenError('Sólo quien edita todos los negocios o maneja el equipo puede cambiar el dueño', 'CRM_NO_PUEDE_REASIGNAR')
   }
   if (staffId && !(await getCrmAccess(staffId))?.editar) {
     throw new ValidationError(
@@ -840,6 +840,14 @@ export async function reassign(access: CrmAccess, id: string, staffId: string | 
 // ── The pipeline ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
+ * «Cerrar negocios» (L9): ganar, perder y reabrir. La ruta ya la pide; aquí también, porque el MCP pierde por `lose` y
+ * reabrir por `moveStage` sólo se sabe con la fila bloqueada. `cerrar` ya viene apagada sin «Editar» (`effectiveKeys`).
+ */
+function assertCierra(access: CrmAccess, message = 'No tienes la llave «Cerrar negocios»') {
+  if (!access.cerrar) throw new ForbiddenError(message, 'CRM_FORBIDDEN')
+}
+
+/**
  * Moves an account to another OPEN stage. «Ganado» and «Perdido» go through `win` and `lose`, which ask for the
  * Organization and the reason. Moving a won or lost account back to an open stage reopens it.
  *
@@ -857,6 +865,8 @@ export async function moveStage(access: CrmAccess, id: string, stageId: string, 
     const account = await touchEditableTx(tx, access, id, now)
     assertExpectedStage(account.stageId, expectedStageId)
     if (account.stageId !== target.id) {
+      // Mover uno GANADO o PERDIDO a una etapa abierta lo reabre: es deshacer un cierre (L9).
+      if (account.stage.kind !== 'ABIERTA') assertCierra(access, 'Para reabrir un negocio cerrado necesitas la llave «Cerrar negocios»')
       const reopened = account.stage.kind === 'ABIERTA' ? {} : { wonAt: null, lostAt: null, lostReasonId: null, lostNote: null }
       await tx.crmAccount.update({ where: { id }, data: { stageId: target.id, stageEnteredAt: now, ...reopened } })
       await addEvent(tx, {
@@ -882,6 +892,7 @@ function assertExpectedStage(current: string, expected: string | undefined) {
  * `expectedStageId`, like in `moveStage`: a business won meanwhile is not turned into a lost one.
  */
 export async function lose(access: CrmAccess, id: string, input: { lostReasonId?: string; note?: string; expectedStageId?: string }) {
+  assertCierra(access)
   if (!input.lostReasonId) throw new ValidationError('Elige por qué se perdió', 'CRM_FALTA_MOTIVO')
   const [reason, lostStage] = await Promise.all([
     prisma.crmLostReason.findUnique({ where: { id: input.lostReasonId }, select: { id: true, name: true, active: true } }),
@@ -949,6 +960,7 @@ export async function resetFirstMoneyTx(
  * spec §5.4 keeps the owner of a won account, and the CRM exists so every sale has one.
  */
 export async function win(access: CrmAccess, id: string, input: { organizationId?: string }) {
+  assertCierra(access)
   const wonStage = await closedStage('GANADA')
   const now = new Date()
   try {
@@ -1032,8 +1044,9 @@ export async function archive(access: CrmAccess, id: string) {
   })
 }
 
-/** Back into the pipeline, freshly touched: it does not come back already stale. */
+/** Back into the pipeline, freshly touched: it does not come back already stale. Pide «Cerrar negocios» (L9). */
 export async function reactivate(access: CrmAccess, id: string) {
+  assertCierra(access)
   const now = new Date()
   return prisma.$transaction(async tx => {
     const account = await touchEditableTx(tx, access, id, now)

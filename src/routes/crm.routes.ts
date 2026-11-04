@@ -69,41 +69,54 @@ router.get('/gmail/callback', autenticacionOpcional, crmEmailController.gmailCal
 
 router.use(authenticateTokenMiddleware)
 
+// Las llaves finas (plan 2026-11-04, L4–L9). 🔴 Ninguna ruta pide `crm:campanas` ni `crm:admin`: son sólo el espejo que
+// `/me` y `/team` le siguen mandando a la pantalla vieja, y no autorizan nada.
 const ver = requireCrm('crm:ver')
 const editar = requireCrm('crm:editar')
-const admin = requireCrm('crm:admin')
 const exportar = requireCrm('crm:exportar')
-// «Campañas masivas» (`crm:campanas`) or the admin: whoever writes the templates and sends the campaigns. It stands alone, without «Ver negocios».
-const campanas = requireCrm(['crm:campanas', 'crm:admin'])
-// Whoever may use a template reads it: the seller who mails one by one, the campaign owner and the admin.
-const leerPlantillas = requireCrm(['crm:contactar', 'crm:campanas', 'crm:admin'])
+// L9: ganar, perder y regresar al embudo. Sólo vale encima de «Editar» y en su alcance (L1). Reabrir por `stage` lo decide el servicio.
+const cerrar = requireCrm('crm:cerrar')
+// L6: el equipo de ventas y sus llaves.
+const equipo = requireCrm('crm:equipo')
+// L7: ordenar el archivero (etapas, motivos, ocultos, importar) y la puerta de «Eliminar».
+const configurar = requireCrm('crm:configurar')
+// L4: escribir plantillas, archivarlas y su correo de prueba. Va sola, sin «Ver negocios».
+const plantillas = requireCrm('crm:plantillas')
+// L4: lee las plantillas quien las usa: el uno a uno, quien las escribe y quien arma campañas.
+const leerPlantillas = requireCrm(['crm:contactar', 'crm:plantillas', 'crm:preparar'])
+// L5: lista, detalle y conteo de campañas. «Ver campañas» es la efectiva: también la traen «Preparar» y «Mandar» (L1).
+const verCampanas = requireCrm('crm:ver-campanas')
+// L5: crear, editar y probar una campaña.
+const preparar = requireCrm('crm:preparar')
+// L5: mandarla y cancelarla. Mandar exige la prueba de esa versión, que es de quien prepara.
+const mandar = requireCrm('crm:mandar')
 
 // Any key opens it: 403 only for whoever holds none.
 router.get('/me', requireCrm(CRM_KEYS), crmController.getMe)
 
-// «Equipo de ventas»: who holds which key. The guard goes first, so nobody without `crm:admin` learns anything here.
-router.get('/team', admin, validateRequest(listTeamSchema), crmController.listTeam)
+// «Equipo de ventas»: who holds which key. The guard goes first, so nobody without «Equipo y llaves» learns anything here.
+router.get('/team', equipo, validateRequest(listTeamSchema), crmController.listTeam)
 // L10: la pantalla vieja (manda `campanas`/`admin`) recibe 409 «recarga la página» antes del esquema, sin escribir nada.
 const sinPantallaVieja = (req: Request, _res: Response, next: NextFunction) => {
   assertFormaNuevaDeLlaves(req.body)
   next()
 }
-router.post('/team', admin, sinPantallaVieja, validateRequest(addTeamMemberSchema), crmController.addTeam)
-router.patch('/team/:id', admin, sinPantallaVieja, validateRequest(updateTeamMemberSchema), crmController.updateTeam)
-router.delete('/team/:id', admin, validateRequest(removeTeamMemberSchema), crmController.removeTeam)
-// The ficha's owner selector (ruling 13). The service hands the names only to whoever can reassign.
-router.get('/team/options', requireCrm(['crm:admin', 'crm:editar']), crmController.teamOptions)
+router.post('/team', equipo, sinPantallaVieja, validateRequest(addTeamMemberSchema), crmController.addTeam)
+router.patch('/team/:id', equipo, sinPantallaVieja, validateRequest(updateTeamMemberSchema), crmController.updateTeam)
+router.delete('/team/:id', equipo, validateRequest(removeTeamMemberSchema), crmController.removeTeam)
+// The ficha's owner selector (ruling 13). The service hands the names only to whoever can reassign (equipo o «Editar: todos»).
+router.get('/team/options', requireCrm(['crm:equipo', 'crm:editar']), crmController.teamOptions)
 
 // «Mis pendientes», where the CRM opens.
 router.get('/pending', ver, crmController.pending)
 
-// Stages and lost reasons: whoever sees the pipeline reads them; an admin without «Ver negocios» still edits them.
-router.get('/stages', requireCrm(['crm:ver', 'crm:admin']), crmController.listStages)
-router.post('/stages', admin, validateRequest(createStageSchema), crmController.createStage)
-router.patch('/stages/:id', admin, validateRequest(updateStageSchema), crmController.updateStage)
-router.get('/lost-reasons', requireCrm(['crm:ver', 'crm:admin']), crmController.listLostReasons)
-router.post('/lost-reasons', admin, validateRequest(createLostReasonSchema), crmController.createLostReason)
-router.patch('/lost-reasons/:id', admin, validateRequest(updateLostReasonSchema), crmController.updateLostReason)
+// Stages and lost reasons: whoever sees the pipeline reads them; «Configurar el CRM» edits them even without «Ver negocios» (L7).
+router.get('/stages', requireCrm(['crm:ver', 'crm:configurar']), crmController.listStages)
+router.post('/stages', configurar, validateRequest(createStageSchema), crmController.createStage)
+router.patch('/stages/:id', configurar, validateRequest(updateStageSchema), crmController.updateStage)
+router.get('/lost-reasons', requireCrm(['crm:ver', 'crm:configurar']), crmController.listLostReasons)
+router.post('/lost-reasons', configurar, validateRequest(createLostReasonSchema), crmController.createLostReason)
+router.patch('/lost-reasons/:id', configurar, validateRequest(updateLostReasonSchema), crmController.updateLostReason)
 
 // What «Ganar» links an account to.
 router.get('/organizations/search', editar, validateRequest(searchOrganizationsSchema), crmController.searchOrganizations)
@@ -113,20 +126,21 @@ router.get('/accounts', ver, validateRequest(listAccountsSchema), crmController.
 router.post('/accounts', editar, validateRequest(createAccountSchema), crmController.createAccount)
 router.get('/accounts/:id', ver, validateRequest(accountIdSchema), crmController.getAccount)
 router.post('/accounts/:id/take', editar, validateRequest(accountIdSchema), crmController.takeAccount)
-// «Editar: todos» or admin: the service decides, so a «propios» seller gets a 403 that says why.
+// «Editar: todos» o «Equipo y llaves» (L6): the service decides, so a «propios» seller gets a 403 that says why.
 router.post(
   '/accounts/:id/reassign',
-  requireCrm(['crm:editar', 'crm:admin']),
+  requireCrm(['crm:editar', 'crm:equipo']),
   validateRequest(reassignAccountSchema),
   crmController.reassignAccount,
 )
+// Mover uno abierto pide «Editar»; reabrir uno GANADO o PERDIDO pide además «Cerrar negocios» (lo revisa `moveStage`, L9).
 router.post('/accounts/:id/stage', editar, validateRequest(moveStageSchema), crmController.moveStage)
-router.post('/accounts/:id/lose', editar, validateRequest(loseAccountSchema), crmController.loseAccount)
-router.post('/accounts/:id/win', editar, validateRequest(winAccountSchema), crmController.winAccount)
+router.post('/accounts/:id/lose', cerrar, validateRequest(loseAccountSchema), crmController.loseAccount)
+router.post('/accounts/:id/win', cerrar, validateRequest(winAccountSchema), crmController.winAccount)
 router.post('/accounts/:id/archive', editar, validateRequest(accountIdSchema), crmController.archiveAccount)
-router.post('/accounts/:id/reactivate', editar, validateRequest(accountIdSchema), crmController.reactivateAccount)
-// «Eliminar», forever (D7): the real superadmin only — founder, 2-nov — which the service checks; the key is the door.
-router.post('/accounts/:id/delete', admin, validateRequest(deleteAccountSchema), crmController.deleteAccount)
+router.post('/accounts/:id/reactivate', cerrar, validateRequest(accountIdSchema), crmController.reactivateAccount)
+// «Eliminar», forever (D7): the real superadmin only — founder, 2-nov — which the service checks; «Configurar» is the door (L7).
+router.post('/accounts/:id/delete', configurar, validateRequest(deleteAccountSchema), crmController.deleteAccount)
 router.post('/accounts/:id/notes', editar, validateRequest(addNoteSchema), crmController.addNote)
 router.post('/accounts/:id/activities', editar, validateRequest(addActivitySchema), crmController.createActivity)
 
@@ -135,9 +149,9 @@ router.get('/accounts/:id/live', ver, validateRequest(accountIdSchema), crmContr
 
 // «Clientes», the reports and the CSV of the filtered list (plan task 9).
 router.get('/clients', ver, validateRequest(listClientsSchema), crmController.listClients)
-// Prime or any internal or test organization never listed as a client (ruling 39): the admin hides it and brings it back.
-router.post('/clients/:organizationId/hide', admin, validateRequest(hideClientSchema), crmController.hideClient)
-router.post('/clients/:organizationId/unhide', admin, validateRequest(hideClientSchema), crmController.unhideClient)
+// Prime or any internal or test organization never listed as a client (ruling 39): «Configurar el CRM» hides it and brings it back.
+router.post('/clients/:organizationId/hide', configurar, validateRequest(hideClientSchema), crmController.hideClient)
+router.post('/clients/:organizationId/unhide', configurar, validateRequest(hideClientSchema), crmController.unhideClient)
 // What is live for a client without a CRM account (ruling 47): the same answer and locks as `/accounts/:id/live`.
 router.get('/clients/:organizationId/live', ver, validateRequest(hideClientSchema), crmController.getClientLive)
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)
@@ -147,25 +161,31 @@ router.get('/export.csv', exportar, validateRequest(exportAccountsSchema), crmCo
 router.post('/activities/:id/done', editar, validateRequest(completeActivitySchema), crmController.markActivityDone)
 router.post('/activities/:id/reschedule', editar, validateRequest(rescheduleActivitySchema), crmController.rescheduleActivityHandler)
 
-// Email templates (phase 2). Reading and the preview are for whoever uses them; writing, the test and the pictures are for «Campañas masivas».
+// Email templates (phase 2, L4). Reading is for whoever uses them; writing and the test, for «Plantillas». The preview also
+// for whoever sees campaigns (`VistaPrevia` inside a campaign): with `contexto` it reads the account with the «Ver» scope.
 router.get('/templates', leerPlantillas, validateRequest(listTemplatesSchema), crmEmailController.listTemplates)
-router.post('/templates', campanas, validateRequest(createTemplateSchema), crmEmailController.createTemplate)
-router.post('/templates/preview', leerPlantillas, validateRequest(previewTemplateSchema), crmEmailController.previewTemplate)
-router.post('/templates/test', campanas, validateRequest(sendTemplateTestSchema), crmEmailController.sendTemplateTest)
+router.post('/templates', plantillas, validateRequest(createTemplateSchema), crmEmailController.createTemplate)
+router.post(
+  '/templates/preview',
+  requireCrm(['crm:contactar', 'crm:plantillas', 'crm:preparar', 'crm:ver-campanas']),
+  validateRequest(previewTemplateSchema),
+  crmEmailController.previewTemplate,
+)
+router.post('/templates/test', plantillas, validateRequest(sendTemplateTestSchema), crmEmailController.sendTemplateTest)
 router.get('/templates/:id', leerPlantillas, validateRequest(templateIdSchema), crmEmailController.getTemplate)
-router.patch('/templates/:id', campanas, validateRequest(updateTemplateSchema), crmEmailController.updateTemplate)
-router.post('/templates/:id/archive', campanas, validateRequest(templateIdSchema), crmEmailController.archiveTemplate)
-router.post('/templates/:id/unarchive', campanas, validateRequest(templateIdSchema), crmEmailController.unarchiveTemplate)
+router.patch('/templates/:id', plantillas, validateRequest(updateTemplateSchema), crmEmailController.updateTemplate)
+router.post('/templates/:id/archive', plantillas, validateRequest(templateIdSchema), crmEmailController.archiveTemplate)
+router.post('/templates/:id/unarchive', plantillas, validateRequest(templateIdSchema), crmEmailController.unarchiveTemplate)
 
-// Mass-email campaigns (phase 2): all of it for «Campañas masivas» or the admin. Sending is confirmed with the preview's token.
-router.get('/campaigns', campanas, validateRequest(listCampaignsSchema), crmEmailController.listCampaigns)
-router.post('/campaigns', campanas, validateRequest(createCampaignSchema), crmEmailController.createCampaign)
-router.get('/campaigns/:id', campanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
-router.patch('/campaigns/:id', campanas, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
-router.post('/campaigns/:id/preview', campanas, validateRequest(campaignIdSchema), crmEmailController.previewCampaign)
-router.post('/campaigns/:id/test', campanas, validateRequest(campaignIdSchema), crmEmailController.sendCampaignTest)
-router.post('/campaigns/:id/send', campanas, validateRequest(sendCampaignSchema), crmEmailController.sendCampaign)
-router.post('/campaigns/:id/cancel', campanas, validateRequest(campaignIdSchema), crmEmailController.cancelCampaign)
+// Mass-email campaigns (phase 2, L5): see, prepare, send. Sending is confirmed with the preview's token.
+router.get('/campaigns', verCampanas, validateRequest(listCampaignsSchema), crmEmailController.listCampaigns)
+router.post('/campaigns', preparar, validateRequest(createCampaignSchema), crmEmailController.createCampaign)
+router.get('/campaigns/:id', verCampanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
+router.patch('/campaigns/:id', preparar, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
+router.post('/campaigns/:id/preview', verCampanas, validateRequest(campaignIdSchema), crmEmailController.previewCampaign)
+router.post('/campaigns/:id/test', preparar, validateRequest(campaignIdSchema), crmEmailController.sendCampaignTest)
+router.post('/campaigns/:id/send', mandar, validateRequest(sendCampaignSchema), crmEmailController.sendCampaign)
+router.post('/campaigns/:id/cancel', mandar, validateRequest(campaignIdSchema), crmEmailController.cancelCampaign)
 
 // A picture for an `image` block: in memory, at most 5 MB, only the three types `uploadAnnouncementImage` accepts.
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -194,19 +214,20 @@ function imageFile(req: Request, res: Response, next: NextFunction) {
     )
   })
 }
-// The key first: whoever is not allowed never gets 5 MB read into memory.
-router.post('/uploads/image', campanas, imageFile, crmEmailController.uploadImage)
+// The key first: whoever is not allowed never gets 5 MB read into memory. Plantillas y campañas llevan imágenes (L4).
+router.post('/uploads/image', requireCrm(['crm:plantillas', 'crm:preparar']), imageFile, crmEmailController.uploadImage)
 
 // The seller's own Gmail (phase 2, plan task 7): connect it, see it, disconnect it, and «Mandar correo» from the ficha.
-// `crm:contactar` only counts on top of «Ver negocios» (`effectiveKeys`), so whoever holds only «Campañas masivas» gets 403.
+// `crm:contactar` only counts on top of «Ver negocios» (`effectiveKeys`), so whoever holds only the mass-email keys gets 403.
 const contactar = requireCrm('crm:contactar')
 router.get('/gmail', contactar, crmEmailController.gmailStatus)
 router.get('/gmail/connect', contactar, crmEmailController.gmailConnect)
 router.post('/gmail/disconnect', contactar, crmEmailController.gmailDisconnect)
 router.post('/accounts/:id/emails', contactar, validateRequest(sendAccountEmailSchema), crmEmailController.sendAccountEmail)
 
-// «Dar de baja este correo» (the opposition, from the ficha): the person stops receiving anything from Avoqado. Only the CRM admin.
-router.post('/opt-outs', admin, validateRequest(createOptOutSchema), crmEmailController.createOptOut)
+// «Dar de baja este correo» (the opposition, from the ficha): the person stops receiving anything from Avoqado. «Bajas de
+// correo», que va sola (L1, L8).
+router.post('/opt-outs', requireCrm('crm:bajas'), validateRequest(createOptOutSchema), crmEmailController.createOptOut)
 
 // «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
 const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024
@@ -237,8 +258,8 @@ function hubspotFiles(req: Request, res: Response, next: NextFunction) {
     return next(new ValidationError(message, 'CRM_IMPORT_ARCHIVO_INVALIDO', multerCode ? { multerCode } : undefined))
   })
 }
-// The key first: whoever is not an admin of the CRM never gets 10 MB read into memory.
-router.post('/import/hubspot/preview', admin, hubspotFiles, crmController.previewHubspotImport)
-router.post('/import/hubspot/apply', admin, hubspotFiles, crmController.applyHubspotImport)
+// The key first: whoever does not configure the CRM never gets 10 MB read into memory (L7).
+router.post('/import/hubspot/preview', configurar, hubspotFiles, crmController.previewHubspotImport)
+router.post('/import/hubspot/apply', configurar, hubspotFiles, crmController.applyHubspotImport)
 
 export default router

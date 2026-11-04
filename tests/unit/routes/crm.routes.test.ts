@@ -174,8 +174,8 @@ describe('importar lo de HubSpot', () => {
     expect(res.body.data).toMatchObject({ nuevos: 1, archivados: 1 })
   })
 
-  it('sin_crm_admin_es_403', async () => {
-    // A seller who sees and edits every account, but does not administer the CRM.
+  it('sin_configurar_es_403 (L7)', async () => {
+    // A seller who sees and edits every account, but does not configure the CRM.
     prismaMock.platformAccess.findUnique.mockResolvedValue({
       id: 'caccessrw0000000000000009',
       staffId: ADMIN_ID,
@@ -235,13 +235,13 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     }
   })
 
-  it('ocultar_y_regresar_piden_crm_admin', async () => {
+  it('ocultar_y_regresar_piden_configurar (L7)', async () => {
     const ORG = 'corgprime0000000000000001'
     prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })
     prismaMock.crmHiddenClient.createMany.mockResolvedValue({ count: 1 })
     prismaMock.crmHiddenClient.deleteMany.mockResolvedValue({ count: 1 })
 
-    // The admin of the team from `beforeEach`: «Administrar» on, even without «Ver negocios».
+    // The admin of the team from `beforeEach` («Configurar el CRM» on, L2), even without «Ver negocios».
     const hidden = await request(app).post(`/crm/clients/${ORG}/hide`)
     expect(hidden.status).toBe(200)
     expect(hidden.body.data).toEqual({ organizationId: ORG, oculta: true })
@@ -249,7 +249,7 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     expect(shown.status).toBe(200)
     expect(shown.body.data).toEqual({ organizationId: ORG, oculta: false })
 
-    // A seller who sees and edits everything, without «Administrar».
+    // A seller who sees and edits everything, without «Configurar el CRM».
     prismaMock.platformAccess.findUnique.mockResolvedValue({
       id: 'caccessrw0000000000000009',
       staffId: ADMIN_ID,

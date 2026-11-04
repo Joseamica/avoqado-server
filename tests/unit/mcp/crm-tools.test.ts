@@ -329,12 +329,12 @@ describe('CRM MCP — access', () => {
 })
 
 describe('crm_delete_account (D7)', () => {
-  it('sin «Administrar» se niega y la nombra; un admin del equipo que no es el superadmin, tampoco', async () => {
-    // «Administrar» son las 3 de administración (plan 2026-11-04): sin ellas, sin la llave.
-    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, admin: false, equipo: false, configurar: false, bajas: false })
+  it('sin «Configurar el CRM» se niega y la nombra; quien configura y no es el superadmin real, tampoco (L7)', async () => {
+    // «Equipo» y «Bajas» no abren la puerta, ni el espejo `admin` de la pantalla vieja.
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, configurar: false })
     expect(await setup().call('crm_delete_account', { ...ARGS.crm_delete_account, confirm: true })).toMatchObject({
       ok: false,
-      error: expect.stringContaining('crm:admin'),
+      error: expect.stringContaining('crm:configurar'),
     })
     ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, isSuperadmin: false })
     expect(await setup().call('crm_delete_account', { ...ARGS.crm_delete_account, confirm: true })).toMatchObject({
@@ -1211,41 +1211,38 @@ describe('CRM MCP — email (read only)', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
-  it('keys: templates open with «Mandar correo», «Campañas masivas» or «Administrar»; campaigns only with the last two', async () => {
+  it('llaves (L4, L5): las plantillas abren con «Mandar correo», «Plantillas» o «Preparar»; las campañas con «Ver campañas»', async () => {
     ;(listTemplates as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
     ;(listCampaigns as jest.Mock).mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
-    // Sin ninguna, y cada llave de antes como la deja la migración de las llaves finas (L2): `campanas` = las 4 de correo
-    // masivo; `admin` = esas 4 y las 3 de administración.
-    const correo = { plantillas: true, preparar: true, mandar: true, verCampanas: true }
-    const administracion = { equipo: true, configurar: true, bajas: true }
-    const none = {
+    const none: CrmAccess = {
       ...ADMIN,
+      isSuperadmin: false,
       contactar: false,
       campanas: false,
       admin: false,
       ...{ plantillas: false, preparar: false, mandar: false, verCampanas: false, equipo: false, configurar: false, bajas: false },
     }
-    const only = (key: 'contactar' | 'campanas' | 'admin') =>
-      key === 'contactar'
-        ? { ...none, contactar: true }
-        : key === 'campanas'
-          ? { ...none, campanas: true, ...correo }
-          : { ...none, campanas: true, admin: true, ...correo, ...administracion }
-    const reads = async (access: CrmAccess) => {
-      ;(getCrmAccess as jest.Mock).mockResolvedValue(access)
+    const reads = async (over: Partial<CrmAccess>) => {
+      ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...none, ...over })
       const { call } = setup()
       return {
         plantillas: (await call('crm_list_email_templates', {})).ok,
         campanas: (await call('crm_campaign_status', {})).ok,
       }
     }
-    expect(await reads(only('contactar') as CrmAccess)).toEqual({ plantillas: true, campanas: false })
-    expect(await reads(only('campanas') as CrmAccess)).toEqual({ plantillas: true, campanas: true })
-    expect(await reads(only('admin') as CrmAccess)).toEqual({ plantillas: true, campanas: true })
-    expect(await reads(none)).toEqual({ plantillas: false, campanas: false })
+    // Las llaves tal como las deja `effectiveKeys`: «Preparar» y «Mandar» traen «Ver campañas» (L1).
+    expect(await reads({ contactar: true })).toEqual({ plantillas: true, campanas: false })
+    expect(await reads({ plantillas: true })).toEqual({ plantillas: true, campanas: false })
+    expect(await reads({ preparar: true, verCampanas: true })).toEqual({ plantillas: true, campanas: true })
+    expect(await reads({ mandar: true, verCampanas: true })).toEqual({ plantillas: false, campanas: true })
+    expect(await reads({ verCampanas: true })).toEqual({ plantillas: false, campanas: true })
+    // 🔴 Ni las 3 de administración ni el espejo viejo (`campanas`/`admin`) abren nada del correo.
+    expect(await reads({ equipo: true, configurar: true, bajas: true })).toEqual({ plantillas: false, campanas: false })
+    expect(await reads({ campanas: true, admin: true })).toEqual({ plantillas: false, campanas: false })
+    expect(await reads({})).toEqual({ plantillas: false, campanas: false })
     // The refusal names the keys, in the words of the screens.
     const { call } = setup()
-    expect(await call('crm_campaign_status', {})).toMatchObject({ ok: false, error: expect.stringContaining('crm:campanas') })
+    expect(await call('crm_campaign_status', {})).toMatchObject({ ok: false, error: expect.stringContaining('crm:ver-campanas') })
     expect(await call('crm_list_email_templates', {})).toMatchObject({ ok: false, error: expect.stringContaining('crm:contactar') })
   })
 

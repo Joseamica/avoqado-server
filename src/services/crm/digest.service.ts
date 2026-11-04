@@ -360,22 +360,24 @@ function sectionLine({ rows, total }: PendingSection): string {
 
 /**
  * The person's digest, or null when nothing is pending (ruling 32): their overdue, today's, without a next step and stale
- * accounts; an admin also counts the new ones nobody owns and the pending activities nobody is in charge of (ruling 12).
+ * accounts; whoever holds «Equipo y llaves» also counts the new ones nobody owns and the pending activities nobody is in
+ * charge of (ruling 12, L6).
  * Archived accounts never count (ruling 30): `getPending` leaves them out, and so does the count here.
  */
 async function digestFor(access: CrmAccess, now: Date): Promise<Omit<DigestContent, 'to'> | null> {
   const pending: Pending = await getPending(access, now)
-  const orphans = access.admin
+  // Repartir lo que no tiene dueño es de quien maneja el equipo (L6), no del espejo `admin` de la pantalla vieja.
+  const orphans = access.equipo
     ? await prisma.crmActivity.count({
         where: { doneAt: null, assigneeStaffId: null, account: { AND: [scopeWhere(access, 'ver'), { archivedAt: null }] } },
       })
     : 0
   const own = DIGEST_SECTIONS.reduce((sum, [key]) => sum + pending[key].total, 0)
-  if (!own && !(access.admin && (pending.nuevosSinDueno.total || orphans))) return null
+  if (!own && !(access.equipo && (pending.nuevosSinDueno.total || orphans))) return null
 
   const subtitle = `${pending.vencidas.total} vencidas y ${pending.hoy.total} para hoy`
   const rows: Array<[string, string]> = DIGEST_SECTIONS.map(([key, label]) => [label, sectionLine(pending[key])])
-  if (access.admin) {
+  if (access.equipo) {
     rows.push(['Sin dueño', sectionLine(pending.nuevosSinDueno)])
     if (orphans) rows.push(['Actividades sin responsable', String(orphans)])
   }

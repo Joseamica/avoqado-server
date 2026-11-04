@@ -276,7 +276,7 @@ export const searchOrganizationsSchema = z.object({
   }),
 })
 
-// Stages and lost reasons (`crm:admin`). The kind of a stage never changes, and a new one is always an open stage: there
+// Stages and lost reasons (`crm:configurar`). The kind of a stage never changes, and a new one is always an open stage: there
 // is one «Ganado» and one «Perdido». Nothing is deleted in phase 1 — a stage is renamed, a reason is turned off.
 const stageName = text(60, 'El nombre de la etapa es obligatorio')
 const stageOrder = z
@@ -325,7 +325,7 @@ export const updateLostReasonSchema = z.object({
     .refine(somethingToChange, 'No hay nada que cambiar'),
 })
 
-// «Importar lo de HubSpot» (`crm:admin`, plan task 8). The two CSVs arrive as multipart; multer already capped them at
+// «Importar lo de HubSpot» (`crm:configurar`, plan task 8). The two CSVs arrive as multipart; multer already capped them at
 // 5 MB each and leaves them in `req.files`, which `validateRequest` does not read: the controller parses it with this.
 const hubspotFile = (label: string) =>
   z

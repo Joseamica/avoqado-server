@@ -149,12 +149,12 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
 /**
  * The ficha's owner selector (ruling 13): every active member who can own accounts, by name — exactly the people
  * `reassign` accepts (M-4), the ones `getCrmAccess` gives «Ver negocios» to. Only for whoever can reassign («Editar:
- * todos» or admin); anyone else gets `[]`, so a «propios» seller does not even learn the names of the team.
+ * todos» or «Equipo y llaves», L6); anyone else gets `[]`, so a «propios» seller does not even learn the names of the team.
  *
  * ponytail: one page of 100 members; a team that grows past it needs a search box instead of a selector.
  */
 export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId: string; name: string }>> {
-  if (!(actor.admin || actor.editar === 'todos')) return []
+  if (!(actor.equipo || actor.editar === 'todos')) return []
   const rows = await prisma.platformAccess.findMany({
     // Whoever `reassign` accepts: «Editar» on top of «Ver» (m-3).
     where: { active: true, verScope: { in: ['propios', 'todos'] }, editarScope: { in: ['propios', 'todos'] } },

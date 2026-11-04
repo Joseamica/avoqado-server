@@ -606,7 +606,8 @@ describe('landing → CRM against Postgres', () => {
         exportar: false,
         ventas: false,
         admin: false,
-        cerrar: false,
+        // Quien gana necesita «Cerrar negocios» (L9); el vendedor nuevo la trae (L3).
+        cerrar: true,
         bajas: false,
         plantillas: false,
         preparar: false,

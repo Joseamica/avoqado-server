@@ -931,9 +931,11 @@ describe('listTeamMembers', () => {
 })
 
 describe('listTeamOptions', () => {
-  it('opciones_del_equipo_solo_para_quien_reasigna', async () => {
+  it('opciones_del_equipo_solo_para_quien_reasigna (L6)', async () => {
     // Ruling 13: a seller who edits only their own accounts cannot reassign, so they do not even get the names.
-    await expect(listTeamOptions(actor({ editar: 'propios', admin: false }))).resolves.toEqual([])
+    await expect(listTeamOptions(actor({ editar: 'propios', equipo: false }))).resolves.toEqual([])
+    // «Configurar el CRM» no reparte negocios, y el espejo `admin` de la pantalla vieja ya no autoriza nada.
+    await expect(listTeamOptions(actor({ editar: 'propios', equipo: false, configurar: true, admin: true }))).resolves.toEqual([])
     expect(prismaMock.platformAccess.findMany).not.toHaveBeenCalled()
 
     // Whoever can reassign gets every member `reassign` would accept (M-4): active keys with «Ver» AND «Editar» (m-3,
@@ -959,7 +961,7 @@ describe('listTeamOptions', () => {
       { id: CHANGED_ID, email: 'luis.nuevo@avoqado.io', emailVerified: true, firstName: 'Luis', lastName: 'Ramírez' },
     ])
 
-    await expect(listTeamOptions(actor({ editar: 'todos', admin: false }))).resolves.toEqual([
+    await expect(listTeamOptions(actor({ editar: 'todos', equipo: false }))).resolves.toEqual([
       { staffId: SELLER_ID, name: 'Carla Ruiz' },
       { staffId: OTHER_ID, name: 'Beto Díaz' },
     ])
@@ -983,8 +985,10 @@ describe('listTeamOptions', () => {
       }),
     )
 
-    // An admin without «Editar: todos» reassigns from «Equipo de ventas» too.
-    await expect(listTeamOptions(actor({ editar: null, ver: null, admin: true }))).resolves.toHaveLength(2)
+    // «Equipo y llaves» without «Editar: todos» reassigns from «Equipo de ventas» too.
+    await expect(
+      listTeamOptions(actor({ editar: null, ver: null, ...SIN_FINAS, equipo: true, campanas: false, admin: false })),
+    ).resolves.toHaveLength(2)
   })
 })
 

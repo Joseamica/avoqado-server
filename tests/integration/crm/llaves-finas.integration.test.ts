@@ -255,7 +255,9 @@ describe('CRM: el disparador de las llaves finas (L11)', () => {
  * L2: el archivo REAL de la migración sobre filas con la forma de antes. Dentro de UNA transacción que siempre se revierte
  * (BEGIN…ROLLBACK), la tabla vuelve a como estaba antes de la migración —sin las 9 columnas ni el disparador— y se corre
  * el archivo completo, como `prisma migrate deploy`. `pg.Client` usa el protocolo simple, que acepta varias sentencias.
- * El DDL toma ACCESS EXCLUSIVE sobre la tabla hasta el ROLLBACK; es seguro porque la integración corre con --runInBand.
+ * El DDL toma ACCESS EXCLUSIVE sobre la tabla hasta el ROLLBACK. Es seguro porque en el CI cada proceso tiene su propia base
+ * (`CI_DB_POR_PROCESO`, que también reescribe `TEST_DATABASE_URL`) y dentro del proceso las pruebas van en serie; con varios
+ * procesos sobre UNA sola base, el candado frenaría a los demás archivos que tocan `PlatformAccess` hasta el ROLLBACK.
  */
 describe('CRM: la migración de las llaves finas (L2)', () => {
   async function enTransaccionDesechable<T>(fn: (client: Client) => Promise<T>): Promise<T> {

@@ -1,7 +1,8 @@
 /**
  * Every CRM route asks for a key. The «Equipo de ventas» routes decide who holds Avoqado's sales pipeline: they all ask
- * for `crm:admin`, and a route that forgot it would let ANY logged-in person list the team (emails and keys) or change it.
- * The rest ask for exactly the key of the plan's table (task 4), so a new route without one fails here.
+ * for `crm:equipo` («Equipo y llaves»), and a route that forgot it would let ANY logged-in person list the team (emails and
+ * keys) or change it. The rest ask for exactly the key of the plan's table (llaves finas, 2026-11-04, L4–L9), so a new
+ * route without one fails here. 🔴 Ninguna ruta pide ya `crm:campanas` ni `crm:admin` (son sólo el espejo de la pantalla vieja).
  *
  * `requireCrm` is swapped for a marker that remembers the key it was given, so the test reads, straight from the router,
  * which key each route asks for. The real guard is covered by its own tests and by the sabotage integration test.
@@ -25,28 +26,37 @@ const routes = () =>
     }))
 
 describe('crm team routes', () => {
-  it('cada_ruta_del_equipo_pide_crm_admin', () => {
+  it('cada_ruta_del_equipo_pide_crm_equipo (L6)', () => {
     const asked = routes().filter(({ route }) => route.split(' ')[1].startsWith('/team'))
 
     expect(asked).toEqual(
       expect.arrayContaining([
-        { route: 'GET /team', keys: ['crm:admin'] },
-        { route: 'POST /team', keys: ['crm:admin'] },
-        { route: 'PATCH /team/:id', keys: ['crm:admin'] },
-        { route: 'DELETE /team/:id', keys: ['crm:admin'] },
-        // Ruling 13: the owner selector. The service hands the names only to whoever can reassign.
-        { route: 'GET /team/options', keys: [['crm:admin', 'crm:editar']] },
+        { route: 'GET /team', keys: ['crm:equipo'] },
+        { route: 'POST /team', keys: ['crm:equipo'] },
+        { route: 'PATCH /team/:id', keys: ['crm:equipo'] },
+        { route: 'DELETE /team/:id', keys: ['crm:equipo'] },
+        // Ruling 13: the owner selector. The service hands the names only to whoever can reassign (equipo o editar: todos).
+        { route: 'GET /team/options', keys: [['crm:equipo', 'crm:editar']] },
       ]),
     )
     expect(asked).toHaveLength(5)
   })
 
-  it('cada_ruta_del_crm_pide_su_llave', () => {
+  it('cada_ruta_del_crm_pide_su_llave (llaves finas, L4–L9)', () => {
     const ver = ['crm:ver']
     const editar = ['crm:editar']
-    const admin = ['crm:admin']
-    const campanas = [['crm:campanas', 'crm:admin']]
-    const leerPlantillas = [['crm:contactar', 'crm:campanas', 'crm:admin']]
+    // L9: ganar, perder y reabrir. «Cerrar negocios» sólo vale encima de «Editar» y en su alcance (L1).
+    const cerrar = ['crm:cerrar']
+    // L7: ordenar el archivero (etapas, motivos, ocultos, importar) y la puerta de «Eliminar».
+    const configurar = ['crm:configurar']
+    // L4: escribir plantillas y su prueba.
+    const plantillas = ['crm:plantillas']
+    // L4: las lee quien las usa: el uno a uno, quien las escribe y quien arma campañas.
+    const leerPlantillas = [['crm:contactar', 'crm:plantillas', 'crm:preparar']]
+    // L5: lista, detalle y conteo. `ver-campanas` es la efectiva: también la traen «Preparar» y «Mandar» (L1).
+    const verCampanas = ['crm:ver-campanas']
+    const preparar = ['crm:preparar']
+    const mandar = ['crm:mandar']
     const asked = routes().filter(({ route }) => !route.split(' ')[1].startsWith('/team'))
 
     expect(asked).toEqual([
@@ -76,35 +86,36 @@ describe('crm team routes', () => {
         ],
       },
       { route: 'GET /pending', keys: ver },
-      // An admin without «Ver negocios» still edits the stages and the reasons.
-      { route: 'GET /stages', keys: [['crm:ver', 'crm:admin']] },
-      { route: 'POST /stages', keys: admin },
-      { route: 'PATCH /stages/:id', keys: admin },
-      { route: 'GET /lost-reasons', keys: [['crm:ver', 'crm:admin']] },
-      { route: 'POST /lost-reasons', keys: admin },
-      { route: 'PATCH /lost-reasons/:id', keys: admin },
+      // L7: quien configura las cambia aunque no vea el embudo; quien ve el embudo las lee.
+      { route: 'GET /stages', keys: [['crm:ver', 'crm:configurar']] },
+      { route: 'POST /stages', keys: configurar },
+      { route: 'PATCH /stages/:id', keys: configurar },
+      { route: 'GET /lost-reasons', keys: [['crm:ver', 'crm:configurar']] },
+      { route: 'POST /lost-reasons', keys: configurar },
+      { route: 'PATCH /lost-reasons/:id', keys: configurar },
       { route: 'GET /organizations/search', keys: editar },
       { route: 'GET /accounts', keys: ver },
       { route: 'POST /accounts', keys: editar },
       { route: 'GET /accounts/:id', keys: ver },
       { route: 'POST /accounts/:id/take', keys: editar },
-      // «Editar: todos» or admin, decided by the service: a «propios» seller gets a 403 that says why.
-      { route: 'POST /accounts/:id/reassign', keys: [['crm:editar', 'crm:admin']] },
+      // L6: «Editar: todos» o «Equipo y llaves», decided by the service: a «propios» seller gets a 403 that says why.
+      { route: 'POST /accounts/:id/reassign', keys: [['crm:editar', 'crm:equipo']] },
+      // Mover uno abierto pide «Editar»; reabrir uno GANADO o PERDIDO pide además «Cerrar negocios» (lo decide el servicio, L9).
       { route: 'POST /accounts/:id/stage', keys: editar },
-      { route: 'POST /accounts/:id/lose', keys: editar },
-      { route: 'POST /accounts/:id/win', keys: editar },
+      { route: 'POST /accounts/:id/lose', keys: cerrar },
+      { route: 'POST /accounts/:id/win', keys: cerrar },
       { route: 'POST /accounts/:id/archive', keys: editar },
-      { route: 'POST /accounts/:id/reactivate', keys: editar },
-      // «Eliminar» (D7): the key is the door; the service lets only the real superadmin through.
-      { route: 'POST /accounts/:id/delete', keys: admin },
+      { route: 'POST /accounts/:id/reactivate', keys: cerrar },
+      // «Eliminar» (D7): «Configurar el CRM» es la puerta; el servicio sólo deja pasar al superadmin real (L7).
+      { route: 'POST /accounts/:id/delete', keys: configurar },
       { route: 'POST /accounts/:id/notes', keys: editar },
       { route: 'POST /accounts/:id/activities', keys: editar },
       // Task 9: what is live, «Clientes» and the reports with «Ver negocios»; the CSV with its own key.
       { route: 'GET /accounts/:id/live', keys: ver },
       { route: 'GET /clients', keys: ver },
-      // Ruling 39: hiding an internal or test organization from «Clientes» is the admin's.
-      { route: 'POST /clients/:organizationId/hide', keys: admin },
-      { route: 'POST /clients/:organizationId/unhide', keys: admin },
+      // Ruling 39 y L7: ocultar una organización interna o de prueba de «Clientes» es de quien configura el CRM.
+      { route: 'POST /clients/:organizationId/hide', keys: configurar },
+      { route: 'POST /clients/:organizationId/unhide', keys: configurar },
       // Ruling 47: what is live for a client without a CRM account, with the same key as the account's.
       { route: 'GET /clients/:organizationId/live', keys: ver },
       { route: 'GET /reports', keys: ver },
@@ -112,37 +123,42 @@ describe('crm team routes', () => {
       { route: 'POST /activities/:id/done', keys: editar },
       // Ruling 55: «Reagendar», with the same key and scope as «Hecha».
       { route: 'POST /activities/:id/reschedule', keys: editar },
-      // Phase 2 (email): the templates are read by whoever uses them and written by whoever sends the campaigns — «Campañas
-      // masivas» stands alone, without «Ver negocios».
+      // L4: las plantillas las escribe «Plantillas»; la vista previa también la usa quien ve campañas (`VistaPrevia`).
       { route: 'GET /templates', keys: leerPlantillas },
-      { route: 'POST /templates', keys: campanas },
-      { route: 'POST /templates/preview', keys: leerPlantillas },
-      { route: 'POST /templates/test', keys: campanas },
+      { route: 'POST /templates', keys: plantillas },
+      { route: 'POST /templates/preview', keys: [['crm:contactar', 'crm:plantillas', 'crm:preparar', 'crm:ver-campanas']] },
+      { route: 'POST /templates/test', keys: plantillas },
       { route: 'GET /templates/:id', keys: leerPlantillas },
-      { route: 'PATCH /templates/:id', keys: campanas },
-      { route: 'POST /templates/:id/archive', keys: campanas },
-      { route: 'POST /templates/:id/unarchive', keys: campanas },
-      // The mass-email campaigns (task 5): all of it for «Campañas masivas» or the admin.
-      { route: 'GET /campaigns', keys: campanas },
-      { route: 'POST /campaigns', keys: campanas },
-      { route: 'GET /campaigns/:id', keys: campanas },
-      { route: 'PATCH /campaigns/:id', keys: campanas },
-      { route: 'POST /campaigns/:id/preview', keys: campanas },
-      { route: 'POST /campaigns/:id/test', keys: campanas },
-      { route: 'POST /campaigns/:id/send', keys: campanas },
-      { route: 'POST /campaigns/:id/cancel', keys: campanas },
-      { route: 'POST /uploads/image', keys: campanas },
+      { route: 'PATCH /templates/:id', keys: plantillas },
+      { route: 'POST /templates/:id/archive', keys: plantillas },
+      { route: 'POST /templates/:id/unarchive', keys: plantillas },
+      // L5: ver, preparar (crear, editar, probar) y mandar (mandar y cancelar).
+      { route: 'GET /campaigns', keys: verCampanas },
+      { route: 'POST /campaigns', keys: preparar },
+      { route: 'GET /campaigns/:id', keys: verCampanas },
+      { route: 'PATCH /campaigns/:id', keys: preparar },
+      { route: 'POST /campaigns/:id/preview', keys: verCampanas },
+      { route: 'POST /campaigns/:id/test', keys: preparar },
+      { route: 'POST /campaigns/:id/send', keys: mandar },
+      { route: 'POST /campaigns/:id/cancel', keys: mandar },
+      // L4: la plantilla y el contenido de la campaña llevan imágenes.
+      { route: 'POST /uploads/image', keys: [['crm:plantillas', 'crm:preparar']] },
       // The seller's own Gmail (task 7): «Mandar correo», which only counts on top of «Ver negocios».
       { route: 'GET /gmail', keys: ['crm:contactar'] },
       { route: 'GET /gmail/connect', keys: ['crm:contactar'] },
       { route: 'POST /gmail/disconnect', keys: ['crm:contactar'] },
       { route: 'POST /accounts/:id/emails', keys: ['crm:contactar'] },
-      // «Dar de baja este correo» (la oposición): sólo el administrador del CRM.
-      { route: 'POST /opt-outs', keys: admin },
-      // «Importar lo de HubSpot» (task 8).
-      { route: 'POST /import/hubspot/preview', keys: admin },
-      { route: 'POST /import/hubspot/apply', keys: admin },
+      // «Dar de baja este correo» (la oposición): «Bajas de correo», que va sola (L8).
+      { route: 'POST /opt-outs', keys: ['crm:bajas'] },
+      // «Importar lo de HubSpot» (task 8, L7).
+      { route: 'POST /import/hubspot/preview', keys: configurar },
+      { route: 'POST /import/hubspot/apply', keys: configurar },
     ])
+    // 🔴 Fuera de `/me` (que acepta cualquier llave), ninguna ruta decide con las llaves viejas.
+    const viejas = routes()
+      .filter(({ route }) => route !== 'GET /me')
+      .filter(({ keys }) => JSON.stringify(keys).match(/crm:(campanas|admin)"/))
+    expect(viejas).toEqual([])
   })
 
   it('cada_ruta_pide_su_llave_antes_que_nada_y_el_token_antes_de_todo (m-5, ruling 52)', () => {
@@ -165,11 +181,11 @@ describe('crm team routes', () => {
     expect(auth).toBeLessThan(layers.findIndex(layer => layer.route && layer.route.path !== '/gmail/callback'))
   })
 
-  it('importar_pide_crm_admin_antes_de_leer_los_archivos', () => {
+  it('importar_pide_crm_configurar_antes_de_leer_los_archivos', () => {
     // The key is the FIRST handler: a caller without it never has its upload read into memory.
     for (const path of ['/import/hubspot/preview', '/import/hubspot/apply']) {
       const layer = (router.stack as unknown as Layer[]).find(candidate => candidate.route?.path === path)
-      expect(layer!.route!.stack[0].handle.crmKey).toBe('crm:admin')
+      expect(layer!.route!.stack[0].handle.crmKey).toBe('crm:configurar')
     }
   })
 })

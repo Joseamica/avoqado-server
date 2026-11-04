@@ -33,9 +33,13 @@ export interface CrmAccess {
   verCampanas: boolean
   equipo: boolean
   configurar: boolean
-  /** Espejo de L11 para la pantalla vieja: tiene las 4 de correo masivo. Sólo se lee; nunca autoriza nada. */
+  /**
+   * Espejo de L11 para la pantalla vieja: tiene las 4 de correo masivo. Sólo se lee para contestarle (`/me`, `/team`) y se
+   * escribe en la columna vieja; ninguna ruta, servicio ni herramienta del MCP decide con él (lo prueban
+   * `crm.team.routes.test.ts` y el grep de la Tarea 3).
+   */
   readonly campanas: boolean
-  /** Espejo de L11 para la pantalla vieja: tiene las 3 de administración Y las 4 de correo masivo. Sólo se lee. */
+  /** Espejo de L11 para la pantalla vieja: tiene las 3 de administración Y las 4 de correo masivo. Igual: nunca autoriza nada. */
   readonly admin: boolean
 }
 
