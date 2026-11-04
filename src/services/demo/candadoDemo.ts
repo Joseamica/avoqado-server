@@ -414,6 +414,8 @@ export const APP_PERMITIDAS: ReadonlySet<string> = new Set([
   'estimates',
   'exchanges',
   'fast',
+  // D2 de vales: «Manda comanda a cocina» del área del aparato, la misma configuración que el panel deja cambiar en un demo.
+  'fulfillment-areas',
   'gift-cards',
   'inventory',
   'kds',

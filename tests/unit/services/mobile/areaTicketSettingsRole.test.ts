@@ -93,7 +93,7 @@ describe('getAreaTicketSettings — papel del aparato (D3)', () => {
 
     expect(prismaMock.fulfillmentArea.findMany).toHaveBeenCalledWith({
       where: { venueId: 'venue-tienda', active: true },
-      select: { id: true, name: true },
+      select: { id: true, name: true, sendsComanda: true },
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
       take: 200,
     })
