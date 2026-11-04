@@ -9,6 +9,7 @@ import {
 } from '../../../../src/services/announcements/announcementRead.service'
 import { ForbiddenError } from '../../../../src/errors/AppError'
 import { readHomeAppIdentity } from '../../../../src/services/posAppVersion/appIdentity'
+import logger from '../../../../src/config/logger'
 
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
@@ -233,7 +234,8 @@ describe('announcementRead.service', () => {
   })
 
   // Actualizador del POS (r7, spec §4.7.3): el aviso de actualizar sale en el inicio de las apps de hoy, elegido por la
-  // versión que trae la app, sin acuses. Ocupa el lugar del banner y de la ventana de ese momento.
+  // versión que trae la app, sin acuses. Ocupa SÓLO los lugares que llena (fallo 8 del coordinador); el que deja vacío lo
+  // llena el camino de hoy, con sus mismas reglas. «Bloquear» llena los dos y no respeta el cierre en ninguno (fallo 9).
   describe('getActiveForHome — el aviso de actualizar, por la versión de la app', () => {
     const bloquear = (over: Record<string, unknown> = {}) => ({
       id: 'bloq-android-100',
@@ -301,15 +303,31 @@ describe('announcementRead.service', () => {
     })
 
     // ===== CASOS NUEVOS =====
-    it('ANDROID 95 con «Bloquear» debajo de 100, ya cerrado: el banner vuelve, la ventana no', async () => {
+    // 🔴 Fallo 9: el ANDROID de hoy no tiene banner, sólo la ventana, y la pide una vez al abrir la app. Para «Bloquear»
+    // la ventana tampoco respeta el cierre: sale cada vez que abren la app.
+    it('ANDROID 95 con «Bloquear» debajo de 100, ya cerrado: banner Y ventana siguen siendo el aviso', async () => {
       servir([bloquear()])
       cerrados(['bloq-android-100'])
       const r = await getActiveForHome('s1', android(95))
       expect(r.banner?.id).toBe('bloq-android-100')
-      expect(r.modal).toBeNull()
-      // Ocupa los dos lugares: el camino de hoy ni se consulta.
-      expect(mockAcuseMany).not.toHaveBeenCalled()
+      expect(r.modal?.id).toBe('bloq-android-100')
+    })
+
+    it('si el aviso llena los dos lugares, el camino de hoy no corre ni una vez', async () => {
+      servir([bloquear()])
+      await getActiveForHome('s1', android(95))
       expect(mockAnnMany).toHaveBeenCalledTimes(1)
+      expect(mockAnnMany.mock.calls.some(c => c[0].where.posAppPlatform === null || c[0].take === 20)).toBe(false)
+      expect(mockAcuseMany).not.toHaveBeenCalled()
+      // «Bloquear» no mira el cierre: ni se lee.
+      expect(mockClickMany).not.toHaveBeenCalled()
+    })
+
+    it('«Avisar» como ventana, sin cerrar: el camino de hoy tampoco corre', async () => {
+      servir([avisar({ showAsModal: true })])
+      await getActiveForHome('s1', android(95))
+      expect(mockAnnMany.mock.calls.some(c => c[0].where.posAppPlatform === null)).toBe(false)
+      expect(mockAcuseMany).not.toHaveBeenCalled()
     })
 
     it('ANDROID 95 con «Bloquear» debajo de 100, sin cerrar: banner y ventana son el aviso', async () => {
@@ -343,12 +361,30 @@ describe('announcementRead.service', () => {
       expect(mockAnnMany.mock.calls[0][0].where.posAppPlatform).toBeNull()
     })
 
-    it('iOS «1.15.11» con «Avisar» «1.16» como banner: el banner es el aviso y no hay ventana', async () => {
+    it('iOS «1.15.11» con «Avisar» «1.16» como banner: el banner es el aviso y la ventana, la del camino de hoy', async () => {
       servir([avisarIos({ showAsModal: false })])
       const r = await getActiveForHome('s1', ios('1.15.11'))
       expect(r.banner?.id).toBe('avisar-ios-1.16')
-      // Ocupa también el lugar de la ventana: la del anuncio normal no sale.
-      expect(r.modal).toBeNull()
+      // Fallo 8: el aviso no llenó la ventana, así que la llena el anuncio normal con acuse.
+      expect(r.modal?.id).toBe('normal-1')
+    })
+
+    it('«Avisar» como banner y una ventana normal con acuse: banner = el aviso, ventana = la normal', async () => {
+      const ventanaNormal = { ...normal, id: 'normal-ventana', showAsBanner: false, showAsModal: true }
+      servir([avisar()], [ventanaNormal])
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'normal-ventana' }])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('avisar-android-110')
+      expect(r.modal?.id).toBe('normal-ventana')
+      // El camino de hoy corre UNA vez, con sus reglas de siempre.
+      expect(mockAnnMany.mock.calls.filter(c => c[0].where.posAppPlatform === null)).toHaveLength(1)
+    })
+
+    it('«Avisar» como banner sin ventana normal con acuse: la ventana queda vacía', async () => {
+      servir([avisar()], [normal])
+      mockAcuseMany.mockResolvedValue([])
+      const r = await getActiveForHome('s1', android(95))
+      expect(r).toEqual({ banner: expect.objectContaining({ id: 'avisar-android-110' }), modal: null })
     })
 
     it('iOS «1.16» con «Avisar» «1.16» no está debajo: sigue el camino de hoy', async () => {
@@ -364,7 +400,7 @@ describe('announcementRead.service', () => {
       expect(r.modal?.id).toBe('avisar-android-110')
     })
 
-    it('«Avisar» cerrado no vuelve: sigue el camino de hoy', async () => {
+    it('«Avisar» como ventana y cerrado no vuelve: banner y ventana, del camino de hoy', async () => {
       servir([avisar({ showAsModal: true })])
       cerrados(['avisar-android-110'])
       const r = await getActiveForHome('s1', android(95))
@@ -388,19 +424,19 @@ describe('announcementRead.service', () => {
       expect(r.modal?.id).toBe('bloq-android-100')
     })
 
-    it('«Bloquear» cerrado pero no «Avisar»: el banner sigue siendo «Bloquear» y no hay ventana', async () => {
+    it('«Bloquear» cerrado y «Avisar» abierto: los dos lugares siguen siendo «Bloquear»', async () => {
       servir([avisar({ showAsModal: true }), bloquear()])
       cerrados(['bloq-android-100'])
       const r = await getActiveForHome('s1', android(95))
       expect(r.banner?.id).toBe('bloq-android-100')
-      expect(r.modal).toBeNull()
+      expect(r.modal?.id).toBe('bloq-android-100')
     })
 
-    it('debajo sólo de «Avisar» (ANDROID 100 con «Bloquear» 100 y «Avisar» 110): sale «Avisar»', async () => {
+    it('debajo sólo de «Avisar» (ANDROID 100 con «Bloquear» 100 y «Avisar» 110): banner «Avisar», ventana la de hoy', async () => {
       servir([bloquear(), avisar()])
       const r = await getActiveForHome('s1', android(100))
       expect(r.banner?.id).toBe('avisar-android-110')
-      expect(r.modal).toBeNull()
+      expect(r.modal?.id).toBe('normal-1')
     })
 
     it('la consulta de avisos pide su plataforma, publicados, vigentes y con tope', async () => {
@@ -414,14 +450,49 @@ describe('announcementRead.service', () => {
       expect(args.take).toBeLessThanOrEqual(4)
     })
 
-    it('los cierres se leen de esta persona, por dismissedAt, para esos avisos y con tope', async () => {
-      servir([bloquear()])
+    it('el cierre de «Avisar» se lee de esta persona, por dismissedAt, para ese aviso y con tope', async () => {
+      servir([avisar({ showAsModal: true })])
       await getActiveForHome('s1', android(95))
       const args = mockClickMany.mock.calls[0][0]
       expect(args.where.staffId).toBe('s1')
       expect(args.where.dismissedAt).toEqual({ not: null })
-      expect(args.where.announcementId).toEqual({ in: ['bloq-android-100'] })
+      expect(args.where.announcementId).toEqual({ in: ['avisar-android-110'] })
       expect(args.take).toBeGreaterThan(0)
+    })
+
+    // 🔴 Fallo 11: el paso nuevo nunca tumba el inicio de las apps.
+    it('si la consulta de avisos falla, sale el camino de hoy y se avisa en el log una vez', async () => {
+      mockAnnMany.mockImplementation(async (args: any) => {
+        if (args.where.posAppPlatform) throw new Error('la base no contestó')
+        return [normal]
+      })
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('normal-1')
+      expect(r.modal?.id).toBe('normal-1')
+      expect(logger.warn).toHaveBeenCalledTimes(1)
+      expect((logger.warn as jest.Mock).mock.calls[0][1]).toEqual(expect.objectContaining({ error: expect.anything() }))
+    })
+
+    it('si la lectura del cierre del aviso falla, sale el camino de hoy y se avisa en el log una vez', async () => {
+      servir([avisar({ showAsModal: true })])
+      mockClickMany.mockImplementation(async (args: any) => {
+        if ((args.where.announcementId?.in ?? []).includes('avisar-android-110')) throw new Error('la base no contestó')
+        return []
+      })
+      const r = await getActiveForHome('s1', android(95))
+      expect(r.banner?.id).toBe('normal-1')
+      expect(r.modal?.id).toBe('normal-1')
+      expect(logger.warn).toHaveBeenCalledTimes(1)
+    })
+
+    it('el camino de hoy, cuando falla el aviso, es idéntico al que sale sin app', async () => {
+      mockAnnMany.mockImplementation(async (args: any) => {
+        if (args.where.posAppPlatform) throw new Error('la base no contestó')
+        return [normal]
+      })
+      const conFalla = await getActiveForHome('s1', android(95))
+      const sinApp = await getActiveForHome('s1', null)
+      expect(conFalla).toEqual(sinApp)
     })
 
     // 🔴 Como lo arma el controlador: las cabeceras del WINDOWS (manda ANDROID, pero su fabricante es «Avoqado» y su
