@@ -395,9 +395,15 @@ async function digestFor(access: CrmAccess, now: Date): Promise<Omit<DigestConte
   }
 }
 
-/** Closes a row we hold for good: «FALLO» with no tries left, so no later run retakes it. */
+/**
+ * Closes a row we hold for good: «FALLO» with no tries left, so no later run retakes it. Its content goes too (D1): it
+ * names people, and a row that will never be resent has no use for it.
+ */
 const closeForGood = (id: string, now: Date) =>
-  prisma.crmDigestSend.updateMany({ where: { id, reservedAt: now }, data: { status: 'FALLO', attempts: MAX_ATTEMPTS } })
+  prisma.crmDigestSend.updateMany({
+    where: { id, reservedAt: now },
+    data: { status: 'FALLO', attempts: MAX_ATTEMPTS, content: Prisma.DbNull },
+  })
 
 /**
  * Sends a reserved row's email with the person's key for the day and marks the row — only while it is still ours (a run
@@ -444,7 +450,8 @@ async function deliver(row: { id: string; staffId: string }, day: string, conten
   }
   await prisma.crmDigestSend.updateMany({
     where: { id: row.id, reservedAt: now },
-    data: ok ? { status: 'ENVIADO' } : { status: 'FALLO', attempts: { increment: 1 } },
+    // Sent: its content (it names people) is no longer needed to repeat it (D1). A failure keeps it to resend the same email.
+    data: ok ? { status: 'ENVIADO', content: Prisma.DbNull } : { status: 'FALLO', attempts: { increment: 1 } },
   })
 }
 
@@ -547,6 +554,11 @@ async function sendNew(day: string, now: Date): Promise<void> {
 export async function runDailyDigest(now = new Date()): Promise<void> {
   const [day, weekday, time] = formatInVenueTimezone(now, DEFAULT_TIMEZONE, 'yyyy-MM-dd i HH:mm').split(' ')
   if (Number(weekday) > 5 || time < WINDOW_FROM || time > WINDOW_TO) return
+  // 🔴 D1: a row from an earlier day is never resent (`retakeLeftovers` only takes today's), so its content (it names people)
+  // goes. A failure here does not hold up today's digest.
+  await prisma.crmDigestSend
+    .updateMany({ where: { day: { lt: day }, content: { not: Prisma.DbNull } }, data: { content: Prisma.DbNull } })
+    .catch(error => logger.warn('[CRM] Could not clear the content of old daily digests', { day, error: errorText(error) }))
   await retakeLeftovers(day, now)
   await sendNew(day, now)
 }

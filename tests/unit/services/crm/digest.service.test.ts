@@ -425,9 +425,10 @@ describe('runDailyDigest', () => {
       const value = row[field]
       if (cond instanceof Date) return value instanceof Date && value.getTime() === cond.getTime()
       if (cond && typeof cond === 'object') {
-        const op = cond as { in?: unknown[]; lt?: number | Date }
+        const op = cond as { in?: unknown[]; lt?: number | Date | string; not?: unknown }
         if (op.in) return op.in.includes(value)
-        if (op.lt !== undefined) return (value as number | Date) < op.lt
+        if (op.lt !== undefined) return (value as number | Date | string) < op.lt
+        if ('not' in op) return op.not === Prisma.DbNull ? value !== null : value !== op.not
       }
       return value === cond
     })
@@ -491,12 +492,59 @@ describe('runDailyDigest', () => {
         }
         const hit = sends.filter(s => matches({ ...s }, where))
         for (const s of hit) {
-          const { attempts, ...rest } = data as { attempts?: number | { increment: number } }
+          const { attempts, ...rest } = data as { attempts?: number | { increment: number }; content?: unknown }
+          if (rest.content === Prisma.DbNull) rest.content = null
           Object.assign(s, rest)
           if (attempts !== undefined) s.attempts = typeof attempts === 'number' ? attempts : s.attempts + attempts.increment
         }
         return { count: hit.length }
       })
+  })
+
+  it('el_resumen_no_guarda_contenido_que_ya_no_se_repite (D1, M3): ENVIADO y cerrado quedan sin contenido; el de días anteriores se vacía; el de hoy en FALLO lo conserva', async () => {
+    const guardado = { to: 'x@avoqado.io', subject: 'Tus pendientes', html: '<p>Café Ana</p>', text: 'Café Ana' }
+    sends.push(
+      {
+        id: 'cdigestsd0000000000000080',
+        staffId: 'cstaffold000000000000001',
+        day: '2026-10-30',
+        kind: 'DIARIO',
+        status: 'FALLO',
+        attempts: 1,
+        reservedAt: at(-3 * 24 * 60),
+        content: guardado,
+      },
+      {
+        id: 'cdigestsd0000000000000081',
+        staffId: 'cstaffold000000000000002',
+        day: DAY,
+        kind: 'DIARIO',
+        status: 'FALLO',
+        attempts: 1,
+        reservedAt: at(-1),
+        content: guardado,
+      },
+    )
+    send.mockImplementation(async (o: { to: string }) => (o.to === 'a@avoqado.io' ? { ok: true } : { ok: false, transient: true }))
+    accessOf.mockImplementation(async (staffId: string) =>
+      staffId === STAFF_A || staffId === 'cstaffold000000000000002' ? access(staffId) : null,
+    )
+
+    await runDailyDigest(T0)
+
+    const porId = (id: string) => sends.find(s => s.id === id)!
+    // El de otro día ya no se repite: se vacía.
+    expect(porId('cdigestsd0000000000000080').content).toBeNull()
+    // El de hoy que falló todavía puede repetirse: conserva su contenido y sus intentos.
+    expect(porId('cdigestsd0000000000000081')).toEqual(expect.objectContaining({ status: 'FALLO', content: guardado }))
+    // El que salió hoy queda sin contenido.
+    expect(sends.find(s => s.staffId === STAFF_A)).toEqual(expect.objectContaining({ status: 'ENVIADO', content: null }))
+  })
+
+  it('el_resumen_cerrado_para_siempre_no_guarda_su_contenido (D1, M3)', async () => {
+    process.env.CRM_CORREO_PRUEBAS = 'otra@avoqado.io'
+    await runDailyDigest(T0)
+    expect(sends).toEqual([expect.objectContaining({ staffId: STAFF_A, status: 'FALLO', attempts: 3, content: null })])
   })
 
   it('dos_corridas_un_envio: two runs at once reserve ONE row and send ONE email; the next tick sends nothing', async () => {
@@ -859,6 +907,12 @@ describe('runDailyDigest', () => {
     expect(prismaMock.crmActivity.count).toHaveBeenCalledWith({
       where: { doneAt: null, assigneeStaffId: null, account: { AND: [expect.anything(), { archivedAt: null }] } },
     })
-    expect(sends[0].content).toEqual({ to: 'a@avoqado.io', subject: email.subject, html: email.html, text: email.text })
+    // Reserved with the content it then sent (so a retake repeats the same email); once sent it no longer keeps it (D1).
+    expect(prismaMock.crmDigestSend.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ content: { to: 'a@avoqado.io', subject: email.subject, html: email.html, text: email.text } }),
+      }),
+    )
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'ENVIADO', content: null }))
   })
 })
