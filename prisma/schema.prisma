@@ -14224,6 +14224,62 @@ model AppUpdate {
 }
 
 // ==========================================
+// ACTUALIZADOR DEL POS (4-nov-2026) — NO ES DE LA TPV
+// `AppPlatform` / `AppUpdate` (arriba) son de la TPV y no se tocan. Esto es la versión
+// mínima del POS (ANDROID / iOS) en la tienda; vive aparte a propósito.
+// ==========================================
+
+/// Plataformas del POS con mínima de versión. NO es AppPlatform (ése es de la TPV).
+enum PosAppPlatform {
+  ANDROID
+  IOS
+}
+
+/// Cómo se avisa la recomendada. BANNER = la tira del inicio; MODAL = la ventana que interrumpe una vez (y su banner).
+enum PosAppNoticeStyle {
+  BANNER
+  MODAL
+}
+
+/// Qué regla lleva un anuncio de plataforma de actualizar el POS.
+enum PosAppNoticeKind {
+  RECOMMENDED
+  REQUIRED
+}
+
+/// Versión mínima del POS por plataforma (actualizador del POS, 4-nov-2026). Una fila por plataforma; si no hay fila, no
+/// hay mínima. Aparte de AppUpdate (TPV) a propósito. La fila nunca se borra: quitar las mínimas deja los dos niveles en
+/// null y sube `version`.
+model PosAppVersionPolicy {
+  id       String         @id @default(cuid())
+  platform PosAppPlatform @unique
+
+  // Debajo de ésta: pantalla que no se quita. null = no hay obligatoria.
+  requiredMinVersionCode    Int?
+  requiredMinVersionName    String?
+  // Debajo de ésta (y arriba de la obligatoria): aviso que se puede cerrar. null = no hay recomendada.
+  recommendedMinVersionCode Int?
+  recommendedMinVersionName String?
+
+  // Texto opcional del aviso (máx. 280). null = el texto fijo de la app.
+  message String? @db.Text
+
+  // Cómo se avisa debajo de la recomendada (BANNER | MODAL). Obligatorio si hay recomendada; null si no hay.
+  recommendedNoticeStyle    PosAppNoticeStyle?
+  // Los anuncios de plataforma que hoy llevan el aviso. null = no hay anuncio vivo para ese nivel.
+  recommendedAnnouncementId String?
+  requiredAnnouncementId    String?
+
+  // CAS: sube de 1 en 1 con cada cambio. Un contador, no `updatedAt`.
+  version Int @default(1)
+
+  // Sin relación con Staff a propósito (la historia queda en ActivityLog).
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ==========================================
 // VENUE CRYPTO CONFIG - Per-venue B4Bit device credentials
 // ==========================================
 
@@ -19439,9 +19495,17 @@ model PlatformAnnouncement {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Actualizador del POS: si este anuncio es el aviso de actualizar el POS, de qué plataforma y de qué nivel.
+  /// Todas null = anuncio normal. NO tiene relación con la TPV.
+  posAppPlatform         PosAppPlatform?
+  posAppNoticeKind       PosAppNoticeKind?
+  posAppBelowVersionCode Int?
+  posAppBelowVersionName String?
+
   clicks     PlatformAnnouncementClick[]
   deliveries PlatformAnnouncementDelivery[]
 
+  @@index([posAppPlatform, status])
   @@index([status, publishedAt])
   @@index([status, scheduledFor])
   @@index([status, showAsBanner])

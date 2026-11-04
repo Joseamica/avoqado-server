@@ -590,6 +590,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CustomerDisplayDesign: 'Terminals / TPV Fleet',
   CustomerDisplayAsset: 'Terminals / TPV Fleet',
   AppUpdate: 'Terminals / TPV Fleet',
+  PosAppVersionPolicy: 'Terminals / TPV Fleet',
   TpvCommandHistory: 'Terminals / TPV Fleet',
   TpvCommandQueue: 'Terminals / TPV Fleet',
   TpvFeedback: 'Terminals / TPV Fleet',

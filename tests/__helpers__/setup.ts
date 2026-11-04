@@ -243,6 +243,7 @@ const prismaMock: any = {
   platformCharge: createMockModel(),
   platformChargeOccurrence: createMockModel(),
   platformChargeDigest: createMockModel(),
+  posAppVersionPolicy: createMockModel(),
   // Token budget models
   chatbotTokenBudget: createMockModel(),
   tokenUsageRecord: createMockModel(),
