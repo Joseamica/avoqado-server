@@ -170,6 +170,18 @@ describe('el aviso del día', () => {
     expect(fila?.exhaustedAlertDay).toBe('2026-11-04')
   })
 
+  it('finDeLaPausaPorCupo da el instante que vio el medidor (reloj de Resend); sin haber visto nada, la medianoche UTC de aquí', async () => {
+    jest.setSystemTime(new Date('2026-11-04T00:00:17.000Z'))
+    const p = cargar()
+    expect(p.finDeLaPausaPorCupo(new Date())).toEqual(new Date('2026-11-05T00:00:00.000Z'))
+    // Para Resend todavía es el 3-nov y el cupo se agotó: su reinicio es el 4-nov 00:00, ya pasado aquí (se prueba en el próximo tic).
+    await mandar(
+      p.fetch,
+      respuesta(429, { 'x-resend-daily-quota': '100', date: 'Tue, 03 Nov 2026 23:59:57 GMT' }, { name: 'daily_quota_exceeded' }),
+    )
+    expect(p.finDeLaPausaPorCupo(new Date())).toEqual(new Date('2026-11-04T00:00:00.000Z'))
+  })
+
   it('otro día vuelve a avisar; la pausa de ayer no pasa a hoy', async () => {
     const p = cargar()
     await mandar(p.fetch, conCupo(80))

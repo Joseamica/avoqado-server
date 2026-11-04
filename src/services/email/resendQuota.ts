@@ -104,6 +104,13 @@ export function campanasPausadasPorCupo(ahora = new Date()): boolean {
   return ahora.getTime() < pausaHasta
 }
 
+/**
+ * Cuándo vuelve a la cola lo que la pausa devolvió: el instante que vio el medidor (la medianoche UTC según la hora de Resend),
+ * nunca uno recalculado con el reloj de aquí, que adelantado lo mandaría al día siguiente. Sin haber visto ninguno, la
+ * medianoche UTC según la hora de aquí. Si ya pasó (reloj de aquí adelantado), se prueba en el siguiente tic.
+ */
+export const finDeLaPausaPorCupo = (ahora: Date): Date => (pausaHasta > 0 ? new Date(pausaHasta) : reinicioDelCupoDiario(ahora))
+
 /** Envuelve el `fetch` global UNA vez (idempotente). */
 export function instalarMedidorDeCupoResend(): void {
   const original = globalThis.fetch

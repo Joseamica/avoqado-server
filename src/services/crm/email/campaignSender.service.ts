@@ -32,7 +32,7 @@ import prisma from '../../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 import { utcTs } from '../../../utils/sqlDates'
 import emailService from '../../email.service'
-import { campanasPausadasPorCupo, CUPO_EN_PAUSA, esErrorDeCupo, reinicioDelCupoDiario } from '../../email/resendQuota'
+import { campanasPausadasPorCupo, CUPO_EN_PAUSA, esErrorDeCupo, finDeLaPausaPorCupo } from '../../email/resendQuota'
 import { correoEliminadoDesde, MOTIVO_PERSONA_ELIMINADA } from '../erase.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { cabecerasDeBaja, pieDeCampana, type MotivoDeEnvio } from './footer'
@@ -302,15 +302,15 @@ async function fueEliminada(d: { email: string; accountId: string | null; campai
  */
 const sinGastarIntento = (attempts: number, ahora: Date): Prisma.CrmCampaignDeliveryUpdateManyMutationInput =>
   attempts > 1
-    ? { status: 'REINTENTO', attempts: attempts - 1, nextAttemptAt: reinicioDelCupoDiario(ahora) }
-    : { status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: reinicioDelCupoDiario(ahora) }
+    ? { status: 'REINTENTO', attempts: attempts - 1, nextAttemptAt: finDeLaPausaPorCupo(ahora) }
+    : { status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: finDeLaPausaPorCupo(ahora) }
 
 /**
  * Lo reclamado en esta vuelta que ya no se mandó vuelve a la cola sin gastar el intento (`sinGastarIntento`, en lote). CAS por
  * el lease de ESTA vuelta y su estado: si otro remitente ya la reclamó, no se toca. Devuelve cuántas volvieron.
  */
 async function devolverPorCupo(ids: string[], lease: Date, ahora: Date): Promise<number> {
-  const nextAttemptAt = reinicioDelCupoDiario(ahora)
+  const nextAttemptAt = finDeLaPausaPorCupo(ahora)
   const nuestras = { id: { in: ids }, status: 'ENVIANDO', leaseUntil: lease }
   const [primeras, reintentos] = await Promise.all([
     prisma.crmCampaignDelivery.updateMany({

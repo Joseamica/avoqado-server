@@ -92,9 +92,9 @@ cabeceras: lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respues
 - **Pausa, sólo de las campañas del CRM**, con 80 en el día o un 429 de cupo (también el del mes: Resend no publica cuándo reinicia el mes,
   así que al día siguiente sale un correo de prueba y, si vuelve el 429, se pausa otra vez): el remitente no reclama, vuelve a preguntar
   justo antes de Resend (`antesDeMandar` de `sendEmailWithResult`, sin `await` en medio), y lo reclamado que ya no salió vuelve a la cola
-  **sin gastar un intento**, con `nextAttemptAt` en `reinicioDelCupoDiario` (un primer intento vuelve PENDIENTE y suelta su lugar del día;
-  un reintento conserva su `sendAttemptAt`). El detalle de la campaña y `crm_campaign_status` lo dicen con `pausadaPorCupo`. El login y los
-  recibos nunca se pausan.
+  **sin gastar un intento**, con `nextAttemptAt` en `finDeLaPausaPorCupo` (el instante que vio el medidor, con el reloj de Resend) (un
+  primer intento vuelve PENDIENTE y suelta su lugar del día; un reintento conserva su `sendAttemptAt`). El detalle de la campaña y
+  `crm_campaign_status` lo dicen con `pausadaPorCupo`. El login y los recibos nunca se pausan.
 - Sin `x-resend-daily-quota` en una respuesta exitosa, la cuenta ya es de pago: se dice una vez y no hay pausa diaria. Al subir de plan, pon
   `RESEND_MONTHLY_QUOTA` (y `RESEND_DAILY_QUOTA` si aplica), o el aviso del mes saldría al 80 % de 3,000.
 - La pausa vive en la memoria del proceso: tras un reinicio se rearma con la primera respuesta de Resend.

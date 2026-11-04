@@ -10,17 +10,19 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 import { BACKOFF_MS, correrEnvioDeCampanas, enviarDelivery, LEASE_MS } from '@/services/crm/email/campaignSender.service'
 import emailService from '@/services/email.service'
-import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
+import { campanasPausadasPorCupo, finDeLaPausaPorCupo } from '@/services/email/resendQuota'
 import { verifyPlatformUnsubscribeToken } from '@/utils/platformUnsubscribeToken'
 
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendEmailWithResult: jest.fn() } }))
 jest.mock('@/services/email/resendQuota', () => ({
   ...jest.requireActual('@/services/email/resendQuota'),
   campanasPausadasPorCupo: jest.fn(() => false),
+  finDeLaPausaPorCupo: jest.fn(jest.requireActual('@/services/email/resendQuota').finDeLaPausaPorCupo),
 }))
 
 const send = emailService.sendEmailWithResult as jest.Mock
 const pausa = campanasPausadasPorCupo as jest.Mock
+const finDeLaPausa = finDeLaPausaPorCupo as jest.Mock
 
 const DELIVERY = 'cdeliverycrm0000000000001'
 const ACCOUNT = 'caccountcrm00000000000001'
@@ -452,6 +454,17 @@ describe('el cupo de Resend', () => {
       where: CAS,
       data: { leaseUntil: null, status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: MEDIANOCHE },
     })
+  })
+
+  it('lo devuelto vuelve cuando el medidor vio que Resend reinicia (su reloj), no en la medianoche del reloj de aquí', async () => {
+    // El reloj de aquí va adelantado: para Resend el día cambia 20 s antes que la medianoche UTC que daría AHORA.
+    const REINICIO_DE_RESEND = new Date('2026-11-02T23:59:40.000Z')
+    finDeLaPausa.mockReturnValueOnce(REINICIO_DE_RESEND)
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'daily_quota_exceeded' })
+
+    await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
+    expect(escrito().data).toMatchObject({ status: 'PENDIENTE', nextAttemptAt: REINICIO_DE_RESEND })
+    expect(finDeLaPausa).toHaveBeenCalledWith(AHORA)
   })
 
   it('un 429 de cupo en el PRIMER intento: vuelve PENDIENTE sin gastar el intento ni su lugar del día', async () => {
