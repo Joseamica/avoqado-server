@@ -4,7 +4,8 @@
  * Un error aquí timbra dos veces la misma venta o suelta una factura en silencio.
  *
  * - Una factura es de un solo cobro, y un cobro con factura pide lo que ella dice: una fecha sin pagar toma sus conceptos y totales. Una ya
- *   pagada no: lo cobrado no se reescribe, y sólo se anexa si el total coincide.
+ *   pagada no: lo cobrado no se reescribe, y sólo se anexa si el total coincide. 🔴 Una factura que no cabe en el modelo del 16 % NUNCA se
+ *   anexa, ni con el mismo total: quitarla o cancelarla dejaría a «Facturar» reemitirla con el modelo fijo.
  * - Sigue el orden de `invoiceOccurrence`: `resolverIntento` (puede preguntarle al PAC) va FUERA del candado del cobro, y adentro se
  *   vuelve a leer la fecha y la factura. El PAC y el correo NUNCA van dentro del candado; `logAction` siempre después y fuera.
  * - 🔴 El candado no basta para la factura: `cancelPlatformCfdi` no lo toma, y una fecha de otro cobro tiene otro candado. Por eso la
@@ -22,7 +23,7 @@ import { withChargeLock } from './lock'
 import { audit, invoiceName, probe, readLocked, viewOf, type OccurrenceView } from './occurrences.service'
 import { dbToCalendarDay } from './schedule'
 import { computeChargeTotals, IVA_RATE } from './totals'
-import { LIVE_INVOICE_STATUSES, linkedLiveWhere, NEWEST_INVOICE_FIRST, type ChargeConcept } from './types'
+import { LIVE_INVOICE_STATUSES, NEWEST_INVOICE_FIRST, type ChargeConcept } from './types'
 
 // ── Errores ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -119,15 +120,28 @@ async function hasPayments(tx: Prisma.TransactionClient, cfdi: PlatformCfdi): Pr
 const isStampedIncome = (cfdi: Pick<PlatformCfdi, 'type' | 'status' | 'uuid'>): boolean =>
   cfdi.type === 'INGRESO' && cfdi.status === 'STAMPED' && Boolean(cfdi.uuid)
 
-/** 409 por lo que le falta a la fecha o a la factura; si todo está bien, lo que la fecha debe tomar de la factura. */
+/**
+ * 409 por lo que le falta a la fecha o a la factura; si todo está bien, lo que la fecha debe tomar de la factura. 🔴 Lo primero es que la factura
+ * quepa en el modelo: una que no cabe no se anexa nunca, tampoco a una fecha pagada ni con el mismo total (si se pudiera quitar o cancelar, «Facturar»
+ * la reemitiría al 16 %: $100 exentos saldrían como $86.21 + $13.79 de IVA).
+ */
 async function datePhotoOf(
   tx: Prisma.TransactionClient,
   occurrence: PlatformChargeOccurrence,
   cfdi: PlatformCfdi,
 ): Promise<Prisma.PlatformChargeOccurrenceUpdateInput> {
-  const sameTotal = cfdi.totalCents === occurrence.totalCents
+  const concepts = conceptsFromInvoice(cfdi)
+  if (!concepts) {
+    // `conceptsFromInvoice` da `null` por varias causas (exento, otra tasa, descuento, más renglones del tope, montos fuera de rango o totales
+    // que no recalculan): el texto no afirma ninguna.
+    throw conflict(
+      `No se puede anexar ${invoiceName(cfdi)}: no cabe en lo que «Por cobrar» sabe calcular (IVA del 16 %, sin descuentos ni exentos, con los ` +
+        'totales al centavo)',
+      'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
+    )
+  }
   if (occurrence.status === 'PAID') {
-    if (sameTotal) return {} // lo cobrado no se reescribe
+    if (cfdi.totalCents === occurrence.totalCents) return {} // lo cobrado no se reescribe
     throw conflict(
       `No se puede anexar ${invoiceName(cfdi)}: esta fecha ya está pagada por ${formatMoney(occurrence.totalCents)} y la factura es por ` +
         `${formatMoney(cfdi.totalCents)}. Lo cobrado no se reescribe`,
@@ -140,24 +154,12 @@ async function datePhotoOf(
       'PLATFORM_CHARGE_INVOICE_LINK_HAS_PAYMENTS',
     )
   }
-  const concepts = conceptsFromInvoice(cfdi)
-  if (concepts) {
-    return {
-      concepts: concepts as unknown as Prisma.InputJsonValue,
-      subtotalCents: cfdi.subtotalCents,
-      taxCents: cfdi.taxCents,
-      totalCents: cfdi.totalCents,
-    }
+  return {
+    concepts: concepts as unknown as Prisma.InputJsonValue,
+    subtotalCents: cfdi.subtotalCents,
+    taxCents: cfdi.taxCents,
+    totalCents: cfdi.totalCents,
   }
-  if (sameTotal) return {} // no cabe en el modelo: la fecha conserva sus conceptos, y el total ya es el de la factura
-  // `conceptsFromInvoice` da `null` por varias causas (exento, otra tasa, descuento, más renglones del tope, montos fuera de rango o totales
-  // que no recalculan): el texto no afirma ninguna.
-  throw conflict(
-    `No se puede anexar ${invoiceName(cfdi)}: no cabe en lo que «Por cobrar» sabe calcular (IVA del 16 %, sin descuentos ni exentos, con los ` +
-      `totales al centavo), y su total (${formatMoney(cfdi.totalCents)}) no es el de esta fecha (${formatMoney(occurrence.totalCents)}). ` +
-      'Sólo se anexa si los totales coinciden',
-    'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
-  )
 }
 
 // ── Anexar ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -223,7 +225,21 @@ export async function attachInvoiceInTx(
   // AUTOMATIC y NONE pasan a MANUAL: deshacer el vínculo no debe timbrar solo ni esconder «Facturar».
   const data: Prisma.PlatformChargeOccurrenceUpdateInput = occurrence.invoiceMode === 'MANUAL' ? photo : { ...photo, invoiceMode: 'MANUAL' }
   if (Object.keys(data).length === 0) return occurrence
-  return tx.platformChargeOccurrence.update({ where: { id: occurrence.id }, data })
+  const updated = await tx.platformChargeOccurrence.update({ where: { id: occurrence.id }, data })
+
+  // 🔴 Un cobro de UNA SOLA VEZ y su única fecha dicen lo mismo: el editor carga los conceptos del cobro, y si se quedaran en lo anterior, guardar sólo
+  // otra fecha mostraría un monto distinto del que está pendiente. Quitar no cambia nada: la fecha y el cobro ya quedaron iguales. Un cobro recurrente
+  // sí conserva lo suyo: el vínculo es de esa fecha.
+  if (
+    charge.frequency === 'ONE_TIME' &&
+    (updated.invoiceMode !== charge.invoiceMode || JSON.stringify(updated.concepts) !== JSON.stringify(charge.concepts))
+  ) {
+    await tx.platformCharge.update({
+      where: { id: charge.id },
+      data: { concepts: updated.concepts as Prisma.InputJsonValue, invoiceMode: updated.invoiceMode },
+    })
+  }
+  return updated
 }
 
 /**
@@ -269,23 +285,25 @@ export async function linkInvoice(
 // ── Quitar ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * `DELETE /occurrences/:id/invoice-link`: suelta lo anexado; la fecha conserva sus números y su modo, y el cobro vuelve a poder facturarse.
- * 🔴 Sólo lo que tiene `chargeLinkedAt`: una factura timbrada desde «Por cobrar» nunca se quita, se cancela. Quita la viva y, si no hay,
- * la más nueva: una anexada ya cancelada también sale en la fila.
+ * `DELETE /occurrences/:id/invoice-link?cfdiId=`: suelta lo anexado; la fecha conserva sus números y su modo, y el cobro vuelve a poder facturarse.
+ * 🔴 Sólo la factura que el operador confirmó (`cfdiId`) y sólo si sigue anexada a ESTA fecha (`chargeLinkedAt`): una confirmación vieja no suelta
+ * otra factura que se anexó después, y una timbrada desde «Por cobrar» nunca se quita, se cancela. Una anexada ya cancelada también sale.
  * 🔴 Con la cancelación en trámite (`CANCEL_REQUESTED`) es 409: si el SAT la rechaza vuelve a estar vigente, y ya suelta se podría facturar la
  * fecha otra vez. Y la escritura es condicional por estado y versión, como la de anexar: cancelar no toma el candado del cobro.
  */
-export async function unlinkInvoice(occurrenceId: string, actorId: string, now: Date = new Date()): Promise<OccurrenceView> {
+export async function unlinkInvoice(
+  occurrenceId: string,
+  { cfdiId }: { cfdiId: string },
+  actorId: string,
+  now: Date = new Date(),
+): Promise<OccurrenceView> {
   const { chargeId } = await probe(occurrenceId)
 
   const { occurrence, cfdi } = await withChargeLock(chargeId, async tx => {
     const occurrence = await readLocked(tx, occurrenceId)
-    const cfdi =
-      (await tx.platformCfdi.findFirst({ where: linkedLiveWhere(occurrenceId), orderBy: NEWEST_INVOICE_FIRST })) ??
-      (await tx.platformCfdi.findFirst({
-        where: { platformChargeOccurrenceId: occurrenceId, chargeLinkedAt: { not: null } },
-        orderBy: NEWEST_INVOICE_FIRST,
-      }))
+    const cfdi = await tx.platformCfdi.findFirst({
+      where: { id: cfdiId, platformChargeOccurrenceId: occurrenceId, chargeLinkedAt: { not: null } },
+    })
     if (!cfdi) {
       throw conflict(
         'Esta fecha no tiene una factura anexada. Una factura timbrada desde «Por cobrar» no se quita: se cancela en Facturas CFDI',
@@ -347,7 +365,7 @@ export interface InvoiceCandidate {
   receptorNombre: string
   /** Los renglones como dicen en la factura, para leerlos aunque no quepa en el modelo. */
   descriptions: string[]
-  /** Los conceptos que tomaría una fecha sin pagar. `null`: no cabe en el modelo del 16 %, y sólo se anexa si el total ya coincide. */
+  /** Los conceptos que tomaría una fecha sin pagar. `null`: no cabe en el modelo del 16 % y NO se puede anexar (409 NOT_REPRESENTABLE), ni con el mismo total. */
   concepts: ChargeConcept[] | null
   /** Ya tiene pagos o un complemento vivo: no se anexa a una fecha sin pagar ni da de alta un cobro. */
   hasPayments: boolean
@@ -410,7 +428,8 @@ export async function listInvoiceCandidates(
   const [rows, total] = await Promise.all([
     prisma.platformCfdi.findMany({
       where,
-      orderBy: NEWEST_INVOICE_FIRST,
+      // Lo mismo que `NEWEST_INVOICE_FIRST`, escrito aquí porque el guardia de paginación lee el texto de la llamada y busca `id` al final.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
       select: CANDIDATE_SELECT,

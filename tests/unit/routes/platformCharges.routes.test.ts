@@ -10,6 +10,7 @@ import {
   listOccurrencesSchema,
   pauseChargeSchema,
   payOccurrenceSchema,
+  unlinkInvoiceSchema,
   updateChargeSchema,
 } from '@/routes/superadmin/platformCharges.schemas'
 
@@ -204,6 +205,16 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
     expect(errores(payOccurrenceSchema, body({ invoice: 'true' }))).toEqual(['invoice debe ser verdadero o falso'])
     expect(errores(payOccurrenceSchema, body({ invoice: false }))).toEqual([])
     expect(errores(payOccurrenceSchema, body({ invoice: false }))).toEqual([])
+  })
+
+  it('🔴 «Ya me pagó» puede traer el total que el operador confirmó (centavos enteros, no negativos); sin él, igual que siempre', () => {
+    expect(errores(payOccurrenceSchema, body({ invoice: false, expectedTotalCents: 10000 }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: false, expectedTotalCents: 0 }))).toEqual([])
+    expect(errores(payOccurrenceSchema, body({ invoice: false, expectedTotalCents: -1 }))).toHaveLength(1)
+    expect(errores(payOccurrenceSchema, body({ invoice: false, expectedTotalCents: 100.5 }))).toHaveLength(1)
+    expect(errores(payOccurrenceSchema, body({ invoice: false, expectedTotalCents: '10000' }))).toHaveLength(1)
+    const r = payOccurrenceSchema.safeParse(body({ invoice: false, expectedTotalCents: 10000 }))
+    expect(r.success && r.data.body.expectedTotalCents).toBe(10000)
   })
 
   it('facturar: ambos campos son opcionales; las claves del SAT vacías o un perfil vacío se rechazan en español', () => {
@@ -405,6 +416,15 @@ describe('platformCharges.schemas — anexar una factura', () => {
     expect(r.success && r.data.body).toEqual({ cfdiId: 'cfdi-1' })
   })
 
+  it('🔴 quitar pide la factura que el operador confirmó, en la URL, con mensaje en español', () => {
+    expect(errores(unlinkInvoiceSchema, query({}))).toEqual(['Elige la factura que vas a quitar'])
+    expect(errores(unlinkInvoiceSchema, query({ cfdiId: '' }))).toEqual(['Elige la factura que vas a quitar'])
+    expect(errores(unlinkInvoiceSchema, query({ cfdiId: ['a', 'b'] }))).toEqual(['Elige la factura que vas a quitar'])
+
+    const r = unlinkInvoiceSchema.safeParse(query({ cfdiId: 'cfdi-1', otro: 'x' }))
+    expect(r.success && r.data.query).toEqual({ cfdiId: 'cfdi-1' })
+  })
+
   it('las candidatas aceptan cliente, RFC, búsqueda y página; la página llega como número', () => {
     const r = listInvoiceCandidatesSchema.safeParse(
       query({ customerType: 'ORGANIZATION', organizationId: 'org-1', rfc: ' LUN010101AAA ', q: ' a19 ', page: '2', pageSize: '500' }),
@@ -482,12 +502,12 @@ describe('platformCharges.routes — permisos y orden', () => {
     }
   })
 
-  it('anexar valida el cuerpo con su esquema y las candidatas su consulta; quitar no recibe datos', () => {
+  it('anexar valida el cuerpo con su esquema y las candidatas su consulta; quitar valida en la URL la factura confirmada', () => {
     const una = (metodo: string, ruta: string) => rutas.find(r => r.metodo === metodo && r.ruta === ruta)!
 
     expect(una('POST', '/occurrences/:id/invoice-link').bloque).toContain('validateRequest(linkInvoiceSchema)')
     expect(una('GET', '/invoice-candidates').bloque).toContain('validateRequest(listInvoiceCandidatesSchema)')
-    expect(una('DELETE', '/occurrences/:id/invoice-link').bloque).not.toContain('validateRequest(')
+    expect(una('DELETE', '/occurrences/:id/invoice-link').bloque).toContain('validateRequest(unlinkInvoiceSchema)')
   })
 
   it('los grupos validan su consulta y se registran ANTES de cualquier /occurrences/:id', () => {

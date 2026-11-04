@@ -353,6 +353,7 @@ function trazar(): string[] {
   anotar(prismaMock.platformCfdi.updateMany, 'tomar la factura')
   anotar(prismaMock.platformCfdi.update, 'soltar la factura')
   anotar(prismaMock.platformChargeOccurrence.update, 'escribir la fecha')
+  anotar(prismaMock.platformCharge.update, 'escribir el cobro')
   anotar(pac.findByExternalId, 'preguntar al PAC')
   mockLogAction.mockImplementation(() => {
     eventos.push('bitácora')
@@ -570,11 +571,92 @@ describe('linkInvoice — anexar a una fecha sin pagar', () => {
     expect(mundo.occ.invoiceMode).toBe(despues)
   })
 
-  it('el modo y los conceptos del COBRO no se tocan: el vínculo es de esta fecha', async () => {
+  it('el modo y los conceptos del COBRO recurrente no se tocan: el vínculo es de esta fecha', async () => {
     await anexar()
 
     expect(mundo.charge).toMatchObject({ invoiceMode: 'AUTOMATIC', concepts: CONCEPTOS_DEL_COBRO })
     expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
+  })
+
+  describe('🔴 una sola vez: el cobro se alinea con su única fecha (Codex r2, hallazgo 5)', () => {
+    beforeEach(() => {
+      mundo.charge.frequency = 'ONE_TIME'
+    })
+
+    it('anexar escribe en el cobro los conceptos y el modo que quedaron en la fecha, dentro del candado y antes de la bitácora', async () => {
+      const eventos = trazar()
+
+      await anexar()
+
+      expect(prismaMock.platformCharge.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.platformCharge.update).toHaveBeenCalledWith({
+        where: { id: 'cobro-1' },
+        data: { concepts: CONCEPTOS_A19, invoiceMode: 'MANUAL' },
+      })
+      expect(mundo.charge).toMatchObject({ concepts: CONCEPTOS_A19, invoiceMode: 'MANUAL' })
+      expect(mundo.occ).toMatchObject({ concepts: CONCEPTOS_A19, invoiceMode: 'MANUAL', ...TOTALES_A19 })
+      expect(eventos).toEqual(['tx:inicio', 'candado', 'tomar la factura', 'escribir la fecha', 'escribir el cobro', 'tx:fin', 'bitácora'])
+    })
+
+    it('quitar no cambia nada más: la fecha y el cobro ya quedaron iguales', async () => {
+      await anexar()
+      prismaMock.platformCharge.update.mockClear()
+      prismaMock.platformChargeOccurrence.update.mockClear()
+
+      await unlinkInvoice('occ-1', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
+      expect(prismaMock.platformChargeOccurrence.update).not.toHaveBeenCalled()
+      expect(mundo.charge).toMatchObject({ concepts: mundo.occ.concepts, invoiceMode: mundo.occ.invoiceMode })
+    })
+
+    it('si el cobro ya dice lo mismo que la fecha, no escribe', async () => {
+      Object.assign(mundo.charge, { concepts: CONCEPTOS_A19.map(c => ({ ...c })), invoiceMode: 'MANUAL' })
+
+      await anexar()
+
+      expect(prismaMock.platformChargeOccurrence.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
+    })
+
+    it('en una fecha pagada (sus números no cambian) el modo del cobro también pasa a MANUAL, con los conceptos de la fecha', async () => {
+      Object.assign(mundo.occ, { status: 'PAID', paidAt: hace(30), totalCents: TOTALES_A19.totalCents })
+
+      await anexar()
+
+      expect(prismaMock.platformCharge.update).toHaveBeenCalledWith({
+        where: { id: 'cobro-1' },
+        data: { concepts: CONCEPTOS_DEL_COBRO, invoiceMode: 'MANUAL' },
+      })
+      expect(mundo.charge.invoiceMode).toBe('MANUAL')
+    })
+
+    it('si la fecha no cambió y ya estaba igual (pagada y ya MANUAL), no escribe ni en la fecha ni en el cobro', async () => {
+      Object.assign(mundo.occ, { status: 'PAID', paidAt: hace(30), totalCents: TOTALES_A19.totalCents, invoiceMode: 'MANUAL' })
+      mundo.charge.invoiceMode = 'MANUAL'
+
+      await anexar()
+
+      expect(prismaMock.platformChargeOccurrence.update).not.toHaveBeenCalled()
+      expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
+    })
+
+    it('una anexada que se rechaza no deja el cobro a medias: no se escribe nada', async () => {
+      mundo.cfdis = [factura({ discountCents: 100 })]
+
+      await rechazo(anexar())
+
+      expect(prismaMock.platformCharge.update).not.toHaveBeenCalled()
+      expect(mundo.charge).toMatchObject({ concepts: CONCEPTOS_DEL_COBRO, invoiceMode: 'AUTOMATIC' })
+    })
+
+    it('«Deshacer» el vínculo y editar sólo la fecha del cobro: cobro y fecha siguen diciendo lo mismo', async () => {
+      await anexar()
+      await unlinkInvoice('occ-1', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)
+
+      expect(mundo.charge.concepts).toEqual(mundo.occ.concepts)
+      expect(mundo.charge.invoiceMode).toBe(mundo.occ.invoiceMode)
+    })
   })
 
   it('deja la bitácora PLATFORM_CHARGE_INVOICE_LINKED del cobro, con quién, qué factura y cómo cambió el monto', async () => {
@@ -992,7 +1074,7 @@ describe('linkInvoice — a qué fecha', () => {
       nadieEscribio()
     })
 
-    it('una factura sin conversión con el mismo total también se anexa: los números ya no se tocan', async () => {
+    it('🔴 una factura que no cabe en el modelo NO se anexa ni con el mismo total (Codex r2, hallazgo 3): quitarla o cancelarla la reemitiría al 16 %', async () => {
       mundo.occ.totalCents = 10000
       mundo.cfdis = [
         factura({
@@ -1003,9 +1085,10 @@ describe('linkInvoice — a qué fecha', () => {
         }),
       ]
 
-      await anexar()
+      expect((await rechazo(anexar())).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
 
-      expect(mundo.cfdis[0].chargeLinkedAt).toEqual(AHORA)
+      expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+      nadieEscribio()
     })
   })
 })
@@ -1126,15 +1209,16 @@ describe('linkInvoice — 🔴 una factura que no cabe en el modelo del 16 % nun
   })
 
   const MENSAJE_GENERAL =
-    /no cabe en lo que «Por cobrar» sabe calcular \(IVA del 16 %, sin descuentos ni exentos, con los totales al centavo\).*Sólo se anexa si los totales coinciden/
+    /no cabe en lo que «Por cobrar» sabe calcular \(IVA del 16 %, sin descuentos ni exentos, con los totales al centavo\)/
 
-  it('🔴 el 409 no afirma una causa que puede ser falsa: dice qué sabe calcular «Por cobrar» y que sólo se anexa si los totales coinciden', async () => {
+  it('🔴 el 409 no afirma una causa que puede ser falsa: dice qué sabe calcular «Por cobrar» y nada de totales que coinciden', async () => {
     mundo.cfdis = [exenta()]
 
     const error = await rechazo(anexar())
 
     expect(error.message).toMatch(MENSAJE_GENERAL)
     expect(error.message).not.toMatch(/trae un renglón exento/)
+    expect(error.message).not.toMatch(/coinciden|no es el de esta fecha/)
   })
 
   it.each([
@@ -1175,20 +1259,21 @@ describe('linkInvoice — 🔴 una factura que no cabe en el modelo del 16 % nun
     queNoSeAnexo()
   })
 
-  it('con el mismo total se anexa y la fecha CONSERVA sus conceptos, subtotal e IVA; sólo cambia el modo', async () => {
-    const propios = { subtotalCents: 8621, taxCents: 1379, totalCents: 10000 }
-    Object.assign(mundo.occ, propios)
+  it('🔴 con el mismo total también es NOT_REPRESENTABLE (Codex r2, hallazgo 3): ya no hay camino en el que la fecha conserve sus conceptos', async () => {
+    Object.assign(mundo.occ, { subtotalCents: 8621, taxCents: 1379, totalCents: 10000 })
     mundo.cfdis = [exenta()]
 
-    await anexar()
+    const error = await rechazo(anexar())
 
-    expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: 'occ-1', chargeLinkedAt: AHORA })
-    expect(mundo.occ).toMatchObject({ concepts: CONCEPTOS_DEL_COBRO, ...propios, invoiceMode: 'MANUAL' })
+    expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
+    expect(error.message).toMatch(MENSAJE_GENERAL)
+    expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+    expect(mundo.occ).toMatchObject({ concepts: CONCEPTOS_DEL_COBRO, invoiceMode: 'AUTOMATIC' })
+    nadieEscribio()
   })
 
-  it('con descuento y el mismo total, igual: conserva los conceptos de la fecha', async () => {
-    const propios = { subtotalCents: 9000, taxCents: 1440, totalCents: 10440 }
-    Object.assign(mundo.occ, propios)
+  it('con descuento y el mismo total, igual: NOT_REPRESENTABLE y no se escribe nada', async () => {
+    Object.assign(mundo.occ, { subtotalCents: 9000, taxCents: 1440, totalCents: 10440 })
     mundo.cfdis = [
       factura({
         lines: [{ description: 'Promo', quantity: 1, unitPriceCents: 10000, discountCents: 1000, ...SAT }],
@@ -1199,9 +1284,25 @@ describe('linkInvoice — 🔴 una factura que no cabe en el modelo del 16 % nun
       }),
     ]
 
-    await anexar()
+    expect((await rechazo(anexar())).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
+    nadieEscribio()
+  })
 
-    expect(mundo.occ).toMatchObject({ concepts: CONCEPTOS_DEL_COBRO, ...propios })
+  describe('🔴 se comprueba ANTES de las demás reglas de la fecha, también en una fecha pagada', () => {
+    it('en una fecha pagada con otro total: NOT_REPRESENTABLE, no PAID_MISMATCH', async () => {
+      Object.assign(mundo.occ, { status: 'PAID', paidAt: hace(30), paidById: 'staff-0', totalCents: 58000 })
+      mundo.cfdis = [exenta()]
+
+      expect((await rechazo(anexar())).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
+      nadieEscribio()
+    })
+
+    it('con pagos en una fecha sin pagar: NOT_REPRESENTABLE, no HAS_PAYMENTS', async () => {
+      mundo.cfdis = [{ ...exenta(), metodoPago: 'PPD', amountPaidCents: 100 }]
+
+      expect((await rechazo(anexar())).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
+      nadieEscribio()
+    })
   })
 })
 
@@ -1245,7 +1346,8 @@ describe('attachInvoiceInTx — anexar dentro de una transacción ajena (el alta
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 describe('unlinkInvoice — quitar lo anexado', () => {
-  const quitar = () => unlinkInvoice('occ-1', 'staff-1', AHORA)
+  /** Siempre con la factura que el operador confirmó (Codex r2, hallazgo 2). */
+  const quitar = (cfdiId = 'cfdi-19') => unlinkInvoice('occ-1', { cfdiId }, 'staff-1', AHORA)
 
   it('suelta el vínculo y la marca; la fecha conserva sus números y su modo', async () => {
     Object.assign(mundo.occ, { concepts: CONCEPTOS_A19, ...TOTALES_A19, invoiceMode: 'MANUAL' })
@@ -1289,7 +1391,7 @@ describe('unlinkInvoice — quitar lo anexado', () => {
   it('🔴 una factura timbrada desde «Por cobrar» NUNCA se quita: PLATFORM_CHARGE_INVOICE_NOT_LINKED', async () => {
     mundo.cfdis = [timbradaDeAqui()]
 
-    const error = await rechazo(quitar())
+    const error = await rechazo(quitar('cfdi-118'))
 
     expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_NOT_LINKED')
     expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: 'occ-1', status: 'STAMPED' })
@@ -1300,16 +1402,41 @@ describe('unlinkInvoice — quitar lo anexado', () => {
     expect((await rechazo(quitar())).code).toBe('PLATFORM_CHARGE_INVOICE_NOT_LINKED')
   })
 
-  it('con una cancelada vieja y una viva anexadas quita la viva, aunque la cancelada sea más nueva; la cancelada se queda', async () => {
+  it('🔴 quita SÓLO la factura confirmada: con otra anexada a la misma fecha (más nueva o viva), la que no se pidió se queda', async () => {
     mundo.cfdis = [
-      anexada({ id: 'cfdi-viva', createdAt: hace(500) }),
-      anexada({ id: 'cfdi-cancelada', status: 'CANCELLED', createdAt: hace(5), idempotencyKey: 'otra' }),
+      anexada({ id: 'cfdi-cancelada', status: 'CANCELLED', createdAt: hace(500), idempotencyKey: 'otra' }),
+      anexada({ id: 'cfdi-viva', createdAt: hace(5), idempotencyKey: 'otra-2' }),
     ]
 
-    await quitar()
+    await quitar('cfdi-cancelada')
 
-    expect(mundo.cfdis.find(c => c.id === 'cfdi-viva')).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
-    expect(mundo.cfdis.find(c => c.id === 'cfdi-cancelada')).toMatchObject({ platformChargeOccurrenceId: 'occ-1' })
+    expect(mundo.cfdis.find(c => c.id === 'cfdi-cancelada')).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+    expect(mundo.cfdis.find(c => c.id === 'cfdi-viva')).toMatchObject({ platformChargeOccurrenceId: 'occ-1' })
+    expect(mundo.cfdis.find(c => c.id === 'cfdi-viva')!.chargeLinkedAt).not.toBeNull()
+  })
+
+  it('🔴 la confirmación vieja no suelta la factura nueva: A ya se quitó y se anexó B; confirmar «Quitar A» es 409 NOT_LINKED y B sigue anexada', async () => {
+    mundo.cfdis = [factura({ id: 'cfdi-A' }), anexada({ id: 'cfdi-B', folio: '20', idempotencyKey: 'b' })]
+
+    const error = await rechazo(quitar('cfdi-A'))
+
+    expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_NOT_LINKED')
+    expect(mundo.cfdis.find(c => c.id === 'cfdi-B')).toMatchObject({ platformChargeOccurrenceId: 'occ-1' })
+    expect(mundo.cfdis.find(c => c.id === 'cfdi-B')!.chargeLinkedAt).not.toBeNull()
+    nadieEscribio()
+  })
+
+  it('una factura anexada a OTRA fecha tampoco se quita desde ésta: NOT_LINKED', async () => {
+    mundo.cfdis = [anexada({ platformChargeOccurrenceId: 'occ-de-otro' })]
+
+    expect((await rechazo(quitar())).code).toBe('PLATFORM_CHARGE_INVOICE_NOT_LINKED')
+    expect(mundo.cfdis[0]).toMatchObject({ platformChargeOccurrenceId: 'occ-de-otro' })
+    nadieEscribio()
+  })
+
+  it('una factura que no existe: NOT_LINKED, sin escribir', async () => {
+    expect((await rechazo(quitar('no-existe'))).code).toBe('PLATFORM_CHARGE_INVOICE_NOT_LINKED')
+    nadieEscribio()
   })
 
   it('una anexada ya cancelada también se puede quitar: la fila enseña «Quitar» mientras la tenga', async () => {
@@ -1331,7 +1458,7 @@ describe('unlinkInvoice — quitar lo anexado', () => {
   })
 
   it('una fecha que no existe es 404', async () => {
-    await expect(unlinkInvoice('no-existe', 'staff-1', AHORA)).rejects.toBeInstanceOf(NotFoundError)
+    await expect(unlinkInvoice('no-existe', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)).rejects.toBeInstanceOf(NotFoundError)
   })
 
   describe('🔴 con la cancelación en trámite ante el SAT', () => {
@@ -1433,7 +1560,7 @@ describe('🔴 nadie timbra encima de una factura anexada (con invoiceOccurrence
     expect(error.message).toBe('Quita primero la factura A-19')
     expect(mundo.occ.status).toBe('PAID')
 
-    await unlinkInvoice('occ-1', 'staff-1', AHORA)
+    await unlinkInvoice('occ-1', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)
     await reopenOccurrence('occ-1', 'staff-1', AHORA)
 
     expect(mundo.occ).toMatchObject({ status: 'PENDING', paidAt: null, invoiceMode: 'AUTOMATIC' })
@@ -1452,7 +1579,7 @@ describe('🔴 nadie timbra encima de una factura anexada (con invoiceOccurrence
       status: 'valid',
     })
 
-    await unlinkInvoice('occ-1', 'staff-1', AHORA)
+    await unlinkInvoice('occ-1', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)
     const cfdi = await invoiceOccurrence('occ-1', { actorId: 'staff-1', receptor: EN_PANTALLA })
 
     expect(pac.createInvoice).toHaveBeenCalledTimes(1)
@@ -1662,7 +1789,7 @@ describe('listInvoiceCandidates — lo que se puede anexar', () => {
     mundo.cfdis = [anexada()]
     expect(ids(await buscar())).toEqual([])
 
-    await unlinkInvoice('occ-1', 'staff-1', AHORA)
+    await unlinkInvoice('occ-1', { cfdiId: 'cfdi-19' }, 'staff-1', AHORA)
 
     expect(ids(await buscar())).toEqual(['cfdi-19'])
   })

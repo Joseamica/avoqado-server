@@ -34,8 +34,15 @@ import { startApiServer, api } from '@tests/__helpers__/apiServer'
 import { ConflictError } from '@/errors/AppError'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
 import { ProviderHttpError } from '@/services/fiscal/providers/facturapi.provider'
-import { createCharge, generateAllActive, pauseCharge, updateCharge } from '@/services/superadmin/platform-charges/charges.service'
+import {
+  createCharge,
+  generateAllActive,
+  getCharge,
+  pauseCharge,
+  updateCharge,
+} from '@/services/superadmin/platform-charges/charges.service'
 import type { ChargeInput } from '@/services/superadmin/platform-charges/charges.service'
+import { registerPlatformPayment } from '@/services/superadmin/platform-billing/platformCfdi.service'
 import { listInvoiceCandidates, linkInvoice, unlinkInvoice } from '@/services/superadmin/platform-charges/invoice-link.service'
 import { invoiceOccurrence } from '@/services/superadmin/platform-charges/invoice.service'
 import {
@@ -2007,7 +2014,7 @@ describe('anexar y quitar una factura: la escritura condicional y los cruces (Po
       await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
       await prisma.platformCfdi.update({ where: { id: factura.id }, data: { status: 'CANCEL_REQUESTED' } })
 
-      const res = await del(`/occurrences/${fecha.id}/invoice-link`)
+      const res = await del(`/occurrences/${fecha.id}/invoice-link?cfdiId=${factura.id}`)
 
       expect(res.status).toBe(409)
       expect(res.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_CANCEL_PENDING' })
@@ -2029,7 +2036,7 @@ describe('anexar y quitar una factura: la escritura condicional y los cruces (Po
       expect(anexada).toMatchObject({ subtotalCents: 20000, taxCents: 3200, totalCents: 23200, invoiceMode: 'MANUAL' }) // tomó lo que dice la factura
       expect(anexada.concepts).toEqual(unConcepto)
 
-      const vista = await unlinkInvoice(a.fecha.id, superId, NOW)
+      const vista = await unlinkInvoice(a.fecha.id, { cfdiId: factura.id }, superId, NOW)
 
       expect(vista.invoice).toBeNull()
       expect(await facturaDe(factura.id)).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null, status: 'STAMPED' }) // libre y vigente
@@ -2057,7 +2064,7 @@ describe('anexar y quitar una factura: la escritura condicional y los cruces (Po
       const otra = otraConexionCambia(factura.id, { status: 'CANCEL_REQUESTED' })
       try {
         const pid = await aTiempo(otra.pid, 60_000, 'la otra conexión pidió la cancelación y la dejó sin confirmar')
-        const quitando = unlinkInvoice(fecha.id, superId, NOW) // la lee STAMPED (la otra no confirmó) y su UPDATE espera la fila
+        const quitando = unlinkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW) // la lee STAMPED (la otra no confirmó) y su UPDATE espera la fila
         quitando.catch(() => undefined)
         await esperaLaFila(pid)
         otra.confirmar()
@@ -2076,7 +2083,7 @@ describe('anexar y quitar una factura: la escritura condicional y los cruces (Po
       const { fecha } = await cobroDeUnaFecha()
       const desdeAqui = await nuevaFactura({ platformChargeOccurrenceId: fecha.id })
 
-      await expect(unlinkInvoice(fecha.id, superId, NOW)).rejects.toMatchObject({
+      await expect(unlinkInvoice(fecha.id, { cfdiId: desdeAqui.id }, superId, NOW)).rejects.toMatchObject({
         statusCode: 409,
         code: 'PLATFORM_CHARGE_INVOICE_NOT_LINKED',
       })
@@ -2096,7 +2103,7 @@ describe('anexar y quitar una factura: la escritura condicional y los cruces (Po
       })
       expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PAID')
 
-      await unlinkInvoice(fecha.id, superId, NOW)
+      await unlinkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
       const vista = await reopenOccurrence(fecha.id, superId, NOW)
 
       expect(vista).toMatchObject({ status: 'PENDING', paidAt: null, invoiceMode: 'AUTOMATIC', invoice: null })
@@ -2194,7 +2201,7 @@ describe('alta desde una factura: POST /platform-charges con invoiceId, por HTTP
     expect(conFactura.body).toMatchObject({ code: 'PLATFORM_CHARGE_ONE_TIME_HAS_INVOICE' })
     expect(dbToCalendarDay((await ocurrenciasDe(chargeId))[0].dueDate)).toBe(hoy())
 
-    const quitada = await del(`/occurrences/${fecha.id}/invoice-link`)
+    const quitada = await del(`/occurrences/${fecha.id}/invoice-link?cfdiId=${factura.id}`)
     expect(quitada.status).toBe(200)
     expect((await facturaDe(factura.id)).platformChargeOccurrenceId).toBeNull()
 
@@ -2651,7 +2658,8 @@ describe('15 · las rutas nuevas, por HTTP con el guardia real (llegan a SU hand
     const anexada = await post(`/occurrences/${fecha.id}/invoice-link`, { cfdiId: delCliente.id })
     expect(anexada.status).toBe(200)
     expect(anexada.body.data).toMatchObject({ id: fecha.id, invoiceMode: 'MANUAL', invoice: { id: delCliente.id, linked: true } })
-    const quitada = await del(`/occurrences/${fecha.id}/invoice-link`)
+    expect((await del(`/occurrences/${fecha.id}/invoice-link`)).status).toBe(400) // sin la factura confirmada
+    const quitada = await del(`/occurrences/${fecha.id}/invoice-link?cfdiId=${delCliente.id}`)
     expect(quitada.status).toBe(200)
     expect(quitada.body.data.invoice).toBeNull()
   })
@@ -2892,5 +2900,351 @@ describe.each(['UTC', 'America/Mexico_City'])('filtros, grupos y fechas con la s
       code: 'PLATFORM_CHARGE_INVALID_DATE_RANGE',
     })
     await expect(lista({ to: '2026-02-30' }, prefijo)).rejects.toMatchObject({ statusCode: 400, code: 'PLATFORM_CHARGE_INVALID_DATE' })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// La auditoría r2 de anexar (docs/audit/2026-11-03-por-cobrar-anexar/codex-r2.md): cada hallazgo, contra Postgres real y con sus cruces observados.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('16 · auditoría r2 de anexar: confirmar el importe, quitar la factura confirmada, lo que no cabe, el complemento y «una sola vez»', () => {
+  const UN_CONCEPTO: ChargeConcept[] = [
+    { description: 'Venta de equipo', amountCents: 20000, ivaMode: 'WITHOUT_IVA', satProductKey: '43211509', satUnitKey: 'H87' },
+  ]
+  const TOTAL_DEL_CONCEPTO = 23200 // 20,000 + 3,200 de IVA, a mano
+
+  /** Los complementos que `registerPlatformPayment` dejó sobre una factura; se anotan para que la limpieza final también los borre. */
+  async function complementosDe(facturaId: string) {
+    const filas = await prisma.platformCfdi.findMany({ where: { parentPlatformCfdiId: facturaId }, take: 20 })
+    creado.cfdis.push(...filas.map(f => f.id))
+    return filas
+  }
+  const pagoDe = (platformCfdiId: string) => ({
+    platformCfdiId,
+    paymentDate: '2026-11-02T12:00:00',
+    formaPago: '03',
+    idempotencyKey: unico('pago'),
+    performedById: superId,
+  })
+
+  beforeEach(() => {
+    Object.assign(pac, {
+      createPaymentComplement: jest.fn(async () => ({
+        providerInvoiceId: `fa-rep-${++consecutivo}`,
+        uuid: `UUID-REP-${suffix}-${consecutivo}`,
+        folio: '9',
+        stampedAt: new Date(),
+      })),
+    })
+  })
+
+  describe('1 · «Ya me pagó» confirma el importe que se vio', () => {
+    it('otra pestaña anexa una factura de OTRO monto mientras «Ya me pagó» espera el candado: 409 con el monto nuevo y la fecha sigue PENDIENTE', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha() // $1,079.00 es lo que el operador vio
+      const factura = await nuevaFactura({}, UN_CONCEPTO) // $232.00
+      const aparcada = aparcarLaTransaccion(1)
+      let pagado: unknown
+      try {
+        const anexando = linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+        anexando.catch(() => undefined)
+        const pid = await aTiempo(aparcada.pid, 60_000, 'anexar escribió la fecha y quedó aparcado con el candado, sin commit')
+
+        const pagando = payOccurrence(fecha.id, { invoice: false, expectedTotalCents: TOTAL }, superId, NOW)
+        pagando.catch(() => undefined)
+        await esperaElCandado(pid) // «Ya me pagó» llegó segundo: espera el candado del cobro
+        aparcada.soltar()
+
+        await anexando
+        pagado = await pagando.then(
+          () => 'se marcó pagado',
+          error => error,
+        )
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+
+      expect(pagado).toMatchObject({
+        statusCode: 409,
+        code: 'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED',
+        message: 'El monto de este cobro cambió a $232.00; revísalo y confirma otra vez',
+      })
+      expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({
+        status: 'PENDING',
+        paidAt: null,
+        paidById: null,
+        totalCents: TOTAL_DEL_CONCEPTO,
+      })
+      expect(await prisma.activityLog.count({ where: { action: 'PLATFORM_CHARGE_PAID', entityId: cobro.id } })).toBe(0)
+    })
+
+    it('por HTTP: con el total viejo es 409; con el nuevo marca pagado; repetir con el viejo sobre la ya pagada es éxito; un total mal formado es 400', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+      const factura = await nuevaFactura({}, UN_CONCEPTO)
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+
+      const viejo = await post(`/occurrences/${fecha.id}/pay`, { invoice: false, expectedTotalCents: TOTAL })
+      expect(viejo.status).toBe(409)
+      expect(viejo.body).toMatchObject({ code: 'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED' })
+      expect(viejo.body.message).toBe('El monto de este cobro cambió a $232.00; revísalo y confirma otra vez')
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PENDING')
+
+      expect((await post(`/occurrences/${fecha.id}/pay`, { invoice: false, expectedTotalCents: -5 })).status).toBe(400)
+      expect((await post(`/occurrences/${fecha.id}/pay`, { invoice: false, expectedTotalCents: 10.5 })).status).toBe(400)
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PENDING')
+
+      const nuevo = await post(`/occurrences/${fecha.id}/pay`, { invoice: false, expectedTotalCents: TOTAL_DEL_CONCEPTO })
+      expect(nuevo.status).toBe(200)
+      expect(nuevo.body.data.occurrence).toMatchObject({ status: 'PAID', totalCents: TOTAL_DEL_CONCEPTO })
+
+      const repetido = await post(`/occurrences/${fecha.id}/pay`, { invoice: false, expectedTotalCents: TOTAL })
+      expect(repetido.status).toBe(200) // repetir sobre una pagada sigue siendo éxito
+      expect(repetido.body.data.occurrence.status).toBe('PAID')
+      expect(await bitacoras('PLATFORM_CHARGE_PAID', cobro.id, 1)).toHaveLength(1)
+    })
+
+    it('sin el campo, igual que siempre (los clientes viejos no lo mandan)', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+
+      const res = await post(`/occurrences/${fecha.id}/pay`, { invoice: false })
+
+      expect(res.status).toBe(200)
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PAID')
+    })
+  })
+
+  describe('2 · quitar suelta SÓLO la factura confirmada', () => {
+    it('la pestaña vieja confirma «Quitar A» cuando otra ya quitó A y está anexando B (con el candado tomado): 409 «no anexada», B sigue anexada y nadie la soltó', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+      const a = await nuevaFactura()
+      const b = await nuevaFactura()
+      await linkInvoice(fecha.id, { cfdiId: a.id }, superId, NOW)
+      await unlinkInvoice(fecha.id, { cfdiId: a.id }, superId, NOW) // la otra pestaña quitó A…
+      const aparcada = aparcarLaTransaccion(1)
+      let confirmada: unknown
+      try {
+        const anexando = linkInvoice(fecha.id, { cfdiId: b.id }, superId, NOW) // …y está anexando B
+        anexando.catch(() => undefined)
+        const pid = await aTiempo(aparcada.pid, 60_000, 'anexar B escribió su vínculo y quedó aparcado con el candado, sin commit')
+
+        const quitandoA = unlinkInvoice(fecha.id, { cfdiId: a.id }, superId, NOW) // la pestaña vieja confirma
+        quitandoA.catch(() => undefined)
+        await esperaElCandado(pid)
+        aparcada.soltar()
+
+        await anexando
+        confirmada = await quitandoA.then(
+          () => 'quitó algo',
+          error => error,
+        )
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+
+      expect(confirmada).toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_NOT_LINKED' })
+      const fila = await facturaDe(b.id)
+      expect(fila.platformChargeOccurrenceId).toBe(fecha.id) // B sigue en su fecha…
+      expect(fila.chargeLinkedAt).not.toBeNull() // …y anexada: con el código viejo la habría soltado
+      expect(await facturaDe(a.id)).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+      const quitadas = await bitacoras('PLATFORM_CHARGE_INVOICE_UNLINKED', cobro.id, 1)
+      expect(quitadas).toHaveLength(1) // sólo la primera: la tardía no dejó rastro de haber quitado nada
+      expect(quitadas[0].data).toMatchObject({ platformCfdiId: a.id })
+    })
+
+    it('por HTTP: sin ?cfdiId es 400; con la factura confirmada la quita; con otra factura (de otra fecha) es 409 y no toca nada', async () => {
+      const uno = await cobroDeUnaFecha()
+      const otro = await cobroDeUnaFecha()
+      const delUno = await nuevaFactura()
+      const delOtro = await nuevaFactura()
+      await linkInvoice(uno.fecha.id, { cfdiId: delUno.id }, superId, NOW)
+      await linkInvoice(otro.fecha.id, { cfdiId: delOtro.id }, superId, NOW)
+
+      expect((await del(`/occurrences/${uno.fecha.id}/invoice-link`)).status).toBe(400)
+      const ajena = await del(`/occurrences/${uno.fecha.id}/invoice-link?cfdiId=${delOtro.id}`)
+      expect(ajena.status).toBe(409)
+      expect(ajena.body).toMatchObject({ code: 'PLATFORM_CHARGE_INVOICE_NOT_LINKED' })
+      expect((await facturaDe(delOtro.id)).platformChargeOccurrenceId).toBe(otro.fecha.id)
+      expect((await facturaDe(delUno.id)).platformChargeOccurrenceId).toBe(uno.fecha.id)
+
+      expect((await del(`/occurrences/${uno.fecha.id}/invoice-link?cfdiId=${delUno.id}`)).status).toBe(200)
+      expect((await facturaDe(delUno.id)).platformChargeOccurrenceId).toBeNull()
+    })
+  })
+
+  describe('3 · una factura que no cabe en el modelo del 16 % no se anexa NUNCA, ni con el mismo total', () => {
+    it('un renglón exento de $100 a una fecha de $100, pendiente o ya pagada: 409 NOT_REPRESENTABLE y no se escribe nada', async () => {
+      const cien: ChargeConcept[] = [{ ...LICENCIA, amountCents: 10000 }] // con IVA incluido: $100.00 en total
+      const exenta = () =>
+        nuevaFactura({
+          lines: [
+            {
+              description: 'Renglón exento',
+              satProductKey: '81112501',
+              satUnitKey: 'E48',
+              quantity: 1,
+              unitPriceCents: 10000,
+              taxExempt: true,
+            },
+          ] as unknown as Prisma.InputJsonValue,
+          subtotalCents: 10000,
+          taxCents: 0,
+          totalCents: 10000,
+        })
+
+      for (const pagada of [false, true]) {
+        const { cobro, fecha } = await cobroDeUnaFecha({ concepts: cien })
+        expect((await porFecha(cobro.id, '2026-11-02')).totalCents).toBe(10000) // el MISMO total que la factura
+        if (pagada) await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+        const antes = await porFecha(cobro.id, '2026-11-02')
+        const factura = await exenta()
+
+        await expect(linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
+        })
+
+        expect(await facturaDe(factura.id)).toMatchObject({ platformChargeOccurrenceId: null, chargeLinkedAt: null })
+        expect(await porFecha(cobro.id, '2026-11-02')).toEqual(antes) // ni la fecha ni su modo cambiaron
+        expect(await prisma.activityLog.count({ where: { action: 'PLATFORM_CHARGE_INVOICE_LINKED', entityId: cobro.id } })).toBe(0)
+      }
+    })
+  })
+
+  describe('4 · un complemento de pago no pasa sobre una factura anexada a un cobro sin pagar (reserva del complemento contra anexar)', () => {
+    const anexadaVigente = (facturaId: string) =>
+      facturaDe(facturaId).then(f => ({ fecha: f.platformChargeOccurrenceId, marca: f.chargeLinkedAt }))
+
+    it('la RESERVA del complemento primero, detenida con la fila del padre tomada: anexar espera esa fila, ve que la versión cambió y recibe 409 «acaba de cambiar»; la factura queda libre', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+      const padre = await nuevaFactura({ metodoPago: 'PPD' })
+      const aparcada = aparcarLaTransaccion(1) // la transacción 1 de registerPlatformPayment es la RESERVA (toca al padre y crea la fila STAMPING)
+      let complemento: Promise<unknown> | undefined
+      try {
+        complemento = registerPlatformPayment(pagoDe(padre.id))
+        complemento.catch(() => undefined)
+        const pid = await aTiempo(aparcada.pid, 60_000, 'la reserva tocó al padre y creó su fila STAMPING, sin commit')
+
+        // Anexar lee al padre con la versión de antes (la reserva no confirmó), no ve ningún complemento y llega a su UPDATE condicional.
+        const anexando = linkInvoice(fecha.id, { cfdiId: padre.id }, superId, NOW)
+        anexando.catch(() => undefined)
+        await esperaLaFila(pid) // el cruce SE PROVOCÓ: el UPDATE de anexar espera la fila del padre
+        aparcada.soltar()
+
+        await complemento
+        await expect(anexando).rejects.toMatchObject({ statusCode: 409, code: 'PLATFORM_CHARGE_INVOICE_LINK_CHANGED' })
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+
+      expect(await anexadaVigente(padre.id)).toEqual({ fecha: null, marca: null })
+      expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({ status: 'PENDING', invoiceMode: 'AUTOMATIC', totalCents: TOTAL })
+      const reps = await complementosDe(padre.id)
+      expect(reps).toHaveLength(1)
+      expect(reps[0]).toMatchObject({ type: 'PAGO', status: 'STAMPED' })
+      expect((await facturaDe(padre.id)).amountPaidCents).toBe(TOTAL)
+    })
+
+    it('ANEXAR primero, detenido con la fila del padre tomada: la reserva espera (su UPDATE toca al padre), ve el vínculo ya escrito y recibe 409; no hay fila de complemento ni PAC', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha()
+      const padre = await nuevaFactura({ metodoPago: 'PPD' })
+      const aparcada = aparcarLaTransaccion(1)
+      let complemento: Promise<unknown> | undefined
+      try {
+        const anexando = linkInvoice(fecha.id, { cfdiId: padre.id }, superId, NOW)
+        anexando.catch(() => undefined)
+        const pid = await aTiempo(
+          aparcada.pid,
+          60_000,
+          'anexar escribió el vínculo y quedó aparcado con la fila del padre tomada, sin commit',
+        )
+
+        // El complemento lee al padre sin vínculo (anexar no confirmó) y entra a su reserva, donde el UPDATE que lo toca espera la fila.
+        complemento = registerPlatformPayment(pagoDe(padre.id))
+        complemento.catch(() => undefined)
+        await esperaLaFila(pid)
+        aparcada.soltar()
+
+        await anexando
+        await expect(complemento).rejects.toMatchObject({
+          code: 'VALIDATION',
+          message:
+            'Esta factura está anexada a un cobro sin pagar en «Por cobrar». Márcalo como pagado primero y después registra el complemento',
+        })
+      } finally {
+        aparcada.soltar()
+        aparcada.restaurar()
+      }
+
+      expect(await complementosDe(padre.id)).toHaveLength(0) // la reserva no dejó fila
+      expect((pac as unknown as { createPaymentComplement: jest.Mock }).createPaymentComplement).not.toHaveBeenCalled()
+      expect((await anexadaVigente(padre.id)).fecha).toBe(fecha.id)
+      expect((await facturaDe(padre.id)).amountPaidCents).toBe(0)
+      expect((await porFecha(cobro.id, '2026-11-02')).status).toBe('PENDING')
+
+      // Y con la fecha ya pagada, el complemento sí pasa: el cobro dejó de deberse.
+      await payOccurrence(fecha.id, { invoice: false }, superId, NOW)
+      const rep = await registerPlatformPayment(pagoDe(padre.id))
+      expect(rep.status).toBe('STAMPED')
+      expect(await complementosDe(padre.id)).toHaveLength(1)
+    })
+
+    it('una factura sin vínculo, y una timbrada desde «Por cobrar» (sin marca de anexada), reciben su complemento como siempre', async () => {
+      const { fecha } = await cobroDeUnaFecha()
+      const sinVinculo = await nuevaFactura({ metodoPago: 'PPD' })
+      const desdeAqui = await nuevaFactura({ metodoPago: 'PPD', platformChargeOccurrenceId: fecha.id })
+
+      expect((await registerPlatformPayment(pagoDe(sinVinculo.id))).status).toBe('STAMPED')
+      expect((await registerPlatformPayment(pagoDe(desdeAqui.id))).status).toBe('STAMPED')
+      await complementosDe(sinVinculo.id)
+      await complementosDe(desdeAqui.id)
+    })
+  })
+
+  describe('5 · una sola vez: el cobro y su única fecha dicen lo mismo', () => {
+    it('anexar otra factura de otro monto y quitarla: getCharge y la fecha coinciden; editar sólo la fecha los conserva', async () => {
+      const cobro = await nuevoCobro({ frequency: 'ONE_TIME', anchorDate: '2026-11-02', invoiceMode: 'AUTOMATIC' }) // [RENTA, LICENCIA] = $1,079.00
+      const fecha = await porFecha(cobro.id, '2026-11-02')
+      const factura = await nuevaFactura({}, UN_CONCEPTO)
+
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      const anexado = await getCharge(cobro.id)
+      expect(anexado.concepts).toEqual(UN_CONCEPTO) // el editor carga esto: ya no son los $1,079.00 del alta
+      expect(anexado.invoiceMode).toBe('MANUAL')
+      expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({
+        concepts: UN_CONCEPTO,
+        totalCents: TOTAL_DEL_CONCEPTO,
+        invoiceMode: 'MANUAL',
+      })
+
+      await unlinkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+      const quitado = await getCharge(cobro.id)
+      expect(quitado.concepts).toEqual(UN_CONCEPTO)
+      expect(quitado.invoiceMode).toBe('MANUAL')
+      expect(await porFecha(cobro.id, '2026-11-02')).toMatchObject({
+        concepts: UN_CONCEPTO,
+        totalCents: TOTAL_DEL_CONCEPTO,
+        invoiceMode: 'MANUAL',
+      })
+
+      // Editar sólo la fecha: la fecha conserva su monto y el cobro sigue diciendo lo mismo.
+      await updateCharge(cobro.id, { anchorDate: '2026-11-03' }, superId, NOW)
+      expect(await porFecha(cobro.id, '2026-11-03')).toMatchObject({ id: fecha.id, concepts: UN_CONCEPTO, totalCents: TOTAL_DEL_CONCEPTO })
+      expect((await getCharge(cobro.id)).concepts).toEqual(UN_CONCEPTO)
+      // Guardar lo que el editor mostró no cambia nada: ya coincide con el cobro.
+      await updateCharge(cobro.id, { concepts: (await getCharge(cobro.id)).concepts as unknown as ChargeConcept[] }, superId, NOW)
+      expect(await porFecha(cobro.id, '2026-11-03')).toMatchObject({ concepts: UN_CONCEPTO, totalCents: TOTAL_DEL_CONCEPTO })
+    })
+
+    it('un cobro recurrente conserva lo suyo: el vínculo es de esa fecha', async () => {
+      const { cobro, fecha } = await cobroDeUnaFecha() // MONTHLY, AUTOMATIC
+      const factura = await nuevaFactura({}, UN_CONCEPTO)
+
+      await linkInvoice(fecha.id, { cfdiId: factura.id }, superId, NOW)
+
+      const intacto = await getCharge(cobro.id)
+      expect(intacto.invoiceMode).toBe('AUTOMATIC')
+      expect(intacto.concepts).toEqual([RENTA, LICENCIA])
+    })
   })
 })

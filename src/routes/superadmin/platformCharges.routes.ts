@@ -12,6 +12,7 @@ import {
   listOccurrencesSchema,
   pauseChargeSchema,
   payOccurrenceSchema,
+  unlinkInvoiceSchema,
   updateChargeSchema,
 } from './platformCharges.schemas'
 
@@ -28,12 +29,12 @@ import {
  *   GET   /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&frequency=&invoice=&customerType=&from=&to=&customer=&page=&pageSize=
  *   GET   /api/v1/superadmin/platform-charges/occurrences/groups?groupBy=customer|month|frequency|invoice&…los mismos filtros
  *   GET   /api/v1/superadmin/platform-charges/occurrences/:id/pay-preview
- *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/pay        { invoice }
+ *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/pay        { invoice, receptor?, expectedTotalCents? }
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/skip
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/reopen
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/invoice    { billingTaxProfileId?, conceptKeys? }
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link   { cfdiId }
- *   DELETE /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link
+ *   DELETE /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link?cfdiId=
  *   GET   /api/v1/superadmin/platform-charges/invoice-candidates?customerType=&organizationId=&venueId=&rfc=&q=&page=&pageSize=
  *   GET   /api/v1/superadmin/platform-charges?status=active|paused&q=&page=&pageSize=
  *   POST  /api/v1/superadmin/platform-charges                         (con `invoiceId`: una sola vez, de una factura de «Facturas CFDI»)
@@ -76,7 +77,12 @@ router.post(
   checkPermission('platform-billing:issue'),
   controller.linkInvoice,
 )
-router.delete('/occurrences/:id/invoice-link', checkPermission('platform-billing:issue'), controller.unlinkInvoice)
+router.delete(
+  '/occurrences/:id/invoice-link',
+  validateRequest(unlinkInvoiceSchema),
+  checkPermission('platform-billing:issue'),
+  controller.unlinkInvoice,
+)
 router.get(
   '/invoice-candidates',
   validateRequest(listInvoiceCandidatesSchema),

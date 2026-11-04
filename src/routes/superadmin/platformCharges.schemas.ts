@@ -192,6 +192,11 @@ export const linkInvoiceSchema = z.object({
   body: z.object({ cfdiId: text('Elige la factura que vas a anexar') }),
 })
 
+/** Quitar lo anexado: la factura que el operador confirmó viaja en la URL (un DELETE no lleva cuerpo) y es la única que se suelta. */
+export const unlinkInvoiceSchema = z.object({
+  query: z.object({ cfdiId: text('Elige la factura que vas a quitar') }),
+})
+
 /** «Ya me pagó»: la casilla «Timbrar factura ahora» se manda SIEMPRE explícita (omitirla no puede volver manual una automática). */
 /** Lo que el operador vio en pantalla al pedir la factura: si viene, es lo único que se puede timbrar. */
 const confirmedReceptor = z
@@ -211,6 +216,12 @@ export const payOccurrenceSchema = z.object({
         invalid_type_error: 'invoice debe ser verdadero o falso',
       }),
       receptor: confirmedReceptor,
+      /** El total que el operador vio al confirmar: si el cobro cambió de monto mientras tanto, no se marca pagado. */
+      expectedTotalCents: z
+        .number({ invalid_type_error: 'El total confirmado debe ser un número' })
+        .int('El total confirmado debe estar en centavos enteros')
+        .min(0, 'El total confirmado no puede ser negativo')
+        .optional(),
     })
     .refine(({ invoice, receptor }) => !invoice || receptor !== undefined, {
       message: 'Para timbrar hace falta confirmar a quién se le factura',

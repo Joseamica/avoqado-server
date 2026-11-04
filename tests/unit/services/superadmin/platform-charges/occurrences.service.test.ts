@@ -477,6 +477,80 @@ describe('platform-charges/occurrences — payOccurrence', () => {
     expect(mockInvoice).not.toHaveBeenCalled()
   })
 
+  describe('🔴 «Ya me pagó» confirma un importe (Codex r2, hallazgo 1)', () => {
+    it('si el total que se confirmó ya no es el de la fecha: 409 PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED con el monto nuevo, y no se marca nada', async () => {
+      // El operador abrió el diálogo por $580.00; otra pestaña anexó una factura y la fecha ahora es de $1,079.00.
+      const error = await payOccurrence('occ-1', { invoice: true, expectedTotalCents: 58000 }, 'staff-1', AHORA).then(
+        () => {
+          throw new Error('se esperaba un rechazo y pasó')
+        },
+        (e: unknown) => e,
+      )
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect((error as ConflictError).statusCode).toBe(409)
+      expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED')
+      expect((error as ConflictError).message).toBe('El monto de este cobro cambió a $1,079.00; revísalo y confirma otra vez')
+      expect(mundo.occ).toMatchObject({ status: 'PENDING', paidAt: null, paidById: null, invoiceMode: 'AUTOMATIC' })
+      expect(mockInvoice).not.toHaveBeenCalled()
+      sinEscrituras()
+    })
+
+    it('con el total que sí es: paga como siempre', async () => {
+      const r = await payOccurrence('occ-1', { invoice: false, expectedTotalCents: 107900 }, 'staff-1', AHORA)
+
+      expect(mundo.occ).toMatchObject({ status: 'PAID', paidAt: AHORA, paidById: 'staff-1' })
+      expect(r.occurrence).toMatchObject({ status: 'PAID', totalCents: 107900 })
+    })
+
+    it('un total confirmado de cero también se compara (0 no es «sin campo»)', async () => {
+      await expect(payOccurrence('occ-1', { invoice: false, expectedTotalCents: 0 }, 'staff-1', AHORA)).rejects.toMatchObject({
+        code: 'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED',
+      })
+      sinEscrituras()
+    })
+
+    it('sin el campo, igual que hoy: paga el importe que haya', async () => {
+      await payOccurrence('occ-1', { invoice: false }, 'staff-1', AHORA)
+
+      expect(mundo.occ.status).toBe('PAID')
+    })
+
+    it('se compara con lo RELEÍDO bajo el candado: si el monto cambió entre la lectura y el candado, también es 409', async () => {
+      prismaMock.platformChargeOccurrence.findUnique
+        .mockImplementationOnce(async () => ({ chargeId: 'cobro-1' }))
+        .mockImplementationOnce(async () => {
+          mundo.occ.totalCents = 20000
+          return { ...mundo.occ, charge: { venueId: null, organizationId: 'org-1', invoiceMode: 'AUTOMATIC' } }
+        })
+
+      await expect(payOccurrence('occ-1', { invoice: false, expectedTotalCents: 107900 }, 'staff-1', AHORA)).rejects.toMatchObject({
+        code: 'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED',
+      })
+      sinEscrituras()
+    })
+
+    it('repetir sobre una ya PAGADA sigue siendo éxito aunque el total confirmado no coincida (la comparación va después de «pagada»)', async () => {
+      Object.assign(mundo.occ, PAGADA())
+
+      const r = await payOccurrence('occ-1', { invoice: true, expectedTotalCents: 1 }, 'staff-2', AHORA)
+
+      expect(r.occurrence).toMatchObject({ status: 'PAID' })
+      expect(r.invoice).toBeNull()
+      expect(mockInvoice).not.toHaveBeenCalled()
+      sinEscrituras()
+    })
+
+    it('una OMITIDA conserva su 409 «deshazlo primero» (la comparación va después de «omitida»)', async () => {
+      Object.assign(mundo.occ, OMITIDA())
+
+      await expect(payOccurrence('occ-1', { invoice: false, expectedTotalCents: 1 }, 'staff-1', AHORA)).rejects.toMatchObject({
+        code: 'PLATFORM_CHARGE_OCCURRENCE_SKIPPED',
+      })
+      sinEscrituras()
+    })
+  })
+
   it('el estado que se decide es el RELEÍDO bajo el candado: si otra pestaña la pagó mientras tanto, esta ve «ya pagada» y no factura', async () => {
     // Lectura previa (sin candado): PENDING. Bajo el candado, otra pestaña ya la había pagado.
     prismaMock.platformChargeOccurrence.findUnique
@@ -1836,14 +1910,26 @@ describe('platform-charges/occurrences — 🔴 filtros: UN armador de where par
         expect(prismaMock.platformCharge.findMany).not.toHaveBeenCalled()
       })
 
-      it('🔴 con más cobros que el tope no se trunca en silencio: sólo lee hasta el tope y lo dice con truncated', async () => {
+      it('🔴 con más cobros que el tope no suma sobre un recorte: grupos vacíos y truncated, sin leer siquiera los nombres', async () => {
+        // 5,001 cobros del MISMO cliente: recortar a 5,000 antes de juntarlos por nombre daría un grupo de 5,000 cuando el clic traería 5,001.
         const filas = Array.from({ length: MAX_GROUP_ROWS + 1 }, (_, i) => porCobro(`c${String(i).padStart(6, '0')}`, 1, 100))
+        groupBy().mockResolvedValue(filas)
+        prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) => where.id.in.map((id: string) => cobroDe(id)))
+
+        const r = await groupOccurrences({}, 'customer')
+
+        expect(r).toEqual({ groups: [], truncated: true })
+        expect(prismaMock.platformCharge.findMany).not.toHaveBeenCalled()
+      })
+
+      it('justo en el tope sí agrupa: el recorte sólo se declara con un renglón de más', async () => {
+        const filas = Array.from({ length: MAX_GROUP_ROWS }, (_, i) => porCobro(`c${String(i).padStart(6, '0')}`, 1, 100))
         groupBy().mockResolvedValue(filas)
         prismaMock.platformCharge.findMany.mockImplementation(async ({ where }: any) => where.id.in.map((id: string) => cobroDe(id, id)))
 
         const { groups, truncated } = await groupOccurrences({}, 'customer')
 
-        expect(truncated).toBe(true)
+        expect(truncated).toBe(false)
         expect(groups).toHaveLength(MAX_GROUP_ROWS)
         expect(prismaMock.platformCharge.findMany.mock.calls[0][0].take).toBe(MAX_GROUP_ROWS)
       })
@@ -1907,7 +1993,7 @@ describe('platform-charges/occurrences — 🔴 filtros: UN armador de where par
         ])
       })
 
-      it('🔴 con más días que el tope: no trunca en silencio', async () => {
+      it('🔴 con más días que el tope no suma sobre un recorte: grupos vacíos y truncated', async () => {
         groupBy().mockResolvedValue(
           Array.from({ length: MAX_GROUP_ROWS + 1 }, (_, i) => ({
             dueDate: new Date(Date.UTC(2020, 0, 1 + i)),
@@ -1916,9 +2002,21 @@ describe('platform-charges/occurrences — 🔴 filtros: UN armador de where par
           })),
         )
 
+        expect(await groupOccurrences({}, 'month')).toEqual({ groups: [], truncated: true })
+      })
+
+      it('justo en el tope sí agrupa todos los días', async () => {
+        groupBy().mockResolvedValue(
+          Array.from({ length: MAX_GROUP_ROWS }, (_, i) => ({
+            dueDate: new Date(Date.UTC(2020, 0, 1 + i)),
+            _count: { _all: 1 },
+            _sum: { totalCents: 1 },
+          })),
+        )
+
         const { groups, truncated } = await groupOccurrences({}, 'month')
 
-        expect(truncated).toBe(true)
+        expect(truncated).toBe(false)
         expect(groups.reduce((suma, g) => suma + g.count, 0)).toBe(MAX_GROUP_ROWS)
       })
 

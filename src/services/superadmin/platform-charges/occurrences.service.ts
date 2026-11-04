@@ -25,6 +25,7 @@ import type {
 import logger from '@/config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { formatMoney } from '@/services/shared/receiptLayout/format'
 import { PlatformBillingError } from '@/services/superadmin/platform-billing/platformEmisor.service'
 import prisma from '@/utils/prismaClient'
 import { isCalendarDay, pageParams } from './charges.service'
@@ -347,13 +348,17 @@ function invoiceFailure(error: unknown, occurrenceId: string): Extract<PayInvoic
  * (dos pestañas: una marca, la otra ve «ya pagado»); sobre una omitida es 409. Sin la casilla «Timbrar factura ahora» (`invoice:
  * false`), una ocurrencia AUTOMÁTICA queda MANUAL: no vuelve a aparecer como una factura automática que falló.
  *
+ * 🔴 `expectedTotalCents` es el total que el operador vio al confirmar: si viene y ya no es el de la fecha (otra pestaña anexó una factura de otro
+ * monto), es 409 `PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED` y no se marca nada: nadie da por recibido un importe que no confirmó. Se compara bajo el
+ * candado, DESPUÉS de «omitida» y de «pagada» (repetir sobre una pagada sigue siendo éxito). Sin el campo, se paga lo que haya (clientes viejos).
+ *
  * Con `invoice: true`, DESPUÉS de marcarla (y fuera del candado) llama a `invoiceOccurrence` y atrapa su error: el cobro SIGUE
  * pagado y la respuesta trae `invoice: { ok: false, message, code, field? }`. Un proceso que muere en medio deja «Pagado · sin
  * factura», con su botón «Facturar».
  */
 export async function payOccurrence(
   id: string,
-  input: { invoice: boolean; receptor?: ConfirmedReceptor },
+  input: { invoice: boolean; receptor?: ConfirmedReceptor; expectedTotalCents?: number },
   actorId: string,
   now: Date = new Date(),
 ): Promise<PayResult> {
@@ -365,6 +370,12 @@ export async function payOccurrence(
       throw conflict('Este cobro está omitido; deshazlo para poder marcarlo como pagado', 'PLATFORM_CHARGE_OCCURRENCE_SKIPPED')
     }
     if (row.status === 'PAID') return null // repetir: éxito, sin volver a escribir ni a facturar
+    if (input.expectedTotalCents !== undefined && input.expectedTotalCents !== row.totalCents) {
+      throw conflict(
+        `El monto de este cobro cambió a ${formatMoney(row.totalCents)}; revísalo y confirma otra vez`,
+        'PLATFORM_CHARGE_OCCURRENCE_TOTAL_CHANGED',
+      )
+    }
     const becomesManual = !input.invoice && row.invoiceMode === 'AUTOMATIC'
     const updated = await tx.platformChargeOccurrence.update({
       where: { id },
@@ -577,7 +588,10 @@ export function occurrenceWhere(filters: OccurrenceFilters): Prisma.PlatformChar
 
 // ── Agrupar ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/** Lo más que se lee al agrupar por cliente o por mes (un renglón por cobro, o por día de cobro); si hay más, la respuesta lo dice (`truncated`). */
+/**
+ * Lo más que se lee al agrupar por cliente o por mes (un renglón por cobro, o por día de cobro). 🔴 Si hay más, NO se suma nada: la respuesta es
+ * `{ groups: [], truncated: true }`. Un grupo hecho con un recorte mostraría menos que lo que trae su clic (5,001 cobros de un cliente, un grupo de 5,000).
+ */
 export const MAX_GROUP_ROWS = 5000
 
 const MONTH_NAMES_ES = [
@@ -646,19 +660,18 @@ async function groupByCustomer(where: Prisma.PlatformChargeOccurrenceWhereInput)
     orderBy: { chargeId: 'asc' },
     take: MAX_GROUP_ROWS + 1,
   })
-  const truncated = rows.length > MAX_GROUP_ROWS
-  const kept = rows.slice(0, MAX_GROUP_ROWS)
-  if (kept.length === 0) return { groups: [], truncated }
+  if (rows.length > MAX_GROUP_ROWS) return { groups: [], truncated: true }
+  if (rows.length === 0) return { groups: [], truncated: false }
 
   const charges = await prisma.platformCharge.findMany({
-    where: { id: { in: kept.map(row => row.chargeId) } },
+    where: { id: { in: rows.map(row => row.chargeId) } },
     select: { id: true, customerName: true },
-    take: kept.length,
+    take: rows.length,
   })
   const nameOf = new Map(charges.map(charge => [charge.id, charge.customerName]))
 
   const groups = new Map<string, OccurrenceGroup>()
-  for (const row of kept) {
+  for (const row of rows) {
     // Un cobro con fechas no se puede borrar (`Restrict`); si aun así faltara, su dinero cuenta aparte en vez de perderse.
     const name = nameOf.get(row.chargeId)
     const key = name ?? `CHARGE:${row.chargeId}`
@@ -668,7 +681,7 @@ async function groupByCustomer(where: Prisma.PlatformChargeOccurrenceWhereInput)
     groups.set(key, group)
   }
   const sorted = [...groups.values()].sort((a, b) => a.label.localeCompare(b.label, 'es') || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
-  return { groups: sorted, truncated }
+  return { groups: sorted, truncated: false }
 }
 
 /**
@@ -685,8 +698,9 @@ async function groupByMonth(where: Prisma.PlatformChargeOccurrenceWhereInput): P
     orderBy: { dueDate: 'asc' },
     take: MAX_GROUP_ROWS + 1,
   })
+  if (rows.length > MAX_GROUP_ROWS) return { groups: [], truncated: true }
   const months = new Map<string, OccurrenceGroup>()
-  for (const row of rows.slice(0, MAX_GROUP_ROWS)) {
+  for (const row of rows) {
     const key = dbToCalendarDay(row.dueDate).slice(0, 7)
     const group = months.get(key) ?? {
       key,
@@ -698,13 +712,13 @@ async function groupByMonth(where: Prisma.PlatformChargeOccurrenceWhereInput): P
     group.totalCents += row._sum.totalCents ?? 0
     months.set(key, group)
   }
-  return { groups: [...months.values()], truncated: rows.length > MAX_GROUP_ROWS }
+  return { groups: [...months.values()], truncated: false }
 }
 
 /**
  * `GET /occurrences/groups`: cuántos cobros y cuánto suman, por cliente, mes, periodicidad o factura, con LOS MISMOS filtros que la lista. 🔴 Todo se agrupa en
  * la base: nunca sobre un recorte ni trayendo las fechas para sumarlas. Por cliente y por mes se lee hasta `MAX_GROUP_ROWS` renglones y, si hay
- * más, `truncated` lo dice (la lista y su suma siguen contando todo).
+ * más, no se devuelve ningún grupo y `truncated` lo dice (la lista y su suma siguen contando todo).
  */
 export async function groupOccurrences(filters: OccurrenceFilters, groupBy: OccurrenceGroupBy): Promise<GroupResult> {
   if (!GROUP_BY.has(groupBy)) {
