@@ -19,7 +19,7 @@
  *
  * 🔴 El cupo de Resend (`services/email/resendQuota.ts`): el plan gratis da 100 correos al día a TODO el servidor. Con 80 en el
  * día las campañas esperan a que Resend reinicie su día (medianoche UTC, las 18:00 de CDMX) para dejarle lugar al login y a los
- * recibos. La pausa se revisa otra vez justo antes de cada envío. Lo que vuelve a la cola no gasta un intento (no debe acercarse
+ * recibos. La pausa se revisa otra vez justo antes de llamar a Resend, dentro del transporte (`antesDeMandar`). Lo que vuelve a la cola no gasta un intento (no debe acercarse
  * al agotamiento del Ruling 11) y nunca sale dos veces: el mismo lease y el mismo CAS. El tope de las campañas sigue contando el
  * día de CDMX.
  */
@@ -32,7 +32,7 @@ import prisma from '../../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
 import { utcTs } from '../../../utils/sqlDates'
 import emailService from '../../email.service'
-import { campanasPausadasPorCupo, esErrorDeCupo, reinicioDelCupoDiario } from '../../email/resendQuota'
+import { campanasPausadasPorCupo, CUPO_EN_PAUSA, esErrorDeCupo, reinicioDelCupoDiario } from '../../email/resendQuota'
 import { correoEliminadoDesde, MOTIVO_PERSONA_ELIMINADA } from '../erase.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { cabecerasDeBaja, pieDeCampana, type MotivoDeEnvio } from './footer'
@@ -241,8 +241,6 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
     d.vars as Vars,
     pieDeCampana(d.reason as MotivoDeEnvio, d.reasonVenueName, urlDeBaja),
   )
-  // 🔴 Otra vez, justo antes de Resend: durante la espera y las relecturas, un login pudo cruzar el 80. No sale y vuelve a la cola.
-  if (campanasPausadasPorCupo()) return escribir('REINTENTO', sinGastarIntento(d.attempts, ahora))
   let resultado: Awaited<ReturnType<typeof emailService.sendEmailWithResult>>
   try {
     resultado = await emailService.sendEmailWithResult({
@@ -257,6 +255,9 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
       // el aviso de Resend aunque su `resendId` no se haya guardado.
       idempotencyKey: d.id,
       tags: [{ name: 'crmDeliveryId', value: d.id }],
+      // 🔴 Otra vez, después del último await del transporte: durante la espera, las relecturas y el candado demo, un login
+      // pudo cruzar el 80. No sale y vuelve a la cola sin gastar el intento.
+      antesDeMandar: () => (campanasPausadasPorCupo() ? CUPO_EN_PAUSA : null),
     })
   } catch {
     // Sin respuesta: pudo salir o no. La misma llave lo vuelve seguro de reintentar.
@@ -272,7 +273,9 @@ export async function enviarDelivery(id: string, ahora: Date = new Date()): Prom
     return 'DESCONOCIDO'
   }
   // El cupo de Resend se acabó: Resend la rechazó sin mandarla. Vuelve a la cola sin gastar el intento (el remitente ya se pausó).
-  if (esErrorDeCupo(resultado.errorCode)) return escribir('REINTENTO', sinGastarIntento(d.attempts, ahora))
+  if (esErrorDeCupo(resultado.errorCode) || resultado.errorCode === CUPO_EN_PAUSA) {
+    return escribir('REINTENTO', sinGastarIntento(d.attempts, ahora))
+  }
   if (resultado.transient || resultado.errorCode === LLAVE_EN_VUELO) return reintentar(resultado.errorCode ?? 'Error transitorio de envío')
   if (resultado.errorCode === LLAVE_YA_USADA) {
     return desconocido('No sabemos si salió: Resend ya tenía un envío con esta llave y otro contenido')

@@ -402,8 +402,8 @@ describe('el cupo de Resend', () => {
   })
 
   it('al cruzar el 80 a media vuelta la siguiente no sale: lo reclamado vuelve sin gastar intento, para el reinicio del cupo', async () => {
-    // Libre al empezar, antes del primer correo y justo antes de mandarlo; ese correo cruza el 80.
-    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
+    // Libre al empezar y antes del primer correo; ese correo cruza el 80.
+    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
     prismaMock.$queryRaw.mockResolvedValue([{ id: DELIVERY }, { id: 'cotra000000000000000000001' }, { id: 'cotra000000000000000000002' }])
 
     await correrEnvioDeCampanas({ ahora: AHORA, pausaMs: 0 })
@@ -438,12 +438,16 @@ describe('el cupo de Resend', () => {
     expect(devoluciones).toHaveLength(0)
   })
 
-  it('la pausa que llega durante la espera o las relecturas frena el correo JUSTO antes de mandarlo, sin gastar el intento', async () => {
-    // Libre al revisar la vuelta; un login cruza el 80 mientras se espera y se releen la baja y la lápida.
-    pausa.mockReturnValue(true)
+  it('la pausa que llega durante la espera, las relecturas o el propio transporte frena el correo JUSTO antes de Resend, sin gastar el intento', async () => {
+    // El transporte pregunta `antesDeMandar` después de su último await; para entonces un login ya cruzó el 80.
+    send.mockImplementation(async (o: { antesDeMandar?: () => string | null }) => {
+      pausa.mockReturnValue(true)
+      const frenado = o.antesDeMandar?.()
+      return frenado ? { ok: false, transient: true, errorCode: frenado } : { ok: true, resendId: 're_1', transient: false }
+    })
 
     await expect(enviarDelivery(DELIVERY, AHORA)).resolves.toBe('REINTENTO')
-    expect(send).not.toHaveBeenCalled()
+    expect(send.mock.calls[0][0].antesDeMandar()).toBe('cupo_en_pausa')
     expect(escrito()).toEqual({
       where: CAS,
       data: { leaseUntil: null, status: 'PENDIENTE', attempts: 0, sendAttemptAt: null, nextAttemptAt: MEDIANOCHE },

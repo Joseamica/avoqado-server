@@ -101,7 +101,8 @@ describe('el aviso del día', () => {
     await mandar(p.fetch, conCupo(81))
 
     expect(avisos()).toHaveLength(1)
-    expect(avisos()[0][0]).toContain('80 de 100')
+    // El número del momento va en el log; el correo dice el umbral, igual para la misma llave.
+    expect(avisos()[0][1]).toMatchObject({ usado: 80, cuota: 100 })
     expect(mockSendEmail).toHaveBeenCalledTimes(1)
     expect(mockSendEmail).toHaveBeenCalledWith(
       expect.objectContaining({ to: 'jose@avoqado.io', subject: expect.stringContaining('80 de 100') }),
@@ -191,7 +192,10 @@ describe('el 429 de cupo agotado', () => {
     await expect(res.json()).resolves.toMatchObject({ name: 'daily_quota_exceeded' })
     expect(p.campanasPausadasPorCupo()).toBe(true)
     expect(avisos().some(([m]) => String(m).includes('se acabó el cupo del día'))).toBe(true)
+    // Con el cupo agotado el correo del aviso no puede salir: queda el log (Better Stack) y se anota sin intentarlo.
+    expect(mockSendEmail).not.toHaveBeenCalled()
     expect(fila?.exhaustedAlertDay).toBe('2026-11-03')
+    expect(fila?.dailyAlertDay).toBe('2026-11-03')
   })
 
   it('monthly_quota_exceeded pausa hasta que Resend reinicia el día y entonces se vuelve a probar (no publica cuándo reinicia el mes)', async () => {
@@ -335,7 +339,45 @@ describe('una vez por día aunque haya dos procesos o un reinicio (la fila, y la
       'cupo-resend-diario-2026-11-03',
       'cupo-resend-diario-2026-11-03',
     ])
+    // 🔴 El mismo contenido con la misma llave (80 la primera vez, 82 la segunda): con otro, Resend contesta 409 y nunca se anota.
+    const [primero, segundo] = mockSendEmail.mock.calls.map(([o]) => ({ subject: o.subject, html: o.html, text: o.text }))
+    expect(segundo).toEqual(primero)
     expect(fila?.dailyAlertDay).toBe('2026-11-03')
+  })
+
+  it('si el correo del aviso falla (503, ritmo), se reintenta a los 10 minutos con la siguiente respuesta, sin repetir el log', async () => {
+    mockSendEmail.mockResolvedValueOnce(false).mockResolvedValue(true)
+    const p = cargar()
+    await mandar(p.fetch, conCupo(80))
+    await mandar(p.fetch, conCupo(81))
+    expect(mockSendEmail).toHaveBeenCalledTimes(1)
+    expect(fila?.dailyAlertDay ?? null).toBeNull()
+
+    jest.setSystemTime(new Date(HOY.getTime() + 10 * 60_000))
+    await mandar(p.fetch, conCupo(82))
+
+    expect(mockSendEmail).toHaveBeenCalledTimes(2)
+    expect(avisos()).toHaveLength(1)
+    expect(fila?.dailyAlertDay).toBe('2026-11-03')
+  })
+
+  it('un aviso de ayer que falla después de cambiar el día no pisa el aviso de hoy (que ya está en vuelo)', async () => {
+    let soltarAyer!: (salio: boolean) => void
+    mockSendEmail
+      .mockImplementationOnce(() => new Promise<boolean>(resolve => (soltarAyer = resolve)))
+      .mockImplementationOnce(() => new Promise<boolean>(() => {}))
+    const p = cargar()
+    await mandar(p.fetch, conCupo(80))
+
+    jest.setSystemTime(MANANA)
+    await mandar(p.fetch, conCupo(80))
+    expect(mockSendEmail).toHaveBeenCalledTimes(2)
+
+    soltarAyer(false)
+    await asentar()
+    await mandar(p.fetch, conCupo(81))
+    // El de hoy sigue en vuelo: otra respuesta no lo vuelve a disparar.
+    expect(mockSendEmail).toHaveBeenCalledTimes(2)
   })
 
   it('si la base no contesta al leer el aviso, se avisa igual (mejor uno de más que uno perdido)', async () => {

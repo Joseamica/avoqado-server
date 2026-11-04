@@ -363,8 +363,8 @@ describe('el cupo de Resend', () => {
     })
     ids.push(reintento.id)
     process.env.CRM_CORREO_PRUEBAS = ['cupo-a', 'cupo-b', 'cupo-c'].map(correo).join(',')
-    // Libre al empezar, antes del primer correo y justo antes de mandarlo; ese correo cruza el 80.
-    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
+    // Libre al empezar y antes del primer correo; ese correo cruza el 80.
+    pausa.mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true)
 
     await correrEnvioDeCampanas({ ahora: T0, pausaMs: 0 })
 

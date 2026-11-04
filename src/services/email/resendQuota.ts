@@ -11,7 +11,8 @@
  *    horario de verano desde 2022). El mes, el mes UTC (Resend no publica cuándo reinicia el suyo).
  *  - Al 80 % del día o del mes, o con un 429 de cupo: `logger.error('[Resend] …')` (lo ve Better Stack) y un correo a
  *    jose@avoqado.io con una llave por aviso. La fila `EmailQuotaAlert` se ANOTA después del log y del correo: si el proceso
- *    muere antes, el siguiente vuelve a avisar y la llave hace que Resend no lo mande dos veces.
+ *    muere antes, el siguiente vuelve a avisar y la llave hace que Resend no lo mande dos veces. Con el cupo agotado el
+ *    correo no puede salir: sólo queda el log.
  *  - Con el 80 % del día, o un 429 de cupo, se pausan SÓLO las campañas del CRM (`campanasPausadasPorCupo`) hasta que Resend
  *    reinicia el día (`reinicioDelCupoDiario`). El 429 del mes también: al día siguiente sale un correo de prueba y, si Resend
  *    vuelve a decir 429, se pausa otra vez. El login y los recibos nunca se frenan.
@@ -53,10 +54,23 @@ export const reinicioDelCupoDiario = (ahora: Date) =>
 let visto = { dia: '', usadoDia: 0, mes: '', usadoMes: 0 }
 /** El día en que Resend contestó «se acabó el cupo» (del día o del mes). */
 let agotadoDia = ''
-/** La clave del último aviso de cada tipo que este proceso ya intentó: el correo del aviso, que también pasa por aquí, no avisa otra vez. */
-const intentado: Record<Aviso, string> = { diario: '', mensual: '', agotado: '' }
+/**
+ * El último aviso de cada tipo en este proceso: su clave y desde cuándo se puede reintentar. `Infinity` = en vuelo o ya dado
+ * (el correo del aviso, que también pasa por aquí, no avisa otra vez); un correo que no salió deja `ahora + REINTENTO_MS`.
+ */
+const intento: Record<Aviso, { clave: string; reintentarDesde: number }> = {
+  diario: { clave: '', reintentarDesde: 0 },
+  mensual: { clave: '', reintentarDesde: 0 },
+  agotado: { clave: '', reintentarDesde: 0 },
+}
+/** La clave del último aviso de cada tipo que ya quedó en el log de este proceso: un reintento del correo no lo repite. */
+const logueado: Record<Aviso, string> = { diario: '', mensual: '', agotado: '' }
+const REINTENTO_MS = 10 * 60_000
 let dijoDePago = false
 const cuotasMalEscritas = new Set<string>()
+
+/** El código con que `sendEmailWithResult` devuelve una campaña que frenó su `antesDeMandar` por la pausa del cupo. */
+export const CUPO_EN_PAUSA = 'cupo_en_pausa'
 
 export const esErrorDeCupo = (name: string | undefined): name is ErrorDeCupo =>
   name === 'daily_quota_exceeded' || name === 'monthly_quota_exceeded'
@@ -162,33 +176,35 @@ async function medir(input: unknown, respuesta: Response): Promise<void> {
       datos: { error: agotado, diario, mensual },
     })
   }
+  // 🔴 El asunto y el cuerpo llevan el UMBRAL, nunca el número del momento: un reintento con la misma llave debe llevar el mismo
+  // contenido, o Resend contesta 409 y el aviso nunca se anota. El número del momento va en el log.
   const cDia = cuotaDiaria()
   if (diario !== null && diario >= umbral(cDia) && tocaIntentar('diario', hoy)) {
     void avisar('diario', hoy, {
-      asunto: `Resend: van ${diario} de ${cDia} correos hoy`,
+      asunto: `Resend: el correo de hoy llegó a ${umbral(cDia)} de ${cDia}`,
       cuerpo:
-        `La cuenta de Resend lleva ${diario} de ${cDia} correos de hoy (cuentan también los recibidos). Las campañas del CRM se ` +
-        'pausaron hasta las 18:00 de Ciudad de México, cuando Resend reinicia el cupo del día, para dejar lugar al login y a los ' +
-        'recibos, que siguen saliendo. Si pasa seguido, conviene subir de plan en Resend.',
+        `La cuenta de Resend llegó a ${umbral(cDia)} de ${cDia} correos de hoy (cuentan también los recibidos). Las campañas del ` +
+        'CRM se pausaron hasta las 18:00 de Ciudad de México, cuando Resend reinicia el cupo del día, para dejar lugar al login y ' +
+        'a los recibos, que siguen saliendo. Si pasa seguido, conviene subir de plan en Resend.',
       datos: { usado: diario, cuota: cDia, dia: hoy },
     })
   }
   const cMes = cuotaMensual()
   if (mensual !== null && mensual >= umbral(cMes) && tocaIntentar('mensual', mes)) {
     void avisar('mensual', mes, {
-      asunto: `Resend: van ${mensual} de ${cMes} correos este mes`,
+      asunto: `Resend: el correo del mes llegó a ${umbral(cMes)} de ${cMes}`,
       cuerpo:
-        `La cuenta de Resend lleva ${mensual} de ${cMes} correos del mes. Al llegar a ${cMes}, Resend deja de mandar todo (también ` +
-        'el login y los recibos) hasta que reinicie el cupo. Conviene subir de plan en Resend.',
+        `La cuenta de Resend llegó a ${umbral(cMes)} de ${cMes} correos del mes. Al llegar a ${cMes}, Resend deja de mandar todo ` +
+        '(también el login y los recibos) hasta que reinicie el cupo. Conviene subir de plan en Resend.',
       datos: { usado: mensual, cuota: cMes, mes },
     })
   }
 }
 
-/** Una vez por clave en este proceso. Se marca ANTES de avisar: el correo del aviso vuelve a pasar por aquí. */
+/** ¿Toca intentar este aviso? Queda «en vuelo» ANTES de avisar: el correo del aviso vuelve a pasar por aquí. */
 function tocaIntentar(tipo: Aviso, clave: string): boolean {
-  if (intentado[tipo] === clave) return false
-  intentado[tipo] = clave
+  if (intento[tipo].clave === clave && Date.now() < intento[tipo].reintentarDesde) return false
+  intento[tipo] = { clave, reintentarDesde: Number.POSITIVE_INFINITY }
   return true
 }
 
@@ -223,7 +239,9 @@ async function anotarAviso(tipo: Aviso, clave: string): Promise<void> {
 
 /**
  * Leer → log → correo → anotar. Si el proceso muere antes de anotar, el siguiente vuelve a avisar: un log de más y el mismo
- * correo, que Resend no repite por su llave (`cupo-resend-<tipo>-<clave>`, 24 h). Dos procesos a la vez, igual.
+ * correo, que Resend no repite por su llave (`cupo-resend-<tipo>-<clave>`, 24 h, con el mismo contenido). Dos procesos a la
+ * vez, igual. Un correo que no salió se reintenta con la siguiente respuesta de Resend pasados `REINTENTO_MS`, sin repetir el
+ * log. Con el cupo agotado el correo no puede salir: queda el log (Better Stack) y se anota sin intentarlo.
  * ponytail: tras 24 h la llave vence; sólo el aviso del mes podría salir dos veces, y sólo si el proceso muere en esa ventana.
  */
 async function avisar(
@@ -232,9 +250,12 @@ async function avisar(
   aviso: { asunto: string; cuerpo: string; datos: Record<string, unknown> },
 ): Promise<void> {
   if (await yaAvisado(tipo, clave)) return
-  // 🔴 Primero el log: si el correo no sale (con el cupo agotado no puede), el aviso ya quedó en Better Stack.
-  logger.error(`[Resend] ${aviso.asunto}`, aviso.datos)
-  if (puedeMandarFueraDeProduccion(AVISAR_A)) {
+  // 🔴 Primero el log: si el correo no sale, el aviso ya quedó en Better Stack. Una vez por clave en este proceso.
+  if (logueado[tipo] !== clave) {
+    logueado[tipo] = clave
+    logger.error(`[Resend] ${aviso.asunto}`, aviso.datos)
+  }
+  if (agotadoDia !== diaDe(new Date()) && puedeMandarFueraDeProduccion(AVISAR_A)) {
     let salio = false
     try {
       salio = await emailService.sendEmail({
@@ -247,8 +268,12 @@ async function avisar(
     } catch (error) {
       logger.warn('[Resend] No salió el correo del aviso del cupo', { tipo, error: error instanceof Error ? error.message : String(error) })
     }
-    // Sin el correo no se anota: el siguiente proceso lo reintenta con la misma llave.
-    if (!salio) return
+    // Sin el correo no se anota: se reintenta (aquí, pasados REINTENTO_MS, o en el siguiente proceso) con la misma llave.
+    if (!salio) {
+      // Sólo si sigue siendo el aviso vigente: uno de ayer que falla al cambiar el día no pisa el de hoy.
+      if (intento[tipo].clave === clave) intento[tipo] = { clave, reintentarDesde: Date.now() + REINTENTO_MS }
+      return
+    }
   }
   await anotarAviso(tipo, clave)
 }
