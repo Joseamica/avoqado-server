@@ -8,7 +8,7 @@
  * modelo cuyo staff sigue activo en la organización (con su `PermissionSet` clonado). El supervisor entra como MANAGER.
  * No se copia: conexiones (Google, Stripe), `VenueFeature`, `VenueCommission` ni nada transaccional.
  */
-import { NotificationChannel, NotificationType, Prisma, PrismaClient, StaffRole, VenueStatus } from '@prisma/client'
+import { NotificationChannel, NotificationType, OrgRole, Prisma, PrismaClient, StaffRole, VenueStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
@@ -41,6 +41,13 @@ const COLUMNAS_DE_LA_MODELO = {
 
 // ponytail: cuántas tiendas/personas lista el formulario; una organización tiene ~60 hoy. Paginar si alguna pasa de mil.
 const TOPE_DE_OPCIONES = 1000
+// ponytail: tope de lectura de la copia; una tienda tiene decenas de filas de configuración. Si se llega, falla
+// cerrado (nunca copia a medias ni compara contra una lista cortada).
+const TOPE_DE_COPIA = 5000
+function completas<T>(filas: T[], que: string): T[] {
+  if (filas.length >= TOPE_DE_COPIA) throw new Error(`Duplicar tienda: ${que} pasa de ${TOPE_DE_COPIA} filas`)
+  return filas
+}
 
 export interface DuplicateVenueInput {
   orgId: string
@@ -153,7 +160,10 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
       if (!supervisor) throw new BadRequestError('Esa persona no está activa en tu organización', 'SUPERVISOR_NOT_IN_ORG')
 
       // ponytail: compara contra todas las tiendas de la organización (~60); es una revisión de exactitud, no un listado.
-      const existentes = await tx.venue.findMany({ where: { organizationId: orgId }, select: { name: true } })
+      const existentes = completas(
+        await tx.venue.findMany({ where: { organizationId: orgId }, select: { name: true }, take: TOPE_DE_COPIA }),
+        'tiendas de la organización',
+      )
       const choque = nombreChoca(
         input.name,
         existentes.map(v => v.name),
@@ -184,7 +194,7 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
       })
 
       await copiarConfiguracion(tx, modelo.id, venue.id)
-      await copiarGente(tx, orgId, modelo.id, venue.id, supervisor.id)
+      await copiarGente(tx, orgId, modelo.id, venue.id, supervisor.id, actorStaffId)
 
       // Esperada y sin try/catch: es la llave del reintento; si falla, la tienda no queda.
       await tx.activityLog.create({
@@ -262,11 +272,11 @@ async function copiarConfiguracion(tx: Prisma.TransactionClient, desde: string, 
   const where = { venueId: desde }
   const [settings, modulos, pago, tarifas, puestos, permisos] = await Promise.all([
     tx.venueSettings.findUnique({ where }),
-    tx.venueModule.findMany({ where }),
+    tx.venueModule.findMany({ where, take: TOPE_DE_COPIA }).then(f => completas(f, 'VenueModule')),
     tx.venuePaymentConfig.findUnique({ where }),
-    tx.venuePricingStructure.findMany({ where }),
-    tx.venueRoleConfig.findMany({ where }),
-    tx.venueRolePermission.findMany({ where }),
+    tx.venuePricingStructure.findMany({ where, take: TOPE_DE_COPIA }).then(f => completas(f, 'VenuePricingStructure')),
+    tx.venueRoleConfig.findMany({ where, take: TOPE_DE_COPIA }).then(f => completas(f, 'VenueRoleConfig')),
+    tx.venueRolePermission.findMany({ where, take: TOPE_DE_COPIA }).then(f => completas(f, 'VenueRolePermission')),
   ])
   if (settings) await tx.venueSettings.create({ data: copia<Prisma.VenueSettingsUncheckedCreateInput>('VenueSettings', settings, hacia) })
   if (pago)
@@ -288,7 +298,14 @@ async function copiarConfiguracion(tx: Prisma.TransactionClient, desde: string, 
 }
 
 /** OWNER/ADMIN activos de la modelo que siguen activos en la organización, con su PermissionSet clonado; más el supervisor. */
-async function copiarGente(tx: Prisma.TransactionClient, orgId: string, desde: string, hacia: string, supervisorId: string): Promise<void> {
+async function copiarGente(
+  tx: Prisma.TransactionClient,
+  orgId: string,
+  desde: string,
+  hacia: string,
+  supervisorId: string,
+  actorId: string,
+): Promise<void> {
   const filas = await tx.staffVenue.findMany({
     where: {
       venueId: desde,
@@ -297,11 +314,13 @@ async function copiarGente(tx: Prisma.TransactionClient, orgId: string, desde: s
       staff: { active: true, organizations: { some: { organizationId: orgId, isActive: true } } },
     },
     select: { staffId: true, role: true, pin: true, permissions: true, permissionSetId: true },
+    take: TOPE_DE_COPIA,
   })
+  completas(filas, 'StaffVenue OWNER/ADMIN')
 
   const conjuntos = new Map<string, string>()
   const ids = [...new Set(filas.map(f => f.permissionSetId).filter((id): id is string => !!id))]
-  for (const set of await tx.permissionSet.findMany({ where: { id: { in: ids }, venueId: desde } })) {
+  for (const set of await tx.permissionSet.findMany({ where: { id: { in: ids }, venueId: desde }, take: TOPE_DE_COPIA })) {
     const clon = await tx.permissionSet.create({
       data: copia<Prisma.PermissionSetUncheckedCreateInput>('PermissionSet', set, hacia),
       select: { id: true },
@@ -318,8 +337,19 @@ async function copiarGente(tx: Prisma.TransactionClient, orgId: string, desde: s
     // Nunca se comparte el id de la modelo: un conjunto ajeno a ella se suelta.
     permissionSetId: f.permissionSetId ? (conjuntos.get(f.permissionSetId) ?? null) : null,
   }))
+  // Quien la crea siendo OWNER de la organización queda OWNER de la tienda nueva, aunque no lo sea en la modelo:
+  // si no, su sesión no la ve (Codex código r1). Un superadmin sin esa fila no entra.
+  const actorEsDueno = await tx.staffOrganization.findFirst({
+    where: { staffId: actorId, organizationId: orgId, role: OrgRole.OWNER, isActive: true, staff: { active: true } },
+    select: { staffId: true },
+  })
+  if (actorEsDueno) {
+    const suya = data.find(f => f.staffId === actorId)
+    if (suya) suya.role = StaffRole.OWNER
+    else data.push({ staffId: actorId, venueId: hacia, role: StaffRole.OWNER })
+  }
   // Si el supervisor ya entra como OWNER/ADMIN, se queda con ese rol.
-  if (!filas.some(f => f.staffId === supervisorId)) data.push({ staffId: supervisorId, venueId: hacia, role: StaffRole.MANAGER })
+  if (!data.some(f => f.staffId === supervisorId)) data.push({ staffId: supervisorId, venueId: hacia, role: StaffRole.MANAGER })
   await tx.staffVenue.createMany({ data })
 }
 

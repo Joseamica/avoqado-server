@@ -170,6 +170,7 @@ beforeAll(async () => {
   await staff('supOtraOrg', ORG_B)
   await staff('superadmin')
   await staff('ownerC', ORG_C, 'OWNER')
+  await staff('owner2', ORG_A, 'OWNER') // OWNER de la organización sin fila en la modelo
 
   const dup = await prisma.module.upsert({
     where: { code: 'VENUE_DUPLICATION' },
@@ -422,6 +423,21 @@ describe('duplicateVenue — qué copia', () => {
         [s.supervisor, 'MANAGER', true],
       ].sort(),
     )
+  })
+
+  it('quien la crea siendo OWNER de la organización, sin fila en la modelo, queda OWNER de la tienda nueva', async () => {
+    jest.spyOn(notificationService, 'sendNotification').mockResolvedValue(null)
+    const { venueId } = await duplicateVenue(entrada({ actorStaffId: s.owner2 }))
+    jest.restoreAllMocks()
+    const fila = await prisma.staffVenue.findFirst({ where: { venueId, staffId: s.owner2 }, select: { role: true, active: true } })
+    expect(fila).toEqual({ role: 'OWNER', active: true })
+  })
+
+  it('un superadmin que la crea sin ser de la organización no entra a la tienda nueva', async () => {
+    jest.spyOn(notificationService, 'sendNotification').mockResolvedValue(null)
+    const { venueId } = await duplicateVenue(entrada({ actorStaffId: s.superadmin }))
+    jest.restoreAllMocks()
+    expect(await prisma.staffVenue.count({ where: { venueId, staffId: s.superadmin } })).toBe(0)
   })
 
   it('no copia operación: productos, terminales ni órdenes', async () => {
