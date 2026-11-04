@@ -5,6 +5,8 @@
  * vez. De él salen las **ocurrencias** (`PlatformChargeOccurrence`): un periodo por cobrar con su foto de conceptos, totales y modo de
  * factura. Editar el cobro cambia sólo lo futuro: lo vencido, lo de hoy y lo ya marcado conservan su foto. Uno de una sola vez
  * (`ONE_TIME`) tiene UNA fecha, que nace con el alta: no se genera, no se pausa y, mientras esté sin pagar y sin factura, se edita en su lugar.
+ * Un alta puede salir de una factura que ya existe en «Facturas CFDI» (`invoiceId`): el servidor deriva de ella los conceptos y pone una sola vez y
+ * MANUAL, y la anexa a la fecha en la misma transacción.
  *
  * - Toda escritura de un cobro y de sus ocurrencias corre en UNA transacción corta que antes toma el candado de su fila
  *   (`withChargeLock`) y ahí adentro vuelve a leer lo que va a decidir. Facturapi y el correo nunca se llaman ahí.
@@ -12,12 +14,14 @@
  * - Fechas: días de calendario de CDMX (`'YYYY-MM-DD'`), sólo con los helpers de `schedule.ts`. Dinero: centavos enteros.
  */
 import { BillingCustomerType, PlatformChargeFrequency, PlatformChargeInvoiceMode } from '@prisma/client'
-import type { BillingTaxProfile, PlatformCharge, Prisma } from '@prisma/client'
+import type { BillingTaxProfile, PlatformCfdi, PlatformCharge, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
+import { attachInvoiceInTx, conceptsFromInvoice } from './invoice-link.service'
 import { lockCharge, withChargeLock } from './lock'
+import { invoiceName } from './occurrences.service'
 import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
 import { computeChargeTotals, hasSatKeys } from './totals'
 import { LINKED_LIVE, LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
@@ -60,6 +64,13 @@ export interface ChargeInput {
   concepts: ChargeConceptInput[]
   invoiceMode: PlatformChargeInvoiceMode
 }
+
+/**
+ * Lo que llega al dar de alta. Con `invoiceId` (una factura de «Facturas CFDI»), `concepts`, `frequency` e `invoiceMode` no hacen falta y, si
+ * vienen, se ignoran: el servidor los deriva de la factura (conceptos de ella, una sola vez, MANUAL). Sin `invoiceId` siguen siendo obligatorios.
+ */
+export type CreateChargeInput = Omit<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'> &
+  Partial<Pick<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'>> & { invoiceId?: string }
 
 export interface ListChargesFilters {
   /** Sin `status` se listan todos los cobros. */
@@ -198,8 +209,11 @@ function assertConceptKeys(state: Pick<ChargeState, 'invoiceMode' | 'concepts'>)
   }
 }
 
-/** Valida y limpia sólo lo que se mande (en un alta, todo): lo inválido se rechaza ANTES de abrir una transacción. */
-function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean): Partial<ChargeState> {
+/**
+ * Valida y limpia sólo lo que se mande (en un alta, todo): lo inválido se rechaza ANTES de abrir una transacción. `conceptsFromInvoice`: los
+ * conceptos no vienen del cuerpo sino de la factura, que se lee dentro de la transacción: aquí no se piden ni se miran.
+ */
+function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean, conceptsFromInvoice = false): Partial<ChargeState> {
   const out: Partial<ChargeState> = {}
   const given = (key: keyof ChargeInput): boolean => requireAll || input[key] !== undefined
 
@@ -227,7 +241,7 @@ function normalizeFields(input: Partial<ChargeInput>, requireAll: boolean): Part
     if (!isCalendarDay(input.anchorDate)) throw invalid('La fecha de inicio no es válida')
     out.anchorDate = input.anchorDate
   }
-  if (given('concepts')) out.concepts = normalizeConcepts(input.concepts)
+  if (given('concepts') && !conceptsFromInvoice) out.concepts = normalizeConcepts(input.concepts)
   if (given('invoiceMode')) {
     if (!INVOICE_MODES.has(input.invoiceMode as string)) {
       throw invalid('Elige si el cobro se factura automáticamente, con un botón o sin factura')
@@ -253,13 +267,21 @@ export function assertTaxProfileOfCustomer(
   profile: Pick<BillingTaxProfile, 'customerType' | 'organizationId' | 'venueId'>,
   customer: CustomerRef,
 ): void {
-  if (
-    profile.customerType !== customer.customerType ||
-    (profile.organizationId ?? null) !== customer.organizationId ||
-    (profile.venueId ?? null) !== customer.venueId
-  ) {
+  if (!isTaxProfileOfCustomer(profile, customer)) {
     throw new BadRequestError('Ese perfil fiscal no es de este cliente', 'PLATFORM_CHARGE_TAX_PROFILE_MISMATCH')
   }
+}
+
+/** La misma regla de `assertTaxProfileOfCustomer`, sin lanzar: para elegir entre usar un perfil o dejarlo, cuando no es de este cliente no es un error. */
+function isTaxProfileOfCustomer(
+  profile: Pick<BillingTaxProfile, 'customerType' | 'organizationId' | 'venueId'>,
+  customer: CustomerRef,
+): boolean {
+  return (
+    profile.customerType === customer.customerType &&
+    (profile.organizationId ?? null) === customer.organizationId &&
+    (profile.venueId ?? null) === customer.venueId
+  )
 }
 
 /**
@@ -294,6 +316,24 @@ async function assertCustomerAndProfile(tx: Prisma.TransactionClient, state: Cha
   })
   if (!profile) throw invalid('El perfil fiscal no existe')
   assertTaxProfileOfCustomer(profile, state)
+}
+
+/**
+ * El perfil fiscal que una factura le deja al cobro que nace de ella: el suyo, SÓLO si es de este cliente. Una factura de otra organización con
+ * el mismo RFC se anexa igual (`attachInvoiceInTx` decide si es del cliente), pero su perfil no es de este cobro: queda sin perfil, y al facturar
+ * se busca el del cliente. Nunca pasa por `assertTaxProfileOfCustomer`: un perfil ajeno aquí no es un error, es un perfil que no se usa.
+ */
+async function profileOfInvoice(
+  tx: Prisma.TransactionClient,
+  cfdi: Pick<PlatformCfdi, 'billingTaxProfileId'>,
+  customer: CustomerRef,
+): Promise<string | null> {
+  if (!cfdi.billingTaxProfileId) return null
+  const profile = await tx.billingTaxProfile.findUnique({
+    where: { id: cfdi.billingTaxProfileId },
+    select: { customerType: true, organizationId: true, venueId: true },
+  })
+  return profile && isTaxProfileOfCustomer(profile, customer) ? cfdi.billingTaxProfileId : null
 }
 
 // ── Estado del cobro ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -505,25 +545,57 @@ function audit(action: string, charge: PlatformCharge, actorId: string, data: Pr
  * Da de alta un cobro y genera sus ocurrencias desde el ancla hasta hoy+7 (lo anterior a hoy nace vencido). Todo en una sola
  * transacción: o quedan el cobro y sus fechas, o nada. Se toma el candado de la fila recién creada por uniformidad: nadie más
  * puede verla hasta el commit, así que no espera a nadie.
+ *
+ * 🔴 Con `invoiceId` (una factura de «Facturas CFDI») el cobro es de UNA SOLA VEZ y MANUAL, con los conceptos de la factura (lo que mande el
+ * cuerpo sobre ellos se ignora), y la factura se anexa a su única fecha EN ESA MISMA transacción con `attachInvoiceInTx`: lo que ésta rechaza
+ * (de otro cliente, ya tomada, con pagos, sin timbrar) es un 409 que deshace también el cobro. Sin `resolverIntento`: la fecha es nueva y no
+ * tiene intentos. Una factura que no cabe en el modelo del 16 % no da de alta nada: resumirla la volvería a timbrar mal.
  */
-export async function createCharge(input: ChargeInput, actorId: string, now: Date = new Date()): Promise<PlatformCharge> {
+export async function createCharge(input: CreateChargeInput, actorId: string, now: Date = new Date()): Promise<PlatformCharge> {
   const today = todayInMexico(now)
-  const fields = normalizeFields(input, true)
-  const state: ChargeState = {
+  const invoiceId = cleanId(input.invoiceId)
+  const fields = normalizeFields(invoiceId ? { ...input, frequency: 'ONE_TIME', invoiceMode: 'MANUAL' } : input, true, invoiceId !== null)
+  // Con factura, `concepts` aún no está: se completa dentro de la transacción, con lo que dice la factura.
+  const draft: ChargeState = {
     ...(fields as ChargeState),
     organizationId: fields.organizationId ?? null,
     venueId: fields.venueId ?? null,
-    billingTaxProfileId: fields.billingTaxProfileId ?? null,
+    // El perfil de un cobro desde factura lo decide la factura (`profileOfInvoice`), no el cuerpo.
+    billingTaxProfileId: invoiceId ? null : (fields.billingTaxProfileId ?? null),
   }
-  assertConceptKeys(state)
-  assertAnchorInWindow(state.anchorDate, today)
+  if (!invoiceId) assertConceptKeys(draft)
+  assertAnchorInWindow(draft.anchorDate, today)
 
-  const charge = await prisma.$transaction(async tx => {
+  const { charge, state, linked } = await prisma.$transaction(async tx => {
+    let state = draft
+    let cfdi: PlatformCfdi | null = null
+    if (invoiceId) {
+      cfdi = await tx.platformCfdi.findUnique({ where: { id: invoiceId } })
+      if (!cfdi) throw new NotFoundError('Esa factura ya no existe: revisa la lista', 'PLATFORM_CHARGE_INVOICE_LINK_NOT_FOUND')
+      const concepts = conceptsFromInvoice(cfdi)
+      if (!concepts) {
+        throw new ConflictError(
+          `No se puede dar de alta un cobro desde ${invoiceName(cfdi)}: no cabe en lo que «Por cobrar» sabe calcular (IVA del 16 %, sin ` +
+            'descuentos ni exentos, con los totales al centavo)',
+          'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
+        )
+      }
+      state = { ...draft, concepts }
+      assertConceptKeys(state)
+    }
     await assertCustomerAndProfile(tx, state)
+    if (cfdi) state = { ...state, billingTaxProfileId: await profileOfInvoice(tx, cfdi, state) }
+
     const created = await tx.platformCharge.create({ data: { ...dbFields(state), createdById: actorId } })
     await lockCharge(tx, created.id)
     await generateOccurrences(tx, created, state.anchorDate, addDays(today, GENERATE_AHEAD_DAYS))
-    return created
+    if (!cfdi) return { charge: created, state, linked: null }
+
+    // Un cobro de una sola vez tiene UNA fecha, y acaba de nacer con el alta.
+    const occurrence = await tx.platformChargeOccurrence.findFirst({ where: { chargeId: created.id }, orderBy: { dueDate: 'asc' } })
+    if (!occurrence) throw new Error(`El cobro ${created.id} no creó su fecha: no se puede anexar la factura`)
+    const updated = (await attachInvoiceInTx(tx, occurrence, cfdi, now)) ?? occurrence
+    return { charge: created, state, linked: { cfdi, previousTotalCents: occurrence.totalCents, updated } }
   })
 
   audit('PLATFORM_CHARGE_CREATED', charge, actorId, {
@@ -533,7 +605,22 @@ export async function createCharge(input: ChargeInput, actorId: string, now: Dat
     anchorDate: state.anchorDate,
     invoiceMode: state.invoiceMode,
     conceptCount: state.concepts.length,
+    ...(invoiceId ? { invoiceId } : {}),
   })
+  if (linked) {
+    // Lo mismo que deja `linkInvoice` al anexar a una fecha que ya existía.
+    audit('PLATFORM_CHARGE_INVOICE_LINKED', charge, actorId, {
+      occurrenceId: linked.updated.id,
+      dueDate: dbToCalendarDay(linked.updated.dueDate),
+      platformCfdiId: linked.cfdi.id,
+      uuid: linked.cfdi.uuid,
+      serie: linked.cfdi.serie,
+      folio: linked.cfdi.folio,
+      previousTotalCents: linked.previousTotalCents,
+      totalCents: linked.updated.totalCents,
+      invoiceMode: linked.updated.invoiceMode,
+    })
+  }
   return charge
 }
 
@@ -663,6 +750,13 @@ export async function resumeCharge(id: string, actorId: string, now: Date = new 
 
   if (outcome.resumed) audit('PLATFORM_CHARGE_RESUMED', outcome.charge, actorId, { occurrencesCreated: outcome.created })
   return outcome.charge
+}
+
+/** Un cobro por su id (la pantalla lo pide para editarlo desde la fila de «Fechas de cobro»). 404 si ya no existe. */
+export async function getCharge(id: string): Promise<PlatformCharge> {
+  const row = await prisma.platformCharge.findUnique({ where: { id } })
+  if (!row) throw chargeNotFound()
+  return row
 }
 
 /** Página y tamaño ya acotados: el servidor impone el default (50) y el tope (100), nunca confía en lo que pida el cliente. */

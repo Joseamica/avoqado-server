@@ -148,7 +148,16 @@ export async function listCharges(req: Request, res: Response, next: NextFunctio
   }
 }
 
-/** POST /api/v1/superadmin/platform-charges — da de alta el cobro y genera sus ocurrencias en el acto. */
+/** GET /api/v1/superadmin/platform-charges/:id — un cobro, para editarlo desde la fila de «Fechas de cobro». */
+export async function getCharge(req: Request, res: Response, next: NextFunction) {
+  try {
+    res.json({ success: true, data: chargeView(await chargesService.getCharge(req.params.id)) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** POST /api/v1/superadmin/platform-charges — da de alta el cobro y genera sus ocurrencias en el acto; con `invoiceId`, de una factura. */
 export async function createCharge(req: Request, res: Response, next: NextFunction) {
   try {
     const charge = await chargesService.createCharge(req.body, actorOf(req))

@@ -116,8 +116,8 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
       body({ ...COBRO, invoiceMode: 'NONE', concepts: [{ description: 'Venta', amountCents: 100, ivaMode: 'WITH_IVA' }] }),
     )
 
-    expect(vacias.success && vacias.data.body.concepts[0]).toMatchObject({ satProductKey: '', satUnitKey: '' })
-    expect(omitidas.success && omitidas.data.body.concepts[0]).toEqual({ description: 'Venta', amountCents: 100, ivaMode: 'WITH_IVA' })
+    expect(vacias.success && vacias.data.body.concepts?.[0]).toMatchObject({ satProductKey: '', satUnitKey: '' })
+    expect(omitidas.success && omitidas.data.body.concepts?.[0]).toEqual({ description: 'Venta', amountCents: 100, ivaMode: 'WITH_IVA' })
   })
 
   it('unas claves que no son texto se rechazan en español, y las demás reglas del concepto siguen igual', () => {
@@ -133,8 +133,54 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
   it('campos que faltan: también en español (nunca el «Required» de Zod)', () => {
     const mensajes = errores(createChargeSchema, body({}))
 
-    expect(mensajes.length).toBeGreaterThanOrEqual(6)
+    // Con un cuerpo vacío sólo salen los que la FORMA exige siempre: la periodicidad, los conceptos y el modo dependen de la factura
+    // (ver abajo) y se revisan cuando lo demás ya es válido.
+    expect(mensajes.length).toBeGreaterThanOrEqual(3)
     for (const mensaje of mensajes) expect(mensaje).not.toMatch(/Required|Expected|Invalid|received/i)
+  })
+
+  describe('🔴 el alta desde una factura (invoiceId)', () => {
+    const { frequency, concepts, invoiceMode, ...CLIENTE_Y_FECHA } = COBRO
+
+    it('con invoiceId, la periodicidad, los conceptos y el modo ya no hacen falta: sólo cliente, nombre y fecha', () => {
+      const r = createChargeSchema.safeParse(body({ ...CLIENTE_Y_FECHA, invoiceId: 'cfdi-19' }))
+
+      expect(r.success).toBe(true)
+      expect(r.success && r.data.body).toEqual({ ...CLIENTE_Y_FECHA, invoiceId: 'cfdi-19' })
+    })
+
+    it('con invoiceId, lo que mande sobre conceptos, periodicidad y modo pasa la forma (el servicio lo ignora)', () => {
+      expect(errores(createChargeSchema, body({ ...COBRO, invoiceId: 'cfdi-19' }))).toEqual([])
+    })
+
+    it('sin invoiceId siguen siendo obligatorios, cada uno con su mensaje en español', () => {
+      expect(errores(createChargeSchema, body(CLIENTE_Y_FECHA))).toEqual([
+        'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME',
+        'Agrega al menos un concepto al cobro',
+        'El modo de factura debe ser AUTOMATIC, MANUAL o NONE',
+      ])
+      expect(errores(createChargeSchema, body({ ...CLIENTE_Y_FECHA, frequency, concepts }))).toEqual([
+        'El modo de factura debe ser AUTOMATIC, MANUAL o NONE',
+      ])
+    })
+
+    it('un invoiceId vacío o que no es texto se rechaza en español', () => {
+      for (const invoiceId of ['', 7]) {
+        expect(errores(createChargeSchema, body({ ...CLIENTE_Y_FECHA, invoiceId }))).toEqual(['Elige la factura de la que sale el cobro'])
+      }
+    })
+
+    it('el cliente, el nombre y la fecha siguen siendo obligatorios, con factura o sin ella', () => {
+      const mensajes = errores(createChargeSchema, body({ invoiceId: 'cfdi-19' }))
+
+      expect(mensajes).toEqual(expect.arrayContaining(['Escribe el nombre del cliente', 'La fecha de inicio es requerida']))
+    })
+
+    it('«editar» no recibe invoiceId: se descarta (anexar y quitar tienen sus rutas)', () => {
+      const r = updateChargeSchema.safeParse(body({ customerName: 'Otro', invoiceId: 'cfdi-19' }))
+
+      expect(r.success && r.data.body).toEqual({ customerName: 'Otro' })
+    })
   })
 
   it('«editar» manda sólo lo que cambia: un cuerpo vacío o parcial pasa, y los ids pueden venir null para quitarlos', () => {
@@ -303,6 +349,7 @@ describe('platformCharges.routes — permisos y orden', () => {
         'GET /invoice-candidates',
         'GET /',
         'POST /',
+        'GET /:id',
         'PATCH /:id',
         'POST /:id/pause',
         'POST /:id/resume',
@@ -325,6 +372,13 @@ describe('platformCharges.routes — permisos y orden', () => {
     expect(una('POST', '/occurrences/:id/invoice-link').bloque).toContain('validateRequest(linkInvoiceSchema)')
     expect(una('GET', '/invoice-candidates').bloque).toContain('validateRequest(listInvoiceCandidatesSchema)')
     expect(una('DELETE', '/occurrences/:id/invoice-link').bloque).not.toContain('validateRequest(')
+  })
+
+  it('leer un cobro (GET /:id) no recibe cuerpo ni consulta: no valida nada, sólo pide platform-billing:view', () => {
+    const leer = rutas.find(r => r.metodo === 'GET' && r.ruta === '/:id')!
+
+    expect(leer.permisos).toEqual(['platform-billing:view'])
+    expect(leer.bloque).not.toContain('validateRequest(')
   })
 
   it('/summary, /occurrences… e /invoice-candidates se registran ANTES de cualquier /:id', () => {

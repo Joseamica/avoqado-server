@@ -20,12 +20,13 @@ const optionalId = z.string({ invalid_type_error: 'El identificador no es válid
 const customerType = z.enum(['ORGANIZATION', 'VENUE', 'STANDALONE'], {
   errorMap: () => ({ message: 'El tipo de cliente debe ser ORGANIZATION, VENUE o STANDALONE' }),
 })
-const frequency = z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'ONE_TIME'], {
-  errorMap: () => ({ message: 'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME' }),
-})
-const invoiceMode = z.enum(['AUTOMATIC', 'MANUAL', 'NONE'], {
-  errorMap: () => ({ message: 'El modo de factura debe ser AUTOMATIC, MANUAL o NONE' }),
-})
+const FREQUENCY_MESSAGE = 'La periodicidad debe ser WEEKLY, BIWEEKLY, MONTHLY o ONE_TIME'
+const INVOICE_MODE_MESSAGE = 'El modo de factura debe ser AUTOMATIC, MANUAL o NONE'
+const CONCEPTS_MESSAGE = 'Agrega al menos un concepto al cobro'
+const INVOICE_ID_MESSAGE = 'Elige la factura de la que sale el cobro'
+
+const frequency = z.enum(['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'ONE_TIME'], { errorMap: () => ({ message: FREQUENCY_MESSAGE }) })
+const invoiceMode = z.enum(['AUTOMATIC', 'MANUAL', 'NONE'], { errorMap: () => ({ message: INVOICE_MODE_MESSAGE }) })
 const ivaMode = z.enum(['WITHOUT_IVA', 'WITH_IVA'], {
   errorMap: () => ({ message: 'El IVA del concepto debe ser WITHOUT_IVA o WITH_IVA' }),
 })
@@ -48,7 +49,7 @@ const concept = z.object({
 })
 
 const concepts = z.array(concept, {
-  required_error: 'Agrega al menos un concepto al cobro',
+  required_error: CONCEPTS_MESSAGE,
   invalid_type_error: 'Los conceptos deben ser una lista',
 })
 
@@ -64,7 +65,33 @@ const chargeFields = {
   invoiceMode,
 }
 
-export const createChargeSchema = z.object({ body: z.object(chargeFields) })
+/**
+ * Dar de alta. Con `invoiceId` (una factura de «Facturas CFDI») la periodicidad, los conceptos y el modo no hacen falta: el servidor los deriva de la
+ * factura (conceptos de ella, una sola vez, MANUAL) y, si el cuerpo los trae, los ignora. Sin `invoiceId` siguen siendo obligatorios, con los mismos
+ * mensajes de siempre. Es una regla de FORMA entre campos del mismo cuerpo; lo que diga la factura (si cabe, de quién es) lo decide el servicio.
+ * Zod revisa esta regla cuando lo demás ya es válido: con un cuerpo roto de otra forma, salen primero esos errores.
+ */
+const createChargeBody = z
+  .object({
+    ...chargeFields,
+    frequency: frequency.optional(),
+    concepts: concepts.optional(),
+    invoiceMode: invoiceMode.optional(),
+    invoiceId: z.string({ invalid_type_error: INVOICE_ID_MESSAGE }).min(1, INVOICE_ID_MESSAGE).optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.invoiceId !== undefined) return
+    const required = [
+      ['frequency', body.frequency, FREQUENCY_MESSAGE],
+      ['concepts', body.concepts, CONCEPTS_MESSAGE],
+      ['invoiceMode', body.invoiceMode, INVOICE_MODE_MESSAGE],
+    ] as const
+    for (const [path, value, message] of required) {
+      if (value === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message })
+    }
+  })
+
+export const createChargeSchema = z.object({ body: createChargeBody })
 
 /** Editar manda sólo lo que cambia; lo que no viene no se toca. */
 export const updateChargeSchema = z.object({ body: z.object(chargeFields).partial() })

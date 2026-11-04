@@ -34,7 +34,8 @@ import {
  *   DELETE /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link
  *   GET   /api/v1/superadmin/platform-charges/invoice-candidates?customerType=&organizationId=&venueId=&rfc=&q=&page=&pageSize=
  *   GET   /api/v1/superadmin/platform-charges?status=active|paused&q=&page=&pageSize=
- *   POST  /api/v1/superadmin/platform-charges
+ *   POST  /api/v1/superadmin/platform-charges                         (con `invoiceId`: una sola vez, de una factura de «Facturas CFDI»)
+ *   GET   /api/v1/superadmin/platform-charges/:id
  *   PATCH /api/v1/superadmin/platform-charges/:id
  *   POST  /api/v1/superadmin/platform-charges/:id/pause                  { skipOverdue }
  *   POST  /api/v1/superadmin/platform-charges/:id/resume
@@ -78,6 +79,7 @@ router.get(
 // Cobros recurrentes
 router.get('/', validateRequest(listChargesSchema), checkPermission('platform-billing:view'), controller.listCharges)
 router.post('/', validateRequest(createChargeSchema), checkPermission('platform-billing:issue'), controller.createCharge)
+router.get('/:id', checkPermission('platform-billing:view'), controller.getCharge)
 router.patch('/:id', validateRequest(updateChargeSchema), checkPermission('platform-billing:issue'), controller.updateCharge)
 router.post('/:id/pause', validateRequest(pauseChargeSchema), checkPermission('platform-billing:issue'), controller.pauseCharge)
 router.post('/:id/resume', checkPermission('platform-billing:issue'), controller.resumeCharge)

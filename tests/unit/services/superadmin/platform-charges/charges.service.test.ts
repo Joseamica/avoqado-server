@@ -5,6 +5,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   createCharge,
   generateAllActive,
+  getCharge,
   listCharges,
   pauseCharge,
   resumeCharge,
@@ -2632,5 +2633,384 @@ describe('platform-charges/charges.service — contrato que no se debe romper (R
       expect(f).toMatchObject({ subtotalCents: 5747, taxCents: 919, totalCents: 6666 })
       for (const cents of [f.subtotalCents, f.taxCents, f.totalCents]) expect(Number.isInteger(cents)).toBe(true)
     }
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/charges.service — 🔴 alta desde una factura (createCharge con invoiceId) (NEW)', () => {
+  // Qué NO prueba este doble: que la transacción de verdad deshaga el cobro cuando algo truena, ni el `updateMany` condicional bajo dos
+  // conexiones reales (es de la integración contra Postgres). Aquí se prueba el contrato: qué se lee, qué se decide, en qué orden y qué se escribe
+  // —y que todo ocurra DENTRO de la misma transacción, que es lo que hace que un error no deje cobro.
+  const SAT = { satProductKey: '81161700', satUnitKey: 'E48' }
+  /** $1,000 + 2 × $250, los dos sin IVA: A = 150000 → subtotal 150000, IVA 24000, total 174000. */
+  const LINEAS = [
+    { description: 'Suscripción', quantity: 1, unitPriceCents: 100000, taxRate: 0.16, ...SAT },
+    { description: 'Capacitación', quantity: 2, unitPriceCents: 25000, ...SAT },
+  ]
+  const CONCEPTOS_DE_LA_FACTURA = [
+    { description: 'Suscripción', amountCents: 100000, ivaMode: 'WITHOUT_IVA', ...SAT },
+    { description: 'Capacitación', amountCents: 50000, ivaMode: 'WITHOUT_IVA', ...SAT },
+  ]
+  const TOTALES_DE_LA_FACTURA = { subtotalCents: 150000, taxCents: 24000, totalCents: 174000 }
+  const RFC_DE_LA_ORG = 'LUN010101AAA'
+
+  let factura: Record<string, any>
+  let creado: Record<string, any> | null
+  let filas: Fila[]
+
+  const unaFactura = (over: Record<string, any> = {}) => ({
+    id: 'cfdi-19',
+    type: 'INGRESO',
+    status: 'STAMPED',
+    uuid: 'UUID-19',
+    serie: 'A',
+    folio: '19',
+    organizationId: 'org-1',
+    venueId: null,
+    billingTaxProfileId: 'perfil-1',
+    receptorRfc: RFC_DE_LA_ORG,
+    platformChargeOccurrenceId: null,
+    chargeLinkedAt: null,
+    amountPaidCents: 0,
+    discountCents: 0,
+    lines: LINEAS,
+    ...TOTALES_DE_LA_FACTURA,
+    updatedAt: new Date('2026-11-01T12:00:00.000Z'),
+    ...over,
+  })
+
+  /** Lo que manda el formulario de «Dar de alta» con una factura elegida: cliente, nombre, fecha y la factura. */
+  const alta = (over: Record<string, unknown> = {}) => ({
+    customerType: 'ORGANIZATION' as const,
+    organizationId: 'org-1',
+    customerName: 'Estética Luna',
+    anchorDate: '2026-11-10',
+    invoiceId: 'cfdi-19',
+    ...over,
+  })
+
+  const rechazo = async (promesa: Promise<unknown>) => (await promesa.catch((e: unknown) => e)) as ConflictError
+
+  beforeEach(() => {
+    for (const fn of [
+      prismaMock.platformCfdi.findUnique,
+      prismaMock.platformCfdi.findFirst,
+      prismaMock.platformCfdi.count,
+      prismaMock.platformCfdi.updateMany,
+      prismaMock.billingTaxProfile.findUnique,
+    ]) {
+      fn.mockReset()
+    }
+    factura = unaFactura()
+    creado = null
+    filas = instalarOcurrencias([])
+    prismaMock.platformCharge.create.mockImplementation(async ({ data }: any) => {
+      creado = { id: 'cobro-nuevo', ...data, pausedAt: null, createdAt: AHORA, updatedAt: AHORA }
+      return creado
+    })
+    prismaMock.platformCharge.findUnique.mockImplementation(async () => creado)
+    prismaMock.platformCfdi.findUnique.mockImplementation(async ({ where }: any) => (where.id === factura.id ? { ...factura } : null))
+    prismaMock.platformCfdi.findFirst.mockResolvedValue(null) // la fecha es nueva: ninguna factura viva
+    prismaMock.platformCfdi.count.mockResolvedValue(0) // ningún complemento de pago
+    // Como la base: sólo escribe si la factura sigue sin cobro, en el mismo estado y con la misma versión que se leyó.
+    prismaMock.platformCfdi.updateMany.mockImplementation(async ({ where, data }: any) => {
+      const cumple =
+        where.id === factura.id &&
+        where.platformChargeOccurrenceId === factura.platformChargeOccurrenceId &&
+        where.status === factura.status &&
+        where.updatedAt.getTime() === factura.updatedAt.getTime()
+      if (cumple) Object.assign(factura, data)
+      return { count: cumple ? 1 : 0 }
+    })
+    prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where }: any) => {
+      if (where.id === 'perfil-1' || where.organizationId === 'org-1') {
+        return { id: 'perfil-1', customerType: 'ORGANIZATION', organizationId: 'org-1', venueId: null, rfc: RFC_DE_LA_ORG }
+      }
+      if (where.id === 'perfil-ajeno') {
+        return { id: 'perfil-ajeno', customerType: 'ORGANIZATION', organizationId: 'org-OTRA', venueId: null, rfc: RFC_DE_LA_ORG }
+      }
+      return null
+    })
+  })
+
+  describe('lo que queda cuando sale bien', () => {
+    it('un cobro de UNA SOLA VEZ, MANUAL y con los conceptos de la factura, aunque el cuerpo mande otros', async () => {
+      const cobroCreado = await createCharge(
+        alta({ frequency: 'MONTHLY', invoiceMode: 'AUTOMATIC', concepts: [LICENCIA], billingTaxProfileId: 'perfil-x' }),
+        'staff-1',
+        AHORA,
+      )
+
+      expect(cobroCreado.id).toBe('cobro-nuevo')
+      expect(prismaMock.platformCharge.create).toHaveBeenCalledWith({
+        data: {
+          customerType: 'ORGANIZATION',
+          organizationId: 'org-1',
+          venueId: null,
+          customerName: 'Estética Luna',
+          billingTaxProfileId: 'perfil-1', // el de la factura, no el que mandó el cuerpo
+          frequency: 'ONE_TIME',
+          anchorDate: calendarDayToDb('2026-11-10'),
+          concepts: CONCEPTOS_DE_LA_FACTURA,
+          invoiceMode: 'MANUAL',
+          createdById: 'staff-1',
+        },
+      })
+    })
+
+    it('UNA sola fecha, en el día pedido (aunque sea lejana), con los totales de la factura y ligada a ella', async () => {
+      await createCharge(alta({ anchorDate: '2027-03-01' }), 'staff-1', AHORA)
+
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({
+        chargeId: 'cobro-nuevo',
+        dueDate: calendarDayToDb('2027-03-01'),
+        status: 'PENDING',
+        invoiceMode: 'MANUAL',
+        concepts: CONCEPTOS_DE_LA_FACTURA,
+        ...TOTALES_DE_LA_FACTURA,
+      })
+      expect(factura).toMatchObject({ platformChargeOccurrenceId: filas[0].id, chargeLinkedAt: AHORA })
+    })
+
+    it('la anexada se puede quitar después: lleva la marca chargeLinkedAt, que es lo que distingue lo anexado de lo timbrado desde aquí', async () => {
+      await createCharge(alta(), 'staff-1', AHORA)
+
+      expect(prismaMock.platformCfdi.updateMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.platformCfdi.updateMany.mock.calls[0][0].data).toEqual({
+        platformChargeOccurrenceId: filas[0].id,
+        chargeLinkedAt: AHORA,
+      })
+    })
+
+    it('TODO corre en UNA transacción: cobro, fecha y anexo; y la bitácora va DESPUÉS y fuera', async () => {
+      const eventos = trazar()
+      const original = prismaMock.platformCfdi.updateMany.getMockImplementation()!
+      prismaMock.platformCfdi.updateMany.mockImplementation(async (...args: unknown[]) => {
+        eventos.push('anexar factura')
+        return original(...args)
+      })
+
+      await createCharge(alta(), 'staff-1', AHORA)
+
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(dentroDeLaTransaccion(eventos)).toEqual(expect.arrayContaining(['crear cobro', 'candado', 'crear fechas', 'anexar factura']))
+      expect(eventos.slice(eventos.indexOf('tx:fin') + 1)).toEqual(['bitácora', 'bitácora'])
+    })
+
+    it('la bitácora cuenta el alta (con la factura) y el anexo, como cuando se anexa a una fecha que ya existía', async () => {
+      await createCharge(alta(), 'staff-1', AHORA)
+
+      expect(mockLogAction.mock.calls.map(([entrada]) => entrada.action)).toEqual([
+        'PLATFORM_CHARGE_CREATED',
+        'PLATFORM_CHARGE_INVOICE_LINKED',
+      ])
+      expect(mockLogAction.mock.calls[0][0].data).toMatchObject({ frequency: 'ONE_TIME', invoiceMode: 'MANUAL', invoiceId: 'cfdi-19' })
+      expect(mockLogAction.mock.calls[1][0]).toMatchObject({
+        staffId: 'staff-1',
+        organizationId: 'org-1',
+        entity: 'PlatformCharge',
+        entityId: 'cobro-nuevo',
+        data: {
+          occurrenceId: filas[0].id,
+          dueDate: '2026-11-10',
+          platformCfdiId: 'cfdi-19',
+          uuid: 'UUID-19',
+          serie: 'A',
+          folio: '19',
+          totalCents: 174000,
+          invoiceMode: 'MANUAL',
+        },
+      })
+    })
+  })
+
+  describe('el perfil fiscal: el de la factura, sólo si es de ESE cliente', () => {
+    it('un perfil de otra organización con el mismo RFC: se anexa y el cobro queda SIN perfil, sin tronar en assertTaxProfileOfCustomer', async () => {
+      factura = unaFactura({ organizationId: 'org-OTRA', billingTaxProfileId: 'perfil-ajeno', receptorRfc: RFC_DE_LA_ORG })
+
+      await createCharge(alta(), 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.create.mock.calls[0][0].data.billingTaxProfileId).toBeNull()
+      expect(factura).toMatchObject({ platformChargeOccurrenceId: filas[0].id })
+    })
+
+    it('una factura sin perfil: el cobro queda sin perfil, aunque el cuerpo mande uno', async () => {
+      factura = unaFactura({ billingTaxProfileId: null })
+
+      await createCharge(alta({ billingTaxProfileId: 'perfil-1' }), 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.create.mock.calls[0][0].data.billingTaxProfileId).toBeNull()
+    })
+
+    it('un perfil de un negocio (no de la organización del cobro) tampoco se usa', async () => {
+      factura = unaFactura({ billingTaxProfileId: 'perfil-de-negocio' })
+      prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where }: any) =>
+        where.id === 'perfil-de-negocio'
+          ? { id: 'perfil-de-negocio', customerType: 'VENUE', organizationId: null, venueId: 'venue-1', rfc: RFC_DE_LA_ORG }
+          : { id: 'perfil-1', customerType: 'ORGANIZATION', organizationId: 'org-1', venueId: null, rfc: RFC_DE_LA_ORG },
+      )
+
+      await createCharge(alta(), 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.create.mock.calls[0][0].data.billingTaxProfileId).toBeNull()
+    })
+  })
+
+  describe('🔴 lo que lo frena: 409 y no queda cobro (todo corre en la misma transacción que lo crea)', () => {
+    const alFinal = (eventos: string[]) => eventos.slice(eventos.indexOf('tx:fin') + 1)
+
+    it('una factura que no cabe en el modelo del 16 %: PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE, antes de crear nada', async () => {
+      factura = unaFactura({
+        lines: [{ description: 'Curso', quantity: 1, unitPriceCents: 10000, taxExempt: true, ...SAT }],
+        subtotalCents: 10000,
+        taxCents: 0,
+        totalCents: 10000,
+      })
+
+      const error = await rechazo(createCharge(alta(), 'staff-1', AHORA))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.statusCode).toBe(409)
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE')
+      expect(error.message).toMatch(/no cabe en lo que «Por cobrar» sabe calcular/)
+      ningunaEscritura()
+      expect(prismaMock.platformCfdi.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('una factura con pagos (o un complemento vivo): PLATFORM_CHARGE_INVOICE_LINK_HAS_PAYMENTS, y el cobro que se creó se deshace con la transacción', async () => {
+      factura = unaFactura({ amountPaidCents: 5000 })
+      const eventos = trazar()
+
+      const error = await rechazo(createCharge(alta(), 'staff-1', AHORA))
+
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_HAS_PAYMENTS')
+      expect(dentroDeLaTransaccion(eventos)).toContain('crear cobro') // el error truena DENTRO de la transacción que lo creó
+      expect(alFinal(eventos)).toEqual([]) // sin bitácora
+      expect(prismaMock.platformCfdi.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('un complemento de pago vivo sin amountPaidCents (uno en duda): también HAS_PAYMENTS', async () => {
+      prismaMock.platformCfdi.count.mockResolvedValue(1)
+
+      expect((await rechazo(createCharge(alta(), 'staff-1', AHORA))).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_HAS_PAYMENTS')
+    })
+
+    it('la factura ya es de otro cobro: PLATFORM_CHARGE_INVOICE_LINK_TAKEN, sin bitácora', async () => {
+      factura = unaFactura({ platformChargeOccurrenceId: 'occ-de-otro', chargeLinkedAt: AHORA })
+      const eventos = trazar()
+
+      const error = await rechazo(createCharge(alta(), 'staff-1', AHORA))
+
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_TAKEN')
+      expect(dentroDeLaTransaccion(eventos)).toContain('crear cobro')
+      expect(alFinal(eventos)).toEqual([])
+      expect(factura.platformChargeOccurrenceId).toBe('occ-de-otro') // no se le escribió encima
+    })
+
+    it('otra pestaña la tomó entre la lectura y la escritura (otro candado): 0 filas y 409, no se anexa a ciegas', async () => {
+      const original = prismaMock.platformCfdi.updateMany.getMockImplementation()!
+      prismaMock.platformCfdi.updateMany.mockImplementation(async (...args: unknown[]) => {
+        Object.assign(factura, { platformChargeOccurrenceId: 'occ-de-otro', chargeLinkedAt: AHORA })
+        return original(...args)
+      })
+
+      const error = await rechazo(createCharge(alta(), 'staff-1', AHORA))
+
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_TAKEN')
+      expect(factura.platformChargeOccurrenceId).toBe('occ-de-otro')
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+
+    it('«Facturas CFDI» pidió cancelarla entre la lectura y la escritura: 0 filas y PLATFORM_CHARGE_INVOICE_LINK_CHANGED', async () => {
+      const original = prismaMock.platformCfdi.updateMany.getMockImplementation()!
+      prismaMock.platformCfdi.updateMany.mockImplementation(async (...args: unknown[]) => {
+        factura.status = 'CANCEL_REQUESTED'
+        return original(...args)
+      })
+
+      expect((await rechazo(createCharge(alta(), 'staff-1', AHORA))).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_CHANGED')
+      expect(factura.platformChargeOccurrenceId).toBeNull()
+      expect(mockLogAction).not.toHaveBeenCalled()
+    })
+
+    it('de otro cliente (otra organización y otro RFC): PLATFORM_CHARGE_INVOICE_LINK_OTHER_CUSTOMER', async () => {
+      factura = unaFactura({ organizationId: 'org-OTRA', billingTaxProfileId: 'perfil-ajeno', receptorRfc: 'OTR010101AAA' })
+      const eventos = trazar()
+
+      const error = await rechazo(createCharge(alta(), 'staff-1', AHORA))
+
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_OTHER_CUSTOMER')
+      expect(dentroDeLaTransaccion(eventos)).toContain('crear cobro')
+      expect(alFinal(eventos)).toEqual([])
+      expect(factura.platformChargeOccurrenceId).toBeNull()
+    })
+
+    it.each([
+      ['no está timbrada', { status: 'STAMP_FAILED', uuid: null }],
+      ['es un complemento de pago', { type: 'PAGO' }],
+    ])('una factura que %s: PLATFORM_CHARGE_INVOICE_LINK_NOT_STAMPED', async (_porQue, campos) => {
+      factura = unaFactura(campos)
+
+      expect((await rechazo(createCharge(alta(), 'staff-1', AHORA))).code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_STAMPED')
+      expect(factura.platformChargeOccurrenceId).toBeNull()
+    })
+
+    it('una factura que ya no existe: 404 PLATFORM_CHARGE_INVOICE_LINK_NOT_FOUND y no se crea nada', async () => {
+      const error = (await createCharge(alta({ invoiceId: 'no-existe' }), 'staff-1', AHORA).catch((e: unknown) => e)) as NotFoundError
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('PLATFORM_CHARGE_INVOICE_LINK_NOT_FOUND')
+      ningunaEscritura()
+    })
+
+    it('la fecha fuera de ±366 días se rechaza igual que sin factura, antes de abrir la transacción', async () => {
+      await expect(createCharge(alta({ anchorDate: '2028-01-01' }), 'staff-1', AHORA)).rejects.toThrow(/366 días/)
+
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      ningunaEscritura()
+    })
+
+    it('el cliente sigue validándose: una organización sin organizationId es 400 y no toca la factura', async () => {
+      await expect(createCharge(alta({ organizationId: undefined }), 'staff-1', AHORA)).rejects.toBeInstanceOf(BadRequestError)
+
+      expect(prismaMock.platformCharge.create).not.toHaveBeenCalled()
+      expect(prismaMock.platformCfdi.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('sin invoiceId nada cambia: lo recurrente se da de alta como siempre', () => {
+    it('sin factura, la periodicidad, los conceptos y el modo siguen siendo obligatorios', async () => {
+      for (const faltante of ['frequency', 'concepts', 'invoiceMode']) {
+        const cuerpo = { ...entrada({ frequency: 'MONTHLY', invoiceMode: 'MANUAL', concepts: [RENTA] }), [faltante]: undefined }
+        await expect(createCharge(cuerpo, 'staff-1', AHORA)).rejects.toBeInstanceOf(BadRequestError)
+      }
+      ningunaEscritura()
+    })
+
+    it('un invoiceId en blanco se trata como sin factura', async () => {
+      await expect(createCharge(alta({ invoiceId: '   ' }), 'staff-1', AHORA)).rejects.toBeInstanceOf(BadRequestError)
+      expect(prismaMock.platformCfdi.findUnique).not.toHaveBeenCalled()
+    })
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/charges.service — getCharge (NEW)', () => {
+  it('regresa el cobro tal cual está guardado', async () => {
+    const row = dadoElCobro()
+
+    await expect(getCharge('cobro-1')).resolves.toEqual(row)
+    expect(prismaMock.platformCharge.findUnique).toHaveBeenCalledWith({ where: { id: 'cobro-1' } })
+  })
+
+  it('un cobro que no existe es 404 PLATFORM_CHARGE_NOT_FOUND', async () => {
+    prismaMock.platformCharge.findUnique.mockResolvedValue(null)
+
+    const error = (await getCharge('no-existe').catch((e: unknown) => e)) as NotFoundError
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.statusCode).toBe(404)
+    expect(error.code).toBe('PLATFORM_CHARGE_NOT_FOUND')
   })
 })
