@@ -553,7 +553,7 @@ describe('duplicateVenue — rechazos (ninguno crea tienda)', () => {
     expect(await tiendasDe(ORG_B)).toBe(1)
   })
 
-  it.each(['supOtraOrg', 'supInactivo', 'supApagado'])('supervisor %s → SUPERVISOR_NOT_IN_ORG', async clave => {
+  it.each(['supOtraOrg', 'supInactivo', 'supApagado', 'waiter'])('supervisor %s → SUPERVISOR_NOT_IN_ORG', async clave => {
     await rechaza(entrada({ supervisorStaffId: s[clave] }), { code: 'SUPERVISOR_NOT_IN_ORG', statusCode: 400 })
   })
 
@@ -568,6 +568,14 @@ describe('duplicateVenue — rechazos (ninguno crea tienda)', () => {
 })
 
 describe('duplicateVenue — entradas que no mandan', () => {
+  it('address.timezone: la tienda nueva la usa; sin ella hereda la de la modelo', async () => {
+    const con = await duplicateVenue(entrada({ address: { ...direccion, timezone: 'America/Tijuana' } }))
+    const sin = await duplicateVenue(entrada())
+    const [c, sn] = await Promise.all([con.venueId, sin.venueId].map(id => prisma.venue.findUniqueOrThrow({ where: { id } })))
+    expect(c.timezone).toBe('America/Tijuana')
+    expect(sn.timezone).toBe('America/Mexico_City')
+  })
+
   it('llaves de más en address no llegan a la tienda nueva (plan, tarifa, Stripe)', async () => {
     const extra = { ...direccion, planTier: 'PREMIUM', seatCapExempt: false, feeValue: 0.5, stripeCustomerId: `cus_extra_${tag}` }
     const { venueId } = await duplicateVenue(entrada({ address: extra as any }))

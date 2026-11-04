@@ -150,3 +150,20 @@ it('rechaza campos de más (plan, tarifa, cuentas no llegan al servicio)', async
   expect(r.isError).toBe(true)
   expect(mockDuplicar).not.toHaveBeenCalled()
 })
+
+it('la zona horaria entra a la vista previa y a la huella firmada', async () => {
+  await abrir(scopeCon())
+  const conZona = { ...args, address: { ...args.address, timezone: 'America/Tijuana' } }
+  const r = await call(conZona)
+  expect(r.change.direccion).toContain('America/Tijuana')
+  const otra = { ...args, address: { ...args.address, timezone: 'America/Cancun' } }
+  expect((await call({ ...otra, previewDigest: r.previewDigest, confirm: true })).isError).toBe(true)
+  expect(mockDuplicar).not.toHaveBeenCalled()
+  expect((await call({ ...conZona, previewDigest: r.previewDigest, confirm: true })).ok).toBe(true)
+  expect(mockDuplicar.mock.calls[0][0].address.timezone).toBe('America/Tijuana')
+})
+
+it('rechaza una zona horaria inválida', async () => {
+  await abrir(scopeCon())
+  expect((await call({ ...args, address: { ...args.address, timezone: 'Nada/Nada' } })).isError).toBe(true)
+})

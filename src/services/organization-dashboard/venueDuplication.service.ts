@@ -55,7 +55,16 @@ export interface DuplicateVenueInput {
   idempotencyKey: string
   templateVenueId: string
   name: string
-  address: { address: string; city: string; state: string; zipCode: string; country?: string; latitude: number; longitude: number }
+  address: {
+    address: string
+    city: string
+    state: string
+    zipCode: string
+    country?: string
+    latitude: number
+    longitude: number
+    timezone?: string
+  }
   supervisorStaffId: string
 }
 
@@ -105,6 +114,7 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
       const previa = await tx.activityLog.findFirst({
         where: {
           action: VENUE_DUPLICATED,
+          entity: 'Venue',
           organizationId: orgId,
           // ponytail: ventana de 30 días para que la búsqueda use el índice de createdAt; la llave es por apertura del diálogo.
           createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
@@ -154,7 +164,13 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
       }
 
       const supervisor = await tx.staff.findFirst({
-        where: { id: input.supervisorStaffId, active: true, organizations: { some: { organizationId: orgId, isActive: true } } },
+        // Misma regla que ofrece `getVenueDuplicationOptions`: MANAGER activo de alguna tienda de la organización.
+        where: {
+          id: input.supervisorStaffId,
+          active: true,
+          organizations: { some: { organizationId: orgId, isActive: true } },
+          venues: { some: { role: StaffRole.MANAGER, active: true, venue: { organizationId: orgId } } },
+        },
         select: { id: true },
       })
       if (!supervisor) throw new BadRequestError('Esa persona no está activa en tu organización', 'SUPERVISOR_NOT_IN_ORG')
@@ -185,6 +201,7 @@ export async function duplicateVenue(input: DuplicateVenueInput): Promise<Duplic
         state: a.state,
         zipCode: a.zipCode,
         country: a.country ?? columnas.country,
+        timezone: a.timezone ?? columnas.timezone,
         latitude: a.latitude,
         longitude: a.longitude,
         organizationId: orgId,

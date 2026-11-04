@@ -114,7 +114,9 @@ describe('POST venue-duplication', () => {
     ['name vacío', { ...BODY, name: '' }],
     ['name sólo espacios', { ...BODY, name: '     ' }],
     ['name de 121', { ...BODY, name: 'x'.repeat(121) }],
-    ['templateVenueId no cuid', { ...BODY, templateVenueId: 'nope' }],
+    ['templateVenueId vacío', { ...BODY, templateVenueId: '' }],
+    ['supervisorStaffId vacío', { ...BODY, supervisorStaffId: '' }],
+    ['timezone inválida', { ...BODY, address: { ...BODY.address, timezone: 'Mordor/Mount_Doom' } }],
     ['address con campo extra', { ...BODY, address: { ...BODY.address, planTier: 'ENTERPRISE' } }],
     ['cuerpo con campo extra (orgId)', { ...BODY, orgId: 'org-b' }],
     ['latitude como texto', { ...BODY, address: { ...BODY.address, latitude: '19.4' } }],
@@ -122,6 +124,14 @@ describe('POST venue-duplication', () => {
     const res = await post('dueno', 'OWNER', body)
     expect(res.status).toBe(400)
     expect(duplicateVenueMock).not.toHaveBeenCalled()
+  })
+
+  it('timezone IANA válida → 201 y llega al servicio', async () => {
+    const res = await post('dueno', 'OWNER', { ...BODY, address: { ...BODY.address, timezone: 'America/Tijuana' } })
+    expect(res.status).toBe(201)
+    expect(duplicateVenueMock).toHaveBeenCalledWith(
+      expect.objectContaining({ address: expect.objectContaining({ timezone: 'America/Tijuana' }) }),
+    )
   })
 
   it('recorta el nombre antes de pasarlo al servicio', async () => {

@@ -24,7 +24,7 @@ const argsDeLaTool = {
   templateVenueId: cuerpo.shape.templateVenueId.describe('Id de la tienda MODELO de tu organización (de la lista de plantillas)'),
   name: cuerpo.shape.name.describe('Nombre de la tienda nueva (3 a 120 caracteres)'),
   address: cuerpo.shape.address.describe(
-    'Dirección de la tienda nueva: address, city, state, zipCode, country (opcional), latitude, longitude',
+    'Dirección de la tienda nueva: address, city, state, zipCode, country (opcional), latitude, longitude, timezone (opcional, IANA, p. ej. America/Tijuana; si falta usa la de la tienda modelo)',
   ),
   supervisorStaffId: cuerpo.shape.supervisorStaffId.describe('Id del supervisor (MANAGER) que quedará a cargo de la tienda nueva'),
   previewDigest: z.string().max(2048).optional().describe('Huella que dio la vista previa — sólo al confirmar'),
@@ -79,7 +79,7 @@ export function registerOrganizationTools(server: McpServer, scope: McpScope) {
       if (!supervisor) return text({ ok: false, error: 'Ese supervisor no es un encargado (MANAGER) activo de tu organización.' })
 
       const a = datos.address
-      const direccion = `${a.address}, ${a.city}, ${a.state}, C.P. ${a.zipCode}`
+      const direccion = `${a.address}, ${a.city}, ${a.state}, C.P. ${a.zipCode}` + (a.timezone ? ` (zona horaria ${a.timezone})` : '')
       // Lo que ve el dueño en la vista previa es lo que se firma: si algo cambia al confirmar, la huella ya no vale.
       const firmado = { org: scope.activeOrg, ...datos }
 
