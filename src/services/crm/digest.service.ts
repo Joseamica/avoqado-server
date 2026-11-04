@@ -448,18 +448,21 @@ async function deliver(row: { id: string; staffId: string }, day: string, conten
     await closeForGood(row.id, now)
     return
   }
-  await prisma.crmDigestSend.updateMany({
-    where: { id: row.id, reservedAt: now },
-    // Sent: its content (it names people) is no longer needed to repeat it (D1). A failure keeps it to resend the same email.
-    data: ok ? { status: 'ENVIADO', content: Prisma.DbNull } : { status: 'FALLO', attempts: { increment: 1 } },
-  })
-  // The last try used up: it will never be resent, so its content goes too (D1). If this write fails, the next run's
-  // cleanup of earlier days takes it.
-  if (!ok)
-    await prisma.crmDigestSend.updateMany({
-      where: { id: row.id, reservedAt: now, status: 'FALLO', attempts: { gte: MAX_ATTEMPTS } },
-      data: { content: Prisma.DbNull },
+  // 🔴 One transaction (Codex A r2): the last try used up and its content cleared land together, or neither does (the row
+  // stays reserved and a later run retakes it with the same key).
+  await prisma.$transaction(async tx => {
+    await tx.crmDigestSend.updateMany({
+      where: { id: row.id, reservedAt: now },
+      // Sent: its content (it names people) is no longer needed to repeat it (D1). A failure keeps it to resend the same email.
+      data: ok ? { status: 'ENVIADO', content: Prisma.DbNull } : { status: 'FALLO', attempts: { increment: 1 } },
     })
+    // The last try used up: it will never be resent, so its content goes too (D1).
+    if (!ok)
+      await tx.crmDigestSend.updateMany({
+        where: { id: row.id, reservedAt: now, status: 'FALLO', attempts: { gte: MAX_ATTEMPTS } },
+        data: { content: Prisma.DbNull },
+      })
+  })
 }
 
 /**

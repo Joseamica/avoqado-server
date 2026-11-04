@@ -644,6 +644,18 @@ describe('runDailyDigest', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A }))
   })
 
+  it('gastar el último intento y vaciar el contenido van en UNA transacción (Codex A r2): si la segunda escritura falla, no queda la primera sola', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit' })
+    for (const minutes of [0, 15]) await runDailyDigest(at(minutes))
+    ;(prismaMock.$transaction as jest.Mock).mockClear()
+    await runDailyDigest(at(30))
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    const writes = prismaMock.crmDigestSend.updateMany.mock.calls.slice(-2).map(([arg]: any[]) => arg)
+    expect(writes[0].data).toEqual({ status: 'FALLO', attempts: { increment: 1 } })
+    expect(writes[1]).toEqual(expect.objectContaining({ data: { content: Prisma.DbNull } }))
+  })
+
   it('un fallo que todavía tiene intentos conserva su contenido para repetir el mismo correo', async () => {
     send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit' })
     await runDailyDigest(T0)
