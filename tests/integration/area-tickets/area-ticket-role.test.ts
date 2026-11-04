@@ -77,7 +77,7 @@ describe('papel del aparato en los vales — contra Postgres real', () => {
   it('el aparato nuevo pregunta, elige emitir vales de Cremería y deja de preguntar', async () => {
     const before = await getAreaTicketSettings(venueId, deviceUid)
     expect(before.terminal.roleChoicePending).toBe(true)
-    expect(before.areas).toEqual([{ id: activeAreaId, name: 'Cremería' }])
+    expect(before.areas).toEqual([{ id: activeAreaId, name: 'Cremería', sendsComanda: true }])
     expect(before.areasTotal).toBe(1)
 
     const after = await setTerminalAreaRole({
