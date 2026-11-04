@@ -425,9 +425,10 @@ describe('runDailyDigest', () => {
       const value = row[field]
       if (cond instanceof Date) return value instanceof Date && value.getTime() === cond.getTime()
       if (cond && typeof cond === 'object') {
-        const op = cond as { in?: unknown[]; lt?: number | Date | string; not?: unknown }
+        const op = cond as { in?: unknown[]; lt?: number | Date | string; gte?: number; not?: unknown }
         if (op.in) return op.in.includes(value)
         if (op.lt !== undefined) return (value as number | Date | string) < op.lt
+        if (op.gte !== undefined) return (value as number) >= op.gte
         if ('not' in op) return op.not === Prisma.DbNull ? value !== null : value !== op.not
       }
       return value === cond
@@ -638,8 +639,17 @@ describe('runDailyDigest', () => {
 
     expect(send).toHaveBeenCalledTimes(3)
     expect(new Set(send.mock.calls.map(([email]) => email.idempotencyKey))).toEqual(new Set([KEY_A]))
-    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
+    // Sin intentos que gastar ya no se repite: no guarda su contenido (D1, Codex A r1).
+    expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3, content: null })])
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A }))
+  })
+
+  it('un fallo que todavía tiene intentos conserva su contenido para repetir el mismo correo', async () => {
+    send.mockResolvedValue({ ok: false, transient: true, errorCode: 'rate_limit' })
+    await runDailyDigest(T0)
+    expect(sends).toEqual([
+      expect.objectContaining({ status: 'FALLO', attempts: 1, content: expect.objectContaining({ to: 'a@avoqado.io' }) }),
+    ])
   })
 
   it('dos_retomas_un_envio: two runs retaking the same stale row at once send it ONCE (the CAS on its reservation)', async () => {
