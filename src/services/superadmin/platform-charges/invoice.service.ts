@@ -15,6 +15,7 @@
  *   `issuePlatformCfdi`): el documento pudo quedar en camino. Sólo un rechazo confirmado queda STAMP_FAILED y se reintenta al momento.
  * - Toda llamada a Facturapi de este flujo usa `chargesSandbox(emisor)` (modo de prueba de QA, ver `sandbox.ts`).
  */
+import { isDeepStrictEqual } from 'node:util'
 import type { PlatformCfdi, PlatformCharge, PlatformChargeOccurrence, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
@@ -31,7 +32,7 @@ import { lockCharge, withChargeLock } from './lock'
 import { chargesSandbox } from './sandbox'
 import { conceptToCfdiLine, hasSatKeys } from './totals'
 import type { PlatformCfdiLineInput } from '@/services/superadmin/platform-billing/types'
-import type { ChargeConcept } from './types'
+import { linkedLiveWhere, NEWEST_INVOICE_FIRST, type ChargeConcept } from './types'
 
 export { chargesSandbox }
 
@@ -284,6 +285,21 @@ async function adoptInvoice(occurrence: Occurrence, row: PlatformCfdi, doc: PacD
   return { kind: 'LIVE', cfdi }
 }
 
+// ── La factura anexada ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** La anexada viva de la fecha, si hay; si hay varias, la más nueva. `resolverIntento` no la ve: viene de «Facturas CFDI» con otra llave. */
+function findLinkedLive(db: Pick<Prisma.TransactionClient, 'platformCfdi'>, occurrenceId: string): Promise<PlatformCfdi | null> {
+  return db.platformCfdi.findFirst({ where: linkedLiveWhere(occurrenceId), orderBy: NEWEST_INVOICE_FIRST })
+}
+
+/** Bajo el candado: otra pestaña pudo anexar después de que `invoiceOccurrence` la buscara, y timbrar dejaría dos facturas vigentes. */
+async function assertNoLinkedLive(tx: Prisma.TransactionClient, occurrenceId: string): Promise<void> {
+  const linked = await findLinkedLive(tx, occurrenceId)
+  if (linked) {
+    throw conflict(`Esta fecha ya tiene anexada ${labelOf(linked)}: no se timbra otra`, 'PLATFORM_CHARGE_INVOICE_LINKED')
+  }
+}
+
 // ── resolverIntento ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** CANCELLED: `cancelPlatformCfdi` la escribe aunque el SAT siga en trámite, así que se pregunta cómo va la cancelación. */
@@ -416,7 +432,7 @@ async function resolveProfileId(charge: PlatformCharge, requested?: string): Pro
 
 /**
  * Bajo el candado: relee la ocurrencia y el COBRO (lo leído antes pudo cambiar), comprueba que sigue PAID, que no hay una fila con la
- * llave actual y que el perfil con el que se va a timbrar es de ESTE cliente (la misma regla que al guardar el cobro: facturar al RFC
+ * llave actual ni una factura anexada (reescribir aquí las claves o el perfil no tendría caso, y no se va a timbrar) y que el perfil con el que se va a timbrar es de ESTE cliente (la misma regla que al guardar el cobro: facturar al RFC
  * equivocado sólo se deshace cancelando ante el SAT). Sólo después de todas las comprobaciones escribe: `conceptKeys` (reescribe las
  * claves del SAT de la foto; los montos no cambian) y el perfil que vino en la llamada. Devuelve lo que se va a timbrar.
  */
@@ -430,6 +446,7 @@ async function prepareSnapshot(occurrence: PlatformChargeOccurrence, input: Invo
     const clash = await tx.platformCfdi.findUnique({ where: { idempotencyKey: intentKey(fresh) }, select: { id: true } })
     if (clash)
       throw conflict('Ya hay un intento de factura en proceso para este cobro; consulta su estado', 'PLATFORM_CHARGE_INVOICE_STAMPING')
+    await assertNoLinkedLive(tx, fresh.id)
 
     const charge = await tx.platformCharge.findUnique({ where: { id: occurrence.chargeId } })
     if (!charge) throw new NotFoundError('Cobro no encontrado', 'PLATFORM_CHARGE_NOT_FOUND')
@@ -534,8 +551,9 @@ function sameReceptor(profile: ReceptorOfProfile | null, row: ReceptorOfRow): bo
 }
 
 /**
- * Lo que corre en la MISMA transacción que crea la fila STAMPING: toma el candado y exige PAID, `invoiceSeq` igual y que el cobro siga
- * con el perfil elegido y con los datos que se van a timbrar; si no, 409. 🔴 El perfil se elige y se lee antes del candado: otra pestaña
+ * Lo que corre en la MISMA transacción que crea la fila STAMPING: toma el candado y exige PAID, `invoiceSeq` igual, que no se haya anexado
+ * una factura y que el cobro siga con el perfil elegido y con los datos que se van a timbrar; si no, 409. Es la puerta obligatoria: nada
+ * corre bajo el candado entre esta revisión y la fila nueva, y anexar revisa esa fila bajo el mismo candado. 🔴 El perfil se elige y se lee antes del candado: otra pestaña
  * pudo corregirlo en medio (STANDALONE cambia de fila; organización o negocio sobrescriben la misma), y facturarle al contribuyente
  * anterior sólo se deshace cancelando ante el SAT.
  */
@@ -545,12 +563,19 @@ async function reserveCheck(
   invoiceSeq: number,
   billingTaxProfileId: string,
   confirmed: ConfirmedReceptor,
-  row: ReceptorOfRow,
+  row: ReceptorOfRow & Pick<Prisma.PlatformCfdiUncheckedCreateInput, 'lines' | 'totalCents'>,
 ): Promise<void> {
   await lockCharge(tx, occurrence.chargeId)
-  const fresh = await tx.platformChargeOccurrence.findUnique({ where: { id: occurrence.id }, select: { status: true, invoiceSeq: true } })
+  const fresh = await tx.platformChargeOccurrence.findUnique({
+    where: { id: occurrence.id },
+    select: { status: true, invoiceSeq: true, concepts: true, totalCents: true },
+  })
   if (!fresh || fresh.status !== 'PAID') throw notPaid()
   if (fresh.invoiceSeq !== invoiceSeq) throw changed()
+  await assertNoLinkedLive(tx, occurrence.id)
+  // 🔴 Se timbra la foto de `prepareSnapshot`: en medio pudieron deshacer, editar o anexar y quitar, y volver a pagar. Con otros números, otra vuelta.
+  const concepts = Array.isArray(fresh.concepts) ? (fresh.concepts as unknown as ChargeConcept[]) : []
+  if (fresh.totalCents !== row.totalCents || !isDeepStrictEqual(concepts.map(conceptToCfdiLine), row.lines)) throw changed()
   const charge = await tx.platformCharge.findUnique({ where: { id: occurrence.chargeId }, select: { billingTaxProfileId: true } })
   const profile = await tx.billingTaxProfile.findUnique({ where: { id: billingTaxProfileId }, select: RECEPTOR_FIELDS })
   if (
@@ -589,8 +614,8 @@ async function assertLiveHasRequestedData(cfdi: PlatformCfdi, input: InvoiceOccu
 /**
  * Factura una ocurrencia PAID («Facturar», «Corregir y reintentar» y la casilla de «Ya me pagó») o consulta cómo va su intento
  * («Consultar estado», sin `receptor`):
- *   1. exige PAID y resuelve el perfil (sin perfil: 422 NEEDS_FISCAL_DATA);
- *   2. `resolverIntento`: si ya hay una factura VIVA, la regresa sin timbrar; sin `receptor`, aquí termina (409);
+ *   1. exige PAID y, con una factura ANEXADA viva, la regresa sin timbrar y sin comparar con lo que traiga la llamada: no se timbró con esos datos;
+ *   2. resuelve el perfil (sin perfil: 422 NEEDS_FISCAL_DATA) y `resolverIntento`: si ya hay una factura VIVA, la regresa sin timbrar; sin `receptor`, aquí termina (409);
  *   3. bajo el candado aplica `conceptKeys` y el perfil, y toma la foto de conceptos y totales;
  *   4. `issuePlatformCfdi` con la llave del intento, PUE, forma de pago 03 y el `reserveCheck` que cierra la carrera con «Deshacer».
  *
@@ -601,6 +626,10 @@ export async function invoiceOccurrence(occurrenceId: string, input: InvoiceOccu
   const occurrence = await prisma.platformChargeOccurrence.findUnique({ where: { id: occurrenceId }, include: { charge: true } })
   if (!occurrence) throw occurrenceNotFound()
   if (occurrence.status !== 'PAID') throw notPaid()
+
+  // 🔴 Antes de exigir datos fiscales: un cobro externo sin perfil puede tener anexada una factura, y esos datos son para emitir otra.
+  const linked = await findLinkedLive(prisma, occurrenceId)
+  if (linked) return linked
 
   const billingTaxProfileId = await resolveProfileId(occurrence.charge, input.billingTaxProfileId)
 

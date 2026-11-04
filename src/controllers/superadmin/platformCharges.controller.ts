@@ -2,6 +2,7 @@ import type { PlatformCharge } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 import { handleBillingError } from '@/controllers/superadmin/platformBilling.controller'
 import * as chargesService from '@/services/superadmin/platform-charges/charges.service'
+import * as invoiceLinkService from '@/services/superadmin/platform-charges/invoice-link.service'
 import type { ConfirmedReceptor, InvoiceOccurrenceInput } from '@/services/superadmin/platform-charges/invoice.service'
 import * as occurrencesService from '@/services/superadmin/platform-charges/occurrences.service'
 import { dbToCalendarDay } from '@/services/superadmin/platform-charges/schedule'
@@ -94,6 +95,37 @@ export async function invoiceOccurrence(req: Request, res: Response, next: NextF
         actorId: actorOf(req),
       }),
     })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+// ── Anexar una factura de «Facturas CFDI» ───────────────────────────────────────────────────────────────────────────────────
+
+/** POST /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link — `{ cfdiId }`: la fecha toma lo que dice la factura. */
+export async function linkInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { cfdiId } = req.body as { cfdiId: string }
+    res.json({ success: true, data: await invoiceLinkService.linkInvoice(req.params.id, { cfdiId }, actorOf(req)) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** DELETE /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link — quita lo anexado; lo timbrado desde aquí no se quita. */
+export async function unlinkInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    res.json({ success: true, data: await invoiceLinkService.unlinkInvoice(req.params.id, actorOf(req)) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** GET /api/v1/superadmin/platform-charges/invoice-candidates?customerType=&organizationId=&venueId=&rfc=&q=&page=&pageSize= */
+export async function listInvoiceCandidates(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await invoiceLinkService.listInvoiceCandidates(req.query as invoiceLinkService.InvoiceCandidateFilters)
+    res.json({ success: true, data: result.rows, meta: { total: result.total, page: result.page, pageSize: result.pageSize } })
   } catch (error) {
     handleBillingError(error, res, next)
   }

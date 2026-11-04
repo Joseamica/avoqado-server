@@ -29,7 +29,7 @@ import { findProfileId, intentKey, invoiceOccurrence, resolverIntento, type Conf
 import type { InvoiceOccurrenceInput } from './invoice.service'
 import { withChargeLock } from './lock'
 import { addDays, calendarDayToDb, dbToCalendarDay, monthBoundsInMexico, todayInMexico } from './schedule'
-import type { CalendarDay, ChargeConcept } from './types'
+import { LIVE_INVOICE_STATUSES, linkedLiveWhere, NEWEST_INVOICE_FIRST, type CalendarDay, type ChargeConcept } from './types'
 
 /** «Próximos 7 días» de las tarjetas: el mismo horizonte con el que el generador crea las fechas (y el de la consulta por MCP). */
 export const UPCOMING_DAYS = 7
@@ -40,7 +40,7 @@ export type OccurrenceViewName = 'open' | 'paid' | 'skipped'
 /** Dónde cae una ocurrencia PENDIENTE respecto a hoy (de CDMX). Una pagada u omitida no tiene. */
 export type OccurrenceBucket = 'OVERDUE' | 'TODAY' | 'UPCOMING'
 
-/** Lo que la pantalla pinta de la factura más reciente de una ocurrencia. */
+/** Lo que la pantalla pinta de la factura de una ocurrencia: la viva y, si no hay, la más reciente. */
 export interface OccurrenceInvoiceView {
   id: string
   status: PlatformCfdi['status']
@@ -48,6 +48,10 @@ export interface OccurrenceInvoiceView {
   folio: string | null
   uuid: string | null
   totalCents: number
+  /** PUE o PPD: la pantalla avisa distinto en cada una. */
+  metodoPago: string
+  /** Se anexó desde «Facturas CFDI», y por eso se puede quitar. Una timbrada desde «Por cobrar» sólo se cancela. */
+  linked: boolean
   /** Por qué falló el último intento (también en una fila STAMPING: el documento pudo quedar en camino). */
   lastError: string | null
   /** `null` = el correo con el PDF y el XML no le ha llegado al cliente. */
@@ -105,6 +109,8 @@ export interface PayPreview {
   receptor: ConfirmedReceptor | null
   /** Facturas PPD ya timbradas del receptor que todavía no se liquidan en «Facturas CFDI». */
   pendingPpdCount: number
+  /** La factura anexada y viva de esta fecha: la pantalla la enseña en vez de ofrecer timbrar. */
+  linkedInvoice: OccurrenceInvoiceView | null
 }
 
 export type PayInvoiceResult = { ok: true; cfdi: PlatformCfdi } | { ok: false; message: string; code: string; field?: string }
@@ -130,7 +136,7 @@ const occurrenceNotFound = () =>
 const conflict = (message: string, code: string) => new ConflictError(message, code)
 
 /** «la factura A-118», o «la factura» si aún no tiene serie y folio. */
-const invoiceName = (row: Pick<PlatformCfdi, 'serie' | 'folio'>): string => {
+export const invoiceName = (row: Pick<PlatformCfdi, 'serie' | 'folio'>): string => {
   const id = [row.serie, row.folio].filter(Boolean).join('-')
   return id ? `la factura ${id}` : 'la factura'
 }
@@ -152,27 +158,62 @@ function blockedByInvoice(row: Pick<PlatformCfdi, 'status' | 'serie' | 'folio'>)
 
 // ── La ocurrencia como la ve la pantalla ────────────────────────────────────────────────────────────────────────────────────
 
-/** El cobro y SU factura más reciente (una sola por ocurrencia: `take: 1` por la más nueva, `id` desempata). */
+/** Lo que se lee de una factura para la vista. */
+const INVOICE_VIEW_SELECT = {
+  id: true,
+  status: true,
+  serie: true,
+  folio: true,
+  uuid: true,
+  totalCents: true,
+  metodoPago: true,
+  chargeLinkedAt: true,
+  lastError: true,
+  emailSentAt: true,
+  createdAt: true,
+} satisfies Prisma.PlatformCfdiSelect
+
+/** El cobro y SU factura más reciente (una sola por ocurrencia: `take: 1` por la más nueva, `id` desempata). La viva sale aparte: `liveInvoicesOf`. */
 const VIEW_INCLUDE = {
   charge: { select: { customerName: true, frequency: true } },
-  invoices: {
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: 1,
-    select: {
-      id: true,
-      status: true,
-      serie: true,
-      folio: true,
-      uuid: true,
-      totalCents: true,
-      lastError: true,
-      emailSentAt: true,
-      createdAt: true,
-    },
-  },
+  invoices: { orderBy: NEWEST_INVOICE_FIRST, take: 1, select: INVOICE_VIEW_SELECT },
 } satisfies Prisma.PlatformChargeOccurrenceInclude
 
 type OccurrenceRow = Prisma.PlatformChargeOccurrenceGetPayload<{ include: typeof VIEW_INCLUDE }>
+type InvoiceRow = Prisma.PlatformCfdiGetPayload<{ select: typeof INVOICE_VIEW_SELECT }>
+
+/**
+ * 🔴 La factura VIVA de cada fecha, de UNA consulta aparte y acotada a la página. Una anexada es más vieja que un intento fallido o una
+ * cancelada, así que no siempre es la que trae la relación; agrandar su `take` sólo movería el problema. Una por fecha (`distinct`): varias
+ * vivas no deberían existir y, si existen, gana la más nueva sin quitarle su lugar a otra fecha de la página.
+ */
+async function liveInvoicesOf(occurrenceIds: string[]): Promise<Map<string, InvoiceRow>> {
+  if (occurrenceIds.length === 0) return new Map()
+  const rows = await prisma.platformCfdi.findMany({
+    where: { platformChargeOccurrenceId: { in: occurrenceIds }, status: { in: LIVE_INVOICE_STATUSES } },
+    orderBy: NEWEST_INVOICE_FIRST,
+    distinct: ['platformChargeOccurrenceId'],
+    take: occurrenceIds.length,
+    select: { ...INVOICE_VIEW_SELECT, platformChargeOccurrenceId: true },
+  })
+  return new Map(rows.map(row => [row.platformChargeOccurrenceId as string, row]))
+}
+
+function invoiceView(invoice: InvoiceRow): OccurrenceInvoiceView {
+  return {
+    id: invoice.id,
+    status: invoice.status,
+    serie: invoice.serie,
+    folio: invoice.folio,
+    uuid: invoice.uuid,
+    totalCents: invoice.totalCents,
+    metodoPago: invoice.metodoPago,
+    linked: invoice.chargeLinkedAt !== null,
+    lastError: invoice.lastError,
+    emailSentAt: invoice.emailSentAt,
+    createdAt: invoice.createdAt,
+  }
+}
 
 const conceptsOf = (json: Prisma.JsonValue): ChargeConcept[] => (Array.isArray(json) ? (json as unknown as ChargeConcept[]) : [])
 
@@ -182,9 +223,9 @@ function bucketOf(status: PlatformChargeOccurrenceStatus, dueDate: CalendarDay, 
   return dueDate < today ? 'OVERDUE' : dueDate === today ? 'TODAY' : 'UPCOMING'
 }
 
-function toView(row: OccurrenceRow, today: CalendarDay): OccurrenceView {
+function toView(row: OccurrenceRow, today: CalendarDay, live: InvoiceRow | undefined): OccurrenceView {
   const dueDate = dbToCalendarDay(row.dueDate)
-  const [invoice] = row.invoices
+  const invoice = live ?? row.invoices[0]
   return {
     id: row.id,
     chargeId: row.chargeId,
@@ -200,32 +241,21 @@ function toView(row: OccurrenceRow, today: CalendarDay): OccurrenceView {
     paidAt: row.paidAt,
     skippedAt: row.skippedAt,
     bucket: bucketOf(row.status, dueDate, today),
-    invoice: invoice
-      ? {
-          id: invoice.id,
-          status: invoice.status,
-          serie: invoice.serie,
-          folio: invoice.folio,
-          uuid: invoice.uuid,
-          totalCents: invoice.totalCents,
-          lastError: invoice.lastError,
-          emailSentAt: invoice.emailSentAt,
-          createdAt: invoice.createdAt,
-        }
-      : null,
+    invoice: invoice ? invoiceView(invoice) : null,
   }
 }
 
-async function viewOf(id: string, now: Date): Promise<OccurrenceView> {
+export async function viewOf(id: string, now: Date): Promise<OccurrenceView> {
   const row = await prisma.platformChargeOccurrence.findUnique({ where: { id }, include: VIEW_INCLUDE })
   if (!row) throw occurrenceNotFound()
-  return toView(row, todayInMexico(now))
+  const live = await liveInvoicesOf([id])
+  return toView(row, todayInMexico(now), live.get(id))
 }
 
 // ── Lo que comparten las tres escrituras ────────────────────────────────────────────────────────────────────────────────────
 
 /** De qué cobro es la ocurrencia (y cómo está): se lee SIN candado sólo para saber cuál tomar; la decisión se relee adentro. */
-async function probe(id: string) {
+export async function probe(id: string) {
   const row = await prisma.platformChargeOccurrence.findUnique({ where: { id }, select: { chargeId: true, status: true } })
   if (!row) throw occurrenceNotFound()
   return row
@@ -236,14 +266,14 @@ const LOCKED_INCLUDE = {
 } satisfies Prisma.PlatformChargeOccurrenceInclude
 
 /** Bajo el candado: la ocurrencia como está AHORA, con lo que la bitácora y «Deshacer» necesitan del cobro. */
-async function readLocked(tx: Prisma.TransactionClient, id: string) {
+export async function readLocked(tx: Prisma.TransactionClient, id: string) {
   const row = await tx.platformChargeOccurrence.findUnique({ where: { id }, include: LOCKED_INCLUDE })
   if (!row) throw occurrenceNotFound()
   return row
 }
 
 /** Una entrada de la bitácora del cobro, con quien lo pidió, el negocio y la organización. Siempre FUERA del candado. */
-function audit(
+export function audit(
   action: string,
   actorId: string,
   chargeId: string,
@@ -367,7 +397,8 @@ export async function skipOccurrence(id: string, actorId: string, now: Date = ne
  * adoptar o cerrar un intento, o decir 409 «se está timbrando», «la cancelación sigue en trámite»…) y DESPUÉS, bajo el candado,
  * comprueba que no haya ninguna fila con la llave ACTUAL (la que resolverIntento pudo haber subido): con una factura viva o en
  * proceso es 409 «Cancela primero la factura A-118 en Facturas CFDI». Si «Facturar» reservó primero, aquí se ve su fila; si éste va
- * primero, la reserva ve PENDING y no timbra (`reserveCheck`).
+ * primero, la reserva ve PENDING y no timbra (`reserveCheck`). Con una factura ANEXADA viva, que tiene otra llave, es 409 «Quita primero
+ * la factura A-19»: se puede quitar y no hace falta cancelarla.
  *
  * Limpia el pago y la omisión (`paidAt`, `paidById`, `skippedAt`, `skippedById`) y regresa la ocurrencia al modo de factura del
  * cobro. Repetirlo sobre una ya pendiente contesta éxito.
@@ -388,6 +419,13 @@ export async function reopenOccurrence(id: string, actorId: string, now: Date = 
       select: { status: true, serie: true, folio: true },
     })
     if (clash) throw blockedByInvoice(clash)
+    // 🔴 Dentro del candado: otra pestaña pudo anexarla mientras se le preguntaba al PAC.
+    const linked = await tx.platformCfdi.findFirst({
+      where: linkedLiveWhere(id),
+      orderBy: NEWEST_INVOICE_FIRST,
+      select: { serie: true, folio: true },
+    })
+    if (linked) throw conflict(`Quita primero ${invoiceName(linked)}`, 'PLATFORM_CHARGE_INVOICE_LINKED')
     const updated = await tx.platformChargeOccurrence.update({
       where: { id },
       // El modo también se deshace: «Ya me pagó» sin la casilla pudo haberla vuelto manual.
@@ -442,7 +480,7 @@ function countPendingPpd(billingTaxProfileId: string): Promise<number> {
  * Lo que el diálogo «Ya me pagó» enseña (spec §3.5): receptor, conceptos y total de la FOTO de la ocurrencia, si la casilla «Timbrar
  * factura ahora» sale marcada y cuántas facturas PPD sin liquidar tiene el receptor. 🔴 Con PPD pendientes NO se timbra aunque la
  * ocurrencia sea automática («si una es de este periodo, no timbres otra y registra el pago allá»); sin receptor tampoco, porque no
- * habría a quién timbrarle.
+ * habría a quién timbrarle; con una factura anexada viva tampoco: ya la tiene, y viene en `linkedInvoice`.
  */
 export async function payPreview(occurrenceId: string): Promise<PayPreview> {
   const row = await prisma.platformChargeOccurrence.findUnique({ where: { id: occurrenceId }, include: { charge: true } })
@@ -456,6 +494,11 @@ export async function payPreview(occurrenceId: string): Promise<PayPreview> {
       })
     : null
   const pendingPpdCount = profile && profileId ? await countPendingPpd(profileId) : 0
+  const linked = await prisma.platformCfdi.findFirst({
+    where: linkedLiveWhere(occurrenceId),
+    orderBy: NEWEST_INVOICE_FIRST,
+    select: INVOICE_VIEW_SELECT,
+  })
 
   return {
     customerName: row.charge.customerName,
@@ -467,9 +510,10 @@ export async function payPreview(occurrenceId: string): Promise<PayPreview> {
     subtotalCents: row.subtotalCents,
     taxCents: row.taxCents,
     totalCents: row.totalCents,
-    willInvoice: row.invoiceMode === 'AUTOMATIC' && profile !== null && pendingPpdCount === 0,
+    willInvoice: !linked && row.invoiceMode === 'AUTOMATIC' && profile !== null && pendingPpdCount === 0,
     receptor: profile,
     pendingPpdCount,
+    linkedInvoice: linked ? invoiceView(linked) : null,
   }
 }
 
@@ -500,7 +544,7 @@ export async function summarizeOccurrences(now: Date = new Date()): Promise<Char
 /**
  * Las ocurrencias de una vista, de tantas en tantas: el servidor impone el tope de página (100), el orden es estable (`id`
  * desempata; los pagados van del más reciente al más viejo, lo demás por fecha de cobro) y el total sale de un `count` con el mismo
- * filtro. La búsqueda por nombre del cliente corre en la base, antes de paginar. Cada fila trae su factura más reciente.
+ * filtro. La búsqueda por nombre del cliente corre en la base, antes de paginar. Cada fila trae su factura viva y, si no hay, la más reciente.
  */
 export async function listOccurrences(
   filters: ListOccurrencesFilters,
@@ -527,5 +571,6 @@ export async function listOccurrences(
     prisma.platformChargeOccurrence.count({ where }),
   ])
   const today = todayInMexico(now)
-  return { rows: rows.map(row => toView(row, today)), total, page, pageSize }
+  const live = await liveInvoicesOf(rows.map(row => row.id))
+  return { rows: rows.map(row => toView(row, today, live.get(row.id))), total, page, pageSize }
 }

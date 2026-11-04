@@ -17,7 +17,7 @@ import type { PlatformCfdiLineInput } from '@/services/superadmin/platform-billi
 import type { ChargeConcept, ChargeTotals } from './types'
 
 /** IVA fijo del 16 %: renta de equipo y licencias siempre lo causan, así que no hay «exento» ni otra tasa. */
-const IVA_RATE = 0.16
+export const IVA_RATE = 0.16
 
 /**
  * Tope de cada suma (A y B), en centavos: mil millones de pesos. Con él, 2·(A·2900 + B·2500) + 2900 queda ocho veces por debajo

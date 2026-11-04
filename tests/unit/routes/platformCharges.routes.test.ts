@@ -3,7 +3,9 @@ import path from 'path'
 import {
   createChargeSchema,
   invoiceOccurrenceSchema,
+  linkInvoiceSchema,
   listChargesSchema,
+  listInvoiceCandidatesSchema,
   listOccurrencesSchema,
   pauseChargeSchema,
   payOccurrenceSchema,
@@ -232,6 +234,40 @@ describe('platformCharges.schemas — lo que entra por la URL', () => {
   })
 })
 
+describe('platformCharges.schemas — anexar una factura', () => {
+  it('anexar pide cuál factura, con mensaje en español; lo demás del cuerpo se descarta', () => {
+    expect(errores(linkInvoiceSchema, body({}))).toEqual(['Elige la factura que vas a anexar'])
+    expect(errores(linkInvoiceSchema, body({ cfdiId: '' }))).toEqual(['Elige la factura que vas a anexar'])
+    expect(errores(linkInvoiceSchema, body({ cfdiId: 7 }))).toEqual(['Elige la factura que vas a anexar'])
+
+    const r = linkInvoiceSchema.safeParse(body({ cfdiId: 'cfdi-1', chargeLinkedAt: 'x', platformChargeOccurrenceId: 'otra' }))
+    expect(r.success && r.data.body).toEqual({ cfdiId: 'cfdi-1' })
+  })
+
+  it('las candidatas aceptan cliente, RFC, búsqueda y página; la página llega como número', () => {
+    const r = listInvoiceCandidatesSchema.safeParse(
+      query({ customerType: 'ORGANIZATION', organizationId: 'org-1', rfc: ' LUN010101AAA ', q: ' a19 ', page: '2', pageSize: '500' }),
+    )
+
+    expect(r.success && r.data.query).toEqual({
+      customerType: 'ORGANIZATION',
+      organizationId: 'org-1',
+      rfc: 'LUN010101AAA',
+      q: 'a19',
+      page: 2,
+      pageSize: 500, // el tope lo impone el servidor, no la forma
+    })
+  })
+
+  it('un tipo de cliente que no existe o una página mal: mensajes en español', () => {
+    expect(errores(listInvoiceCandidatesSchema, query({ customerType: 'NADIE' }))).toEqual([
+      'El tipo de cliente debe ser ORGANIZATION, VENUE o STANDALONE',
+    ])
+    expect(errores(listInvoiceCandidatesSchema, query({ page: '0' }))).toEqual(['La página debe ser al menos 1'])
+    expect(errores(listInvoiceCandidatesSchema, query({ rfc: 'x'.repeat(14) }))).toEqual(['El RFC es demasiado largo'])
+  })
+})
+
 describe('platformCharges.routes — permisos y orden', () => {
   /** Un bloque por cada `router.<método>(...)` del archivo (una ruta puede ocupar varias líneas). */
   const bloques = RUTAS.split(/\n(?=router\.(?:get|post|patch|put|delete)\()/).filter(b => b.startsWith('router.'))
@@ -252,7 +288,7 @@ describe('platformCharges.routes — permisos y orden', () => {
     )
   })
 
-  it('las 12 rutas del spec existen, cada una con UN permiso, y la subruta no pasa un rol suelto a authorizeRole', () => {
+  it('las rutas del spec existen, cada una con UN permiso, y la subruta no pasa un rol suelto a authorizeRole', () => {
     expect(rutas.map(r => `${r.metodo} ${r.ruta}`).sort()).toEqual(
       [
         'GET /summary',
@@ -262,6 +298,9 @@ describe('platformCharges.routes — permisos y orden', () => {
         'POST /occurrences/:id/skip',
         'POST /occurrences/:id/reopen',
         'POST /occurrences/:id/invoice',
+        'POST /occurrences/:id/invoice-link',
+        'DELETE /occurrences/:id/invoice-link',
+        'GET /invoice-candidates',
         'GET /',
         'POST /',
         'PATCH /:id',
@@ -280,9 +319,17 @@ describe('platformCharges.routes — permisos y orden', () => {
     }
   })
 
-  it('/summary y /occurrences… se registran ANTES de cualquier /:id', () => {
+  it('anexar valida el cuerpo con su esquema y las candidatas su consulta; quitar no recibe datos', () => {
+    const una = (metodo: string, ruta: string) => rutas.find(r => r.metodo === metodo && r.ruta === ruta)!
+
+    expect(una('POST', '/occurrences/:id/invoice-link').bloque).toContain('validateRequest(linkInvoiceSchema)')
+    expect(una('GET', '/invoice-candidates').bloque).toContain('validateRequest(listInvoiceCandidatesSchema)')
+    expect(una('DELETE', '/occurrences/:id/invoice-link').bloque).not.toContain('validateRequest(')
+  })
+
+  it('/summary, /occurrences… e /invoice-candidates se registran ANTES de cualquier /:id', () => {
     const primeraConId = rutas.findIndex(r => /^\/:id/.test(r.ruta))
-    const ultimaFija = Math.max(...rutas.map((r, i) => (/^\/(summary|occurrences)/.test(r.ruta) ? i : -1)))
+    const ultimaFija = Math.max(...rutas.map((r, i) => (/^\/(summary|occurrences|invoice-candidates)/.test(r.ruta) ? i : -1)))
 
     expect(primeraConId).toBeGreaterThan(-1)
     expect(ultimaFija).toBeLessThan(primeraConId)

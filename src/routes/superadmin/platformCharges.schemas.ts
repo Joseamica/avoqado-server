@@ -106,6 +106,24 @@ export const listOccurrencesSchema = z.object({
   }),
 })
 
+/** Las facturas que se le pueden anexar a un cliente. Sin cliente ni RFC es 400: lo decide el servicio, que es quien sabe qué identifica a cada tipo. */
+export const listInvoiceCandidatesSchema = z.object({
+  query: z.object({
+    customerType: customerType.optional(),
+    organizationId: z.string({ invalid_type_error: 'El identificador no es válido' }).min(1, 'El identificador no es válido').optional(),
+    venueId: z.string({ invalid_type_error: 'El identificador no es válido' }).min(1, 'El identificador no es válido').optional(),
+    rfc: z.string({ invalid_type_error: 'El RFC debe ser texto' }).trim().max(13, 'El RFC es demasiado largo').optional(),
+    q: search,
+    page,
+    pageSize,
+  }),
+})
+
+/** Anexar a una fecha una factura que ya existe en «Facturas CFDI». */
+export const linkInvoiceSchema = z.object({
+  body: z.object({ cfdiId: text('Elige la factura que vas a anexar') }),
+})
+
 /** «Ya me pagó»: la casilla «Timbrar factura ahora» se manda SIEMPRE explícita (omitirla no puede volver manual una automática). */
 /** Lo que el operador vio en pantalla al pedir la factura: si viene, es lo único que se puede timbrar. */
 const confirmedReceptor = z

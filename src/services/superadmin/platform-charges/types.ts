@@ -5,7 +5,7 @@
  * Fechas SIEMPRE de calendario de CDMX, sin hora: ver `schedule.ts`.
  */
 
-import type { PlatformCfdiStatus } from '@prisma/client'
+import type { PlatformCfdiStatus, Prisma } from '@prisma/client'
 
 /** Un día de calendario de CDMX, sin hora: `'YYYY-MM-DD'`. Nunca un instante. */
 export type CalendarDay = string
@@ -17,6 +17,19 @@ export type CalendarDay = string
  * anexar una factura, filtrar la lista): si está mal, se corrige aquí. `DRAFT`, `STAMP_FAILED` y `CANCELLED` no cuentan.
  */
 export const LIVE_INVOICE_STATUSES: PlatformCfdiStatus[] = ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING']
+
+/** De la más nueva a la más vieja, con `id` de desempate: la que gana entre varias facturas de una fecha. */
+export const NEWEST_INVOICE_FIRST: Prisma.PlatformCfdiOrderByWithRelationInput[] = [{ createdAt: 'desc' }, { id: 'desc' }]
+
+/**
+ * 🔴 La factura ANEXADA a una fecha y todavía viva. Viene de «Facturas CFDI» con otra llave, así que `resolverIntento`, que busca por la
+ * llave del intento, no la ve: lo que timbra o deshace pregunta aparte por ella.
+ */
+export const linkedLiveWhere = (occurrenceId: string): Prisma.PlatformCfdiWhereInput => ({
+  platformChargeOccurrenceId: occurrenceId,
+  chargeLinkedAt: { not: null },
+  status: { in: LIVE_INVOICE_STATUSES },
+})
 
 /** `WITHOUT_IVA`: el monto no trae IVA y se le suma el 16 %. `WITH_IVA`: el monto ya lo trae. */
 export type ChargeIvaMode = 'WITHOUT_IVA' | 'WITH_IVA'

@@ -102,6 +102,8 @@ function factura(over: Fila = {}): Fila {
     serie: 'A',
     folio: '118',
     uuid: 'UUID-1',
+    metodoPago: 'PUE',
+    chargeLinkedAt: null,
     ...TOTALES,
     lastError: null,
     emailSentAt: hace(10),
@@ -154,6 +156,33 @@ function instalar() {
   prismaMock.platformCfdi.findUnique.mockImplementation(
     async ({ where }: any) => mundo.cfdis.find(c => c.idempotencyKey === where.idempotencyKey) ?? null,
   )
+  // De la más nueva a la más vieja, con `id` de desempate, como el `orderBy` de la vista.
+  const nuevasPrimero = (filas: Fila[]) =>
+    [...filas].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || String(b.id).localeCompare(String(a.id)))
+  // La anexada viva de una fecha: se niega a contestar sin la fecha, y sólo entiende lo que el servicio pregunta.
+  prismaMock.platformCfdi.findFirst.mockImplementation(async ({ where }: any) => {
+    if (where.platformChargeOccurrenceId === undefined) throw new Error('el doble exige la fecha')
+    const halladas = mundo.cfdis.filter(
+      c =>
+        c.platformChargeOccurrenceId === where.platformChargeOccurrenceId &&
+        (where.chargeLinkedAt === undefined || c.chargeLinkedAt) &&
+        where.status.in.includes(c.status),
+    )
+    return nuevasPrimero(halladas)[0] ?? null
+  })
+  // Las vivas de una página: una por fecha (`distinct`) y con su tope, igual que en la base.
+  prismaMock.platformCfdi.findMany.mockImplementation(async ({ where, distinct, take }: any) => {
+    const halladas = nuevasPrimero(
+      mundo.cfdis.filter(
+        c => where.platformChargeOccurrenceId.in.includes(c.platformChargeOccurrenceId) && where.status.in.includes(c.status),
+      ),
+    )
+    const vistas = new Set<string>()
+    const unaPorFecha = distinct
+      ? halladas.filter(c => !vistas.has(c.platformChargeOccurrenceId) && Boolean(vistas.add(c.platformChargeOccurrenceId)))
+      : halladas
+    return unaPorFecha.slice(0, take)
+  })
   prismaMock.platformCfdi.count.mockImplementation(async () => mundo.ppd)
   prismaMock.billingTaxProfile.findUnique.mockImplementation(async ({ where, select }: any) => {
     if (where.id !== PERFIL.id) return null
@@ -172,6 +201,8 @@ beforeEach(() => {
     prismaMock.platformChargeOccurrence.aggregate,
     prismaMock.platformChargeOccurrence.update,
     prismaMock.platformCfdi.findUnique,
+    prismaMock.platformCfdi.findFirst,
+    prismaMock.platformCfdi.findMany,
     prismaMock.platformCfdi.count,
     prismaMock.billingTaxProfile.findUnique,
     mockLogAction,
@@ -672,6 +703,87 @@ describe('platform-charges/occurrences — reopenOccurrence («Deshacer»)', () 
     expect(view.status).toBe('PENDING')
   })
 
+  describe('🔴 con una factura ANEXADA (Codex r1, hallazgo 1)', () => {
+    const anexada = (over: Fila = {}) =>
+      factura({ id: 'cfdi-19', folio: '19', idempotencyKey: 'hecha-a-mano-19', chargeLinkedAt: hace(5), ...over })
+
+    it.each(['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'])(
+      '%s, dentro del candado: 409 «Quita primero la factura A-19» y no se deshace',
+      async status => {
+        Object.assign(mundo.occ, PAGADA())
+        mundo.cfdis = [anexada({ status })]
+        const eventos = trazar()
+
+        const error = await reopenOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+        expect(error).toBeInstanceOf(ConflictError)
+        expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_INVOICE_LINKED')
+        expect((error as ConflictError).message).toBe('Quita primero la factura A-19')
+        expect(eventos).toContain('candado')
+        expect(mundo.occ.status).toBe('PAID')
+        sinEscrituras()
+      },
+    )
+
+    it('la que se anexa mientras se le pregunta al PAC también la frena: la búsqueda es dentro del candado', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mockResolver.mockImplementation(async () => {
+        mundo.cfdis = [anexada()]
+        return { kind: 'NONE' }
+      })
+
+      await expect(reopenOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('Quita primero la factura A-19')
+      sinEscrituras()
+    })
+
+    it('una omitida con anexada tampoco se deshace', async () => {
+      Object.assign(mundo.occ, OMITIDA())
+      mundo.cfdis = [anexada()]
+
+      await expect(reopenOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('Quita primero la factura A-19')
+      expect(mundo.occ.status).toBe('SKIPPED')
+    })
+
+    it('una anexada sin serie ni folio dice «la factura», sin inventar el nombre', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mundo.cfdis = [anexada({ serie: null, folio: null })]
+
+      await expect(reopenOccurrence('occ-1', 'staff-1', AHORA)).rejects.toThrow('Quita primero la factura')
+    })
+
+    it('con la timbrada desde aquí, el mensaje de hoy: esa no se quita, se cancela', async () => {
+      Object.assign(mundo.occ, PAGADA())
+      mundo.cfdis = [factura()]
+
+      const error = await reopenOccurrence('occ-1', 'staff-1', AHORA).catch((e: unknown) => e)
+
+      expect((error as ConflictError).code).toBe('PLATFORM_CHARGE_HAS_INVOICE')
+      expect((error as ConflictError).message).toBe('Cancela primero la factura A-118 en Facturas CFDI')
+    })
+
+    it('una anexada cancelada ya no frena: se deshace y la fecha regresa al modo del cobro', async () => {
+      Object.assign(mundo.occ, PAGADA({ invoiceMode: 'MANUAL' }))
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+      expect(mundo.occ).toMatchObject({ status: 'PENDING', paidAt: null, invoiceMode: 'AUTOMATIC' })
+    })
+
+    it.each(['AUTOMATIC', 'NONE', 'MANUAL'])(
+      'tras quitarla, «Deshacer» restaura el modo del cobro (%s): anexar la había dejado en MANUAL sólo mientras estuvo anexada',
+      async modo => {
+        Object.assign(mundo.occ, PAGADA({ invoiceMode: 'MANUAL' }))
+        mundo.charge.invoiceMode = modo
+        mundo.cfdis = [] // ya se quitó: la factura no tiene vínculo con la fecha
+
+        await reopenOccurrence('occ-1', 'staff-1', AHORA)
+
+        expect(mundo.occ).toMatchObject({ status: 'PENDING', invoiceMode: modo })
+      },
+    )
+  })
+
   it('repetir sobre una ya PENDIENTE contesta éxito sin consultar al PAC ni escribir', async () => {
     const view = await reopenOccurrence('occ-1', 'staff-1', AHORA)
 
@@ -717,6 +829,7 @@ describe('platform-charges/occurrences — payPreview', () => {
       willInvoice: true,
       receptor: { rfc: 'LUN010101AAA', razonSocial: 'ESTETICA LUNA SA DE CV', regimenFiscal: '601', codigoPostal: '06000' },
       pendingPpdCount: 0,
+      linkedInvoice: null,
     })
   })
 
@@ -744,6 +857,55 @@ describe('platform-charges/occurrences — payPreview', () => {
 
     expect(mundo.occ.invoiceMode).toBe('AUTOMATIC')
     expect(preview).toMatchObject({ willInvoice: false, pendingPpdCount: 1, receptor: { rfc: 'LUN010101AAA' } })
+  })
+
+  describe('🔴 con una factura anexada', () => {
+    const anexada = (over: Fila = {}) =>
+      factura({ id: 'cfdi-19', folio: '19', idempotencyKey: 'hecha-a-mano-19', chargeLinkedAt: hace(5), metodoPago: 'PPD', ...over })
+
+    it('trae linkedInvoice y willInvoice es false, aunque la fecha siga AUTOMÁTICA y haya receptor', async () => {
+      const a = anexada()
+      mundo.cfdis = [a]
+
+      const r = await payPreview('occ-1')
+
+      expect(r.willInvoice).toBe(false)
+      expect(r.linkedInvoice).toEqual({
+        id: 'cfdi-19',
+        status: 'STAMPED',
+        serie: 'A',
+        folio: '19',
+        uuid: 'UUID-1',
+        totalCents: 107900,
+        metodoPago: 'PPD',
+        linked: true,
+        lastError: null,
+        emailSentAt: a.emailSentAt,
+        createdAt: a.createdAt,
+      })
+    })
+
+    it('sin anexada, linkedInvoice es null y lo demás no cambia', async () => {
+      const r = await payPreview('occ-1')
+
+      expect(r.linkedInvoice).toBeNull()
+      expect(r.willInvoice).toBe(true)
+    })
+
+    it('la anexada cancelada ya no cuenta: vuelve a poder timbrar', async () => {
+      mundo.cfdis = [anexada({ status: 'CANCELLED' })]
+
+      const r = await payPreview('occ-1')
+
+      expect(r.linkedInvoice).toBeNull()
+      expect(r.willInvoice).toBe(true)
+    })
+
+    it('una timbrada desde aquí no es anexada: linkedInvoice sigue en null', async () => {
+      mundo.cfdis = [factura()]
+
+      expect((await payPreview('occ-1')).linkedInvoice).toBeNull()
+    })
   })
 
   it('una MANUAL no timbra por default, con o sin PPD', async () => {
@@ -1052,10 +1214,140 @@ describe('platform-charges/occurrences — listOccurrences', () => {
         folio: null,
         uuid: null,
         totalCents: 107900,
+        metodoPago: 'PUE',
+        linked: false,
         lastError: 'ETIMEDOUT',
         emailSentAt: null,
         createdAt: f.createdAt,
       },
+    })
+  })
+
+  describe('🔴 la factura que enseña la fila: la viva y, si no hay, la más nueva (Review Focus 3, Codex r1 hallazgo 6)', () => {
+    const OCC = 'occ-2026-10-30'
+    const viejaViva = (over: Fila = {}) =>
+      factura({
+        id: 'viva',
+        platformChargeOccurrenceId: OCC,
+        idempotencyKey: 'hecha-a-mano',
+        chargeLinkedAt: hace(10),
+        serie: 'A',
+        folio: '19',
+        createdAt: hace(60 * 24 * 30),
+        ...over,
+      })
+    const cancelada = (i: number) =>
+      factura({
+        id: `cancelada-${i}`,
+        platformChargeOccurrenceId: OCC,
+        idempotencyKey: `por-cobrar:${OCC}:${i}`,
+        status: 'CANCELLED',
+        createdAt: hace(i + 1),
+      })
+    /** Como en la base: la relación `invoices` de la lista sólo trae la más nueva (`take: 1`). */
+    const filaConLaMasNueva = (id: string, cfdis: Fila[]) => {
+      const [masNueva] = cfdis
+        .filter(c => c.platformChargeOccurrenceId === id)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      return fila(id.replace('occ-', ''), { id, invoices: masNueva ? [masNueva] : [] })
+    }
+
+    it.each([
+      ['anexada STAMPED', { status: 'STAMPED' }],
+      ['anexada con la cancelación en trámite', { status: 'CANCEL_REQUESTED' }],
+      ['timbrándose', { status: 'STAMPING', chargeLinkedAt: null }],
+    ])('la viva (%s) aunque haya once canceladas más nuevas', async (_caso, over) => {
+      mundo.cfdis = [viejaViva(over), ...Array.from({ length: 11 }, (_, i) => cancelada(i))]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows[0].invoice).toMatchObject({ id: 'viva', status: over.status })
+    })
+
+    it('la anexada sale marcada, con su método de pago; una timbrada desde aquí, sin marca', async () => {
+      mundo.cfdis = [viejaViva({ metodoPago: 'PPD' }), cancelada(0)]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const anexada = await listOccurrences({ view: 'open' }, AHORA)
+      expect(anexada.rows[0].invoice).toMatchObject({ id: 'viva', linked: true, metodoPago: 'PPD' })
+
+      mundo.cfdis = [viejaViva({ chargeLinkedAt: null })]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const timbrada = await listOccurrences({ view: 'open' }, AHORA)
+      expect(timbrada.rows[0].invoice).toMatchObject({ id: 'viva', linked: false })
+    })
+
+    it('sin viva, la más nueva', async () => {
+      mundo.cfdis = [cancelada(5), cancelada(0), cancelada(3)]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows[0].invoice).toMatchObject({ id: 'cancelada-0', status: 'CANCELLED' })
+    })
+
+    it('una fecha con varias vivas no debería existir; si existe, gana la más nueva', async () => {
+      mundo.cfdis = [viejaViva(), viejaViva({ id: 'viva-nueva', createdAt: hace(5) }), cancelada(0)]
+      findMany().mockResolvedValue([filaConLaMasNueva(OCC, mundo.cfdis)])
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows[0].invoice?.id).toBe('viva-nueva')
+    })
+
+    it('las vivas de la página salen de UNA sola consulta aparte, acotada a sus filas, no una por fila', async () => {
+      const fechas = ['occ-2026-10-28', 'occ-2026-10-29', 'occ-2026-10-30']
+      mundo.cfdis = fechas.map((id, i) => viejaViva({ id: `viva-${i}`, platformChargeOccurrenceId: id }))
+      findMany().mockResolvedValue(fechas.map(id => fila(id.replace('occ-', ''), { id, invoices: [] })))
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows.map(r => r.invoice?.id)).toEqual(['viva-0', 'viva-1', 'viva-2'])
+      expect(prismaMock.platformCfdi.findMany).toHaveBeenCalledTimes(1)
+      const consulta = prismaMock.platformCfdi.findMany.mock.calls[0][0]
+      expect(consulta.where).toEqual({
+        platformChargeOccurrenceId: { in: fechas },
+        status: { in: ['STAMPED', 'CANCEL_REQUESTED', 'STAMPING'] },
+      })
+      expect(consulta.take).toBe(3)
+      expect(consulta.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    })
+
+    it('el `take` de la lista no se agranda: la relación sigue trayendo una sola', async () => {
+      await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(llamada().include.invoices.take).toBe(1)
+    })
+
+    it('dos vivas en una fecha no le quitan su factura a otra fecha de la página: el tope es por fecha', async () => {
+      const [a, b] = ['occ-2026-10-29', 'occ-2026-10-30']
+      mundo.cfdis = [
+        viejaViva({ id: 'a-nueva', platformChargeOccurrenceId: a, createdAt: hace(1) }),
+        viejaViva({ id: 'a-otra', platformChargeOccurrenceId: a, createdAt: hace(2) }),
+        viejaViva({ id: 'b-vieja', platformChargeOccurrenceId: b, createdAt: hace(3) }),
+      ]
+      findMany().mockResolvedValue([a, b].map(id => fila(id.replace('occ-', ''), { id, invoices: [] })))
+
+      const { rows } = await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(rows.map(r => r.invoice?.id)).toEqual(['a-nueva', 'b-vieja'])
+    })
+
+    it('sin filas en la página no hace la consulta de las vivas', async () => {
+      await listOccurrences({ view: 'open' }, AHORA)
+
+      expect(prismaMock.platformCfdi.findMany).not.toHaveBeenCalled()
+    })
+
+    it('la vista de UNA fecha (la que regresan pagar, omitir y deshacer) sigue la misma regla', async () => {
+      mundo.occ.id = OCC
+      mundo.cfdis = [viejaViva(), ...Array.from({ length: 11 }, (_, i) => cancelada(i))]
+
+      const vista = await skipOccurrence(OCC, 'staff-1', AHORA)
+
+      expect(vista.invoice).toMatchObject({ id: 'viva', linked: true })
     })
   })
 
@@ -1084,7 +1376,7 @@ describe('platform-charges/occurrences — listOccurrences', () => {
     const { rows } = await listOccurrences({ view: 'open' }, AHORA)
 
     expect(Object.keys(rows[0].invoice!).sort()).toEqual(
-      ['createdAt', 'emailSentAt', 'folio', 'id', 'lastError', 'serie', 'status', 'totalCents', 'uuid'].sort(),
+      ['createdAt', 'emailSentAt', 'folio', 'id', 'lastError', 'linked', 'metodoPago', 'serie', 'status', 'totalCents', 'uuid'].sort(),
     )
   })
 })

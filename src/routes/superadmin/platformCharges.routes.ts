@@ -5,7 +5,9 @@ import * as controller from '@/controllers/superadmin/platformCharges.controller
 import {
   createChargeSchema,
   invoiceOccurrenceSchema,
+  linkInvoiceSchema,
   listChargesSchema,
+  listInvoiceCandidatesSchema,
   listOccurrencesSchema,
   pauseChargeSchema,
   payOccurrenceSchema,
@@ -19,7 +21,7 @@ import {
  * (permisos que ya existen; sin espejos nuevos). `validateRequest` corre ANTES de `checkPermission` para que lo mal formado falle
  * rápido, y deja en `req.body` / `req.query` lo ya limpio.
  *
- * `/summary` y `/occurrences…` van ANTES de `/:id`.
+ * `/summary`, `/occurrences…` e `/invoice-candidates` van ANTES de `/:id`.
  *
  *   GET   /api/v1/superadmin/platform-charges/summary
  *   GET   /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&page=&pageSize=
@@ -28,6 +30,9 @@ import {
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/skip
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/reopen
  *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/invoice    { billingTaxProfileId?, conceptKeys? }
+ *   POST  /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link   { cfdiId }
+ *   DELETE /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link
+ *   GET   /api/v1/superadmin/platform-charges/invoice-candidates?customerType=&organizationId=&venueId=&rfc=&q=&page=&pageSize=
  *   GET   /api/v1/superadmin/platform-charges?status=active|paused&q=&page=&pageSize=
  *   POST  /api/v1/superadmin/platform-charges
  *   PATCH /api/v1/superadmin/platform-charges/:id
@@ -53,6 +58,21 @@ router.post(
   validateRequest(invoiceOccurrenceSchema),
   checkPermission('platform-billing:issue'),
   controller.invoiceOccurrence,
+)
+
+// Anexar a una fecha una factura que ya existe en «Facturas CFDI»
+router.post(
+  '/occurrences/:id/invoice-link',
+  validateRequest(linkInvoiceSchema),
+  checkPermission('platform-billing:issue'),
+  controller.linkInvoice,
+)
+router.delete('/occurrences/:id/invoice-link', checkPermission('platform-billing:issue'), controller.unlinkInvoice)
+router.get(
+  '/invoice-candidates',
+  validateRequest(listInvoiceCandidatesSchema),
+  checkPermission('platform-billing:view'),
+  controller.listInvoiceCandidates,
 )
 
 // Cobros recurrentes

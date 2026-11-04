@@ -26,9 +26,9 @@ import { LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './t
 const GENERATE_AHEAD_DAYS = 7
 /** `anchorDate` entre hoy−366 y hoy+366 días, los dos extremos incluidos (spec §3.1). */
 const ANCHOR_WINDOW_DAYS = 366
-const MAX_CONCEPTS = 20
+export const MAX_CONCEPTS = 20
 /** Centavos por concepto: $9,999,999.99. */
-const MAX_CONCEPT_CENTS = 999_999_999
+export const MAX_CONCEPT_CENTS = 999_999_999
 /** Las columnas de dinero de la ocurrencia son `Int` de Postgres: un total con IVA mayor no cabe. */
 const MAX_TOTAL_CENTS = 2_147_483_647
 /** Cobros activos que lee el generador por página. */
@@ -384,20 +384,36 @@ async function generateOccurrences(
 
 /**
  * 🔴 Cambiar el calendario con una ocurrencia futura ya pagada u omitida generaría otro cobro por el mismo periodo (no se
- * modelan periodos). Se avisa con la más próxima. Va dentro del candado, junto con el borrado y la regeneración.
+ * modelan periodos), y lo mismo con una PENDING con factura: no se borra (`invoices: { none: {} }`), y la regeneración crearía otra junto a
+ * ella. `leaving` son las PENDING que este cambio borraría si no tuvieran factura, incluida la de hoy si ya no cae en el calendario nuevo.
+ * Se avisa con la más próxima. Va dentro del candado, junto con el borrado y la regeneración.
+ *
+ * ponytail: una futura sin pagar cuya única factura es una timbrada desde aquí y ya cancelada también frena, y ésa no se puede quitar: el
+ * 409 dura hasta que pase la fecha. Pide pagar por adelantado, timbrar, cancelar y deshacer; si un día estorba, que no cuenten las canceladas sin marca.
  */
-async function assertNoMarkedFuture(tx: Prisma.TransactionClient, chargeId: string, today: CalendarDay): Promise<void> {
-  const marked = await tx.platformChargeOccurrence.findFirst({
-    where: { chargeId, status: { in: ['PAID', 'SKIPPED'] }, dueDate: { gt: calendarDayToDb(today) } },
+async function assertNoMarkedFuture(
+  tx: Prisma.TransactionClient,
+  chargeId: string,
+  today: CalendarDay,
+  leaving: { gt: Date } | { gte: Date },
+): Promise<void> {
+  const blocking = await tx.platformChargeOccurrence.findFirst({
+    where: {
+      chargeId,
+      OR: [
+        { status: { in: ['PAID', 'SKIPPED'] }, dueDate: { gt: calendarDayToDb(today) } },
+        { status: 'PENDING', dueDate: leaving, invoices: { some: {} } },
+      ],
+    },
     orderBy: { dueDate: 'asc' },
-    select: { dueDate: true },
+    select: { dueDate: true, status: true },
   })
-  if (marked) {
-    throw new ConflictError(
-      `Ya marcaste el cobro del ${shortDayEs(dbToCalendarDay(marked.dueDate))}; deshazlo para cambiar la fecha`,
-      'PLATFORM_CHARGE_FUTURE_MARKED',
-    )
+  if (!blocking) return
+  const day = shortDayEs(dbToCalendarDay(blocking.dueDate))
+  if (blocking.status === 'PENDING') {
+    throw new ConflictError(`El cobro del ${day} ya tiene factura; quítala para cambiar la fecha`, 'PLATFORM_CHARGE_FUTURE_INVOICED')
   }
+  throw new ConflictError(`Ya marcaste el cobro del ${day}; deshazlo para cambiar la fecha`, 'PLATFORM_CHARGE_FUTURE_MARKED')
 }
 
 /**
@@ -512,8 +528,8 @@ export async function createCharge(input: ChargeInput, actorId: string, now: Dat
 
 /**
  * Edita un cobro: sólo cambia lo futuro. Si cambió algo que afecta las fechas (calendario, conceptos o modo), borra las PENDING
- * con fecha mayor a hoy y las regenera de hoy a hoy+7 con la foto nueva; lo vencido y lo de hoy conservan la suya. Cambiar el
- * ancla o la periodicidad con una ocurrencia futura ya marcada es un 409. Si no cambió nada, no escribe nada.
+ * con fecha mayor a hoy que no tengan factura y las regenera de hoy a hoy+7 con la foto nueva; lo vencido y lo de hoy conservan la suya.
+ * Cambiar el ancla o la periodicidad con una ocurrencia futura ya marcada o con factura es un 409. Si no cambió nada, no escribe nada.
  *
  * Una sola vez (`ONE_TIME`): no se cambia de o a esa periodicidad (400) y su única fecha se edita en su lugar (`updateOneTime`).
  */
@@ -539,17 +555,19 @@ export async function updateCharge(
     if (changed.includes('anchorDate')) assertAnchorInWindow(next.anchorDate, today)
     if (changed.some(field => CUSTOMER_FIELDS.includes(field))) await assertCustomerAndProfile(tx, next)
     if (next.frequency === 'ONE_TIME') return { charge: await updateOneTime(tx, id, next, changed), changed }
-    if (changed.includes('anchorDate') || changed.includes('frequency')) await assertNoMarkedFuture(tx, id, today)
+    // 🔴 Mover la fecha no debe dejar dos cobros en el mes: lo de hoy sin pagar se va si ya no cae en el calendario nuevo. Lo vencido
+    // se queda: eso sí se debe, y omitirlo es decisión de quien cobra.
+    const calendarChanged = changed.includes('anchorDate') || changed.includes('frequency')
+    const todayLeaves = calendarChanged && occurrenceDatesBetween(next.frequency, next.anchorDate, today, today).length === 0
+    const todayDb = calendarDayToDb(today)
+    const leaving = todayLeaves ? { gte: todayDb } : { gt: todayDb }
+    if (calendarChanged) await assertNoMarkedFuture(tx, id, today, leaving)
 
     const updated = await tx.platformCharge.update({ where: { id }, data: dbFields(next) })
     if (changed.some(field => RESCHEDULE_FIELDS.includes(field))) {
-      // 🔴 Mover la fecha no debe dejar dos cobros en el mes: lo de hoy sin pagar se va si ya no cae en el calendario nuevo. Lo vencido
-      // se queda: eso sí se debe, y omitirlo es decisión de quien cobra.
-      const calendarChanged = changed.includes('anchorDate') || changed.includes('frequency')
-      const todayLeaves = calendarChanged && occurrenceDatesBetween(next.frequency, next.anchorDate, today, today).length === 0
-      const todayDb = calendarDayToDb(today)
+      // 🔴 Con factura no se borra: la relación es SetNull y borrar la fecha soltaría la factura en silencio. Sus números son de ella.
       await tx.platformChargeOccurrence.deleteMany({
-        where: { chargeId: id, status: 'PENDING', dueDate: todayLeaves ? { gte: todayDb } : { gt: todayDb } },
+        where: { chargeId: id, status: 'PENDING', dueDate: leaving, invoices: { none: {} } },
       })
       // Un cobro pausado no genera: al reanudarlo se generará desde hoy.
       if (!updated.pausedAt) await generateOccurrences(tx, updated, today, addDays(today, GENERATE_AHEAD_DAYS))
@@ -562,7 +580,7 @@ export async function updateCharge(
 }
 
 /**
- * Pausa un cobro: deja de generar y borra sus PENDING futuras. Con `skipOverdue` pasa a SKIPPED lo vencido y lo de hoy (para un
+ * Pausa un cobro: deja de generar y borra sus PENDING futuras sin factura. Con `skipOverdue` pasa a SKIPPED lo vencido y lo de hoy (para un
  * cliente que se fue); sin él se quedan por cobrar. Repetir no cambia nada: `pausedAt` conserva el momento original y no se
  * vuelve a borrar nada; sólo `skipOverdue` se sigue respetando, por si la segunda vez se eligió «Omitirlo».
  */
@@ -584,8 +602,11 @@ export async function pauseCharge(
     let skippedOverdue = 0
     if (wasActive) {
       charge = await tx.platformCharge.update({ where: { id }, data: { pausedAt: now } })
+      // 🔴 Con factura no se borra: la relación es SetNull y borrar la fecha soltaría la factura en silencio.
       removedFuture = (
-        await tx.platformChargeOccurrence.deleteMany({ where: { chargeId: id, status: 'PENDING', dueDate: { gt: todayDb } } })
+        await tx.platformChargeOccurrence.deleteMany({
+          where: { chargeId: id, status: 'PENDING', dueDate: { gt: todayDb }, invoices: { none: {} } },
+        })
       ).count
     }
     if (options.skipOverdue === true) {
