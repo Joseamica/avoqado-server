@@ -79,6 +79,12 @@ export async function deletePrivateFile(path: string): Promise<void> {
   await requireBucket().file(path).delete({ ignoreNotFound: true })
 }
 
+/** Borra TODO lo que cuelga de una carpeta privada (`private/<env>/<scope>/`). Lanza si algo falla: quien llama reintenta. */
+export async function deletePrivateFolder(scope: string): Promise<void> {
+  if (!/^[a-zA-Z0-9_/-]+$/.test(scope) || scope.includes('..')) throw new BadRequestError('Ámbito inválido')
+  await requireBucket().deleteFiles({ prefix: `${PRIVATE_PREFIX}/${getStorageEnvPrefix()}/${scope.replace(/\/+$/, '')}/` })
+}
+
 /** A caller can durably record this path before sending bytes to Storage. */
 export function buildPrivateFilePath(scope: string, name: string): string {
   if (!/^[a-zA-Z0-9_/-]+$/.test(scope) || scope.includes('..') || !/^[a-zA-Z0-9_.-]+$/.test(name) || name.includes('..'))
@@ -100,11 +106,27 @@ export async function savePrivateFileAtPath(path: string, buffer: Buffer, conten
     })
 }
 
-export async function signPrivateAttachmentUrl(path: string): Promise<string> {
+/**
+ * Escritura en stream para exportes grandes: memoria constante. La ruta la arma `buildPrivateFilePath` y quien llama la
+ * anota ANTES del primer byte (si el proceso muere, se sabe qué borrar). Mismo prefijo privado, sin makePublic(), create-only.
+ */
+export function abrirEscrituraPrivada(path: string, contentType: string): NodeJS.WritableStream {
   assertPrivatePath(path)
-  const [url] = await requireBucket()
+  return requireBucket()
     .file(path)
-    .getSignedUrl({ action: 'read', version: 'v4', expires: Date.now() + 10 * 60000, responseDisposition: 'attachment' })
+    .createWriteStream({
+      contentType,
+      resumable: false,
+      preconditionOpts: { ifGenerationMatch: 0 },
+      metadata: { cacheControl: 'private, no-store', contentDisposition: 'attachment' },
+    })
+}
+
+/** 10 min por default; con `hasta` (p. ej. el vencimiento de un exporte) nunca pasa de esa fecha. */
+export async function signPrivateAttachmentUrl(path: string, hasta?: Date): Promise<string> {
+  assertPrivatePath(path)
+  const expires = hasta ? Math.min(Date.now() + 10 * 60000, hasta.getTime()) : Date.now() + 10 * 60000
+  const [url] = await requireBucket().file(path).getSignedUrl({ action: 'read', version: 'v4', expires, responseDisposition: 'attachment' })
   return url
 }
 

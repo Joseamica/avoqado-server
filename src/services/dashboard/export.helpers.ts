@@ -5,7 +5,7 @@
 // filter set; the listing-specific service builds the rows and calls
 // `encodeExport()` to get back a `{ buffer, contentType, extension }` tuple.
 
-import * as XLSX from 'xlsx'
+import { construirXlsxDesdeMatriz } from '@/services/exports/xlsxDesdeMatriz'
 import PDFDocument from 'pdfkit'
 import { Response } from 'express'
 
@@ -100,22 +100,6 @@ function fechaHoraMx(instante: Date): string {
   return `${fechaMx(`${p.year}-${p.month}-${p.day}`)}, ${p.hour}:${p.minute}`
 }
 
-/**
- * Nombre de hoja válido para Excel: sin `\ / ? * [ ] :`, a lo más 31 caracteres y, si hubo que cortar, en un límite de
- * palabra y sin separador colgando («Recibo de Carlos Rodríguez ·» → «Recibo de Carlos Rodríguez»).
- */
-function nombreDeHoja(title: string): string {
-  let s = title
-    .replace(/[\\/?*[\]:]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  if (s.length > 31) {
-    const corte = s.slice(0, 32).lastIndexOf(' ')
-    s = s.slice(0, corte > 0 ? corte : 31)
-  }
-  return s.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N})]+$/gu, '') || 'Export'
-}
-
 function encodeCsv<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[]): EncodedExport {
   const header = columns.map(c => csvField(c.label)).join(',')
   const lines = rows.map(row => columns.map(c => csvField(c.value(row) ?? '')).join(','))
@@ -130,37 +114,13 @@ function encodeCsv<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[]): Encode
 }
 
 function encodeXlsx<TRow>(columns: ExportColumnDef<TRow>[], rows: TRow[], title: string): EncodedExport {
-  // Build an array-of-arrays; XLSX figures out cell types per cell.
-  const headerRow = columns.map(c => c.label)
-  const dataRows = rows.map(row => columns.map(c => c.value(row) ?? ''))
-  const aoa = [headerRow, ...dataRows]
-  const sheet = XLSX.utils.aoa_to_sheet(aoa)
-  columns.forEach((c, colIdx) => {
-    if (!c.numFmt) return
-    for (let r = 1; r <= dataRows.length; r++) {
-      const cell = sheet[XLSX.utils.encode_cell({ r, c: colIdx })]
-      if (cell?.t === 'n') cell.z = c.numFmt
-    }
+  const buffer = construirXlsxDesdeMatriz({
+    encabezados: columns.map(c => c.label),
+    formatos: columns.map(c => c.numFmt),
+    filas: rows.map(row => columns.map(c => c.value(row) ?? '')),
+    hoja: title,
   })
-  // Roughly autofit columns based on header + first 50 row widths.
-  const widths = headerRow.map((label, colIdx) => {
-    let max = String(label).length
-    for (let i = 0; i < Math.min(dataRows.length, 50); i++) {
-      const v = dataRows[i][colIdx]
-      const len = v === null || v === undefined ? 0 : String(v).length
-      if (len > max) max = len
-    }
-    return { wch: Math.min(Math.max(max + 2, 10), 40) }
-  })
-  ;(sheet as any)['!cols'] = widths
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, sheet, nombreDeHoja(title))
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer
-  return {
-    buffer,
-    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    extension: 'xlsx',
-  }
+  return { buffer, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', extension: 'xlsx' }
 }
 
 async function encodePdf<TRow>(
