@@ -220,6 +220,39 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     expect(res.headers['content-type']).toContain('text/csv')
   })
 
+  // Codex r1 #1: el GET viejo ya no arma lo grande en el hilo. Directo = archivo como hoy; segundo plano = 413 sin traer filas.
+  it('GET viejo, de segundo plano (4,224 × 13 columnas) ⇒ 413 «recarga la página» y no trae filas', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockCountSalesSummaryDetailRows.mockResolvedValue(4_224)
+    const res = await request(app).get(exportUrl(`mode=detailed&format=xlsx&${RANGE}`)).set(authHeader('OWNER'))
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ success: false, message: 'Este archivo es grande: recarga la página para descargarlo en segundo plano' })
+    expect(mockFetchSalesSummaryDetailRows).not.toHaveBeenCalled()
+  })
+  it('GET viejo, del carril directo (1,000 × 13 = 13,000 celdas) ⇒ 200 con el archivo, como hoy', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockCountSalesSummaryDetailRows.mockResolvedValue(1_000)
+    mockFetchSalesSummaryDetailRows.mockResolvedValue([])
+    const res = await request(app).get(exportUrl(`mode=detailed&format=csv&${RANGE}`)).set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+    expect(res.headers['content-disposition']).toContain('ventas-detalladas')
+  })
+  it('GET viejo, frontera: 1,539 × 13 = 20,007 celdas ya es 413; con 2 columnas pedidas, 3,000 filas es directo', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockFetchSalesSummaryDetailRows.mockResolvedValue([])
+    mockCountSalesSummaryDetailRows.mockResolvedValue(1_539)
+    expect((await request(app).get(exportUrl(`mode=detailed&format=csv&${RANGE}`)).set(authHeader('OWNER'))).status).toBe(413)
+    mockCountSalesSummaryDetailRows.mockResolvedValue(3_000)
+    expect((await request(app).get(exportUrl(`mode=detailed&format=csv&columns=createdAt,amount&${RANGE}`)).set(authHeader('OWNER'))).status).toBe(200)
+  })
+  it('GET viejo, PDF de 900 filas ⇒ 200 (el PDF no cambia: su tope sigue en 1,000)', async () => {
+    mockVenueHasFeatureAccess.mockResolvedValue(true)
+    mockCountSalesSummaryDetailRows.mockResolvedValue(900)
+    mockFetchSalesSummaryDetailRows.mockResolvedValue([])
+    const res = await request(app).get(exportUrl(`mode=detailed&format=pdf&${RANGE}`)).set(authHeader('OWNER'))
+    expect(res.status).toBe(200)
+  })
+
   // ── FIX (edge bug): QR_LEGACY in detailed mode must 400, NEVER 500 ──────────
   // Legacy QR transactions live in the legacy avo-pwa store, not the native Payment
   // table that the detailed export reads. Without the controller guard, paymentMethod
