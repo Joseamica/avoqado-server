@@ -85,21 +85,27 @@ const recommendedShape = thresholdShape.extend({
   noticeStyle: z.enum(['BANNER', 'MODAL'], { errorMap: () => ({ message: 'El aviso debe ser banner o ventana' }) }).optional(),
 })
 
-const MISSING = { required_error: 'Falta este dato' }
+const objErr = (campo: string) => ({
+  required_error: `Falta ${campo}`,
+  invalid_type_error: `${campo[0].toUpperCase()}${campo.slice(1)} no es válido`,
+})
 
 export const putPolicySchema = z.object({
   params: z.object({ platform: platformParam }),
   body: z.object({
-    required: thresholdShape.nullable(MISSING as any),
-    recommended: recommendedShape.nullable(MISSING as any),
+    required: z.object(thresholdShape.shape, objErr('la versión obligatoria (usa null si no hay)')).nullable(),
+    recommended: z.object(recommendedShape.shape, objErr('la versión recomendada (usa null si no hay)')).nullable(),
     message: z
-      .string()
+      .string({ invalid_type_error: 'El mensaje debe ser texto' })
       .trim()
       .max(280, 'El mensaje no puede pasar de 280 caracteres')
       .nullish()
       .transform(m => (m ? m : null)),
     expectedVersion: z
-      .number(MISSING)
+      .number({
+        required_error: 'Falta la versión esperada (usa null si no hay)',
+        invalid_type_error: 'La versión esperada debe ser un entero',
+      })
       .int('La versión esperada debe ser un entero')
       .min(1, 'La versión esperada debe ser 1 o más')
       .nullable(),
@@ -119,13 +125,22 @@ export const clearPolicySchema = z.object({
 export const impactQuerySchema = z.object({
   params: z.object({ platform: platformParam }),
   query: z.object({
-    versionCode: z.coerce
-      .number({ invalid_type_error: 'El número de versión debe ser un entero' })
-      .int('El número de versión debe ser un entero')
-      .min(1, 'El número de versión debe ser mayor que 0')
-      .max(MAX_INT32, 'El número de versión es demasiado grande')
+    versionCode: z
+      .unknown()
+      .optional()
+      .transform((v, ctx) => {
+        if (v === undefined) return undefined
+        const n = readVersionCode(v)
+        if (n === undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'El número de versión debe ser un entero válido' })
+          return z.NEVER
+        }
+        return n
+      }),
+    versionName: z
+      .string({ invalid_type_error: 'El nombre de versión no es válido' })
+      .regex(VERSION_NAME_RE, 'El nombre de versión no es válido (por ejemplo 1.16.0)')
       .optional(),
-    versionName: z.string().regex(VERSION_NAME_RE, 'El nombre de versión no es válido (por ejemplo 1.16.0)').optional(),
     days: z.coerce
       .number({ invalid_type_error: 'Los días deben ser un entero de 1 a 90' })
       .int('Los días deben ser un entero de 1 a 90')

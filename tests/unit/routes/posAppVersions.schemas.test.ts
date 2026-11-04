@@ -108,7 +108,43 @@ describe('putPolicySchema (forma)', () => {
   })
 })
 
+describe('mensajes en español', () => {
+  const ok = { required: { versionCode: 100 }, recommended: null, expectedVersion: null }
+  const sin = (k: string) => {
+    const b: any = { ...ok }
+    delete b[k]
+    return errores(putPolicySchema, put('ANDROID', b))
+  }
+  it('falta required / recommended', () => {
+    expect(sin('required')).toEqual(['Falta la versión obligatoria (usa null si no hay)'])
+    expect(sin('recommended')).toEqual(['Falta la versión recomendada (usa null si no hay)'])
+  })
+  it('expectedVersion de tipo equivocado', () => {
+    expect(errores(putPolicySchema, put('ANDROID', { ...ok, expectedVersion: 'x' }))).toEqual(['La versión esperada debe ser un entero'])
+  })
+  it('message no texto', () => {
+    expect(errores(putPolicySchema, put('ANDROID', { ...ok, message: 5 }))).toEqual(['El mensaje debe ser texto'])
+  })
+  it('noticeStyle no válido o no texto', () => {
+    for (const n of ['TOAST', 5]) {
+      expect(errores(putPolicySchema, put('ANDROID', { ...ok, recommended: { versionCode: 100, noticeStyle: n } }))).toEqual([
+        'El aviso debe ser banner o ventana',
+      ])
+    }
+  })
+  it('impact versionCode "1e3" falla', () => {
+    expect(errores(impactQuerySchema, { params: { platform: 'ANDROID' }, query: { versionCode: '1e3' } })).not.toEqual([])
+    expect(errores(impactQuerySchema, { params: { platform: 'ANDROID' }, query: { versionCode: '0x10' } })).not.toEqual([])
+    expect(parse(impactQuerySchema, { params: { platform: 'ANDROID' }, query: { versionCode: '96' } }).query.versionCode).toBe(96)
+  })
+})
+
 describe('assertPolicyRules', () => {
+  it('iOS recomendada 1.16 con obligatoria 1.16.0 pasa (iguales al rellenar)', () => {
+    expect(() =>
+      assertPolicyRules('IOS', { required: { versionName: '1.16.0' }, recommended: { versionName: '1.16', noticeStyle: 'BANNER' } }),
+    ).not.toThrow()
+  })
   it('ANDROID válido normaliza los campos ausentes a null', () => {
     const r = assertPolicyRules('ANDROID', { required: { versionCode: 100 } as any, recommended: null })
     expect(r).toEqual({ required: { versionCode: 100, versionName: null }, recommended: null })
