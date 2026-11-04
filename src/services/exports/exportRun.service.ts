@@ -239,9 +239,13 @@ export function crearExportRunService(overrides: Partial<DepsExportRun> = {}) {
       if (count === 1 && r.filePath) await soltarArchivo(r.id, r.filePath)
     }
     // Codex r4: nunca se reclama un pedido a menos de 1 h de vencer (ni uno ya vencido): lo cierra la limpieza como VENCIO_SIN_ARMARSE.
+    // Un RUNNING agotado (MAX_INTENTOS) nunca es candidato: si hubo más de los que el pase de arriba toma, esperan su turno ahí.
     const vigenteHasta = new Date(+ahora + MARGEN_DE_VENCIMIENTO_MS)
     const candidatos = await d.prisma.exportRun.findMany({
-      where: { expiresAt: { gt: vigenteHasta }, OR: [{ status: 'QUEUED' }, { status: 'RUNNING', leaseExpiresAt: { lt: ahora } }] },
+      where: {
+        expiresAt: { gt: vigenteHasta },
+        OR: [{ status: 'QUEUED' }, { status: 'RUNNING', leaseExpiresAt: { lt: ahora }, attempts: { lt: MAX_INTENTOS } }],
+      },
       orderBy: { createdAt: 'asc' },
       take: CANDIDATOS_POR_RECLAMO,
     })
@@ -263,7 +267,7 @@ export function crearExportRunService(overrides: Partial<DepsExportRun> = {}) {
           id: c.id,
           attempts: c.attempts,
           expiresAt: { gt: vigenteHasta },
-          OR: [{ status: 'QUEUED' }, { status: 'RUNNING', leaseExpiresAt: { lt: ahora } }],
+          OR: [{ status: 'QUEUED' }, { status: 'RUNNING', leaseExpiresAt: { lt: ahora }, attempts: { lt: MAX_INTENTOS } }],
         },
         data: {
           status: 'RUNNING',

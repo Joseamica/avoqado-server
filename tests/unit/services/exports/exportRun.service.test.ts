@@ -407,6 +407,17 @@ describe('exportRunService — reclamar y procesar', () => {
     expect(ctx.correos).toEqual([expect.objectContaining({ estado: 'FAILED' })])
     expect(ctx.notificaciones).toHaveLength(0)
   })
+  it('🔴 más de 10 agotados a la vez: ninguno se reclama por tercera vez; todos acaban FAILED REINTENTOS_AGOTADOS', async () => {
+    const ctx = montar(12_000)
+    for (let i = 0; i < 12; i++) await ctx.svc.pedir({ ...pedido, staffId: `s${i}` }) // una persona por pedido (tope de 3)
+    for (const r of ctx.prisma.filas) Object.assign(r, { status: 'RUNNING', attempts: 2, leaseExpiresAt: new Date(+ctx.ahora() - 1) })
+    const reclamos: any[] = []
+    for (let i = 0; i < 3; i++) reclamos.push(await ctx.svc.reclamarSiguiente())
+    expect(reclamos).toEqual([null, null, null])
+    expect(ctx.prisma.filas.every((r: any) => r.attempts === 2 && r.status === 'FAILED' && r.failureCode === 'REINTENTOS_AGOTADOS')).toBe(
+      true,
+    )
+  })
   it('🔴 Codex r4: a 30 min de vencer no se reclama; a 2 h sí, y se arma', async () => {
     const cerca = montar(12_000)
     await cerca.svc.pedir(pedido)
