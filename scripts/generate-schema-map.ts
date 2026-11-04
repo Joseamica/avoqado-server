@@ -607,6 +607,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
 
   // 18. Notifications, WhatsApp & Marketing
   Notification: 'Notifications, WhatsApp & Marketing',
+  ExportRun: 'Notifications, WhatsApp & Marketing',
   NotificationPreference: 'Notifications, WhatsApp & Marketing',
   PlatformAnnouncement: 'Notifications, WhatsApp & Marketing',
   PlatformAnnouncementClick: 'Notifications, WhatsApp & Marketing',

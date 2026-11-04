@@ -192,6 +192,7 @@ model Zone {
 }
 
 model Venue {
+  exportRuns ExportRun[]
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
   onlineOrderCharges     OnlineOrderCharge[]
@@ -1067,6 +1068,7 @@ model PosConnectionStatus {
 // ==========================================
 
 model Staff {
+  exportRunsRequested ExportRun[] @relation("ExportRunRequestedBy")
   documentRequestLinks DocumentRequestVenueLink[]
   id String @id @default(cuid())
   // organizationId removed: use StaffOrganization junction table for multi-org membership
@@ -9851,6 +9853,60 @@ model Notification {
   @@index([entityType, entityId])
 }
 
+enum ExportRunStatus {
+  QUEUED
+  RUNNING
+  READY
+  FAILED
+  EXPIRED
+}
+
+enum ExportRunFormat {
+  CSV
+  XLSX
+}
+
+/// Pedido de exporte armado en segundo plano (spec 2026-10-06-exportes-en-segundo-plano; plan v2 del 3-nov).
+/// Borrar la persona o la sucursal NO borra la fila (SetNull): queda sin dueño (nadie pasa el permiso para descargarla) y la
+/// limpieza diaria borra su archivo privado a su fecha (Codex r1, hallazgo 7).
+model ExportRun {
+  id              String          @id @default(cuid())
+  venueId         String?
+  venue           Venue?          @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  requestedById   String?
+  requestedBy     Staff?          @relation("ExportRunRequestedBy", fields: [requestedById], references: [id], onDelete: SetNull)
+  kind            String // clave del exportador: 'ventas-detalladas' | 'cobros'
+  format          ExportRunFormat
+  cambioACsv      Boolean         @default(false) // pidió Excel y se arma en CSV (no cabía en memoria)
+  params          Json // filtros ya validados por el exportador
+  columns         String[]
+  huella          String // sha256(kind, format, columns, params): deduplica el doble clic
+  status          ExportRunStatus @default(QUEUED)
+  esperandoCobros Boolean         @default(false) // el semáforo lo tiene en pausa: el dashboard lo dice
+  totalRows       Int             @default(0)
+  processedRows   Int             @default(0)
+  corte           DateTime // createdAt <= corte: lo que entra mientras se arma no se mezcla
+  filePath        String? // se anota ANTES del primer byte: si el proceso muere, se sabe qué borrar
+  fileName        String?
+  fileBytes       Int?
+  failureCode     String?
+  attempts        Int             @default(0)
+  leaseExpiresAt  DateTime?
+  heartbeatAt     DateTime?
+  createdAt       DateTime        @default(now())
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  expiresAt       DateTime
+  // Bandeja de avisos en la misma fila (Codex r1, hallazgo 6): el cocinero manda lo que falte y anota cada uno al lograrlo.
+  campanitaAt     DateTime? // sólo READY
+  correoAt        DateTime? // READY y FAILED
+  avisoIntentos   Int             @default(0) // tope 5
+
+  @@index([status, createdAt])
+  @@index([venueId, requestedById, createdAt])
+  @@index([requestedById, huella, status])
+}
+
 model NotificationPreference {
   id String @id @default(cuid())
 
@@ -10881,6 +10937,8 @@ enum NotificationType {
   RESERVATION_NO_SHOW_SUMMARY
   /// D4: una corrección de «No asistió» dejó algo para una persona (clase sin pagar, multa cobrada, llegada del kiosco).
   RESERVATION_NEEDS_REVIEW
+  /// Exportes en segundo plano: el archivo que pidió la persona ya está listo.
+  EXPORT_READY
 
   // KYC notifications (Superadmin)
   NEW_KYC_SUBMISSION // New venue submitted KYC documents
