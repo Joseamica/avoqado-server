@@ -642,7 +642,7 @@ export async function sendVenueNotification(
 /**
  * Check if current time is in quiet hours
  */
-function isInQuietHours(quietStart?: string, quietEnd?: string): boolean {
+export function isInQuietHours(quietStart?: string, quietEnd?: string): boolean {
   if (!quietStart || !quietEnd) return false
 
   const now = new Date()
