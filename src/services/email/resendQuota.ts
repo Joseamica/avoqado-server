@@ -145,25 +145,35 @@ async function errorDeCupo(respuesta: Response): Promise<ErrorDeCupo | undefined
   }
 }
 
+/**
+ * El día en que Resend contó: su cabecera `Date`. Una respuesta de las 23:59:59 UTC que llega pasada la medianoche es del día
+ * viejo; contarla en el nuevo pausaría las campañas todo el día con el cupo ya renovado. Sin cabecera, la hora de aquí.
+ */
+function diaDeLaRespuesta(respuesta: Response): string {
+  const fecha = new Date(respuesta.headers.get('date') ?? '')
+  return diaDe(Number.isNaN(fecha.getTime()) ? new Date() : fecha)
+}
+
 async function medir(input: unknown, respuesta: Response): Promise<void> {
   if (hostDe(input) !== HOST) return
-  const hoy = diaDe(new Date())
+  const hoy = diaDeLaRespuesta(respuesta)
   const mes = hoy.slice(0, 7)
   const diario = numero(respuesta.headers.get('x-resend-daily-quota'))
   const mensual = numero(respuesta.headers.get('x-resend-monthly-quota'))
   // Se espera ANTES de devolver la respuesta: así la pausa ya está puesta cuando el remitente pregunta por el siguiente correo.
   const agotado = respuesta.status === 429 ? await errorDeCupo(respuesta) : undefined
 
+  // Una respuesta de un día ya pasado (llegó tarde) no se mezcla con el día que ya se está viendo.
   if (diario !== null) {
-    visto = { ...visto, dia: hoy, usadoDia: visto.dia === hoy ? Math.max(visto.usadoDia, diario) : diario }
+    if (hoy >= visto.dia) visto = { ...visto, dia: hoy, usadoDia: visto.dia === hoy ? Math.max(visto.usadoDia, diario) : diario }
   } else if (respuesta.ok && !dijoDePago) {
     dijoDePago = true
     logger.info('[Resend] La respuesta no trae x-resend-daily-quota: la cuenta es de pago, sin pausa diaria de campañas')
   }
-  if (mensual !== null) {
+  if (mensual !== null && mes >= visto.mes) {
     visto = { ...visto, mes, usadoMes: visto.mes === mes ? Math.max(visto.usadoMes, mensual) : mensual }
   }
-  if (agotado) agotadoDia = hoy
+  if (agotado && hoy >= agotadoDia) agotadoDia = hoy
 
   // Los avisos no detienen el correo que los disparó: corren aparte y nunca lanzan.
   if (agotado && tocaIntentar('agotado', hoy)) {

@@ -131,6 +131,23 @@ describe('el aviso del día', () => {
     expect(p.reinicioDelCupoDiario(new Date('2026-11-04T01:00:00.000Z'))).toEqual(new Date('2026-11-05T00:00:00.000Z'))
   })
 
+  it('una respuesta que Resend fechó ayer y llega después de medianoche no pausa el día nuevo (se cuenta en su día)', async () => {
+    // 4-nov 00:00:01 UTC en el servidor; Resend la generó a las 23:59:59 del 3-nov, con 80 en ese día.
+    jest.setSystemTime(new Date('2026-11-04T00:00:01.000Z'))
+    const p = cargar()
+    await mandar(p.fetch, respuesta(200, { 'x-resend-daily-quota': '80', date: 'Tue, 03 Nov 2026 23:59:59 GMT' }))
+    expect(p.campanasPausadasPorCupo()).toBe(false)
+    expect(fila?.dailyAlertDay).toBe('2026-11-03')
+
+    // Ya del día nuevo, con 1: el 80 de ayer no se le suma.
+    await mandar(p.fetch, respuesta(200, { 'x-resend-daily-quota': '1', date: 'Wed, 04 Nov 2026 00:00:02 GMT' }))
+    expect(p.campanasPausadasPorCupo()).toBe(false)
+
+    // Y una de ayer que llega todavía más tarde no tumba lo que ya se vio hoy.
+    await mandar(p.fetch, respuesta(200, { 'x-resend-daily-quota': '99', date: 'Tue, 03 Nov 2026 23:59:58 GMT' }))
+    expect(p.campanasPausadasPorCupo()).toBe(false)
+  })
+
   it('otro día vuelve a avisar; la pausa de ayer no pasa a hoy', async () => {
     const p = cargar()
     await mandar(p.fetch, conCupo(80))
