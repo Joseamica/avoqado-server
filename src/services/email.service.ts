@@ -8,6 +8,7 @@ import { escapeHtml } from '../controllers/public/publicHtml'
 import { isValidIANATimezone } from '../utils/sanitizeTimezone'
 import type { PriceSelection } from './launchCampaigns/publicPriceList.service'
 import { formatMoney } from './shared/receiptLayout/format'
+import { correoInvitacionCrm } from './crm/correoInvitacionCrm'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -761,6 +762,12 @@ Recibo enviado por ${data.venueName} via Avoqado
       html,
       text,
     })
+  }
+
+  /** La invitación al CRM de ventas (negocio interno del equipo, `CrmTeam`): su propio texto y botón al SUPERADMIN (D3). */
+  async sendCrmTeamInvitation(email: string, data: { inviterName: string; crmUrl: string; inviteLink: string }): Promise<boolean> {
+    const { subject, html, text } = correoInvitacionCrm({ ...data, email })
+    return this.sendEmail({ to: email, subject, html, text })
   }
 
   async sendTeamInvitation(email: string, data: InvitationEmailData): Promise<boolean> {
