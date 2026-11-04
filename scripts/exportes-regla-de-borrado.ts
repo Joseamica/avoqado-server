@@ -23,7 +23,7 @@ import { getStorageEnvPrefix } from '../src/services/storage.service'
 export const DIAS_DE_VIDA = 8
 
 type Bucket = ReturnType<storage.Storage['bucket']>
-type Regla = { action?: { type?: string }; condition?: { age?: number; matchesPrefix?: string[] } }
+type Regla = { action?: { type?: string }; condition?: { age?: number; matchesPrefix?: string[]; matchesSuffix?: string[] } }
 type Log = Pick<Console, 'log' | 'error'>
 
 export const prefijoDeExportes = (env: string): string => `${PRIVATE_PREFIX}/${env}/exports/`

@@ -5,8 +5,15 @@ const nuestra = { action: { type: 'Delete' }, condition: { age: 8, matchesPrefix
 const ajena = { action: { type: 'SetStorageClass', storageClass: 'COLDLINE' }, condition: { age: 30 } }
 
 /** Bucket en memoria con la misma semántica que `addLifecycleRule` (append por default). */
-function bucketFalso(reglas: any[] = []) {
-  const b = {
+interface BucketFalso {
+  name: string
+  reglas: any[]
+  getMetadata: jest.Mock
+  addLifecycleRule: jest.Mock
+  setMetadata: jest.Mock
+}
+function bucketFalso(reglas: any[] = []): BucketFalso {
+  const b: BucketFalso = {
     name: 'test-bucket',
     reglas,
     getMetadata: jest.fn(async () => [{ metageneration: '7', lifecycle: { rule: [...b.reglas] } }]),
