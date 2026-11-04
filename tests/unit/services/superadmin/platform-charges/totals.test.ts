@@ -1,4 +1,4 @@
-import { computeChargeTotals, conceptToCfdiLine } from '@/services/superadmin/platform-charges/totals'
+import { computeChargeTotals, conceptToCfdiLine, hasSatKeys } from '@/services/superadmin/platform-charges/totals'
 import type { ChargeConcept } from '@/services/superadmin/platform-charges/types'
 
 /**
@@ -161,5 +161,25 @@ describe('platform-charges/totals — conceptToCfdiLine (NEW)', () => {
       taxRate: 0.16,
       taxIncluded: true,
     })
+  })
+})
+
+describe('platform-charges/totals — hasSatKeys (NEW)', () => {
+  it('con las dos claves, sí', () => {
+    expect(hasSatKeys({ satProductKey: '81112401', satUnitKey: 'E48' })).toBe(true)
+  })
+
+  it.each([
+    ['las dos vacías', '', ''],
+    ['sin clave de producto', '', 'E48'],
+    ['sin unidad', '81112401', ''],
+    ['una clave de puros espacios no es una clave', '   ', 'E48'],
+    ['una unidad de puros espacios tampoco', '81112401', '  '],
+  ])('%s: no', (_caso, satProductKey, satUnitKey) => {
+    expect(hasSatKeys({ satProductKey, satUnitKey })).toBe(false)
+  })
+
+  it('un concepto viejo de la base sin esas llaves tampoco truena', () => {
+    expect(hasSatKeys({} as never)).toBe(false)
   })
 })
