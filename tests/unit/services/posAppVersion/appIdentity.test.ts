@@ -53,6 +53,43 @@ describe('readHomeAppIdentity — la app que pide el inicio', () => {
     ).toBeNull()
   })
 
+  // 🔴 La señal real del WINDOWS: su shim de `android.os.Build` (avoqado-android/desktop/plataforma/.../android/os/Build.java)
+  // fija MANUFACTURER = "Avoqado" y MODEL = el nombre del sistema («Windows 11»), y viajan como x-device-manufacturer y
+  // x-device-model, aunque la plataforma diga ANDROID y la forma TABLET o PHONE.
+  describe('el WINDOWS, que manda ANDROID', () => {
+    const android95 = { 'x-device-platform': 'ANDROID', 'x-device-form-factor': 'TABLET', 'x-app-version-code': '95' }
+
+    it('con x-device-manufacturer «Avoqado» → null', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'Avoqado', 'x-device-model': 'Windows 11' })).toBeNull()
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'Avoqado' })).toBeNull()
+    })
+
+    it('con x-device-manufacturer «avoqado » (mayúsculas y espacios) → null', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'avoqado ' })).toBeNull()
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': ' AVOQADO' })).toBeNull()
+    })
+
+    it('con x-device-model que empieza con «Windows» → null', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-model': 'Windows 11' })).toBeNull()
+      expect(readHomeAppIdentity({ ...android95, 'x-device-model': ' windows 10' })).toBeNull()
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'Dell', 'x-device-model': 'WINDOWS SERVER 2022' })).toBeNull()
+    })
+
+    it('un ANDROID real («samsung», «SM-X710») sigue teniendo su identidad', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'samsung', 'x-device-model': 'SM-X710' })).toEqual({
+        platform: 'ANDROID',
+        versionCode: 95,
+      })
+    })
+
+    it('un modelo que sólo CONTIENE «windows» no es el WINDOWS: sigue teniendo su identidad', () => {
+      expect(readHomeAppIdentity({ ...android95, 'x-device-manufacturer': 'SUNMI', 'x-device-model': 'T2-windowsless' })).toEqual({
+        platform: 'ANDROID',
+        versionCode: 95,
+      })
+    })
+  })
+
   it('con x-device-platform DESKTOP → null', () => {
     expect(readHomeAppIdentity({ 'x-device-platform': 'DESKTOP', 'x-app-version-code': '95' })).toBeNull()
     expect(readHomeAppIdentity({ 'x-device-platform': 'desktop', 'x-app-version': '1.15.11' })).toBeNull()

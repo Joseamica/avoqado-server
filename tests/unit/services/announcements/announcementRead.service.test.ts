@@ -8,6 +8,7 @@ import {
   getActiveForHome,
 } from '../../../../src/services/announcements/announcementRead.service'
 import { ForbiddenError } from '../../../../src/errors/AppError'
+import { readHomeAppIdentity } from '../../../../src/services/posAppVersion/appIdentity'
 
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
@@ -421,6 +422,36 @@ describe('announcementRead.service', () => {
       expect(args.where.dismissedAt).toEqual({ not: null })
       expect(args.where.announcementId).toEqual({ in: ['bloq-android-100'] })
       expect(args.take).toBeGreaterThan(0)
+    })
+
+    // 🔴 Como lo arma el controlador: las cabeceras del WINDOWS (manda ANDROID, pero su fabricante es «Avoqado» y su
+    // modelo, el nombre del sistema) no dan identidad, así que nunca reciben el aviso de ANDROID.
+    it('con las cabeceras del WINDOWS no sale el aviso de ANDROID: sigue el camino de hoy', async () => {
+      servir([bloquear()])
+      const windows = readHomeAppIdentity({
+        'x-device-platform': 'ANDROID',
+        'x-device-form-factor': 'TABLET',
+        'x-device-manufacturer': 'Avoqado',
+        'x-device-model': 'Windows 11',
+        'x-app-version-code': '95',
+      })
+      const r = await getActiveForHome('s1', windows)
+      expect(r.banner?.id).toBe('normal-1')
+      expect(mockAnnMany).toHaveBeenCalledTimes(1)
+      expect(mockAnnMany.mock.calls[0][0].where.posAppPlatform).toBeNull()
+    })
+
+    it('con las cabeceras de un ANDROID real, el mismo aviso sí sale', async () => {
+      servir([bloquear()])
+      const tableta = readHomeAppIdentity({
+        'x-device-platform': 'ANDROID',
+        'x-device-form-factor': 'TABLET',
+        'x-device-manufacturer': 'samsung',
+        'x-device-model': 'SM-X710',
+        'x-app-version-code': '95',
+      })
+      const r = await getActiveForHome('s1', tableta)
+      expect(r.banner?.id).toBe('bloq-android-100')
     })
 
     // ===== REGRESION =====
