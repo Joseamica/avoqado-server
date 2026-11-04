@@ -16,6 +16,7 @@ import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
 import { hashToken } from '@/services/auth/refreshGrant.service'
+import { aTiempo, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 
 jest.setTimeout(60_000)
 
@@ -77,6 +78,9 @@ const renovar = (refreshToken: string) => request(server).post('/api/v1/mobile/a
 /** Una ruta autenticada cualquiera del POS (exige `sid` vivo). */
 const rutaAutenticada = (access: string) => request(server).get('/api/v1/mobile/auth/passkeys').set('Authorization', `Bearer ${access}`)
 
+/** El SQL del candado de la familia, tal como lo toma `rotateGrant` (lo que se busca en `pg_stat_activity`). */
+const SQL_DEL_CANDADO = /pg_advisory_xact_lock\(hashtextextended\('refreshGrant:'/
+
 const grantDe = (refresh: string) => prisma.refreshGrant.findUniqueOrThrow({ where: { tokenHash: hashToken(refresh) } })
 const sesion = (id: string) => prisma.session.findUniqueOrThrow({ where: { id } })
 
@@ -121,24 +125,40 @@ it('si la renovación espera el candado de su familia más de 5 s: 503 SESSION_R
   const { refresh: r0 } = await entrar()
   const { familyId, sessionId } = await grantDe(r0)
 
-  // Otra operación de la misma familia retiene el candado 6 s (el presupuesto de la transacción es 5 s).
+  // Otra operación de la MISMA familia toma su candado (y nada más) y lo retiene.
   let soltar: () => void = () => undefined
   const suelto = new Promise<void>(r => (soltar = r))
-  let avisar: () => void = () => undefined
-  const tomado = new Promise<void>(r => (avisar = r))
+  let avisar: (pid: number) => void = () => undefined
+  const pidDelRetenedor = new Promise<number>(r => (avisar = r))
   const retenedor = prisma.$transaction(
     async tx => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('refreshGrant:' || ${familyId}, 0))::text`
-      avisar()
+      const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+      avisar(Number(pid))
       await suelto
     },
     { timeout: 30_000 },
   )
   let respuesta: Awaited<ReturnType<typeof renovar>> | undefined
   try {
-    await tomado
+    const retiene = await aTiempo(pidDelRetenedor, 10_000, 'el retenedor no tomó el candado')
     const enCurso = renovar(r0).then(r => r) // `then` la manda ya
+    enCurso.catch(() => undefined)
+
+    // 🔴 Inequívoco (Codex código r2): la renovación YA tiene conexión y está DENTRO de su transacción, bloqueada en el
+    // candado de esa familia por el retenedor. Un 503 por falta de conexión del pool (P2028 de `maxWait`) no pasaría
+    // por aquí: nunca llegaría a ejecutar el SQL del candado.
+    const espera = await esperarBloqueado(prisma, { bloqueadoPor: [retiene], consulta: SQL_DEL_CANDADO, ms: 5_000 })
+    expect(espera).toMatchObject({ waitEventType: 'Lock', waitEvent: 'advisory' })
+    const desde = Date.now()
+
+    // Se mantiene el candado hasta que vence el presupuesto de la transacción (5 s), con margen…
     await new Promise(r => setTimeout(r, 6_000))
+    // …y la renovación SIGUE ahí, esperando ese mismo candado: el tiempo se le fue en la fila del candado.
+    const sigue = await esperarBloqueado(prisma, { bloqueadoPor: [retiene], consulta: SQL_DEL_CANDADO, ms: 1_000 })
+    expect(sigue?.pid).toBe(espera!.pid)
+    expect(Date.now() - desde).toBeGreaterThan(5_000)
+
     soltar()
     respuesta = await enCurso
   } finally {
