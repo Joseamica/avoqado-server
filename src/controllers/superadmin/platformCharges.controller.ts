@@ -2,6 +2,7 @@ import type { PlatformCharge } from '@prisma/client'
 import type { NextFunction, Request, Response } from 'express'
 import { handleBillingError } from '@/controllers/superadmin/platformBilling.controller'
 import * as chargesService from '@/services/superadmin/platform-charges/charges.service'
+import * as invoiceLinkService from '@/services/superadmin/platform-charges/invoice-link.service'
 import type { ConfirmedReceptor, InvoiceOccurrenceInput } from '@/services/superadmin/platform-charges/invoice.service'
 import * as occurrencesService from '@/services/superadmin/platform-charges/occurrences.service'
 import { dbToCalendarDay } from '@/services/superadmin/platform-charges/schedule'
@@ -33,12 +34,34 @@ export async function getSummary(_req: Request, res: Response, next: NextFunctio
   }
 }
 
-/** GET /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&page=&pageSize= */
+/** Los filtros de la lista y de los grupos, ya validados por zod: sólo los que existen, nada más de lo que llegue por la URL. */
+function occurrenceFiltersOf(req: Request): occurrencesService.OccurrenceFilters {
+  const { view, q, frequency, invoice, customerType, from, to, customer } = req.query as occurrencesService.OccurrenceFilters
+  return { view, q, frequency, invoice, customerType, from, to, customer }
+}
+
+/** GET /api/v1/superadmin/platform-charges/occurrences?view=open|paid|skipped&q=&frequency=&invoice=&customerType=&from=&to=&customer=&page=&pageSize= */
 export async function listOccurrences(req: Request, res: Response, next: NextFunction) {
   try {
-    const { view, q, page, pageSize } = req.query as occurrencesService.ListOccurrencesFilters
-    const result = await occurrencesService.listOccurrences({ view, q, page, pageSize })
-    res.json({ success: true, data: result.rows, meta: { total: result.total, page: result.page, pageSize: result.pageSize } })
+    const { page, pageSize } = req.query as occurrencesService.ListOccurrencesFilters
+    const result = await occurrencesService.listOccurrences({ ...occurrenceFiltersOf(req), page, pageSize })
+    res.json({
+      success: true,
+      data: result.rows,
+      // `sumCents`: lo que suman TODOS los cobros del filtro (no sólo esta página).
+      meta: { total: result.total, page: result.page, pageSize: result.pageSize, sumCents: result.sumCents },
+    })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** GET /api/v1/superadmin/platform-charges/occurrences/groups?groupBy=customer|month|frequency|invoice&…los mismos filtros */
+export async function groupOccurrences(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { groupBy } = req.query as { groupBy: occurrencesService.OccurrenceGroupBy }
+    const result = await occurrencesService.groupOccurrences(occurrenceFiltersOf(req), groupBy)
+    res.json({ success: true, data: result.groups, meta: { groupBy, truncated: result.truncated } })
   } catch (error) {
     handleBillingError(error, res, next)
   }
@@ -56,8 +79,15 @@ export async function getPayPreview(req: Request, res: Response, next: NextFunct
 /** POST /api/v1/superadmin/platform-charges/occurrences/:id/pay — «Ya me pagó»; con `invoice: true` también timbra. */
 export async function payOccurrence(req: Request, res: Response, next: NextFunction) {
   try {
-    const { invoice, receptor } = req.body as { invoice: boolean; receptor?: ConfirmedReceptor }
-    res.json({ success: true, data: await occurrencesService.payOccurrence(req.params.id, { invoice, receptor }, actorOf(req)) })
+    const { invoice, receptor, expectedTotalCents } = req.body as {
+      invoice: boolean
+      receptor?: ConfirmedReceptor
+      expectedTotalCents?: number
+    }
+    res.json({
+      success: true,
+      data: await occurrencesService.payOccurrence(req.params.id, { invoice, receptor, expectedTotalCents }, actorOf(req)),
+    })
   } catch (error) {
     handleBillingError(error, res, next)
   }
@@ -99,6 +129,38 @@ export async function invoiceOccurrence(req: Request, res: Response, next: NextF
   }
 }
 
+// ── Anexar una factura de «Facturas CFDI» ───────────────────────────────────────────────────────────────────────────────────
+
+/** POST /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link — `{ cfdiId }`: la fecha toma lo que dice la factura. */
+export async function linkInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { cfdiId } = req.body as { cfdiId: string }
+    res.json({ success: true, data: await invoiceLinkService.linkInvoice(req.params.id, { cfdiId }, actorOf(req)) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** DELETE /api/v1/superadmin/platform-charges/occurrences/:id/invoice-link?cfdiId= — quita SÓLO esa factura anexada; lo timbrado desde aquí no se quita. */
+export async function unlinkInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { cfdiId } = req.query as { cfdiId: string }
+    res.json({ success: true, data: await invoiceLinkService.unlinkInvoice(req.params.id, { cfdiId }, actorOf(req)) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** GET /api/v1/superadmin/platform-charges/invoice-candidates?customerType=&organizationId=&venueId=&rfc=&q=&page=&pageSize= */
+export async function listInvoiceCandidates(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await invoiceLinkService.listInvoiceCandidates(req.query as invoiceLinkService.InvoiceCandidateFilters)
+    res.json({ success: true, data: result.rows, meta: { total: result.total, page: result.page, pageSize: result.pageSize } })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
 // ── Cobros recurrentes ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** GET /api/v1/superadmin/platform-charges?status=active|paused&q=&page=&pageSize= */
@@ -116,7 +178,16 @@ export async function listCharges(req: Request, res: Response, next: NextFunctio
   }
 }
 
-/** POST /api/v1/superadmin/platform-charges — da de alta el cobro y genera sus ocurrencias en el acto. */
+/** GET /api/v1/superadmin/platform-charges/:id — un cobro, para editarlo desde la fila de «Fechas de cobro». */
+export async function getCharge(req: Request, res: Response, next: NextFunction) {
+  try {
+    res.json({ success: true, data: chargeView(await chargesService.getCharge(req.params.id)) })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** POST /api/v1/superadmin/platform-charges — da de alta el cobro y genera sus ocurrencias en el acto; con `invoiceId`, de una factura. */
 export async function createCharge(req: Request, res: Response, next: NextFunction) {
   try {
     const charge = await chargesService.createCharge(req.body, actorOf(req))
