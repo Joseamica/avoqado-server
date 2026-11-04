@@ -96,6 +96,17 @@ function isTransientResendStatus(statusCode: number | null | undefined): boolean
   return statusCode >= 500
 }
 
+export interface ExportResultEmailData {
+  estado: 'READY' | 'FAILED'
+  venueName: string
+  titulo: string // 'Ventas detalladas' | 'Pagos'
+  filas: number
+  formato: 'csv' | 'xlsx'
+  expiresAt: Date
+  url: string // <FRONTEND_URL>/venues/<slug>/exports/<runId>: abre el DASHBOARD, NO descarga en público
+  idempotencyKey: string // export-<runId>-<status>
+}
+
 interface InvitationEmailData {
   inviterName: string
   organizationName: string
@@ -3629,6 +3640,75 @@ Revisar en Avoqado: ${data.dashboardUrl}
 ---
 Servicios Tecnologicos Avo S.A. de C.V.
 Este correo sale una vez al día mientras haya algo por revisar.`
+    return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
+  }
+
+  /**
+   * Exportes en segundo plano: aviso de que el archivo quedó listo o de que no se pudo armar.
+   * Plantilla canónica de `sendShopifyPorRevisarEmail`. EXENTO de baja: es un recibo de algo que la persona pidió con
+   * «Exportar» (regla del founder del 28-oct), así que no lleva `List-Unsubscribe` ni liga a preferencias; el pie dice
+   * por qué le llega. La liga abre el DASHBOARD (pide sesión), nunca descarga en público.
+   */
+  async sendExportResultEmail(email: string, data: ExportResultEmailData): Promise<boolean> {
+    const esc = escapeHtmlForReferralEmail
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const ok = data.estado === 'READY'
+    const subject = ok
+      ? `${data.venueName}: tu archivo de ${data.titulo} está listo`
+      : `${data.venueName}: no pudimos armar tu archivo de ${data.titulo}`
+    const fmtFecha = data.expiresAt.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', timeZone: 'America/Mexico_City' })
+    const filas = data.filas.toLocaleString('es-MX')
+    const formato = data.formato === 'xlsx' ? 'Excel' : 'CSV'
+    const h1 = ok ? 'Tu archivo est&aacute; listo' : 'No pudimos armar tu archivo'
+    const parrafo = ok
+      ? `Armamos tu archivo de <strong>${esc(data.titulo)}</strong> de <strong>${esc(data.venueName)}</strong>: ${filas} filas en ${formato}. Estar&aacute; disponible hasta el ${fmtFecha}.`
+      : `Algo fall&oacute; al armar tu archivo de <strong>${esc(data.titulo)}</strong> de <strong>${esc(data.venueName)}</strong>. Puedes intentarlo otra vez desde el bot&oacute;n; si vuelve a fallar, escr&iacute;benos.`
+    const boton = ok ? 'Descargar archivo' : 'Intentar otra vez'
+    const nota = 'Por seguridad, el enlace te pide entrar a Avoqado antes de descargar.'
+    const pie = 'Te llega porque pediste este archivo en Avoqado.'
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">${h1}</h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">${parrafo}</p>
+    <div style="margin: 32px 0 12px 0; text-align: left;">
+      <a href="${esc(data.url)}" style="display: inline-block; background-color: #000000; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        ${boton}
+      </a>
+    </div>
+    <p style="margin: 0 0 24px 0; font-size: 13px; color: #666;">${nota}</p>
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">Servicios Tecnologicos Avo S.A. de C.V.</p>
+      <p style="margin: 0; font-size: 12px; color: #999;">${pie} <a href="https://avoqado.io/privacy" style="color: #999;">Aviso de privacidad</a></p>
+    </div>
+  </div>
+</body>
+</html>`
+    const cuerpo = ok
+      ? `Tu archivo esta listo\n\nArmamos tu archivo de ${data.titulo} de ${data.venueName}: ${filas} filas en ${formato}. Estara disponible hasta el ${fmtFecha}.`
+      : `No pudimos armar tu archivo\n\nAlgo fallo al armar tu archivo de ${data.titulo} de ${data.venueName}. Puedes intentarlo otra vez desde el boton; si vuelve a fallar, escribenos.`
+    // Sin acentos ni ñ: se quita lo que no sea ASCII imprimible (incluido venueName).
+    const text =
+      `${cuerpo}\n\n${boton}:\n${data.url}\n\n${nota}\n\n---\nServicios Tecnologicos Avo S.A. de C.V.\n${pie}\nAviso de privacidad: https://avoqado.io/privacy`
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .replace(/[^\t\n\r -~]/g, '')
     return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
   }
 
