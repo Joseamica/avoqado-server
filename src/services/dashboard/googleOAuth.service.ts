@@ -6,6 +6,7 @@ import { AuthenticationError, ConflictError, ForbiddenError } from '../../errors
 import prisma from '../../utils/prismaClient'
 import { StaffRole, OrgRole, InvitationStatus, AuthMethod, Prisma } from '@prisma/client'
 import { esCuentaProvisional } from '../cuentaProvisional'
+import { acceptInvitation } from '../invitation.service'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
@@ -139,23 +140,46 @@ const STAFF_LOGIN_INCLUDE = {
 } satisfies Prisma.StaffInclude
 
 /**
- * Prende con Google la cuenta provisional que dejó una invitación TODAVÍA VIVA, sin aceptarla aquí, y
- * devuelve la cuenta releída (null si no hay invitación viva: no toca nada y el login la rechaza como hoy).
+ * Acepta con Google la ÚNICA invitación viva de una cuenta provisional y devuelve la cuenta releída (null si no hay
+ * invitación viva: no toca nada y el login la rechaza como hoy).
  *
- * No se acepta aquí a propósito: el DASHBOARD guarda el token que la persona apretó, vuelve a
- * /invite/:token con la sesión de Google y acepta ESA invitación (`acceptInvitation` con `sesionStaffId`,
- * PIN incluido si lo pide). Aceptar aquí elegiría «la más nueva», que puede ser de otro negocio, y la
- * página diría después «ya utilizada». Es lo mismo que ya hace la cuenta nueva de Google con PIN: se
- * crea prendida, sin sucursales, y el login la devuelve en `pendingInvitations`.
+ * Se acepta AQUÍ, con el mismo `acceptInvitation` del formulario (cupo, sucursal, ACCEPTED y bitácora en UNA
+ * transacción), y no después en la página: la invitación ya le dejó una membresía ACTIVA en la organización, así que
+ * prender la cuenta sin aceptar le abriría la organización (incluso como dueño) antes de aceptar (Codex, 4-nov). Por la
+ * misma razón, lo que Google no puede completar se rechaza sin prender nada, y la persona usa el formulario:
+ * - la invitación pide PIN (un PIN no cabe en la vuelta de Google);
+ * - hay más de una invitación viva (no sabemos cuál apretó; aceptar otra sería aceptar por ella).
+ *
+ * `acceptInvitation` vuelve a comprobar dentro de su transacción que la cuenta siga provisional (por eso no se le pasa
+ * `sesionStaffId`): una baja que llegue a media entrada no se revive. Si otro clic ya aceptó, se entra con lo que dejó.
  */
-async function prenderCuentaProvisionalInvitada(staffId: string, email: string) {
-  const invitation = await prisma.invitation.findFirst({
+async function aceptarInvitacionDeCuentaProvisional(staffId: string, email: string) {
+  const vivas = await prisma.invitation.findMany({
     where: { email: email.toLowerCase(), status: InvitationStatus.PENDING, expiresAt: { gt: new Date() } },
-    select: { id: true },
+    select: { token: true, requirePin: true },
+    take: 2,
   })
-  if (!invitation) return null
-  // Google demuestra que el correo es de esta persona; nada más cambia hasta que acepte.
-  await prisma.staff.update({ where: { id: staffId }, data: { active: true, emailVerified: true } })
+  if (vivas.length === 0) return null
+  if (vivas.length > 1) {
+    throw new ForbiddenError(
+      'Tienes más de una invitación pendiente. Abre la que quieras desde su correo y acéptala llenando el formulario.',
+      'INVITACION_ELIGE_EN_FORMULARIO',
+    )
+  }
+  const [invitacion] = vivas
+  if (invitacion.requirePin) {
+    throw new ForbiddenError(
+      'Esta invitación pide un PIN. Ábrela desde su correo y acéptala llenando el formulario.',
+      'INVITACION_PIDE_PIN',
+    )
+  }
+  try {
+    await acceptInvitation(invitacion.token, {})
+  } catch (error) {
+    const releida = await prisma.staff.findUnique({ where: { id: staffId }, include: STAFF_LOGIN_INCLUDE })
+    if (releida?.active) return releida // otro clic la aceptó primero
+    throw error
+  }
   return prisma.staff.findUnique({ where: { id: staffId }, include: STAFF_LOGIN_INCLUDE })
 }
 
@@ -436,11 +460,15 @@ export async function loginWithGoogle(
   } else {
     // 🔴 La cuenta PROVISIONAL que dejó la propia invitación (apagada, sin contraseña, sin Google y nunca
     // usada) no es una baja: es la persona invitada terminando su alta. Sin esto, todo invitado que elegía
-    // Google chocaba con «Account is inactive» (Rafa, 4-nov-2026). Se prende y la invitación la acepta la
-    // página con la sesión (ver `prenderCuentaProvisionalInvitada`). Una baja no es provisional (ya se usó)
-    // y sigue rechazada abajo.
+    // Google chocaba con «Account is inactive» (Rafa, 4-nov-2026). Se acepta su invitación aquí, como la
+    // cuenta nueva de Google (`isNewUser`: la página no debe volver a /invite/:token). Una baja no es
+    // provisional (ya se usó) y sigue rechazada abajo.
     if (esCuentaProvisional(staff)) {
-      staff = (await prenderCuentaProvisionalInvitada(staff.id, staff.email)) ?? staff
+      const aceptada = await aceptarInvitacionDeCuentaProvisional(staff.id, staff.email)
+      if (aceptada) {
+        staff = aceptada
+        isNewUser = true
+      }
     }
 
     // 🔴 Una cuenta desactivada se rechaza ANTES de tocar nada: antes se le ligaba Google y se

@@ -6,9 +6,10 @@
  * sabía «no existe → la crea desde la invitación» o «existe → tiene que estar activa», así que rechazaba con «Account is
  * inactive» a todo invitado que elegía Google. Le pasó a Rafa en producción: 4 intentos, 4 rechazos.
  *
- * El arreglo sólo PRENDE la cuenta (Google ya demostró que el correo es suyo) y la devuelve con su invitación pendiente:
- * la página de /invite/:token acepta ESA invitación con la sesión, como ya hace con cualquier cuenta de Google. Una
- * cuenta inactiva que NO es provisional (una baja) sigue rechazada.
+ * El arreglo acepta su ÚNICA invitación viva con el mismo `acceptInvitation` del formulario (Google ya demostró que el
+ * correo es suyo). No la prende sin aceptar: la invitación ya le dejó una membresía activa en la organización (Codex,
+ * 4-nov). Lo que Google no puede completar (PIN, varias invitaciones) se rechaza sin prender nada. Una baja sigue
+ * rechazada.
  */
 import { InvitationStatus, StaffRole } from '@prisma/client'
 
@@ -44,6 +45,11 @@ jest.mock('../../../src/utils/prismaClient', () => ({
       throw new Error('el camino de la cuenta provisional no debe crear otra cuenta')
     }),
   },
+}))
+
+const acceptInvitation = jest.fn()
+jest.mock('../../../src/services/invitation.service', () => ({
+  acceptInvitation: (...a: any[]) => acceptInvitation(...a),
 }))
 
 jest.mock('../../../src/services/access/seatCap.service', () => ({ assertCanAddSeatsBulk: jest.fn() }))
@@ -104,71 +110,92 @@ function aceptada(overrides: Record<string, any> = {}) {
   })
 }
 
-const PENDIENTE = {
-  id: 'inv-rafa',
-  token: 'tok-rafa',
-  role: StaffRole.VIEWER,
-  venue: { id: VENUE.id, name: VENUE.name },
-  organization: { id: ORG.id, name: ORG.name },
-  expiresAt: new Date(Date.now() + 86_400_000),
-}
+const VIVA = { token: 'tok-rafa', requirePin: false }
 
 beforeEach(() => {
   jest.clearAllMocks()
   staffFindUnique.mockReset()
   invitationFindFirst.mockReset()
+  invitationFindMany.mockReset()
   invitationFindMany.mockResolvedValue([])
+  acceptInvitation.mockResolvedValue({})
 })
 
 describe('loginWithGoogle — cuenta provisional de una invitación', () => {
-  it('🔴 la prende, entra y regresa la invitación para que la página la acepte (el caso de Rafa)', async () => {
-    staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(provisional({ active: true, emailVerified: true }))
-    invitationFindFirst.mockResolvedValueOnce({ id: 'inv-rafa' })
-    invitationFindMany.mockResolvedValueOnce([PENDIENTE])
+  it('🔴 acepta su única invitación con el código del formulario y entra (el caso de Rafa)', async () => {
+    staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(aceptada())
+    invitationFindMany.mockResolvedValueOnce([VIVA])
 
     const result = await loginWithGoogle('id-token', false)
 
-    expect(invitationFindFirst).toHaveBeenCalledWith(
+    expect(invitationFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ email: 'rafael@playtelecom.com', status: InvitationStatus.PENDING }),
+        take: 2,
       }),
     )
-    expect(staffUpdate).toHaveBeenCalledWith({ where: { id: 'staff-rafa' }, data: { active: true, emailVerified: true } })
-    // Google queda ligado a la cuenta, como en cualquier entrada con Google.
+    // Sin `sesionStaffId`: dentro de su transacción vuelve a exigir que la cuenta siga provisional.
+    expect(acceptInvitation).toHaveBeenCalledWith('tok-rafa', {})
+    expect(result.accessToken).toBe('access-token')
+    // «true»: la invitación ya quedó aceptada; la página no debe volver a /invite/:token («ya utilizada»).
+    expect(result.isNewUser).toBe(true)
     expect(staffUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'staff-rafa' }, data: expect.objectContaining({ googleId: 'google-uid-rafa' }) }),
     )
-    expect(result.accessToken).toBe('access-token')
-    expect(result.pendingInvitations?.[0].token).toBe('tok-rafa')
-    // «false»: la página NO debe saltarse /invite/:token (resolvePostLoginRedirect del DASHBOARD).
-    expect(result.isNewUser).toBe(false)
   })
 
-  it('no acepta ninguna invitación aquí: la acepta la página, la que la persona apretó', async () => {
-    staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(provisional({ active: true, emailVerified: true }))
-    invitationFindFirst.mockResolvedValueOnce({ id: 'inv-rafa' })
-    invitationFindMany.mockResolvedValueOnce([PENDIENTE])
+  it('🔴 con PIN obligatorio no prende nada: pide el formulario', async () => {
+    staffFindUnique.mockResolvedValueOnce(provisional())
+    invitationFindMany.mockResolvedValueOnce([{ token: 'tok-rafa', requirePin: true }])
 
-    await loginWithGoogle('id-token', false)
+    await expect(loginWithGoogle('id-token', false)).rejects.toMatchObject({ statusCode: 403, code: 'INVITACION_PIDE_PIN' })
+    expect(acceptInvitation).not.toHaveBeenCalled()
+    expect(staffUpdate).not.toHaveBeenCalled()
+  })
 
-    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'INVITATION_ACCEPTED' }))
+  it('🔴 con dos invitaciones vivas no elige por la persona: pide el formulario', async () => {
+    staffFindUnique.mockResolvedValueOnce(provisional())
+    invitationFindMany.mockResolvedValueOnce([VIVA, { token: 'tok-otro', requirePin: false }])
+
+    await expect(loginWithGoogle('id-token', false)).rejects.toMatchObject({ statusCode: 403, code: 'INVITACION_ELIGE_EN_FORMULARIO' })
+    expect(acceptInvitation).not.toHaveBeenCalled()
+    expect(staffUpdate).not.toHaveBeenCalled()
+  })
+
+  it('si otro clic la aceptó primero, entra con lo que dejó', async () => {
+    staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(aceptada())
+    invitationFindMany.mockResolvedValueOnce([VIVA])
+    acceptInvitation.mockRejectedValueOnce(Object.assign(new Error('Invitación no encontrada o ya utilizada'), { statusCode: 404 }))
+
+    const result = await loginWithGoogle('id-token', false)
+
+    expect(result.accessToken).toBe('access-token')
+  })
+
+  it('🔴 si aceptar falla y la cuenta sigue apagada (sin lugares, o la dieron de baja a media entrada), sale el error', async () => {
+    staffFindUnique.mockResolvedValueOnce(provisional()).mockResolvedValueOnce(provisional())
+    invitationFindMany.mockResolvedValueOnce([VIVA])
+    acceptInvitation.mockRejectedValueOnce(new Error('Ya no hay lugares en el plan Gratis'))
+
+    await expect(loginWithGoogle('id-token', false)).rejects.toThrow('Ya no hay lugares en el plan Gratis')
+    expect(staffUpdate).not.toHaveBeenCalled()
   })
 
   describe('lo que NO cambia', () => {
     it('una cuenta provisional sin invitación viva sigue rechazada y no se prende', async () => {
       staffFindUnique.mockResolvedValueOnce(provisional())
-      invitationFindFirst.mockResolvedValueOnce(null)
 
       await expect(loginWithGoogle('id-token', false)).rejects.toThrow('Account is inactive')
+      expect(acceptInvitation).not.toHaveBeenCalled()
       expect(staffUpdate).not.toHaveBeenCalled()
     })
 
     it('🔴 una cuenta dada de baja (ya se usó) no se reactiva con Google aunque tenga una invitación viva', async () => {
       staffFindUnique.mockResolvedValueOnce(provisional({ lastLoginAt: new Date('2026-10-01T12:00:00Z'), emailVerified: true }))
-      invitationFindFirst.mockResolvedValue({ id: 'inv-rafa' })
+      invitationFindMany.mockResolvedValue([VIVA])
 
       await expect(loginWithGoogle('id-token', false)).rejects.toThrow('Account is inactive')
-      expect(invitationFindFirst).not.toHaveBeenCalled()
+      expect(acceptInvitation).not.toHaveBeenCalled()
       expect(staffUpdate).not.toHaveBeenCalled()
     })
 
@@ -178,7 +205,8 @@ describe('loginWithGoogle — cuenta provisional de una invitación', () => {
       const result = await loginWithGoogle('id-token', false)
 
       expect(result.accessToken).toBe('access-token')
-      expect(invitationFindFirst).not.toHaveBeenCalled()
+      expect(result.isNewUser).toBe(false)
+      expect(acceptInvitation).not.toHaveBeenCalled()
     })
   })
 })

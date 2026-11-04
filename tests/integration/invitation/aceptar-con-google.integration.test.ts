@@ -2,12 +2,12 @@
  * Aceptar con Google una invitación por correo — el recorrido entero contra Postgres real (hz:e0c38c0d:D2, 4-nov-2026).
  *
  * Rafa fue invitado (la invitación le creó una cuenta PROVISIONAL), apretó «Continuar con Google» y el servidor le
- * contestó 4 veces «Account is inactive». El camino que el DASHBOARD ya tenía diseñado es: Google da la sesión, la página
- * vuelve a /invite/:token y acepta ESA invitación con la sesión. Aquí se recorre igual: invitar → Google → aceptar.
+ * contestó 4 veces «Account is inactive». Ahora el login con Google acepta su ÚNICA invitación viva con el mismo
+ * `acceptInvitation` del formulario. Lo que Google no puede completar (PIN, varias invitaciones) se rechaza sin prender
+ * la cuenta: la invitación ya le dejó una membresía activa en la organización y prenderla le abriría la organización.
  */
 import { StaffRole } from '@prisma/client'
 import prisma from '../../../src/utils/prismaClient'
-import { acceptInvitation } from '../../../src/services/invitation.service'
 import { inviteTeamMember } from '../../../src/services/dashboard/team.dashboard.service'
 import { loginWithGoogle } from '../../../src/services/dashboard/googleOAuth.service'
 
@@ -84,9 +84,9 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 
-async function invitarPorCorreo(nombre: string) {
+async function invitarPorCorreo(nombre: string, extra: { requirePin?: boolean } = {}) {
   const email = `${nombre}-${sufijo}@test.mx`
-  await inviteTeamMember(venueId, invitador, { email, firstName: 'Rafa', lastName: 'Prueba', role: StaffRole.VIEWER })
+  await inviteTeamMember(venueId, invitador, { email, firstName: 'Rafa', lastName: 'Prueba', role: StaffRole.VIEWER, ...extra })
   const staff = await prisma.staff.findUniqueOrThrow({ where: { email } })
   ids.staff.push(staff.id)
   const invitacion = await prisma.invitation.findFirstOrThrow({ where: { email, organizationId: orgId }, orderBy: { createdAt: 'desc' } })
@@ -94,7 +94,7 @@ async function invitarPorCorreo(nombre: string) {
 }
 
 describe('aceptar una invitación por correo con Google', () => {
-  it('🔴 la cuenta provisional entra con Google y la página acepta ESA invitación con la sesión (el caso de Rafa)', async () => {
+  it('🔴 la cuenta provisional entra con Google y su invitación queda aceptada (el caso de Rafa)', async () => {
     const { email, staff, invitacion } = await invitarPorCorreo('rafa')
     expect(staff.active).toBe(false) // así la deja la invitación
 
@@ -102,20 +102,22 @@ describe('aceptar una invitación por correo con Google', () => {
     const login = await loginWithGoogle('id-token', false)
 
     expect(login.accessToken).toBeTruthy()
-    expect(login.isNewUser).toBe(false)
-    expect(login.pendingInvitations?.map(i => i.token)).toContain(invitacion.token)
-    const prendida = await prisma.staff.findUniqueOrThrow({ where: { id: staff.id } })
-    expect(prendida).toMatchObject({ active: true, emailVerified: true, googleId: `g-${email}` })
-    // Todavía no hay sucursal: la da la aceptación, no el login.
-    expect(await prisma.staffVenue.count({ where: { staffId: staff.id } })).toBe(0)
-    expect((await prisma.invitation.findUniqueOrThrow({ where: { id: invitacion.id } })).status).toBe('PENDING')
-
-    // La página vuelve a /invite/:token y acepta con la sesión de Google (POST /invitations/:token/accept).
-    await acceptInvitation(invitacion.token, {}, { sesionStaffId: staff.id })
-
+    expect(login.isNewUser).toBe(true)
+    const despues = await prisma.staff.findUniqueOrThrow({ where: { id: staff.id } })
+    expect(despues).toMatchObject({ active: true, emailVerified: true, googleId: `g-${email}` })
     const sv = await prisma.staffVenue.findFirstOrThrow({ where: { staffId: staff.id, venueId } })
     expect(sv).toMatchObject({ role: StaffRole.VIEWER, active: true })
     expect((await prisma.invitation.findUniqueOrThrow({ where: { id: invitacion.id } })).status).toBe('ACCEPTED')
+  })
+
+  it('🔴 si la invitación pide PIN, no prende la cuenta ni acepta: pide el formulario', async () => {
+    const { email, staff, invitacion } = await invitarPorCorreo('conpin', { requirePin: true })
+
+    mockCorreoDeGoogle = email
+    await expect(loginWithGoogle('id-token', false)).rejects.toMatchObject({ code: 'INVITACION_PIDE_PIN' })
+
+    expect((await prisma.staff.findUniqueOrThrow({ where: { id: staff.id } })).active).toBe(false)
+    expect((await prisma.invitation.findUniqueOrThrow({ where: { id: invitacion.id } })).status).toBe('PENDING')
   })
 
   it('🔴 alguien dado de baja (su cuenta ya se usó) no se reactiva con Google aunque lo vuelvan a invitar', async () => {
