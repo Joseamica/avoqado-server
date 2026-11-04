@@ -158,6 +158,8 @@ describe('qué schedulers quedan cubiertos (cobertura declarada, no supuesta)', 
       'jobs/angelpay-event-worker.job.ts': 1,
       'jobs/blumon-payment-audit.job.ts': 2,
       // `delivery-webhook-reconciliation` salió de la lista: su tick devuelve la promesa de sus dos carriles.
+      // `export-runner`: `tick()` atrapa todo (try/catch/finally), nunca rechaza; `despertar()` ya corre dentro de `runInJobContext`.
+      'jobs/export-runner.job.ts': 1,
       'jobs/loyalty-reconciliation.job.ts': 1,
       'jobs/payment-effects.job.ts': 1,
     }

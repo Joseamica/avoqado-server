@@ -1798,7 +1798,7 @@ export function flattenSalesSummaryForExport(
 }
 
 /** Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter). */
-function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSummaryExportFilters): Prisma.PaymentWhereInput {
+export function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSummaryExportFilters): Prisma.PaymentWhereInput {
   const paymentWhereFilter = buildPaymentWhereFilter(filters.paymentMethod, filters.cardType)
   const where: Prisma.PaymentWhereInput = {
     venueId,
@@ -1818,27 +1818,49 @@ export async function countSalesSummaryDetailRows(venueId: string, filters: Sale
 }
 
 /** Fetch capped detailed-mode payment rows; flat select with everything the export columns pluck. */
+export const SALES_SUMMARY_DETAIL_SELECT = {
+  id: true,
+  createdAt: true,
+  method: true,
+  cardBrand: true,
+  maskedPan: true,
+  processorData: true,
+  amount: true,
+  tipAmount: true,
+  status: true,
+  source: true,
+  orderId: true,
+  processedBy: { select: { firstName: true, lastName: true } },
+  merchantAccount: { select: { displayName: true, externalMerchantId: true } },
+} satisfies Prisma.PaymentSelect
+
 export async function fetchSalesSummaryDetailRows(venueId: string, filters: SalesSummaryExportFilters, limit: number) {
   return prisma.payment.findMany({
     where: buildSalesSummaryDetailWhere(venueId, filters),
-    select: {
-      id: true,
-      createdAt: true,
-      method: true,
-      cardBrand: true,
-      maskedPan: true,
-      processorData: true,
-      amount: true,
-      tipAmount: true,
-      status: true,
-      source: true,
-      orderId: true,
-      processedBy: { select: { firstName: true, lastName: true } },
-      merchantAccount: { select: { displayName: true, externalMerchantId: true } },
-    },
+    select: SALES_SUMMARY_DETAIL_SELECT,
     orderBy: { createdAt: 'desc' },
     take: limit,
   })
+}
+
+/** Página por keyset (createdAt desc, id desc) para exportes en segundo plano. `corte` deja fuera lo que entró después de pedirlo. */
+export async function fetchSalesSummaryDetailPage(
+  venueId: string,
+  filters: SalesSummaryExportFilters,
+  corte: Date,
+  keyset: Prisma.PaymentWhereInput,
+  limit: number,
+) {
+  return prisma.payment.findMany({
+    where: { AND: [buildSalesSummaryDetailWhere(venueId, filters), { createdAt: { lte: corte } }, keyset] },
+    select: SALES_SUMMARY_DETAIL_SELECT,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit,
+  })
+}
+
+export async function countSalesSummaryDetailRowsHasta(venueId: string, filters: SalesSummaryExportFilters, corte: Date): Promise<number> {
+  return prisma.payment.count({ where: { AND: [buildSalesSummaryDetailWhere(venueId, filters), { createdAt: { lte: corte } }] } })
 }
 
 // ============================================================

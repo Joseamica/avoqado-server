@@ -12,7 +12,6 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express'
-import { formatInTimeZone } from 'date-fns-tz'
 
 import { payLaterAgingReport } from '@/controllers/dashboard/reports.dashboard.controller'
 import { salesSummaryReport, salesSummaryExport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
@@ -21,8 +20,7 @@ import { promotionSalesReport } from '@/controllers/dashboard/promotion-sales.da
 import { refundsReport } from '@/controllers/dashboard/refunds.dashboard.controller'
 import { checkPermission, resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
-import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import prisma from '@/utils/prismaClient'
+import { RESPUESTA_RANGO_FUERA_DEL_PLAN, rangoBloqueadoPorPlan } from '@/services/dashboard/salesSummaryPlanRange'
 
 const router = express.Router()
 
@@ -48,7 +46,7 @@ export function rejectForeignVenueInQuery(req: Request, res: Response, next: Nex
 router.use(rejectForeignVenueInQuery)
 
 /** Stable error code when a Free venue requests a sales-summary range beyond "today". */
-export const PLAN_LIMIT_RANGE_CODE = 'PLAN_LIMIT_RANGE'
+export { PLAN_LIMIT_RANGE_CODE } from '@/services/dashboard/salesSummaryPlanRange'
 
 /**
  * Range clamp for the Free-tier basic sales summary.
@@ -67,29 +65,13 @@ export async function clampSalesSummaryRangeToToday(req: Request, res: Response,
     const authContext = (req as any).authContext
     const venueId = resolveRequestVenueId(req, authContext || {})
     if (!venueId) return next() // controller surfaces its own missing-venue error
-
-    if (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')) return next()
-
     const { startDate, endDate } = req.query
     if (typeof startDate !== 'string' || typeof endDate !== 'string') return next() // controller 400s
-    const start = new Date(startDate)
-    const end = new Date(endDate)
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) return next() // service 400s
-
-    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-    const timezone = venue?.timezone || 'America/Mexico_City'
-    const todayKey = formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd')
-    const startKey = formatInTimeZone(start, timezone, 'yyyy-MM-dd')
-    const endKey = formatInTimeZone(end, timezone, 'yyyy-MM-dd')
-    if (startKey === todayKey && endKey === todayKey) return next()
-
-    res.status(403).json({
-      error: 'Plan limit',
-      message: 'El histórico de ventas requiere el plan Pro. El plan Gratis incluye el resumen de ventas de hoy.',
-      code: PLAN_LIMIT_RANGE_CODE,
-      featureCode: 'ADVANCED_REPORTS',
-      subscriptionRequired: true,
-    })
+    if (await rangoBloqueadoPorPlan(venueId, startDate, endDate)) {
+      res.status(403).json(RESPUESTA_RANGO_FUERA_DEL_PLAN)
+      return
+    }
+    next()
   } catch (error) {
     next(error)
   }

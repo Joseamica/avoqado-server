@@ -211,7 +211,7 @@ jobs:
         # exactamente los archivos que importan el arnés o utils/eventLoopBudget: ninguna queda fuera.
         run: |
           START=$(date +%s)
-          CRONOMETRO='tests/unit/(utils/eventLoopBudget|services/dashboard/sale-verification\.org\.eventloop-budget|services/master-catalog/(catalogImport(Canonical|Dependencies|DurableEventLoop|FieldValidation|StagedPayload)\.service|catalogWorkbook\.eventloop-budget))\.test\.ts$'
+          CRONOMETRO='tests/unit/(utils/eventLoopBudget|services/dashboard/sale-verification\.org\.eventloop-budget|services/exports/exportCarga|services/master-catalog/(catalogImport(Canonical|Dependencies|DurableEventLoop|FieldValidation|StagedPayload)\.service|catalogWorkbook\.eventloop-budget))\.test\.ts$'
           NODE_OPTIONS='--max-old-space-size=4096' npx jest tests/unit --maxWorkers=4 --workerIdleMemoryLimit=512MB --detectOpenHandles=false --verbose=false --cacheDirectory=node_modules/.cache/jest --testPathIgnorePatterns="$CRONOMETRO"
           NODE_OPTIONS='--max-old-space-size=4096' npx jest "$CRONOMETRO" --runInBand --detectOpenHandles=false --verbose=false --cacheDirectory=node_modules/.cache/jest
           END=$(date +%s)

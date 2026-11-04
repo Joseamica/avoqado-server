@@ -1,6 +1,6 @@
 // services/dashboard/payment.dashboard.service.ts
 
-import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@prisma/client'
+import { Prisma, TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
 import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchanges/exchangeMarks'
@@ -320,6 +320,44 @@ export async function fetchPaymentsForExport(venueId: string, filters: PaymentFi
       ecommerceMerchant: { select: { channelName: true } },
     },
     orderBy: { createdAt: 'desc' },
+    take: limit,
+  })
+}
+
+/** Lo que leen las 13 columnas del exporte de cobros, y nada más (el GET viejo trae la fila entera + su orden con mesa). */
+export const PAYMENTS_EXPORT_SELECT = {
+  id: true,
+  createdAt: true,
+  method: true,
+  source: true,
+  cardBrand: true,
+  maskedPan: true,
+  processorData: true,
+  amount: true,
+  tipAmount: true,
+  status: true,
+  processedBy: { select: { firstName: true, lastName: true } },
+  merchantAccount: { select: { displayName: true, externalMerchantId: true } },
+  ecommerceMerchant: { select: { channelName: true } },
+} satisfies Prisma.PaymentSelect
+
+/** Conteo del exporte en segundo plano: el mismo where del listado, cortado en el instante del pedido. */
+export async function countPaymentsForExportHasta(venueId: string, filters: PaymentFilters | undefined, corte: Date): Promise<number> {
+  return prisma.payment.count({ where: { AND: [buildPaymentsWhereClause(venueId, filters), { createdAt: { lte: corte } }] } })
+}
+
+/** Página por keyset (createdAt desc, id desc). `AND` y no spread: el where base ya trae su `createdAt` y su `OR` de búsqueda. */
+export async function fetchPaymentsExportPage(
+  venueId: string,
+  filters: PaymentFilters | undefined,
+  corte: Date,
+  keyset: Prisma.PaymentWhereInput,
+  limit: number,
+) {
+  return prisma.payment.findMany({
+    where: { AND: [buildPaymentsWhereClause(venueId, filters), { createdAt: { lte: corte } }, keyset] },
+    select: PAYMENTS_EXPORT_SELECT,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: limit,
   })
 }

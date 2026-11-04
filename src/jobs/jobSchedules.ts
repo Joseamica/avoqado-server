@@ -106,4 +106,9 @@ export const DATABASE_JOB_SCHEDULES = {
   // sin la bandera la vuelta no hace nada. Segundo :39, libre en todo este archivo (en `origin/develop` y en los demás worktrees
   // también): los vecinos más cercanos son :38 (watchdog de pagos) y :40 (vencimiento de pedidos en línea), los dos cada 30 s.
   platformChargeDigest: '39 */15 * * * *',
+  // Exportes en segundo plano: el cocinero mira la fila cada 30 s (además lo despierta cada pedido nuevo). Segundos :28/:58,
+  // libres en todo el archivo el 3-nov (:39 ya era de platformChargeDigest).
+  exportRunner: '28,58 * * * * *',
+  // Limpieza diaria de archivos de exporte vencidos (7 días). 04:27:27 CDMX, fuera de las horas de venta.
+  exportCleanup: '27 27 4 * * *',
 } as const

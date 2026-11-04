@@ -30,6 +30,8 @@ import {
   type ExportColumnDef,
 } from '@/services/dashboard/export.helpers'
 import { BadRequestError } from '@/errors/AppError'
+import { decidirCarril, MENSAJE_GET_VIEJO_GRANDE } from '@/services/exports/exportPolicy'
+import { VENTAS_DETALLADAS_COLUMNAS } from '@/services/exports/exportadores/ventasDetalladas.exportador'
 import { MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
@@ -249,7 +251,20 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
         shiftId: typeof shiftId === 'string' ? shiftId : undefined,
       }
 
+      const requestedColumnIds = parseColumnsParam(req.query.columns)
       const total = await countSalesSummaryDetailRows(venueId, filters)
+
+      // Codex r1 #1: lo grande ya no se arma en esta petición (bloqueaba el hilo, alertas del 6-oct y 3-nov). El PDF no cambia.
+      if (format !== 'pdf') {
+        const columnas =
+          requestedColumnIds.length > 0
+            ? VENTAS_DETALLADAS_COLUMNAS.filter(c => requestedColumnIds.includes(c.id)).length
+            : VENTAS_DETALLADAS_COLUMNAS.length
+        if (decidirCarril({ filas: total, columnas: Math.max(columnas, 1), formato: format }).carril !== 'directo') {
+          res.status(413).json({ success: false, message: MENSAJE_GET_VIEJO_GRANDE })
+          return
+        }
+      }
       if (total > cap) {
         res.status(413).json({
           success: false,
@@ -262,38 +277,9 @@ export async function salesSummaryExport(req: Request, res: Response, next: Next
       }
 
       const rows = await fetchSalesSummaryDetailRows(venueId, filters, cap)
-      type Row = (typeof rows)[number]
 
-      // Column registry — order here is the order in the output file.
-      const allColumns: ExportColumnDef<Row>[] = [
-        { id: 'createdAt', label: 'Fecha', value: r => r.createdAt?.toISOString() ?? '' },
-        { id: 'paymentId', label: 'ID', value: r => r.id },
-        {
-          id: 'waiterName',
-          label: 'Mesero',
-          value: r => (r.processedBy ? `${r.processedBy.firstName ?? ''} ${r.processedBy.lastName ?? ''}`.trim() : ''),
-        },
-        {
-          id: 'merchantAccount',
-          label: 'Cuenta Comercial',
-          value: r => r.merchantAccount?.displayName || r.merchantAccount?.externalMerchantId || '',
-        },
-        { id: 'method', label: 'Método', value: r => r.method ?? '' },
-        { id: 'cardBrand', label: 'Marca', value: r => r.cardBrand ?? '' },
-        { id: 'last4', label: 'Últimos 4', value: r => (r.maskedPan ? r.maskedPan.slice(-4) : '') },
-        {
-          id: 'international',
-          label: 'Internacional',
-          value: r => ((r.processorData as { isInternational?: boolean } | null)?.isInternational ? 'Sí' : 'No'),
-        },
-        { id: 'amount', label: 'Subtotal', value: r => Number(r.amount) || 0 },
-        { id: 'tipAmount', label: 'Propina', value: r => Number(r.tipAmount) || 0 },
-        { id: 'totalAmount', label: 'Total', value: r => (Number(r.amount) || 0) + (Number(r.tipAmount) || 0) },
-        { id: 'status', label: 'Estatus', value: r => r.status ?? '' },
-        { id: 'source', label: 'Origen', value: r => r.source ?? '' },
-      ]
+      const allColumns = VENTAS_DETALLADAS_COLUMNAS
 
-      const requestedColumnIds = parseColumnsParam(req.query.columns)
       const encoded = await encodeExport(format, {
         allColumns,
         requestedColumnIds: requestedColumnIds.length > 0 ? requestedColumnIds : allColumns.map(c => c.id),

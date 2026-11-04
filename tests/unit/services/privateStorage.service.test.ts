@@ -15,7 +15,7 @@ const mockFile = {
   getSignedUrl: jest.fn().mockResolvedValue(['https://signed.example/doc?sig=abc']),
   delete: jest.fn().mockResolvedValue(undefined),
 }
-const mockBucket = { name: 'test-bucket', file: jest.fn(() => mockFile) }
+const mockBucket = { name: 'test-bucket', file: jest.fn(() => mockFile), deleteFiles: jest.fn().mockResolvedValue(undefined) }
 jest.mock('@/config/firebase', () => ({
   getStorageBucket: () => ({ bucket: () => mockBucket }),
 }))
@@ -24,7 +24,14 @@ jest.mock('@/services/storage.service', () => ({
   getStorageEnvPrefix: () => 'test',
 }))
 
-import { PRIVATE_PREFIX, savePrivateFile, signPrivateFileUrl, deletePrivateFile } from '@/services/privateStorage.service'
+import {
+  PRIVATE_PREFIX,
+  savePrivateFile,
+  signPrivateFileUrl,
+  deletePrivateFile,
+  deletePrivateFolder,
+  signPrivateAttachmentUrl,
+} from '@/services/privateStorage.service'
 
 describe('privateStorage', () => {
   beforeEach(() => jest.clearAllMocks())
@@ -86,5 +93,28 @@ describe('privateStorage', () => {
     expect(mockFile.delete).not.toHaveBeenCalled()
     await deletePrivateFile(`${PRIVATE_PREFIX}/test/staff/v/s/doc.pdf`)
     expect(mockFile.delete).toHaveBeenCalled()
+  })
+
+  it('🔴 borra una carpeta privada por prefijo (todos los intentos de un pedido) y rechaza ámbitos raros', async () => {
+    await deletePrivateFolder('exports/crun1')
+    expect(mockBucket.deleteFiles).toHaveBeenCalledWith({ prefix: `${PRIVATE_PREFIX}/test/exports/crun1/` })
+    await expect(deletePrivateFolder('exports/../staff')).rejects.toThrow('Ámbito inválido')
+  })
+
+  it('si el borrado por prefijo falla, lanza (quien llama reintenta)', async () => {
+    mockBucket.deleteFiles.mockRejectedValueOnce(new Error('gcs'))
+    await expect(deletePrivateFolder('exports/crun1')).rejects.toThrow('gcs')
+  })
+
+  it('signPrivateAttachmentUrl: sin `hasta` vence a 10 min; con `hasta` a 1 min vence en 1 min', async () => {
+    const ahora = Date.now()
+    await signPrivateAttachmentUrl(`${PRIVATE_PREFIX}/test/exports/a/b.csv`)
+    const e1 = mockFile.getSignedUrl.mock.calls[0][0].expires
+    expect(e1 - ahora).toBeGreaterThanOrEqual(10 * 60000 - 50)
+    expect(e1 - ahora).toBeLessThanOrEqual(10 * 60000 + 500)
+    await signPrivateAttachmentUrl(`${PRIVATE_PREFIX}/test/exports/a/b.csv`, new Date(ahora + 60000))
+    expect(mockFile.getSignedUrl.mock.calls[1][0].expires).toBe(ahora + 60000)
+    await signPrivateAttachmentUrl(`${PRIVATE_PREFIX}/test/exports/a/b.csv`, new Date(ahora + 3 * 3600000))
+    expect(mockFile.getSignedUrl.mock.calls[2][0].expires - ahora).toBeLessThanOrEqual(10 * 60000 + 500)
   })
 })

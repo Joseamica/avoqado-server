@@ -104,3 +104,25 @@ describe('detailed rows where-clause + cap', () => {
     expect(where.merchantAccountId).toBeUndefined()
   })
 })
+
+describe('página por keyset (exportes en segundo plano)', () => {
+  const corte = new Date('2026-11-03T18:00:00.000Z')
+  const keyset = { OR: [{ createdAt: { lt: corte } }] }
+
+  it('fetchSalesSummaryDetailPage: where = [filtros, corte, keyset], orden estable y tope', async () => {
+    paymentFindMany.mockResolvedValue([])
+    await svc.fetchSalesSummaryDetailPage('v1', { startDate: '2026-10-01', endDate: '2026-10-31' }, corte, keyset as any, 500)
+    const arg = paymentFindMany.mock.calls[0][0]
+    expect(arg.where.AND[0]).toEqual(svc.buildSalesSummaryDetailWhere('v1', { startDate: '2026-10-01', endDate: '2026-10-31' }))
+    expect(arg.where.AND[1]).toEqual({ createdAt: { lte: corte } })
+    expect(arg.where.AND[2]).toBe(keyset)
+    expect(arg.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    expect(arg.take).toBe(500)
+    expect(arg.select).toBe(svc.SALES_SUMMARY_DETAIL_SELECT)
+  })
+  it('countSalesSummaryDetailRowsHasta cuenta con el corte', async () => {
+    paymentCount.mockResolvedValue(7)
+    expect(await svc.countSalesSummaryDetailRowsHasta('v1', { startDate: '2026-10-01', endDate: '2026-10-31' }, corte)).toBe(7)
+    expect(paymentCount.mock.calls[0][0].where.AND[1]).toEqual({ createdAt: { lte: corte } })
+  })
+})
