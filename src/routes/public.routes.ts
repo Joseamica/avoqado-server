@@ -1,3 +1,5 @@
+import { getPosAppVersion } from '../controllers/public/posAppVersion.public.controller'
+import { publicPosAppVersionQuerySchema } from './superadmin/posAppVersions.schemas'
 import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
 import express, { ErrorRequestHandler, Router } from 'express'
@@ -177,12 +179,21 @@ const readLimit = rateLimit({ windowMs: 60_000, max: 60, keyGenerator: porVisita
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })
+// El actualizador del POS: cada aparato pregunta al abrir y al volver la red; 120 por minuto por visitante.
+const posAppVersionLimit = rateLimit({
+  windowMs: 60_000,
+  max: 120,
+  keyGenerator: porVisitante,
+  standardHeaders: true,
+  legacyHeaders: false,
+})
 // La oferta de lanzamiento la consulta la LANDING desde un servidor de Cloudflare, así que
 // muchísimas visitas comparten pocas IPs de salida. Con `readLimit` (60/min) el destino del
 // CTA pagado se apagaría solo en cuanto el anuncio funcionara — el peor momento posible.
 const offerReadLimit = rateLimit({ windowMs: 60_000, max: 600, standardHeaders: true, legacyHeaders: false })
 
 router.get('/feature-catalog', offerReadLimit, validateRequest(z.object({ query: featureCatalogQuery })), getFeatureCatalog)
+router.get('/pos-app-version', posAppVersionLimit, validateRequest(publicPosAppVersionQuerySchema), getPosAppVersion)
 router.get('/hybrid-offers', offerReadLimit, publicHybridOffers)
 // /presentacion/precios del DASHBOARD: precios de lista vivos del SUPERADMIN (spec 2026-10-26-presentacion-de-precios).
 router.get('/price-list', offerReadLimit, getPriceList)
