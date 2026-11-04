@@ -14,6 +14,7 @@ export const MODULE_CODES = {
   WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD',
   COMMISSIONS: 'COMMISSIONS',
   MASTER_CATALOG: 'MASTER_CATALOG',
+  VENUE_DUPLICATION: 'VENUE_DUPLICATION',
   // SERVICE_PAY ya NO es módulo: es la función del plan (fase 3, Bloque C; `staffPay/acceso.ts`, `venueHasFeatureAccess`).
 } as const
 
