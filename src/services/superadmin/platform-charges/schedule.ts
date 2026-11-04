@@ -62,7 +62,14 @@ export function monthBoundsInMexico(day: CalendarDay): { from: Date; to: Date } 
  * de 28 días (mensual) y 12 (quincenal, en febrero con ancla 31). `ponytail:` es una regla de distancia, no de periodos; si algún
  * cobro necesita otra cosa, se modela el periodo.
  */
-const MIN_DAYS_AFTER_MARKED: Record<PlatformChargeFrequency, number> = { WEEKLY: 5, BIWEEKLY: 11, MONTHLY: 23 }
+const MIN_DAYS_AFTER_MARKED: Record<PlatformChargeFrequency, number> = {
+  WEEKLY: 5,
+  BIWEEKLY: 11,
+  MONTHLY: 23,
+  // Una sola vez: no hay periodos que cuidar (tiene una única fecha), así que nunca es «del mismo periodo». 0 lo vuelve siempre falso:
+  // `day > marked && day < marked` no se cumple nunca.
+  ONE_TIME: 0,
+}
 
 export function isSamePeriodAsMarked(frequency: PlatformChargeFrequency, marked: CalendarDay, day: CalendarDay): boolean {
   return day > marked && day < addDays(marked, MIN_DAYS_AFTER_MARKED[frequency])
@@ -87,6 +94,7 @@ export function dbToCalendarDay(date: Date): CalendarDay {
  *   desde el día del ANCLA, no desde la ocurrencia anterior (30 → 28 feb → 30 mar, no 28 mar).
  * - **Quincenal:** dos días fijos al mes, con el mismo tope al último día. Con D = día del ancla: D y D+15 si D ≤ 15, o D−15 y D
  *   si D > 15 (1 → 1 y 16 · 15 → 15 y 30 · 20 → 5 y 20 · 31 → 16 y 31).
+ * - **Una sola vez:** no hay serie. Su única fecha es el ancla, si cae en el rango.
  *
  * El llamador acota el rango (el generador pide de max(ancla, hoy) a hoy+7): aquí se devuelven todas las fechas que caben.
  */
@@ -100,6 +108,9 @@ export function occurrenceDatesBetween(
   // Se validan los dos extremos aunque no hagan falta: un rango con un día inventado no debe contestar «ninguna» en silencio.
   parts(from)
   parts(to)
+
+  // Una sola vez: no hay serie que recorrer, su única fecha es el ancla (comparar los textos es comparar los días, como abajo).
+  if (frequency === 'ONE_TIME') return anchorDate >= from && anchorDate <= to ? [anchorDate] : []
 
   // Un 'YYYY-MM-DD' con ceros a la izquierda se ordena como el calendario: comparar los textos es comparar los días.
   const start = from > anchorDate ? from : anchorDate

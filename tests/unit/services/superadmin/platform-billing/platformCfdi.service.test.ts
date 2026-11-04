@@ -490,6 +490,169 @@ describe('platformCfdi.service', () => {
       await expect(registerPlatformPayment({ ...baseInput, idempotencyKey: 'paid' })).rejects.toMatchObject({ code: 'VALIDATION' })
     })
 
+    describe('🔴 una factura anexada a un cobro sin pagar de «Por cobrar» no recibe complemento (Codex r2, hallazgo 4)', () => {
+      const MENSAJE =
+        'Esta factura está anexada a un cobro sin pagar en «Por cobrar». Márcalo como pagado primero y después registra el complemento'
+      const STAMPED_REP = {
+        providerInvoiceId: 'fa-rep',
+        uuid: 'UUID-REP',
+        serie: 'A',
+        folio: '9',
+        stampedAt: new Date('2026-06-28T12:00:00Z'),
+        status: 'valid',
+      }
+      let createPaymentComplement: jest.Mock
+      let eventos: string[]
+
+      /** Lo que contesta el `update` que toca al padre: su vínculo, tal como quedó DESPUÉS de esperar el candado de su fila. */
+      function preparar(
+        vinculo: { platformChargeOccurrenceId: string | null; chargeLinkedAt: Date | null },
+        fecha: { status: string } | null,
+      ) {
+        eventos = []
+        prismaMock.platformCfdi.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(PPD_PARENT)
+        prismaMock.platformCfdi.count.mockResolvedValue(0)
+        prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
+        prismaMock.platformChargeOccurrence.findUnique.mockImplementation(async () => {
+          eventos.push('leer la fecha')
+          return fecha
+        })
+        prismaMock.platformCfdi.create.mockImplementation(async () => {
+          eventos.push('reservar el complemento')
+          return { id: 'rep1', status: 'STAMPING' }
+        })
+        prismaMock.platformCfdi.update.mockImplementation(async (args: any) => {
+          if (args.data.updatedAt) {
+            eventos.push('tocar al padre')
+            return vinculo
+          }
+          if (args.data.amountPaidCents) eventos.push('sumar al padre')
+          if (args.data.status === 'STAMPED') eventos.push('marcar el complemento')
+          return { id: args.where.id, ...args.data }
+        })
+        prismaMock.$transaction.mockImplementation(async (callback: any) => {
+          eventos.push('tx:inicio')
+          try {
+            return await callback(prismaMock)
+          } finally {
+            eventos.push('tx:fin')
+          }
+        })
+        createPaymentComplement = jest.fn().mockImplementation(async () => {
+          eventos.push('PAC')
+          return STAMPED_REP
+        })
+        mockResolve.mockReturnValue({ createPaymentComplement })
+      }
+
+      afterEach(() => {
+        prismaMock.$transaction.mockImplementation((callback: any) => callback(prismaMock))
+      })
+
+      it('anexada a una fecha PENDIENTE: VALIDATION con el texto, no reserva ni llama al PAC', async () => {
+        preparar({ platformChargeOccurrenceId: 'occ-1', chargeLinkedAt: new Date('2026-06-20T00:00:00Z') }, { status: 'PENDING' })
+
+        const error = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'anexada-1' }).catch((e: unknown) => e)
+
+        expect(error).toBeInstanceOf(PlatformBillingError)
+        expect(error).toMatchObject({ code: 'VALIDATION', message: MENSAJE })
+        expect(prismaMock.platformCfdi.create).not.toHaveBeenCalled()
+        expect(createPaymentComplement).not.toHaveBeenCalled()
+        expect(prismaMock.platformChargeOccurrence.findUnique).toHaveBeenCalledWith({ where: { id: 'occ-1' }, select: { status: true } })
+      })
+
+      it('anexada a una fecha PAGADA: pasa, porque el cobro ya no se debe', async () => {
+        preparar({ platformChargeOccurrenceId: 'occ-1', chargeLinkedAt: new Date('2026-06-20T00:00:00Z') }, { status: 'PAID' })
+
+        const rep = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'anexada-2' })
+
+        expect(rep.status).toBe('STAMPED')
+        expect(createPaymentComplement).toHaveBeenCalledTimes(1)
+      })
+
+      it('timbrada desde «Por cobrar» (ligada a su fecha pero sin marca de anexada): se comporta como siempre, ni lee la fecha', async () => {
+        preparar({ platformChargeOccurrenceId: 'occ-1', chargeLinkedAt: null }, { status: 'PENDING' })
+
+        const rep = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'de-aqui' })
+
+        expect(rep.status).toBe('STAMPED')
+        expect(prismaMock.platformChargeOccurrence.findUnique).not.toHaveBeenCalled()
+      })
+
+      it('sin vínculo: pasa, ni lee la fecha', async () => {
+        preparar({ platformChargeOccurrenceId: null, chargeLinkedAt: null }, null)
+
+        const rep = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'sin-vinculo' })
+
+        expect(rep.status).toBe('STAMPED')
+        expect(prismaMock.platformChargeOccurrence.findUnique).not.toHaveBeenCalled()
+      })
+
+      it('toca al padre (para serializarse con anexar) y reserva en la MISMA transacción; el PAC va después, fuera de ella', async () => {
+        preparar({ platformChargeOccurrenceId: null, chargeLinkedAt: null }, null)
+
+        await registerPlatformPayment({ ...baseInput, idempotencyKey: 'orden' })
+
+        expect(prismaMock.platformCfdi.update).toHaveBeenNthCalledWith(1, {
+          where: { id: 'inv1' },
+          data: { updatedAt: expect.any(Date) },
+          select: { platformChargeOccurrenceId: true, chargeLinkedAt: true },
+        })
+        expect(eventos.slice(0, 5)).toEqual(['tx:inicio', 'tocar al padre', 'reservar el complemento', 'tx:fin', 'PAC'])
+      })
+
+      it('🔴 la confirmación (después del PAC) toma primero al padre y luego al complemento, en UNA transacción: el mismo orden que la reserva (Codex r3, hallazgo 1)', async () => {
+        // Reserva: padre → complemento. Si la confirmación fuera complemento → padre, dos peticiones con la misma llave se esperarían en cruz
+        // (la confirmación retiene al complemento y espera al padre; el reintento retiene al padre y espera al complemento por la llave repetida).
+        preparar({ platformChargeOccurrenceId: null, chargeLinkedAt: null }, null)
+
+        await registerPlatformPayment({ ...baseInput, idempotencyKey: 'orden-confirmacion' })
+
+        expect(eventos).toEqual([
+          'tx:inicio',
+          'tocar al padre',
+          'reservar el complemento',
+          'tx:fin',
+          'PAC',
+          'tx:inicio',
+          'sumar al padre',
+          'marcar el complemento',
+          'tx:fin',
+        ])
+      })
+
+      it('la reserva sigue siendo idéntica: la misma fila STAMPING con su llave y su paymentInfo', async () => {
+        preparar({ platformChargeOccurrenceId: null, chargeLinkedAt: null }, null)
+
+        await registerPlatformPayment({ ...baseInput, idempotencyKey: 'identica' })
+
+        expect(prismaMock.platformCfdi.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            type: 'PAGO',
+            parentPlatformCfdiId: 'inv1',
+            status: 'STAMPING',
+            idempotencyKey: 'identica',
+            totalCents: 0,
+            createdById: 'staff-1',
+          }),
+        })
+      })
+
+      it('una llave repetida a media carrera (P2002 al reservar) sigue regresando el complemento ya reservado', async () => {
+        preparar({ platformChargeOccurrenceId: null, chargeLinkedAt: null }, null)
+        prismaMock.platformCfdi.findUnique.mockReset().mockResolvedValueOnce(null).mockResolvedValueOnce(PPD_PARENT)
+        prismaMock.platformCfdi.create.mockRejectedValue(
+          new (jest.requireActual('@prisma/client').Prisma.PrismaClientKnownRequestError)('dup', { code: 'P2002', clientVersion: 'x' }),
+        )
+        prismaMock.platformCfdi.findUnique.mockResolvedValueOnce({ id: 'rep-otra-pestana', status: 'STAMPING' })
+
+        const rep = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'carrera' })
+
+        expect(rep.id).toBe('rep-otra-pestana')
+        expect(createPaymentComplement).not.toHaveBeenCalled()
+      })
+    })
+
     it('is idempotent: a repeated key returns the prior REP without re-stamping', async () => {
       prismaMock.platformCfdi.findUnique.mockResolvedValueOnce({ id: 'repX', status: 'STAMPED' })
       const createPaymentComplement = jest.fn()

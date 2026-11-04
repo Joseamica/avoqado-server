@@ -19004,6 +19004,10 @@ model PlatformCfdi {
   platformChargeOccurrenceId String?
   platformChargeOccurrence   PlatformChargeOccurrence? @relation(fields: [platformChargeOccurrenceId], references: [id], onDelete: SetNull)
 
+  // «Por cobrar»: cuándo se ANEXÓ esta factura (ya hecha en «Facturas CFDI») a una fecha de cobro. null = no se anexó: la timbró «Por cobrar» o sigue suelta.
+  // Sólo lo anexado se puede quitar; nunca una factura timbrada desde «Por cobrar». Quién la anexó lo dice la bitácora.
+  chargeLinkedAt DateTime?
+
   // destinatario (denormalizado para listado/filtro); STANDALONE → ambos null
   organizationId String?
   venueId        String?
@@ -19078,11 +19082,13 @@ enum PlatformChargeFrequency {
   WEEKLY
   BIWEEKLY // quincenal: dos días fijos al mes (spec §3.1)
   MONTHLY
+  ONE_TIME // una sola vez: su única fecha es el ancla, nace con el alta y el generador diario no lo recorre; no se pausa (spec 2026-11-03-por-cobrar-desde-factura-y-filtros)
 }
 
 enum PlatformChargeInvoiceMode {
   AUTOMATIC // al marcar pagado, se timbra sola
   MANUAL // el botón «Facturar» de la fila pagada
+  NONE // sin factura: no pide claves del SAT; si el cliente la pide después, la fila pagada sigue pudiendo facturar con «Facturar»
 }
 
 enum PlatformChargeOccurrenceStatus {

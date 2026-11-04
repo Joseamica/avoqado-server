@@ -908,6 +908,15 @@ describe('buildPlatformChargeDigest — el contenido', () => {
     expect(await buildPlatformChargeDigest(T0)).toBeNull()
   })
 
+  it('🔴 una fecha pagada en MANUAL y sin factura NO sale en «Pagados sin factura»: es a propósito', async () => {
+    // A propósito (spec 2026-11-03-por-cobrar-desde-factura-y-filtros, «Anexar»): anexar una factura pasa la fecha a MANUAL y quitarla la deja
+    // en MANUAL, «para que deshacer el vínculo no timbre solo ni lo esconda». El correo sólo avisa de lo AUTOMÁTICO que quedó sin factura;
+    // una MANUAL sin factura es de quien cobra, y su fila sigue ofreciendo «Facturar». No lo cambies sin decidirlo: aquí lo fija esta prueba.
+    occurrences = [paid(5, { charge: { customerName: 'Factura Quitada' }, invoiceMode: 'MANUAL', invoices: [] })]
+
+    expect(await buildPlatformChargeDigest(T0)).toBeNull()
+  })
+
   it('sólo «Pagados sin factura» también es algo que decir; sin las tres secciones, nada (null)', async () => {
     occurrences = [paid(2)]
     expect(await buildPlatformChargeDigest(T0)).not.toBeNull()
