@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client'
+import { BadRequestError } from '@/errors/AppError'
 import { parseCsv } from '@/services/dashboard/listSummary.shared'
 import type { Bloqueo, Cursor } from './types'
 
@@ -23,6 +24,13 @@ export function sinFuncion(featureCode: string): Bloqueo {
 }
 
 export const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+
+/** Fecha opcional, leída como la lee el servicio (`new Date(s)`): si no es fecha, 400 al pedir y no un pedido que truena después. */
+export function fecha(v: unknown, nombre: string): string | undefined {
+  const s = str(v)
+  if (s && Number.isNaN(new Date(s).getTime())) throw new BadRequestError(`${nombre} must be a valid ISO date string`)
+  return s
+}
 
 /** Lista de un filtro: arreglo de strings o CSV (los dos llegan del DASHBOARD). */
 export const lista = (v: unknown): string[] | undefined =>

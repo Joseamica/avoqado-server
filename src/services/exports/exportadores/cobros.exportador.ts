@@ -1,6 +1,6 @@
 import type { ExportColumnDef } from '@/services/dashboard/export.helpers'
 import { countPaymentsForExportHasta, fetchPaymentsExportPage, type PaymentFilters } from '@/services/dashboard/payment.dashboard.service'
-import { construirWhereKeyset, lista, str } from './comun'
+import { construirWhereKeyset, fecha, lista, str } from './comun'
 import type { Exportador } from './types'
 
 export type FilaCobro = Awaited<ReturnType<typeof fetchPaymentsExportPage>>[number]
@@ -50,8 +50,8 @@ export const cobros: Exportador<PaymentFilters, FilaCobro> = {
       sources: lista(r.sources),
       staffIds: lista(r.staffIds),
       search: str(r.search),
-      startDate: str(r.startDate),
-      endDate: str(r.endDate),
+      startDate: fecha(r.startDate, 'startDate'),
+      endDate: fecha(r.endDate, 'endDate'),
     }
   },
   async autorizar() {

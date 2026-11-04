@@ -9,7 +9,7 @@ import {
   type PaymentMethodFilter,
   type SalesSummaryExportFilters,
 } from '@/services/dashboard/sales-summary.dashboard.service'
-import { construirWhereKeyset, lista, sinFuncion, str } from './comun'
+import { construirWhereKeyset, fecha, lista, sinFuncion, str } from './comun'
 import type { Exportador } from './types'
 
 export type FilaVentaDetallada = Awaited<ReturnType<typeof fetchSalesSummaryDetailPage>>[number]
@@ -53,8 +53,8 @@ export const ventasDetalladas: Exportador<SalesSummaryExportFilters, FilaVentaDe
   permiso: 'reports:read',
   parsearFiltros(raw) {
     const r = (raw ?? {}) as Record<string, unknown>
-    const startDate = str(r.startDate)
-    const endDate = str(r.endDate)
+    const startDate = fecha(r.startDate, 'startDate')
+    const endDate = fecha(r.endDate, 'endDate')
     if (!startDate) throw new BadRequestError('startDate is required (ISO date string)')
     if (!endDate) throw new BadRequestError('endDate is required (ISO date string)')
     const paymentMethod = str(r.paymentMethod) as PaymentMethodFilter | undefined

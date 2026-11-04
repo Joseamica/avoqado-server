@@ -77,7 +77,7 @@ describe('exportador cobros', () => {
       sources: 'TPV',
       staffIds: '',
       search: ' 1234 ',
-      startDate: 'x',
+      startDate: '2026-10-01T06:00:00.000Z',
     })
     expect(f).toEqual({
       merchantAccountIds: ['a', 'b'],
@@ -85,9 +85,10 @@ describe('exportador cobros', () => {
       sources: ['TPV'],
       staffIds: undefined,
       search: '1234',
-      startDate: 'x',
+      startDate: '2026-10-01T06:00:00.000Z',
       endDate: undefined,
     })
+    expect(() => cobros.parsearFiltros({ endDate: 'ayer' })).toThrow(/endDate must be a valid ISO date/)
     expect(cobros.parsearFiltros(f)).toEqual(f)
     expect(cobros.parsearFiltros(undefined)).toEqual(expect.objectContaining({ startDate: undefined }))
   })

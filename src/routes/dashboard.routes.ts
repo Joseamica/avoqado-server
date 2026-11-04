@@ -421,6 +421,7 @@ import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
 import birthdayAutomationRoutes from './dashboard/birthdayAutomation.routes'
 // Per-staff, per-venue onboarding UX state (tour banners, checklists, welcome-tour flags)
 import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
+import exportsRoutes from './dashboard/exports.routes'
 // SUPERADMIN impersonation — view the dashboard as another user/role (read-only)
 import impersonationRoutes from './dashboard/impersonation.routes'
 // Referral Program routes (Phase C)
@@ -4813,6 +4814,8 @@ router.use('/venues/:venueId', staffOnboardingRoutes)
 
 // Reports routes (ADMIN and OWNER)
 router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
+// Exportes en segundo plano (cobros y ventas detalladas): pedir, estado, descarga, lista y reintento.
+router.use('/venues/:venueId/exports', authenticateTokenMiddleware, exportsRoutes)
 
 // Commission routes (OWNER/ADMIN for config, STAFF for view own)
 router.use('/commissions', authenticateTokenMiddleware, commissionRoutes)
