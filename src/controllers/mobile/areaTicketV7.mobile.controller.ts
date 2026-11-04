@@ -6,6 +6,7 @@ import AppError from '../../errors/AppError'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as service from '../../services/mobile/areaTicketV7.mobile.service'
 import { setTerminalAreaRole } from '../../services/mobile/areaTicketRole.mobile.service'
+import { setAreaComandaFromPos } from '../../services/mobile/areaComanda.mobile.service'
 
 function requiredEnum<T extends string>(value: unknown, allowed: readonly T[], field: string, code: string): T {
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
@@ -85,6 +86,24 @@ export async function setAreaRole(req: Request, res: Response, next: NextFunctio
         deviceUid: deviceUid(req),
         staffId: staffId(req),
         choice: req.body,
+      }),
+    )
+  } catch (error) {
+    return fail(error, req, res, next)
+  }
+}
+
+/** D2: el POS apaga o prende la comanda del área que emite («Impresoras y cajón»). */
+export async function setAreaComanda(req: Request, res: Response, next: NextFunction) {
+  try {
+    return success(
+      res,
+      await setAreaComandaFromPos({
+        venueId: req.params.venueId,
+        areaId: req.params.areaId,
+        deviceUid: deviceUid(req),
+        staffId: staffId(req),
+        sendsComanda: req.body.sendsComanda,
       }),
     )
   } catch (error) {
