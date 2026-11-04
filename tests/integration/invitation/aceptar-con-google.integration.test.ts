@@ -139,6 +139,47 @@ describe('aceptar una invitación por correo con Google', () => {
     expect((await prisma.staffVenue.findFirstOrThrow({ where: { staffId: staff.id, venueId } })).role).toBe(StaffRole.WAITER)
   })
 
+  it('🔴 invitado como dueño en OTRO negocio y cancelado: al aceptar aquí no le queda nada allá (Codex r3)', async () => {
+    const otraOrg = await prisma.organization.create({
+      data: { name: `Otra org ${sufijo}`, email: `otra-${sufijo}@test.mx`, phone: '5555555556', seatCapExempt: true },
+    })
+    ids.orgs.push(otraOrg.id)
+    const otraSucursal = await prisma.venue.create({
+      data: {
+        name: `Otra sucursal ${sufijo}`,
+        slug: `otra-${sufijo}`,
+        organizationId: otraOrg.id,
+        address: 'x',
+        city: 'CDMX',
+        country: 'Mexico',
+        timezone: 'America/Mexico_City',
+        currency: 'MXN',
+        status: 'ACTIVE',
+      },
+    })
+    ids.venues.push(otraSucursal.id)
+    const email = `dosorgs-${sufijo}@test.mx`
+    await inviteTeamMember(otraSucursal.id, invitador, { email, firstName: 'Dos', lastName: 'Orgs', role: StaffRole.OWNER })
+    const staff = await prisma.staff.findUniqueOrThrow({ where: { email } })
+    ids.staff.push(staff.id)
+    const allaComoDueno = await prisma.invitation.findFirstOrThrow({ where: { email, organizationId: otraOrg.id } })
+    await cancelInvitation(otraSucursal.id, allaComoDueno.id)
+    await inviteTeamMember(venueId, invitador, { email, firstName: 'Dos', lastName: 'Orgs', role: StaffRole.WAITER })
+
+    mockCorreoDeGoogle = email
+    const login = await loginWithGoogle('id-token', false)
+
+    expect(login.accessToken).toBeTruthy()
+    const alla = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: staff.id, organizationId: otraOrg.id } },
+    })
+    expect(alla.isActive).toBe(false)
+    const aqui = await prisma.staffOrganization.findUniqueOrThrow({
+      where: { staffId_organizationId: { staffId: staff.id, organizationId: orgId } },
+    })
+    expect(aqui).toMatchObject({ isActive: true, isPrimary: true, role: OrgRole.MEMBER })
+  })
+
   it('🔴 alguien dado de baja (su cuenta ya se usó) no se reactiva con Google aunque lo vuelvan a invitar', async () => {
     const email = `baja-${sufijo}@test.mx`
     const baja = await prisma.staff.create({

@@ -298,12 +298,24 @@ export async function acceptInvitation(
         // aunque esa invitación se haya cancelado. Su rol nunca se ganó: al aceptar se toma el de ESTA invitación.
         // Sin esto, invitado como dueño, cancelado y reinvitado como mesero quedaba dueño de la organización (Codex, 4-nov).
         const esProvisional = esCuentaProvisional(existingStaff)
+        if (esProvisional) {
+          // Y lo único que gana al aceptar es ESTA organización: la membresía que le dejó otra invitación al crear la
+          // cuenta (cancelada o sin aceptar) se apaga, y renace si algún día acepta la suya. Sin esto, dueño en A con la
+          // invitación cancelada + aceptar mesero en B ⇒ seguía siendo dueño de A (Codex r3, 4-nov).
+          await tx.staffOrganization.updateMany({
+            where: { staffId: existingStaff.id, organizationId: { not: invitation.organizationId }, isActive: true },
+            data: { isActive: false, isPrimary: false },
+          })
+        }
         if (yaEsMiembroActivo && (invitation.role === StaffRole.OWNER || esProvisional)) {
           // N2 (Codex): una invitación de DUEÑO (que sólo emite quien puede otorgarlo) promueve también
           // la membresía; sin esto quedaba OWNER en la sucursal y MEMBER en la organización.
           await tx.staffOrganization.update({
             where: { staffId_organizationId: { staffId: existingStaff.id, organizationId: invitation.organizationId } },
-            data: { role: invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER },
+            data: {
+              role: invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER,
+              ...(esProvisional ? { isPrimary: true } : {}),
+            },
           })
         }
         if (!yaEsMiembroActivo) {
@@ -317,7 +329,8 @@ export async function acceptInvitation(
               staffId: staff.id,
               organizationId: invitation.organizationId,
               role: orgRoleForCrossOrg,
-              isPrimary: false,
+              // La provisional no tiene otra organización viva (se apagaron arriba): ésta es su primaria.
+              isPrimary: esProvisional,
               joinedById: invitation.invitedById ?? undefined,
             },
             tx, // inside the accept transaction: a 409 below rolls it back too
