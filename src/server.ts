@@ -108,6 +108,7 @@ import { initializeSocketServer, shutdownSocketServer } from './communication/so
 import { initializeFirebase } from './config/firebase'
 import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
+import { instalarMedidorDeCupoResend } from './services/email/resendQuota'
 import { precalentarSellos } from './services/wallet/precalentarSellos'
 import { primeVenuesEstrictos } from './services/terminal-payment-strictness'
 // Import Stripe feature sync startup
@@ -418,6 +419,11 @@ process.on('unhandledRejection', (reason, promise) => {
 // --- Application Startup Logic ---
 const startApplication = async (retries = 3) => {
   try {
+    // El medidor del cupo de Resend (`services/email/resendQuota.ts`): lee cuántos correos lleva la cuenta en cada respuesta,
+    // avisa al 80 % y pausa sólo las campañas del CRM. Es pasivo (nunca frena ni cambia un correo), por eso va también en
+    // DEMO_MODE, y antes que cualquier cosa que pueda mandar correo.
+    instalarMedidorDeCupoResend()
+
     // Initialize Firebase Admin SDK (for storage file deletion)
     try {
       initializeFirebase()

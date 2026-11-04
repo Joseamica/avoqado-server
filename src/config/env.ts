@@ -126,8 +126,14 @@ const envSchema = z.object({
   CRM_CAMPAIGN_FROM: z.string().default('Avoqado <novedades@novedades.avoqado.io>'),
   CRM_CAMPAIGN_REPLY_TO: z.string().default('hola@avoqado.io'),
   // Primeros intentos por día (hora de Ciudad de México): calentamiento del subdominio. Se sube a mano.
-  // 🔴 `.catch(300)` (Ruling 3): uno mal escrito («1,000», «mil») vale el default seguro en vez de hacer `process.exit` de TODA la API.
-  CRM_CAMPAIGN_DAILY_CAP: z.coerce.number().int().min(0).default(300).catch(300),
+  // 50 por omisión (3-nov, cupo de Resend): el plan gratis da 100 correos al día a TODO el servidor (login, recibos, avisos).
+  // 🔴 `.catch(50)` (Ruling 3): uno mal escrito («1,000», «mil») vale el default seguro en vez de hacer `process.exit` de TODA la API.
+  CRM_CAMPAIGN_DAILY_CAP: z.coerce.number().int().min(0).default(50).catch(50),
+  // El cupo de la cuenta de Resend, para cuando cambie el plan (gratis: 100 al día y 3,000 al mes). Al 80 % se avisa y, con el
+  // del día, se pausan las campañas del CRM. 🔴 Texto opcional a propósito (Ruling 3): se valida donde se usa
+  // (`services/email/resendQuota.ts`, desde `process.env`); uno mal escrito vale el del plan gratis y nunca tumba el arranque.
+  RESEND_DAILY_QUOTA: z.string().optional(),
+  RESEND_MONTHLY_QUOTA: z.string().optional(),
   // 🔴 Fuera de producción sólo sale correo a estas direcciones (lista separada por comas, en minúsculas). Vacía = no sale
   // nada: la base local trae correos de gente real. Se lee EN CADA ENVÍO desde `process.env`
   // (`services/crm/email/testAllowlist.ts`), no de este objeto congelado: aquí queda declarada y documentada.
