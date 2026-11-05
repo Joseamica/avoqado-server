@@ -5221,6 +5221,9 @@ model VenueFeature {
   paymentFailureCount Int       @default(0) // Number of consecutive payment failures
 
   renewalReminderSentAt DateTime? // last renewal-reminder email sent (cron dedup, per billing period)
+  /// Prueba REGALADA (sin Stripe): el `endDate` cuyo aviso «tu prueba termina» ya se mandó (plan-renewal-reminder).
+  /// Guarda la FECHA anunciada, no cuándo se mandó: alargar o acortar la prueba la deja distinta y se vuelve a avisar.
+  freeTrialNoticeFor    DateTime?
   winbackSentAt         DateTime? // win-back email sent once after suspension (cron dedup)
 
   /// 🔴 CAS del acceso al plan. Prisma la actualiza en CADA escritura (`@updatedAt`), incluso
