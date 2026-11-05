@@ -3,6 +3,8 @@ import {
   getUserNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,
+  deleteAllNotifications,
+  filtroDeNegocio,
   deleteNotification,
   sendVenueNotification,
   cleanupOldNotifications,
@@ -284,6 +286,53 @@ describe('Notification Dashboard Service', () => {
         skip: 0,
         take: 10,
       })
+    })
+  })
+
+  describe('campana por negocio (filtroDeNegocio)', () => {
+    const DE_PLATAFORMA = { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }
+    const CON_NEGOCIO = { OR: [{ venueId: 'venue1' }, DE_PLATAFORMA] }
+
+    it('sin negocio: sin filtro (todo como hoy)', () => {
+      expect(filtroDeNegocio()).toEqual({})
+    })
+
+    it('con negocio: lo suyo más los anuncios con procedencia de plataforma, no cualquier ANNOUNCEMENT', () => {
+      expect(filtroDeNegocio('venue1')).toEqual(CON_NEGOCIO)
+      // un aviso de venue2 con type ANNOUNCEMENT pero sin entityType de plataforma no cumple ninguna rama
+      const ramas = (filtroDeNegocio('venue1').OR as any[]).map(r => JSON.stringify(r))
+      expect(ramas).not.toContain(JSON.stringify({ type: NotificationType.ANNOUNCEMENT }))
+    })
+
+    it('la lista, el total y los no leídos usan el filtro y la lista trae el venue', async () => {
+      mockPrismaNotificationFindMany.mockResolvedValue([])
+      mockPrismaNotificationCount.mockResolvedValue(2)
+      await getUserNotifications('u1', 'venue1', {}, { limit: 10 })
+      expect(mockPrismaNotificationFindMany.mock.calls[0][0].where).toEqual({ recipientId: 'u1', ...CON_NEGOCIO })
+      expect(mockPrismaNotificationFindMany.mock.calls[0][0].include.venue).toEqual({ select: { id: true, name: true, slug: true } })
+      expect(mockPrismaNotificationCount.mock.calls[0][0].where).toEqual({ recipientId: 'u1', ...CON_NEGOCIO })
+      expect(mockPrismaNotificationCount.mock.calls[1][0].where).toEqual({ recipientId: 'u1', ...CON_NEGOCIO, isRead: false })
+    })
+
+    it('sin negocio la lista trae todo como hoy', async () => {
+      mockPrismaNotificationFindMany.mockResolvedValue([])
+      mockPrismaNotificationCount.mockResolvedValue(0)
+      await getUserNotifications('u1', undefined, {}, {})
+      expect(mockPrismaNotificationFindMany.mock.calls[0][0].where).toEqual({ recipientId: 'u1' })
+    })
+
+    it('marcar todo con negocio no toca los avisos de otro negocio', async () => {
+      mockPrismaNotificationUpdateMany.mockResolvedValue({ count: 2 })
+      await markAllNotificationsAsRead('u1', 'venue1')
+      expect(mockPrismaNotificationUpdateMany.mock.calls[0][0].where).toEqual({ recipientId: 'u1', isRead: false, ...CON_NEGOCIO })
+    })
+
+    it('borrar todas con negocio no borra los de otro negocio; sin negocio borra todo como hoy', async () => {
+      mockPrismaNotificationDeleteMany.mockResolvedValue({ count: 2 })
+      await deleteAllNotifications('u1', 'venue1')
+      expect(mockPrismaNotificationDeleteMany.mock.calls[0][0].where).toEqual({ recipientId: 'u1', ...CON_NEGOCIO })
+      await deleteAllNotifications('u1')
+      expect(mockPrismaNotificationDeleteMany.mock.calls[1][0].where).toEqual({ recipientId: 'u1' })
     })
   })
 

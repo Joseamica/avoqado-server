@@ -4,11 +4,12 @@
  * permiso se revisa en el negocio de la petición; el aviso tiene que ser de ese negocio y para su gente.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
-import { createNotification, sendBulkNotification } from '@/controllers/dashboard/notification.dashboard.controller'
+import { createNotification, sendBulkNotification, deleteAllNotifications } from '@/controllers/dashboard/notification.dashboard.controller'
 import * as notificationService from '@/services/dashboard/notification.dashboard.service'
 
 jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
   createNotification: jest.fn(async (d: unknown) => ({ id: 'n1', ...(d as object) })),
+  deleteAllNotifications: jest.fn(async () => ({ deleted: 0 })),
   sendBulkNotification: jest.fn(async (ids: string[]) => ids.map(id => ({ id: `n-${id}` }))),
 }))
 
@@ -99,5 +100,18 @@ describe('avisos que manda una persona: sólo para la gente de su negocio (D1)',
       args.where.OR?.[1]?.organizations?.some?.organizationId === 'corg00000000000000000000a' ? 1 : 0) as never)
     const { error } = await correr(createNotification, req({ ...aviso, recipientId: AJENO }))
     expect(error).toBeUndefined()
+  })
+})
+
+describe('campana por negocio: reservas del controlador', () => {
+  it('el POST genérico rechaza entityType PlatformAnnouncement (procedencia reservada)', async () => {
+    const { error } = await correr(createNotification, req({ ...aviso, recipientId: MIO, entityType: 'PlatformAnnouncement' }))
+    expect(error?.statusCode).toBe(400)
+    expect(notificationService.createNotification).not.toHaveBeenCalled()
+  })
+
+  it('borrar todas pasa el negocio de x-venue-id', async () => {
+    await correr(deleteAllNotifications, req({}, { header: MI_NEGOCIO }))
+    expect(notificationService.deleteAllNotifications).toHaveBeenCalledWith('cdueno0000000000000000000', MI_NEGOCIO)
   })
 })

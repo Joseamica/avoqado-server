@@ -1,4 +1,4 @@
-import { Notification, NotificationChannel, NotificationPreference, NotificationPriority, NotificationType } from '@prisma/client'
+import { Notification, NotificationChannel, NotificationPreference, NotificationPriority, NotificationType, Prisma } from '@prisma/client'
 import socketManager from '../../communication/sockets'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -205,6 +205,15 @@ async function dispatchToChannels(
 }
 
 /**
+ * Campana por negocio: con negocio, sus avisos más los anuncios de plataforma (Avoqado). La excepción exige la PROCEDENCIA
+ * (`entityType`), no sólo el tipo: el POST genérico deja crear `ANNOUNCEMENT` de un negocio y no debe colarse en otro. Esa
+ * procedencia está reservada: sólo el reparto de anuncios la escribe. Sin negocio, sin filtro (como hoy).
+ */
+export function filtroDeNegocio(venueId?: string): Prisma.NotificationWhereInput {
+  return venueId ? { OR: [{ venueId }, { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }] } : {}
+}
+
+/**
  * Get notifications for a user
  */
 export async function getUserNotifications(
@@ -219,9 +228,9 @@ export async function getUserNotifications(
 }> {
   const { page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'desc' } = pagination
 
-  const where = {
+  const where: Prisma.NotificationWhereInput = {
     recipientId: userId,
-    ...(venueId && { venueId }),
+    ...filtroDeNegocio(venueId),
     ...(filters.isRead !== undefined && { isRead: filters.isRead }),
     ...(filters.type && { type: filters.type }),
     ...(filters.priority && { priority: filters.priority }),
@@ -321,7 +330,7 @@ export async function markAllNotificationsAsRead(userId: string, venueId?: strin
   const where = {
     recipientId: userId,
     isRead: false,
-    ...(venueId && { venueId }),
+    ...filtroDeNegocio(venueId),
   }
 
   const result = await prisma.notification.updateMany({
@@ -348,9 +357,9 @@ export async function markAllNotificationsAsRead(userId: string, venueId?: strin
  *
  * Acotado al `recipientId` de quien pide: nadie puede vaciar el buzón de otro.
  */
-export async function deleteAllNotifications(userId: string): Promise<{ deleted: number }> {
-  const { count } = await prisma.notification.deleteMany({ where: { recipientId: userId } })
-  logger.info('Buzón vaciado', { userId, deleted: count })
+export async function deleteAllNotifications(userId: string, venueId?: string): Promise<{ deleted: number }> {
+  const { count } = await prisma.notification.deleteMany({ where: { recipientId: userId, ...filtroDeNegocio(venueId) } })
+  logger.info('Buzón vaciado', { userId, venueId, deleted: count })
   return { deleted: count }
 }
 

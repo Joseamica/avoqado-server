@@ -119,6 +119,8 @@ async function asegurarAvisoDeMiNegocio(req: AuthenticatedRequest, recipientIds:
  */
 export const createNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const validatedData = createNotificationSchema.parse(req.body)
+  // Procedencia reservada: sólo el reparto de anuncios de plataforma escribe este entityType (campana por negocio).
+  if (validatedData.entityType === 'PlatformAnnouncement') throw new BadRequestError('entityType reservado para anuncios de plataforma')
   await asegurarAvisoDeMiNegocio(req, [validatedData.recipientId], validatedData.venueId)
 
   const notification = await notificationService.createNotification(validatedData)
@@ -218,7 +220,8 @@ export const markAllAsRead = asyncHandler(async (req: AuthenticatedRequest, res:
  */
 export const deleteAllNotifications = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.authContext!.userId
-  const resultado = await notificationService.deleteAllNotifications(userId)
+  const venueId = req.headers['x-venue-id'] as string | undefined
+  const resultado = await notificationService.deleteAllNotifications(userId, venueId)
   res.json({ success: true, data: resultado })
 })
 
