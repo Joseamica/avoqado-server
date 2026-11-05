@@ -318,7 +318,14 @@ describe('qué estado de Stripe autoriza qué', () => {
   })
 
   it('un registro ya ACTIVO y sano no consulta a Stripe (no hay nada que decidir)', async () => {
-    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    // «Sano» = sin suspensión y sin gracia pendiente (D6: un pago durante la gracia sí se registra).
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      paymentFailureCount: 0,
+    })
     const { suscripcionVigente } = await import('@/services/stripe.service')
     ;(suscripcionVigente as jest.Mock).mockClear()
 
@@ -578,5 +585,43 @@ describe('una activación en TRIAL conserva su vencimiento', () => {
     expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
     const data = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0].data
     expect(data).toHaveProperty('endDate', null)
+  })
+})
+
+// D6 (5-nov-2026): un pago que pasa DURANTE la gracia (plan activo, sin suspender) también se registra: si no, quedaban la
+// gracia, el contador y —tras una prueba— el vencimiento al final de la gracia, y perdía el plan el día 4 aunque ya pagó.
+describe('un pago que pasa durante la gracia limpia la gracia (D6)', () => {
+  const escritura = () =>
+    ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ?? (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
+
+  it('🔴 tras una prueba (vence al fin de la gracia): pagar la deja sin vencimiento, sin gracia y con el contador en cero', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      paymentFailureCount: 1,
+      gracePeriodEndsAt: new Date('2026-12-09T18:00:00Z'),
+      endDate: new Date('2026-12-09T18:00:00Z'),
+    })
+    await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
+    expect(escritura()?.data).toMatchObject({
+      active: true,
+      endDate: null,
+      gracePeriodEndsAt: null,
+      paymentFailureCount: 0,
+      suspendedAt: null,
+    })
+  })
+
+  it('REGRESIÓN: un plan al corriente y sin gracia no se reescribe (la activación inmediata ya funcionó)', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      paymentFailureCount: 0,
+      gracePeriodEndsAt: null,
+    })
+    await handleInvoicePaymentSucceeded({ ...facturaPagada } as never)
+    expect(escritura()).toBeUndefined()
   })
 })

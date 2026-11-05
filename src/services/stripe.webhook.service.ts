@@ -171,8 +171,10 @@ async function procedeActivar(
  * Preguntar sólo por `active` dejaba al negocio pagando sin acceso, para siempre.
  * (Cuarta auditoría de Codex, 19-sep.)
  */
-function necesitaReactivacion(venueFeature: { active: boolean; suspendedAt: Date | null }): boolean {
-  return !venueFeature.active || venueFeature.suspendedAt != null
+function necesitaReactivacion(venueFeature: { active: boolean; suspendedAt: Date | null; gracePeriodEndsAt?: Date | null }): boolean {
+  // 🔴 D6: un pago que pasa DURANTE la gracia también se registra. Si no, quedaban la gracia, el contador de fallos y —tras
+  // una prueba— el vencimiento al final de la gracia: perdía el plan el día 4 aunque ya hubiera pagado.
+  return !venueFeature.active || venueFeature.suspendedAt != null || venueFeature.gracePeriodEndsAt != null
 }
 
 /**

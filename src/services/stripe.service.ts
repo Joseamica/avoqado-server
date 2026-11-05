@@ -2289,37 +2289,35 @@ export async function generateBillingPortalUrl(customerId: string, returnUrl?: s
 }
 
 /**
- * Check if this is the first payment attempt for a subscription
- * Used to determine grace period eligibility (only for returning customers)
- *
- * @param subscriptionId - Stripe subscription ID
- * @returns true if this is the first payment attempt (no previous successful payments)
+ * 🔴 D6 (5-nov-2026): de dónde viene un negocio cuyo cobro acaba de fallar.
+ * - `RECURRENTE`: ya pagó con dinero alguna vez (una factura pagada con `amount_paid > 0`) → 7 días de gracia.
+ * - `TRAS_PRUEBA`: sólo tiene la factura de $0 con la que Stripe abre una prueba (o un primer mes 100 % gratis) →
+ *   4 días de gracia (decisión del founder). Antes esa factura de $0 contaba como «ya pagó» y recibía los 7 días.
+ * - `NUEVO`: ninguna factura pagada → suspensión inmediata, como siempre.
+ * Si Stripe no contesta: `RECURRENTE` (lo seguro es dar gracia, como antes).
  */
-async function isFirstSubscriptionPayment(subscriptionId: string): Promise<boolean> {
+export type HistorialDePago = 'RECURRENTE' | 'TRAS_PRUEBA' | 'NUEVO'
+export const DIAS_DE_GRACIA = { RECURRENTE: 7, TRAS_PRUEBA: 4 } as const
+
+export async function historialDePago(subscriptionId: string): Promise<HistorialDePago> {
   try {
-    // Query Stripe for invoices with successful payments for this subscription
-    const invoices = await stripe.invoices.list({
-      subscription: subscriptionId,
-      status: 'paid',
-      limit: 1,
-    })
-
-    // If there are no paid invoices, this is the first payment attempt
-    const isFirstPayment = invoices.data.length === 0
-
-    logger.info(`🔍 Checked payment history for subscription ${subscriptionId}`, {
-      isFirstPayment,
-      paidInvoiceCount: invoices.data.length,
-    })
-
-    return isFirstPayment
+    // 100 facturas = años de mensualidades. Si hay más y ninguna de ésas trae dinero, no se puede probar que nunca pagó:
+    // se trata como recurrente (lo seguro), nunca como prueba (Codex D6 r1 #2).
+    const invoices = await stripe.invoices.list({ subscription: subscriptionId, status: 'paid', limit: 100 })
+    const historial: HistorialDePago =
+      invoices.data.some(i => (i.amount_paid ?? 0) > 0) || invoices.has_more
+        ? 'RECURRENTE'
+        : invoices.data.length > 0
+          ? 'TRAS_PRUEBA'
+          : 'NUEVO'
+    logger.info(`🔍 Checked payment history for subscription ${subscriptionId}`, { historial, paidInvoiceCount: invoices.data.length })
+    return historial
   } catch (error) {
     logger.error('❌ Error checking subscription payment history', {
       subscriptionId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })
-    // On error, assume it's NOT the first payment (safer to give grace period)
-    return false
+    return 'RECURRENTE'
   }
 }
 
@@ -2410,14 +2408,12 @@ export async function handlePaymentFailure(
     paymentFailureCount: attemptCount,
   }
 
-  // Check if this is the first payment attempt for this subscription
-  let isFirstPayment = false
-  if (attemptCount === 1) {
-    isFirstPayment = await isFirstSubscriptionPayment(subscriptionId)
-  }
+  // ¿De dónde viene? (D6): nuevo sin prueba, tras una prueba (4 días) o ya pagó antes (7 días).
+  const historial: HistorialDePago | null = attemptCount === 1 ? await historialDePago(subscriptionId) : null
+  const isFirstPayment = historial === 'NUEVO'
 
-  // Set grace period on first failure (7 days) - ONLY for returning customers
-  if (attemptCount === 1) {
+  // Grace period on first failure: none for a brand-new customer, 4 days after a trial, 7 days for a returning one.
+  if (attemptCount === 1 && historial) {
     if (isFirstPayment) {
       // First-time customer: Immediate suspension, NO grace period
       updateData.gracePeriodEndsAt = null
@@ -2428,8 +2424,12 @@ export async function handlePaymentFailure(
         reason: 'First payment attempt failed - no grace period for new customers',
       })
     } else {
-      // Returning customer: 7-day grace period
-      updateData.gracePeriodEndsAt = addDays(now, 7)
+      // Returning customer (7 days) or first real charge after a trial (4 days, D6). Access stays during the grace.
+      updateData.gracePeriodEndsAt = addDays(now, DIAS_DE_GRACIA[historial === 'TRAS_PRUEBA' ? 'TRAS_PRUEBA' : 'RECURRENTE'])
+      // 🔴 D6 (Codex r1 #1): tras una prueba, la fila guarda `endDate` = fin de la prueba, ya vencido, y el resolver negaba
+      // el plan desde el día 0 aunque hubiera gracia. Su vencimiento pasa al fin de la gracia: 4 días de acceso exactos y
+      // el corte llega solo, sin tarea aparte. Un pago que sí pasa lo limpia (`necesitaReactivacion` con gracia).
+      if (historial === 'TRAS_PRUEBA') updateData.endDate = updateData.gracePeriodEndsAt
       // active stays TRUE during grace period
       logger.info(`⏰ RETURNING CUSTOMER: Grace period granted for ${venueFeature.feature.name} (Venue: ${venueFeature.venue.name})`, {
         subscriptionId,
@@ -2559,7 +2559,11 @@ export async function handlePaymentFailure(
           venueName: venueFeature.venue.name,
           featureName: venueFeature.feature.name,
           suspendedAt: now,
-          gracePeriodEndsAt: updateData.gracePeriodEndsAt || addDays(now, 7),
+          // La baja definitiva es 7 días después de que venció la gracia (subscription-cancellation): con 4 días de gracia
+          // tras una prueba ya no coincide con «hoy + 7» (Codex D6 r1 #5).
+          gracePeriodEndsAt: venueFeature.gracePeriodEndsAt
+            ? addDays(venueFeature.gracePeriodEndsAt, 7)
+            : updateData.gracePeriodEndsAt || addDays(now, 7),
           billingPortalUrl,
           locale: target.locale,
         })
