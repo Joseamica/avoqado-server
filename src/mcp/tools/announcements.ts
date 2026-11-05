@@ -14,7 +14,7 @@ import { getAnnouncementForStaff, listAnnouncementsForStaff } from '@/services/a
 export function registerAnnouncementTools(server: McpServer, scope: McpScope) {
   server.tool(
     'list_announcements',
-    'Novedades y avisos que Avoqado te ha enviado: funciones nuevas, promociones de plan, mantenimientos. Devuelve sólo los que te llegaron a ti, del más reciente al más viejo, con si ya lo leíste. Úsalo cuando el usuario pregunte "¿qué hay de nuevo?", "¿qué novedades hay en Avoqado?" o "¿me llegó algún aviso?".',
+    'Novedades y avisos que Avoqado te ha enviado: funciones nuevas, promociones de plan, mantenimientos. Devuelve sólo los que te llegaron a ti, del más reciente al más viejo, con si ya lo leíste; los anuncios que no quedan en la campana no aparecen aquí. Úsalo cuando el usuario pregunte "¿qué hay de nuevo?", "¿qué novedades hay en Avoqado?" o "¿me llegó algún aviso?".',
     {
       limit: z.number().int().min(1).max(50).default(10).describe('Cuántos avisos devolver'),
       unreadOnly: z.boolean().default(false).describe('Sólo los que no has leído'),

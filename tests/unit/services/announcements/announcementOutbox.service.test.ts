@@ -35,6 +35,7 @@ const entrega = (over = {}) => ({
     body: 'Dos pantallas',
     actionLabel: 'Ver',
     priority: 'NORMAL',
+    showInInbox: true,
   },
   ...over,
 })
@@ -97,6 +98,27 @@ describe('announcementOutbox.service', () => {
         }),
       )
       expect(r.sent).toBe(1)
+    })
+
+    it('sin campana no crea Notification y marca SENT', async () => {
+      mockDelivFind.mockResolvedValue([entrega({ announcement: { ...entrega().announcement, showInInbox: false } })])
+      const r = await deliverClaimed(['d1'], { now: AHORA })
+      expect(mockNotifCreate).not.toHaveBeenCalled()
+      expect(mockNotifFirst).not.toHaveBeenCalled()
+      expect(mockDelivUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: 'd1', attempts: 1 }),
+          data: expect.objectContaining({ status: 'SENT', notificationId: null, deliveredAt: AHORA }),
+        }),
+      )
+      expect(r.sent).toBe(1)
+    })
+
+    it('sin campana, si el CAS no casa no cuenta como enviada', async () => {
+      mockDelivFind.mockResolvedValue([entrega({ announcement: { ...entrega().announcement, showInInbox: false } })])
+      mockDelivUpdate.mockResolvedValue({ count: 0 })
+      const r = await deliverClaimed(['d1'], { now: AHORA })
+      expect(r).toEqual({ sent: 0, failed: 0 })
     })
 
     // 🔴 El CAS: si otro worker tomo la fila mientras esta entregaba, el resultado
