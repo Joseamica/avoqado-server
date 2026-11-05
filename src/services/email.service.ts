@@ -265,6 +265,11 @@ export interface PlanFreeTrialEndingEmailData {
   timeZone?: string
   /** Clave de Resend: la misma prueba y fecha mandan UN correo aunque el job reintente. */
   idempotencyKey?: string
+  /**
+   * D3: Facturación del negocio, cuando todavía puede quedarse con su plan poniendo la tarjeta (primer cobro al terminar la
+   * prueba). Sin ella (le quedan menos de 3 días), el botón escribe a hola@avoqado.io como antes.
+   */
+  billingUrl?: string
 }
 
 export interface PlanWinbackEmailData {
@@ -5155,16 +5160,28 @@ Equipo de Avoqado`
     const subject = en
       ? `Your free Avoqado ${planName} trial ends on ${fecha}`
       : `Tu prueba gratis de Avoqado ${planName} termina el ${fecha}`
-    const ctaLabel = en ? `Keep ${planName}` : `Quiero seguir con ${planName}`
-    const ctaUrl = `mailto:hola@avoqado.io?subject=${encodeURIComponent(`${ctaLabel} · ${data.venueName}`)}`
+    const quedarse = !!data.billingUrl
+    const ctaLabel = quedarse
+      ? en
+        ? `Keep ${planName}`
+        : `Quedarme con ${planName}`
+      : en
+        ? `Keep ${planName}`
+        : `Quiero seguir con ${planName}`
+    const ctaUrl = data.billingUrl ?? `mailto:hola@avoqado.io?subject=${encodeURIComponent(`${ctaLabel} · ${data.venueName}`)}`
+    const correo = '<a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a>'
     const parrafos = en
       ? [
           `Your free Avoqado ${planName} trial ends on <strong>${fecha}</strong>. We won't charge you anything for this trial.`,
-          `After that date your business keeps working on the Free plan and your data stays as it is. To keep ${planName}, write to us at <a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a> and we'll help you sign up.`,
+          quedarse
+            ? `After that date your business keeps working on the Free plan and your data stays as it is. To keep ${planName}, add your card in Billing: you pay nothing today and the first charge is on the day your trial ends. Questions? Write to ${correo}.`
+            : `After that date your business keeps working on the Free plan and your data stays as it is. To keep ${planName}, write to us at ${correo} and we'll help you sign up.`,
         ]
       : [
           `Tu prueba gratis de Avoqado ${planName} termina el <strong>${fecha}</strong>. Por esta prueba no te cobraremos nada.`,
-          `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, escríbenos a <a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a> y te ayudamos a contratarlo.`,
+          quedarse
+            ? `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, pon tu tarjeta en Facturación: hoy no pagas nada y el primer cobro es el día que termina tu prueba. ¿Dudas? Escríbenos a ${correo}.`
+            : `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, escríbenos a ${correo} y te ayudamos a contratarlo.`,
         ]
     const greeting = en ? 'Hi,' : 'Hola,'
     const bodyHtml = `
@@ -5174,7 +5191,7 @@ Equipo de Avoqado`
 
 ${parrafos.map(p => p.replace(/<[^>]+>/g, '')).join('\n\n')}
 
-${ctaLabel}: hola@avoqado.io
+${ctaLabel}: ${data.billingUrl ?? 'hola@avoqado.io'}
 
 ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
 

@@ -633,6 +633,8 @@ describe('PlanRenewalReminderJob.runNow — pruebas regaladas sin tarjeta', () =
       planName: 'Pro',
       timeZone: 'America/Mexico_City',
       idempotencyKey: `prueba-regalada:vf9:${FIN.toISOString()}`,
+      // D3: con ≥ 72 h todavía puede quedarse con su plan desde Facturación.
+      billingUrl: expect.stringContaining('/venues/taqueria-el-patio/'),
     })
     expect(renewalSpy).not.toHaveBeenCalled()
     expect(mockPrisma.venueFeature.updateMany).toHaveBeenCalledWith({
@@ -787,5 +789,14 @@ describe('PlanRenewalReminderJob.runNow — pruebas regaladas sin tarjeta', () =
     await new PlanRenewalReminderJob().runNow()
     expect(renewalSpy).toHaveBeenCalledTimes(1)
     expect(freeSpy).not.toHaveBeenCalled()
+  })
+
+  it('D3: con menos de 3 días el botón ya no lleva a Facturación (ahí ya no se ofrece), sino a escribirnos', async () => {
+    const pronto = new Date(NOW + 2 * DAY)
+    conPruebas([prueba({ endDate: pronto })])
+    ;(getPlanState as jest.Mock).mockResolvedValue(cortesia(pronto))
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+    expect(freeSpy.mock.calls[0][1].billingUrl).toBeUndefined()
   })
 })

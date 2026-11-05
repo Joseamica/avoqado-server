@@ -31,6 +31,9 @@ import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
+import { elegirFilaDelPlan } from '../access/filaDelPlan'
+import { MARGEN_CHECKOUT_MS, finDePruebaDiferible } from '../billing/cobroDiferido'
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder, deleteFileFromStorage, estaEnLaCarpetaDelNegocio } from '../storage.service'
@@ -1667,7 +1670,11 @@ export async function createVenuePlanCheckoutSession(
   venueId: string,
   interval: 'monthly' | 'annual',
   tier: 'PRO' | 'PREMIUM',
-  options: { skipOrgCheck?: boolean } = {},
+  /**
+   * `primerCobroAnunciado` (D3): la fecha que el DASHBOARD mostró con «hoy $0». Si ya no se puede diferir, o la prueba
+   * cambió de fecha (el SUPERADMIN la acortó), 409 en vez de abrir un pago distinto de lo anunciado.
+   */
+  options: { skipOrgCheck?: boolean; primerCobroAnunciado?: string } = {},
 ): Promise<string> {
   const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
   logger.info('Creating plan checkout session', { venueId, interval, tier })
@@ -1759,18 +1766,47 @@ export async function createVenuePlanCheckoutSession(
   // antes, que miraban el ACCESO (un plan suspendido que Stripe sigue cobrando no contaba) y no impedían dos pestañas:
   // ahora se expiran las compras abiertas y se lee lo que el negocio tiene vivo en Stripe.
   const cliente = stripeCustomerId
-  const checkoutUrl = await autorizarObligacionNueva(venueId, cliente, { tipo: 'PLAN', tier }, () =>
-    createPlanCheckoutSession({
+  const checkoutUrl = await autorizarObligacionNueva(venueId, cliente, { tipo: 'PLAN', tier }, async () => {
+    // D3: dentro de la regla común (bajo su candado). Con una prueba regalada del MISMO plan, el primer cobro es el fin de
+    // la prueba; la fecha la decide el servidor, nunca el cliente.
+    const filas = await prisma.venueFeature.findMany({
+      where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+      select: {
+        id: true,
+        active: true,
+        endDate: true,
+        suspendedAt: true,
+        stripeSubscriptionId: true,
+        updatedAt: true,
+        feature: { select: { code: true } },
+      },
+      take: PAID_PLAN_TIER_CODES.length,
+    })
+    const trialEnd = finDePruebaDiferible(elegirFilaDelPlan(filas), tierCode, Date.now(), MARGEN_CHECKOUT_MS) ?? undefined
+    if (options.primerCobroAnunciado && !trialEnd) {
+      throw new ConflictError(
+        'A tu prueba le quedan menos de 2 días: podrás contratar tu plan en cuanto termine. Hoy no se te cobró nada.',
+        'COBRO_DIFERIDO_CADUCO',
+      )
+    }
+    if (options.primerCobroAnunciado && trialEnd && trialEnd.toISOString() !== options.primerCobroAnunciado) {
+      throw new ConflictError(
+        'La fecha de tu prueba cambió: revisa el día del primer cobro y vuelve a intentarlo. Hoy no se te cobró nada.',
+        'COBRO_DIFERIDO_CADUCO',
+      )
+    }
+    return createPlanCheckoutSession({
       venueId,
       customerId: cliente,
       interval,
       tierCode,
-      successUrl: `${billingBase}?checkout=success`,
+      successUrl: `${billingBase}?checkout=success${trialEnd ? '&sinCobroHoy=1' : ''}`,
       cancelUrl: `${billingBase}?checkout=cancel`,
       venueName: venue.name,
       venueSlug: venue.slug,
-    }),
-  )
+      trialEnd,
+    })
+  })
 
   logger.info('✅ Plan checkout session created', {
     venueId,

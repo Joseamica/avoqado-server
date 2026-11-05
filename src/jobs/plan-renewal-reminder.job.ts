@@ -43,6 +43,7 @@ import { billingPageUrl } from '@/utils/dashboardLinks'
 import { zonaValida } from '@/utils/datetime'
 import { scheduleJob } from '../observability/jobContext'
 import { getPlanState } from '@/services/dashboard/planState.service'
+import { MARGEN_OFERTA_MS } from '@/services/billing/cobroDiferido'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 const DIA_MS = 86400000
@@ -173,6 +174,9 @@ export class PlanRenewalReminderJob {
             timeZone: zonaValida(vf.venue?.timezone),
             // Same row and date → one email at the provider even if the stamp below is lost (its window is 24 h).
             idempotencyKey: `prueba-regalada:${vf.id}:${fin.toISOString()}`,
+            // D3: mientras Facturación ofrezca «Quedarme con mi plan» (≥ 72 h; la consulta ya garantiza prueba regalada
+            // activa, sin Stripe ni suspender), el botón lleva ahí; si no, a hola@avoqado.io.
+            ...(fin.getTime() - now >= MARGEN_OFERTA_MS ? { billingUrl: billingPageUrl(vf.venue?.slug) } : {}),
           })
           // Not delivered → no stamp, so the next daily run retries.
           if (!sent) continue

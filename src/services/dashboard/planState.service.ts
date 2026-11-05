@@ -27,6 +27,7 @@ import { resolvePlanNotificationTarget } from '@/services/access/planNotificatio
 import { cancellationAuditData, toStripeCancellationDetails, type CancellationInput } from '@/services/shared/cancellationReason'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { MARGEN_OFERTA_MS, finDePruebaDiferible } from '../billing/cobroDiferido'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
 const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
@@ -141,6 +142,11 @@ export interface PlanOrigin {
   subscriptionId: string | null
   /** The contract purchase's last billing issue, for "pago pendiente". */
   paymentIssue: string | null
+  /**
+   * D3: COMP con fecha (prueba REGALADA) — el día del primer cobro si el dueño se queda HOY con su plan (= fin de la
+   * prueba). Sólo cuando faltan ≥ 72 h (`MARGEN_OFERTA_MS`); si no, `null` y Facturación no lo ofrece. Opcional y nuevo.
+   */
+  firstChargeAt?: string | null
 }
 
 const NO_ORIGIN: PlanOrigin = {
@@ -346,7 +352,13 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       ? classicOrigin(tier, stripeSub, price, vf.stripeSubscriptionId)
       : await planContractOrigin(venueId)
   if (origin.kind === 'NONE' && inWindow) {
-    origin = { ...NO_ORIGIN, kind: 'COMP', tier, currentPeriodEnd: vf.endDate ? vf.endDate.toISOString() : null }
+    origin = {
+      ...NO_ORIGIN,
+      kind: 'COMP',
+      tier,
+      currentPeriodEnd: vf.endDate ? vf.endDate.toISOString() : null,
+      firstChargeAt: finDePruebaDiferible(vf, vf.feature.code, now.getTime(), MARGEN_OFERTA_MS)?.toISOString() ?? null,
+    }
   }
   const pauseOfferEligible = Boolean(
     stripeSub &&

@@ -85,4 +85,18 @@ describe('sendPlanFreeTrialEndingEmail', () => {
     const { html } = enviado()
     expect(html).not.toContain('<b>&</b>')
   })
+
+  // D3: mientras pueda quedarse con su plan, el botón lleva a Facturación y el texto dice que hoy no paga nada.
+  it('con billingUrl: «Quedarme con Pro» a Facturación, hoy no paga y primer cobro al terminar', async () => {
+    const LIGA = 'https://dashboard.avoqado.io/venues/taqueria/settings/billing/subscriptions'
+    await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { locale: 'es', venueName: 'Taqueria', endDate: FIN, billingUrl: LIGA })
+    const { html, text } = enviado()
+    expect(html).toContain(`href="${LIGA}"`)
+    expect(html).toContain('Quedarme con Pro')
+    for (const cuerpo of [html, text]) {
+      expect(cuerpo).toContain('hoy no pagas nada y el primer cobro es el día que termina tu prueba')
+      expect(cuerpo).not.toMatch(/\$\d/)
+    }
+    expect(text).toContain(LIGA)
+  })
 })
