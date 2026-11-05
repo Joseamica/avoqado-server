@@ -20,6 +20,20 @@ describe('UpdateLoyaltyConfigSchema — bono por visita (D7)', () => {
     expect(parse({ pointsPerVisit: -1 }).success).toBe(false)
     expect(parse({ pointsPerVisit: 1.5 }).success).toBe(false)
   })
+
+  it('deja pasar lo demás que manda el panel: prender o apagar, el mínimo y la caducidad (o sin caducidad)', () => {
+    const r = parse({ active: false, minPointsRedeem: 50, pointsExpireDays: null })
+    expect(r.success && r.data.body).toEqual({ active: false, minPointsRedeem: 50, pointsExpireDays: null })
+    expect(parse({ pointsExpireDays: 365 }).success).toBe(true)
+  })
+
+  it('rechaza, en español, un mínimo o una caducidad negativos o con decimales', () => {
+    for (const malo of [{ minPointsRedeem: -1 }, { minPointsRedeem: 1.5 }, { pointsExpireDays: -5 }, { pointsExpireDays: 2.5 }]) {
+      const r = parse(malo)
+      expect(r.success).toBe(false)
+      if (!r.success) expect(r.error.issues[0].message).toMatch(/[áéíóúñ]|no puede|enteros/)
+    }
+  })
 })
 
 describe('UpdateLoyaltyConfigSchema — campos de sellos', () => {
