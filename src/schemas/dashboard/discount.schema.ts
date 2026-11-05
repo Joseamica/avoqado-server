@@ -39,12 +39,14 @@ export const getDiscountsQuerySchema = z.object({
 // CREATE SCHEMAS
 // ==========================================
 
+const SIN_CATEGORIAS = 'Elige al menos una categoría para un descuento por categorías'
+
 export const createDiscountBodySchema = z
   .object({
-    name: z.string().min(1, 'Name is required').max(100, 'Name too long'),
-    description: z.string().max(500, 'Description too long').optional(),
+    name: z.string().min(1, 'El nombre es obligatorio').max(100, 'El nombre puede tener hasta 100 caracteres'),
+    description: z.string().max(500, 'La descripción puede tener hasta 500 caracteres').optional(),
     type: DiscountTypeSchema,
-    value: z.number().min(0, 'Value must be positive'),
+    value: z.number().min(0, 'El valor del descuento no puede ser negativo'),
     scope: DiscountScopeSchema.default('ORDER'),
 
     // Target IDs
@@ -76,11 +78,11 @@ export const createDiscountBodySchema = z
     daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
     timeFrom: z
       .string()
-      .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
+      .regex(/^\d{2}:\d{2}$/, 'La hora debe tener formato HH:MM')
       .optional(),
     timeUntil: z
       .string()
-      .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
+      .regex(/^\d{2}:\d{2}$/, 'La hora debe tener formato HH:MM')
       .optional(),
 
     // Usage limits
@@ -110,7 +112,7 @@ export const createDiscountBodySchema = z
       }
       return true
     },
-    { message: 'Percentage discount value must be between 0 and 100' },
+    { message: 'El porcentaje del descuento debe estar entre 0 y 100' },
   )
   .refine(
     data => {
@@ -120,7 +122,7 @@ export const createDiscountBodySchema = z
       }
       return true
     },
-    { message: 'BOGO discounts require both buyQuantity and getQuantity' },
+    { message: 'Para «Compra X y lleva Y» indica cuántos se compran y cuántos se llevan' },
   )
   .refine(
     data => {
@@ -130,7 +132,7 @@ export const createDiscountBodySchema = z
       }
       return true
     },
-    { message: 'Both timeFrom and timeUntil must be provided together' },
+    { message: 'El horario necesita hora de inicio y hora de fin' },
   )
   .refine(
     data => {
@@ -140,84 +142,94 @@ export const createDiscountBodySchema = z
       }
       return true
     },
-    { message: 'validFrom must be before validUntil' },
+    { message: 'La fecha de inicio debe ser antes de la fecha de fin' },
   )
+  // D14 (5-nov-2026): el panel dejaba guardar «Categorías» sin elegir ninguna. Una lista vacía las apps la leen como
+  // «todas» y el motor del panel como «ninguna»: nadie la pidió así.
+  .refine(data => data.scope !== 'CATEGORY' || (data.targetCategoryIds?.length ?? 0) > 0, {
+    message: SIN_CATEGORIAS, // sin `path`: el 400 sale «Error de validación: Elige…», sin el nombre del campo en inglés
+  })
 
 // ==========================================
 // UPDATE SCHEMAS
 // ==========================================
 
-export const updateDiscountBodySchema = z.object({
-  name: z.string().min(1, 'Name is required').max(100, 'Name too long').optional(),
-  description: z.string().max(500, 'Description too long').optional().nullable(),
-  type: DiscountTypeSchema.optional(),
-  value: z.number().min(0, 'Value must be positive').optional(),
-  scope: DiscountScopeSchema.optional(),
+export const updateDiscountBodySchema = z
+  .object({
+    name: z.string().min(1, 'El nombre es obligatorio').max(100, 'El nombre puede tener hasta 100 caracteres').optional(),
+    description: z.string().max(500, 'La descripción puede tener hasta 500 caracteres').optional().nullable(),
+    type: DiscountTypeSchema.optional(),
+    value: z.number().min(0, 'El valor del descuento no puede ser negativo').optional(),
+    scope: DiscountScopeSchema.optional(),
 
-  // Target IDs
-  targetItemIds: z.array(z.string()).optional(),
-  targetCategoryIds: z.array(z.string()).optional(),
-  targetModifierIds: z.array(z.string()).optional(),
-  targetModifierGroupIds: z.array(z.string()).optional(),
-  customerGroupId: z.string().optional().nullable(),
+    // Target IDs
+    targetItemIds: z.array(z.string()).optional(),
+    targetCategoryIds: z.array(z.string()).optional(),
+    targetModifierIds: z.array(z.string()).optional(),
+    targetModifierGroupIds: z.array(z.string()).optional(),
+    customerGroupId: z.string().optional().nullable(),
 
-  // Automatic application
-  isAutomatic: z.boolean().optional(),
-  priority: z.number().int().min(0).optional(),
+    // Automatic application
+    isAutomatic: z.boolean().optional(),
+    priority: z.number().int().min(0).optional(),
 
-  // Rules
-  minPurchaseAmount: z.number().min(0).optional().nullable(),
-  maxDiscountAmount: z.number().min(0).optional().nullable(),
-  minQuantity: z.number().int().min(1).optional().nullable(),
+    // Rules
+    minPurchaseAmount: z.number().min(0).optional().nullable(),
+    maxDiscountAmount: z.number().min(0).optional().nullable(),
+    minQuantity: z.number().int().min(1).optional().nullable(),
 
-  // BOGO
-  buyQuantity: z.number().int().min(1).optional().nullable(),
-  getQuantity: z.number().int().min(1).optional().nullable(),
-  getDiscountPercent: z.number().min(0).max(100).optional().nullable(),
-  buyItemIds: z.array(z.string()).optional(),
-  getItemIds: z.array(z.string()).optional(),
+    // BOGO
+    buyQuantity: z.number().int().min(1).optional().nullable(),
+    getQuantity: z.number().int().min(1).optional().nullable(),
+    getDiscountPercent: z.number().min(0).max(100).optional().nullable(),
+    buyItemIds: z.array(z.string()).optional(),
+    getItemIds: z.array(z.string()).optional(),
 
-  // Time-based
-  validFrom: z.coerce.date().optional().nullable(),
-  validUntil: z.coerce.date().optional().nullable(),
-  daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
-  timeFrom: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
-    .optional()
-    .nullable(),
-  timeUntil: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/, 'Time format must be HH:MM')
-    .optional()
-    .nullable(),
+    // Time-based
+    validFrom: z.coerce.date().optional().nullable(),
+    validUntil: z.coerce.date().optional().nullable(),
+    daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+    timeFrom: z
+      .string()
+      .regex(/^\d{2}:\d{2}$/, 'La hora debe tener formato HH:MM')
+      .optional()
+      .nullable(),
+    timeUntil: z
+      .string()
+      .regex(/^\d{2}:\d{2}$/, 'La hora debe tener formato HH:MM')
+      .optional()
+      .nullable(),
 
-  // Usage limits
-  maxTotalUses: z.number().int().min(1).optional().nullable(),
-  maxUsesPerCustomer: z.number().int().min(1).optional().nullable(),
+    // Usage limits
+    maxTotalUses: z.number().int().min(1).optional().nullable(),
+    maxUsesPerCustomer: z.number().int().min(1).optional().nullable(),
 
-  // Comp-specific
-  requiresApproval: z.boolean().optional(),
-  compReason: z.string().max(500).optional().nullable(),
+    // Comp-specific
+    requiresApproval: z.boolean().optional(),
+    compReason: z.string().max(500).optional().nullable(),
 
-  // Tax handling
-  applyBeforeTax: z.boolean().optional(),
-  modifyTaxBasis: z.boolean().optional(),
+    // Tax handling
+    applyBeforeTax: z.boolean().optional(),
+    modifyTaxBasis: z.boolean().optional(),
 
-  // Stacking
-  isStackable: z.boolean().optional(),
-  stackPriority: z.number().int().min(0).optional(),
+    // Stacking
+    isStackable: z.boolean().optional(),
+    stackPriority: z.number().int().min(0).optional(),
 
-  // Status
-  active: z.boolean().optional(),
-})
+    // Status
+    active: z.boolean().optional(),
+  })
+  // Al editar sólo se rechaza la lista vacía explícita: un cambio que no manda la lista (prender o apagar) la conserva.
+  .refine(data => !(data.scope === 'CATEGORY' && data.targetCategoryIds?.length === 0), {
+    message: SIN_CATEGORIAS,
+  })
 
 // ==========================================
 // CUSTOMER DISCOUNT SCHEMAS
 // ==========================================
 
 export const assignDiscountToCustomerBodySchema = z.object({
-  customerId: z.string().min(1, 'Customer ID is required'),
+  customerId: z.string().min(1, 'Elige un cliente'),
   validFrom: z.coerce.date().optional(),
   validUntil: z.coerce.date().optional(),
   maxUses: z.number().int().min(1).optional(),
@@ -234,12 +246,12 @@ export const removeDiscountFromCustomerParamsSchema = z.object({
 // ==========================================
 
 export const discountParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  discountId: z.string().min(1, 'Discount ID is required'),
+  venueId: z.string().min(1, 'Falta el negocio'),
+  discountId: z.string().min(1, 'Falta el descuento'),
 })
 
 export const venueParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
+  venueId: z.string().min(1, 'Falta el negocio'),
 })
 
 // ==========================================

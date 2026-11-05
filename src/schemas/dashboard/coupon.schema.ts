@@ -36,12 +36,12 @@ export const getRedemptionsQuerySchema = z.object({
 
 export const createCouponBodySchema = z
   .object({
-    discountId: z.string().min(1, 'Discount ID is required'),
+    discountId: z.string().min(1, 'Elige el descuento del cupón'),
     code: z
       .string()
-      .min(3, 'Code must be at least 3 characters')
-      .max(30, 'Code must be at most 30 characters')
-      .regex(/^[A-Za-z0-9-_]+$/, 'Code can only contain letters, numbers, hyphens, and underscores'),
+      .min(3, 'El código debe tener al menos 3 caracteres')
+      .max(30, 'El código puede tener hasta 30 caracteres')
+      .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos'),
     maxUses: z.number().int().min(1).optional(),
     maxUsesPerCustomer: z.number().int().min(1).optional(),
     minPurchaseAmount: z.number().min(0).optional(),
@@ -57,7 +57,7 @@ export const createCouponBodySchema = z
       }
       return true
     },
-    { message: 'validFrom must be before validUntil' },
+    { message: 'La fecha de inicio debe ser antes de la fecha de fin' },
   )
 
 // ==========================================
@@ -67,9 +67,9 @@ export const createCouponBodySchema = z
 export const updateCouponBodySchema = z.object({
   code: z
     .string()
-    .min(3, 'Code must be at least 3 characters')
-    .max(30, 'Code must be at most 30 characters')
-    .regex(/^[A-Za-z0-9-_]+$/, 'Code can only contain letters, numbers, hyphens, and underscores')
+    .min(3, 'El código debe tener al menos 3 caracteres')
+    .max(30, 'El código puede tener hasta 30 caracteres')
+    .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
   maxUses: z.number().int().min(1).optional().nullable(),
   maxUsesPerCustomer: z.number().int().min(1).optional().nullable(),
@@ -84,13 +84,13 @@ export const updateCouponBodySchema = z.object({
 // ==========================================
 
 export const bulkGenerateCouponsBodySchema = z.object({
-  discountId: z.string().min(1, 'Discount ID is required'),
+  discountId: z.string().min(1, 'Elige el descuento del cupón'),
   prefix: z
     .string()
-    .max(10, 'Prefix must be at most 10 characters')
-    .regex(/^[A-Za-z0-9-_]*$/, 'Prefix can only contain letters, numbers, hyphens, and underscores')
+    .max(10, 'El prefijo puede tener hasta 10 caracteres')
+    .regex(/^[A-Za-z0-9-_]*$/, 'El prefijo sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
-  quantity: z.number().int().min(1, 'Quantity must be at least 1').max(1000, 'Quantity must be at most 1000'),
+  quantity: z.number().int().min(1, 'La cantidad debe ser al menos 1').max(1000, 'La cantidad puede ser hasta 1000'),
   codeLength: z.number().int().min(4).max(20).default(8),
   maxUsesPerCode: z.number().int().min(1).optional(),
   maxUsesPerCustomer: z.number().int().min(1).optional(),
@@ -123,12 +123,12 @@ export const recordRedemptionBodySchema = z.object({
 // ==========================================
 
 export const couponParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  couponId: z.string().min(1, 'Coupon ID is required'),
+  venueId: z.string().min(1, 'Falta el negocio'),
+  couponId: z.string().min(1, 'Falta el cupón'),
 })
 
 export const venueParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
+  venueId: z.string().min(1, 'Falta el negocio'),
 })
 
 // ==========================================

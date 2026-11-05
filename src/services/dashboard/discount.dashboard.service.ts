@@ -313,7 +313,7 @@ export async function getDiscountById(venueId: string, discountId: string) {
   })
 
   if (!discount) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   // Uso: dos conteos acotados (nunca se cargan filas). `pos` = todo lo que no vino de una liga de pago.
@@ -346,14 +346,14 @@ export async function createDiscount(venueId: string, data: CreateDiscountReques
       where: { id: data.customerGroupId, venueId },
     })
     if (!group) {
-      throw new BadRequestError('Customer group not found')
+      throw new BadRequestError('El grupo de clientes no existe en este negocio')
     }
   }
 
   // Validate BOGO configuration
   if (data.scope === 'QUANTITY' || data.buyQuantity || data.getQuantity) {
     if (!data.buyQuantity || !data.getQuantity) {
-      throw new BadRequestError('BOGO discounts require both buyQuantity and getQuantity')
+      throw new BadRequestError('Para «Compra X y lleva Y» indica cuántos se compran y cuántos se llevan')
     }
     if (data.getDiscountPercent === undefined) {
       data.getDiscountPercent = 100 // Default: free item
@@ -362,20 +362,20 @@ export async function createDiscount(venueId: string, data: CreateDiscountReques
 
   // Validate time-based configuration
   if (data.timeFrom && !data.timeUntil) {
-    throw new BadRequestError('timeUntil is required when timeFrom is set')
+    throw new BadRequestError('Indica también la hora de fin del horario')
   }
   if (data.timeUntil && !data.timeFrom) {
-    throw new BadRequestError('timeFrom is required when timeUntil is set')
+    throw new BadRequestError('Indica también la hora de inicio del horario')
   }
 
   // Validate value based on type
   if (data.type === 'PERCENTAGE') {
     if (data.value < 0 || data.value > 100) {
-      throw new BadRequestError('Percentage discount value must be between 0 and 100')
+      throw new BadRequestError('El porcentaje del descuento debe estar entre 0 y 100')
     }
   } else if (data.type === 'FIXED_AMOUNT') {
     if (data.value < 0) {
-      throw new BadRequestError('Fixed amount discount value must be positive')
+      throw new BadRequestError('El monto del descuento no puede ser negativo')
     }
   } else if (data.type === 'COMP') {
     data.value = 100 // Comp is always 100%
@@ -462,7 +462,7 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
     where: { id: discountId, venueId },
   })
   if (!existing) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   // Validate customer group if provided
@@ -471,7 +471,7 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
       where: { id: data.customerGroupId, venueId },
     })
     if (!group) {
-      throw new BadRequestError('Customer group not found')
+      throw new BadRequestError('El grupo de clientes no existe en este negocio')
     }
   }
 
@@ -481,11 +481,11 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
 
   if (type === 'PERCENTAGE') {
     if (value < 0 || value > 100) {
-      throw new BadRequestError('Percentage discount value must be between 0 and 100')
+      throw new BadRequestError('El porcentaje del descuento debe estar entre 0 y 100')
     }
   } else if (type === 'FIXED_AMOUNT') {
     if (value < 0) {
-      throw new BadRequestError('Fixed amount discount value must be positive')
+      throw new BadRequestError('El monto del descuento no puede ser negativo')
     }
   }
 
@@ -566,7 +566,7 @@ export async function deleteDiscount(venueId: string, discountId: string): Promi
     where: { id: discountId, venueId },
   })
   if (!existing) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   await prisma.discount.delete({
@@ -596,7 +596,7 @@ export async function cloneDiscount(venueId: string, discountId: string, created
     where: { id: discountId, venueId },
   })
   if (!original) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   const clone = await prisma.discount.create({
@@ -778,7 +778,7 @@ export async function assignDiscountToCustomer(
     where: { id: discountId, venueId },
   })
   if (!discount) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   // Verify customer exists and belongs to venue
@@ -786,7 +786,7 @@ export async function assignDiscountToCustomer(
     where: { id: customerId, venueId },
   })
   if (!customer) {
-    throw new NotFoundError('Customer not found')
+    throw new NotFoundError('El cliente no existe')
   }
 
   // Check if already assigned
@@ -850,7 +850,7 @@ export async function removeDiscountFromCustomer(venueId: string, discountId: st
     where: { id: discountId, venueId },
   })
   if (!discount) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   const assignment = await prisma.customerDiscount.findUnique({
@@ -860,7 +860,7 @@ export async function removeDiscountFromCustomer(venueId: string, discountId: st
   })
 
   if (!assignment) {
-    throw new NotFoundError('Customer discount assignment not found')
+    throw new NotFoundError('Ese cliente no tiene asignado este descuento')
   }
 
   await prisma.customerDiscount.delete({
@@ -882,7 +882,7 @@ export async function getCustomerDiscounts(venueId: string, customerId: string) 
     where: { id: customerId, venueId },
   })
   if (!customer) {
-    throw new NotFoundError('Customer not found')
+    throw new NotFoundError('El cliente no existe')
   }
 
   const assignments = await prisma.customerDiscount.findMany({

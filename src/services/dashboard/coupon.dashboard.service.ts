@@ -256,7 +256,7 @@ export async function getCouponCodeById(venueId: string, couponId: string) {
   })
 
   if (!coupon) {
-    throw new NotFoundError('Coupon code not found')
+    throw new NotFoundError('El cupón no existe')
   }
 
   return {
@@ -292,7 +292,7 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
     where: { id: data.discountId, venueId },
   })
   if (!discount) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   // Normalize code to uppercase
@@ -303,16 +303,16 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
     where: { code: normalizedCode },
   })
   if (existingCode) {
-    throw new BadRequestError(`Coupon code "${normalizedCode}" already exists`)
+    throw new BadRequestError(`Ya existe un cupón con el código "${normalizedCode}"`)
   }
 
   // Validate code format
   if (!/^[A-Z0-9-_]+$/.test(normalizedCode)) {
-    throw new BadRequestError('Coupon code can only contain letters, numbers, hyphens, and underscores')
+    throw new BadRequestError('El código sólo puede tener letras, números, guiones y guiones bajos')
   }
 
   if (normalizedCode.length < 3 || normalizedCode.length > 30) {
-    throw new BadRequestError('Coupon code must be between 3 and 30 characters')
+    throw new BadRequestError('El código debe tener entre 3 y 30 caracteres')
   }
 
   const coupon = await prisma.couponCode.create({
@@ -372,7 +372,7 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
     where: { id: couponId, discount: { venueId } },
   })
   if (!existing) {
-    throw new NotFoundError('Coupon code not found')
+    throw new NotFoundError('El cupón no existe')
   }
 
   // If updating code, normalize and check uniqueness
@@ -382,11 +382,11 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
 
     // Validate code format
     if (!/^[A-Z0-9-_]+$/.test(normalizedCode)) {
-      throw new BadRequestError('Coupon code can only contain letters, numbers, hyphens, and underscores')
+      throw new BadRequestError('El código sólo puede tener letras, números, guiones y guiones bajos')
     }
 
     if (normalizedCode.length < 3 || normalizedCode.length > 30) {
-      throw new BadRequestError('Coupon code must be between 3 and 30 characters')
+      throw new BadRequestError('El código debe tener entre 3 y 30 caracteres')
     }
 
     // Check uniqueness if code is different
@@ -395,7 +395,7 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
         where: { code: normalizedCode },
       })
       if (existingCode) {
-        throw new BadRequestError(`Coupon code "${normalizedCode}" already exists`)
+        throw new BadRequestError(`Ya existe un cupón con el código "${normalizedCode}"`)
       }
     }
   }
@@ -455,7 +455,7 @@ export async function deleteCouponCode(venueId: string, couponId: string): Promi
     where: { id: couponId, discount: { venueId } },
   })
   if (!existing) {
-    throw new NotFoundError('Coupon code not found')
+    throw new NotFoundError('El cupón no existe')
   }
 
   await prisma.couponCode.delete({
@@ -501,16 +501,16 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
     where: { id: data.discountId, venueId },
   })
   if (!discount) {
-    throw new NotFoundError('Discount not found')
+    throw new NotFoundError('El descuento no existe')
   }
 
   if (data.quantity < 1 || data.quantity > 1000) {
-    throw new BadRequestError('Quantity must be between 1 and 1000')
+    throw new BadRequestError('La cantidad debe estar entre 1 y 1000')
   }
 
   const codeLength = data.codeLength ?? 8
   if (codeLength < 4 || codeLength > 20) {
-    throw new BadRequestError('Code length must be between 4 and 20')
+    throw new BadRequestError('El largo del código debe estar entre 4 y 20')
   }
 
   const prefix = data.prefix?.toUpperCase().trim() ?? ''
@@ -533,7 +533,7 @@ export async function bulkGenerateCouponCodes(venueId: string, data: BulkGenerat
   }
 
   if (codes.length < data.quantity) {
-    throw new BadRequestError(`Could only generate ${codes.length} unique codes. Try increasing code length.`)
+    throw new BadRequestError(`Sólo se pudieron generar ${codes.length} códigos únicos. Prueba con códigos más largos.`)
   }
 
   // Bulk create
