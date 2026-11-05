@@ -253,6 +253,20 @@ export interface PlanRenewalReminderEmailData {
   timeZone?: string
 }
 
+/** Prueba REGALADA del plan (SUPERADMIN «Dar días de prueba», sin tarjeta): se acaba y no se cobra nada. */
+export interface PlanFreeTrialEndingEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  /** Último día de la prueba (`VenueFeature.endDate`). */
+  endDate: Date
+  /** Por defecto `'Pro'`. */
+  planName?: string
+  /** Zona del negocio para escribir la fecha. Por defecto Ciudad de México. */
+  timeZone?: string
+  /** Clave de Resend: la misma prueba y fecha mandan UN correo aunque el job reintente. */
+  idempotencyKey?: string
+}
+
 export interface PlanWinbackEmailData {
   locale: 'es' | 'en'
   venueName: string
@@ -5122,6 +5136,57 @@ Equipo de Avoqado`
     })
 
     return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  /**
+   * Aviso de que se acaba una prueba REGALADA del plan (sin tarjeta), del job `plan-renewal-reminder` (D2, 5-nov-2026).
+   * No hay cobro que anunciar. Durante la prueba Facturación la muestra «de cortesía» y no deja contratar, así que el
+   * botón abre un correo a hola@avoqado.io en vez de mandar a pagar.
+   */
+  async sendPlanFreeTrialEndingEmail(email: string, data: PlanFreeTrialEndingEmailData): Promise<boolean> {
+    const en = data.locale === 'en'
+    const planName = data.planName ?? 'Pro'
+    const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: zonaValida(data.timeZone),
+    })
+    const subject = en
+      ? `Your free Avoqado ${planName} trial ends on ${fecha}`
+      : `Tu prueba gratis de Avoqado ${planName} termina el ${fecha}`
+    const ctaLabel = en ? `Keep ${planName}` : `Quiero seguir con ${planName}`
+    const ctaUrl = `mailto:hola@avoqado.io?subject=${encodeURIComponent(`${ctaLabel} · ${data.venueName}`)}`
+    const parrafos = en
+      ? [
+          `Your free Avoqado ${planName} trial ends on <strong>${fecha}</strong>. We won't charge you anything for this trial.`,
+          `After that date your business keeps working on the Free plan and your data stays as it is. To keep ${planName}, write to us at <a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a> and we'll help you sign up.`,
+        ]
+      : [
+          `Tu prueba gratis de Avoqado ${planName} termina el <strong>${fecha}</strong>. Por esta prueba no te cobraremos nada.`,
+          `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, escríbenos a <a href="mailto:hola@avoqado.io" style="color: #000;">hola@avoqado.io</a> y te ayudamos a contratarlo.`,
+        ]
+    const greeting = en ? 'Hi,' : 'Hola,'
+    const bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      ${parrafos.map(p => `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${p}</p>`).join('\n      ')}`
+    const text = `${greeting}
+
+${parrafos.map(p => p.replace(/<[^>]+>/g, '')).join('\n\n')}
+
+${ctaLabel}: hola@avoqado.io
+
+${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
+
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: escapeHtml(data.venueName),
+      bodyHtml,
+      ctaLabel,
+      ctaUrl,
+    })
+    return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
   }
 
   /**
