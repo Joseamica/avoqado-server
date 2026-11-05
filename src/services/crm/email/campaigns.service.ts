@@ -4,9 +4,9 @@
  *
  * 🔴 Lo que no se negocia:
  *  - Nunca sale un contenido que no se probó ni se confirmó. «Envíame una prueba» deja la huella de ESA versión
- *    (`testSentHash`) y la vista previa firma contenido + público + conteo (token de 15 min); el encolado revisa las dos
- *    cosas con la fila de la campaña BLOQUEADA, así que una edición que llega a la vez espera y luego ya no la encuentra en
- *    BORRADOR (o el envío encuentra el contenido cambiado y da 409).
+ *    (`testSentHash`) y la vista previa firma contenido + público + conteo + las PERSONAS contadas (`conjuntoHash`; token de
+ *    15 min); el encolado revisa todo con la fila de la campaña BLOQUEADA, así que una edición que llega a la vez espera y
+ *    luego ya no la encuentra en BORRADOR (o el envío encuentra el contenido cambiado, o a otras personas, y da 409).
  *  - El encolado es UNA transacción: o quedan la campaña en ENVIANDO y TODAS sus deliveries, o nada. El remitente nunca ve
  *    una campaña a medias.
  */
@@ -128,6 +128,11 @@ interface Confirmacion {
   contentHash: string
   audienceHash: string
   total: number
+  /**
+   * Las personas que se contaron (sha256 de sus correos, ya sin bajas, en el orden del recorrido): mismo total con otra gente no es lo
+   * que se confirmó (Codex r1 #5). Ausente en un token firmado antes del despliegue: ése se valida como antes (dura 15 min).
+   */
+  conjuntoHash?: string
   exp: number
 }
 
@@ -155,6 +160,7 @@ function leerConfirmacion(token: string): Confirmacion | null {
       typeof p.contentHash === 'string' &&
       typeof p.audienceHash === 'string' &&
       Number.isInteger(p.total) &&
+      (p.conjuntoHash === undefined || typeof p.conjuntoHash === 'string') &&
       typeof p.exp === 'number'
     return forma ? p : null
   } catch {
@@ -366,7 +372,8 @@ export async function updateCampaign(actor: CrmAccess, id: string, input: Cambio
 /**
  * A cuántos les llega ahora mismo, por público, cuántos se quedan fuera por baja, y el token para confirmar ESTO. Con `huella` (la de
  * la versión que pinta la pantalla), si la campaña ya cambió: 409 y no se firma nada. Sin ella (la pantalla vieja), igual que antes.
- * Con 0 personas no se firma: `token: null` (el campo sigue; el encolado también rechaza sin destinatarios).
+ * Con 0 personas no se firma: `token: null` (el campo sigue; el encolado también rechaza sin destinatarios). El token también firma a
+ * QUIÉNES se contó (`conjuntoHash`), que no sale en la respuesta ni cambia la `huella`.
  */
 export async function previewSend(_actor: CrmAccess, id: string, huella?: string) {
   const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { status: true, subject: true, blocks: true, audience: true } })
@@ -379,7 +386,7 @@ export async function previewSend(_actor: CrmAccess, id: string, huella?: string
     )
   }
   const audiencia = audienciaDe(fila.audience)
-  const { total, porSegmento, bloqueados } = await contarAudiencia(audiencia)
+  const { total, porSegmento, bloqueados, conjuntoHash } = await contarAudiencia(audiencia)
   const token =
     total > 0
       ? firmarConfirmacion({
@@ -387,6 +394,7 @@ export async function previewSend(_actor: CrmAccess, id: string, huella?: string
           contentHash: contentHash(fila.subject, bloquesDe(fila)),
           audienceHash: audienceHash(audiencia),
           total,
+          conjuntoHash,
           exp: Date.now() + VIGENCIA_MS,
         })
       : null
@@ -465,7 +473,7 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
       // 2. Las deliveries, por lote (recorrerAudiencia ya junta repetidos y quita bloqueados; `skipDuplicates` es la segunda capa).
       // ponytail: una transacción alcanza hasta ~50 mil destinatarios; más allá, un estado PREPARANDO reanudable.
       let creadas = 0
-      await recorrerAudiencia(audiencia, async lote => {
+      const { conjuntoHash } = await recorrerAudiencia(audiencia, async lote => {
         const { count: n } = await tx.crmCampaignDelivery.createMany({
           data: lote.map(d => ({
             campaignId: id,
@@ -481,7 +489,7 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
         creadas += n
       })
 
-      // Más de los que se confirmaron: se deshace todo. Menos (alguien se dio de baja) sí sigue.
+      // Más de los que se confirmaron: se deshace todo, con el código de siempre.
       if (creadas > confirmado) {
         throw new ConflictError(
           `El público creció (${confirmado} → ${creadas}): revísalo y confirma otra vez`,
@@ -493,6 +501,11 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
         )
       }
       if (creadas === 0) throw new ConflictError('No hay a quién mandarle esta campaña', 'CRM_CAMPANA_SIN_DESTINATARIOS')
+      // Las mismas cuántas no son las mismas personas (Codex r1 #5): si salió alguien y entró otro, o alguien se dio de baja, lo que
+      // sale ya no es lo que se confirmó. Se deshace todo. Un token de antes del despliegue (sin `conjuntoHash`) sigue como antes.
+      if (confirmacion.conjuntoHash !== undefined && confirmacion.conjuntoHash !== conjuntoHash) {
+        throw new ConflictError('El público cambió: revisa otra vez', 'CRM_CAMPANA_PUBLICO_CAMBIO', { confirmado, actual: creadas })
+      }
 
       // 3. El total.
       await tx.crmCampaign.update({ where: { id }, data: { total: creadas } })

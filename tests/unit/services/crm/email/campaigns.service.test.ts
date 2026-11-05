@@ -11,7 +11,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
-import { contarAudiencia, personasNoElegibles } from '@/services/crm/email/audience.service'
+import { contarAudiencia, personasNoElegibles, recorrerAudiencia } from '@/services/crm/email/audience.service'
 import {
   cancelCampaign,
   enqueueCampaign,
@@ -35,6 +35,7 @@ jest.mock('@/services/email/resendQuota', () => ({ campanasPausadasPorCupo: jest
 jest.mock('@/services/crm/email/audience.service', () => ({
   ...jest.requireActual('@/services/crm/email/audience.service'),
   contarAudiencia: jest.fn(),
+  recorrerAudiencia: jest.fn(),
   personasNoElegibles: jest.fn(),
 }))
 jest.mock('@/services/crm/access.service', () => ({
@@ -656,5 +657,109 @@ describe('el público con excluir e incluir: guardar bajo el candado, forma v2 y
     prismaMock.crmCampaign.updateMany.mockClear()
     await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_CAMBIO' })
     expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+// ── Plan B, tarea 5 (Codex r1 #5): lo que se confirma son PERSONAS, no un número ──────────────────────────────────────────
+// La vista previa firma `conjuntoHash` (los correos que contó, ya sin bajas) en el TOKEN; el encolado lo recalcula en la misma pasada que
+// crea las deliveries. Si salió Ana y entró Brenda (mismo total), 409 PUBLICO_CAMBIO y se deshace todo. La `huella` de versión no cambia.
+describe('conjuntoHash: se confirman las mismas personas, no sólo cuántas', () => {
+  const ACTOR = { staffId: STAFF } as never
+  const SUBJECT = 'Lo nuevo de Avoqado'
+  const BLOCKS = [{ type: 'paragraph', text: 'Hola {{nombre}}' }]
+  const borrador = () => ({
+    ...fila(CAMP_A, 0),
+    status: 'BORRADOR',
+    enqueuedAt: null,
+    testSentHash: contentHash(SUBJECT, BLOCKS as never),
+  })
+  const DOS = ['ana@x.mx', 'beto@x.mx'].map(email => ({ email, reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} }))
+  const conteo = (conjuntoHash?: string) => ({
+    total: 2,
+    porSegmento: { PROSPECTOS: 2, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 0 },
+    bloqueados: 0,
+    ...(conjuntoHash === undefined ? {} : { conjuntoHash }),
+  })
+  /** El recorrido del encolado entrega a DOS personas cuyo conjunto da `conjuntoHash`. */
+  const recorre = (conjuntoHash: string, personas = DOS) =>
+    (recorrerAudiencia as jest.Mock).mockImplementationOnce(async (_a: unknown, alLote: (l: unknown[]) => Promise<void>) => {
+      await alLote(personas)
+      return { entregados: personas.length, conjuntoHash }
+    })
+
+  beforeEach(() => {
+    prismaMock.crmCampaign.findUnique.mockReset().mockResolvedValue(borrador() as never)
+    prismaMock.crmCampaign.updateMany.mockReset().mockResolvedValue({ count: 1 } as never)
+    prismaMock.crmCampaign.update.mockReset().mockResolvedValue({} as never)
+    prismaMock.crmCampaignDelivery.createMany
+      .mockReset()
+      .mockImplementation(((args: { data: unknown[] }) => Promise.resolve({ count: args.data.length })) as never)
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue([] as never)
+    prismaMock.$queryRaw.mockReset().mockResolvedValue([{ id: CAMP_A }] as never)
+    ;(contarAudiencia as jest.Mock).mockReset()
+    ;(recorrerAudiencia as jest.Mock).mockReset()
+  })
+
+  it('el token firma el conjuntoHash del conteo; la respuesta no lo trae', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const vista = await previewSend(ACTOR, CAMP_A)
+    expect(cuerpoDelToken(vista.token!)).toMatchObject({ campaignId: CAMP_A, total: 2, conjuntoHash: 'h-ana-beto' })
+    expect(vista).not.toHaveProperty('conjuntoHash')
+  })
+
+  it('las mismas personas: encola', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    recorre('h-ana-beto')
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).resolves.toEqual({ total: 2 })
+  })
+
+  it('🔴 mismo total, otras personas: 409 CRM_CAMPANA_PUBLICO_CAMBIO con confirmado y actual, y no se escribe el total', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    recorre('h-brenda-beto')
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PUBLICO_CAMBIO',
+      message: 'El público cambió: revisa otra vez',
+      details: { confirmado: 2, actual: 2 },
+    })
+    expect(prismaMock.crmCampaign.update).not.toHaveBeenCalled()
+  })
+
+  it('si creció sigue siendo PUBLICO_CRECIO (aunque el conjunto también cambió)', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    recorre('h-tres', [...DOS, { email: 'caro@x.mx', reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} }])
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PUBLICO_CRECIO',
+      details: { confirmado: 2, actual: 3 },
+    })
+  })
+
+  it('un token sin conjuntoHash (firmado antes del despliegue) se acepta como hoy', async () => {
+    // Sin conjuntoHash en el conteo, la vista previa firma el cuerpo de antes: { v, campaignId, contentHash, audienceHash, total, exp }.
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo())
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    expect(Object.keys(cuerpoDelToken(token!)).sort()).toEqual(['audienceHash', 'campaignId', 'contentHash', 'exp', 'total', 'v'])
+    recorre('cualquier-conjunto')
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).resolves.toEqual({ total: 2 })
+  })
+
+  it('un conjuntoHash que no es texto vuelve inválido al token', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo(123 as never))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({ code: 'CRM_CAMPANA_CONFIRMACION_INVALIDA' })
+    expect(recorrerAudiencia).not.toHaveBeenCalled()
+  })
+
+  it('la huella de versión que devuelve la vista previa no cambia con conjuntoHash', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto')).mockResolvedValueOnce(conteo('h-brenda-beto'))
+    const a = await previewSend(ACTOR, CAMP_A)
+    const b = await previewSend(ACTOR, CAMP_A)
+    expect(a.huella).toBe(b.huella)
+    expect(a.huella).toBe((await getCampaign(CAMP_A)).huella)
+    expect(cuerpoDelToken(a.token!).conjuntoHash).not.toBe(cuerpoDelToken(b.token!).conjuntoHash)
   })
 })

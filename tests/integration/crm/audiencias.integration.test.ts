@@ -12,6 +12,7 @@
  *   TEST_DATABASE_URL='postgresql://<user>:<password>@localhost:5432/<disposable database>' \
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/audiencias.integration.test.ts --ci
  */
+import { createHash } from 'crypto'
 import { Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import type { Audiencia } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
@@ -44,10 +45,10 @@ let n = 0
 /** Recorre una audiencia y junta los lotes tal como los recibe quien manda. */
 async function recorrer(aud: Audiencia) {
   const lotes: Destinatario[][] = []
-  const total = await recorrerAudiencia(aud, async lote => {
+  const { entregados: total, conjuntoHash } = await recorrerAudiencia(aud, async lote => {
     lotes.push(lote)
   })
-  return { lotes, filas: lotes.flat(), total }
+  return { lotes, filas: lotes.flat(), total, conjuntoHash }
 }
 const correos = (filas: Destinatario[]) => filas.map(d => d.email).sort()
 /** Los prospectos de ESTA prueba (la base puede traer consentimientos de otras suites): los que empiezan con `prefijos`. */
@@ -242,6 +243,24 @@ async function cuenta(over: { name?: string; stageId?: string; ownerStaffId?: st
 
 const contacto = (accountId: string, name: string, email: string | null, isPrimary: boolean) =>
   prisma.crmContact.create({ data: { accountId, name, email, isPrimary } })
+
+/** Una persona del CRM que SÍ se puede agregar: contacto con correo en una cuenta abierta y su fila de permiso. */
+async function conPermiso(
+  alias: string,
+  over: { archivedAt?: Date; organizationId?: string; contacto?: string; nombre?: string; stageId?: string; ownerStaffId?: string } = {},
+) {
+  const id = await cuenta({ archivedAt: over.archivedAt, name: over.nombre, stageId: over.stageId, ownerStaffId: over.ownerStaffId })
+  if (over.organizationId) await prisma.crmAccount.update({ where: { id }, data: { organizationId: over.organizationId } })
+  await contacto(id, `Persona ${alias}`, over.contacto ?? correo(alias), true)
+  await consentimiento(correo(alias), id)
+  return id
+}
+
+/** El `conjuntoHash` que deben dar estos correos, en ESTE orden: sha256 de «correo\n» por persona. */
+const hashDe = (emails: string[]) =>
+  createHash('sha256')
+    .update(emails.map(e => `${e}\n`).join(''))
+    .digest('hex')
 
 describe('Públicos de las campañas del CRM contra Postgres', () => {
   beforeAll(async () => {
@@ -623,7 +642,12 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
 
       expect(correos(filas)).toEqual([correo('bien')])
       expect(total).toBe(1)
-      expect(conteo).toEqual({ total: 1, porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 1 }, bloqueados: 4 })
+      expect(conteo).toEqual({
+        total: 1,
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 1, AGREGADOS: 0 },
+        bloqueados: 4,
+        conjuntoHash: hashDe([correo('bien')]),
+      })
     })
 
     it('una_baja_que_llega_a_media_campana_ya_no_sale_en_el_lote_siguiente', async () => {
@@ -642,7 +666,7 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
 
       const lotes: Destinatario[][] = []
       const tardia = emails[1_200]
-      const total = await recorrerAudiencia(usuarios([StaffRole.HOST], {}, ciudad), async lote => {
+      const { entregados: total } = await recorrerAudiencia(usuarios([StaffRole.HOST], {}, ciudad), async lote => {
         lotes.push(lote)
         // Entre el primer lote y el segundo, alguien pide la baja con la liga de un clic.
         if (lotes.length === 1) await prisma.crmEmailOptOut.create({ data: { email: tardia, source: 'UN_CLIC' } })
@@ -687,25 +711,15 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
       expect(filas.filter(d => d.reason === 'CLIENTE').map(d => d.email)).toEqual([emails[999], emails[1_000], emails[2_000]])
       expect(await contarAudiencia(aud)).toEqual({
         total: 2_500,
-        porSegmento: { PROSPECTOS: 0, CLIENTES: 3, USUARIOS: 2_497 },
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 3, USUARIOS: 2_497, AGREGADOS: 0 },
         bloqueados: 0,
+        conjuntoHash: hashDe(emails),
       })
     }, 120_000)
   })
   // ── Quién se puede agregar (plan B, tarea 4): cada caso es una exclusión de `personasNoElegibles`, la revisión del PATCH ──
 
   describe('quién se puede agregar', () => {
-    /** Una persona del CRM que SÍ se puede agregar: contacto con correo en una cuenta abierta y su fila de permiso. */
-    async function conPermiso(
-      alias: string,
-      over: { archivedAt?: Date; organizationId?: string; contacto?: string; nombre?: string } = {},
-    ) {
-      const id = await cuenta({ archivedAt: over.archivedAt, name: over.nombre })
-      if (over.organizationId) await prisma.crmAccount.update({ where: { id }, data: { organizationId: over.organizationId } })
-      await contacto(id, `Persona ${alias}`, over.contacto ?? correo(alias), true)
-      await consentimiento(correo(alias), id)
-      return id
-    }
     const noSalen = (...alias: string[]) => personasNoElegibles(alias.map(correo))
 
     it('con_permiso_y_cuenta_abierta_sale_elegible', async () => {
@@ -802,6 +816,219 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
       const porLote = await filtrarBloqueados(prisma, emails)
       expect(porSql.sort()).toEqual([...porLote].sort())
       expect(porSql.sort()).toEqual([baja, queja, rebote].sort())
+    })
+  })
+
+  // ── Personas quitadas y agregadas a mano (plan B, tarea 5; rediseño tras Codex r2 y r3) ─────────────────────────────────────────
+  // Contar, ver y mandar son la MISMA consulta: `incluir` es una cuarta rama (con la regla de `sqlCorreoAgregable`, por correo) y
+  // `excluir` gana sobre todas, antes del DISTINCT ON. El conjunto que se confirma (`conjuntoHash`) sale de esa misma pasada.
+
+  describe('excluir e incluir', () => {
+    /** Un negocio en una ciudad que sólo existe en esta prueba, con estas personas como cajeras. */
+    async function cajeras(etiqueta: string, alias: string[]) {
+      const ciudad = `${etiqueta} ${suffix}`
+      const v = await venue(await organizacion(), { name: `Negocio ${etiqueta}`, city: ciudad })
+      for (const a of alias) await enVenue((await persona(correo(a))).id, v, StaffRole.CASHIER)
+      return usuarios([StaffRole.CASHIER], {}, ciudad)
+    }
+
+    it('incluir_agrega_a_quien_es_elegible_aunque_su_cuenta_este_en_otra_etapa_y_sale_como_PROSPECTO_en_AGREGADOS', async () => {
+      const duena = await persona(correo('inc-duena'), { firstName: 'Lupe', lastName: 'Ventas' })
+      const id = await conPermiso('inc-perdida', { stageId: perdidaId, nombre: 'Tacos La Perdida', ownerStaffId: duena.id })
+      const abiertas: Audiencia = { segmentos: [{ tipo: 'PROSPECTOS', etapas: [abiertaId] }] }
+
+      // Control: su cuenta está en «perdida», así que el público de etapas abiertas no la alcanza.
+      expect(correos((await recorrer(abiertas)).filas)).not.toContain(correo('inc-perdida'))
+      const { filas } = await recorrer({ ...abiertas, incluir: [correo('inc-perdida')] })
+
+      expect(filas.filter(d => d.email === correo('inc-perdida'))).toEqual([
+        {
+          email: correo('inc-perdida'),
+          name: 'Persona inc-perdida',
+          reason: 'PROSPECTO',
+          publico: 'AGREGADOS',
+          vars: { nombre: 'Persona inc-perdida', negocio: 'Tacos La Perdida', vendedor: 'Lupe Ventas' },
+          accountId: id,
+        },
+      ])
+      expect(await contarAudiencia({ segmentos: [], incluir: [correo('inc-perdida')] })).toEqual({
+        total: 1,
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 1 },
+        bloqueados: 0,
+        conjuntoHash: hashDe([correo('inc-perdida')]),
+      })
+    })
+
+    it('🔴 incluir_no_alcanza_a_un_archivado_ni_a_un_cliente_oculto_ni_al_equipo_ni_a_quien_no_tiene_permiso', async () => {
+      await conPermiso('inc-archivada', { archivedAt: new Date() })
+      const oculta = await organizacion()
+      await prisma.crmHiddenClient.create({ data: { organizationId: oculta } })
+      await conPermiso('inc-oculta', { organizationId: oculta })
+      const equipo = await ensureCrmTeamVenue()
+      // Una cuenta del CRM por organización: si otra prueba ya ligó la del equipo, el contacto va en ésa.
+      const ya = await prisma.crmAccount.findUnique({ where: { organizationId: equipo.organizationId }, select: { id: true } })
+      if (ya) {
+        await contacto(ya.id, 'Del equipo', correo('inc-equipo'), false)
+        await consentimiento(correo('inc-equipo'), ya.id)
+      } else {
+        await conPermiso('inc-equipo', { organizationId: equipo.organizationId })
+      }
+      await contacto(await cuenta(), 'Sin Permiso', correo('inc-sin-permiso'), true)
+      // Control: la misma forma, abierta y con permiso, sí sale.
+      await conPermiso('inc-ok')
+
+      const aud: Audiencia = {
+        segmentos: [],
+        incluir: ['inc-archivada', 'inc-oculta', 'inc-equipo', 'inc-sin-permiso', 'inc-nadie', 'inc-ok'].map(correo),
+      }
+
+      expect(correos((await recorrer(aud)).filas)).toEqual([correo('inc-ok')])
+      expect(await contarAudiencia(aud)).toMatchObject({ total: 1, porSegmento: { AGREGADOS: 1 }, bloqueados: 0 })
+      // La misma respuesta que la revisión del PATCH: los cinco que no salen son los que no se pueden agregar.
+      expect(await personasNoElegibles(aud.incluir!)).toEqual(
+        ['inc-archivada', 'inc-oculta', 'inc-equipo', 'inc-sin-permiso', 'inc-nadie'].map(correo),
+      )
+    })
+
+    it('🔴 quien_esta_en_incluir_Y_en_un_segmento_y_luego_en_excluir_no_se_resuelve_ni_se_manda', async () => {
+      const publico = await cajeras('Quitada', ['qx-queda', 'qx-quitada'])
+      await conPermiso('qx-quitada')
+      const aud: Audiencia = { ...publico, excluir: [correo('qx-quitada')], incluir: [correo('qx-quitada')] }
+
+      const { filas, total } = await recorrer(aud)
+
+      expect(correos(filas)).toEqual([correo('qx-queda')])
+      expect(total).toBe(1)
+      // Quitada a mano no es una baja: no cuenta en «bloqueados».
+      expect(await contarAudiencia(aud)).toEqual({
+        total: 1,
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 1, AGREGADOS: 0 },
+        bloqueados: 0,
+        conjuntoHash: hashDe([correo('qx-queda')]),
+      })
+    })
+
+    it('quien_esta_en_un_publico_y_ademas_agregado_sale_una_vez_por_su_publico', async () => {
+      const publico = await cajeras('Doble', ['dob-usuaria'])
+      await conPermiso('dob-usuaria')
+      const aud: Audiencia = { ...publico, incluir: [correo('dob-usuaria')] }
+
+      const { filas } = await recorrer(aud)
+
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({
+        email: correo('dob-usuaria'),
+        reason: 'USUARIO',
+        publico: 'USUARIOS',
+        reasonVenueName: 'Negocio Doble',
+      })
+      expect(await contarAudiencia(aud)).toMatchObject({ total: 1, porSegmento: { USUARIOS: 1, AGREGADOS: 0 } })
+    })
+
+    it('un_agregado_dado_de_baja_no_sale_ni_cuenta_un_quitado_no_cuenta_en_bloqueados', async () => {
+      const publico = await cajeras('BajaAgregada', ['ba-usuaria', 'ba-quitada'])
+      await conPermiso('ba-agregada-baja')
+      await conPermiso('ba-agregada-ok')
+      await prisma.crmEmailOptOut.create({ data: { email: correo('ba-agregada-baja'), source: 'UN_CLIC' } })
+      const aud: Audiencia = {
+        ...publico,
+        excluir: [correo('ba-quitada')],
+        incluir: [correo('ba-agregada-baja'), correo('ba-agregada-ok')],
+      }
+
+      const { filas, conjuntoHash } = await recorrer(aud)
+
+      expect(correos(filas)).toEqual([correo('ba-agregada-ok'), correo('ba-usuaria')])
+      // La agregada con baja ya no es agregable (la misma regla que el PATCH), así que tampoco es un «bloqueado» de este público.
+      expect(await contarAudiencia(aud)).toEqual({
+        total: 2,
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 1, AGREGADOS: 1 },
+        bloqueados: 0,
+        conjuntoHash,
+      })
+    })
+
+    it('sin_publicos_y_con_incluir_salen_solo_los_agregados', async () => {
+      await conPermiso('so-a')
+      await conPermiso('so-b')
+      const aud: Audiencia = { segmentos: [], incluir: [correo('so-b'), correo('so-a')] }
+
+      const { filas } = await recorrer(aud)
+
+      // En orden de correo, no en el de la lista.
+      expect(filas.map(d => d.email)).toEqual([correo('so-a'), correo('so-b')])
+      expect(filas.every(d => d.reason === 'PROSPECTO' && d.publico === 'AGREGADOS')).toBe(true)
+      expect(await contarAudiencia(aud)).toEqual({
+        total: 2,
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 2 },
+        bloqueados: 0,
+        conjuntoHash: hashDe([correo('so-a'), correo('so-b')]),
+      })
+    })
+
+    it('sin_publicos_ni_incluir_no_hay_nadie_y_no_se_consulta', async () => {
+      const espia = jest.spyOn(prisma, '$queryRaw')
+      try {
+        expect(await contarAudiencia({ segmentos: [], excluir: [correo('nadie')] })).toEqual({
+          total: 0,
+          porSegmento: { PROSPECTOS: 0, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 0 },
+          bloqueados: 0,
+          conjuntoHash: hashDe([]),
+        })
+        expect(await recorrer({ segmentos: [], incluir: [] })).toMatchObject({ total: 0, filas: [], conjuntoHash: hashDe([]) })
+        expect(espia).not.toHaveBeenCalled()
+      } finally {
+        espia.mockRestore()
+      }
+    })
+
+    it('🔴 el_conteo_es_igual_a_lo_que_entrega_recorrerAudiencia_y_el_conjuntoHash_coincide', async () => {
+      const publico = await cajeras('Mezcla', ['mz-a', 'mz-b', 'mz-baja', 'mz-quitada'])
+      await prisma.crmEmailOptOut.create({ data: { email: correo('mz-baja'), source: 'ADMIN' } })
+      await conPermiso('mz-agregada')
+      await conPermiso('mz-b')
+      const a: Audiencia = { ...publico, excluir: [correo('mz-quitada')], incluir: [correo('mz-agregada'), correo('mz-b')] }
+
+      const { total, conjuntoHash, bloqueados } = await contarAudiencia(a)
+      const vistos: string[] = []
+      const recorrido = await recorrerAudiencia(a, async lote => void vistos.push(...lote.map(d => d.email)))
+
+      expect(vistos).toHaveLength(total)
+      expect(new Set(vistos).size).toBe(total)
+      expect(recorrido).toEqual({ entregados: total, conjuntoHash })
+      // Las personas, en el orden de bytes del correo (COLLATE "C"), y el hash es el de ESA lista en ESE orden.
+      expect(vistos).toEqual([correo('mz-a'), correo('mz-agregada'), correo('mz-b')])
+      expect(conjuntoHash).toBe(hashDe(vistos))
+      expect(bloqueados).toBe(1)
+    })
+
+    it('🔴 un_correo_en_dos_cuentas_A_archivada_duena_del_permiso_y_B_abierta_sale_con_el_nombre_el_negocio_y_la_cuenta_de_B', async () => {
+      const duena = await persona(correo('dc-duena-b'), { firstName: 'Bety', lastName: 'Abierta' })
+      // A (archivada) tiene el permiso y un contacto PRINCIPAL con ese correo: nunca debe asomarse.
+      await conPermiso('dc-persona', { archivedAt: new Date(), nombre: 'Negocio A archivado' })
+      const b = await cuenta({ name: 'Negocio B abierto', ownerStaffId: duena.id })
+      await contacto(b, 'Nombre en B', `  DC-Persona-${suffix}@Test.mx `, false)
+      // Y una cuenta de un cliente oculto con otro contacto principal del mismo correo: tampoco.
+      const oculta = await organizacion()
+      await prisma.crmHiddenClient.create({ data: { organizationId: oculta } })
+      const d = await cuenta({ name: 'Negocio D oculto' })
+      await prisma.crmAccount.update({ where: { id: d }, data: { organizationId: oculta } })
+      await contacto(d, 'Nombre en D', correo('dc-persona'), true)
+
+      const { filas } = await recorrer({ segmentos: [], incluir: [correo('dc-persona')] })
+
+      expect(filas).toEqual([
+        {
+          email: correo('dc-persona'),
+          name: 'Nombre en B',
+          reason: 'PROSPECTO',
+          publico: 'AGREGADOS',
+          vars: { nombre: 'Nombre en B', negocio: 'Negocio B abierto', vendedor: 'Bety Abierta' },
+          accountId: b,
+        },
+      ])
+      // Y la regla dice lo mismo: es agregable (por el contacto visible de B).
+      expect(await personasNoElegibles([correo('dc-persona')])).toEqual([])
     })
   })
 })

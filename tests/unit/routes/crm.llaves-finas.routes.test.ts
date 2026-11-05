@@ -95,9 +95,11 @@ const campana = () => ({
   updatedAt: new Date('2026-11-04T10:00:00Z'),
 })
 const DESTINATARIOS = [
-  { email: 'ana@example.com', name: 'Ana', reason: 'PROSPECTO', vars: {} },
-  { email: 'beto@example.com', name: 'Beto', reason: 'PROSPECTO', vars: {} },
+  { email: 'ana@example.com', name: 'Ana', reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} },
+  { email: 'beto@example.com', name: 'Beto', reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} },
 ]
+/** Las mismas dos personas al contar y al mandar: el `conjuntoHash` coincide. */
+const CONJUNTO = 'conjunto-ana-beto'
 
 beforeEach(() => {
   for (const fn of [
@@ -130,12 +132,13 @@ beforeEach(() => {
   prismaMock.crmCampaignDelivery.createMany.mockResolvedValue({ count: DESTINATARIOS.length })
   ;(contarAudiencia as jest.Mock).mockResolvedValue({
     total: DESTINATARIOS.length,
-    porSegmento: { PROSPECTOS: DESTINATARIOS.length, CLIENTES: 0, USUARIOS: 0 },
+    porSegmento: { PROSPECTOS: DESTINATARIOS.length, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 0 },
     bloqueados: 0,
+    conjuntoHash: CONJUNTO,
   })
   ;(recorrerAudiencia as jest.Mock).mockImplementation(async (_audiencia, alLote) => {
     await alLote(DESTINATARIOS)
-    return DESTINATARIOS.length
+    return { entregados: DESTINATARIOS.length, conjuntoHash: CONJUNTO }
   })
 })
 

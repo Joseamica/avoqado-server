@@ -516,9 +516,12 @@ describe('encolar: una transacción con la fila bloqueada', () => {
     const { id, vista } = await listaParaMandar()
     await prospecto('nuevo')
     try {
+      // si_crecio_sigue_siendo_PUBLICO_CRECIO_con_confirmado_y_actual (plan B, tarea 5): aunque el conjunto también cambió.
       await expect(enqueueCampaign(rafa, id, vista.token)).rejects.toMatchObject({
         statusCode: 409,
+        code: 'CRM_CAMPANA_PUBLICO_CRECIO',
         message: 'El público creció (3 → 4): revísalo y confirma otra vez',
+        details: { confirmado: 3, actual: 4 },
       })
 
       expect((await prisma.crmCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('BORRADOR')
@@ -529,10 +532,88 @@ describe('encolar: una transacción con la fila bloqueada', () => {
     }
   })
 
+  // Plan B, tarea 5 (Codex r1 #5): lo que se confirma son PERSONAS. Mismo total con otra gente, o una baja de por medio, ya no encola.
+  it('🔴 Ana_sale_y_Brenda_entra_con_el_mismo_total_es_409_PUBLICO_CAMBIO_y_no_se_crea_ninguna_delivery', async () => {
+    const { id, vista } = await listaParaMandar()
+    expect(vista.total).toBe(3)
+    const { accountId: deAna } = await prisma.crmEmailConsent.findUniqueOrThrow({ where: { email: correo('ana') } })
+    // Ana sale (su negocio se archiva) y Brenda entra (marca la casilla): siguen siendo 3.
+    await prisma.crmAccount.update({ where: { id: deAna! }, data: { archivedAt: new Date() } })
+    await prospecto('brenda')
+    try {
+      await expect(enqueueCampaign(rafa, id, vista.token)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMPANA_PUBLICO_CAMBIO',
+        message: 'El público cambió: revisa otra vez',
+        details: { confirmado: 3, actual: 3 },
+      })
+      expect((await prisma.crmCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('BORRADOR')
+      expect(await prisma.crmCampaignDelivery.count({ where: { campaignId: id } })).toBe(0)
+    } finally {
+      await prisma.crmAccount.update({ where: { id: deAna! }, data: { archivedAt: null } })
+      await prisma.crmEmailConsent.deleteMany({ where: { email: correo('brenda') } })
+    }
+  })
+
+  // Cambio de comportamiento (duda A, aceptada): antes una baja entre la vista previa y «Mandar» encolaba a los demás; ahora el conjunto
+  // confirmado ya no es el que sale, así que pide revisar otra vez. Del lado seguro: nadie recibe algo que no se confirmó.
+  it('una_baja_entre_la_vista_previa_y_mandar_tambien_es_409_PUBLICO_CAMBIO', async () => {
+    const { id, vista } = await listaParaMandar()
+    await prisma.crmEmailOptOut.create({ data: { email: correo('ana'), source: 'UN_CLIC' } })
+    try {
+      await expect(enqueueCampaign(rafa, id, vista.token)).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMPANA_PUBLICO_CAMBIO',
+        details: { confirmado: 3, actual: 2 },
+      })
+      expect((await prisma.crmCampaign.findUniqueOrThrow({ where: { id } })).status).toBe('BORRADOR')
+      expect(await prisma.crmCampaignDelivery.count({ where: { campaignId: id } })).toBe(0)
+    } finally {
+      await prisma.crmEmailOptOut.deleteMany({ where: { email: correo('ana') } })
+    }
+  })
+
+  it('🔴 un agregado con el permiso en una cuenta archivada (A) y su contacto en una abierta (B) se encola con el nombre, el negocio y la cuenta de B', async () => {
+    const email = correo('dos-cuentas')
+    const nueva = async (data: { name: string; archivedAt?: Date; ownerStaffId?: string }) => {
+      const { id } = await prisma.crmAccount.create({ data: { ...data, source: 'MANUAL', stageId } })
+      accountIds.push(id)
+      return id
+    }
+    // A está archivada (fuera de los prospectos de la etapa) y es dueña del permiso y de un contacto PRINCIPAL con ese correo.
+    const a = await nueva({ name: `Negocio A ${suffix}`, archivedAt: new Date() })
+    await prisma.crmContact.create({ data: { accountId: a, name: 'Nombre en A', email, isPrimary: true } })
+    await prisma.crmEmailConsent.create({
+      data: { email, accountId: a, entryId: `entry-dos-cuentas-${suffix}`, consentAt: new Date(), source: 'LANDING', noticeVersion: 'v1' },
+    })
+    consentEmails.push(email)
+    const b = await nueva({ name: `Negocio B ${suffix}`, ownerStaffId: rafa.staffId })
+    await prisma.crmContact.create({ data: { accountId: b, name: 'Nombre en B', email, isPrimary: false } })
+    try {
+      const id = await borrador()
+      await updateCampaign(rafa, id, { audience: { ...AUDIENCIA(), incluir: [email] }, basePublico: (await getCampaign(id)).huellaPublico })
+      process.env.CRM_CORREO_PRUEBAS = correo('rafa')
+      await expect(sendCampaignTest(rafa, id)).resolves.toMatchObject({ ok: true })
+      const vista = await previewSend(rafa, id)
+      expect(vista).toMatchObject({ total: 4, porSegmento: { PROSPECTOS: 3, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 1 } })
+
+      await expect(enqueueCampaign(rafa, id, vista.token!)).resolves.toEqual({ total: 4 })
+
+      expect(await prisma.crmCampaignDelivery.findUniqueOrThrow({ where: { campaignId_email: { campaignId: id, email } } })).toMatchObject({
+        name: 'Nombre en B',
+        reason: 'PROSPECTO',
+        accountId: b,
+        vars: { nombre: 'Nombre en B', negocio: `Negocio B ${suffix}`, vendedor: 'Rafa Campañas' },
+      })
+    } finally {
+      await prisma.crmEmailConsent.deleteMany({ where: { email } })
+    }
+  })
+
   it('una falla a mitad de la inserción deja la campaña en BORRADOR y sin deliveries', async () => {
     const { id, vista } = await listaParaMandar()
     jest.spyOn(audience, 'recorrerAudiencia').mockImplementationOnce(async (_aud, alLote) => {
-      await alLote([{ email: correo('ana'), reason: 'PROSPECTO', vars: {} }])
+      await alLote([{ email: correo('ana'), reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} }])
       throw new Error('se cayó a la mitad')
     })
 
