@@ -33,7 +33,9 @@ empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 
 La vista de una campaña trae `huella` (contenido + público; campo nuevo y opcional). La pantalla la manda en `POST /campaigns/:id/preview`
 (`{ huella }`): si la campaña ya cambió, 409 `CRM_CAMPANA_CAMBIO` y no se firma token. Sin `huella` (pantalla vieja), igual que antes. Así
-quien sólo tiene `mandar` nunca confirma una versión que otra persona cambió mientras la veía.
+quien sólo tiene `mandar` nunca confirma una versión que otra persona cambió mientras la veía. La respuesta de la vista previa también trae
+la `huella` que contó y firmó, y la pantalla sólo deja mandar si es la que enseña (una reversa a un SERVIDOR viejo no la manda: «Mandar» se
+cierra y sale en gris). No quites ese campo.
 
 ## Llaves del CRM (plan 2026-11-04, L4–L9): cada ruta pide la suya
 

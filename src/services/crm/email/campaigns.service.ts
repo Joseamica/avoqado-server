@@ -290,7 +290,9 @@ export async function previewSend(_actor: CrmAccess, id: string, huella?: string
     total,
     exp: Date.now() + VIGENCIA_MS,
   })
-  return { total, porSegmento, bloqueados, token }
+  // `huella` (campo nuevo): la versión que se contó y se firmó. La pantalla sólo deja mandar si es la que enseña, así un
+  // SERVIDOR viejo (que no la manda ni la revisa) nunca confirma una versión distinta (H3, Codex código r4).
+  return { total, porSegmento, bloqueados, token, huella: huellaDe(fila) }
 }
 
 /**

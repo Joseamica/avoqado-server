@@ -270,6 +270,8 @@ describe('previewSend — la confirmación se ata a la versión que se ve (huell
     const vista = await previewSend(ACTOR, CAMP_A, huella)
     expect(vista).toMatchObject({ total: 2, bloqueados: 0 })
     expect(vista.token).toEqual(expect.any(String))
+    // H3 (Codex r4): la respuesta dice QUÉ versión comprobó; la pantalla no deja mandar si no es la que enseña.
+    expect(vista.huella).toBe(huella)
   })
 
   it('🔴 con la huella de Guadalajara y el servidor ya en Monterrey: 409 CRM_CAMPANA_CAMBIO y no se firma nada', async () => {
@@ -296,6 +298,8 @@ describe('previewSend — la confirmación se ata a la versión que se ve (huell
     const vista = await previewSend(ACTOR, CAMP_A)
     expect(vista).toMatchObject({ total: 2, bloqueados: 0 })
     expect(vista.token).toEqual(expect.any(String))
+    // También dice qué versión firmó (la de Monterrey), aunque nadie la pidió.
+    expect(vista.huella).toBe(await huellaVista({ audience: monterrey }))
   })
 
   it('una campaña que ya no está en BORRADOR sigue diciendo por qué, aunque traiga huella', async () => {
