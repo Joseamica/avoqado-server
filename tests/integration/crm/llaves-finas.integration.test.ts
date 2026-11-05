@@ -18,7 +18,7 @@ import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
 import { addTeamMember, updateTeamMember } from '@/services/crm/teamVenue.service'
 import prisma from '@/utils/prismaClient'
 
-const MIGRACION = fs.readFileSync(path.join(__dirname, '../../../prisma/migrations/20261104120000_crm_llaves_finas/migration.sql'), 'utf8')
+const MIGRACION = fs.readFileSync(path.join(__dirname, '../../../prisma/migrations/20261104200000_crm_llaves_finas/migration.sql'), 'utf8')
 
 const suffix = `llf${Date.now()}`
 const FINAS = ['cerrar', 'bajas', 'plantillas', 'preparar', 'mandar', 'verCampanas', 'equipo', 'configurar'] as const

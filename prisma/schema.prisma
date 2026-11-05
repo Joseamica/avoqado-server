@@ -21024,7 +21024,7 @@ model PlatformAccess {
   bajas         Boolean  @default(false)
   cerrar        Boolean  @default(false) // sólo cuenta con `editarScope`, y en su alcance
   // L11: el código nuevo la sube en CADA escritura de la fila. Un disparador de la base apaga las 8 finas en todo UPDATE
-  // que no la sube (= lo que escribe la versión vieja, que no la conoce). Ver la migración 20261104120000.
+  // que no la sube (= lo que escribe la versión vieja, que no la conoce). Ver la migración 20261104200000.
   llavesVersion Int      @default(0)
   active        Boolean  @default(true)
   createdById   String
