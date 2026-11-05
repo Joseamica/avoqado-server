@@ -886,9 +886,15 @@ export const ProductWizardStep3SimpleStockSchema = z.object({
     productId: cuidLikeId(),
   }),
   body: z.object({
-    initialStock: z.number().min(0, 'Initial stock must be non-negative'),
-    reorderPoint: z.number().min(0, 'Reorder point must be non-negative'),
-    costPerUnit: z.number().positive('Cost per unit must be positive'),
+    // Opcional: sin existencias se guardan mínimo y costo y el saldo queda como esté (el panel ya no relee y reenvía el saldo).
+    initialStock: z
+      .number({ invalid_type_error: 'Escribe las existencias (puede ser 0)' })
+      .min(0, 'Las existencias no pueden ser negativas')
+      .optional(),
+    reorderPoint: z.number({ invalid_type_error: 'Escribe el mínimo (puede ser 0)' }).min(0, 'El mínimo no puede ser negativo'),
+    costPerUnit: z.number({ invalid_type_error: 'Escribe el costo por unidad' }).positive('El costo por unidad debe ser mayor que 0'),
+    // Versión del producto que el panel vio en su paso anterior: si cambió en medio, 409 PRODUCT_CHANGED.
+    expectedUpdatedAt: z.string().datetime({ message: 'La versión del producto no es válida' }).optional(),
   }),
 })
 
@@ -931,8 +937,7 @@ export const CreateProductWithInventorySchema = z.object({
       sku: z.string().max(64).optional(),
       gtin: z.string().max(32).optional(),
       // Lo demás que el asistente manda al crear, con las reglas del alta normal: antes también se tiraba.
-      ...ProductBodyBase.pick({ modifierGroupIds: true, soldByWeight: true, satProductKey: true, satUnitKey: true, objetoImp: true })
-        .shape,
+      ...ProductBodyBase.pick({ modifierGroupIds: true, soldByWeight: true, satProductKey: true, satUnitKey: true, objetoImp: true }).shape,
       type: z
         .enum([
           'FOOD',

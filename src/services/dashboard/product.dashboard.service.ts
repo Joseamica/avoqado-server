@@ -851,6 +851,17 @@ export async function createProduct(venueId: string, productData: CreateProductD
 /**
  * Update an existing product
  */
+/**
+ * El producto cambió entre dos pasos de un mismo guardado (otra ventana o aparato lo editó en medio). Lo usan el PUT del producto y el
+ * paso 3 del asistente cuando el panel manda `expectedUpdatedAt` (Codex r4 #1, PR #273 del DASHBOARD): una activación atrasada no
+ * vuelve a prender un inventario que otra ventana ya apagó.
+ */
+export const productoCambioError = () =>
+  new ConflictError(
+    'Este producto cambió mientras se guardaba (alguien lo editó en otra ventana o aparato). No se aplicó este cambio para no deshacer el otro. Ábrelo de nuevo para ver cómo quedó.',
+    'PRODUCT_CHANGED',
+  )
+
 export async function updateProduct(
   venueId: string,
   productId: string,
@@ -861,6 +872,9 @@ export async function updateProduct(
   opts: { origen?: OrigenIva } = {},
 ): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
+  // La versión esperada no es un campo del producto: se quita aquí, antes de que el spread la copie a la escritura.
+  const { expectedUpdatedAt, ...datosDelProducto } = productData
+  productData = datosDelProducto
   validateProductByType(productData, true)
 
   const { modifierGroupIds, ...productFields } = productData
@@ -1007,7 +1021,12 @@ export async function updateProduct(
     let updated
     try {
       updated = await tx.product.update({
-        where: { id: productId, ...(expectedState ? { venueId, deletedAt: null, ...expectedState } : {}) },
+        where: {
+          id: productId,
+          ...(expectedState ? { venueId, deletedAt: null, ...expectedState } : {}),
+          // Bajo el candado de fila que ya tomó la guardia de gobierno: comparar aquí es atómico.
+          ...(expectedUpdatedAt ? { updatedAt: new Date(expectedUpdatedAt) } : {}),
+        },
         data: updateData,
         include: {
           category: true,
@@ -1021,6 +1040,7 @@ export async function updateProduct(
     } catch (e) {
       if (expectedState && (e as { code?: string }).code === 'P2025')
         throw new ConflictError('El producto cambió desde la vista previa. Revisa y confirma de nuevo.')
+      if (expectedUpdatedAt && (e as { code?: string }).code === 'P2025') throw productoCambioError()
       // El trigger del escritor único ganó una carrera (lo agruparon mientras se editaba): 409, nunca 500.
       if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
       traducirErrorDeIva(e)

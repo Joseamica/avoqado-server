@@ -17,6 +17,7 @@ import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normaliza
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 import { registrarCambioDeIva } from '../fiscal/encendidoIva.service'
 import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
+import { productoCambioError } from './product.dashboard.service'
 
 /**
  * Product Creation Wizard Service
@@ -57,10 +58,12 @@ export interface WizardStep2Data {
 }
 
 export interface WizardStep3SimpleStockData {
-  // For SIMPLE_STOCK: initial stock setup
-  initialStock: number
+  // Sin `initialStock`, el saldo queda como esté y sólo se guardan mínimo y costo.
+  initialStock?: number
   reorderPoint: number
   costPerUnit: number
+  // Versión del producto que vio el panel en su paso anterior: si cambió en medio, 409 PRODUCT_CHANGED.
+  expectedUpdatedAt?: string
 }
 
 export interface WizardStep3RecipeData {
@@ -283,19 +286,30 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
   // el producto, el saldo leído BAJO CANDADO de la fila, el kardex y el costo. Leído afuera, una venta en
   // medio dejaba saldo ≠ Σ movimientos; y un fallo al anotar el movimiento dejaba el saldo cambiado sin
   // kardex, o la receta ya borrada. La venta (`deductSimpleStock`) toma el mismo candado de la fila.
-  const nuevoSaldo = new Decimal(data.initialStock)
+  const esperado = data.expectedUpdatedAt ? new Date(data.expectedUpdatedAt) : undefined
+  const mismaVersion = (v: Date) => !esperado || v.getTime() === esperado.getTime()
+  let saldoFinal = new Decimal(0)
   await prisma.$transaction(async tx => {
     // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
     const product = await tx.product.findUnique({
       where: { id: productId, venueId },
-      select: { externalData: true, recipe: { select: { id: true } } },
+      select: { externalData: true, updatedAt: true, recipe: { select: { id: true } } },
     })
     if (!product) throw new AppError('Product not found', 404)
+    if (!mismaVersion(product.updatedAt)) throw productoCambioError()
+    // La versión se vuelve a exigir al escribir el producto (abajo), salvo si este paso ya lo escribió y tiene su candado.
+    let versionAlEscribir = esperado
 
     // ✅ Auto-switch de RECETA a CANTIDAD en vez de un 409.
     if (product.recipe) {
+      // Este camino escribe el producto PRIMERO (switchInventoryMethod toma su candado): la versión se compara bajo ese mismo candado.
+      if (esperado) {
+        const [fila] = await tx.$queryRaw<Array<{ updatedAt: Date }>>`SELECT "updatedAt" FROM "Product" WHERE id = ${productId} FOR UPDATE`
+        if (!fila || !mismaVersion(fila.updatedAt)) throw productoCambioError()
+      }
       logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
       await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)
+      versionAlEscribir = undefined
     }
 
     // La fila tiene que existir para poder tomar su candado; una existente no se toca.
@@ -303,6 +317,9 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
       SELECT id, "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
     const saldoPrevio = new Decimal(fila.currentStock)
+    // Sin existencias en la petición el saldo queda como esté: ni se escribe ni deja movimiento.
+    const nuevoSaldo = data.initialStock === undefined ? saldoPrevio : new Decimal(data.initialStock)
+    saldoFinal = nuevoSaldo
     const delta = nuevoSaldo.minus(saldoPrevio)
     // Una fila en 0 y sin kardex (la deja el paso 2 o nace aquí) recibe el PRIMER saldo, no un ajuste.
     const esSaldoInicial =
@@ -311,7 +328,7 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     await tx.inventory.update({
       where: { id: fila.id },
       data: {
-        currentStock: nuevoSaldo,
+        ...(data.initialStock === undefined ? {} : { currentStock: nuevoSaldo }),
         minimumStock: new Decimal(data.reorderPoint),
       },
     })
@@ -335,19 +352,26 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     // entrada del mismo producto a la vez se trababa con este paso (Postgres abortaba una de las dos).
     // Y queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin
     // receta, o sin inventario, recibía un saldo que la venta ignoraba.
-    const updated = await tx.product.update({
-      where: { id: productId },
-      data: {
-        trackInventory: true,
-        inventoryMethod: 'QUANTITY',
-        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
-        externalData: {
-          ...(product.externalData as any),
-          wizardCompleted: true,
-          inventoryConfigured: true,
+    let updated
+    try {
+      updated = await tx.product.update({
+        // Con versión: si otro la cambió desde que se leyó, no hay fila que escribir (P2025) y se revierte todo el paso.
+        where: { id: productId, ...(versionAlEscribir ? { updatedAt: versionAlEscribir } : {}) },
+        data: {
+          trackInventory: true,
+          inventoryMethod: 'QUANTITY',
+          cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
+          externalData: {
+            ...(product.externalData as any),
+            wizardCompleted: true,
+            inventoryConfigured: true,
+          },
         },
-      },
-    })
+      })
+    } catch (e) {
+      if (versionAlEscribir && (e as { code?: string }).code === 'P2025') throw productoCambioError()
+      throw e
+    }
     // Una clase o una cita no llevan existencias: se revierte todo el paso (misma regla que Artículos).
     if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
   })
@@ -355,10 +379,10 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
   return {
     success: true,
     inventoryMethod: 'QUANTITY',
-    initialStock: data.initialStock,
+    initialStock: saldoFinal.toNumber(),
     minimumStock: data.reorderPoint,
     nextStep: 'complete',
-    message: `Simple stock tracking configured: ${data.initialStock} unit(s) in stock`,
+    message: `Simple stock tracking configured: ${saldoFinal.toString()} unit(s) in stock`,
   }
 }
 
