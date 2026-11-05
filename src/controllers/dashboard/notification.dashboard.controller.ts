@@ -275,14 +275,6 @@ export const updatePreferences = asyncHandler(async (req: AuthenticatedRequest, 
   return res.json(formatApiResponse(preference, 'Notification preferences updated successfully'))
 })
 
-/**
- * Atomically update MANY notification preferences at once
- * PUT /api/v1/dashboard/notifications/preferences/bulk
- *
- * Applies all changes in a single transaction (all-or-nothing) so the dashboard
- * master channel toggle can flip Email/Web for every type without the partial-
- * failure window that made it "stick" on after a refresh.
- */
 const announcementEmailSchema = z.object({ enabled: z.boolean() })
 
 export const getAnnouncementEmailPreference = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
@@ -299,6 +291,14 @@ export const updateAnnouncementEmailPreference = asyncHandler(async (req: Authen
   return res.json(formatApiResponse({ enabled }, 'OK'))
 })
 
+/**
+ * Atomically update MANY notification preferences at once
+ * PUT /api/v1/dashboard/notifications/preferences/bulk
+ *
+ * Applies all changes in a single transaction (all-or-nothing) so the dashboard
+ * master channel toggle can flip Email/Web for every type without the partial-
+ * failure window that made it "stick" on after a refresh.
+ */
 export const updatePreferencesBulk = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.authContext?.userId
   const venueId = req.headers['x-venue-id'] as string
