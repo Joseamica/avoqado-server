@@ -21,6 +21,7 @@ jest.mock('@/services/email/resendQuota', () => ({
   campanasPausadasPorCupo: jest.fn(() => false),
 }))
 
+import { aparcarLaSiguienteTransaccion, aTiempo, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 import { env } from '@/config/env'
 import type { CrmAccess } from '@/services/crm/access.service'
 import * as audience from '@/services/crm/email/audience.service'
@@ -28,6 +29,7 @@ import {
   cancelCampaign,
   createCampaign,
   enqueueCampaign,
+  getCampaign,
   previewSend,
   sendCampaignTest,
   updateCampaign,
@@ -178,7 +180,9 @@ async function listaParaMandar() {
   process.env.CRM_CORREO_PRUEBAS = correo('rafa')
   await expect(sendCampaignTest(rafa, id)).resolves.toMatchObject({ ok: true })
   const vista = await previewSend(rafa, id)
-  return { id, vista }
+  // Con 0 personas la vista previa no firma (plan B, tarea 4): aquí siempre hay tres prospectos.
+  if (!vista.token) throw new Error('La vista previa no firmó: el público de este archivo quedó vacío')
+  return { id, vista: { ...vista, token: vista.token } }
 }
 
 describe('la cola: lease, SKIP LOCKED y la ventana de 23 h', () => {
@@ -411,7 +415,7 @@ describe('encolar: una transacción con la fila bloqueada', () => {
     const id = await borrador()
     const { token } = await previewSend(rafa, id)
 
-    await expect(enqueueCampaign(rafa, id, token)).rejects.toMatchObject({
+    await expect(enqueueCampaign(rafa, id, token!)).rejects.toMatchObject({
       statusCode: 409,
       message: 'Mándate la prueba de esta versión antes',
     })
@@ -426,7 +430,7 @@ describe('encolar: una transacción con la fila bloqueada', () => {
 
     expect((await prisma.crmCampaign.findUniqueOrThrow({ where: { id } })).testSentHash).toBeNull()
     const { token } = await previewSend(rafa, id)
-    await expect(enqueueCampaign(rafa, id, token)).rejects.toMatchObject({ statusCode: 409 })
+    await expect(enqueueCampaign(rafa, id, token!)).rejects.toMatchObject({ statusCode: 409 })
   })
 
   it('una prueba rechazada por Resend no escribe testSentHash', async () => {
@@ -579,5 +583,132 @@ describe('encolar: una transacción con la fila bloqueada', () => {
       nextAttemptAt: null,
     })
     expect(await estado(pendiente.id)).toMatchObject({ status: 'OMITIDO', skipReason: 'campaña cancelada' })
+  })
+})
+
+// Plan B, tarea 4 (ajustes tras Codex r3 y r4): guardar el público corre bajo el candado de la campaña y con `basePublico` (la huella
+// del público que leyó la pantalla). Las intercalaciones se FUERZAN (la primera transacción se aparca antes del commit con el candado
+// tomado) y se COMPRUEBAN en `pg_blocking_pids`, no se suponen por tiempos. «El viejo lee → el nuevo escribe → el viejo escribe» ya no
+// existe: el viejo lee CON el candado, así que la prueba se parte en sus dos órdenes posibles.
+describe('guardar el público: candado y basePublico', () => {
+  const conExcluida = (alias: string) => ({ ...AUDIENCIA(), excluir: [correo(alias)] })
+  const conClientes = () => ({ segmentos: [...AUDIENCIA().segmentos, { tipo: 'CLIENTES' as const }] })
+  const guardado = async (id: string) =>
+    (await prisma.crmCampaign.findUniqueOrThrow({ where: { id }, select: { audience: true } })).audience
+  const POR_EL_CANDADO = /FROM "CrmCampaign" WHERE "id" = \$1 FOR UPDATE/
+
+  /** Corre `primero` aparcado con el candado tomado, lanza `segundo`, comprueba que espera ESE candado y suelta. */
+  async function cruzar<A, B>(primero: () => Promise<A>, segundo: () => Promise<B>) {
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let a: Promise<A> | undefined
+    let b: Promise<B> | undefined
+    try {
+      a = primero()
+      const pid = await aTiempo(aparcada.pid, 8_000, 'el primer PATCH no llegó al commit')
+      b = segundo()
+      expect(await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: POR_EL_CANDADO })).not.toBeNull()
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+    return Promise.allSettled([a!, b!])
+  }
+
+  it('🔴 nuevo primero: el nuevo toma el candado y guarda la exclusión; el viejo espera, relee y recibe 409 PANTALLA_VIEJA; la exclusión sigue', async () => {
+    const id = await borrador()
+    const { huellaPublico } = await getCampaign(id)
+
+    const [nuevo, viejo] = await cruzar(
+      () => updateCampaign(rafa, id, { audience: conExcluida('ana'), basePublico: huellaPublico }),
+      () => updateCampaign(rafa, id, { audience: conClientes() }),
+    )
+
+    expect(nuevo).toMatchObject({ status: 'fulfilled', value: { publico: { excluir: [correo('ana')] } } })
+    expect(viejo).toMatchObject({ status: 'rejected', reason: { statusCode: 409, code: 'CRM_CAMPANA_PANTALLA_VIEJA' } })
+    expect(await guardado(id)).toEqual({ v: 2, publicos: AUDIENCIA().segmentos, excluir: [correo('ana')], incluir: [] })
+  })
+
+  it('🔴 viejo primero y cambió el público: el viejo guarda; el nuevo espera, relee y recibe 409 CAMBIO (nada se pierde en silencio)', async () => {
+    const id = await borrador()
+    const { huellaPublico } = await getCampaign(id)
+
+    const [viejo, nuevo] = await cruzar(
+      () => updateCampaign(rafa, id, { audience: conClientes() }),
+      () => updateCampaign(rafa, id, { audience: conExcluida('ana'), basePublico: huellaPublico }),
+    )
+
+    expect(viejo.status).toBe('fulfilled')
+    expect(nuevo).toMatchObject({ status: 'rejected', reason: { statusCode: 409, code: 'CRM_CAMPANA_CAMBIO' } })
+    expect(await guardado(id)).toEqual(conClientes())
+    // La pantalla nueva recarga la campaña y vuelve a quitar a Ana: ahora sí queda, sobre el público del viejo.
+    const recargada = await getCampaign(id)
+    await updateCampaign(rafa, id, { audience: { ...conClientes(), excluir: [correo('ana')] }, basePublico: recargada.huellaPublico })
+    expect(await guardado(id)).toEqual({ v: 2, publicos: conClientes().segmentos, excluir: [correo('ana')], incluir: [] })
+  })
+
+  it('viejo primero sin cambiar el público: los dos guardan y la exclusión queda', async () => {
+    const id = await borrador()
+    const { huellaPublico } = await getCampaign(id)
+
+    const [viejo, nuevo] = await cruzar(
+      () => updateCampaign(rafa, id, { name: `Renombrada ${suffix}`, audience: AUDIENCIA() }),
+      () => updateCampaign(rafa, id, { audience: conExcluida('beto'), basePublico: huellaPublico }),
+    )
+
+    expect(viejo.status).toBe('fulfilled')
+    expect(nuevo.status).toBe('fulfilled')
+    expect(await guardado(id)).toEqual({ v: 2, publicos: AUDIENCIA().segmentos, excluir: [correo('beto')], incluir: [] })
+  })
+
+  it('🔴 dos PATCH nuevos a la vez con el mismo basePublico: uno guarda y el otro es 409 CAMBIO', async () => {
+    const id = await borrador()
+    const { huellaPublico } = await getCampaign(id)
+
+    const { fulfilled, rejected } = settle(
+      await Promise.allSettled([
+        updateCampaign(rafa, id, { audience: conExcluida('ana'), basePublico: huellaPublico }),
+        updateCampaign(rafa, id, { audience: conExcluida('beto'), basePublico: huellaPublico }),
+      ]),
+    )
+
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]).toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_CAMBIO' })
+    const ganador = (fulfilled[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof updateCampaign>>>).value.publico.excluir
+    expect(await guardado(id)).toMatchObject({ v: 2, excluir: ganador })
+  })
+
+  it('🔴 prueba terminada + GET demorado + guardar el público con el basePublico de antes: sin 409 (la prueba y el contenido no tocan el público)', async () => {
+    const id = await borrador()
+    const vistaVieja = await getCampaign(id)
+    process.env.CRM_CORREO_PRUEBAS = correo('rafa')
+    await expect(sendCampaignTest(rafa, id)).resolves.toMatchObject({ ok: true })
+    await updateCampaign(rafa, id, { subject: 'Hola otra vez {{nombre}}' })
+
+    await expect(updateCampaign(rafa, id, { audience: conExcluida('caro'), basePublico: vistaVieja.huellaPublico })).resolves.toMatchObject(
+      {
+        publico: { excluir: [correo('caro')] },
+      },
+    )
+  })
+
+  it('agregar a alguien sin contacto en el CRM es 400 PERSONA_SIN_PERMISO dentro de la transacción; con su contacto, se guarda', async () => {
+    const id = await borrador()
+    // Ana marcó la casilla, pero su negocio no tiene ningún contacto con su correo: no es agregable.
+    await expect(
+      updateCampaign(rafa, id, {
+        audience: { ...AUDIENCIA(), incluir: [correo('ana')] },
+        basePublico: (await getCampaign(id)).huellaPublico,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'CRM_CAMPANA_PERSONA_SIN_PERMISO', details: { correos: [correo('ana')] } })
+    expect(await guardado(id)).toEqual(AUDIENCIA())
+
+    const { accountId } = await prisma.crmEmailConsent.findUniqueOrThrow({ where: { email: correo('ana') } })
+    await prisma.crmContact.create({ data: { accountId: accountId!, name: 'Ana', email: correo('ana'), isPrimary: true } })
+    await updateCampaign(rafa, id, {
+      audience: { ...AUDIENCIA(), incluir: [correo('ana')] },
+      basePublico: (await getCampaign(id)).huellaPublico,
+    })
+    expect(await guardado(id)).toEqual({ v: 2, publicos: AUDIENCIA().segmentos, excluir: [], incluir: [correo('ana')] })
   })
 })

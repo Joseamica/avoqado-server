@@ -23,7 +23,7 @@ import { clientSql, planVigenteSql, type PaidPlan } from '../clients.service'
 import { teamOrganizationId } from '../inbound.service'
 import { REAL_VENUE_SQL } from '../sweep.service'
 import type { MotivoDeEnvio } from './footer'
-import { filtrarBloqueados } from './optOut.service'
+import { filtrarBloqueados, sqlBloqueado } from './optOut.service'
 import type { Vars } from './templateVars'
 
 /** El tamaño del lote: el de `filtrarBloqueados` (un solo `IN`) y el de las deliveries que crea quien encola. */
@@ -223,6 +223,55 @@ function aDestinatario(fila: Fila): Destinatario {
     vars,
     ...(fila.accountId ? { accountId: fila.accountId } : {}),
   }
+}
+
+// ── Quién se puede agregar a mano (plan B, tarea 4; rediseño tras Codex r2, Familia 3) ──────────────────────────────────
+// UNA definición, decidida POR CORREO, que usan la revisión del PATCH (`personasNoElegibles`), la rama de `incluir` al resolver y el
+// buscador de «Agregar»: así nunca se agrega, se cuenta o se manda a alguien que otro de los tres no dejaría.
+
+/**
+ * La cuenta del CRM `cuenta` (un alias de `CrmAccount`) es VISIBLE: no está archivada, su organización no está oculta
+ * (`CrmHiddenClient`) y no es la del equipo de ventas. Una cuenta sin organización (un prospecto) es visible si no está archivada.
+ */
+export function sqlCuentaVisible(cuenta: Prisma.Sql, equipo: string | null): Prisma.Sql {
+  const sinEquipo = equipo ? Prisma.sql` AND ${cuenta}."organizationId" IS DISTINCT FROM ${equipo}` : Prisma.empty
+  return Prisma.sql`(${cuenta}."archivedAt" IS NULL
+    AND NOT EXISTS (SELECT 1 FROM "CrmHiddenClient" vis_h WHERE vis_h."organizationId" = ${cuenta}."organizationId")${sinEquipo})`
+}
+
+/**
+ * ¿Se puede agregar `correo` (ya NORMALIZADO) a una campaña? Las tres cosas:
+ *  - hay fila de permiso (`CrmEmailConsent`) para ese correo, cuelgue de la cuenta que cuelgue (se decide por el correo);
+ *  - hay un contacto del CRM con ese correo en una cuenta VISIBLE (`sqlCuentaVisible`);
+ *  - no pidió la baja ni rebotó ni se quejó (`sqlBloqueado`).
+ * «Eliminado» (D7) queda fuera solo: borrar a la persona borra su contacto y su permiso.
+ *
+ * 🔴 Alias propios (`agr_*`): el correo puede venir de una columna de la consulta de afuera (`ec."email"`), y un alias igual adentro
+ * lo taparía (la subconsulta se compararía consigo misma y todos saldrían agregables).
+ */
+export function sqlCorreoAgregable(correo: Prisma.Sql, equipo: string | null): Prisma.Sql {
+  // El permiso guarda el correo normalizado (y único): igualdad exacta, por su índice.
+  return Prisma.sql`(EXISTS (SELECT 1 FROM "CrmEmailConsent" agr_ec WHERE agr_ec."email" = ${correo})
+    AND EXISTS (
+      SELECT 1 FROM "CrmContact" agr_c JOIN "CrmAccount" agr_a ON agr_a."id" = agr_c."accountId"
+      WHERE lower(btrim(agr_c."email")) = ${correo} AND ${sqlCuentaVisible(Prisma.sql`agr_a`, equipo)}
+    )
+    AND NOT ${sqlBloqueado(correo)})`
+}
+
+/**
+ * De los correos dados, los que NO se pueden agregar (normalizados, en el orden en que llegaron). UNA consulta; sin correos no
+ * consulta. `db` = la transacción de quien guarda el público, con la campaña bloqueada.
+ */
+export async function personasNoElegibles(emails: string[], db: Prisma.TransactionClient = prisma): Promise<string[]> {
+  const pedidos = [...new Set(emails.map(normalizeEmail))]
+  if (pedidos.length === 0) return []
+  const equipo = await teamOrganizationId()
+  const filas = await db.$queryRaw<Array<{ email: string }>>(Prisma.sql`
+    SELECT p."email" FROM unnest(${pedidos}::text[]) WITH ORDINALITY AS p("email", "n")
+    WHERE NOT ${sqlCorreoAgregable(Prisma.sql`p."email"`, equipo)}
+    ORDER BY p."n"`)
+  return filas.map(f => f.email)
 }
 
 /** Lee la audiencia lote por lote: cada uno ya sin bloqueados, con cuántos se quitaron. */

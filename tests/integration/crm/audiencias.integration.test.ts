@@ -12,9 +12,12 @@
  *   TEST_DATABASE_URL='postgresql://<user>:<password>@localhost:5432/<disposable database>' \
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/audiencias.integration.test.ts --ci
  */
-import { StaffRole, VenueStatus } from '@prisma/client'
+import { Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import type { Audiencia } from '@/schemas/crm.schema'
-import { contarAudiencia, recorrerAudiencia, type Destinatario } from '@/services/crm/email/audience.service'
+import type { CrmAccess } from '@/services/crm/access.service'
+import { contarAudiencia, personasNoElegibles, recorrerAudiencia, type Destinatario } from '@/services/crm/email/audience.service'
+import { filtrarBloqueados, sqlBloqueado } from '@/services/crm/email/optOut.service'
+import { deleteAccount, erasedHashes } from '@/services/crm/erase.service'
 import { ensureCrmTeamVenue } from '@/services/crm/teamVenue.service'
 import prisma from '@/utils/prismaClient'
 
@@ -28,6 +31,8 @@ const organizationIds: string[] = []
 const venueIds: string[] = []
 /** Los negocios con un contrato comercial: Postgres no deja borrarlos (publicaciones inmutables), sólo apagarlos. */
 const hybridContractIds: string[] = []
+/** Las lápidas que deja «Eliminar» en la prueba de quién se puede agregar. */
+const erasedKeys: string[] = []
 let abiertaId: string
 let ganadaId: string
 let perdidaId: string
@@ -275,6 +280,9 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
     await prisma.crmEmailOptOut.deleteMany({ where: { email: { contains: suffix } } })
     await prisma.emailSuppression.deleteMany({ where: { email: { contains: suffix } } })
     await prisma.crmEmailConsent.deleteMany({ where: { email: { contains: suffix } } })
+    // Un contacto colgado de una cuenta que no es de este archivo (la del equipo, si ya existía) no se va en cascada.
+    await prisma.crmContact.deleteMany({ where: { email: { contains: suffix, mode: 'insensitive' } } })
+    if (erasedKeys.length) await prisma.crmErased.deleteMany({ where: { keyHash: { in: erasedKeys } } })
     if (accountIds.length) await prisma.crmAccount.deleteMany({ where: { id: { in: accountIds } } })
     if (stageIds.length) await prisma.crmStage.deleteMany({ where: { id: { in: stageIds } } })
     await prisma.staff.deleteMany({ where: { email: { contains: suffix } } })
@@ -683,5 +691,117 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
         bloqueados: 0,
       })
     }, 120_000)
+  })
+  // ── Quién se puede agregar (plan B, tarea 4): cada caso es una exclusión de `personasNoElegibles`, la revisión del PATCH ──
+
+  describe('quién se puede agregar', () => {
+    /** Una persona del CRM que SÍ se puede agregar: contacto con correo en una cuenta abierta y su fila de permiso. */
+    async function conPermiso(
+      alias: string,
+      over: { archivedAt?: Date; organizationId?: string; contacto?: string; nombre?: string } = {},
+    ) {
+      const id = await cuenta({ archivedAt: over.archivedAt, name: over.nombre })
+      if (over.organizationId) await prisma.crmAccount.update({ where: { id }, data: { organizationId: over.organizationId } })
+      await contacto(id, `Persona ${alias}`, over.contacto ?? correo(alias), true)
+      await consentimiento(correo(alias), id)
+      return id
+    }
+    const noSalen = (...alias: string[]) => personasNoElegibles(alias.map(correo))
+
+    it('con_permiso_y_cuenta_abierta_sale_elegible', async () => {
+      await conPermiso('agr-ok')
+      // El contacto se escribió con mayúsculas y espacios: es la misma persona.
+      await conPermiso('agr-mayus', { contacto: `  Agr-Mayus-${suffix}@Test.MX ` })
+      expect(await noSalen('agr-ok', 'agr-mayus')).toEqual([])
+      // Lo que se pregunta también se normaliza, y sin correos no se consulta.
+      expect(await personasNoElegibles([` AGR-OK-${suffix}@TEST.MX`])).toEqual([])
+      expect(await personasNoElegibles([])).toEqual([])
+    })
+
+    it('sin_fila_de_permiso_no_es_elegible', async () => {
+      const id = await cuenta()
+      await contacto(id, 'Sin Permiso', correo('agr-sin-permiso'), true)
+      expect(await noSalen('agr-sin-permiso', 'agr-nadie')).toEqual([correo('agr-sin-permiso'), correo('agr-nadie')])
+    })
+
+    it('dado_de_baja_o_con_rebote_no_es_elegible', async () => {
+      for (const alias of ['agr-baja', 'agr-rebote', 'agr-queja', 'agr-libre']) await conPermiso(alias)
+      await prisma.crmEmailOptOut.create({ data: { email: correo('agr-baja'), source: 'UN_CLIC' } })
+      await prisma.emailSuppression.createMany({
+        data: [
+          { email: correo('agr-rebote'), reason: 'HARD_BOUNCE' },
+          { email: correo('agr-queja'), reason: 'COMPLAINT' },
+        ],
+      })
+      expect(await noSalen('agr-baja', 'agr-rebote', 'agr-queja', 'agr-libre')).toEqual([
+        correo('agr-baja'),
+        correo('agr-rebote'),
+        correo('agr-queja'),
+      ])
+    })
+
+    it('con_su_cuenta_archivada_no_es_elegible', async () => {
+      await conPermiso('agr-archivada', { archivedAt: new Date() })
+      expect(await noSalen('agr-archivada')).toEqual([correo('agr-archivada')])
+    })
+
+    it('🔴 por_correo_un_permiso_colgado_de_una_cuenta_archivada_sirve_si_hay_un_contacto_visible_en_otra', async () => {
+      // A (archivada) es dueña del permiso; B (abierta) tiene un contacto con el mismo correo: se decide por el correo.
+      const a = await conPermiso('agr-dos-cuentas', { archivedAt: new Date() })
+      const b = await cuenta()
+      await contacto(b, 'En la abierta', correo('agr-dos-cuentas'), false)
+      expect(await noSalen('agr-dos-cuentas')).toEqual([])
+      expect((await prisma.crmEmailConsent.findUniqueOrThrow({ where: { email: correo('agr-dos-cuentas') } })).accountId).toBe(a)
+    })
+
+    it('🔴 de_un_cliente_oculto_no_es_elegible_aunque_tenga_permiso', async () => {
+      const oculta = await organizacion()
+      await prisma.crmHiddenClient.create({ data: { organizationId: oculta } })
+      await conPermiso('agr-oculta', { organizationId: oculta })
+      // Control: la misma forma, en una organización que no está oculta, sí sale.
+      await conPermiso('agr-visible', { organizationId: await organizacion() })
+      expect(await noSalen('agr-oculta', 'agr-visible')).toEqual([correo('agr-oculta')])
+    })
+
+    it('de_la_organizacion_del_equipo_no_es_elegible', async () => {
+      const equipo = await ensureCrmTeamVenue()
+      // Una cuenta del CRM por organización: si otra prueba ya ligó la del equipo, el contacto va en ésa.
+      const ya = await prisma.crmAccount.findUnique({ where: { organizationId: equipo.organizationId }, select: { id: true } })
+      if (ya) {
+        await contacto(ya.id, 'Del equipo', correo('agr-equipo'), false)
+        await consentimiento(correo('agr-equipo'), ya.id)
+      } else {
+        await conPermiso('agr-equipo', { organizationId: equipo.organizationId })
+      }
+      expect(await noSalen('agr-equipo')).toEqual([correo('agr-equipo')])
+    })
+
+    it('eliminado_del_CRM_no_es_elegible', async () => {
+      const nombre = `Para borrar ${suffix}`
+      const id = await conPermiso('agr-eliminado', { nombre })
+      expect(await noSalen('agr-eliminado')).toEqual([])
+      erasedKeys.push(...erasedHashes({ keys: [], emails: [correo('agr-eliminado')], phones: [], organizationId: null }).person)
+      // «Eliminar» borra a la persona (su contacto se va en cascada) y su fila de permiso.
+      await deleteAccount({ staffId: vendedor.id, isSuperadmin: true } as CrmAccess, id, nombre)
+      expect(await noSalen('agr-eliminado')).toEqual([correo('agr-eliminado')])
+    })
+
+    it('🔴 sqlBloqueado_dice_lo_mismo_que_filtrarBloqueados_para_una_baja_un_rebote_una_queja_y_uno_libre', async () => {
+      const [baja, rebote, queja, libre] = ['blq-baja', 'blq-rebote', 'blq-queja', 'blq-libre'].map(correo)
+      await prisma.crmEmailOptOut.create({ data: { email: baja, source: 'ADMIN' } })
+      await prisma.emailSuppression.createMany({
+        data: [
+          { email: rebote, reason: 'HARD_BOUNCE' },
+          { email: queja, reason: 'COMPLAINT' },
+        ],
+      })
+      const emails = [baja, rebote, queja, libre]
+      const filas = await prisma.$queryRaw<Array<{ email: string; bloqueado: boolean }>>(Prisma.sql`
+        SELECT p."email", ${sqlBloqueado(Prisma.sql`p."email"`)} AS "bloqueado" FROM unnest(${emails}::text[]) AS p("email")`)
+      const porSql = filas.filter(f => f.bloqueado).map(f => f.email)
+      const porLote = await filtrarBloqueados(prisma, emails)
+      expect(porSql.sort()).toEqual([...porLote].sort())
+      expect(porSql.sort()).toEqual([baja, queja, rebote].sort())
+    })
   })
 })

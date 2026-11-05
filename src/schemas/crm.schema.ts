@@ -561,13 +561,43 @@ const audienceSegmentSchema = z.discriminatedUnion(
   { errorMap: () => ({ message: 'Ese público no existe' }) },
 )
 
-/** Who a campaign goes to: 1 to 3 publics, ONE of each type. Who actually receives it is the service's, in SQL. */
+/** How many people can be removed (`excluir`) or added (`incluir`) by hand to a campaign, each list. */
+export const MAX_PERSONAS_SUELTAS = 500
+
+const correoDePersona = z
+  .string({ invalid_type_error: 'El correo no es válido' })
+  .trim()
+  .toLowerCase()
+  .max(254, 'El correo no es válido')
+  .regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, 'El correo no es válido')
+
+/**
+ * People removed or added by hand. 🔴 Never reordered or deduplicated: the screen compares the saved JSON with its own to count, so
+ * a repeated email is a 400, not something the server quietly fixes.
+ */
+const personasSueltas = z
+  .array(correoDePersona, { invalid_type_error: 'Las personas van en una lista' })
+  .max(MAX_PERSONAS_SUELTAS, `Máximo ${MAX_PERSONAS_SUELTAS} personas`)
+  .superRefine((correos, ctx) => {
+    const vistos = new Set<string>()
+    correos.forEach((correo, i) => {
+      if (vistos.has(correo)) ctx.addIssue({ code: 'custom', path: [i], message: 'Esa persona ya está en la lista' })
+      vistos.add(correo)
+    })
+  })
+
+/**
+ * Who a campaign goes to: 0 to 3 publics (a draft can be left empty), ONE of each type, plus the people removed (`excluir`, wins over
+ * everything) and added (`incluir`, only eligible people: the service checks it) by hand. Keys in THIS order: the hash of an audience
+ * is its JSON. Who actually receives it is the service's, in SQL.
+ */
 export const audienciaSchema = z
   .object({
     segmentos: z
       .array(audienceSegmentSchema, { required_error: 'Elige a quién le mandas', invalid_type_error: 'Elige a quién le mandas' })
-      .min(1, 'Elige al menos un público')
       .max(3, 'Máximo 3 públicos'),
+    excluir: personasSueltas.optional(),
+    incluir: personasSueltas.optional(),
   })
   .superRefine((audience, ctx) => {
     const seen = new Set<string>()
@@ -619,7 +649,10 @@ export const createCampaignSchema = z.object({
   body: z.object({ name: campaignName, templateId: z.string({ required_error: 'Elige una plantilla' }).cuid('La plantilla no es válida') }),
 })
 
-/** PATCH /crm/campaigns/:id — only what changes, only while it is a draft (the service answers 409 otherwise). */
+/**
+ * PATCH /crm/campaigns/:id — only what changes, only while it is a draft (the service answers 409 otherwise). `basePublico`, optional:
+ * the `huellaPublico` of the audience the screen read; with it, saving an audience that someone else changed meanwhile is a 409.
+ */
 export const updateCampaignSchema = z.object({
   params: byId,
   body: z
@@ -628,8 +661,14 @@ export const updateCampaignSchema = z.object({
       subject: emailSubject.optional(),
       blocks: emailBlocks.optional(),
       audience: audienciaSchema.optional(),
+      basePublico: z
+        .string({ invalid_type_error: 'La versión que ves no es válida' })
+        .min(1, 'La versión que ves no es válida')
+        .max(200, 'La versión que ves no es válida')
+        .optional(),
     })
-    .refine(somethingToChange, 'No hay nada que cambiar'),
+    // `basePublico` alone changes nothing.
+    .refine(({ basePublico: _base, ...cambios }) => somethingToChange(cambios), 'No hay nada que cambiar'),
 })
 
 /** POST /crm/campaigns/:id/send — the token the preview gave, which ties what was seen to what is sent. */
