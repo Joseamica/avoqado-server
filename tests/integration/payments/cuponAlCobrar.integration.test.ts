@@ -9,6 +9,7 @@ import { createOrderWithItems as crearEnMovil, payCashOrder } from '@/services/m
 import { onOrderPaid } from '@/services/referrals/referralQualification.service'
 import { removeDiscountFromOrder } from '@/services/dashboard/discountEngine.service'
 import { validateCoupon as validarEnTerminal } from '@/services/tpv/discount.tpv.service'
+import { barrerCuponesSinCanje } from '@/services/shared/cuponDeLaVenta'
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/communication/sockets', () => ({
@@ -208,5 +209,49 @@ describe('quitar el descuento antes de cobrar', () => {
     expect(await uso(cupon.id)).toEqual(antes)
     const o = await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })
     expect(Number(o.total)).toBe(100)
+  })
+})
+
+describe('el último uso (Codex r1 #1, r2 #1 y #2)', () => {
+  it('una venta sin cobrar aparta el último uso; cancelarla lo suelta', async () => {
+    const cupon = await nuevoCupon({ maxUses: 1 })
+    const primera = await ventaMovil(cupon.code)
+    await expect(ventaMovil(cupon.code)).rejects.toMatchObject({ message: 'Este cupón ya alcanzó su límite de usos.' })
+    await prisma.order.update({ where: { id: primera.id }, data: { status: 'CANCELLED' } })
+    expect(Number((await ventaMovil(cupon.code)).total)).toBe(90)
+  })
+
+  it('pagada pero todavía sin canje, sigue apartando', async () => {
+    const cupon = await nuevoCupon({ maxUses: 1 })
+    const primera = await ventaMovil(cupon.code)
+    await prisma.order.update({ where: { id: primera.id }, data: { paymentStatus: 'PAID', status: 'COMPLETED' } })
+    await expect(ventaMovil(cupon.code)).rejects.toMatchObject({ message: 'Este cupón ya alcanzó su límite de usos.' })
+  })
+
+  it('dos códigos del mismo descuento comparten su límite total', async () => {
+    const limitado = await prisma.discount.create({
+      data: { venueId, name: 'Uno', type: 'PERCENTAGE', value: 10, scope: 'ORDER', active: true, maxTotalUses: 1 },
+    })
+    const a = await prisma.couponCode.create({ data: { discountId: limitado.id, code: `A${randomUUID().slice(0, 8).toUpperCase()}` } })
+    const b = await prisma.couponCode.create({ data: { discountId: limitado.id, code: `B${randomUUID().slice(0, 8).toUpperCase()}` } })
+    await ventaMovil(a.code)
+    await expect(ventaMovil(b.code)).rejects.toMatchObject({ message: 'Este cupón ya alcanzó su límite de usos.' })
+  })
+
+  it('dos cajas a la vez con el último uso: sólo una crea la venta', async () => {
+    const cupon = await nuevoCupon({ maxUses: 1 })
+    const r = await Promise.allSettled([ventaMovil(cupon.code), ventaMovil(cupon.code)])
+    expect(r.filter(x => x.status === 'fulfilled')).toHaveLength(1)
+  })
+})
+
+describe('el barrido (Codex r2 #3)', () => {
+  it('cuenta el cupón de una venta pagada que se quedó sin canje', async () => {
+    const cupon = await nuevoCupon()
+    const orden = await ventaMovil(cupon.code)
+    await prisma.order.update({ where: { id: orden.id }, data: { paymentStatus: 'PAID', status: 'COMPLETED' } })
+    await barrerCuponesSinCanje(200)
+    expect(await prisma.couponRedemption.count({ where: { orderId: orden.id } })).toBe(1)
+    expect((await uso(cupon.id)).cupon).toBe(1)
   })
 })

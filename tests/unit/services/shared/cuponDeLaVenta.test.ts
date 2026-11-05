@@ -1,7 +1,14 @@
 /** D5: el cierre cuenta el cupón una sola vez y los textos que ve la caja salen en español. */
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '../../../__helpers__/setup'
-import { apartarCupon, cuponDeLaVenta, finalizeCouponsForOrder, montoDelCupon, textoDeRechazoDeCupon } from '@/services/shared/cuponDeLaVenta'
+import {
+  apartarCupon,
+  barrerCuponesSinCanje,
+  cuponDeLaVenta,
+  finalizeCouponsForOrder,
+  montoDelCupon,
+  textoDeRechazoDeCupon,
+} from '@/services/shared/cuponDeLaVenta'
 
 const fila = {
   id: 'od-1',
@@ -28,6 +35,8 @@ describe('finalizeCouponsForOrder', () => {
     expect(prismaMock.couponCode.update).toHaveBeenCalledWith({ where: { id: 'cup-1' }, data: { currentUses: { increment: 1 } } })
     expect(prismaMock.discount.update).toHaveBeenCalledWith({ where: { id: 'd-1' }, data: { currentUses: { increment: 1 } } })
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    // El canje toma el mismo candado que el apartado: sin él, un apartado podía leer el contador viejo y la venta ya canjeada.
+    expect(JSON.stringify(prismaMock.$queryRaw.mock.calls[0][0])).toContain('avoqado:cupon-descuento:v1:d-1')
   })
 
   it('sin pagar no cuenta: el hook puede llegar con la cuenta abierta o cancelada', async () => {
@@ -193,10 +202,11 @@ describe('apartarCupon: el último uso no se gasta dos veces (Codex r1 #1)', () 
     prismaMock.couponRedemption.count.mockResolvedValue(0)
   })
 
-  it('toma el candado del cupón antes de contar', async () => {
+  it('toma el candado del DESCUENTO (sus límites los comparten todos sus códigos) antes de contar', async () => {
     prismaMock.couponCode.findFirst.mockResolvedValue(fresco() as any)
     await apartarCupon(prismaMock as any, 'v-1', cupon, null)
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(prismaMock.$queryRaw.mock.calls[0][0])).toContain('avoqado:cupon-descuento:v1:d-1')
     // Sin límites no cuenta nada: una venta sin límite no paga consultas.
     expect(prismaMock.orderDiscount.count).not.toHaveBeenCalled()
   })
@@ -211,7 +221,7 @@ describe('apartarCupon: el último uso no se gasta dos veces (Codex r1 #1)', () 
     expect(prismaMock.orderDiscount.count).toHaveBeenCalledWith({
       where: {
         couponCodeId: 'cup-1',
-        order: { venueId: 'v-1', paymentStatus: { in: ['PENDING', 'PARTIAL'] }, status: { notIn: ['CANCELLED', 'DELETED'] } },
+        order: { venueId: 'v-1', status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } },
       },
     })
   })
@@ -233,5 +243,41 @@ describe('apartarCupon: el último uso no se gasta dos veces (Codex r1 #1)', () 
     prismaMock.couponCode.findFirst.mockResolvedValue(fresco({ maxUses: 2 }) as any)
     prismaMock.orderDiscount.count.mockResolvedValue(1)
     await expect(apartarCupon(prismaMock as any, 'v-1', cupon, null)).resolves.toBeUndefined()
+  })
+})
+
+describe('barrerCuponesSinCanje (Codex r2 #3)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+  })
+
+  it('busca ventas PAGADAS con cupón y sin canje, acotado, y canjea cada una', async () => {
+    prismaMock.orderDiscount.findMany
+      .mockResolvedValueOnce([{ orderId: 'o-1', order: { venueId: 'v-1' } }] as any)
+      .mockResolvedValueOnce([fila] as any)
+    prismaMock.order.findFirst.mockResolvedValue({ customerId: null, paymentStatus: 'PAID' } as any)
+    prismaMock.couponRedemption.findUnique.mockResolvedValue(null)
+
+    await expect(barrerCuponesSinCanje(10)).resolves.toBe(1)
+
+    expect(prismaMock.orderDiscount.findMany.mock.calls[0][0]).toMatchObject({
+      where: { couponCodeId: { not: null }, order: { paymentStatus: 'PAID', couponRedemption: { is: null } } },
+      take: 10,
+    })
+    expect(prismaMock.couponRedemption.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('una venta que falla no detiene a las demás', async () => {
+    prismaMock.orderDiscount.findMany
+      .mockResolvedValueOnce([
+        { orderId: 'o-1', order: { venueId: 'v-1' } },
+        { orderId: 'o-2', order: { venueId: 'v-1' } },
+      ] as any)
+      .mockRejectedValueOnce(new Error('se cayó'))
+      .mockResolvedValueOnce([fila] as any)
+    prismaMock.order.findFirst.mockResolvedValue({ customerId: null, paymentStatus: 'PAID' } as any)
+    prismaMock.couponRedemption.findUnique.mockResolvedValue(null)
+    await expect(barrerCuponesSinCanje()).resolves.toBe(1)
   })
 })

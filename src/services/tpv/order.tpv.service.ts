@@ -29,7 +29,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
-import { CUPON_CAMBIO_DE_VALOR, apartarCupon, cuponDeLaVenta, finalizeCouponsForOrder, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
+import { CUPON_CAMBIO_DE_VALOR, apartarCupon, canjearCuponEnTx, cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
@@ -1444,6 +1444,16 @@ export async function createOrderWithItems(
             amount: 0,
           },
         })
+        // D5 (Codex r2 #3): nace pagada sin pasar por ningún cobro: su cupón se canjea AQUÍ, con la venta, o no se cuenta nunca.
+        if (cupon) {
+          await canjearCuponEnTx(tx, {
+            orderId: order.id,
+            couponCodeId: cupon.id,
+            discountId: cupon.discount.id,
+            customerId: input.customerId || null,
+            amountSaved: decimalFromPesos(orderDiscountPesos),
+          })
+        }
       }
 
       return order
@@ -1454,12 +1464,6 @@ export async function createOrderWithItems(
 
   if (totalPesos === 0) {
     await deductTrackedInventoryForFreeCart(fullOrder, input.staffId)
-    // Un carrito gratis nace pagado y nunca pasa por el cobro: aquí es donde su cupón se canjea. Su fallo no desmiente la venta.
-    if (cupon) {
-      await finalizeCouponsForOrder(venueId, createdOrder.id).catch(error =>
-        logger.error('⚠️ No se pudo canjear el cupón del carrito gratis', { orderId: createdOrder.id, error: (error as Error).message }),
-      )
-    }
   }
 
   if (marcarCocina) {

@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { validateCouponCode, type CouponValidationResult } from '../dashboard/coupon.dashboard.service'
 import { calculateDiscountCents } from './discount.service'
 
@@ -66,52 +67,6 @@ export async function cuponDeLaVenta(
   return { id: v.coupon.id, code: v.coupon.code, discount, minimo: v.minimo ?? null }
 }
 
-/** Una venta sin cobrar que ya trae el cupón: su uso está apartado aunque todavía no cuente. */
-const EN_VUELO = { paymentStatus: { in: ['PENDING', 'PARTIAL'] }, status: { notIn: ['CANCELLED', 'DELETED'] } } satisfies Prisma.OrderWhereInput
-
-/**
- * 🔴 El último uso no se gasta dos veces (Codex r1 #1). Validar y canjear van separados (se canjea al cobrar), así que dos cajas podían
- * crear dos ventas con el último uso y cobrar las dos. Aquí, en la transacción que crea la venta y bajo un candado del cupón, cuentan los
- * canjes MÁS las ventas sin cobrar que ya lo traen. Una venta abandonada lo aparta hasta que se cancela, como un apartado de Square.
- * El canje (`finalizeCouponsForOrder`) nunca rechaza: para entonces el dinero ya se cobró con la rebaja.
- */
-export async function apartarCupon(
-  tx: Prisma.TransactionClient,
-  venueId: string,
-  cupon: CuponDeLaVenta,
-  customerId: string | null | undefined,
-): Promise<void> {
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:cupon:v1:${cupon.id}`}, 0))::text`)
-  const fresco = await tx.couponCode.findFirst({
-    where: { id: cupon.id, discount: { venueId } },
-    select: {
-      currentUses: true,
-      maxUses: true,
-      maxUsesPerCustomer: true,
-      discount: { select: { id: true, currentUses: true, maxTotalUses: true, maxUsesPerCustomer: true } },
-    },
-  })
-  if (!fresco) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'NOT_FOUND' }))
-  const agotado = () => new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'USAGE_LIMIT' }))
-  if (fresco.maxUses != null) {
-    const enVuelo = await tx.orderDiscount.count({ where: { couponCodeId: cupon.id, order: { venueId, ...EN_VUELO } } })
-    if (fresco.currentUses + enVuelo >= fresco.maxUses) throw agotado()
-  }
-  if (fresco.discount.maxTotalUses != null) {
-    const enVuelo = await tx.orderDiscount.count({ where: { couponCode: { discountId: fresco.discount.id }, order: { venueId, ...EN_VUELO } } })
-    if (fresco.discount.currentUses + enVuelo >= fresco.discount.maxTotalUses) throw agotado()
-  }
-  const porCliente = fresco.maxUsesPerCustomer ?? fresco.discount.maxUsesPerCustomer
-  if (porCliente != null && customerId) {
-    const delCupon = fresco.maxUsesPerCustomer != null ? { couponCodeId: cupon.id } : { couponCode: { discountId: fresco.discount.id } }
-    const [canjes, enVuelo] = await Promise.all([
-      tx.couponRedemption.count({ where: { ...delCupon, customerId } }),
-      tx.orderDiscount.count({ where: { ...delCupon, order: { venueId, customerId, ...EN_VUELO } } }),
-    ])
-    if (canjes + enVuelo >= porCliente) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'CUSTOMER_LIMIT', limite: porCliente }))
-  }
-}
-
 /** En centavos enteros, como las apps: en pesos flotantes, 10 % de $21.35 daba $2.13 y la caja rebajaba $2.14. */
 export function montoDelCupon(discount: any, basePesos: number): number {
   return calculateDiscountCents(discount, Math.round(basePesos * 100)) / 100
@@ -128,6 +83,73 @@ export function ligarCupon(fila: Prisma.OrderDiscountUncheckedCreateInput, cupon
     name: `${cupon.discount.name} (${cupon.code})`,
     isManual: false,
   }
+}
+
+/**
+ * Un uso apartado: una venta viva que trae el cupón y todavía no tiene canje, esté pagada o no (Codex r2 #2: al quedar pagada sale de
+ * «sin cobrar» antes de que el canje suba el contador). Una pagada cuyo canje se perdió sigue apartando hasta que el barrido la cuenta.
+ */
+const APARTADO = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
+
+/** El candado es del DESCUENTO (Codex r2 #1): sus límites los comparten todos sus códigos. Lo toman apartar y canjear. */
+async function bloquearDescuento(tx: Prisma.TransactionClient, discountId: string): Promise<void> {
+  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:cupon-descuento:v1:${discountId}`}, 0))::text`)
+}
+
+/**
+ * 🔴 El último uso no se gasta dos veces (Codex r1 #1, r2 #1 y #2). Validar y canjear van separados (se canjea al cobrar), así que dos
+ * cajas podían crear dos ventas con el último uso y cobrar las dos. Aquí, en la transacción que crea la venta y bajo el candado del
+ * descuento, cuentan los canjes MÁS los usos apartados. Una venta abandonada lo aparta hasta que se cancela, como un apartado de Square.
+ * El canje nunca rechaza: para entonces el dinero ya se cobró con la rebaja.
+ */
+export async function apartarCupon(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  cupon: CuponDeLaVenta,
+  customerId: string | null | undefined,
+): Promise<void> {
+  await bloquearDescuento(tx, cupon.discount.id)
+  const fresco = await tx.couponCode.findFirst({
+    where: { id: cupon.id, discount: { venueId } },
+    select: {
+      currentUses: true,
+      maxUses: true,
+      maxUsesPerCustomer: true,
+      discount: { select: { id: true, currentUses: true, maxTotalUses: true, maxUsesPerCustomer: true } },
+    },
+  })
+  if (!fresco) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'NOT_FOUND' }))
+  const agotado = () => new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'USAGE_LIMIT' }))
+  if (fresco.maxUses != null) {
+    const apartados = await tx.orderDiscount.count({ where: { couponCodeId: cupon.id, order: { venueId, ...APARTADO } } })
+    if (fresco.currentUses + apartados >= fresco.maxUses) throw agotado()
+  }
+  if (fresco.discount.maxTotalUses != null) {
+    const apartados = await tx.orderDiscount.count({ where: { couponCode: { discountId: fresco.discount.id }, order: { venueId, ...APARTADO } } })
+    if (fresco.discount.currentUses + apartados >= fresco.discount.maxTotalUses) throw agotado()
+  }
+  const porCliente = fresco.maxUsesPerCustomer ?? fresco.discount.maxUsesPerCustomer
+  if (porCliente != null && customerId) {
+    const delCupon = fresco.maxUsesPerCustomer != null ? { couponCodeId: cupon.id } : { couponCode: { discountId: fresco.discount.id } }
+    const [canjes, apartados] = await Promise.all([
+      tx.couponRedemption.count({ where: { ...delCupon, customerId } }),
+      tx.orderDiscount.count({ where: { ...delCupon, order: { venueId, customerId, ...APARTADO } } }),
+    ])
+    if (canjes + apartados >= porCliente) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'CUSTOMER_LIMIT', limite: porCliente }))
+  }
+}
+
+/** El canje en la transacción de quien llama: el registro y los dos contadores juntos, bajo el candado del descuento. */
+export async function canjearCuponEnTx(
+  tx: Prisma.TransactionClient,
+  c: { orderId: string; couponCodeId: string; discountId: string; customerId: string | null; amountSaved: Prisma.Decimal | number },
+): Promise<void> {
+  await bloquearDescuento(tx, c.discountId)
+  await tx.couponRedemption.create({
+    data: { couponCodeId: c.couponCodeId, orderId: c.orderId, customerId: c.customerId, amountSaved: c.amountSaved },
+  })
+  await tx.couponCode.update({ where: { id: c.couponCodeId }, data: { currentUses: { increment: 1 } } })
+  await tx.discount.update({ where: { id: c.discountId }, data: { currentUses: { increment: 1 } } })
 }
 
 /**
@@ -149,14 +171,40 @@ export async function finalizeCouponsForOrder(venueId: string, orderId: string):
 
   const { id: couponCodeId, code, discountId } = fila.couponCode
   try {
-    await prisma.$transaction(async tx => {
-      await tx.couponRedemption.create({ data: { couponCodeId, orderId, customerId: order.customerId, amountSaved: fila.amount } })
-      await tx.couponCode.update({ where: { id: couponCodeId }, data: { currentUses: { increment: 1 } } })
-      await tx.discount.update({ where: { id: discountId }, data: { currentUses: { increment: 1 } } })
-    })
+    await prisma.$transaction(tx => canjearCuponEnTx(tx, { orderId, couponCodeId, discountId, customerId: order.customerId, amountSaved: fila.amount }))
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return
     throw error
   }
   logger.info('✅ Cupón canjeado al quedar pagada la venta', { orderId, venueId, couponCode: code, amountSaved: fila.amount.toString() })
+}
+
+/**
+ * La red de los canjes que se perdieron (Codex r2 #3): una venta PAGADA con cupón y sin canje (el proceso murió tras cobrar, o un camino
+ * sin efecto durable falló). La corre el barrido de lealtad, que ya recupera el trabajo de las ventas pagadas.
+ * ponytail: lote fijo y en orden de id; si un día se atoran más de `limite` filas que siempre fallan, las nuevas esperan (subir el lote).
+ */
+export async function barrerCuponesSinCanje(limite = 25): Promise<number> {
+  const filas = await retry(
+    () =>
+      prisma.orderDiscount.findMany({
+        where: { couponCodeId: { not: null }, order: { paymentStatus: 'PAID', couponRedemption: { is: null } } },
+        select: { orderId: true, order: { select: { venueId: true } } },
+        distinct: ['orderId'],
+        orderBy: { orderId: 'asc' },
+        take: limite,
+      }),
+    { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cupones-sin-canje.find' },
+  )
+  let contados = 0
+  for (const f of filas ?? []) {
+    try {
+      await finalizeCouponsForOrder(f.order.venueId, f.orderId)
+      contados++
+    } catch (error) {
+      logger.error('⚠️ El barrido no pudo canjear el cupón de una venta pagada', { orderId: f.orderId, error: (error as Error).message })
+    }
+  }
+  if (contados > 0) logger.warn('🎟️ El barrido canjeó cupones de ventas pagadas que se habían quedado sin contar', { contados })
+  return contados
 }

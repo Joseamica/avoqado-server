@@ -10,13 +10,8 @@ jest.mock('@/communication/sockets', () => ({
 jest.mock('@/services/dashboard/activity-log.service', () => ({ __esModule: true, logAction: jest.fn() }))
 jest.mock('@/services/kds/kitchenDisplayStations', () => ({ debeMarcarCocina: jest.fn().mockResolvedValue(false) }))
 jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({ armarComandasTrasCommit: jest.fn().mockResolvedValue(undefined) }))
-jest.mock('@/services/shared/cuponDeLaVenta', () => ({
-  ...jest.requireActual('@/services/shared/cuponDeLaVenta'),
-  finalizeCouponsForOrder: jest.fn().mockResolvedValue(undefined),
-}))
 
 import { createOrderWithItems } from '@/services/tpv/order.tpv.service'
-import { finalizeCouponsForOrder } from '@/services/shared/cuponDeLaVenta'
 
 const descuento = (extra: Record<string, unknown> = {}) => ({
   id: 'd-1',
@@ -103,7 +98,7 @@ it('liga la fila al cupón con el nombre del ticket, y no cuenta el uso al crear
   expect(creadas[0]).toMatchObject({ couponCodeId: 'cup-1', discountId: 'd-1', name: 'Diez (DESC10)', isManual: false })
   expect(Number(creadas[0].amount)).toBe(10)
   expect(prismaMock.discount.updateMany).not.toHaveBeenCalled()
-  expect(finalizeCouponsForOrder).not.toHaveBeenCalled()
+  expect(prismaMock.couponRedemption.create).not.toHaveBeenCalled()
   expect((prismaMock.order.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
     discountAmount: new Prisma.Decimal(10),
     total: new Prisma.Decimal(90),
@@ -124,12 +119,16 @@ it('el tope del catálogo viaja en el reparto para el siguiente recálculo', asy
   expect(creadas[0].reparto).toMatchObject({ alcance: 'CUENTA', tope: 20 })
 })
 
-it('carrito gratis: nace pagado y cuenta el uso tras el commit', async () => {
+it('carrito gratis: nace pagado y su canje va en la MISMA transacción (Codex r2 #3)', async () => {
   conDescuento(descuento({ value: new Prisma.Decimal(100) }))
   prismaMock.payment.create.mockResolvedValue({ id: 'p-1' } as any)
   ;(prismaMock as any).paymentAllocation.create.mockResolvedValue({ id: 'pa-1' })
   await venta({ discount: 100, total: 0 })
-  expect(finalizeCouponsForOrder).toHaveBeenCalledWith('v-1', 'order-1')
+  expect(prismaMock.couponRedemption.create).toHaveBeenCalledWith({
+    data: { couponCodeId: 'cup-1', orderId: 'order-1', customerId: null, amountSaved: new Prisma.Decimal(100) },
+  })
+  expect(prismaMock.couponCode.update).toHaveBeenCalledWith({ where: { id: 'cup-1' }, data: { currentUses: { increment: 1 } } })
+  expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
 })
 
 it('si el cupón cambió desde que se validó, lo dice y no crea la venta', async () => {
