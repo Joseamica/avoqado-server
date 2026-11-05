@@ -129,6 +129,9 @@ const envSchema = z.object({
   // 50 por omisión (3-nov, cupo de Resend): el plan gratis da 100 correos al día a TODO el servidor (login, recibos, avisos).
   // 🔴 `.catch(50)` (Ruling 3): uno mal escrito («1,000», «mil») vale el default seguro en vez de hacer `process.exit` de TODA la API.
   CRM_CAMPAIGN_DAILY_CAP: z.coerce.number().int().min(0).default(50).catch(50),
+  // Correos de los anuncios de plataforma por día UTC (el día de Resend). 40 deja 60 de los 100 del plan gratis al login,
+  // los recibos y los avisos; con Resend de pago se sube aquí. `.catch(40)`: uno mal escrito nunca tumba el arranque.
+  ANNOUNCEMENT_EMAIL_DAILY_CAP: z.coerce.number().int().min(0).default(40).catch(40),
   // El cupo de la cuenta de Resend, para cuando cambie el plan (gratis: 100 al día y 3,000 al mes). Al 80 % se avisa y, con el
   // del día, se pausan las campañas del CRM. 🔴 Texto opcional a propósito (Ruling 3): se valida donde se usa
   // (`services/email/resendQuota.ts`, desde `process.env`); uno mal escrito vale el del plan gratis y nunca tumba el arranque.

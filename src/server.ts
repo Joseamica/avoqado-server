@@ -67,6 +67,7 @@ import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
 import { customerApprovalOutboxJob } from './jobs/customer-approval-outbox.job'
 import { publishScheduledAnnouncementsJob } from './jobs/publishScheduledAnnouncements.job'
 import { announcementOutboxJob } from './jobs/announcementOutbox.job'
+import { announcementEmailJob } from './jobs/announcementEmail.job'
 import { crmCampaignSenderJob } from './jobs/crm-campaign-sender.job'
 import { crmDailyDigestJob } from './jobs/crm-daily-digest.job'
 import { crmGmailRepliesJob } from './jobs/crm-gmail-replies.job'
@@ -319,6 +320,7 @@ const gracefulShutdown = async (signal: string) => {
       // Anuncios de plataforma programados
       publishScheduledAnnouncementsJob.stop()
       announcementOutboxJob.stop()
+      announcementEmailJob.stop()
       // CRM propio: barrido de reparación y primer dinero, y el aviso diario de pendientes
       crmSweepJob.stop()
       crmDailyDigestJob.stop()
@@ -690,6 +692,8 @@ const startApplication = async (retries = 3) => {
       publishScheduledAnnouncementsJob.start()
       // Entrega los anuncios encolados (cada 30 s)
       announcementOutboxJob.start()
+      // Correo de los anuncios (cada 30 s): encola y manda en tandas con el tope del día
+      announcementEmailJob.start()
       // CRM propio: aplica las entradas de la landing pendientes, liga, carga las altas viejas y llena el primer dinero (cada 5 min)
       crmSweepJob.start()
       // CRM propio: «Tus pendientes de hoy» a cada vendedor (lunes a viernes, 8:30; hasta las 11:00 retoma lo que quedó a medias)
