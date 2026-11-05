@@ -107,7 +107,7 @@ import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.jo
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
-import { initializeFirebase } from './config/firebase'
+import { getStorageBucket, initializeFirebase } from './config/firebase'
 import { iniciarCajaNegra } from './observability/cajaNegra'
 import { primeVenueNames } from './observability/venueNames'
 import { instalarMedidorDeCupoResend } from './services/email/resendQuota'
@@ -431,6 +431,10 @@ const startApplication = async (retries = 3) => {
     // Initialize Firebase Admin SDK (for storage file deletion)
     try {
       initializeFirebase()
+      // D7 (5-nov): `admin.storage()` carga `@google-cloud/storage` con un require síncrono de 300–440 ms. Si se deja para el
+      // primer uso, ese uso (el primer exporte, una foto, una liga firmada) atora el hilo con cobros en vuelo; aquí lo paga
+      // el arranque, antes de abrir el puerto.
+      getStorageBucket()
       logger.info('✅ Firebase Admin SDK initialized')
     } catch (error) {
       logger.warn('⚠️  Firebase Admin SDK not initialized. File deletion from storage will be skipped.', error)
