@@ -291,7 +291,7 @@ describe('Notification Dashboard Service', () => {
 
   describe('campana por negocio (filtroDeNegocio)', () => {
     const DE_PLATAFORMA = { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }
-    const CON_NEGOCIO = { AND: [{ OR: [{ venueId: 'venue1' }, DE_PLATAFORMA] }] }
+    const CON_NEGOCIO = { AND: [{ OR: [{ venueId: 'venue1' }, { venueId: null }, DE_PLATAFORMA] }] }
 
     it('sin negocio: sin filtro (todo como hoy)', () => {
       expect(filtroDeNegocio()).toEqual({})
@@ -302,6 +302,11 @@ describe('Notification Dashboard Service', () => {
       // un aviso de venue2 con type ANNOUNCEMENT pero sin entityType de plataforma no cumple ninguna rama
       const ramas = ((filtroDeNegocio('venue1').AND as any[])[0].OR as any[]).map(r => JSON.stringify(r))
       expect(ramas).not.toContain(JSON.stringify({ type: NotificationType.ANNOUNCEMENT }))
+    })
+
+    it('con negocio: los avisos personales sin negocio (KYC, avisos de superadmin) también salen (D7)', () => {
+      const ramas = ((filtroDeNegocio('venue1').AND as any[])[0].OR as any[]).map(r => JSON.stringify(r))
+      expect(ramas).toContain(JSON.stringify({ venueId: null }))
     })
 
     it('la lista, el total y los no leídos usan el filtro y la lista trae el venue', async () => {
