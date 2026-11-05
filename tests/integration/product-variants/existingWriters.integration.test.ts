@@ -343,9 +343,11 @@ describe('🔴 las apps publicadas guardan el precio de una variante (formulario
 
   /** Lo que la app tiene en memoria: el GET de productos del POS, ya serializado como JSON. */
   async function comoLoLeeLaApp(productId: string) {
-    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
-    await listMobile({ params: { venueId: n.venueId } } as any, res as any, jest.fn())
-    const data = JSON.parse(JSON.stringify(res.json.mock.calls[0][0].data))
+    const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn(), send: jest.fn(), type: jest.fn() }
+    res.type.mockReturnValue(res)
+    await listMobile({ params: { venueId: n.venueId } } as any, res, jest.fn())
+    // D6: el catálogo sale ya serializado (res.send); sin versión cae a res.json
+    const data = (res.json.mock.calls.length ? JSON.parse(JSON.stringify(res.json.mock.calls[0][0])) : JSON.parse(res.send.mock.calls[0][0])).data
     return data.find((p: any) => p.id === productId)
   }
   async function guardar(productId: string, body: Record<string, unknown>) {
