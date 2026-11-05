@@ -31,14 +31,18 @@ const CATEGORIAS = ['FOOD_SERVICE', 'RETAIL', 'SERVICES', 'HOSPITALITY', 'ENTERT
  * Un tipo desconocido se rechaza AL ESCRIBIR; ignorarlo al leer es la defensa del
  * cliente viejo, no la del servidor.
  */
+const medida = z.number().int().min(1).max(10000).optional()
+
 const bloque = z.discriminatedUnion('type', [
   z.object({ type: z.literal('heading'), text: z.string().min(1) }),
   z.object({ type: z.literal('paragraph'), text: z.string().min(1) }),
   z.object({ type: z.literal('bullets'), items: z.array(z.string().min(1)).min(1) }),
-  z.object({ type: z.literal('image'), url: z.string().url(), alt: z.string().min(1), caption: z.string().optional() }),
+  z.object({ type: z.literal('image'), url: z.string().url(), alt: z.string().min(1), caption: z.string().optional(), width: medida, height: medida }),
   z.object({
     type: z.literal('gallery'),
-    images: z.array(z.object({ url: z.string().url(), alt: z.string().min(1), caption: z.string().optional() })).min(1),
+    images: z
+      .array(z.object({ url: z.string().url(), alt: z.string().min(1), caption: z.string().optional(), width: medida, height: medida }))
+      .min(1),
   }),
   z.object({ type: z.literal('specs'), rows: z.array(z.object({ label: z.string(), value: z.string() })).min(1) }),
   z.object({ type: z.literal('callout'), tone: z.enum(['info', 'warning', 'success']), text: z.string().min(1) }),
@@ -69,6 +73,9 @@ const announcementSchema = filtrosSchema.extend({
   contentBlocks: z.array(bloque).optional(),
   showAsBanner: z.boolean().default(false),
   showAsModal: z.boolean().default(false),
+  // Sin `.default`: en un parcial (update) un default pisaría lo guardado. El servicio aplica los de la base.
+  showInInbox: z.boolean().optional(),
+  sendEmail: z.boolean().optional(),
   expiresAt: z.coerce.date().optional(),
 })
 
@@ -201,8 +208,16 @@ export const uploadImage = async (req: Request, res: Response, next: NextFunctio
       res.status(400).json({ success: false, message: 'No llegó ninguna imagen' })
       return
     }
-    const url = await uploadAnnouncementImage(file.buffer, file.mimetype, file.originalname)
-    res.json({ success: true, data: { url } })
+    const { width, height } = req.body ?? {}
+    const hayMedida = (v: unknown) => v !== undefined && v !== ''
+    let medidas: { width: number; height: number } | undefined
+    if (hayMedida(width) || hayMedida(height)) {
+      const medidasSchema = z.object({ width: z.coerce.number().int().min(1).max(10000), height: z.coerce.number().int().min(1).max(10000) })
+      const r = medidasSchema.safeParse({ width, height })
+      if (!r.success) throw new BadRequestError('Las medidas de la foto no son válidas')
+      medidas = r.data
+    }
+    res.json({ success: true, data: await uploadAnnouncementImage(file.buffer, file.mimetype, file.originalname, medidas) })
   } catch (error) {
     next(error)
   }

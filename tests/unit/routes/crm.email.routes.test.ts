@@ -393,7 +393,7 @@ describe('POST /crm/uploads/image', () => {
   beforeEach(soloCampanas)
 
   it('sube la imagen con el servicio de siempre y devuelve su url', async () => {
-    ;(uploadAnnouncementImage as jest.Mock).mockResolvedValue('https://storage.example/announcements/x.png')
+    ;(uploadAnnouncementImage as jest.Mock).mockResolvedValue({ url: 'https://storage.example/announcements/x.png' })
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
 
     const res = await upload().attach('file', bytes, { filename: 'logo.png', contentType: 'image/png' })
@@ -405,7 +405,7 @@ describe('POST /crm/uploads/image', () => {
   })
 
   it('png, jpeg y webp pasan; 5 MB exactos pasan', async () => {
-    ;(uploadAnnouncementImage as jest.Mock).mockResolvedValue('https://storage.example/x')
+    ;(uploadAnnouncementImage as jest.Mock).mockResolvedValue({ url: 'https://storage.example/x' })
     for (const [filename, contentType] of [
       ['a.jpg', 'image/jpeg'],
       ['a.webp', 'image/webp'],

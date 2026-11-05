@@ -24,7 +24,12 @@ function pareceImagenDeVerdad(buffer: Buffer): boolean {
   return FIRMAS.some(f => f.bytes.every((b, i) => buffer[i] === b))
 }
 
-export async function uploadAnnouncementImage(buffer: Buffer, contentType: string, nombreOriginal: string): Promise<string> {
+export async function uploadAnnouncementImage(
+  buffer: Buffer,
+  contentType: string,
+  nombreOriginal: string,
+  medidas?: { width: number; height: number },
+): Promise<{ url: string; width?: number; height?: number }> {
   if (!buffer || buffer.length === 0) {
     throw new BadRequestError('El archivo llegó vacío')
   }
@@ -50,5 +55,7 @@ export async function uploadAnnouncementImage(buffer: Buffer, contentType: strin
       .replace(/[^a-z0-9]/g, '') || 'png'
   const ruta = buildStoragePath(`announcements/${randomUUID()}.${extension}`)
 
-  return uploadFileToStorage(buffer, ruta, contentType)
+  const url = await uploadFileToStorage(buffer, ruta, contentType)
+  // Las medidas las manda el navegador (el servidor no decodifica la foto): sirven para reservar el hueco al pintarla.
+  return medidas ? { url, width: medidas.width, height: medidas.height } : { url }
 }

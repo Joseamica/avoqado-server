@@ -141,7 +141,16 @@ export interface AnnouncementInput {
   targetVenueIds: string[]
   showAsBanner: boolean
   showAsModal: boolean
+  showInInbox?: boolean
+  sendEmail?: boolean
   expiresAt?: Date
+}
+
+const SIN_SALIDA = 'El anuncio no se vería en ningún lado: prende el banner, la ventana, la campana o el correo.'
+
+/** Un anuncio con las cuatro salidas apagadas no lo vería nadie y el superadmin creería que salió. */
+export function assertVisible(flags: { showAsBanner: boolean; showAsModal: boolean; showInInbox: boolean; sendEmail: boolean }): void {
+  if (!flags.showAsBanner && !flags.showAsModal && !flags.showInInbox && !flags.sendEmail) throw new BadRequestError(SIN_SALIDA)
 }
 
 /**
@@ -183,6 +192,8 @@ export async function listAnnouncements() {
 }
 
 export async function createAnnouncement(input: AnnouncementInput, createdBy: string, createdByName: string) {
+  // Los defaults de la base (campana sí, correo no) valen igual para quien no manda la bandera.
+  assertVisible({ ...input, showInInbox: input.showInInbox ?? true, sendEmail: input.sendEmail ?? false })
   const creado = await prisma.platformAnnouncement.create({
     data: {
       ...input,
@@ -207,17 +218,28 @@ export async function createAnnouncement(input: AnnouncementInput, createdBy: st
  * editable daría una falsa sensación de corrección.
  */
 export async function updateAnnouncement(id: string, input: Partial<AnnouncementInput>, performedBy?: string) {
-  const actual = await prisma.platformAnnouncement.findUnique({ where: { id } })
-  if (!actual) throw new NotFoundError('Anuncio no encontrado')
-  if (actual.status !== PlatformAnnouncementStatus.DRAFT && actual.status !== PlatformAnnouncementStatus.SCHEDULED) {
-    throw new BadRequestError('Sólo se puede editar un anuncio en borrador o programado')
-  }
-  const guardado = await prisma.platformAnnouncement.update({
-    where: { id },
-    data: {
-      ...input,
-      contentBlocks: (input.contentBlocks ?? undefined) as Prisma.InputJsonValue | undefined,
-    },
+  // 🔴 Leer, validar con el parcial mezclado y escribir van en UNA transacción con la fila bloqueada:
+  // dos parciales simultáneos (uno apaga el banner, otro la campana) no pueden apagarlo todo.
+  const guardado = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM platform_announcements WHERE id = ${id} FOR UPDATE`
+    const actual = await tx.platformAnnouncement.findUnique({ where: { id } })
+    if (!actual) throw new NotFoundError('Anuncio no encontrado')
+    if (actual.status !== PlatformAnnouncementStatus.DRAFT && actual.status !== PlatformAnnouncementStatus.SCHEDULED) {
+      throw new BadRequestError('Sólo se puede editar un anuncio en borrador o programado')
+    }
+    assertVisible({
+      showAsBanner: input.showAsBanner ?? actual.showAsBanner,
+      showAsModal: input.showAsModal ?? actual.showAsModal,
+      showInInbox: input.showInInbox ?? actual.showInInbox,
+      sendEmail: input.sendEmail ?? actual.sendEmail,
+    })
+    return tx.platformAnnouncement.update({
+      where: { id },
+      data: {
+        ...input,
+        contentBlocks: (input.contentBlocks ?? undefined) as Prisma.InputJsonValue | undefined,
+      },
+    })
   })
   rastro('PLATFORM_ANNOUNCEMENT_UPDATED', id, performedBy, { campos: Object.keys(input) })
   return guardado

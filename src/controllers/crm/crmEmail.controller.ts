@@ -55,7 +55,7 @@ export async function sendTemplateTest(req: Request, res: Response): Promise<voi
 export async function uploadImage(req: Request, res: Response): Promise<void> {
   const file = req.file
   if (!file) throw new BadRequestError('No llegó ninguna imagen', 'CRM_IMAGEN_INVALIDA')
-  res.json({ data: { url: await uploadAnnouncementImage(file.buffer, file.mimetype, file.originalname) } })
+  res.json({ data: { url: (await uploadAnnouncementImage(file.buffer, file.mimetype, file.originalname)).url } })
 }
 
 /**
