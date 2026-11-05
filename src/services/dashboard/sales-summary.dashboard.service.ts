@@ -7,8 +7,10 @@ import { sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
  *
  * Accounting Structure:
  * - grossSales = items + serviceCosts (Order.subtotal + service fees)
- *   Does NOT include taxes or tips (pass-through items)
- * - items: Sum of Order.subtotal (item prices without taxes/tips)
+ *   Mexico model: prices INCLUDE the IVA. A native order's subtotal already carries it; an order that charged the IVA ON TOP
+ *   (onboarding demo data, imported SoftRestaurant history) adds it back (`sqlImpuestoQueSeCobraAparte`, D16), so every sale is
+ *   what the customer paid for the goods. Tips are never sales.
+ * - items: Sum of Order.subtotal + IVA charged on top (item prices as paid, without tips)
  * - serviceCosts: Service fees, delivery fees (future)
  * - discounts: Total discounts applied
  * - refunds: Total refunded payments
@@ -54,6 +56,7 @@ import {
   sqlOrdenSinTarjetasTexto,
 } from '@/services/giftCards/giftCardMarks'
 import { montoSaldoAFavorSql, sqlNoEsDelMedioSaldoAFavor } from '@/services/storeCredit/saldoAFavorEnLectores'
+import { sqlImpuestoQueSeCobraAparte } from '@/services/shared/orderBalance'
 
 // ============================================================
 // Types
@@ -1014,7 +1017,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     ? await prisma
         .$queryRawUnsafe<Array<{ subtotal: Prisma.Decimal | null; tax: Prisma.Decimal | null; discounts: Prisma.Decimal | null }>>(
           `
-      SELECT SUM(subtotal) AS subtotal, SUM("taxAmount") AS tax, SUM(LEAST("discountAmount", subtotal)) AS discounts
+      SELECT SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}) AS subtotal, SUM("taxAmount") AS tax, SUM(LEAST("discountAmount", subtotal)) AS discounts
       FROM "Order"
       WHERE "venueId" = $1
         AND "createdAt" >= ${utcTsParam(2)}
@@ -1947,7 +1950,7 @@ async function calculateTimePeriodMetrics(
   const orderMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
-      COALESCE(SUM(subtotal), 0) as gross_sales,
+      COALESCE(SUM(subtotal + ${sqlImpuestoQueSeCobraAparte()}), 0) as gross_sales,
       COALESCE(SUM("taxAmount"), 0) as taxes,
       -- EFFECTIVE discount per order (header can exceed the subtotal since B2/B2c); same rule as the summary cards.
       COALESCE(SUM(LEAST("discountAmount", subtotal)), 0) as discounts,
