@@ -261,6 +261,8 @@ describe('planState.service', () => {
         contractRevision: null,
         subscriptionId: 'sub_123',
         paymentIssue: null,
+        // D5: sin cupón → sin descuento.
+        discount: null,
       })
     })
 
