@@ -18,6 +18,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { normalizeEmail } from '../marketing/emailSuppression.service'
 import { getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
+import { escribirConsentimientoDelEquipoTx } from './inbound.service'
 import { movePendingActivitiesTx, type OwnerChangeReason } from './ownership'
 import { addEvent } from './timeline.service'
 
@@ -696,7 +697,7 @@ export interface ManualAccountInput {
   sucursales?: number
   source?: 'MANUAL' | 'REFERIDO' | 'OTRO'
   referidoPor?: string
-  contact?: { name: string; phone?: string; email?: string; role?: string }
+  contact?: { name: string; phone?: string; email?: string; role?: string; aceptaCorreos?: boolean }
 }
 
 /**
@@ -722,7 +723,8 @@ export async function createManual(access: CrmAccess, input: ManualAccountInput,
   const source = input.source ?? 'MANUAL'
   const now = new Date()
 
-  return prisma.$transaction(async tx => {
+  const quiereCorreos = input.contact?.aceptaCorreos === true && !!contact?.email
+  const { row, personas, permiso } = await prisma.$transaction(async tx => {
     const { id } = await tx.crmAccount.create({
       data: {
         name: input.name,
@@ -740,8 +742,33 @@ export async function createManual(access: CrmAccess, input: ManualAccountInput,
       select: { id: true },
     })
     await addEvent(tx, { accountId: id, kind: 'SYSTEM', actorStaffId: access.staffId, data: { event: 'CREATED', source } })
-    return rowTx(tx, id, now)
+    // The box: the consent of THIS email, with who and when. Without it the person enters the CRM and never gets campaigns.
+    const personas = quiereCorreos
+      ? await escribirConsentimientoDelEquipoTx(tx, {
+          emails: [contact!.email!],
+          accountId: id,
+          source: 'MANUAL',
+          staffId: access.staffId,
+          at: now,
+        })
+      : 0
+    // Written now, or already there (the landing's): either way the person can receive.
+    const permiso =
+      quiereCorreos &&
+      (personas > 0 || !!(await tx.crmEmailConsent.findUnique({ where: { email: normalizeEmail(contact!.email!) }, select: { id: true } })))
+    return { row: await rowTx(tx, id, now), personas, permiso }
   })
+  if (personas > 0) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      action: 'CRM_EMAIL_CONSENT_RECORDED',
+      entity: 'CrmAccount',
+      entityId: row.id,
+      data: { source: 'MANUAL', personas },
+    })
+  }
+  return { ...row, consentimientoRegistrado: permiso }
 }
 
 // ── Owners ────────────────────────────────────────────────────────────────────────────────────────────────────────────

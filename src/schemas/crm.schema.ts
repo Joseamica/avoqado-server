@@ -187,7 +187,13 @@ export const createAccountSchema = z.object({
       .enum(MANUAL_SOURCES, { errorMap: () => ({ message: 'A mano, la fuente es «MANUAL», «REFERIDO» u «OTRO»' }) })
       .default('MANUAL'),
     referidoPor: optionalText(200),
-    contact: contactSchema.optional(),
+    contact: contactSchema
+      .extend({ aceptaCorreos: z.boolean({ invalid_type_error: 'Aceptó recibir correos es sí o no' }).optional() })
+      .refine(contact => contact.aceptaCorreos !== true || !!contact.email, {
+        message: 'Para que reciba correos, escribe su correo',
+        path: ['email'],
+      })
+      .optional(),
     confirmarOtroNegocio: z.boolean({ invalid_type_error: 'Confirmar es sí o no' }).optional(),
   }),
 })
