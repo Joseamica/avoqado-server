@@ -126,33 +126,34 @@ export async function getEstimate(estimateId: string, venueId: string) {
 // CREATE ESTIMATE
 // ============================================================================
 
-/**
- * Generate a sequential estimate number: EST-{YYYYMMDD}-{sequence}
- */
-async function generateEstimateNumber(venueId: string): Promise<string> {
-  const today = new Date()
-  const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '')
+/** Siguiente consecutivo del negocio en el día: EST-{YYYYMMDD}-NNN. Se compara como número: como texto, `-999` queda después de `-1000`. */
+async function generateEstimateNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '')
   const prefix = `EST-${dateStr}-`
 
-  // Find the highest sequence number for today
-  const lastEstimate = await prisma.estimate.findFirst({
-    where: {
-      venueId,
-      estimateNumber: { startsWith: prefix },
+  const [fila] = await tx.$queryRaw<{ ultimo: number | null }[]>(
+    Prisma.sql`SELECT max(split_part("estimateNumber", '-', 3)::int) AS ultimo FROM "Estimate"
+      WHERE "venueId" = ${venueId} AND "estimateNumber" ~ ${`^${prefix}[0-9]+$`}`,
+  )
+  return `${prefix}${String((fila?.ultimo ?? 0) + 1).padStart(3, '0')}`
+}
+
+/**
+ * Crea una cotización con el siguiente número del negocio. El candado dura la transacción: dos
+ * cotizaciones a la vez no leen el mismo último número, y si la creación falla el número no se gasta.
+ * Las que esperan el candado retienen su conexión y cuentan en el timeout: por eso no son los defaults de Prisma (5 s y 2 s).
+ */
+export async function crearConNumeroDeCotizacion<T>(
+  venueId: string,
+  crear: (tx: Prisma.TransactionClient, estimateNumber: string) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(
+    async tx => {
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`estimate-number:${venueId}`}, 0))`)
+      return crear(tx, await generateEstimateNumber(tx, venueId))
     },
-    orderBy: { estimateNumber: 'desc' },
-    select: { estimateNumber: true },
-  })
-
-  let sequence = 1
-  if (lastEstimate) {
-    const lastSeq = parseInt(lastEstimate.estimateNumber.replace(prefix, ''), 10)
-    if (!isNaN(lastSeq)) {
-      sequence = lastSeq + 1
-    }
-  }
-
-  return `${prefix}${sequence.toString().padStart(3, '0')}`
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 }
 
 /**
@@ -168,9 +169,6 @@ export async function createEstimate(params: CreateEstimateParams) {
   if (!staffName || !staffName.trim()) {
     throw new BadRequestError('staffName es requerido')
   }
-
-  // Generate estimate number
-  const estimateNumber = await generateEstimateNumber(venueId)
 
   // Normalize items: accept both {productName, quantity, unitPrice} and {name, qty, price}
   const normalizedItems = items.map((item: any) => ({
@@ -203,30 +201,32 @@ export async function createEstimate(params: CreateEstimateParams) {
   const taxAmount = new Decimal(0)
   const total = subtotal
 
-  const estimate = await prisma.estimate.create({
-    data: {
-      venueId,
-      estimateNumber,
-      customerId: params.customerId || null,
-      customerName: params.customerName || '',
-      customerEmail: params.customerEmail || null,
-      customerPhone: params.customerPhone || null,
-      status: 'DRAFT',
-      subtotal,
-      taxAmount,
-      total,
-      notes: notes || null,
-      validUntil: validUntil ? new Date(validUntil) : null,
-      createdById: staffId,
-      createdByName: staffName.trim(),
-      items: {
-        create: itemsData,
+  const estimate = await crearConNumeroDeCotizacion(venueId, (tx, estimateNumber) =>
+    tx.estimate.create({
+      data: {
+        venueId,
+        estimateNumber,
+        customerId: params.customerId || null,
+        customerName: params.customerName || '',
+        customerEmail: params.customerEmail || null,
+        customerPhone: params.customerPhone || null,
+        status: 'DRAFT',
+        subtotal,
+        taxAmount,
+        total,
+        notes: notes || null,
+        validUntil: validUntil ? new Date(validUntil) : null,
+        createdById: staffId,
+        createdByName: staffName.trim(),
+        items: {
+          create: itemsData,
+        },
       },
-    },
-    include: {
-      items: true,
-    },
-  })
+      include: {
+        items: true,
+      },
+    }),
+  )
 
   logAction({
     staffId,
@@ -234,7 +234,7 @@ export async function createEstimate(params: CreateEstimateParams) {
     action: 'ESTIMATE_CREATED',
     entity: 'Estimate',
     entityId: estimate.id,
-    data: { estimateNumber, itemCount: items.length, total: total.toNumber(), source: 'MOBILE' },
+    data: { estimateNumber: estimate.estimateNumber, itemCount: items.length, total: total.toNumber(), source: 'MOBILE' },
   })
 
   return formatEstimate(estimate)

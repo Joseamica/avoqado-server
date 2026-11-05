@@ -39,7 +39,7 @@ beforeEach(() => {
 
 describe('createEstimate — el total es la suma de los precios, con el IVA dentro', () => {
   it('🔴 dos piezas de $100 dan un total de $200, sin sumar el 16 % encima', async () => {
-    prismaMock.estimate.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([])
     // `items` llega como `{ create: [...] }`: lo que devuelve la base es la lista ya creada.
     prismaMock.estimate.create.mockImplementation(async (args: any) => presupuestoGuardado({ ...args.data, items: [] }))
 
@@ -65,7 +65,7 @@ describe('createEstimate — el total es la suma de los precios, con el IVA dent
  */
 describe('createEstimate — guarda y responde pesos, con los nombres que leen las dos apps', () => {
   it('🔴 $12.50 × 3 son $37.50 en la base y en la respuesta; Android lee `number` y el `total` de cada renglón', async () => {
-    prismaMock.estimate.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.estimate.create.mockImplementation(async (args: any) =>
       presupuestoGuardado({ ...args.data, items: args.data.items.create.map((renglon: any, i: number) => ({ id: `l${i}`, ...renglon })) }),
     )
