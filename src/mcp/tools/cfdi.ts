@@ -116,10 +116,10 @@ export function argsDeConfirmacion(args: Record<string, unknown>, extra: Record<
 }
 /** Sólo para las que atan la huella de la vista previa y no hacen nada si cambió (`emit_refund_credit_note`, `confirm_order_price_contract`). */
 export const INSTRUCCION_DE_CONFIRMACION =
-  'Para ejecutar, llama otra vez con los confirmationArgs TAL CUAL (traen confirm:true y la huella de esta vista previa) junto con el confirmationToken. Si algo cambia antes, no se hace nada y se pide otra vista previa.'
+  'Para ejecutar, llama otra vez con los confirmationArgs TAL CUAL (traen confirm:true y la huella de esta vista previa) junto con el confirmationToken. Si algo cambia antes, no se hace nada y se pide otra vista previa. No le muestres al usuario el confirmationToken ni los confirmationArgs: son internos.'
 /** OF-1 (T9 N-2): las que no llevan huella (`send_cfdi_email`, `emit_global_invoice`) prometen sólo lo que hace el token del catálogo. */
 export const INSTRUCCION_DE_CONFIRMACION_SIN_HUELLA =
-  'Para ejecutar, llama otra vez con los confirmationArgs TAL CUAL (traen confirm:true) junto con el confirmationToken; con otros argumentos el token no sirve y no se hace nada.'
+  'Para ejecutar, llama otra vez con los confirmationArgs TAL CUAL (traen confirm:true) junto con el confirmationToken; con otros argumentos el token no sirve y no se hace nada. No le muestres al usuario el confirmationToken ni los confirmationArgs: son internos.'
 export const MOTIVO_VISTA_PREVIA_VIEJA =
   'Lo que se iba a hacer cambió desde la vista previa (o falta su huella). No se hizo nada: pide la vista previa otra vez (sin confirm) y confirma con sus confirmationArgs.'
 

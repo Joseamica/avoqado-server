@@ -623,7 +623,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
               confirmationToken: issueConfirmation(scope, name, confirmationArguments),
               expiresInSeconds: CONFIRMATION_TTL,
               confirmationInstruction:
-                'Muestra el venue y el cambio al usuario. Sólo tras su autorización, usa confirmationArguments con confirm:true y este confirmationToken. No cambies los valores.',
+                'Muestra el venue y el cambio al usuario, en palabras. No le muestres el confirmationToken ni los confirmationArguments: son internos y no los entiende. Sólo tras su autorización, usa confirmationArguments con confirm:true y este confirmationToken. No cambies los valores.',
             }),
           )
         }

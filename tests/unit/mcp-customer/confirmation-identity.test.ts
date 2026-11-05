@@ -216,3 +216,11 @@ describe('🔴 tarjetas: la confirmación opera la tarjeta que se VIO en la vist
     }
   })
 })
+
+// D10 (5-nov): Claude le enseñaba al dueño el token de confirmación (cientos de caracteres) en la tarjeta del cambio.
+it('la vista previa pide no enseñarle al usuario el token ni los argumentos internos', async () => {
+  const p = await call('set_menu_item_price', { venueId: 'centro', name: 'Cafe', price: 45 })
+  expect(p.confirmationToken).toEqual(expect.any(String))
+  expect(p.confirmationInstruction).toMatch(/no le muestres/i)
+  expect(p.confirmationInstruction).toMatch(/confirmationToken/)
+})
