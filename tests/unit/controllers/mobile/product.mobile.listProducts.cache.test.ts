@@ -14,7 +14,8 @@ import {
   catalogoMovilCacheado,
   guardarCatalogoMovil,
   vaciarCacheDelCatalogoMovil,
-  TOPE_DE_PRODUCTOS_EN_CACHE,
+  TOPE_DE_BYTES_EN_CACHE,
+  COSTO_FIJO_POR_NEGOCIO,
   VIDA_DEL_CATALOGO_MS,
 } from '@/services/mobile/catalogoMovil.cache'
 
@@ -158,23 +159,36 @@ describe('D6 — la caché tiene vida y tope', () => {
     expect(catalogoMovilCacheado('v1', 'ver-2', 0)).toBeUndefined()
   })
 
-  it('con más productos que el tope, se suelta el negocio más viejo y nunca se pasa del tope', () => {
-    const mitad = Array.from({ length: TOPE_DE_PRODUCTOS_EN_CACHE / 2 }, (_, i) => ({ id: `p${i}` }))
-    guardarCatalogoMovil('a', 'v', mitad, 0)
-    guardarCatalogoMovil('b', 'v', mitad, 0)
-    guardarCatalogoMovil('c', 'v', mitad, 0)
+  /** Un catálogo cuyo JSON pesa casi exactamente `bytes` (un solo producto con descripción larga). */
+  const catalogoDe = (bytes: number) => [{ description: 'x'.repeat(bytes - COSTO_FIJO_POR_NEGOCIO - 20) }]
+
+  it('el tope cuenta BYTES: un solo producto con una descripción enorme cuenta lo que pesa (Codex r1 P2)', () => {
+    const tercio = catalogoDe(Math.floor(TOPE_DE_BYTES_EN_CACHE / 3) + 1)
+    guardarCatalogoMovil('a', 'v', tercio, 0)
+    guardarCatalogoMovil('b', 'v', tercio, 0)
+    guardarCatalogoMovil('c', 'v', tercio, 0)
     expect(catalogoMovilCacheado('a', 'v', 0)).toBeUndefined()
-    expect(catalogoMovilCacheado('b', 'v', 0)).toBe(mitad)
-    expect(catalogoMovilCacheado('c', 'v', 0)).toBe(mitad)
+    expect(catalogoMovilCacheado('b', 'v', 0)).toBe(tercio)
+    expect(catalogoMovilCacheado('c', 'v', 0)).toBe(tercio)
   })
 
-  it('un catálogo más grande que el tope ni se guarda', () => {
-    guardarCatalogoMovil(
-      'enorme',
-      'v',
-      Array.from({ length: TOPE_DE_PRODUCTOS_EN_CACHE + 1 }, () => ({})),
-      0,
-    )
+  it('un catálogo más pesado que el tope ni se guarda', () => {
+    guardarCatalogoMovil('enorme', 'v', catalogoDe(TOPE_DE_BYTES_EN_CACHE + 100), 0)
     expect(catalogoMovilCacheado('enorme', 'v', 0)).toBeUndefined()
+  })
+
+  it('los catálogos vacíos también cuentan: el número de negocios guardados tiene tope (Codex r1 P2)', () => {
+    const cuantos = Math.floor(TOPE_DE_BYTES_EN_CACHE / COSTO_FIJO_POR_NEGOCIO) + 5
+    for (let i = 0; i < cuantos; i++) guardarCatalogoMovil(`n${i}`, 'v', [], 0)
+    expect(catalogoMovilCacheado('n0', 'v', 0)).toBeUndefined()
+    expect(catalogoMovilCacheado(`n${cuantos - 1}`, 'v', 0)).toEqual([])
+  })
+
+  it('al guardar, se sueltan los vencidos de OTROS negocios aunque ya no pregunten (Codex r1 P2)', () => {
+    guardarCatalogoMovil('abandonado', 'v', [{ id: 'viejo' }], 0)
+    guardarCatalogoMovil('activo', 'v', [{ id: 'p' }], VIDA_DEL_CATALOGO_MS)
+    // Se pregunta con la hora vieja a propósito: si sigue ahí, nadie lo soltó al guardar el otro.
+    expect(catalogoMovilCacheado('abandonado', 'v', 0)).toBeUndefined()
+    expect(catalogoMovilCacheado('activo', 'v', VIDA_DEL_CATALOGO_MS)).toEqual([{ id: 'p' }])
   })
 })

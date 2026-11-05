@@ -176,6 +176,51 @@ describe('D6 — versión del catálogo del POS', () => {
     expect(await versionDelCatalogoMovil(n.venueId)).toBe(antes)
   })
 
+  it('Codex r1 P1: una transacción VIEJA que confirma DESPUÉS de otra más nueva no deja la misma versión', async () => {
+    // A tiene xmin a0. T1 (xid x1) abre y espera. T2 (xid x2 = 2·x1 − a0) cambia B y confirma: el POS baja A=a0, B=x2.
+    // Luego T1 cambia A y B y confirma: A=x1, B=x1. Una «suma de xmin» empata (a0 + x2 = 2·x1) y serviría precios viejos.
+    const M = 4_294_967_296 // xmin es de 32 bits; txid_current trae la época encima
+    const xid = async (c: any = prisma) => Number((await c.$queryRaw`SELECT (txid_current() % ${M})::bigint AS x`)[0].x)
+    const rastro: unknown[] = []
+    for (let intento = 0; intento < 5; intento++) {
+      await prisma.product.update({ where: { id: productoId }, data: { price: 70 + intento } })
+      const a0 = Number(
+        (await prisma.$queryRaw<Array<{ x: bigint }>>`SELECT xmin::text::bigint AS x FROM "Product" WHERE id = ${productoId}`)[0].x,
+      )
+      let soltarT1!: () => void
+      const puedeSeguir = new Promise<void>(r => (soltarT1 = r))
+      let avisarX1!: (x: number) => void
+      const x1Listo = new Promise<number>(r => (avisarX1 = r))
+      const t1 = prisma.$transaction(
+        async tx => {
+          avisarX1(await xid(tx))
+          await puedeSeguir
+          await tx.product.update({ where: { id: productoId }, data: { price: 80 + intento } })
+          await tx.product.update({ where: { id: varianteId }, data: { price: 180 + intento } })
+        },
+        { timeout: 60_000 },
+      )
+      const x1 = await x1Listo
+      const x2 = 2 * x1 - a0
+      let ultimo = x1 // gasta xids hasta que el siguiente que se asigne sea x2
+      while (ultimo < x2 - 1) ultimo = await xid()
+      const empata = await prisma.$transaction(async tx => {
+        const propio = await xid(tx)
+        rastro.push({ a0, x1, x2, propio })
+        if (propio !== x2) return false
+        await tx.product.update({ where: { id: varianteId }, data: { price: 150 + intento } })
+        return true
+      })
+      const antes = await versionDelCatalogoMovil(n.venueId)
+      soltarT1()
+      await t1
+      if (!empata) continue
+      expect(await versionDelCatalogoMovil(n.venueId)).not.toBe(antes)
+      return
+    }
+    throw new Error(`no se logró armar el empate de xid en 5 intentos: ${JSON.stringify(rastro)}`)
+  })
+
   it('de punta a punta: sin cambios la segunda bajada es idéntica; tras un cambio de precio sale el precio nuevo', async () => {
     const primera = await listar(n.venueId)
     const segunda = await listar(n.venueId)
