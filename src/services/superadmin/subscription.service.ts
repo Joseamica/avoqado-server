@@ -10,6 +10,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError
 import { exigirSinObligacionViva } from '@/services/stripe.service'
 import { PAID_PLAN_TIER_CODES, derivePlanState } from '@/services/access/basePlan.service'
 import { writeLegacyActivityAuditTx } from '@/services/activityAudit.service'
+import { terminarAltaPorPlanRegalado } from '@/services/onboarding/terminarAltaCobrada'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -274,7 +275,7 @@ async function runAuditedPlanMutation(
  * Para cambiar de plan o regalarlo sobre algo ligado está «Asignar cortesía» (`assignCompPlan`), que consulta Stripe.
  */
 export async function activateVenuePlan(venueId: string, actorId: string): Promise<SuperadminVenueSubscription> {
-  return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_ACTIVATED', async (tx, feature) => {
+  const fila = await runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_ACTIVATED', async (tx, feature) => {
     const filas = await tx.venueFeature.findMany({
       where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
       select: { id: true, featureId: true, active: true, stripeSubscriptionId: true, updatedAt: true },
@@ -308,6 +309,9 @@ export async function activateVenuePlan(venueId: string, actorId: string): Promi
     }
     return { auditData: {} }
   })
+  // D1: con el plan ya regalado, quien se quedó en la pantalla de la tarjeta sale del alta (nunca deshace el regalo).
+  await terminarAltaPorPlanRegalado(venueId, actorId)
+  return fila
 }
 
 export async function deactivateVenuePlan(venueId: string, actorId: string): Promise<SuperadminVenueSubscription> {
@@ -371,7 +375,7 @@ export async function grantVenuePlanTrial(venueId: string, days: number, actorId
   // pagando y, al vencer el trial, se quedaba sin acceso. Se rechaza; nunca se cancela por debajo.
   const vinculo = await vinculoDelPlan(venueId)
   await exigirSinObligacionViva(vinculo, 'conceder una prueba del plan')
-  return runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_TRIAL_GRANTED', async (tx, feature) => {
+  const fila = await runAuditedPlanMutation(venueId, actorId, 'SUPERADMIN_PLAN_TRIAL_GRANTED', async (tx, feature) => {
     // 🔴 Codex R2: bajo el candado se leen las DOS filas de plan. Mirar sólo PRO dejaba conceder una prueba PRO a quien
     // tenía PREMIUM activo — dos planes vivos a la vez, sin necesidad de ninguna carrera.
     const filas = await tx.venueFeature.findMany({
@@ -401,6 +405,9 @@ export async function grantVenuePlanTrial(venueId: string, days: number, actorId
     )
     return { auditData: { days, endDate: endDate.toISOString() } }
   })
+  // D1: con la prueba ya concedida, quien se quedó en la pantalla de la tarjeta sale del alta (nunca deshace la prueba).
+  await terminarAltaPorPlanRegalado(venueId, actorId)
+  return fila
 }
 
 /**
