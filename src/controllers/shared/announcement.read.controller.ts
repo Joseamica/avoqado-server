@@ -12,6 +12,7 @@ import {
   recordCta,
   recordDismiss,
 } from '../../services/announcements/announcementRead.service'
+import { ConflictError } from '../../errors/AppError'
 
 export const getDetail = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -50,6 +51,11 @@ export const open = async (req: Request, res: Response, next: NextFunction) => {
 export const dismiss = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { userId, venueId } = (req as any).authContext
+    // El aparato manda quién cerró (cierre guardado sin red). Si la sesión ya es de otra persona, no se le apunta a ella.
+    const staffId = req.body?.staffId
+    if (staffId != null && staffId !== userId) {
+      throw new ConflictError('El cierre es de otra persona', 'CIERRE_DE_OTRA_PERSONA')
+    }
     await recordDismiss(req.params.id, userId, venueId)
     res.json({ success: true })
   } catch (error) {
