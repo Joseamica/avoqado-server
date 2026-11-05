@@ -12,6 +12,7 @@ import { isAnnouncementEmailOn } from '@/services/announcements/announcementEmai
 import { campanasPausadasPorCupo, finDeLaPausaPorCupo } from '@/services/email/resendQuota'
 import { esCorreoDemo, esNegocioDemo } from '@/services/demo/candadoDemo'
 import {
+  DIA_CAMBIADO,
   claimAnnouncementEmails,
   enqueuePendingAnnouncementEmails,
   sendClaimedAnnouncementEmails,
@@ -81,7 +82,14 @@ const fila = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-const mandar = (ids: string[], reloj: () => Date = () => AHORA) => sendClaimedAnnouncementEmails(ids, { now: AHORA, reloj, pausaMs: 0 })
+type Reclamo = { id: string; attempts: number; leaseUntil: Date }
+/** La tupla de cada reclamo, igual a la fila que devuelve el doble de la base (lo normal: nadie más la tocó). */
+const reclamosDe = async (ids: string[]): Promise<Reclamo[]> => {
+  const filas = (await mockFind.getMockImplementation()!({})) as Array<Reclamo>
+  return filas.filter(f => ids.includes(f.id)).map(f => ({ id: f.id, attempts: f.attempts, leaseUntil: f.leaseUntil }))
+}
+const mandar = async (ids: string[], reloj: () => Date = () => AHORA) =>
+  sendClaimedAnnouncementEmails(await reclamosDe(ids), { now: AHORA, reloj, pausaMs: 0 })
 /** El `data` de cada escritura, en orden. */
 const escrituras = () => mockUpdate.mock.calls.map(c => c[0].data)
 const ultima = () => escrituras()[escrituras().length - 1]
@@ -120,11 +128,13 @@ describe('announcementEmail.service', () => {
     })
 
     it('reclama con FOR UPDATE SKIP LOCKED y nunca una fila que ya empezó a mandarse', async () => {
-      mockRaw.mockResolvedValue([{ id: 'e1' }])
-      await expect(claimAnnouncementEmails({ limit: 20, now: AHORA })).resolves.toEqual(['e1'])
+      mockRaw.mockResolvedValue([{ id: 'e1', attempts: 1, leaseUntil: LEASE }])
+      await expect(claimAnnouncementEmails({ limit: 20, now: AHORA })).resolves.toEqual([{ id: 'e1', attempts: 1, leaseUntil: LEASE }])
       const sql = mockRaw.mock.calls[0][0].text
       expect(sql).toContain('FOR UPDATE SKIP LOCKED')
       expect(sql).toContain('"sendStartedAt" IS NULL')
+      // B1: devuelve la tupla del reclamo, que es el CAS de cada escritura (nunca la que se vuelve a leer).
+      expect(sql).toMatch(/RETURNING e\.id, e\.attempts, e\."leaseUntil"/)
     })
 
     it('al reclamar, una fila con sendStartedAt y el lease vencido queda FAILED INCIERTO', async () => {
@@ -138,12 +148,74 @@ describe('announcementEmail.service', () => {
 
   // ===== MANDAR =====
   describe('sendClaimedAnnouncementEmails', () => {
-    it('fila reclamada con sendStartedAt y sin SENT queda FAILED INCIERTO sin mandar', async () => {
+    // B1 (c): una marca puesta es de quien está llamando a Resend con esta misma tupla; sólo el resultado de SU llamada la
+    // limpia. Esta vuelta no la toca ni manda; si el proceso murió, el reclamo la deja FAILED INCIERTO al vencer el lease.
+    it('fila reclamada con sendStartedAt y sin SENT: no se manda ni se toca (la retira el reclamo como INCIERTO)', async () => {
       mockFind.mockResolvedValue([fila({ sendStartedAt: new Date('2026-11-04T11:00:00.000Z') })])
-      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 0, failed: 1 })
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 0, failed: 0 })
       expect(mockSend).not.toHaveBeenCalled()
-      expect(ultima()).toMatchObject({ status: 'FAILED', leaseUntil: null })
-      expect(ultima().lastError).toContain('INCIERTO')
+      expect(mockUpdate).not.toHaveBeenCalled()
+    })
+
+    // B1: A se retrasó hasta vencer su lease y B reclamó la fila (attempts 2, otro lease). A trae su tupla vieja.
+    it('un trabajador rezagado no adopta el reclamo de otro: con su tupla vieja no escribe nada', async () => {
+      const DE_B = new Date('2026-11-04T12:10:00.000Z')
+      mockFind.mockResolvedValue([fila({ attempts: 2, leaseUntil: DE_B })])
+      mockOn.mockResolvedValue(false) // A, si adoptara la fila, la marcaría BAJA
+      const deA = [{ id: 'e1', attempts: 1, leaseUntil: LEASE }]
+      await expect(sendClaimedAnnouncementEmails(deA, { now: AHORA, pausaMs: 0 })).resolves.toEqual({ sent: 0, skipped: 0, failed: 0 })
+      expect(mockUpdate).not.toHaveBeenCalled()
+      expect(mockSend).not.toHaveBeenCalled()
+    })
+
+    it('el CAS de cada escritura es la tupla del reclamo, nunca la leída', async () => {
+      await mandar(['e1'])
+      for (const [{ where }] of mockUpdate.mock.calls) expect(where).toMatchObject({ id: 'e1', attempts: 1, leaseUntil: LEASE })
+    })
+
+    it('toda escritura antes de Resend exige sendStartedAt null: saltar', async () => {
+      mockOn.mockResolvedValue(false)
+      await mandar(['e1'])
+      expect(mockUpdate.mock.calls[0][0].where).toMatchObject({ sendStartedAt: null })
+    })
+
+    it('toda escritura antes de Resend exige sendStartedAt null: reintentar', async () => {
+      env.BASE_URL = undefined
+      await mandar(['e1'])
+      expect(mockUpdate.mock.calls[0][0].where).toMatchObject({ sendStartedAt: null })
+    })
+
+    it('el resultado de Resend sólo casa con la marca que esta vuelta puso', async () => {
+      await mandar(['e1'])
+      expect(mockUpdate.mock.calls[mockUpdate.mock.calls.length - 1][0].where).toMatchObject({ sendStartedAt: AHORA })
+    })
+
+    // B2: `sendEmailWithResult` espera al candado demo DESPUÉS de la última revisión del bucle; la que queda pegada a
+    // `resend.emails.send` es `antesDeMandar`.
+    it('si la medianoche cae justo antes de Resend (antesDeMandar), no manda y vuelve sin gastar intento', async () => {
+      const ANTES = new Date('2026-11-04T23:59:59.900Z')
+      const DESPUES = new Date('2026-11-05T00:00:00.100Z')
+      let ahora = ANTES
+      let salioAResend = false
+      mockSend.mockImplementation(async (o: { antesDeMandar: () => string | null }) => {
+        ahora = DESPUES // la espera del candado demo cruzó la medianoche
+        const frenado = o.antesDeMandar()
+        if (frenado) return { ok: false, transient: true, errorCode: frenado }
+        salioAResend = true
+        return { ok: true, transient: false }
+      })
+      await mandar(['e1'], () => ahora)
+      expect(salioAResend).toBe(false)
+      expect(DIA_CAMBIADO).toBe('DIA_CAMBIADO')
+      expect(ultima()).toEqual({
+        status: 'PENDING',
+        attempts: 0, // el de antes del reclamo: no se gasta
+        sendStartedAt: null,
+        capDay: null,
+        leaseUntil: null,
+        nextAttemptAt: DESPUES,
+        lastError: 'DIA_CAMBIADO',
+      })
     })
 
     it('manda con idempotencyKey y List-Unsubscribe', async () => {
@@ -444,7 +516,7 @@ describe('announcementEmail.service', () => {
       })
       mockFind.mockResolvedValue([fila(), fila({ id: 'e2', staffId: 's2', staff: { email: 's2@correo-anuncios.mx' } })])
 
-      await sendClaimedAnnouncementEmails(['e1', 'e2'], { now: AHORA, reloj: () => AHORA, pausaMs: 500 })
+      await sendClaimedAnnouncementEmails(await reclamosDe(['e1', 'e2']), { now: AHORA, reloj: () => AHORA, pausaMs: 500 })
       espia.mockRestore()
 
       expect(orden).toEqual(['reserva', 'resend', 'escribe SENT', 'pausa', 'reserva', 'resend', 'escribe SENT'])

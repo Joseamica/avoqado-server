@@ -40,6 +40,9 @@ const INCIERTO = 'INCIERTO: el proceso se detuvo a media llamada a Resend; no se
 
 const Estado = PlatformAnnouncementDeliveryStatus
 
+/** Lo devuelve `antesDeMandar` si el día UTC cambió entre la reserva y la llamada a Resend: el correo no salió. */
+export const DIA_CAMBIADO = 'DIA_CAMBIADO'
+
 /** El día de Resend (UTC), `YYYY-MM-DD`. */
 const diaUTC = (fecha: Date) => fecha.toISOString().slice(0, 10)
 
@@ -116,8 +119,13 @@ export async function enqueuePendingAnnouncementEmails(now: Date): Promise<numbe
  * Antes retira lo que ya no tiene salida: una fila con `sendStartedAt` sin SENT y el lease vencido (el proceso murió a media
  * llamada) queda FAILED «INCIERTO», sin volver a mandarse; una que agotó sus intentos antes de la red, FAILED. Nunca se reclama
  * una fila con `sendStartedAt`.
+ *
+ * Devuelve la tupla de cada reclamo (`id, attempts, leaseUntil`): es el CAS de todas las escrituras de esa fila. Quien vuelve a
+ * leerla nunca usa lo leído como CAS: un trabajador rezagado leería la tupla del que la reclamó después y la adoptaría (B1).
  */
-export async function claimAnnouncementEmails(input: { limit?: number; now: Date }): Promise<string[]> {
+export type ReclamoDeCorreo = { id: string; attempts: number; leaseUntil: Date }
+
+export async function claimAnnouncementEmails(input: { limit?: number; now: Date }): Promise<ReclamoDeCorreo[]> {
   const now = input.now
   if (campanasPausadasPorCupo(now)) return []
 
@@ -132,7 +140,7 @@ export async function claimAnnouncementEmails(input: { limit?: number; now: Date
 
   const limit = Math.max(1, Math.min(LIMITE_RECLAMO, input.limit ?? LIMITE_RECLAMO))
   const leaseUntil = new Date(now.getTime() + LEASE_MS)
-  const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+  return prisma.$queryRaw<ReclamoDeCorreo[]>(Prisma.sql`
     WITH candidates AS (
       SELECT e.id
       FROM "platform_announcement_emails" AS e
@@ -149,9 +157,8 @@ export async function claimAnnouncementEmails(input: { limit?: number; now: Date
     SET "leaseUntil" = ${utcTs(leaseUntil)}, attempts = e.attempts + 1, "updatedAt" = CURRENT_TIMESTAMP
     FROM candidates
     WHERE e.id = candidates.id
-    RETURNING e.id
+    RETURNING e.id, e.attempts, e."leaseUntil"
   `)
-  return rows.map(r => r.id)
 }
 
 // ===========================
@@ -194,17 +201,18 @@ async function reservar(d: Fila, cas: Prisma.PlatformAnnouncementEmailWhereInput
  * momento de cada reserva; `opts.now` sólo fecha lo que no depende del día.
  */
 export async function sendClaimedAnnouncementEmails(
-  ids: string[],
+  reclamos: ReclamoDeCorreo[],
   opts: { now: Date; reloj?: () => Date; pausaMs?: number },
 ): Promise<{ sent: number; skipped: number; failed: number }> {
   const res = { sent: 0, skipped: 0, failed: 0 }
-  if (ids.length === 0) return res
+  if (reclamos.length === 0) return res
   const reloj = opts.reloj ?? (() => new Date())
   const pausaMs = opts.pausaMs ?? PAUSA_ENTRE_ENVIOS_MS
+  const reclamoDe = new Map(reclamos.map(c => [c.id, c]))
 
   const filas = await prisma.platformAnnouncementEmail.findMany({
-    where: { id: { in: ids }, status: Estado.PENDING },
-    take: ids.length,
+    where: { id: { in: [...reclamoDe.keys()] }, status: Estado.PENDING },
+    take: reclamoDe.size,
     include: {
       announcement: {
         select: { status: true, title: true, body: true, imageUrl: true, contentBlocks: true, actionLabel: true, actionUrl: true },
@@ -215,30 +223,36 @@ export async function sendClaimedAnnouncementEmails(
 
   let huboEnvio = false
   for (const d of filas) {
-    const cas = { id: d.id, attempts: d.attempts, leaseUntil: d.leaseUntil }
-    const escribir = async (data: Prisma.PlatformAnnouncementEmailUpdateManyMutationInput, extra: { sendStartedAt?: null } = {}) =>
-      (await prisma.platformAnnouncementEmail.updateMany({ where: { ...cas, ...extra }, data })).count > 0
+    // 🔴 B1: el CAS es la tupla del RECLAMO, nunca la leída. Si no casan, otro trabajador reclamó la fila después (el lease de
+    // éste venció): es suya y no se toca.
+    const reclamo = reclamoDe.get(d.id)
+    if (!reclamo || d.attempts !== reclamo.attempts || d.leaseUntil?.getTime() !== reclamo.leaseUntil.getTime()) continue
+    // Una marca ya puesta es de quien está llamando a Resend con esta misma tupla: sólo el resultado de SU llamada la limpia.
+    // Si ese proceso murió, el reclamo la deja FAILED INCIERTO al vencer el lease.
+    if (d.sendStartedAt) continue
+    const cas = { id: d.id, attempts: reclamo.attempts, leaseUntil: reclamo.leaseUntil }
+    /** La marca `sendStartedAt` que ESTA vuelta puso (null antes de reservar): toda escritura la exige en su where. */
+    let marca: Date | null = null
+    const escribir = async (data: Prisma.PlatformAnnouncementEmailUpdateManyMutationInput) =>
+      (await prisma.platformAnnouncementEmail.updateMany({ where: { ...cas, sendStartedAt: marca }, data })).count > 0
     /** Vuelve a la cola sin gastar el intento: nunca llegó a Resend, o Resend lo rechazó seguro. */
-    const devolver = (nextAttemptAt: Date, lastError: string | null, extra: { sendStartedAt?: null } = {}) =>
-      escribir(
-        {
-          status: Estado.PENDING,
-          attempts: d.attempts - 1,
-          sendStartedAt: null,
-          capDay: null,
-          leaseUntil: null,
-          nextAttemptAt,
-          lastError,
-        },
-        extra,
-      )
+    const devolver = (nextAttemptAt: Date, lastError: string | null) =>
+      escribir({
+        status: Estado.PENDING,
+        attempts: reclamo.attempts - 1,
+        sendStartedAt: null,
+        capDay: null,
+        leaseUntil: null,
+        nextAttemptAt,
+        lastError,
+      })
     /** No salió y el error puede pasar solo: reintento con backoff (el intento ya se contó al reclamar), FAILED al 5º. */
     const reintentar = async (mensaje: string) => {
       const base = { leaseUntil: null, sendStartedAt: null, capDay: null, lastError: mensaje }
       const escrito = await escribir(
-        d.attempts >= MAX_INTENTOS
+        reclamo.attempts >= MAX_INTENTOS
           ? { status: Estado.FAILED, ...base }
-          : { status: Estado.PENDING, nextAttemptAt: new Date(opts.now.getTime() + REINTENTO_MS * d.attempts), ...base },
+          : { status: Estado.PENDING, nextAttemptAt: new Date(opts.now.getTime() + REINTENTO_MS * reclamo.attempts), ...base },
       )
       if (escrito) res.failed++
       logger.warn('[Anuncios] Correo de anuncio sin salir; se reintenta', { emailId: d.id, error: mensaje })
@@ -247,11 +261,6 @@ export async function sendClaimedAnnouncementEmails(
     const saltar = async (skippedReason: string) => {
       const data = { status: Estado.SENT, skippedReason, sendStartedAt: null, capDay: null, leaseUntil: null, lastError: null }
       if (await escribir(data)) res.skipped++
-    }
-
-    if (d.sendStartedAt) {
-      if (await escribir({ status: Estado.FAILED, leaseUntil: null, lastError: INCIERTO })) res.failed++
-      continue
     }
 
     // ── Antes de la red: cualquier error aquí es seguro de reintentar ──
@@ -299,10 +308,11 @@ export async function sendClaimedAnnouncementEmails(
       const r = await reservar(d, { ...cas, status: Estado.PENDING, sendStartedAt: null }, reloj)
       if (r.r === 'perdida') break
       if (r.r === 'lleno') {
-        await devolver(reinicioDelCupoDiario(r.t), null, { sendStartedAt: null })
+        await devolver(reinicioDelCupoDiario(r.t), null)
         break
       }
       d.capDay = r.dia
+      marca = r.t
       // codex r7: si la medianoche cayó entre reservar y mandar, esa reserva es del día viejo. Se suelta y se reserva otra vez.
       // ponytail: un correo que ya está en el aire a medianoche cuenta en el día en que salió de aquí; el tope de 40 deja 60 de
       // margen sobre los 100 de Resend. Si el tope se acerca a 100, medir el día con la cabecera `Date` de Resend.
@@ -312,6 +322,7 @@ export async function sendClaimedAnnouncementEmails(
       }
       if (!(await escribir({ capDay: null, sendStartedAt: null }))) break
       d.capDay = null
+      marca = null
     }
     if (!reservado) continue
 
@@ -328,7 +339,9 @@ export async function sendClaimedAnnouncementEmails(
           headers: cabecerasDeBaja(correo.unsubscribeUrl),
           // Segunda red: si de todos modos se repitiera, Resend no lo manda dos veces.
           idempotencyKey: `announcement-email:${d.announcementId}:${d.staffId}`,
-          antesDeMandar: () => (campanasPausadasPorCupo() ? CUPO_EN_PAUSA : null),
+          // 🔴 B2: la ÚLTIMA pregunta, ya sin esperas del transporte en medio (el candado demo espera a la base después de la
+          // revisión del bucle). Si el día cambió desde la reserva, no sale y se vuelve a reservar contra el día nuevo.
+          antesDeMandar: () => (campanasPausadasPorCupo() ? CUPO_EN_PAUSA : diaUTC(reloj()) !== d.capDay ? DIA_CAMBIADO : null),
         }),
       )
     } catch (error) {
@@ -338,6 +351,9 @@ export async function sendClaimedAnnouncementEmails(
     const codigo = resultado.errorCode
     if (resultado.ok) {
       if (await escribir({ status: Estado.SENT, sentAt: reloj(), leaseUntil: null, lastError: null })) res.sent++
+    } else if (codigo === DIA_CAMBIADO) {
+      // Rechazo seguro: no salió. Vuelve ya, sin gastar intento, y la siguiente vuelta reserva contra el día nuevo.
+      await devolver(reloj(), DIA_CAMBIADO)
     } else if (esErrorDeCupo(codigo) || codigo === CUPO_EN_PAUSA) {
       // El instante que vio el medidor (la medianoche UTC según Resend), como `campaignSender`.
       await devolver(finDeLaPausaPorCupo(reloj()), codigo ?? null)

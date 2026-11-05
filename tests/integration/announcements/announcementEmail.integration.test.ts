@@ -278,7 +278,7 @@ describe('correo de anuncios: reclamar y mandar (Postgres real)', () => {
     })
     const now = new Date(Date.now() + 1000)
     const [ids1, ids2] = await Promise.all([claimAnnouncementEmails({ limit: 1, now }), claimAnnouncementEmails({ limit: 1, now })])
-    expect(new Set([...ids1, ...ids2]).size).toBe(2)
+    expect(new Set([...ids1, ...ids2].map(c => c.id)).size).toBe(2)
 
     await Promise.all([
       sendClaimedAnnouncementEmails(ids1, { now, reloj, pausaMs: 0 }),
@@ -294,6 +294,38 @@ describe('correo de anuncios: reclamar y mandar (Postgres real)', () => {
     expect(esperando.nextAttemptAt.toISOString()).toBe('2031-02-04T00:00:00.000Z')
   })
 
+  // B1: A se retrasó hasta vencer su lease y B reclamó la misma fila. A, con su tupla vieja, no puede escribir nada sobre
+  // la fila de B (si la adoptara, su «baja» o su reintento borrarían el envío de B).
+  it('un trabajador rezagado no escribe sobre la fila que ya reclamó otro', async () => {
+    await vaciarPendientes()
+    const a = await anuncio({ deliveredAt: null })
+    await prisma.platformAnnouncementEmail.create({ data: { announcementId: a, staffId: staffIds[0], venueId: venueIds[0] } })
+    const t0 = new Date(Date.now() + 1000)
+    const deA = await claimAnnouncementEmails({ limit: 20, now: t0 })
+    expect(deA).toHaveLength(1)
+    // Vence el lease de A (5 min) y B reclama.
+    const t1 = new Date(t0.getTime() + 6 * 60 * 1000)
+    const deB = await claimAnnouncementEmails({ limit: 20, now: t1 })
+    expect(deB.map(c => c.id)).toEqual(deA.map(c => c.id))
+    expect(deB[0].attempts).toBe(2)
+    const antes = await prisma.platformAnnouncementEmail.findUniqueOrThrow({ where: { id: deA[0].id } })
+
+    // A llega tarde con un error de configuración: si adoptara la fila, la devolvería a PENDING sin lease.
+    const base = env.BASE_URL
+    env.BASE_URL = undefined
+    await expect(sendClaimedAnnouncementEmails(deA, { now: t1, reloj: () => t1, pausaMs: 0 })).resolves.toEqual({
+      sent: 0,
+      skipped: 0,
+      failed: 0,
+    })
+    env.BASE_URL = base
+    expect(await prisma.platformAnnouncementEmail.findUniqueOrThrow({ where: { id: deA[0].id } })).toEqual(antes)
+
+    // B sigue con su reclamo intacto y manda una sola vez.
+    await expect(sendClaimedAnnouncementEmails(deB, { now: t1, reloj: () => t1, pausaMs: 0 })).resolves.toMatchObject({ sent: 1 })
+    expect(mockSend).toHaveBeenCalledTimes(1)
+  })
+
   it('una fila con sendStartedAt y el lease vencido queda FAILED INCIERTO al reclamar, sin mandarse', async () => {
     await vaciarPendientes()
     const a = await anuncio({ deliveredAt: null })
@@ -302,7 +334,7 @@ describe('correo de anuncios: reclamar y mandar (Postgres real)', () => {
       data: { announcementId: a, staffId: staffIds[0], venueId: venueIds[0], attempts: 1, leaseUntil: hace, sendStartedAt: hace },
     })
     const ids = await claimAnnouncementEmails({ limit: 20, now: new Date() })
-    expect(ids).not.toContain(fila.id)
+    expect(ids.map(c => c.id)).not.toContain(fila.id)
     const despues = await prisma.platformAnnouncementEmail.findUniqueOrThrow({ where: { id: fila.id } })
     expect(despues.status).toBe('FAILED')
     expect(despues.lastError).toContain('INCIERTO')

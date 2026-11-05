@@ -66,9 +66,9 @@ export class AnnouncementEmailJob {
     })
     if (encolados) logger.info('[Anuncios] correos encolados', { encolados })
 
-    const ids = await claimAnnouncementEmails({ limit: TANDA, now })
-    if (ids.length === 0) return
-    const r = await sendClaimedAnnouncementEmails(ids, { now })
+    const reclamos = await claimAnnouncementEmails({ limit: TANDA, now })
+    if (reclamos.length === 0) return
+    const r = await sendClaimedAnnouncementEmails(reclamos, { now })
     logger.info('[Anuncios] correos procesados', r)
   }
 }
