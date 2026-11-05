@@ -149,7 +149,7 @@ describe('POST /plan/comp', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.planTier).toBe('PRO')
     expect(res.body.data.stripeSubscriptionId).toBeNull()
-    expect(mockedAssignComp).toHaveBeenCalledWith(VENUE_ID, 'PRO')
+    expect(mockedAssignComp).toHaveBeenCalledWith(VENUE_ID, 'PRO', 'superadmin-1')
   })
 
   it('comp FREE → PlanState.planTier null', async () => {
@@ -161,7 +161,7 @@ describe('POST /plan/comp', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data.planTier).toBeNull()
-    expect(mockedAssignComp).toHaveBeenCalledWith(VENUE_ID, 'FREE')
+    expect(mockedAssignComp).toHaveBeenCalledWith(VENUE_ID, 'FREE', 'superadmin-1')
   })
 
   it('rejects an unknown tier with 400 (Spanish message)', async () => {
@@ -188,7 +188,7 @@ describe('POST /plan/trial', () => {
     expect(res.status).toBe(200)
     expect(res.body.data.state).toBe('trial')
     expect(res.body.data.trialEndsAt).toBe(ends)
-    expect(mockedExtendTrial).toHaveBeenCalledWith(VENUE_ID, 'PRO', 30)
+    expect(mockedExtendTrial).toHaveBeenCalledWith(VENUE_ID, 'PRO', 30, 'superadmin-1')
   })
 
   it('rejects days = 0 with 400 (Spanish message), service NOT called', async () => {
