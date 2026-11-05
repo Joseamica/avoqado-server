@@ -78,13 +78,13 @@ describe('enqueuePaymentEffect · exchange credit (spec §7.6)', () => {
   it('refunding with EXCHANGE_CREDIT enqueues no commission reversal and no referral reversal', async () => {
     const { tx, tipos } = txFalso(CREDITO)
     await enqueueRefundPaymentEffectsInTx(tx, 'ref', 'p')
-    expect(tipos()).toEqual([])
+    expect(tipos()).toEqual(['LOYALTY_POINTS_REVERSAL'])
   })
 
   it('regression: refunding in cash still enqueues the commission reversal and the referral reversal', async () => {
     const { tx, tipos } = txFalso(null)
     await enqueueRefundPaymentEffectsInTx(tx, 'ref', 'p')
-    expect(tipos()).toEqual(['COMMISSION', 'REFERRAL'])
+    expect(tipos()).toEqual(['COMMISSION', 'REFERRAL', 'LOYALTY_POINTS_REVERSAL'])
   })
 })
 

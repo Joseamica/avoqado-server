@@ -8,6 +8,20 @@ import { UpdateLoyaltyConfigSchema, AdjustStampsSchema } from '@/schemas/dashboa
  * llegar al servicio — la pantalla mandaría "prende los sellos" y el servidor
  * respondería 200 sin haber prendido nada. Ya pasó en este repo con `migrateMerchant`.
  */
+describe('UpdateLoyaltyConfigSchema — bono por visita (D7)', () => {
+  const parse = (body: Record<string, unknown>) => UpdateLoyaltyConfigSchema.safeParse({ body, params: { venueId: 'v1' }, query: {} })
+
+  it('deja pasar el bono: el panel lo manda al guardar', () => {
+    const r = parse({ pointsPerVisit: 10, pointsPerDollar: 1 })
+    expect(r.success && r.data.body).toEqual({ pointsPerVisit: 10, pointsPerDollar: 1 })
+  })
+
+  it('rechaza un bono negativo o con decimales', () => {
+    expect(parse({ pointsPerVisit: -1 }).success).toBe(false)
+    expect(parse({ pointsPerVisit: 1.5 }).success).toBe(false)
+  })
+})
+
 describe('UpdateLoyaltyConfigSchema — campos de sellos', () => {
   const parse = (body: Record<string, unknown>) => UpdateLoyaltyConfigSchema.safeParse({ body, params: { venueId: 'v1' }, query: {} })
 

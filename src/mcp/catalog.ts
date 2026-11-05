@@ -128,6 +128,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   customer_display_design: 'read',
   customer_group_detail: 'read',
   customer_history: 'read',
+  customer_loyalty_history: 'read',
   customers_awaiting_approval: 'read',
   daily_sales: 'read',
   decide_customer_approval: 'write',

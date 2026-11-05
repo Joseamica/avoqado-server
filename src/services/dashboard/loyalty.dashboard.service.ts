@@ -25,6 +25,7 @@ import { logAction } from './activity-log.service'
 import { grantStamp, type GrantStampResult } from '../wallet/stampLedger.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
+import { ventaTieneReembolso } from '../shared/ligaDeClienteEnVenta'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -191,19 +192,21 @@ export async function updateLoyaltyConfig(
 }
 
 /**
+ * Lo que da una venta de `amount` pesos: el gasto (`amount * pointsPerDollar`) y el bono por visita, una vez por venta. Una venta en
+ * $0 no da bono. Es también la vista previa del panel: lo que promete y lo que se acredita salen de aquí.
+ */
+async function calcularPuntosDeLaVenta(venueId: string, amount: number): Promise<{ total: number; bono: number }> {
+  const config = await getOrCreateLoyaltyConfig(venueId)
+  if (!config.active || amount <= 0) return { total: 0, bono: 0 }
+  const bono = Number(config.pointsPerVisit) || 0
+  return { total: Math.floor(amount * config.pointsPerDollar) + bono, bono }
+}
+
+/**
  * Calculate how many points a customer earns for a purchase amount
  */
 export async function calculatePointsForAmount(venueId: string, amount: number): Promise<number> {
-  const config = await getOrCreateLoyaltyConfig(venueId)
-
-  if (!config.active) {
-    return 0
-  }
-
-  // Calculate points: amount * pointsPerDollar
-  const points = Math.floor(amount * config.pointsPerDollar)
-
-  return points
+  return (await calcularPuntosDeLaVenta(venueId, amount)).total
 }
 
 /**
@@ -460,7 +463,7 @@ async function acreditarPuntosTrasElSello(ctx: {
     })
   }
 
-  const pointsEarned = await calculatePointsForAmount(venueId, amount)
+  const { total: pointsEarned, bono } = await calcularPuntosDeLaVenta(venueId, amount)
 
   if (pointsEarned === 0) {
     // H4, tercera ola: negocio de sólo sellos. «Ya sellada» con el sello de OTRO cliente quiere decir que la venta es de él:
@@ -499,13 +502,24 @@ async function acreditarPuntosTrasElSello(ctx: {
       // La otra llamada del MISMO cliente pudo escribir mientras ésta esperaba el candado: idempotente.
       const propio = await tx.loyaltyTransaction.findFirst({ where: { customerId, orderId, type: LoyaltyTransactionType.EARN } })
       if (propio) return { tipo: 'YA_ESTABA' as const, puntos: propio.points }
+      // 🔴 D6 (5-nov): una venta ya devuelta no da puntos, la misma regla que el sello (`grantStamp`) y la lealtad tardía. Bajo este
+      // candado, y la reversa de puntos (`puntosAlReembolsar`) toma el mismo: o esto ve el reembolso y no otorga, o la reversa ve estos
+      // puntos y los quita. Sin él, una reversa que corrió antes de existir el EARN dejaba los puntos vivos.
+      if (await ventaTieneReembolso(tx, { venueId, orderId })) return { tipo: 'VENTA_DEVUELTA' as const }
       await tx.loyaltyTransaction.create({
         data: {
           customerId,
           type: LoyaltyTransactionType.EARN,
           points: pointsEarned,
           orderId,
-          reason: `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
+          reason:
+            bono > 0
+              ? `Ganó ${pointsEarned} puntos por compra de $${amount.toFixed(2)} (incluye ${bono} de bono por visita)`
+              : `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
+          ...(bono > 0 ? { visitBonusPoints: bono } : {}),
+          // D6: la base de la proporción de un reembolso. Lo que dio puntos, no lo que dicen los cobros (un pago manual con descuento guarda
+          // el importe antes del descuento).
+          baseAmount: new Prisma.Decimal(amount.toFixed(2)),
           createdById: staffId,
         },
       })
@@ -518,6 +532,14 @@ async function acreditarPuntosTrasElSello(ctx: {
           loyaltyPoints: true,
         },
       })
+      // 🔴 D6: si la venta ya tuvo un cambio, lo que regresó de ella ya no da puntos, aunque su reversa haya corrido antes que este EARN.
+      // Import dinámico: `puntosAlReembolsar` importa de este archivo. Sólo las ventas con cambio llegan a cargarlo.
+      if (await tx.exchange.count({ where: { venueId, originalOrderId: orderId } })) {
+        const { quitarDevolucionesDelCambioEnTx } = await import('../shared/puntosAlReembolsar')
+        await quitarDevolucionesDelCambioEnTx(tx, venueId, orderId)
+        const alCorriente = await tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
+        return { tipo: 'ACREDITADO' as const, saldo: alCorriente.loyaltyPoints }
+      }
       return { tipo: 'ACREDITADO' as const, saldo: customer.loyaltyPoints }
     }
 
@@ -544,6 +566,10 @@ async function acreditarPuntosTrasElSello(ctx: {
       return finish({ pointsEarned: 0, newBalance: await saldoActual(), otroCliente: true as const })
     }
     if (escrito.tipo === 'YA_ESTABA') return finish({ pointsEarned: escrito.puntos, newBalance: await saldoActual() })
+    if (escrito.tipo === 'VENTA_DEVUELTA') {
+      logger.info('⏭️ [LOYALTY] Order already refunded: no points', { venueId, orderId, customerId })
+      return finish({ pointsEarned: 0, newBalance: await saldoActual() })
+    }
     return finish(
       {
         pointsEarned,
@@ -787,6 +813,7 @@ export async function getLoyaltyTransactions(
       points: t.points,
       reason: t.reason,
       orderId: t.orderId,
+      refundPaymentId: t.refundPaymentId,
       createdById: t.createdById,
       createdAt: t.createdAt,
       order: t.order

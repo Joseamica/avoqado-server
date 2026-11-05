@@ -11237,6 +11237,7 @@ router.get(
  *             type: object
  *             properties:
  *               pointsPerDollar: { type: number, minimum: 0 }
+ *               pointsPerVisit: { type: integer, minimum: 0 }
  *               minPurchaseAmount: { type: number, minimum: 0 }
  *               redemptionRate: { type: number, minimum: 0 }
  *               minRedemptionPoints: { type: integer, minimum: 0 }

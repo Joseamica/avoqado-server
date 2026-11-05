@@ -15,6 +15,8 @@ import { LoyaltyTransactionType } from '@prisma/client'
 export const UpdateLoyaltyConfigSchema = z.object({
   body: z.object({
     pointsPerDollar: z.number().min(0, 'Points per dollar must be non-negative').optional(),
+    // D7 (5-nov): sin esta línea, `validateRequest` lo borraba y el panel guardaba el bono por visita con un 200 sin guardar nada.
+    pointsPerVisit: z.number().int('Los puntos por visita son enteros').min(0, 'Points per visit must be non-negative').optional(),
     minPurchaseAmount: z.number().min(0, 'Minimum purchase amount must be non-negative').optional(),
     redemptionRate: z.number().min(0, 'Redemption rate must be non-negative').optional(),
     minRedemptionPoints: z.number().int().min(0, 'Minimum redemption points must be non-negative').optional(),
