@@ -281,48 +281,34 @@ async function getStaffSummary(staffId?: string | null) {
   }
 }
 
-/**
- * Siguiente consecutivo del negocio en el día: PO<fecha>-NNN.
- * ponytail: ordena por texto, así que pasando de 999 órdenes de un negocio en un día `-1000` queda antes
- * que `-999` y el número choca. Si un negocio se acerca a eso, ordenar por el consecutivo como número.
- */
+/** Siguiente consecutivo del negocio en el día: PO<fecha>-NNN. Se compara como número: como texto, `-999` queda después de `-1000`. */
 async function generateOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
   const today = new Date()
   const datePrefix = `PO${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
 
-  const lastOrder = await tx.purchaseOrder.findFirst({
-    where: {
-      venueId,
-      orderNumber: {
-        startsWith: datePrefix,
-      },
-    },
-    orderBy: {
-      orderNumber: 'desc',
-    },
-  })
-
-  if (!lastOrder) {
-    return `${datePrefix}-001`
-  }
-
-  const lastSequence = parseInt(lastOrder.orderNumber.split('-')[1])
-  const nextSequence = String(lastSequence + 1).padStart(3, '0')
-  return `${datePrefix}-${nextSequence}`
+  const [fila] = await tx.$queryRaw<{ ultimo: number | null }[]>(
+    Prisma.sql`SELECT max(split_part("orderNumber", '-', 2)::int) AS ultimo FROM "PurchaseOrder"
+      WHERE "venueId" = ${venueId} AND "orderNumber" ~ ${`^${datePrefix}-[0-9]+$`}`,
+  )
+  return `${datePrefix}-${String((fila?.ultimo ?? 0) + 1).padStart(3, '0')}`
 }
 
 /**
  * Crea una orden de compra con el siguiente número del negocio. El candado dura la transacción: dos
  * órdenes a la vez no leen el mismo último número, y si la creación falla el número no se gasta.
+ * El tiempo esperando el candado cuenta en el timeout de la transacción: por eso no es el default de 5 s.
  */
 export async function crearConNumeroDeOrden<T>(
   venueId: string,
   crear: (tx: Prisma.TransactionClient, orderNumber: string) => Promise<T>,
 ): Promise<T> {
-  return prisma.$transaction(async tx => {
-    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`purchase-order-number:${venueId}`}, 0))`)
-    return crear(tx, await generateOrderNumber(tx, venueId))
-  })
+  return prisma.$transaction(
+    async tx => {
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`purchase-order-number:${venueId}`}, 0))`)
+      return crear(tx, await generateOrderNumber(tx, venueId))
+    },
+    { timeout: 15_000 },
+  )
 }
 
 /**

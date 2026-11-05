@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import { createPurchaseOrder } from '@/services/dashboard/purchaseOrder.service'
+import { createPurchaseOrder, crearConNumeroDeOrden } from '@/services/dashboard/purchaseOrder.service'
 import { createPurchaseOrdersFromSuggestions } from '@/services/dashboard/autoReorder.service'
 import { Decimal } from '@prisma/client/runtime/library'
 
@@ -133,6 +133,67 @@ describe('Número de orden de compra por negocio', () => {
     expect(resultados.filter(r => r.status === 'rejected')).toEqual([])
     const filas = await prisma.purchaseOrder.findMany({ where: { venueId: n.venueId }, select: { orderNumber: true } })
     expect(filas.map(f => consecutivo(f.orderNumber)).sort()).toEqual(Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(3, '0')))
+  })
+
+  it('🔴 esperar el candado más de 5 s no hace fallar la orden', async () => {
+    const n = await negocio()
+    let avisar!: () => void
+    const candadoTomado = new Promise<void>(resolve => (avisar = resolve))
+    const otraOrden = prisma.$transaction(
+      async tx => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`purchase-order-number:${n.venueId}`}, 0))`
+        avisar()
+        await new Promise(resolve => setTimeout(resolve, 6_000))
+      },
+      { timeout: 10_000 },
+    )
+    await candadoTomado
+
+    const orden = await crear(n)
+    await otraOrden
+
+    expect(consecutivo(orden.orderNumber)).toBe('001')
+  })
+
+  it('🔴 de -999 y -1000 sigue -1001: el consecutivo se compara como número', async () => {
+    const n = await negocio()
+    const prefijo = (await crear(n)).orderNumber.split('-')[0]
+    for (const numero of ['999', '1000']) {
+      await prisma.purchaseOrder.create({
+        data: {
+          venueId: n.venueId,
+          supplierId: n.supplierId,
+          orderNumber: `${prefijo}-${numero}`,
+          orderDate: new Date(),
+          subtotal: new Decimal(0),
+          total: new Decimal(0),
+        },
+      })
+    }
+
+    expect(consecutivo((await crear(n)).orderNumber)).toBe('1001')
+  })
+
+  it('una orden que falla no gasta número', async () => {
+    const n = await negocio()
+
+    await expect(
+      crearConNumeroDeOrden(n.venueId, async (tx, orderNumber) => {
+        await tx.purchaseOrder.create({
+          data: {
+            venueId: n.venueId,
+            supplierId: n.supplierId,
+            orderNumber,
+            orderDate: new Date(),
+            subtotal: new Decimal(0),
+            total: new Decimal(0),
+          },
+        })
+        throw new Error('falló a media creación')
+      }),
+    ).rejects.toThrow('falló a media creación')
+
+    expect(consecutivo((await crear(n)).orderNumber)).toBe('001')
   })
 
   it('la base permite el mismo número en dos negocios y lo rechaza dentro de uno', async () => {

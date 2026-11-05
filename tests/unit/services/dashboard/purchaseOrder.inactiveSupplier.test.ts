@@ -41,7 +41,7 @@ function supplier(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.rawMaterial.findMany.mockResolvedValue([{ id: RM, unit: 'PIECE' }])
-  prismaMock.purchaseOrder.findFirst.mockResolvedValue(null)
+  prismaMock.$queryRaw.mockResolvedValue([])
   prismaMock.purchaseOrder.count.mockResolvedValue(0)
   prismaMock.purchaseOrder.create.mockResolvedValue({ id: 'po-1', orderNumber: 'OC-001', supplierId: SUPPLIER, items: [] })
 })
