@@ -493,6 +493,7 @@ describe('/crm/campaigns — las llaves de correo masivo (L5)', () => {
     ['GET /campaigns', () => request(app).get('/crm/campaigns')],
     ['POST /campaigns', () => request(app).post('/crm/campaigns').send({ name: 'x', templateId: TEMPLATE })],
     ['GET /campaigns/:id', () => request(app).get(`/crm/campaigns/${CAMPAIGN}`)],
+    ['GET /campaigns/:id/recipients', () => request(app).get(`/crm/campaigns/${CAMPAIGN}/recipients`)],
     ['PATCH /campaigns/:id', () => request(app).patch(`/crm/campaigns/${CAMPAIGN}`).send({ name: 'Otra' })],
     ['POST /campaigns/:id/preview', () => request(app).post(`/crm/campaigns/${CAMPAIGN}/preview`)],
     ['POST /campaigns/:id/test', () => request(app).post(`/crm/campaigns/${CAMPAIGN}/test`)],

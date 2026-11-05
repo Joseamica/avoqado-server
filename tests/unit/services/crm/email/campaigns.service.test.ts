@@ -11,12 +11,13 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
-import { contarAudiencia, personasNoElegibles, recorrerAudiencia } from '@/services/crm/email/audience.service'
+import { contarAudiencia, paginaDeDestinatarios, personasNoElegibles, recorrerAudiencia } from '@/services/crm/email/audience.service'
 import {
   cancelCampaign,
   enqueueCampaign,
   getCampaign,
   listCampaigns,
+  listRecipients,
   previewSend,
   sendCampaignTest,
   updateCampaign,
@@ -36,6 +37,7 @@ jest.mock('@/services/crm/email/audience.service', () => ({
   ...jest.requireActual('@/services/crm/email/audience.service'),
   contarAudiencia: jest.fn(),
   recorrerAudiencia: jest.fn(),
+  paginaDeDestinatarios: jest.fn(),
   personasNoElegibles: jest.fn(),
 }))
 jest.mock('@/services/crm/access.service', () => ({
@@ -761,5 +763,80 @@ describe('conjuntoHash: se confirman las mismas personas, no sólo cuántas', ()
     expect(a.huella).toBe(b.huella)
     expect(a.huella).toBe((await getCampaign(CAMP_A)).huella)
     expect(cuerpoDelToken(a.token!).conjuntoHash).not.toBe(cuerpoDelToken(b.token!).conjuntoHash)
+  })
+})
+
+describe('listRecipients — «Ver quiénes»: una consulta por página, sin total', () => {
+  const borrador = { status: 'BORRADOR', audience: { segmentos: [{ tipo: 'PROSPECTOS' }] } }
+  const cursorDe = (correo: string) => Buffer.from(correo).toString('base64url')
+  const destinatario = (email: string, publico: 'PROSPECTOS' | 'AGREGADOS' = 'PROSPECTOS') => ({
+    email,
+    name: 'José',
+    reason: 'PROSPECTO',
+    publico,
+    vars: { negocio: 'Cafetería' },
+    accountId: 'cacc',
+  })
+
+  beforeEach(() => {
+    ;(paginaDeDestinatarios as jest.Mock).mockReset().mockResolvedValue({ filas: [destinatario('a@x.mx')], siguiente: null })
+    ;(contarAudiencia as jest.Mock).mockClear()
+    prismaMock.crmCampaign.findUnique.mockReset().mockResolvedValue(borrador as never)
+  })
+
+  it('🔴 ninguna página llama a contarAudiencia y la respuesta no trae total', async () => {
+    const primera = await listRecipients(CAMP_A, {})
+    const segunda = await listRecipients(CAMP_A, { cursor: cursorDe('a@x.mx') })
+    expect(contarAudiencia).not.toHaveBeenCalled()
+    expect(primera).not.toHaveProperty('total')
+    expect(segunda).not.toHaveProperty('total')
+    expect(primera).toEqual({
+      rows: [{ email: 'a@x.mx', nombre: 'José', negocio: 'Cafetería', motivo: 'PROSPECTO', accountId: 'cacc' }],
+      nextCursor: null,
+      hasMore: false,
+    })
+  })
+
+  it('el cursor que entrega es opaco (base64url del último correo) y el que recibe se decodifica', async () => {
+    ;(paginaDeDestinatarios as jest.Mock).mockResolvedValue({ filas: [destinatario('a@x.mx')], siguiente: 'z@x.mx' })
+    const pagina = await listRecipients(CAMP_A, { cursor: cursorDe('m@x.mx'), q: 'jose' })
+    expect(pagina).toMatchObject({ nextCursor: cursorDe('z@x.mx'), hasMore: true })
+    expect(paginaDeDestinatarios).toHaveBeenCalledWith(expect.anything(), { desde: 'm@x.mx', limit: 50, buscar: 'jose' })
+  })
+
+  it.each([
+    [5000, 100],
+    [0, 1],
+    [-3, 1],
+    [7, 7],
+    [undefined, 50],
+  ])('un limit de %s se recorta a %s', async (pedido, esperado) => {
+    await listRecipients(CAMP_A, { limit: pedido as number | undefined })
+    expect((paginaDeDestinatarios as jest.Mock).mock.calls[0][1].limit).toBe(esperado)
+  })
+
+  it('un cursor basura es 400 CRM_CURSOR_INVALIDO y no consulta la lista', async () => {
+    for (const cursor of ['!!!', 'zzzz', cursorDe('sin-arroba'), Buffer.from([0xff, 0xfe, 0x40]).toString('base64url')]) {
+      await expect(listRecipients(CAMP_A, { cursor })).rejects.toMatchObject({ statusCode: 400, code: 'CRM_CURSOR_INVALIDO' })
+    }
+    expect(paginaDeDestinatarios).not.toHaveBeenCalled()
+  })
+
+  it.each(['ENVIANDO', 'ENVIADA', 'CANCELADA'])('una campaña %s es 409 CRM_CAMPANA_NO_EDITABLE', async status => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValue({ ...borrador, status } as never)
+    await expect(listRecipients(CAMP_A, {})).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_NO_EDITABLE' })
+    expect(paginaDeDestinatarios).not.toHaveBeenCalled()
+  })
+
+  it('una campaña que no existe es 404 y una página vacía es una lista vacía', async () => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(null)
+    await expect(listRecipients(CAMP_A, {})).rejects.toMatchObject({ statusCode: 404 })
+    ;(paginaDeDestinatarios as jest.Mock).mockResolvedValue({ filas: [], siguiente: null })
+    expect(await listRecipients(CAMP_A, {})).toEqual({ rows: [], nextCursor: null, hasMore: false })
+  })
+
+  it('el motivo de una persona agregada es AGREGADO', async () => {
+    ;(paginaDeDestinatarios as jest.Mock).mockResolvedValue({ filas: [destinatario('b@x.mx', 'AGREGADOS')], siguiente: null })
+    expect((await listRecipients(CAMP_A, {})).rows[0].motivo).toBe('AGREGADO')
   })
 })

@@ -82,6 +82,12 @@ export async function getCampaign(req: Request, res: Response): Promise<void> {
   res.json({ data: await campaigns.getCampaign(req.params.id) })
 }
 
+/** GET /api/v1/crm/campaigns/:id/recipients — «Ver quiénes»: una página, sin total (la pantalla usa el «Le llega a N»). */
+export async function listRecipients(req: Request, res: Response): Promise<void> {
+  const { rows, nextCursor, hasMore } = await campaigns.listRecipients(req.params.id, req.query as unknown as campaigns.ListRecipientsQuery)
+  res.json({ data: rows, meta: { nextCursor, hasMore } })
+}
+
 /** POST /api/v1/crm/campaigns — a draft from a template. */
 export async function createCampaign(req: Request, res: Response): Promise<void> {
   res.status(201).json({ data: await campaigns.createCampaign(req.crmAccess!, req.body) })

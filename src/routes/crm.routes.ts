@@ -38,6 +38,7 @@ import {
   hideClientSchema,
   listAccountsSchema,
   listCampaignsSchema,
+  listRecipientsSchema,
   listClientsSchema,
   listTeamSchema,
   listTemplatesSchema,
@@ -184,6 +185,8 @@ router.post('/templates/:id/unarchive', plantillas, validateRequest(templateIdSc
 router.get('/campaigns', verCampanas, validateRequest(listCampaignsSchema), crmEmailController.listCampaigns)
 router.post('/campaigns', preparar, validateRequest(createCampaignSchema), crmEmailController.createCampaign)
 router.get('/campaigns/:id', verCampanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
+// «Ver quiénes»: la lista de a quién le llega un borrador, una consulta por página y sin total.
+router.get('/campaigns/:id/recipients', verCampanas, validateRequest(listRecipientsSchema), crmEmailController.listRecipients)
 router.patch('/campaigns/:id', preparar, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
 router.post('/campaigns/:id/preview', verCampanas, validateRequest(previewCampaignSchema), crmEmailController.previewCampaign)
 router.post('/campaigns/:id/test', preparar, validateRequest(campaignTestSchema), crmEmailController.sendCampaignTest)

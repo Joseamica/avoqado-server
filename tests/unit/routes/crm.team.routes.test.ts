@@ -137,6 +137,7 @@ describe('crm team routes', () => {
       { route: 'GET /campaigns', keys: verCampanas },
       { route: 'POST /campaigns', keys: preparar },
       { route: 'GET /campaigns/:id', keys: verCampanas },
+      { route: 'GET /campaigns/:id/recipients', keys: ['crm:ver-campanas'] },
       { route: 'PATCH /campaigns/:id', keys: preparar },
       { route: 'POST /campaigns/:id/preview', keys: verCampanas },
       { route: 'POST /campaigns/:id/test', keys: preparar },

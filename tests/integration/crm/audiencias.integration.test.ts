@@ -16,7 +16,13 @@ import { createHash } from 'crypto'
 import { Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import type { Audiencia } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { contarAudiencia, personasNoElegibles, recorrerAudiencia, type Destinatario } from '@/services/crm/email/audience.service'
+import {
+  contarAudiencia,
+  paginaDeDestinatarios,
+  personasNoElegibles,
+  recorrerAudiencia,
+  type Destinatario,
+} from '@/services/crm/email/audience.service'
 import { filtrarBloqueados, sqlBloqueado } from '@/services/crm/email/optOut.service'
 import { deleteAccount, erasedHashes } from '@/services/crm/erase.service'
 import { ensureCrmTeamVenue } from '@/services/crm/teamVenue.service'
@@ -1029,6 +1035,105 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
       ])
       // Y la regla dice lo mismo: es agregable (por el contacto visible de B).
       expect(await personasNoElegibles([correo('dc-persona')])).toEqual([])
+    })
+  })
+  describe('ver quiénes', () => {
+    /** Recorre «Ver quiénes» página por página, como lo hace la pantalla con «Ver más». */
+    async function paginas(aud: Audiencia, limit: number, buscar?: string) {
+      const paginas: Destinatario[][] = []
+      let desde: string | undefined
+      for (;;) {
+        const { filas, siguiente } = await paginaDeDestinatarios(aud, { desde, limit, buscar })
+        paginas.push(filas)
+        if (siguiente === null) return paginas
+        expect(filas[filas.length - 1].email).toBe(siguiente)
+        desde = siguiente
+      }
+    }
+    async function cajerasDe(etiqueta: string, nombres: Array<{ alias: string; firstName?: string }>, negocio = `Negocio ${etiqueta}`) {
+      const ciudad = `${etiqueta} ${suffix}`
+      const v = await venue(await organizacion(), { name: negocio, city: ciudad })
+      for (const { alias, firstName } of nombres) await enVenue((await persona(correo(alias), { firstName })).id, v, StaffRole.CASHIER)
+      return usuarios([StaffRole.CASHIER], {}, ciudad)
+    }
+
+    it('las_paginas_no_repiten_ni_pierden_y_su_union_es_el_recorrido_completo_en_orden', async () => {
+      const aud = await cajerasDe(
+        'Ciento veinte',
+        Array.from({ length: 120 }, (_, i) => ({ alias: `p120-${String(i).padStart(3, '0')}` })),
+      )
+      const todas = await paginas(aud, 100)
+      expect(todas.map(p => p.length)).toEqual([100, 20])
+      const unidas = todas.flat().map(d => d.email)
+      expect(unidas).toEqual([...unidas].sort())
+      expect(unidas).toEqual(correos((await recorrer(aud)).filas))
+      expect(new Set(unidas).size).toBe(120)
+      expect((await contarAudiencia(aud)).total).toBe(120)
+      // Una página exacta no inventa otra con filas: la última dice que no hay siguiente.
+      expect((await paginas(aud, 120)).map(p => p.length)).toEqual([120])
+    })
+
+    it('🔴 con_bajas_y_rebotes_la_union_de_las_paginas_es_el_conteo_y_ninguno_esta_bloqueado', async () => {
+      const aud = await cajerasDe(
+        'Con bajas lista',
+        Array.from({ length: 10 }, (_, i) => ({ alias: `bl-${i}` })),
+      )
+      await prisma.crmEmailOptOut.createMany({ data: [0, 1, 2].map(i => ({ email: correo(`bl-${i}`), source: 'UN_CLIC' })) })
+      await prisma.emailSuppression.createMany({ data: [3, 4].map(i => ({ email: correo(`bl-${i}`), reason: 'HARD_BOUNCE' })) })
+
+      const unidas = (await paginas(aud, 3)).flat().map(d => d.email)
+
+      expect(unidas).toHaveLength((await contarAudiencia(aud)).total)
+      expect(unidas).toEqual([5, 6, 7, 8, 9].map(i => correo(`bl-${i}`)))
+      expect(unidas).toEqual(correos((await recorrer(aud)).filas))
+      expect(await filtrarBloqueados(prisma, unidas)).toEqual(new Set())
+    })
+
+    it('🔴 buscar_jose_encuentra_a_José_y_cafeteria_a_Cafetería_sin_mayusculas_ni_acentos', async () => {
+      const aud = await cajerasDe(
+        'Busca',
+        [
+          { alias: 'bus-1', firstName: 'José' },
+          { alias: 'bus-2', firstName: 'Ana' },
+        ],
+        'Cafetería La Esquina',
+      )
+      const buscar = async (q: string) => (await paginas(aud, 100, q)).flat().map(d => d.email)
+
+      expect(await buscar('jose')).toEqual([correo('bus-1')])
+      expect(await buscar('JOSÉ')).toEqual([correo('bus-1')])
+      expect(await buscar('cafeteria')).toEqual([correo('bus-1'), correo('bus-2')])
+      expect(await buscar(`BUS-2-${suffix}`)).toEqual([correo('bus-2')])
+      expect(await buscar('nadie-se-llama-asi')).toEqual([])
+      expect(await buscar('   ')).toEqual([correo('bus-1'), correo('bus-2')])
+      // La búsqueda pagina igual y el cursor sigue valiendo con ella.
+      expect((await paginas(aud, 1, 'cafeteria')).map(p => p.length)).toEqual([1, 1])
+    })
+
+    it('buscar_con_porcentaje_guion_bajo_o_signo_de_cierre_no_es_comodin', async () => {
+      const aud = await cajerasDe('Comodin', [{ alias: 'com-1' }, { alias: 'com-2' }])
+      for (const q of ['%', '_', '!', 'com_1', 'com%']) expect((await paginas(aud, 100, q)).flat()).toEqual([])
+    })
+
+    it('el_motivo_dice_AGREGADO_para_incluir_y_PROSPECTO_para_el_publico_y_los_quitados_no_salen', async () => {
+      await consentimiento(correo('mot-prosp'))
+      await consentimiento(correo('mot-quitado'))
+      await conPermiso('mot-agregada')
+      const aud: Audiencia = {
+        segmentos: [{ tipo: 'PROSPECTOS' }],
+        incluir: [correo('mot-agregada')],
+        excluir: [correo('mot-quitado')],
+      }
+      const filas = (await paginas(aud, 100, `-${suffix}`)).flat().filter(d => d.email.startsWith('mot-'))
+
+      expect(filas.map(d => [d.email, d.publico])).toEqual([
+        [correo('mot-agregada'), 'PROSPECTOS'],
+        [correo('mot-prosp'), 'PROSPECTOS'],
+      ])
+      // Sin el público, la misma persona sólo llega por «agregada».
+      const soloAgregada = (await paginas({ segmentos: [], incluir: [correo('mot-agregada')] }, 100)).flat()
+      expect(soloAgregada.map(d => [d.email, d.publico])).toEqual([[correo('mot-agregada'), 'AGREGADOS']])
+      expect(await paginas({ segmentos: [] }, 100)).toEqual([[]])
     })
   })
 })

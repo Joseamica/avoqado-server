@@ -20,7 +20,7 @@ import { logAction } from '../../dashboard/activity-log.service'
 import { campanasPausadasPorCupo } from '../../email/resendQuota'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import type { CrmAccess } from '../access.service'
-import { contarAudiencia, personasNoElegibles, recorrerAudiencia } from './audience.service'
+import { contarAudiencia, paginaDeDestinatarios, personasNoElegibles, recorrerAudiencia } from './audience.service'
 import { PUDO_SALIR_EN_UN_INTENTO_ANTERIOR } from './campaignSender.service'
 import { assertSinVariablesDesconocidas, contentHash, enviarPrueba } from './templates.service'
 
@@ -237,6 +237,48 @@ export async function listCampaigns(q: ListCampaignsQuery = {}) {
     rows: rows.map(r => vista(r, contadores.get(r.id))),
     nextCursor: found.length > limit ? rows[rows.length - 1].id : null,
     total,
+  }
+}
+
+export interface ListRecipientsQuery {
+  cursor?: string
+  limit?: number
+  q?: string
+}
+
+const MOTIVO_DE_PUBLICO = { PROSPECTOS: 'PROSPECTO', CLIENTES: 'CLIENTE', USUARIOS: 'USUARIO', AGREGADOS: 'AGREGADO' } as const
+
+/** El cursor es el correo en base64url; uno que no hace el viaje de ida y vuelta (o no es un correo) es 400. */
+function leerCursor(cursor: string | undefined): string | undefined {
+  if (cursor === undefined) return undefined
+  const correo = Buffer.from(cursor, 'base64url').toString('utf8')
+  if (!correo || correo.includes('\u0000') || !correo.includes('@') || Buffer.from(correo).toString('base64url') !== cursor) {
+    throw new BadRequestError('La página pedida no es válida', 'CRM_CURSOR_INVALIDO')
+  }
+  return correo
+}
+
+/**
+ * «Ver quiénes»: a quién le llega un BORRADOR, una consulta por página (tope 100 impuesto aquí) y SIN total: la pantalla usa el
+ * «Le llega a N» que ya tiene. Sólo lo que la pantalla enseña (correo, nombre, negocio, por qué le llega y su cuenta).
+ */
+export async function listRecipients(id: string, q: ListRecipientsQuery = {}) {
+  const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { status: true, audience: true } })
+  if (!fila) throw notFound()
+  if (fila.status !== 'BORRADOR') throw noEditable(fila.status)
+  const limit = Math.min(Math.max(Math.trunc(Number.isFinite(q.limit) ? (q.limit as number) : DEFAULT_PAGE), 1), MAX_PAGE)
+  const desde = leerCursor(q.cursor)
+  const { filas, siguiente } = await paginaDeDestinatarios(audienciaDe(fila.audience), { desde, limit, buscar: q.q })
+  return {
+    rows: filas.map(d => ({
+      email: d.email,
+      nombre: d.name ?? null,
+      negocio: d.vars.negocio ?? null,
+      motivo: MOTIVO_DE_PUBLICO[d.publico],
+      accountId: d.accountId ?? null,
+    })),
+    nextCursor: siguiente === null ? null : Buffer.from(siguiente).toString('base64url'),
+    hasMore: siguiente !== null,
   }
 }
 

@@ -26,6 +26,7 @@ import prisma from '../../../utils/prismaClient'
 import { normalizeEmail } from '../../marketing/emailSuppression.service'
 import { clientSql, planVigenteSql, type PaidPlan } from '../clients.service'
 import { teamOrganizationId } from '../inbound.service'
+import { plegarTexto, TABLA_DE_PLEGADO_SQL } from '../../shared/customerSearch'
 import { REAL_VENUE_SQL } from '../sweep.service'
 import type { MotivoDeEnvio } from './footer'
 import { filtrarBloqueados, sqlBloqueado } from './optOut.service'
@@ -359,6 +360,41 @@ async function porLotes(
     desde = filas[filas.length - 1].email
   }
   return conjunto.digest('hex')
+}
+
+const escaparLike = (texto: string) => texto.replace(/[!%_]/g, m => `!${m}`)
+/** Una columna de texto, sin mayúsculas ni acentos (la misma tabla que plegó `plegarTexto`). */
+const plegada = (columna: Prisma.Sql) =>
+  Prisma.sql`translate(lower(coalesce(${columna}, '')), ${TABLA_DE_PLEGADO_SQL.de}, ${TABLA_DE_PLEGADO_SQL.a})`
+
+/**
+ * Una página de «Ver quiénes»: UNA consulta, sin total. Envuelve la MISMA resolución que cuenta y manda (`seleccionDistinta`), así el
+ * ganador de cada correo (y su motivo) es el mismo; las bajas (`sqlBloqueado`) y la búsqueda se aplican DESPUÉS del `DISTINCT ON`,
+ * nunca adentro. Orden por correo en `COLLATE "C"`, cursor = el último correo entregado, `LIMIT limit + 1` para saber si hay más.
+ * La búsqueda (sin mayúsculas ni acentos; `%`, `_` y `!` no son comodín) mira correo, nombre y negocio del ganador.
+ */
+export async function paginaDeDestinatarios(
+  audiencia: Audiencia,
+  opciones: { desde?: string; limit: number; buscar?: string },
+): Promise<{ filas: Destinatario[]; siguiente: string | null }> {
+  if (audiencia.segmentos.length === 0 && !audiencia.incluir?.length) return { filas: [], siguiente: null }
+  const contexto: Contexto = { equipo: await teamOrganizationId(), ahora: new Date() }
+  const resolucion = seleccionDistinta(ramas(audiencia, contexto), audiencia.excluir ?? [])
+  const desde = opciones.desde === undefined ? Prisma.empty : Prisma.sql` AND w."email" > ${opciones.desde}`
+  const texto = plegarTexto((opciones.buscar ?? '').split('\u0000').join(''))
+    .trim()
+    .slice(0, 100)
+  const patron = `%${escaparLike(texto)}%`
+  const buscar = texto
+    ? Prisma.sql` AND (${plegada(Prisma.sql`w."email"`)} LIKE ${patron} ESCAPE '!' OR ${plegada(Prisma.sql`w."name"`)} LIKE ${patron} ESCAPE '!' OR ${plegada(Prisma.sql`w."negocio"`)} LIKE ${patron} ESCAPE '!')`
+    : Prisma.empty
+  const filas = await prisma.$queryRaw<Fila[]>(Prisma.sql`
+    SELECT w.* FROM (${resolucion}) w
+    WHERE NOT ${sqlBloqueado(Prisma.sql`w."email"`)}${desde}${buscar}
+    ORDER BY w."email"
+    LIMIT ${opciones.limit + 1}`)
+  const pagina = filas.slice(0, opciones.limit)
+  return { filas: pagina.map(aDestinatario), siguiente: filas.length > opciones.limit ? pagina[pagina.length - 1].email : null }
 }
 
 /**

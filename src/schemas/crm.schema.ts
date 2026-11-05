@@ -624,6 +624,16 @@ export const listCampaignsSchema = z.object({
   }),
 })
 
+/** GET /crm/campaigns/:id/recipients — «Ver quiénes». El cursor es opaco (el servicio lo valida); `q` es la búsqueda de siempre. */
+export const listRecipientsSchema = z.object({
+  params: byId,
+  query: z.object({
+    cursor: z.string({ invalid_type_error: 'La página pedida no es válida' }).max(400, 'La página pedida no es válida').optional(),
+    limit: listAccountsSchema.shape.query.shape.limit,
+    q: listAccountsSchema.shape.query.shape.q,
+  }),
+})
+
 /** GET /crm/campaigns/:id and POST /crm/campaigns/:id/cancel */
 export const campaignIdSchema = z.object({ params: byId })
 
