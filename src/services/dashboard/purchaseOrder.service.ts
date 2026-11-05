@@ -296,7 +296,7 @@ async function generateOrderNumber(tx: Prisma.TransactionClient, venueId: string
 /**
  * Crea una orden de compra con el siguiente número del negocio. El candado dura la transacción: dos
  * órdenes a la vez no leen el mismo último número, y si la creación falla el número no se gasta.
- * El tiempo esperando el candado cuenta en el timeout de la transacción: por eso no es el default de 5 s.
+ * Las que esperan el candado retienen su conexión y cuentan en el timeout: por eso no son los defaults de Prisma (5 s y 2 s).
  */
 export async function crearConNumeroDeOrden<T>(
   venueId: string,
@@ -307,7 +307,7 @@ export async function crearConNumeroDeOrden<T>(
       await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`purchase-order-number:${venueId}`}, 0))`)
       return crear(tx, await generateOrderNumber(tx, venueId))
     },
-    { timeout: 15_000 },
+    { timeout: 15_000, maxWait: 5_000 },
   )
 }
 
