@@ -70,7 +70,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
-import { cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
+import { apartarCupon, cuponDeLaVenta, ligarCupon, montoDelCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
@@ -1530,8 +1530,18 @@ export async function crearVentaDeMostradorEnTx(
   const itemDiscountTotal = catalogDiscountTotal + cortesiaTotal.toNumber()
 
   const remainingAfterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal)
+  // Con combos la base todavía no existe (se arman abajo): su mínimo se revisa allá, contra la base con promociones (Codex r1 #6).
   const cupon =
-    input.couponCode && !enLaCola ? await cuponDeLaVenta(tx, venueId, input.couponCode, remainingAfterItemDiscounts, normalizedCustomerId) : null
+    input.couponCode && !enLaCola
+      ? await cuponDeLaVenta(
+          tx,
+          venueId,
+          input.couponCode,
+          promocionesUnicas.length > 0 ? undefined : remainingAfterItemDiscounts,
+          normalizedCustomerId,
+        )
+      : null
+  if (cupon) await apartarCupon(tx, venueId, cupon, normalizedCustomerId)
   // Descuento de catálogo de la CUENTA (como `/tpv/with-items`): del negocio y vigente, o la venta entera se rechaza.
   const orderDiscount =
     cupon?.discount ?? (input.orderDiscountId ? await tx.discount.findFirst({ where: { id: input.orderDiscountId, venueId } }) : null)
@@ -1812,6 +1822,9 @@ export async function crearVentaDeMostradorEnTx(
   // error y sin rastro. Nunca cobraba de menos: cobraba de MÁS que lo que el
   // cajero aplicó.
   const topeDescuentoDeOrden = Math.max(0, subtotalConPromociones - itemDiscountTotal)
+  if (cupon?.minimo != null && topeDescuentoDeOrden < cupon.minimo) {
+    throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'MIN_PURCHASE', limite: cupon.minimo }))
+  }
   const descuentoDeOrdenFinal = cupon
     ? montoDelCupon(cupon.discount, topeDescuentoDeOrden)
     : Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))

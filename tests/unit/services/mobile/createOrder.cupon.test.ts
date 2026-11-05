@@ -131,3 +131,20 @@ it('sin cupón no cambia nada', async () => {
   expect(filas[0]).toMatchObject({ name: 'Descuento de la cuenta', isManual: true })
   expect(prismaMock.couponCode.findFirst).not.toHaveBeenCalled()
 })
+
+it('Codex r1 #3: un cupón y un premio de sellos en la misma venta se rechazan antes de crear nada', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { leerVentaDeMostrador } = require('@/controllers/mobile/order.mobile.controller')
+  const r = leerVentaDeMostrador(
+    { staffId: 'staff-1', items: [{ productId: 'cafe', quantity: 1 }], couponCode: 'DESC10', stampRewardId: 'rw-1', stampRewardAware: true },
+    { conPropinaDeOrden: true, venueId: VENUE, usuario: 'staff-1' },
+  )
+  expect(r).toEqual({ error: 'Un cupón y un premio de sellos no se combinan en la misma venta. Quita uno de los dos.' })
+})
+
+it('Codex r1 #1: aparta el cupón en la MISMA transacción que crea la venta', async () => {
+  prismaMock.couponCode.findFirst.mockResolvedValue(cupon(descuento(), { maxUses: 1 }) as any)
+  prismaMock.orderDiscount.count.mockResolvedValue(1)
+  await expect(crear()).rejects.toMatchObject({ statusCode: 400, message: 'Este cupón ya alcanzó su límite de usos.' })
+  expect(prismaMock.order.create).not.toHaveBeenCalled()
+})

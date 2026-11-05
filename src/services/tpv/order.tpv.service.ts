@@ -29,7 +29,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
-import { CUPON_CAMBIO_DE_VALOR, cuponDeLaVenta, finalizeCouponsForOrder, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
+import { CUPON_CAMBIO_DE_VALOR, apartarCupon, cuponDeLaVenta, finalizeCouponsForOrder, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
@@ -1235,6 +1235,8 @@ export async function createOrderWithItems(
   async function runCreateOrderTransaction() {
     return prisma.$transaction(async tx => {
       if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
+      // D5 (Codex r1 #1): bajo el candado del cupón, contra los canjes y las ventas sin cobrar que ya lo traen.
+      if (cupon) await apartarCupon(tx, venueId, cupon, input.customerId)
       // El turno de caja es del NEGOCIO, no de quien abre la orden (`../shared/turnoDeCaja.ts`).
       const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 

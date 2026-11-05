@@ -389,11 +389,14 @@ interface OnOrderPaidTxResult {
  * who re-crosses a threshold post-refund.
  */
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
+  await calificarReferidoDeLaVenta(input)
   // D5: todo camino que salda una cuenta (efectivo, saldo, panel, ligas, terminal) pasa por este hook; el cupón se canjea aquí para que
-  // ninguno se quede sin contar. Es idempotente y exige la cuenta PAGADA. Su fallo no tumba el cobro ni el referido.
-  await finalizeCouponsForOrder(input.venueId, input.orderId).catch(error =>
-    logger.error('⚠️ No se pudo canjear el cupón de la venta (el cobro sigue)', { orderId: input.orderId, error: (error as Error).message }),
-  )
+  // ninguno se quede sin contar. Va DESPUÉS del referido y su fallo sube (Codex r1 #5): el efecto durable `REFERRAL` del cobro
+  // (`paymentEffects`) reintenta los dos, y los dos son idempotentes. Quien lo llama directo ya lo envuelve en try/catch.
+  await finalizeCouponsForOrder(input.venueId, input.orderId)
+}
+
+async function calificarReferidoDeLaVenta(input: OnOrderPaidInput): Promise<void> {
   const txResult = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
     // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; uno atado a una cuenta de tarjetas nunca califica. Por eso

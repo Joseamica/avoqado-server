@@ -103,6 +103,8 @@ export interface CouponValidationResult {
   errorCode?: 'NOT_FOUND' | 'INACTIVE' | 'EXPIRED' | 'NOT_STARTED' | 'USAGE_LIMIT' | 'MIN_PURCHASE' | 'CUSTOMER_LIMIT'
   /** MIN_PURCHASE: la compra mínima; CUSTOMER_LIMIT: los usos por cliente. Para que quien muestre el rechazo arme su texto. */
   limite?: number
+  /** Válido: la compra mínima que rige (la del código o la del descuento). Para revisarla otra vez cuando la base se conoce después. */
+  minimo?: number | null
 }
 
 interface _CouponRedemptionItem {
@@ -612,6 +614,7 @@ export async function validateCouponCode(
           maxTotalUses: true,
           currentUses: true,
           minPurchaseAmount: true,
+          maxUsesPerCustomer: true,
         },
       },
       _count: {
@@ -694,27 +697,29 @@ export async function validateCouponCode(
     }
   }
 
-  // Check per-customer usage limit
-  if (coupon.maxUsesPerCustomer !== null && customerId) {
+  // Check per-customer usage limit: el del código o, si no trae, el del descuento (sus usos con cualquier código suyo).
+  const porCliente = coupon.maxUsesPerCustomer ?? coupon.discount.maxUsesPerCustomer
+  if (porCliente != null && customerId) {
     const customerRedemptions = await db.couponRedemption.count({
-      where: {
-        couponCodeId: coupon.id,
-        customerId,
-      },
+      where:
+        coupon.maxUsesPerCustomer != null
+          ? { couponCodeId: coupon.id, customerId }
+          : { couponCode: { discountId: coupon.discount.id }, customerId },
     })
 
-    if (customerRedemptions >= coupon.maxUsesPerCustomer) {
+    if (customerRedemptions >= porCliente) {
       return {
         valid: false,
-        error: `You have already used this coupon ${coupon.maxUsesPerCustomer} time(s)`,
+        error: `You have already used this coupon ${porCliente} time(s)`,
         errorCode: 'CUSTOMER_LIMIT',
-        limite: coupon.maxUsesPerCustomer,
+        limite: porCliente,
       }
     }
   }
 
   return {
     valid: true,
+    minimo: minPurchase != null ? Number(minPurchase) : null,
     coupon: {
       id: coupon.id,
       code: coupon.code,

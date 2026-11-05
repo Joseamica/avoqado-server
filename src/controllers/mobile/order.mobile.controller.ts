@@ -240,6 +240,11 @@ export function leerVentaDeMostrador(
   if (couponCode != null && orderDiscountId != null) {
     return { error: 'Una venta no puede llevar cupón y descuento de catálogo a la vez' }
   }
+  // D5 (Codex r1 #3): el premio cambia el total después de crear la cuenta y la caja ajusta sólo su parte; con un cupón que el servidor
+  // recalcula, lo cobrado podía no ser la cuenta. Hasta resolverlo junto, no se combinan.
+  if (couponCode != null && typeof stampRewardId === 'string') {
+    return { error: 'Un cupón y un premio de sellos no se combinan en la misma venta. Quita uno de los dos.' }
+  }
 
   // 🔴 Propina NEGATIVA = descuento disfrazado. El servicio suma la propina al
   // total SIN clamp (`tipDecimal = tip/100`), así que un tip de -500 rebajaba

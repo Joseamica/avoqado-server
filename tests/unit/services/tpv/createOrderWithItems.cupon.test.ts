@@ -82,6 +82,7 @@ beforeEach(() => {
       }),
       findMany: jest.fn(async () => creadas),
       update: jest.fn(async () => ({})),
+      count: prismaMock.orderDiscount.count,
     },
   }
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx))
@@ -155,4 +156,11 @@ it('sin cupón no cambia nada: el descuento libre sigue siendo el de hoy', async
   await venta({ couponCode: undefined })
   expect(creadas[0]).toMatchObject({ name: 'Descuento de la cuenta', isManual: true })
   expect(creadas[0].couponCodeId).toBeUndefined()
+})
+
+it('Codex r1 #1: aparta el cupón dentro de su transacción; sin cupo no crea la venta', async () => {
+  prismaMock.couponCode.findFirst.mockResolvedValue({ ...cupon(), maxUses: 1 } as any)
+  prismaMock.orderDiscount.count.mockResolvedValue(1)
+  await expect(venta()).rejects.toMatchObject({ statusCode: 400, message: 'Este cupón ya alcanzó su límite de usos.' })
+  expect(prismaMock.order.create).not.toHaveBeenCalled()
 })

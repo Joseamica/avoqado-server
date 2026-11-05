@@ -39,17 +39,20 @@ export interface CuponDeLaVenta {
   code: string
   /** La fila COMPLETA del catálogo: de ella salen el monto, el tope y la fila de la orden. */
   discount: any
+  /** La compra mínima que rige, para revisarla cuando la base sólo se conoce después (una venta con combos). */
+  minimo: number | null
 }
 
 /**
  * Valida el cupón contra lo que vale la venta y lo devuelve, o lanza el 400 con el texto de la caja. `basePesos` es lo que queda
- * tras los descuentos de renglón: la misma base que el monto, para que el mínimo y la rebaja midan lo mismo.
+ * tras los descuentos de renglón: la misma base que el monto, para que el mínimo y la rebaja midan lo mismo. Sin base (la venta trae
+ * combos que todavía no se arman) el mínimo lo revisa quien la conozca, con `minimo`.
  */
 export async function cuponDeLaVenta(
   db: Prisma.TransactionClient,
   venueId: string,
   codigo: string,
-  basePesos: number,
+  basePesos: number | undefined,
   customerId: string | null | undefined,
 ): Promise<CuponDeLaVenta> {
   const v = await validateCouponCode(venueId, codigo, basePesos, customerId ?? undefined, db)
@@ -60,7 +63,53 @@ export async function cuponDeLaVenta(
   }
   const discount = await db.discount.findFirst({ where: { id: v.coupon.discount.id, venueId } })
   if (!discount) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'NOT_FOUND' }))
-  return { id: v.coupon.id, code: v.coupon.code, discount }
+  return { id: v.coupon.id, code: v.coupon.code, discount, minimo: v.minimo ?? null }
+}
+
+/** Una venta sin cobrar que ya trae el cupón: su uso está apartado aunque todavía no cuente. */
+const EN_VUELO = { paymentStatus: { in: ['PENDING', 'PARTIAL'] }, status: { notIn: ['CANCELLED', 'DELETED'] } } satisfies Prisma.OrderWhereInput
+
+/**
+ * 🔴 El último uso no se gasta dos veces (Codex r1 #1). Validar y canjear van separados (se canjea al cobrar), así que dos cajas podían
+ * crear dos ventas con el último uso y cobrar las dos. Aquí, en la transacción que crea la venta y bajo un candado del cupón, cuentan los
+ * canjes MÁS las ventas sin cobrar que ya lo traen. Una venta abandonada lo aparta hasta que se cancela, como un apartado de Square.
+ * El canje (`finalizeCouponsForOrder`) nunca rechaza: para entonces el dinero ya se cobró con la rebaja.
+ */
+export async function apartarCupon(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  cupon: CuponDeLaVenta,
+  customerId: string | null | undefined,
+): Promise<void> {
+  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:cupon:v1:${cupon.id}`}, 0))::text`)
+  const fresco = await tx.couponCode.findFirst({
+    where: { id: cupon.id, discount: { venueId } },
+    select: {
+      currentUses: true,
+      maxUses: true,
+      maxUsesPerCustomer: true,
+      discount: { select: { id: true, currentUses: true, maxTotalUses: true, maxUsesPerCustomer: true } },
+    },
+  })
+  if (!fresco) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'NOT_FOUND' }))
+  const agotado = () => new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'USAGE_LIMIT' }))
+  if (fresco.maxUses != null) {
+    const enVuelo = await tx.orderDiscount.count({ where: { couponCodeId: cupon.id, order: { venueId, ...EN_VUELO } } })
+    if (fresco.currentUses + enVuelo >= fresco.maxUses) throw agotado()
+  }
+  if (fresco.discount.maxTotalUses != null) {
+    const enVuelo = await tx.orderDiscount.count({ where: { couponCode: { discountId: fresco.discount.id }, order: { venueId, ...EN_VUELO } } })
+    if (fresco.discount.currentUses + enVuelo >= fresco.discount.maxTotalUses) throw agotado()
+  }
+  const porCliente = fresco.maxUsesPerCustomer ?? fresco.discount.maxUsesPerCustomer
+  if (porCliente != null && customerId) {
+    const delCupon = fresco.maxUsesPerCustomer != null ? { couponCodeId: cupon.id } : { couponCode: { discountId: fresco.discount.id } }
+    const [canjes, enVuelo] = await Promise.all([
+      tx.couponRedemption.count({ where: { ...delCupon, customerId } }),
+      tx.orderDiscount.count({ where: { ...delCupon, order: { venueId, customerId, ...EN_VUELO } } }),
+    ])
+    if (canjes + enVuelo >= porCliente) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'CUSTOMER_LIMIT', limite: porCliente }))
+  }
 }
 
 /** En centavos enteros, como las apps: en pesos flotantes, 10 % de $21.35 daba $2.13 y la caja rebajaba $2.14. */
