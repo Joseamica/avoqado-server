@@ -163,3 +163,15 @@ it('Codex r1 #1: aparta el cupón dentro de su transacción; sin cupo no crea la
   await expect(venta()).rejects.toMatchObject({ statusCode: 400, message: 'Este cupón ya alcanzó su límite de usos.' })
   expect(prismaMock.order.create).not.toHaveBeenCalled()
 })
+
+it('Codex r3 #7: el reintento con la misma llave que choca con el apartado de SU venta recibe esa venta', async () => {
+  prismaMock.couponCode.findFirst.mockResolvedValue({ ...cupon(), maxUses: 1 } as any)
+  prismaMock.orderDiscount.count.mockResolvedValue(1)
+  // Primera lectura (antes de crear): todavía no existe; después del rechazo: la ganadora.
+  prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'order-ganadora' } as any)
+  prismaMock.order.findUniqueOrThrow.mockResolvedValue({ id: 'order-ganadora', orderNumber: 'ORD-1', table: null, items: [], payments: [] } as any)
+  const r = await venta({ externalId: 'llave-1' })
+  expect(r.id).toBe('order-ganadora')
+  expect(prismaMock.order.create).not.toHaveBeenCalled()
+})
+

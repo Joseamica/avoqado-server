@@ -1219,7 +1219,8 @@ export async function createOrderWithItems(
     // (venueId, externalId) → P2002. Antes se propagaba como 500 a la terminal
     // y la app reintentaba OTRA vez — justo el loop que la llave vino a matar.
     // Se devuelve la orden ganadora con la misma forma que el camino normal.
-    if (err?.code === 'P2002' && externalId) {
+    // D5 (Codex r3 #7): con cupón, el perdedor puede chocar ANTES, con el apartado de la venta ganadora (su propio último uso).
+    if ((err?.code === 'P2002' || (cupon && err instanceof BadRequestError)) && externalId) {
       const winner = await prisma.order.findUnique({
         where: { venueId_externalId: { venueId, externalId } },
         select: { id: true },

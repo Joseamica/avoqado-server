@@ -389,251 +389,250 @@ interface OnOrderPaidTxResult {
  * who re-crosses a threshold post-refund.
  */
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
-  await calificarReferidoDeLaVenta(input)
-  // D5: todo camino que salda una cuenta (efectivo, saldo, panel, ligas, terminal) pasa por este hook; el cupón se canjea aquí para que
-  // ninguno se quede sin contar. Va DESPUÉS del referido y su fallo sube (Codex r1 #5): el efecto durable `REFERRAL` del cobro
-  // (`paymentEffects`) reintenta los dos, y los dos son idempotentes. Quien lo llama directo ya lo envuelve en try/catch.
-  await finalizeCouponsForOrder(input.venueId, input.orderId)
-}
-
-async function calificarReferidoDeLaVenta(input: OnOrderPaidInput): Promise<void> {
-  const txResult = await prisma.$transaction(async tx => {
-    await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
-    // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; uno atado a una cuenta de tarjetas nunca califica. Por eso
-    // la captura sobre esa cuenta se rechaza (`GIFT_CARD_SALE`) y comprar la tarjeta no cuenta como compra previa: el referido se
-    // captura en la primera compra real (`referralCapture.service`).
-    if (await leerSiEsCuentaDeTarjetas(tx, input.orderId)) return null
-    if (await isOrderFullyReversed(input.orderId, input.venueId, tx)) {
-      await tx.referral.updateMany({
-        where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
-        data: { status: 'VOID', voidedAt: new Date(), voidReason: 'ORDER_REFUNDED' },
-      })
-      return null
-    }
-    // Step 0 — GUARDIA DE ESTADO: la orden tiene que haber quedado PAGADA.
-    //
-    // 🔴 El hook se llama `onOrderPaid`, no `onPayment`. Los pasos de abajo
-    // reclaman el referido (PENDING → QUALIFIED), incrementan el contador del
-    // referidor, minan cupones/descuentos y queman un `ReferralTierUnlock` —
-    // que por diseño se gana UNA vez en la vida del cliente y NUNCA se vuelve a
-    // emitir (ver "Design decision" arriba). O sea: calificar de más NO se
-    // deshace. Un abono de $1 sobre una cuenta de $500 le quemaba el nivel al
-    // referidor para siempre.
-    //
-    // Hasta ahora eso dependía de que CADA llamador acertara. El barrido de los
-    // 8 sitios (2026-08-17) los encontró correctos, pero por CONSTRUCCIÓN —
-    // un `if (isFullyPaid)` 300 líneas más arriba, una orden rápida que nace
-    // PAID, un CAS que ganó— no por una comprobación local. Cualquiera de esas
-    // invariantes se rompe en un refactor sin que nada avise. La guardia vive
-    // aquí para que el próximo camino de cobro no pueda reabrir el defecto:
-    // es defensa en profundidad, no sustituto de arreglar al llamador.
-    //
-    // Va DENTRO de la transacción y ANTES del claim, así la lectura y el claim
-    // ven el mismo estado. `venueId` no es decorativo: aislamiento de tenant es
-    // regla dura, y de paso un id de otro venue cae aquí en vez de calificar.
-    const order = await tx.order.findUnique({
-      where: { id: input.orderId, venueId: input.venueId },
-      select: { paymentStatus: true },
-    })
-    if (order?.paymentStatus !== 'PAID') {
-      // WARN, no silencio: el error es del LLAMADOR y tiene que verse. El
-      // contexto de ejecución le estampa venueName/correlationId/entrypoint, así
-      // que la línea alcanza para saber qué camino de cobro disparó esto.
-      //
-      // 🔴 El mensaje nombra las DOS causas posibles a propósito. Quien lea esto
-      // a las 2am ve `paymentStatus: 'PENDING'` y concluye lo obvio —"llamaron
-      // de más sobre una cuenta impaga"— cuando puede ser lo contrario: que el
-      // llamador SÍ cobró pero invocó el hook DENTRO de su propia transacción,
-      // y esta relectura (otra conexión, READ COMMITTED) no ve su `PAID` sin
-      // commitear. Mismo síntoma, culpable opuesto. Ver la precondición arriba.
-      logger.warn(
-        '[referral] onOrderPaid ignorado: la orden no se leyó PAGADA. O el llamador lo invocó sin que la cuenta cerrara, ' +
-          'O lo invocó DENTRO de su propia transacción y el PAID aún no estaba commiteado (ver la precondición de onOrderPaid).',
-        {
-          orderId: input.orderId,
-          venueId: input.venueId,
-          paymentStatus: order?.paymentStatus ?? 'ORDEN_NO_ENCONTRADA',
-          // Si el llamador cobró de verdad, esto es una llamada anidada y el
-          // referido se perdió SIN reintento: hay que arreglar al llamador, no
-          // la orden.
-          hint: 'si el cobro sí ocurrió, revisa si onOrderPaid se llamó dentro de una $transaction del llamador',
-        },
-      )
-      return null
-    }
-
-    // La venta nueva de un cambio no es una compra nueva (spec §7.6): no califica un referido, ni con la diferencia cobrada.
-    // Vive aquí, y no sólo en el efecto, porque la terminal, el cobro en efectivo del POS y la liga tardía llaman directo.
-    if (await esVentaNuevaDeCambio(tx, input.orderId)) return null
-
-    // Step 1: CAS claim by order. `count === 0` → someone else already
-    // claimed this order (concurrent execution or duplicate webhook), or
-    // there is no PENDING referral for it. Either way, no-op.
-    const claim = await tx.referral.updateMany({
-      where: { qualifyingOrderId: input.orderId, status: 'PENDING' },
-      data: { status: 'QUALIFIED', qualifiedAt: new Date() },
-    })
-    if (claim.count === 0) return null
-
-    // Step 2: `updateMany` doesn't return rows — re-fetch the referral we
-    // just claimed (now QUALIFIED, and per the partial-unique index there
-    // is at most one such row for this order).
-    const referral = await tx.referral.findFirst({
-      where: { qualifyingOrderId: input.orderId, status: 'QUALIFIED' },
-    })
-    /* istanbul ignore if -- defensive only: claim.count === 1 guarantees this row exists */
-    if (!referral) return null
-
-    // Step 3: increment the referrer's referralCount — safe from
-    // double-counting because step 1 already ensured this is the only
-    // execution that will reach this line for this order.
-    const referrer = await tx.customer.update({
-      where: { id: referral.referrerCustomerId },
-      data: { referralCount: { increment: 1 } },
-    })
-
-    const config = await tx.referralProgramConfig.findUnique({
-      where: { venueId: input.venueId },
-    })
-    if (!config) return null
-
-    // Step 4: no NEW tier crossed → commit the claim + increment as-is.
-    const newTier = computeTier(referrer.referralCount, config)
-    if (!newTier || newTier === referrer.referralTier) return null
-
-    // Step 5: unlock guard — a tier is earned ONCE per customer lifetime
-    // (spec D11). `count === 0` → already unlocked previously (e.g.
-    // re-crossing after a refund revoked the prior grants) — skip
-    // emission, don't re-mint. `count === 1` → fresh unlock, emit.
-    const unlock = await tx.referralTierUnlock.createMany({
-      data: [{ customerId: referrer.id, tierLevel: tierToLevel(newTier), unlockedByReferralId: referral.id }],
-      skipDuplicates: true,
-    })
-
-    const emitted: EmittedTierReward[] =
-      unlock.count > 0
-        ? await emitTierRewards(tx, {
-            venueId: input.venueId,
-            customer: { id: referrer.id, firstName: referrer.firstName, lastName: referrer.lastName },
-            tierLevel: tierToLevel(newTier),
-            config,
-            referralId: referral.id,
-          })
-        : []
-
-    // Step 6: keep Customer.referralTier in sync with the live count
-    // regardless of whether this is a fresh unlock or an already-earned
-    // re-cross (see design decision in the function doc above).
-    await tx.customer.update({
-      where: { id: referrer.id },
-      data: {
-        referralTier: newTier,
-        tierUnlockedAt: new Date(),
-        tierUpModalSeenAt: null,
-      },
-    })
-
-    // `Referral.rewardDiscountId` predates per-tier N-rewards (single-bundle
-    // era). Keep it pointing at the first discount-bearing grant so any code
-    // still reading it (referralRefund.service, until Task 6 rewrites it
-    // around grants) keeps working. Nothing to point at when the unlock
-    // guard skipped emission, or when the tier configures ONLY FREE_PRODUCT.
-    const firstDiscount = emitted.find(e => e.discount)?.discount
-    if (firstDiscount) {
-      await tx.referral.update({
-        where: { id: referral.id },
-        data: { rewardDiscountId: firstDiscount.id },
-      })
-    }
-
-    // Step 7: ActivityLog — always written on a tier crossing, even when
-    // the unlock guard skipped emission, so the audit trail shows the
-    // re-cross happened (grants: [] + alreadyUnlocked: true documents why
-    // nothing was minted).
-    await tx.activityLog.create({
-      data: {
-        venueId: input.venueId,
-        action: 'REFERRAL_TIER_UNLOCKED',
-        entity: 'Customer',
-        entityId: referrer.id,
-        data: {
-          tier: newTier,
-          triggeringReferralId: referral.id,
-          alreadyUnlocked: unlock.count === 0,
-          grants: emitted.map(e => ({
-            grantId: e.grant.id,
-            tierRewardId: e.grant.tierRewardId,
-            rewardType: e.grant.rewardType,
-            status: e.grant.status,
-            discountId: e.discount?.id ?? null,
-            couponCode: e.couponCode?.code ?? null,
-          })),
-        },
-      },
-    })
-
-    return { referrer, newTier, emitted, config } as OnOrderPaidTxResult
-  })
-
-  if (!txResult) return
-  const { referrer, newTier, emitted, config } = txResult
-
-  // Tier-up email — fire-and-forget, OUTSIDE the transaction. Wrapped in
-  // try/catch so a Resend / satori / resvg failure can never break the
-  // payment-paid event handler (we'd rather lose the email than lose the
-  // qualification + reward bundle that already committed).
-  //
-  // Only sent when the tier granted a PERCENT_COUPON (the email template
-  // is built around "here's your coupon code"). A tier configured with
-  // ONLY PERMANENT_DISCOUNT / FREE_PRODUCT rewards — or an already-earned
-  // re-cross where nothing was (re-)emitted — skips the email.
-  const percentCouponReward = emitted.find(e => e.couponCode)
+  // D5: todo camino que salda una cuenta (efectivo, saldo, panel, ligas, terminal) pasa por este hook; el cupón se canjea aquí, DESPUÉS del
+  // referido y pase lo que pase con él, para que ninguno se quede sin contar. Su fallo sube (Codex r1 #5): el efecto durable `REFERRAL` del
+  // cobro (`paymentEffects`) reintenta los dos, y los dos son idempotentes. Quien lo llama directo ya lo envuelve en try/catch.
   try {
-    if (percentCouponReward) {
-      const fullReferrer = await prisma.customer.findUnique({
-        where: { id: referrer.id },
-        select: { email: true, firstName: true, lastName: true, marketingConsent: true },
-      })
-      if (fullReferrer?.email && fullReferrer.marketingConsent) {
-        const venue = await prisma.venue.findUnique({
-          where: { id: input.venueId },
-          select: { name: true },
+    const txResult = await prisma.$transaction(async tx => {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
+      // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; uno atado a una cuenta de tarjetas nunca califica. Por eso
+      // la captura sobre esa cuenta se rechaza (`GIFT_CARD_SALE`) y comprar la tarjeta no cuenta como compra previa: el referido se
+      // captura en la primera compra real (`referralCapture.service`).
+      if (await leerSiEsCuentaDeTarjetas(tx, input.orderId)) return null
+      if (await isOrderFullyReversed(input.orderId, input.venueId, tx)) {
+        await tx.referral.updateMany({
+          where: { qualifyingOrderId: input.orderId, venueId: input.venueId, status: 'PENDING' },
+          data: { status: 'VOID', voidedAt: new Date(), voidReason: 'ORDER_REFUNDED' },
         })
-        if (venue) {
-          const tierLabel = { TIER_1: 'Nivel 1', TIER_2: 'Nivel 2', TIER_3: 'Nivel 3' }[newTier]
-          const rewardPercent = Number(percentCouponReward.grant.rewardPercent ?? 0)
-          const { generateTierUpCard } = await import('@/services/referrals/referralCard.service')
-          const { sendReferralTierUpEmail } = await import('@/services/email.service')
-          const cardPng = await generateTierUpCard({
-            customerName: [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
-            venueName: venue.name,
+        return null
+      }
+      // Step 0 — GUARDIA DE ESTADO: la orden tiene que haber quedado PAGADA.
+      //
+      // 🔴 El hook se llama `onOrderPaid`, no `onPayment`. Los pasos de abajo
+      // reclaman el referido (PENDING → QUALIFIED), incrementan el contador del
+      // referidor, minan cupones/descuentos y queman un `ReferralTierUnlock` —
+      // que por diseño se gana UNA vez en la vida del cliente y NUNCA se vuelve a
+      // emitir (ver "Design decision" arriba). O sea: calificar de más NO se
+      // deshace. Un abono de $1 sobre una cuenta de $500 le quemaba el nivel al
+      // referidor para siempre.
+      //
+      // Hasta ahora eso dependía de que CADA llamador acertara. El barrido de los
+      // 8 sitios (2026-08-17) los encontró correctos, pero por CONSTRUCCIÓN —
+      // un `if (isFullyPaid)` 300 líneas más arriba, una orden rápida que nace
+      // PAID, un CAS que ganó— no por una comprobación local. Cualquiera de esas
+      // invariantes se rompe en un refactor sin que nada avise. La guardia vive
+      // aquí para que el próximo camino de cobro no pueda reabrir el defecto:
+      // es defensa en profundidad, no sustituto de arreglar al llamador.
+      //
+      // Va DENTRO de la transacción y ANTES del claim, así la lectura y el claim
+      // ven el mismo estado. `venueId` no es decorativo: aislamiento de tenant es
+      // regla dura, y de paso un id de otro venue cae aquí en vez de calificar.
+      const order = await tx.order.findUnique({
+        where: { id: input.orderId, venueId: input.venueId },
+        select: { paymentStatus: true },
+      })
+      if (order?.paymentStatus !== 'PAID') {
+        // WARN, no silencio: el error es del LLAMADOR y tiene que verse. El
+        // contexto de ejecución le estampa venueName/correlationId/entrypoint, así
+        // que la línea alcanza para saber qué camino de cobro disparó esto.
+        //
+        // 🔴 El mensaje nombra las DOS causas posibles a propósito. Quien lea esto
+        // a las 2am ve `paymentStatus: 'PENDING'` y concluye lo obvio —"llamaron
+        // de más sobre una cuenta impaga"— cuando puede ser lo contrario: que el
+        // llamador SÍ cobró pero invocó el hook DENTRO de su propia transacción,
+        // y esta relectura (otra conexión, READ COMMITTED) no ve su `PAID` sin
+        // commitear. Mismo síntoma, culpable opuesto. Ver la precondición arriba.
+        logger.warn(
+          '[referral] onOrderPaid ignorado: la orden no se leyó PAGADA. O el llamador lo invocó sin que la cuenta cerrara, ' +
+            'O lo invocó DENTRO de su propia transacción y el PAID aún no estaba commiteado (ver la precondición de onOrderPaid).',
+          {
+            orderId: input.orderId,
+            venueId: input.venueId,
+            paymentStatus: order?.paymentStatus ?? 'ORDEN_NO_ENCONTRADA',
+            // Si el llamador cobró de verdad, esto es una llamada anidada y el
+            // referido se perdió SIN reintento: hay que arreglar al llamador, no
+            // la orden.
+            hint: 'si el cobro sí ocurrió, revisa si onOrderPaid se llamó dentro de una $transaction del llamador',
+          },
+        )
+        return null
+      }
+
+      // La venta nueva de un cambio no es una compra nueva (spec §7.6): no califica un referido, ni con la diferencia cobrada.
+      // Vive aquí, y no sólo en el efecto, porque la terminal, el cobro en efectivo del POS y la liga tardía llaman directo.
+      if (await esVentaNuevaDeCambio(tx, input.orderId)) return null
+
+      // Step 1: CAS claim by order. `count === 0` → someone else already
+      // claimed this order (concurrent execution or duplicate webhook), or
+      // there is no PENDING referral for it. Either way, no-op.
+      const claim = await tx.referral.updateMany({
+        where: { qualifyingOrderId: input.orderId, status: 'PENDING' },
+        data: { status: 'QUALIFIED', qualifiedAt: new Date() },
+      })
+      if (claim.count === 0) return null
+
+      // Step 2: `updateMany` doesn't return rows — re-fetch the referral we
+      // just claimed (now QUALIFIED, and per the partial-unique index there
+      // is at most one such row for this order).
+      const referral = await tx.referral.findFirst({
+        where: { qualifyingOrderId: input.orderId, status: 'QUALIFIED' },
+      })
+      /* istanbul ignore if -- defensive only: claim.count === 1 guarantees this row exists */
+      if (!referral) return null
+
+      // Step 3: increment the referrer's referralCount — safe from
+      // double-counting because step 1 already ensured this is the only
+      // execution that will reach this line for this order.
+      const referrer = await tx.customer.update({
+        where: { id: referral.referrerCustomerId },
+        data: { referralCount: { increment: 1 } },
+      })
+
+      const config = await tx.referralProgramConfig.findUnique({
+        where: { venueId: input.venueId },
+      })
+      if (!config) return null
+
+      // Step 4: no NEW tier crossed → commit the claim + increment as-is.
+      const newTier = computeTier(referrer.referralCount, config)
+      if (!newTier || newTier === referrer.referralTier) return null
+
+      // Step 5: unlock guard — a tier is earned ONCE per customer lifetime
+      // (spec D11). `count === 0` → already unlocked previously (e.g.
+      // re-crossing after a refund revoked the prior grants) — skip
+      // emission, don't re-mint. `count === 1` → fresh unlock, emit.
+      const unlock = await tx.referralTierUnlock.createMany({
+        data: [{ customerId: referrer.id, tierLevel: tierToLevel(newTier), unlockedByReferralId: referral.id }],
+        skipDuplicates: true,
+      })
+
+      const emitted: EmittedTierReward[] =
+        unlock.count > 0
+          ? await emitTierRewards(tx, {
+              venueId: input.venueId,
+              customer: { id: referrer.id, firstName: referrer.firstName, lastName: referrer.lastName },
+              tierLevel: tierToLevel(newTier),
+              config,
+              referralId: referral.id,
+            })
+          : []
+
+      // Step 6: keep Customer.referralTier in sync with the live count
+      // regardless of whether this is a fresh unlock or an already-earned
+      // re-cross (see design decision in the function doc above).
+      await tx.customer.update({
+        where: { id: referrer.id },
+        data: {
+          referralTier: newTier,
+          tierUnlockedAt: new Date(),
+          tierUpModalSeenAt: null,
+        },
+      })
+
+      // `Referral.rewardDiscountId` predates per-tier N-rewards (single-bundle
+      // era). Keep it pointing at the first discount-bearing grant so any code
+      // still reading it (referralRefund.service, until Task 6 rewrites it
+      // around grants) keeps working. Nothing to point at when the unlock
+      // guard skipped emission, or when the tier configures ONLY FREE_PRODUCT.
+      const firstDiscount = emitted.find(e => e.discount)?.discount
+      if (firstDiscount) {
+        await tx.referral.update({
+          where: { id: referral.id },
+          data: { rewardDiscountId: firstDiscount.id },
+        })
+      }
+
+      // Step 7: ActivityLog — always written on a tier crossing, even when
+      // the unlock guard skipped emission, so the audit trail shows the
+      // re-cross happened (grants: [] + alreadyUnlocked: true documents why
+      // nothing was minted).
+      await tx.activityLog.create({
+        data: {
+          venueId: input.venueId,
+          action: 'REFERRAL_TIER_UNLOCKED',
+          entity: 'Customer',
+          entityId: referrer.id,
+          data: {
             tier: newTier,
-            tierLabel,
-            referralCount: referrer.referralCount,
-            rewardPercent,
-            couponCode: percentCouponReward.couponCode!.code,
-            validDays: config.rewardCouponExpiryDays,
+            triggeringReferralId: referral.id,
+            alreadyUnlocked: unlock.count === 0,
+            grants: emitted.map(e => ({
+              grantId: e.grant.id,
+              tierRewardId: e.grant.tierRewardId,
+              rewardType: e.grant.rewardType,
+              status: e.grant.status,
+              discountId: e.discount?.id ?? null,
+              couponCode: e.couponCode?.code ?? null,
+            })),
+          },
+        },
+      })
+
+      return { referrer, newTier, emitted, config } as OnOrderPaidTxResult
+    })
+
+    if (!txResult) return
+    const { referrer, newTier, emitted, config } = txResult
+
+    // Tier-up email — fire-and-forget, OUTSIDE the transaction. Wrapped in
+    // try/catch so a Resend / satori / resvg failure can never break the
+    // payment-paid event handler (we'd rather lose the email than lose the
+    // qualification + reward bundle that already committed).
+    //
+    // Only sent when the tier granted a PERCENT_COUPON (the email template
+    // is built around "here's your coupon code"). A tier configured with
+    // ONLY PERMANENT_DISCOUNT / FREE_PRODUCT rewards — or an already-earned
+    // re-cross where nothing was (re-)emitted — skips the email.
+    const percentCouponReward = emitted.find(e => e.couponCode)
+    try {
+      if (percentCouponReward) {
+        const fullReferrer = await prisma.customer.findUnique({
+          where: { id: referrer.id },
+          select: { email: true, firstName: true, lastName: true, marketingConsent: true },
+        })
+        if (fullReferrer?.email && fullReferrer.marketingConsent) {
+          const venue = await prisma.venue.findUnique({
+            where: { id: input.venueId },
+            select: { name: true },
           })
-          await sendReferralTierUpEmail({
-            to: fullReferrer.email,
-            customerName: fullReferrer.firstName ?? 'Cliente',
-            venueName: venue.name,
-            tier: newTier,
-            tierLabel,
-            referralCount: referrer.referralCount,
-            rewardPercent,
-            couponCode: percentCouponReward.couponCode!.code,
-            validDays: config.rewardCouponExpiryDays,
-            cardPng,
-          })
+          if (venue) {
+            const tierLabel = { TIER_1: 'Nivel 1', TIER_2: 'Nivel 2', TIER_3: 'Nivel 3' }[newTier]
+            const rewardPercent = Number(percentCouponReward.grant.rewardPercent ?? 0)
+            const { generateTierUpCard } = await import('@/services/referrals/referralCard.service')
+            const { sendReferralTierUpEmail } = await import('@/services/email.service')
+            const cardPng = await generateTierUpCard({
+              customerName: [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
+              venueName: venue.name,
+              tier: newTier,
+              tierLabel,
+              referralCount: referrer.referralCount,
+              rewardPercent,
+              couponCode: percentCouponReward.couponCode!.code,
+              validDays: config.rewardCouponExpiryDays,
+            })
+            await sendReferralTierUpEmail({
+              to: fullReferrer.email,
+              customerName: fullReferrer.firstName ?? 'Cliente',
+              venueName: venue.name,
+              tier: newTier,
+              tierLabel,
+              referralCount: referrer.referralCount,
+              rewardPercent,
+              couponCode: percentCouponReward.couponCode!.code,
+              validDays: config.rewardCouponExpiryDays,
+              cardPng,
+            })
+          }
         }
       }
+    } catch (err) {
+      console.error('[referral-tier-up-email] failed', {
+        customerId: referrer.id,
+        tier: newTier,
+        err,
+      })
     }
-  } catch (err) {
-    console.error('[referral-tier-up-email] failed', {
-      customerId: referrer.id,
-      tier: newTier,
-      err,
-    })
+  } finally {
+    await finalizeCouponsForOrder(input.venueId, input.orderId)
   }
 }

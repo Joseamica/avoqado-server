@@ -28,6 +28,13 @@ it('el referido corre primero y el canje después, con la venta de la llamada', 
   expect(finalizeCouponsForOrder).toHaveBeenCalledWith('v-1', 'o-1')
 })
 
+it('si el referido falla, el cupón se canjea igual y el error del referido sube', async () => {
+  prismaMock.$transaction.mockRejectedValue(new Error('referido caído'))
+  ;(finalizeCouponsForOrder as jest.Mock).mockResolvedValue(undefined)
+  await expect(onOrderPaid({ orderId: 'o-1', venueId: 'v-1' })).rejects.toThrow('referido caído')
+  expect(finalizeCouponsForOrder).toHaveBeenCalledWith('v-1', 'o-1')
+})
+
 it('si el canje falla, lanza: el efecto durable lo reintenta', async () => {
   ;(finalizeCouponsForOrder as jest.Mock).mockRejectedValue(new Error('base caída'))
   await expect(onOrderPaid({ orderId: 'o-1', venueId: 'v-1' })).rejects.toThrow('base caída')
