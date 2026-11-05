@@ -39,10 +39,12 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
   const skip = (page - 1) * pageSize
   const take = pageSize
 
+  // D1 (IQ, 5-nov-2026): un pago FAILED (no se cobró, p. ej. una venta duplicada anulada) tampoco va: las apps no leen `status`
+  // en la lista y lo pintaban como una venta cobrada más.
   const whereClause: any = {
     venueId,
     status: {
-      not: 'PENDING' as TransactionStatus,
+      notIn: ['PENDING', 'FAILED'] as TransactionStatus[],
     },
   }
 
