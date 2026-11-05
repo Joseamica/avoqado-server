@@ -28,3 +28,16 @@ it('todos eliminados: 0, sin permiso y sin evento en la línea de tiempo', async
   expect(db.consents).toHaveLength(0)
   expect(db.events).toHaveLength(0)
 })
+
+it('🔴 una lápida con varios scopes no agota el tope: los dos correos eliminados se saltan y no se cuentan', async () => {
+  const db = installCrmInboundFake(prismaMock)
+  const hash = (email: string) => createHash('sha256').update(`EMAIL:${email}`).digest('hex')
+  db.erased.push(
+    { keyHash: hash('ana@cafe.mx'), scope: '', erasedAt: new Date() },
+    { keyHash: hash('ana@cafe.mx'), scope: 'corg1', erasedAt: new Date() },
+    { keyHash: hash('ana@cafe.mx'), scope: 'corg2', erasedAt: new Date() },
+    { keyHash: hash('beto@cafe.mx'), scope: '', erasedAt: new Date() },
+  )
+  expect(await run(['ana@cafe.mx', 'beto@cafe.mx'])).toBe(0)
+  expect(db.consents).toHaveLength(0)
+})

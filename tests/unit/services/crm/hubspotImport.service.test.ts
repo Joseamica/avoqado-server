@@ -662,6 +662,18 @@ describe('la casilla «Aceptaron recibir correos»', () => {
     expect(db.consents).toHaveLength(2)
   })
 
+  it('un_eliminado_en_un_contacto_que_no_es_el_principal_frena_el_registro_entero_y_no_deja_permiso_a_nadie', async () => {
+    // accountForTx asks the tombstone for EVERY email of the record: one erased person keeps the whole record out, so the
+    // box never sees it (the helper's own tombstone check is the second line, for a deletion that lands in between).
+    db.erased.push({ keyHash: createHash('sha256').update('EMAIL:otro@cafe.mx').digest('hex'), scope: '', erasedAt: new Date() })
+    const header = 'Record ID,First Name,Last Name,Phone Number,Email,Correo,Company Name\n'
+    const applied = await applyHubspot(admin, `${header}101,Ana,López,5512345601,ana@cafe.mx,otro@cafe.mx,Café Ana\n`, NO_DEALS, {
+      aceptaronCorreos: true,
+    })
+    expect(applied).toMatchObject({ aplicados: 0, conPermiso: 0 })
+    expect(db.consents).toHaveLength(0)
+  })
+
   it('un_correo_mal_escrito_no_se_cuenta_ni_se_escribe', async () => {
     const bad = `${CONTACTS_HEADER}101,Ana,López,5512345601,sin-arroba,Café Ana\n`
     const applied = await applyHubspot(admin, bad, NO_DEALS, { aceptaronCorreos: true })

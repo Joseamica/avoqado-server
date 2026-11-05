@@ -283,9 +283,10 @@ export function installCrmInboundFake(prismaMock: any) {
     const found = db.erased.filter(row => erasedMatches(row, where)).sort((a, b) => b.erasedAt.getTime() - a.erasedAt.getTime())[0]
     return found ? { erasedAt: found.erasedAt } : null
   })
-  prismaMock.crmErased.findMany.mockImplementation(async ({ where, take }: Row) =>
+  prismaMock.crmErased.findMany.mockImplementation(async ({ where, take, distinct }: Row) =>
     db.erased
       .filter(row => erasedMatches(row, where))
+      .filter((row, i, rows) => !distinct || rows.findIndex(other => other.keyHash === row.keyHash) === i)
       .slice(0, take ?? Infinity)
       .map(row => ({ keyHash: row.keyHash })),
   )

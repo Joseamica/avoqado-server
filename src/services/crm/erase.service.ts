@@ -76,11 +76,17 @@ export async function erasedAtTx(tx: Prisma.TransactionClient, who: ErasedIdenti
   return hit?.erasedAt ?? null
 }
 
-/** Which of these emails (already normalized) were deleted from the CRM (D7), in ONE lookup; any deletion counts. */
+/** Which of these emails (already normalized) were deleted from the CRM (D7), in ONE lookup; any deletion counts.
+ * `distinct`: a hash can have one row per scope, and without it those rows could use up `take` before another hash is reached. */
 export async function erasedEmailsTx(tx: Prisma.TransactionClient, emails: string[]): Promise<Set<string>> {
   if (!emails.length) return new Set()
   const byHash = new Map(emails.map(email => [hashOf('EMAIL', normalEmail(email)), email]))
-  const hits = await tx.crmErased.findMany({ where: { keyHash: { in: [...byHash.keys()] } }, select: { keyHash: true }, take: byHash.size })
+  const hits = await tx.crmErased.findMany({
+    where: { keyHash: { in: [...byHash.keys()] } },
+    select: { keyHash: true },
+    distinct: ['keyHash'],
+    take: byHash.size,
+  })
   return new Set(hits.flatMap(hit => byHash.get(hit.keyHash) ?? []))
 }
 

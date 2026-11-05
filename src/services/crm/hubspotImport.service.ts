@@ -631,7 +631,7 @@ async function createTx(
  * before anything is written. The answer carries the preview's counts plus what this run created (`aplicados`) and what
  * failed; a deal whose person reached the CRM between the plan and the write adds its aviso (ruling 36).
  *
- * ponytail: the whole import runs inside the one HTTP request, ~6–8 sequential queries per record. Today (~1k records)
+ * ponytail: the whole import runs inside the one HTTP request, ~6–8 sequential queries per record (+2 with the consent box: the tombstone lookup and the insert). Today (~1k records)
  * that is seconds; a full 5 MB file (~25k contacts) is minutes. Nothing is lost if the client gives up — the server
  * finishes, and importing the same files again completes whatever did not land — so for a one-time admin import that is
  * enough. Upgrade path: a background job with progress, like the exports.
