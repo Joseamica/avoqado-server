@@ -138,6 +138,8 @@ describe('crm team routes', () => {
       { route: 'POST /campaigns', keys: preparar },
       { route: 'GET /campaigns/:id', keys: verCampanas },
       { route: 'GET /campaigns/:id/recipients', keys: ['crm:ver-campanas'] },
+      // Buscar a quién agregar a una campaña: sólo quien edita el público.
+      { route: 'GET /campaign-people', keys: preparar },
       { route: 'PATCH /campaigns/:id', keys: preparar },
       { route: 'POST /campaigns/:id/preview', keys: verCampanas },
       { route: 'POST /campaigns/:id/test', keys: preparar },

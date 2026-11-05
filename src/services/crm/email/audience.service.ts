@@ -26,7 +26,7 @@ import prisma from '../../../utils/prismaClient'
 import { normalizeEmail } from '../../marketing/emailSuppression.service'
 import { clientSql, planVigenteSql, type PaidPlan } from '../clients.service'
 import { teamOrganizationId } from '../inbound.service'
-import { plegarTexto, TABLA_DE_PLEGADO_SQL } from '../../shared/customerSearch'
+import { escaparLike, plegarTexto, TABLA_DE_PLEGADO_SQL } from '../../shared/customerSearch'
 import { REAL_VENUE_SQL } from '../sweep.service'
 import type { MotivoDeEnvio } from './footer'
 import { filtrarBloqueados, sqlBloqueado } from './optOut.service'
@@ -362,7 +362,6 @@ async function porLotes(
   return conjunto.digest('hex')
 }
 
-const escaparLike = (texto: string) => texto.replace(/[!%_]/g, m => `!${m}`)
 /** Una columna de texto, sin mayúsculas ni acentos (la misma tabla que plegó `plegarTexto`). */
 const plegada = (columna: Prisma.Sql) =>
   Prisma.sql`translate(lower(coalesce(${columna}, '')), ${TABLA_DE_PLEGADO_SQL.de}, ${TABLA_DE_PLEGADO_SQL.a})`
@@ -395,6 +394,56 @@ export async function paginaDeDestinatarios(
     LIMIT ${opciones.limit + 1}`)
   const pagina = filas.slice(0, opciones.limit)
   return { filas: pagina.map(aDestinatario), siguiente: filas.length > opciones.limit ? pagina[pagina.length - 1].email : null }
+}
+
+/** Cuántas personas trae el buscador de «Agregar»: lo impone el servidor, no el cliente. */
+const TOPE_DEL_BUSCADOR = 20
+
+export interface PersonaBuscada {
+  email: string
+  nombre: string | null
+  negocio: string | null
+  /** Hay fila de permiso (`CrmEmailConsent`) para ese correo. */
+  aceptoCorreos: boolean
+  /** Baja, rebote o queja (`sqlBloqueado`). */
+  bloqueado: boolean
+  /** `aceptoCorreos && !bloqueado`: exactamente lo que `personasNoElegibles` deja pasar (la persona ya es de una cuenta visible). */
+  agregable: boolean
+}
+
+/**
+ * «Agregar» a una campaña: busca SÓLO entre personas que ya están en el CRM y son visibles (`sqlCuentaVisible`: nunca una cuenta
+ * archivada, un cliente oculto ni el equipo, ni sus datos). UNA consulta, una fila por correo (gana el contacto principal y luego el
+ * más viejo, como la rama `incluir`), y la búsqueda —frase completa, sin mayúsculas ni acentos, igual que «Ver quiénes»— mira correo,
+ * nombre y negocio de ESE contacto. Orden por correo en `COLLATE "C"`; `TOPE_DEL_BUSCADOR + 1` filas para saber si hay más.
+ *
+ * ponytail: no busca permisos de la landing sin cuenta (no son agregables: siguen llegando con «Prospectos» sin etapas). El correo
+ * del contacto se compara normalizado, así que su índice no sirve: cada búsqueda lee los contactos con correo de cuentas visibles.
+ */
+export async function buscarPersonasParaCampana(q: string): Promise<{ rows: PersonaBuscada[]; hayMas: boolean }> {
+  const texto = plegarTexto(q.split('\u0000').join('')).trim().slice(0, 100)
+  if (!texto) return { rows: [], hayMas: false }
+  const patron = `%${escaparLike(texto)}%`
+  const equipo = await teamOrganizationId()
+  const filas = await prisma.$queryRaw<Array<Omit<PersonaBuscada, 'agregable'>>>(Prisma.sql`
+    SELECT w."email", w."nombre", w."negocio",
+      EXISTS (SELECT 1 FROM "CrmEmailConsent" bus_ec WHERE bus_ec."email" = w."email") AS "aceptoCorreos",
+      ${sqlBloqueado(Prisma.sql`w."email"`)} AS "bloqueado"
+    FROM (
+      SELECT DISTINCT ON (${normalizado(Prisma.sql`c."email"`)}) ${normalizado(Prisma.sql`c."email"`)} AS "email",
+        NULLIF(btrim(c."name"), '') AS "nombre", NULLIF(btrim(a."name"), '') AS "negocio"
+      FROM "CrmContact" c
+      JOIN "CrmAccount" a ON a."id" = c."accountId"
+      WHERE btrim(coalesce(c."email", '')) <> '' AND ${sqlCuentaVisible(Prisma.sql`a`, equipo)}
+      ORDER BY ${normalizado(Prisma.sql`c."email"`)}, c."isPrimary" DESC, c."createdAt", c."id"
+    ) w
+    WHERE (${plegada(Prisma.sql`w."email"`)} LIKE ${patron} ESCAPE '!' OR ${plegada(Prisma.sql`w."nombre"`)} LIKE ${patron} ESCAPE '!' OR ${plegada(Prisma.sql`w."negocio"`)} LIKE ${patron} ESCAPE '!')
+    ORDER BY w."email"
+    LIMIT ${TOPE_DEL_BUSCADOR + 1}`)
+  return {
+    rows: filas.slice(0, TOPE_DEL_BUSCADOR).map(f => ({ ...f, agregable: f.aceptoCorreos && !f.bloqueado })),
+    hayMas: filas.length > TOPE_DEL_BUSCADOR,
+  }
 }
 
 /**

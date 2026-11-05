@@ -39,6 +39,7 @@ import {
   listAccountsSchema,
   listCampaignsSchema,
   listRecipientsSchema,
+  searchCampaignPeopleSchema,
   listClientsSchema,
   listTeamSchema,
   listTemplatesSchema,
@@ -187,6 +188,8 @@ router.post('/campaigns', preparar, validateRequest(createCampaignSchema), crmEm
 router.get('/campaigns/:id', verCampanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
 // «Ver quiénes»: la lista de a quién le llega un borrador, una consulta por página y sin total.
 router.get('/campaigns/:id/recipients', verCampanas, validateRequest(listRecipientsSchema), crmEmailController.listRecipients)
+// «Agregar»: busca a quién sumar a un borrador, sólo entre personas visibles del CRM. Sólo quien edita el público.
+router.get('/campaign-people', preparar, validateRequest(searchCampaignPeopleSchema), crmEmailController.searchCampaignPeople)
 router.patch('/campaigns/:id', preparar, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
 router.post('/campaigns/:id/preview', verCampanas, validateRequest(previewCampaignSchema), crmEmailController.previewCampaign)
 router.post('/campaigns/:id/test', preparar, validateRequest(campaignTestSchema), crmEmailController.sendCampaignTest)

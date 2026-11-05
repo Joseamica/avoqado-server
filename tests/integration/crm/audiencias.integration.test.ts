@@ -17,6 +17,7 @@ import { Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import type { Audiencia } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
 import {
+  buscarPersonasParaCampana,
   contarAudiencia,
   paginaDeDestinatarios,
   personasNoElegibles,
@@ -1037,6 +1038,175 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
       expect(await personasNoElegibles([correo('dc-persona')])).toEqual([])
     })
   })
+  // ── Buscar a quién agregar (plan B, tarea 7; rediseño tras Codex r2 y r3) ────────────────────────────────────────────────────
+  // Sólo gente que ya está en el CRM y es VISIBLE (cuenta abierta, cliente no oculto, no del equipo). «Agregable» es lo mismo que
+  // contesta `personasNoElegibles` (el PATCH): permiso Y no bloqueado, sobre un contacto visible.
+
+  describe('buscar a quién agregar', () => {
+    const buscar = async (q: string) => buscarPersonasParaCampana(q)
+    const emailsDe = async (q: string) => (await buscar(q)).rows.map(r => r.email)
+
+    it('busca_sin_acentos_y_dice_quien_no_acepto_correos_y_quien_se_dio_de_baja', async () => {
+      await conPermiso('bus7-jose', { nombre: `Cafetería La Esquina ${suffix}` })
+      await prisma.crmContact.updateMany({ where: { email: correo('bus7-jose') }, data: { name: `José Pérez ${suffix}` } })
+      const sin = await cuenta({ name: `Sin permiso ${suffix}` })
+      await contacto(sin, `Sin Permiso ${suffix}`, correo('bus7-sin'), true)
+      await conPermiso('bus7-baja', { nombre: `Dada de baja ${suffix}` })
+      await prisma.crmEmailOptOut.create({ data: { email: correo('bus7-baja'), source: 'UN_CLIC' } })
+
+      expect((await buscar(`jose perez ${suffix}`)).rows).toEqual([
+        {
+          email: correo('bus7-jose'),
+          nombre: `José Pérez ${suffix}`,
+          negocio: `Cafetería La Esquina ${suffix}`,
+          aceptoCorreos: true,
+          bloqueado: false,
+          agregable: true,
+        },
+      ])
+      expect(await emailsDe(`CAFETERIA la esquina ${suffix}`)).toEqual([correo('bus7-jose')])
+      const [sinPermiso] = (await buscar(`sin permiso ${suffix}`)).rows
+      expect(sinPermiso).toMatchObject({ email: correo('bus7-sin'), aceptoCorreos: false, bloqueado: false, agregable: false })
+      const [baja] = (await buscar(`dada de baja ${suffix}`)).rows
+      expect(baja).toMatchObject({ email: correo('bus7-baja'), aceptoCorreos: true, bloqueado: true, agregable: false })
+    })
+
+    it('🔴 no_devuelve_a_nadie_de_una_cuenta_archivada_ni_sus_datos', async () => {
+      await conPermiso('bus7-arch', { archivedAt: new Date(), nombre: `Archivada ${suffix}` })
+      expect(await emailsDe(correo('bus7-arch'))).toEqual([])
+      expect(await emailsDe(`Archivada ${suffix}`)).toEqual([])
+      expect(await emailsDe(`Persona bus7-arch`)).toEqual([])
+    })
+
+    it('🔴 no_devuelve_a_nadie_de_un_cliente_oculto', async () => {
+      const oculta = await organizacion()
+      await prisma.crmHiddenClient.create({ data: { organizationId: oculta } })
+      await conPermiso('bus7-oculto', { organizationId: oculta, nombre: `Oculto ${suffix}` })
+      await conPermiso('bus7-visible', { organizationId: await organizacion(), nombre: `Visible ${suffix}` })
+      expect(await emailsDe(correo('bus7-oculto'))).toEqual([])
+      expect(await emailsDe(`Oculto ${suffix}`)).toEqual([])
+      expect(await emailsDe(correo('bus7-visible'))).toEqual([correo('bus7-visible')])
+    })
+
+    it('no_devuelve_a_nadie_de_la_organizacion_del_equipo', async () => {
+      const equipo = await ensureCrmTeamVenue()
+      const ya = await prisma.crmAccount.findUnique({ where: { organizationId: equipo.organizationId }, select: { id: true } })
+      if (ya) {
+        await contacto(ya.id, 'Del equipo', correo('bus7-equipo'), false)
+        await consentimiento(correo('bus7-equipo'), ya.id)
+      } else {
+        await conPermiso('bus7-equipo', { organizationId: equipo.organizationId })
+      }
+      expect(await emailsDe(correo('bus7-equipo'))).toEqual([])
+    })
+
+    it('no_devuelve_a_un_eliminado', async () => {
+      const nombre = `Para borrar bus7 ${suffix}`
+      const id = await conPermiso('bus7-eliminado', { nombre })
+      expect(await emailsDe(correo('bus7-eliminado'))).toEqual([correo('bus7-eliminado')])
+      erasedKeys.push(...erasedHashes({ keys: [], emails: [correo('bus7-eliminado')], phones: [], organizationId: null }).person)
+      await deleteAccount({ staffId: vendedor.id, isSuperadmin: true } as CrmAccess, id, nombre)
+      expect(await emailsDe(correo('bus7-eliminado'))).toEqual([])
+    })
+
+    it('🔴 agregable_en_el_buscador_es_lo_mismo_que_elegible_para_personasNoElegibles', async () => {
+      const oculta = await organizacion()
+      await prisma.crmHiddenClient.create({ data: { organizationId: oculta } })
+      const equipo = await ensureCrmTeamVenue()
+      const yaEquipo = await prisma.crmAccount.findUnique({ where: { organizationId: equipo.organizationId }, select: { id: true } })
+      const sin = await cuenta()
+      await contacto(sin, 'Sin permiso', correo('par-sin-permiso'), true)
+      await conPermiso('par-ok')
+      await conPermiso('par-baja')
+      await prisma.crmEmailOptOut.create({ data: { email: correo('par-baja'), source: 'UN_CLIC' } })
+      await conPermiso('par-rebote')
+      await prisma.emailSuppression.create({ data: { email: correo('par-rebote'), reason: 'HARD_BOUNCE' } })
+      await conPermiso('par-archivada', { archivedAt: new Date() })
+      await conPermiso('par-oculta', { organizationId: oculta })
+      if (yaEquipo) {
+        await contacto(yaEquipo.id, 'Del equipo', correo('par-equipo'), false)
+        await consentimiento(correo('par-equipo'), yaEquipo.id)
+      } else {
+        await conPermiso('par-equipo', { organizationId: equipo.organizationId })
+      }
+      // Un correo en dos cuentas: A archivada y dueña del permiso, B abierta.
+      await conPermiso('par-dos', { archivedAt: new Date(), nombre: `Negocio A ${suffix}` })
+      await contacto(await cuenta({ name: `Negocio B ${suffix}` }), 'En B', correo('par-dos'), false)
+      // Y uno que sólo vive en una cuenta archivada (el permiso es de la landing, sin cuenta visible).
+      const soloA = await cuenta({ archivedAt: new Date() })
+      await contacto(soloA, 'Sólo en A', correo('par-solo-archivada'), true)
+      await consentimiento(correo('par-solo-archivada'))
+      // Sin ninguna cuenta: sólo el permiso de la landing.
+      await consentimiento(correo('par-sin-cuenta'))
+      // Eliminado.
+      const nombre = `Eliminada par ${suffix}`
+      const borrar = await conPermiso('par-eliminado', { nombre })
+      erasedKeys.push(...erasedHashes({ keys: [], emails: [correo('par-eliminado')], phones: [], organizationId: null }).person)
+      await deleteAccount({ staffId: vendedor.id, isSuperadmin: true } as CrmAccess, borrar, nombre)
+
+      const alias = [
+        'par-ok',
+        'par-sin-permiso',
+        'par-baja',
+        'par-rebote',
+        'par-archivada',
+        'par-oculta',
+        'par-equipo',
+        'par-dos',
+        'par-solo-archivada',
+        'par-sin-cuenta',
+        'par-eliminado',
+        'par-inexistente',
+      ]
+      const emails = alias.map(correo)
+      const noElegibles = new Set(await personasNoElegibles(emails))
+      for (const email of emails) {
+        const { rows } = await buscar(email)
+        const fila = rows.find(r => r.email === email)
+        const agregableEnBuscador = !!fila && fila.aceptoCorreos && !fila.bloqueado
+        expect([email, agregableEnBuscador, fila?.agregable ?? false]).toEqual([email, !noElegibles.has(email), !noElegibles.has(email)])
+      }
+      // Control: el reparto no es trivial (hay de los dos lados).
+      expect(emails.filter(e => !noElegibles.has(e)).sort()).toEqual([correo('par-dos'), correo('par-ok')])
+      // El de las dos cuentas sale con los datos de B, nunca los de A archivada.
+      const [dos] = (await buscar(correo('par-dos'))).rows
+      expect(dos).toMatchObject({ email: correo('par-dos'), nombre: 'En B', negocio: `Negocio B ${suffix}`, aceptoCorreos: true })
+      expect(await emailsDe(`Negocio A ${suffix}`)).toEqual([])
+    })
+
+    it('una_persona_en_dos_cuentas_sale_una_vez', async () => {
+      await conPermiso('bus7-dup', { nombre: `Dup A ${suffix}` })
+      await contacto(await cuenta({ name: `Dup B ${suffix}` }), 'Otra vez', `  BUS7-DUP-${suffix}@Test.MX`, false)
+      const { rows } = await buscar(`bus7-dup-${suffix}`)
+      expect(rows.map(r => r.email)).toEqual([correo('bus7-dup')])
+      // Gana el contacto principal.
+      expect(rows[0].negocio).toBe(`Dup A ${suffix}`)
+    })
+
+    it('trae_20_y_dice_hayMas_con_21', async () => {
+      for (let i = 0; i < 21; i++) {
+        const id = await cuenta({ name: `Veintiuno ${suffix}` })
+        await contacto(id, `Persona ${i}`, correo(`v21-${String(i).padStart(2, '0')}`), true)
+      }
+      const lleno = await buscar(`veintiuno ${suffix}`)
+      expect(lleno.rows).toHaveLength(20)
+      expect(lleno.hayMas).toBe(true)
+      expect(lleno.rows.map(r => r.email)).toEqual(Array.from({ length: 20 }, (_, i) => correo(`v21-${String(i).padStart(2, '0')}`)))
+      // Con exactamente 20 no hay más.
+      await prisma.crmContact.deleteMany({ where: { email: correo('v21-20') } })
+      const justo = await buscar(`veintiuno ${suffix}`)
+      expect(justo.rows).toHaveLength(20)
+      expect(justo.hayMas).toBe(false)
+    })
+
+    it('un_comodin_no_trae_a_todos', async () => {
+      await conPermiso('bus7-com', { nombre: `Comodin ${suffix}` })
+      for (const q of ['%%', '__', '!!', 'bus7_com', 'bus7%com', '%', '_']) expect((await buscar(q)).rows).toEqual([])
+      // Y lo que sólo es espacio no es una búsqueda.
+      expect(await buscar('    ')).toEqual({ rows: [], hayMas: false })
+    })
+  })
+
   describe('ver quiénes', () => {
     /** Recorre «Ver quiénes» página por página, como lo hace la pantalla con «Ver más». */
     async function paginas(aud: Audiencia, limit: number, buscar?: string) {

@@ -13,6 +13,7 @@ import { uploadAnnouncementImage } from '@/services/announcements/announcementIm
 import emailService from '@/services/email.service'
 import * as templatesService from '@/services/crm/email/templates.service'
 import * as campaignsService from '@/services/crm/email/campaigns.service'
+import * as audienceService from '@/services/crm/email/audience.service'
 import * as teamService from '@/services/crm/teamVenue.service'
 
 const STAFF = 'cstaffemail00000000000001'
@@ -549,6 +550,51 @@ describe('/crm/campaigns — las llaves de correo masivo (L5)', () => {
       .patch(`/crm/campaigns/${CAMPAIGN}`)
       .send({ audience: { segmentos: [{ tipo: 'CLIENTES' }, { tipo: 'CLIENTES' }] } })
     expect(res.status).toBe(400)
+  })
+
+  describe('GET /campaign-people — buscar a quién agregar', () => {
+    let espiado: jest.SpyInstance | undefined
+    const buscar = () => (espiado = jest.spyOn(audienceService, 'buscarPersonasParaCampana'))
+
+    afterEach(() => espiado?.mockRestore())
+
+    it('🔴 con sólo «Ver campañas» es 403 y no busca nada', async () => {
+      keys({ verCampanas: true })
+      const espia = buscar().mockResolvedValue({ rows: [], hayMas: false })
+      const res = await request(app).get('/crm/campaign-people?q=ana')
+      expect(res.status).toBe(403)
+      expect(espia).not.toHaveBeenCalled()
+    })
+
+    it('🔴 con las llaves viejas «Campañas» o «Administrar» pero sin «Preparar» también es 403', async () => {
+      keys({ campanas: true, admin: true, verCampanas: true, mandar: true })
+      const espia = buscar().mockResolvedValue({ rows: [], hayMas: false })
+      expect((await request(app).get('/crm/campaign-people?q=ana')).status).toBe(403)
+      expect(espia).not.toHaveBeenCalled()
+    })
+
+    it('con «Preparar» y una letra es 400 «Escribe al menos 2 letras»; sin q también', async () => {
+      keys({ preparar: true })
+      const espia = buscar().mockResolvedValue({ rows: [], hayMas: false })
+      const una = await request(app).get('/crm/campaign-people?q=a')
+      expect(una.status).toBe(400)
+      expect(JSON.stringify(una.body)).toContain('Escribe al menos 2 letras')
+      expect((await request(app).get('/crm/campaign-people?q=%20a%20')).status).toBe(400)
+      expect((await request(app).get('/crm/campaign-people')).status).toBe(400)
+      expect((await request(app).get(`/crm/campaign-people?q=${'x'.repeat(101)}`)).status).toBe(400)
+      expect(espia).not.toHaveBeenCalled()
+    })
+
+    it('con «Preparar» contesta { data, meta: { hayMas } } y el servidor ignora el límite que pida el cliente', async () => {
+      keys({ preparar: true })
+      const fila = { email: 'ana@test.mx', nombre: 'Ana', negocio: 'Café', aceptoCorreos: true, bloqueado: false, agregable: true }
+      const espia = buscar().mockResolvedValue({ rows: [fila], hayMas: true })
+      const res = await request(app).get('/crm/campaign-people?q=%20%20ana%20&limit=100000&take=9999')
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ data: [fila], meta: { hayMas: true } })
+      expect(espia).toHaveBeenCalledTimes(1)
+      expect(espia).toHaveBeenCalledWith('ana')
+    })
   })
 })
 

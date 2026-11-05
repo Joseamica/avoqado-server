@@ -634,6 +634,17 @@ export const listRecipientsSchema = z.object({
   }),
 })
 
+/** GET /crm/campaign-people — buscar a quién agregar. Sin `limit`: el servidor trae siempre 20 (y `hayMas`). */
+export const searchCampaignPeopleSchema = z.object({
+  query: z.object({
+    q: z
+      .string({ required_error: 'Escribe al menos 2 letras', invalid_type_error: 'Escribe al menos 2 letras' })
+      .trim()
+      .min(2, 'Escribe al menos 2 letras')
+      .max(100, 'Máximo 100 caracteres'),
+  }),
+})
+
 /** GET /crm/campaigns/:id and POST /crm/campaigns/:id/cancel */
 export const campaignIdSchema = z.object({ params: byId })
 

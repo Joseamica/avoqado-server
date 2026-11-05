@@ -4,6 +4,7 @@ import { uploadAnnouncementImage } from '../../services/announcements/announceme
 import * as gmail from '../../services/crm/email/gmailOAuth.service'
 import { mandarCorreo } from '../../services/crm/email/gmailSend.service'
 import { optOut } from '../../services/crm/email/optOut.service'
+import * as audience from '../../services/crm/email/audience.service'
 import * as campaigns from '../../services/crm/email/campaigns.service'
 import { listarDestinosDePrueba } from '../../services/crm/teamVenue.service'
 import * as templates from '../../services/crm/email/templates.service'
@@ -86,6 +87,12 @@ export async function getCampaign(req: Request, res: Response): Promise<void> {
 export async function listRecipients(req: Request, res: Response): Promise<void> {
   const { rows, nextCursor, hasMore } = await campaigns.listRecipients(req.params.id, req.query as unknown as campaigns.ListRecipientsQuery)
   res.json({ data: rows, meta: { nextCursor, hasMore } })
+}
+
+/** GET /api/v1/crm/campaign-people?q= — «Agregar»: personas del CRM (visibles) con su permiso y su baja; siempre a lo más 20. */
+export async function searchCampaignPeople(req: Request, res: Response): Promise<void> {
+  const { rows, hayMas } = await audience.buscarPersonasParaCampana((req.query as { q: string }).q)
+  res.json({ data: rows, meta: { hayMas } })
 }
 
 /** POST /api/v1/crm/campaigns — a draft from a template. */
