@@ -286,7 +286,9 @@ export const getAnnouncementEmailPreference = asyncHandler(async (req: Authentic
 export const updateAnnouncementEmailPreference = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.authContext?.userId
   if (!userId) throw new BadRequestError('User ID is required')
-  const { enabled } = announcementEmailSchema.parse(req.body)
+  const parsed = announcementEmailSchema.safeParse(req.body)
+  if (!parsed.success) throw new BadRequestError('«enabled» debe ser verdadero o falso')
+  const { enabled } = parsed.data
   await setAnnouncementEmailOn(userId, enabled)
   return res.json(formatApiResponse({ enabled }, 'OK'))
 })
