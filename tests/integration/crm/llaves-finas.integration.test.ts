@@ -213,7 +213,8 @@ describe('CRM: el disparador de las llaves finas (L11)', () => {
   })
 
   it('volver_a_dar_de_alta_con_el_codigo_nuevo_conserva_lo_que_manda', async () => {
-    // Hilda ya tiene cuenta activa: el alta le da su lugar en el venue del equipo, sin invitación ni correo.
+    // Hilda ya tiene cuenta activa: el alta le da su lugar en el venue del equipo, sin invitación (el aviso de acceso de D4 no
+    // sale en pruebas: no está en `CRM_CORREO_PRUEBAS`).
     const hilda = await persona('hilda')
     const email = `hilda-${suffix}@test.mx`
     const yaHabiaEquipo = await prisma.crmTeam.findUnique({ where: { key: 'default' } })
