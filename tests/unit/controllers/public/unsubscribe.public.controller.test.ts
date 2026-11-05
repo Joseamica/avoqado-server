@@ -94,3 +94,24 @@ describe('POST /unsubscribe (execute + one-click)', () => {
     expect(mockUnsub).not.toHaveBeenCalled()
   })
 })
+
+describe('GET /unsubscribe (ANNOUNCEMENTS es global)', () => {
+  it('no menciona el negocio aunque el token traiga venueId', async () => {
+    mockVerify.mockReturnValue({ staffId: 's1', venueId: 'v1', category: 'ANNOUNCEMENTS' })
+    mockCtx.mockResolvedValue({ ...CTX, categoryLabel: 'anuncios de Avoqado' })
+    const res = mockRes()
+    await getUnsubscribePage({ query: { token: 't' }, originalUrl: '/x' } as any, res, jest.fn())
+    await flush()
+    expect(res.body).toContain('anuncios de Avoqado')
+    expect(res.body).not.toContain('Mindform')
+  })
+
+  it('las otras categorías siguen con el negocio', async () => {
+    mockVerify.mockReturnValue(VALID)
+    mockCtx.mockResolvedValue(CTX)
+    const res = mockRes()
+    await getUnsubscribePage({ query: { token: 't' }, originalUrl: '/x' } as any, res, jest.fn())
+    await flush()
+    expect(res.body).toContain('Mindform')
+  })
+})
