@@ -13,7 +13,7 @@ jest.mock('../../../../src/utils/prismaClient', () => {
     __esModule: true,
     default: {
       notificationPreference,
-      staff: { findUnique: jest.fn() },
+      staff: { findUnique: jest.fn(), updateMany: jest.fn() },
       venue: { findUnique: jest.fn() },
       $transaction: jest.fn(async (cb: any) => cb({ notificationPreference })),
     },
@@ -28,6 +28,7 @@ const mockCreate = prisma.notificationPreference.create as jest.Mock
 const mockUpdate = prisma.notificationPreference.update as jest.Mock
 const mockStaff = prisma.staff.findUnique as jest.Mock
 const mockVenue = prisma.venue.findUnique as jest.Mock
+const mockStaffUpdateMany = (prisma as any).staff.updateMany as jest.Mock
 
 const STAFF = 'staff_1'
 const VENUE = 'venue_1'
@@ -150,5 +151,23 @@ describe('getUnsubscribeContext', () => {
     mockStaff.mockResolvedValue(null)
     mockVenue.mockResolvedValue({ name: 'Mindform' })
     expect(await getUnsubscribeContext(STAFF, VENUE, 'INVENTORY')).toBeNull()
+  })
+})
+
+describe('unsubscribeFromEmailCategory (ANNOUNCEMENTS)', () => {
+  it('la baja ANNOUNCEMENTS apaga la global aunque el token traiga otro negocio', async () => {
+    mockStaffUpdateMany.mockResolvedValue({ count: 1 })
+    const r = await unsubscribeFromEmailCategory(STAFF, 'otro_negocio', 'ANNOUNCEMENTS')
+    expect(mockStaffUpdateMany.mock.calls[0][0].where).toEqual({ id: STAFF, announcementEmailOptOutAt: null })
+    expect(mockFindMany).not.toHaveBeenCalled()
+    expect(mockCreate).not.toHaveBeenCalled()
+    expect(r).toEqual({ affectedTypes: 1, alreadyUnsubscribed: false })
+  })
+
+  it('la etiqueta es «anuncios de Avoqado»', async () => {
+    mockStaff.mockResolvedValue({ email: 'a@b.mx', firstName: 'A' })
+    mockVenue.mockResolvedValue(null)
+    const ctx = await getUnsubscribeContext(STAFF, 'v', 'ANNOUNCEMENTS')
+    expect(ctx?.categoryLabel).toBe('anuncios de Avoqado')
   })
 })

@@ -157,6 +157,14 @@ describe('announcementRead.service', () => {
       expect(r.modal?.id).toBe('a1')
     })
 
+    it('getActiveForHome sigue regresando el anuncio sin campana', async () => {
+      mockAnnMany.mockResolvedValue([anuncio({ showAsModal: true, showInInbox: false })])
+      mockAcuseMany.mockResolvedValue([{ announcementId: 'a1', notificationId: null }])
+      mockClickMany.mockResolvedValue([])
+      const r = await getActiveForHome('s1')
+      expect(r.modal?.id).toBe('a1')
+    })
+
     // 🔴 Lo que pidio el founder: se cierra UNA vez y despues vive en la campanita.
     it('una vez cerrada, la ventana YA NO interrumpe', async () => {
       mockAnnMany.mockResolvedValue([anuncio({ showAsModal: true })])

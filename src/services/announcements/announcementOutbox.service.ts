@@ -90,7 +90,7 @@ export async function deliverClaimed(ids: string[], opts: { now: Date }): Promis
     where: { id: { in: ids } },
     include: {
       announcement: {
-        select: { id: true, title: true, body: true, actionLabel: true, actionUrl: true, priority: true },
+        select: { id: true, title: true, body: true, actionLabel: true, actionUrl: true, priority: true, showInInbox: true },
       },
     },
   })
@@ -110,6 +110,22 @@ export async function deliverClaimed(ids: string[], opts: { now: Date }): Promis
       // worker ya se quedó con la fila y el aviso recién creado se deshace con ella.
       const enviada = await prisma.$transaction(async tx => {
         await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`announcement-notification:${d.staffId}:${d.announcement.id}`}, 0))::text`
+
+        // Sin campana: la entrega cuenta como SENT (la ventana y el banner salen de las
+        // entregas, no de la Notification), pero no se crea aviso en el buzón.
+        if (!d.announcement.showInInbox) {
+          const r = await tx.platformAnnouncementDelivery.updateMany({
+            where: casWhere,
+            data: {
+              status: PlatformAnnouncementDeliveryStatus.SENT,
+              notificationId: null,
+              deliveredAt: opts.now,
+              leaseUntil: null,
+              lastError: null,
+            },
+          })
+          return r.count > 0
+        }
 
         // 🔴 UN aviso por PERSONA, no uno por sucursal.
         //

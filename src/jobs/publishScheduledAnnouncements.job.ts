@@ -8,6 +8,10 @@ import { scheduleJob } from '../observability/jobContext'
 import { publishAnnouncement } from '../services/announcements/announcement.service'
 
 const TIMEZONE = 'America/Mexico_City'
+/** Cuántos anuncios por vuelta (cada 5 min): los que sobren salen en la siguiente. */
+const POR_VUELTA = 50
+const RECUPERAR_TRAS_MS = 10 * 60 * 1000
+const RECUPERAR_HASTA_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * Publica los anuncios de plataforma programados cuya hora ya llegó.
@@ -19,15 +23,27 @@ const TIMEZONE = 'America/Mexico_City'
  * 🔴 El reparto NO se envuelve en retry: duplicaría avisos. Sólo el read de entrada, que
  * es puro y seguro de repetir.
  */
-export async function publishScheduledAnnouncements(): Promise<number> {
+export async function publishScheduledAnnouncements(now: Date = new Date()): Promise<number> {
   const pendientes = await retry(
     () =>
       prisma.platformAnnouncement.findMany({
         where: {
-          status: PlatformAnnouncementStatus.SCHEDULED,
-          scheduledFor: { lte: new Date() },
+          OR: [
+            { status: PlatformAnnouncementStatus.SCHEDULED, scheduledFor: { lte: now } },
+            // 🔴 Un reparto que murió a la mitad (codex r2 #1, r3 #3): PUBLISHED sin `deliveredAt`. Nadie más lo retoma, y el
+            // correo y el modo «sólo ventana» dependen de que termine. `publishAnnouncement` ya admite reintentarlo (segundo
+            // brazo de su CAS) y reencola con `skipDuplicates`. 10 min de gracia para no encimarse con una publicación viva.
+            {
+              status: PlatformAnnouncementStatus.PUBLISHED,
+              deliveredAt: null,
+              // Y no más de 7 días: un reparto viejo tomaría la audiencia de HOY, que ya no es a quien se le escribió.
+              publishedAt: { gte: new Date(now.getTime() - RECUPERAR_HASTA_MS), lte: new Date(now.getTime() - RECUPERAR_TRAS_MS) },
+            },
+          ],
         },
         select: { id: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: POR_VUELTA,
       }),
     {
       retries: 2,

@@ -38,6 +38,9 @@ export const DATABASE_JOB_SCHEDULES = {
   publishScheduledAnnouncements: '47 */5 * * * *',
   // Entrega de anuncios encolados. Cada 30 s en los segundos 6 y 36, huecos libres.
   announcementOutbox: '6,36 * * * * *',
+  // Correo de los anuncios: encola lo repartido en las últimas 24 h y manda una tanda de 20 con el tope del día.
+  // Segundos 21/51, los mismos del worker de Shopify: los dos son de pocas consultas y ninguno es de dinero.
+  announcementEmail: '21,51 * * * * *',
   // Fase 0 del turno de caja del negocio: cierra órdenes cuyos cobros ya las cubren.
   paidOrderReconciler: '55 */10 * * * *',
   // Task 5l: completa el cierre unificado que murió entre sus dos commits. Cada MINUTO y no cada 5:

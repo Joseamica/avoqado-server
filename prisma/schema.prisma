@@ -1142,6 +1142,10 @@ model Staff {
   platformAnnouncementClicks     PlatformAnnouncementClick[]
   /// Acuses de recibo de anuncios de plataforma (ver PlatformAnnouncementDelivery).
   platformAnnouncementDeliveries PlatformAnnouncementDelivery[]
+  /// Correos de anuncios de plataforma (outbox, ver PlatformAnnouncementEmail).
+  platformAnnouncementEmails     PlatformAnnouncementEmail[]
+  /// Baja de anuncios por correo (vive aquí y no en NotificationPreference: ver PlatformAnnouncement.sendEmail).
+  announcementEmailOptOutAt      DateTime?
 
   /// Sesiones autenticadas revocables (JWT `sid`). Ver modelo `Session`.
   sessions Session[]
@@ -19502,6 +19506,12 @@ model PlatformAnnouncement {
   /// cambio de precios, una fecha límite.
   showAsModal Boolean @default(false)
 
+  /// Aparece en la campana (buzón). false = "sin campana": sólo banner/correo.
+  showInInbox Boolean @default(true)
+
+  /// Además se manda por correo a la audiencia (outbox PlatformAnnouncementEmail).
+  sendEmail Boolean @default(false)
+
   // Vigencia
   status       PlatformAnnouncementStatus @default(DRAFT)
   publishedAt  DateTime?
@@ -19521,6 +19531,7 @@ model PlatformAnnouncement {
 
   clicks     PlatformAnnouncementClick[]
   deliveries PlatformAnnouncementDelivery[]
+  emails     PlatformAnnouncementEmail[]
 
   @@index([status, publishedAt])
   @@index([status, scheduledFor])
@@ -19601,6 +19612,39 @@ model PlatformAnnouncementDelivery {
   @@index([status, nextAttemptAt])
   @@index([status, leaseUntil])
   @@map("platform_announcement_deliveries")
+}
+
+/// Outbox de correos de un anuncio: una fila por persona. Mismo patrón que la entrega a la campana.
+model PlatformAnnouncementEmail {
+  id             String               @id @default(cuid())
+  announcementId String
+  announcement   PlatformAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  staffId        String
+  staff          Staff                @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  venueId        String // para el token de baja
+
+  status        PlatformAnnouncementDeliveryStatus @default(PENDING)
+  attempts      Int                                @default(0)
+  nextAttemptAt DateTime                           @default(now())
+  leaseUntil    DateTime?
+  /// Marca antes de llamar al proveedor: el envío es "a lo más una vez".
+  sendStartedAt DateTime?
+  /// Día UTC (YYYY-MM-DD) del lugar reservado en el tope diario.
+  capDay        String?
+  lastError     String?                            @db.Text
+  skippedReason String?
+  sentAt        DateTime?
+
+  createdAt DateTime @default(now())
+  // `@default(now())` en updatedAt por la misma razón que PlatformAnnouncementDelivery:
+  // el servidor viejo (sin esta columna conocida) sigue haciendo INSERT durante el build de Render.
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([announcementId, staffId])
+  @@index([status, nextAttemptAt])
+  @@index([sentAt])
+  @@index([capDay])
+  @@map("platform_announcement_emails")
 }
 
 enum PlatformAnnouncementDeliveryStatus {

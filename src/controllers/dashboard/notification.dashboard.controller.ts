@@ -7,6 +7,7 @@ import prisma from '../../utils/prismaClient'
 import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
 import asyncHandler from '../../utils/asyncHandler'
 import { AuthContext } from '../../security'
+import { isAnnouncementEmailOn, setAnnouncementEmailOn } from '../../services/announcements/announcementEmailPreference.service'
 
 // Extend Request type to include authContext
 interface AuthenticatedRequest extends Request {
@@ -119,6 +120,8 @@ async function asegurarAvisoDeMiNegocio(req: AuthenticatedRequest, recipientIds:
  */
 export const createNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const validatedData = createNotificationSchema.parse(req.body)
+  // Procedencia reservada: sólo el reparto de anuncios de plataforma escribe este entityType (campana por negocio).
+  if (validatedData.entityType === 'PlatformAnnouncement') throw new BadRequestError('entityType reservado para anuncios de plataforma')
   await asegurarAvisoDeMiNegocio(req, [validatedData.recipientId], validatedData.venueId)
 
   const notification = await notificationService.createNotification(validatedData)
@@ -218,7 +221,8 @@ export const markAllAsRead = asyncHandler(async (req: AuthenticatedRequest, res:
  */
 export const deleteAllNotifications = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.authContext!.userId
-  const resultado = await notificationService.deleteAllNotifications(userId)
+  const venueId = req.headers['x-venue-id'] as string | undefined
+  const resultado = await notificationService.deleteAllNotifications(userId, venueId)
   res.json({ success: true, data: resultado })
 })
 
@@ -269,6 +273,22 @@ export const updatePreferences = asyncHandler(async (req: AuthenticatedRequest, 
   const preference = await notificationService.updateNotificationPreferences(userId, venueId || null, validatedData.type, validatedData)
 
   return res.json(formatApiResponse(preference, 'Notification preferences updated successfully'))
+})
+
+const announcementEmailSchema = z.object({ enabled: z.boolean() })
+
+export const getAnnouncementEmailPreference = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.authContext?.userId
+  if (!userId) throw new BadRequestError('User ID is required')
+  return res.json(formatApiResponse({ enabled: await isAnnouncementEmailOn(userId) }, 'OK'))
+})
+
+export const updateAnnouncementEmailPreference = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.authContext?.userId
+  if (!userId) throw new BadRequestError('User ID is required')
+  const { enabled } = announcementEmailSchema.parse(req.body)
+  await setAnnouncementEmailOn(userId, enabled)
+  return res.json(formatApiResponse({ enabled }, 'OK'))
 })
 
 /**

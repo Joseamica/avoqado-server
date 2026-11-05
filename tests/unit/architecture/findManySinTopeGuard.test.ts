@@ -106,7 +106,6 @@ const INVENTARIO: Record<string, number> = {
   'src/jobs/nightly-upsell-rules.job.ts': 4,
   'src/jobs/plan-renewal-reminder.job.ts': 1,
   'src/jobs/plan-winback.job.ts': 1,
-  'src/jobs/publishScheduledAnnouncements.job.ts': 1,
   'src/jobs/stalePendingAlert.job.ts': 1,
   'src/jobs/subscription-cancellation.job.ts': 2,
   'src/jobs/tpv-order-expiry.job.ts': 1,

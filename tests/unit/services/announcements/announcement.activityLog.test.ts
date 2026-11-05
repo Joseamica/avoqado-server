@@ -14,6 +14,8 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     platformAnnouncement: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     notification: { createMany: jest.fn() },
     platformAnnouncementDelivery: { createMany: jest.fn(), count: jest.fn() },
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(),
   },
 }))
 jest.mock('../../../../src/services/announcements/audience.service', () => ({ resolveAudience: jest.fn() }))
@@ -31,6 +33,10 @@ const base = {
   status: PlatformAnnouncementStatus.DRAFT,
   deliveredAt: null,
   expiresAt: null,
+  showAsBanner: true,
+  showAsModal: false,
+  showInInbox: true,
+  sendEmail: false,
 }
 
 const entrada = {
@@ -53,6 +59,7 @@ const entrada = {
 describe('bitácora de los anuncios de plataforma', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.$transaction as unknown as jest.Mock).mockImplementation((cb: (tx: unknown) => unknown) => cb(prisma))
     mockFind.mockResolvedValue(base)
     mockCreate.mockResolvedValue(base)
     mockUpdate.mockResolvedValue(base)

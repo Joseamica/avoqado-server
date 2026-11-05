@@ -428,6 +428,12 @@ export class BroadcastingService {
   /**
    * Notification Events
    */
+
+  /** El contador va a TODO el negocio: nunca lleva el aviso (título, mensaje, destinatario) de otra persona. */
+  private countPayload(action: 'increment' | 'decrement', venueId: string, p: { correlationId?: string; timestamp?: Date }) {
+    return { action, venueId, correlationId: p.correlationId, timestamp: p.timestamp }
+  }
+
   public broadcastNewNotification(
     notification: Omit<NotificationEventPayload, 'correlationId' | 'timestamp'>,
     options?: BroadcastOptions,
@@ -445,10 +451,7 @@ export class BroadcastingService {
     this.broadcastToVenue(
       notification.venueId,
       SocketEventType.NOTIFICATION_COUNT_UPDATED,
-      {
-        ...payload,
-        action: 'increment',
-      },
+      this.countPayload('increment', notification.venueId, payload),
       options,
     )
 
@@ -478,10 +481,7 @@ export class BroadcastingService {
     this.broadcastToVenue(
       venueId,
       SocketEventType.NOTIFICATION_COUNT_UPDATED,
-      {
-        ...payload,
-        action: 'decrement',
-      },
+      this.countPayload('decrement', venueId, payload),
       options,
     )
 
@@ -516,10 +516,7 @@ export class BroadcastingService {
       this.broadcastToVenue(
         venueId,
         SocketEventType.NOTIFICATION_COUNT_UPDATED,
-        {
-          ...payload,
-          action: 'decrement',
-        },
+        this.countPayload('decrement', venueId, payload),
         options,
       )
     }

@@ -20,8 +20,13 @@ describe('uploadAnnouncementImage', () => {
 
   // ===== CASOS NUEVOS =====
   it('sube un PNG y devuelve su URL', async () => {
-    const url = await uploadAnnouncementImage(PNG, 'image/png', 'terminal.png')
-    expect(url).toBe('https://storage.example/foto.png')
+    const r = await uploadAnnouncementImage(PNG, 'image/png', 'terminal.png')
+    expect(r).toEqual({ url: 'https://storage.example/foto.png' })
+  })
+
+  it('devuelve las medidas que recibe', async () => {
+    const r = await uploadAnnouncementImage(PNG, 'image/png', 'terminal.png', { width: 1600, height: 900 })
+    expect(r).toEqual({ url: 'https://storage.example/foto.png', width: 1600, height: 900 })
   })
 
   it('acepta JPEG', async () => {

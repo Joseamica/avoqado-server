@@ -9125,6 +9125,16 @@ router.delete('/notifications/:id', authenticateTokenMiddleware, notificationCon
  *         description: User notification preferences
  *       401: { $ref: '#/components/responses/UnauthorizedError' }
  */
+router.get(
+  '/notifications/preferences/announcement-email',
+  authenticateTokenMiddleware,
+  notificationController.getAnnouncementEmailPreference,
+)
+router.put(
+  '/notifications/preferences/announcement-email',
+  authenticateTokenMiddleware,
+  notificationController.updateAnnouncementEmailPreference,
+)
 router.get('/notifications/preferences', authenticateTokenMiddleware, notificationController.getPreferences)
 
 /**

@@ -23,10 +23,25 @@ describe('publishScheduledAnnouncements', () => {
   // ===== CASOS NUEVOS =====
   it('solo toma los SCHEDULED cuya hora ya paso', async () => {
     mockFindMany.mockResolvedValue([])
-    await publishScheduledAnnouncements()
-    const where = mockFindMany.mock.calls[0][0].where
-    expect(where.status).toBe(PlatformAnnouncementStatus.SCHEDULED)
-    expect(where.scheduledFor.lte).toBeInstanceOf(Date)
+    const now = new Date('2026-11-04T12:00:00.000Z')
+    await publishScheduledAnnouncements(now)
+    const { where, take } = mockFindMany.mock.calls[0][0]
+    expect(where.OR).toContainEqual({ status: PlatformAnnouncementStatus.SCHEDULED, scheduledFor: { lte: now } })
+    expect(take).toBeGreaterThan(0)
+  })
+
+  // Un PUBLISHED con deliveredAt nulo es un reparto que murió a la mitad (codex r2 #1): nadie más lo retoma. Se le
+  // dan 10 min para no pisar una publicación que sigue en curso.
+  it('el job recupera un PUBLISHED con deliveredAt null de hace más de 10 min, y no uno más reciente', async () => {
+    mockFindMany.mockResolvedValue([])
+    const now = new Date('2026-11-04T12:00:00.000Z')
+    await publishScheduledAnnouncements(now)
+    const { where } = mockFindMany.mock.calls[0][0]
+    expect(where.OR).toContainEqual({
+      status: PlatformAnnouncementStatus.PUBLISHED,
+      deliveredAt: null,
+      publishedAt: { gte: new Date('2026-10-28T12:00:00.000Z'), lte: new Date('2026-11-04T11:50:00.000Z') },
+    })
   })
 
   it('publica cada uno y devuelve cuantos', async () => {

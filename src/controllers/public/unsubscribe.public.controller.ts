@@ -34,7 +34,8 @@ export const getUnsubscribePage = asyncHandler(async (req: Request, res: Respons
   }
 
   const action = escapeHtml(req.originalUrl) // same URL incl. ?token=… → POST here
-  const venueSuffix = ctx.venueName ? ` de <span class="email">${escapeHtml(ctx.venueName)}</span>` : ''
+  // ANNOUNCEMENTS es por persona, no por negocio: sin sufijo del negocio.
+  const venueSuffix = ctx.venueName && data.category !== 'ANNOUNCEMENTS' ? ` de <span class="email">${escapeHtml(ctx.venueName)}</span>` : ''
   const body = `
     <h1>¿Dejar de recibir ${escapeHtml(ctx.categoryLabel)}?</h1>
     <p>Dejarás de recibir correos de <span class="email">${escapeHtml(ctx.categoryLabel)}</span>${venueSuffix} en

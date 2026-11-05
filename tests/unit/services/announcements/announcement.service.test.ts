@@ -1,16 +1,18 @@
 import { PlatformAnnouncementStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import { resolveAudience } from '../../../../src/services/announcements/audience.service'
-import { publishAnnouncement, scheduleAnnouncement } from '../../../../src/services/announcements/announcement.service'
+import { publishAnnouncement, scheduleAnnouncement, createAnnouncement, updateAnnouncement } from '../../../../src/services/announcements/announcement.service'
 
-jest.mock('../../../../src/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
-    platformAnnouncement: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+jest.mock('../../../../src/utils/prismaClient', () => {
+  const prisma: any = {
+    platformAnnouncement: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     notification: { createMany: jest.fn() },
     platformAnnouncementDelivery: { createMany: jest.fn(), count: jest.fn() },
-  },
-}))
+    $queryRaw: jest.fn(),
+  }
+  prisma.$transaction = jest.fn((cb: (tx: unknown) => unknown) => cb(prisma))
+  return { __esModule: true, default: prisma }
+})
 jest.mock('../../../../src/services/announcements/audience.service', () => ({
   resolveAudience: jest.fn(),
 }))
@@ -163,5 +165,70 @@ describe('scheduleAnnouncement — maquina de estados (P2 de la auditoria)', () 
   it('un anuncio ARCHIVADO tampoco se puede programar', async () => {
     mockFind.mockResolvedValue({ ...anuncio, status: PlatformAnnouncementStatus.ARCHIVED })
     await expect(scheduleAnnouncement('a1', new Date('2026-09-10'))).rejects.toThrow(/archivado/i)
+  })
+})
+
+const COPIA = 'El anuncio no se vería en ningún lado: prende el banner, la ventana, la campana o el correo.'
+const entrada = {
+  title: 'Terminal nueva',
+  body: 'Ya disponible',
+  priority: 'NORMAL' as never,
+  audienceRoles: [] as never[],
+  targetPlanTiers: [] as never[],
+  targetCategories: [] as string[],
+  targetVenueIds: [] as string[],
+  showAsBanner: false,
+  showAsModal: false,
+  showInInbox: false,
+  sendEmail: false,
+}
+
+describe('anuncio invisible (no sale en ningún lado)', () => {
+  const mockCreate = prisma.platformAnnouncement.create as unknown as jest.Mock
+  const mockRaw = (prisma as any).$queryRaw as jest.Mock
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockCreate.mockResolvedValue({ id: 'a1' })
+    mockUpdate.mockResolvedValue({ id: 'a1' })
+  })
+
+  it('rechaza crear un anuncio sin banner, ventana, campana ni correo', async () => {
+    await expect(createAnnouncement(entrada, 'u1', 'Jose')).rejects.toThrow(COPIA)
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('acepta sólo correo', async () => {
+    await createAnnouncement({ ...entrada, sendEmail: true }, 'u1', 'Jose')
+    expect(mockCreate).toHaveBeenCalled()
+  })
+
+  it('sin banderas nuevas, la campana queda prendida por defecto (cliente viejo)', async () => {
+    const { showInInbox, sendEmail, ...vieja } = entrada
+    await createAnnouncement(vieja, 'u1', 'Jose')
+    expect(mockCreate).toHaveBeenCalled()
+  })
+
+  it('update que apaga la última salida se rechaza', async () => {
+    mockFind.mockResolvedValue({ ...anuncio, showAsBanner: false, showAsModal: true, showInInbox: false, sendEmail: false })
+    await expect(updateAnnouncement('a1', { showAsModal: false, showInInbox: false })).rejects.toThrow(COPIA)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('update parcial que deja otra salida prendida pasa', async () => {
+    mockFind.mockResolvedValue({ ...anuncio, showAsBanner: true, showAsModal: true, showInInbox: false, sendEmail: false })
+    await updateAnnouncement('a1', { showAsModal: false })
+    expect(mockUpdate).toHaveBeenCalled()
+  })
+
+  it('update lee el anuncio con FOR UPDATE dentro de la transacción, antes de escribir', async () => {
+    mockFind.mockResolvedValue({ ...anuncio, showAsBanner: true, showAsModal: false, showInInbox: true, sendEmail: false })
+    const orden: string[] = []
+    mockRaw.mockImplementation(async () => void orden.push('lock'))
+    mockUpdate.mockImplementation(async () => void orden.push('update'))
+    await updateAnnouncement('a1', { showAsBanner: false })
+    expect((prisma as any).$transaction).toHaveBeenCalled()
+    expect(String(mockRaw.mock.calls[0][0].join?.('') ?? mockRaw.mock.calls[0][0])).toMatch(/FOR UPDATE/)
+    expect(orden).toEqual(['lock', 'update'])
   })
 })
