@@ -174,7 +174,7 @@ describe('quien sólo tiene «Mandar correo» (crm:contactar)', () => {
   })
 })
 
-describe('quien sólo tiene «Campañas masivas» (crm:campanas), sin «Ver negocios»', () => {
+describe('quien sólo tiene las 4 llaves de correo masivo (plantillas, preparar, mandar, ver-campanas), sin «Ver negocios»', () => {
   beforeEach(soloCampanas)
 
   it('crea una plantilla (201) y la guarda a su nombre', async () => {

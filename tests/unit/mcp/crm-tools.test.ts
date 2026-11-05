@@ -881,6 +881,17 @@ describe('crm_advance_stage', () => {
     expect(moveStage).not.toHaveBeenCalled()
   })
 
+  it('«Perdido» sin la llave «Cerrar negocios» responde ok:false con CRM_FORBIDDEN y no audita nada', async () => {
+    const { ForbiddenError } = jest.requireActual('@/errors/AppError')
+    ;(getCrmAccess as jest.Mock).mockResolvedValueOnce({ ...ADMIN, cerrar: false })
+    ;(lose as jest.Mock).mockRejectedValueOnce(
+      new ForbiddenError('Para cerrar un negocio necesitas la llave «Cerrar negocios»', 'CRM_FORBIDDEN'),
+    )
+    const answer = await setup().call('crm_advance_stage', { accountId: ACC, stageName: 'Perdido', lostReason: 'Dijo que no' })
+    expect(answer).toMatchObject({ ok: false, code: 'CRM_FORBIDDEN' })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
   it('«Perdido» without a reason, or with one that does not resolve to exactly one active reason, answers the list', async () => {
     const { call } = setup()
     const active = ['Dijo que no', 'Precio', 'Précio']
@@ -1199,14 +1210,14 @@ describe('CRM MCP — email (read only)', () => {
   it('conLlave with a LIST that holds «crm:editar» still demands the write grant, and with it any one key opens (M1)', async () => {
     const run = jest.fn().mockResolvedValue({ ok: true })
     const readOnly = { ...SUPER, scopes: ['mcp:read'] } as McpScope
-    await expect(conLlave(readOnly, ['crm:editar', 'crm:admin'], run)).rejects.toThrow(/mcp:write/)
-    await expect(conLlave(readOnly, ['crm:admin', 'crm:editar'], run)).rejects.toThrow(/mcp:write/)
+    await expect(conLlave(readOnly, ['crm:editar', 'crm:configurar'], run)).rejects.toThrow(/mcp:write/)
+    await expect(conLlave(readOnly, ['crm:configurar', 'crm:editar'], run)).rejects.toThrow(/mcp:write/)
     expect(run).not.toHaveBeenCalled()
     expect(getCrmAccess).not.toHaveBeenCalled()
 
-    // With the grant it runs; one key of the list is enough (the person has «admin» but not «editar»).
+    // With the grant it runs; one key of the list is enough (the person has «configurar» but not «editar»).
     ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, editar: null })
-    const answer = JSON.parse((await conLlave(SUPER, ['crm:editar', 'crm:admin'], run)).content[0].text)
+    const answer = JSON.parse((await conLlave(SUPER, ['crm:editar', 'crm:configurar'], run)).content[0].text)
     expect(answer).toEqual({ ok: true })
     expect(run).toHaveBeenCalledTimes(1)
   })

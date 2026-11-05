@@ -45,7 +45,7 @@ empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 | `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, y mover un GANADO o PERDIDO a una etapa abierta. «Regresar al embudo» sólo desarchiva: pide «Editar», como archivar                                                      |
 
 🔴 `crm:campanas` y `crm:admin` (y `access.campanas`/`access.admin`) son sólo el espejo para la pantalla vieja: ninguna ruta, servicio ni
-herramienta del MCP decide con ellos (`tests/unit/routes/crm.team.routes.test.ts` lo revisa). 🔴 El disparador de `PlatformAccess` (L11)
+herramienta del MCP decide con ellos (lo vigilan `tests/unit/architecture/crmEspejoDeLlaves.test.ts` en servicios, controladores, rutas y MCP, y `tests/unit/routes/crm.team.routes.test.ts` en las rutas). 🔴 El disparador de `PlatformAccess` (L11)
 apaga las 8 finas en todo `UPDATE` que no suba `llavesVersion`: código nuevo que escribe esa fila y debe conservarlas suma
 `llavesVersion: { increment: 1 }`; cualquier otra escritura las apaga.
 
