@@ -406,6 +406,16 @@ export function isTPVOnlyEmail(email: string): boolean {
  * - 'email' (default): Traditional invitation with email verification
  * - 'tpv-only': Creates staff directly with PIN, no email required
  */
+/** ¿Es el negocio interno del equipo de ventas del CRM? Por la fila `CrmTeam` (dato), nunca por nombre ni slug. */
+async function esNegocioDelEquipoDeVentas(venueId: string): Promise<boolean> {
+  return Boolean(await prisma.crmTeam.findUnique({ where: { venueId }, select: { id: true } }))
+}
+
+/** La entrada del SUPERADMIN, donde vive el CRM. */
+function urlDeEntradaAlCrm(): string {
+  return `${(process.env.SUPERADMIN_URL || 'https://superadmin.avoqado.io').replace(/\/$/, '')}/login`
+}
+
 export async function inviteTeamMember(
   venueId: string,
   inviterStaffId: string,
@@ -785,14 +795,22 @@ export async function inviteTeamMember(
   // Get custom role display name (e.g., "Promotor" instead of "ADMIN")
   const roleDisplayName = await getRoleDisplayName(venueId, request.role)
 
-  const emailSent = await emailService.sendTeamInvitation(email, {
-    inviterName: `${inviter.firstName} ${inviter.lastName}`,
-    organizationName: venue.organization.name,
-    venueName: venue.name,
-    role: request.role,
-    roleDisplayName,
-    inviteLink,
-  })
+  // D3: la invitación al negocio interno del equipo de ventas (fila `CrmTeam`, por DATO, nunca por nombre) lleva su
+  // propio correo, con el botón al SUPERADMIN, donde «Continuar con Google» ya acepta la invitación.
+  const emailSent = (await esNegocioDelEquipoDeVentas(venueId))
+    ? await emailService.sendCrmTeamInvitation(email, {
+        inviterName: `${inviter.firstName} ${inviter.lastName}`,
+        crmUrl: urlDeEntradaAlCrm(),
+        inviteLink,
+      })
+    : await emailService.sendTeamInvitation(email, {
+        inviterName: `${inviter.firstName} ${inviter.lastName}`,
+        organizationName: venue.organization.name,
+        venueName: venue.name,
+        role: request.role,
+        roleDisplayName,
+        inviteLink,
+      })
 
   logger.info('Team invitation created', {
     invitationId: invitation.id,
@@ -1382,14 +1400,22 @@ export async function resendInvitation(venueId: string, invitationId: string, _i
   const roleDisplayName = await getRoleDisplayName(venueId, invitation.role as StaffRole)
 
   try {
-    await emailService.sendTeamInvitation(invitation.email, {
-      inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
-      organizationName: invitation.organization.name,
-      venueName: invitation.venue?.name || '',
-      role: invitation.role,
-      roleDisplayName,
-      inviteLink,
-    })
+    if (await esNegocioDelEquipoDeVentas(venueId)) {
+      await emailService.sendCrmTeamInvitation(invitation.email, {
+        inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
+        crmUrl: urlDeEntradaAlCrm(),
+        inviteLink,
+      })
+    } else {
+      await emailService.sendTeamInvitation(invitation.email, {
+        inviterName: `${invitation.invitedBy.firstName} ${invitation.invitedBy.lastName}`,
+        organizationName: invitation.organization.name,
+        venueName: invitation.venue?.name || '',
+        role: invitation.role,
+        roleDisplayName,
+        inviteLink,
+      })
+    }
 
     logger.info('Team invitation resent', {
       invitationId: invitation.id,

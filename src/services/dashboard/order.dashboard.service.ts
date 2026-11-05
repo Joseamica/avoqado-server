@@ -291,6 +291,32 @@ export async function fetchOrdersForExport(venueId: string, filters: OrderFilter
   })
 }
 
+/** Cuenta lo que el exporte en segundo plano va a recorrer: mismo filtro que el GET viejo, más el corte de la petición. */
+export async function countOrdersForExportHasta(venueId: string, filters: OrderFilters | undefined, corte: Date): Promise<number> {
+  return prisma.order.count({ where: { AND: [buildOrdersWhereClause(venueId, filters), { createdAt: { lte: corte } }] } })
+}
+
+/** Página por keyset (createdAt desc, id desc). `AND` y no spread: el where base ya trae su `createdAt` y su `OR` de búsqueda. */
+export async function fetchOrdersExportPage(
+  venueId: string,
+  filters: OrderFilters | undefined,
+  corte: Date,
+  keyset: Prisma.OrderWhereInput,
+  limit: number,
+) {
+  return prisma.order.findMany({
+    where: { AND: [buildOrdersWhereClause(venueId, filters), { createdAt: { lte: corte } }, keyset] },
+    include: {
+      createdBy: { select: { firstName: true, lastName: true } },
+      servedBy: { select: { firstName: true, lastName: true } },
+      table: { select: { number: true } },
+      _count: { select: { items: true } },
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit,
+  })
+}
+
 /**
  * Hoists refund metadata from `processorData` to top-level fields and attaches
  * a `refunds[]` array to each original payment that has been (partially or fully)

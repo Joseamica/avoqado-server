@@ -1,10 +1,12 @@
-import type { Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { parseCsv } from '@/services/dashboard/listSummary.shared'
 import type { Bloqueo, Cursor } from './types'
 
+/** Forma concreta del keyset: asignable a `PaymentWhereInput` y a `OrderWhereInput` (los dos modelos tienen `createdAt` e `id`). */
+export type WhereKeyset = { OR?: [{ createdAt: { lt: Date } }, { createdAt: Date; id: { lt: string } }] }
+
 /** Keyset descendente: después de (t, id) vienen createdAt < t, o = t con id < id. Sin cursor, nada. */
-export function construirWhereKeyset(despuesDe: Cursor | null): Prisma.PaymentWhereInput {
+export function construirWhereKeyset(despuesDe: Cursor | null): WhereKeyset {
   if (!despuesDe) return {}
   const t = new Date(despuesDe.createdAt)
   return { OR: [{ createdAt: { lt: t } }, { createdAt: t, id: { lt: despuesDe.id } }] }
