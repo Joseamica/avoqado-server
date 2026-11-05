@@ -712,15 +712,19 @@ export async function issueCfdiForOrder(
 
   // 2. Load (legacy rows only)
   // El personal (Pedidos → Facturar) factura a propósito; la autofactura del cliente respeta el interruptor.
-  const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo: (params.flow ?? 'STAFF_B') === 'STAFF_B' })
-  if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
+  let motivo = undefined as MotivoNoFacturable | undefined
+  const bundle = await deps.loadOrderForCfdi(params.orderId, {
+    permitirEfectivo: (params.flow ?? 'STAFF_B') === 'STAFF_B',
+    explicar: m => (motivo = m),
+  })
+  if (!bundle) throw noFacturable(SIN_EMISOR_MSG(params.orderId), params.orderId, motivo, params.expectedVenueId)
   // Tenant isolation (critical-warnings rule): the order MUST belong to the caller's venue.
   if (params.expectedVenueId && bundle.venueId !== params.expectedVenueId) {
     throw new Error(`Order ${params.orderId} not found`) // → 404, no cross-venue leak
   }
 
   // Merchant gating: issuance requires facturacionEnabled on the payment merchant.
-  if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
+  if (!bundle.facturacionEnabled) throw noFacturable(NO_HABILITADA_MSG, params.orderId, motivo)
   // Flow-A gating: autofactura requires autofacturaEnabled in addition.
   if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
 
@@ -952,9 +956,10 @@ export async function emitirConEntrada(
     else if (vigente?.status === 'STAMPED') await ext.registrarExtraccionEmitida(vigente, actor) // C3-23: si una caída se lo comió
     if (vigente?.status === 'STAMPED') return null
     const permitirEfectivo = (params.flow ?? 'STAFF_B') === 'STAFF_B'
-    const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo })
-    if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
-    if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
+    let motivo = undefined as MotivoNoFacturable | undefined
+    const bundle = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo, explicar: m => (motivo = m) })
+    if (!bundle) throw noFacturable(SIN_EMISOR_MSG(params.orderId), params.orderId, motivo, params.expectedVenueId)
+    if (!bundle.facturacionEnabled) throw noFacturable(NO_HABILITADA_MSG, params.orderId, motivo, params.expectedVenueId)
     if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
     // D3 (Codex r5 #3 de pedidos): una venta cancelada después de entrar a la global no se saca de ella ni se factura al cliente: ni egreso
     // ni ingreso (su dinero, si lo hubo, se devuelve; la devolución lleva su propia nota). Antes de la comprobación previa: cero efectos.
@@ -973,9 +978,10 @@ export async function emitirConEntrada(
         // 🔴 C3-12 / G1: la preparación REAL, otra vez, dentro de la reserva de la extracción (la orden y el emisor releídos con `tx`, bajo
         // el `FOR UPDATE` de la orden). `c` trae lo que acaba de armar `construirExtraccion` (no se modifica: memoria compartida).
         comprobarNominativa: async (tx, c) => {
+          // D11 (Codex r2 #1): aquí NO van los motivos nuevos: estos textos también llegan a la autofactura pública, que los clasifica.
           const b = await deps.loadOrderForCfdi(params.orderId, { permitirEfectivo }, tx)
           if (!b) return ['La venta ya no tiene un emisor fiscal configurado.']
-          if (!b.facturacionEnabled) return ['Facturación no habilitada para este comercio']
+          if (!b.facturacionEnabled) return [NO_HABILITADA_MSG]
           if (params.flow === 'AUTOFACTURA_A' && !b.autofacturaEnabled) return ['Autofactura no habilitada para este comercio']
           if (esVentaCancelada(b)) return [MOTIVO_VENTA_CANCELADA] // D3: se canceló entre la comprobación previa y la reserva
           const base = { remanentes: c.remanentes, filasD16: c.filasD16, bruto: c.bruto, porTratamiento: c.porTratamiento }
@@ -1076,14 +1082,15 @@ export async function emitirConEntrada(
       if (deLaOriginal?.extraccion || deLaOriginal?.devoluciones?.modo === 'DESCONTADAS') extraidaDeLaOriginal = deLaOriginal
       else if (deLaOriginal?.devoluciones?.modo === 'CON_NOTA') notasDeLaOriginal = deLaOriginal.devoluciones.pagos
     }
+    let motivo = undefined as MotivoNoFacturable | undefined
     const bundle = await deps.loadOrderForCfdi(
       params.orderId,
-      { permitirEfectivo: !!sustitucion || (params.flow ?? 'STAFF_B') === 'STAFF_B' },
+      { permitirEfectivo: !!sustitucion || (params.flow ?? 'STAFF_B') === 'STAFF_B', explicar: m => (motivo = m) },
       tx,
     )
-    if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
+    if (!bundle) throw noFacturable(SIN_EMISOR_MSG(params.orderId), params.orderId, motivo, params.expectedVenueId)
     if (params.expectedVenueId && bundle.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
-    if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
+    if (!bundle.facturacionEnabled) throw noFacturable(NO_HABILITADA_MSG, params.orderId, motivo)
     if (!sustitucion && params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled)
       throw new Error('Autofactura no habilitada para este comercio')
     if (sustitucion && bundle.emisor.id !== sustitucion.fiscalEmisorId) {
@@ -2113,6 +2120,106 @@ export interface LoadOrderForCfdiOpts {
    * Por default `false`: todo lector que no lo pida (QR del ticket, portal) sigue siendo estricto.
    */
   permitirEfectivo?: boolean
+  /**
+   * D11: si se pasa, el cargador dice POR QUÉ la venta no se puede facturar (cuando devuelve `null` o un bundle con la facturación
+   * apagada). No cambia lo que devuelve. Sólo con él se busca el nombre del comercio (una lectura más, sólo en el camino del error).
+   */
+  explicar?: (motivo: MotivoNoFacturable) => void
+}
+
+/**
+ * D11 (videos de Facturación, 5-nov): por qué una venta no se puede facturar, en palabras del dueño: qué falta y dónde se arregla.
+ * 🔴 Nunca habla de efectivo (founder: lo de facturación para clientes no lo menciona).
+ */
+export type CodigoNoFacturable =
+  | 'VENTA_NO_ENCONTRADA'
+  | 'SALDO_SIN_ORIGEN'
+  | 'SIN_COBRO'
+  | 'COMERCIO_SIN_CONFIGURAR'
+  | 'FACTURACION_APAGADA'
+  | 'COMERCIOS_DE_RFC_DISTINTO'
+  | 'RFC_DE_OTRA_SUCURSAL'
+  | 'PAGO_SIN_RFC'
+  | 'SIN_EMISOR'
+  | 'VARIOS_RFC'
+  | 'AUTOFACTURA_NO_DISPONIBLE'
+  | 'SIN_COMERCIO_ENCENDIDO'
+  | 'SIN_COMERCIOS'
+export interface MotivoNoFacturable {
+  code: CodigoNoFacturable
+  texto: string
+  /** De qué negocio es la venta (`null` si no existe): quien lo enseña comprueba antes que es del negocio que pregunta. */
+  venueId: string | null
+}
+
+/**
+ * D11: «no se puede facturar» con su motivo. El `message` es el de siempre (los controladores que leen el texto siguen igual); el
+ * motivo sólo viaja si la venta es del negocio que pregunta (`noFacturable`).
+ */
+export class NoFacturableError extends Error {
+  constructor(
+    message: string,
+    readonly motivo?: MotivoNoFacturable,
+  ) {
+    super(message)
+    this.name = 'NoFacturableError'
+  }
+}
+const SIN_EMISOR_MSG = (orderId: string) => `Order ${orderId} not found or has no fiscal emisor configured`
+export const NO_HABILITADA_MSG = 'Facturación no habilitada para este comercio'
+/** El error de «no se puede facturar»; la venta de otro negocio es un 404 sin fuga, como siempre. */
+function noFacturable(message: string, orderId: string, motivo: MotivoNoFacturable | undefined, expectedVenueId?: string): Error {
+  if (motivo && expectedVenueId && motivo.venueId !== expectedVenueId) return new Error(`Order ${orderId} not found`)
+  return new NoFacturableError(message, motivo)
+}
+const CONFIGURACION = 'Facturación › Configuración'
+const delComercio = (nombre: string | null) =>
+  nombre ? `El comercio «${nombre}» con el que se cobró esta venta` : 'El comercio con el que se cobró esta venta'
+export const TEXTOS_NO_FACTURABLE = {
+  VENTA_NO_ENCONTRADA: () => 'Esta venta no existe o no es de este negocio.',
+  SALDO_SIN_ORIGEN: () =>
+    'Esta venta se pagó con saldo a favor de un cambio y no se encontró en este negocio el cobro original de ese saldo, así que no se sabe con qué RFC facturarla.',
+  SIN_COBRO: () => 'Esta venta no tiene ningún cobro completado. Se puede facturar cuando esté cobrada.',
+  COMERCIO_SIN_CONFIGURAR: (nombre: string | null) =>
+    `${delComercio(nombre)} no tiene la facturación configurada. En ${CONFIGURACION}, elige con qué RFC factura ese comercio y enciende su facturación.`,
+  FACTURACION_APAGADA: (nombre: string | null) => `${delComercio(nombre)} tiene la facturación apagada. Enciéndela en ${CONFIGURACION}.`,
+  COMERCIOS_DE_RFC_DISTINTO: () => 'La cuenta se cobró con comercios de RFC distinto; factúrala por separado.',
+  RFC_DE_OTRA_SUCURSAL: () =>
+    'El comercio con el que se cobró esta venta factura con el RFC de otra sucursal, así que no se puede facturar desde este negocio. Escríbenos a soporte para revisarlo.',
+  PAGO_SIN_RFC: () =>
+    'Esta venta se cobró con un tipo de pago que no pasa por una terminal ni es transferencia (por ejemplo, vales o una plataforma de pedidos), y todavía no se puede saber con qué RFC facturarla.',
+  SIN_EMISOR: () => `Este negocio todavía no tiene sus datos fiscales. Agrega su RFC y su certificado (CSD) en ${CONFIGURACION}.`,
+  VARIOS_RFC: () => 'Esta venta se cobró sin terminal y el negocio tiene más de un RFC: todavía no se puede elegir con cuál facturarla.',
+  AUTOFACTURA_NO_DISPONIBLE: () => 'El negocio no ofrece la autofactura de esta venta.',
+  SIN_COMERCIO_ENCENDIDO: () =>
+    `Esta venta se cobró sin terminal: se factura si alguno de los comercios del negocio tiene la facturación encendida, y ninguno la tiene. Enciéndela en ${CONFIGURACION}.`,
+  SIN_COMERCIOS: () =>
+    'Esta venta se cobró sin terminal, y hoy una venta así se factura sólo si el negocio tiene algún comercio con la facturación encendida; este negocio no tiene ninguno. Escríbenos a soporte.',
+} satisfies Record<CodigoNoFacturable, (nombre: string | null) => string>
+
+/** El nombre que el dueño ve del comercio de un cobro (el mismo que la tabla de Configuración). */
+async function nombreDelComercio(
+  db: Prisma.TransactionClient | typeof prisma,
+  pago: { merchantAccountId: string | null; ecommerceMerchantId: string | null },
+): Promise<string | null> {
+  if (pago.merchantAccountId) {
+    const m = await db.merchantAccount.findUnique({ where: { id: pago.merchantAccountId }, select: { displayName: true, alias: true } })
+    return m?.displayName || m?.alias || null
+  }
+  if (pago.ecommerceMerchantId) {
+    const e = await db.ecommerceMerchant.findUnique({ where: { id: pago.ecommerceMerchantId }, select: { channelName: true } })
+    return e?.channelName || null
+  }
+  return null
+}
+
+/** D11: ¿el negocio tiene algún comercio (terminal o canal en línea), ligado o no a un RFC? */
+async function negocioTieneComercios(db: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<boolean> {
+  const [terminales, enLinea] = await Promise.all([
+    db.venuePaymentConfig.count({ where: { venueId } }),
+    db.ecommerceMerchant.count({ where: { venueId } }),
+  ])
+  return terminales + enLinea > 0
 }
 
 export async function loadOrderForCfdiFromDb(
@@ -2206,7 +2313,12 @@ export async function loadOrderForCfdiFromDb(
       },
     },
   })
-  if (!order) return null
+  // D11: cada salida sin factura dice por qué (sólo a quien lo pide); el valor devuelto no cambia.
+  const sin = (code: CodigoNoFacturable, nombre: string | null = null): null => {
+    opts.explicar?.({ code, texto: TEXTOS_NO_FACTURABLE[code](nombre), venueId: order?.venueId ?? null })
+    return null
+  }
+  if (!order) return sin('VENTA_NO_ENCONTRADA')
 
   // Resolver el emisor por el pago que trae merchant (el que cobró por procesador). En una orden mixta
   // el efectivo no trae merchant, así que se prefiere el pago con tarjeta para resolver el emisor.
@@ -2223,7 +2335,7 @@ export async function loadOrderForCfdiFromDb(
           pp.exchangeCreditAsCredit.originPayment.venueId !== order.venueId),
     )
   )
-    return null
+    return sin('SALDO_SIN_ORIGEN')
   const pays = cobros.map(pp =>
     isExchangeCreditTenderKind(pp.tenderType?.systemKind)
       ? {
@@ -2234,7 +2346,7 @@ export async function loadOrderForCfdiFromDb(
       : pp,
   )
   const pay = pays.find(pp => pp.merchantAccountId || pp.ecommerceMerchantId) ?? pays[0]
-  if (!pay) return null
+  if (!pay) return sin('SIN_COBRO')
 
   const EMISOR_SELECT = {
     id: true,
@@ -2258,6 +2370,8 @@ export async function loadOrderForCfdiFromDb(
       invoiceCashSales: boolean
     } | null
   } | null
+  /** D11: `null` = la venta se cobró con comercio; si no, cuántos comercios tiene el RFC del negocio. */
+  let comerciosDelRfc: number | null = null
 
   if (pay.merchantAccountId || pay.ecommerceMerchantId) {
     // Resolve MerchantFiscalConfig via the unique merchantAccountId XOR ecommerceMerchantId
@@ -2278,13 +2392,13 @@ export async function loadOrderForCfdiFromDb(
           !isExchangeCreditTenderKind(pp.tenderType?.systemKind),
       )
     )
-      return null
+      return sin('PAGO_SIN_RFC')
     const emisores = await db.fiscalEmisor.findMany({
       where: { venueId: order.venueId },
       select: { ...EMISOR_SELECT, merchantConfigs: { select: { facturacionEnabled: true, autofacturaEnabled: true }, take: 50 } },
       take: 2,
     })
-    if (emisores.length !== 1) return null
+    if (emisores.length !== 1) return sin(emisores.length === 0 ? 'SIN_EMISOR' : 'VARIOS_RFC')
     const { merchantConfigs, ...emisor } = emisores[0]
     // Hereda los interruptores de SUS comercios: se factura si alguno la tiene encendida; la autofactura
     // sólo si TODOS los que facturan la tienen encendida (mismo criterio que una cuenta con varios comercios).
@@ -2294,28 +2408,38 @@ export async function loadOrderForCfdiFromDb(
       autofacturaEnabled: encendidos.length > 0 && encendidos.every(c => c.autofacturaEnabled),
       fiscalEmisor: emisor,
     }
+    comerciosDelRfc = merchantConfigs.length
   }
   // No merchant config or emisor not set up → cannot invoice
-  if (!cfg || !cfg.fiscalEmisor) return null
+  if (!cfg || !cfg.fiscalEmisor) return sin('COMERCIO_SIN_CONFIGURAR', opts.explicar ? await nombreDelComercio(db, pay) : null)
 
   // Todos los pagos con comercio deben resolver al MISMO emisor: una cuenta cobrada mitad con un comercio
   // del RFC A y mitad con uno del RFC B no se factura completa bajo A «porque fue el más reciente».
   // Todos los comercios de la cuenta cuentan por igual (no «el primero»): mismo emisor, con configuración
   // y con facturación encendida; la autofactura sólo se ofrece si TODOS la tienen encendida.
   const motivosComercios: string[] = []
+  // D11 (Codex r1 #2): el primer OTRO comercio de la cuenta que no factura; el aviso previo del panel también lo dice.
+  let otroQueNoFactura: { code: CodigoNoFacturable; nombre: string | null } | null = null
   let autofacturaTodos = cfg.autofacturaEnabled
   for (const otro of pays.filter(pp => pp !== pay && (pp.merchantAccountId || pp.ecommerceMerchantId))) {
     const cfgOtro = await db.merchantFiscalConfig.findUnique({
       where: otro.merchantAccountId ? { merchantAccountId: otro.merchantAccountId } : { ecommerceMerchantId: otro.ecommerceMerchantId! },
       select: { facturacionEnabled: true, autofacturaEnabled: true, fiscalEmisor: { select: { id: true } } },
     })
-    if (!cfgOtro || !cfgOtro.fiscalEmisor)
-      motivosComercios.push('La cuenta se cobró con un comercio sin configuración fiscal; factúrala por separado.')
-    else if (cfgOtro.fiscalEmisor.id !== cfg.fiscalEmisor.id)
-      motivosComercios.push('La cuenta se cobró con comercios de RFC distinto; factúrala por separado.')
-    else if (!cfgOtro.facturacionEnabled)
-      motivosComercios.push('La cuenta se cobró con un comercio que tiene la facturación apagada; factúrala por separado.')
-    else if (!cfgOtro.autofacturaEnabled) autofacturaTodos = false
+    // D11 (Codex r3 #1): el motivo del 422 es el MISMO texto del aviso previo, con el nombre del comercio (una lectura más, sólo aquí).
+    const code: CodigoNoFacturable | null =
+      !cfgOtro || !cfgOtro.fiscalEmisor
+        ? 'COMERCIO_SIN_CONFIGURAR'
+        : cfgOtro.fiscalEmisor.id !== cfg.fiscalEmisor.id
+          ? 'COMERCIOS_DE_RFC_DISTINTO'
+          : !cfgOtro.facturacionEnabled
+            ? 'FACTURACION_APAGADA'
+            : null
+    if (code) {
+      const nombre = code === 'COMERCIOS_DE_RFC_DISTINTO' ? null : await nombreDelComercio(db, otro)
+      motivosComercios.push(TEXTOS_NO_FACTURABLE[code](nombre))
+      otroQueNoFactura ??= { code, nombre }
+    } else if (!cfgOtro!.autofacturaEnabled) autofacturaTodos = false
   }
 
   // Cash sales are not invoiceable unless the emisor opted in (most venues don't declare cash, so a
@@ -2323,7 +2447,7 @@ export async function loadOrderForCfdiFromDb(
   // pago sea en efectivo para bloquearla — si no, se facturaría el total (incl. la parte de efectivo).
   // Salvo que la emita el personal a propósito (`permitirEfectivo`): ver `LoadOrderForCfdiOpts`.
   const hasCash = pays.some(pp => pp.method === 'CASH')
-  if (hasCash && !cfg.fiscalEmisor.invoiceCashSales && !opts.permitirEfectivo) return null
+  if (hasCash && !cfg.fiscalEmisor.invoiceCashSales && !opts.permitirEfectivo) return sin('AUTOFACTURA_NO_DISPONIBLE')
 
   // Tenant isolation: a MerchantAccount can be shared across venues in the same org (via VenuePaymentConfig
   // primary/secondary/tertiary slots). The emisor it maps to MUST belong to THIS order's venue — otherwise
@@ -2332,7 +2456,17 @@ export async function loadOrderForCfdiFromDb(
     logger.warn(
       `[cfdi] emisor/venue mismatch for order ${orderId}: order.venueId=${order.venueId}, emisor.venueId=${cfg.fiscalEmisor.venueId} — refusing to stamp`,
     )
-    return null
+    return sin('RFC_DE_OTRA_SUCURSAL')
+  }
+  // D11: la facturación apagada no es `null` (el 403 de siempre), pero también se explica; igual otro comercio de la cuenta que no factura
+  // (el 422 de siempre). `SIN_COMERCIOS` es el caso (a) de D11: sólo si el negocio no tiene NINGÚN comercio (Codex r1 #3: con comercios
+  // sin ligar al RFC, el dueño sí lo arregla en Configuración).
+  if (opts.explicar && !cfg.facturacionEnabled) {
+    if (comerciosDelRfc === null) sin('FACTURACION_APAGADA', await nombreDelComercio(db, pay))
+    else if (comerciosDelRfc > 0 || (await negocioTieneComercios(db, order.venueId))) sin('SIN_COMERCIO_ENCENDIDO')
+    else sin('SIN_COMERCIOS')
+  } else if (opts.explicar && otroQueNoFactura) {
+    sin(otroQueNoFactura.code, otroQueNoFactura.nombre)
   }
 
   const peso = (d: any) => Math.round(Number(d) * 100)
