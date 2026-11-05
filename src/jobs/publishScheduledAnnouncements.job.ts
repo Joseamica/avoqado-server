@@ -11,6 +11,7 @@ const TIMEZONE = 'America/Mexico_City'
 /** Cuántos anuncios por vuelta (cada 5 min): los que sobren salen en la siguiente. */
 const POR_VUELTA = 50
 const RECUPERAR_TRAS_MS = 10 * 60 * 1000
+const RECUPERAR_HASTA_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * Publica los anuncios de plataforma programados cuya hora ya llegó.
@@ -35,7 +36,8 @@ export async function publishScheduledAnnouncements(now: Date = new Date()): Pro
             {
               status: PlatformAnnouncementStatus.PUBLISHED,
               deliveredAt: null,
-              publishedAt: { lte: new Date(now.getTime() - RECUPERAR_TRAS_MS) },
+              // Y no más de 7 días: un reparto viejo tomaría la audiencia de HOY, que ya no es a quien se le escribió.
+              publishedAt: { gte: new Date(now.getTime() - RECUPERAR_HASTA_MS), lte: new Date(now.getTime() - RECUPERAR_TRAS_MS) },
             },
           ],
         },

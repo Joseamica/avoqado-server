@@ -67,17 +67,17 @@ async function vaciarPendientes() {
 
 beforeAll(async () => {
   env.BASE_URL = 'https://api.test.local'
-  const org = await prisma.organization.create({ data: { name: `Org ${tag}`, email: `${tag}@test.local`, phone: '5555555555' } })
+  const org = await prisma.organization.create({ data: { name: `Org ${tag}`, email: `${tag}@correo-anuncios.mx`, phone: '5555555555' } })
   organizationId = org.id
   for (const v of [1, 2]) {
     const venue = await prisma.venue.create({ data: { organizationId, name: `Venue ${tag} ${v}`, slug: `${tag}-v${v}` } })
     venueIds.push(venue.id)
   }
   for (let i = 0; i < 4; i++) {
-    const s = await prisma.staff.create({ data: { email: `${tag}-${i}@test.local`, firstName: 'Persona', lastName: `${i}` } })
+    const s = await prisma.staff.create({ data: { email: `${tag}-${i}@correo-anuncios.mx`, firstName: 'Persona', lastName: `${i}` } })
     staffIds.push(s.id)
   }
-  process.env.CRM_CORREO_PRUEBAS = staffIds.map((_, i) => `${tag}-${i}@test.local`).join(',')
+  process.env.CRM_CORREO_PRUEBAS = staffIds.map((_, i) => `${tag}-${i}@correo-anuncios.mx`).join(',')
 })
 
 beforeEach(() => {
@@ -191,15 +191,19 @@ describe('correo de anuncios: encolar (Postgres real)', () => {
     expect(await correosDe(a)).toHaveLength(0)
   })
 
-  it('el job recupera un PUBLISHED con deliveredAt null de hace 11 min y no uno de hace 5', async () => {
+  it('el job recupera un PUBLISHED con deliveredAt null de hace 11 min y no uno de hace 5 ni uno de hace 8 días', async () => {
     const viejo = await anuncio({ deliveredAt: null, publishedAt: new Date(Date.now() - 11 * 60 * 1000), targetVenueIds: [venueIds[0]] })
     const reciente = await anuncio({ deliveredAt: null, publishedAt: new Date(Date.now() - 5 * 60 * 1000), targetVenueIds: [venueIds[0]] })
+    const muyViejo = await anuncio({ deliveredAt: null, publishedAt: new Date(Date.now() - 8 * 24 * HORA), targetVenueIds: [venueIds[0]] })
     await publishScheduledAnnouncements(new Date())
     const [v, r] = await Promise.all(
       [viejo, reciente].map(id => prisma.platformAnnouncement.findUniqueOrThrow({ where: { id }, select: { deliveredAt: true } })),
     )
     expect(v.deliveredAt).not.toBeNull()
     expect(r.deliveredAt).toBeNull()
+    // Uno de hace 8 días no se recupera: se repartiría a la audiencia de hoy.
+    const mv = await prisma.platformAnnouncement.findUniqueOrThrow({ where: { id: muyViejo }, select: { deliveredAt: true } })
+    expect(mv.deliveredAt).toBeNull()
   })
 })
 
@@ -222,7 +226,7 @@ describe('correo de anuncios: reclamar y mandar (Postgres real)', () => {
     const [r1, r2] = await Promise.all([trabajador(), trabajador()])
 
     expect(r1.sent + r2.sent).toBe(4)
-    expect(mockSend.mock.calls.map(([o]) => o.to).sort()).toEqual(staffIds.map((_, i) => `${tag}-${i}@test.local`).sort())
+    expect(mockSend.mock.calls.map(([o]) => o.to).sort()).toEqual(staffIds.map((_, i) => `${tag}-${i}@correo-anuncios.mx`).sort())
     expect((await correosDe(a)).every(f => f.status === 'SENT')).toBe(true)
   })
 

@@ -9,7 +9,8 @@ import prisma from '@/utils/prismaClient'
 import { env } from '@/config/env'
 import emailService from '@/services/email.service'
 import { isAnnouncementEmailOn } from '@/services/announcements/announcementEmailPreference.service'
-import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
+import { campanasPausadasPorCupo, finDeLaPausaPorCupo } from '@/services/email/resendQuota'
+import { esCorreoDemo, esNegocioDemo } from '@/services/demo/candadoDemo'
 import {
   claimAnnouncementEmails,
   enqueuePendingAnnouncementEmails,
@@ -30,8 +31,13 @@ jest.mock('@/services/announcements/announcementEmailPreference.service', () => 
 jest.mock('@/services/email/resendQuota', () => ({
   ...jest.requireActual('@/services/email/resendQuota'),
   campanasPausadasPorCupo: jest.fn(),
+  finDeLaPausaPorCupo: jest.fn(),
 }))
-jest.mock('@/services/demo/candadoDemo', () => ({ conNegocio: (_v: string, fn: () => unknown) => fn() }))
+jest.mock('@/services/demo/candadoDemo', () => ({
+  conNegocio: (_v: string, fn: () => unknown) => fn(),
+  esCorreoDemo: jest.fn(),
+  esNegocioDemo: jest.fn(),
+}))
 
 const mockRaw = prisma.$queryRaw as unknown as jest.Mock
 const mockFind = prisma.platformAnnouncementEmail.findMany as unknown as jest.Mock
@@ -41,6 +47,10 @@ const mockCreate = prisma.platformAnnouncementEmail.createMany as unknown as jes
 const mockSend = emailService.sendEmailWithResult as unknown as jest.Mock
 const mockOn = isAnnouncementEmailOn as unknown as jest.Mock
 const mockPausa = campanasPausadasPorCupo as unknown as jest.Mock
+const mockFinPausa = finDeLaPausaPorCupo as unknown as jest.Mock
+const mockCorreoDemo = esCorreoDemo as unknown as jest.Mock
+const mockNegocioDemo = esNegocioDemo as unknown as jest.Mock
+const { finDeLaPausaPorCupo: finDeLaPausaReal } = jest.requireActual('@/services/email/resendQuota')
 
 const AHORA = new Date('2026-11-04T12:00:00.000Z')
 const LEASE = new Date('2026-11-04T12:05:00.000Z')
@@ -59,6 +69,7 @@ const fila = (over: Record<string, unknown> = {}) => ({
   capDay: null,
   announcement: {
     id: 'a1',
+    status: 'PUBLISHED',
     title: 'Terminal nueva',
     body: 'Dos pantallas',
     imageUrl: null,
@@ -66,7 +77,7 @@ const fila = (over: Record<string, unknown> = {}) => ({
     actionLabel: null,
     actionUrl: null,
   },
-  staff: { email: 's1@test.local' },
+  staff: { email: 's1@correo-anuncios.mx' },
   ...over,
 })
 
@@ -82,12 +93,15 @@ describe('announcementEmail.service', () => {
     env.BASE_URL = 'https://api.test.local'
     env.FRONTEND_URL = 'https://dashboard.test.local'
     env.ANNOUNCEMENT_EMAIL_DAILY_CAP = 40
-    process.env.CRM_CORREO_PRUEBAS = 's1@test.local,s2@test.local'
+    process.env.CRM_CORREO_PRUEBAS = 's1@correo-anuncios.mx,s2@correo-anuncios.mx'
     mockUpdate.mockResolvedValue({ count: 1 })
     mockCount.mockResolvedValue(0)
     mockRaw.mockResolvedValue([])
     mockOn.mockResolvedValue(true)
     mockPausa.mockReturnValue(false)
+    mockFinPausa.mockImplementation(finDeLaPausaReal)
+    mockCorreoDemo.mockReturnValue(false)
+    mockNegocioDemo.mockResolvedValue(false)
     mockSend.mockResolvedValue({ ok: true, resendId: 'r1', transient: false })
     mockFind.mockResolvedValue([fila()])
   })
@@ -135,7 +149,7 @@ describe('announcementEmail.service', () => {
     it('manda con idempotencyKey y List-Unsubscribe', async () => {
       await expect(mandar(['e1'])).resolves.toEqual({ sent: 1, skipped: 0, failed: 0 })
       const opciones = mockSend.mock.calls[0][0]
-      expect(opciones.to).toBe('s1@test.local')
+      expect(opciones.to).toBe('s1@correo-anuncios.mx')
       expect(opciones.idempotencyKey).toBe('announcement-email:a1:s1')
       expect(opciones.headers['List-Unsubscribe']).toMatch(/^<https:\/\/api\.test\.local\/api\/v1\/public\/unsubscribe\?token=[^>]+>$/)
       expect(opciones.headers['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click')
@@ -184,10 +198,13 @@ describe('announcementEmail.service', () => {
       })
     })
 
-    it('un 429 de cupo vuelve a PENDING sin gastar intento, hasta el reinicio', async () => {
+    it('un 429 de cupo vuelve a PENDING sin gastar intento, hasta el fin de la pausa que vio el medidor', async () => {
+      // El medidor vio la medianoche con el reloj de Resend (unos segundos distinto del de aquí): ése manda, como en campaignSender.
+      const DE_RESEND = new Date('2026-11-05T00:00:02.000Z')
+      mockFinPausa.mockReturnValue(DE_RESEND)
       mockSend.mockResolvedValue({ ok: false, transient: true, errorCode: 'monthly_quota_exceeded' })
       await mandar(['e1'])
-      expect(ultima()).toMatchObject({ status: 'PENDING', attempts: 0, nextAttemptAt: REINICIO, capDay: null })
+      expect(ultima()).toMatchObject({ status: 'PENDING', attempts: 0, nextAttemptAt: DE_RESEND, capDay: null })
     })
 
     it('cupo_en_pausa también', async () => {
@@ -223,6 +240,10 @@ describe('announcementEmail.service', () => {
       expect(mockSend).not.toHaveBeenCalled()
       expect(mockCount.mock.calls[0][0].where).toEqual({ capDay: HOY })
       expect(ultima()).toMatchObject({ status: 'PENDING', attempts: 0, capDay: null, leaseUntil: null, nextAttemptAt: REINICIO })
+      // El tope PROPIO usa la medianoche UTC de aquí, no la pausa del medidor.
+      expect(mockFinPausa).not.toHaveBeenCalled()
+      // Su CAS exige que la fila no haya empezado a mandarse.
+      expect(mockUpdate.mock.calls[mockUpdate.mock.calls.length - 1][0].where).toMatchObject({ id: 'e1', sendStartedAt: null })
     })
 
     it('una fila que ya reservó hoy no se cuenta otra vez', async () => {
@@ -249,14 +270,14 @@ describe('announcementEmail.service', () => {
         yaSalio = true
         return { ok: true, transient: false }
       })
-      mockFind.mockResolvedValue([fila(), fila({ id: 'e2', staffId: 's2', staff: { email: 's2@test.local' } })])
+      mockFind.mockResolvedValue([fila(), fila({ id: 'e2', staffId: 's2', staff: { email: 's2@correo-anuncios.mx' } })])
       // El día nuevo ya tiene sus 40.
       mockCount.mockImplementation(async ({ where }: { where: { capDay: string } }) => (where.capDay === '2026-11-05' ? 40 : 0))
 
       await mandar(['e1', 'e2'], () => (yaSalio ? DESPUES : ANTES))
 
       expect(mockSend).toHaveBeenCalledTimes(1)
-      expect(mockSend.mock.calls[0][0].to).toBe('s1@test.local')
+      expect(mockSend.mock.calls[0][0].to).toBe('s1@correo-anuncios.mx')
       expect(ultima()).toMatchObject({ status: 'PENDING', capDay: null, nextAttemptAt: new Date('2026-11-06T00:00:00.000Z') })
     })
 
@@ -297,7 +318,10 @@ describe('announcementEmail.service', () => {
     })
 
     it('se salta a quien se dio de baja y a quien no tiene correo, sin mandar', async () => {
-      mockFind.mockResolvedValue([fila({ staff: { email: null } }), fila({ id: 'e2', staffId: 's2', staff: { email: 's2@test.local' } })])
+      mockFind.mockResolvedValue([
+        fila({ staff: { email: null } }),
+        fila({ id: 'e2', staffId: 's2', staff: { email: 's2@correo-anuncios.mx' } }),
+      ])
       mockOn.mockImplementation(async (staffId: string) => staffId !== 's2')
 
       await expect(mandar(['e1', 'e2'])).resolves.toEqual({ sent: 0, skipped: 2, failed: 0 })
@@ -321,6 +345,109 @@ describe('announcementEmail.service', () => {
       await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 0, failed: 0 })
       expect(mockSend).not.toHaveBeenCalled()
       expect(mockUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    it('un anuncio que ya no está PUBLISHED se salta sin mandar y sin reservar (ARCHIVADO)', async () => {
+      mockFind.mockResolvedValue([fila({ announcement: { ...fila().announcement, status: 'ARCHIVED' } })])
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 1, failed: 0 })
+      expect(mockSend).not.toHaveBeenCalled()
+      expect(mockCount).not.toHaveBeenCalled()
+      expect(escrituras()).toEqual([expect.objectContaining({ status: 'SENT', skippedReason: 'ARCHIVADO', capDay: null })])
+    })
+
+    it('un correo de relleno (no entregable) se salta antes de reservar: NO_ENTREGABLE', async () => {
+      mockFind.mockResolvedValue([fila({ staff: { email: 'tpv-caja-1@internal.avoqado.io' } })])
+      process.env.CRM_CORREO_PRUEBAS = 'tpv-caja-1@internal.avoqado.io'
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 1, failed: 0 })
+      expect(mockSend).not.toHaveBeenCalled()
+      expect(mockCount).not.toHaveBeenCalled()
+      expect(ultima()).toMatchObject({ status: 'SENT', skippedReason: 'NO_ENTREGABLE', capDay: null, sendStartedAt: null })
+    })
+
+    it.each([
+      ['un correo demo', () => mockCorreoDemo.mockReturnValue(true)],
+      ['un negocio demo', () => mockNegocioDemo.mockResolvedValue(true)],
+    ])('%s se salta antes de reservar: DEMO', async (_caso, preparar) => {
+      preparar()
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 1, failed: 0 })
+      expect(mockSend).not.toHaveBeenCalled()
+      expect(mockCount).not.toHaveBeenCalled()
+      expect(ultima()).toMatchObject({ status: 'SENT', skippedReason: 'DEMO' })
+    })
+
+    it('si no se pudo confirmar el negocio demo (base caída), no manda y se reintenta', async () => {
+      mockNegocioDemo.mockRejectedValue(new Error('base caída'))
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 0, failed: 1 })
+      expect(mockSend).not.toHaveBeenCalled()
+      expect(ultima()).toMatchObject({ status: 'PENDING', leaseUntil: null })
+    })
+
+    // Los tres vuelven de `sendEmailWithResult` ANTES de `resend.emails.send`: nunca salieron, no gastan tope ni quedan FAILED.
+    it('UNDELIVERABLE_RECIPIENT de Resend: SENT NO_ENTREGABLE y suelta el lugar del día', async () => {
+      mockSend.mockResolvedValue({ ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' })
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 1, failed: 0 })
+      expect(ultima()).toMatchObject({
+        status: 'SENT',
+        skippedReason: 'NO_ENTREGABLE',
+        capDay: null,
+        sendStartedAt: null,
+        leaseUntil: null,
+      })
+    })
+
+    it('NEGOCIO_DEMO definitivo (transient=false): SENT DEMO y suelta el lugar del día', async () => {
+      mockSend.mockResolvedValue({ ok: false, transient: false, errorCode: 'NEGOCIO_DEMO' })
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 1, failed: 0 })
+      expect(ultima()).toMatchObject({ status: 'SENT', skippedReason: 'DEMO', capDay: null, sendStartedAt: null })
+    })
+
+    it('NEGOCIO_DEMO sin confirmar (transient=true): PENDING con backoff, sin marca ni lugar', async () => {
+      mockSend.mockResolvedValue({ ok: false, transient: true, errorCode: 'NEGOCIO_DEMO' })
+      await expect(mandar(['e1'])).resolves.toEqual({ sent: 0, skipped: 0, failed: 1 })
+      expect(ultima()).toMatchObject({
+        status: 'PENDING',
+        capDay: null,
+        sendStartedAt: null,
+        leaseUntil: null,
+        nextAttemptAt: new Date(AHORA.getTime() + 2 * 60_000),
+        lastError: 'NEGOCIO_DEMO',
+      })
+    })
+
+    it('EMAIL_SERVICE_UNAVAILABLE: PENDING con backoff, sin marca ni lugar', async () => {
+      mockSend.mockResolvedValue({ ok: false, transient: true, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' })
+      await mandar(['e1'])
+      expect(ultima()).toMatchObject({ status: 'PENDING', capDay: null, sendStartedAt: null, lastError: 'EMAIL_SERVICE_UNAVAILABLE' })
+    })
+
+    it('EMAIL_SERVICE_UNAVAILABLE en el 5º intento queda FAILED, sin marca ni lugar', async () => {
+      mockFind.mockResolvedValue([fila({ attempts: 5 })])
+      mockSend.mockResolvedValue({ ok: false, transient: true, errorCode: 'EMAIL_SERVICE_UNAVAILABLE' })
+      await mandar(['e1'])
+      expect(ultima()).toMatchObject({ status: 'FAILED', capDay: null, sendStartedAt: null })
+    })
+
+    it('la pausa de 500 ms va ANTES de reservar: la última revisión del día queda pegada a Resend', async () => {
+      const orden: string[] = []
+      const setTimeoutReal = global.setTimeout
+      const espia = jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void) => {
+        orden.push('pausa')
+        return setTimeoutReal(fn, 0)
+      }) as unknown as typeof setTimeout)
+      mockUpdate.mockImplementation(async ({ data }: { data: { capDay?: string; status?: string } }) => {
+        orden.push(data.capDay ? 'reserva' : `escribe ${data.status}`)
+        return { count: 1 }
+      })
+      mockSend.mockImplementation(async () => {
+        orden.push('resend')
+        return { ok: true, transient: false }
+      })
+      mockFind.mockResolvedValue([fila(), fila({ id: 'e2', staffId: 's2', staff: { email: 's2@correo-anuncios.mx' } })])
+
+      await sendClaimedAnnouncementEmails(['e1', 'e2'], { now: AHORA, reloj: () => AHORA, pausaMs: 500 })
+      espia.mockRestore()
+
+      expect(orden).toEqual(['reserva', 'resend', 'escribe SENT', 'pausa', 'reserva', 'resend', 'escribe SENT'])
     })
 
     it.each([[undefined], ['ftp://api.test.local'], ['/api']])(

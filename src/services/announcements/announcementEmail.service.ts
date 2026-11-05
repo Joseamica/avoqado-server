@@ -1,12 +1,13 @@
-import { Prisma, PlatformAnnouncementDeliveryStatus } from '@prisma/client'
+import { Prisma, PlatformAnnouncementDeliveryStatus, PlatformAnnouncementStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
 import emailService from '../email.service'
-import { CUPO_EN_PAUSA, campanasPausadasPorCupo, esErrorDeCupo, reinicioDelCupoDiario } from '../email/resendQuota'
+import { CUPO_EN_PAUSA, campanasPausadasPorCupo, esErrorDeCupo, finDeLaPausaPorCupo, reinicioDelCupoDiario } from '../email/resendQuota'
 import { cabecerasDeBaja } from '../crm/email/footer'
 import { puedeMandarFueraDeProduccion } from '../crm/email/testAllowlist'
-import { conNegocio } from '../demo/candadoDemo'
+import { conNegocio, esCorreoDemo, esNegocioDemo } from '../demo/candadoDemo'
+import { isDeliverableRecipient } from '../../utils/undeliverableEmail'
 import { signUnsubscribeToken } from '../../utils/unsubscribeToken'
 import { utcTs } from '../../utils/sqlDates'
 import { isAnnouncementEmailOn } from './announcementEmailPreference.service'
@@ -205,27 +206,48 @@ export async function sendClaimedAnnouncementEmails(
     where: { id: { in: ids }, status: Estado.PENDING },
     take: ids.length,
     include: {
-      announcement: { select: { title: true, body: true, imageUrl: true, contentBlocks: true, actionLabel: true, actionUrl: true } },
+      announcement: {
+        select: { status: true, title: true, body: true, imageUrl: true, contentBlocks: true, actionLabel: true, actionUrl: true },
+      },
       staff: { select: { email: true } },
     },
   })
 
-  let mandados = 0
+  let huboEnvio = false
   for (const d of filas) {
     const cas = { id: d.id, attempts: d.attempts, leaseUntil: d.leaseUntil }
-    const escribir = async (data: Prisma.PlatformAnnouncementEmailUpdateManyMutationInput) =>
-      (await prisma.platformAnnouncementEmail.updateMany({ where: cas, data })).count > 0
+    const escribir = async (data: Prisma.PlatformAnnouncementEmailUpdateManyMutationInput, extra: { sendStartedAt?: null } = {}) =>
+      (await prisma.platformAnnouncementEmail.updateMany({ where: { ...cas, ...extra }, data })).count > 0
     /** Vuelve a la cola sin gastar el intento: nunca llegó a Resend, o Resend lo rechazó seguro. */
-    const devolver = (nextAttemptAt: Date, lastError: string | null) =>
-      escribir({
-        status: Estado.PENDING,
-        attempts: d.attempts - 1,
-        sendStartedAt: null,
-        capDay: null,
-        leaseUntil: null,
-        nextAttemptAt,
-        lastError,
-      })
+    const devolver = (nextAttemptAt: Date, lastError: string | null, extra: { sendStartedAt?: null } = {}) =>
+      escribir(
+        {
+          status: Estado.PENDING,
+          attempts: d.attempts - 1,
+          sendStartedAt: null,
+          capDay: null,
+          leaseUntil: null,
+          nextAttemptAt,
+          lastError,
+        },
+        extra,
+      )
+    /** No salió y el error puede pasar solo: reintento con backoff (el intento ya se contó al reclamar), FAILED al 5º. */
+    const reintentar = async (mensaje: string) => {
+      const base = { leaseUntil: null, sendStartedAt: null, capDay: null, lastError: mensaje }
+      const escrito = await escribir(
+        d.attempts >= MAX_INTENTOS
+          ? { status: Estado.FAILED, ...base }
+          : { status: Estado.PENDING, nextAttemptAt: new Date(opts.now.getTime() + REINTENTO_MS * d.attempts), ...base },
+      )
+      if (escrito) res.failed++
+      logger.warn('[Anuncios] Correo de anuncio sin salir; se reintenta', { emailId: d.id, error: mensaje })
+    }
+    /** No se manda nunca (baja, sin correo, demo…): cuenta como hecho, sin gastar tope. */
+    const saltar = async (skippedReason: string) => {
+      const data = { status: Estado.SENT, skippedReason, sendStartedAt: null, capDay: null, leaseUntil: null, lastError: null }
+      if (await escribir(data)) res.skipped++
+    }
 
     if (d.sendStartedAt) {
       if (await escribir({ status: Estado.FAILED, leaseUntil: null, lastError: INCIERTO })) res.failed++
@@ -236,15 +258,23 @@ export async function sendClaimedAnnouncementEmails(
     let correo: { to: string; subject: string; html: string; text: string; unsubscribeUrl: string }
     try {
       const to = d.staff.email
-      const motivo = !to
-        ? 'SIN_CORREO'
-        : !(await isAnnouncementEmailOn(d.staffId))
-          ? 'BAJA'
-          : !puedeMandarFueraDeProduccion(to)
-            ? 'FUERA_DE_LA_LISTA'
-            : null
+      // Lo que nunca va a salir se salta ANTES de reservar: no gasta tope ni se marca FAILED.
+      const motivo =
+        d.announcement.status !== PlatformAnnouncementStatus.PUBLISHED
+          ? 'ARCHIVADO'
+          : !to
+            ? 'SIN_CORREO'
+            : !(await isAnnouncementEmailOn(d.staffId))
+              ? 'BAJA'
+              : !puedeMandarFueraDeProduccion(to)
+                ? 'FUERA_DE_LA_LISTA'
+                : !isDeliverableRecipient(to, 'announcementEmail', { emailId: d.id })
+                  ? 'NO_ENTREGABLE'
+                  : esCorreoDemo(to) || (await esNegocioDemo(d.venueId))
+                    ? 'DEMO'
+                    : null
       if (motivo || !to) {
-        if (await escribir({ status: Estado.SENT, skippedReason: motivo, leaseUntil: null, lastError: null })) res.skipped++
+        await saltar(motivo ?? 'SIN_CORREO')
         continue
       }
       const base = urlHttp(env.BASE_URL)
@@ -255,22 +285,13 @@ export async function sendClaimedAnnouncementEmails(
       const unsubscribeUrl = `${base}/api/v1/public/unsubscribe?token=${token}`
       correo = { to, unsubscribeUrl, ...renderAnnouncementEmail({ ...d.announcement, openUrl: panel, unsubscribeUrl }) }
     } catch (error) {
-      const mensaje = error instanceof Error ? error.message : String(error)
-      const agotado = d.attempts >= MAX_INTENTOS
-      const escrito = await escribir(
-        agotado
-          ? { status: Estado.FAILED, leaseUntil: null, lastError: mensaje }
-          : {
-              status: Estado.PENDING,
-              leaseUntil: null,
-              nextAttemptAt: new Date(opts.now.getTime() + REINTENTO_MS * d.attempts),
-              lastError: mensaje,
-            },
-      )
-      if (escrito) res.failed++
-      logger.warn('[Anuncios] No se pudo preparar un correo de anuncio', { emailId: d.id, error: mensaje })
+      await reintentar(error instanceof Error ? error.message : String(error))
       continue
     }
+
+    // 500 ms entre envíos (Resend: 2 por segundo), ANTES de reservar: la última revisión del día queda pegada a Resend.
+    if (huboEnvio && pausaMs > 0) await new Promise(resolve => setTimeout(resolve, pausaMs))
+    huboEnvio = false
 
     // ── El tope del día, reservado ANTES de la red ──
     let reservado = false
@@ -278,7 +299,7 @@ export async function sendClaimedAnnouncementEmails(
       const r = await reservar(d, { ...cas, status: Estado.PENDING, sendStartedAt: null }, reloj)
       if (r.r === 'perdida') break
       if (r.r === 'lleno') {
-        await devolver(reinicioDelCupoDiario(r.t), null)
+        await devolver(reinicioDelCupoDiario(r.t), null, { sendStartedAt: null })
         break
       }
       d.capDay = r.dia
@@ -295,8 +316,8 @@ export async function sendClaimedAnnouncementEmails(
     if (!reservado) continue
 
     // ── La llamada a Resend: a lo más una vez ──
-    if (mandados++ > 0 && pausaMs > 0) await new Promise(resolve => setTimeout(resolve, pausaMs))
-    let resultado: { ok: boolean; errorCode?: string }
+    huboEnvio = true
+    let resultado: { ok: boolean; transient?: boolean; errorCode?: string }
     try {
       resultado = await conNegocio(d.venueId, () =>
         emailService.sendEmailWithResult({
@@ -314,10 +335,18 @@ export async function sendClaimedAnnouncementEmails(
       resultado = { ok: false, errorCode: error instanceof Error ? error.message : 'Sin respuesta de Resend' }
     }
 
+    const codigo = resultado.errorCode
     if (resultado.ok) {
       if (await escribir({ status: Estado.SENT, sentAt: reloj(), leaseUntil: null, lastError: null })) res.sent++
-    } else if (esErrorDeCupo(resultado.errorCode) || resultado.errorCode === CUPO_EN_PAUSA) {
-      await devolver(reinicioDelCupoDiario(reloj()), resultado.errorCode ?? null)
+    } else if (esErrorDeCupo(codigo) || codigo === CUPO_EN_PAUSA) {
+      // El instante que vio el medidor (la medianoche UTC según Resend), como `campaignSender`.
+      await devolver(finDeLaPausaPorCupo(reloj()), codigo ?? null)
+    } else if (codigo === 'UNDELIVERABLE_RECIPIENT' || (codigo === 'NEGOCIO_DEMO' && !resultado.transient)) {
+      // `sendEmailWithResult` lo frenó antes de `resend.emails.send`: nunca salió y nunca saldrá.
+      await saltar(codigo === 'NEGOCIO_DEMO' ? 'DEMO' : 'NO_ENTREGABLE')
+    } else if (codigo === 'EMAIL_SERVICE_UNAVAILABLE' || codigo === 'NEGOCIO_DEMO') {
+      // También antes de `resend.emails.send` (sin llave de Resend, o el candado demo sin confirmar): se reintenta.
+      await reintentar(codigo)
     } else if (resultado.errorCode === 'rate_limit_exceeded') {
       await devolver(new Date(reloj().getTime() + VELOCIDAD_MS), resultado.errorCode)
     } else {

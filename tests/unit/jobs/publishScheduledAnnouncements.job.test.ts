@@ -40,7 +40,7 @@ describe('publishScheduledAnnouncements', () => {
     expect(where.OR).toContainEqual({
       status: PlatformAnnouncementStatus.PUBLISHED,
       deliveredAt: null,
-      publishedAt: { lte: new Date('2026-11-04T11:50:00.000Z') },
+      publishedAt: { gte: new Date('2026-10-28T12:00:00.000Z'), lte: new Date('2026-11-04T11:50:00.000Z') },
     })
   })
 
