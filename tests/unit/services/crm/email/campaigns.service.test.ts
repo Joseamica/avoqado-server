@@ -9,9 +9,15 @@ import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
 import { contarAudiencia } from '@/services/crm/email/audience.service'
-import { cancelCampaign, getCampaign, listCampaigns, previewSend } from '@/services/crm/email/campaigns.service'
+import { cancelCampaign, getCampaign, listCampaigns, previewSend, sendCampaignTest } from '@/services/crm/email/campaigns.service'
+import { contentHash, enviarPrueba } from '@/services/crm/email/templates.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
 
+jest.mock('@/services/crm/email/templates.service', () => ({
+  ...jest.requireActual('@/services/crm/email/templates.service'),
+  enviarPrueba: jest.fn(),
+}))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/services/email/resendQuota', () => ({ campanasPausadasPorCupo: jest.fn(() => false) }))
 // A quién le llega es SQL del servicio de públicos: aquí basta el conteo.
@@ -306,5 +312,39 @@ describe('previewSend — la confirmación se ata a la versión que se ve (huell
     const huella = await huellaVista({ audience: guadalajara })
     prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: guadalajara, status: 'ENVIADA' }) as never)
     await expect(previewSend(ACTOR, CAMP_A, huella)).rejects.toMatchObject({ code: 'CRM_CAMPANA_NO_EDITABLE' })
+  })
+})
+
+describe('sendCampaignTest', () => {
+  const OTRA = 'cstaffotra00000000000001'
+  const actor = { staffId: STAFF } as never
+  const campana = { subject: 'Lo nuevo', blocks: [{ type: 'paragraph', text: 'Hola' }] }
+  beforeEach(() => {
+    ;(enviarPrueba as jest.Mock).mockReset()
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(campana as never)
+    prismaMock.crmCampaign.updateMany.mockResolvedValue({ count: 1 } as never)
+  })
+
+  it('pasa el destino, escribe testSentHash sólo si salió y su bitácora dice { para, llave } sin correo', async () => {
+    ;(enviarPrueba as jest.Mock).mockResolvedValue({ resultado: { ok: true, destino: { nombre: 'Ana' } }, llave: 'crm-prueba:a:b:h' })
+    await expect(sendCampaignTest(actor, CAMP_A, { destinoStaffId: OTRA })).resolves.toEqual({ ok: true, destino: { nombre: 'Ana' } })
+    expect(enviarPrueba).toHaveBeenCalledWith(actor, expect.objectContaining({ destinoStaffId: OTRA }))
+    expect(prismaMock.crmCampaign.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { testSentHash: contentHash(campana.subject, campana.blocks as never) } }),
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CRM_CAMPAIGN_TEST_SENT', entityId: CAMP_A, data: { para: OTRA, llave: 'crm-prueba:a:b:h' } }),
+    )
+  })
+
+  it('no salió: ni testSentHash ni bitácora; repetida: testSentHash sí, bitácora no', async () => {
+    ;(enviarPrueba as jest.Mock).mockResolvedValueOnce({ resultado: { ok: false, motivo: 'x' } })
+    await sendCampaignTest(actor, CAMP_A)
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    ;(enviarPrueba as jest.Mock).mockResolvedValueOnce({ resultado: { ok: true, repetida: true }, llave: 'k' })
+    await sendCampaignTest(actor, CAMP_A)
+    expect(prismaMock.crmCampaign.updateMany).toHaveBeenCalledTimes(1)
+    expect(logAction).not.toHaveBeenCalled()
   })
 })

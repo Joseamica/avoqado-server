@@ -30,6 +30,7 @@ import {
   ensureCrmTeamVenue,
   listTeamMembers,
   listTeamOptions,
+  miembrosConCorreo,
   removeTeamMember,
   updateTeamMember,
 } from '@/services/crm/teamVenue.service'
@@ -990,6 +991,41 @@ describe('listTeamOptions', () => {
     await expect(
       listTeamOptions(actor({ editar: null, ver: null, ...SIN_FINAS, equipo: true, campanas: false, admin: false })),
     ).resolves.toHaveLength(2)
+  })
+})
+
+describe('miembrosConCorreo', () => {
+  it('sólo filas activas reclamadas cuyo Staff sigue activo y con el mismo correo; con take 100', async () => {
+    const CHANGED_ID = 'cstaffchg0000000000000001'
+    const INACTIVE_ID = 'cstaffina0000000000000001'
+    prismaMock.platformAccess.findMany.mockResolvedValue([
+      { staffId: SELLER_ID, email: 'carla@avoqado.io' },
+      { staffId: null, email: 'beto@avoqado.io' },
+      { staffId: CHANGED_ID, email: 'luis@avoqado.io' },
+      { staffId: INACTIVE_ID, email: 'ines@avoqado.io' },
+    ])
+    prismaMock.staff.findMany.mockResolvedValue([
+      { id: SELLER_ID, email: 'Carla@Avoqado.io', firstName: 'Carla', lastName: 'Ruiz' },
+      { id: CHANGED_ID, email: 'luis.nuevo@avoqado.io', firstName: 'Luis', lastName: 'Ramírez' },
+    ])
+
+    await expect(miembrosConCorreo()).resolves.toEqual([{ staffId: SELLER_ID, name: 'Carla Ruiz', email: 'carla@avoqado.io' }])
+    expect(prismaMock.platformAccess.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { active: true, staffId: { not: null } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 100,
+      }),
+    )
+    expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { active: true, id: { in: [SELLER_ID, CHANGED_ID, INACTIVE_ID] } }, take: 100 }),
+    )
+  })
+
+  it('sin filas no consulta Staff', async () => {
+    prismaMock.platformAccess.findMany.mockResolvedValue([])
+    await expect(miembrosConCorreo()).resolves.toEqual([])
+    expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
   })
 })
 

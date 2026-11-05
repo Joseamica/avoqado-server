@@ -22,7 +22,7 @@ import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import type { CrmAccess } from '../access.service'
 import { contarAudiencia, recorrerAudiencia } from './audience.service'
 import { PUDO_SALIR_EN_UN_INTENTO_ANTERIOR } from './campaignSender.service'
-import { assertSinVariablesDesconocidas, contentHash, sendTestToSelf } from './templates.service'
+import { assertSinVariablesDesconocidas, contentHash, enviarPrueba } from './templates.service'
 
 export type EstadoDeCampana = 'BORRADOR' | 'ENVIANDO' | 'ENVIADA' | 'CANCELADA'
 
@@ -299,14 +299,28 @@ export async function previewSend(_actor: CrmAccess, id: string, huella?: string
  * «Envíame una prueba» con el contenido de la campaña. 🔴 Sólo una prueba que SALIÓ (`ok: true`) habilita el envío: una
  * omitida por la lista de prueba o rechazada por Resend no escribe la huella.
  */
-export async function sendCampaignTest(actor: CrmAccess, id: string) {
+export async function sendCampaignTest(actor: CrmAccess, id: string, opciones: { destinoStaffId?: string } = {}) {
   const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { subject: true, blocks: true } })
   if (!fila) throw notFound()
-  const resultado = await sendTestToSelf(actor, { subject: fila.subject, blocks: bloquesDe(fila) })
+  const { resultado, llave } = await enviarPrueba(actor, {
+    subject: fila.subject,
+    blocks: bloquesDe(fila),
+    destinoStaffId: opciones.destinoStaffId,
+  })
   if (resultado.ok) {
     // La huella de lo que se probó, no de lo que haya ahora: si alguien editó mientras tanto, la nueva versión pide su prueba.
     await prisma.crmCampaign.updateMany({ where: { id }, data: { testSentHash: contentHash(fila.subject, bloquesDe(fila)) } })
-    void logAction({ staffId: actor.staffId, venueId: null, action: 'CRM_CAMPAIGN_TEST_SENT', entity: 'CrmCampaign', entityId: id })
+    // Una repetida no deja otra bitácora (la primera sigue contando); la llave y el «para» no llevan correos.
+    if (!resultado.repetida) {
+      void logAction({
+        staffId: actor.staffId,
+        venueId: null,
+        action: 'CRM_CAMPAIGN_TEST_SENT',
+        entity: 'CrmCampaign',
+        entityId: id,
+        data: { para: opciones.destinoStaffId ?? actor.staffId, llave },
+      })
+    }
   }
   return resultado
 }
