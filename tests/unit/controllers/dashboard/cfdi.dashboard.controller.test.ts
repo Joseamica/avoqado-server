@@ -5,8 +5,20 @@ const mockCancel = jest.fn()
 const mockGetStatus = jest.fn()
 const mockListCfdis = jest.fn()
 const mockExtraccionesPendientes = jest.fn()
+const mockLoadOrder = jest.fn()
+const mockCfdiFindFirst = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   issueCfdiForOrder: (...a: any[]) => mockIssue(...a),
+  loadOrderForCfdiFromDb: (...a: any[]) => mockLoadOrder(...a),
+  // D11: la clase de verdad es trivial; aquí una igual para que `instanceof` funcione sin cargar el servicio.
+  NoFacturableError: class NoFacturableError extends Error {
+    constructor(
+      message: string,
+      readonly motivo?: unknown,
+    ) {
+      super(message)
+    }
+  },
   cancelCfdi: (...a: any[]) => mockCancel(...a),
   getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
   listCfdisForVenue: (...a: any[]) => mockListCfdis(...a),
@@ -90,7 +102,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     fiscalEmisor: { findFirst: (...a: any[]) => mockPrismaFiscalEmisorFindFirst(...a) },
     venue: { findUnique: (...a: any[]) => mockPrismaVenueFindUnique(...a) },
-    cfdi: { findUnique: jest.fn(), upsert: jest.fn() },
+    cfdi: { findUnique: jest.fn(), upsert: jest.fn(), findFirst: (...a: any[]) => mockCfdiFindFirst(...a) },
   },
 }))
 
@@ -130,6 +142,7 @@ jest.mock('../../../../src/config/env', () => ({
 
 import {
   issueCfdiForOrderController,
+  quienFacturaLaVentaController,
   replaceCfdiController,
   listCfdisController,
   extraccionesPendientesController,
@@ -296,7 +309,52 @@ describe('issueCfdiForOrderController', () => {
     const body = res.json.mock.calls[0][0]
     expect(body.code).toBe('CFDI_NO_EMISOR')
     expect(body.error).toMatch(/Facturación › Configuración/)
-    expect(body.error).toMatch(/más de un RFC/)
+    // D11: el founder pidió no mencionar efectivo en lo de facturación.
+    expect(body.error).not.toMatch(/efectivo/i)
+  })
+
+  describe('D11: con el motivo del cargador, el texto dice lo que de verdad falta', () => {
+    const { NoFacturableError } = jest.requireMock('../../../../src/services/fiscal/cfdi.service')
+    const motivo = (code: string, texto: string) => ({ code, texto, venueId: 'venue-1' })
+
+    it('comercio sin configurar ⇒ 404 CFDI_NO_EMISOR con su texto y su código', async () => {
+      mockIssue.mockRejectedValue(
+        new NoFacturableError(
+          'Order o1 not found or has no fiscal emisor configured',
+          motivo('COMERCIO_SIN_CONFIGURAR', 'El comercio «PAX 1» con el que se cobró esta venta no tiene la facturación configurada.'),
+        ),
+      )
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(404)
+      expect(res.json.mock.calls[0][0]).toEqual({
+        code: 'CFDI_NO_EMISOR',
+        motivo: 'COMERCIO_SIN_CONFIGURAR',
+        error: 'El comercio «PAX 1» con el que se cobró esta venta no tiene la facturación configurada.',
+      })
+    })
+
+    it('facturación apagada ⇒ 403 de siempre, con el texto del motivo', async () => {
+      mockIssue.mockRejectedValue(new NoFacturableError('Facturación no habilitada para este comercio', motivo('SIN_COMERCIOS', 'TEXTO-A')))
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(403)
+      expect(res.json.mock.calls[0][0]).toEqual({ error: 'TEXTO-A', motivo: 'SIN_COMERCIOS' })
+    })
+
+    it('la venta no existe ⇒ 404 ORDER_NOT_FOUND', async () => {
+      mockIssue.mockRejectedValue(
+        new NoFacturableError('Order o1 not found or has no fiscal emisor configured', {
+          code: 'VENTA_NO_ENCONTRADA',
+          texto: 'Esta venta no existe o no es de este negocio.',
+          venueId: null,
+        }),
+      )
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(404)
+      expect(res.json.mock.calls[0][0].code).toBe('ORDER_NOT_FOUND')
+    })
   })
 
   // /full-testing 24-sep: una orden de OTRO negocio respondía «no se pudo determinar quién factura», un texto
@@ -3030,5 +3088,81 @@ describe('extraccionesPendientesController', () => {
     expect(bloque).toContain("checkFeatureAccess('CFDI')")
     expect(bloque).toContain("checkPermission('cfdi:view')")
     expect(bloque).toContain('extraccionesPendientesController')
+  })
+})
+
+// D11: antes del formulario, el panel pregunta quién factura la venta (la misma regla que «Facturar», sin efectos).
+describe('quienFacturaLaVentaController', () => {
+  const req = () => ({ params: { orderId: 'o1', venueId: 'v1' } }) as any
+  beforeEach(() => mockCfdiFindFirst.mockResolvedValue(null))
+  const conMotivo = (bundle: any, motivo?: any) =>
+    mockLoadOrder.mockImplementation(async (_id: string, opts: any) => {
+      if (motivo) opts.explicar(motivo)
+      return bundle
+    })
+
+  it('venta facturable ⇒ { listo: true }, cargada como el personal (permitirEfectivo)', async () => {
+    conMotivo({ venueId: 'v1', facturacionEnabled: true })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ listo: true })
+    expect(mockLoadOrder.mock.calls[0][1]).toEqual(expect.objectContaining({ permitirEfectivo: true }))
+  })
+
+  it('comercio sin configurar ⇒ { listo: false } con el motivo', async () => {
+    conMotivo(null, { code: 'COMERCIO_SIN_CONFIGURAR', texto: 'TEXTO', venueId: 'v1' })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.json).toHaveBeenCalledWith({ listo: false, motivo: 'COMERCIO_SIN_CONFIGURAR', error: 'TEXTO' })
+  })
+
+  it('facturación apagada ⇒ { listo: false } aunque el bundle cargue', async () => {
+    conMotivo({ venueId: 'v1', facturacionEnabled: false }, { code: 'FACTURACION_APAGADA', texto: 'APAGADA', venueId: 'v1' })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.json).toHaveBeenCalledWith({ listo: false, motivo: 'FACTURACION_APAGADA', error: 'APAGADA' })
+  })
+
+  it('Codex r1 #2: otro comercio de la cuenta no factura (bundle cargado + motivo) ⇒ { listo: false }', async () => {
+    mockCfdiFindFirst.mockResolvedValue(null)
+    conMotivo({ venueId: 'v1', facturacionEnabled: true }, { code: 'COMERCIO_SIN_CONFIGURAR', texto: 'OTRO', venueId: 'v1' })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.json).toHaveBeenCalledWith({ listo: false, motivo: 'COMERCIO_SIN_CONFIGURAR', error: 'OTRO' })
+  })
+
+  it('Codex r1 #1 / r2 #2-#3: con historia fiscal (un intento en cualquier estado, o en una global) no estorba: decide «Facturar»', async () => {
+    mockCfdiFindFirst.mockResolvedValue({ id: 'cfdi-1' })
+    conMotivo({ venueId: 'v1', facturacionEnabled: false }, { code: 'FACTURACION_APAGADA', texto: 'APAGADA', venueId: 'v1' })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.json).toHaveBeenCalledWith({ listo: true })
+    expect(mockCfdiFindFirst.mock.calls[0][0].where).toEqual({
+      venueId: 'v1',
+      OR: [{ orderId: 'o1' }, { isGlobal: true, manifiestoGlobal: { some: { orderId: 'o1' } } }],
+    })
+  })
+
+  it('SEGURIDAD: venta de otro negocio ⇒ 404 sin motivo (ni el nombre de su comercio)', async () => {
+    conMotivo(null, { code: 'COMERCIO_SIN_CONFIGURAR', texto: 'El comercio «Ajeno»…', venueId: 'otro' })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(JSON.stringify(res.json.mock.calls[0][0])).not.toContain('Ajeno')
+  })
+
+  it('SEGURIDAD: venta facturable de otro negocio ⇒ 404', async () => {
+    conMotivo({ venueId: 'otro', facturacionEnabled: true })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
+  })
+
+  it('la venta no existe ⇒ 404', async () => {
+    conMotivo(null, { code: 'VENTA_NO_ENCONTRADA', texto: 'x', venueId: null })
+    const res = mockRes()
+    await quienFacturaLaVentaController(req(), res)
+    expect(res.status).toHaveBeenCalledWith(404)
   })
 })

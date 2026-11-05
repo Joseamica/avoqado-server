@@ -114,6 +114,7 @@ import * as tpvMessageController from '../controllers/dashboard/tpv-message.dash
 import { preserveContext } from '@/observability/preserveContext'
 import {
   issueCfdiForOrderController,
+  quienFacturaLaVentaController,
   confirmOrderPriceContractController,
   listCfdisController,
   extraccionesPendientesController,
@@ -3734,6 +3735,15 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:issue'),
   issueCfdiForOrderController,
+)
+
+// D11: antes del formulario de «Facturar», ¿se sabe quién factura esta venta? Misma regla y mismos candados que facturar; sin efectos.
+router.get(
+  '/venues/:venueId/orders/:orderId/cfdi/quien-factura',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:issue'),
+  quienFacturaLaVentaController,
 )
 
 // ---- IVA por producto (B3b): confirmar que una venta VIEJA se cobró con el IVA incluido ----

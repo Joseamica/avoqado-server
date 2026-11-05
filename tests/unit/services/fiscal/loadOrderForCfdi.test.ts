@@ -9,6 +9,9 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     order: { findUnique: jest.fn() },
     merchantFiscalConfig: { findUnique: jest.fn() },
+    // D11: el motivo de OTRO comercio de la cuenta lleva su nombre.
+    merchantAccount: { findUnique: jest.fn().mockResolvedValue(null) },
+    ecommerceMerchant: { findUnique: jest.fn().mockResolvedValue(null) },
     fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
     orderDiscount: { findMany: jest.fn() },
   },
@@ -1437,7 +1440,8 @@ describe('loadOrderForCfdiFromDb', () => {
     // m2 SIN configuración → razón
     cfgMock.mockImplementation(async (args: any) => (args.where.merchantAccountId === 'm2' ? null : aConfig()))
     bundle = await loadOrderForCfdiFromDb('o1')
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/sin configuraci/i)
+    // D11: el mismo texto del aviso previo (dice qué falta y dónde se arregla).
+    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/no tiene la facturación configurada/i)
 
     // los dos bien pero m2 sin autofactura → la cuenta NO ofrece autofactura
     cfgMock.mockImplementation(async (args: any) =>
