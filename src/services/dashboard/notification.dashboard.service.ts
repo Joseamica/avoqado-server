@@ -205,12 +205,16 @@ async function dispatchToChannels(
 }
 
 /**
- * Campana por negocio: con negocio, sus avisos más los anuncios de plataforma (Avoqado). La excepción exige la PROCEDENCIA
- * (`entityType`), no sólo el tipo: el POST genérico deja crear `ANNOUNCEMENT` de un negocio y no debe colarse en otro. Esa
- * procedencia está reservada: sólo el reparto de anuncios la escribe. Sin negocio, sin filtro (como hoy).
+ * Campana por negocio: con negocio, sus avisos, los avisos personales sin negocio (`venueId` nulo: KYC, avisos de
+ * superadmin; son de la persona, como los anuncios — D7, founder 5-nov) y los anuncios de plataforma (Avoqado). La
+ * excepción de anuncios exige la PROCEDENCIA (`entityType`), no sólo el tipo: el POST genérico deja crear `ANNOUNCEMENT`
+ * de un negocio y no debe colarse en otro. Esa procedencia está reservada: sólo el reparto de anuncios la escribe. Sin
+ * negocio, sin filtro (como hoy). Todo va además acotado a `recipientId`.
  */
 export function filtroDeNegocio(venueId?: string): Prisma.NotificationWhereInput {
-  return venueId ? { AND: [{ OR: [{ venueId }, { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }] }] } : {}
+  return venueId
+    ? { AND: [{ OR: [{ venueId }, { venueId: null }, { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }] }] }
+    : {}
 }
 
 /**
