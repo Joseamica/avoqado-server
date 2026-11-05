@@ -8,8 +8,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     order: { findUnique: jest.fn() },
     merchantFiscalConfig: { findUnique: jest.fn() },
     merchantAccount: { findUnique: jest.fn() },
-    ecommerceMerchant: { findUnique: jest.fn(), count: jest.fn().mockResolvedValue(0) },
-    venuePaymentConfig: { count: jest.fn().mockResolvedValue(0) },
+    ecommerceMerchant: { findUnique: jest.fn() },
     fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
     orderDiscount: { findMany: jest.fn() },
   },
@@ -179,20 +178,43 @@ describe('loadOrderForCfdiFromDb · por qué no se factura (D11)', () => {
       sinEfectivo(motivo)
     })
 
-    it('Codex r1 #3: el negocio SÍ tiene comercios, pero ninguno ligado al RFC ⇒ SIN_COMERCIO_ENCENDIDO (se arregla en Configuración)', async () => {
-      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
-      emisorMock.mockResolvedValue([unEmisor({ merchantConfigs: [] })])
-      ;((prisma as any).venuePaymentConfig.count as jest.Mock).mockResolvedValueOnce(1)
-      expect((await cargar()).motivo?.code).toBe('SIN_COMERCIO_ENCENDIDO')
-    })
-
-    it('caso (a): RFC con CSD y NINGÚN comercio ⇒ SIN_COMERCIOS (la regla no cambia: sigue sin facturar)', async () => {
-      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
+    // D11 opción A (founder, 5-nov): «el RFC basta». Un RFC con CSD y NINGÚN comercio ligado factura sus ventas sin terminal desde el panel;
+    // la autofactura del cliente sigue apagada (no hay dónde prenderla). Aplica aunque el negocio tenga comercios SIN ligar a un RFC.
+    it.each([
+      ['efectivo', efectivo],
+      ['transferencia', transferencia],
+      ['tarjeta de otra terminal', { ...transferencia, method: 'CREDIT_CARD' }],
+    ])('A: RFC sin ningún comercio ligado ⇒ el personal factura (%s), sin motivo; autofactura apagada', async (_n, pago) => {
+      orderMock.mockResolvedValue(anOrder({ payments: [pago] }))
       emisorMock.mockResolvedValue([unEmisor({ merchantConfigs: [] })])
       const { bundle, motivo } = await cargar()
+      expect(bundle!.facturacionEnabled).toBe(true)
+      expect(bundle!.autofacturaEnabled).toBe(false)
+      expect(motivo).toBeUndefined()
+    })
+
+    it('A: la autofactura del cliente de esa venta (efectivo con el interruptor del RFC encendido) sigue sin ofrecerse', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
+      emisorMock.mockResolvedValue([unEmisor({ merchantConfigs: [], invoiceCashSales: true })])
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle!.facturacionEnabled).toBe(true)
+      expect(bundle!.autofacturaEnabled).toBe(false)
+    })
+
+    it('A: con comercios ligados TODOS apagados la regla no cambia ⇒ apagada y SIN_COMERCIO_ENCENDIDO', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
+      emisorMock.mockResolvedValue([unEmisor({ merchantConfigs: [{ facturacionEnabled: false, autofacturaEnabled: true }] })])
+      const { bundle, motivo } = await cargar()
       expect(bundle!.facturacionEnabled).toBe(false)
-      expect(motivo?.code).toBe('SIN_COMERCIOS')
-      sinEfectivo(motivo)
+      expect(motivo?.code).toBe('SIN_COMERCIO_ENCENDIDO')
+    })
+
+    it('A: dos RFC sin comercios ⇒ sigue VARIOS_RFC', async () => {
+      orderMock.mockResolvedValue(anOrder({ payments: [efectivo] }))
+      emisorMock.mockResolvedValue([unEmisor({ merchantConfigs: [] }), unEmisor({ id: 'e2', merchantConfigs: [] })])
+      const { bundle, motivo } = await cargar()
+      expect(bundle).toBeNull()
+      expect(motivo?.code).toBe('VARIOS_RFC')
     })
   })
 

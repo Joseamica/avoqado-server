@@ -335,11 +335,11 @@ describe('issueCfdiForOrderController', () => {
     })
 
     it('facturación apagada ⇒ 403 de siempre, con el texto del motivo', async () => {
-      mockIssue.mockRejectedValue(new NoFacturableError('Facturación no habilitada para este comercio', motivo('SIN_COMERCIOS', 'TEXTO-A')))
+      mockIssue.mockRejectedValue(new NoFacturableError('Facturación no habilitada para este comercio', motivo('SIN_COMERCIO_ENCENDIDO', 'TEXTO-A')))
       const res = mockRes()
       await issueCfdiForOrderController(mockReq(), res)
       expect(res.status).toHaveBeenCalledWith(403)
-      expect(res.json.mock.calls[0][0]).toEqual({ error: 'TEXTO-A', motivo: 'SIN_COMERCIOS' })
+      expect(res.json.mock.calls[0][0]).toEqual({ error: 'TEXTO-A', motivo: 'SIN_COMERCIO_ENCENDIDO' })
     })
 
     it('la venta no existe ⇒ 404 ORDER_NOT_FOUND', async () => {

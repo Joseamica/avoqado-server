@@ -2144,7 +2144,6 @@ export type CodigoNoFacturable =
   | 'VARIOS_RFC'
   | 'AUTOFACTURA_NO_DISPONIBLE'
   | 'SIN_COMERCIO_ENCENDIDO'
-  | 'SIN_COMERCIOS'
 export interface MotivoNoFacturable {
   code: CodigoNoFacturable
   texto: string
@@ -2193,8 +2192,6 @@ export const TEXTOS_NO_FACTURABLE = {
   AUTOFACTURA_NO_DISPONIBLE: () => 'El negocio no ofrece la autofactura de esta venta.',
   SIN_COMERCIO_ENCENDIDO: () =>
     `Esta venta se cobró sin terminal: se factura si alguno de los comercios del negocio tiene la facturación encendida, y ninguno la tiene. Enciéndela en ${CONFIGURACION}.`,
-  SIN_COMERCIOS: () =>
-    'Esta venta se cobró sin terminal, y hoy una venta así se factura sólo si el negocio tiene algún comercio con la facturación encendida; este negocio no tiene ninguno. Escríbenos a soporte.',
 } satisfies Record<CodigoNoFacturable, (nombre: string | null) => string>
 
 /** El nombre que el dueño ve del comercio de un cobro (el mismo que la tabla de Configuración). */
@@ -2211,15 +2208,6 @@ async function nombreDelComercio(
     return e?.channelName || null
   }
   return null
-}
-
-/** D11: ¿el negocio tiene algún comercio (terminal o canal en línea), ligado o no a un RFC? */
-async function negocioTieneComercios(db: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<boolean> {
-  const [terminales, enLinea] = await Promise.all([
-    db.venuePaymentConfig.count({ where: { venueId } }),
-    db.ecommerceMerchant.count({ where: { venueId } }),
-  ])
-  return terminales + enLinea > 0
 }
 
 export async function loadOrderForCfdiFromDb(
@@ -2370,8 +2358,6 @@ export async function loadOrderForCfdiFromDb(
       invoiceCashSales: boolean
     } | null
   } | null
-  /** D11: `null` = la venta se cobró con comercio; si no, cuántos comercios tiene el RFC del negocio. */
-  let comerciosDelRfc: number | null = null
 
   if (pay.merchantAccountId || pay.ecommerceMerchantId) {
     // Resolve MerchantFiscalConfig via the unique merchantAccountId XOR ecommerceMerchantId
@@ -2402,13 +2388,14 @@ export async function loadOrderForCfdiFromDb(
     const { merchantConfigs, ...emisor } = emisores[0]
     // Hereda los interruptores de SUS comercios: se factura si alguno la tiene encendida; la autofactura
     // sólo si TODOS los que facturan la tienen encendida (mismo criterio que una cuenta con varios comercios).
+    // 🔴 D11 opción A (founder, 5-nov, «el RFC basta»): un RFC SIN ningún comercio ligado factura desde el panel; el comercio sólo existe
+    // para la TPV o el ecommerce, y quien usa sólo el POS igual tiene que facturar. La autofactura sigue apagada: no hay dónde prenderla.
     const encendidos = merchantConfigs.filter(c => c.facturacionEnabled)
     cfg = {
-      facturacionEnabled: encendidos.length > 0,
+      facturacionEnabled: merchantConfigs.length === 0 || encendidos.length > 0,
       autofacturaEnabled: encendidos.length > 0 && encendidos.every(c => c.autofacturaEnabled),
       fiscalEmisor: emisor,
     }
-    comerciosDelRfc = merchantConfigs.length
   }
   // No merchant config or emisor not set up → cannot invoice
   if (!cfg || !cfg.fiscalEmisor) return sin('COMERCIO_SIN_CONFIGURAR', opts.explicar ? await nombreDelComercio(db, pay) : null)
@@ -2459,12 +2446,10 @@ export async function loadOrderForCfdiFromDb(
     return sin('RFC_DE_OTRA_SUCURSAL')
   }
   // D11: la facturación apagada no es `null` (el 403 de siempre), pero también se explica; igual otro comercio de la cuenta que no factura
-  // (el 422 de siempre). `SIN_COMERCIOS` es el caso (a) de D11: sólo si el negocio no tiene NINGÚN comercio (Codex r1 #3: con comercios
-  // sin ligar al RFC, el dueño sí lo arregla en Configuración).
+  // (el 422 de siempre). Sin terminal sólo se apaga con comercios ligados al RFC, todos apagados (opción A: sin ninguno, factura).
   if (opts.explicar && !cfg.facturacionEnabled) {
-    if (comerciosDelRfc === null) sin('FACTURACION_APAGADA', await nombreDelComercio(db, pay))
-    else if (comerciosDelRfc > 0 || (await negocioTieneComercios(db, order.venueId))) sin('SIN_COMERCIO_ENCENDIDO')
-    else sin('SIN_COMERCIOS')
+    if (pay.merchantAccountId || pay.ecommerceMerchantId) sin('FACTURACION_APAGADA', await nombreDelComercio(db, pay))
+    else sin('SIN_COMERCIO_ENCENDIDO')
   } else if (opts.explicar && otroQueNoFactura) {
     sin(otroQueNoFactura.code, otroQueNoFactura.nombre)
   }
