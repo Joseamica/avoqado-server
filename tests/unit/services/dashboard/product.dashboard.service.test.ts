@@ -608,6 +608,25 @@ describe('updateProduct — versión esperada (expectedUpdatedAt)', () => {
     ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED', message: expect.stringContaining('cambió mientras se guardaba') })
   })
 
+  // Codex r1 #4: si se pierde la respuesta, src/api.ts del panel repite la MISMA petición. Si lo pedido ya es lo que hay, no es un
+  // cambio ajeno: pasa, atada a la versión que se ve bajo el candado.
+  it('repetición de una activación ya aplicada (respuesta perdida): no da 409 falso', async () => {
+    const vigente = new Date('2026-11-05T18:00:01.000Z')
+    prismaMock.product.findFirst.mockResolvedValue(
+      makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY', updatedAt: vigente }),
+    )
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY' }))
+
+    await productService.updateProduct(
+      'venue-xyz',
+      'product-abc',
+      { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: version } as any,
+      humanActor,
+    )
+
+    expect(prismaMock.product.update.mock.calls[0][0].where).toEqual({ id: 'product-abc', updatedAt: vigente })
+  })
+
   it('sin versión (ANDROID, MCP, paneles viejos): igual que hoy', async () => {
     prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
     prismaMock.product.update.mockResolvedValue(makeMockProduct())

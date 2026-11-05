@@ -132,6 +132,33 @@ describe('versión esperada (Codex r4 #1)', () => {
     expect((await inventario()).currentStock.toString()).toBe('9')
   })
 
+  // Codex r1 #4: el panel repite la MISMA petición si se pierde la respuesta. No es un cambio ajeno.
+  it('repetir una activación y un paso 3 ya aplicados no da 409 falso ni toca el kardex', async () => {
+    const v1 = (await updateProduct(ids.venue, ids.product, { name: 'Libreta B5' }, actor)).updatedAt.toISOString()
+    const activar = { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: v1 } as any
+    const v2 = (await updateProduct(ids.venue, ids.product, activar, actor)).updatedAt.toISOString()
+    await updateProduct(ids.venue, ids.product, activar, actor) // la repetición
+
+    const paso3 = { initialStock: 9, reorderPoint: 4, costPerUnit: 20, expectedUpdatedAt: v2 }
+    await setupSimpleStockStep3(ids.venue, ids.product, paso3)
+    const movimientosTrasAplicar = await movimientos()
+    await setupSimpleStockStep3(ids.venue, ids.product, paso3) // la repetición
+
+    const inv = await inventario()
+    expect(inv.currentStock.toString()).toBe('9')
+    expect(inv.minimumStock.toString()).toBe('4')
+    expect(await movimientos()).toBe(movimientosTrasAplicar)
+  })
+
+  it('una repetición NO pasa si otra ventana ya apagó el inventario en medio', async () => {
+    const v1 = (await updateProduct(ids.venue, ids.product, { name: 'Libreta B6' }, actor)).updatedAt.toISOString()
+    const activar = { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: v1 } as any
+    await updateProduct(ids.venue, ids.product, activar, actor)
+    await updateProduct(ids.venue, ids.product, { trackInventory: false }, actor)
+    await expect(updateProduct(ids.venue, ids.product, activar, actor)).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
+    expect((await producto()).trackInventory).toBe(false)
+  })
+
   it('sin versión (ANDROID, MCP, paneles viejos): se comporta como hoy', async () => {
     await updateProduct(ids.venue, ids.product, { trackInventory: false }, actor)
     await updateProduct(ids.venue, ids.product, { trackInventory: true, inventoryMethod: 'QUANTITY' }, actor)
