@@ -111,6 +111,14 @@ const seller = (staffId: string): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
 })
 
 /** Un vendedor con «Ver negocios» y «Mandar correo» de verdad (la vuelta de Google relee sus llaves) y su negocio. */

@@ -1,7 +1,8 @@
 /**
  * Las rutas de plantillas, vista previa, prueba e imágenes de `/api/v1/crm`, con la guardia REAL (`requireCrm` releyendo las
- * llaves de la base —simulada—): quien sólo manda correo uno a uno LEE las plantillas pero no las escribe; quien sólo tiene
- * «Campañas masivas» las escribe pero no ve ni un negocio; y lo que se guarda no puede inyectar nada.
+ * llaves de la base —simulada—): quien sólo manda correo uno a uno LEE las plantillas pero no las escribe; quien tenía
+ * «Campañas masivas» (hoy las 4 llaves de correo masivo, L2) las escribe pero no ve ni un negocio; y lo que se guarda no puede
+ * inyectar nada. Las llaves finas una por una: `crm.llaves-finas.routes.test.ts`.
  */
 import 'express-async-errors'
 import express from 'express'
@@ -59,10 +60,21 @@ const keys = (over: Record<string, unknown>) =>
     exportar: false,
     ventas: false,
     admin: false,
+    cerrar: false,
+    bajas: false,
+    plantillas: false,
+    preparar: false,
+    mandar: false,
+    verCampanas: false,
+    equipo: false,
+    configurar: false,
     ...over,
   })
+/** Como deja la migración de las llaves finas (L2) una fila vieja con `campanas`, y una con `admin`. */
+const CAMPANAS_DE_ANTES = { campanas: true, plantillas: true, preparar: true, mandar: true, verCampanas: true }
+const ADMIN_DE_ANTES = { ...CAMPANAS_DE_ANTES, admin: true, equipo: true, configurar: true, bajas: true }
 const soloContactar = () => keys({ verScope: 'propios', editarScope: 'propios', contactar: true })
-const soloCampanas = () => keys({ campanas: true })
+const soloCampanas = () => keys(CAMPANAS_DE_ANTES)
 
 const template = (over: Record<string, unknown> = {}) => ({
   id: TEMPLATE,
@@ -162,7 +174,7 @@ describe('quien sólo tiene «Mandar correo» (crm:contactar)', () => {
   })
 })
 
-describe('quien sólo tiene «Campañas masivas» (crm:campanas), sin «Ver negocios»', () => {
+describe('quien sólo tiene las 4 llaves de correo masivo (plantillas, preparar, mandar, ver-campanas), sin «Ver negocios»', () => {
   beforeEach(soloCampanas)
 
   it('crea una plantilla (201) y la guarda a su nombre', async () => {
@@ -221,9 +233,9 @@ describe('quien sólo tiene «Campañas masivas» (crm:campanas), sin «Ver nego
   })
 })
 
-describe('el administrador del CRM', () => {
-  it('puede escribir plantillas aunque no tenga «Campañas masivas»', async () => {
-    keys({ admin: true })
+describe('un administrador de antes (migrado, L2)', () => {
+  it('sigue escribiendo plantillas: la migración le dio «Plantillas»', async () => {
+    keys(ADMIN_DE_ANTES)
     expect((await request(app).post('/crm/templates').send(BODY)).status).toBe(201)
   })
 })
@@ -239,9 +251,9 @@ describe('POST /crm/opt-outs — «Dar de baja este correo» (la oposición, des
   it.each([
     ['sin llaves', {}],
     ['«Mandar correo» (contactar)', { verScope: 'todos', editarScope: 'todos', contactar: true }],
-    ['«Campañas masivas» (campanas)', { campanas: true }],
+    ['«Campañas masivas» (campanas)', CAMPANAS_DE_ANTES],
     ['«Ver negocios», «Editar» y «Exportar»', { verScope: 'todos', editarScope: 'todos', exportar: true }],
-  ])('🔴 %s: 403 y no escribe nada (sólo crm:admin da de baja)', async (_name, over) => {
+  ])('🔴 %s: 403 y no escribe nada (sólo «Bajas de correo» da de baja)', async (_name, over) => {
     keys(over)
     const res = await request(app).post('/crm/opt-outs').send({ email: EMAIL })
     expect(res.status).toBe(403)
@@ -249,8 +261,8 @@ describe('POST /crm/opt-outs — «Dar de baja este correo» (la oposición, des
     expect(prismaMock.crmEmailOptOut.createMany).not.toHaveBeenCalled()
   })
 
-  it('crm:admin: da de baja el correo (en minúsculas), con origen ADMIN y a su nombre', async () => {
-    keys({ admin: true })
+  it('un admin de antes (con «Bajas de correo»): da de baja el correo (en minúsculas), con origen ADMIN y a su nombre', async () => {
+    keys(ADMIN_DE_ANTES)
     const res = await request(app).post('/crm/opt-outs').send({ email: '  Cliente@Example.COM ' })
 
     expect(res.status).toBe(200)
@@ -262,7 +274,7 @@ describe('POST /crm/opt-outs — «Dar de baja este correo» (la oposición, des
   })
 
   it('repetirlo es 200 otra vez (idempotente)', async () => {
-    keys({ admin: true })
+    keys(ADMIN_DE_ANTES)
     prismaMock.crmEmailOptOut.createMany.mockResolvedValue({ count: 0 })
     expect((await request(app).post('/crm/opt-outs').send({ email: EMAIL })).status).toBe(200)
   })
@@ -270,7 +282,7 @@ describe('POST /crm/opt-outs — «Dar de baja este correo» (la oposición, des
   it.each([[{}], [{ email: '' }], [{ email: 'no-es-correo' }], [{ email: 42 }], [{ email: `${'a'.repeat(250)}@example.com` }]])(
     'un cuerpo inválido (%j) es 400 y no escribe',
     async body => {
-      keys({ admin: true })
+      keys(ADMIN_DE_ANTES)
       const res = await request(app).post('/crm/opt-outs').send(body)
       expect(res.status).toBe(400)
       expect(prismaMock.crmEmailOptOut.createMany).not.toHaveBeenCalled()
@@ -455,7 +467,7 @@ describe('POST /crm/uploads/image', () => {
   })
 })
 
-describe('/crm/campaigns — sólo «Campañas masivas» o el administrador', () => {
+describe('/crm/campaigns — las llaves de correo masivo (L5)', () => {
   const CAMPAIGN = 'ccampaign0000000000000001'
   const campana = {
     id: CAMPAIGN,

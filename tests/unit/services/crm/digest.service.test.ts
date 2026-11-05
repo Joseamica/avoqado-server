@@ -456,6 +456,15 @@ describe('runDailyDigest', () => {
     exportar: false,
     ventas: false,
     admin,
+    // Un admin de antes, como lo deja la migración de las llaves finas (L2): las 3 de administración y las 4 de correo.
+    cerrar: false,
+    bajas: admin,
+    plantillas: admin,
+    preparar: admin,
+    mandar: admin,
+    verCampanas: admin,
+    equipo: admin,
+    configurar: admin,
   })
 
   beforeEach(() => {
@@ -885,6 +894,25 @@ describe('runDailyDigest', () => {
     pendingOf.mockResolvedValue(pending({ vencidas: section(3) }))
     await runDailyDigest(T0)
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it('sin_dueno_es_de_equipo (L6): «Equipo y llaves» trae los sin dueño; «Configurar el CRM» o el espejo `admin`, no', async () => {
+    pendingOf.mockResolvedValue(pending({ nuevosSinDueno: section(4, ['Café Nuevo']) }))
+    prismaMock.crmActivity.count.mockResolvedValue(2)
+
+    // Sólo configura el CRM (y trae el espejo viejo prendido): repartir negocios no es lo suyo.
+    accessOf.mockResolvedValue({ ...access(STAFF_A), configurar: true, bajas: true, admin: true })
+    await runDailyDigest(T0)
+    expect(send).not.toHaveBeenCalled()
+    expect(prismaMock.crmActivity.count).not.toHaveBeenCalled()
+
+    // Con «Equipo y llaves» sí: los nuevos sin dueño y las actividades sin responsable.
+    accessOf.mockResolvedValue({ ...access(STAFF_A), equipo: true })
+    await runDailyDigest(at(1))
+    expect(send).toHaveBeenCalledTimes(1)
+    const [email] = send.mock.calls[0]
+    expect(email.text).toContain('Sin dueño: 4 · Café Nuevo')
+    expect(email.text).toContain('Actividades sin responsable: 2')
   })
 
   it('fin_de_semana_no_manda: Saturday and Sunday, and outside 8:30–11:00, the run does nothing', async () => {

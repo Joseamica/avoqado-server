@@ -24,6 +24,7 @@ import {
   listAccounts,
   lose,
   moveStage,
+  reactivate,
   reassign,
   searchOrganizations,
   semaforo,
@@ -53,7 +54,10 @@ const END_OF_TODAY = new Date('2026-11-01T05:59:59.999Z')
 const DAY = 86_400_000
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * DAY)
 
-/** The caller's EFFECTIVE keys, as `requireCrm` leaves them. Default: a seller who sees and edits their own. */
+/**
+ * The caller's EFFECTIVE keys, as `requireCrm` leaves them. Default: a seller who sees and edits their own and closes them
+ * («Cerrar negocios» viene en las llaves del vendedor nuevo, L3).
+ */
 const access = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   staffId: SELLER,
   isSuperadmin: false,
@@ -64,6 +68,14 @@ const access = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: true,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
   ...over,
 })
 
@@ -502,8 +514,13 @@ describe('who sees and changes what', () => {
     )
   })
 
-  it('reasignar_sin_todos_ni_admin_403', async () => {
+  it('reasignar_sin_todos_ni_equipo_403 (L6)', async () => {
     await expect(reassign(access(), ACCOUNT, OTHER)).rejects.toMatchObject({ statusCode: 403, code: 'CRM_NO_PUEDE_REASIGNAR' })
+    // «Configurar el CRM» no reparte negocios, y el espejo `admin` de la pantalla vieja ya no autoriza nada.
+    await expect(reassign(access({ configurar: true, bajas: true, admin: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_NO_PUEDE_REASIGNAR',
+    })
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
 
     // Ana is on the team with «Ver negocios», so she can own accounts.
@@ -560,12 +577,12 @@ describe('who sees and changes what', () => {
       data: { assigneeStaffId: null },
     })
 
-    // An admin may as well, even without «Editar: todos».
-    await expect(reassign(access({ admin: true }), ACCOUNT, OTHER)).resolves.toBeDefined()
+    // «Equipo y llaves» may as well, even without «Editar: todos».
+    await expect(reassign(access({ equipo: true }), ACCOUNT, OTHER)).resolves.toBeDefined()
 
     // Only to someone on the team.
     prismaMock.platformAccess.findUnique.mockResolvedValue(null)
-    await expect(reassign(access({ admin: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
+    await expect(reassign(access({ equipo: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
       statusCode: 422,
       code: 'CRM_REASSIGN_TARGET_INVALID',
     })
@@ -586,7 +603,7 @@ describe('who sees and changes what', () => {
       admin: false,
     })
 
-    await expect(reassign(access({ admin: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
+    await expect(reassign(access({ equipo: true }), ACCOUNT, OTHER)).rejects.toMatchObject({
       statusCode: 422,
       code: 'CRM_REASSIGN_TARGET_INVALID',
     })
@@ -594,7 +611,7 @@ describe('who sees and changes what', () => {
   })
 
   it('reasignar_sin_ver_solo_dice_el_nuevo_dueno', async () => {
-    // M-1: an admin of the team without «Ver negocios» reassigns (from «Equipo de ventas»), but never sees the account:
+    // M-1: «Equipo y llaves» without «Ver negocios» reassigns (from «Equipo de ventas»), but never sees the account:
     // the answer says who owns it now, and nothing about the account itself.
     prismaMock.staff.findUnique.mockImplementation(async ({ select }: { select?: Record<string, boolean> }) =>
       select?.firstName
@@ -615,7 +632,7 @@ describe('who sees and changes what', () => {
     })
     editable()
     prismaMock.crmAccount.findFirst.mockResolvedValue(null)
-    const adminWithoutVer = access({ ver: null, editar: null, admin: true })
+    const adminWithoutVer = access({ ver: null, editar: null, cerrar: false, equipo: true })
 
     await expect(reassign(adminWithoutVer, ACCOUNT, OTHER)).resolves.toEqual({ id: ACCOUNT, owner: { id: OTHER, name: 'Ana López' } })
     // The account is read back with THEIR «ver» scope, which for them matches nothing.
@@ -932,7 +949,7 @@ describe('stages and lost reasons', () => {
   it('primera_escritura_siembra_ganado_y_perdido', async () => {
     // M-3: on a brand-new database the first CRM write is an admin creating a stage. Without seeding first, the table
     // would stop being empty, «Ganado» and «Perdido» would never be created, and winning or losing would fail for good.
-    const admin = access({ admin: true })
+    const admin = access({ configurar: true })
     prismaMock.crmStage.count.mockResolvedValue(0)
     prismaMock.crmLostReason.count.mockResolvedValue(0)
     prismaMock.crmStage.create.mockResolvedValue(stage({ id: DEMO, name: 'Seguimiento' }))
@@ -969,7 +986,7 @@ describe('stages and lost reasons', () => {
     expect(patch({ name: 'Cerrado' })).toBe(true)
 
     // Renaming «Ganado» keeps it a won stage: the service writes only what it knows, whatever slips in.
-    const admin = access({ admin: true })
+    const admin = access({ configurar: true })
     prismaMock.crmStage.findUnique.mockResolvedValue(stage({ id: GANADO, name: 'Ganado', kind: 'GANADA', staleDays: null }))
     prismaMock.crmStage.update.mockResolvedValue(stage({ id: GANADO, name: 'Cerrado', kind: 'GANADA', staleDays: null }))
     await updateStage(admin, GANADO, { name: 'Cerrado', kind: 'ABIERTA', active: false } as never)
@@ -1103,5 +1120,65 @@ describe("the ficha: email events and each contact's consent (phase 2, plan task
     fichaConCorreos([{ id: 'cevent3', kind: 'NOTE', actorStaffId: SELLER, data: { text: 'x' }, createdAt: daysAgo(1) }])
     await getAccount(access(), ACCOUNT, NOW)
     expect(prismaMock.crmEmailMessage.findMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('«Cerrar negocios» (L9): ganar, perder y reabrir', () => {
+  const sinCerrar = () => access({ cerrar: false })
+  const demo = stage({ id: DEMO, name: 'Demo', staleDays: 5 })
+  const perdido = stage({ id: PERDIDO, name: 'Perdido', kind: 'PERDIDA', staleDays: null })
+  const ganado = stage({ id: GANADO, name: 'Ganado', kind: 'GANADA', staleDays: null })
+
+  it('con «Editar» sin «Cerrar», mover un PERDIDO o un GANADO a una etapa abierta es 403 y no lo reabre', async () => {
+    prismaMock.crmStage.findUnique.mockResolvedValue(demo)
+    for (const cerrado of [perdido, ganado]) {
+      editable(account({ stageId: cerrado.id, stage: cerrado }))
+      await expect(moveStage(sinCerrar(), ACCOUNT, DEMO)).rejects.toMatchObject({
+        statusCode: 403,
+        code: 'CRM_FORBIDDEN',
+        message: expect.stringContaining('«Cerrar negocios»'),
+      })
+    }
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+  })
+
+  it('con «Editar» sin «Cerrar», mover uno ABIERTO sigue funcionando', async () => {
+    prismaMock.crmStage.findUnique.mockResolvedValue(demo)
+    editable(account())
+    await moveStage(sinCerrar(), ACCOUNT, DEMO)
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { stageId: DEMO, stageEnteredAt: expect.any(Date) },
+    })
+  })
+
+  it('con «Cerrar», reabrir un PERDIDO limpia el cierre, como siempre', async () => {
+    prismaMock.crmStage.findUnique.mockResolvedValue(demo)
+    editable(account({ stageId: PERDIDO, stage: perdido }))
+    await moveStage(access(), ACCOUNT, DEMO)
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { stageId: DEMO, stageEnteredAt: expect.any(Date), wonAt: null, lostAt: null, lostReasonId: null, lostNote: null },
+    })
+  })
+
+  it('sin «Cerrar», ganar y perder son 403 antes de tocar nada (también desde el MCP, que llama a perder)', async () => {
+    const llave = { statusCode: 403, code: 'CRM_FORBIDDEN', message: 'No tienes la llave «Cerrar negocios»' }
+    await expect(lose(sinCerrar(), ACCOUNT, { lostReasonId: REASON })).rejects.toMatchObject(llave)
+    await expect(win(sinCerrar(), ACCOUNT, { organizationId: ORG })).rejects.toMatchObject(llave)
+    expect(prismaMock.crmLostReason.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+  })
+
+  it('«Regresar al embudo» desarchiva, no reabre un cierre: con «Editar» sin «Cerrar» sí funciona, igual que archivar', async () => {
+    editable(account({ archivedAt: daysAgo(2) }))
+    await reactivate(sinCerrar(), ACCOUNT)
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({ where: { id: ACCOUNT }, data: { archivedAt: null } })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [{ accountId: ACCOUNT, kind: 'REACTIVATED', actorStaffId: SELLER, data: {} }],
+      skipDuplicates: true,
+    })
   })
 })

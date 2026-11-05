@@ -18,7 +18,7 @@ export function getMe(req: Request, res: Response): void {
   res.json({ data: req.crmAccess })
 }
 
-// «Equipo de ventas» (`crm:admin`). `req.crmAccess` is the admin's own keys, read by `requireCrm` for this request.
+// «Equipo de ventas» (`crm:equipo`). `req.crmAccess` is the caller's own keys, read by `requireCrm` for this request.
 
 /** GET /api/v1/crm/team */
 export async function listTeam(req: Request, res: Response): Promise<void> {
@@ -216,7 +216,7 @@ export async function exportAccountsCsv(req: Request, res: Response): Promise<vo
   res.send(`\uFEFF${csv}`)
 }
 
-// «Importar lo de HubSpot» (`crm:admin`). Both receive the two CSVs multer read into memory.
+// «Importar lo de HubSpot» (`crm:configurar`). Both receive the two CSVs multer read into memory.
 
 /**
  * A file as text, only if it is UTF-8 (M-5). Re-saved by Excel as ANSI, «José» would decode to «Jos�» without a word; the

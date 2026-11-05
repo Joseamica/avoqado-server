@@ -73,6 +73,14 @@ beforeAll(async () => {
     exportar: false,
     ventas: false,
     admin: false,
+    cerrar: false,
+    bajas: false,
+    plantillas: true,
+    preparar: true,
+    mandar: true,
+    verCampanas: true,
+    equipo: false,
+    configurar: false,
   }
   stageId = (await prisma.crmStage.create({ data: { name: `Etapa ${suffix}`, order: 900, kind: 'ABIERTA' } })).id
   templateId = (

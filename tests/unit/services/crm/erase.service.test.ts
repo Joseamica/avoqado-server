@@ -32,6 +32,14 @@ const FOUNDER: CrmAccess = {
   exportar: true,
   ventas: true,
   admin: true,
+  cerrar: true,
+  bajas: true,
+  plantillas: true,
+  preparar: true,
+  mandar: true,
+  verCampanas: true,
+  equipo: true,
+  configurar: true,
 }
 /** Every key of the CRM, «Administrar» included — but not the superadmin. */
 const ADMIN_DEL_EQUIPO: CrmAccess = { ...FOUNDER, staffId: 'cstaffadmin00000000000001', isSuperadmin: false }

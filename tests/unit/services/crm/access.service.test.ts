@@ -5,11 +5,23 @@
  */
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
-import { getCrmAccess, scopeWhere, type CrmAccess } from '@/services/crm/access.service'
+import { effectiveKeys, getCrmAccess, hasCrmKey, legacyFlags, scopeWhere, type CrmAccess } from '@/services/crm/access.service'
 
 const STAFF_ID = 'cstaffcrm0000000000000001'
 const OTHER_STAFF_ID = 'cstaffcrm0000000000000009'
 const ROW_ID = 'caccessrw0000000000000001'
+
+/** Las llaves finas (plan 2026-11-04), todas apagadas. */
+const SIN_FINAS = {
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
+}
 
 /** A `PlatformAccess` row with no key at all, already claimed by STAFF_ID; each test turns on what it needs. */
 const row = (over: Record<string, unknown> = {}) => ({
@@ -22,6 +34,7 @@ const row = (over: Record<string, unknown> = {}) => ({
   exportar: false,
   ventas: false,
   admin: false,
+  ...SIN_FINAS,
   ...over,
 })
 
@@ -35,6 +48,7 @@ const access = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  ...SIN_FINAS,
   ...over,
 })
 
@@ -60,6 +74,15 @@ describe('getCrmAccess', () => {
       exportar: true,
       ventas: true,
       admin: true,
+      // Las 8 finas también: el superadmin real tiene todas, siempre.
+      cerrar: true,
+      bajas: true,
+      plantillas: true,
+      preparar: true,
+      mandar: true,
+      verCampanas: true,
+      equipo: true,
+      configurar: true,
     })
     // Superadmin for real: an ACTIVE SUPERADMIN row of an ACTIVE person — never the role written in the token.
     expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
@@ -99,15 +122,26 @@ describe('getCrmAccess', () => {
     await expect(getCrmAccess(STAFF_ID)).resolves.toBeNull()
   })
 
-  it('sin_ver_solo_cuentan_campanas_y_admin', async () => {
-    // editar, contactar, exportar and ventas work on top of ver; campanas and admin stand alone (spec §5.1).
+  it('sin_ver_solo_cuentan_las_que_van_solas', async () => {
+    // editar, contactar, exportar and ventas work on top of ver; cerrar on top of editar. Las de correo masivo y las de
+    // administración van solas (L1). `campanas` y `admin` de la respuesta son el espejo de las finas, no las columnas viejas.
     prismaMock.staff.findUnique.mockResolvedValue({ email: 'mkt@avoqado.io', active: true })
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    const todasLasSolas = { bajas: true, plantillas: true, preparar: true, mandar: true, verCampanas: true, equipo: true, configurar: true }
     prismaMock.platformAccess.findUnique.mockResolvedValue(
-      row({ editarScope: 'todos', contactar: true, campanas: true, exportar: true, ventas: true, admin: true }),
+      row({
+        editarScope: 'todos',
+        contactar: true,
+        campanas: true,
+        exportar: true,
+        ventas: true,
+        admin: true,
+        cerrar: true,
+        ...todasLasSolas,
+      }),
     )
 
-    await expect(getCrmAccess(STAFF_ID)).resolves.toEqual(access({ campanas: true, admin: true }))
+    await expect(getCrmAccess(STAFF_ID)).resolves.toEqual(access({ campanas: true, admin: true, ...todasLasSolas }))
   })
 })
 
@@ -130,7 +164,8 @@ describe('getCrmAccess: the row is claimed by one person', () => {
     // Compare-and-set: it claims the row only while nobody has (or this same person, if their first two requests race).
     expect(prismaMock.platformAccess.updateMany).toHaveBeenCalledWith({
       where: { id: ROW_ID, active: true, OR: [{ staffId: null }, { staffId: STAFF_ID }] },
-      data: { staffId: STAFF_ID },
+      // L11: el reclamo del código nuevo sube `llavesVersion`, para que el disparador de la base no apague las finas.
+      data: { staffId: STAFF_ID, llavesVersion: { increment: 1 } },
     })
 
     // Someone else claimed it a moment earlier: no access.
@@ -186,5 +221,92 @@ describe('scopeWhere', () => {
   it('sin_alcance_no_deja_ver_nada', () => {
     // A route that forgot requireCrm must fail closed: a filter no account can match.
     expect(scopeWhere(access({ ver: 'propios' }), 'editar')).toEqual({ id: { in: [] } })
+  })
+})
+
+/**
+ * Las llaves finas (plan 2026-11-04, L1 y L11): qué cuenta de cada fila, y cómo se contestan `crm:campanas` y `crm:admin`,
+ * que ninguna ruta nueva pide pero que nunca se quitan.
+ */
+describe('effectiveKeys: las llaves finas (L1)', () => {
+  it('bajas_va_sola_sin_ver', () => {
+    expect(effectiveKeys(row({ verScope: null, bajas: true })).bajas).toBe(true)
+  })
+
+  it('cerrar_sin_editar_no_cuenta', () => {
+    // Cerrar es editar una ficha: sin «Editar» no hace nada, aunque esté guardada.
+    expect(effectiveKeys(row({ verScope: 'todos', editarScope: null, cerrar: true })).cerrar).toBe(false)
+    expect(effectiveKeys(row({ verScope: 'todos', editarScope: 'propios', cerrar: true })).cerrar).toBe(true)
+    // Y «Editar» sin «Ver» tampoco cuenta, así que «Cerrar» tampoco.
+    expect(effectiveKeys(row({ verScope: null, editarScope: 'todos', cerrar: true })).cerrar).toBe(false)
+  })
+
+  it('preparar_y_mandar_incluyen_ver_campanas', () => {
+    expect(effectiveKeys(row({ mandar: true, verCampanas: false })).verCampanas).toBe(true)
+    expect(effectiveKeys(row({ preparar: true, verCampanas: false })).verCampanas).toBe(true)
+    expect(effectiveKeys(row({ plantillas: true })).verCampanas).toBe(false)
+  })
+
+  it('las_de_correo_y_administracion_van_solas', () => {
+    const solas = { plantillas: true, preparar: true, mandar: true, verCampanas: true, equipo: true, configurar: true, bajas: true }
+    expect(effectiveKeys(row(solas))).toEqual(expect.objectContaining(solas))
+    expect(effectiveKeys(row({ plantillas: true })).plantillas).toBe(true)
+  })
+
+  it('sin_reconciliar_al_leer (L11)', () => {
+    // Las 4 de correo con la columna vieja `campanas` en false: siguen las 4, y el espejo de la respuesta sale de ellas.
+    const correo = { plantillas: true, preparar: true, mandar: true, verCampanas: true }
+    expect(effectiveKeys(row({ ...correo, campanas: false }))).toEqual(expect.objectContaining({ ...correo, campanas: true }))
+    // Las columnas viejas ya no dan nada: una fila que sólo trae `campanas` y `admin` (escrita por la versión vieja, que el
+    // disparador deja sin finas) no tiene ninguna llave de correo ni de administración.
+    expect(effectiveKeys(row({ campanas: true, admin: true }))).toEqual(
+      expect.objectContaining({ ...SIN_FINAS, campanas: false, admin: false }),
+    )
+  })
+})
+
+describe('legacyFlags: el espejo de L11, falla cerrado', () => {
+  const sinNada = { plantillas: false, preparar: false, mandar: false, verCampanas: false, equipo: false, configurar: false, bajas: false }
+  const correo = { plantillas: true, preparar: true, mandar: true, verCampanas: true }
+  const administracion = { equipo: true, configurar: true, bajas: true }
+
+  it('campanas_solo_con_las_4_de_correo', () => {
+    expect(legacyFlags({ ...sinNada, ...correo })).toEqual({ campanas: true, admin: false })
+    expect(legacyFlags({ ...sinNada, ...correo, mandar: false })).toEqual({ campanas: false, admin: false })
+  })
+
+  it('admin_con_las_3_de_administracion_y_las_4_de_correo', () => {
+    expect(legacyFlags({ ...sinNada, ...administracion })).toEqual({ campanas: false, admin: false })
+    expect(legacyFlags({ ...sinNada, ...administracion, ...correo })).toEqual({ campanas: true, admin: true })
+  })
+})
+
+describe('hasCrmKey: las 8 nuevas y las 2 viejas', () => {
+  it('crm_campanas_es_cualquiera_de_las_4_de_correo', () => {
+    expect(hasCrmKey(access({ plantillas: true }), 'crm:campanas')).toBe(true)
+    expect(hasCrmKey(access({ verCampanas: true }), 'crm:campanas')).toBe(true)
+    expect(hasCrmKey(access({ equipo: true, configurar: true, bajas: true }), 'crm:campanas')).toBe(false)
+  })
+
+  it('crm_admin_son_las_3_de_administracion', () => {
+    expect(hasCrmKey(access({ equipo: true }), 'crm:admin')).toBe(false)
+    expect(hasCrmKey(access({ equipo: true, configurar: true, bajas: true }), 'crm:admin')).toBe(true)
+  })
+
+  it('cada_llave_nueva_lee_su_campo', () => {
+    const casos = [
+      ['crm:plantillas', 'plantillas'],
+      ['crm:preparar', 'preparar'],
+      ['crm:mandar', 'mandar'],
+      ['crm:ver-campanas', 'verCampanas'],
+      ['crm:equipo', 'equipo'],
+      ['crm:configurar', 'configurar'],
+      ['crm:bajas', 'bajas'],
+      ['crm:cerrar', 'cerrar'],
+    ] as const
+    for (const [key, field] of casos) {
+      expect(hasCrmKey(access(), key)).toBe(false)
+      expect(hasCrmKey(access({ [field]: true }), key)).toBe(true)
+    }
   })
 })

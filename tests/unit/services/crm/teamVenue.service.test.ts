@@ -26,6 +26,7 @@ import { addTeamMemberSchema, removeTeamMemberSchema, updateTeamMemberSchema } f
 import type { CrmAccess } from '@/services/crm/access.service'
 import {
   addTeamMember,
+  assertFormaNuevaDeLlaves,
   ensureCrmTeamVenue,
   listTeamMembers,
   listTeamOptions,
@@ -45,6 +46,28 @@ const ACCOUNT_B = 'caccountb0000000000000001'
 
 const realInviteTeamMember = teamDashboard.inviteTeamMember
 
+/** Las 8 llaves finas (plan 2026-11-04), todas apagadas. */
+const SIN_FINAS = {
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
+}
+const TODAS_FINAS = {
+  cerrar: true,
+  bajas: true,
+  plantillas: true,
+  preparar: true,
+  mandar: true,
+  verCampanas: true,
+  equipo: true,
+  configurar: true,
+}
+
 /** The actor's EFFECTIVE keys, as `requireCrm` leaves them in `req.crmAccess`. Default: an admin with every key. */
 const actor = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   staffId: ADMIN_ID,
@@ -56,12 +79,16 @@ const actor = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: true,
   ventas: true,
   admin: true,
+  ...TODAS_FINAS,
   ...over,
 })
 
-/** The keys the screen sends. Default: what the spec gives a new seller (see and edit their own, email one to one). */
+/**
+ * The keys the screen sends: las 13 de la pantalla nueva, nunca `campanas` ni `admin` (L10). Default: what the spec gives a
+ * new seller (see and edit their own, close their own, email one to one; L3).
+ */
 const keys = (over: Record<string, unknown> = {}) =>
-  ({ ver: 'propios', editar: 'propios', contactar: true, campanas: false, exportar: false, ventas: false, admin: false, ...over }) as any
+  ({ ver: 'propios', editar: 'propios', contactar: true, exportar: false, ventas: false, ...SIN_FINAS, cerrar: true, ...over }) as any
 
 const newMember = (over: Record<string, unknown> = {}) =>
   ({ email: 'ana@avoqado.io', firstName: 'Ana', lastName: 'López', keys: keys(), ...over }) as any
@@ -78,6 +105,9 @@ const storedRow = (over: Record<string, unknown> = {}) => ({
   exportar: false,
   ventas: false,
   admin: false,
+  ...SIN_FINAS,
+  cerrar: true,
+  llavesVersion: 3,
   active: true,
   createdById: ADMIN_ID,
   createdAt: new Date('2026-10-30T12:00:00Z'),
@@ -562,7 +592,7 @@ describe('who may give which key', () => {
   })
 
   it('llave_dependiente_sin_ver_422', async () => {
-    const noVer = { ver: null, editar: null, contactar: false }
+    const noVer = { ver: null, editar: null, contactar: false, cerrar: false }
     for (const dependent of [{ editar: 'propios' }, { contactar: true }, { exportar: true }, { ventas: true }]) {
       await expect(addTeamMember(actor(), newMember({ keys: keys({ ...noVer, ...dependent }) }))).rejects.toMatchObject({
         statusCode: 422,
@@ -573,8 +603,8 @@ describe('who may give which key', () => {
     await expect(updateTeamMember(actor(), ROW_ID, keys({ ...noVer, exportar: true }))).rejects.toMatchObject({ statusCode: 422 })
     expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
 
-    // «Campañas masivas» and «Administrar» stand alone: the marketing profile needs no «Ver negocios».
-    await expect(addTeamMember(actor(), newMember({ keys: keys({ ...noVer, campanas: true }) }))).resolves.toBeDefined()
+    // Las de correo masivo y las de administración van solas: el perfil de marketing no necesita «Ver negocios».
+    await expect(addTeamMember(actor(), newMember({ keys: keys({ ...noVer, plantillas: true, mandar: true }) }))).resolves.toBeDefined()
   })
 })
 
@@ -602,11 +632,12 @@ describe('expectedKeys: lo viejo no pisa lo nuevo (ruling 60)', () => {
     prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ verScope: null, editarScope: null, contactar: true }))
     prismaMock.platformAccess.updateManyAndReturn.mockImplementation(async ({ data }: any) => [storedRow({ ...data })])
 
-    const updated = await updateTeamMember(actor(), ROW_ID, keys(), keys({ ver: null, editar: null, contactar: false }))
+    const updated = await updateTeamMember(actor(), ROW_ID, keys(), keys({ ver: null, editar: null, contactar: false, cerrar: false }))
 
     expect(updated.keys).toEqual(expect.objectContaining({ ver: 'propios', contactar: true }))
     // The write is the compare-and-set: it only lands on the row exactly as it was read.
     expect(prismaMock.platformAccess.updateManyAndReturn).toHaveBeenCalledWith({
+      // Las 15 columnas de llaves tal como se leyeron (las 13 y el espejo): cualquier escritura de en medio la hace fallar.
       where: {
         id: ROW_ID,
         active: true,
@@ -617,8 +648,10 @@ describe('expectedKeys: lo viejo no pisa lo nuevo (ruling 60)', () => {
         exportar: false,
         ventas: false,
         admin: false,
+        ...SIN_FINAS,
+        cerrar: true,
       },
-      data: expect.objectContaining({ verScope: 'propios', editarScope: 'propios', contactar: true }),
+      data: expect.objectContaining({ verScope: 'propios', editarScope: 'propios', contactar: true, llavesVersion: { increment: 1 } }),
     })
     expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_TEAM_MEMBER_KEYS_UPDATED', entityId: ROW_ID }))
@@ -877,7 +910,18 @@ describe('listTeamMembers', () => {
         firstName: 'Carla',
         lastName: 'Ruiz',
         openAccounts: 3,
-        keys: { ver: 'propios', editar: 'propios', contactar: true, campanas: false, exportar: false, ventas: false, admin: false },
+        // Las 13 y el espejo `campanas`/`admin` de L11: la pantalla vieja sigue leyendo sus 7.
+        keys: {
+          ver: 'propios',
+          editar: 'propios',
+          contactar: true,
+          exportar: false,
+          ventas: false,
+          ...SIN_FINAS,
+          cerrar: true,
+          campanas: false,
+          admin: false,
+        },
       }),
       expect.objectContaining({ id: ROW2_ID, staffId: OTHER_ID, firstName: 'Beto', openAccounts: 0 }),
     ])
@@ -888,9 +932,11 @@ describe('listTeamMembers', () => {
 })
 
 describe('listTeamOptions', () => {
-  it('opciones_del_equipo_solo_para_quien_reasigna', async () => {
+  it('opciones_del_equipo_solo_para_quien_reasigna (L6)', async () => {
     // Ruling 13: a seller who edits only their own accounts cannot reassign, so they do not even get the names.
-    await expect(listTeamOptions(actor({ editar: 'propios', admin: false }))).resolves.toEqual([])
+    await expect(listTeamOptions(actor({ editar: 'propios', equipo: false }))).resolves.toEqual([])
+    // «Configurar el CRM» no reparte negocios, y el espejo `admin` de la pantalla vieja ya no autoriza nada.
+    await expect(listTeamOptions(actor({ editar: 'propios', equipo: false, configurar: true, admin: true }))).resolves.toEqual([])
     expect(prismaMock.platformAccess.findMany).not.toHaveBeenCalled()
 
     // Whoever can reassign gets every member `reassign` would accept (M-4): active keys with «Ver» AND «Editar» (m-3,
@@ -916,7 +962,7 @@ describe('listTeamOptions', () => {
       { id: CHANGED_ID, email: 'luis.nuevo@avoqado.io', emailVerified: true, firstName: 'Luis', lastName: 'Ramírez' },
     ])
 
-    await expect(listTeamOptions(actor({ editar: 'todos', admin: false }))).resolves.toEqual([
+    await expect(listTeamOptions(actor({ editar: 'todos', equipo: false }))).resolves.toEqual([
       { staffId: SELLER_ID, name: 'Carla Ruiz' },
       { staffId: OTHER_ID, name: 'Beto Díaz' },
     ])
@@ -940,7 +986,222 @@ describe('listTeamOptions', () => {
       }),
     )
 
-    // An admin without «Editar: todos» reassigns from «Equipo de ventas» too.
-    await expect(listTeamOptions(actor({ editar: null, ver: null, admin: true }))).resolves.toHaveLength(2)
+    // «Equipo y llaves» without «Editar: todos» reassigns from «Equipo de ventas» too.
+    await expect(
+      listTeamOptions(actor({ editar: null, ver: null, ...SIN_FINAS, equipo: true, campanas: false, admin: false })),
+    ).resolves.toHaveLength(2)
+  })
+})
+
+/**
+ * Plan 2026-11-04 (L10): la pantalla VIEJA del SUPERADMIN manda `campanas` o `admin`; la nueva nunca. Una pestaña vieja
+ * abierta mientras se publican las dos no puede dar ni quitar una llave por accidente: se le pide recargar.
+ */
+describe('la pantalla vieja se rechaza (L10)', () => {
+  const VIEJA_7 = { ver: null, editar: null, contactar: false, campanas: true, exportar: false, ventas: false, admin: false }
+
+  it('forma_vieja_de_7_o_de_15_campos_es_409', () => {
+    for (const body of [
+      { keys: VIEJA_7 },
+      { keys: { ...keys(), campanas: false, admin: false } },
+      { keys: keys(), expectedKeys: VIEJA_7 },
+      { keys: keys(), expectedKeys: { ...keys(), campanas: false, admin: false } },
+      { email: 'ana@avoqado.io', firstName: 'Ana', lastName: 'López', keys: { ...keys(), admin: false } },
+    ]) {
+      expect(() => assertFormaNuevaDeLlaves(body)).toThrow(
+        expect.objectContaining({
+          statusCode: 409,
+          code: 'CRM_LLAVES_PANTALLA_VIEJA',
+          message: 'El editor de llaves cambió. Recarga la página y vuelve a intentarlo.',
+        }),
+      )
+    }
+  })
+
+  it('la_forma_nueva_pasa', () => {
+    expect(() => assertFormaNuevaDeLlaves({ keys: keys(), expectedKeys: keys() })).not.toThrow()
+    expect(() => assertFormaNuevaDeLlaves({ keys: keys() })).not.toThrow()
+    // Lo que no trae llaves (o un cuerpo raro) lo rechaza el esquema, no esta regla.
+    expect(() => assertFormaNuevaDeLlaves(undefined)).not.toThrow()
+    expect(() => assertFormaNuevaDeLlaves({ keys: 'x' })).not.toThrow()
+  })
+
+  it('el_esquema_pide_las_13_y_guarda_tal_cual', () => {
+    const body = { keys: keys({ bajas: true }), expectedKeys: keys() }
+    const parsed = updateTeamMemberSchema.parse({ params: { id: ROW_ID }, body }).body
+    expect(parsed.keys).toEqual(keys({ bajas: true }))
+    // Media forma nueva tampoco: sin una de las 13, 400.
+    const sinMandar = { ...keys() }
+    delete sinMandar.mandar
+    expect(updateTeamMemberSchema.safeParse({ params: { id: ROW_ID }, body: { keys: sinMandar } }).success).toBe(false)
+  })
+})
+
+describe('las llaves finas: reglas al darlas (L1, L12)', () => {
+  it('quien_solo_tiene_equipo_no_da_mandar_campanas', async () => {
+    const soloEquipo = actor({
+      ver: null,
+      editar: null,
+      contactar: false,
+      exportar: false,
+      ventas: false,
+      ...SIN_FINAS,
+      equipo: true,
+      campanas: false,
+      admin: false,
+    })
+    const mandar = keys({ ver: null, editar: null, contactar: false, cerrar: false, mandar: true })
+
+    await expect(addTeamMember(soloEquipo, newMember({ keys: mandar }))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_KEY_ESCALATION',
+      message: expect.stringContaining('«Mandar campañas»'),
+    })
+    // Ni dándosela a sí mismo, ni cualquier otra de las nuevas que no tiene.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(
+      storedRow({ staffId: ADMIN_ID, verScope: null, editarScope: null, contactar: false, cerrar: false, equipo: true }),
+    )
+    for (const [campo, etiqueta] of [
+      ['mandar', 'Mandar campañas'],
+      ['plantillas', 'Plantillas'],
+      ['preparar', 'Preparar campañas'],
+      ['verCampanas', 'Ver campañas'],
+      ['configurar', 'Configurar el CRM'],
+      ['bajas', 'Bajas de correo'],
+    ] as const) {
+      await expect(
+        updateTeamMember(
+          soloEquipo,
+          ROW_ID,
+          keys({ ver: null, editar: null, contactar: false, cerrar: false, equipo: true, [campo]: true }),
+        ),
+      ).rejects.toMatchObject({ statusCode: 403, code: 'CRM_KEY_ESCALATION', message: expect.stringContaining(`«${etiqueta}»`) })
+    }
+    expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+  })
+
+  it('ampliar_editar_de_quien_cierra_es_ampliar_cerrar (L12)', async () => {
+    // Quien maneja el equipo, ve y edita todo, pero NO cierra negocios. Carla edita y cierra los suyos.
+    const sinCerrar = actor({ cerrar: false })
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ verScope: 'todos', editarScope: 'propios', cerrar: true }))
+
+    await expect(updateTeamMember(sinCerrar, ROW_ID, keys({ ver: 'todos', editar: 'todos', cerrar: true }))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_KEY_ESCALATION',
+      message: expect.stringContaining('«Cerrar negocios» en todos'),
+    })
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+
+    // Ampliar «Editar» de alguien que NO cierra sí puede: «Editar» en todos lo tiene.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ verScope: 'todos', editarScope: 'propios', cerrar: false }))
+    prismaMock.platformAccess.update.mockImplementation(async ({ data }: any) => storedRow({ ...data }))
+    await expect(updateTeamMember(sinCerrar, ROW_ID, keys({ ver: 'todos', editar: 'todos', cerrar: false }))).resolves.toBeDefined()
+
+    // Y conservarle a Carla su «Cerrar» en propios mientras le cambias otra cosa no es darlo.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ verScope: 'todos', editarScope: 'propios', cerrar: true }))
+    await expect(
+      updateTeamMember(sinCerrar, ROW_ID, keys({ ver: 'todos', editar: 'propios', cerrar: true, exportar: true })),
+    ).resolves.toBeDefined()
+  })
+
+  it('cerrar_en_propios_tambien_cuenta_como_darla', async () => {
+    const sinCerrar = actor({ cerrar: false })
+    await expect(addTeamMember(sinCerrar, newMember({ keys: keys({ cerrar: true }) }))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_KEY_ESCALATION',
+      message: expect.stringContaining('«Cerrar negocios» en propios'),
+    })
+  })
+
+  it('bajas_va_sola_y_exportar_sin_ver_sigue_422', async () => {
+    const noVer = { ver: null, editar: null, contactar: false, cerrar: false }
+
+    await addTeamMember(actor(), newMember({ keys: keys({ ...noVer, bajas: true }) }))
+    expect(prismaMock.platformAccess.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ create: expect.objectContaining({ verScope: null, bajas: true }) }),
+    )
+    await expect(addTeamMember(actor(), newMember({ keys: keys({ ...noVer, exportar: true }) }))).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CRM_KEY_NEEDS_VER',
+    })
+  })
+
+  it('cerrar_sin_editar_422', async () => {
+    const cerrarSinEditar = keys({ ver: 'propios', editar: null, cerrar: true })
+
+    await expect(addTeamMember(actor(), newMember({ keys: cerrarSinEditar }))).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CRM_KEY_NEEDS_EDITAR',
+      message: expect.stringContaining('«Cerrar negocios»'),
+    })
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
+    await expect(updateTeamMember(actor(), ROW_ID, cerrarSinEditar)).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'CRM_KEY_NEEDS_EDITAR',
+    })
+    expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+  })
+
+  it('se_guardan_las_13_tal_cual_con_el_espejo_de_L11_y_sube_la_version', async () => {
+    const correo = { plantillas: true, preparar: true, mandar: true, verCampanas: true }
+    const administracion = { equipo: true, configurar: true, bajas: true }
+
+    // Sólo «Plantillas»: el espejo viejo queda apagado (falla cerrado).
+    await addTeamMember(actor(), newMember({ keys: keys({ plantillas: true }) }))
+    // Las 4 de correo: `campanas`. Las 3 de administración sin las de correo: `admin` sigue apagado.
+    await addTeamMember(actor(), newMember({ keys: keys({ ...correo }) }))
+    await addTeamMember(actor(), newMember({ keys: keys({ ...administracion }) }))
+    await addTeamMember(actor(), newMember({ keys: keys({ ...correo, ...administracion }) }))
+
+    const llamadas = prismaMock.platformAccess.upsert.mock.calls.map(([args]: any) => args)
+    expect(llamadas.map(({ create }: any) => [create.campanas, create.admin])).toEqual([
+      [false, false],
+      [true, false],
+      [false, false],
+      [true, true],
+    ])
+    expect(llamadas[0].create).toEqual(
+      expect.objectContaining({
+        verScope: 'propios',
+        editarScope: 'propios',
+        contactar: true,
+        ...SIN_FINAS,
+        cerrar: true,
+        plantillas: true,
+      }),
+    )
+    // La rama de UPDATE del upsert (la fila ya existía) sube `llavesVersion` para que el disparador no apague las finas;
+    // la de INSERT no pasa por el disparador.
+    for (const { update, create } of llamadas) {
+      expect(update).toEqual(expect.objectContaining({ llavesVersion: { increment: 1 }, campanas: create.campanas, admin: create.admin }))
+      expect(create).not.toHaveProperty('llavesVersion')
+    }
+
+    // El cambio directo (sin `expectedKeys`) también sube la versión y escribe el espejo.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
+    prismaMock.platformAccess.update.mockImplementation(async ({ data }: any) => storedRow({ ...data }))
+    const cambiado = await updateTeamMember(actor(), ROW_ID, keys({ ...correo }))
+    expect(prismaMock.platformAccess.update).toHaveBeenCalledWith({
+      where: { id: ROW_ID },
+      data: expect.objectContaining({ ...correo, campanas: true, admin: false, llavesVersion: { increment: 1 } }),
+    })
+    expect(cambiado.keys).toEqual(expect.objectContaining({ ...correo, campanas: true, admin: false }))
+  })
+
+  it('expectedKeys_de_13_que_ya_no_coincide_409', async () => {
+    // La pantalla la vio sin «Bajas de correo»; mientras, otro admin se la dio.
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ bajas: true }))
+
+    await expect(updateTeamMember(actor(), ROW_ID, keys({ ventas: true }), keys())).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_LLAVES_CAMBIARON',
+    })
+    expect(prismaMock.platformAccess.updateManyAndReturn).not.toHaveBeenCalled()
+
+    // Con lo que de verdad vio, pasa.
+    prismaMock.platformAccess.updateManyAndReturn.mockImplementation(async ({ data }: any) => [storedRow({ ...data })])
+    await expect(updateTeamMember(actor(), ROW_ID, keys({ bajas: true, ventas: true }), keys({ bajas: true }))).resolves.toBeDefined()
   })
 })

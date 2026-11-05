@@ -41,6 +41,14 @@ const access = (staffId: string, over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
   ...over,
 })
 
@@ -169,7 +177,8 @@ describe('CRM reports and «Clientes» against Postgres', () => {
     organizationIds.push(organization.id)
     // A «Ganado» link makes it a client, with or without money.
     await account({ ownerStaffId: seller.id, organizationId: organization.id })
-    const admin = access(seller.id, { admin: true })
+    // Ocultar y ver los ocultos es de «Configurar el CRM» (L7).
+    const admin = access(seller.id, { configurar: true })
 
     const before = await listClients(access(seller.id), { q: suffix })
     expect(before.total).toBe(1)

@@ -10,6 +10,18 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 const ADMIN_ID = 'cstaffadm0000000000000009'
 
+/** Las 8 llaves finas (plan 2026-11-04), todas apagadas. */
+const SIN_FINAS = {
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
+}
+
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: any, _res: unknown, next: () => void) => {
     req.authContext = {
@@ -56,7 +68,8 @@ beforeEach(() => {
     prismaMock.platformAccess.updateManyAndReturn,
   ])
     fn.mockReset()
-  // An admin of the team: «Administrar» on, «Ver negocios» off. Not a superadmin.
+  // An admin of the team: «Administrar» on, «Ver negocios» off. Not a superadmin. Como lo deja la migración de las llaves
+  // finas (L2): `admin` trae las 3 de administración y las 4 de correo masivo, y el espejo `campanas`/`admin` prendido.
   prismaMock.staff.findUnique.mockResolvedValue({ email: 'admin@avoqado.io', active: true, emailVerified: true })
   prismaMock.staffVenue.findFirst.mockResolvedValue(null)
   prismaMock.platformAccess.findUnique.mockResolvedValue({
@@ -65,10 +78,18 @@ beforeEach(() => {
     verScope: null,
     editarScope: null,
     contactar: false,
-    campanas: false,
+    campanas: true,
     exportar: false,
     ventas: false,
     admin: true,
+    ...SIN_FINAS,
+    plantillas: true,
+    preparar: true,
+    mandar: true,
+    verCampanas: true,
+    equipo: true,
+    configurar: true,
+    bajas: true,
   })
   prismaMock.crmStage.count.mockResolvedValue(7)
   prismaMock.crmLostReason.count.mockResolvedValue(5)
@@ -153,8 +174,8 @@ describe('importar lo de HubSpot', () => {
     expect(res.body.data).toMatchObject({ nuevos: 1, archivados: 1 })
   })
 
-  it('sin_crm_admin_es_403', async () => {
-    // A seller who sees and edits every account, but does not administer the CRM.
+  it('sin_configurar_es_403 (L7)', async () => {
+    // A seller who sees and edits every account, but does not configure the CRM.
     prismaMock.platformAccess.findUnique.mockResolvedValue({
       id: 'caccessrw0000000000000009',
       staffId: ADMIN_ID,
@@ -214,13 +235,13 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     }
   })
 
-  it('ocultar_y_regresar_piden_crm_admin', async () => {
+  it('ocultar_y_regresar_piden_configurar (L7)', async () => {
     const ORG = 'corgprime0000000000000001'
     prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })
     prismaMock.crmHiddenClient.createMany.mockResolvedValue({ count: 1 })
     prismaMock.crmHiddenClient.deleteMany.mockResolvedValue({ count: 1 })
 
-    // The admin of the team from `beforeEach`: «Administrar» on, even without «Ver negocios».
+    // The admin of the team from `beforeEach` («Configurar el CRM» on, L2), even without «Ver negocios».
     const hidden = await request(app).post(`/crm/clients/${ORG}/hide`)
     expect(hidden.status).toBe(200)
     expect(hidden.body.data).toEqual({ organizationId: ORG, oculta: true })
@@ -228,7 +249,7 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     expect(shown.status).toBe(200)
     expect(shown.body.data).toEqual({ organizationId: ORG, oculta: false })
 
-    // A seller who sees and edits everything, without «Administrar».
+    // A seller who sees and edits everything, without «Configurar el CRM».
     prismaMock.platformAccess.findUnique.mockResolvedValue({
       id: 'caccessrw0000000000000009',
       staffId: ADMIN_ID,
@@ -293,10 +314,13 @@ describe('cambiar llaves con expectedKeys (ruling 60)', () => {
       exportar: false,
       ventas: false,
       admin: false,
+      ...SIN_FINAS,
+      cerrar: true,
       active: true,
     }
     prismaMock.platformAccess.findFirst.mockResolvedValue(carla)
-    const keys = { ver: 'propios', editar: 'propios', contactar: false, campanas: false, exportar: false, ventas: false, admin: false }
+    // Las 13 de la pantalla nueva (L10).
+    const keys = { ver: 'propios', editar: 'propios', contactar: false, exportar: false, ventas: false, ...SIN_FINAS, cerrar: true }
 
     const stale = await request(jsonApp)
       .patch(`/crm/team/${carla.id}`)
@@ -311,5 +335,74 @@ describe('cambiar llaves con expectedKeys (ruling 60)', () => {
     const asToday = await request(jsonApp).patch(`/crm/team/${carla.id}`).send({ keys })
     expect(asToday.status).toBe(200)
     expect(asToday.body.data.keys).toMatchObject({ contactar: false })
+  })
+})
+
+describe('la pantalla vieja del equipo recibe 409 y no escribe nada (L10)', () => {
+  const jsonApp = express().use(express.json()).use(appWithErrors)
+  const VIEJA_7 = { ver: 'propios', editar: 'propios', contactar: true, campanas: false, exportar: false, ventas: false, admin: false }
+  const NUEVA = { ver: 'propios', editar: 'propios', contactar: true, exportar: false, ventas: false, ...SIN_FINAS, cerrar: true }
+  const recarga = { code: 'CRM_LLAVES_PANTALLA_VIEJA', message: 'El editor de llaves cambió. Recarga la página y vuelve a intentarlo.' }
+
+  it('agregar_con_la_forma_vieja_es_409', async () => {
+    // Los 7 campos de la pantalla vieja, y los 15 que copió de la respuesta nueva.
+    for (const keys of [VIEJA_7, { ...NUEVA, campanas: false, admin: false }]) {
+      const res = await request(jsonApp).post('/crm/team').send({ email: 'ana@avoqado.io', firstName: 'Ana', lastName: 'López', keys })
+      expect(res.status).toBe(409)
+      expect(res.body).toEqual(recarga)
+    }
+    expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
+  })
+
+  it('cambiar_con_la_forma_vieja_es_409', async () => {
+    const ID = 'caccessrw0000000000000001'
+    for (const body of [
+      { keys: VIEJA_7, expectedKeys: VIEJA_7 },
+      { keys: { ...NUEVA, campanas: false, admin: false } },
+      { keys: NUEVA, expectedKeys: { ...NUEVA, admin: false } },
+    ]) {
+      const res = await request(jsonApp).patch(`/crm/team/${ID}`).send(body)
+      expect(res.status).toBe(409)
+      expect(res.body).toEqual(recarga)
+    }
+    expect(prismaMock.platformAccess.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.updateManyAndReturn).not.toHaveBeenCalled()
+  })
+})
+
+describe('GET /crm/me con las llaves finas', () => {
+  it('solo_plantillas_trae_el_espejo_apagado_y_las_8_nuevas', async () => {
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: null,
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      plantillas: true,
+    })
+
+    const res = await request(app).get('/crm/me')
+
+    expect(res.status).toBe(200)
+    // `campanas` y `admin` siguen en la respuesta (la pantalla vieja los lee), con el espejo de L11: sólo con las 4.
+    expect(res.body.data).toEqual({
+      staffId: ADMIN_ID,
+      isSuperadmin: false,
+      ver: null,
+      editar: null,
+      contactar: false,
+      exportar: false,
+      ventas: false,
+      ...SIN_FINAS,
+      plantillas: true,
+      campanas: false,
+      admin: false,
+    })
   })
 })

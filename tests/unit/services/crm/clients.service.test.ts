@@ -43,6 +43,14 @@ const access = (over: Partial<CrmAccess> = {}): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
   ...over,
 })
 
@@ -264,21 +272,24 @@ describe('organizaciones ocultas (ruling 39)', () => {
     expect(countQuery().sql).toContain(HIDDEN)
   })
 
-  it('ocultos_con_admin_lista_solo_las_ocultas', async () => {
-    await listClients(access({ admin: true }), { ocultos: true }, NOW)
+  it('ocultos_con_configurar_lista_solo_las_ocultas (L7)', async () => {
+    await listClients(access({ configurar: true }), { ocultos: true }, NOW)
     expect(pageQuery().sql).toMatch(ONLY_HIDDEN)
     expect(pageQuery().sql).not.toContain(HIDDEN)
     // Still clients by the same rule, and never the team's organization.
     expect(pageQuery().values).toContain(TEAM_ORG)
   })
 
-  it('ocultos_sin_admin_se_ignora', async () => {
+  it('ocultos_sin_configurar_se_ignora', async () => {
     await listClients(access(), { ocultos: true }, NOW)
     expect(pageQuery().sql).toContain(HIDDEN)
+    // «Equipo y llaves» no ordena el archivero, y el espejo `admin` de la pantalla vieja ya no autoriza nada.
+    await listClients(access({ equipo: true, bajas: true, admin: true }), { ocultos: true }, NOW)
+    expect(pageQuery(1).sql).toContain(HIDDEN)
   })
 
   it('ocultar_es_idempotente_y_queda_en_la_bitacora', async () => {
-    const admin = access({ admin: true, ver: null, editar: null })
+    const admin = access({ configurar: true, ver: null, editar: null })
     prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })
     prismaMock.crmHiddenClient.createMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 })
     jest.mocked(logAction).mockClear()
@@ -302,7 +313,7 @@ describe('organizaciones ocultas (ruling 39)', () => {
 
   it('ocultar_una_organizacion_que_no_existe_es_404', async () => {
     prismaMock.organization.findUnique.mockResolvedValue(null)
-    await expect(hideClient(access({ admin: true }), ORG)).rejects.toMatchObject({ statusCode: 404 })
+    await expect(hideClient(access({ configurar: true }), ORG)).rejects.toMatchObject({ statusCode: 404 })
     expect(prismaMock.crmHiddenClient.createMany).not.toHaveBeenCalled()
   })
 
@@ -310,13 +321,13 @@ describe('organizaciones ocultas (ruling 39)', () => {
     prismaMock.crmHiddenClient.deleteMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 })
     jest.mocked(logAction).mockClear()
 
-    await expect(unhideClient(access({ admin: true }), ORG)).resolves.toEqual({ organizationId: ORG, oculta: false })
+    await expect(unhideClient(access({ configurar: true }), ORG)).resolves.toEqual({ organizationId: ORG, oculta: false })
     expect(prismaMock.crmHiddenClient.deleteMany).toHaveBeenCalledWith({ where: { organizationId: ORG } })
     expect(logAction).toHaveBeenCalledWith(
       expect.objectContaining({ staffId: SELLER, organizationId: ORG, action: 'CRM_CLIENT_UNHIDDEN', entityId: ORG }),
     )
     // A visible one: nothing to do, nothing logged.
-    await expect(unhideClient(access({ admin: true }), ORG)).resolves.toEqual({ organizationId: ORG, oculta: false })
+    await expect(unhideClient(access({ configurar: true }), ORG)).resolves.toEqual({ organizationId: ORG, oculta: false })
     expect(logAction).toHaveBeenCalledTimes(1)
   })
 })
@@ -437,14 +448,18 @@ describe('getLive', () => {
     )
   })
 
-  it('vivo_kyc_solo_con_admin', async () => {
+  it('vivo_kyc_solo_con_configurar (L7)', async () => {
     // Spec §5.10 (ruling 40): the seller never sees KYC — not even its status.
     linked()
     const seller = await getLive(access({ ver: 'todos', ventas: true }), ACCOUNT, NOW)
     expect(seller.ligada && seller.venues[0]).not.toHaveProperty('kycStatus')
     expect(JSON.stringify(seller)).not.toContain('VERIFIED')
 
-    const admin = await getLive(access({ admin: true }), ACCOUNT, NOW)
+    // Ni «Equipo y llaves» ni el espejo `admin` lo abren: sólo «Configurar el CRM».
+    const equipo = await getLive(access({ equipo: true, bajas: true, admin: true }), ACCOUNT, NOW)
+    expect(equipo.ligada && equipo.venues[0]).not.toHaveProperty('kycStatus')
+
+    const admin = await getLive(access({ configurar: true }), ACCOUNT, NOW)
     expect(admin.ligada && admin.venues[0]).toMatchObject({ kycStatus: 'VERIFIED' })
   })
 
@@ -532,8 +547,8 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     expect(seller).toMatchObject({ ligada: true, organizationId: ORG, ventasMes: null, ventasBloqueadas: true })
     expect(seller.venues[0]).not.toHaveProperty('kycStatus')
     expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
-    // The same locks: «Ver ventas» brings the month, «Administrar» the KYC.
-    const admin = await getClientLive(access({ ventas: true, admin: true }), ORG, NOW)
+    // The same locks: «Ver ventas» brings the month, «Configurar el CRM» the KYC.
+    const admin = await getClientLive(access({ ventas: true, configurar: true }), ORG, NOW)
     expect(admin).toMatchObject({ ventasBloqueadas: false, venues: [expect.objectContaining({ kycStatus: 'VERIFIED' })] })
     expect(admin.ventasMes?.toString()).toBe('1500.5')
 

@@ -29,6 +29,35 @@ aunque cuelgue de otra cuenta o de ninguna. El remitente vuelve a mirar al borde
 minuto antes de encolar (`correoEliminadoDesde`, `erase.service.ts`). El marketing viejo del superadmin hace la misma pregunta desde que
 empezó su campaña. El historial (`CrmEmailMessage`, deliveries) es de D1.
 
+## 🔴 La vista previa se ata a la versión que se ve (`huella`, H3 del 4-nov)
+
+La vista de una campaña trae `huella` (contenido + público; campo nuevo y opcional). La pantalla la manda en `POST /campaigns/:id/preview`
+(`{ huella }`): si la campaña ya cambió, 409 `CRM_CAMPANA_CAMBIO` y no se firma token. Sin `huella` (pantalla vieja), igual que antes. Así
+quien sólo tiene `mandar` nunca confirma una versión que otra persona cambió mientras la veía. La respuesta de la vista previa también trae
+la `huella` que contó y firmó, y la pantalla sólo deja mandar si es la que enseña (una reversa a un SERVIDOR viejo no la manda: «Mandar» se
+cierra y sale en gris). No quites ese campo.
+
+## Llaves del CRM (plan 2026-11-04, L4–L9): cada ruta pide la suya
+
+| Llave                                                       | Abre                                                                                                                                                                                    |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crm:plantillas`                                            | crear, editar, archivar y desarchivar plantillas, y su correo de prueba                                                                                                                 |
+| `crm:contactar` · `crm:plantillas` · `crm:preparar`         | leer plantillas (también `crm_list_email_templates`); `/templates/preview` además con `crm:ver-campanas`                                                                                |
+| `crm:plantillas` · `crm:preparar`                           | subir una imagen                                                                                                                                                                        |
+| `crm:ver-campanas` (la traen también `preparar` y `mandar`) | lista, detalle y conteo de campañas (también `crm_campaign_status`)                                                                                                                     |
+| `crm:preparar`                                              | crear y editar una campaña, y su prueba                                                                                                                                                 |
+| `crm:mandar`                                                | mandar y cancelar                                                                                                                                                                       |
+| `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                 |
+| `crm:configurar`                                            | etapas y motivos (leerlos también con `crm:ver`), ocultar clientes y ver los ocultos y el KYC, importar de HubSpot, la puerta de «Eliminar» (que sigue siendo sólo del superadmin real) |
+| `crm:bajas`                                                 | `POST /opt-outs`, sola                                                                                                                                                                  |
+| `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, y mover un GANADO o PERDIDO a una etapa abierta. «Regresar al embudo» sólo desarchiva: pide «Editar», como archivar                                                      |
+
+🔴 `crm:campanas` y `crm:admin` (y `access.campanas`/`access.admin`) son sólo el espejo para la pantalla vieja: ninguna ruta, servicio ni
+herramienta del MCP decide con ellos (lo vigilan `tests/unit/architecture/crmEspejoDeLlaves.test.ts` en servicios, controladores, rutas y
+MCP, y `tests/unit/routes/crm.team.routes.test.ts` en las rutas). 🔴 El disparador de `PlatformAccess` (L11) apaga las 8 finas en todo
+`UPDATE` que no suba `llavesVersion`: código nuevo que escribe esa fila y debe conservarlas suma `llavesVersion: { increment: 1 }`;
+cualquier otra escritura las apaga.
+
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 
 `sendTestToSelf` firma `platformUnsubscribeUrl` con el correo de quien prueba. Si lo usa (Rafa, por ejemplo), su correo queda bloqueado y

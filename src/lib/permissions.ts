@@ -2295,9 +2295,30 @@ export async function resolveCustomPermissionsForRole(venueId: string, role: Sta
  * own sales pipeline. Mirrored by exact name in `avoqado-superadmin/src/features/crm/access.ts`.
  *
  * `crm:ver` and `crm:editar` carry a scope (`propios` = mine + unowned, or `todos`). `crm:editar`, `crm:contactar`,
- * `crm:exportar` and `crm:ventas` only work on top of `crm:ver`; `crm:campanas` and `crm:admin` stand alone.
+ * `crm:exportar` and `crm:ventas` only work on top of `crm:ver`; `crm:cerrar` on top of `crm:editar`, in its scope.
+ * Las de correo masivo (`crm:plantillas`, `crm:preparar`, `crm:mandar`, `crm:ver-campanas`) y las de administración
+ * (`crm:equipo`, `crm:configurar`, `crm:bajas`) van solas; `crm:preparar` y `crm:mandar` incluyen `crm:ver-campanas`.
+ *
+ * `crm:campanas` y `crm:admin` se quedan (nunca se quita un permiso): ninguna ruta nueva los pide, y `hasCrmKey` los
+ * contesta como «cualquiera de las 4 de correo masivo» y «las 3 de administración» (plan 2026-11-04, L1 y L11).
  */
-export const CRM_KEYS = ['crm:ver', 'crm:editar', 'crm:contactar', 'crm:campanas', 'crm:exportar', 'crm:ventas', 'crm:admin'] as const
+export const CRM_KEYS = [
+  'crm:ver',
+  'crm:editar',
+  'crm:contactar',
+  'crm:campanas',
+  'crm:exportar',
+  'crm:ventas',
+  'crm:admin',
+  'crm:plantillas',
+  'crm:preparar',
+  'crm:mandar',
+  'crm:ver-campanas',
+  'crm:equipo',
+  'crm:configurar',
+  'crm:bajas',
+  'crm:cerrar',
+] as const
 
 export type CrmKey = (typeof CRM_KEYS)[number]
 
@@ -2310,4 +2331,12 @@ export const CRM_KEY_LABELS: Record<CrmKey, string> = {
   'crm:exportar': 'Exportar',
   'crm:ventas': 'Ver ventas',
   'crm:admin': 'Administrar',
+  'crm:plantillas': 'Plantillas',
+  'crm:preparar': 'Preparar campañas',
+  'crm:mandar': 'Mandar campañas',
+  'crm:ver-campanas': 'Ver campañas',
+  'crm:equipo': 'Equipo y llaves',
+  'crm:configurar': 'Configurar el CRM',
+  'crm:bajas': 'Bajas de correo',
+  'crm:cerrar': 'Cerrar negocios',
 }
