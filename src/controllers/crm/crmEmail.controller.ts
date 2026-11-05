@@ -60,14 +60,15 @@ export async function uploadImage(req: Request, res: Response): Promise<void> {
 
 /**
  * POST /api/v1/crm/opt-outs — «Dar de baja este correo» desde la ficha (la oposición): ya no recibe nada de Avoqado. Sólo
- * `crm:admin`. Idempotente: darlo de baja otra vez contesta igual.
+ * `crm:bajas` («Bajas de correo», L8). Idempotente: darlo de baja otra vez contesta igual.
  */
 export async function createOptOut(req: Request, res: Response): Promise<void> {
   await optOut(req.body.email, 'ADMIN', req.crmAccess!.staffId)
   res.json({ data: { ok: true } })
 }
 
-// Mass-email campaigns (phase 2, plan task 5). Every route is for «Campañas masivas» (`crm:campanas`) or the admin.
+// Mass-email campaigns (phase 2, plan task 5). Ver y contar: `crm:ver-campanas`; crear, editar y probar: `crm:preparar`;
+// mandar y cancelar: `crm:mandar` (L5).
 
 /** GET /api/v1/crm/campaigns */
 export async function listCampaigns(req: Request, res: Response): Promise<void> {
@@ -90,9 +91,9 @@ export async function updateCampaign(req: Request, res: Response): Promise<void>
   res.json({ data: await campaigns.updateCampaign(req.crmAccess!, req.params.id, req.body) })
 }
 
-/** POST /api/v1/crm/campaigns/:id/preview — how many get it now, and the token to confirm exactly that. */
+/** POST /api/v1/crm/campaigns/:id/preview — how many get it now, and the token to confirm exactly that (`huella`: the version seen). */
 export async function previewCampaign(req: Request, res: Response): Promise<void> {
-  res.json({ data: await campaigns.previewSend(req.crmAccess!, req.params.id) })
+  res.json({ data: await campaigns.previewSend(req.crmAccess!, req.params.id, req.body?.huella) })
 }
 
 /** POST /api/v1/crm/campaigns/:id/test — «Envíame una prueba» of this version. A refusal is a 200 with `ok: false` and why. */

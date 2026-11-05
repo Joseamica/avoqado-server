@@ -29,6 +29,14 @@ const seller = (staffId: string): CrmAccess => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
 })
 
 const settle = <T>(results: PromiseSettledResult<T>[]) => ({
@@ -171,16 +179,36 @@ describe('CRM: two sellers on the same account at once', () => {
       data: { email: `carla-${suffix}@test.mx`, verScope: 'propios', editarScope: 'propios', contactar: true, createdById: ana! },
     })
     accessIds.push(carla.id)
+    // Las 13 de la pantalla nueva (plan 2026-11-04, L10), como las vio: Carla aún no cierra (su fila nació sin `cerrar`).
     const seen = {
       ver: 'propios',
       editar: 'propios',
+      cerrar: false,
       contactar: true,
-      campanas: false,
       exportar: false,
       ventas: false,
-      admin: false,
+      bajas: false,
+      plantillas: false,
+      preparar: false,
+      mandar: false,
+      verCampanas: false,
+      equipo: false,
+      configurar: false,
     } as const
-    const admin = (staffId: string): CrmAccess => ({ ...seller(staffId), campanas: true, exportar: true, ventas: true, admin: true })
+    const admin = (staffId: string): CrmAccess => ({
+      ...seller(staffId),
+      campanas: true,
+      exportar: true,
+      ventas: true,
+      admin: true,
+      plantillas: true,
+      preparar: true,
+      mandar: true,
+      verCampanas: true,
+      equipo: true,
+      configurar: true,
+      bajas: true,
+    })
 
     const { fulfilled, rejected } = settle(
       await Promise.allSettled([

@@ -14,9 +14,27 @@ const cuid = z.string({ required_error: 'Falta el id' }).cuid('El id no es váli
 const name = (missing: string) =>
   z.string({ required_error: missing, invalid_type_error: missing }).trim().min(1, missing).max(100, 'Máximo 100 caracteres')
 
-/** A person's seven CRM keys, all of them every time: the screen sends the whole set, never a partial one. */
+/**
+ * A person's 13 CRM keys (plan 2026-11-04), all of them every time: the screen sends the whole set, never a partial one.
+ * Sin `campanas` ni `admin`: sólo los manda la pantalla vieja, y la rechaza `assertFormaNuevaDeLlaves` (409) antes de este
+ * esquema (L10).
+ */
 export const crmKeysSchema = z.object(
-  { ver: scope, editar: scope, contactar: flag, campanas: flag, exportar: flag, ventas: flag, admin: flag },
+  {
+    ver: scope,
+    editar: scope,
+    cerrar: flag,
+    contactar: flag,
+    exportar: flag,
+    ventas: flag,
+    bajas: flag,
+    plantillas: flag,
+    preparar: flag,
+    mandar: flag,
+    verCampanas: flag,
+    equipo: flag,
+    configurar: flag,
+  },
   { required_error: 'Faltan las llaves', invalid_type_error: 'Faltan las llaves' },
 )
 
@@ -258,7 +276,7 @@ export const searchOrganizationsSchema = z.object({
   }),
 })
 
-// Stages and lost reasons (`crm:admin`). The kind of a stage never changes, and a new one is always an open stage: there
+// Stages and lost reasons (`crm:configurar`). The kind of a stage never changes, and a new one is always an open stage: there
 // is one «Ganado» and one «Perdido». Nothing is deleted in phase 1 — a stage is renamed, a reason is turned off.
 const stageName = text(60, 'El nombre de la etapa es obligatorio')
 const stageOrder = z
@@ -307,7 +325,7 @@ export const updateLostReasonSchema = z.object({
     .refine(somethingToChange, 'No hay nada que cambiar'),
 })
 
-// «Importar lo de HubSpot» (`crm:admin`, plan task 8). The two CSVs arrive as multipart; multer already capped them at
+// «Importar lo de HubSpot» (`crm:configurar`, plan task 8). The two CSVs arrive as multipart; multer already capped them at
 // 5 MB each and leaves them in `req.files`, which `validateRequest` does not read: the controller parses it with this.
 const hubspotFile = (label: string) =>
   z
@@ -574,8 +592,22 @@ export const listCampaignsSchema = z.object({
   }),
 })
 
-/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/preview, /test and /cancel */
+/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/test and /cancel */
 export const campaignIdSchema = z.object({ params: byId })
+
+/** POST /crm/campaigns/:id/preview — `huella`, optional: the version the screen shows (H3). Without it (old screen), as before. */
+export const previewCampaignSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      huella: z
+        .string({ invalid_type_error: 'La versión que ves no es válida' })
+        .min(1, 'La versión que ves no es válida')
+        .max(200, 'La versión que ves no es válida')
+        .optional(),
+    })
+    .optional(),
+})
 
 /** POST /crm/campaigns — from a template: its subject and blocks are copied. */
 export const createCampaignSchema = z.object({

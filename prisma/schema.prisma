@@ -21045,22 +21045,35 @@ model DocumentRequestVenueLink {
 
 /// Las llaves «sólo CRM» de una persona, por su correo. Una fila por persona.
 model PlatformAccess {
-  id          String   @id @default(cuid())
-  email       String   @unique // siempre en minúsculas
+  id            String   @id @default(cuid())
+  email         String   @unique // siempre en minúsculas
   // The ONE Staff that holds this row, claimed on first use by a verified person with this email: a recycled or
   // changed email never inherits the keys. Plain id like the other CRM actor columns (no FK).
-  staffId     String?  @unique
-  verScope    String? // 'propios' | 'todos' | null (sin crm:ver)
-  editarScope String? // 'propios' | 'todos' | null (sin crm:editar)
-  contactar   Boolean  @default(false)
-  campanas    Boolean  @default(false)
-  exportar    Boolean  @default(false)
-  ventas      Boolean  @default(false)
-  admin       Boolean  @default(false)
-  active      Boolean  @default(true)
-  createdById String
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  staffId       String?  @unique
+  verScope      String? // 'propios' | 'todos' | null (sin crm:ver)
+  editarScope   String? // 'propios' | 'todos' | null (sin crm:editar)
+  contactar     Boolean  @default(false)
+  campanas      Boolean  @default(false)
+  exportar      Boolean  @default(false)
+  ventas        Boolean  @default(false)
+  admin         Boolean  @default(false)
+  // Llaves finas (plan 2026-11-04). `campanas` y `admin` de arriba quedan como ESPEJO para la versión vieja del servidor:
+  // el código nuevo los escribe (L11) y nunca los lee para autorizar.
+  plantillas    Boolean  @default(false)
+  preparar      Boolean  @default(false)
+  mandar        Boolean  @default(false)
+  verCampanas   Boolean  @default(false)
+  equipo        Boolean  @default(false)
+  configurar    Boolean  @default(false)
+  bajas         Boolean  @default(false)
+  cerrar        Boolean  @default(false) // sólo cuenta con `editarScope`, y en su alcance
+  // L11: el código nuevo la sube en CADA escritura de la fila. Un disparador de la base apaga las 8 finas en todo UPDATE
+  // que no la sube (= lo que escribe la versión vieja, que no la conoce). Ver la migración 20261104200000.
+  llavesVersion Int      @default(0)
+  active        Boolean  @default(true)
+  createdById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }
 
 /// El equipo de ventas: SU organización (vacía, sólo para él) y el venue donde inicia sesión el vendedor. Una sola fila

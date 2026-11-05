@@ -110,7 +110,7 @@ export interface ClientFilters {
   q?: string
   cursor?: string
   limit?: number
-  /** Only the hidden ones (ruling 39), to bring one back. Only with «Administrar»; for anyone else it is ignored. */
+  /** Only the hidden ones (ruling 39), to bring one back. Only with «Configurar el CRM» (L7); for anyone else it is ignored. */
   ocultos?: boolean
 }
 
@@ -121,11 +121,11 @@ const fullName = (person: { firstName: string; lastName: string }) => `${person.
  * Every client is listed for whoever has «Ver negocios» — they are Avoqado's clients, not anybody's prospects — but a
  * linked CRM account shows its owner and stage only inside the caller's scope (`cuentaAjena` says there is one).
  * `yaCobro` is «Ya cobró» / «Aún no cobra». An organization marked hidden (Prime, or any internal or test one, ruling 39)
- * never takes a slot of the page nor counts in the total; `ocultos` with «Administrar» lists only those.
+ * never takes a slot of the page nor counts in the total; `ocultos` with «Configurar el CRM» lists only those.
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
   const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
-  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: !!(filters.ocultos && access.admin), q: filters.q })
+  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: !!(filters.ocultos && access.configurar), q: filters.q })
   // After the cursor's row in the same (createdAt DESC, id DESC) order; an unknown cursor leaves nothing after it.
   const after = filters.cursor
     ? Prisma.sql` AND (o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ${filters.cursor})`
@@ -280,8 +280,8 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
       id: venue.id,
       name: venue.name,
       status: venue.status,
-      // Spec §5.10 (ruling 40): the seller never sees KYC, not even its status.
-      ...(access.admin ? { kycStatus: venue.kycStatus } : {}),
+      // Spec §5.10 (ruling 40): the seller never sees KYC, not even its status. Sólo «Configurar el CRM» (L7).
+      ...(access.configurar ? { kycStatus: venue.kycStatus } : {}),
       terminales: venue._count.terminals,
       plan: effectivePlan(plans[i]),
     })),
@@ -303,7 +303,7 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
 // ── Hidden organizations (ruling 39) ──────────────────────────────────────────────────────────────────────────────────
 
 /**
- * «Ocultar de Clientes» (`crm:admin`): Prime or any internal or test organization stops being listed as a client. Hiding
+ * «Ocultar de Clientes» (`crm:configurar`): Prime or any internal or test organization stops being listed as a client. Hiding
  * twice is a no-op, and only a real change leaves its ActivityLog with who did it.
  */
 export async function hideClient(access: CrmAccess, organizationId: string) {
@@ -324,7 +324,7 @@ export async function hideClient(access: CrmAccess, organizationId: string) {
   return { organizationId, oculta: true }
 }
 
-/** Back into «Clientes» (`crm:admin`). Unhiding one that is not hidden is a no-op. */
+/** Back into «Clientes» (`crm:configurar`). Unhiding one that is not hidden is a no-op. */
 export async function unhideClient(access: CrmAccess, organizationId: string) {
   const { count } = await prisma.crmHiddenClient.deleteMany({ where: { organizationId } })
   if (count) {

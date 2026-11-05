@@ -35,8 +35,20 @@ const accessRow = (keys: Record<string, unknown> = {}) => ({
   exportar: false,
   ventas: false,
   admin: false,
+  cerrar: false,
+  bajas: false,
+  plantillas: false,
+  preparar: false,
+  mandar: false,
+  verCampanas: false,
+  equipo: false,
+  configurar: false,
   ...keys,
 })
+
+/** Como deja la migración de las llaves finas (L2) una fila vieja con `campanas`, y una con `admin`. */
+const CAMPANAS_DE_ANTES = { campanas: true, plantillas: true, preparar: true, mandar: true, verCampanas: true }
+const ADMIN_DE_ANTES = { ...CAMPANAS_DE_ANTES, admin: true, equipo: true, configurar: true, bajas: true }
 
 /** A seller (not superadmin) whose PlatformAccess row has these keys; `null` = no row at all. */
 function seller(keys: Record<string, unknown> | null) {
@@ -83,7 +95,7 @@ describe('requireCrm', () => {
   })
 
   it('campanas_sin_ver_pasa', async () => {
-    seller({ campanas: true })
+    seller(CAMPANAS_DE_ANTES)
     const { res, next, req } = await ask('crm:campanas')
 
     expect(next).toHaveBeenCalledWith()
@@ -93,12 +105,12 @@ describe('requireCrm', () => {
   })
 
   it('cualquiera_de_un_arreglo_basta', async () => {
-    seller({ admin: true })
+    seller(ADMIN_DE_ANTES)
     const admin = await ask(['crm:ver', 'crm:admin'])
     expect(admin.next).toHaveBeenCalledWith()
 
     // With none of them, the 403 names every key that would have opened it.
-    seller({ campanas: true })
+    seller(CAMPANAS_DE_ANTES)
     const none = await ask(['crm:ver', 'crm:admin'])
     expect(none.res.status).toHaveBeenCalledWith(403)
     expect(none.res.json).toHaveBeenCalledWith({
@@ -130,7 +142,7 @@ describe('requireCrm', () => {
   it('impersonacion_siempre_403', async () => {
     // Even a session whose person holds every key: an impersonation token never reads the CRM, and the guard decides
     // before touching the database (review I-1: the shared guard's prefix can be dodged with `/api/v1/Crm/me`).
-    seller({ verScope: 'todos', editarScope: 'todos', contactar: true, campanas: true, exportar: true, ventas: true, admin: true })
+    seller({ verScope: 'todos', editarScope: 'todos', contactar: true, exportar: true, ventas: true, cerrar: true, ...ADMIN_DE_ANTES })
     const impersonating = {
       authContext: {
         userId: STAFF_ID,

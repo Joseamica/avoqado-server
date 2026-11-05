@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **479 models / 418 enums / ~21,400 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
+`prisma/schema.prisma` is **479 models / 418 enums / ~21,500 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -146,26 +146,26 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CreditPackItem` → `schema.prisma:L15932`
 - `CreditPackPurchase` → `schema.prisma:L15949`
 - `CreditTransaction` → `schema.prisma:L16023`
-- `CrmAccount` → `schema.prisma:L21091`
-- `CrmActivity` → `schema.prisma:L21208`
-- `CrmCampaign` → `schema.prisma:L21331`
-- `CrmCampaignDelivery` → `schema.prisma:L21357`
-- `CrmContact` → `schema.prisma:L21166`
-- `CrmDigestSend` → `schema.prisma:L21290`
-- `CrmEmailConsent` → `schema.prisma:L21400`
-- `CrmEmailMessage` → `schema.prisma:L21442`
-- `CrmEmailOptOut` → `schema.prisma:L21390`
-- `CrmEmailTemplate` → `schema.prisma:L21313`
-- `CrmErased` → `schema.prisma:L21276`
-- `CrmGmailAccountSeen` → `schema.prisma:L21434`
-- `CrmGmailConnection` → `schema.prisma:L21418`
-- `CrmHiddenClient` → `schema.prisma:L21082`
-- `CrmInboundEntry` → `schema.prisma:L21245`
-- `CrmLostReason` → `schema.prisma:L21198`
-- `CrmStage` → `schema.prisma:L21186`
-- `CrmTeam` → `schema.prisma:L21069`
-- `CrmTimelineEvent` → `schema.prisma:L21230`
-- `CrmWhatsappMessage` → `schema.prisma:L21472`
+- `CrmAccount` → `schema.prisma:L21104`
+- `CrmActivity` → `schema.prisma:L21221`
+- `CrmCampaign` → `schema.prisma:L21344`
+- `CrmCampaignDelivery` → `schema.prisma:L21370`
+- `CrmContact` → `schema.prisma:L21179`
+- `CrmDigestSend` → `schema.prisma:L21303`
+- `CrmEmailConsent` → `schema.prisma:L21413`
+- `CrmEmailMessage` → `schema.prisma:L21455`
+- `CrmEmailOptOut` → `schema.prisma:L21403`
+- `CrmEmailTemplate` → `schema.prisma:L21326`
+- `CrmErased` → `schema.prisma:L21289`
+- `CrmGmailAccountSeen` → `schema.prisma:L21447`
+- `CrmGmailConnection` → `schema.prisma:L21431`
+- `CrmHiddenClient` → `schema.prisma:L21095`
+- `CrmInboundEntry` → `schema.prisma:L21258`
+- `CrmLostReason` → `schema.prisma:L21211`
+- `CrmStage` → `schema.prisma:L21199`
+- `CrmTeam` → `schema.prisma:L21082`
+- `CrmTimelineEvent` → `schema.prisma:L21243`
+- `CrmWhatsappMessage` → `schema.prisma:L21485`
 - `Customer` → `schema.prisma:L8032`
 - `CustomerApprovalDelivery` → `schema.prisma:L10680`
 - `CustomerApprovalOutbox` → `schema.prisma:L10655`

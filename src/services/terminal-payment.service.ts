@@ -1656,6 +1656,28 @@ class TerminalPaymentService {
   /** requestId → cuándo la terminal contestó a la sonda SIN evidencia acreditada (throttle del re-sondeo). */
   private unaccreditedProbeAnswers = new Map<string, number>()
   /**
+   * D23 (IQ, 4-nov): requestId → el cobro cuyo correo «cobro sin respuesta» ya salió. Se vigila 24 h: al tener desenlace
+   * sale «✅ Resuelto» y, si después el desenlace cambia, una «⚠️ Corrección» (Codex r3: el cierre financiero puede volver
+   * COMPLETED un «no se cobró»; adivinar cuál es definitivo no cierra la familia, corregir sí). En 30 días de producción las
+   * 3 alertas se resolvieron solas entre 11 s y 149 s.
+   * ponytail: memoria del proceso (una instancia, sin Redis); si el servidor reinicia entre los dos correos, ese «Resuelto»
+   * no sale. Una columna en la fila si alguna vez importa.
+   */
+  private alertasSinResolver = new Map<
+    string,
+    {
+      venueId: string
+      terminalId: string
+      amountCents: number
+      alertadaEn: number
+      anunciado?: 'CHARGED' | 'NOT_CHARGED'
+      enviando?: boolean
+      /** Envíos fallidos del desenlace `clave` (tope 3: un `false` por plazo pudo haber llegado; Codex r4). */
+      fallidos?: { clave: 'CHARGED' | 'NOT_CHARGED'; n: number }
+    }
+  >()
+  private seguimientoEnCurso = false
+  /**
    * B0-2 (20-oct): terminal normalizada → la última fila del lote anterior de la sonda. Sin él la sonda tomaba siempre
    * las 25 más antiguas y la 26 no llegaba nunca. Memoria de proceso a propósito: un reinicio vuelve a empezar por las
    * más antiguas, que es lo correcto. Sólo hay entrada mientras la terminal tiene más de un lote pendiente.
@@ -3819,15 +3841,110 @@ class TerminalPaymentService {
               : 'La terminal no ha confirmado el resultado del cobro.',
             'Mientras el resultado siga pendiente, la solicitud conserva la reserva. El sistema sigue consultando la evidencia disponible.',
             'Revisa el estado actual: si continúa pendiente, confirma el resultado en la terminal o concilia con el procesador. No vuelvas a pasar la tarjeta mientras siga pendiente.',
+            'Si el cobro se resuelve solo, te llegará otro correo «✅ Resuelto» con el resultado.',
           ],
         })
+        // Codex r4: se poda ANTES de guardar y, lleno, sale la más vieja (la que más probablemente ya se resolvió), nunca la nueva.
+        this.podarAlertasVencidas(now)
+        if (this.alertasSinResolver.size >= 500) this.alertasSinResolver.delete(this.alertasSinResolver.keys().next().value as string)
+        this.alertasSinResolver.set(row.requestId, {
+          venueId: row.venueId,
+          terminalId: row.terminalId,
+          amountCents: row.amountCents,
+          alertadaEn: now.getTime(),
+        })
       }
+    }
+
+    // NOT awaited (Codex r3, P1): una consulta colgada del seguimiento no puede detener los pasos que siguen ni, por el
+    // latch isRunning, los siguientes barridos. Uno a la vez.
+    if (!this.seguimientoEnCurso) {
+      this.seguimientoEnCurso = true
+      void this.avisarAlertasResueltas(now)
+        .catch(err => logger.warn('[Terminal-payment watchdog] alert follow-up failed', { error: err instanceof Error ? err.message : String(err) }))
+        .finally(() => {
+          this.seguimientoEnCurso = false
+        })
     }
 
     if (completed || unknown || cancelled) {
       logger.info(`🧹 [Terminal-payment watchdog] reconciled`, { completed, unknown, cancelled, scanned: stale.length })
     }
     return { completed, unknown, cancelled }
+  }
+
+  /**
+   * D23: el seguimiento del correo «cobro sin respuesta». Cada cobro alertado se vigila 24 h: cuando su desenlace es
+   * distinto del último anunciado sale un correo («✅ Resuelto» la primera vez, «⚠️ Corrección» después); lo que siga en
+   * duda (UNKNOWN, TIMED_OUT soltada, liberación reversible) no se anuncia. Un envío fallido se reintenta en la siguiente
+   * vuelta, hasta 3 veces (Codex r3 y r4). Nunca lanza.
+   */
+  private podarAlertasVencidas(now: Date): void {
+    const DIA_MS = 24 * 60 * 60_000
+    for (const [requestId, a] of this.alertasSinResolver) if (now.getTime() - a.alertadaEn > DIA_MS) this.alertasSinResolver.delete(requestId)
+  }
+
+  private async avisarAlertasResueltas(now: Date): Promise<void> {
+    this.podarAlertasVencidas(now)
+    if (this.alertasSinResolver.size === 0) return
+    let filas: (FilaDeDesenlace & { requestId: string; venueId: string })[]
+    let plazo: NodeJS.Timeout | undefined
+    try {
+      // Con plazo (Codex r4, P1): una consulta colgada suelta el candado y la siguiente vuelta vuelve a intentar.
+      filas = await Promise.race([
+        prisma.terminalPaymentRequest.findMany({
+          where: { requestId: { in: [...this.alertasSinResolver.keys()] } },
+          select: { requestId: true, venueId: true, status: true, failureCode: true, cancelDisposition: true, paymentId: true, resultJson: true },
+          take: 500,
+        }),
+        new Promise<never>((_, reject) => {
+          plazo = setTimeout(() => reject(new Error('alert follow-up read timed out')), 10_000)
+        }),
+      ]).finally(() => clearTimeout(plazo))
+    } catch (err) {
+      logger.warn('[Terminal-payment watchdog] alert follow-up read failed; retrying next sweep', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return
+    }
+    for (const fila of filas) {
+      const a = this.alertasSinResolver.get(fila.requestId)
+      if (!a || a.venueId !== fila.venueId || a.enviando) continue
+      // Sólo lo que el SERVIDOR ya acredita (el mismo criterio que ve el POS), y nunca una liberación REVERSIBLE (ventana,
+      // cajero o banco: un cobro tardío la vuelve a retener; Codex r1 y r2). Un «SÍ se cobró» nunca dice «nada que hacer»:
+      // la venta pudo volver a cobrarse mientras estaba en duda (Codex r2, P1).
+      const d = desenlaceCanonico(fila)
+      if (d.outcome === 'UNRESOLVED') continue
+      const noCobradoFirme = d.outcome === 'NOT_CHARGED' && !esLiberacionReversible({ ...fila, failureCode: fila.failureCode ?? null, paymentId: fila.paymentId ?? null })
+      const desenlace =
+        d.outcome === 'CHARGED'
+          ? d.reconciliationRequired
+            ? 'SÍ se cobró, pero el importe no cuadra con lo que pidió el POS: hay que conciliarlo'
+            : 'SÍ se cobró (el pago quedó registrado)'
+          : noCobradoFirme
+            ? `NO se cobró (evidencia: ${d.outcomeEvidence ?? 'sin evidencia'})`
+            : null
+      if (!desenlace || a.anunciado === d.outcome) continue
+      const clave = d.outcome
+      if (a.fallidos?.clave === clave && a.fallidos.n >= 3) continue
+      const correccion = a.anunciado !== undefined
+      a.enviando = true
+      void sendOpsAlert({
+        subject: `${correccion ? '⚠️ Corrección' : '✅ Resuelto'} · Terminal ${a.terminalId}: cobro sin respuesta (${a.venueId})`,
+        lines: [
+          correccion
+            ? `Corrección del cobro de $${(a.amountCents / 100).toFixed(2)} (requestId ${fila.requestId}): te dijimos que ${a.anunciado === 'CHARGED' ? 'SÍ' : 'NO'} se cobró, pero ahora el registro dice: ${desenlace}.`
+            : `El cobro de $${(a.amountCents / 100).toFixed(2)} que te avisamos (requestId ${fila.requestId}) ya se resolvió: ${desenlace}.`,
+          d.outcome === 'CHARGED'
+            ? 'Revisa que esa venta no se haya cobrado otra vez mientras estaba en duda; si hay un aviso de posible doble cobro, atiéndelo.'
+            : 'No hace falta hacer nada. Si el registro cambia en las próximas 24 h, te llegará una corrección.',
+        ],
+      }).then(enviado => {
+        a.enviando = false
+        if (enviado) a.anunciado = clave
+        else a.fallidos = { clave, n: a.fallidos?.clave === clave ? a.fallidos.n + 1 : 1 }
+      })
+    }
   }
 
   /** Exact recorded request identity, completed card payment, and single ownership. */

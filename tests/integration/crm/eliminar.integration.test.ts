@@ -64,6 +64,14 @@ beforeAll(async () => {
     exportar: true,
     ventas: true,
     admin: true,
+    cerrar: true,
+    bajas: true,
+    plantillas: true,
+    preparar: true,
+    mandar: true,
+    verCampanas: true,
+    equipo: true,
+    configurar: true,
   }
   await getInitialStage()
 })

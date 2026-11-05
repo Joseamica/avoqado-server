@@ -52,6 +52,14 @@ const admin: CrmAccess = {
   exportar: false,
   ventas: false,
   admin: true,
+  cerrar: false,
+  bajas: true,
+  plantillas: true,
+  preparar: true,
+  mandar: true,
+  verCampanas: true,
+  equipo: true,
+  configurar: true,
 }
 
 let db: ReturnType<typeof installCrmInboundFake>
