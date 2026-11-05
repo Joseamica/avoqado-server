@@ -1,5 +1,7 @@
+import crypto from 'crypto'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
+import { ACCESS_TOKEN_SECRET } from '@/config/env'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { grantPackInTx } from '@/services/mobile/creditPack.mobile.service'
@@ -62,6 +64,51 @@ export function buildCreditPackSnapshot(pack: {
   // paquete sin artículos).
   if (!CreditPackSnapshotSchema.safeParse(foto).success) throw new BadRequestError('Este paquete no se puede vender: revisa sus productos')
   return foto
+}
+
+/**
+ * La foto viaja por el POS, FIRMADA (D4, 5-nov). La lista de paquetes la manda a la app, que la guarda con la venta y la devuelve
+ * al entregar, quizá horas después y sin haber tenido red: así se entrega lo vendido sin creerle a quien llama (`amountPaid` y los
+ * productos salen de la firma, nunca del body). Llave derivada de `ACCESS_TOKEN_SECRET`, como `platformUnsubscribeToken.ts`.
+ */
+const FOTO_LABEL = 'avoqado-credit-pack-sale-v1'
+/** Cubre una caja varios días sin red. Vencida, se entrega el paquete vigente, como antes de la foto. */
+const FOTO_VIGENCIA_MS = 7 * 24 * 60 * 60 * 1000
+
+function firmaDeLaFoto(cuerpo: string): string {
+  const llave = crypto.createHmac('sha256', ACCESS_TOKEN_SECRET).update(FOTO_LABEL).digest()
+  return crypto.createHmac('sha256', llave).update(cuerpo).digest('base64url')
+}
+
+/** null si el paquete no se podría entregar: no lleva foto y no rompe la lista. */
+export function firmarFotoDelPaquete(pack: Parameters<typeof buildCreditPackSnapshot>[0]): string | null {
+  let foto: CreditPackSnapshot
+  try {
+    foto = buildCreditPackSnapshot(pack)
+  } catch {
+    return null
+  }
+  const cuerpo = Buffer.from(JSON.stringify({ p: 'credit-pack-sale', exp: Date.now() + FOTO_VIGENCIA_MS, foto })).toString('base64url')
+  return `${cuerpo}.${firmaDeLaFoto(cuerpo)}`
+}
+
+/** null ante cualquier cosa mal formada, alterada, vencida o de otro propósito. La firma se compara en tiempo constante. */
+export function leerFotoDelPaquete(token: unknown): CreditPackSnapshot | null {
+  if (typeof token !== 'string') return null
+  const punto = token.indexOf('.')
+  if (punto <= 0) return null
+  const cuerpo = token.slice(0, punto)
+  const dada = Buffer.from(token.slice(punto + 1))
+  const esperada = Buffer.from(firmaDeLaFoto(cuerpo))
+  if (dada.length !== esperada.length || !crypto.timingSafeEqual(dada, esperada)) return null
+  try {
+    const leido = JSON.parse(Buffer.from(cuerpo, 'base64url').toString())
+    if (leido?.p !== 'credit-pack-sale' || typeof leido.exp !== 'number' || leido.exp <= Date.now()) return null
+    const foto = CreditPackSnapshotSchema.safeParse(leido.foto)
+    return foto.success ? foto.data : null
+  } catch {
+    return null
+  }
 }
 
 export const CREDIT_PACK_LINE_HELD = 'CREDIT_PACK_LINE_HELD' as const
