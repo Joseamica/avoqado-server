@@ -35,6 +35,7 @@ import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
 import { registrarCambioDeIva } from '../../services/fiscal/encendidoIva.service'
 import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
 import { categoriaParaProductoSinCategoria } from '../../services/mobile/categoriaGeneral.service'
+import { catalogoMovilCacheado, guardarCatalogoMovil, versionDelCatalogoMovil } from '../../services/mobile/catalogoMovil.cache'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -104,20 +105,31 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
     // fijo (ISO UTC con milisegundos, 24 caracteres): iOS lo parsea con fracciones y ambas apps lo comparan como fecha.
     const catalogAt = new Date().toISOString()
 
-    const products = await prisma.product.findMany({
-      where: {
-        venueId,
-        active: true,
-        deletedAt: null,
-      },
-      include: productInclude,
-      orderBy: [{ category: { displayOrder: 'asc' } }, { displayOrder: 'asc' }, { name: 'asc' }],
-    })
+    // D6: los POS piden esto cada pocos minutos; armarlo (1,022 productos en La Galeterie) retenía el hilo 0.2–1 s. Si la
+    // versión no cambió, se reutiliza el JSON ya armado. La versión se lee ANTES que los productos: un cambio a media lectura
+    // deja guardado algo más nuevo que su versión, y la siguiente bajada lo vuelve a armar.
+    const version = await versionDelCatalogoMovil(venueId)
+    let dataJson = version ? catalogoMovilCacheado(venueId, version) : undefined
+    if (dataJson === undefined) {
+      const products = await prisma.product.findMany({
+        where: {
+          venueId,
+          active: true,
+          deletedAt: null,
+        },
+        include: productInclude,
+        orderBy: [{ category: { displayOrder: 'asc' } }, { displayOrder: 'asc' }, { name: 'asc' }],
+      })
+      const data = products.map(withAvailableQuantity)
+      // `catalogAt` es aditivo y sólo vive en la raíz: `data` no cambia para las apps viejas.
+      if (!version) return res.json({ success: true, data, catalogAt })
+      // Con el mismo replacer de la app que usa `res.json` (app.ts): el cuerpo sale idéntico byte por byte.
+      dataJson = JSON.stringify(data, req.app?.get('json replacer'))
+      guardarCatalogoMovil(venueId, version, dataJson)
+    }
 
-    const data = products.map(withAvailableQuantity)
-
-    // `catalogAt` es aditivo y sólo vive en la raíz: `data` no cambia para las apps viejas.
-    return res.json({ success: true, data, catalogAt })
+    // Lo mismo que escribiría `res.json({ success: true, data, catalogAt })`, sin volver a convertir `data`.
+    return res.type('json').send(`{"success":true,"data":${dataJson},"catalogAt":${JSON.stringify(catalogAt)}}`)
   } catch (error) {
     next(error)
   }

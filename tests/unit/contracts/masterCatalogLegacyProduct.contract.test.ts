@@ -251,7 +251,13 @@ const expectNoUnexpectedPrismaAccess = () => {
   }
   for (const operation of ['$queryRaw', '$queryRawUnsafe', '$executeRaw', '$executeRawUnsafe']) {
     const query = prismaMock[operation]
-    if (typeof query === 'function' && jest.isMockFunction(query)) expect(query).not.toHaveBeenCalled()
+    if (typeof query !== 'function' || !jest.isMockFunction(query)) continue
+    // D6: el listado móvil lee la VERSIÓN de su catálogo (conteo y `xmin`, sólo lectura) para no volver a armarlo si no
+    // cambió. Es acceso NUEVO e INTENCIONAL, no una fuga de H1: es la única lectura cruda permitida.
+    const ajenas = (query as jest.Mock).mock.calls.filter(
+      ([sql]) => !(operation === '$queryRaw' && String((sql as string[])?.join?.('')).includes('xmin')),
+    )
+    expect(ajenas).toEqual([])
   }
 }
 

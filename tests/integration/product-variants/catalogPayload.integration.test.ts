@@ -91,9 +91,11 @@ describe('contrato del catálogo (las dos ramas)', () => {
   })
 
   it('POS móvil (listProducts): mismos campos', async () => {
-    const res: any = { json: jest.fn() }
+    const res: any = { json: jest.fn(), send: jest.fn(), type: jest.fn() }
+    res.type.mockReturnValue(res)
     await listProducts({ params: { venueId: n.venueId } } as any, res, jest.fn())
-    const data = res.json.mock.calls[0][0].data
+    // D6: el catálogo sale ya serializado (res.send); sin versión cae a res.json
+    const data = (res.json.mock.calls.length ? JSON.parse(JSON.stringify(res.json.mock.calls[0][0])) : JSON.parse(res.send.mock.calls[0][0])).data
     expect(data.find((p: any) => p.id === varianteId)).toMatchObject({ productGroupName: 'Playera' })
     expect(data.find((p: any) => p.id === sueltoId)).toMatchObject({ productGroupName: null, variantOptions: null })
     data.forEach(sinCrudo)
