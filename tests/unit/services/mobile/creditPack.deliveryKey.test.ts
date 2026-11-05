@@ -123,7 +123,7 @@ describe('Venta en persona con llave de entrega', () => {
       await vender()
       await vender()
 
-      const porLlave = prismaMock.creditPackPurchase.findUnique.mock.calls.filter(([a]) => 'venueId_deliveryKey' in (a.where as object))
+      const porLlave = prismaMock.creditPackPurchase.findUnique.mock.calls.filter((c: any[]) => 'venueId_deliveryKey' in c[0].where)
       expect(porLlave).toHaveLength(0)
       expect(tx.creditPackPurchase.create).toHaveBeenCalledTimes(2)
       expect(tx.creditPackPurchase.create.mock.calls[0][0].data).not.toHaveProperty('deliveryKey')
