@@ -14,16 +14,48 @@
 
 const envMock: Record<string, string | undefined> = {}
 
-// Captura los archivos que se le entregan a PKPass, que es lo unico que decide
-// si Apple acepta el pase.
+// Captura los archivos que se le entregan al hilo que arma el pase (D5: PKPass corre allá),
+// que es lo unico que decide si Apple acepta el pase. La firma real se prueba en applePassSigner.hilo.test.ts.
 const archivosDelPase: Record<string, Buffer> = {}
-jest.mock('passkit-generator', () => ({
-  PKPass: jest.fn().mockImplementation((buffers: Record<string, Buffer>) => {
-    for (const k of Object.keys(archivosDelPase)) delete archivosDelPase[k]
-    Object.assign(archivosDelPase, buffers)
-    return { getAsBuffer: async () => Buffer.from('pkpass') }
-  }),
-}))
+// Para la prueba del tope: con `retener`, cada hilo espera a que la prueba lo suelte.
+const mockHilos = {
+  abiertos: 0,
+  vivos: 0,
+  maxVivos: 0,
+  retener: false,
+  soltar: [] as Array<() => void>,
+  // Con `cierreLento`, terminate() tarda: el hilo sigue vivo hasta que la prueba lo cierra (Codex D5 r1 P2).
+  cierreLento: false,
+  cerrar: [] as Array<() => void>,
+}
+jest.mock('node:worker_threads', () => {
+  const { EventEmitter } = jest.requireActual('node:events')
+  class HiloFalso extends EventEmitter {
+    constructor(_archivo: string, opciones: { workerData: { archivos: Record<string, Buffer> } }) {
+      super()
+      for (const k of Object.keys(archivosDelPase)) delete archivosDelPase[k]
+      Object.assign(archivosDelPase, opciones.workerData.archivos)
+      mockHilos.abiertos++
+      mockHilos.vivos++
+      mockHilos.maxVivos = Math.max(mockHilos.maxVivos, mockHilos.vivos)
+      const contestar = () => this.emit('message', { ok: true, bytes: new Uint8Array(Buffer.from('pkpass')).buffer })
+      if (mockHilos.retener) mockHilos.soltar.push(contestar)
+      else queueMicrotask(contestar)
+    }
+    terminate() {
+      return new Promise<number>(r => {
+        const morir = () => {
+          mockHilos.vivos--
+          this.emit('exit', 0)
+          r(0)
+        }
+        if (mockHilos.cierreLento) mockHilos.cerrar.push(morir)
+        else morir()
+      })
+    }
+  }
+  return { Worker: HiloFalso, isMainThread: true, parentPort: null, workerData: null }
+})
 
 jest.mock('../../../../src/config/env', () => ({
   get env() {
@@ -31,7 +63,14 @@ jest.mock('../../../../src/config/env', () => ({
   },
 }))
 
-import { walletSigningAvailable, signPass } from '../../../../src/services/wallet/applePassSigner.service'
+import {
+  walletSigningAvailable,
+  signPass,
+  FIRMAS_A_LA_VEZ,
+  FIRMAS_EN_ESPERA_MAX,
+  ESPERA_DE_FIRMA_MS,
+  FIRMA_TIMEOUT_MS,
+} from '../../../../src/services/wallet/applePassSigner.service'
 
 const COMPLETO = {
   APPLE_PASS_TYPE_ID: 'pass.io.avoqado.loyalty',
@@ -142,5 +181,140 @@ describe('signPass', () => {
 
     expect(archivosDelPase['icon.png']).toBeInstanceOf(Buffer)
     expect(archivosDelPase['icon.png'].length).toBeGreaterThan(50)
+  })
+})
+
+describe('tope de hilos de firma (D5)', () => {
+  const vuelta = () => new Promise(r => setImmediate(r))
+  const vueltas = async (n = 20) => {
+    for (let i = 0; i < n; i++) await vuelta()
+  }
+  beforeEach(() => {
+    setEnv(COMPLETO)
+    Object.assign(mockHilos, { abiertos: 0, vivos: 0, maxVivos: 0, retener: false, soltar: [], cierreLento: false, cerrar: [] })
+  })
+
+  it('una ráfaga nunca tiene más de FIRMAS_A_LA_VEZ hilos VIVOS, aunque cerrarlos tarde, y todas salen', async () => {
+    mockHilos.retener = true
+    mockHilos.cierreLento = true
+    const pedidos = Array.from({ length: 5 }, () => signPass({ formatVersion: 1 }, { brandColor: '#123456' }))
+    await vueltas()
+    expect(mockHilos.abiertos).toBe(FIRMAS_A_LA_VEZ)
+
+    while (mockHilos.soltar.length || mockHilos.cerrar.length) {
+      mockHilos.soltar.shift()?.()
+      await vueltas()
+      // Mientras el hilo que ya contestó no termine de cerrarse, no entra otro.
+      expect(mockHilos.maxVivos).toBeLessThanOrEqual(FIRMAS_A_LA_VEZ)
+      mockHilos.cerrar.shift()?.()
+      await vueltas()
+    }
+    const pases = await Promise.all(pedidos)
+    expect(pases.map(p => p.toString())).toEqual(Array(5).fill('pkpass'))
+    expect(mockHilos.abiertos).toBe(5)
+    expect(mockHilos.maxVivos).toBe(FIRMAS_A_LA_VEZ)
+  })
+
+  it('la fila tiene tope: el que llega con la fila llena recibe «ocupado» (503) al momento, sin preparar nada', async () => {
+    mockHilos.retener = true
+    const capacidad = FIRMAS_A_LA_VEZ + FIRMAS_EN_ESPERA_MAX
+    const pedidos = Array.from({ length: capacidad }, () => signPass({ formatVersion: 1 }, { brandColor: '#123456' }))
+    await vueltas()
+    await expect(signPass({ formatVersion: 1 }, { brandColor: '#123456' })).rejects.toMatchObject({ statusCode: 503 })
+    expect(mockHilos.abiertos).toBe(FIRMAS_A_LA_VEZ)
+
+    mockHilos.retener = false
+    while (mockHilos.soltar.length) {
+      mockHilos.soltar.shift()!()
+      await vueltas()
+    }
+    await expect(Promise.all(pedidos)).resolves.toHaveLength(capacidad)
+  })
+
+  it('quien espera su turno más de ESPERA_DE_FIRMA_MS se rinde con «ocupado» y no se queda en la fila', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'queueMicrotask', 'nextTick'] })
+    try {
+      mockHilos.retener = true
+      // Se les pone el `catch` desde ya: vencen dentro del mismo avance de reloj.
+      const ocupando = Array.from({ length: FIRMAS_A_LA_VEZ }, () =>
+        signPass({ formatVersion: 1 }, { brandColor: '#123456' }).then(
+          () => 'firmó',
+          (e: Error) => e,
+        ),
+      )
+      await vueltas()
+      const esperando = signPass({ formatVersion: 1 }, { brandColor: '#123456' })
+      const resultado = esperando.catch(e => e)
+      await vueltas()
+      jest.advanceTimersByTime(ESPERA_DE_FIRMA_MS + 1)
+      await vueltas()
+      expect(await resultado).toMatchObject({ statusCode: 503 })
+
+      // Los que ocupaban el turno también vencen su propio plazo de 20 s, y el que se rindió nunca abrió hilo.
+      await vueltas()
+      const fin = await Promise.all(ocupando)
+      expect(fin.every(r => r instanceof Error)).toBe(true)
+      expect(mockHilos.abiertos).toBe(FIRMAS_A_LA_VEZ)
+      mockHilos.soltar.length = 0
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('al pasar el turno al siguiente, un recién llegado no se cuela: nunca 3 hilos vivos (Codex r2 P1)', async () => {
+    // El recién llegado (D) entra en distintos momentos del relevo de A hacia C.
+    for (let k = 0; k < 8; k++) {
+      Object.assign(mockHilos, { abiertos: 0, vivos: 0, maxVivos: 0, retener: true, soltar: [], cierreLento: false, cerrar: [] })
+      const pedidos = Array.from({ length: 3 }, () => signPass({ formatVersion: 1 }, { brandColor: '#123456' }))
+      await vueltas()
+      mockHilos.soltar.shift()!()
+      for (let i = 0; i < k; i++) await Promise.resolve()
+      pedidos.push(signPass({ formatVersion: 1 }, { brandColor: '#123456' }))
+      await vueltas()
+      expect(mockHilos.maxVivos).toBeLessThanOrEqual(FIRMAS_A_LA_VEZ)
+      mockHilos.retener = false
+      while (mockHilos.soltar.length) {
+        mockHilos.soltar.shift()!()
+        await vueltas()
+      }
+      await Promise.all(pedidos)
+      expect(mockHilos.maxVivos).toBeLessThanOrEqual(FIRMAS_A_LA_VEZ)
+    }
+  })
+
+  it('si el hilo no termina de cerrarse, el pedido igual contesta al vencer su plazo y el turno sigue apartado (Codex r2 P2)', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'queueMicrotask', 'nextTick'] })
+    try {
+      mockHilos.retener = true
+      mockHilos.cierreLento = true
+      const pedidos = Array.from({ length: FIRMAS_A_LA_VEZ }, () =>
+        signPass({ formatVersion: 1 }, { brandColor: '#123456' }).then(
+          () => 'firmó',
+          (e: Error) => e,
+        ),
+      )
+      await vueltas()
+      jest.advanceTimersByTime(FIRMA_TIMEOUT_MS + 1)
+      await vueltas()
+      // Contestaron (con error) aunque sus hilos sigan sin cerrar.
+      const respuestas = await Promise.all(pedidos)
+      expect(respuestas.every(r => r instanceof Error)).toBe(true)
+
+      // El turno sigue apartado: uno nuevo espera en vez de abrir un tercer hilo.
+      const nuevo = signPass({ formatVersion: 1 }, { brandColor: '#123456' })
+      await vueltas()
+      expect(mockHilos.abiertos).toBe(FIRMAS_A_LA_VEZ)
+
+      // Al cerrar de verdad un hilo, el nuevo entra.
+      mockHilos.retener = false
+      mockHilos.cierreLento = false
+      mockHilos.cerrar.shift()!()
+      await vueltas()
+      expect(mockHilos.abiertos).toBe(FIRMAS_A_LA_VEZ + 1)
+      await expect(nuevo).resolves.toEqual(Buffer.from('pkpass'))
+      mockHilos.cerrar.shift()?.()
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })
