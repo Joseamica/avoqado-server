@@ -19,6 +19,7 @@ jest.mock('@/utils/prismaClient', () => {
 
 import prisma from '@/utils/prismaClient'
 import { clearPublicMenuCache, getPublicMenu } from '@/services/online-ordering/menu.service'
+import { quoteCart } from '@/services/online-ordering/quote.service'
 
 // El guardia global rechaza `av-db-25` y hosts remotos; esta suite exige además una base DESECHABLE por nombre.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -46,6 +47,7 @@ describe('Carta pública contra Postgres (integration, real DB)', () => {
   /** Lo que la tienda tiene sembrado, activo o no: ninguna sentencia de su carta debería leer más que esto. */
   const propias = { Modifier: 0, ProductModifierGroup: 0 }
   let ordenDeSalsas: string[] = []
+  let paquete: { id: string }
 
   beforeAll(async () => {
     const org = await prisma.organization.create({
@@ -93,6 +95,7 @@ describe('Carta pública contra Postgres (integration, real DB)', () => {
     const suadero = await platillo('Suadero', tacos.id, 2)
     const imposible = await platillo('Imposible', tacos.id, 3)
     await platillo('Agua', bebidas.id, 1) // sin grupos
+    paquete = await platillo('12 Clases Lagree', bebidas.id, 3, { type: 'SERVICE' }) // cobrarlo aquí no entrega créditos
     await platillo('Refresco', bebidas.id, 2, { availableOnline: false })
     await platillo('Apagado', apagados.id, 1, { availableOnline: false })
     await liga(pastor.id, salsas.id, 0)
@@ -160,6 +163,16 @@ describe('Carta pública contra Postgres (integration, real DB)', () => {
       },
       { name: 'Bebidas', productCount: 1, products: [{ name: 'Agua', grupos: [] }] },
     ])
+  })
+
+  it('un producto SERVICE ya marcado en línea no sale en la carta y el cotizador lo rechaza como no disponible', async () => {
+    clearPublicMenuCache()
+    const menu = await getPublicMenu(venueId!)
+    expect(menu.categories.flatMap(c => c.products.map(p => p.name))).not.toContain('12 Clases Lagree')
+
+    const quote = await quoteCart(venueId!, [{ productId: paquete.id, quantity: 1 }])
+    expect(quote.ok).toBe(false)
+    expect(quote.issues).toEqual([expect.objectContaining({ code: 'PRODUCT_UNAVAILABLE', productId: paquete.id })])
   })
 
   it('cada sentencia de la carta lleva LIMIT o un IN, y ninguna recorre vínculos u opciones de otro negocio (EXPLAIN ANALYZE)', async () => {
