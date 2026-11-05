@@ -11,6 +11,9 @@ import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { uploadAnnouncementImage } from '@/services/announcements/announcementImage.service'
 import emailService from '@/services/email.service'
+import * as templatesService from '@/services/crm/email/templates.service'
+import * as campaignsService from '@/services/crm/email/campaigns.service'
+import * as teamService from '@/services/crm/teamVenue.service'
 
 const STAFF = 'cstaffemail00000000000001'
 const TEMPLATE = 'ctemplate0000000000000001'
@@ -654,5 +657,62 @@ describe('el Gmail del vendedor — sólo «Mandar correo» (crm:contactar)', ()
       expect(cancelado.status).toBe(302)
       expect(cancelado.headers.location).toBe('https://superadmin.test/crm/gmail?error=cancelado')
     })
+  })
+})
+
+describe('la prueba con destino (T3): rutas, esquemas y la lista de a quién mandarla', () => {
+  const OTRO = 'cstaffotro0000000000000001'
+  const CAMP = 'ccampana00000000000000001'
+  const tpl = jest.spyOn(templatesService, 'sendTemplateTest')
+  const camp = jest.spyOn(campaignsService, 'sendCampaignTest')
+  const lista = jest.spyOn(teamService, 'listarDestinosDePrueba')
+
+  beforeEach(() => {
+    tpl.mockReset().mockResolvedValue({ ok: true, repetida: true, destino: { nombre: 'Ana' } })
+    camp.mockReset().mockResolvedValue({ ok: true } as never)
+    lista.mockReset().mockResolvedValue([{ staffId: STAFF, name: 'Rafa Pérez', tu: true }])
+  })
+
+  it('POST /campaigns/:id/test sin body sigue 200 y llama con {}', async () => {
+    keys({ preparar: true })
+    const res = await request(app).post(`/crm/campaigns/${CAMP}/test`)
+    expect(res.status).toBe(200)
+    expect(camp).toHaveBeenCalledWith(expect.objectContaining({ staffId: STAFF }), CAMP, {})
+  })
+
+  it('con destinoStaffId válido lo pasa; con uno que no es id, 400 «El id no es válido»', async () => {
+    keys({ preparar: true })
+    const ok = await request(app).post(`/crm/campaigns/${CAMP}/test`).send({ destinoStaffId: OTRO })
+    expect(ok.status).toBe(200)
+    expect(camp).toHaveBeenCalledWith(expect.anything(), CAMP, { destinoStaffId: OTRO })
+    const mal = await request(app).post(`/crm/campaigns/${CAMP}/test`).send({ destinoStaffId: 'x' })
+    expect(mal.status).toBe(400)
+    expect(JSON.stringify(mal.body)).toContain('El id no es válido')
+  })
+
+  it('POST /templates/test pasa por sendTemplateTest y devuelve el eco tal cual', async () => {
+    keys({ plantillas: true })
+    const res = await request(app).post('/crm/templates/test').send({ subject: 'Hola', blocks: BODY.blocks, destinoStaffId: OTRO })
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual({ ok: true, repetida: true, destino: { nombre: 'Ana' } })
+    expect(tpl).toHaveBeenCalledWith(expect.anything(), { subject: 'Hola', blocks: BODY.blocks, destinoStaffId: OTRO })
+  })
+
+  it('el esquema de la plantilla exige subject y blocks y rechaza un destino que no es id', async () => {
+    keys({ plantillas: true })
+    expect((await request(app).post('/crm/templates/test').send({ subject: 'Hola' })).status).toBe(400)
+    expect(
+      (await request(app).post('/crm/templates/test').send({ subject: 'Hola', blocks: BODY.blocks, destinoStaffId: 'x' })).status,
+    ).toBe(400)
+  })
+
+  it('GET /test-recipients con sólo «Preparar» es 200 y no trae correos; sin llave, 403', async () => {
+    keys({ preparar: true })
+    const res = await request(app).get('/crm/test-recipients')
+    expect(res.status).toBe(200)
+    expect(res.body.data).toEqual([{ staffId: STAFF, name: 'Rafa Pérez', tu: true }])
+    expect(JSON.stringify(res.body)).not.toMatch(/"email"|@/)
+    soloContactar()
+    expect((await request(app).get('/crm/test-recipients')).status).toBe(403)
   })
 })

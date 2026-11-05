@@ -207,6 +207,11 @@ export async function miembrosConCorreo(): Promise<Array<{ staffId: string; name
   })
 }
 
+/** La lista de «¿a quién le mando la prueba?»: los mismos que valida el servidor, sólo nombres. `tu` = quien la pide. */
+export async function listarDestinosDePrueba(actor: CrmAccess): Promise<Array<{ staffId: string; name: string; tu: boolean }>> {
+  return (await miembrosConCorreo()).map(({ staffId, name }) => ({ staffId, name, tu: staffId === actor.staffId }))
+}
+
 /**
  * A Staff by the exact lowercase email: the same rule as login, password reset, Google and invitation acceptance (ruling
  * 16). An account stored with capitals can never log in, so it must not count as "already has an account".

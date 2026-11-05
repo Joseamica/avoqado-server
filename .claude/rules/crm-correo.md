@@ -46,6 +46,7 @@ cierra y sale en gris). No quites ese campo.
 | `crm:plantillas` · `crm:preparar`                           | subir una imagen                                                                                                                                                                        |
 | `crm:ver-campanas` (la traen también `preparar` y `mandar`) | lista, detalle y conteo de campañas (también `crm_campaign_status`)                                                                                                                     |
 | `crm:preparar`                                              | crear y editar una campaña, y su prueba                                                                                                                                                 |
+| `crm:plantillas` · `crm:preparar`                           | `GET /test-recipients`: a quién mandar la prueba (sólo nombres, nunca correos)                                                                                                          |
 | `crm:mandar`                                                | mandar y cancelar                                                                                                                                                                       |
 | `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                 |
 | `crm:configurar`                                            | etapas y motivos (leerlos también con `crm:ver`), ocultar clientes y ver los ocultos y el KYC, importar de HubSpot, la puerta de «Eliminar» (que sigue siendo sólo del superadmin real) |
@@ -61,7 +62,9 @@ cualquier otra escritura las apaga.
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 
 `sendTestToSelf` firma `platformUnsubscribeUrl` con el correo de quien prueba. Si lo usa (Rafa, por ejemplo), su correo queda bloqueado y
-hoy no hay ruta para revertirlo. Para probar la baja, usa una dirección de `CRM_CORREO_PRUEBAS` que no sea la tuya.
+hoy no hay ruta para revertirlo. Para probar la baja, usa una dirección de `CRM_CORREO_PRUEBAS` que no sea la tuya. La prueba puede ir a
+otra persona del equipo (`destinoStaffId`, validado en el servidor contra `miembrosConCorreo`; sin él, a quien la pide): la liga de baja se
+firma con el correo del DESTINO.
 
 ## Interruptor y jobs (`src/jobs/jobSchedules.ts`)
 

@@ -79,3 +79,19 @@ describe('CRM propio — forma del esquema', () => {
     }
   })
 })
+
+describe('esquemas de la prueba con destino', () => {
+  const { sendTemplateTestSchema, campaignTestSchema } = jest.requireActual('@/schemas/crm.schema')
+  const id = 'cstaffotro0000000000000001'
+  it('la plantilla acepta destinoStaffId opcional y sigue exigiendo subject y blocks', () => {
+    const blocks = [{ type: 'paragraph', text: 'Hola' }]
+    expect(sendTemplateTestSchema.safeParse({ body: { subject: 'Hola', blocks } }).success).toBe(true)
+    expect(sendTemplateTestSchema.safeParse({ body: { subject: 'Hola', blocks, destinoStaffId: id } }).success).toBe(true)
+    expect(sendTemplateTestSchema.safeParse({ body: { blocks } }).success).toBe(false)
+  })
+  it('la campaña acepta body ausente, vacío o con destino', () => {
+    for (const body of [undefined, {}, { destinoStaffId: id }])
+      expect(campaignTestSchema.safeParse({ params: { id }, body }).success).toBe(true)
+    expect(campaignTestSchema.safeParse({ params: { id }, body: { destinoStaffId: 'x' } }).success).toBe(false)
+  })
+})

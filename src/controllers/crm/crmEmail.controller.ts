@@ -5,6 +5,7 @@ import * as gmail from '../../services/crm/email/gmailOAuth.service'
 import { mandarCorreo } from '../../services/crm/email/gmailSend.service'
 import { optOut } from '../../services/crm/email/optOut.service'
 import * as campaigns from '../../services/crm/email/campaigns.service'
+import { listarDestinosDePrueba } from '../../services/crm/teamVenue.service'
 import * as templates from '../../services/crm/email/templates.service'
 
 // Email templates, preview, «Envíame una prueba» and images (phase 2). `req.crmAccess` is the caller's own keys, read by
@@ -48,7 +49,7 @@ export async function previewTemplate(req: Request, res: Response): Promise<void
 
 /** POST /api/v1/crm/templates/test — «Envíame una prueba». A refusal is a 200 with `ok: false` and why, never a 500. */
 export async function sendTemplateTest(req: Request, res: Response): Promise<void> {
-  res.json({ data: await templates.sendTestToSelf(req.crmAccess!, req.body) })
+  res.json({ data: await templates.sendTemplateTest(req.crmAccess!, req.body) })
 }
 
 /** POST /api/v1/crm/uploads/image — a picture for an `image` block; its public URL. */
@@ -98,7 +99,12 @@ export async function previewCampaign(req: Request, res: Response): Promise<void
 
 /** POST /api/v1/crm/campaigns/:id/test — «Envíame una prueba» of this version. A refusal is a 200 with `ok: false` and why. */
 export async function sendCampaignTest(req: Request, res: Response): Promise<void> {
-  res.json({ data: await campaigns.sendCampaignTest(req.crmAccess!, req.params.id) })
+  res.json({ data: await campaigns.sendCampaignTest(req.crmAccess!, req.params.id, req.body ?? {}) })
+}
+
+/** GET /api/v1/crm/test-recipients — a quién se le puede mandar la prueba: sólo nombres, nunca correos. */
+export async function testRecipients(req: Request, res: Response): Promise<void> {
+  res.json({ data: await listarDestinosDePrueba(req.crmAccess!) })
 }
 
 /** POST /api/v1/crm/campaigns/:id/send — «Mandar a N personas». */

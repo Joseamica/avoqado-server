@@ -25,6 +25,7 @@ import {
   addNoteSchema,
   addTeamMemberSchema,
   campaignIdSchema,
+  campaignTestSchema,
   completeActivitySchema,
   createAccountSchema,
   createCampaignSchema,
@@ -185,9 +186,11 @@ router.post('/campaigns', preparar, validateRequest(createCampaignSchema), crmEm
 router.get('/campaigns/:id', verCampanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
 router.patch('/campaigns/:id', preparar, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
 router.post('/campaigns/:id/preview', verCampanas, validateRequest(previewCampaignSchema), crmEmailController.previewCampaign)
-router.post('/campaigns/:id/test', preparar, validateRequest(campaignIdSchema), crmEmailController.sendCampaignTest)
+router.post('/campaigns/:id/test', preparar, validateRequest(campaignTestSchema), crmEmailController.sendCampaignTest)
 router.post('/campaigns/:id/send', mandar, validateRequest(sendCampaignSchema), crmEmailController.sendCampaign)
 router.post('/campaigns/:id/cancel', mandar, validateRequest(campaignIdSchema), crmEmailController.cancelCampaign)
+// A quién se le puede mandar la prueba: sólo nombres (nunca correos); la ven quienes pueden pedirla.
+router.get('/test-recipients', requireCrm(['crm:plantillas', 'crm:preparar']), crmEmailController.testRecipients)
 
 // A picture for an `image` block: in memory, at most 5 MB, only the three types `uploadAnnouncementImage` accepts.
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024

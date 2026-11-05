@@ -468,7 +468,9 @@ export const previewTemplateSchema = z.object({
 })
 
 /** POST /crm/templates/test — «Envíame una prueba». */
-export const sendTemplateTestSchema = z.object({ body: z.object({ subject: emailSubject, blocks: emailBlocks }) })
+export const sendTemplateTestSchema = z.object({
+  body: z.object({ subject: emailSubject, blocks: emailBlocks, destinoStaffId: cuid.optional() }),
+})
 
 /**
  * POST /crm/accounts/:id/emails — «Mandar correo» desde el Gmail del vendedor. `clientRequestId` lo genera el diálogo al
@@ -592,8 +594,11 @@ export const listCampaignsSchema = z.object({
   }),
 })
 
-/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/test and /cancel */
+/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/cancel */
 export const campaignIdSchema = z.object({ params: byId })
+
+/** POST /crm/campaigns/:id/test — sin body, como siempre; `destinoStaffId` (otra persona del equipo) es opcional. */
+export const campaignTestSchema = z.object({ params: byId, body: z.object({ destinoStaffId: cuid.optional() }).optional() })
 
 /** POST /crm/campaigns/:id/preview — `huella`, optional: the version the screen shows (H3). Without it (old screen), as before. */
 export const previewCampaignSchema = z.object({

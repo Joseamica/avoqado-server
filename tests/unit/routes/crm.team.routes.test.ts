@@ -142,6 +142,8 @@ describe('crm team routes', () => {
       { route: 'POST /campaigns/:id/test', keys: preparar },
       { route: 'POST /campaigns/:id/send', keys: mandar },
       { route: 'POST /campaigns/:id/cancel', keys: mandar },
+      // La lista de a quién mandar la prueba: sólo nombres; la ve quien puede pedir la prueba (plantillas o preparar).
+      { route: 'GET /test-recipients', keys: [['crm:plantillas', 'crm:preparar']] },
       // L4: la plantilla y el contenido de la campaña llevan imágenes.
       { route: 'POST /uploads/image', keys: [['crm:plantillas', 'crm:preparar']] },
       // The seller's own Gmail (task 7): «Mandar correo», which only counts on top of «Ver negocios».
