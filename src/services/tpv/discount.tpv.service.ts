@@ -13,6 +13,7 @@ import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
+import { textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -536,13 +537,20 @@ export async function validateCoupon(
   discountType?: string
   discountValue?: number
   estimatedSavings?: number
+  // D5: ADITIVOS, los lee la TPV ≥ 2.16.2; las viejas siguen leyendo lo de arriba.
+  couponId?: string
+  code?: string
+  scope?: string
+  maxDiscountAmount?: number | null
+  errorCode?: string
 }> {
   const validation = await couponService.validateCouponCode(venueId, couponCode.toUpperCase(), orderTotal, customerId)
 
   if (!validation.valid || !validation.coupon) {
     return {
       valid: false,
-      message: validation.error || 'Invalid coupon',
+      message: textoDeRechazoDeCupon(validation),
+      errorCode: validation.errorCode,
     }
   }
 
@@ -569,5 +577,9 @@ export async function validateCoupon(
     discountType: discount.type,
     discountValue: Number(discount.value),
     estimatedSavings: Math.round(estimatedSavings * 100) / 100,
+    couponId: validation.coupon.id,
+    code: validation.coupon.code,
+    scope: discount.scope,
+    maxDiscountAmount: discount.maxDiscountAmount,
   }
 }

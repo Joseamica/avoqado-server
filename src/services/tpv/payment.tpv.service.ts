@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { Payment, PaymentMethod, SplitType, OrderSource, PaymentSource, Prisma, type DigitalReceipt } from '@prisma/client'
 import logger from '../../config/logger'
+import { finalizeCouponsForOrder } from '../shared/cuponDeLaVenta'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
@@ -6552,92 +6553,4 @@ function mapPaymentMethodToPOS(method: PaymentMethod): string {
   }
 
   return paymentMethodMap[method] || 'ACARD' // ✅ CHANGED: Default fallback to DEB
-}
-
-// ==========================================
-// COUPON FINALIZATION
-// ==========================================
-
-/**
- * Finalize coupon redemptions when order payment completes.
- * Called ONLY when order is fully paid - not on partial payments.
- *
- * This follows Toast/Square best practice: coupons are "applied" at checkout
- * but only "redeemed" (counted against limits) when payment succeeds.
- *
- * @param venueId Venue ID for logging
- * @param orderId Order ID to finalize coupons for
- */
-async function finalizeCouponsForOrder(venueId: string, orderId: string): Promise<void> {
-  // Find all coupon-based discounts on this order
-  const couponDiscounts = await prisma.orderDiscount.findMany({
-    where: {
-      orderId,
-      couponCodeId: { not: null },
-    },
-    include: {
-      couponCode: {
-        include: { discount: true },
-      },
-    },
-  })
-
-  if (couponDiscounts.length === 0) {
-    logger.debug('🎟️ No coupons to finalize for order', { orderId })
-    return
-  }
-
-  // Get order for customerId
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    select: { customerId: true },
-  })
-
-  for (const orderDiscount of couponDiscounts) {
-    if (!orderDiscount.couponCodeId || !orderDiscount.couponCode) continue
-
-    // Check if already redeemed (idempotency - prevents double counting on retries)
-    const existingRedemption = await prisma.couponRedemption.findUnique({
-      where: { orderId },
-    })
-    if (existingRedemption) {
-      logger.debug('🎟️ Coupon already redeemed for order, skipping', {
-        orderId,
-        couponCodeId: orderDiscount.couponCodeId,
-      })
-      continue
-    }
-
-    // Create redemption record
-    await prisma.couponRedemption.create({
-      data: {
-        couponCodeId: orderDiscount.couponCodeId,
-        orderId,
-        customerId: order?.customerId,
-        amountSaved: orderDiscount.amount,
-      },
-    })
-
-    // Increment CouponCode.currentUses
-    await prisma.couponCode.update({
-      where: { id: orderDiscount.couponCodeId },
-      data: { currentUses: { increment: 1 } },
-    })
-
-    // Increment Discount.currentUses
-    if (orderDiscount.couponCode.discountId) {
-      await prisma.discount.update({
-        where: { id: orderDiscount.couponCode.discountId },
-        data: { currentUses: { increment: 1 } },
-      })
-    }
-
-    logger.info('✅ Coupon finalized on payment completion', {
-      orderId,
-      venueId,
-      couponCode: orderDiscount.couponCode.code,
-      couponCodeId: orderDiscount.couponCodeId,
-      amountSaved: orderDiscount.amount.toString(),
-    })
-  }
 }

@@ -29,6 +29,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { CUPON_CAMBIO_DE_VALOR, cuponDeLaVenta, finalizeCouponsForOrder, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge, devolverCanjesDeVentaAnuladaEnTx, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
@@ -705,6 +706,8 @@ type TpvCreateOrderWithItemsInput = {
   customerId?: string | null
   discount?: number // pesos
   orderDiscountId?: string | null
+  /** D5: el cupón que la terminal validó. El servidor lo revalida y calcula; `discount` sólo tiene que coincidir. */
+  couponCode?: string | null
   taxAmount: number // pesos (must be 0 in V1)
   tip?: number // pesos (must be 0 in V1)
   subtotal: number // pesos (gross)
@@ -1165,16 +1168,30 @@ export async function createOrderWithItems(
 
   const grossSubtotalPesos = roundPesos(preparedLines.reduce((sum, line) => sum + line.lineGrossPesos, 0))
   const itemDiscountPesos = roundPesos(preparedLines.reduce((sum, line) => sum + line.lineDiscountPesos, 0))
-  const orderDiscount = input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null
-  const orderDiscountPesos = orderDiscount
-    ? calculateDiscountPesos(orderDiscount, grossSubtotalPesos - itemDiscountPesos)
-    : roundPesos(input.discount || 0)
+  const baseDeLaCuentaPesos = roundPesos(grossSubtotalPesos - itemDiscountPesos)
+  const cupon = input.couponCode ? await cuponDeLaVenta(prisma, venueId, input.couponCode, baseDeLaCuentaPesos, input.customerId) : null
+  if (cupon?.discount.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
+    throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
+  const orderDiscount = cupon?.discount ?? (input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null)
+  const orderDiscountPesos = cupon
+    ? montoDelCupon(cupon.discount, baseDeLaCuentaPesos)
+    : orderDiscount
+      ? calculateDiscountPesos(orderDiscount, baseDeLaCuentaPesos)
+      : roundPesos(input.discount || 0)
   const discountAmountPesos = roundPesos(itemDiscountPesos + orderDiscountPesos)
   const totalPesos = roundPesos(grossSubtotalPesos - discountAmountPesos)
 
   assertClosePesos('subtotal', input.subtotal, grossSubtotalPesos)
-  assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
-  assertClosePesos('total', input.total, totalPesos)
+  if (cupon) {
+    // D5: si el cupón cambió entre validarlo y cobrar, la cajera lo tiene que ver: el total de pantalla ya no es el de la cuenta. En
+    // centavos enteros: restar pesos flotantes da 0.0100000002 y un centavo de redondeo se leía como otro cupón.
+    const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
+    if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos)) throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
+  } else {
+    assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
+    assertClosePesos('total', input.total, totalPesos)
+  }
 
   if (totalPesos < 0) {
     throw new BadRequestError('Order total cannot be negative')
@@ -1336,15 +1353,15 @@ export async function createOrderWithItems(
       }
 
       if (orderDiscount && orderDiscountPesos > 0) {
-        await tx.orderDiscount.create({
-          data: filaDeDescuentoDeCatalogoEnCuenta({
-            orderId: order.id,
-            discount: orderDiscount,
-            montoPesos: orderDiscountPesos,
-            appliedById: activeStaffVenue.id,
-            renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
-          }),
+        const fila = filaDeDescuentoDeCatalogoEnCuenta({
+          orderId: order.id,
+          discount: orderDiscount,
+          montoPesos: orderDiscountPesos,
+          appliedById: activeStaffVenue.id,
+          renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
+          tope: cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null ? Number(orderDiscount.maxDiscountAmount) : null,
         })
+        await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
       }
       if (!orderDiscount && orderDiscountPesos > 0) {
         // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
@@ -1357,7 +1374,8 @@ export async function createOrderWithItems(
       }
 
       const usedDiscountIds = [...new Set(createdItems.map(item => item.line.appliedDiscount?.id).filter(Boolean) as string[])]
-      if (orderDiscount?.id) usedDiscountIds.push(orderDiscount.id)
+      // El cupón sube sus contadores al canjearse (`finalizeCouponsForOrder`): aquí contaría dos veces.
+      if (orderDiscount?.id && !cupon) usedDiscountIds.push(orderDiscount.id)
       if (usedDiscountIds.length > 0) {
         await tx.discount.updateMany({
           where: { id: { in: [...new Set(usedDiscountIds)] } },
@@ -1434,6 +1452,12 @@ export async function createOrderWithItems(
 
   if (totalPesos === 0) {
     await deductTrackedInventoryForFreeCart(fullOrder, input.staffId)
+    // Un carrito gratis nace pagado y nunca pasa por el cobro: aquí es donde su cupón se canjea. Su fallo no desmiente la venta.
+    if (cupon) {
+      await finalizeCouponsForOrder(venueId, createdOrder.id).catch(error =>
+        logger.error('⚠️ No se pudo canjear el cupón del carrito gratis', { orderId: createdOrder.id, error: (error as Error).message }),
+      )
+    }
   }
 
   if (marcarCocina) {

@@ -1,4 +1,5 @@
 import { isOrderFullyReversed } from './referralReversalPolicy.service'
+import { finalizeCouponsForOrder } from '@/services/shared/cuponDeLaVenta'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { leerSiEsCuentaDeTarjetas } from '@/services/giftCards/giftCardMarks'
@@ -388,6 +389,11 @@ interface OnOrderPaidTxResult {
  * who re-crosses a threshold post-refund.
  */
 export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
+  // D5: todo camino que salda una cuenta (efectivo, saldo, panel, ligas, terminal) pasa por este hook; el cupón se canjea aquí para que
+  // ninguno se quede sin contar. Es idempotente y exige la cuenta PAGADA. Su fallo no tumba el cobro ni el referido.
+  await finalizeCouponsForOrder(input.venueId, input.orderId).catch(error =>
+    logger.error('⚠️ No se pudo canjear el cupón de la venta (el cobro sigue)', { orderId: input.orderId, error: (error as Error).message }),
+  )
   const txResult = await prisma.$transaction(async tx => {
     await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`)
     // R1 (tarjetas de regalo): vender una tarjeta no califica un referido; uno atado a una cuenta de tarjetas nunca califica. Por eso

@@ -543,6 +543,14 @@ export const createOrderWithItemsSchema = z.object({
       customerId: z.string().cuid({ message: 'El ID del cliente debe ser un CUID válido.' }).optional().nullable(),
       discount: z.number().nonnegative({ message: 'El descuento debe ser un número no negativo en pesos.' }).default(0),
       orderDiscountId: z.string().cuid({ message: 'El ID del descuento debe ser un CUID válido.' }).optional().nullable(),
+      // D5. ADITIVO: las TPV viejas no lo mandan. El servidor valida el cupón y `discount` debe coincidir con lo que él calcula.
+      couponCode: z
+        .string()
+        .trim()
+        .min(3, { message: 'El código del cupón debe tener al menos 3 caracteres.' })
+        .max(30, { message: 'El código del cupón no puede tener más de 30 caracteres.' })
+        .optional()
+        .nullable(),
       taxAmount: z.number().nonnegative({ message: 'El impuesto debe ser un número no negativo en pesos.' }),
       tip: z.number().nonnegative({ message: 'La propina debe ser un número no negativo en pesos.' }).default(0),
       subtotal: z.number().nonnegative({ message: 'El subtotal debe ser un número no negativo en pesos.' }),
@@ -556,6 +564,10 @@ export const createOrderWithItemsSchema = z.object({
         .max(255, { message: 'externalId no puede exceder 255 caracteres.' })
         .optional()
         .nullable(),
+    })
+    .refine(data => !(data.couponCode && data.orderDiscountId), {
+      message: 'Una venta no puede llevar cupón y descuento de catálogo a la vez.',
+      path: ['couponCode'],
     })
     .refine(data => data.taxAmount === 0, {
       message: 'taxAmount debe ser 0 en V1 del nuevo Cobrar (la fórmula del payment service aún no incluye tax).',

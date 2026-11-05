@@ -70,6 +70,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { cuponDeLaVenta, ligarCupon, montoDelCupon } from '../shared/cuponDeLaVenta'
 import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { applyPromotionToOrder } from '../promotions/promotion.service'
@@ -288,6 +289,11 @@ export interface CreateOrderInput {
    * Todavía no se combina con promociones (400).
    */
   orderDiscountId?: string | null
+  /**
+   * D5: el cupón que la caja validó. En línea el servidor lo revalida y calcula (el `discount` de la app no manda); una venta de la
+   * cola «ya ocurrió» y nunca se rechaza por él: las apps no encolan ventas con cupón, y si llega una, su `discount` queda como libre.
+   */
+  couponCode?: string | null
   tip?: number // cents
   note?: string | null
   splitType?: string | null
@@ -1523,12 +1529,17 @@ export async function crearVentaDeMostradorEnTx(
   })
   const itemDiscountTotal = catalogDiscountTotal + cortesiaTotal.toNumber()
 
+  const remainingAfterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal)
+  const cupon =
+    input.couponCode && !enLaCola ? await cuponDeLaVenta(tx, venueId, input.couponCode, remainingAfterItemDiscounts, normalizedCustomerId) : null
   // Descuento de catálogo de la CUENTA (como `/tpv/with-items`): del negocio y vigente, o la venta entera se rechaza.
-  const orderDiscount = input.orderDiscountId ? await tx.discount.findFirst({ where: { id: input.orderDiscountId, venueId } }) : null
+  const orderDiscount =
+    cupon?.discount ?? (input.orderDiscountId ? await tx.discount.findFirst({ where: { id: input.orderDiscountId, venueId } }) : null)
   if (input.orderDiscountId && !orderDiscount) {
     throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${input.orderDiscountId}`)
   }
-  if (orderDiscount) validateDiscountActive(orderDiscount, { horaDeLaVenta: enLaCola ? precioMostrado.horaDeLaVenta : undefined })
+  // El cupón ya se validó con sus fechas, que mandan sobre las del descuento.
+  if (orderDiscount && !cupon) validateDiscountActive(orderDiscount, { horaDeLaVenta: enLaCola ? precioMostrado.horaDeLaVenta : undefined })
   if (orderDiscount?.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
@@ -1539,11 +1550,12 @@ export async function crearVentaDeMostradorEnTx(
   // the order can never go negative. With `orderDiscountId` the catalog discount decides the
   // amount and `discount` is not added (in /tpv it only repeated that same amount); without it,
   // `discount` (cents) is the flat amount, clamped.
-  const remainingAfterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal)
-  const orderLevelDiscountDecimal = orderDiscount
-    ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
-    : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
-  if (orderDiscount && (input.discount ?? 0) > 0) {
+  const orderLevelDiscountDecimal = cupon
+    ? montoDelCupon(cupon.discount, remainingAfterItemDiscounts)
+    : orderDiscount
+      ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
+      : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
+  if (orderDiscount && !cupon && (input.discount ?? 0) > 0) {
     logger.warn('[ORDER.MOBILE] Llegaron orderDiscountId y discount: manda el de catálogo y el libre no se suma', {
       venueId,
       orderDiscountId: orderDiscount.id,
@@ -1557,7 +1569,8 @@ export async function crearVentaDeMostradorEnTx(
     subtotal,
     discountDecimal,
     total,
-    discounts: orderDiscount ? [...discounts, orderDiscount] : discounts,
+    // El cupón sube sus contadores al canjearse (`finalizeCouponsForOrder`): aquí contaría dos veces.
+    discounts: orderDiscount && !cupon ? [...discounts, orderDiscount] : discounts,
     cambiosDePrecio,
   }
 
@@ -1724,17 +1737,17 @@ export async function crearVentaDeMostradorEnTx(
     // catálogo, sobre los renglones sin cortesía (como `/tpv/with-items`).
     if (orderLevelDiscountDecimal > 0) {
       const appliedById = appliedByStaffVenue?.id ?? null
-      await tx.orderDiscount.create({
-        data: orderDiscount
-          ? filaDeDescuentoDeCatalogoEnCuenta({
-              orderId: createdOrder.id,
-              discount: orderDiscount,
-              montoPesos: orderLevelDiscountDecimal,
-              appliedById,
-              renglonesSinCortesia: createdOrder.items.filter(item => !item.isCortesia).map(item => item.id),
-            })
-          : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById }),
-      })
+      const fila = orderDiscount
+        ? filaDeDescuentoDeCatalogoEnCuenta({
+            orderId: createdOrder.id,
+            discount: orderDiscount,
+            montoPesos: orderLevelDiscountDecimal,
+            appliedById,
+            renglonesSinCortesia: createdOrder.items.filter(item => !item.isCortesia).map(item => item.id),
+            tope: cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null ? Number(orderDiscount.maxDiscountAmount) : null,
+          })
+        : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById })
+      await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
     }
     if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
     return { order: createdOrder, promotionTotals: null, venta }
@@ -1799,20 +1812,21 @@ export async function crearVentaDeMostradorEnTx(
   // error y sin rastro. Nunca cobraba de menos: cobraba de MÁS que lo que el
   // cajero aplicó.
   const topeDescuentoDeOrden = Math.max(0, subtotalConPromociones - itemDiscountTotal)
-  const descuentoDeOrdenFinal = Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
+  const descuentoDeOrdenFinal = cupon
+    ? montoDelCupon(cupon.discount, topeDescuentoDeOrden)
+    : Math.min(topeDescuentoDeOrden, Math.max(0, (input.discount || 0) / 100))
   const descuentoFinal = itemDiscountTotal + descuentoDeOrdenFinal
 
   const totalFinal = Math.round((Math.max(0, subtotalConPromociones - descuentoFinal) + serviceChargeAmount + tipDecimal) * 100) / 100
   const remainingFinal = Math.round(Math.max(0, totalFinal - Number(recalculada.paidAmount ?? 0)) * 100) / 100
   // B2: la fila nace aquí, con el importe reafirmado contra el subtotal CON promociones, y se sincroniza sobre el combo.
   if (descuentoDeOrdenFinal > 0) {
-    await tx.orderDiscount.create({
-      data: filaDeDescuentoDeCuenta({
-        orderId: createdOrder.id,
-        montoPesos: descuentoDeOrdenFinal,
-        appliedById: appliedByStaffVenue?.id ?? null,
-      }),
+    const fila = filaDeDescuentoDeCuenta({
+      orderId: createdOrder.id,
+      montoPesos: descuentoDeOrdenFinal,
+      appliedById: appliedByStaffVenue?.id ?? null,
     })
+    await tx.orderDiscount.create({ data: cupon ? { ...ligarCupon(fila, cupon), type: fila.type, value: fila.value } : fila })
     await sincronizarRepartos(tx, createdOrder.id)
   }
   const reafirmada = await tx.order.update({
@@ -5827,6 +5841,8 @@ function huellaDeVentaConSaldo(venta: CreateOrderInput, giftCardId: string, mont
     discount: venta.discount ?? 0,
     // Unión con develop: el descuento de catálogo de la cuenta cambia lo que la venta debe (otro cuerpo, otra huella).
     orderDiscountId: venta.orderDiscountId ?? null,
+    // D5: otro cupón es otra venta (otro cuerpo, otra huella). Sin cupón, la huella de siempre: `undefined` no entra al hash.
+    ...(venta.couponCode ? { couponCode: venta.couponCode } : {}),
     // Codex unión r1 #2: «Pagar después» decide si lo que falta es deuda del cliente.
     payLater: venta.payLater ?? null,
     giftCardId,

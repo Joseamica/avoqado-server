@@ -85,7 +85,7 @@ interface BulkGenerateCouponsRequest {
   validUntil?: Date
 }
 
-interface CouponValidationResult {
+export interface CouponValidationResult {
   valid: boolean
   coupon?: {
     id: string
@@ -101,6 +101,8 @@ interface CouponValidationResult {
   }
   error?: string
   errorCode?: 'NOT_FOUND' | 'INACTIVE' | 'EXPIRED' | 'NOT_STARTED' | 'USAGE_LIMIT' | 'MIN_PURCHASE' | 'CUSTOMER_LIMIT'
+  /** MIN_PURCHASE: la compra mínima; CUSTOMER_LIMIT: los usos por cliente. Para que quien muestre el rechazo arme su texto. */
+  limite?: number
 }
 
 interface _CouponRedemptionItem {
@@ -604,6 +606,12 @@ export async function validateCouponCode(
           scope: true,
           maxDiscountAmount: true,
           active: true,
+          // D5: lo que el cupón hereda del descuento si no trae lo suyo (el esquema: sus campos «override»).
+          validFrom: true,
+          validUntil: true,
+          maxTotalUses: true,
+          currentUses: true,
+          minPurchaseAmount: true,
         },
       },
       _count: {
@@ -643,15 +651,17 @@ export async function validateCouponCode(
   const now = new Date()
 
   // Check validity period
-  if (coupon.validFrom && coupon.validFrom > now) {
+  const validFrom = coupon.validFrom ?? coupon.discount.validFrom
+  if (validFrom && validFrom > now) {
     return {
       valid: false,
-      error: `Coupon is not valid yet. Valid from ${coupon.validFrom.toISOString()}`,
+      error: `Coupon is not valid yet. Valid from ${validFrom.toISOString()}`,
       errorCode: 'NOT_STARTED',
     }
   }
 
-  if (coupon.validUntil && coupon.validUntil < now) {
+  const validUntil = coupon.validUntil ?? coupon.discount.validUntil
+  if (validUntil && validUntil < now) {
     return {
       valid: false,
       error: 'Coupon has expired',
@@ -659,8 +669,11 @@ export async function validateCouponCode(
     }
   }
 
-  // Check usage limit
-  if (coupon.maxUses !== null && coupon.currentUses >= coupon.maxUses) {
+  // Check usage limit (el del código y el total del descuento)
+  if (
+    (coupon.maxUses != null && coupon.currentUses >= coupon.maxUses) ||
+    (coupon.discount.maxTotalUses != null && coupon.discount.currentUses >= coupon.discount.maxTotalUses)
+  ) {
     return {
       valid: false,
       error: 'Coupon usage limit has been reached',
@@ -669,12 +682,14 @@ export async function validateCouponCode(
   }
 
   // Check minimum purchase amount
-  if (coupon.minPurchaseAmount !== null && orderTotal !== undefined) {
-    if (orderTotal < Number(coupon.minPurchaseAmount)) {
+  const minPurchase = coupon.minPurchaseAmount ?? coupon.discount.minPurchaseAmount
+  if (minPurchase != null && orderTotal !== undefined) {
+    if (orderTotal < Number(minPurchase)) {
       return {
         valid: false,
-        error: `Minimum purchase of ${Number(coupon.minPurchaseAmount)} required`,
+        error: `Minimum purchase of ${Number(minPurchase)} required`,
         errorCode: 'MIN_PURCHASE',
+        limite: Number(minPurchase),
       }
     }
   }
@@ -693,6 +708,7 @@ export async function validateCouponCode(
         valid: false,
         error: `You have already used this coupon ${coupon.maxUsesPerCustomer} time(s)`,
         errorCode: 'CUSTOMER_LIMIT',
+        limite: coupon.maxUsesPerCustomer,
       }
     }
   }
