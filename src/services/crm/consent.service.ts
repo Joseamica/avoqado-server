@@ -4,6 +4,7 @@
  */
 import type { Prisma } from '@prisma/client'
 import { normalizeEmail } from '../marketing/emailSuppression.service'
+import { erasedEmailsTx } from './erase.service'
 import { addEvent } from './timeline.service'
 
 /** `noticeVersion` of a consent the team recorded by ticking the box on a prospect it created or imported. */
@@ -18,7 +19,10 @@ export async function escribirConsentimientoDelEquipoTx(
   tx: Prisma.TransactionClient,
   p: { emails: string[]; accountId: string; source: 'MANUAL' | 'IMPORTACION'; staffId: string; at: Date },
 ): Promise<number> {
-  const emails = [...new Set(p.emails.filter(email => email.trim()).map(normalizeEmail))]
+  const all = [...new Set(p.emails.filter(email => email.trim()).map(normalizeEmail))]
+  // Like the landing: whoever was deleted from the CRM (D7) is neither written nor counted — and nothing is thrown.
+  const erased = await erasedEmailsTx(tx, all)
+  const emails = all.filter(email => !erased.has(email))
   if (emails.length === 0) return 0
   const { count } = await tx.crmEmailConsent.createMany({
     data: emails.map(email => ({

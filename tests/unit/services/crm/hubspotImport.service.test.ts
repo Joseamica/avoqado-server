@@ -7,6 +7,7 @@
  * file is refused whole, before anything is written; and a batch that fails keeps what the earlier batches wrote, so
  * importing again completes it.
  */
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -597,4 +598,79 @@ it('una_tanda_que_falla_no_deshace_las_anteriores_y_reimportar_completa', async 
   expect(second).toMatchObject({ nuevos: 50, repetidos: 200, aplicados: 50, fallaron: 0 })
   expect(db.accounts).toHaveLength(250)
   expect(new Set(db.accounts.map(account => account.externalKey)).size).toBe(250)
+})
+
+describe('la casilla «Aceptaron recibir correos»', () => {
+  const ONE = `${CONTACTS_HEADER}101,Ana,López,5512345601,Ana@Cafe.mx,Café Ana\n102,Beto,Ruiz,5512345602,beto@cafe.mx,Café Beto\n`
+  const consentOf = (email: string) => db.consents.find(consent => consent.email === email)
+
+  it('con_la_casilla_cada_registro_que_entra_deja_el_permiso_de_sus_correos_con_IMPORTACION', async () => {
+    const applied = await applyHubspot(admin, ONE, NO_DEALS, { aceptaronCorreos: true })
+    expect(applied).toMatchObject({ aplicados: 2, conPermiso: 2 })
+    expect(consentOf('ana@cafe.mx')).toMatchObject({
+      source: 'IMPORTACION',
+      grantedById: ADMIN,
+      entryId: null,
+      noticeVersion: 'casilla-del-equipo-v1',
+      accountId: accountOf('hubspot:contact:101')!.id,
+    })
+    expect(consentOf('beto@cafe.mx')).toBeDefined()
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CRM_HUBSPOT_IMPORTED', data: expect.objectContaining({ aceptaronCorreos: true, conPermiso: 2 }) }),
+    )
+  })
+
+  it('sin_la_casilla_no_escribe_ningun_permiso', async () => {
+    const applied = await applyHubspot(admin, ONE, NO_DEALS)
+    expect(db.consents).toHaveLength(0)
+    expect(applied.conPermiso).toBeUndefined()
+    const off = await applyHubspot(admin, `${CONTACTS_HEADER}103,Cris,Paz,5512345603,cris@cafe.mx,Café Cris\n`, NO_DEALS, {
+      aceptaronCorreos: false,
+    })
+    expect(off.conPermiso).toBeUndefined()
+    expect(db.consents).toHaveLength(0)
+  })
+
+  it('🔴 un_repetido_no_escribe_permiso_ni_toca_el_que_ya_habia', async () => {
+    await applyHubspot(admin, ONE, NO_DEALS)
+    db.consents.push({
+      id: 'cconsprev0000000000000001',
+      email: 'ana@cafe.mx',
+      source: 'LANDING',
+      grantedById: null,
+      noticeVersion: '2026-01-01',
+    })
+    const applied = await applyHubspot(admin, ONE, NO_DEALS, { aceptaronCorreos: true })
+    expect(applied).toMatchObject({ aplicados: 0, conPermiso: 0 })
+    expect(db.consents).toEqual([expect.objectContaining({ source: 'LANDING', grantedById: null, noticeVersion: '2026-01-01' })])
+  })
+
+  it('un_eliminado_no_vuelve_ni_con_permiso', async () => {
+    const hash = createHash('sha256').update('EMAIL:ana@cafe.mx').digest('hex')
+    db.erased.push({ keyHash: hash, scope: '', erasedAt: new Date() })
+    const applied = await applyHubspot(admin, ONE, NO_DEALS, { aceptaronCorreos: true })
+    expect(applied).toMatchObject({ aplicados: 1, conPermiso: 1 })
+    expect(consentOf('ana@cafe.mx')).toBeUndefined()
+    expect(accountOf('hubspot:contact:101')).toBeUndefined()
+  })
+
+  it('importar_dos_veces_con_la_casilla_no_duplica_ni_cuenta_dos_veces', async () => {
+    const first = await applyHubspot(admin, ONE, NO_DEALS, { aceptaronCorreos: true })
+    const second = await applyHubspot(admin, ONE, NO_DEALS, { aceptaronCorreos: true })
+    expect(first.conPermiso).toBe(2)
+    expect(second.conPermiso).toBe(0)
+    expect(db.consents).toHaveLength(2)
+  })
+
+  it('un_correo_mal_escrito_no_se_cuenta_ni_se_escribe', async () => {
+    const bad = `${CONTACTS_HEADER}101,Ana,López,5512345601,sin-arroba,Café Ana\n`
+    const applied = await applyHubspot(admin, bad, NO_DEALS, { aceptaronCorreos: true })
+    expect(applied).toMatchObject({ aplicados: 1, conPermiso: 0 })
+    expect(db.consents).toHaveLength(0)
+  })
+
+  it('la_vista_previa_no_escribe_permisos', async () => {
+    await previewHubspot(ONE, NO_DEALS)
+    expect(prismaMock.crmEmailConsent.createMany).not.toHaveBeenCalled()
+  })
 })

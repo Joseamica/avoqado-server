@@ -139,6 +139,15 @@ cabeceras: lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respues
   `RESEND_MONTHLY_QUOTA` (y `RESEND_DAILY_QUOTA` si aplica), o el aviso del mes saldría al 80 % de 3,000.
 - La pausa vive en la memoria del proceso: tras un reinicio se rearma con la primera respuesta de Resend.
 
+## El permiso de correo (`consent.service.ts`)
+
+Una fila de `CrmEmailConsent` por correo (único). Tres entradas: la **landing** (casilla del formulario), el **alta a mano** (casilla
+«Aceptó recibir correos») y la **importación de HubSpot** (casilla «Las personas de estos archivos aceptaron…», campo multipart
+`aceptaronCorreos`, no parámetro de URL: un SERVIDOR viejo rechaza el campo con 422 en vez de importar sin el permiso). Las dos del equipo
+pasan por `escribirConsentimientoDelEquipoTx`: `skipDuplicates`, así que **nunca pisa** un permiso que ya había (ni su autor); **se salta**
+(sin contar ni lanzar) el correo eliminado del CRM (D7), como la landing; sólo cuenta lo que escribió. La importación sólo lo escribe para
+lo que CREA y sólo con correos bien formados; su respuesta trae `conPermiso`. Sin casilla la persona entra al CRM y no a campañas.
+
 ## Gmail del vendedor
 
 - **«Configurado»** sólo si están presentes y bien formadas las cuatro `CRM_GMAIL_*` **y** `OAUTH_STATE_SECRET` (la llave, 64 hex; la URI,

@@ -6,6 +6,7 @@
  * 403); the server — not the client — caps every list and says the real total; «today» is Mexico City's day, never the
  * server's; and an admin who renames «Prospecto» never gets it back on the next deploy.
  */
+import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { updateStageSchema } from '@/schemas/crm.schema'
@@ -523,9 +524,25 @@ describe('who sees and changes what', () => {
       prismaMock.crmAccount.create.mockResolvedValue({ id: NEW_ACCOUNT })
       prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue(account({ id: NEW_ACCOUNT }))
       prismaMock.crmEmailConsent.createMany.mockResolvedValue({ count: createCount })
+      prismaMock.crmErased.findMany.mockResolvedValue([])
       prismaMock.crmEmailConsent.findUnique.mockResolvedValue({ id: 'cconsent00000000000000001' })
       ;(logAction as jest.Mock).mockClear()
     }
+
+    it('🔴 un correo eliminado del CRM (D7) no recibe permiso: el alta entra y la respuesta dice false', async () => {
+      prepara()
+      prismaMock.crmErased.findMany.mockResolvedValue([{ keyHash: createHash('sha256').update('EMAIL:paola@cafe.mx').digest('hex') }])
+      prismaMock.crmEmailConsent.findUnique.mockResolvedValue(null)
+      const row = await createManual(
+        access(),
+        { ...base, contact: { ...base.contact, aceptaCorreos: true } },
+        { confirmarOtroNegocio: true },
+      )
+
+      expect(prismaMock.crmEmailConsent.createMany).not.toHaveBeenCalled()
+      expect(row.consentimientoRegistrado).toBe(false)
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_EMAIL_CONSENT_RECORDED' }))
+    })
 
     it('con la casilla escribe el permiso de ESE correo con MANUAL, quién y cuándo, dentro de la transacción', async () => {
       prepara()

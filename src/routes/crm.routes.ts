@@ -243,8 +243,9 @@ router.post('/opt-outs', requireCrm('crm:bajas'), validateRequest(createOptOutSc
 // «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
 const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024
 // `+ 1`: busboy cuts a file that REACHES the limit, so a file of exactly 5 MB would not pass with the bare number.
-// `fields: 0`: nothing but the two files.
-const hubspotUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: HUBSPOT_FILE_MAX_BYTES + 1, files: 2, fields: 0 } })
+// `fields: 1`: the two files and the box `aceptaronCorreos` (an older SERVIDOR has 0: it refuses the field, so no import
+// goes without the consent that was asked for).
+const hubspotUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: HUBSPOT_FILE_MAX_BYTES + 1, files: 2, fields: 1 } })
 const readHubspotFiles = preserveContext(
   hubspotUpload.fields([
     { name: 'contactos', maxCount: 1 },
