@@ -8,11 +8,17 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import type { McpScope } from '@/mcp/scope'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
-import { cancelCampaign, getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
+import { contarAudiencia } from '@/services/crm/email/audience.service'
+import { cancelCampaign, getCampaign, listCampaigns, previewSend } from '@/services/crm/email/campaigns.service'
 import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/services/email/resendQuota', () => ({ campanasPausadasPorCupo: jest.fn(() => false) }))
+// A quién le llega es SQL del servicio de públicos: aquí basta el conteo.
+jest.mock('@/services/crm/email/audience.service', () => ({
+  ...jest.requireActual('@/services/crm/email/audience.service'),
+  contarAudiencia: jest.fn(),
+}))
 jest.mock('@/services/crm/access.service', () => ({
   ...jest.requireActual('@/services/crm/access.service'),
   getCrmAccess: jest.fn(),
@@ -224,5 +230,77 @@ describe('cancelCampaign — lo que esperaba otro intento queda DESCONOCIDO, no 
       },
     })
     expect(escrituras.some((e: any) => e.data.status === 'OMITIDO' && JSON.stringify(e.where).includes('REINTENTO'))).toBe(false)
+  })
+})
+
+// H3 (Codex código r2, misma familia que H1): con sólo «Mandar», Yonatan ve el público de Guadalajara; Rafa lo cambia a Monterrey
+// mientras tanto. La vista previa ya no firma la versión NUEVA: la pantalla manda la huella de lo que pinta y, si no coincide con
+// lo que hay ahora, 409 sin token. Sin huella (la pantalla vieja), igual que antes.
+describe('previewSend — la confirmación se ata a la versión que se ve (huella)', () => {
+  const guadalajara = { segmentos: [{ tipo: 'CLIENTES', ciudades: ['Guadalajara'] }] }
+  const monterrey = { segmentos: [{ tipo: 'CLIENTES', ciudades: ['Monterrey'] }] }
+  const borrador = (over: Record<string, unknown> = {}) => ({ ...fila(CAMP_A, 0), status: 'BORRADOR', enqueuedAt: null, ...over })
+  const ACTOR = { staffId: STAFF } as never
+
+  beforeEach(() => {
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue([] as never)
+    ;(contarAudiencia as jest.Mock).mockReset().mockResolvedValue({ total: 2, porSegmento: { CLIENTES: 2 }, bloqueados: 0 })
+  })
+
+  /** La huella que la pantalla recibió al abrir la campaña con ese estado. */
+  const huellaVista = async (over: Record<string, unknown>) => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador(over) as never)
+    return (await getCampaign(CAMP_A)).huella
+  }
+
+  it('la vista trae la huella: igual para la misma versión, distinta si cambia el público o el contenido', async () => {
+    const a = await huellaVista({ audience: guadalajara })
+    expect(a).toMatch(/^[0-9a-f]{64}$/)
+    expect(await huellaVista({ audience: guadalajara })).toBe(a)
+    expect(await huellaVista({ audience: monterrey })).not.toBe(a)
+    expect(await huellaVista({ audience: guadalajara, subject: 'Otro asunto' })).not.toBe(a)
+    expect(await huellaVista({ audience: guadalajara, blocks: [{ type: 'paragraph', text: 'Otro texto' }] })).not.toBe(a)
+    // Un borrador recién creado (sin público) también la trae: la vista nunca truena por eso.
+    expect(await huellaVista({ audience: { segmentos: [] } })).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('con la huella de la versión que hay ahora: conteo y token, como siempre', async () => {
+    const huella = await huellaVista({ audience: guadalajara })
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: guadalajara }) as never)
+    const vista = await previewSend(ACTOR, CAMP_A, huella)
+    expect(vista).toMatchObject({ total: 2, bloqueados: 0 })
+    expect(vista.token).toEqual(expect.any(String))
+  })
+
+  it('🔴 con la huella de Guadalajara y el servidor ya en Monterrey: 409 CRM_CAMPANA_CAMBIO y no se firma nada', async () => {
+    const huella = await huellaVista({ audience: guadalajara })
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: monterrey }) as never)
+    await expect(previewSend(ACTOR, CAMP_A, huella)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_CAMBIO',
+      message: 'Alguien cambió esta campaña mientras la veías. Ya te enseñamos la versión nueva: revísala y vuelve a confirmar.',
+    })
+    // Ni siquiera se contó: el token sale después del conteo, así que no hubo token.
+    expect(contarAudiencia).not.toHaveBeenCalled()
+  })
+
+  it('🔴 lo mismo si cambió el contenido (mismo público)', async () => {
+    const huella = await huellaVista({ audience: guadalajara })
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: guadalajara, subject: 'Otro asunto' }) as never)
+    await expect(previewSend(ACTOR, CAMP_A, huella)).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_CAMBIO' })
+    expect(contarAudiencia).not.toHaveBeenCalled()
+  })
+
+  it('sin huella (la pantalla vieja): conteo y token de lo que haya, igual que antes', async () => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: monterrey }) as never)
+    const vista = await previewSend(ACTOR, CAMP_A)
+    expect(vista).toMatchObject({ total: 2, bloqueados: 0 })
+    expect(vista.token).toEqual(expect.any(String))
+  })
+
+  it('una campaña que ya no está en BORRADOR sigue diciendo por qué, aunque traiga huella', async () => {
+    const huella = await huellaVista({ audience: guadalajara })
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: guadalajara, status: 'ENVIADA' }) as never)
+    await expect(previewSend(ACTOR, CAMP_A, huella)).rejects.toMatchObject({ code: 'CRM_CAMPANA_NO_EDITABLE' })
   })
 })

@@ -592,8 +592,22 @@ export const listCampaignsSchema = z.object({
   }),
 })
 
-/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/preview, /test and /cancel */
+/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/test and /cancel */
 export const campaignIdSchema = z.object({ params: byId })
+
+/** POST /crm/campaigns/:id/preview — `huella`, optional: the version the screen shows (H3). Without it (old screen), as before. */
+export const previewCampaignSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      huella: z
+        .string({ invalid_type_error: 'La versión que ves no es válida' })
+        .min(1, 'La versión que ves no es válida')
+        .max(200, 'La versión que ves no es válida')
+        .optional(),
+    })
+    .optional(),
+})
 
 /** POST /crm/campaigns — from a template: its subject and blocks are copied. */
 export const createCampaignSchema = z.object({

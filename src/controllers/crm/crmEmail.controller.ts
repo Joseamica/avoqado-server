@@ -91,9 +91,9 @@ export async function updateCampaign(req: Request, res: Response): Promise<void>
   res.json({ data: await campaigns.updateCampaign(req.crmAccess!, req.params.id, req.body) })
 }
 
-/** POST /api/v1/crm/campaigns/:id/preview — how many get it now, and the token to confirm exactly that. */
+/** POST /api/v1/crm/campaigns/:id/preview — how many get it now, and the token to confirm exactly that (`huella`: the version seen). */
 export async function previewCampaign(req: Request, res: Response): Promise<void> {
-  res.json({ data: await campaigns.previewSend(req.crmAccess!, req.params.id) })
+  res.json({ data: await campaigns.previewSend(req.crmAccess!, req.params.id, req.body?.huella) })
 }
 
 /** POST /api/v1/crm/campaigns/:id/test — «Envíame una prueba» of this version. A refusal is a 200 with `ok: false` and why. */

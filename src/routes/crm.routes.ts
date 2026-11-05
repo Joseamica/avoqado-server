@@ -42,6 +42,7 @@ import {
   listTemplatesSchema,
   loseAccountSchema,
   moveStageSchema,
+  previewCampaignSchema,
   previewTemplateSchema,
   reassignAccountSchema,
   reportsSchema,
@@ -183,7 +184,7 @@ router.get('/campaigns', verCampanas, validateRequest(listCampaignsSchema), crmE
 router.post('/campaigns', preparar, validateRequest(createCampaignSchema), crmEmailController.createCampaign)
 router.get('/campaigns/:id', verCampanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
 router.patch('/campaigns/:id', preparar, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
-router.post('/campaigns/:id/preview', verCampanas, validateRequest(campaignIdSchema), crmEmailController.previewCampaign)
+router.post('/campaigns/:id/preview', verCampanas, validateRequest(previewCampaignSchema), crmEmailController.previewCampaign)
 router.post('/campaigns/:id/test', preparar, validateRequest(campaignIdSchema), crmEmailController.sendCampaignTest)
 router.post('/campaigns/:id/send', mandar, validateRequest(sendCampaignSchema), crmEmailController.sendCampaign)
 router.post('/campaigns/:id/cancel', mandar, validateRequest(campaignIdSchema), crmEmailController.cancelCampaign)

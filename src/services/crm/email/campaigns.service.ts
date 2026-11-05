@@ -73,6 +73,18 @@ function audienciaDe(raw: Prisma.JsonValue): Audiencia {
 /** La huella del público: zod devuelve las llaves en el orden del esquema, así que el mismo público da la misma huella. */
 const audienceHash = (audiencia: Audiencia) => createHash('sha256').update(JSON.stringify(audiencia)).digest('hex')
 
+/**
+ * La huella de la VERSIÓN que se ve: contenido + público (H3, Codex código r2). La vista la entrega y la pantalla la devuelve al
+ * pedir la vista previa; si alguien cambió la campaña mientras tanto, no se firma nada. Un borrador sin público también la tiene.
+ */
+function huellaDe(fila: { subject: string; blocks: Prisma.JsonValue; audience: Prisma.JsonValue }): string {
+  const publico = audienciaSchema.safeParse(fila.audience)
+  const delPublico = publico.success ? audienceHash(publico.data) : JSON.stringify(fila.audience)
+  return createHash('sha256')
+    .update(`${contentHash(fila.subject, bloquesDe(fila))}:${delPublico}`)
+    .digest('hex')
+}
+
 // ── El token de confirmación (mismo patrón que `marketing/campaignConfirmToken.ts`) ─────────────────────────────────────
 // Llave derivada de ACCESS_TOKEN_SECRET con una etiqueta PROPIA (un token de otro carril nunca vale aquí), cuerpo en base64url
 // y firma HMAC-SHA256 comparada en tiempo constante. No se guarda nada: se firma y se verifica al vuelo.
@@ -141,8 +153,9 @@ async function contadoresDe(ids: string[]): Promise<Map<string, Record<string, n
 }
 
 /**
- * Lo que ve la pantalla: sin la huella cruda, con «¿ya te mandaste la prueba de esta versión?», los contadores y si la campaña
- * espera al cupo de Resend (`pausadaPorCupo`, campo nuevo y opcional: hasta las 18:00 de CDMX, cuando Resend reinicia su día; sólo si sigue enviando).
+ * Lo que ve la pantalla: sin la huella cruda de la prueba, con «¿ya te mandaste la prueba de esta versión?», los contadores, si la
+ * campaña espera al cupo de Resend (`pausadaPorCupo`, campo nuevo y opcional: hasta las 18:00 de CDMX, cuando Resend reinicia su día;
+ * sólo si sigue enviando) y la `huella` de esta versión (campo nuevo y opcional) para atar la vista previa a lo que se ve.
  */
 function vista(fila: Fila, contadores: Record<string, number> = {}) {
   const { testSentHash, ...resto } = fila
@@ -151,6 +164,7 @@ function vista(fila: Fila, contadores: Record<string, number> = {}) {
     pruebaVigente: testSentHash === contentHash(fila.subject, bloquesDe(fila)),
     contadores,
     pausadaPorCupo: fila.status === 'ENVIANDO' && campanasPausadasPorCupo(),
+    huella: huellaDe(fila),
   }
 }
 
@@ -253,11 +267,20 @@ export async function updateCampaign(
 
 // ── Vista previa, prueba, envío y cancelación ────────────────────────────────────────────────────────────────────────
 
-/** A cuántos les llega ahora mismo, por público, cuántos se quedan fuera por baja, y el token para confirmar ESTO. */
-export async function previewSend(_actor: CrmAccess, id: string) {
+/**
+ * A cuántos les llega ahora mismo, por público, cuántos se quedan fuera por baja, y el token para confirmar ESTO. Con `huella` (la de
+ * la versión que pinta la pantalla), si la campaña ya cambió: 409 y no se firma nada. Sin ella (la pantalla vieja), igual que antes.
+ */
+export async function previewSend(_actor: CrmAccess, id: string, huella?: string) {
   const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { status: true, subject: true, blocks: true, audience: true } })
   if (!fila) throw notFound()
   if (fila.status !== 'BORRADOR') throw noEditable(fila.status)
+  if (huella !== undefined && huella !== huellaDe(fila)) {
+    throw new ConflictError(
+      'Alguien cambió esta campaña mientras la veías. Ya te enseñamos la versión nueva: revísala y vuelve a confirmar.',
+      'CRM_CAMPANA_CAMBIO',
+    )
+  }
   const audiencia = audienciaDe(fila.audience)
   const { total, porSegmento, bloqueados } = await contarAudiencia(audiencia)
   const token = firmarConfirmacion({

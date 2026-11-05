@@ -167,6 +167,40 @@ describe('sólo «Mandar campañas» (Review Focus 1)', () => {
     expect(prismaMock.crmCampaign.update).toHaveBeenCalledWith({ where: { id: CAMPAIGN }, data: { total: 2 } })
   })
 
+  // H3 (Codex código r2): Yonatan abre la campaña con el público de Guadalajara; Rafa lo cambia a Monterrey mientras la ve.
+  it('🔴 si alguien cambió la campaña mientras la veía, la vista previa contesta 409 sin token; con la versión actual, sí', async () => {
+    const guadalajara = { ...campana(), audience: { segmentos: [{ tipo: 'CLIENTES', ciudades: ['Guadalajara'] }] } }
+    const monterrey = { ...campana(), audience: { segmentos: [{ tipo: 'CLIENTES', ciudades: ['Monterrey'] }] } }
+
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(guadalajara)
+    const vista = await request(app).get(`/crm/campaigns/${CAMPAIGN}`)
+    expect(vista.body.data.huella).toMatch(/^[0-9a-f]{64}$/)
+
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(monterrey)
+    const vieja = await request(app).post(`/crm/campaigns/${CAMPAIGN}/preview`).send({ huella: vista.body.data.huella })
+    expect(vieja.status).toBe(409)
+    expect(vieja.body).toEqual({
+      code: 'CRM_CAMPANA_CAMBIO',
+      message: 'Alguien cambió esta campaña mientras la veías. Ya te enseñamos la versión nueva: revísala y vuelve a confirmar.',
+    })
+    expect(contarAudiencia).not.toHaveBeenCalled()
+
+    // La pantalla recarga: con la huella de Monterrey ya cuenta y firma.
+    const nueva = await request(app).get(`/crm/campaigns/${CAMPAIGN}`)
+    const conteo = await request(app).post(`/crm/campaigns/${CAMPAIGN}/preview`).send({ huella: nueva.body.data.huella })
+    expect(conteo.status).toBe(200)
+    expect(conteo.body.data).toMatchObject({ total: 2, token: expect.any(String) })
+  })
+
+  it('una huella que no es texto o es enorme se rechaza en español, sin contar', async () => {
+    for (const huella of [123, 'x'.repeat(201), '']) {
+      const res = await request(app).post(`/crm/campaigns/${CAMPAIGN}/preview`).send({ huella })
+      expect(res.status).toBe(400)
+      expect(res.body.message).toMatch(/^Error de validación: huella: La versión que ves no es válida/)
+    }
+    expect(contarAudiencia).not.toHaveBeenCalled()
+  })
+
   it('no edita ni se manda la prueba: 403 y no se toca la campaña', async () => {
     for (const res of [
       await request(app).patch(`/crm/campaigns/${CAMPAIGN}`).send({ name: 'Otra' }),
