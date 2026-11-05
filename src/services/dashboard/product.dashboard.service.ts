@@ -95,6 +95,8 @@ export interface CreateProductDto {
 
 export interface UpdateProductDto {
   // Versión que el panel obtuvo en su paso anterior: si el producto cambió en medio, 409 PRODUCT_CHANGED. No es un campo del producto.
+  // Estricta a propósito: coincidir en los campos pedidos NO prueba que sea una repetición (Codex r2 de la ronda 5); por eso el panel
+  // no reintenta solo las peticiones que llevan versión.
   expectedUpdatedAt?: string
   name?: string
   description?: string
@@ -864,18 +866,6 @@ export const productoCambioError = () =>
     'PRODUCT_CHANGED',
   )
 
-/**
- * ¿Lo pedido ya es lo que hay? Sólo campos sueltos (un objeto o lista nunca cuenta como igual). Sirve para que la REPETICIÓN de una
- * petición ya aplicada (el panel reintenta si se pierde la respuesta) no se confunda con un cambio ajeno (Codex r1 #4).
- */
-export const yaEsAsi = (vigente: Record<string, unknown>, pedido: Record<string, unknown>) =>
-  Object.entries(pedido).every(([campo, valor]) => {
-    if (valor === undefined) return true
-    if (valor !== null && typeof valor === 'object') return false
-    const actual = vigente[campo]
-    return actual === null || actual === undefined ? valor === null : String(actual) === String(valor)
-  })
-
 export async function updateProduct(
   venueId: string,
   productId: string,
@@ -1022,14 +1012,6 @@ export async function updateProduct(
       select: { ivaTratamiento: true, taxRate: true, objetoImp: true, price: true },
     })
     precioBajoCandado = actual.price
-    // Versión esperada, bajo el candado de fila de la guardia. Si ya no es la misma pero lo pedido ya es lo que hay, es la repetición
-    // de esta misma petición (respuesta perdida): pasa, atada a la versión que se ve ahora.
-    let versionExigida = expectedUpdatedAt ? new Date(expectedUpdatedAt) : undefined
-    if (versionExigida) {
-      const vigente = await tx.product.findFirst({ where: { id: productId, venueId } })
-      if (vigente && vigente.updatedAt.getTime() !== versionExigida.getTime() && yaEsAsi(vigente, productFields as Record<string, unknown>))
-        versionExigida = vigente.updatedAt
-    }
     const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
     Object.assign(
       updateData,
@@ -1047,7 +1029,7 @@ export async function updateProduct(
           id: productId,
           ...(expectedState ? { venueId, deletedAt: null, ...expectedState } : {}),
           // Bajo el candado de fila que ya tomó la guardia de gobierno: comparar aquí es atómico.
-          ...(versionExigida ? { updatedAt: versionExigida } : {}),
+          ...(expectedUpdatedAt ? { updatedAt: new Date(expectedUpdatedAt) } : {}),
         },
         data: updateData,
         include: {

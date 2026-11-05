@@ -17,7 +17,7 @@ import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normaliza
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 import { registrarCambioDeIva } from '../fiscal/encendidoIva.service'
 import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
-import { productoCambioError, yaEsAsi } from './product.dashboard.service'
+import { productoCambioError } from './product.dashboard.service'
 
 /**
  * Product Creation Wizard Service
@@ -293,36 +293,19 @@ export async function setupSimpleStockStep3(venueId: string, productId: string, 
     // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
     const product = await tx.product.findUnique({
       where: { id: productId, venueId },
-      select: {
-        externalData: true,
-        updatedAt: true,
-        trackInventory: true,
-        inventoryMethod: true,
-        cost: true,
-        recipe: { select: { id: true } },
-      },
+      select: { externalData: true, updatedAt: true, recipe: { select: { id: true } } },
     })
     if (!product) throw new AppError('Product not found', 404)
+    if (!mismaVersion(product.updatedAt)) throw productoCambioError()
     // La versión se vuelve a exigir al escribir el producto (abajo), salvo si este paso ya lo escribió y tiene su candado.
     let versionAlEscribir = esperado
-    if (!mismaVersion(product.updatedAt)) {
-      // ¿Es la repetición de este mismo paso ya aplicado (el panel reintenta si se pierde la respuesta)? Entonces no es un cambio ajeno:
-      // sigue, atado a la versión que se ve ahora (Codex r1 #4).
-      const inv = await tx.inventory.findUnique({ where: { productId }, select: { currentStock: true, minimumStock: true } })
-      const repetida =
-        !!inv &&
-        yaEsAsi(product, { trackInventory: true, inventoryMethod: 'QUANTITY', cost: data.costPerUnit }) &&
-        yaEsAsi(inv, { minimumStock: data.reorderPoint, ...(data.initialStock === undefined ? {} : { currentStock: data.initialStock }) })
-      if (!repetida) throw productoCambioError()
-      versionAlEscribir = product.updatedAt
-    }
 
     // ✅ Auto-switch de RECETA a CANTIDAD en vez de un 409.
     if (product.recipe) {
       // Este camino escribe el producto PRIMERO (switchInventoryMethod toma su candado): la versión se compara bajo ese mismo candado.
-      if (versionAlEscribir) {
+      if (esperado) {
         const [fila] = await tx.$queryRaw<Array<{ updatedAt: Date }>>`SELECT "updatedAt" FROM "Product" WHERE id = ${productId} FOR UPDATE`
-        if (!fila || fila.updatedAt.getTime() !== versionAlEscribir.getTime()) throw productoCambioError()
+        if (!fila || !mismaVersion(fila.updatedAt)) throw productoCambioError()
       }
       logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
       await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)

@@ -608,23 +608,22 @@ describe('updateProduct — versión esperada (expectedUpdatedAt)', () => {
     ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED', message: expect.stringContaining('cambió mientras se guardaba') })
   })
 
-  // Codex r1 #4: si se pierde la respuesta, src/api.ts del panel repite la MISMA petición. Si lo pedido ya es lo que hay, no es un
-  // cambio ajeno: pasa, atada a la versión que se ve bajo el candado.
-  it('repetición de una activación ya aplicada (respuesta perdida): no da 409 falso', async () => {
-    const vigente = new Date('2026-11-05T18:00:01.000Z')
+  // Codex r2 de la ronda 5: que lo pedido coincida con lo que hay NO prueba que sea una repetición (otra ventana pudo guardar costo y
+  // mínimo con el inventario prendido). Con versión vieja, siempre 409.
+  it('versión vieja aunque lo pedido ya sea lo que hay: igual exige la versión (409)', async () => {
     prismaMock.product.findFirst.mockResolvedValue(
-      makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY', updatedAt: vigente }),
+      makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY', updatedAt: new Date('2026-11-05T18:00:01.000Z') }),
     )
-    prismaMock.product.update.mockResolvedValue(makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY' }))
-
-    await productService.updateProduct(
-      'venue-xyz',
-      'product-abc',
-      { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: version } as any,
-      humanActor,
-    )
-
-    expect(prismaMock.product.update.mock.calls[0][0].where).toEqual({ id: 'product-abc', updatedAt: vigente })
+    prismaMock.product.update.mockRejectedValueOnce({ code: 'P2025' })
+    await expect(
+      productService.updateProduct(
+        'venue-xyz',
+        'product-abc',
+        { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: version } as any,
+        humanActor,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
+    expect(prismaMock.product.update.mock.calls[0][0].where).toEqual({ id: 'product-abc', updatedAt: new Date(version) })
   })
 
   it('sin versión (ANDROID, MCP, paneles viejos): igual que hoy', async () => {

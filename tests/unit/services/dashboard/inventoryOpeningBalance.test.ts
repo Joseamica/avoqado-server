@@ -121,40 +121,6 @@ describe('productWizard paso 3 — mínimo y costo sin existencias', () => {
     expect(prismaMock.inventory.update).not.toHaveBeenCalled()
   })
 
-  // Codex r1 #4: el panel repite la MISMA petición si se perdió la respuesta. Si ya quedó así, no es un cambio ajeno.
-  it('repetición de un paso 3 ya aplicado (respuesta perdida): no da 409 falso', async () => {
-    const vigente = new Date('2026-11-05T18:00:01.000Z')
-    prismaMock.product.findUnique.mockResolvedValue({
-      id: PRODUCT,
-      recipe: null,
-      updatedAt: vigente,
-      trackInventory: true,
-      inventoryMethod: 'QUANTITY',
-      cost: 12,
-    } as any)
-    prismaMock.inventory.findUnique.mockResolvedValue({ id: 'inv-1', currentStock: 5, minimumStock: 4 } as any)
-
-    await setupSimpleStockStep3(VENUE, PRODUCT, { reorderPoint: 4, costPerUnit: 12, expectedUpdatedAt: version } as any)
-
-    expect((prismaMock.product.update.mock.calls[0][0] as any).where).toEqual({ id: PRODUCT, updatedAt: vigente })
-    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
-  })
-
-  it('versión vieja y lo pedido NO es lo que hay: 409 aunque parezca repetición', async () => {
-    prismaMock.product.findUnique.mockResolvedValue({
-      id: PRODUCT,
-      recipe: null,
-      updatedAt: new Date('2026-11-05T18:00:01.000Z'),
-      trackInventory: false,
-      inventoryMethod: null,
-      cost: 12,
-    } as any)
-    prismaMock.inventory.findUnique.mockResolvedValue({ id: 'inv-1', currentStock: 5, minimumStock: 4 } as any)
-    await expect(
-      setupSimpleStockStep3(VENUE, PRODUCT, { reorderPoint: 4, costPerUnit: 12, expectedUpdatedAt: version } as any),
-    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
-  })
-
   it('con versión vieja al escribir (cambió en medio): 409 PRODUCT_CHANGED', async () => {
     prismaMock.product.update.mockRejectedValueOnce({ code: 'P2025' })
     await expect(
