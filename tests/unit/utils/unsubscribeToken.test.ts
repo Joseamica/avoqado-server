@@ -3,6 +3,11 @@ import { signUnsubscribeToken, verifyUnsubscribeToken } from '../../../src/utils
 const DATA = { staffId: 'staff_abc', venueId: 'venue_xyz', category: 'INVENTORY' as const }
 
 describe('unsubscribeToken', () => {
+  it('verifyUnsubscribeToken acepta la categoría ANNOUNCEMENTS', () => {
+    const d = { ...DATA, category: 'ANNOUNCEMENTS' as const }
+    expect(verifyUnsubscribeToken(signUnsubscribeToken(d))).toEqual(d)
+  })
+
   it('round-trips a signed token back to the same data', () => {
     const token = signUnsubscribeToken(DATA)
     expect(verifyUnsubscribeToken(token)).toEqual(DATA)

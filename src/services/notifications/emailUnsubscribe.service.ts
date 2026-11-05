@@ -1,6 +1,7 @@
 import { NotificationChannel, NotificationType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { updateManyNotificationPreferences } from '../dashboard/notification.dashboard.service'
+import { setAnnouncementEmailOn } from '../announcements/announcementEmailPreference.service'
 import type { EmailUnsubscribeCategory } from '../../utils/unsubscribeToken'
 
 /**
@@ -20,6 +21,8 @@ const CATEGORY_TYPES: Record<EmailUnsubscribeCategory, NotificationType[]> = {
   INVENTORY: [NotificationType.LOW_INVENTORY],
   // D4: el resumen de «No asistió» por clase y los avisos que piden a una persona.
   RESERVATIONS: [NotificationType.RESERVATION_NO_SHOW_SUMMARY, NotificationType.RESERVATION_NEEDS_REVIEW],
+  // Global por persona (Staff.announcementEmailOptOutAt): no usa NotificationPreference.
+  ANNOUNCEMENTS: [],
 }
 
 // Default channels a type has when no preference row exists yet (mirrors the
@@ -33,6 +36,7 @@ const DEFAULT_CHANNELS: Partial<Record<NotificationType, NotificationChannel[]>>
 export const CATEGORY_LABELS: Record<EmailUnsubscribeCategory, string> = {
   INVENTORY: 'alertas de inventario',
   RESERVATIONS: 'avisos de reservaciones',
+  ANNOUNCEMENTS: 'anuncios de Avoqado',
 }
 
 export interface UnsubscribeContext {
@@ -79,6 +83,14 @@ export async function unsubscribeFromEmailCategory(
   venueId: string,
   category: EmailUnsubscribeCategory,
 ): Promise<UnsubscribeResult> {
+  // Anuncios de Avoqado: preferencia global de la persona; el negocio del token no cuenta.
+  if (category === 'ANNOUNCEMENTS') {
+    const antes = await prisma.staff.findUnique({ where: { id: staffId }, select: { announcementEmailOptOutAt: true } })
+    const yaEstaba = !!antes?.announcementEmailOptOutAt
+    await setAnnouncementEmailOn(staffId, false)
+    return { affectedTypes: yaEstaba ? 0 : 1, alreadyUnsubscribed: yaEstaba }
+  }
+
   const types = CATEGORY_TYPES[category]
 
   const existing = await prisma.notificationPreference.findMany({

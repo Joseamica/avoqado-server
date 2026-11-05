@@ -291,7 +291,7 @@ describe('Notification Dashboard Service', () => {
 
   describe('campana por negocio (filtroDeNegocio)', () => {
     const DE_PLATAFORMA = { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }
-    const CON_NEGOCIO = { OR: [{ venueId: 'venue1' }, DE_PLATAFORMA] }
+    const CON_NEGOCIO = { AND: [{ OR: [{ venueId: 'venue1' }, DE_PLATAFORMA] }] }
 
     it('sin negocio: sin filtro (todo como hoy)', () => {
       expect(filtroDeNegocio()).toEqual({})
@@ -300,7 +300,7 @@ describe('Notification Dashboard Service', () => {
     it('con negocio: lo suyo más los anuncios con procedencia de plataforma, no cualquier ANNOUNCEMENT', () => {
       expect(filtroDeNegocio('venue1')).toEqual(CON_NEGOCIO)
       // un aviso de venue2 con type ANNOUNCEMENT pero sin entityType de plataforma no cumple ninguna rama
-      const ramas = (filtroDeNegocio('venue1').OR as any[]).map(r => JSON.stringify(r))
+      const ramas = ((filtroDeNegocio('venue1').AND as any[])[0].OR as any[]).map(r => JSON.stringify(r))
       expect(ramas).not.toContain(JSON.stringify({ type: NotificationType.ANNOUNCEMENT }))
     })
 

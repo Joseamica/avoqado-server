@@ -7,6 +7,7 @@ import prisma from '../../utils/prismaClient'
 import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
 import asyncHandler from '../../utils/asyncHandler'
 import { AuthContext } from '../../security'
+import { isAnnouncementEmailOn, setAnnouncementEmailOn } from '../../services/announcements/announcementEmailPreference.service'
 
 // Extend Request type to include authContext
 interface AuthenticatedRequest extends Request {
@@ -282,6 +283,22 @@ export const updatePreferences = asyncHandler(async (req: AuthenticatedRequest, 
  * master channel toggle can flip Email/Web for every type without the partial-
  * failure window that made it "stick" on after a refresh.
  */
+const announcementEmailSchema = z.object({ enabled: z.boolean() })
+
+export const getAnnouncementEmailPreference = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.authContext?.userId
+  if (!userId) throw new BadRequestError('User ID is required')
+  return res.json(formatApiResponse({ enabled: await isAnnouncementEmailOn(userId) }, 'OK'))
+})
+
+export const updateAnnouncementEmailPreference = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.authContext?.userId
+  if (!userId) throw new BadRequestError('User ID is required')
+  const { enabled } = announcementEmailSchema.parse(req.body)
+  await setAnnouncementEmailOn(userId, enabled)
+  return res.json(formatApiResponse({ enabled }, 'OK'))
+})
+
 export const updatePreferencesBulk = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.authContext?.userId
   const venueId = req.headers['x-venue-id'] as string

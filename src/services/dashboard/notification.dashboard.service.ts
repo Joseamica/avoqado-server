@@ -210,7 +210,7 @@ async function dispatchToChannels(
  * procedencia está reservada: sólo el reparto de anuncios la escribe. Sin negocio, sin filtro (como hoy).
  */
 export function filtroDeNegocio(venueId?: string): Prisma.NotificationWhereInput {
-  return venueId ? { OR: [{ venueId }, { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }] } : {}
+  return venueId ? { AND: [{ OR: [{ venueId }, { type: NotificationType.ANNOUNCEMENT, entityType: 'PlatformAnnouncement' }] }] } : {}
 }
 
 /**

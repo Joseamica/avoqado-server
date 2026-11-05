@@ -19,8 +19,8 @@ import { ACCESS_TOKEN_SECRET } from '../config/env'
  *   category (idempotent, reversible from the dashboard). Minimal blast radius.
  */
 
-export type EmailUnsubscribeCategory = 'INVENTORY' | 'RESERVATIONS'
-const CATEGORIES: readonly EmailUnsubscribeCategory[] = ['INVENTORY', 'RESERVATIONS']
+export type EmailUnsubscribeCategory = 'INVENTORY' | 'RESERVATIONS' | 'ANNOUNCEMENTS'
+const CATEGORIES: readonly EmailUnsubscribeCategory[] = ['INVENTORY', 'RESERVATIONS', 'ANNOUNCEMENTS']
 
 interface UnsubscribePayload {
   v: 1
