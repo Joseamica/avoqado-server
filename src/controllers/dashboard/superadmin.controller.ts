@@ -201,7 +201,7 @@ export async function enableFeatureForVenue(req: Request, res: Response, next: N
     const { venueId, featureCode } = req.params
     logger.info('Enabling feature for venue', { venueId, featureCode, userId: req.authContext?.userId })
 
-    await superadminService.enableFeatureForVenue(venueId, featureCode)
+    await superadminService.enableFeatureForVenue(venueId, featureCode, req.authContext?.userId)
     res.json({ success: true, data: { venueId, featureCode }, message: 'Feature enabled successfully' })
   } catch (error) {
     logger.error('Error enabling feature for venue', {
@@ -252,7 +252,7 @@ export async function grantTrialForVenue(req: Request, res: Response, next: Next
       userId: req.authContext?.userId,
     })
 
-    const result = await superadminService.grantTrialForVenue(venueId, featureCode, trialDays)
+    const result = await superadminService.grantTrialForVenue(venueId, featureCode, trialDays, req.authContext?.userId)
 
     res.json({
       success: true,
@@ -322,7 +322,7 @@ export async function assignVenueCompPlan(req: Request, res: Response, next: Nex
       userId: req.authContext?.userId,
     })
 
-    const planState = await superadminService.assignCompPlan(venueId, tier)
+    const planState = await superadminService.assignCompPlan(venueId, tier, req.authContext?.userId)
 
     res.json({ success: true, data: planState, message: 'Comp plan assigned successfully' })
   } catch (error) {
@@ -353,7 +353,7 @@ export async function extendVenuePlanTrial(req: Request, res: Response, next: Ne
       userId: req.authContext?.userId,
     })
 
-    const planState = await superadminService.extendPlanTrial(venueId, tier, days)
+    const planState = await superadminService.extendPlanTrial(venueId, tier, days, req.authContext?.userId)
 
     res.json({ success: true, data: planState, message: 'Plan trial extended successfully' })
   } catch (error) {
