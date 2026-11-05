@@ -48,4 +48,6 @@ export const STAFF_SECRET_FIELDS = [
   'resetTokenUsedAt',
   'lastPasswordReset',
   'sessionsRevokedAt',
+  // Preferencia privada de la persona (correo de anuncios); ninguna app la lee como relación.
+  'announcementEmailOptOutAt',
 ] as const

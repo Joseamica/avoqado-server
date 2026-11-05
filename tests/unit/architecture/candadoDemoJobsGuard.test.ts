@@ -18,6 +18,8 @@ const SALTOS = 3
 /** Jobs que pueden llegar a un mensaje pero nunca a partir de un negocio demo. La razón es obligatoria. */
 const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
   'giftCardDelivery.job.ts': 'cada entrega corre con conNegocio(e.venueId) en giftCardDelivery.service (la prueba de abajo lo exige)',
+  'announcementEmail.job.ts':
+    'cada correo de anuncio se manda con conNegocio(d.venueId) en announcementEmail.service y salta DEMO antes de reservar (la prueba de abajo lo exige)',
   'altas-a-medio-pago.job.ts': 'altas de la landing a medio pagar; un negocio demo no pasa por el alta',
   'campaign-sender.job.ts': 'sólo manda lo que se publicó (bloqueado en el demo, capa 1) o encoló cumpleaños (sólo negocios ACTIVE)',
   'cfdiGlobal.job.ts': 'el correo de la factura pasa por cfdiEmail.enviar, que revisa el negocio de la factura (capa 2)',
@@ -112,4 +114,9 @@ describe('candado demo: jobs que pueden mandar mensajes', () => {
 it('las tarjetas de regalo se entregan con el negocio de cada tarjeta en el contexto (la venta está permitida en el demo)', () => {
   const servicio = sinComentarios(fs.readFileSync(path.join(JOBS, '../services/giftCards/giftCardDelivery.service.ts'), 'utf8'))
   expect(servicio).toMatch(/conNegocio\(e\.venueId, \(\) => entregarUna\(/)
+})
+
+it('los correos de anuncios se mandan con el negocio de cada fila en el contexto', () => {
+  const servicio = sinComentarios(fs.readFileSync(path.join(JOBS, '../services/announcements/announcementEmail.service.ts'), 'utf8'))
+  expect(servicio).toMatch(/conNegocio\(d\.venueId, \(\) =>\s*emailService\.sendEmailWithResult\(/)
 })
