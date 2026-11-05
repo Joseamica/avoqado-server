@@ -18,11 +18,12 @@ jest.setTimeout(120_000)
 const t = () => `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
 async function listar(venueId: string) {
-  const res: any = { json: jest.fn() }
+  const res: any = { json: jest.fn(), send: jest.fn(), type: jest.fn() }
+  res.type.mockReturnValue(res)
   const next = jest.fn()
   await listProducts({ params: { venueId } } as any, res, next)
   expect(next).not.toHaveBeenCalled()
-  return res.json.mock.calls[0][0]
+  return res.json.mock.calls.length ? JSON.parse(JSON.stringify(res.json.mock.calls[0][0])) : JSON.parse(res.send.mock.calls[0][0])
 }
 
 describe('D6 — versión del catálogo del POS', () => {

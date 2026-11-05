@@ -10,21 +10,24 @@
  * modificadores y recetas. Cualquier INSERT/UPDATE/DELETE —por Prisma, por SQL a mano o por un trigger, ponga o no
  * `updatedAt`— cambia la huella. Una sola instancia (regla `una-sola-instancia.md`), sin Redis: memoria basta.
  *
- * Tope: por BYTES del JSON de cada catálogo, más un costo fijo por negocio (Codex r1 P2: contar productos dejaba pasar
- * descripciones enormes y catálogos vacíos sin límite). En memoria ocupa ~1.8× su JSON (medido: ~4.4 KB por producto contra
- * ~2.4 KB de JSON). Vida: la versión es la que manda; al guardar se sueltan los vencidos de todos los negocios.
+ * Qué guarda: el `data` YA convertido a JSON (un solo string), no los objetos. Codex r2 P2 midió que los objetos de Prisma
+ * (`Decimal`) ocupaban hasta 30× su JSON; un string ocupa lo que mide (1 o 2 bytes por carácter). De paso, en cada bajada
+ * sin cambios ya no se vuelve a convertir.
+ *
+ * Tope: 2 bytes por carácter (el peor caso de V8) más un costo fijo por negocio, para que también los catálogos vacíos
+ * tengan límite (Codex r1 P2). Vida: la versión es la que manda; al guardar se sueltan los vencidos de todos los negocios.
  */
 import prisma from '../../utils/prismaClient'
 
 export const VIDA_DEL_CATALOGO_MS = 30 * 60_000
-/** 32 MB de JSON ≈ 60 MB de memoria en el peor caso. Hoy La Galeterie, el catálogo más grande, pesa 2.5 MB. */
-export const TOPE_DE_BYTES_EN_CACHE = 32 * 1024 * 1024
-/** Lo que cuenta cada negocio aunque su catálogo esté vacío: acota el número de entradas a ~32 mil. */
+/** Memoria máxima de la caché. Hoy La Galeterie, el catálogo más grande, pesa 2.5 MB de JSON (≤ 5 MB contados así). */
+export const TOPE_DE_BYTES_EN_CACHE = 48 * 1024 * 1024
+/** Lo que cuenta cada negocio aunque su catálogo esté vacío: acota el número de entradas. */
 export const COSTO_FIJO_POR_NEGOCIO = 1024
 
 interface Entrada {
   version: string
-  data: unknown[]
+  dataJson: string
   guardadoEn: number
   bytes: number
 }
@@ -39,23 +42,23 @@ function soltar(venueId: string): void {
   cache.delete(venueId)
 }
 
-export function catalogoMovilCacheado(venueId: string, version: string, ahora = Date.now()): unknown[] | undefined {
+/** El `data` en JSON, tal cual lo escribiría `res.json`, o undefined si no hay uno vigente para esa versión. */
+export function catalogoMovilCacheado(venueId: string, version: string, ahora = Date.now()): string | undefined {
   const e = cache.get(venueId)
   if (!e) return undefined
   if (e.version !== version || ahora - e.guardadoEn >= VIDA_DEL_CATALOGO_MS) {
     soltar(venueId)
     return undefined
   }
-  return e.data
+  return e.dataJson
 }
 
-export function guardarCatalogoMovil(venueId: string, version: string, data: unknown[], ahora = Date.now()): void {
+export function guardarCatalogoMovil(venueId: string, version: string, dataJson: string, ahora = Date.now()): void {
   soltar(venueId)
   for (const [id, e] of cache) if (ahora - e.guardadoEn >= VIDA_DEL_CATALOGO_MS) soltar(id)
-  // Sólo al volver a armar (algo cambió): ~15 ms con el catálogo más grande, contra los 150+ ms de armarlo.
-  const bytes = Buffer.byteLength(JSON.stringify(data)) + COSTO_FIJO_POR_NEGOCIO
+  const bytes = dataJson.length * 2 + COSTO_FIJO_POR_NEGOCIO
   if (bytes > TOPE_DE_BYTES_EN_CACHE) return
-  cache.set(venueId, { version, data, guardadoEn: ahora, bytes })
+  cache.set(venueId, { version, dataJson, guardadoEn: ahora, bytes })
   bytesGuardados += bytes
   // El Map recuerda el orden de inserción: el primero es el que se guardó hace más tiempo.
   for (const masViejo of cache.keys()) {

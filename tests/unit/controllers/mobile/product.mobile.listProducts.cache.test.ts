@@ -60,12 +60,20 @@ function cuerpoDeAntes(productos: any[], catalogAt: string) {
   return JSON.stringify({ success: true, data, catalogAt })
 }
 
-async function pedir(venueId = 'v1') {
-  const res: any = { json: jest.fn() }
+/** El cuerpo EXACTO que sale por la red: `res.json` lo convierte con JSON.stringify; `res.send` ya lo trae en texto. */
+async function pedirTexto(venueId = 'v1'): Promise<string> {
+  const res: any = { json: jest.fn(), send: jest.fn(), type: jest.fn() }
+  res.type.mockReturnValue(res)
   const next = jest.fn()
   await listProducts({ params: { venueId } } as any, res, next)
   expect(next).not.toHaveBeenCalled()
-  return res.json.mock.calls[0][0]
+  if (res.json.mock.calls.length) return JSON.stringify(res.json.mock.calls[0][0])
+  expect(res.type).toHaveBeenCalledWith('json')
+  return res.send.mock.calls[0][0]
+}
+
+async function pedir(venueId = 'v1') {
+  return JSON.parse(await pedirTexto(venueId))
 }
 
 describe('D6 — catálogo del POS: no se vuelve a armar si no cambió', () => {
@@ -91,12 +99,12 @@ describe('D6 — catálogo del POS: no se vuelve a armar si no cambió', () => {
     prismaMock.$queryRaw.mockResolvedValue([{ version: 'ver-1' }])
     prismaMock.product.findMany.mockResolvedValue(productos)
 
-    const primera = await pedir()
-    expect(JSON.stringify(primera)).toBe(cuerpoDeAntes(productos, '2026-11-04T18:39:51.000Z'))
+    expect(await pedirTexto()).toBe(cuerpoDeAntes(productos, '2026-11-04T18:39:51.000Z'))
 
     jest.setSystemTime(new Date('2026-11-04T18:44:51.000Z'))
-    const segunda = await pedir()
-    expect(JSON.stringify(segunda)).toBe(cuerpoDeAntes(productos, '2026-11-04T18:44:51.000Z'))
+    const texto = await pedirTexto()
+    expect(texto).toBe(cuerpoDeAntes(productos, '2026-11-04T18:44:51.000Z'))
+    const segunda = JSON.parse(texto)
     expect(Object.keys(segunda)).toEqual(['success', 'data', 'catalogAt'])
     expect(segunda.data[0]).not.toHaveProperty('createdById')
   })
@@ -105,8 +113,8 @@ describe('D6 — catálogo del POS: no se vuelve a armar si no cambió', () => {
     prismaMock.$queryRaw.mockResolvedValueOnce([{ version: 'ver-1' }]).mockResolvedValueOnce([{ version: 'ver-2' }])
     prismaMock.product.findMany.mockResolvedValueOnce([producto('p1', '45')]).mockResolvedValueOnce([producto('p1', '50')])
 
-    expect((await pedir()).data[0].price).toEqual(new Prisma.Decimal('45'))
-    expect((await pedir()).data[0].price).toEqual(new Prisma.Decimal('50'))
+    expect((await pedir()).data[0].price).toBe('45')
+    expect((await pedir()).data[0].price).toBe('50')
     expect(prismaMock.product.findMany).toHaveBeenCalledTimes(2)
   })
 
@@ -118,6 +126,15 @@ describe('D6 — catálogo del POS: no se vuelve a armar si no cambió', () => {
     expect((await pedir('venue-b')).data[0].id).toBe('b')
     expect((await pedir('venue-a')).data[0].id).toBe('a')
     expect(prismaMock.product.findMany).toHaveBeenCalledTimes(2)
+  })
+
+  it('guarda el JSON (texto), no los objetos de Prisma: los Decimal ocupaban hasta 30× su JSON (Codex r2 P2)', async () => {
+    prismaMock.$queryRaw.mockResolvedValue([{ version: 'ver-1' }])
+    prismaMock.product.findMany.mockResolvedValue([producto('p1', '45')])
+    await pedir()
+    const guardado = catalogoMovilCacheado('v1', 'ver-1')
+    expect(typeof guardado).toBe('string')
+    expect(JSON.parse(guardado as string)[0].price).toBe('45')
   })
 
   it('si la versión no se puede leer, se arma como antes y no se guarda nada (la bajada nunca falla por la caché)', async () => {
@@ -149,20 +166,21 @@ describe('D6 — la caché tiene vida y tope', () => {
   beforeEach(() => vaciarCacheDelCatalogoMovil())
 
   it('vence: pasada su vida se vuelve a armar aunque la versión sea la misma', () => {
-    guardarCatalogoMovil('v1', 'ver', [{ id: 'p' }], 1_000)
-    expect(catalogoMovilCacheado('v1', 'ver', 1_000 + VIDA_DEL_CATALOGO_MS - 1)).toEqual([{ id: 'p' }])
+    guardarCatalogoMovil('v1', 'ver', '[{"id":"p"}]', 1_000)
+    expect(catalogoMovilCacheado('v1', 'ver', 1_000 + VIDA_DEL_CATALOGO_MS - 1)).toBe('[{"id":"p"}]')
     expect(catalogoMovilCacheado('v1', 'ver', 1_000 + VIDA_DEL_CATALOGO_MS)).toBeUndefined()
   })
 
   it('otra versión no sirve', () => {
-    guardarCatalogoMovil('v1', 'ver-1', [{ id: 'p' }], 0)
+    guardarCatalogoMovil('v1', 'ver-1', '[]', 0)
     expect(catalogoMovilCacheado('v1', 'ver-2', 0)).toBeUndefined()
   })
 
   /** Un catálogo cuyo JSON pesa casi exactamente `bytes` (un solo producto con descripción larga). */
-  const catalogoDe = (bytes: number) => [{ description: 'x'.repeat(bytes - COSTO_FIJO_POR_NEGOCIO - 20) }]
+  /** Un catálogo en JSON que cuenta `bytes` (2 por carácter, el peor caso de V8, más el costo fijo). */
+  const catalogoDe = (bytes: number) => `[{"description":"${'x'.repeat(Math.ceil((bytes - COSTO_FIJO_POR_NEGOCIO) / 2) - 20)}"}]`
 
-  it('el tope cuenta BYTES: un solo producto con una descripción enorme cuenta lo que pesa (Codex r1 P2)', () => {
+  it('el tope cuenta BYTES del JSON guardado: un solo producto con una descripción enorme cuenta lo que pesa (Codex r1 P2)', () => {
     const tercio = catalogoDe(Math.floor(TOPE_DE_BYTES_EN_CACHE / 3) + 1)
     guardarCatalogoMovil('a', 'v', tercio, 0)
     guardarCatalogoMovil('b', 'v', tercio, 0)
@@ -179,16 +197,16 @@ describe('D6 — la caché tiene vida y tope', () => {
 
   it('los catálogos vacíos también cuentan: el número de negocios guardados tiene tope (Codex r1 P2)', () => {
     const cuantos = Math.floor(TOPE_DE_BYTES_EN_CACHE / COSTO_FIJO_POR_NEGOCIO) + 5
-    for (let i = 0; i < cuantos; i++) guardarCatalogoMovil(`n${i}`, 'v', [], 0)
+    for (let i = 0; i < cuantos; i++) guardarCatalogoMovil(`n${i}`, 'v', '[]', 0)
     expect(catalogoMovilCacheado('n0', 'v', 0)).toBeUndefined()
-    expect(catalogoMovilCacheado(`n${cuantos - 1}`, 'v', 0)).toEqual([])
+    expect(catalogoMovilCacheado(`n${cuantos - 1}`, 'v', 0)).toBe('[]')
   })
 
   it('al guardar, se sueltan los vencidos de OTROS negocios aunque ya no pregunten (Codex r1 P2)', () => {
-    guardarCatalogoMovil('abandonado', 'v', [{ id: 'viejo' }], 0)
-    guardarCatalogoMovil('activo', 'v', [{ id: 'p' }], VIDA_DEL_CATALOGO_MS)
+    guardarCatalogoMovil('abandonado', 'v', '[]', 0)
+    guardarCatalogoMovil('activo', 'v', '[]', VIDA_DEL_CATALOGO_MS)
     // Se pregunta con la hora vieja a propósito: si sigue ahí, nadie lo soltó al guardar el otro.
     expect(catalogoMovilCacheado('abandonado', 'v', 0)).toBeUndefined()
-    expect(catalogoMovilCacheado('activo', 'v', VIDA_DEL_CATALOGO_MS)).toEqual([{ id: 'p' }])
+    expect(catalogoMovilCacheado('activo', 'v', VIDA_DEL_CATALOGO_MS)).toBe('[]')
   })
 })
