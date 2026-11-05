@@ -18,7 +18,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { normalizeEmail } from '../marketing/emailSuppression.service'
 import { getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
-import { escribirConsentimientoDelEquipoTx } from './inbound.service'
+import { escribirConsentimientoDelEquipoTx } from './consent.service'
 import { movePendingActivitiesTx, type OwnerChangeReason } from './ownership'
 import { addEvent } from './timeline.service'
 
