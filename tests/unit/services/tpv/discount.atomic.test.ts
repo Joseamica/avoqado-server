@@ -93,6 +93,7 @@ function db() {
     orderItem: { findMany: jest.fn(async () => []) },
     discount: { findFirst: jest.fn(async () => discount), findMany: jest.fn(async () => [discount]), update: jest.fn() },
     customer: { findUnique: jest.fn(async () => ({ customerGroupId: null })) },
+    staffVenue: { findUnique: jest.fn(async () => null) },
     customerDiscount: { findMany: jest.fn(async () => []) },
     venue: { findUnique: jest.fn(async () => ({ timezone: 'America/Mexico_City' })) },
     orderServiceCharge: { findMany: jest.fn(async () => []), update: jest.fn() },

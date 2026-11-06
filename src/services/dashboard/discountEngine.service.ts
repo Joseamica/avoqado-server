@@ -1088,8 +1088,12 @@ async function applyEvaluatedDiscount(
   // bitácora y el retorno mienten cuando el recorte entra en juego.
   logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${appliedAmount})`)
 
+  // D3 (Codex D1 r3 #2): `appliedById`/`authorizedById` son `StaffVenue.id`; la bitácora (`ActivityLog.staffId`) quiere a la
+  // PERSONA. Con el id de la membresía la inserción violaba la FK y quedaba «sin identificar».
+  const actor = appliedById ?? authorizedById
+  const staffId = actor ? ((await tx.staffVenue.findUnique({ where: { id: actor }, select: { staffId: true } }))?.staffId ?? null) : null
   audits.push({
-    staffId: appliedById ?? authorizedById ?? null,
+    staffId,
     venueId: order.venueId,
     action: 'DISCOUNT_APPLIED',
     entity: 'Order',

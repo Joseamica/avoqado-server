@@ -8,6 +8,7 @@ import * as tpv from '@/services/tpv/discount.tpv.service'
 import * as controller from '@/controllers/tpv/discount.tpv.controller'
 import { applyDiscountToOrder, evaluateAutomaticDiscounts } from '@/services/dashboard/discountEngine.service'
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+import { logAction } from '@/services/dashboard/activity-log.service'
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
@@ -767,6 +768,13 @@ describe('existing discount policies', () => {
       const o = await newOrder()
       expect(await porLaRuta(handler, o.id, body())).toEqual([{ appliedById: staffVenueId }])
     })
+    // Codex D1 r3 #2: la bitácora guarda a la PERSONA (Staff.id), no la membresía (violaba la FK de ActivityLog).
+    it('predefinido: la bitácora DISCOUNT_APPLIED lleva el Staff de quien llama', async () => {
+      ;(logAction as jest.Mock).mockClear()
+      const o = await newOrder()
+      await porLaRuta(controller.applyPredefinedDiscount, o.id, { discountId })
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'DISCOUNT_APPLIED', staffId }))
+    })
     it('sin membresía en este negocio (superadmin): se aplica igual y queda sin autor, como hoy', async () => {
       const o = await newOrder()
       expect(
@@ -780,6 +788,16 @@ describe('existing discount policies', () => {
       success: true,
       amount: 10,
     })
+  })
+  // Codex D1 r3 #1: el cupón tampoco se salta la «aprobación de gerente» de su descuento (D2).
+  it('D2: un cupón de un % que pide aprobación se rechaza y no escribe', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { requiresApproval: true } })
+    const o = await newOrder()
+    expect(await tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId, true)).toMatchObject({
+      success: false,
+      error: 'This discount requires manager approval',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
   })
   it('D14: un cupón de % sigue sin pedir permiso de cortesía', async () => {
     const o = await newOrder()

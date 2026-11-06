@@ -368,6 +368,17 @@ export async function applyCouponCode(
     }
     // D14: regalar la cuenta con un cupón pide el permiso de cortesía, igual que la venta de D5 (`order.tpv.service.ts`). Antes del apartado.
     if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías')
+    // D2 (Codex D1 r3 #1): un cupón no es la puerta de atrás de la «aprobación de gerente». Igual que el catálogo: una cortesía
+    // la aprueba `orders:comp` (arriba); un % o fijo que pide aprobación todavía no tiene aprobador y se rechaza.
+    if (discount.requiresApproval && discount.type !== 'COMP') {
+      return {
+        success: false,
+        discountName: discount.name,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'This discount requires manager approval',
+      }
+    }
     // D5 (Codex r3 #1): el mismo apartado que la venta nueva, bajo el mismo candado del descuento (lanza el 400 del límite).
     await apartarCupon(tx, venueId, { id: coupon.id, code: coupon.code, discount: { id: discount.id }, minimo: null }, order.customerId)
 
