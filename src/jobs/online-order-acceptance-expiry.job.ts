@@ -1,8 +1,9 @@
 import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
-import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from '../services/online-ordering/cancelledOrderSync'
+import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from '../services/online-ordering/cancelledOrderSync'
 import { EXPIRY_BATCH_SIZE, OPEN_ORDER_STATUSES } from '../services/online-ordering/constants'
+import { syncPaidClosedFolios, syncPaidFolios } from '../services/online-ordering/folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
 import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
 import type { ReadCandidates } from '../services/online-ordering/types'
@@ -35,6 +36,10 @@ interface OnlineOrderAcceptanceExpiryDependencies {
   syncCancelled: (now: Date, readEntry: ReadCandidates) => Promise<number>
   /** Opción 1 del founder (17-oct): entrega (y anuncia) lo de pagar al recoger que ya quedó pagado, después de R2. */
   syncPaidPickups: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  /** Tienda híbrida (decisión 18): folios pagados a «Por entregar», después de `syncPaidPickups` y antes de vencer. */
+  syncPaidFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  /** Tabla 7b, regla 2: folios cerrados que otro cobro terminó de saldar, de vuelta en «Por entregar». */
+  syncPaidClosedFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
 }
 
 interface ExpiryResult {
@@ -44,6 +49,8 @@ interface ExpiryResult {
   errors: number
   synced: number
   collected: number
+  /** Folios que esta pasada dejó en «Por entregar» (pagados y cerrados ya saldados). */
+  porEntregar: number
   skipped?: true
 }
 
@@ -53,8 +60,9 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
   expireOrder: expireOnlineOrder,
   retryEntry: retry,
   // I-1: el job ya corre fuera de una transacción, así que anuncia a sus ganadores justo después de la llamada.
+  // R12: cada candidato se cierra en su transacción, releyendo la cuenta bajo el candado de la orden.
   syncCancelled: async (now, readEntry) => {
-    const won = await syncOnlineOrdersOfCancelledOrders(prisma, {}, now, readEntry)
+    const won = await cerrarCanceladasReleyendo({}, now, readEntry)
     announceCancelledElsewhere(won, now)
     return won.length
   },
@@ -63,6 +71,9 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
     announceCollectedAutomatically(won, now)
     return won.length
   },
+  // Anuncian a sus ganadores ellas mismas (cada fila confirma en su propia transacción).
+  syncPaidFolios: (now, readEntry) => syncPaidFolios({}, now, readEntry),
+  syncPaidClosedFolios: (now, readEntry) => syncPaidClosedFolios({}, now, readEntry),
 }
 
 export class OnlineOrderAcceptanceExpiryJob {
@@ -105,11 +116,12 @@ export class OnlineOrderAcceptanceExpiryJob {
   async checkNow(): Promise<ExpiryResult> {
     if (this.isRunning) {
       logger.warn('[Online-order expiry] tick skipped — previous run still in progress')
-      return { scanned: 0, expired: 0, noop: 0, errors: 0, synced: 0, collected: 0, skipped: true }
+      return { scanned: 0, expired: 0, noop: 0, errors: 0, synced: 0, collected: 0, porEntregar: 0, skipped: true }
     }
     this.isRunning = true
     let synced = 0
     let collected = 0
+    let porEntregar = 0
 
     try {
       const now = this.dependencies.now()
@@ -125,6 +137,20 @@ export class OnlineOrderAcceptanceExpiryJob {
         collected = await this.dependencies.syncPaidPickups(now, this.readEntry('online-order-acceptance-expiry.syncPaidPickups'))
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron entregar los pedidos ya pagados (la pasada sigue)', { error })
+      }
+      // Tienda híbrida (decisión 18): lo pagado pasa a «Por entregar» ANTES de vencer, con la misma regla de reintento.
+      try {
+        porEntregar += await this.dependencies.syncPaidFolios(now, this.readEntry('online-order-acceptance-expiry.syncPaidFolios'))
+      } catch (error) {
+        logger.error('Online-order expiry: no se pudieron pasar a «Por entregar» los folios pagados (la pasada sigue)', { error })
+      }
+      try {
+        porEntregar += await this.dependencies.syncPaidClosedFolios(
+          now,
+          this.readEntry('online-order-acceptance-expiry.syncPaidClosedFolios'),
+        )
+      } catch (error) {
+        logger.error('Online-order expiry: no se pudieron revivir los folios cerrados ya saldados (la pasada sigue)', { error })
       }
 
       let scanned = 0
@@ -169,10 +195,10 @@ export class OnlineOrderAcceptanceExpiryJob {
         cursor = { at: last.acceptDeadlineAt, id: last.id }
       }
 
-      return { scanned, expired, noop, errors, synced, collected }
+      return { scanned, expired, noop, errors, synced, collected, porEntregar }
     } catch (error) {
       logger.error('Online-order expiry pass failed', { error })
-      return { scanned: 0, expired: 0, noop: 0, errors: 1, synced, collected }
+      return { scanned: 0, expired: 0, noop: 0, errors: 1, synced, collected, porEntregar }
     } finally {
       this.isRunning = false
     }

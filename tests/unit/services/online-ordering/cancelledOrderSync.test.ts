@@ -18,6 +18,7 @@ import { notifyOrderEvent } from '@/services/online-ordering/notifications.servi
 import {
   announceCancelledElsewhere,
   CANCELLED_ELSEWHERE,
+  cerrarCanceladasReleyendo,
   syncOnlineOrdersOfCancelledOrders,
 } from '@/services/online-ordering/cancelledOrderSync'
 
@@ -114,5 +115,74 @@ describe('syncOnlineOrdersOfCancelledOrders (R2)', () => {
       ['ord-A', 'CANCELLED'],
       ['ord-C', 'CANCELLED'],
     ])
+  })
+})
+
+describe('cerrarCanceladasReleyendo (R12: la bandeja, las listas y el job releen la cuenta bajo el candado)', () => {
+  const CANCELADA = { status: { in: ['CANCELLED', 'DELETED'] } }
+  /** La base simulada: cada pedido con su cuenta; el CAS aplica el filtro de la cuenta que trae. */
+  let cuentas: Record<string, string>
+  beforeEach(() => {
+    cuentas = { 'oo-A': 'CANCELLED', 'oo-B': 'CANCELLED' }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    // lockExistingOrderForPayment: devuelve la orden que se pidió (su primer valor interpolado).
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) => [{ id: orderId }])
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => ({
+      count: !a.where.order || a.where.order.status.in.includes(cuentas[a.where.id]) ? 1 : 0,
+    })) as any)
+  })
+
+  it('lee con tope (cliente raíz) y cierra cada candidato en SU transacción, con el candado antes de un CAS que vuelve a exigir la cuenta cancelada', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([fila('A'), fila('B', 'DELETED')] as any)
+
+    const won = await cerrarCanceladasReleyendo({ venueId: 'v1' }, NOW)
+
+    expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledWith({
+      where: { venueId: 'v1', status: { in: OPEN }, order: CANCELADA },
+      select: { id: true, orderId: true, venueId: true, order: { select: { orderNumber: true, status: true } } },
+      orderBy: { id: 'asc' },
+      take: 100,
+    })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    const data = { status: 'CANCELLED_BY_STAFF', cancelledAt: NOW, cancelledBy: CANCELLED_ELSEWHERE }
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: 'oo-A', status: { in: OPEN }, order: CANCELADA },
+      data,
+    })
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.onlineOrder.updateMany.mock.invocationCallOrder[0])
+    expect(won.map(w => [w.id, w.orderStatus])).toEqual([
+      ['oo-A', 'CANCELLED'],
+      ['oo-B', 'DELETED'],
+    ])
+    expect(notifyOrderEvent).not.toHaveBeenCalled() // el aviso es de quien llama, después
+  })
+
+  it('carrera r3/r4: la bandeja leyó la cuenta CANCELLED; antes de su CAS el dinero tardío la reabrió y pasó el folio a ACCEPTED ⇒ no lo cancela', async () => {
+    prismaMock.onlineOrder.findMany.mockImplementation((async () => {
+      const leidas = [fila('A')]
+      cuentas['oo-A'] = 'COMPLETED' // el cobro capturado gana el candado primero y reabre la cuenta
+      return leidas
+    }) as any)
+
+    const won = await cerrarCanceladasReleyendo({ venueId: 'v1' }, NOW)
+
+    expect(won).toEqual([])
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('una orden que ya no es del negocio (el candado no la encuentra) no se toca; una fila que truena se registra y la pasada sigue', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([fila('A'), fila('B'), fila('C')] as any)
+    cuentas['oo-C'] = 'CANCELLED'
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([])
+    ;(prismaMock.$transaction as jest.Mock)
+      .mockImplementationOnce(async (fn: any) => fn(prismaMock))
+      .mockRejectedValueOnce(new Error('lock timeout'))
+    const error = jest.spyOn(logger, 'error')
+
+    const won = await cerrarCanceladasReleyendo({}, NOW)
+
+    expect(won.map(w => w.id)).toEqual(['oo-C'])
+    expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ onlineOrderId: 'oo-B' }))
+    expect((prismaMock.onlineOrder.findMany.mock.calls[0][0] as any).where).not.toHaveProperty('venueId')
   })
 })

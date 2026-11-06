@@ -42,6 +42,8 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
       where: {
         venueId: 'v1',
         paymentMode: 'PAY_AT_PICKUP',
+        // Tienda híbrida (decisión 18): un folio nunca lo entrega este cierre.
+        requiresAcceptance: true,
         order: CUENTA_PAGADA,
         OR: [
           { status: 'READY' },
@@ -79,11 +81,11 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
     const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
 
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(1, {
-      where: { id: 'oo-A', status: 'READY', order: CUENTA_PAGADA },
+      where: { id: 'oo-A', status: 'READY', requiresAcceptance: true, order: CUENTA_PAGADA },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: 'oo-B', status: 'ACCEPTED', order: CUENTA_PAGADA, printedAt: { not: null } },
+      where: { id: 'oo-B', status: 'ACCEPTED', requiresAcceptance: true, order: CUENTA_PAGADA, printedAt: { not: null } },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
@@ -206,6 +208,34 @@ describe('S4: la entrega por hora espera a la comanda confirmada o a Listo', () 
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
+  /** La base simulada aplica `requiresAcceptance` (ausente en el `where` = cualquiera) además de la regla de hora y papel. */
+  const deQuien = (f: any, w: any) => w.requiresAcceptance === undefined || f.requiresAcceptance === w.requiresAcceptance
+  const lee = (filas: any[]) =>
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
+      filas.filter(f => deQuien(f, a.where) && a.where.OR.some((b: any) => cumple(f, b)))) as any)
+  const escribe = (f: any) =>
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => ({
+      count: deQuien(f, a.where) && f.status === a.where.status && f.printedAt !== null ? 1 : 0,
+    })) as any)
+
+  it('tienda híbrida: un folio ACCEPTED, pagado e impreso, con su hora cumplida, NO se entrega solo (ni en la lectura ni en el CAS)', async () => {
+    const folio: any = aceptada('F', { requiresAcceptance: false, printClaimedAt: PASADA, printedAt: PASADA })
+    lee([folio])
+    escribe(folio)
+    expect(await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)).toEqual([])
+    // Una lectura vieja que lo trajera de todos modos tampoco lo escribe: el CAS repite el filtro.
+    prismaMock.onlineOrder.findMany.mockResolvedValueOnce([folio] as any)
+    expect(await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)).toEqual([])
+  })
+
+  it('control: un pedido de «Mi equipo» igual sí, como hoy', async () => {
+    const equipo: any = aceptada('E', { requiresAcceptance: true, printClaimedAt: PASADA, printedAt: PASADA })
+    lee([equipo])
+    escribe(equipo)
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+    expect(won.map(w => w.id)).toEqual(['oo-E'])
+  })
+
   it('READY paid order is delivered regardless of print', async () => {
     base([fila('A', { status: 'READY', estimatedReadyAt: null, printClaimedAt: new Date(NOW.getTime() - 120_000), printedAt: null })])
     const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
@@ -226,7 +256,7 @@ describe('S4: la entrega por hora espera a la comanda confirmada o a Listo', () 
     const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
 
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
-      where: { id: 'oo-A', status: 'ACCEPTED', order: CUENTA_PAGADA, printedAt: { not: null } },
+      where: { id: 'oo-A', status: 'ACCEPTED', requiresAcceptance: true, order: CUENTA_PAGADA, printedAt: { not: null } },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(won).toEqual([])

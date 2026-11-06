@@ -20790,6 +20790,8 @@ model OnlineOrder {
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
   @@index([venueId, requiresAcceptance, status])
+  /// Tienda híbrida (T9, R4): `syncPaidClosedFolios` barre los folios cerrados de los últimos 7 días en TODOS los negocios.
+  @@index([requiresAcceptance, status, updatedAt])
 }
 
 /// Cargo con tarjeta de un pedido en línea (fase 2). Nace ANTES que el pedido (al abrir la sesión de pago), por eso

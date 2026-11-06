@@ -263,7 +263,7 @@ async function casTransition(a: CasArgs, afterCas?: AfterCasInTx): Promise<CasRe
   return result
 }
 
-function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
+export function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
   switch (r.r) {
     case 'STALE':
       return r.confirmingPayment ? { outcome: 'CONFIRMING_PAYMENT' } : { outcome: 'STALE', status: r.status }
@@ -298,6 +298,13 @@ export async function acceptOnlineOrder(i: AcceptInput): Promise<TransitionResul
     // Dinámico: el módulo de la captura importa esta máquina de estados.
     const { acceptCardOnlineOrder } = await import('./card/capture.service')
     return acceptCardOnlineOrder(i)
+  }
+  // Tienda híbrida (decisión 18): aceptar un folio es pasarlo a «Por entregar» por el único camino (`prepararFolioPagado`).
+  const folio = await prisma.onlineOrder.count({ where: { orderId: i.orderId, venueId: i.venueId, requiresAcceptance: false } })
+  if (folio > 0) {
+    // Dinámico: `folios.service` importa esta máquina de estados.
+    const { prepararFolioPagado } = await import('./folios.service')
+    return prepararFolioPagado(i)
   }
   return acceptWithoutCapture(i)
 }

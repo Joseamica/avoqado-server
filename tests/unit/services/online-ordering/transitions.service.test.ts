@@ -626,4 +626,29 @@ describe('cargo de tarjeta (fase 2): la máquina lo lee bajo el candado', () => 
     await expect(acceptOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
     expect(acceptCardOnlineOrder).not.toHaveBeenCalled()
   })
+
+  it('T9 (decisión 18): aceptar un folio pagado va por el único camino a «Por entregar» (`prepararFolioPagado`): el dinero gana a la hora y marca la cocina aunque la cuenta ya esté cerrada', async () => {
+    prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1) // no es tarjeta; sí es folio
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(
+      row({
+        requiresAcceptance: false,
+        acceptDeadlineAt: new Date(NOW.getTime() - 60_000),
+        order: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: D('206.00') },
+      }) as any,
+    )
+    prismaMock.order.updateMany.mockResolvedValueOnce({ count: 0 }) // la TPV ya cerró la cuenta: no se reabre
+
+    await expect(acceptOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+
+    expect(prismaMock.onlineOrder.count).toHaveBeenNthCalledWith(2, {
+      where: { orderId: 'ord1', venueId: 'v1', requiresAcceptance: false },
+    })
+    // Sin la condición de hora: un folio pagado no vence (tabla 7b, «Pagado»).
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).where).toEqual({ id: 'oo1', status: { in: ['PENDING_ACCEPTANCE'] } })
+    expect(prismaMock.order.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'ord1', venueId: 'v1', status: { notIn: ['CANCELLED', 'DELETED'] } },
+      data: { kitchenPendingAt: NOW },
+    })
+    expect(armarComandasTrasCommit).toHaveBeenCalledWith('v1', 'ord1', 'ROUND')
+  })
 })

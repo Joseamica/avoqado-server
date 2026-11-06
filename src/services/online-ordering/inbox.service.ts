@@ -7,9 +7,10 @@ import {
 } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
+import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
 import { BadRequestError } from '@/errors/AppError'
 import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './constants'
+import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
 
@@ -181,20 +182,23 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
   const dayAgo = new Date(now.getTime() - 24 * 3_600_000)
 
   // Antes de leer, y en este orden (ninguna le cuesta la lista; cada una anuncia a SUS ganadores, ya fuera de transacción):
-  // R2 cierra los pedidos cuya cuenta se canceló por otra vía (POS, panel); luego, opción 1 del founder (17-oct), se entrega
-  // solo lo de pagar al recoger que ya quedó pagado.
+  // R2 cierra los pedidos cuya cuenta se canceló por otra vía (POS, panel), releyendo la cuenta bajo el candado de la orden (R12);
+  // luego, opción 1 del founder (17-oct), se entrega solo lo de pagar al recoger que ya quedó pagado; y al final (tienda híbrida,
+  // decisión 18) los folios pagados —también los cerrados que otro cobro terminó de saldar— pasan a «Por entregar».
   const warnSync = (que: string) => (error: unknown) => {
     logger.warn(`[OnlineOrdering] no se pudieron ${que} antes de la bandeja`, {
       venueId: p.venueId,
       error: error instanceof Error ? error.message : String(error),
     })
   }
-  await syncOnlineOrdersOfCancelledOrders(prisma, { venueId: p.venueId }, now)
+  await cerrarCanceladasReleyendo({ venueId: p.venueId }, now)
     .then(won => announceCancelledElsewhere(won, now))
     .catch(warnSync('cerrar los pedidos de cuentas canceladas'))
   await syncOnlineOrdersOfPaidPickups(prisma, { venueId: p.venueId }, now)
     .then(won => announceCollectedAutomatically(won, now))
     .catch(warnSync('entregar los pedidos ya pagados'))
+  await syncPaidFolios({ venueId: p.venueId }, now).catch(warnSync('pasar a «Por entregar» los folios pagados'))
+  await syncPaidClosedFolios({ venueId: p.venueId }, now).catch(warnSync('revivir los folios cerrados ya saldados'))
 
   const wantPending = filter === 'pending' || filter === 'all'
   const wantActive = filter === 'active' || filter === 'all'
