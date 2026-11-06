@@ -5,6 +5,7 @@ import {
   dbToCalendarDay,
   isSamePeriodAsMarked,
   monthBoundsInMexico,
+  nextDueDate,
   occurrenceDatesBetween,
   todayInMexico,
 } from '@/services/superadmin/platform-charges/schedule'
@@ -448,5 +449,37 @@ describe('platform-charges/schedule — isSamePeriodAsMarked (NEW)', () => {
         })
       }
     }
+  })
+})
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('platform-charges/schedule — nextDueDate, la columna «Próximo cobro» (NEW)', () => {
+  // Hoy = viernes 6-nov-2026. Los casos de Amaena, IQ y La Galeterie son los de producción del 6-nov.
+  const HOY = '2026-11-06'
+
+  it.each<[string, PlatformChargeFrequency, string, string | null, string | null, string | null]>([
+    // [caso, periodicidad, ancla, primera PENDIENTE, último PAGADO u OMITIDO, esperado]
+    ['Amaena: mensual del 27, sin fechas creadas todavía (faltan más de 7 días)', 'MONTHLY', '2026-08-27', null, null, '2026-11-27'],
+    ['IQ: el 1-nov ya se pagó, toca el 1-dic', 'MONTHLY', '2026-11-01', null, '2026-11-01', '2026-12-01'],
+    ['La Galeterie: su fecha ya está creada y pendiente', 'MONTHLY', '2026-10-10', '2026-11-10', '2026-10-10', '2026-11-10'],
+    ['lo vencido sin pagar va primero: eso es lo que toca cobrar', 'MONTHLY', '2026-08-27', '2026-10-27', '2026-09-27', '2026-10-27'],
+    ['hoy toca y no se ha pagado: es hoy', 'MONTHLY', '2026-08-06', null, '2026-10-06', '2026-11-06'],
+    ['hoy toca y ya se pagó: el del mes que entra', 'MONTHLY', '2026-08-06', null, '2026-11-06', '2026-12-06'],
+    [
+      'pagado por adelantado y luego movido al 10: el 10-nov es del mismo periodo, sigue el 10-dic',
+      'MONTHLY',
+      '2026-11-10',
+      null,
+      '2026-11-05',
+      '2026-12-10',
+    ],
+    ['semanal de lunes: el lunes que sigue', 'WEEKLY', '2026-10-05', null, '2026-11-02', '2026-11-09'],
+    ['quincenal 1 y 16: el 16', 'BIWEEKLY', '2026-10-01', null, '2026-11-01', '2026-11-16'],
+    ['empieza en el futuro: su primera fecha', 'MONTHLY', '2027-01-15', null, null, '2027-01-15'],
+    ['empieza dentro de un año (el tope del ancla): todavía la encuentra', 'MONTHLY', '2027-11-07', null, null, '2027-11-07'],
+    ['una sola vez, pendiente: su fecha', 'ONE_TIME', '2026-12-01', '2026-12-01', null, '2026-12-01'],
+    ['una sola vez, ya pagada u omitida: no hay próximo', 'ONE_TIME', '2026-11-01', null, '2026-11-01', null],
+  ])('%s', (_caso, frecuencia, ancla, pendiente, marcado, esperado) => {
+    expect(nextDueDate(frecuencia, ancla, HOY, pendiente, marcado)).toBe(esperado)
   })
 })

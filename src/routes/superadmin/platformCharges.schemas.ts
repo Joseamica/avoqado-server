@@ -77,6 +77,8 @@ const createChargeBody = z
     concepts: concepts.optional(),
     invoiceMode: invoiceMode.optional(),
     invoiceId: z.string({ invalid_type_error: INVOICE_ID_MESSAGE }).min(1, INVOICE_ID_MESSAGE).optional(),
+    /** «¿Te debe las fechas pasadas?» de un alta con fecha de inicio pasada. Sin él, lo pasado nace vencido, como siempre. */
+    pastDatesOwed: z.boolean({ invalid_type_error: 'Indica con verdadero o falso si el cliente debe las fechas pasadas' }).optional(),
   })
   .superRefine((body, ctx) => {
     if (body.invoiceId !== undefined) return
