@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Cupones al cobrar (D5): `POST /mobile/.../orders` y `POST /tpv/.../orders/with-items` aceptan `couponCode` opcional; el servidor lo valida, calcula el monto y liga la fila. El uso se cuenta al quedar pagada la venta por cualquier camino (`onOrderPaid`) y en el carrito gratis de la terminal. Validar devuelve textos en español; en la terminal, además, `couponId`, `code`, `scope`, `maxDiscountAmount` y `errorCode` opcionales.
 - AngelPay: las respuestas JSON HTTP omiten la clave de firma del webhook, también en cuentas anidadas, sin modificar sus datos persistidos ni las credenciales SDK solicitadas.
 
 - Wallet: el servidor abre los sellos de los negocios al arrancar, antes de abrir el puerto (`precalentarSellos`). La primera tarjeta de Apple, actualización de passkit o franja de Google tras cada despliegue ya no congela el hilo 1-3 s (3,088 ms el 21-oct-2026, alerta «Server congelado ≥3 s»). Nunca tumba el arranque y tiene tope de 15 s.

@@ -123,7 +123,7 @@ import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema
 import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent, traeDescuentoManual } from '../middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaPermissionIfPresent, checkCuponPermissionIfPresent, traeDescuentoManual } from '../middlewares/cortesiaPidePermiso.middleware'
 import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
 
 const router = Router()
@@ -706,6 +706,7 @@ router.post(
   checkPermission('orders:create'),
   // S9: regalar una línea (`isCortesia`) pide `orders:comp`. Después del aviso (S7) para que su 403 también avise al gerente.
   checkCortesiaPermissionIfPresent,
+  checkCuponPermissionIfPresent,
   checkPromotionGuardsIfPresent,
   orderMobileController.createOrder,
 )
@@ -1764,6 +1765,7 @@ router.post(
   checkPermission('giftCards:redeem'),
   // Unión con develop (S9): esta venta también puede regalar (`isCortesia`, descuento COMP); pide `orders:comp` como `POST /orders`.
   checkCortesiaPermissionIfPresent,
+  checkCuponPermissionIfPresent,
   checkPromotionGuardsIfPresent,
   ...giftCardPayFailureRateLimiters,
   giftCardMobileController.payNewOrder,

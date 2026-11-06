@@ -8,6 +8,7 @@ import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 import { conNegocio } from '../services/demo/candadoDemo'
+import { barrerCuponesSinCanje } from '../services/shared/cuponDeLaVenta'
 
 const BATCH_LIMIT = 25
 const MAX_ATTEMPTS = 15
@@ -21,6 +22,8 @@ interface LoyaltyReconciliationDependencies {
   now: () => Date
   // Sólo `args`: el reconciliador nunca pasa opciones (el envoltorio de abajo acepta un observador opcional, R3-1).
   award: (args: Parameters<typeof awardLoyaltyForPaidOrder>[0]) => ReturnType<typeof awardLoyaltyForPaidOrder>
+  /** D5: los cupones de ventas pagadas que se quedaron sin canje. */
+  barrerCupones: () => Promise<number>
 }
 
 const defaults: LoyaltyReconciliationDependencies = {
@@ -30,6 +33,7 @@ const defaults: LoyaltyReconciliationDependencies = {
   // reembolsos: si el intento inmediato fallaba antes del sello y luego se devolvía el pago, este barrido creaba el sello
   // sobre una venta devuelta. El envoltorio no otorga a una venta reembolsada y revierte si el reembolso entra a media.
   award: otorgarLealtadRespetandoReembolsos,
+  barrerCupones: () => barrerCuponesSinCanje(),
 }
 
 /**
@@ -194,6 +198,8 @@ export class LoyaltyReconciliationJob {
         }
       }
 
+      // D5: aparte de la lealtad y sin tumbarla: su fallo sólo queda en el log y la siguiente vuelta lo reintenta.
+      await this.dependencies.barrerCupones().catch(error => logger.error('Coupon redemption sweep failed', { error }))
       return { scanned: candidates.length, applied, failed, skipped }
     } finally {
       this.running = false
