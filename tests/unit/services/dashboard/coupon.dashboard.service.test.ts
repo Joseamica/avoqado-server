@@ -184,7 +184,7 @@ describe('Coupon Dashboard Service', () => {
       prismaMock.couponCode.findFirst.mockResolvedValue(null)
 
       await expect(getCouponCodeById('venue-123', 'nonexistent')).rejects.toThrow(NotFoundError)
-      await expect(getCouponCodeById('venue-123', 'nonexistent')).rejects.toThrow('Coupon code not found')
+      await expect(getCouponCodeById('venue-123', 'nonexistent')).rejects.toThrow('El cupón no existe')
     })
   })
 
@@ -241,7 +241,7 @@ describe('Coupon Dashboard Service', () => {
           discountId: 'discount-123',
           code: 'DUPLICATE',
         }),
-      ).rejects.toThrow('Coupon code "DUPLICATE" already exists')
+      ).rejects.toThrow('Ya existe un cupón con el código "DUPLICATE"')
     })
 
     it('should throw BadRequestError for invalid code format (special characters)', async () => {
@@ -259,7 +259,7 @@ describe('Coupon Dashboard Service', () => {
           discountId: 'discount-123',
           code: 'CODE!@#',
         }),
-      ).rejects.toThrow('Coupon code can only contain letters, numbers, hyphens, and underscores')
+      ).rejects.toThrow('El código sólo puede tener letras, números, guiones y guiones bajos')
     })
 
     it('should throw BadRequestError for code too short (< 3 chars)', async () => {
@@ -277,7 +277,7 @@ describe('Coupon Dashboard Service', () => {
           discountId: 'discount-123',
           code: 'AB',
         }),
-      ).rejects.toThrow('Coupon code must be between 3 and 30 characters')
+      ).rejects.toThrow('El código debe tener entre 3 y 30 caracteres')
     })
 
     it('should throw BadRequestError for code too long (> 30 chars)', async () => {
@@ -447,7 +447,7 @@ describe('Coupon Dashboard Service', () => {
           discountId: 'discount-123',
           quantity: 1001,
         }),
-      ).rejects.toThrow('Quantity must be between 1 and 1000')
+      ).rejects.toThrow('La cantidad debe estar entre 1 y 1000')
     })
 
     it('should throw BadRequestError for invalid quantity (< 1)', async () => {
@@ -477,7 +477,7 @@ describe('Coupon Dashboard Service', () => {
           quantity: 5,
           codeLength: 3,
         }),
-      ).rejects.toThrow('Code length must be between 4 and 20')
+      ).rejects.toThrow('El largo del código debe estar entre 4 y 20')
     })
   })
 
