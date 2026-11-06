@@ -39,6 +39,7 @@ function harness(
     syncPaidPickups?: jest.Mock
     syncPaidFolios?: jest.Mock
     syncPaidClosedFolios?: jest.Mock
+    cerrarFoliosDelDia?: jest.Mock
   } = {},
 ) {
   const cron = { start: jest.fn(), stop: jest.fn() }
@@ -48,6 +49,7 @@ function harness(
   const syncPaidPickups = o.syncPaidPickups ?? jest.fn().mockResolvedValue(0)
   const syncPaidFolios = o.syncPaidFolios ?? jest.fn().mockResolvedValue(0)
   const syncPaidClosedFolios = o.syncPaidClosedFolios ?? jest.fn().mockResolvedValue(0)
+  const cerrarFoliosDelDia = o.cerrarFoliosDelDia ?? jest.fn().mockResolvedValue(0)
   const now = jest.fn(() => NOW)
   const job = new OnlineOrderAcceptanceExpiryJob({
     prisma: { onlineOrder: { findMany } } as never,
@@ -58,9 +60,10 @@ function harness(
     syncPaidPickups,
     syncPaidFolios,
     syncPaidClosedFolios,
+    cerrarFoliosDelDia,
     now,
   })
-  return { job, cron, findMany, expireOrder, syncCancelled, syncPaidPickups, syncPaidFolios, syncPaidClosedFolios, now }
+  return { job, cron, findMany, expireOrder, syncCancelled, syncPaidPickups, syncPaidFolios, syncPaidClosedFolios, cerrarFoliosDelDia, now }
 }
 
 beforeEach(() => {
@@ -99,7 +102,10 @@ describe('online-order-acceptance-expiry.job', () => {
     const orden = (m: jest.Mock) => m.mock.invocationCallOrder[0]
     expect(orden(h.syncPaidPickups)).toBeLessThan(orden(h.syncPaidFolios))
     expect(orden(h.syncPaidFolios)).toBeLessThan(orden(h.syncPaidClosedFolios))
-    expect(orden(h.syncPaidClosedFolios)).toBeLessThan(orden(h.findMany))
+    // R38: el fin del día va DESPUÉS de lo que mete folios a la lista y ANTES de vencer.
+    expect(h.cerrarFoliosDelDia).toHaveBeenCalledWith(NOW, expect.any(Function))
+    expect(orden(h.syncPaidClosedFolios)).toBeLessThan(orden(h.cerrarFoliosDelDia))
+    expect(orden(h.cerrarFoliosDelDia)).toBeLessThan(orden(h.findMany))
   })
 
   it('un fallo al pasar folios a «Por entregar» no detiene la otra pasada ni el vencimiento', async () => {
@@ -108,6 +114,8 @@ describe('online-order-acceptance-expiry.job', () => {
       syncPaidClosedFolios: jest.fn().mockResolvedValue(1),
     })
     await expect(h.job.checkNow()).resolves.toMatchObject({ porEntregar: 1, expired: 2, errors: 0 })
+    const h3 = harness({ cerrarFoliosDelDia: jest.fn().mockRejectedValue(new Error('db')) })
+    await expect(h3.job.checkNow()).resolves.toMatchObject({ expired: 2, errors: 0 })
     const h2 = harness({ syncPaidClosedFolios: jest.fn().mockRejectedValue(new Error('db')) })
     await expect(h2.job.checkNow()).resolves.toMatchObject({ porEntregar: 0, expired: 2, errors: 0 })
   })
@@ -228,6 +236,7 @@ describe('online-order-acceptance-expiry.job', () => {
       cron: { start: jest.fn(), stop: jest.fn() } as never,
       now: () => NOW,
       retryEntry: retryEntry as never,
+      cerrarFoliosDelDia: jest.fn().mockResolvedValue(0), // el fin del día (T9b) tiene su propia prueba
     })
 
     await expect(job.checkNow()).resolves.toMatchObject({ synced: 0, collected: 1, errors: 0 })

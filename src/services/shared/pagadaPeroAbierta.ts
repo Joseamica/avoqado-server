@@ -184,20 +184,32 @@ export function laCocinaLoTerminoSql(alias = 'o'): string {
  * `ahora` es una expresión SQL del reloj de pared UTC (`instanteUtcSql`).
  */
 export function seAcaboSuDiaDelNegocioSql(alias: string, ahora: string): string {
-  const o = alias
+  return seAcaboElDiaDelNegocioDeSql(
+    `GREATEST(${alias}."createdAt", ${alias}."providerAcceptedAt", ${alias}."scheduledFor")`,
+    `${alias}."venueId"`,
+    ahora,
+  )
+}
+
+/**
+ * La misma regla de arriba para CUALQUIER instante: ¿el día del negocio de `instanteUtc` (expresión SQL UTC) ya terminó, en la zona
+ * del negocio `venueIdExpr` (expresión SQL con su id), contra `ahora` (`instanteUtcSql`)? La usa también el cierre de «Entregado» de
+ * los folios (`cerrarFoliosDelDiaTerminado`, decisión 18), que cuenta desde `acceptedAt`.
+ */
+export function seAcaboElDiaDelNegocioDeSql(instanteUtc: string, venueIdExpr: string, ahora: string): string {
   if (!Number.isInteger(BUSINESS_DAY_START_HOUR) || BUSINESS_DAY_START_HOUR < 0 || BUSINESS_DAY_START_HOUR > 23) {
-    throw new Error(`seAcaboSuDiaDelNegocioSql: hora de corte inválida (${BUSINESS_DAY_START_HOUR})`)
+    throw new Error(`seAcaboElDiaDelNegocioDeSql: hora de corte inválida (${BUSINESS_DAY_START_HOUR})`)
   }
   // El día del negocio de una hora local: su fecha, una vez descontado el corte de la caja.
-  const diaDelNegocio = (instanteUtc: string) =>
-    `(((${instanteUtc} AT TIME ZONE 'UTC') AT TIME ZONE z.tz) - INTERVAL '${BUSINESS_DAY_START_HOUR} hours')::date`
+  const diaDelNegocio = (instante: string) =>
+    `(((${instante} AT TIME ZONE 'UTC') AT TIME ZONE z.tz) - INTERVAL '${BUSINESS_DAY_START_HOUR} hours')::date`
   return `EXISTS (
         SELECT 1 FROM "Venue" vz
         CROSS JOIN LATERAL (
           SELECT CASE WHEN vz.timezone IN (SELECT name FROM pg_timezone_names) THEN vz.timezone ELSE '${DEFAULT_TIMEZONE}' END AS tz
         ) z
-        WHERE vz.id = ${o}."venueId"
-          AND ${diaDelNegocio(`GREATEST(${o}."createdAt", ${o}."providerAcceptedAt", ${o}."scheduledFor")`)} < ${diaDelNegocio(ahora)}
+        WHERE vz.id = ${venueIdExpr}
+          AND ${diaDelNegocio(instanteUtc)} < ${diaDelNegocio(ahora)}
       )`
 }
 

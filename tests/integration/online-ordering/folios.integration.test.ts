@@ -22,9 +22,14 @@ import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.serv
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
-import { syncPaidFolios } from '@/services/online-ordering/folios.service'
+import { cerrarFoliosDelDiaTerminado, syncPaidFolios } from '@/services/online-ordering/folios.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
-import { acceptOnlineOrder, expireOnlineOrder, rejectOnlineOrder } from '@/services/online-ordering/transitions.service'
+import {
+  acceptOnlineOrder,
+  markOnlineOrderDelivered,
+  expireOnlineOrder,
+  rejectOnlineOrder,
+} from '@/services/online-ordering/transitions.service'
 import { reabrirSiRecibeDinero } from '@/services/shared/cuentaCancelada'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
@@ -518,5 +523,92 @@ describe('T9 · el cierre automático de pagar al recoger no toca folios', () =>
 
     await porEntregar(folio.onlineOrderId)
     expect((await pedido(equipo.onlineOrderId)).status).toBe('COMPLETED')
+  })
+})
+
+const entregarPorPersona = (orderId: string) => markOnlineOrderDelivered({ venueId: f.venueId, orderId, staffId: f.staffId })
+
+describe('T9b · «Entregado» sólo por una persona o al terminar el día del negocio (corte de las 04:00, zona del negocio)', () => {
+  // México no tiene horario de verano desde 2022: en noviembre la hora local es UTC-6.
+  const Z = (iso: string) => new Date(`${iso}-06:00`)
+  const poner = (timezone: string) => prisma.venue.update({ where: { id: f.venueId }, data: { timezone } })
+
+  /** Un folio ya en «Por entregar» desde `aceptado` (la hora local del negocio). */
+  async function porEntregarDesde(aceptado: Date, o: { estado?: 'ACCEPTED' | 'READY'; equipo?: boolean; creado?: Date } = {}) {
+    const x = await nuevoFolio({ equipo: o.equipo })
+    await prisma.onlineOrder.update({
+      where: { id: x.onlineOrderId },
+      data: { status: o.estado ?? 'ACCEPTED', acceptedAt: aceptado, ...(o.creado ? { createdAt: o.creado } : {}) },
+    })
+    return x
+  }
+  const cierra = async (hora: Date) => cerrarFoliosDelDiaTerminado({ venueId: f.venueId }, hora)
+  const estado = async (id: string) => (await pedido(id)).status
+
+  it('aceptado a las 23:50 sigue en la lista a las 03:59 y sale a las 04:00 (zona del negocio)', async () => {
+    await poner('America/Mexico_City')
+    const x = await porEntregarDesde(Z('2026-11-05T23:50:00'))
+    expect(await cierra(Z('2026-11-06T00:30:00'))).toBe(0)
+    expect(await cierra(Z('2026-11-06T03:59:00'))).toBe(0)
+    expect(await estado(x.onlineOrderId)).toBe('ACCEPTED')
+    expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(1)
+    const p = await pedido(x.onlineOrderId)
+    expect(p.status).toBe('COMPLETED')
+    expect(p.completedAt).toEqual(Z('2026-11-06T04:00:00'))
+    expect(await cierra(Z('2026-11-06T04:01:00'))).toBe(0) // ya no es candidato
+  })
+
+  it('un folio que el dinero tardío pasó a la lista hoy a las 09:00, aunque se creó ayer, sale hasta mañana a las 04:00', async () => {
+    await poner('America/Mexico_City')
+    const x = await porEntregarDesde(Z('2026-11-06T09:00:00'), { creado: Z('2026-11-05T12:00:00') })
+    expect(await cierra(Z('2026-11-06T20:00:00'))).toBe(0)
+    expect(await cierra(Z('2026-11-07T03:59:00'))).toBe(0)
+    expect(await cierra(Z('2026-11-07T04:00:00'))).toBe(1)
+    expect(await estado(x.onlineOrderId)).toBe('COMPLETED')
+  })
+
+  it('READY también sale al terminar el día', async () => {
+    await poner('America/Mexico_City')
+    const x = await porEntregarDesde(Z('2026-11-05T12:00:00'), { estado: 'READY' })
+    expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(1)
+    expect(await estado(x.onlineOrderId)).toBe('COMPLETED')
+  })
+
+  it('«Mi equipo» no lo toca este cierre, ni lo que está pendiente de pago', async () => {
+    await poner('America/Mexico_City')
+    const equipo = await porEntregarDesde(Z('2026-11-05T12:00:00'), { equipo: true })
+    const porPagar = await nuevoFolio()
+    expect(await cierra(Z('2026-11-08T04:00:00'))).toBe(0)
+    expect(await estado(equipo.onlineOrderId)).toBe('ACCEPTED')
+    expect(await estado(porPagar.onlineOrderId)).toBe('PENDING_ACCEPTANCE')
+  })
+
+  it('zona desconocida ⇒ la de respaldo (México), sin tumbar la pasada', async () => {
+    await poner('Marte/Olimpo')
+    const x = await porEntregarDesde(Z('2026-11-05T23:50:00'))
+    expect(await cierra(Z('2026-11-06T03:59:00'))).toBe(0)
+    expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(1)
+    expect(await estado(x.onlineOrderId)).toBe('COMPLETED')
+    await poner('America/Mexico_City')
+  })
+
+  it('la zona del negocio manda: en Tijuana (UTC-8) las 04:00 locales son las 12:00Z', async () => {
+    await poner('America/Tijuana')
+    const x = await porEntregarDesde(new Date('2026-11-06T07:50:00Z')) // 23:50 del 5 en Tijuana
+    expect(await cierra(new Date('2026-11-06T11:59:00Z'))).toBe(0)
+    expect(await cierra(new Date('2026-11-06T12:00:00Z'))).toBe(1)
+    expect(await estado(x.onlineOrderId)).toBe('COMPLETED')
+    await poner('America/Mexico_City')
+  })
+
+  it('una persona que entrega antes gana: el cierre del día no escribe encima', async () => {
+    await poner('America/Mexico_City')
+    const x = await nuevoFolio()
+    await efectivoDelPos(x.orderId) // la puerta de «Entregado» pide la cuenta pagada
+    await pasada()
+    await prisma.onlineOrder.update({ where: { id: x.onlineOrderId }, data: { acceptedAt: Z('2026-11-05T12:00:00') } })
+    const r = await entregarPorPersona(x.orderId)
+    expect(r.outcome).toBe('OK')
+    expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(0)
   })
 })

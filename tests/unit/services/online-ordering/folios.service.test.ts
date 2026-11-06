@@ -36,6 +36,7 @@ import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
 import {
+  cerrarFoliosDelDiaTerminado,
   prepararFolioPagado,
   prepararFolioPagadoEnTx,
   syncPaidClosedFolios,
@@ -299,5 +300,68 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('candado'))
     await expect(syncPaidClosedFolios({}, NOW)).resolves.toBe(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ onlineOrderId: 'oo-A' }))
+  })
+})
+
+describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar el día del negocio)', () => {
+  const fila = (k: string, status = 'ACCEPTED') => ({ id: `oo-${k}`, orderId: `ord-${k}`, venueId: 'v1', status, orderNumber: `F-${k}` })
+  /** El texto SQL de la lectura: junta las partes fijas y los fragmentos `Prisma.raw` del template. */
+  const sqlLeido = () => {
+    const [strings, ...valores] = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
+    const aplanar = (x: any): string =>
+      Array.isArray(x) ? x.join(' ') : x && typeof x === 'object' && 'strings' in x ? x.strings.join(' ') : ''
+    return [aplanar(strings), ...valores.map(aplanar)].join(' ')
+  }
+
+  it('lee con tope sólo folios (requiresAcceptance = false) ACCEPTED o READY cuyo día del negocio de `acceptedAt` ya terminó, con el corte de las 04:00', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([])
+    await expect(cerrarFoliosDelDiaTerminado({ venueId: 'v1' }, NOW)).resolves.toBe(0)
+    const sql = sqlLeido()
+    expect(sql).toContain('"requiresAcceptance" = false')
+    expect(sql).toMatch(/IN \('ACCEPTED', 'READY'\)/)
+    expect(sql).toContain('oo."acceptedAt"')
+    expect(sql).toContain("INTERVAL '4 hours'")
+    expect(sql).toContain("ELSE 'America/Mexico_City'") // zona desconocida ⇒ la de respaldo
+    expect(sql).toContain('LIMIT')
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('cada fila: un CAS sobre el estado leído y requiresAcceptance:false que sólo escribe estado y completedAt; avisa y audita después', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([fila('A'), fila('B', 'READY')])
+    await expect(cerrarFoliosDelDiaTerminado({}, NOW)).resolves.toBe(2)
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: 'oo-A', status: 'ACCEPTED', requiresAcceptance: false },
+      data: { status: 'COMPLETED', completedAt: NOW },
+    })
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: 'oo-B', status: 'READY', requiresAcceptance: false },
+      data: { status: 'COMPLETED', completedAt: NOW },
+    })
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled() // no toca la cuenta ni el dinero
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledTimes(2)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'ONLINE_ORDER_COLLECTED',
+        entityId: 'oo-A',
+        staffId: null,
+        data: { orderNumber: 'F-A', automatic: 'END_OF_DAY' },
+      }),
+    )
+  })
+
+  it('si el CAS pierde (una persona lo entregó antes) no cuenta ni avisa; una fila que truena se registra y la pasada sigue', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([fila('A'), fila('B'), fila('C')])
+    prismaMock.onlineOrder.updateMany.mockRejectedValueOnce(new Error('conexión')).mockResolvedValueOnce({ count: 0 })
+    await expect(cerrarFoliosDelDiaTerminado({}, NOW)).resolves.toBe(1)
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ onlineOrderId: 'oo-A' }))
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ entityId: 'oo-C' }))
+  })
+
+  it('la lectura pasa por `readCandidates` (el job la reintenta)', async () => {
+    const readCandidates = jest.fn(async () => [])
+    await expect(cerrarFoliosDelDiaTerminado({}, NOW, readCandidates as any)).resolves.toBe(0)
+    expect(readCandidates).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
 })

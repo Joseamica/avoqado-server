@@ -4,6 +4,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
+import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/pagadaPeroAbierta'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import prisma from '@/utils/prismaClient'
 import { announceCancelledElsewhere } from './cancelledOrderSync'
@@ -203,5 +204,66 @@ export async function syncPaidClosedFolios(
     }
   }
   if (won > 0) logger.info('[OnlineOrdering] folios cerrados que otro cobro saldó, de vuelta en «Por entregar»', { ...scope, count: won })
+  return won
+}
+
+/**
+ * Decisión 18, T9b: «Por entregar» sale de la lista sólo con «Entregado» de una persona o, aquí, al terminar el día del negocio
+ * (corte de las 04:00 en la zona del negocio, la regla de `seAcaboElDiaDelNegocioDeSql`). El día se cuenta desde `acceptedAt`: el
+ * folio que el dinero tardío pasó a la lista hoy (aunque se creó ayer) sale hasta el cierre de hoy. Sólo escribe `OnlineOrder`
+ * (estado y `completedAt`): ni la cuenta, ni el dinero, ni la cocina; por eso no necesita el candado de la orden y basta el CAS por
+ * fila sobre el estado leído y `requiresAcceptance:false` (si una persona lo entregó antes, el CAS pierde y no cuenta).
+ * Lectura con tope (lo que sobre lo toma la siguiente pasada) y una escritura por fila; anuncia después, con actor de sistema.
+ */
+export async function cerrarFoliosDelDiaTerminado(
+  scope: { venueId?: string },
+  now: Date,
+  readCandidates: ReadCandidates = read => read(),
+): Promise<number> {
+  const rows = await readCandidates(
+    () => prisma.$queryRaw<Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; orderNumber: string }>>`
+      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, o."orderNumber"
+      FROM "OnlineOrder" oo
+      JOIN "Order" o ON o.id = oo."orderId"
+      WHERE oo."requiresAcceptance" = false
+        AND oo.status IN ('ACCEPTED', 'READY')
+        ${scope.venueId !== undefined ? Prisma.sql`AND oo."venueId" = ${scope.venueId}` : Prisma.empty}
+        AND ${Prisma.raw(seAcaboElDiaDelNegocioDeSql('oo."acceptedAt"', 'oo."venueId"', instanteUtcSql(now)))}
+      ORDER BY oo.id ASC
+      LIMIT ${SYNC_BATCH_SIZE}`,
+  )
+  let won = 0
+  for (const row of rows) {
+    try {
+      const cas = await prisma.onlineOrder.updateMany({
+        where: { id: row.id, status: row.status, requiresAcceptance: false },
+        data: { status: OnlineOrderStatus.COMPLETED, completedAt: now },
+      })
+      if (cas.count !== 1) continue
+      won += 1
+      emitOnlineOrderUpdated({
+        venueId: row.venueId,
+        orderId: row.orderId,
+        orderNumber: row.orderNumber,
+        onlineStatus: OnlineOrderStatus.COMPLETED,
+        now,
+      })
+      void logAction({
+        staffId: null,
+        venueId: row.venueId,
+        action: 'ONLINE_ORDER_COLLECTED',
+        entity: 'OnlineOrder',
+        entityId: row.id,
+        data: { orderNumber: row.orderNumber, automatic: 'END_OF_DAY' },
+      })
+    } catch (error) {
+      logger.error('[OnlineOrdering] no se pudo entregar al terminar el día un folio (la pasada sigue)', {
+        onlineOrderId: row.id,
+        venueId: row.venueId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (won > 0) logger.info('[OnlineOrdering] folios entregados al terminar el día del negocio', { ...scope, count: won })
   return won
 }

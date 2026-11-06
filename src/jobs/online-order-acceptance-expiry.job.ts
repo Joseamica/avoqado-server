@@ -3,7 +3,7 @@ import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from '../services/online-ordering/cancelledOrderSync'
 import { EXPIRY_BATCH_SIZE, OPEN_ORDER_STATUSES } from '../services/online-ordering/constants'
-import { syncPaidClosedFolios, syncPaidFolios } from '../services/online-ordering/folios.service'
+import { cerrarFoliosDelDiaTerminado, syncPaidClosedFolios, syncPaidFolios } from '../services/online-ordering/folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
 import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
 import type { ReadCandidates } from '../services/online-ordering/types'
@@ -40,6 +40,8 @@ interface OnlineOrderAcceptanceExpiryDependencies {
   syncPaidFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
   /** Tabla 7b, regla 2: folios cerrados que otro cobro terminó de saldar, de vuelta en «Por entregar». */
   syncPaidClosedFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  /** Decisión 18 (T9b): folios en «Por entregar» cuyo día del negocio terminó pasan a «Entregado», después de lo anterior y antes de vencer. */
+  cerrarFoliosDelDia: (now: Date, readEntry: ReadCandidates) => Promise<number>
 }
 
 interface ExpiryResult {
@@ -74,6 +76,7 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
   // Anuncian a sus ganadores ellas mismas (cada fila confirma en su propia transacción).
   syncPaidFolios: (now, readEntry) => syncPaidFolios({}, now, readEntry),
   syncPaidClosedFolios: (now, readEntry) => syncPaidClosedFolios({}, now, readEntry),
+  cerrarFoliosDelDia: (now, readEntry) => cerrarFoliosDelDiaTerminado({}, now, readEntry),
 }
 
 export class OnlineOrderAcceptanceExpiryJob {
@@ -151,6 +154,13 @@ export class OnlineOrderAcceptanceExpiryJob {
         )
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron revivir los folios cerrados ya saldados (la pasada sigue)', { error })
+      }
+
+      // Decisión 18 (T9b): al final de lo que mete folios a la lista (así un folio revivido hoy no sale por un día viejo) y antes de vencer.
+      try {
+        await this.dependencies.cerrarFoliosDelDia(now, this.readEntry('online-order-acceptance-expiry.cerrarFoliosDelDia'))
+      } catch (error) {
+        logger.error('Online-order expiry: no se pudieron entregar los folios del día terminado (la pasada sigue)', { error })
       }
 
       let scanned = 0
