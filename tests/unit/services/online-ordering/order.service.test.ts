@@ -376,8 +376,9 @@ describe('createOnlineOrder', () => {
     expect((prismaMock.order.findUnique.mock.calls[0][0] as any).where).toEqual({
       venueId_externalId: { venueId: 'v1', externalId: expect.stringMatching(/^web:/) },
     })
-    expect(prismaMock.idempotencyRequest.findUnique).not.toHaveBeenCalled()
-    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.findUnique).toHaveBeenCalledTimes(1) // R85: sólo la decisión de ESTA llave (anon:<llave>)
+    expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(1) // R85: el 401 anónimo se registra como la decisión de la llave
+    expect((prismaMock.idempotencyRequest.create.mock.calls[0][0] as any).data).toMatchObject({ actorStaffId: `anon:${KEY}`, responseStatus: 401 })
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -472,12 +473,12 @@ describe('createOnlineOrder', () => {
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
-  it('R47: con la tienda cerrada o el plan vencido, el anónimo de «Mi equipo» sigue siendo 401 y no guarda un rechazo `anon:`', async () => {
+  it('R47: con la tienda cerrada o el plan vencido, el anónimo de «Mi equipo» sigue siendo 401 y registra UNA decisión `anon:` por intento (R85)', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
     const vencido = { assertCanCreate: async () => Promise.reject(new ForbiddenError('Plan vencido', 'PLAN_REQUIRED')) }
     await expect(createOnlineOrder(input({ customerId: null }), vencido)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
     await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
-    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(2) // R85: cada 401 anónimo registra su decisión (la tabla real la deduplica por llave)
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2) // dos intentos, cada uno con su espera corta del candado
   })
 
@@ -833,7 +834,7 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
     })
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // R82: la transacción corta que espera el candado de la llave
     expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK]) // R82: sólo el candado de la llave, en una transacción corta
-    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled() // la tienda pide el código y reintenta con la MISMA llave
+    expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(1) // R85: se registra bajo anon:<llave>; el reintento con sesión verificada usa customer:<id> y no choca
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -1076,6 +1077,93 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })
   }
 
+  describe('R85: UNA decisión por llave (el 401 anónimo se registra bajo el mismo candado)', () => {
+    /** Una «tabla» IdempotencyRequest en memoria para los dos caminos (temprano y creación). */
+    const tablaDeRechazos = () => {
+      const filas = new Map<string, any>()
+      const k = (w: any) => JSON.stringify(Object.values(w.organizationId_actorStaffId_endpoint_idempotencyKey ?? w))
+      prismaMock.idempotencyRequest.findUnique.mockImplementation((async (a: any) => filas.get(k(a.where)) ?? null) as any)
+      prismaMock.idempotencyRequest.create.mockImplementation((async (a: any) => {
+        const key = k({
+          organizationId: a.data.organizationId,
+          actorStaffId: a.data.actorStaffId,
+          endpoint: a.data.endpoint,
+          idempotencyKey: a.data.idempotencyKey,
+        })
+        filas.set(key, a.data)
+        return a.data
+      }) as any)
+      return filas
+    }
+
+    it('el REINTENTO llega primero (el original aún cotiza): el 401 queda registrado y el ORIGINAL, al llegar a su transacción, NO crea: recibe ese rechazo', async () => {
+      const filas = tablaDeRechazos()
+      aMiEquipo()
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+      expect(filas.size).toBe(1)
+      expect([...filas.values()][0]).toMatchObject({ ...LLAVE_ANON, requestHash: huellaAnon(), responseStatus: 401 })
+
+      // el original (que cotizó en «Nadie» antes del cambio de modo) llega a su transacción
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: false })
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(NADIE)
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    })
+
+    it('el ORIGINAL llega primero: crea, y el reintento (ya en «Mi equipo») recibe SU folio y no registra rechazo', async () => {
+      const filas = tablaDeRechazos()
+      const primero = await createOnlineOrder(anon(), PUEDE_CREAR)
+      const guardado = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+      aMiEquipo()
+      prismaMock.order.findUnique.mockResolvedValue(
+        existing({
+          customerId: null,
+          orderNumber: primero.orderNumber,
+          onlineOrder: oo({
+            status: 'PENDING_ACCEPTANCE',
+            trackingToken: primero.trackingToken,
+            requestHash: guardado.requestHash,
+            acceptDeadlineAt: guardado.acceptDeadlineAt,
+          }),
+        }) as any,
+      )
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({ replay: true, orderNumber: primero.orderNumber })
+      expect(filas.size).toBe(0)
+      expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('un segundo reintento con el rechazo ya registrado sigue dando 401 sin escribir otra fila', async () => {
+      const filas = tablaDeRechazos()
+      aMiEquipo()
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401 })
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+      expect(filas.size).toBe(1)
+      expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('la misma llave con OTRA huella ya registrada: en «Nadie» sigue siendo 409 IDEMPOTENCY_KEY_CONFLICT, como hoy', async () => {
+      const filas = tablaDeRechazos()
+      aMiEquipo()
+      await expect(createOnlineOrder(anon({ customer: { name: 'Otra Persona', email: null } }), PUEDE_CREAR)).rejects.toMatchObject({
+        statusCode: 401,
+      })
+      expect(filas.size).toBe(1)
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: false })
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(NADIE)
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+    })
+
+    it('con un pedido de esa llave pero OTRA huella (nació con sesión) el 401 anónimo no registra nada', async () => {
+      const filas = tablaDeRechazos()
+      aMiEquipo()
+      prismaMock.order.findUnique.mockResolvedValue(existing() as any)
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401 })
+      expect(filas.size).toBe(0)
+    })
+  })
+
   it('en «Nadie», sin sesión ni teléfono, crea el folio con customerId null, sin teléfono, requiresAcceptance false y channel QR', async () => {
     const res = await createOnlineOrder(anon(), PUEDE_CREAR)
 
@@ -1256,7 +1344,7 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       statusCode: 401,
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
-    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.create.mock.calls.every((c: any[]) => (c[0] as any).data.responseStatus === 401)).toBe(true) // R85
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 

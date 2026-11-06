@@ -475,24 +475,43 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   })
 
   if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
-    // R79 (Codex fase 2 r1 #1): un folio creado en «Nadie» cuya respuesta se perdió, y la tienda pasó a «Mi equipo» antes del
-    // reintento: la MISMA llave con el MISMO pedido recibe SU folio (la misma lectura indexada de la repetición normal), no el 401.
-    // Es la única lectura extra y sólo en este camino; sin pedido con esa llave, 401 como siempre.
-    // Un pedido con esa llave pero OTRA huella (p. ej. nació con sesión, R47 T7a) sigue siendo 401, nunca 409.
-    // R82 (Codex fase 2 r2 #1): si el envío ORIGINAL sigue en vuelo (ya tomó el candado de la llave y no confirma), se espera ESE
-    // mismo candado (`lockKey`, el de la creación) en una transacción corta y SÓLO entonces se lee la repetición: el original
-    // confirma primero y se encuentra. Techo: un original que aún no llegó a su transacción (cotiza fuera de ella) no retiene el
-    // candado todavía; esa ventana de milisegundos con cambio de modo simultáneo queda sin cubrir.
-    try {
-      const folio = await prisma.$transaction(async tx => {
-        await lockKey(tx, input.venueId, externalId)
-        return findReplay(tx, input.venueId, externalId, requestHash)
-      }, TX_OPTIONS) // las mismas esperas que la creación: un original que retiene la llave 5-15 s no debe vencer a la espera (P2028)
-      if (folio) return folio
-    } catch (e) {
-      if (!(e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT')) throw e
-    }
-    throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
+    // R85 (Codex fase 2 r3): UNA decisión por llave. Bajo el MISMO candado de la creación (`lockKey`), en una transacción corta:
+    //  1. si el original ya confirmó con esta huella, el reintento recibe SU folio (R79/R82);
+    //  2. si no, este 401 se REGISTRA como la decisión de la llave (el almacén de rechazos de `decidedBefore`, mismo `anon:<llave>`):
+    //     un original que aún cotiza fuera de su transacción, al llegar a ella, encuentra el rechazo y NO crea (recibe el mismo 401).
+    //  Sin esto la tienda soltaba la llave tras el 401 y el original terminaba creando: dos pedidos.
+    // Un pedido de esa llave con OTRA huella (p. ej. nació con sesión, R47 T7a) sigue siendo 401, nunca 409, y no registra nada.
+    // Misma espera que la creación (`TX_OPTIONS`); un P2028 sale tal cual (5xx: la tienda conserva la llave), jamás como 401.
+    const rechazo = new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
+    const decisionDeLaLlave = rejectionKey(input.venueId, null, input.idempotencyKey)
+    const folio = await prisma.$transaction(async tx => {
+      await lockKey(tx, input.venueId, externalId)
+      try {
+        const replay = await findReplay(tx, input.venueId, externalId, requestHash)
+        if (replay) return replay
+      } catch (e) {
+        if (e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT') return null
+        throw e
+      }
+      const yaRegistrado = await tx.idempotencyRequest.findUnique({
+        where: { organizationId_actorStaffId_endpoint_idempotencyKey: decisionDeLaLlave },
+        select: { id: true },
+      })
+      if (!yaRegistrado) {
+        await tx.idempotencyRequest.create({
+          data: {
+            ...decisionDeLaLlave,
+            requestHash,
+            responseStatus: rechazo.statusCode,
+            responseBody: JSON.parse(JSON.stringify({ code: rechazo.code, message: rechazo.message, details: rechazo.details })),
+            expiresAt: new Date(now.getTime() + 24 * 3600_000),
+          },
+        })
+      }
+      return null
+    }, TX_OPTIONS)
+    if (folio) return folio
+    throw rechazo
   }
 
   const trackingToken = generateTrackingToken()
