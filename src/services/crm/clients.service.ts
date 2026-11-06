@@ -217,7 +217,7 @@ export async function getClientLive(access: CrmAccess, organizationId: string, n
 
 /** What is live in Avoqado for one Organization, read when the ficha opens (see `getLive`). */
 async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
-  const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts] = await Promise.all([
+  const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts, org] = await Promise.all([
     prisma.venue.findMany({
       where: { organizationId },
       select: { id: true, name: true, status: true, kycStatus: true, _count: { select: { terminals: true } } },
@@ -234,6 +234,7 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     prisma.terminal.count({ where: { venue: { organizationId } } }),
     access.ventas ? monthSales(organizationId, now) : null,
     altaFactsOf([organizationId]),
+    prisma.organization.findUnique({ where: { id: organizationId }, select: { seatCapExempt: true } }),
   ])
   const plans = await enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id))
   const steps = onboarding?.completedSteps
@@ -242,6 +243,8 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
   return {
     ligada: true as const,
     organizationId,
+    // «Cliente de antes» is the organization's mark (what `plan/grandfathered` writes), not a plan condition of one store.
+    deAntes: org?.seatCapExempt === true,
     venues: venues.map((venue, i) => ({
       id: venue.id,
       name: venue.name,

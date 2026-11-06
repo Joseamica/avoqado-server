@@ -757,8 +757,17 @@ describe('getLive', () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue({ completedSteps: [1, 2, 3], completedAt: null })
     prismaMock.terminal.count.mockResolvedValue(2)
     prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: over.ventas ?? new Prisma.Decimal('1500.50') } })
+    prismaMock.organization.findUnique.mockResolvedValue({ seatCapExempt: false })
     jest.mocked(getPlanState).mockResolvedValue(planState())
   }
+
+  it('vivo_dice_si_la_organizacion_es_cliente_de_antes (Organization.seatCapExempt)', async () => {
+    linked()
+    expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ deAntes: false })
+    prismaMock.organization.findUnique.mockResolvedValue({ seatCapExempt: true })
+    expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ deAntes: true })
+    expect(prismaMock.organization.findUnique).toHaveBeenLastCalledWith({ where: { id: ORG }, select: { seatCapExempt: true } })
+  })
 
   it('vivo_sin_llave_ventas_no_trae_ventas', async () => {
     linked()
