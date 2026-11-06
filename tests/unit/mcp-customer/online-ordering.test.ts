@@ -4,7 +4,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { registerOnlineOrderingTools } from '../../../src/mcp/tools/onlineOrdering'
 import type { McpScope } from '../../../src/mcp/scope'
 import { settingsPatchBody } from '../../../src/schemas/online-ordering.schema'
-import { BadRequestError } from '../../../src/errors/AppError'
+import { BadRequestError, ConflictError } from '../../../src/errors/AppError'
 
 const mockRequirePermission = jest.fn()
 const mockPlanGate = jest.fn()
@@ -27,6 +27,7 @@ const mockRequirements = jest.fn()
 const mockAudit = jest.fn()
 const mockMenuSummary = jest.fn()
 const mockMenuProducts = jest.fn()
+const mockListFolios = jest.fn()
 
 jest.mock('@/mcp/guard', () => {
   const real = jest.requireActual('@/mcp/guard')
@@ -61,6 +62,9 @@ jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(
 jest.mock('@/services/online-ordering/inbox.service', () => ({
   listInbox: (...a: unknown[]) => mockListInbox(...(a as [])),
   getInboxOrder: (...a: unknown[]) => mockGetInboxOrder(...(a as [])),
+}))
+jest.mock('@/services/online-ordering/folios.service', () => ({
+  listFolios: (...a: unknown[]) => mockListFolios(...(a as [])),
 }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({
   acceptOnlineOrder: (...a: unknown[]) => mockAccept(...(a as [])),
@@ -166,8 +170,28 @@ describe('online_orders_list', () => {
     await call('online_orders_list', { venueId: 'v1', status: 'active', cursor: CURSOR })
     expect(mockListInbox).toHaveBeenCalledWith({ venueId: 'v1', filter: 'active', activeCursor: CURSOR })
     const mal = parse(await call('online_orders_list', { venueId: 'v1', status: 'all', cursor: CURSOR }))
-    expect(mal).toMatchObject({ ok: false, error: 'El cursor sólo sirve para los pedidos activos (status=active).' })
+    expect(mal).toMatchObject({
+      ok: false,
+      error: 'El cursor sólo sirve para los pedidos activos, por pagar o por entregar (status=active, to_pay o to_deliver).',
+    })
     expect(mockListInbox).toHaveBeenCalledTimes(1)
+  })
+
+  it('T16/R17: to_pay y to_deliver traen la lista de folios y siguen con el cursor (nunca se trunca en silencio)', async () => {
+    mockListFolios.mockResolvedValue({ counts: { toPay: 1, toDeliver: 101 }, nextCursors: { toPay: null, toDeliver: 'C1' } })
+    const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_pay' }))
+    expect(mockListFolios).toHaveBeenCalledWith({ venueId: 'v1', section: 'toPay' })
+    expect(mockListInbox).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ ok: true, nextCursors: { toDeliver: 'C1' } })
+    await call('online_orders_list', { venueId: 'v1', status: 'to_deliver', cursor: 'C1' })
+    expect(mockListFolios).toHaveBeenLastCalledWith({ venueId: 'v1', section: 'toDeliver', cursor: 'C1' })
+    expect(mockRequirePermission).toHaveBeenCalledWith('orders:read', 'v1')
+  })
+
+  it('T16: un cursor mal formado de folios se dice en texto', async () => {
+    mockListFolios.mockRejectedValue(new BadRequestError('Cursor inválido', 'INVALID_CURSOR'))
+    const r = parse(await call('online_orders_list', { venueId: 'v1', status: 'to_deliver', cursor: 'x' }))
+    expect(r).toMatchObject({ ok: false, code: 'INVALID_CURSOR' })
   })
 
   it('un venue fuera de scope se rechaza antes de leer', async () => {
@@ -274,6 +298,45 @@ describe('online_order_respond', () => {
     expect(mockGetInboxOrder).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1' })
     expect(mockCancel).toHaveBeenCalledWith({ venueId: 'v1', orderId: 'ord1', staffId: 's1' })
     expect(r).toMatchObject({ ok: true, status: 'CANCELLED_BY_STAFF' })
+  })
+
+  it('T16: ACCEPT sobre un folio sin pagar responde en texto que se cobra antes de prepararlo y no ejecuta', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PENDING' })
+    const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT', confirm: true }))
+    expect(r).toMatchObject({ ok: false, code: 'PAYMENT_REQUIRED', error: 'Este pedido se cobra antes de prepararlo' })
+    expect(mockAccept).not.toHaveBeenCalled()
+  })
+
+  it('T16: si se pagó a medias entre la vista y el confirm, el servicio dice PAYMENT_REQUIRED y se responde igual', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PAID' })
+    mockAccept.mockResolvedValue({ outcome: 'PAYMENT_REQUIRED' })
+    const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT', confirm: true }))
+    expect(r).toMatchObject({ ok: false, error: 'Este pedido se cobra antes de prepararlo' })
+  })
+
+  it('R46: REJECT sobre un folio responde STALE (se quita con CANCELAR), ni la vista previa ni la respuesta prometen «no se le cobró nada»', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PENDING' })
+    for (const confirm of [undefined, true]) {
+      const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', confirm }))
+      expect(r).toMatchObject({ ok: false, status: 'PENDING_ACCEPTANCE' })
+      expect(r.requiresConfirmation).toBeUndefined()
+      expect(r.error).toContain('CANCELAR')
+      expect(JSON.stringify(r)).not.toMatch(/no se le cobr/i)
+    }
+    expect(mockReject).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('T16: CANCEL sobre un folio por pagar se permite; sobre un pedido de «Mi equipo» por aceptar sigue rechazado', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PENDING' })
+    mockCancel.mockResolvedValue({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })
+    const ok = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'CANCEL', confirm: true }))
+    expect(mockCancel).toHaveBeenCalledTimes(1)
+    expect(ok).toMatchObject({ ok: true })
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: true })
+    const no = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'CANCEL', confirm: true }))
+    expect(no.ok).toBe(false)
+    expect(mockCancel).toHaveBeenCalledTimes(1)
   })
 
   it('READY usa su servicio; DELIVERED sin cobro responde PAYMENT_REQUIRED sin error', async () => {
@@ -480,6 +543,19 @@ describe('online_ordering_configure', () => {
     )
     expect(r).toEqual({ ok: false, code: 'NO_PAYMENT_MODE', error: SIN_COMO_COBRAR })
     expect(mockSetAvailability).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [new BadRequestError('Con "Nadie" se paga en caja', 'PAY_AT_PICKUP_REQUIRED'), 'PAY_AT_PICKUP_REQUIRED'],
+    [new BadRequestError('Pon tu horario', 'HOURS_REQUIRED'), 'HOURS_REQUIRED'],
+    [new ConflictError('Ningún aparato puede cobrar folios todavía', 'NO_FOLIO_DEVICE'), 'NO_FOLIO_DEVICE'],
+  ])('T16: elegir «Nadie» (requiresAcceptance:false) con la vista previa y el rechazo %#: texto claro, sin auditar', async (err, code) => {
+    const vista = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { requiresAcceptance: false } }))
+    expect(vista.preview.cambios).toEqual([{ campo: 'requiresAcceptance', de: undefined, a: false }])
+    mockUpdateSettings.mockRejectedValue(err)
+    const r = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { requiresAcceptance: false }, confirm: true }))
+    expect(r).toEqual({ ok: false, code, error: err.message })
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
@@ -787,7 +863,9 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     const args = { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }
     const { confirmationToken } = parse(await call('online_order_card_refund', args))
     for (const vista of [{}, { expectedLatestRefundId: null }, { expectedLatestRefundId: 'cr-otra' }]) {
-      expect(parse(await call('online_order_card_refund', { ...args, ...vista, confirm: true, confirmationToken }))).toMatchObject({ ok: false })
+      expect(parse(await call('online_order_card_refund', { ...args, ...vista, confirm: true, confirmationToken }))).toMatchObject({
+        ok: false,
+      })
     }
     expect(mockRefundCard).not.toHaveBeenCalled()
   })

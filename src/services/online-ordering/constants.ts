@@ -1,4 +1,12 @@
-import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus } from '@prisma/client'
+import {
+  OnlineOrderChargeStatus,
+  OnlineOrderPaymentMode,
+  OnlineOrderStatus,
+  OrderStatus,
+  PaymentStatus,
+  type VenueType,
+} from '@prisma/client'
+import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -18,6 +26,8 @@ export const PRESENCE_WINDOW_MS = 120_000
 export const PRESENCE_WRITE_DEBOUNCE_MS = 30_000
 /** R13: sólo la pantalla de bandeja en primer plano manda esta cabecera con `1`; es la única que cuenta como «hay alguien». */
 export const ONLINE_ORDERS_TRAY_HEADER = 'x-online-orders-tray'
+/** Tienda híbrida: la TPV y el POS que pueden cobrar folios mandan esta cabecera con `1` (las rutas que la leen son de T12). */
+export const ONLINE_ORDERS_TO_PAY_HEADER = 'x-online-orders-to-pay'
 export const MAX_PENDING_PER_PHONE = 3
 export const MAX_PENDING_PER_VENUE = 30
 export const MAX_CART_LINES = 50
@@ -64,9 +74,81 @@ export const liveCardDraftsWhere = (venueId: string, now: Date) => ({
   status: OnlineOrderChargeStatus.PENDING_AUTH,
   checkoutExpiresAt: { gt: now },
 })
+/** Tienda híbrida: lo que de verdad espera a «Mi equipo» (saturación y topes). Los folios (`requiresAcceptance:false`) no cuentan. */
+export const awaitingAcceptanceWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: true,
+})
+/** Tienda híbrida (R18): folios sin un peso pagado; los usará el tope de folios (T7) y T12. Un folio con abono no ocupa lugar. */
+export const unpaidFoliosWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: false,
+  order: { paymentStatus: PaymentStatus.PENDING },
+})
+/**
+ * Tienda híbrida (R42, T12): la lista «Por pagar» y `counts.toPay`. Un folio vivo sin saldar: con abono (PARTIAL) también (R41; se
+ * cobra desde esta lista, con «Falta $X»), pero nunca uno cuya cuenta se canceló (R16) o ya quedó saldada (la sincronización lo pasa
+ * a «Por entregar»). NO es `unpaidFoliosWhere`, que sólo mide el tope de folios sin un peso.
+ */
+export const foliosPorPagarWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: false,
+  order: {
+    status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
+    paymentStatus: { notIn: FOLIO_PAID_STATUSES }, // R24: una sola definición de «cobrada»
+  },
+})
+/**
+ * Tienda híbrida (T11): para el `AND` de las listas de «cuentas abiertas» (TPV y POS). Un folio por pagar se cobra desde la lista de
+ * folios de la caja; aquí saldría como una mesa fantasma. Un folio vencido con abono tardío ya no está `PENDING_ACCEPTANCE`: sí sale.
+ */
+export const NO_ES_FOLIO_POR_PAGAR = {
+  NOT: { onlineOrder: { is: { requiresAcceptance: false, status: OnlineOrderStatus.PENDING_ACCEPTANCE } } },
+}
+/** Tienda híbrida (R23): un folio vence a los 30 min o al cierre de la franja vigente, lo que pase primero. */
+export const FOLIO_TIMEOUT_MINUTES = 30
+/**
+ * R56 «último pedido para pagar en caja»: en «Nadie» la tienda deja de recibir folios estos minutos antes del cierre de la franja
+ * vigente (`closesAt`). Así todo folio nace con al menos este margen para pagar, y una espera de segundos al crearlo (candados,
+ * recetas) ya no lo deja vencido. «Mi equipo» no lo tiene.
+ */
+export const FOLIO_LAST_CALL_MINUTES = 10
+/** Tienda híbrida (T3b): folios sin pagar por negocio; el siguiente recibe 409 y la tienda sigue abierta. El doble del tope de hoy. */
+export const MAX_UNPAID_FOLIOS_PER_VENUE = 60
 /** Fase 2: minutos que vive la sesión de pago con tarjeta antes de darse por abandonada. */
 export const CARD_CHECKOUT_TTL_MINUTES = 30
 /** Fase 2: un cargo atorado (p. ej. `CAPTURING`) más de estos minutos levanta alerta en el conciliador. */
 export const CARD_STUCK_ALERT_MINUTES = 15
 /** Fase 2: cargos por pasada del conciliador; lo que sobre lo toma la siguiente. */
 export const CARD_RECONCILE_BATCH = 50
+
+/** Tienda híbrida (R37): giros para los que el panel SUGIERE «Nadie» (sobre `Venue.type`). Sólo sugiere; el servidor nunca lo elige solo. */
+export const NO_ONE_VENUE_TYPES: readonly VenueType[] = [
+  'RETAIL_STORE',
+  'JEWELRY',
+  'CLOTHING',
+  'ELECTRONICS',
+  'PHARMACY',
+  'CONVENIENCE_STORE',
+  'SUPERMARKET',
+  'LIQUOR_STORE',
+  'FURNITURE',
+  'HARDWARE',
+  'BOOKSTORE',
+  'PET_STORE',
+  'TELECOMUNICACIONES',
+  'SALON',
+  'SPA',
+  'FITNESS',
+  'FITNESS_STUDIO',
+  'CLINIC',
+  'VETERINARY',
+  'AUTO_SERVICE',
+  'LAUNDRY',
+  'REPAIR_SHOP',
+]
+/** Tienda híbrida: «Nadie» sólo se enciende si algún aparato consultó la lista «por cobrar» en este plazo. */
+export const FOLIO_DEVICE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000

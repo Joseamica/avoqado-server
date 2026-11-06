@@ -767,6 +767,16 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
+    "src/services/online-ordering/folios.service.ts#syncPaidClosedFolios#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tienda híbrida T9: el bucle (≤ SYNC_BATCH_SIZE folios) abre una transacción POR folio; dentro toma la Order de ese folio y sólo escribe su OnlineOrder (CAS), sin retener ventas previas."
+    },
+    "src/services/online-ordering/cancelledOrderSync.ts#cerrarCanceladasReleyendo#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tienda híbrida T9 (R12): el bucle (≤ SYNC_BATCH_SIZE pedidos) abre una transacción POR pedido; dentro toma la Order de ese pedido y sólo escribe su OnlineOrder (CAS releyendo la cuenta), sin retener ventas previas."
+    },
     "src/services/payments/deferredTransactionCost.service.ts#asegurarCostoSincrono#convergerCostoDeTransaccion": {
       "count": 1,
       "loops": 0,

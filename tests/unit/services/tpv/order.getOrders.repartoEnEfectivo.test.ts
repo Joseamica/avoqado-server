@@ -53,3 +53,17 @@ describe('TPV: pedidos en línea con tarjeta', () => {
     await expect(getOrder('venue-1', 'o-web')).rejects.toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_PAID_BY_CARD' })
   })
 })
+
+// Tienda híbrida (T11): ver el comentario de la prueba de listOrders del POS.
+describe('getOrders de la TPV: folios por pagar (T11)', () => {
+  it.each([
+    ['por omisión', undefined],
+    ['con los de «pagar después»', { includePayLater: true }],
+    ['con los del kiosco', { includeKiosk: true }],
+  ])('%s, excluye el folio PENDING_ACCEPTANCE sin aceptación, y sólo ése', async (_caso, opciones) => {
+    await getOrders('venue-1', undefined, opciones)
+    expect(filtro().AND).toEqual(
+      expect.arrayContaining([{ NOT: { onlineOrder: { is: { requiresAcceptance: false, status: 'PENDING_ACCEPTANCE' } } } }]),
+    )
+  })
+})

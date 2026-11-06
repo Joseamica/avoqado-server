@@ -102,6 +102,9 @@ interface Base {
     completedAt: Date | null
     cancelledAt?: Date | null
     cancelledBy?: string | null
+    acceptedAt?: Date | null
+    /** Tienda híbrida: `false` = folio de «Nadie». */
+    requiresAcceptance: boolean
   } | null
   personal: typeof PERSONAL
   bitacora: any[]
@@ -109,7 +112,9 @@ interface Base {
   pagos: any[]
 }
 
-function nuevaBase(o: { online?: string | null; contrato?: string; taxAmount?: number; personal?: Base['personal'] } = {}): Base {
+function nuevaBase(
+  o: { online?: string | null; contrato?: string; taxAmount?: number; personal?: Base['personal']; folio?: boolean } = {},
+): Base {
   return {
     order: {
       id: ORDER,
@@ -122,7 +127,15 @@ function nuevaBase(o: { online?: string | null; contrato?: string; taxAmount?: n
     online:
       o.online === null
         ? null
-        : { id: ONLINE, orderId: ORDER, venueId: VENUE, status: o.online ?? 'CANCELLED_BY_STAFF', completedAt: null },
+        : {
+            id: ONLINE,
+            orderId: ORDER,
+            venueId: VENUE,
+            status: o.online ?? 'CANCELLED_BY_STAFF',
+            completedAt: null,
+            acceptedAt: null,
+            requiresAcceptance: o.folio !== true,
+          },
     personal: o.personal ?? PERSONAL,
     bitacora: [],
     avisos: [],
@@ -141,7 +154,13 @@ function txSobre(b: Base) {
           orderNumber: b.order.orderNumber,
           contratoDePrecio: b.order.contratoDePrecio,
           taxAmount: new Decimal(b.order.taxAmount),
-          onlineOrder: b.online ? { id: b.online.id, status: b.online.status } : null,
+          onlineOrder: b.online
+            ? ({ id: b.online.id, status: b.online.status, requiresAcceptance: b.online.requiresAcceptance } as {
+                id: string
+                status: string
+                requiresAcceptance?: boolean
+              })
+            : null,
         }
       }),
     },
@@ -151,6 +170,7 @@ function txSobre(b: Base) {
       ),
       updateMany: jest.fn(async ({ where, data }: any) => {
         if (!b.online || where.id !== b.online.id || (where.status !== undefined && where.status !== b.online.status)) return { count: 0 }
+        if (where.requiresAcceptance !== undefined && where.requiresAcceptance !== b.online.requiresAcceptance) return { count: 0 }
         Object.assign(b.online, data)
         return { count: 1 }
       }),
@@ -239,8 +259,10 @@ describe('S1 — la regla dentro de `reabrirSiRecibeDinero` (transacción simula
 
     expect(b.order.status).toBe('PENDING')
     expect(b.online).toMatchObject({ status: 'COMPLETED', completedAt: expect.any(Date) })
-    // CAS sobre el estado que leyó.
-    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: ONLINE, status: 'CANCELLED_BY_STAFF' } }))
+    // CAS sobre el estado que leyó; R15: la escritura de COMPLETED de «Mi equipo» exige `requiresAcceptance: true`.
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: ONLINE, status: 'CANCELLED_BY_STAFF', requiresAcceptance: true } }),
+    )
     expect(reaperturas(b)).toHaveLength(1)
     expect(delPedido(b)).toEqual([
       expect.objectContaining({
@@ -452,6 +474,66 @@ describe('S1 — la regla dentro de `reabrirSiRecibeDinero` (transacción simula
     expect(tx.onlineOrder.updateMany).toHaveBeenCalledTimes(2)
     // El estado del que de verdad salió (el que ganó el CAS), no el de la primera lectura.
     expect(delPedido(b)[0].data.estadoAnterior).toBe('CANCELLED_BY_STAFF')
+  })
+})
+
+describe('Tienda híbrida T9 (decisión 18): el dinero tardío que SALDA un folio lo deja «Por entregar», nunca «Entregado»', () => {
+  it.each(['PENDING_ACCEPTANCE', 'EXPIRED', 'CANCELLED_BY_CUSTOMER', 'CANCELLED_BY_STAFF', 'REJECTED'])(
+    'folio %s ⇒ ACCEPTED con acceptedAt, en la MISMA transacción del dinero; el CAS exige que sea folio',
+    async desde => {
+      const b = nuevaBase({ folio: true, online: desde })
+      const tx = txSobre(b)
+
+      expect(await reabrir(tx, { cobrado: 150, cubre: true })).toBe('PENDING')
+
+      expect(b.online).toMatchObject({ status: 'ACCEPTED', acceptedAt: expect.any(Date), completedAt: null })
+      expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith({
+        where: { id: ONLINE, status: desde, requiresAcceptance: false },
+        data: { status: 'ACCEPTED', acceptedAt: expect.any(Date) },
+      })
+      // Se reporta igual que hoy: hay dinero en una cuenta que alguien canceló.
+      expect(delPedido(b)).toHaveLength(1)
+      expect(delPedido(b)[0].data.estadoAnterior).toBe(desde)
+      expect(b.avisos).toHaveLength(2)
+      nadaPorElClienteGlobal()
+    },
+  )
+
+  it.each(['ACCEPTED', 'READY'])('folio %s (ya en la lista o listo) se queda como está', async desde => {
+    const b = nuevaBase({ folio: true, online: desde })
+    const tx = txSobre(b)
+
+    await reabrir(tx, { cobrado: 150, cubre: true })
+
+    expect(b.online?.status).toBe(desde)
+    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('folio con un abono (no salda): sigue cerrado, como hoy; lo revivirá `syncPaidClosedFolios` cuando otro cobro salde', async () => {
+    const b = nuevaBase({ folio: true, online: 'EXPIRED' })
+    const tx = txSobre(b)
+
+    await reabrir(tx, { cobrado: 50, cubre: false })
+
+    expect(b.online?.status).toBe('EXPIRED')
+    expect(tx.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(delPedido(b)).toHaveLength(1)
+  })
+
+  it('si una lectura vieja lo movió entre la lectura y el CAS, relee una vez y lo deja en «Por entregar»', async () => {
+    const b = nuevaBase({ folio: true, online: 'PENDING_ACCEPTANCE' })
+    const tx = txSobre(b)
+    tx.order.update.mockImplementationOnce(async ({ data }: any) => {
+      b.order.status = data.status
+      const leido = { id: ONLINE, status: 'PENDING_ACCEPTANCE', requiresAcceptance: false }
+      b.online!.status = 'CANCELLED_BY_STAFF'
+      return { orderNumber: 'WK7QX', contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(0), onlineOrder: leido }
+    })
+
+    await reabrir(tx)
+
+    expect(b.online?.status).toBe('ACCEPTED')
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledTimes(2)
   })
 })
 

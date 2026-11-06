@@ -4,6 +4,7 @@ import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus
 import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
+import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import { SocketEventType } from '../../communication/sockets/types'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { simRegistrationService } from '../serialized-inventory/simRegistration.service'
@@ -127,7 +128,7 @@ export async function getOrders(
     // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
     // Pedidos en línea fase 2 (Codex r2 #1): un pedido pagado con tarjeta en línea no se le ofrece a la terminal para cobrarlo
     // (sí los de pagar al recoger y las cuentas sin pedido en línea).
-    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO, { onlineOrder: { isNot: { paymentMode: 'CARD_ONLINE' } } }],
+    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO, { onlineOrder: { isNot: { paymentMode: 'CARD_ONLINE' } } }, NO_ES_FOLIO_POR_PAGAR],
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list
@@ -1173,7 +1174,8 @@ export async function createOrderWithItems(
   if (cupon?.discount.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
-  const orderDiscount = cupon?.discount ?? (input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null)
+  const orderDiscount =
+    cupon?.discount ?? (input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null)
   const orderDiscountPesos = cupon
     ? montoDelCupon(cupon.discount, baseDeLaCuentaPesos)
     : orderDiscount
@@ -1187,7 +1189,8 @@ export async function createOrderWithItems(
     // D5: si el cupón cambió entre validarlo y cobrar, la cajera lo tiene que ver: el total de pantalla ya no es el de la cuenta. En
     // centavos enteros: restar pesos flotantes da 0.0100000002 y un centavo de redondeo se leía como otro cupón.
     const difiere = (a: number, b: number) => Math.abs(Math.round(a * 100) - Math.round(b * 100)) > 1
-    if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos)) throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
+    if (difiere(input.discount || 0, orderDiscountPesos) || difiere(input.total, totalPesos))
+      throw new BadRequestError(CUPON_CAMBIO_DE_VALOR)
   } else {
     assertClosePesos('discount', input.discount || 0, orderDiscountPesos)
     assertClosePesos('total', input.total, totalPesos)
@@ -1362,7 +1365,10 @@ export async function createOrderWithItems(
           montoPesos: orderDiscountPesos,
           appliedById: activeStaffVenue.id,
           renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
-          tope: cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null ? Number(orderDiscount.maxDiscountAmount) : null,
+          tope:
+            cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null
+              ? Number(orderDiscount.maxDiscountAmount)
+              : null,
         })
         await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
       }

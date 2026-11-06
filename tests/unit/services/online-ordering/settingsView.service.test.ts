@@ -50,3 +50,38 @@ describe('settingsView.card', () => {
     expect((await settingsView('v1')).card.enabled).toBe(false)
   })
 })
+
+describe('settingsView: ¿Quién confirma? (T5)', () => {
+  beforeEach(() => prismaMock.ecommerceMerchant.findMany.mockResolvedValue([]))
+
+  it('trae requiresAcceptance y lastToPayPollAt en ISO', async () => {
+    const at = new Date('2026-11-05T10:00:00.000Z')
+    ;(getSettings as jest.Mock).mockResolvedValue({ ...SETTINGS, requiresAcceptance: false, lastToPayPollAt: at })
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING' } as any)
+    const v = await settingsView('v1')
+    expect(v.requiresAcceptance).toBe(false)
+    expect(v.lastToPayPollAt).toBe(at.toISOString())
+  })
+
+  it('lastToPayPollAt null sigue siendo null', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ ...SETTINGS, requiresAcceptance: true, lastToPayPollAt: null })
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'RESTAURANT' } as any)
+    expect((await settingsView('v1')).lastToPayPollAt).toBeNull()
+  })
+
+  it('una tienda de ropa sugiere «Nadie» (suggestedRequiresAcceptance false) aunque hoy esté en «Mi equipo»; un restaurante sugiere «Mi equipo»', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ ...SETTINGS, requiresAcceptance: true, lastToPayPollAt: null })
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'CLOTHING' } as any)
+    const ropa = await settingsView('v1')
+    expect(ropa.requiresAcceptance).toBe(true)
+    expect(ropa.suggestedRequiresAcceptance).toBe(false)
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'RESTAURANT' } as any)
+    expect((await settingsView('v1')).suggestedRequiresAcceptance).toBe(true)
+  })
+
+  it('un FITNESS_STUDIO sugiere «Nadie» (suggestedRequiresAcceptance false)', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ ...SETTINGS, requiresAcceptance: true, lastToPayPollAt: null })
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'FITNESS_STUDIO' } as any)
+    expect((await settingsView('v1')).suggestedRequiresAcceptance).toBe(false)
+  })
+})

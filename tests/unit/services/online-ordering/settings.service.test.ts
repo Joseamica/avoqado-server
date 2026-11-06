@@ -22,6 +22,8 @@ const row = (o: Record<string, unknown> = {}) => ({
   pausedUntil: null,
   hours: null,
   lastInboxPollAt: null,
+  requiresAcceptance: true,
+  lastToPayPollAt: null,
   ...o,
 })
 
@@ -115,8 +117,9 @@ describe('settings.service', () => {
 
   it('sin fila devuelve los defaults: apagado y sin latido', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
-    await expect(getSettings('v1')).resolves.toEqual({ ...DEFAULT_CONFIG, lastInboxPollAt: null })
+    await expect(getSettings('v1')).resolves.toEqual({ ...DEFAULT_CONFIG, lastInboxPollAt: null, lastToPayPollAt: null })
     expect(DEFAULT_CONFIG.enabled).toBe(false)
+    expect(DEFAULT_CONFIG.requiresAcceptance).toBe(true)
   })
 
   it('convierte Decimal a número de pesos y la pausa a ISO', async () => {
@@ -495,7 +498,8 @@ describe('settings.service', () => {
       await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 'staff1')).rejects.toMatchObject({
         statusCode: 400,
         code: 'NO_PAYMENT_MODE',
-        message: 'Sin «Pagar al recoger» la tienda sólo cobraría con tarjeta, y tu cuenta de Stripe todavía no puede cobrar: déjalo prendido o conecta tu Stripe en Ligas de pago.',
+        message:
+          'Sin «Pagar al recoger» la tienda sólo cobraría con tarjeta, y tu cuenta de Stripe todavía no puede cobrar: déjalo prendido o conecta tu Stripe en Ligas de pago.',
       })
       expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
     })
@@ -511,8 +515,12 @@ describe('settings.service', () => {
 
     it('A: otro cambio con la cuenta Stripe caída (sólo tarjeta) no consulta Stripe ni bloquea: la tienda ya se ve en pausa por sí sola', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsPayAtPickup: false, acceptsCardOnline: true }) as any)
-      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(row({ acceptsPayAtPickup: false, acceptsCardOnline: true, minOrderAmount: 60 }) as any)
-      await expect(updateSettings('v1', { minOrderAmount: 60, acceptsPayAtPickup: false, acceptsCardOnline: true }, 'staff1')).resolves.toBeTruthy()
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(
+        row({ acceptsPayAtPickup: false, acceptsCardOnline: true, minOrderAmount: 60 }) as any,
+      )
+      await expect(
+        updateSettings('v1', { minOrderAmount: 60, acceptsPayAtPickup: false, acceptsCardOnline: true }, 'staff1'),
+      ).resolves.toBeTruthy()
       expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
     })
 
@@ -521,5 +529,131 @@ describe('settings.service', () => {
       await expect(getSettings('v1')).resolves.toMatchObject({ acceptsCardOnline: true })
       expect(DEFAULT_CONFIG.acceptsCardOnline).toBe(true)
     })
+  })
+})
+
+describe('tienda híbrida T5: «¿Quién confirma?» y sus candados', () => {
+  beforeEach(() => conRequisitos())
+  const ahora = Date.now()
+  const hace = (dias: number) => new Date(ahora - dias * 86_400_000)
+  const conTx = (existing: unknown) => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: {
+        findUnique: jest.fn().mockResolvedValue(existing),
+        upsert: jest.fn().mockImplementation(async (a: any) => row({ ...(existing as any), ...a.update })),
+      },
+      reservationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+      venue: { findUnique: jest.fn().mockResolvedValue(VENUE_COMPLETO) },
+      privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue({ id: 'pnv1' }) },
+      activityLog: { create: jest.fn() },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+    return tx
+  }
+  const NADIE = { enabled: true, requiresAcceptance: false, hours: semana(), lastToPayPollAt: hace(1) }
+
+  it('sin fila: getSettings devuelve requiresAcceptance:true y lastToPayPollAt null (R10), sin consultar nada más', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
+    const s = await getSettings('v1')
+    expect(s).toMatchObject({ requiresAcceptance: true, lastToPayPollAt: null })
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('la primera fila nace en «Mi equipo»: el servidor nunca elige «Nadie» solo (R37)', async () => {
+    const tx = conTx(null)
+    await updateSettings('v1', { minOrderAmount: 10 }, 's1')
+    const c = tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any
+    expect(c.create.requiresAcceptance).toBeUndefined()
+    expect(c.create.venueId).toBe('v1')
+  })
+
+  it('elegir «Nadie» guarda acceptsPayAtPickup = true en la misma escritura', async () => {
+    const tx = conTx(row({ enabled: false, acceptsPayAtPickup: false, lastToPayPollAt: hace(1) }))
+    await updateSettings('v1', { requiresAcceptance: false }, 's1')
+    expect((tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update).toEqual({
+      requiresAcceptance: false,
+      acceptsPayAtPickup: true,
+    })
+  })
+
+  it('R9: en el mismo parche, requiresAcceptance:false gana sobre acceptsPayAtPickup:false', async () => {
+    const tx = conTx(row({ enabled: false }))
+    await updateSettings('v1', { requiresAcceptance: false, acceptsPayAtPickup: false }, 's1')
+    expect((tx.onlineOrderingSettings.upsert.mock.calls[0][0] as any).update.acceptsPayAtPickup).toBe(true)
+  })
+
+  it('en «Nadie», apagar «pagar en caja» responde 400 PAY_AT_PICKUP_REQUIRED y no escribe', async () => {
+    const tx = conTx(row(NADIE))
+    await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 's1')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'PAY_AT_PICKUP_REQUIRED',
+      message: 'Con "Nadie" se paga en caja',
+    })
+    expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('encender en «Nadie» sin horario: 400 HOURS_REQUIRED; con la tienda apagada sí se guarda', async () => {
+    const tx = conTx(row({ ...NADIE, enabled: false, hours: null }))
+    await expect(updateSettings('v1', { enabled: true }, 's1')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'HOURS_REQUIRED',
+      message: 'Pon tu horario: con "Nadie", los folios se cancelan al cierre',
+    })
+    expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    const tx2 = conTx(row({ ...NADIE, enabled: false, requiresAcceptance: true, hours: null }))
+    await updateSettings('v1', { requiresAcceptance: false }, 's1')
+    expect(tx2.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(1)
+  })
+
+  it('R8: quitar el horario con la tienda encendida en «Nadie» es 400 HOURS_REQUIRED', async () => {
+    const tx = conTx(row(NADIE))
+    await expect(updateSettings('v1', { hours: null }, 's1')).rejects.toMatchObject({ code: 'HOURS_REQUIRED' })
+    expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('R8: pasar a «Nadie» con la tienda encendida y sin horario es 400 HOURS_REQUIRED', async () => {
+    const tx = conTx(row({ enabled: true, requiresAcceptance: true, hours: null, lastToPayPollAt: hace(1) }))
+    await expect(updateSettings('v1', { requiresAcceptance: false }, 's1')).rejects.toMatchObject({ code: 'HOURS_REQUIRED' })
+    expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('encender en «Nadie» sin latido de folios en 7 días: 409 NO_FOLIO_DEVICE; con latido reciente sí', async () => {
+    for (const lastToPayPollAt of [null, hace(8)]) {
+      const tx = conTx(row({ ...NADIE, enabled: false, lastToPayPollAt }))
+      await expect(updateSettings('v1', { enabled: true }, 's1')).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'NO_FOLIO_DEVICE',
+        message: 'Ningún aparato puede cobrar folios todavía: actualiza la terminal o el POS',
+      })
+      expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    }
+    const ok = conTx(row({ ...NADIE, enabled: false, lastToPayPollAt: hace(6) }))
+    await updateSettings('v1', { enabled: true }, 's1')
+    expect(ok.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(1)
+  })
+
+  it('pasar a «Nadie» con la tienda encendida sin latido: 409; con la tienda apagada sí se guarda', async () => {
+    conTx(row({ enabled: true, hours: semana(), lastToPayPollAt: null }))
+    await expect(updateSettings('v1', { requiresAcceptance: false }, 's1')).rejects.toMatchObject({ code: 'NO_FOLIO_DEVICE' })
+    const off = conTx(row({ enabled: false, hours: semana(), lastToPayPollAt: null }))
+    await updateSettings('v1', { requiresAcceptance: false }, 's1')
+    expect(off.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(1)
+  })
+
+  it('una tienda YA encendida en «Nadie» no repite el candado del latido al cambiar otra cosa', async () => {
+    const tx = conTx(row({ ...NADIE, lastToPayPollAt: null }))
+    await updateSettings('v1', { minOrderAmount: 5 }, 's1')
+    expect(tx.onlineOrderingSettings.upsert).toHaveBeenCalledTimes(1)
+  })
+
+  it('la bitácora trae { de, a } de requiresAcceptance cuando cambia, y no cuando se repite', async () => {
+    conTx(row({ enabled: false, lastToPayPollAt: hace(1), hours: semana() }))
+    await updateSettings('v1', { requiresAcceptance: false }, 's1')
+    expect((logAction as jest.Mock).mock.calls.at(-1)[0].data.requiresAcceptance).toEqual({ de: true, a: false })
+    ;(logAction as jest.Mock).mockClear()
+    conTx(row({ ...NADIE, enabled: false }))
+    await updateSettings('v1', { requiresAcceptance: false }, 's1')
+    expect((logAction as jest.Mock).mock.calls.at(-1)[0].data.requiresAcceptance).toBeUndefined()
   })
 })

@@ -167,9 +167,9 @@ export async function salirSiLaLlaveYaTienePago(
 }
 
 /** Pedidos en línea 1c (S1): quién recibe el aviso de un pedido web cancelado que después se cobró. */
-const ROLES_QUE_RECIBEN_EL_AVISO: StaffRole[] = [StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]
+export const ROLES_QUE_RECIBEN_EL_AVISO: StaffRole[] = [StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]
 /** Tope del reparto del aviso (regla de consultas acotadas): un negocio real tiene unos cuantos gerentes, no cientos. */
-const MAX_GERENTES_AVISADOS = 50
+export const MAX_GERENTES_AVISADOS = 50
 /**
  * Lo que `conciliarPedidoEnLinea` LEE de la cuenta al reabrirla. Va fuera de la llamada a propósito: la guarda de escritores del
  * contrato de precio (`orderContratoDePrecioWriters.test.ts`) busca `contratoDePrecio:` dentro de cada `order.update`, y aquí sólo
@@ -179,7 +179,8 @@ const LO_QUE_LEE_LA_CONCILIACION = {
   orderNumber: true,
   contratoDePrecio: true,
   taxAmount: true,
-  onlineOrder: { select: { id: true, status: true } },
+  // Tienda híbrida (T9): un folio (`requiresAcceptance:false`) saldado tarde va a «Por entregar», no a «Entregado».
+  onlineOrder: { select: { id: true, status: true, requiresAcceptance: true } },
 } satisfies Prisma.OrderSelect
 
 /**
@@ -262,7 +263,7 @@ async function conciliarPedidoEnLinea(
     orderNumber: string
     contratoDePrecio: string
     taxAmount: Prisma.Decimal | null
-    onlineOrder: { id: string; status: OnlineOrderStatus } | null
+    onlineOrder: { id: string; status: OnlineOrderStatus; requiresAcceptance?: boolean } | null
   },
 ): Promise<void> {
   const pedido = cuenta.onlineOrder
@@ -271,25 +272,44 @@ async function conciliarPedidoEnLinea(
 
   const saldada = a.cubreComoCancelada && impuestoQueSeCobraAparte({ ...cuenta, status: estado }).isZero()
   const ahora = new Date()
-  // Saldada ⇒ el pedido se ENTREGA (desde cualquier estado salvo COMPLETED). No saldada ⇒ hay dinero en una cuenta cancelada que
-  // quedó viva otra vez: si el pedido sigue ABIERTO (el panel canceló y nadie leyó la bandeja, Codex plan r2 #4) se cierra como lo
-  // cierra la bandeja al leer (`cancelledOrderSync.ts`, mismos valores). Así el resultado no depende de esa lectura, y el pedido no
-  // queda «En preparación», cobrable ni imprimible en la cocina (`printClaim.service.ts`). Si ya estaba cancelado, no se toca.
-  const destino = saldada
+  // Saldada ⇒ «Mi equipo»: el pedido se ENTREGA (desde cualquier estado salvo COMPLETED). Un folio (tienda híbrida, decisión 18)
+  // pasa a «Por entregar» (`ACCEPTED`) desde cualquier estado salvo ACCEPTED, READY y COMPLETED, que se quedan como están: el dinero
+  // nunca lo entrega, y sin marca de cocina (como hoy). El `where` de cada CAS repite de quién es (R15), para que ninguna rama
+  // escriba el destino de la otra. No saldada ⇒ hay dinero en una cuenta cancelada que quedó viva otra vez: si el pedido sigue
+  // ABIERTO (el panel canceló y nadie leyó la bandeja, Codex plan r2 #4) se cierra como lo cierra la bandeja al leer
+  // (`cancelledOrderSync.ts`, mismos valores). Así el resultado no depende de esa lectura, y el pedido no queda «En preparación»,
+  // cobrable ni imprimible en la cocina (`printClaim.service.ts`). Si ya estaba cancelado, no se toca. Un folio que sólo abona
+  // sigue cerrado: cuando otro cobro salde la cuenta, `syncPaidClosedFolios` lo pasa a «Por entregar».
+  const esFolio = pedido.requiresAcceptance === false
+  const POR_ENTREGAR_O_DESPUES: OnlineOrderStatus[] = [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY, OnlineOrderStatus.COMPLETED]
+  const destino: {
+    puedeSalirDe: (s: OnlineOrderStatus) => boolean
+    donde: Prisma.OnlineOrderWhereInput
+    data: Prisma.OnlineOrderUpdateManyMutationInput & { status: OnlineOrderStatus }
+  } = !saldada
     ? {
-        puedeSalirDe: (s: OnlineOrderStatus) => s !== OnlineOrderStatus.COMPLETED,
-        data: { status: OnlineOrderStatus.COMPLETED, completedAt: ahora },
-      }
-    : {
-        puedeSalirDe: (s: OnlineOrderStatus) => OPEN_ONLINE_STATUSES.includes(s),
+        puedeSalirDe: s => OPEN_ONLINE_STATUSES.includes(s),
+        donde: {},
         data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: ahora, cancelledBy: CANCELLED_ELSEWHERE },
       }
+    : esFolio
+      ? {
+          puedeSalirDe: s => !POR_ENTREGAR_O_DESPUES.includes(s),
+          donde: { requiresAcceptance: false },
+          data: { status: OnlineOrderStatus.ACCEPTED, acceptedAt: ahora },
+        }
+      : {
+          puedeSalirDe: s => s !== OnlineOrderStatus.COMPLETED,
+          donde: { requiresAcceptance: true },
+          data: { status: OnlineOrderStatus.COMPLETED, completedAt: ahora },
+        }
   let estadoAnterior: OnlineOrderStatus = pedido.status
   let estadoFinal: OnlineOrderStatus = pedido.status
   if (destino.puedeSalirDe(pedido.status)) {
-    // CAS sobre el estado leído. Si la bandeja lo movió entre la lectura y la escritura (sincroniza la cancelación AL LEER, sin el
-    // candado de la orden), se relee UNA vez: si todavía puede moverse, se reintenta; si no, se respeta lo que quedó.
-    const cas = await tx.onlineOrder.updateMany({ where: { id: pedido.id, status: pedido.status }, data: destino.data })
+    // CAS sobre el estado leído. Si otro lo movió entre la lectura y la escritura, se relee UNA vez: si todavía puede moverse, se
+    // reintenta; si no, se respeta lo que quedó. (La bandeja ya no puede: desde R12 cierra releyendo bajo el candado de la orden,
+    // que tiene este cobro; la relectura queda de defensa.)
+    const cas = await tx.onlineOrder.updateMany({ where: { id: pedido.id, status: pedido.status, ...destino.donde }, data: destino.data })
     if (cas.count === 1) {
       estadoFinal = destino.data.status
     } else {
@@ -298,7 +318,10 @@ async function conciliarPedidoEnLinea(
         estadoAnterior = releido.status
         estadoFinal = releido.status
         if (destino.puedeSalirDe(releido.status)) {
-          const otraVez = await tx.onlineOrder.updateMany({ where: { id: releido.id, status: releido.status }, data: destino.data })
+          const otraVez = await tx.onlineOrder.updateMany({
+            where: { id: releido.id, status: releido.status, ...destino.donde },
+            data: destino.data,
+          })
           if (otraVez.count === 1) estadoFinal = destino.data.status
         }
       }

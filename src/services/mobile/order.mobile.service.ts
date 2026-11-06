@@ -1,4 +1,5 @@
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
+import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
 import type { HttpEnvelope } from './http-operation.mobile.service'
 import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type ExchangeTxEarly } from '../exchanges/exchangeTx'
 import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
@@ -42,7 +43,7 @@ import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoD
 import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
-import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -637,6 +638,8 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
     AND: [
       WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO,
       { NOT: { onlineOrder: { is: { paymentMode: 'CARD_ONLINE', charge: { isNot: { status: 'CAPTURED' } } } } } },
+      // Tienda híbrida (T11): un folio por pagar se cobra desde la lista de folios de la caja, no desde aquí.
+      NO_ES_FOLIO_POR_PAGAR,
     ],
   }
 
@@ -1102,7 +1105,9 @@ export async function buildOrderItemsData(
     // la vieja (`importePorPesoDeLaPeticionCents`).
     // El precio es el de la LÍNEA (el respetado o el de la base); peso, extras y descuento de línea no cambian.
     const precio = precioDeLinea[k]
-    const lineBase = product.soldByWeight ? importePorPesoDeLaPeticionCents(Number(precio), weightKg!) / 100 : Number(precio) * item.quantity
+    const lineBase = product.soldByWeight
+      ? importePorPesoDeLaPeticionCents(Number(precio), weightKg!) / 100
+      : Number(precio) * item.quantity
     if (respetadas.has(k)) {
       preciosRespetados.push({
         externalId: typeof item.externalId === 'string' ? item.externalId : null,
@@ -1754,7 +1759,10 @@ export async function crearVentaDeMostradorEnTx(
             montoPesos: orderLevelDiscountDecimal,
             appliedById,
             renglonesSinCortesia: createdOrder.items.filter(item => !item.isCortesia).map(item => item.id),
-            tope: cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null ? Number(orderDiscount.maxDiscountAmount) : null,
+            tope:
+              cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null
+                ? Number(orderDiscount.maxDiscountAmount)
+                : null,
           })
         : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById })
       await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
@@ -2677,6 +2685,7 @@ export async function splitOrderItemsInTransaction(
   }
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
+  await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -2873,6 +2882,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
   }
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
+  await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -3061,6 +3071,7 @@ export async function mergeOrdersInTransaction(
   // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
+  await assertNotFolioInTx(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
@@ -3305,7 +3316,9 @@ export async function mergeOrdersInTransaction(
     await tx.orderCustomer.createMany({
       data: [
         { orderId: target.id, customerId: duenoQueQueda, isPrimary: !destinoTienePrimario },
-        ...[...new Set(otrosDelOrigen)].filter(id => id !== duenoQueQueda).map(customerId => ({ orderId: target.id, customerId, isPrimary: false })),
+        ...[...new Set(otrosDelOrigen)]
+          .filter(id => id !== duenoQueQueda)
+          .map(customerId => ({ orderId: target.id, customerId, isPrimary: false })),
       ],
       skipDuplicates: true,
     })
