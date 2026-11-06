@@ -1119,6 +1119,20 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
     })
 
+    it('m3b: una decisión `anon:K` registrada con OTRA huella ⇒ el camino temprano responde 401 PHONE_VERIFICATION_REQUIRED y NO escribe nada', async () => {
+      const filas = tablaDeRechazos()
+      filas.set(JSON.stringify([LLAVE_ANON.organizationId, LLAVE_ANON.actorStaffId, LLAVE_ANON.endpoint, LLAVE_ANON.idempotencyKey]), {
+        ...LLAVE_ANON,
+        requestHash: huellaAnon({ customerName: 'Otra Persona' }),
+        responseStatus: 409,
+        responseBody: { code: 'PRICE_CHANGED', message: 'El precio cambió' },
+      })
+      aMiEquipo()
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+      expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+    })
+
     it('I2: sesión sin teléfono verificado ⇒ 401 que registra anon:K; la tienda reenvía la MISMA K con la sesión VERIFICADA y SÍ crea (su llave es customer:<id>:K)', async () => {
       const filas = tablaDeRechazos()
       aMiEquipo()

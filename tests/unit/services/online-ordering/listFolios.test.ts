@@ -119,21 +119,34 @@ describe('listFolios', () => {
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
   })
 
-  it('T18g: páginas y conteos salen de UNA transacción RepeatableRead con tiempos acotados; sin más lecturas que las de hoy', async () => {
+  it('T18g: páginas y conteos salen de UNA transacción RepeatableRead con tiempos acotados, y las 4 lecturas van por el `tx` (ninguna por el prisma global)', async () => {
     POR_PAGAR = [row(1)]
     CONTEOS = { toPay: 1, toDeliver: 0 }
+    // un `tx` DISTINTO del prismaMock global: si una lectura se escapa al `prisma`, se ve en el global
+    const tx = {
+      onlineOrder: {
+        findMany: jest.fn(async (a: any) => (a.where.status === 'ACCEPTED' ? POR_ENTREGAR : POR_PAGAR)),
+        count: jest.fn(async (a: any) => (a.where.status === 'ACCEPTED' ? CONTEOS.toDeliver : CONTEOS.toPay)),
+      },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(tx))
     prismaMock.$transaction.mockClear()
     prismaMock.onlineOrder.findMany.mockClear()
     prismaMock.onlineOrder.count.mockClear()
-    await listFolios({ venueId: 'v1', now: NOW })
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay).toHaveLength(1)
+    expect(r.counts).toEqual({ toPay: 1, toDeliver: 0 })
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     const opts = (prismaMock.$transaction.mock.calls[0] as any[])[1]
     expect(opts).toMatchObject({ isolationLevel: 'RepeatableRead' })
     expect(opts.timeout).toBeGreaterThan(0)
     expect(opts.maxWait).toBeGreaterThan(0)
-    // las mismas consultas de la lista y de los conteos (2 páginas + 2 conteos), todas dentro de esa transacción
-    expect(listas()).toHaveLength(2)
-    expect(prismaMock.onlineOrder.count).toHaveBeenCalledTimes(2)
+    // las 2 páginas y los 2 conteos, TODOS en el tx
+    expect(tx.onlineOrder.findMany).toHaveBeenCalledTimes(2)
+    expect(tx.onlineOrder.count).toHaveBeenCalledTimes(2)
+    // y NINGUNA lista ni conteo por el prisma global (las sincronizaciones previas no usan `select: INBOX_SELECT` ni `count`)
+    expect(listas()).toHaveLength(0)
+    expect(prismaMock.onlineOrder.count).not.toHaveBeenCalled()
   })
 
   it('T18g: showTile es true con una lista no vacía aunque los conteos digan 0 (un folio que nació entre lecturas)', async () => {
