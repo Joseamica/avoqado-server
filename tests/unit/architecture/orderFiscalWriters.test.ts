@@ -1494,11 +1494,11 @@ describe('Mesas lock/budget scanner regressions', () => {
     const sf = source(text)
     let result: Transaction | undefined
     const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && calleeName(node) === '$transaction') {
+      if (ts.isCallExpression(node) && (calleeName(node) === '$transaction' || calleeName(node) === 'withDeadlockRetry')) {
         result = {
           owner: ownerOf(node),
           line: 1,
-          options: node.arguments[1],
+          options: calleeName(node) === 'withDeadlockRetry' ? opcionesDelReintento(node.arguments[1]) : node.arguments[1],
           callees: calleesOf(transactionCallback(node.arguments[0], node)),
         }
       }
@@ -1551,6 +1551,17 @@ describe('Mesas lock/budget scanner regressions', () => {
     expect(budgetOf(noBudget.options)).not.toEqual(ONE_BUDGET)
     expect(budgetOf(opener(local.replace('OPTIONS', '{ timeout: 5000, maxWait: 2000 }')).options)).not.toEqual(ONE_BUDGET)
     expect(budgetOf(opener(local.replace('OPTIONS', 'ORDER_LOCK_WAIT_BUDGET')).options)).toEqual(ONE_BUDGET)
+  })
+
+  it('withDeadlockRetry: `{ etiqueta, ...ORDER_LOCK_WAIT_BUDGET }` vale el presupuesto; sin presupuesto o con otro, se señala', () => {
+    const local = 'async function f() { return withDeadlockRetry(async tx => lockTableOrderScope(tx), OPTIONS) }'
+    const con = opener(local.replace('OPTIONS', "{ etiqueta: 'f', ...ORDER_LOCK_WAIT_BUDGET }"))
+    expect(con.callees.some(c => c.name === 'lockTableOrderScope')).toBe(true)
+    expect(budgetOf(con.options)).toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', "{ etiqueta: 'f' }")).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace(', OPTIONS', '')).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', "{ etiqueta: 'f', timeout: 5000, maxWait: 2000 }")).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', "{ etiqueta: 'f', timeout: 15_000, maxWait: 5_000 }")).options)).toEqual(ONE_BUDGET)
   })
 
   it('does not use a homonymous callback from another lexical scope', () => {

@@ -1572,6 +1572,15 @@ function paymentResultStableUntilAudit(payment: AstCall, audit: AstCall): boolea
   return Boolean(result && ts.isIdentifier(result.name) && objectBindingStableUntilAudit(result.name, audit, new Set(['id']), false))
 }
 
+/** Un `withDeadlockRetry` canónico abre en el cliente global: sus opciones son un literal y no traen `cliente` (otro cliente = tx no canónico). */
+function deadlockRetryOptionsAreCanonical(invocation: ts.CallExpression): boolean {
+  const options = invocation.arguments[1]
+  if (!options || !ts.isObjectLiteralExpression(options)) return false
+  return !options.properties.some(
+    p => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && staticPropertyName(p.name) === 'cliente',
+  )
+}
+
 function isCanonicalDeadlockRetryImport(identifier: ts.Identifier, context: AstCall): boolean {
   const declarations = identifierSymbol(identifier, context.sourceFile)?.declarations ?? []
   if (declarations.length !== 1 || !ts.isImportSpecifier(declarations[0])) return false
@@ -1593,7 +1602,7 @@ function canonicalTransactionCallbackOwns(parameter: ts.ParameterDeclaration, co
   if (!ts.isCallExpression(invocation) || invocation.arguments[0] !== callback || invocation.questionDotToken) return false
   const callee = invocation.expression
   // S5b (red por traba): `withDeadlockRetry(cuerpo, …)` de `utils/serializableRetry` abre la misma transacción canónica que `prisma.$transaction`.
-  if (ts.isIdentifier(callee)) return isCanonicalDeadlockRetryImport(callee, context)
+  if (ts.isIdentifier(callee)) return isCanonicalDeadlockRetryImport(callee, context) && deadlockRetryOptionsAreCanonical(invocation)
   if ((!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) || callee.questionDotToken) return false
   if (staticPropertyName(callee) !== '$transaction') return false
   const receiver = receiverOf(callee)
@@ -3291,6 +3300,22 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
   it('POS serializa llave natural, clasifica en tx y sólo en la rama existing hace Order→Shift', () => {
     const calls = parseCalls('src/services/pos-sync/posSyncOrder.service.ts')
     expect(posNaturalKeyClassificationIsSafe(calls, 'processPosOrderEvent')).toBe(true)
+  })
+
+  it('withDeadlockRetry es dueño del tx canónico sólo con opciones literales y sin `cliente`', () => {
+    const camino = (opciones: string) => {
+      const calls = parseCalls(
+        'fixture.ts',
+        `import { withDeadlockRetry } from '@/utils/serializableRetry'
+         export async function f(otro: unknown) { await withDeadlockRetry(async tx => { await tx.payment.create({ data: {} }) }, ${opciones}) }`,
+      )
+      const pago = calls.find(c => c.node.expression.getText() === 'tx.payment.create')!
+      return transactionPathForPayment(pago)
+    }
+    expect(camino("{ etiqueta: 'f' }")).toEqual([])
+    expect(camino("{ etiqueta: 'f', cliente: otro }")).toBeUndefined()
+    expect(camino("{ etiqueta: 'f', cliente }")).toBeUndefined()
+    expect(camino('opciones')).toBeUndefined()
   })
 
   it('fixtures mutantes no certifican lock condicional, bulk Order-after-Shift ni clasificación POS exterior', () => {

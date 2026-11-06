@@ -3323,7 +3323,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       return { orderIdForReferral, postingId, loyaltyBase }
       // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
     },
-    { etiqueta: 'finalizePaymentLinkCheckout', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
+    { etiqueta: 'completeCharge', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
   )
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
@@ -4277,7 +4277,7 @@ export async function finalizeMercadoPagoCheckout(args: {
         return { postingId, orderIdForReferral }
         // La comisión se congela en esta transacción: el mismo tope de 10 s que las otras ligas y la terminal.
       },
-      { etiqueta: 'finalizePaymentLinkCheckout', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
+      { etiqueta: 'finalizeMercadoPagoCheckout', ...OPCIONES_DE_TRANSACCION_DEL_INTENTO },
     )
 
     // Aplicar el vale YA COMMITEADO el cobro. Nunca puede tumbar una venta
