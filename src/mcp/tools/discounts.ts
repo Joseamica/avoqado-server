@@ -7,6 +7,11 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { createDiscount } from '@/services/dashboard/discount.dashboard.service'
 import { validarCambioDeDescuento } from '@/services/dashboard/reglasDeDescuento'
+
+// D14 v2 (Codex r2 #2): los errores de tipo de los límites, en español; 0 y negativos los decide la regla única.
+const limiteDeUsos = z
+  .number({ invalid_type_error: 'El límite de usos debe ser un número' })
+  .int('El límite de usos debe ser un número entero')
 import { createCouponCode } from '@/services/dashboard/coupon.dashboard.service'
 import { planGateMessage } from '../planGate'
 import { DiscountType } from '@prisma/client'
@@ -166,8 +171,8 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('Venue that owns the discount (must be in your scope)'),
       discountName: z.string().min(1).describe('Name of the existing discount this code belongs to (see list_discounts)'),
       code: z.string().min(2).describe('The coupon code customers will type, e.g. "VERANO20"'),
-      maxUses: z.number().int().optional().describe('Total redemptions allowed, 1 or more (omit = unlimited)'),
-      maxUsesPerCustomer: z.number().int().optional().describe('Redemptions allowed per customer, 1 or more'),
+      maxUses: limiteDeUsos.optional().describe('Total redemptions allowed, 1 or more (omit = unlimited)'),
+      maxUsesPerCustomer: limiteDeUsos.optional().describe('Redemptions allowed per customer, 1 or more'),
       minPurchase: z.number().min(0).optional().describe('Minimum purchase to redeem'),
       validFrom: z.string().optional().describe('Valid from — AAAA-MM-DD (venue-local start of day) or full ISO 8601'),
       validUntil: z.string().optional().describe('Valid until — AAAA-MM-DD (venue-local end of day) or full ISO 8601'),
