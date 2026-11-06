@@ -18,8 +18,8 @@ import { DATABASE_JOB_SCHEDULES } from '@/jobs/jobSchedules'
 
 const NOW = new Date('2026-10-14T18:30:10.000Z')
 const CANDIDATES = [
-  { orderId: 'ord1', venueId: 'v1', order: { paymentStatus: 'PENDING' } },
-  { orderId: 'ord2', venueId: 'v2', order: { paymentStatus: 'PENDING' } },
+  { orderId: 'ord1', venueId: 'v1' },
+  { orderId: 'ord2', venueId: 'v2' },
 ]
 
 async function retryOnce<T>(operation: () => Promise<T>, options: { shouldRetry?: (e: unknown) => boolean }): Promise<T> {
@@ -36,7 +36,7 @@ function harness(
     candidates?: typeof CANDIDATES
     expireOrder?: jest.Mock
     findMany?: jest.Mock
-    groupBy?: jest.Mock
+    leerAbonosDevueltos?: jest.Mock
     syncCancelled?: jest.Mock
     syncPaidPickups?: jest.Mock
     syncPaidFolios?: jest.Mock
@@ -46,16 +46,16 @@ function harness(
 ) {
   const cron = { start: jest.fn(), stop: jest.fn() }
   const findMany = o.findMany ?? jest.fn().mockResolvedValue(o.candidates ?? CANDIDATES)
-  const groupBy = o.groupBy ?? jest.fn().mockResolvedValue([])
   const expireOrder = o.expireOrder ?? jest.fn().mockResolvedValue({ outcome: 'OK', status: 'EXPIRED' })
   const syncCancelled = o.syncCancelled ?? jest.fn().mockResolvedValue(0)
   const syncPaidPickups = o.syncPaidPickups ?? jest.fn().mockResolvedValue(0)
   const syncPaidFolios = o.syncPaidFolios ?? jest.fn().mockResolvedValue(0)
   const syncPaidClosedFolios = o.syncPaidClosedFolios ?? jest.fn().mockResolvedValue(0)
   const cerrarFoliosDelDia = o.cerrarFoliosDelDia ?? jest.fn().mockResolvedValue(0)
+  const leerAbonosDevueltos = o.leerAbonosDevueltos ?? jest.fn().mockResolvedValue([])
   const now = jest.fn(() => NOW)
   const job = new OnlineOrderAcceptanceExpiryJob({
-    prisma: { onlineOrder: { findMany }, payment: { groupBy } } as never,
+    prisma: { onlineOrder: { findMany } } as never,
     cron: cron as never,
     expireOrder,
     retryEntry: retryOnce as never,
@@ -64,13 +64,14 @@ function harness(
     syncPaidFolios,
     syncPaidClosedFolios,
     cerrarFoliosDelDia,
+    leerAbonosDevueltos,
     now,
   })
   return {
     job,
     cron,
     findMany,
-    groupBy,
+    leerAbonosDevueltos,
     expireOrder,
     syncCancelled,
     syncPaidPickups,
@@ -100,21 +101,10 @@ describe('online-order-acceptance-expiry.job', () => {
       where: {
         status: 'PENDING_ACCEPTANCE',
         acceptDeadlineAt: { lte: NOW },
-        AND: [
-          {
-            OR: [
-              // A13: una cuenta ya cerrada sin dinero (cortesía, COMPLETED) no se vuelve a intentar vencer en cada pasada.
-              { order: { paymentStatus: 'PENDING', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } } },
-              // R44: un folio con abono (PARTIAL), por si su dinero se reembolsó completo.
-              {
-                requiresAcceptance: false,
-                order: { paymentStatus: 'PARTIAL', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } },
-              },
-            ],
-          },
-        ],
+        // A13: una cuenta ya cerrada sin dinero (cortesía, COMPLETED) no se vuelve a intentar vencer en cada pasada.
+        order: { paymentStatus: 'PENDING', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } },
       },
-      select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true, order: { select: { paymentStatus: true } } },
+      select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
       orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
       take: 100,
     })
@@ -153,9 +143,8 @@ describe('online-order-acceptance-expiry.job', () => {
       orderId: `bloq${i}`,
       venueId: 'v1',
       acceptDeadlineAt: at,
-      order: { paymentStatus: 'PENDING' },
     }))
-    const vencible = { id: 'oo-999', orderId: 'ord-ok', venueId: 'v2', acceptDeadlineAt: at, order: { paymentStatus: 'PENDING' } }
+    const vencible = { id: 'oo-999', orderId: 'ord-ok', venueId: 'v2', acceptDeadlineAt: at }
     const findMany = jest.fn().mockResolvedValueOnce(bloqueados).mockResolvedValueOnce([vencible])
     const expireOrder = jest.fn(async (i: { orderId: string }) =>
       i.orderId === 'ord-ok' ? { outcome: 'OK', status: 'EXPIRED' } : { outcome: 'HAS_PAYMENTS' },
@@ -178,33 +167,84 @@ describe('online-order-acceptance-expiry.job', () => {
     expect(findMany).toHaveBeenCalledTimes(2) // la segunda página vino incompleta: la pasada termina
   })
 
-  it('R44: también lee folios con abono (PARTIAL); su neto sale de UNA consulta del lote y sólo se intenta vencer el de neto 0 (R18: un abono vivo ni se intenta)', async () => {
-    const at = new Date('2026-10-14T18:00:00.000Z')
-    const findMany = jest.fn().mockResolvedValue([
-      { id: 'a', orderId: 'sin-dinero', venueId: 'v1', acceptDeadlineAt: at, order: { paymentStatus: 'PENDING' } },
-      { id: 'b', orderId: 'reembolsado', venueId: 'v1', acceptDeadlineAt: at, order: { paymentStatus: 'PARTIAL' } },
-      { id: 'c', orderId: 'abonado', venueId: 'v2', acceptDeadlineAt: at, order: { paymentStatus: 'PARTIAL' } },
-    ])
-    const D = (v: string) => new Prisma.Decimal(v)
-    const groupBy = jest.fn().mockResolvedValue([
-      { orderId: 'reembolsado', _sum: { amount: D('0.00'), tipAmount: D('0.00') } },
-      { orderId: 'abonado', _sum: { amount: D('50.00'), tipAmount: D('0.00') } },
-    ])
-    const h = harness({ findMany, groupBy })
-
-    await expect(h.job.checkNow()).resolves.toMatchObject({ scanned: 3, expired: 2, noop: 1, errors: 0 })
-    expect(groupBy).toHaveBeenCalledTimes(1)
-    expect(groupBy.mock.calls[0][0]).toMatchObject({
-      by: ['orderId'],
-      where: { orderId: { in: ['reembolsado', 'abonado'] }, status: 'COMPLETED' },
+  it('R49 (Codex r2): 1,000 folios con abono VIVO y vencidos (más que las 10 páginas) no tapan a un pedido posterior sin dinero de otro negocio: vence en la MISMA pasada', async () => {
+    // Base simulada como la de Codex: el barrido lee lo que su filtro pide. Los abonos vivos son PARTIAL con neto $50.
+    const viejo = new Date('2026-10-14T10:00:00.000Z')
+    const abonos = Array.from({ length: 1000 }, (_, i) => ({
+      id: `oo-a${String(i).padStart(4, '0')}`,
+      orderId: `abono${i}`,
+      venueId: `v-folios-${i % 7}`,
+      acceptDeadlineAt: viejo,
+      order: { paymentStatus: 'PARTIAL' },
+    }))
+    const posterior = {
+      id: 'oo-z',
+      orderId: 'equipo-sin-dinero',
+      venueId: 'v-otro',
+      acceptDeadlineAt: new Date('2026-10-14T18:00:00.000Z'),
+      order: { paymentStatus: 'PENDING' },
+    }
+    const filas = [...abonos, posterior]
+    const despuesDe = (f: (typeof filas)[number], cursor: any) => {
+      if (!cursor) return true
+      const at = f.acceptDeadlineAt.getTime()
+      const cursorAt = cursor[0].acceptDeadlineAt.gt.getTime()
+      return at > cursorAt || (at === cursorAt && f.id > cursor[1].id.gt)
+    }
+    const findMany = jest.fn(async ({ where, take }: any) => {
+      const pideAbonos = JSON.stringify(where).includes('PARTIAL')
+      return filas
+        .filter(f => f.order.paymentStatus === 'PENDING' || pideAbonos)
+        .filter(f => despuesDe(f, where.OR))
+        .slice(0, take)
     })
-    expect(h.expireOrder.mock.calls.map(([i]: any[]) => i.orderId)).toEqual(['sin-dinero', 'reembolsado'])
+    const D = (v: string) => new Prisma.Decimal(v)
+    const groupBy = jest.fn(async ({ where }: any) =>
+      where.orderId.in.map((orderId: string) => ({ orderId, _sum: { amount: D('50.00'), tipAmount: D('0.00') } })),
+    )
+    const expireOrder = jest.fn(async (i: { orderId: string }) =>
+      i.orderId.startsWith('abono') ? { outcome: 'HAS_PAYMENTS' } : { outcome: 'OK', status: 'EXPIRED' },
+    )
+    const job = new OnlineOrderAcceptanceExpiryJob({
+      prisma: { onlineOrder: { findMany }, payment: { groupBy } } as never,
+      cron: { start: jest.fn(), stop: jest.fn() } as never,
+      expireOrder: expireOrder as never,
+      retryEntry: retryOnce as never,
+      syncCancelled: jest.fn().mockResolvedValue(0),
+      syncPaidPickups: jest.fn().mockResolvedValue(0),
+      syncPaidFolios: jest.fn().mockResolvedValue(0),
+      syncPaidClosedFolios: jest.fn().mockResolvedValue(0),
+      cerrarFoliosDelDia: jest.fn().mockResolvedValue(0),
+      // La pasada aparte filtra el neto 0 en SQL: un abono vivo nunca sale de ella.
+      leerAbonosDevueltos: jest.fn().mockResolvedValue([]),
+      now: () => NOW,
+    } as never)
+
+    for (let pasada = 0; pasada < 2; pasada++) {
+      expireOrder.mockClear()
+      const r = await job.checkNow()
+      expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v-otro', orderId: 'equipo-sin-dinero', now: NOW })
+      expect(r).toMatchObject({ expired: 1, errors: 0 })
+      expect(expireOrder.mock.calls.some(([i]: any[]) => i.orderId.startsWith('abono'))).toBe(false)
+    }
   })
 
-  it('R44: sin folios con abono en el lote no consulta pagos', async () => {
-    const h = harness()
-    await h.job.checkNow()
-    expect(h.groupBy).not.toHaveBeenCalled()
+  it('R49: la pasada aparte vence lo que su consulta (neto 0 en SQL) devuelve, con el mismo vencer bajo candado; su lectura va con reintento y su fallo no detiene el barrido', async () => {
+    const leerAbonosDevueltos = jest.fn().mockResolvedValue([
+      { id: 'oo-d1', orderId: 'devuelto1', venueId: 'v3' },
+      { id: 'oo-d2', orderId: 'devuelto2', venueId: 'v4' },
+    ])
+    const expireOrder = jest.fn(async (i: { orderId: string }) =>
+      i.orderId === 'devuelto2' ? { outcome: 'HAS_PAYMENTS' } : { outcome: 'OK', status: 'EXPIRED' },
+    )
+    const h = harness({ leerAbonosDevueltos, expireOrder })
+    await expect(h.job.checkNow()).resolves.toMatchObject({ scanned: 4, expired: 3, noop: 1, errors: 0 })
+    expect(leerAbonosDevueltos).toHaveBeenCalledWith(NOW)
+    expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v3', orderId: 'devuelto1', now: NOW })
+    expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v4', orderId: 'devuelto2', now: NOW })
+
+    const h2 = harness({ leerAbonosDevueltos: jest.fn().mockRejectedValue(new Error('db')) })
+    await expect(h2.job.checkNow()).resolves.toMatchObject({ scanned: 2, expired: 2, errors: 0 })
   })
 
   it('usa UN solo instante por pasada y vence cada candidato en su venue', async () => {
@@ -256,7 +296,11 @@ describe('online-order-acceptance-expiry.job', () => {
       return []
     }) as any)
     prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
-    const job = new OnlineOrderAcceptanceExpiryJob({ cron: { start: jest.fn(), stop: jest.fn() } as never, now: () => NOW })
+    const job = new OnlineOrderAcceptanceExpiryJob({
+      cron: { start: jest.fn(), stop: jest.fn() } as never,
+      now: () => NOW,
+      leerAbonosDevueltos: jest.fn().mockResolvedValue([]), // su SQL tiene su propia prueba
+    })
 
     await expect(job.checkNow()).resolves.toMatchObject({ synced: 1, collected: 1, scanned: 0 })
     expect(notifyOrderEvent).toHaveBeenCalledTimes(1)
@@ -293,6 +337,7 @@ describe('online-order-acceptance-expiry.job', () => {
       now: () => NOW,
       retryEntry: retryEntry as never,
       cerrarFoliosDelDia: jest.fn().mockResolvedValue(0), // el fin del día (T9b) tiene su propia prueba
+      leerAbonosDevueltos: jest.fn().mockResolvedValue([]),
     })
 
     await expect(job.checkNow()).resolves.toMatchObject({ synced: 0, collected: 1, errors: 0 })

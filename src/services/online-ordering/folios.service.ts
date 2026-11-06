@@ -8,8 +8,9 @@ import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/p
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
-import { INBOX_PAGE_SIZE, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
+import { EXPIRY_BATCH_SIZE, INBOX_PAGE_SIZE, OPEN_ORDER_STATUSES, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
 // Ciclo a propósito: `inbox.service` usa las sincronizaciones de aquí y esta lista usa su forma; todo se usa al llamar, nunca al cargar.
 import { INBOX_SELECT, fromActiveCursor, toActiveCursor, toInboxOrder } from './inbox.service'
 import { getSettings } from './settings.service'
@@ -271,6 +272,28 @@ export async function cerrarFoliosDelDiaTerminado(
   }
   if (won > 0) logger.info('[OnlineOrdering] folios entregados al terminar el día del negocio', { ...scope, count: won })
   return won
+}
+
+/**
+ * R44/R49: folios por pagar cuyo abono se devolvió completo, con el plazo vencido y la cuenta abierta en PARTIAL. El dinero neto
+ * (Σ amount + tipAmount de los `Payment` COMPLETED; los reembolsos son filas negativas) se filtra EN esta consulta: un abono vivo
+ * nunca sale de aquí, así que no gasta páginas del barrido de vencer (Codex r2). El trabajo vence cada uno bajo el candado de la
+ * orden, releyendo el neto (`casTransitionInTx`, R44).
+ * ponytail: una página por pasada; los que vencen salen del conjunto, y uno frenado por un cobro vivo de terminal es pasajero.
+ */
+export function leerFoliosConAbonoDevuelto(now: Date) {
+  return prisma.$queryRaw<Array<{ id: string; orderId: string; venueId: string }>>`
+    SELECT oo.id, oo."orderId", oo."venueId"
+    FROM "OnlineOrder" oo
+    JOIN "Order" o ON o.id = oo."orderId"
+    WHERE oo."requiresAcceptance" = false
+      AND oo.status = 'PENDING_ACCEPTANCE'
+      AND oo."acceptDeadlineAt" <= ${utcTs(now)}
+      AND o."paymentStatus" = 'PARTIAL'
+      AND o.status::text IN (${Prisma.join([...OPEN_ORDER_STATUSES])})
+      AND COALESCE((SELECT SUM(p.amount + p."tipAmount") FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED'), 0) <= 0
+    ORDER BY oo."acceptDeadlineAt" ASC, oo.id ASC
+    LIMIT ${EXPIRY_BATCH_SIZE}`
 }
 
 export type FolioSection = 'toPay' | 'toDeliver'

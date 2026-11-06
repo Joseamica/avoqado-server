@@ -37,6 +37,7 @@ import { notifyOrderEvent } from '@/services/online-ordering/notifications.servi
 import { getSettings } from '@/services/online-ordering/settings.service'
 import {
   cerrarFoliosDelDiaTerminado,
+  leerFoliosConAbonoDevuelto,
   prepararFolioPagado,
   prepararFolioPagadoEnTx,
   syncPaidClosedFolios,
@@ -375,5 +376,36 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
     await expect(cerrarFoliosDelDiaTerminado({}, NOW, readCandidates as any)).resolves.toBe(0)
     expect(readCandidates).toHaveBeenCalledTimes(1)
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+  })
+})
+
+describe('leerFoliosConAbonoDevuelto (R49: la pasada aparte de R44, con el neto 0 filtrado en SQL)', () => {
+  const sqlLeido = () => {
+    const [strings, ...valores] = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
+    const aplanar = (x: any): string =>
+      Array.isArray(x) ? x.join(' ') : x && typeof x === 'object' && 'strings' in x ? x.strings.join(' ') : String(x)
+    return { sql: [aplanar(strings), ...valores.map(aplanar)].join(' '), valores }
+  }
+
+  it('UNA consulta acotada: folio PENDING_ACCEPTANCE vencido, cuenta abierta PARTIAL y Σ (importe + propina) de los COMPLETED ≤ 0, en orden estable', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([{ id: 'oo1', orderId: 'ord1', venueId: 'v1' }])
+    await expect(leerFoliosConAbonoDevuelto(NOW)).resolves.toEqual([{ id: 'oo1', orderId: 'ord1', venueId: 'v1' }])
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1) // sin N+1: el neto va dentro de la misma consulta
+    const { sql, valores } = sqlLeido()
+    expect(sql).toContain('oo."requiresAcceptance" = false')
+    expect(sql).toContain("oo.status = 'PENDING_ACCEPTANCE'")
+    expect(sql).toContain('oo."acceptDeadlineAt" <=')
+    expect(sql).toContain("AT TIME ZONE 'UTC'") // la fecha va por `utcTs`
+    expect(sql).toContain('o."paymentStatus" = \'PARTIAL\'')
+    expect(sql).toContain('o.status::text IN')
+    expect(sql).toMatch(/SUM\(p\.amount \+ p\."tipAmount"\)/)
+    expect(sql).toContain("p.status = 'COMPLETED'")
+    expect(sql).toMatch(/<= 0/)
+    expect(sql).toMatch(/ORDER BY oo\."acceptDeadlineAt" ASC, oo\.id ASC/)
+    expect(sql).toContain('LIMIT')
+    expect(valores).toEqual(expect.arrayContaining([100]))
+    expect(valores.flatMap((v: any) => (v && typeof v === 'object' && 'values' in v ? v.values : [v]))).toEqual(
+      expect.arrayContaining(['PENDING', 'CONFIRMED', 'PREPARING', 'READY', NOW]),
+    )
   })
 })
