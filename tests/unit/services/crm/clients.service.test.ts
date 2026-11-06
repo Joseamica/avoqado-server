@@ -1274,6 +1274,81 @@ describe('setUsa (C1, tarea 7)', () => {
     expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledTimes(1)
   })
 
+  describe('«vio»: lo que el editor vio (el SERVIDOR decide si cambió mientras tanto)', () => {
+    const noEscribio = () => {
+      expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+      expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // ni lastTouchAt
+      expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    }
+
+    it('coincide con lo guardado → escribe como siempre', async () => {
+      cuenta('TERMINAL', 'Lo dijo la dueña')
+      await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('se compara normalizado: espacios del porqué y null contra «» no son un cambio', async () => {
+      cuenta('TERMINAL', 'Lo dijo la dueña')
+      await setUsa(access(), ACCOUNT, {
+        valor: 'POS',
+        porque: 'Lo vi en su local',
+        vio: { valor: 'TERMINAL', porque: '  Lo dijo la dueña ' },
+      })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      prismaMock.crmAccount.update.mockClear()
+      cuenta(null, null)
+      await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: null, porque: '' } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+
+    it('🔴 otro valor guardado → 409 CRM_CAMBIO_AL_EDITAR con su mensaje, y no escribe nada', async () => {
+      cuenta('AMBOS', 'Lo cambió otra persona')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMBIO_AL_EDITAR',
+        message: 'Cambió mientras lo editabas: revisa y guarda otra vez.',
+      })
+      noEscribio()
+    })
+
+    it('🔴 mismo valor con otro porqué guardado → 409 (alguien más lo reescribió)', async () => {
+      cuenta('TERMINAL', 'Otra razón')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: null, vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } }),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR' })
+      noEscribio()
+    })
+
+    it('🔴 vio null («Leerlo solo») pero alguien ya escribió un ✋ → 409', async () => {
+      cuenta('POS', 'Lo vi en su local')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: 'TERMINAL', porque: 'La tiene en caja', vio: { valor: null, porque: null } }),
+      ).rejects.toMatchObject({
+        code: 'CRM_CAMBIO_AL_EDITAR',
+      })
+      noEscribio()
+    })
+
+    it('lo que se pide ya está guardado (reintento del propio guardado) → no-op aunque vio sea lo de antes', async () => {
+      cuenta('POS', 'Lo vi en su local')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } }),
+      ).resolves.toEqual({ accountId: ACCOUNT, usaManual: 'POS' })
+      noEscribio()
+    })
+
+    it('sin vio, otro valor guardado se pisa como hoy', async () => {
+      cuenta('AMBOS', 'Lo cambió otra persona')
+      await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local' })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('🔴 A «propios» sobre la cuenta de B (no la ve) → 404 y no escribe', async () => {
     prismaMock.crmAccount.findFirst.mockResolvedValue(null)
     await expect(setUsa(access(), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({ statusCode: 404 })
@@ -1388,6 +1463,84 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
     expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
     expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  describe('«vio»: lo que el editor vio (el SERVIDOR decide si cambió mientras tanto)', () => {
+    const noEscribio = () => {
+      expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+      expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // ni lastTouchAt
+      expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    }
+
+    it('coincide con lo guardado → escribe como siempre', async () => {
+      cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'Se fue', altaPerdido: false })
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: 'OTRO', texto: 'Se fue', perdido: false } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('se compara normalizado: espacios del texto y null contra «» no son un cambio', async () => {
+      cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'Se fue', altaPerdido: false })
+      await setAltaMotivo(access(), ACCOUNT, {
+        motivo: 'PRECIO',
+        perdido: true,
+        vio: { motivo: 'OTRO', texto: ' Se fue  ', perdido: false },
+      })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      prismaMock.crmAccount.update.mockClear()
+      cuenta()
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: null, texto: '', perdido: false } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+
+    it('🔴 otro motivo guardado → 409 CRM_CAMBIO_AL_EDITAR con su mensaje, y no escribe nada', async () => {
+      cuenta({ altaMotivo: 'DESPUES' })
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: null, texto: null, perdido: false } }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMBIO_AL_EDITAR',
+        message: 'Cambió mientras lo editabas: revisa y guarda otra vez.',
+      })
+      noEscribio()
+    })
+
+    it('🔴 otro texto o otro «Perdido» guardado → 409', async () => {
+      cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'Otra historia', altaPerdido: false })
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, {
+          motivo: 'OTRO',
+          texto: 'Se fue',
+          perdido: true,
+          vio: { motivo: 'OTRO', texto: 'Se fue', perdido: false },
+        }),
+      ).rejects.toMatchObject({ code: 'CRM_CAMBIO_AL_EDITAR' })
+      cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, { motivo: null, perdido: true, vio: { motivo: 'PRECIO', texto: null, perdido: false } }),
+      ).rejects.toMatchObject({ code: 'CRM_CAMBIO_AL_EDITAR' })
+      noEscribio()
+    })
+
+    it('lo que se pide ya está guardado (reintento del propio guardado) → no-op aunque vio sea lo de antes', async () => {
+      cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: null, texto: null, perdido: false } })
+      noEscribio()
+    })
+
+    it('el alta ya terminó → sigue siendo CRM_ALTA_TERMINADA aunque vio no coincida', async () => {
+      cuenta({ altaMotivo: 'DESPUES' }, false)
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false, vio: { motivo: null, texto: null, perdido: false } }),
+      ).rejects.toMatchObject({ code: 'CRM_ALTA_TERMINADA' })
+    })
+
+    it('sin vio, otro motivo guardado se pisa como hoy', async () => {
+      cuenta({ altaMotivo: 'DESPUES' })
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
   })
 
   it('🔴 A «propios» sobre la de B (no la ve) → 404 y no escribe', async () => {

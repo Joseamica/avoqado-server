@@ -171,6 +171,14 @@ describe('POST /crm/accounts/:id/usa: el «✋ a mano» (C1, tarea 7)', () => {
     expect(parse({ valor: 'POS', porque: 'x'.repeat(141) }).success).toBe(false)
     expect(parse({ valor: 'POS', porque: '   a   ' }).success).toBe(false)
   })
+
+  it('«vio» (lo que el editor vio) es opcional; con forma { valor, porque } pasa y llega al servicio', () => {
+    const r = parse({ valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } })
+    expect(r.success && r.data.body.vio).toEqual({ valor: 'TERMINAL', porque: 'Lo dijo la dueña' })
+    expect(parse({ valor: 'POS', porque: 'Lo vi en su local', vio: { valor: null, porque: null } }).success).toBe(true)
+    expect(parse({ valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'OTRO', porque: null } }).success).toBe(false)
+    expect(parse({ valor: 'POS', porque: 'Lo vi en su local', vio: 'POS' }).success).toBe(false)
+  })
 })
 
 describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)', () => {
@@ -199,5 +207,13 @@ describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)',
     expect(parse({ motivo: 'TERMINO', perdido: false }).success).toBe(false)
     expect(parse({ motivo: 'OTRO', texto: 'x'.repeat(201), perdido: false }).success).toBe(false)
     expect(parse({ motivo: 'PRECIO' }).success).toBe(false)
+  })
+
+  it('«vio» (lo que el editor vio) es opcional; con forma { motivo, texto, perdido } pasa y llega al servicio', () => {
+    const r = parse({ motivo: 'PRECIO', perdido: true, vio: { motivo: 'OTRO', texto: 'Se fue', perdido: false } })
+    expect(r.success && r.data.body.vio).toEqual({ motivo: 'OTRO', texto: 'Se fue', perdido: false })
+    expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null, perdido: false } }).success).toBe(true)
+    expect(parse({ motivo: null, perdido: true, vio: { motivo: 'TERMINO', texto: null, perdido: false } }).success).toBe(false)
+    expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null } }).success).toBe(false)
   })
 })

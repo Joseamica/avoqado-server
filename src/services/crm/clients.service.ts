@@ -328,15 +328,22 @@ export async function ensureClientAccount(access: CrmAccess, organizationId: str
   return result
 }
 
+/** «Lo que viste» against what is saved: trimmed, and '' is the same as null. */
+const mismoTexto = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim() === (b ?? '').trim()
+/** The editor's copy is stale: someone saved something else while it was open (C1 redesign: the SERVER decides, not the browser). */
+const cambioAlEditar = () => new ConflictError('Cambió mientras lo editabas: revisa y guarda otra vez.', 'CRM_CAMBIO_AL_EDITAR')
+
 /**
  * «✋ a mano» en Usa (C1, tarea 7): a seller with «Editar» writes what the client uses, with the reason, or clears it
  * (`valor: null`, «Leerlo solo»). The reason lives only in the timeline event: the ActivityLog never carries it. Clearing
  * what is already clear, or writing the same value with the same reason, writes nothing (no event, no touch).
+ * `vio` is what the editor saw when opening it: if what is saved is something else, 409 `CRM_CAMBIO_AL_EDITAR` and nothing is
+ * written. Asking for what is already saved stays a no-op even then (a retry of one's own save is never a conflict).
  */
 export async function setUsa(
   access: CrmAccess,
   accountId: string,
-  input: { valor: UsaEscrito | null; porque?: string },
+  input: { valor: UsaEscrito | null; porque?: string; vio?: { valor: UsaEscrito | null; porque: string | null } },
 ): Promise<{ accountId: string; usaManual: UsaEscrito | null }> {
   const now = new Date()
   const { valor } = input
@@ -348,6 +355,9 @@ export async function setUsa(
     })
     // The same thing again (clear on clear, or the same value with the same reason) writes nothing, as `setAltaMotivo`.
     if (before.usaManual === valor && (valor === null || before.usaManualPorque === input.porque)) return null
+    const { vio } = input
+    if (vio && (vio.valor !== before.usaManual || (vio.valor !== null && !mismoTexto(vio.porque, before.usaManualPorque))))
+      throw cambioAlEditar()
     await touchNoEarlierTx(tx, accountId, now)
     await tx.crmAccount.update({
       where: { id: accountId },
@@ -384,11 +394,18 @@ export async function setUsa(
  * once the organization stops being a pending signup (`altaPendienteSql`, the rule that paints the 🟠) it is a 409 and
  * nothing is written. The text lives only in the timeline event: the ActivityLog never carries it. The same value again
  * writes nothing. `lockEditableTx` locks the row without touching it (a no-op never resets «Estancado»), so the pending check and the write see the same account.
+ * `vio` is what the editor saw when opening it: if what is saved is something else, 409 `CRM_CAMBIO_AL_EDITAR` and nothing is
+ * written (as in `setUsa`, the same value again stays a no-op).
  */
 export async function setAltaMotivo(
   access: CrmAccess,
   accountId: string,
-  input: { motivo: MotivoDelAlta | null; texto?: string; perdido: boolean },
+  input: {
+    motivo: MotivoDelAlta | null
+    texto?: string
+    perdido: boolean
+    vio?: { motivo: MotivoDelAlta | null; texto: string | null; perdido: boolean }
+  },
 ): Promise<{ accountId: string; motivo: MotivoDelAlta | null; texto: string | null; perdido: boolean }> {
   const now = new Date()
   const { motivo, perdido } = input
@@ -405,6 +422,9 @@ export async function setAltaMotivo(
     )
     if (!pendiente.length) throw new ConflictError('Ya terminó su alta: ya no hace falta el motivo', 'CRM_ALTA_TERMINADA')
     if (before.altaMotivo === motivo && before.altaMotivoTexto === texto && before.altaPerdido === perdido) return null
+    const { vio } = input
+    if (vio && (vio.motivo !== before.altaMotivo || !mismoTexto(vio.texto, before.altaMotivoTexto) || vio.perdido !== before.altaPerdido))
+      throw cambioAlEditar()
     await touchNoEarlierTx(tx, accountId, now)
     await tx.crmAccount.update({ where: { id: accountId }, data: { altaMotivo: motivo, altaMotivoTexto: texto, altaPerdido: perdido } })
     await addEvent(tx, {

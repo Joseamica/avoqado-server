@@ -1772,6 +1772,30 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       })
       expect(eventos[1].data).toEqual({ valor: guardado.usaManual, porque: guardado.usaManualPorque })
     })
+
+    it('🔴 copia vieja: A abre con TERMINAL, B guarda AMBOS, A guarda con lo que vio → 409 CRM_CAMBIO_AL_EDITAR y queda lo de B', async () => {
+      const c = await cliente([{ source: 'TPV', dias: 3 }])
+      await setUsa(todos(), c.accountId, { valor: 'TERMINAL', porque: 'La tiene en caja' })
+      const vioA = { valor: 'TERMINAL' as const, porque: 'La tiene en caja' }
+      await setUsa(todos(), c.accountId, { valor: 'AMBOS', porque: 'Lo cambió B', vio: vioA })
+      const leer = () =>
+        prisma.crmAccount.findUniqueOrThrow({
+          where: { id: c.accountId },
+          select: { usaManual: true, usaManualPorque: true, lastTouchAt: true },
+        })
+      const deB = await leer()
+      await expect(setUsa(todos(), c.accountId, { valor: 'POS', porque: 'Lo dijo A', vio: vioA })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMBIO_AL_EDITAR',
+        message: 'Cambió mientras lo editabas: revisa y guarda otra vez.',
+      })
+      expect(await leer()).toEqual(deB)
+      expect(deB).toMatchObject({ usaManual: 'AMBOS', usaManualPorque: 'Lo cambió B' })
+      expect((await usaEvents(c.accountId)).map(e => (e.data as { valor: string }).valor)).toEqual(['TERMINAL', 'AMBOS'])
+      // Con lo que hay ahora (lo fresco), A sí guarda.
+      await setUsa(todos(), c.accountId, { valor: 'POS', porque: 'Lo dijo A', vio: { valor: 'AMBOS', porque: 'Lo cambió B' } })
+      expect(await leer()).toMatchObject({ usaManual: 'POS', usaManualPorque: 'Lo dijo A' })
+    })
   })
   describe('«¿Por qué se quedó?» (Tarea 8)', () => {
     const todos = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
@@ -1890,6 +1914,25 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         altaMotivo: null,
       })
       expect(await eventos(c.accountId)).toHaveLength(0)
+    })
+
+    it('🔴 copia vieja: A abre sin motivo, B guarda DESPUES, A guarda con lo que vio → 409 CRM_CAMBIO_AL_EDITAR y queda lo de B', async () => {
+      const c = await altaConCuenta()
+      const vioA = { motivo: null, texto: null, perdido: false }
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'DESPUES', perdido: false, vio: vioA })
+      const leer = () =>
+        prisma.crmAccount.findUniqueOrThrow({
+          where: { id: c.accountId },
+          select: { altaMotivo: true, altaMotivoTexto: true, altaPerdido: true, lastTouchAt: true },
+        })
+      const deB = await leer()
+      await expect(setAltaMotivo(todos(), c.accountId, { motivo: null, perdido: true, vio: vioA })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMBIO_AL_EDITAR',
+      })
+      expect(await leer()).toEqual(deB)
+      expect(deB).toMatchObject({ altaMotivo: 'DESPUES', altaPerdido: false })
+      expect(await eventos(c.accountId)).toEqual([{ data: { motivo: 'DESPUES', perdido: false } }])
     })
 
     it('🔴 una cuenta del CRM sin organización → 409 CRM_NO_ES_ALTA', async () => {

@@ -397,6 +397,16 @@ export const usaSchema = z.object({
     .object({
       valor: z.enum(USA_ESCRITO, { errorMap: () => ({ message: 'Ese valor no existe' }) }).nullable(),
       porque: z.string({ invalid_type_error: PORQUE_USA }).trim().min(3, PORQUE_USA).max(140, PORQUE_USA).optional(),
+      /** What the editor saw when opening it: the server answers 409 CRM_CAMBIO_AL_EDITAR if it is no longer what is saved. */
+      vio: z
+        .object(
+          {
+            valor: z.enum(USA_ESCRITO, { errorMap: () => ({ message: 'Lo que viste no es un valor válido' }) }).nullable(),
+            porque: z.string({ invalid_type_error: 'Lo que viste no es un texto' }).max(500, 'Lo que viste es muy largo').nullable(),
+          },
+          { invalid_type_error: 'Lo que viste no es válido' },
+        )
+        .optional(),
     })
     .refine(({ valor, porque }) => valor === null || !!porque, { message: PORQUE_USA, path: ['porque'] }),
 })
@@ -413,6 +423,17 @@ export const altaMotivoSchema = z.object({
         .max(200, 'El motivo es muy largo (máximo 200 letras)')
         .optional(),
       perdido: z.boolean({ required_error: 'Falta decir si se perdió', invalid_type_error: 'Falta decir si se perdió' }),
+      /** What the editor saw when opening it: the server answers 409 CRM_CAMBIO_AL_EDITAR if it is no longer what is saved. */
+      vio: z
+        .object(
+          {
+            motivo: z.enum(MOTIVOS_DEL_ALTA, { errorMap: () => ({ message: 'Lo que viste no es un motivo válido' }) }).nullable(),
+            texto: z.string({ invalid_type_error: 'Lo que viste no es un texto' }).max(500, 'Lo que viste es muy largo').nullable(),
+            perdido: z.boolean({ required_error: 'Falta lo que viste', invalid_type_error: 'Falta lo que viste' }),
+          },
+          { invalid_type_error: 'Lo que viste no es válido' },
+        )
+        .optional(),
     })
     .superRefine(({ motivo, texto }, ctx) => {
       if (motivo === 'OTRO' && !texto) ctx.addIssue({ code: 'custom', message: 'Escribe el motivo', path: ['texto'] })
