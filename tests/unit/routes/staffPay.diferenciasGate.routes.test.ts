@@ -155,7 +155,7 @@ describe('las tres rutas nuevas validan su entrada (cada una con su validateRequ
       .post(`${base}/class-sessions/${CLASE}/difference/settle`)
       .send({ ...CUERPO, huellaEsperada: undefined })
     expect(sinHuella.status).toBe(400)
-    expect(sinHuella.body.error).toMatch(/huellaEsperada/)
+    expect(sinHuella.body.error).toMatch(/Revisa la diferencia antes de liquidarla/)
     const huellaMala = await request(server)
       .post(`${base}/class-sessions/${CLASE}/difference/settle`)
       .send({ ...CUERPO, huellaEsperada: 'x' })

@@ -31,11 +31,12 @@ export const getRedemptionsQuerySchema = z.object({
 })
 
 // Codex r1 #3: los números sin mensaje salían con el de Zod en inglés.
-const Numero = z.number({ invalid_type_error: 'Debe ser un número', required_error: 'Falta un número' })
-const enteroDesde = (n: number) => Numero.int('Debe ser un número entero').min(n, `Debe ser ${n} o más`)
-const NoNegativo = Numero.min(0, 'No puede ser negativo')
+// D24 (5-nov): `validateRequest` ya no antepone el campo, así que cada número dice cuál es (frases sin género).
+const Numero = (q: string) => z.number({ invalid_type_error: `${q} debe ser un número`, required_error: `Falta: ${q.toLowerCase()}` })
+const enteroDesde = (n: number, q: string) => Numero(q).int(`${q} debe ser un número entero`).min(n, `${q} debe ser ${n} o más`)
+const NoNegativo = (q: string) => Numero(q).min(0, `${q} debe ser 0 o más`)
 // D14 v2: los límites de uso sólo validan la forma; 0, negativos y lo guardado los decide validarCambioDeDescuento.
-const Limite = Numero.int('Debe ser un número entero')
+const Limite = (q: string) => Numero(q).int(`${q} debe ser un número entero`)
 
 // ==========================================
 // CREATE SCHEMAS
@@ -49,9 +50,9 @@ export const createCouponBodySchema = z
       .min(3, 'El código debe tener al menos 3 caracteres')
       .max(30, 'El código puede tener hasta 30 caracteres')
       .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos'),
-    maxUses: Limite.optional(),
-    maxUsesPerCustomer: Limite.optional(),
-    minPurchaseAmount: NoNegativo.optional(),
+    maxUses: Limite('El límite de usos').optional(),
+    maxUsesPerCustomer: Limite('El límite de usos por cliente').optional(),
+    minPurchaseAmount: NoNegativo('La compra mínima').optional(),
     validFrom: z.coerce.date().optional(),
     validUntil: z.coerce.date().optional(),
     active: z.boolean().default(true),
@@ -79,9 +80,9 @@ export const updateCouponBodySchema = z.object({
     .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
   // null = sin límite
-  maxUses: Limite.optional().nullable(),
-  maxUsesPerCustomer: Limite.optional().nullable(),
-  minPurchaseAmount: NoNegativo.optional().nullable(),
+  maxUses: Limite('El límite de usos').optional().nullable(),
+  maxUsesPerCustomer: Limite('El límite de usos por cliente').optional().nullable(),
+  minPurchaseAmount: NoNegativo('La compra mínima').optional().nullable(),
   validFrom: z.coerce.date().optional().nullable(),
   validUntil: z.coerce.date().optional().nullable(),
   active: z.boolean().optional(),
@@ -98,10 +99,10 @@ export const bulkGenerateCouponsBodySchema = z.object({
     .max(10, 'El prefijo puede tener hasta 10 caracteres')
     .regex(/^[A-Za-z0-9-_]*$/, 'El prefijo sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
-  quantity: enteroDesde(1).min(1, 'La cantidad debe ser al menos 1').max(1000, 'La cantidad puede ser hasta 1000'),
-  codeLength: enteroDesde(4).max(20, 'El largo del código puede ser hasta 20').default(8),
-  maxUsesPerCode: Limite.optional(),
-  maxUsesPerCustomer: Limite.optional(),
+  quantity: enteroDesde(1, 'La cantidad').min(1, 'La cantidad debe ser al menos 1').max(1000, 'La cantidad puede ser hasta 1000'),
+  codeLength: enteroDesde(4, 'El largo del código').max(20, 'El largo del código puede ser hasta 20').default(8),
+  maxUsesPerCode: Limite('El límite de usos por código').optional(),
+  maxUsesPerCustomer: Limite('El límite de usos por cliente').optional(),
   validFrom: z.coerce.date().optional(),
   validUntil: z.coerce.date().optional(),
 })
@@ -111,8 +112,8 @@ export const bulkGenerateCouponsBodySchema = z.object({
 // ==========================================
 
 export const validateCouponBodySchema = z.object({
-  code: z.string().min(1, 'Code is required'),
-  orderTotal: NoNegativo.optional(),
+  code: z.string().min(1, 'Escribe el código'),
+  orderTotal: NoNegativo('El total de la cuenta').optional(),
   customerId: z.string().optional(),
 })
 
