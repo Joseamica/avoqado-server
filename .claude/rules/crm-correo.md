@@ -37,6 +37,17 @@ quien sólo tiene `mandar` nunca confirma una versión que otra persona cambió 
 la `huella` que contó y firmó, y la pantalla sólo deja mandar si es la que enseña (una reversa a un SERVIDOR viejo no la manda: «Mandar» se
 cierra y sale en gris). No quites ese campo.
 
+## 🔴 Personas quitadas y agregadas: el público v2 (plan B, 5-nov)
+
+- Sin personas sueltas la fila es `{ segmentos }`; con ellas, `{ v: 2, publicos, excluir, incluir }` y **nunca** `segmentos`: así un
+  SERVIDOR viejo (tras una reversa) la rechaza («Elige a quién le mandas») en vez de mandarle a quien se quitó. No le agregues esa llave.
+- La vista trae `publico` (las tres llaves) y `huellaPublico`; la pantalla nueva la devuelve como `basePublico` al guardar y, si el público
+  cambió, es 409 `CRM_CAMPANA_CAMBIO`. Sin `basePublico` (pantalla vieja) sobre una fila v2, 409 `CRM_CAMPANA_PANTALLA_VIEJA`.
+- `excluir` (gana sobre todo; la forma de la resolución, `algo@algo`) e `incluir` (sólo quien deja `sqlCorreoAgregable`; dominio con
+  punto): hasta 500 cada una, sin repetidos (400) y sin reordenar. Lo quitado se quita en SQL y otra vez con el correo con que se manda
+  (`btrim` no quita un U+00A0 de origen; `normalizeEmail` sí).
+- «Envíame una prueba» igual a una de las últimas 24 h contesta `{ ok: true, repetida: true }`: no llama a Resend ni deja otra bitácora.
+
 ## Llaves del CRM (plan 2026-11-04, L4–L9): cada ruta pide la suya
 
 | Llave                                                       | Abre                                                                                                                                                                                                                                                             |
@@ -47,7 +58,7 @@ cierra y sale en gris). No quites ese campo.
 | `crm:ver-campanas` (la traen también `preparar` y `mandar`) | lista, detalle y conteo de campañas (también `crm_campaign_status`)                                                                                                                                                                                              |
 | `crm:ver-campanas`                                          | `GET /campaigns/:id/recipients` «Ver quiénes» (sólo en BORRADOR, 409 si no): una consulta SQL por página, `LIMIT` ≤ 100 impuesto en el servidor, cursor opaco, **sin total** (la pantalla usa el «Le llega a N»); las bajas se quitan en SQL con `sqlBloqueado`. |
 | `crm:preparar`                                              | crear y editar una campaña, y su prueba                                                                                                                                                                                                                          |
-| `crm:preparar` | `GET /campaign-people?q=` «Agregar»: busca sólo entre personas **visibles** del CRM (nunca cuenta archivada, cliente oculto ni equipo, ni sus datos), frase completa sin acentos (como «Ver quiénes»), 20 filas fijas + `hayMas`; dice `aceptoCorreos`, `bloqueado` y `agregable` (la misma regla `sqlCorreoAgregable` del PATCH y de la resolución) |
+| `crm:preparar`                                              | `GET /campaign-people?q=` «Agregar»: sólo personas **visibles** del CRM (nunca archivada, oculto ni equipo), frase sin acentos, 20 filas + `hayMas`; dice `aceptoCorreos`, `bloqueado` y `agregable` (`sqlCorreoAgregable`, la del PATCH)                        |
 | `crm:plantillas` · `crm:preparar`                           | `GET /test-recipients`: a quién mandar la prueba (sólo nombres, nunca correos)                                                                                                                                                                                   |
 | `crm:mandar`                                                | mandar y cancelar                                                                                                                                                                                                                                                |
 | `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                                                                                          |
