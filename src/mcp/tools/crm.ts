@@ -36,7 +36,7 @@ import {
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, type Condicion, type Usa } from '@/services/crm/clientCodes'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, type Condicion, type Estado, type Usa } from '@/services/crm/clientCodes'
 import { listClients } from '@/services/crm/clients.service'
 import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 import { listTemplates } from '@/services/crm/email/templates.service'
@@ -80,7 +80,6 @@ function porNombre<T extends { name: string }>(items: T[], name: string | undefi
   return matches.length === 1 ? matches[0] : null
 }
 
-/** One business as the routine reads it. In «Vencidas» and «Hoy» it also says which activity is the caller's (ruling 61). */
 // ── «Clientes» (C1): lo que el SUPERADMIN pinta, dicho en texto ─────────────────────────────────────────────────────
 
 const USA_TEXTO: Record<Usa, string> = {
@@ -100,7 +99,7 @@ const CONDICION_TEXTO: Record<Condicion, string> = {
   GRATIS: 'gratis',
 }
 const NIVEL_TEXTO = { FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' } as const
-const ESTADO_TEXTO: Record<string, string> = {
+const ESTADO_TEXTO: Record<Estado, string> = {
   ALTA_SIN_TARJETA: 'Alta sin tarjeta',
   COBRA: 'Cobra (último cobro en 30 días)',
   SIN_COBROS: 'Cobró alguna vez, ya no en 30 días',
@@ -124,7 +123,7 @@ function cliente(row: FilaDeClientes) {
     usa: usaTexto(usa.visto),
     aviso: usa.aviso ? `Escrito a mano: ${usaTexto(usa.visto)}; lo medido dice: ${usaTexto(usa.medido)}` : null,
     plan: `${NIVEL_TEXTO[plan.nivel]}${condicion}${plan.pagoVencido ? ' · pago vencido' : ''}${plan.variaPorSucursal ? ' · varía por sucursal' : ''}${campana}`,
-    estado: ESTADO_TEXTO[estado.codigo] ?? estado.codigo,
+    estado: ESTADO_TEXTO[estado.codigo as Estado] ?? estado.codigo,
     ultimoCobro: fecha(estado.ultimoCobroAt, 'yyyy-MM-dd'),
     dueno: row.cuenta ? (row.cuenta.owner?.name ?? 'Sin dueño') : row.cuentaAjena ? 'De otra persona' : 'Sin cuenta en el CRM',
     motivo: alta?.motivo ?? null,
@@ -132,6 +131,7 @@ function cliente(row: FilaDeClientes) {
   }
 }
 
+/** One business as the routine reads it. In «Vencidas» and «Hoy» it also says which activity is the caller's (ruling 61). */
 function negocio(row: AccountRow & { miActividad?: MiActividad | null }) {
   const mine = row.miActividad
   return {

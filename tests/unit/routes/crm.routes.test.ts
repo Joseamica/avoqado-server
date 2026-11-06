@@ -296,7 +296,7 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
       query.sql.includes('AS "altaSinTarjeta"') ? [{ altaSinTarjeta: 0 }] : query.sql.includes('AS "total"') ? [{ total: 0 }] : [],
     )
 
-    const ok = await request(appWithErrors).get('/crm/clients?usa=POS&nivel=PRO&estado=COBRA&dueno=MIOS&motivo=SIN_MOTIVO')
+    const ok = await request(appWithErrors).get('/crm/clients?usa=POS&nivel=PRO&estado=COBRA&dueno=MIOS&motivo=SIN_MOTIVO&altas=true')
     expect(ok.status).toBe(200)
     expect(ok.body.meta).toMatchObject({ total: 0, nextCursor: null, legible: 1, conteos: { altaSinTarjeta: 0 } })
     for (const query of ['usa=AVISO', 'motivo=SIN_MOTIVO', 'condicion=PAGADO']) {

@@ -52,8 +52,11 @@ describe('clientFacts SQL', () => {
     for (const sql of [clientFactsLateral(NOW).sql, altaPendienteSql().sql]) {
       expect(sql).not.toContain('lastHeartbeat')
       // The only terminal column read is the one of the PAYMENT (alias `p`), which says where the card was processed.
-      for (const use of sql.match(/\w+\."terminalId"/g) ?? []) expect(use).toBe('p."terminalId"')
+      // Any spelling: quoted or not, with or without a table or alias in front (`"Order"."terminalId"`, `o2.terminalId`…).
+      for (const use of sql.match(/(?:"?\w+"?\.)?"?terminalId\b"?/gi) ?? []) expect(use).toBe('p."terminalId"')
     }
+    // The regex does find the one legitimate read (it is not vacuous).
+    expect(clientFactsLateral(NOW).sql.match(/(?:"?\w+"?\.)?"?terminalId\b"?/gi)).toEqual(['p."terminalId"'])
   })
 
   it('un alias que no es un identificador no entra al texto', () => {

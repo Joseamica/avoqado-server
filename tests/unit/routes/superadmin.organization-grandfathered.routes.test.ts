@@ -14,18 +14,10 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 }))
 jest.mock('@/services/access/rolVigente', () => ({ rolVigente: async (ctx: any) => ctx.role }))
 const mockGrandfathered = jest.fn((req: any, res: any) => res.status(200).json({ success: true, org: req.params.organizationId }))
-// Las demás rutas del controlador sólo necesitan ser funciones para que el router legacy se pueda armar.
-jest.mock(
-  '@/controllers/dashboard/organizations.superadmin.controller',
-  () =>
-    new Proxy(
-      {},
-      {
-        get: (_t, prop) =>
-          prop === '__esModule' ? true : prop === 'setOrganizationPlanGrandfathered' ? mockGrandfathered : (_q: any, r: any) => r.json({}),
-      },
-    ),
-)
+// El esquema vive en su archivo de esquemas: esta ruta ya no arma el router legacy, sólo usa este controlador.
+jest.mock('@/controllers/dashboard/organizations.superadmin.controller', () => ({
+  setOrganizationPlanGrandfathered: (req: any, res: any) => mockGrandfathered(req, res),
+}))
 
 import superadminRoutes from '@/routes/superadmin.routes'
 

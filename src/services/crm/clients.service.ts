@@ -11,6 +11,7 @@
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
 import { ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { isProductionVenue } from '../../lib/venueStatus.constants'
 import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
@@ -72,16 +73,18 @@ type PageRow = {
  * never takes a slot of the page nor counts in the total; `ocultos` with «Configurar el CRM» lists only those.
  * `legible: 1` tells a client this server filters and paints the C1 columns (Usa, Plan, Estado). Each row also carries, read
  * for the page only (task 5): its devices, its plan's condition by the platform's own rules, a 🟠's signup and the newest
- * note of an account the caller sees; `conteos` counts the 🟠 by reason.
+ * note of an account the caller sees; `conteos` counts the 🟠 by reason, only when the request lists them (`altas=true`).
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
   checkDueno(access, filters.dueno)
   const limit = pageSize(filters.limit)
   const queries = clientsQueries(access, filters, now, await teamOrganizationId())
-  const [found, [{ total }], [conteo]] = await Promise.all([
+  // The count of 🟠 only for whoever lists the signups (`altas=true`): an old SUPERADMIN never sends it nor reads it.
+  const conAltas = filters.altas === true
+  const [found, [{ total }], conteo] = await Promise.all([
     prisma.$queryRaw<PageRow[]>(queries.page),
     prisma.$queryRaw<Array<{ total: number }>>(queries.total),
-    prisma.$queryRaw<Array<Record<string, number>>>(queries.conteos),
+    conAltas ? prisma.$queryRaw<Array<Record<string, number>>>(queries.conteos) : null,
   ])
   const page = found.slice(0, limit)
 
@@ -145,7 +148,7 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
     }),
     nextCursor: found.length > limit ? page[page.length - 1].id : null,
     total,
-    conteos: conteosDe(conteo),
+    ...(conteo ? { conteos: conteosDe(conteo[0]) } : {}),
     legible: 1 as const,
   }
 }
@@ -220,7 +223,7 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
   const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts, org] = await Promise.all([
     prisma.venue.findMany({
       where: { organizationId },
-      select: { id: true, name: true, status: true, kycStatus: true, _count: { select: { terminals: true } } },
+      select: { id: true, name: true, status: true, kycStatus: true, demoExpiresAt: true, _count: { select: { terminals: true } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: VENUES_CAP,
     }),
@@ -249,6 +252,8 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
       id: venue.id,
       name: venue.name,
       status: venue.status,
+      // Not a real store (the `REAL_VENUE` rule of the list): a plan is never offered on it (the drawer «Plan…» hides it).
+      demo: !isProductionVenue(venue.status) || venue.demoExpiresAt !== null,
       // Spec §5.10 (ruling 40): the seller never sees KYC, not even its status. Sólo «Configurar el CRM» (L7).
       ...(access.configurar ? { kycStatus: venue.kycStatus } : {}),
       terminales: venue._count.terminals,
@@ -326,7 +331,7 @@ export async function ensureClientAccount(access: CrmAccess, organizationId: str
 /**
  * «✋ a mano» en Usa (C1, tarea 7): a seller with «Editar» writes what the client uses, with the reason, or clears it
  * (`valor: null`, «Leerlo solo»). The reason lives only in the timeline event: the ActivityLog never carries it. Clearing
- * what is already clear writes nothing.
+ * what is already clear, or writing the same value with the same reason, writes nothing (no event, no touch).
  */
 export async function setUsa(
   access: CrmAccess,
@@ -337,8 +342,12 @@ export async function setUsa(
   const { valor } = input
   const changed = await prisma.$transaction(async tx => {
     await lockEditableTx(tx, access, accountId)
-    const before = await tx.crmAccount.findUniqueOrThrow({ where: { id: accountId }, select: { usaManual: true, organizationId: true } })
-    if (valor === null && before.usaManual === null) return null
+    const before = await tx.crmAccount.findUniqueOrThrow({
+      where: { id: accountId },
+      select: { usaManual: true, usaManualPorque: true, organizationId: true },
+    })
+    // The same thing again (clear on clear, or the same value with the same reason) writes nothing, as `setAltaMotivo`.
+    if (before.usaManual === valor && (valor === null || before.usaManualPorque === input.porque)) return null
     await touchNoEarlierTx(tx, accountId, now)
     await tx.crmAccount.update({
       where: { id: accountId },

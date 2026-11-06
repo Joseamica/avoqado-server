@@ -556,6 +556,24 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       await add('contrato Pro con concesión vigente', 'PRO', v => contract(v, 'PRO', hace(10 * DAY), dentroDe(20 * DAY)))
       await add('contrato con la concesión vencida', 'FREE', v => contract(v, 'PREMIUM', hace(40 * DAY), hace(10 * DAY)))
       await add('grandfather sin plan', 'FREE', async () => undefined, { seatCapExempt: true })
+      // Bordes (T2-1/2): el segundo exacto de vencimiento y de gracia, dos filas vigentes, y concesiones que ya no valen.
+      await add('prueba que vence justo ahora (endDate = now)', 'PRO', v => planRow(v, 'PRO', { endDate: NOW }))
+      await add('gracia que vence justo ahora (grace = now)', 'PRO', v =>
+        planRow(v, 'PRO', { endDate: hace(DAY), gracePeriodEndsAt: NOW, stripeSubscriptionId: `sub_gnow_${suffix}` }),
+      )
+      await add('Pro y Premium vigentes a la vez', 'PREMIUM', async v => {
+        await planRow(v, 'PRO', { stripeSubscriptionId: `sub_both_${suffix}` })
+        await planRow(v, 'PREMIUM')
+      })
+      await add('contrato con la concesión revocada', 'FREE', async v => {
+        await contract(v, 'PRO', hace(10 * DAY), dentroDe(20 * DAY))
+        await prisma.capabilityGrant.updateMany({ where: { venueId: v }, data: { revokedAt: hace(DAY) } })
+      })
+      await add('contrato con la concesión en el futuro', 'FREE', v => contract(v, 'PRO', dentroDe(2 * DAY), dentroDe(30 * DAY)))
+      await add('contrato terminado con la concesión vigente', 'FREE', async v => {
+        await contract(v, 'PREMIUM', hace(10 * DAY), dentroDe(20 * DAY))
+        await prisma.hybridContract.updateMany({ where: { venueId: v }, data: { endedAt: hace(DAY) } })
+      })
     })
 
     afterEach(() => jest.useRealTimers())
@@ -687,7 +705,6 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
   describe('altas sin tarjeta en «Clientes»', () => {
     // Lazy: `staffId` is set in `beforeAll`.
     const sa = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
-    const nameOf = (id: string) => prisma.organization.findUniqueOrThrow({ where: { id }, select: { name: true } }).then(o => o.name)
     /** Ids of the organizations this file made that «Clientes» lists, newest first, walking every page. */
     async function listed(filters: { altas?: boolean; ocultos?: boolean } = {}) {
       const out: string[] = []
@@ -1009,9 +1026,9 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
     })
 
     it('conteos de los 🟠 por motivo, en el alcance de quien mira (DE_OTRO y perdidos llegan con la Tarea 5)', async () => {
-      const deA = await listClients(propios(A), { q: LEG, usa: 'TERMINAL' }, NOW)
+      const deA = await listClients(propios(A), { q: LEG, usa: 'TERMINAL', altas: true }, NOW)
       expect(deA.conteos).toMatchObject({ altaSinTarjeta: 3, porMotivo: { PRECIO: 1, SIN_MOTIVO: 1 } })
-      const deTodos = await listClients(todos(), { q: LEG }, NOW)
+      const deTodos = await listClients(todos(), { q: LEG, altas: true }, NOW)
       expect(deTodos.conteos).toMatchObject({ altaSinTarjeta: 3, porMotivo: { PRECIO: 2, SIN_MOTIVO: 1 } })
     })
   })
@@ -1453,6 +1470,24 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
           alta: { terminada: false, origen: 'DIRECTO', tarjeta: 'RECHAZADA', oferta: { tipo: 'LISTA', nombre: null } },
         })
       })
+
+      it('🔴 liveOf de un negocio que PAGA con su alta sin cerrar (cobro real, o plan con Stripe) no trae los hechos del alta; un 🟠 sí', async () => {
+        const cobra = await altaP('vivoCobra', { acquisitionSource: null })
+        await sale(cobra.venueId, { source: 'TPV', payment: { source: 'TPV' } })
+        const conStripe = await altaP('vivoStripe', { acquisitionSource: null })
+        await planRow(conStripe.venueId, 'PRO', { stripeSubscriptionId: `sub_vivo_${PAG}` })
+        const naranja = await altaP('vivoNaranja')
+        const HECHOS = ['negocioCreadoAt', 'ultimaVezAt', 'oferta', 'origen', 'tarjeta']
+
+        for (const { organizationId } of [cobra, conStripe]) {
+          const { alta } = (await getClientLive(todos(), organizationId, NOW)) as { alta: Record<string, unknown> }
+          expect(alta).toMatchObject({ terminada: false, totales: 8 })
+          for (const hecho of HECHOS) expect(alta).not.toHaveProperty(hecho)
+        }
+        const { alta } = (await getClientLive(todos(), naranja.organizationId, NOW)) as { alta: Record<string, unknown> }
+        for (const hecho of HECHOS) expect(alta).toHaveProperty(hecho)
+        expect(alta).toMatchObject({ tarjeta: 'NO_INTENTO', origen: 'LANDING' })
+      })
     })
 
     describe('último comentario', () => {
@@ -1506,7 +1541,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         await cuenta(await alta('b1'), B, { altaMotivo: 'PRECIO' })
       })
       const conteosDe = async (access: CrmAccess, filters: ClientFilters = {}) =>
-        (await listClients(access, { q: CONT, ...filters }, NOW)).conteos
+        (await listClients(access, { q: CONT, altas: true, ...filters }, NOW)).conteos!
 
       it('🔴 3 🟠 de A (PRECIO, PRECIO, sin motivo) y 1 de B con PRECIO → para A PRECIO 2, SIN_MOTIVO 1, DE_OTRO 1; para «todos» PRECIO 3', async () => {
         const deA = await conteosDe(propios(A))

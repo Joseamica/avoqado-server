@@ -14,6 +14,8 @@ import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
+import { altaPendienteSql } from '@/services/crm/clientFacts'
+import { planesPorSucursal } from '@/services/crm/clientPage'
 import {
   clientsQueries,
   ensureClientAccount,
@@ -446,7 +448,7 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
 
   it('sin ✋ visible no busca autores, y conteos llega con todas las llaves en cero', async () => {
     clientsDb([client()])
-    const result = await listClients(access(), {}, NOW)
+    const result = await listClients(access(), { altas: true }, NOW)
     expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
     expect(result.rows[0].usa).toEqual({
       visto: 'TERMINAL',
@@ -473,8 +475,17 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
     })
   })
 
+  it('🔴 sin altas=true (el SUPERADMIN viejo) no se cuenta nada ni viene conteos; lo demás es igual', async () => {
+    clientsDb([client()])
+    const sin = await listClients(access(), { q: 'tacos' }, NOW)
+    expect(sin).not.toHaveProperty('conteos')
+    expect(rawQueries().some(isConteo)).toBe(false)
+    expect(sin).toMatchObject({ legible: 1, total: 1, nextCursor: null })
+    expect(sin.rows).toHaveLength(1)
+  })
+
   it('🔴 conteos siempre sobre el universo ampliado (altas), con la búsqueda y sin los demás filtros', async () => {
-    await listClients(access(), { usa: 'POS', estado: 'COBRA', q: 'tacos' }, NOW)
+    await listClients(access(), { usa: 'POS', estado: 'COBRA', q: 'tacos', altas: true }, NOW)
     const conteos = rawQueries().find(isConteo)!
     expect(conteos.sql).toContain('op."acquisitionSource" IS NOT NULL')
     expect(conteos.values).toContain('%tacos%')
@@ -619,6 +630,46 @@ describe('lo de la página (C1, Tarea 5)', () => {
 
     expect(rows[0].plan).toMatchObject({ nivel: 'PREMIUM', condicion: null, sucursalesLeidas: 1, sucursalesTotales: 21 })
     expect(logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('🔴 T5-1: una fila con Stripe que ya no da acceso (vencida, sin gracia) nunca dice PAGADO: cae al contrato (CAMPANA) o a nada', async () => {
+    const vencida = {
+      venueId: VENUE,
+      active: true,
+      endDate: new Date('2026-09-01T00:00:00.000Z'),
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      stripeSubscriptionId: 'sub_vencida',
+      updatedAt: NOW,
+      feature: { code: 'PLAN_PRO' },
+    }
+    prismaMock.venueFeature.findMany.mockResolvedValue([vencida])
+    const conContrato = (contrato: boolean) =>
+      prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+        query.sql.includes('ROW_NUMBER()')
+          ? [
+              {
+                id: VENUE,
+                organizationId: ORG,
+                seatCapExempt: false,
+                orgSeatCapExempt: false,
+                total: 1,
+                concesionPro: true,
+                concesionPremium: false,
+              },
+            ]
+          : query.sql.includes('"HybridOfferPublication"') && contrato
+            ? [{ venueId: VENUE, planTier: 'PRO', name: 'Combo Pro' }]
+            : [],
+      )
+
+    conContrato(true)
+    expect(await planesPorSucursal([ORG], NOW)).toMatchObject([{ nivel: 'PRO', condicion: 'CAMPANA', campana: 'Combo Pro' }])
+    conContrato(false)
+    expect(await planesPorSucursal([ORG], NOW)).toMatchObject([{ nivel: 'PRO', condicion: null }])
+    // With access, the same row is PAGADO (regression).
+    prismaMock.venueFeature.findMany.mockResolvedValue([{ ...vencida, endDate: null }])
+    expect(await planesPorSucursal([ORG], NOW)).toMatchObject([{ nivel: 'PRO', condicion: 'PAGADO' }])
   })
 
   it('🔴 arquitectura: la condición sale de elegirFilaDelPlan y derivePlanState importados; nadie más puntúa filas de plan', () => {
@@ -767,6 +818,32 @@ describe('getLive', () => {
     prismaMock.organization.findUnique.mockResolvedValue({ seatCapExempt: true })
     expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ deAntes: true })
     expect(prismaMock.organization.findUnique).toHaveBeenLastCalledWith({ where: { id: ORG }, select: { seatCapExempt: true } })
+  })
+
+  it('🔴 vivo: los hechos del alta sólo se leen de una organización 🟠 (la misma regla altaPendienteSql que pinta la fila)', async () => {
+    linked()
+    await getLive(access(), ACCOUNT, NOW)
+    const alta = rawQueries().find(query => query.sql.includes('"OnboardingProgress" op LEFT JOIN'))!
+    expect(alta.sql.replace(/\s+/g, ' ')).toContain(altaPendienteSql().sql.replace(/\s+/g, ' '))
+  })
+
+  it('vivo: cada sucursal dice si es de demostración (demo), con la misma regla de «sucursal real» de la lista', async () => {
+    linked({
+      venues: [
+        { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', demoExpiresAt: null, _count: { terminals: 2 } },
+        { id: VENUE_2, name: 'Demo', status: VenueStatus.LIVE_DEMO, kycStatus: null, demoExpiresAt: null, _count: { terminals: 0 } },
+        {
+          id: 'cvenueccc0000000000000001',
+          name: 'Prueba',
+          status: 'ACTIVE',
+          kycStatus: null,
+          demoExpiresAt: NOW,
+          _count: { terminals: 0 },
+        },
+      ],
+    })
+    const live = await getLive(access(), ACCOUNT, NOW)
+    expect((live as { venues: Array<{ id: string; demo: boolean }> }).venues.map(v => v.demo)).toEqual([false, true, true])
   })
 
   it('vivo_sin_llave_ventas_no_trae_ventas', async () => {
@@ -1113,8 +1190,8 @@ describe('ensureClientAccount (C1, tarea 6)', () => {
 
 describe('setUsa (C1, tarea 7)', () => {
   /** What the account holds before: `touchTx` reads it with ROW_SELECT and `setUsa` with its own select (the same mock). */
-  const cuenta = (usaManual: string | null) =>
-    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual, organizationId: ORG } as never)
+  const cuenta = (usaManual: string | null, usaManualPorque: string | null = null) =>
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual, usaManualPorque, organizationId: ORG } as never)
   beforeEach(() => {
     jest.mocked(logAction).mockClear()
     prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
@@ -1176,6 +1253,25 @@ describe('setUsa (C1, tarea 7)', () => {
     expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
     expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 guardar el MISMO ✋ (mismo valor y mismo porqué) no deja evento ni ActivityLog ni toca lastTouchAt', async () => {
+    cuenta('POS', 'Lo vi en su local')
+    await expect(setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local' })).resolves.toEqual({
+      accountId: ACCOUNT,
+      usaManual: 'POS',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('el mismo valor con otro porqué sí escribe (es otra razón)', async () => {
+    cuenta('POS', 'Lo vi en su local')
+    await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Me lo dijo la dueña' })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledTimes(1)
   })
 
   it('🔴 A «propios» sobre la cuenta de B (no la ve) → 404 y no escribe', async () => {

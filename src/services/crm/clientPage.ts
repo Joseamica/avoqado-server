@@ -218,6 +218,9 @@ export async function planesPorSucursal(organizationIds: string[], now: Date): P
     const origen: Origen =
       fila?.active && fila.stripeSubscriptionId ? 'CLASSIC' : contrato ? 'CONTRACT' : fila && daAcceso(fila, now) ? 'COMP' : 'NONE'
 
+    // T5-1: «PAGADO»/«PRUEBA_CON_TARJETA» only while the classic row gives access; a Stripe row that no longer does falls
+    // to the next canonical rule (the contract, else nothing), so the list never says «pagado» of a plan without access.
+    const clasicaConAcceso = origen === 'CLASSIC' && daAcceso(fila!, now)
     const grandfathered = resolveGrandfathered({
       seatCapExempt: sucursal.seatCapExempt,
       organization: { seatCapExempt: sucursal.orgSeatCapExempt },
@@ -227,11 +230,11 @@ export async function planesPorSucursal(organizationIds: string[], now: Date): P
         ? grandfathered
           ? 'DE_ANTES'
           : 'GRATIS'
-        : origen === 'CLASSIC'
+        : clasicaConAcceso
           ? state === 'trial'
             ? 'PRUEBA_CON_TARJETA'
             : 'PAGADO'
-          : origen === 'CONTRACT'
+          : contrato
             ? 'CAMPANA'
             : origen === 'COMP'
               ? state === 'trial'
@@ -322,8 +325,9 @@ export interface AltaFacts {
 }
 
 /**
- * What the database knows of each organization's signup (only those with an `OnboardingProgress`). The bank's reason for a
- * decline is not stored, so `RECHAZADA` says no more than that.
+ * What the database knows of each organization's signup — only a 🟠 (`altaPendienteSql`): one that pays or charges never
+ * gets these facts, even with an unfinished `OnboardingProgress`. The bank's reason for a decline is not stored, so
+ * `RECHAZADA` says no more than that.
  */
 export async function altaFactsOf(organizationIds: string[]): Promise<Map<string, AltaFacts>> {
   if (!organizationIds.length) return new Map()

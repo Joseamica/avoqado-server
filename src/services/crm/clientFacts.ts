@@ -138,8 +138,9 @@ const nivelSql = (tier: 'PRO' | 'PREMIUM', now: Date) =>
 
 /**
  * `LEFT JOIN LATERAL (…) f ON true` over `o`, with exactly: `f."usaTerminal"`, `f."usaPos"` (booleans), `f."ultimoCobroAt"`
- * (the newest real charge of its real venues, or null), `f."usaMedido"` (`USA`), `f."nivel"` (`NIVELES`) and `f."estado"`
- * (`ESTADOS`). The same `now` for every expression of a request.
+ * (the newest real charge of its real venues, or null — a `timestamp` without zone holding UTC, like every Prisma column:
+ * compare it in SQL only with a `utcTs` bind, never a bare `Date`), `f."usaMedido"` (`USA`), `f."nivel"` (`NIVELES`) and
+ * `f."estado"` (`ESTADOS`). The same `now` for every expression of a request.
  *
  * - Terminal: a `TPV` order without reservation charged in the window; or a real charge processed on a `TPV_ANDROID` /
  *   `TPV_IOS` device (`Payment.terminalId`), asked after the order so a TPV order answers without reading `Payment`; or a

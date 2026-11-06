@@ -248,7 +248,9 @@ describe('CRM: two sellers on the same account at once', () => {
   })
 
   it('🔴 dos_ensureClientAccount_a_la_vez_dan_UNA_cuenta_un_evento_y_una_creada (C1, tarea 6)', async () => {
-    // A stalled signup is a client of «Clientes» with no payment to seed: own acquisition source, a real venue.
+    // A stalled signup is a client of «Clientes» with no payment to seed: own acquisition source, a real venue. It opens in
+    // the first ABIERTA stage: this file's `beforeAll` makes its own (never depends on the shared catalog having one).
+    expect(await prisma.crmStage.count({ where: { id: { in: stageIds }, kind: 'ABIERTA' } })).toBeGreaterThan(0)
     const organization = await prisma.organization.create({
       data: { name: `Org ${suffix}`, email: `org-${suffix}@test.mx`, phone: '5555555555' },
     })
@@ -265,6 +267,11 @@ describe('CRM: two sellers on the same account at once', () => {
       expect(fulfilled).toHaveLength(2)
       const results = fulfilled.map(r => (r as PromiseFulfilledResult<{ accountId: string; creada: boolean }>).value)
       expect(results.filter(r => r.creada)).toHaveLength(1)
+      const { stage } = await prisma.crmAccount.findUniqueOrThrow({
+        where: { id: results[0].accountId },
+        select: { stage: { select: { kind: true } } },
+      })
+      expect(stage.kind).toBe('ABIERTA')
       expect(new Set(results.map(r => r.accountId)).size).toBe(1)
       expect(await prisma.crmAccount.count({ where: { organizationId: organization.id } })).toBe(1)
       const events = await prisma.crmTimelineEvent.findMany({ where: { accountId: results[0].accountId, kind: 'SYSTEM' }, take: 10 })

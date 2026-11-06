@@ -8,7 +8,7 @@ import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { StaffRole } from '@prisma/client'
 import { validateRequest } from '../middlewares/validation'
 import * as organizationController from '../controllers/dashboard/organizations.superadmin.controller'
-import { setOrganizationGrandfatheredSchema } from './superadmin/organization.routes'
+import { setOrganizationGrandfatheredSchema } from '../schemas/superadmin/organizationGrandfathered.schema'
 
 // Import superadmin sub-routes
 import kycReviewRoutes from './superadmin/kycReview.routes'
