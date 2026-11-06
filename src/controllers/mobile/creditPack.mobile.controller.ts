@@ -64,7 +64,7 @@ export const getBalance = async (req: Request, res: Response, next: NextFunction
 export const sellPack = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, packId } = req.params
-    const { customerId, note, deliveryKey, saleProof } = req.body
+    const { customerId, note, deliveryKey, saleProof, cobradoEnOrden } = req.body
 
     if (!customerId) {
       return res.status(400).json({ success: false, message: 'customerId es requerido' })
@@ -74,13 +74,23 @@ export const sellPack = async (req: Request, res: Response, next: NextFunction) 
       return res.status(400).json({ success: false, message: 'deliveryKey debe tener entre 1 y 64 caracteres' })
     }
 
+    // D17: opcional; las apps viejas no lo mandan y suman como hoy.
+    if (cobradoEnOrden !== undefined && typeof cobradoEnOrden !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'cobradoEnOrden debe ser true o false' })
+    }
+
     const staffVenueId = await resolveStaffVenueId(venueId, req.authContext?.userId || '')
     // El monto ya NO viaja en el body: lo pone el servidor con el precio de lista.
     // Para una venta con descuento real está el otro carril — se registra el cobro y
     // se acredita con `fulfillCreditPackPurchaseFromPayment`, que toma el monto del cobro.
     // La foto sólo cuenta con llave: sin llave, un reintento crearía otra compra por lo vendido hace días.
     const foto = deliveryKey ? leerFotoDelPaquete(saleProof) : null
-    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, { note, deliveryKey, foto })
+    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, {
+      note,
+      deliveryKey,
+      foto,
+      cobradoEnOrden,
+    })
     return res.status(201).json({ success: true, purchase })
   } catch (error) {
     next(error)
