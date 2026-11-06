@@ -479,8 +479,15 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     // reintento: la MISMA llave con el MISMO pedido recibe SU folio (la misma lectura indexada de la repetición normal), no el 401.
     // Es la única lectura extra y sólo en este camino; sin pedido con esa llave, 401 como siempre.
     // Un pedido con esa llave pero OTRA huella (p. ej. nació con sesión, R47 T7a) sigue siendo 401, nunca 409.
+    // R82 (Codex fase 2 r2 #1): si el envío ORIGINAL sigue en vuelo (ya tomó el candado de la llave y no confirma), se espera ESE
+    // mismo candado (`lockKey`, el de la creación) en una transacción corta y SÓLO entonces se lee la repetición: el original
+    // confirma primero y se encuentra. Techo: un original que aún no llegó a su transacción (cotiza fuera de ella) no retiene el
+    // candado todavía; esa ventana de milisegundos con cambio de modo simultáneo queda sin cubrir.
     try {
-      const folio = await findReplay(prisma, input.venueId, externalId, requestHash)
+      const folio = await prisma.$transaction(async tx => {
+        await lockKey(tx, input.venueId, externalId)
+        return findReplay(tx, input.venueId, externalId, requestHash)
+      })
       if (folio) return folio
     } catch (e) {
       if (!(e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT')) throw e
@@ -921,9 +928,10 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       charge: { select: { status: true } },
       order: {
         select: {
-          id: true,
           orderNumber: true,
           total: true,
+          paidAmount: true,
+          remainingBalance: true,
           paymentStatus: true,
           customerName: true,
           payments: { // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
@@ -946,13 +954,9 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     },
   })
   if (!row) return null
-  // R79: lo cobrado es la suma EXACTA (un aggregate por orderId, indexado) de los mismos cobros que dan `paidAt`; sin ningún cobro
-  // (`payments` vacío) no hay nada que sumar y no se consulta.
-  const paidSoFar = row.order.payments.length
-    ? new Prisma.Decimal(
-        (await prisma.payment.aggregate({ _sum: { amount: true }, where: { orderId: row.order.id, ...CHARGE_FILTER } }))._sum.amount ?? 0,
-      ).toDecimalPlaces(2)
-    : new Prisma.Decimal(0)
+  // R82: lo cobrado y lo que falta son los de la cuenta, calculados por la función CANÓNICA de saldo (`orderBalance`: propinas dentro
+  // del total y de lo pagado, un reembolso no reabre saldo) cada vez que entra dinero. Son los mismos que la caja y `to-pay`, sin
+  // sumar nada aparte (ni filas topadas, ni una suma propia que olvide la propina).
   const pending = row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING
   return {
     orderNumber: row.order.orderNumber,
@@ -974,8 +978,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     })),
     total: Number(new Prisma.Decimal(row.order.total).toFixed(2)),
     paid: row.order.paymentStatus === PaymentStatus.PAID,
-    amountPaid: paidSoFar.toNumber(),
-    remaining: Prisma.Decimal.max(new Prisma.Decimal(row.order.total).minus(paidSoFar), 0).toDecimalPlaces(2).toNumber(),
+    amountPaid: Number(new Prisma.Decimal(row.order.paidAmount).toFixed(2)),
+    remaining: Prisma.Decimal.max(new Prisma.Decimal(row.order.remainingBalance), 0).toDecimalPlaces(2).toNumber(),
     customerName: row.order.customerName ?? null,
     paidAt: row.order.paymentStatus === PaymentStatus.PAID ? (row.order.payments[0]?.createdAt.toISOString() ?? null) : null,
     estimatedReadyAt: row.estimatedReadyAt ? row.estimatedReadyAt.toISOString() : null,

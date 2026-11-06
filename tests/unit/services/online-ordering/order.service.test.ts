@@ -369,7 +369,8 @@ describe('createOnlineOrder', () => {
     expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledWith({ where: { venueId: 'v1' } })
     expect(assertCanCreate).not.toHaveBeenCalled()
     expect(getAcceptingStatus).not.toHaveBeenCalled()
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // R82: la transacción corta que espera el candado de la llave
+    expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK]) // R82: sólo el candado de la llave, en una transacción corta
     // R79: la ÚNICA lectura extra es la repetición por la llave (indexada); nada más, y sin pedido con esa llave sigue el 401.
     expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1)
     expect((prismaMock.order.findUnique.mock.calls[0][0] as any).where).toEqual({
@@ -393,8 +394,39 @@ describe('createOnlineOrder', () => {
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
     expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1)
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // R82: la transacción corta que espera el candado de la llave
+    expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK]) // R82: sólo el candado de la llave, en una transacción corta
     expect(prismaMock.idempotencyRequest.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('R82: con el original EN VUELO (retiene el candado de la llave) el reintento anónimo ESPERA el candado y sólo entonces lee: recibe el folio que el original confirmó', async () => {
+    const req = input({ customerId: null })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })
+    let soltar!: () => void
+    ;(prismaMock.$executeRaw as jest.Mock).mockImplementationOnce(() => new Promise<number>(r => (soltar = () => r(0))))
+    prismaMock.order.findUnique.mockResolvedValue(null) // el original aún no confirma
+    const reintento = createOnlineOrder(req, PUEDE_CREAR)
+    await new Promise(r => setImmediate(r))
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled() // espera: no decide 401 antes de que el original termine
+    const hash = onlineOrderRequestHash({
+      venueId: 'v1',
+      customerId: '',
+      paymentMode: req.paymentMode,
+      expectedTotal: new Prisma.Decimal(req.expectedTotal),
+      items: req.items,
+      customerName: req.customer.name,
+      customerPhone: '',
+    })
+    prismaMock.order.findUnique.mockResolvedValue({
+      id: 'ord1',
+      orderNumber: 'W-0042',
+      total: D('93.00'),
+      onlineOrder: { id: 'oo1', status: 'PENDING_ACCEPTANCE', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW, requestHash: hash },
+    } as any)
+    soltar() // el original confirmó y soltó el candado
+    await expect(reintento).resolves.toMatchObject({ orderNumber: 'W-0042', replay: true })
+    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1)
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -421,7 +453,8 @@ describe('createOnlineOrder', () => {
       trackingToken: 'T'.repeat(32),
       replay: true,
     })
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // R82: la transacción corta que espera el candado de la llave
+    expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK]) // R82: sólo el candado de la llave, en una transacción corta
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -431,7 +464,7 @@ describe('createOnlineOrder', () => {
     await expect(createOnlineOrder(input({ customerId: null }), vencido)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
     await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
     expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2) // dos intentos, cada uno con su espera corta del candado
   })
 
   it('con sesión probada no se lee el modo aparte: lo trae la lectura de la tienda (una sola vez)', async () => {
@@ -784,8 +817,8 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
     await expect(createOnlineOrder(input({ verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
-    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // R82: la transacción corta que espera el candado de la llave
+    expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK]) // R82: sólo el candado de la llave, en una transacción corta
     expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled() // la tienda pide el código y reintenta con la MISMA llave
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
@@ -1477,6 +1510,8 @@ describe('getTrackingByToken', () => {
         ],
         customerName: 'Ana',
         payments: [],
+        paidAmount: D('0'),
+        remainingBalance: D('206'),
         venue: {
           name: 'Flautas Coyoacán',
           slug: 'flautas-coyoacan',
@@ -1520,6 +1555,8 @@ describe('getTrackingByToken', () => {
         paymentStatus,
         customerName: 'María G.',
         payments: [],
+        paidAmount: D('0'),
+        remainingBalance: D('93'),
         items: [{ productName: 'Flautas', quantity: 1, notes: null, unitPrice: D('93.00'), total: D('93.00'), modifiers: [] }],
         venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
       },
@@ -1534,6 +1571,8 @@ describe('getTrackingByToken', () => {
         ...base.order,
         customerName: 'María G.',
         payments: [],
+        paidAmount: D('0'),
+        remainingBalance: D('93'),
         items: [{ productName: 'Flautas', quantity: 2, notes: null, unitPrice: D('46.50'), total: D('93.00'), modifiers: [] }],
       },
     })
@@ -1563,27 +1602,21 @@ describe('getTrackingByToken', () => {
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
   })
 
-  it('R79: amountPaid sale de UN aggregate exacto por orderId (sin tope de filas); remaining nunca baja de 0; sin cobros no se consulta', async () => {
+  it('R82: amountPaid y remaining son los CANÓNICOS de la cuenta (paidAmount/remainingBalance, con propina): $185 + abono $100 + propina $10 ⇒ pagó 110, falta 85, igual que to-pay; nunca negativo', async () => {
     const base = folioNadie({}, 'PARTIAL')
-    const conCobros = (extra: Record<string, any> = {}) =>
-      ({ ...base, order: { ...base.order, id: 'ord1', customerName: 'M', payments: [{ createdAt: NOW }], ...extra } }) as any
-    // más de 50 cobros: la suma exacta viene del aggregate (no de una página de filas)
-    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: D('53.50') } } as any)
-    prismaMock.onlineOrder.findUnique.mockResolvedValue(conCobros())
-    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: false, paidAt: null, amountPaid: 53.5, remaining: 39.5 })
-    expect(prismaMock.payment.aggregate).toHaveBeenCalledTimes(1)
-    expect(prismaMock.payment.aggregate).toHaveBeenCalledWith({
-      _sum: { amount: true },
-      where: { orderId: 'ord1', status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
-    })
-    const pagos = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select.payments
-    expect(pagos).toMatchObject({ take: 1, select: { createdAt: true } })
-    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: D('120.00') } } as any)
-    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 120, remaining: 0 })
-    prismaMock.payment.aggregate.mockClear()
-    prismaMock.onlineOrder.findUnique.mockResolvedValue(conCobros({ payments: [] }))
-    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 0, remaining: 93 })
+    const cuenta = (o: Record<string, any>) => ({ ...base, order: { ...base.order, customerName: 'M', payments: [{ createdAt: NOW }], ...o } }) as any
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(
+      cuenta({ total: D('195.00'), paidAmount: D('110.00'), remainingBalance: D('85.00') }),
+    )
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ total: 195, paid: false, paidAt: null, amountPaid: 110, remaining: 85 })
+    const sel = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
+    expect(sel).toMatchObject({ paidAmount: true, remainingBalance: true })
+    expect(sel.payments).toMatchObject({ take: 1, select: { createdAt: true }, where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } })
     expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(cuenta({ paidAmount: D('0.00'), remainingBalance: D('93.00'), payments: [] }))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 0, remaining: 93 })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(cuenta({ paidAmount: D('120.00'), remainingBalance: D('-27.00') }))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 120, remaining: 0 })
   })
 
   it('T18b: «Mi equipo» y tarjeta traen los mismos campos (aditivos)', async () => {
@@ -1636,6 +1669,8 @@ describe('getTrackingByToken', () => {
         total: D('93.00'),
         paymentStatus: 'PENDING',
         payments: [],
+        paidAmount: D('0'),
+        remainingBalance: D('93'),
         items: [],
         venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
       },
@@ -1693,7 +1728,7 @@ describe('getTrackingByToken', () => {
         createdAt: NOW,
         venueId: 'v1',
         charge: { status: 'RELEASING' },
-        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', payments: [], items: [], venue: VENUE },
+        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', payments: [], paidAmount: D('0'), remainingBalance: D('250'), items: [], venue: VENUE },
       } as any)
       await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
     })
