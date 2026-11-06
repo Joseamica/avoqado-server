@@ -188,7 +188,6 @@ export async function createManualPayment(
         }
         let anchorOrderId: string
         let anchorOrderTotal: Prisma.Decimal
-        let paidSoFar: Prisma.Decimal
         // T18f: el saldo CANÓNICO de la cuenta existente tras este pago (`computeOrderBalance`); null en la orden sombra.
         let saldoCanonico: OrderBalance | null = null
         let aggregatedTipAmount: Prisma.Decimal = tipAmount
@@ -306,7 +305,6 @@ export async function createManualPayment(
           // Las filas ya vienen con `type`: sin él un reembolso sería indistinguible de un cobro negativo.
           const saldoAntes = computeOrderBalance(order, order.payments)
           saldoCanonico = computeOrderBalance(order, [...order.payments, { amount, tipAmount, type: 'REGULAR' }])
-          paidSoFar = saldoAntes.paidAmount
           aggregatedTipAmount = saldoCanonico.tipAmount
           anchorOrderTotal = saldoCanonico.total
 
@@ -411,7 +409,6 @@ export async function createManualPayment(
           })
           anchorOrderId = shadow.id
           anchorOrderTotal = shadowTotal
-          paidSoFar = new Prisma.Decimal(0)
 
           // If a customer was attached, also create the OrderCustomer link as
           // primary so loyalty / per-customer reports surface this entry. Queue

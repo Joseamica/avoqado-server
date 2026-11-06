@@ -180,8 +180,9 @@ export function lockKey(tx: Prisma.TransactionClient, venueId: string, externalI
 /**
  * Codex r3: la primera DECISIÓN sobre una llave es durable (como Stripe, que también guarda el resultado de un error). Sin
  * migración, en la tabla genérica `IdempotencyRequest` (custodia de SIMs y comandos de la TPV): los prefijos `venue:` y
- * `customer:` nunca chocan con sus ids de organización y de staff. ponytail: sin purga (sólo nacen al rechazar, volumen bajo);
- * si crecen, borrar por `expiresAt` (ya indexado).
+ * `customer:` nunca chocan con sus ids de organización y de staff. ponytail: SIN purga. Desde R85 cada POST anónimo distinto en
+ * «Mi equipo» también deja una fila (acotado por el limitador por IP, no por volumen): la tabla crece sin tope hasta que alguien
+ * barra por `expiresAt` (ya indexado); ver `docs/audit/deuda-encontrada.md` (2026-11-06, IdempotencyRequest).
  */
 const rejectionKey = (venueId: string, customerId: string | null, idempotencyKey: string) => ({
   organizationId: `venue:${venueId}`,
@@ -454,9 +455,11 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   const sessionPhone =
     input.customerId && input.verifiedPhone && phonesMatch(input.verifiedPhone, input.customer.phone) ? input.verifiedPhone : null
   const customerId = sessionPhone ? input.customerId : null
-  // R47: sin esa sesión, «Mi equipo» responde 401 de inmediato. La única lectura es el modo de la tienda (su fila de ajustes, por su
-  // llave): sin él no se sabe si se puede pedir sin sesión. Ni plan, ni tienda, ni la llave, y nunca una fila de rechazo `anon:` (la
-  // tienda pide el código y reintenta con la MISMA llave). En «Nadie» esa misma lectura es la de la tienda (paso 3).
+  // R47: sin esa sesión, «Mi equipo» responde 401 de inmediato, sin plan ni tienda ni cotización: lo único que se lee primero es el
+  // modo de la tienda (su fila de ajustes, por su llave). R85: ese 401 SÍ se registra como la decisión de la llave (fila `anon:<llave>`,
+  // más abajo): una decisión por llave; si no, el original tardío —que aún cotiza fuera de su transacción— crea un segundo pedido
+  // (Codex fase 2 r1–r3). La tienda suelta la llave tras este 401; el reintento con sesión verificada usa `customer:<id>` y no choca.
+  // En «Nadie» esa misma lectura es la de la tienda (paso 3).
   const ajustesSinSesion = customerId ? undefined : await getSettings(input.venueId)
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
@@ -495,8 +498,9 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       }
       const yaRegistrado = await tx.idempotencyRequest.findUnique({
         where: { organizationId_actorStaffId_endpoint_idempotencyKey: decisionDeLaLlave },
-        select: { id: true },
       })
+      // Una decisión por llave: si ya hay una con ESTA huella (el 401 de antes, o la que fuera: PRICE_CHANGED…), ésa se devuelve.
+      if (yaRegistrado && yaRegistrado.requestHash === requestHash) return yaRegistrado
       if (!yaRegistrado) {
         await tx.idempotencyRequest.create({
           data: {
@@ -510,7 +514,11 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       }
       return null
     }, TX_OPTIONS)
-    if (folio) return folio
+    if (folio && 'orderId' in folio) return folio
+    if (folio) {
+      const body = folio.responseBody as { code?: string; message: string; details?: unknown }
+      throw final(new AppError(body.message, folio.responseStatus, true, body.code, body.details))
+    }
     throw rechazo
   }
 

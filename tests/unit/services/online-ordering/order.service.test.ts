@@ -479,6 +479,10 @@ describe('createOnlineOrder', () => {
     await expect(createOnlineOrder(input({ customerId: null }), vencido)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
     await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
     expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(2) // R85: cada 401 anónimo registra su decisión (la tabla real la deduplica por llave)
+    // y la decisión registrada es el 401 de verificación, no el CLOSED ni el PLAN_REQUIRED que se habrían dicho después
+    for (const [a] of prismaMock.idempotencyRequest.create.mock.calls as any[][]) {
+      expect(a.data).toMatchObject({ responseStatus: 401, responseBody: { code: 'PHONE_VERIFICATION_REQUIRED' } })
+    }
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2) // dos intentos, cada uno con su espera corta del candado
   })
 
@@ -828,13 +832,17 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
   })
 
-  it('R47: un 401 PHONE_VERIFICATION_REQUIRED no abre transacción ni toma la llave, y no se guarda', async () => {
+  it('R47/R85: un 401 PHONE_VERIFICATION_REQUIRED abre UNA transacción corta que toma sólo el candado de la llave, y registra UNA decisión `anon:<llave>` DESPUÉS de tomarlo', async () => {
     await expect(createOnlineOrder(input({ verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // R82: la transacción corta que espera el candado de la llave
     expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK]) // R82: sólo el candado de la llave, en una transacción corta
     expect(prismaMock.idempotencyRequest.create).toHaveBeenCalledTimes(1) // R85: se registra bajo anon:<llave>; el reintento con sesión verificada usa customer:<id> y no choca
+    // R85: la decisión se escribe bajo el candado, nunca antes de tomarlo
+    const candado = (prismaMock.$executeRaw as jest.Mock).mock.invocationCallOrder[0]
+    const registro = prismaMock.idempotencyRequest.create.mock.invocationCallOrder[0]
+    expect(candado).toBeLessThan(registro)
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -1109,6 +1117,31 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
       expect(prismaMock.order.create).not.toHaveBeenCalled()
       expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    })
+
+    it('I2: sesión sin teléfono verificado ⇒ 401 que registra anon:K; la tienda reenvía la MISMA K con la sesión VERIFICADA y SÍ crea (su llave es customer:<id>:K)', async () => {
+      const filas = tablaDeRechazos()
+      aMiEquipo()
+      await expect(createOnlineOrder(input({ verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401 })
+      expect(filas.size).toBe(1)
+      expect([...filas.values()][0].actorStaffId).toBe(`anon:${KEY}`)
+      const res = await createOnlineOrder(input(), PUEDE_CREAR)
+      expect(res).toMatchObject({ replay: false, status: 'PENDING_ACCEPTANCE' })
+      expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('m3: si la llave ya tiene una decisión registrada con la MISMA huella (p. ej. PRICE_CHANGED), el camino temprano devuelve ESA, no un 401 nuevo', async () => {
+      const filas = tablaDeRechazos()
+      filas.set(JSON.stringify([LLAVE_ANON.organizationId, LLAVE_ANON.actorStaffId, LLAVE_ANON.endpoint, LLAVE_ANON.idempotencyKey]), {
+        ...LLAVE_ANON,
+        requestHash: huellaAnon(),
+        responseStatus: 409,
+        responseBody: { code: 'PRICE_CHANGED', message: 'El precio cambió', details: { quote: { total: '210.00' } } },
+      })
+      aMiEquipo()
+      await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'PRICE_CHANGED' })
+      expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
     })
 
     it('el ORIGINAL llega primero: crea, y el reintento (ya en «Mi equipo») recibe SU folio y no registra rechazo', async () => {
