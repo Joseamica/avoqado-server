@@ -138,6 +138,17 @@ export class ForbiddenError extends AppError {
   }
 }
 
+/**
+ * hz:e0b12f00:D1: el servicio descubrió, con el importe que él calcula y bajo su candado, que un descuento manual deja en $0 lo
+ * que queda de los productos sin que quien llama tenga `orders:comp`. El controlador lo convierte en el 403 canónico de
+ * `checkPermission` (PIN de gerente incluido) con `conCortesiaSiRegala`; si sale suelto, es un 403 normal.
+ */
+export class RegaloSinPermisoError extends ForbiddenError {
+  constructor() {
+    super('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+  }
+}
+
 export class ValidationError extends AppError {
   constructor(message: string = 'Error de validación', code?: string, details?: unknown) {
     super(message, 422, true, code, details)
