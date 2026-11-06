@@ -14,6 +14,7 @@
  */
 import crypto from 'crypto'
 import jwt from 'jsonwebtoken'
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
 import logger from '@/config/logger'
@@ -57,6 +58,26 @@ async function correoOcupadoPorOtra(correo: string, staffId: string): Promise<bo
   return !!duena && duena.id !== staffId
 }
 
+/**
+ * D4 (6-nov): las llaves del CRM (`PlatformAccess`) se buscan por el correo de la persona (`getCrmAccess`). La fila que ella
+ * ya reclamó (`staffId`) se muda con su correo; si el correo NUEVO ya tiene OTRA fila, serían dos juegos de llaves para una
+ * persona y no se adivina cuál vale: se rechaza (la quita quien administra «Equipo de ventas»). Una fila sin reclamar con el
+ * correo nuevo y nada propio sí pasa: el admin le dio llaves a esa dirección y las reclama en su primer acceso, como hoy.
+ */
+async function llavesDelCrmChocan(staffId: string, correoNuevo: string): Promise<boolean> {
+  const [propia, delCorreoNuevo] = await Promise.all([
+    prisma.platformAccess.findUnique({ where: { staffId }, select: { id: true } }),
+    prisma.platformAccess.findUnique({ where: { email: correoNuevo }, select: { id: true } }),
+  ])
+  return !!propia && !!delCorreoNuevo && delCorreoNuevo.id !== propia.id
+}
+
+const llavesEnUso = () =>
+  new ConflictError(
+    'Ese correo ya tiene otras llaves del CRM. Pide a quien administra «Equipo de ventas» que quite una de las dos y vuelve a intentarlo.',
+    'CRM_KEYS_EMAIL_IN_USE',
+  )
+
 /** Manda el enlace al correo nuevo. NO cambia nada todavía. */
 export async function solicitarCambioDeCorreo(staffId: string, correoPedido: string): Promise<{ correoNuevo: string }> {
   const correoNuevo = normalizar(correoPedido)
@@ -66,6 +87,7 @@ export async function solicitarCambioDeCorreo(staffId: string, correoPedido: str
   if (await correoOcupadoPorOtra(correoNuevo, staffId)) {
     throw new ConflictError('El correo electrónico ya está en uso por otro usuario.', 'EMAIL_IN_USE')
   }
+  if (await llavesDelCrmChocan(staffId, correoNuevo)) throw llavesEnUso()
 
   const payload: EnlaceDeCambio = { sub: staff.id, correoAnterior: staff.email, correoNuevo, proposito: PROPOSITO, emitidoMs: Date.now() }
   const token = jwt.sign(payload, llaveDelEnlace(), { algorithm: 'HS256', expiresIn: VIGENCIA })
@@ -124,21 +146,39 @@ export async function confirmarCambioDeCorreo(token: string): Promise<{ correoNu
     throw new ConflictError('El correo electrónico ya está en uso por otro usuario.', 'EMAIL_IN_USE')
   }
 
-  // CAS sobre el correo anterior: dos pestañas con el mismo enlace cambian una sola vez.
-  const { count } = await prisma.staff.updateMany({
-    where: { id: staff.id, email: enlace.correoAnterior },
-    // Un código o un link de recuperación emitidos para el buzón ANTERIOR no deben abrir la cuenta nueva.
-    data: {
-      email: enlace.correoNuevo,
-      emailVerified: true,
-      emailVerificationCode: null,
-      emailVerificationExpires: null,
-      resetToken: null,
-      resetTokenExpiry: null,
-    },
-  })
-  if (count === 0) {
-    throw new BadRequestError('Este enlace ya no es válido. Pide el cambio de correo otra vez.', 'EMAIL_CHANGE_LINK_STALE')
+  if (await llavesDelCrmChocan(staff.id, enlace.correoNuevo)) throw llavesEnUso()
+
+  const enlaceViejo = () =>
+    new BadRequestError('Este enlace ya no es válido. Pide el cambio de correo otra vez.', 'EMAIL_CHANGE_LINK_STALE')
+  try {
+    await prisma.$transaction(async tx => {
+      // CAS sobre el correo anterior: dos pestañas con el mismo enlace cambian una sola vez.
+      const { count } = await tx.staff.updateMany({
+        where: { id: staff.id, email: enlace.correoAnterior },
+        // Un código o un link de recuperación emitidos para el buzón ANTERIOR no deben abrir la cuenta nueva.
+        data: {
+          email: enlace.correoNuevo,
+          emailVerified: true,
+          emailVerificationCode: null,
+          emailVerificationExpires: null,
+          resetToken: null,
+          resetTokenExpiry: null,
+        },
+      })
+      if (count === 0) throw enlaceViejo()
+      // D4: su fila de llaves del CRM se muda con el correo (o el CRM le contesta 403 desde ya). Sube `llavesVersion`
+      // (L11): el disparador de la base apaga las 8 llaves finas en toda escritura que no la sube.
+      await tx.platformAccess.updateMany({
+        where: { staffId: staff.id },
+        data: { email: enlace.correoNuevo, llavesVersion: { increment: 1 } },
+      })
+    })
+  } catch (error) {
+    // Alguien ocupó el correo nuevo (cuenta o llaves) entre la revisión y la escritura: no cambia nada.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      throw new ConflictError('El correo electrónico ya está en uso.', 'EMAIL_IN_USE')
+    }
+    throw error
   }
 
   // N4 (Codex): con su organización en la COLUMNA; sin ella la bitácora del cliente no la muestra.
