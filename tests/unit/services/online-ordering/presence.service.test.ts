@@ -98,6 +98,24 @@ describe('getAcceptingStatus', () => {
   })
 })
 
+describe('getAcceptingStatus — tienda híbrida: los folios sin pagar no son saturación', () => {
+  // 30 filas de folio (requiresAcceptance:false) y ninguna por aceptar: sólo cuenta quien pregunta por requiresAcceptance:true.
+  const FOLIOS = ({ where }: any) => Promise.resolve(where.requiresAcceptance === true ? 0 : MAX_PENDING_PER_VENUE) as any
+  const DE_MI_EQUIPO = ({ where }: any) => Promise.resolve(where.requiresAcceptance === true ? MAX_PENDING_PER_VENUE : 0) as any
+
+  it('30 folios sin pagar no pausan la tienda', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow() as any)
+    prismaMock.onlineOrder.count.mockImplementation(FOLIOS)
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
+  })
+
+  it('30 por aceptar de «Mi equipo» sí la pausan', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow() as any)
+    prismaMock.onlineOrder.count.mockImplementation(DE_MI_EQUIPO)
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'TOO_BUSY' })
+  })
+})
+
 describe('getAcceptingStatus — fase 2: los borradores de tarjeta vigentes cuentan para la saturación', () => {
   it('pedidos por aceptar + borradores vigentes = 30 → PAUSED TOO_BUSY; un vencido no cuenta', async () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow() as any)

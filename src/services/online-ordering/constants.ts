@@ -1,4 +1,4 @@
-import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, PaymentStatus } from '@prisma/client'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -63,6 +63,19 @@ export const liveCardDraftsWhere = (venueId: string, now: Date) => ({
   venueId,
   status: OnlineOrderChargeStatus.PENDING_AUTH,
   checkoutExpiresAt: { gt: now },
+})
+/** Tienda híbrida: lo que de verdad espera a «Mi equipo» (saturación y topes). Los folios (`requiresAcceptance:false`) no cuentan. */
+export const awaitingAcceptanceWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: true,
+})
+/** Tienda híbrida (R18): folios sin un peso pagado; los usará el tope de folios (T7) y T12. Un folio con abono no ocupa lugar. */
+export const unpaidFoliosWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: false,
+  order: { paymentStatus: PaymentStatus.PENDING },
 })
 /** Fase 2: minutos que vive la sesión de pago con tarjeta antes de darse por abandonada. */
 export const CARD_CHECKOUT_TTL_MINUTES = 30

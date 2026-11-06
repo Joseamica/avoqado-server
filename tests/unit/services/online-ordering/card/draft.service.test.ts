@@ -281,6 +281,11 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
     })
   })
 
+  it('tienda híbrida: con 30 folios vivos y el negocio de vuelta en «Mi equipo», un borrador nuevo no responde ORDERING_PAUSED ni TOO_BUSY', async () => {
+    prismaMock.onlineOrder.count.mockImplementation((({ where }: any) => Promise.resolve(where.requiresAcceptance === true ? 0 : 30)) as any)
+    await expect(createCardOnlineDraft(input(), PUEDE_CREAR)).resolves.toBeDefined()
+  })
+
   it('Codex r1 #3: si Stripe falla, el cargo sigue PENDING_AUTH con lastError → 502; el reintento repite clave y parámetros', async () => {
     createAuthorizationCheckout.mockRejectedValueOnce(new Error('stripe caído'))
     await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 502, 'CARD_PROVIDER_UNAVAILABLE')

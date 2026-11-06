@@ -1,7 +1,6 @@
-import { OnlineOrderStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { isWithinHours } from './hours'
-import { MAX_PENDING_PER_VENUE, PRESENCE_WINDOW_MS, PRESENCE_WRITE_DEBOUNCE_MS, liveCardDraftsWhere } from './constants'
+import { MAX_PENDING_PER_VENUE, PRESENCE_WINDOW_MS, PRESENCE_WRITE_DEBOUNCE_MS, awaitingAcceptanceWhere, liveCardDraftsWhere } from './constants'
 import { getSettings } from './settings.service'
 import type { AcceptingReason, AcceptingState, AcceptingStatus } from './types'
 
@@ -51,7 +50,7 @@ export async function getAcceptingStatus(
 
   // Fase 2: los borradores de tarjeta vigentes también ocupan lugar (el tope de admisión los cuenta igual).
   const pending =
-    (await prisma.onlineOrder.count({ where: { venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE } })) +
+    (await prisma.onlineOrder.count({ where: awaitingAcceptanceWhere(venueId) })) +
     (await prisma.onlineOrderCharge.count({ where: liveCardDraftsWhere(venueId, now) }))
   if (pending >= MAX_PENDING_PER_VENUE) return done('PAUSED', 'TOO_BUSY')
 

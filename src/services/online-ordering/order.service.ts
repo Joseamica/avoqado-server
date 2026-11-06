@@ -21,7 +21,7 @@ import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
 import { canonicalPhoneE164, phonesMatch } from '@/utils/phone'
 import { ponerNombreSiFalta } from '@/services/customer/customerName'
-import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, OPEN_ORDER_STATUSES, liveCardDraftsWhere } from './constants'
+import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, OPEN_ORDER_STATUSES, awaitingAcceptanceWhere, liveCardDraftsWhere } from './constants'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
@@ -511,13 +511,13 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente.
         const pendingByPhone =
           (await tx.onlineOrder.count({
-            where: { venueId: input.venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE, order: { customerPhone: phone } },
+            where: { ...awaitingAcceptanceWhere(input.venueId), order: { customerPhone: phone } },
           })) + (await tx.onlineOrderCharge.count({ where: { ...liveCardDraftsWhere(input.venueId, now), customerPhone: phone } }))
         if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
           throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
         }
         const pendingInVenue =
-          (await tx.onlineOrder.count({ where: { venueId: input.venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE } })) +
+          (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(input.venueId) })) +
           (await tx.onlineOrderCharge.count({ where: liveCardDraftsWhere(input.venueId, now) }))
         if (pendingInVenue >= MAX_PENDING_PER_VENUE) {
           throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
