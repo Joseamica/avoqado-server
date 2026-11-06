@@ -479,10 +479,12 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     // reintento: la MISMA llave con el MISMO pedido recibe SU folio (la misma lectura indexada de la repetición normal), no el 401.
     // Es la única lectura extra y sólo en este camino; sin pedido con esa llave, 401 como siempre.
     // Un pedido con esa llave pero OTRA huella (p. ej. nació con sesión, R47 T7a) sigue siendo 401, nunca 409.
-    const folio = await findReplay(prisma, input.venueId, externalId, requestHash).catch(e =>
-      e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT' ? null : Promise.reject(e),
-    )
-    if (folio) return folio
+    try {
+      const folio = await findReplay(prisma, input.venueId, externalId, requestHash)
+      if (folio) return folio
+    } catch (e) {
+      if (!(e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT')) throw e
+    }
     throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
   }
 
@@ -900,6 +902,9 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
   }
 }
 
+/** Un cobro real: COMPLETED y `type` nulo o distinto de REFUND (`<> 'REFUND'` descartaría NULL; `orderBalance` cuenta NULL como cobro). */
+const CHARGE_FILTER = { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] } satisfies Prisma.PaymentWhereInput
+
 async function orderTracking(token: string): Promise<PublicTracking | null> {
   const row = await prisma.onlineOrder.findUnique({
     where: { trackingToken: token },
@@ -916,12 +921,13 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       charge: { select: { status: true } },
       order: {
         select: {
+          id: true,
           orderNumber: true,
           total: true,
           paymentStatus: true,
           customerName: true,
           payments: { // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
-          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 50, select: { createdAt: true, amount: true } },
+          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,
@@ -940,8 +946,13 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     },
   })
   if (!row) return null
-  // R79: hasta 50 cobros recientes (un folio no tiene tantos); la suma es de los mismos cobros que dan `paidAt`.
-  const paidSoFar = row.order.payments.reduce((sum, p) => sum.plus(p.amount ?? 0), new Prisma.Decimal(0)).toDecimalPlaces(2)
+  // R79: lo cobrado es la suma EXACTA (un aggregate por orderId, indexado) de los mismos cobros que dan `paidAt`; sin ningún cobro
+  // (`payments` vacío) no hay nada que sumar y no se consulta.
+  const paidSoFar = row.order.payments.length
+    ? new Prisma.Decimal(
+        (await prisma.payment.aggregate({ _sum: { amount: true }, where: { orderId: row.order.id, ...CHARGE_FILTER } }))._sum.amount ?? 0,
+      ).toDecimalPlaces(2)
+    : new Prisma.Decimal(0)
   const pending = row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING
   return {
     orderNumber: row.order.orderNumber,
