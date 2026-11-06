@@ -6,6 +6,7 @@ import {
   PaymentStatus,
   type VenueType,
 } from '@prisma/client'
+import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -97,7 +98,7 @@ export const foliosPorPagarWhere = (venueId: string) => ({
   requiresAcceptance: false,
   order: {
     status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
-    paymentStatus: { notIn: [PaymentStatus.PAID, PaymentStatus.REFUNDED] },
+    paymentStatus: { notIn: FOLIO_PAID_STATUSES }, // R24: una sola definición de «cobrada»
   },
 })
 /**

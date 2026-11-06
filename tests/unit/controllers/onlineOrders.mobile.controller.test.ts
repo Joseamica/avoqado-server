@@ -390,6 +390,13 @@ describe('toPay (tienda híbrida T12)', () => {
     expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...FOLIOS, store: TIENDA_ABIERTA } })
   })
 
+  it('m8: el panel (toPayPanel) nunca late, aunque mande la cabecera', async () => {
+    const { req, res, next } = mock({ headers: TO_PAY })
+    await ctrl.toPayPanel(req, res, next)
+    expect(listFolios).toHaveBeenCalled()
+    expect(touchToPayPoll).not.toHaveBeenCalled()
+  })
+
   it('sin la cabecera no late', async () => {
     const { req, res, next } = mock()
     await ctrl.toPay(req, res, next)

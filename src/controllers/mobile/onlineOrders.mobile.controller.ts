@@ -104,13 +104,14 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
  * Tienda híbrida (T12): «Por pagar» y «Por entregar». El latido (`x-online-orders-to-pay: 1`) dice a la tienda que hay una caja viva y
  * sólo cuenta de quien puede COBRAR (`payments:create`, no suplantando); sin la cabecera no late, y el panel nunca la manda.
  */
-export const toPay = async (req: Request, res: Response, next: NextFunction) => {
+const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
     const section = typeof req.query.section === 'string' ? (req.query.section as FolioSection) : undefined
     const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
     const data = await listFolios({ venueId, ...(section ? { section } : {}), ...(cursor ? { cursor } : {}) })
-    const latido = req.header(ONLINE_ORDERS_TO_PAY_HEADER) === '1' && (await canDo(req, venueId, 'payments:create').catch(() => false))
+    const latido =
+      puedeLatir && req.header(ONLINE_ORDERS_TO_PAY_HEADER) === '1' && (await canDo(req, venueId, 'payments:create').catch(() => false))
     if (latido) await touchToPayPoll(venueId).catch(() => false)
     const state = await getAcceptingStatus(venueId).catch(() => null)
     return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
@@ -118,6 +119,11 @@ export const toPay = async (req: Request, res: Response, next: NextFunction) => 
     return next(e)
   }
 }
+
+/** Apps (TPV y POS): la lista con latido. */
+export const toPay = makeToPay(true)
+/** Panel: la MISMA lista, pero el servidor nunca lo cuenta como caja viva (no lee la cabecera), esté o no en CORS. */
+export const toPayPanel = makeToPay(false)
 
 /** Rappi 2b: los pedidos de plataforma que la caja cobra en efectivo (venta, propina y lo de la plataforma, en centavos). */
 export const deliveryCash = async (req: Request, res: Response, next: NextFunction) => {

@@ -6,6 +6,7 @@ import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.s
 import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
 import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/pagadaPeroAbierta'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
 import { INBOX_PAGE_SIZE, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
@@ -283,6 +284,8 @@ export type FolioSection = 'toPay' | 'toDeliver'
  */
 export async function listFolios(p: { venueId: string; section?: FolioSection; cursor?: string; now?: Date }) {
   const now = p.now ?? new Date()
+  // El cursor es de UNA sección: sin ella no hay forma no ambigua de aplicarlo (la ruta ya lo frena; esto cubre a quien llame directo).
+  if (p.cursor && !p.section) throw new BadRequestError('El cursor necesita la sección a la que sigue', 'INVALID_CURSOR')
   const after = p.cursor ? fromActiveCursor(p.cursor) : null
   const warnSync = (que: string) => (error: unknown) => {
     logger.warn(`[OnlineOrdering] no se pudieron ${que} antes de la lista de folios`, {

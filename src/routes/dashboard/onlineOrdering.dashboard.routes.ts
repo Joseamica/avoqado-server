@@ -50,7 +50,7 @@ router.post('/pause', validateRequest(pauseSchema), checkPermission('online-orde
 // (permitida en CORS, H2) y quien mira tiene `orders:update` efectivo (H3).
 router.get('/orders', validateRequest(inboxSchema), checkPermission('orders:read'), orders.inbox)
 // Tienda híbrida (T12): la misma lista de folios, sin latido (el panel no cuenta como caja). ANTES de `/orders/:orderId`, o «to-pay» se leería como id.
-router.get('/orders/to-pay', validateRequest(toPaySchema), checkPermission('orders:read'), orders.toPay)
+router.get('/orders/to-pay', validateRequest(toPaySchema), checkPermission('orders:read'), orders.toPayPanel)
 // S3 (clientes): UN pedido por su cuenta, para devolver a la tarjeta después de las 24 h de la bandeja. Sin plan (R14).
 router.get('/orders/:orderId', validateRequest(orderActionSchema), checkPermission('orders:read'), admin.getOnlineOrderHandler)
 router.post('/orders/:orderId/accept', validateRequest(acceptSchema), checkPermission('orders:update'), orders.accept)

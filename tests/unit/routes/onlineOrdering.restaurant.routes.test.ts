@@ -6,7 +6,11 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   __esModule: true,
-  authenticateTokenMiddleware: (_req: any, _res: any, next: any) => next(),
+  // El token dice a qué negocio pertenece la sesión (`x-test-token-venue`; por defecto v1) para `validateVenueAccess` de la TPV.
+  authenticateTokenMiddleware: (req: any, _res: any, next: any) => {
+    req.authContext = { venueId: req.headers['x-test-token-venue'] ?? 'v1' }
+    next()
+  },
 }))
 // Registra QUÉ esquema validó cada ruta (el objeto real de `@/schemas/online-ordering.schema`), sin validar nada.
 jest.mock('@/middlewares/validation', () => ({
@@ -47,6 +51,7 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
     __esModule: true,
     inbox: respond,
     toPay: respond,
+    toPayPanel: respond,
     deliveryCash: respond,
     accept: respond,
     reject: respond,
@@ -149,6 +154,18 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
     for (const [metodo, path, perm, schema] of casos) {
       const r = await request(app)[metodo](`${T}/${path}`)
       expect({ path, ...r.body }).toEqual({ path, perms: [perm], plans: [], schemas: [schema] })
+    }
+  })
+
+  it('T12 (m1): la TPV exige que el :venueId de la URL sea el del token (validateVenueAccess): otra sucursal ⇒ 403 en cada ruta', async () => {
+    for (const [metodo, path] of [
+      ['get', 'to-pay'],
+      ['post', 'ord1/accept'],
+      ['post', 'ord1/cancel'],
+      ['post', 'ord1/print/claim'],
+    ] as const) {
+      const r = await request(app)[metodo](`${T}/${path}`).set('x-test-token-venue', 'vOtra')
+      expect({ path, status: r.status }).toEqual({ path, status: 403 })
     }
   })
 

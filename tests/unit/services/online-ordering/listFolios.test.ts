@@ -134,6 +134,10 @@ describe('listFolios', () => {
     await expect(listFolios({ venueId: 'v1', section: 'toPay', cursor: 'basura', now: NOW })).rejects.toMatchObject({ statusCode: 400 })
   })
 
+  it('m4: un cursor sin section da 400 en el servicio, no se ignora', async () => {
+    await expect(listFolios({ venueId: 'v1', cursor: `${NOW.toISOString()}_oo001`, now: NOW })).rejects.toMatchObject({ statusCode: 400 })
+  })
+
   it('con la tienda apagada y sin folios vivos: showTile false y pollSeconds 600', async () => {
     ;(getSettings as jest.Mock).mockResolvedValue({ enabled: false, requiresAcceptance: false })
     const r = await listFolios({ venueId: 'v1', now: NOW })

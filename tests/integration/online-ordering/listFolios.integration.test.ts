@@ -6,7 +6,7 @@
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { listFolios } from '@/services/online-ordering/folios.service'
-import { markOnlineOrderDelivered } from '@/services/online-ordering/transitions.service'
+import { expireOnlineOrder, markOnlineOrderDelivered, markOnlineOrderReady } from '@/services/online-ordering/transitions.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
@@ -173,5 +173,30 @@ describe('T12 · listFolios contra Postgres', () => {
     // el pedido de «Mi equipo» nunca es folio
     expect(numeros([...r.toPay, ...r.toDeliver])).not.toContain(deEquipo.orderId)
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: cancelado.onlineOrderId } })).status).toBe('CANCELLED_BY_STAFF')
+  })
+
+  it('un folio que el dinero tardío pasó a ACCEPTED sale en toDeliver', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio({ vencido: true })
+    expect(await expireOnlineOrder({ venueId: f.venueId, orderId })).toMatchObject({ outcome: 'OK', status: 'EXPIRED' })
+    await efectivoDeLaTpv(orderId, CIEN) // el dinero llega después de vencer
+
+    const r = await listFolios({ venueId: f.venueId })
+
+    expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status).toBe('ACCEPTED')
+    expect(numeros(r.toDeliver)).toEqual([orderId])
+    expect(r.toPay).toEqual([])
+    expect(r.counts).toEqual({ toPay: 0, toDeliver: 1 })
+  })
+
+  it('«Listo» lo saca de toDeliver', async () => {
+    const { orderId } = await nuevoFolio()
+    await efectivoDeLaTpv(orderId, CIEN)
+    expect(numeros((await listFolios({ venueId: f.venueId })).toDeliver)).toEqual([orderId])
+
+    await expect(markOnlineOrderReady({ venueId: f.venueId, orderId, staffId: f.staffId })).resolves.toMatchObject({ outcome: 'OK' })
+
+    const r = await listFolios({ venueId: f.venueId })
+    expect(r.toDeliver).toEqual([])
+    expect(r.counts.toDeliver).toBe(0)
   })
 })
