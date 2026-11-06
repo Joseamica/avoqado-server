@@ -281,32 +281,34 @@ async function getStaffSummary(staffId?: string | null) {
   }
 }
 
-/**
- * Generate unique order number
- */
-async function generateOrderNumber(venueId: string): Promise<string> {
+/** Siguiente consecutivo del negocio en el día: PO<fecha>-NNN. Se compara como número: como texto, `-999` queda después de `-1000`. */
+async function generateOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
   const today = new Date()
   const datePrefix = `PO${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
 
-  const lastOrder = await prisma.purchaseOrder.findFirst({
-    where: {
-      venueId,
-      orderNumber: {
-        startsWith: datePrefix,
-      },
-    },
-    orderBy: {
-      orderNumber: 'desc',
-    },
-  })
+  const [fila] = await tx.$queryRaw<{ ultimo: number | null }[]>(
+    Prisma.sql`SELECT max(split_part("orderNumber", '-', 2)::int) AS ultimo FROM "PurchaseOrder"
+      WHERE "venueId" = ${venueId} AND "orderNumber" ~ ${`^${datePrefix}-[0-9]+$`}`,
+  )
+  return `${datePrefix}-${String((fila?.ultimo ?? 0) + 1).padStart(3, '0')}`
+}
 
-  if (!lastOrder) {
-    return `${datePrefix}-001`
-  }
-
-  const lastSequence = parseInt(lastOrder.orderNumber.split('-')[1])
-  const nextSequence = String(lastSequence + 1).padStart(3, '0')
-  return `${datePrefix}-${nextSequence}`
+/**
+ * Crea una orden de compra con el siguiente número del negocio. El candado dura la transacción: dos
+ * órdenes a la vez no leen el mismo último número, y si la creación falla el número no se gasta.
+ * Las que esperan el candado retienen su conexión y cuentan en el timeout: por eso no son los defaults de Prisma (5 s y 2 s).
+ */
+export async function crearConNumeroDeOrden<T>(
+  venueId: string,
+  crear: (tx: Prisma.TransactionClient, orderNumber: string) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(
+    async tx => {
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`purchase-order-number:${venueId}`}, 0))`)
+      return crear(tx, await generateOrderNumber(tx, venueId))
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 }
 
 /**
@@ -677,64 +679,63 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
   // orden completa, no dejarla a medias.
   const presentationSnapshots = await resolvePresentationSnapshots(venueId, data.items)
 
-  // Generate order number
-  const orderNumber = await generateOrderNumber(venueId)
-
   // Create purchase order with items
-  const purchaseOrder = await prisma.purchaseOrder.create({
-    data: {
-      venueId,
-      supplierId: data.supplierId,
-      orderNumber,
-      orderDate: new Date(data.orderDate),
-      expectedDeliveryDate: data.expectedDeliveryDate ? new Date(data.expectedDeliveryDate) : undefined,
-      status: PurchaseOrderStatus.DRAFT,
-      subtotal,
-      taxRate,
-      taxAmount,
-      commissionRate,
-      commission,
-      total: totalAmount,
-      notes: data.notes,
-      createdBy: staffId,
-      // Shipping address fields
-      shippingAddressType: data.shippingAddressType || 'VENUE',
-      shippingAddress: data.shippingAddress,
-      shippingCity: data.shippingCity,
-      shippingState: data.shippingState,
-      shippingZipCode: data.shippingZipCode,
-      items: {
-        create: data.items.map((item, index) => {
-          const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
-          const presentation = presentationSnapshots.get(index)
-          return {
-            // Insumo de cocina O producto de reventa, nunca los dos: la exclusividad
-            // ya la garantizó el esquema Zod de entrada.
-            ...(item.rawMaterialId ? { rawMaterial: { connect: { id: item.rawMaterialId } } } : {}),
-            ...(item.productId ? { product: { connect: { id: item.productId } } } : {}),
-            quantityOrdered: item.quantityOrdered,
-            // Con presentación, la unidad del renglón es la BASE del insumo: el
-            // enum no puede decir "caja", eso lo dice `presentationName`.
-            unit: presentation ? presentation.baseUnit : (item.unit as Unit),
-            unitPrice: item.unitPrice,
-            total: itemTotal,
-            quantityReceived: 0,
-            presentationName: presentation?.name ?? null,
-            presentationFactor: presentation?.factor ?? null,
-          }
-        }),
-      },
-    },
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
+  const purchaseOrder = await crearConNumeroDeOrden(venueId, (tx, orderNumber) =>
+    tx.purchaseOrder.create({
+      data: {
+        venueId,
+        supplierId: data.supplierId,
+        orderNumber,
+        orderDate: new Date(data.orderDate),
+        expectedDeliveryDate: data.expectedDeliveryDate ? new Date(data.expectedDeliveryDate) : undefined,
+        status: PurchaseOrderStatus.DRAFT,
+        subtotal,
+        taxRate,
+        taxAmount,
+        commissionRate,
+        commission,
+        total: totalAmount,
+        notes: data.notes,
+        createdBy: staffId,
+        // Shipping address fields
+        shippingAddressType: data.shippingAddressType || 'VENUE',
+        shippingAddress: data.shippingAddress,
+        shippingCity: data.shippingCity,
+        shippingState: data.shippingState,
+        shippingZipCode: data.shippingZipCode,
+        items: {
+          create: data.items.map((item, index) => {
+            const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
+            const presentation = presentationSnapshots.get(index)
+            return {
+              // Insumo de cocina O producto de reventa, nunca los dos: la exclusividad
+              // ya la garantizó el esquema Zod de entrada.
+              ...(item.rawMaterialId ? { rawMaterial: { connect: { id: item.rawMaterialId } } } : {}),
+              ...(item.productId ? { product: { connect: { id: item.productId } } } : {}),
+              quantityOrdered: item.quantityOrdered,
+              // Con presentación, la unidad del renglón es la BASE del insumo: el
+              // enum no puede decir "caja", eso lo dice `presentationName`.
+              unit: presentation ? presentation.baseUnit : (item.unit as Unit),
+              unitPrice: item.unitPrice,
+              total: itemTotal,
+              quantityReceived: 0,
+              presentationName: presentation?.name ?? null,
+              presentationFactor: presentation?.factor ?? null,
+            }
+          }),
         },
       },
-    },
-  })
+      include: {
+        supplier: true,
+        items: {
+          include: {
+            rawMaterial: true,
+            product: true, // renglón de mercancía de reventa: sin esto sale anónimo
+          },
+        },
+      },
+    }),
+  )
 
   // Send email notification to supplier and staff (non-blocking)
   // This is async but we don't await it - email failures should not block PO creation

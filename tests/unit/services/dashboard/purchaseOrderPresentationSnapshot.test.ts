@@ -34,7 +34,7 @@ describe('createPurchaseOrder — snapshot de la presentación de compra', () =>
     jest.clearAllMocks()
     prismaMock.supplier.findFirst.mockResolvedValue({ id: SUPPLIER, name: 'Proveedor', minimumOrder: null, active: true, deletedAt: null })
     prismaMock.rawMaterial.findMany.mockResolvedValue([{ id: RM, unit: 'PIECE' }])
-    prismaMock.purchaseOrder.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.purchaseOrder.count.mockResolvedValue(0)
     prismaMock.purchaseOrder.create.mockResolvedValue({
       id: 'po-1',

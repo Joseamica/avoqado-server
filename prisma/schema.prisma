@@ -2703,7 +2703,7 @@ model PurchaseOrder {
   supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Restrict)
 
   // Order details
-  orderNumber          String              @unique
+  orderNumber          String // Consecutivo de cada negocio: único con venueId, no en toda la base
   status               PurchaseOrderStatus @default(DRAFT)
   orderDate            DateTime
   expectedDeliveryDate DateTime?
@@ -2746,6 +2746,7 @@ model PurchaseOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([venueId, orderNumber])
   @@index([venueId])
   @@index([supplierId])
   @@index([status])
