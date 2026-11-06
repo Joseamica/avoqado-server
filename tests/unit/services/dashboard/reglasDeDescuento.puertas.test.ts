@@ -219,6 +219,13 @@ describe('Zod del panel · sólo forma, en español', () => {
     expect(JSON.stringify(r)).toContain('Debe ser un número entero')
   })
 
+  it('🔴 D14 v2 r1 #2: formas raras (`{ set: [] }`, alcance inválido) salen en español', () => {
+    const lista = updateDiscountBodySchema.safeParse({ targetCategoryIds: { set: [] } })
+    const alcance = updateDiscountBodySchema.safeParse({ scope: 'NADA' })
+    expect(JSON.stringify(lista)).toContain('Las categorías deben ser una lista')
+    expect(JSON.stringify(alcance)).toContain('El alcance del descuento no es válido')
+  })
+
   it('🔴 r5 #4: editar CATEGORY + [] (igual a lo guardado) pasa el esquema; null en límites también', () => {
     expect(updateDiscountBodySchema.safeParse({ scope: 'CATEGORY', targetCategoryIds: [], active: false }).success).toBe(true)
     expect(updateDiscountBodySchema.safeParse({ maxTotalUses: null }).success).toBe(true)

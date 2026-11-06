@@ -60,6 +60,12 @@ describe('create_coupon (write)', () => {
     expect(mockCreateCoupon).not.toHaveBeenCalled()
   })
 
+  it('🔴 D14 v2 r1 #2: 0 usos → error en español de la regla única, no se crea', async () => {
+    const out = parse(await call({ venueId: 'v1', discountName: 'Verano', code: 'verano20', maxUses: 0, confirm: true }))
+    expect(out).toEqual({ ok: false, error: 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado' })
+    expect(mockCreateCoupon).not.toHaveBeenCalled()
+  })
+
   it('without confirm → previews the coupon, does NOT create (M3)', async () => {
     mockDiscountFind.mockResolvedValueOnce([{ id: 'd1', name: 'Verano' }])
     const out = parse(await call({ venueId: 'v1', discountName: 'Verano', code: 'verano20', maxUses: 100 }))

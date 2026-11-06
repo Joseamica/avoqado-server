@@ -13,7 +13,9 @@ import { z } from 'zod'
 // ==========================================
 
 export const DiscountTypeSchema = z.enum(['PERCENTAGE', 'FIXED_AMOUNT', 'COMP'])
-export const DiscountScopeSchema = z.enum(['ORDER', 'ITEM', 'CATEGORY', 'MODIFIER', 'MODIFIER_GROUP', 'CUSTOMER_GROUP', 'QUANTITY'])
+export const DiscountScopeSchema = z.enum(['ORDER', 'ITEM', 'CATEGORY', 'MODIFIER', 'MODIFIER_GROUP', 'CUSTOMER_GROUP', 'QUANTITY'], {
+  errorMap: () => ({ message: 'El alcance del descuento no es válido' }),
+})
 
 // ==========================================
 // QUERY SCHEMAS
@@ -48,6 +50,10 @@ const Motivo = z.string().max(500, 'El motivo puede tener hasta 500 caracteres')
 const Dias = z.array(enteroDesde(0).max(6, 'El día de la semana va de 0 a 6'))
 // D14 v2: los límites de uso sólo validan la forma; 0, negativos y lo guardado los decide validarCambioDeDescuento.
 const Limite = Numero.int('Debe ser un número entero')
+// Codex D14 v2 r1 #2: `{ set: [] }` salía con «Expected array, received object».
+const Categorias = z.array(z.string({ invalid_type_error: 'Cada categoría debe ser un texto' }), {
+  invalid_type_error: 'Las categorías deben ser una lista',
+})
 
 export const createDiscountBodySchema = z
   .object({
@@ -59,7 +65,7 @@ export const createDiscountBodySchema = z
 
     // Target IDs
     targetItemIds: z.array(z.string()).optional(),
-    targetCategoryIds: z.array(z.string()).optional(),
+    targetCategoryIds: Categorias.optional(),
     targetModifierIds: z.array(z.string()).optional(),
     targetModifierGroupIds: z.array(z.string()).optional(),
     customerGroupId: z.string().optional(),
@@ -166,7 +172,7 @@ export const updateDiscountBodySchema = z.object({
 
   // Target IDs
   targetItemIds: z.array(z.string()).optional(),
-  targetCategoryIds: z.array(z.string()).optional(),
+  targetCategoryIds: Categorias.optional(),
   targetModifierIds: z.array(z.string()).optional(),
   targetModifierGroupIds: z.array(z.string()).optional(),
   customerGroupId: z.string().optional().nullable(),
