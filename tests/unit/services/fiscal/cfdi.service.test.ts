@@ -497,7 +497,7 @@ describe('issueCfdiForOrder', () => {
     })
 
     it('facturación apagada ⇒ el mensaje de siempre («no habilitada») con su motivo', async () => {
-      const apagada = { code: 'SIN_COMERCIOS', texto: 'TEXTO', venueId: 'v1' }
+      const apagada = { code: 'SIN_COMERCIO_ENCENDIDO', texto: 'TEXTO', venueId: 'v1' }
       const bundle = await (makeDeps().loadOrderForCfdi as jest.Mock)()
       const deps = makeDeps({ loadOrderForCfdi: conMotivo({ ...bundle, facturacionEnabled: false }, apagada) })
       const err = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps).catch(e => e)
