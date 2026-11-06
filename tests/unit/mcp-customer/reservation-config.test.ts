@@ -17,6 +17,8 @@ const mockAudit = jest.fn()
 const mockPlanGate = jest.fn()
 
 jest.mock('@/services/dashboard/reservationSettings.service', () => ({
+  // La regla «¿prende un cobro?» es la REAL: la comparten el panel y la MCP (D18).
+  prendeCobroEnLinea: jest.requireActual('@/services/dashboard/reservationSettings.service').prendeCobroEnLinea,
   getReservationSettings: (...a: unknown[]) => mockGet(...(a as [])),
   updateReservationSettings: (...a: unknown[]) => mockUpdate(...(a as [])),
 }))
@@ -212,9 +214,29 @@ describe('configure_reservations (write)', () => {
 
   it('blocks enabling upfront=required when the venue cannot charge — at PREVIEW time (no confirm)', async () => {
     mockCanCharge.mockResolvedValue(false)
+    mockSettingsFindUnique.mockResolvedValue({ slotIntervalMin: 30, classUpfrontDefault: 'at_venue' })
     const out = parse(await call('configure_reservations', { venueId: 'v1', classUpfrontDefault: 'required' }))
     expect(out.ok).toBe(false)
     expect(out.requiresConfirmation).toBeUndefined()
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('D18: a venue with no row and no rail can save while resending the class default it already runs on', async () => {
+    mockCanCharge.mockResolvedValue(false)
+    mockSettingsFindUnique.mockResolvedValue(null) // nunca guardó ajustes: rige classUpfrontDefault='required'
+    const out = parse(
+      await call('configure_reservations', { venueId: 'v1', publicBookingEnabled: true, classUpfrontDefault: 'required', confirm: true }),
+    )
+    expect(out.ok).toBe(true)
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('D18: appointments still need a rail on a venue with no row (their default is at_venue)', async () => {
+    mockCanCharge.mockResolvedValue(false)
+    mockSettingsFindUnique.mockResolvedValue(null)
+    const out = parse(await call('configure_reservations', { venueId: 'v1', appointmentUpfrontDefault: 'required', confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/Stripe/)
     expect(mockUpdate).not.toHaveBeenCalled()
   })
 
