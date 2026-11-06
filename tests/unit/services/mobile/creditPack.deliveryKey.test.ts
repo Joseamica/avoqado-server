@@ -48,19 +48,51 @@ describe('Venta en persona con llave de entrega', () => {
     return sellPackInPerson('venue-1', 'pack-1', 'cust-1', 'staff-1', opts as any)
   }
 
-  // 🔴 D17 (hz:433063d4:D17): vendido desde el CARRITO, el cobro de la orden ya sumó al «Total gastado» del cliente; la entrega
-  // no lo vuelve a sumar ($1,700 cobrados marcaban $3,400). Desde la ficha la cajera cobra a mano, sin orden: ahí sí suma.
-  it('🔴 D17: con cobradoEnOrden la entrega no vuelve a sumar al total gastado', async () => {
-    await vender({ deliveryKey: 'llave-1', cobradoEnOrden: true })
+  // 🔴 D17 (hz:433063d4:D17): vendido desde el CARRITO, el cobro de la orden ya suma al «Total gastado» del cliente al saldarse; la
+  // entrega no lo repite ($1,700 cobrados marcaban $3,400). La app manda las llaves de esos cobros y el SERVIDOR comprueba que la
+  // orden sea de ESTE cliente (Codex r2: cambiar de cliente a media venta dividida dejaba al que recibe el paquete sin su gasto).
+  describe('D17 · cobrosDeLaOrden', () => {
+    const conOrdenes = (ligadas: number, ids: string[] = ['orden-1']) => {
+      prismaMock.payment.findMany.mockResolvedValue(ids.map(orderId => ({ orderId })) as any)
+      prismaMock.terminalPaymentRequest.findMany.mockResolvedValue([] as any)
+      prismaMock.order.count.mockResolvedValue(ligadas)
+    }
 
-    expect(tx.creditPackPurchase.create).toHaveBeenCalled()
-    expect(tx.customer.update).not.toHaveBeenCalled()
-  })
+    it('🔴 la orden que lo cobró es del mismo cliente: la entrega no suma', async () => {
+      conOrdenes(1)
+      await vender({ deliveryKey: 'llave-1', cobrosDeLaOrden: ['cobro-1'] })
 
-  it('D17: sin cobradoEnOrden (ficha del cliente, apps viejas, MCP) suma como siempre', async () => {
-    await vender({ deliveryKey: 'llave-1' })
+      expect(tx.creditPackPurchase.create).toHaveBeenCalled()
+      expect(tx.customer.update).not.toHaveBeenCalled()
+      expect(prismaMock.payment.findMany.mock.calls[0][0].where).toEqual({ venueId: 'venue-1', idempotencyKey: { in: ['cobro-1'] } })
+      expect(prismaMock.order.count.mock.calls[0][0].where).toEqual({
+        id: { in: ['orden-1'] },
+        venueId: 'venue-1',
+        OR: [{ customerId: 'cust-1' }, { orderCustomers: { some: { customerId: 'cust-1' } } }],
+      })
+    })
 
-    expect(tx.customer.update.mock.calls[0][0].data).toEqual({ totalSpent: { increment: expect.anything() } })
+    it('🔴 la orden es de OTRO cliente (se cambió a media venta): la entrega sí suma a quien recibe el paquete', async () => {
+      conOrdenes(0)
+      await vender({ deliveryKey: 'llave-1', cobrosDeLaOrden: ['cobro-1'] })
+
+      expect(tx.customer.update.mock.calls[0][0].data).toEqual({ totalSpent: { increment: expect.anything() } })
+    })
+
+    it('el cobro todavía no sube (sin red): se confía en el carrito y no suma', async () => {
+      conOrdenes(0, [])
+      await vender({ deliveryKey: 'llave-1', cobrosDeLaOrden: ['cobro-1'] })
+
+      expect(prismaMock.order.count).not.toHaveBeenCalled()
+      expect(tx.customer.update).not.toHaveBeenCalled()
+    })
+
+    it('sin cobrosDeLaOrden (ficha del cliente, apps viejas, MCP) suma como siempre', async () => {
+      await vender({ deliveryKey: 'llave-1' })
+
+      expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
+      expect(tx.customer.update.mock.calls[0][0].data).toEqual({ totalSpent: { increment: expect.anything() } })
+    })
   })
 
   it('🔴 guarda la llave en la compra', async () => {

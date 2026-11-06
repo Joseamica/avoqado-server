@@ -64,7 +64,7 @@ export const getBalance = async (req: Request, res: Response, next: NextFunction
 export const sellPack = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, packId } = req.params
-    const { customerId, note, deliveryKey, saleProof, cobradoEnOrden } = req.body
+    const { customerId, note, deliveryKey, saleProof, cobrosDeLaOrden } = req.body
 
     if (!customerId) {
       return res.status(400).json({ success: false, message: 'customerId es requerido' })
@@ -74,9 +74,14 @@ export const sellPack = async (req: Request, res: Response, next: NextFunction) 
       return res.status(400).json({ success: false, message: 'deliveryKey debe tener entre 1 y 64 caracteres' })
     }
 
-    // D17: opcional; las apps viejas no lo mandan y suman como hoy.
-    if (cobradoEnOrden !== undefined && typeof cobradoEnOrden !== 'boolean') {
-      return res.status(400).json({ success: false, message: 'cobradoEnOrden debe ser true o false' })
+    // D17: opcional; las llaves de los cobros de la orden del carrito. Las apps viejas no lo mandan y suman como hoy.
+    if (
+      cobrosDeLaOrden !== undefined &&
+      (!Array.isArray(cobrosDeLaOrden) ||
+        cobrosDeLaOrden.length > 20 ||
+        cobrosDeLaOrden.some(c => typeof c !== 'string' || !c.trim() || c.length > 64))
+    ) {
+      return res.status(400).json({ success: false, message: 'cobrosDeLaOrden debe ser una lista de hasta 20 llaves de 1 a 64 caracteres' })
     }
 
     const staffVenueId = await resolveStaffVenueId(venueId, req.authContext?.userId || '')
@@ -89,7 +94,7 @@ export const sellPack = async (req: Request, res: Response, next: NextFunction) 
       note,
       deliveryKey,
       foto,
-      cobradoEnOrden,
+      cobrosDeLaOrden,
     })
     return res.status(201).json({ success: true, purchase })
   } catch (error) {
