@@ -107,6 +107,8 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   crm_upsert_whatsapp_prospect: 'write',
   crm_advance_stage: 'write',
   crm_add_note: 'write',
+  crm_update_account: 'write',
+  crm_set_contact: 'write',
   crm_add_activity: 'write',
   crm_delete_account: 'write',
   crm_pending: 'read',

@@ -20,7 +20,17 @@ import { conLlave, registerCrmTools } from '@/mcp/tools/crm'
 import { deleteAccount, erasedHashes } from '@/services/crm/erase.service'
 import { auditMcpWrite } from '@/mcp/audit'
 import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
-import { addNote, getPending, listAccounts, listLostReasons, listStages, lose, moveStage } from '@/services/crm/accounts.service'
+import {
+  addNote,
+  getPending,
+  listAccounts,
+  listContacts,
+  listLostReasons,
+  listStages,
+  lose,
+  moveStage,
+} from '@/services/crm/accounts.service'
+import { addContact, removeContact, updateAccount, updateContact } from '@/services/crm/ficha.service'
 import { addActivity } from '@/services/crm/activities.service'
 import { applyEntry } from '@/services/crm/inbound.service'
 import { NotFoundError } from '@/errors/AppError'
@@ -43,10 +53,18 @@ jest.mock('@/services/crm/accounts.service', () => ({
   moveStage: jest.fn(),
   lose: jest.fn(),
   addNote: jest.fn(),
+  listContacts: jest.fn(),
   listStages: jest.fn(),
   listLostReasons: jest.fn(),
 }))
 jest.mock('@/services/crm/activities.service', () => ({ addActivity: jest.fn() }))
+// C2: la ficha editable se prueba por su cuenta (ficha.service.test.ts); aquí sólo cómo la herramienta la llama y contesta.
+jest.mock('@/services/crm/ficha.service', () => ({
+  updateAccount: jest.fn(),
+  addContact: jest.fn(),
+  updateContact: jest.fn(),
+  removeContact: jest.fn(),
+}))
 // «Eliminar» is tested on its own (erase.service.test.ts); here only who reaches it, and the two steps.
 jest.mock('@/services/crm/erase.service', () => ({ ...jest.requireActual('@/services/crm/erase.service'), deleteAccount: jest.fn() }))
 jest.mock('@/services/crm/reports.service', () => ({ getReports: jest.fn() }))
@@ -70,6 +88,8 @@ const CRM_TOOLS = [
   'crm_upsert_whatsapp_prospect',
   'crm_advance_stage',
   'crm_add_note',
+  'crm_update_account',
+  'crm_set_contact',
   'crm_add_activity',
   'crm_delete_account',
   'crm_pending',
@@ -83,6 +103,8 @@ const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_upsert_whatsapp_prospect: 'write',
   crm_advance_stage: 'write',
   crm_add_note: 'write',
+  crm_update_account: 'write',
+  crm_set_contact: 'write',
   crm_add_activity: 'write',
   crm_delete_account: 'write',
   crm_pending: 'read',
@@ -129,6 +151,8 @@ const ARGS: Record<string, Record<string, unknown>> = {
   crm_upsert_whatsapp_prospect: { phoneE164: '+525512345678' },
   crm_advance_stage: { accountId: ACC, stageName: 'Demo' },
   crm_add_note: { accountId: ACC, text: 'Pidió precios' },
+  crm_update_account: { accountId: ACC, cambios: { giro: 'Bar' }, vio: { giro: 'Cafetería' } },
+  crm_set_contact: { accountId: ACC, accion: 'AGREGAR', nombre: 'Ana', correo: 'ana@cafe.mx' },
   crm_add_activity: { accountId: ACC, type: 'LLAMADA', title: 'Llamarle', dueAt: '2026-11-03T10:00:00-06:00' },
   crm_delete_account: { accountId: ACC, confirmName: 'Tacos Lupe' },
   crm_pending: {},
@@ -1410,5 +1434,153 @@ describe('CRM MCP — email (read only)', () => {
     } finally {
       await c.close()
     }
+  })
+})
+
+// ── C2 · Ficha editable por MCP ───────────────────────────────────────────────────────────────────────────────────────
+
+describe('crm_update_account y crm_set_contact (C2, Tarea 6)', () => {
+  const { ConflictError } = jest.requireActual('@/errors/AppError')
+  const CONTACT = cuid('contact')
+  const ANA = { name: 'Ana', phoneE164: null, email: 'ana@cafe.mx', role: null, isPrimary: true }
+  const VIO_MCP = { nombre: 'Ana', telefono: null, correo: 'ana@cafe.mx', puesto: null, principal: true }
+
+  it('crm_update_account sin vio → requiereVio con lo de ahora y el servicio no se llama', async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValueOnce({
+      name: 'Tacos Lupe',
+      giro: 'Taquería',
+      ventasRango: null,
+      sucursales: 2,
+      modulos: [],
+      referidoPor: null,
+    })
+    const answer = await setup().call('crm_update_account', { accountId: ACC, cambios: { nombre: 'Tacos Lupe Centro', sucursales: 3 } })
+    expect(answer).toEqual({ ok: false, requiereVio: true, ahora: { nombre: 'Tacos Lupe', sucursales: 2 } })
+    expect(updateAccount).not.toHaveBeenCalled()
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('crm_update_account con vio: llama al servicio con los nombres de la ficha y deja su bitácora', async () => {
+    ;(updateAccount as jest.Mock).mockResolvedValueOnce({ accountId: ACC, cambiados: ['name'] })
+    const answer = await setup().call('crm_update_account', { accountId: ACC, cambios: { nombre: 'Nuevo' }, vio: { nombre: 'Viejo' } })
+    expect(answer).toEqual({ ok: true, accountId: ACC, cambiados: ['nombre'] })
+    expect(updateAccount).toHaveBeenCalledWith(ADMIN, ACC, { cambios: { name: 'Nuevo' }, vio: { name: 'Viejo' } })
+    expect(auditMcpWrite).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'CRM_ACCOUNT_UPDATED_BY_MCP', data: { campos: ['name'] } }),
+    )
+  })
+
+  it('crm_update_account 409 → ok:false con lo de ahora (conLlave sola perdería los detalles)', async () => {
+    ;(updateAccount as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Cambió mientras lo editabas: revisa y guarda otra vez.', 'CRM_CAMBIO_AL_EDITAR', { ahora: { name: 'De Beto' } }),
+    )
+    expect(await setup().call('crm_update_account', { accountId: ACC, cambios: { nombre: 'Mío' }, vio: { nombre: 'Viejo' } })).toEqual({
+      ok: false,
+      code: 'CRM_CAMBIO_AL_EDITAR',
+      error: 'Cambió mientras lo editabas: revisa y guarda otra vez.',
+      ahora: { nombre: 'De Beto' },
+    })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+  })
+
+  it('crm_set_contact AGREGAR no tiene casilla de correos: lo que mande el modelo no llega al servicio', async () => {
+    ;(addContact as jest.Mock).mockResolvedValueOnce({ contactId: CONTACT, repetido: false })
+    await setup().call('crm_set_contact', { accountId: ACC, accion: 'AGREGAR', nombre: 'Ana', correo: 'ana@cafe.mx', aceptaCorreos: true })
+    expect((addContact as jest.Mock).mock.calls[0][2]).not.toHaveProperty('aceptaCorreos')
+    expect(auditMcpWrite).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'CRM_CONTACT_ADDED_BY_MCP', data: { contactId: CONTACT } }),
+    )
+  })
+
+  it('🔴 sin llave → cada llamada manda un UUID distinto; con llave → ésa; nunca el correo, el teléfono o el nombre', async () => {
+    ;(addContact as jest.Mock).mockResolvedValue({ contactId: CONTACT, repetido: false })
+    const { call } = setup()
+    await call('crm_set_contact')
+    await call('crm_set_contact')
+    const K = '11111111-1111-4111-8111-111111111111'
+    await call('crm_set_contact', { ...ARGS.crm_set_contact, llave: K })
+    const llaves = (addContact as jest.Mock).mock.calls.map(c => c[2].clientRequestId)
+    expect(llaves[0]).toMatch(/^[0-9a-f-]{36}$/)
+    expect(llaves[0]).not.toBe(llaves[1])
+    expect(llaves[2]).toBe(K)
+  })
+
+  it('🔴 llave «ana@ejemplo.mx» o cualquier no-UUID → error de zod, sin llamar al servicio', async () => {
+    const c = await connect('manual')
+    try {
+      const answer = await c.client.callTool({
+        name: 'crm_set_contact',
+        arguments: { ...ARGS.crm_set_contact, llave: 'ana@ejemplo.mx' },
+      })
+      expect(answer.isError).toBe(true)
+      expect(addContact).not.toHaveBeenCalled()
+    } finally {
+      await c.close()
+    }
+  })
+
+  it('AGREGAR sin teléfono ni correo → ok:false «di el teléfono o el correo»', async () => {
+    const answer = await setup().call('crm_set_contact', { accountId: ACC, accion: 'AGREGAR', nombre: 'Ana' })
+    expect(answer).toMatchObject({ ok: false, error: expect.stringContaining('di el teléfono o el correo') })
+    expect(addContact).not.toHaveBeenCalled()
+  })
+
+  it('la misma llave repetida → repetido; otro contenido o lo creado ya no está → ok:false con su código; duplicados → candidatos', async () => {
+    const { call } = setup()
+    ;(addContact as jest.Mock).mockResolvedValueOnce({ contactId: CONTACT, repetido: true })
+    expect(await call('crm_set_contact')).toEqual({ ok: true, contactId: CONTACT, repetido: true })
+    expect(auditMcpWrite).not.toHaveBeenCalled()
+    ;(addContact as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Ese intento guardó otra cosa', 'CRM_LLAVE_CON_OTRO_CONTENIDO', { ahora: ANA }),
+    )
+    expect(await call('crm_set_contact')).toMatchObject({ ok: false, code: 'CRM_LLAVE_CON_OTRO_CONTENIDO', ahora: VIO_MCP })
+    ;(addContact as jest.Mock).mockRejectedValueOnce(new ConflictError('Ya no está', 'CRM_LLAVE_YA_NO_ESTA'))
+    expect(await call('crm_set_contact')).toMatchObject({ ok: false, code: 'CRM_LLAVE_YA_NO_ESTA' })
+    ;(addContact as jest.Mock).mockRejectedValueOnce(new ConflictError('Ya está', 'CRM_PERSONA_YA_ESTA', { contactId: CONTACT }))
+    expect(await call('crm_set_contact')).toMatchObject({ ok: false, code: 'CRM_PERSONA_YA_ESTA', contactId: CONTACT })
+    ;(addContact as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Ya hay un negocio', 'CRM_POSIBLE_DUPLICADO', { duplicates: [{ ownerName: 'Beto' }] }),
+    )
+    expect(await call('crm_set_contact')).toMatchObject({ ok: false, code: 'CRM_POSIBLE_DUPLICADO', candidatos: [{ ownerName: 'Beto' }] })
+  })
+
+  it('CAMBIAR sin vio con 51 personas → total 51, 50 personas y nextCursor; no cambia nada', async () => {
+    const filas = Array.from({ length: 50 }, (_, i) => ({ id: cuid(`p${i}`), ...ANA, name: `P${i}` }))
+    ;(listContacts as jest.Mock).mockResolvedValueOnce({ rows: filas, nextCursor: filas[49].id, total: 51 })
+    const answer = await setup().call('crm_set_contact', { accountId: ACC, accion: 'CAMBIAR', contactId: CONTACT, nombre: 'X' })
+    expect(answer).toMatchObject({ ok: false, requiereVio: true, total: 51, hayMas: true, nextCursor: filas[49].id })
+    expect(answer.personas).toHaveLength(50)
+    expect(answer.personas[0]).toEqual({
+      id: filas[0].id,
+      nombre: 'P0',
+      telefono: null,
+      correo: 'ana@cafe.mx',
+      puesto: null,
+      principal: true,
+    })
+    expect(updateContact).not.toHaveBeenCalled()
+  })
+
+  it('CAMBIAR y QUITAR con vio pasan la persona que se vio con los nombres de la ficha; su 409 vuelve con ahora', async () => {
+    const { call } = setup()
+    ;(updateContact as jest.Mock).mockResolvedValueOnce({ contactId: CONTACT, cambiados: ['role'] })
+    expect(await call('crm_set_contact', { accountId: ACC, accion: 'CAMBIAR', contactId: CONTACT, puesto: 'Dueña', vio: VIO_MCP })).toEqual(
+      {
+        ok: true,
+        contactId: CONTACT,
+        cambiados: ['role'],
+      },
+    )
+    expect(updateContact).toHaveBeenCalledWith(ADMIN, ACC, CONTACT, { cambios: { role: 'Dueña' }, vio: ANA, esOtroNegocio: undefined })
+    ;(removeContact as jest.Mock).mockRejectedValueOnce(
+      new ConflictError('Cambió', 'CRM_CAMBIO_AL_EDITAR', { ahora: { ...ANA, name: 'Ana María' } }),
+    )
+    expect(await call('crm_set_contact', { accountId: ACC, accion: 'QUITAR', contactId: CONTACT, vio: VIO_MCP })).toMatchObject({
+      ok: false,
+      code: 'CRM_CAMBIO_AL_EDITAR',
+      ahora: { ...VIO_MCP, nombre: 'Ana María' },
+    })
   })
 })

@@ -14,13 +14,19 @@ jest.mock('@/services/email.service', () => ({
     sendEmailWithResult: jest.fn().mockResolvedValue({ ok: true, transient: false }),
   },
 }))
+// The MCP tools read the caller's CRM keys through this one; here they are the seller's of each test.
+jest.mock('@/services/crm/access.service', () => ({ ...jest.requireActual('@/services/crm/access.service'), getCrmAccess: jest.fn() }))
 jest.mock('@/services/integrations/hubspot.client', () => ({
   sendLeadToHubspot: jest.fn().mockResolvedValue(false),
   isHubspotEnabled: () => false,
 }))
 
 import { randomUUID } from 'crypto'
-import type { CrmAccess } from '@/services/crm/access.service'
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { McpScope } from '@/mcp/scope'
+import { registerCrmTools } from '@/mcp/tools/crm'
+import { getCrmAccess, type CrmAccess } from '@/services/crm/access.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { recorrerAudiencia } from '@/services/crm/email/audience.service'
 import { erasedHashes } from '@/services/crm/erase.service'
 import { getAccount, listContacts } from '@/services/crm/accounts.service'
@@ -442,5 +448,80 @@ describe('Tarea 4 · la ficha llega a todas las personas', () => {
     const [ana, beto] = [await vendedor('ana-t4b'), await vendedor('beto-t4b')]
     const { accountId } = await accountWithPerson(`t4b-${suffix}@test.mx`, { ownerStaffId: beto })
     await expect(listContacts(seller(ana, { ver: 'propios', editar: 'propios' }), accountId, {})).rejects.toMatchObject({ statusCode: 404 })
+  })
+})
+
+describe('Tarea 6 · crm_set_contact por MCP, sobre los servicios de la ficha', () => {
+  /** Las herramientas del CRM como las registra el MCP libre para un superadmin con permiso de escribir. */
+  async function mcpDe(staffId: string) {
+    jest.mocked(getCrmAccess).mockResolvedValue(seller(staffId, { isSuperadmin: true }))
+    const handlers: Record<string, (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>> = {}
+    const server = { tool: (name: string, _d: string, _s: unknown, handler: (typeof handlers)[string]) => (handlers[name] = handler) }
+    const scope = {
+      staffId,
+      activeOrg: '',
+      allowedVenueIds: [],
+      perVenueAccess: new Map(),
+      isSuperAdmin: true,
+      scopes: ['mcp:read', 'mcp:write'],
+    }
+    registerCrmTools(server as unknown as McpServer, scope as McpScope)
+    return async (name: string, args: Record<string, unknown>) => JSON.parse((await handlers[name](args)).content[0].text)
+  }
+
+  it('🔴 r3 H2: AGREGAR Ana por MCP; quitarla desde la ficha; AGREGAR otra vez ana@ sin llave → se crea de nuevo, con otro contactId', async () => {
+    const ana = await vendedor('ana-t6a')
+    const call = await mcpDe(ana)
+    const { accountId } = await accountWithPerson(`t6a-beto-${suffix}@test.mx`)
+    const correo = `t6a-ana-${suffix}@test.mx`
+
+    const primera = await call('crm_set_contact', { accountId, accion: 'AGREGAR', nombre: 'Ana', correo, esOtroNegocio: true })
+    expect(primera).toMatchObject({ ok: true, contactId: expect.any(String) })
+    await removeContact(seller(ana), accountId, primera.contactId, { vio: await vistaDe(primera.contactId) })
+    const segunda = await call('crm_set_contact', { accountId, accion: 'AGREGAR', nombre: 'Ana', correo, esOtroNegocio: true })
+
+    expect(segunda).toMatchObject({ ok: true })
+    expect(segunda.contactId).not.toBe(primera.contactId)
+    expect(await prisma.crmContact.count({ where: { accountId, email: correo } })).toBe(1)
+  })
+
+  it('🔴 la misma llave con el mismo contenido → repetido con el mismo contactId; quitada Ana, la misma llave → CRM_LLAVE_YA_NO_ESTA', async () => {
+    const ana = await vendedor('ana-t6b')
+    const call = await mcpDe(ana)
+    const { accountId } = await accountWithPerson(`t6b-beto-${suffix}@test.mx`)
+    const args = { accountId, accion: 'AGREGAR', nombre: 'Ana', correo: `t6b-ana-${suffix}@test.mx`, esOtroNegocio: true, llave: llave() }
+
+    const primera = await call('crm_set_contact', args)
+    expect(await call('crm_set_contact', args)).toEqual({ ok: true, contactId: primera.contactId, repetido: true })
+    await removeContact(seller(ana), accountId, primera.contactId, { vio: await vistaDe(primera.contactId) })
+    expect(await call('crm_set_contact', args)).toMatchObject({ ok: false, code: 'CRM_LLAVE_YA_NO_ESTA' })
+  })
+
+  it('🔴 r3 H3: el CONTACT_ADDED de una alta por MCP (todas sus columnas, sourceKey incluido) y su bitácora no tienen nombre, correo ni teléfono', async () => {
+    const ana = await vendedor('ana-t6c')
+    const call = await mcpDe(ana)
+    const { accountId } = await accountWithPerson(`t6c-beto-${suffix}@test.mx`)
+    const telefono = nextPhone()
+    const r = await call('crm_set_contact', {
+      accountId,
+      accion: 'AGREGAR',
+      nombre: 'Zoila Secreta',
+      correo: `zoila-t6c-${suffix}@test.mx`,
+      telefono,
+      puesto: 'Gerente General',
+      esOtroNegocio: true,
+    })
+    expect(r).toMatchObject({ ok: true })
+
+    const eventos = await prisma.crmTimelineEvent.findMany({ where: { accountId, kind: 'CONTACT_ADDED' }, take: 5 })
+    // La bitácora va simulada en la integración (integration-setup.ts): se lee lo que se le pidió escribir.
+    const bitacora = jest
+      .mocked(logAction)
+      .mock.calls.map(([params]) => params)
+      .filter(params => params.staffId === ana)
+    expect(eventos).toHaveLength(1)
+    expect(bitacora.map(params => params.action)).toEqual(expect.arrayContaining(['CRM_CONTACT_ADDED', 'CRM_CONTACT_ADDED_BY_MCP']))
+    const todo = JSON.stringify({ eventos, bitacora })
+    for (const dato of ['Zoila', `zoila-t6c-${suffix}`, telefono.slice(-8), 'Gerente General']) expect(todo).not.toContain(dato)
   })
 })
