@@ -4,6 +4,7 @@
  */
 import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../services/crm/clientFacts'
 import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'
@@ -354,9 +355,16 @@ export const hubspotImportFilesSchema = z.object(
 
 const listQuery = listAccountsSchema.shape.query.shape
 
+/** A filter of «Clientes» (C1): one of its values, or «Ese filtro no existe». */
+const clientFilter = <T extends readonly [string, ...string[]]>(values: T) =>
+  z.enum(values, { errorMap: () => ({ message: 'Ese filtro no existe' }) }).optional()
+
 /**
  * GET /crm/clients. The cursor is an Organization id (not always a cuid); the service caps the page at 100. `ocultos=true`
- * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39).
+ * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39). The C1 filters: `usa`
+ * (with `AVISO`), `nivel`, `estado`, `motivo` (with `SIN_MOTIVO`) and `dueno` (`MIOS`, `SIN_DUENO` or an id — the regex of
+ * existing ids accepts the two words; «propios» with an id is a business rule of the service). A `condicion` someone still
+ * sends is dropped (not `.strict()`): that filter left C1 in the redesign r3.
  */
 export const listClientsSchema = z.object({
   query: z.object({
@@ -365,6 +373,11 @@ export const listClientsSchema = z.object({
     limit: listQuery.limit,
     ocultos: flagQuery,
     altas: flagQuery,
+    usa: clientFilter([...USA, 'AVISO']),
+    nivel: clientFilter(NIVELES),
+    estado: clientFilter(ESTADOS),
+    motivo: clientFilter([...MOTIVOS_DEL_ALTA, 'SIN_MOTIVO']),
+    dueno: existing('El dueño no es válido').optional(),
   }),
 })
 

@@ -27,7 +27,8 @@ import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { getVenueBaseTier, getVenuePlanInfo } from '@/services/access/basePlan.service'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@/services/crm/clientFacts'
-import { clientsFilter, getClientLive, listClients } from '@/services/crm/clients.service'
+import { scopeWhere } from '@/services/crm/access.service'
+import { clientsFilter, getClientLive, listClients, scopeSql, type ClientFilters } from '@/services/crm/clients.service'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `cfacts${Date.now()}`
@@ -40,6 +41,10 @@ const organizationIds: string[] = []
 const venueIds: string[] = []
 /** A commercial contract cannot be deleted (its purchase is immutable): it is ended, and its venue stays. */
 const hybridContractIds: string[] = []
+/** Task 4: the CRM rows this file made (accounts, its stage, the two sellers). */
+const crmAccountIds: string[] = []
+const crmStageIds: string[] = []
+const sellerIds: string[] = []
 let staffId: string
 let planProId: string
 let planPremiumId: string
@@ -339,6 +344,9 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
     jest.useRealTimers()
     // By the ids this file created, never a `where` that could be undefined.
     if (organizationIds.length) await prisma.crmHiddenClient.deleteMany({ where: { organizationId: { in: organizationIds } } })
+    if (crmAccountIds.length) await prisma.crmAccount.deleteMany({ where: { id: { in: crmAccountIds } } })
+    if (crmStageIds.length) await prisma.crmStage.deleteMany({ where: { id: { in: crmStageIds } } })
+    if (sellerIds.length) await prisma.staff.deleteMany({ where: { id: { in: sellerIds } } })
     if (hybridContractIds.length) {
       await prisma.hybridContract.updateMany({ where: { id: { in: hybridContractIds } }, data: { endedAt: new Date() } })
     }
@@ -753,6 +761,236 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       expect(sin.ids).toContain(organizationId)
       expect((await listed({ altas: true })).ids).toContain(organizationId)
       expect((await factOf(organizationId)).estado).not.toBe('ALTA_SIN_TARJETA')
+    })
+  })
+
+  // ── La lista con filtros, columnas y total (Tarea 4) ──────────────────────────────────────────────────────────────
+
+  describe('filtros, columnas y total de «Clientes» (Tarea 4)', () => {
+    /** This block's organizations carry their own name key, so `q` lists only them (the blocks above made many more). */
+    const LEG = `leg${Date.now()}`
+    const o: Record<string, string> = {}
+    let A: string
+    let B: string
+    let stageId: string
+    const propios = (me: string) => ({ staffId: me, isSuperadmin: false, ver: 'propios', editar: 'propios' }) as unknown as CrmAccess
+    const todos = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos' }) as unknown as CrmAccess
+    type Row = Awaited<ReturnType<typeof listClients>>['rows'][number]
+
+    async function orgL(key: string) {
+      const { id } = await prisma.organization.create({
+        data: { name: `Leg ${LEG} ${key}`, email: `leg-${LEG}-${key}@test.mx`, phone: '5555555555' },
+      })
+      organizationIds.push(id)
+      o[key] = id
+      return { organizationId: id, venueId: await venue(id) }
+    }
+    async function altaL(key: string) {
+      const made = await orgL(key)
+      await prisma.onboardingProgress.create({
+        data: { organizationId: made.organizationId, completedSteps: [], acquisitionSource: 'landing' },
+      })
+      return made
+    }
+    async function account(
+      organizationId: string,
+      ownerStaffId: string | null,
+      extra: Partial<Prisma.CrmAccountUncheckedCreateInput> = {},
+    ) {
+      const { id } = await prisma.crmAccount.create({
+        data: { name: `Cuenta ${LEG}`, source: 'MANUAL', stageId, organizationId, ownerStaffId, ...extra },
+      })
+      crmAccountIds.push(id)
+      return id
+    }
+
+    /** Every page of «Clientes» for `access`, `limit` at a time, with the total each page said. */
+    async function walk(access: CrmAccess, filters: ClientFilters = {}, limit = 2) {
+      const rows: Row[] = []
+      const totals = new Set<number>()
+      let cursor: string | undefined
+      do {
+        const page = await listClients(access, { ...filters, q: LEG, altas: true, limit, cursor }, NOW)
+        expect(page.legible).toBe(1)
+        rows.push(...page.rows)
+        totals.add(page.total)
+        cursor = page.nextCursor ?? undefined
+      } while (cursor)
+      expect(totals.size).toBe(1)
+      return { rows, total: [...totals][0], ids: rows.map(row => row.id) }
+    }
+
+    beforeAll(async () => {
+      A = (await prisma.staff.create({ data: { email: `a-${LEG}@test.mx`, firstName: 'Ana', lastName: 'Propios' } })).id
+      B = (await prisma.staff.create({ data: { email: `b-${LEG}@test.mx`, firstName: 'Beto', lastName: 'Propios' } })).id
+      sellerIds.push(A, B)
+      stageId = (await prisma.crmStage.create({ data: { name: `Etapa ${LEG}`, order: 900, kind: 'ABIERTA' } })).id
+      crmStageIds.push(stageId)
+
+      // 1 · terminal, cobra, Gratis; B wrote ✋ POS (≠ lo medido → aviso).
+      const t = await orgL('terminal')
+      await sale(t.venueId, { source: 'TPV', payment: { source: 'TPV' } })
+      await account(t.organizationId, B, {
+        usaManual: 'POS',
+        usaManualPorque: 'Lo vi en su local',
+        usaManualById: B,
+        usaManualAt: hace(DAY),
+      })
+      // 2 · POS, cobra, Pro; A wrote ✋ POS (= lo medido → sin aviso).
+      const p = await orgL('pos')
+      await sale(p.venueId, { source: 'AVOQADO_ANDROID', payment: { source: 'APP' } })
+      await planRow(p.venueId, 'PRO')
+      await account(p.organizationId, A, { usaManual: 'POS', usaManualById: A, usaManualAt: hace(DAY) })
+      // 3 · los dos, cobra, Premium; cuenta sin dueño.
+      const ambos = await orgL('ambos')
+      await sale(ambos.venueId, { source: 'TPV', payment: { source: 'TPV' } })
+      await sale(ambos.venueId, { source: 'AVOQADO_IOS', payment: { source: 'APP' } })
+      await planRow(ambos.venueId, 'PREMIUM')
+      await account(ambos.organizationId, null)
+      // 4 · cobró por una liga: aparato no identificado.
+      const liga = await orgL('liga')
+      await sale(liga.venueId, { source: 'PAYMENT_LINK', payment: { source: 'WEB', method: 'CREDIT_CARD' } })
+      // 5 · cobró hace 40 días: sin cobros.
+      const viejo = await orgL('viejo')
+      await sale(viejo.venueId, { source: 'TPV', at: hace(40 * DAY), payment: { source: 'TPV' } })
+      // 6, 7, 8 · altas sin tarjeta: de B con PRECIO, de A con PRECIO, sin cuenta.
+      await account((await altaL('altaB')).organizationId, B, { altaMotivo: 'PRECIO' })
+      await account((await altaL('altaA')).organizationId, A, { altaMotivo: 'PRECIO' })
+      await altaL('altaSin')
+      // 9 · Pro sin cobrar nunca.
+      await planRow((await orgL('soloPlan')).venueId, 'PRO')
+    })
+
+    it('las 9 organizaciones pintan lo sembrado (control)', async () => {
+      const { rows, total } = await walk(todos(), {}, 100)
+      expect(total).toBe(9)
+      const by = new Map(rows.map(row => [row.id, row]))
+      const pinta = (key: string) => {
+        const row = by.get(o[key])!
+        return [row.usa.visto, row.usa.medido, row.plan.nivel, row.estado.codigo]
+      }
+      expect(pinta('terminal')).toEqual(['POS', 'TERMINAL', 'FREE', 'COBRA'])
+      expect(pinta('pos')).toEqual(['POS', 'POS', 'PRO', 'COBRA'])
+      expect(pinta('ambos')).toEqual(['AMBOS', 'AMBOS', 'PREMIUM', 'COBRA'])
+      expect(pinta('liga')).toEqual(['NO_IDENTIFICADO', 'NO_IDENTIFICADO', 'FREE', 'COBRA'])
+      expect(pinta('viejo')).toEqual(['NINGUNO', 'NINGUNO', 'FREE', 'SIN_COBROS'])
+      for (const key of ['altaB', 'altaA', 'altaSin']) expect(pinta(key)).toEqual(['NINGUNO', 'NINGUNO', 'FREE', 'ALTA_SIN_TARJETA'])
+      expect(pinta('soloPlan')).toEqual(['NINGUNO', 'NINGUNO', 'PRO', 'NUNCA'])
+      expect(by.get(o.pos)!.estado.ultimoCobroAt).toEqual(hace(3 * DAY))
+      expect(by.get(o.soloPlan)!.estado.ultimoCobroAt).toBeNull()
+    })
+
+    it('🔴 para cada valor de cada filtro, total = filas recorridas página por página (limit 2) cuyo valor pintado es ése; la suma por valores = total sin filtro', async () => {
+      const filtros: Array<{ key: 'usa' | 'nivel' | 'estado'; values: readonly string[]; pinta: (row: Row, value: string) => boolean }> = [
+        {
+          key: 'usa',
+          values: ['AMBOS', 'TERMINAL', 'POS', 'NO_IDENTIFICADO', 'NINGUNO', 'AVISO'],
+          pinta: (row, value) => (value === 'AVISO' ? row.usa.aviso : row.usa.visto === value),
+        },
+        { key: 'nivel', values: ['FREE', 'PRO', 'PREMIUM'], pinta: (row, value) => row.plan.nivel === value },
+        { key: 'estado', values: ['ALTA_SIN_TARJETA', 'COBRA', 'SIN_COBROS', 'NUNCA'], pinta: (row, value) => row.estado.codigo === value },
+      ]
+      for (const access of [propios(A), propios(B), todos()]) {
+        const base = await walk(access)
+        expect(base.rows).toHaveLength(base.total)
+        for (const { key, values, pinta } of filtros) {
+          let suma = 0
+          for (const value of values) {
+            const filtered = await walk(access, { [key]: value } as ClientFilters)
+            expect({ key, value, total: filtered.total }).toEqual({ key, value, total: filtered.rows.length })
+            expect(filtered.rows.every(row => pinta(row, value))).toBe(true)
+            expect({ key, value, total: filtered.total }).toEqual({ key, value, total: base.rows.filter(row => pinta(row, value)).length })
+            if (value !== 'AVISO') suma += filtered.total
+          }
+          expect({ key, suma }).toEqual({ key, suma: base.total })
+        }
+        // Dueño, pintado con lo que la fila dice de la cuenta.
+        const me = access.staffId
+        for (const [value, pinta] of [
+          ['MIOS', (row: Row) => row.cuenta?.owner?.id === me],
+          ['SIN_DUENO', (row: Row) => !row.cuentaAjena && !row.cuenta?.owner],
+        ] as const) {
+          const filtered = await walk(access, { dueno: value })
+          expect(filtered.total).toBe(filtered.rows.length)
+          expect(filtered.rows.every(row => pinta(row))).toBe(true)
+          expect(filtered.total).toBe(base.rows.filter(row => pinta(row)).length)
+        }
+      }
+    })
+
+    it('usa=AVISO trae sólo las de ✋ distinto de lo medido', async () => {
+      expect((await walk(todos(), { usa: 'AVISO' })).ids).toEqual([o.terminal])
+      // A's ✋ equals what was measured: no warning, the value is still «escrito».
+      const pos = (await walk(todos(), { usa: 'POS' })).rows.find(row => row.id === o.pos)!
+      expect(pos.usa).toMatchObject({ visto: 'POS', medido: 'POS', manual: true, aviso: false })
+    })
+
+    it('🔴 A con dueno=SIN_DUENO no ve la cuenta de B; con MIOS sólo las suyas', async () => {
+      const sinDueno = (await walk(propios(A), { dueno: 'SIN_DUENO' })).ids
+      expect(sinDueno).not.toContain(o.terminal)
+      expect(sinDueno).not.toContain(o.altaB)
+      expect(new Set(sinDueno)).toEqual(new Set([o.ambos, o.liga, o.viejo, o.altaSin, o.soloPlan]))
+      expect(new Set((await walk(propios(A), { dueno: 'MIOS' })).ids)).toEqual(new Set([o.pos, o.altaA]))
+      await expect(listClients(propios(A), { dueno: B, q: LEG, altas: true }, NOW)).rejects.toMatchObject({ code: 'CRM_FILTRO_DE_DUENO' })
+      // «Ver: todos» may filter by a colleague.
+      expect(new Set((await walk(todos(), { dueno: B })).ids)).toEqual(new Set([o.terminal, o.altaB]))
+    })
+
+    it('🔴 A ve el valor y manual=true del ✋ que puso B en su cuenta, pero detalle = null', async () => {
+      const seenByA = (await walk(propios(A))).rows.find(row => row.id === o.terminal)!
+      expect(seenByA).toMatchObject({ cuenta: null, cuentaAjena: true })
+      expect(seenByA.usa).toEqual({ visto: 'POS', medido: 'TERMINAL', manual: true, aviso: true, detalle: null })
+
+      const seenByB = (await walk(propios(B))).rows.find(row => row.id === o.terminal)!
+      expect(seenByB.usa.detalle).toEqual({ porque: 'Lo vi en su local', por: { id: B, name: 'Beto Propios' }, at: hace(DAY) })
+      const seenByAll = (await walk(todos())).rows.find(row => row.id === o.terminal)!
+      expect(seenByAll.usa.detalle).toEqual(seenByB.usa.detalle)
+    })
+
+    it('🔴 motivo=PRECIO para A no trae la cuenta de B con motivo PRECIO', async () => {
+      expect((await walk(propios(A), { motivo: 'PRECIO' })).ids).toEqual([o.altaA])
+      expect(new Set((await walk(todos(), { motivo: 'PRECIO' })).ids)).toEqual(new Set([o.altaA, o.altaB]))
+      // «Sin hablarle»: sin cuenta, o una visible sin motivo; la de B no es «sin motivo» para A.
+      expect((await walk(propios(A), { motivo: 'SIN_MOTIVO' })).ids).toEqual([o.altaSin])
+      // A reason only ever lists a 🟠.
+      expect((await walk(todos(), { motivo: 'OTRO' })).ids).toEqual([])
+    })
+
+    it('el cursor con filtros no repite ni salta filas', async () => {
+      for (const filters of [{ estado: 'COBRA' }, { usa: 'NINGUNO' }, { nivel: 'FREE', dueno: 'SIN_DUENO' }] as ClientFilters[]) {
+        const all = await walk(todos(), filters, 100)
+        const oneByOne = await walk(todos(), filters, 1)
+        expect(oneByOne.ids).toEqual(all.ids)
+        expect(new Set(oneByOne.ids).size).toBe(oneByOne.ids.length)
+      }
+    })
+
+    it('🔴 scopeSql = scopeWhere para propios y todos (dos vendedores)', async () => {
+      for (const access of [propios(A), propios(B), todos()]) {
+        const sql = await prisma.$queryRaw<Array<{ id: string }>>(
+          Prisma.sql`SELECT ca."id" FROM "CrmAccount" ca WHERE ca."id" IN (${Prisma.join(crmAccountIds)}) AND ${scopeSql(access, 'ca')}`,
+        )
+        const where = await prisma.crmAccount.findMany({
+          where: { AND: [{ id: { in: crmAccountIds } }, scopeWhere(access, 'ver')] },
+          select: { id: true },
+          take: crmAccountIds.length,
+        })
+        expect(new Set(sql.map(row => row.id))).toEqual(new Set(where.map(row => row.id)))
+      }
+      // And it is not vacuous: A and B see different accounts.
+      const de = async (me: string) =>
+        prisma.$queryRaw<Array<{ id: string }>>(
+          Prisma.sql`SELECT ca."id" FROM "CrmAccount" ca WHERE ca."id" IN (${Prisma.join(crmAccountIds)}) AND ${scopeSql(propios(me), 'ca')}`,
+        )
+      expect((await de(A)).length).toBe(3)
+      expect((await de(B)).length).toBe(3)
+    })
+
+    it('conteos de los 🟠 por motivo, en el alcance de quien mira (DE_OTRO y perdidos llegan con la Tarea 5)', async () => {
+      const deA = await listClients(propios(A), { q: LEG, usa: 'TERMINAL' }, NOW)
+      expect(deA.conteos).toMatchObject({ altaSinTarjeta: 3, porMotivo: { PRECIO: 1, SIN_MOTIVO: 1 } })
+      const deTodos = await listClients(todos(), { q: LEG }, NOW)
+      expect(deTodos.conteos).toMatchObject({ altaSinTarjeta: 3, porMotivo: { PRECIO: 2, SIN_MOTIVO: 1 } })
     })
   })
 })

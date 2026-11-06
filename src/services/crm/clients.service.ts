@@ -10,7 +10,7 @@
  */
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
@@ -20,7 +20,16 @@ import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import { teamOrganizationId } from './inbound.service'
-import { altaPropiaPendienteSql } from './clientFacts'
+import {
+  altaPropiaPendienteSql,
+  clientFactsLateral,
+  MOTIVOS_DEL_ALTA,
+  type Estado,
+  type MotivoDelAlta,
+  type Nivel,
+  type Usa,
+} from './clientFacts'
+import { autoresDelUsa, conteosDe, usaDeLaFila } from './clientPage'
 import { MONEY, REAL_VENUE, REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './sweep.service'
 
 const DEFAULT_PAGE = 50
@@ -123,9 +132,116 @@ export interface ClientFilters {
   ocultos?: boolean
   /** Also list the signups that stopped before giving a card (P1 = A). Only the new SUPERADMIN and the MCP ask. */
   altas?: boolean
+  /** What it uses, as seen (✋ ?? measured); `AVISO` = a ✋ that differs from the measure. */
+  usa?: Usa | 'AVISO'
+  /** The canonical plan level (`f."nivel"`). There is no «condición» filter (redesign r3). */
+  nivel?: Nivel
+  estado?: Estado
+  /** `MIOS`, `SIN_DUENO` (no account or an account nobody owns) or an owner's id (only with «Ver: todos»). */
+  dueno?: 'MIOS' | 'SIN_DUENO' | string
+  /** Why a 🟠 stalled — only on accounts in the caller's «Ver». Implies `estado = ALTA_SIN_TARJETA`. */
+  motivo?: MotivoDelAlta | 'SIN_MOTIVO'
 }
 
 const fullName = (person: { firstName: string; lastName: string }) => `${person.firstName} ${person.lastName}`.trim()
+const pageSize = (limit?: number) => Math.min(Math.max(limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
+
+/**
+ * `scopeWhere(access, 'ver')` in SQL over the CRM account aliased `alias` (LEFT-joined: with no account, `ownerStaffId` is
+ * null and «propios» matches, as an account nobody owns). Its integration test compares it with `scopeWhere` row by row.
+ */
+export function scopeSql(access: CrmAccess, alias: string): Prisma.Sql {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error(`Alias SQL inválido: ${alias}`)
+  const a = Prisma.raw(alias)
+  if (access.ver === 'todos') return Prisma.sql`TRUE`
+  if (access.ver === 'propios') return Prisma.sql`(${a}."ownerStaffId" = ${access.staffId} OR ${a}."ownerStaffId" IS NULL)`
+  return Prisma.sql`FALSE`
+}
+
+/** «Usa» as the cell paints it and the filter reads it: a person's ✋ over the measure, and the warning when they differ. */
+const USA_VISTO = Prisma.sql`COALESCE(ca."usaManual", f."usaMedido")`
+const USA_AVISO = Prisma.sql`(ca."usaManual" IS NOT NULL AND ca."usaManual" <> f."usaMedido")`
+const ES_ALTA = Prisma.sql`f."estado" = 'ALTA_SIN_TARJETA'`
+
+/** A «propios» seller filters only «Míos» or «Sin dueño»: another owner's id would tell who owns what (Review Focus 2). */
+function checkDueno(access: CrmAccess, dueno: string | undefined) {
+  if (dueno && dueno !== 'MIOS' && dueno !== 'SIN_DUENO' && access.ver !== 'todos')
+    throw new BadRequestError('Con «Ver: propios» sólo puedes filtrar «Míos» o «Sin dueño»', 'CRM_FILTRO_DE_DUENO')
+}
+
+/** A reason of a 🟠, only on accounts the caller sees; «Sin hablarle» = no account, or a visible one without a reason. */
+function motivoSql(access: CrmAccess, motivo: MotivoDelAlta | 'SIN_MOTIVO'): Prisma.Sql {
+  const visible = scopeSql(access, 'ca')
+  return motivo === 'SIN_MOTIVO'
+    ? Prisma.sql`(${ES_ALTA} AND (ca."id" IS NULL OR (${visible} AND ca."altaMotivo" IS NULL)))`
+    : Prisma.sql`(${ES_ALTA} AND ${visible} AND ca."altaMotivo" = ${motivo})`
+}
+
+/** The filters over `f.*` and `ca.*`, in the `WHERE` of the page and of the total. */
+function filtrosSql(access: CrmAccess, filters: ClientFilters): Prisma.Sql {
+  checkDueno(access, filters.dueno)
+  const parts: Prisma.Sql[] = []
+  if (filters.usa) parts.push(filters.usa === 'AVISO' ? USA_AVISO : Prisma.sql`${USA_VISTO} = ${filters.usa}`)
+  if (filters.nivel) parts.push(Prisma.sql`f."nivel" = ${filters.nivel}`)
+  if (filters.estado) parts.push(Prisma.sql`f."estado" = ${filters.estado}`)
+  if (filters.dueno === 'MIOS') parts.push(Prisma.sql`ca."ownerStaffId" = ${access.staffId}`)
+  else if (filters.dueno === 'SIN_DUENO') parts.push(Prisma.sql`(ca."id" IS NULL OR ca."ownerStaffId" IS NULL)`)
+  else if (filters.dueno) parts.push(Prisma.sql`ca."ownerStaffId" = ${filters.dueno}`)
+  if (filters.motivo) parts.push(motivoSql(access, filters.motivo))
+  return parts.length ? Prisma.sql` AND ${Prisma.join(parts, ' AND ')}` : Prisma.empty
+}
+
+/**
+ * EVERY statement of «Clientes» that walks the universe (Codex r2 #3): the page, its total and the count of 🟠 by reason.
+ * `listClients` runs exactly these (a test pins it) and `scripts/crm/explain-clientes.ts` measures exactly these. The page
+ * and the total share one `FROM … WHERE` (filters before the cursor); the count is always over the widened universe
+ * (`altas`) with the search and «Ocultos» only, so the header never moves when filtering (C16).
+ */
+export function clientsQueries(access: CrmAccess, filters: ClientFilters, now: Date, teamOrgId: string | null = null) {
+  const from = (conAltas: boolean) => Prisma.sql`FROM "Organization" o
+      LEFT JOIN "CrmAccount" ca ON ca."organizationId" = o."id"
+      ${clientFactsLateral(now)}
+      WHERE ${clientsFilter(teamOrgId, now, { onlyHidden: !!(filters.ocultos && access.configurar), q: filters.q, conAltas })}`
+  const listed = Prisma.sql`${from(filters.altas === true)}${filtrosSql(access, filters)}`
+  // After the cursor's row in the same (createdAt DESC, id DESC) order; an unknown cursor leaves nothing after it.
+  const after = filters.cursor
+    ? Prisma.sql` AND (o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ${filters.cursor})`
+    : Prisma.empty
+  const porMotivo = MOTIVOS_DEL_ALTA.map(
+    motivo => Prisma.sql`COUNT(*) FILTER (WHERE ${motivoSql(access, motivo)})::int AS ${Prisma.raw(`"${motivo}"`)}`,
+  )
+  return {
+    page: Prisma.sql`
+      SELECT o."id", o."name", o."createdAt", ca."id" AS "crmAccountId",
+        EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro",
+        f."usaMedido", ${USA_VISTO} AS "usaVisto", ${USA_AVISO} AS "usaAviso", ca."usaManual" IS NOT NULL AS "usaEscrito",
+        f."nivel", f."estado", f."ultimoCobroAt"
+      ${listed}${after}
+      ORDER BY o."createdAt" DESC, o."id" DESC
+      LIMIT ${pageSize(filters.limit) + 1}`,
+    // One more than the page says whether there is a next one; the total counts the same filter, without the cursor.
+    total: Prisma.sql`SELECT COUNT(*)::int AS "total" ${listed}`,
+    conteos: Prisma.sql`
+      SELECT COUNT(*) FILTER (WHERE ${ES_ALTA})::int AS "altaSinTarjeta", ${Prisma.join(porMotivo, ', ')},
+        COUNT(*) FILTER (WHERE ${motivoSql(access, 'SIN_MOTIVO')})::int AS "SIN_MOTIVO"
+      ${from(true)}`,
+  }
+}
+
+type PageRow = {
+  id: string
+  name: string
+  createdAt: Date
+  crmAccountId: string | null
+  yaCobro: boolean
+  usaMedido: string
+  usaVisto: string
+  usaAviso: boolean
+  usaEscrito: boolean
+  nivel: string
+  estado: string
+  ultimoCobroAt: Date | null
+}
 
 /**
  * «Clientes», a page at a time: filters and search in the database, the page capped at 100 by the server, the real total.
@@ -133,30 +249,16 @@ const fullName = (person: { firstName: string; lastName: string }) => `${person.
  * linked CRM account shows its owner and stage only inside the caller's scope (`cuentaAjena` says there is one).
  * `yaCobro` is «Ya cobró» / «Aún no cobra». An organization marked hidden (Prime, or any internal or test one, ruling 39)
  * never takes a slot of the page nor counts in the total; `ocultos` with «Configurar el CRM» lists only those.
+ * `legible: 1` tells a client this server filters and paints the C1 columns (Usa, Plan, Estado).
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
-  const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
-  const filter = clientsFilter(await teamOrganizationId(), now, {
-    onlyHidden: !!(filters.ocultos && access.configurar),
-    q: filters.q,
-    conAltas: filters.altas === true,
-  })
-  // After the cursor's row in the same (createdAt DESC, id DESC) order; an unknown cursor leaves nothing after it.
-  const after = filters.cursor
-    ? Prisma.sql` AND (o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ${filters.cursor})`
-    : Prisma.empty
-
-  const [found, [{ total }]] = await Promise.all([
-    prisma.$queryRaw<Array<{ id: string; name: string; createdAt: Date; crmAccountId: string | null; yaCobro: boolean }>>(Prisma.sql`
-      SELECT o."id", o."name", o."createdAt",
-        (SELECT ca."id" FROM "CrmAccount" ca WHERE ca."organizationId" = o."id") AS "crmAccountId",
-        EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro"
-      FROM "Organization" o
-      WHERE ${filter}${after}
-      ORDER BY o."createdAt" DESC, o."id" DESC
-      LIMIT ${limit + 1}`),
-    // One more than the page says whether there is a next one; the total counts the same filter, without the cursor.
-    prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`SELECT COUNT(*)::int AS "total" FROM "Organization" o WHERE ${filter}`),
+  checkDueno(access, filters.dueno)
+  const limit = pageSize(filters.limit)
+  const queries = clientsQueries(access, filters, now, await teamOrganizationId())
+  const [found, [{ total }], [conteo]] = await Promise.all([
+    prisma.$queryRaw<PageRow[]>(queries.page),
+    prisma.$queryRaw<Array<{ total: number }>>(queries.total),
+    prisma.$queryRaw<Array<Record<string, number>>>(queries.conteos),
   ])
   const page = found.slice(0, limit)
 
@@ -170,12 +272,17 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
           organizationId: true,
           owner: { select: { id: true, firstName: true, lastName: true } },
           stage: { select: { id: true, name: true, kind: true } },
+          usaManual: true,
+          usaManualPorque: true,
+          usaManualById: true,
+          usaManualAt: true,
         },
         orderBy: [{ id: 'asc' }],
         take: linked.length,
       })
     : []
   const byOrganization = new Map(visible.map(account => [account.organizationId, account]))
+  const autores = await autoresDelUsa(visible)
 
   return {
     rows: page.map(organization => {
@@ -193,10 +300,15 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
             }
           : null,
         cuentaAjena: !!organization.crmAccountId && !account,
+        usa: usaDeLaFila(organization, account, autores),
+        plan: { nivel: organization.nivel },
+        estado: { codigo: organization.estado, ultimoCobroAt: organization.ultimoCobroAt },
       }
     }),
     nextCursor: found.length > limit ? page[page.length - 1].id : null,
     total,
+    conteos: conteosDe(conteo),
+    legible: 1 as const,
   }
 }
 

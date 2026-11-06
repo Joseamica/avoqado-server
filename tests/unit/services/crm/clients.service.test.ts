@@ -11,7 +11,7 @@ import { Prisma, TransactionStatus, VenueStatus } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { getClientLive, getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
+import { clientsQueries, getClientLive, getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '@/services/dashboard/planState.service'
 
@@ -99,6 +99,7 @@ const MODELS = [
   'onboardingProgress',
   'terminal',
   'payment',
+  'staff',
 ] as const
 
 beforeEach(() => {
@@ -111,15 +112,19 @@ beforeEach(() => {
 })
 
 /**
- * «Clientes» reads in raw SQL (ruling 51): the page and its total. Each test answers the page with these rows and the
- * total with this number.
+ * «Clientes» reads in raw SQL (ruling 51): the page, its total and the count by reason of the stalled signups (C1). Each
+ * test answers the page with these rows, the total with this number and the count with zeros.
  */
 function clientsDb(rows: Array<Record<string, unknown>> = [], total = rows.length) {
-  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (query.sql.includes('COUNT(*)') ? [{ total }] : rows))
+  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+    isConteo(query) ? [{ altaSinTarjeta: 0 }] : isTotal(query) ? [{ total }] : rows,
+  )
 }
+const isConteo = (query: Prisma.Sql) => query.sql.includes('AS "altaSinTarjeta"')
+const isTotal = (query: Prisma.Sql) => query.sql.includes('AS "total"')
 const rawQueries = () => (prismaMock.$queryRaw.mock.calls as Array<[Prisma.Sql]>).map(([query]) => query)
-const pageQuery = (n = 0) => rawQueries().filter(query => !query.sql.includes('COUNT(*)'))[n]
-const countQuery = (n = 0) => rawQueries().filter(query => query.sql.includes('COUNT(*)'))[n]
+const pageQuery = (n = 0) => rawQueries().filter(query => !isTotal(query) && !isConteo(query))[n]
+const countQuery = (n = 0) => rawQueries().filter(isTotal)[n]
 /** What follows `FROM "Organization" o`: the filter of the page (before its order) and of the total. */
 const filterOf = (query: Prisma.Sql) => {
   const from = query.sql.slice(query.sql.indexOf('FROM "Organization" o')).replace(/\s+/g, ' ')
@@ -133,6 +138,13 @@ const client = (over: Record<string, unknown> = {}) => ({
   createdAt: new Date('2026-09-01T12:00:00.000Z'),
   crmAccountId: null,
   yaCobro: true,
+  usaMedido: 'TERMINAL',
+  usaVisto: 'TERMINAL',
+  usaAviso: false,
+  usaEscrito: false,
+  nivel: 'FREE',
+  estado: 'COBRA',
+  ultimoCobroAt: new Date('2026-10-30T20:00:00.000Z'),
   ...over,
 })
 
@@ -258,6 +270,169 @@ describe('listClients', () => {
     ])
     // «Ya cobró» is the same real-money EXISTS, per row.
     expect(pageQuery().sql).toMatch(/AS "yaCobro"/)
+  })
+})
+
+describe('filtros, columnas y total de C1 (Tarea 4)', () => {
+  const sqlOf = (query: Prisma.Sql) => query.sql.replace(/\s+/g, ' ')
+
+  it('🔴 propios con dueno=<otro id> → 400 CRM_FILTRO_DE_DUENO y no consulta', async () => {
+    await expect(listClients(access(), { dueno: OTHER }, NOW)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'CRM_FILTRO_DE_DUENO',
+      message: 'Con «Ver: propios» sólo puedes filtrar «Míos» o «Sin dueño»',
+    })
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.crmTeam.findUnique).not.toHaveBeenCalled()
+
+    // «Míos» and «Sin dueño» are fine for a «propios» seller; any owner is fine with «Ver: todos».
+    await expect(listClients(access(), { dueno: 'MIOS' }, NOW)).resolves.toBeDefined()
+    await expect(listClients(access(), { dueno: 'SIN_DUENO' }, NOW)).resolves.toBeDefined()
+    await expect(listClients(access({ ver: 'todos' }), { dueno: OTHER }, NOW)).resolves.toBeDefined()
+    expect(countQuery(2).values).toContain(OTHER)
+  })
+
+  it('el tope sigue siendo 100 con filtros', async () => {
+    const filters = { limit: 10_000, usa: 'POS', nivel: 'PRO', estado: 'COBRA', dueno: 'MIOS', motivo: 'PRECIO' } as const
+    clientsDb([], 935)
+    await expect(listClients(access(), filters, NOW)).resolves.toMatchObject({ total: 935, legible: 1 })
+    expect(pageQuery().values.at(-1)).toBe(101)
+    expect(countQuery().sql).not.toMatch(/LIMIT \?\s*$/)
+    expect(pageQuery().sql).toMatch(/LIMIT \?\s*$/)
+  })
+
+  it('cada filtro va en el WHERE de la página y del total, antes del cursor', async () => {
+    await listClients(access(), { usa: 'POS', nivel: 'PRO', estado: 'COBRA', cursor: ORG_2 }, NOW)
+    for (const query of [pageQuery(), countQuery()]) {
+      const sql = sqlOf(query)
+      expect(sql).toContain('LEFT JOIN "CrmAccount" ca ON ca."organizationId" = o."id"')
+      expect(sql).toContain('LEFT JOIN LATERAL')
+      expect(sql).toContain('COALESCE(ca."usaManual", f."usaMedido") = ?')
+      expect(sql).toContain('f."nivel" = ?')
+      expect(sql).toContain('f."estado" = ?')
+      expect(query.values).toEqual(expect.arrayContaining(['POS', 'PRO', 'COBRA']))
+    }
+    // The cursor only in the page, after the filters.
+    const page = sqlOf(pageQuery())
+    expect(page.indexOf('f."estado" = ?')).toBeLessThan(page.indexOf('(o."createdAt", o."id") <'))
+    expect(sqlOf(countQuery())).not.toContain('(o."createdAt", o."id") <')
+  })
+
+  it('usa=AVISO es lo escrito distinto de lo medido', async () => {
+    await listClients(access(), { usa: 'AVISO' }, NOW)
+    expect(sqlOf(countQuery())).toContain('(ca."usaManual" IS NOT NULL AND ca."usaManual" <> f."usaMedido")')
+    expect(countQuery().values).not.toContain('AVISO')
+  })
+
+  it('dueño: MIOS es el mío, SIN_DUENO es sin cuenta o sin dueño, un id es ese dueño (con «todos»)', async () => {
+    await listClients(access(), { dueno: 'MIOS' }, NOW)
+    expect(sqlOf(countQuery(0))).toContain('ca."ownerStaffId" = ?')
+    expect(countQuery(0).values).toContain(SELLER)
+    await listClients(access(), { dueno: 'SIN_DUENO' }, NOW)
+    expect(sqlOf(countQuery(1))).toContain('(ca."id" IS NULL OR ca."ownerStaffId" IS NULL)')
+    await listClients(access({ ver: 'todos' }), { dueno: OTHER }, NOW)
+    expect(countQuery(2).values).toContain(OTHER)
+  })
+
+  it('🔴 motivo sólo sobre cuentas en el alcance de quien mira, y siempre de un 🟠', async () => {
+    await listClients(access(), { motivo: 'PRECIO' }, NOW)
+    const precio = sqlOf(countQuery(0))
+    expect(precio).toContain(`f."estado" = 'ALTA_SIN_TARJETA'`)
+    expect(precio).toContain('(ca."ownerStaffId" = ? OR ca."ownerStaffId" IS NULL) AND ca."altaMotivo" = ?')
+    expect(countQuery(0).values).toEqual(expect.arrayContaining([SELLER, 'PRECIO']))
+
+    await listClients(access(), { motivo: 'SIN_MOTIVO' }, NOW)
+    expect(sqlOf(countQuery(1))).toContain(
+      '(ca."id" IS NULL OR ((ca."ownerStaffId" = ? OR ca."ownerStaffId" IS NULL) AND ca."altaMotivo" IS NULL))',
+    )
+    // «todos» sees every account.
+    await listClients(access({ ver: 'todos' }), { motivo: 'PRECIO' }, NOW)
+    expect(sqlOf(countQuery(2))).toContain('TRUE AND ca."altaMotivo" = ?')
+  })
+
+  it('🔴 listClients corre como sentencias de universo exactamente page, total y conteos de clientsQueries (texto igual), y las demás consultas sólo reciben ids de la página', async () => {
+    clientsDb([
+      client({ id: ORG, crmAccountId: ACCOUNT, usaVisto: 'POS', usaAviso: true, usaEscrito: true }),
+      client({ id: ORG_2, crmAccountId: ACCOUNT_B, usaVisto: 'AMBOS', usaAviso: true, usaEscrito: true }),
+    ])
+    prismaMock.crmAccount.findMany.mockResolvedValue([
+      {
+        id: ACCOUNT,
+        organizationId: ORG,
+        owner: null,
+        stage: { id: GANADO, name: 'Ganado', kind: 'GANADA' },
+        usaManual: 'POS',
+        usaManualPorque: 'Lo vi en su local',
+        usaManualById: OTHER,
+        usaManualAt: new Date('2026-10-29T17:00:00.000Z'),
+      },
+    ])
+    prismaMock.staff.findMany.mockResolvedValue([{ id: OTHER, firstName: 'Ana', lastName: 'Pérez' }])
+    const filters = { usa: 'POS', altas: true, q: 'tacos' } as const
+
+    const result = await listClients(access(), filters, NOW)
+
+    const expected = clientsQueries(access(), filters, NOW, TEAM_ORG)
+    expect(rawQueries().map(query => ({ sql: query.sql, values: query.values }))).toEqual(
+      [expected.page, expected.total, expected.conteos].map(query => ({ sql: query.sql, values: query.values })),
+    )
+    // The rest only reads the page: its organizations, and the authors of what the caller may see.
+    expect(prismaMock.crmAccount.findMany.mock.calls[0][0].where).toEqual({
+      AND: [{ organizationId: { in: [ORG, ORG_2] } }, MINE_OR_UNOWNED],
+    })
+    expect(prismaMock.staff.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.staff.findMany.mock.calls[0][0]).toMatchObject({ where: { id: { in: [OTHER] } }, take: 1 })
+
+    expect(result).toMatchObject({ legible: 1, total: 2 })
+    expect(result.rows[0]).toMatchObject({
+      usa: {
+        visto: 'POS',
+        medido: 'TERMINAL',
+        manual: true,
+        aviso: true,
+        detalle: { porque: 'Lo vi en su local', por: { id: OTHER, name: 'Ana Pérez' }, at: new Date('2026-10-29T17:00:00.000Z') },
+      },
+      plan: { nivel: 'FREE' },
+      estado: { codigo: 'COBRA', ultimoCobroAt: new Date('2026-10-30T20:00:00.000Z') },
+      cuentaAjena: false,
+    })
+    // A colleague's ✋: the value and the mark, never who, why or when.
+    expect(result.rows[1]).toMatchObject({
+      usa: { visto: 'AMBOS', medido: 'TERMINAL', manual: true, aviso: true, detalle: null },
+      cuenta: null,
+      cuentaAjena: true,
+    })
+  })
+
+  it('sin ✋ visible no busca autores, y conteos llega con todas las llaves en cero', async () => {
+    clientsDb([client()])
+    const result = await listClients(access(), {}, NOW)
+    expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
+    expect(result.rows[0].usa).toEqual({ visto: 'TERMINAL', medido: 'TERMINAL', manual: false, aviso: false, detalle: null })
+    expect(result.conteos).toEqual({
+      altaSinTarjeta: 0,
+      porMotivo: {
+        PRECIO: 0,
+        NO_QUISO_TARJETA: 0,
+        SOLO_VEIA: 0,
+        OTRO_SISTEMA: 0,
+        PROBLEMA_TECNICO: 0,
+        DESPUES: 0,
+        OTRO: 0,
+        SIN_MOTIVO: 0,
+        DE_OTRO: 0,
+      },
+      perdidos: 0,
+    })
+  })
+
+  it('🔴 conteos siempre sobre el universo ampliado (altas), con la búsqueda y sin los demás filtros', async () => {
+    await listClients(access(), { usa: 'POS', estado: 'COBRA', q: 'tacos' }, NOW)
+    const conteos = rawQueries().find(isConteo)!
+    expect(conteos.sql).toContain('op."acquisitionSource" IS NOT NULL')
+    expect(conteos.values).toContain('%tacos%')
+    expect(conteos.values).not.toContain('POS')
+    expect(conteos.values).not.toContain('COBRA')
   })
 })
 

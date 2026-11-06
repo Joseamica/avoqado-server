@@ -273,6 +273,51 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     }
   })
 
+  it('C1: los filtros nuevos piden «Ver»; con ella, 200 y meta.legible = 1; un valor que no existe es 400', async () => {
+    // The admin of the team from `beforeEach`: «Ver negocios» off.
+    const forbidden = await request(app).get('/crm/clients?usa=POS')
+    expect(forbidden.status).toBe(403)
+    expect(forbidden.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'propios',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+    })
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$queryRaw.mockImplementation(async (query: { sql: string }) =>
+      query.sql.includes('AS "altaSinTarjeta"') ? [{ altaSinTarjeta: 0 }] : query.sql.includes('AS "total"') ? [{ total: 0 }] : [],
+    )
+
+    const ok = await request(appWithErrors).get('/crm/clients?usa=POS&nivel=PRO&estado=COBRA&dueno=MIOS&motivo=SIN_MOTIVO')
+    expect(ok.status).toBe(200)
+    expect(ok.body.meta).toMatchObject({ total: 0, nextCursor: null, legible: 1, conteos: { altaSinTarjeta: 0 } })
+    for (const query of ['usa=AVISO', 'motivo=SIN_MOTIVO', 'condicion=PAGADO']) {
+      expect((await request(appWithErrors).get(`/crm/clients?${query}`)).status).toBe(200)
+    }
+
+    for (const query of ['usa=OTRA', 'nivel=ENTERPRISE', 'estado=OTRO', 'motivo=CARO']) {
+      const bad = await request(appWithErrors).get(`/crm/clients?${query}`)
+      expect(bad.status).toBe(400)
+      expect(bad.body.message).toContain('Ese filtro no existe')
+    }
+    const badOwner = await request(appWithErrors).get('/crm/clients?dueno=a%20b')
+    expect(badOwner.status).toBe(400)
+    expect(badOwner.body.message).toContain('El dueño no es válido')
+
+    // A «propios» seller filtering by somebody else.
+    const otro = await request(appWithErrors).get('/crm/clients?dueno=cstaffoth0000000000000001')
+    expect(otro.status).toBe(400)
+    expect(otro.body).toMatchObject({ code: 'CRM_FILTRO_DE_DUENO', message: 'Con «Ver: propios» sólo puedes filtrar «Míos» o «Sin dueño»' })
+  })
+
   it('ocultar_y_regresar_piden_configurar (L7)', async () => {
     const ORG = 'corgprime0000000000000001'
     prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })

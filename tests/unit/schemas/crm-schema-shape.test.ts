@@ -115,3 +115,35 @@ describe('POST /crm/accounts: la casilla «Aceptó recibir correos»', () => {
     expect(mensajes(parse({ name: 'Paola', email: 'p@cafe.mx', aceptaCorreos: 'si' }))).toContain('Aceptó recibir correos es sí o no')
   })
 })
+
+describe('GET /crm/clients: los filtros de C1', () => {
+  const { listClientsSchema } = jest.requireActual('@/schemas/crm.schema')
+  const parse = (query: Record<string, string>) => listClientsSchema.safeParse({ query })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map((i: { message: string }) => i.message))
+
+  it('acepta cada valor de Usa (con AVISO), Plan, Estado y Motivo (con SIN_MOTIVO)', () => {
+    for (const usa of ['AMBOS', 'TERMINAL', 'POS', 'NO_IDENTIFICADO', 'NINGUNO', 'AVISO']) expect(parse({ usa }).success).toBe(true)
+    for (const nivel of ['FREE', 'PRO', 'PREMIUM']) expect(parse({ nivel }).success).toBe(true)
+    for (const estado of ['ALTA_SIN_TARJETA', 'COBRA', 'SIN_COBROS', 'NUNCA']) expect(parse({ estado }).success).toBe(true)
+    for (const motivo of ['PRECIO', 'NO_QUISO_TARJETA', 'SOLO_VEIA', 'OTRO_SISTEMA', 'PROBLEMA_TECNICO', 'DESPUES', 'OTRO', 'SIN_MOTIVO'])
+      expect(parse({ motivo }).success).toBe(true)
+    for (const dueno of ['MIOS', 'SIN_DUENO', 'cstaffoth0000000000000001']) expect(parse({ dueno }).success).toBe(true)
+  })
+
+  it('un valor que no existe dice «Ese filtro no existe»; ENTERPRISE no es un nivel', () => {
+    for (const query of [{ usa: 'OTRA' }, { nivel: 'ENTERPRISE' }, { estado: 'PAGANDO' }, { motivo: 'CARO' }] as Array<
+      Record<string, string>
+    >)
+      expect(mensajes(parse(query))).toEqual(['Ese filtro no existe'])
+  })
+
+  it('un dueño con forma rara dice «El dueño no es válido»', () => {
+    expect(mensajes(parse({ dueno: "x' OR 1=1" }))).toEqual(['El dueño no es válido'])
+  })
+
+  it('«condicion» ya no es filtro (rediseño r3): se ignora y no llega al servicio', () => {
+    const r = parse({ condicion: 'PAGADO', usa: 'POS' })
+    expect(r.success).toBe(true)
+    expect(r.success && r.data.query).toEqual({ usa: 'POS' })
+  })
+})
