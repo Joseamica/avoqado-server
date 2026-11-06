@@ -110,6 +110,12 @@ export const NO_ES_FOLIO_POR_PAGAR = {
 }
 /** Tienda híbrida (R23): un folio vence a los 30 min o al cierre de la franja vigente, lo que pase primero. */
 export const FOLIO_TIMEOUT_MINUTES = 30
+/**
+ * R56 «último pedido para pagar en caja»: en «Nadie» la tienda deja de recibir folios estos minutos antes del cierre de la franja
+ * vigente (`closesAt`). Así todo folio nace con al menos este margen para pagar, y una espera de segundos al crearlo (candados,
+ * recetas) ya no lo deja vencido. «Mi equipo» no lo tiene.
+ */
+export const FOLIO_LAST_CALL_MINUTES = 10
 /** Tienda híbrida (T3b): folios sin pagar por negocio; el siguiente recibe 409 y la tienda sigue abierta. El doble del tope de hoy. */
 export const MAX_UNPAID_FOLIOS_PER_VENUE = 60
 /** Fase 2: minutos que vive la sesión de pago con tarjeta antes de darse por abandonada. */

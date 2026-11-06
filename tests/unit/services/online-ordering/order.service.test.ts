@@ -1161,6 +1161,11 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
   })
 
   describe('R52 (Codex f1 r5): un folio nunca nace vencido', () => {
+    afterEach(() => {
+      // Lo que estas pruebas simulan no se queda para las siguientes del archivo.
+      prismaMock.venue.findUnique.mockReset()
+      ;(prismaMock.$executeRaw as jest.Mock).mockReset()
+    })
     const SIN_HORA_FIJA = { now: undefined } // la ruta no pasa hora: lee el reloj
     /** Cotizar y esperar el candado de admisión tarda: el reloj avanza a `escritura` al tomar ese candado. */
     const relojQueAvanzaEnLaAdmision = (escritura: Date) =>
@@ -1227,6 +1232,90 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
         await expect(createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR)).resolves.toMatchObject({ replay: true })
         expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
       })
+    })
+  })
+
+  describe('R56: «último pedido para pagar en caja» al crear (con la regla de apertura REAL)', () => {
+    afterEach(() => prismaMock.venue.findUnique.mockReset())
+    /** Hora de pared de Cancún (UTC-5 todo el año) del 14-oct. */
+    const a = (hhmmss: string) => new Date(`2026-10-14T${hhmmss}-05:00`)
+    /** La tienda real: ajustes, latido de hace 30 s y la zona del negocio; `getAcceptingStatus` sin simular. */
+    const tiendaReal = (ahora: Date, o: Record<string, unknown> = {}) => {
+      const real = jest.requireActual(
+        '@/services/online-ordering/presence.service',
+      ) as typeof import('@/services/online-ordering/presence.service')
+      ;(getAcceptingStatus as jest.Mock).mockImplementation(real.getAcceptingStatus)
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Cancun' } as any)
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+        venueId: 'v1',
+        enabled: true,
+        requiresAcceptance: false,
+        acceptsPayAtPickup: true,
+        acceptsCardOnline: false,
+        manualPause: false,
+        pausedUntil: null,
+        minOrderAmount: 0,
+        defaultPrepMinutes: 15,
+        hours: HORARIO,
+        lastToPayPollAt: new Date(ahora.getTime() - 30_000),
+        lastInboxPollAt: new Date(ahora.getTime() - 30_000),
+        ...o,
+      } as any)
+    }
+    const fueraDeHorario = {
+      statusCode: 409,
+      code: 'ORDERING_CLOSED',
+      message: 'La tienda no está recibiendo pedidos en este momento.',
+      details: { status: 'CLOSED', reason: 'OUTSIDE_HOURS' },
+    }
+
+    it('a las 20:50:01 con cierre a las 21:00 el folio ya no se recibe: lo mismo que fuera de horario y nada se crea', async () => {
+      tiendaReal(a('20:50:01'))
+      await expect(createOnlineOrder(anon({ now: a('20:50:01') }), PUEDE_CREAR)).rejects.toMatchObject(fueraDeHorario)
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    })
+
+    it('a las 20:49:59 se crea con plazo 21:00 (al menos 10 min para pagar)', async () => {
+      tiendaReal(a('20:49:59'))
+      const r = await createOnlineOrder(anon({ now: a('20:49:59') }), PUEDE_CREAR)
+      expect(r).toMatchObject({ replay: false, acceptDeadlineAt: a('21:00:00').toISOString() })
+    })
+
+    it('franjas contiguas (09–21 + 21–23): a las 20:55 el cierre real es 23:00, así que se crea con su plazo de 30 min', async () => {
+      const d = {
+        enabled: true,
+        ranges: [
+          { open: '09:00', close: '21:00' },
+          { open: '21:00', close: '23:00' },
+        ],
+      }
+      const contiguas = { monday: d, tuesday: d, wednesday: d, thursday: d, friday: d, saturday: d, sunday: d }
+      tiendaReal(a('20:55:00'), { hours: contiguas })
+      const r = await createOnlineOrder(anon({ now: a('20:55:00') }), PUEDE_CREAR)
+      expect(r.acceptDeadlineAt).toBe(a('21:25:00').toISOString())
+    })
+
+    it('«Mi equipo» a las 20:55 sigue creando como hoy', async () => {
+      tiendaReal(a('20:55:00'), { requiresAcceptance: true })
+      await expect(createOnlineOrder(input({ now: a('20:55:00') }), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+      expect((prismaMock.onlineOrder.create.mock.calls[0][0] as any).data.requiresAcceptance).toBe(true)
+    })
+
+    it('Codex r6: a las 20:59:59 ni siquiera se admite, aunque crear la cuenta tarde 6 s DESPUÉS de comprobar (antes: folio vencido)', async () => {
+      tiendaReal(a('20:59:59'))
+      jest.useFakeTimers({ now: a('20:59:59'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+      try {
+        // Crear la cuenta y sus artículos espera el FOR UPDATE de recetas: la escritura del folio cae a las 21:00:05.
+        prismaMock.order.create.mockImplementation((async () => {
+          jest.setSystemTime(a('21:00:05'))
+          return { id: 'ord1', orderNumber: 'WABCD' }
+        }) as any)
+        await expect(createOnlineOrder(anon({ now: undefined }), PUEDE_CREAR)).rejects.toMatchObject(fueraDeHorario)
+        expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+      } finally {
+        jest.useRealTimers()
+      }
     })
   })
 

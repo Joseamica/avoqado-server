@@ -6,7 +6,12 @@ import { getInfo } from '@/controllers/public/onlineOrdering.public.controller'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 
 /** T8: el comercio de verdad (no un mock de `findCardMerchant`): la regla única `cardOnlineAvailable` lo consulta por `ecommerceMerchant`. */
-const STRIPE = { id: 'em1', chargesEnabled: true, providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } }
+const STRIPE = {
+  id: 'em1',
+  chargesEnabled: true,
+  providerCredentials: { connectAccountId: 'acct_1' },
+  provider: { code: 'STRIPE_CONNECT' },
+}
 const comercio = (cobra: boolean) => prismaMock.ecommerceMerchant.findMany.mockResolvedValue((cobra ? [STRIPE] : []) as any)
 
 const res = () => {
@@ -18,7 +23,15 @@ const res = () => {
 const state = (config: Record<string, unknown>, status = 'OPEN', reason: string | null = null) => ({
   status,
   reason,
-  config: { acceptsPayAtPickup: true, acceptsCardOnline: false, requiresAcceptance: true, minOrderAmount: 0, defaultPrepMinutes: 15, hours: null, ...config },
+  config: {
+    acceptsPayAtPickup: true,
+    acceptsCardOnline: false,
+    requiresAcceptance: true,
+    minOrderAmount: 0,
+    defaultPrepMinutes: 15,
+    hours: null,
+    ...config,
+  },
 })
 const call = async () => {
   const r = res()
@@ -37,13 +50,13 @@ describe('GET /info paymentModes', () => {
 
   it('switch prendido y comercio cobrable: cardOnline true', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsCardOnline: true }))
-    ;comercio(true)
+    comercio(true)
     expect((await call()).paymentModes).toEqual({ payAtPickup: true, cardOnline: true })
   })
 
   it('switch prendido pero el comercio dejó de poder cobrar: cardOnline false', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsCardOnline: true }))
-    ;comercio(false)
+    comercio(false)
     expect((await call()).paymentModes).toEqual({ payAtPickup: true, cardOnline: false })
   })
 })
@@ -51,7 +64,7 @@ describe('GET /info paymentModes', () => {
 describe('GET /info sin ningún medio de pago vivo', () => {
   it('pickup apagado, tarjeta prendida y el comercio ya no cobra: la tienda NO está OPEN (PAUSED / NO_PAYMENT_MODE)', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsPayAtPickup: false, acceptsCardOnline: true }))
-    ;comercio(false)
+    comercio(false)
     const d = await call()
     expect(d.paymentModes).toEqual({ payAtPickup: false, cardOnline: false })
     expect(d.status).toBe('PAUSED')
@@ -61,7 +74,7 @@ describe('GET /info sin ningún medio de pago vivo', () => {
 
   it('pickup apagado y tarjeta cobrando: sigue OPEN', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsPayAtPickup: false, acceptsCardOnline: true }))
-    ;comercio(true)
+    comercio(true)
     const d = await call()
     expect(d.status).toBe('OPEN')
     expect(d.reason).toBeNull()
@@ -69,7 +82,7 @@ describe('GET /info sin ningún medio de pago vivo', () => {
 
   it('con pagar al recoger prendido, aunque la tarjeta no cobre, sigue OPEN', async () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsPayAtPickup: true, acceptsCardOnline: true }))
-    ;comercio(false)
+    comercio(false)
     expect((await call()).status).toBe('OPEN')
   })
 
@@ -101,6 +114,41 @@ describe('GET /info en «Nadie» (T8)', () => {
       const hours = { monday: day, tuesday: day, wednesday: day, thursday: day, friday: day, saturday: day, sunday: day }
       ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ requiresAcceptance: false, hours }))
       expect((await call()).closesAt).toBe('2026-11-05T02:00:00.000Z')
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
+  it('R56: a las 20:55 en «Nadie» con cierre a las 21:00 dice cerrado (último pedido para pagar en caja) y anuncia el cierre REAL', async () => {
+    const real = jest.requireActual(
+      '@/services/online-ordering/presence.service',
+    ) as typeof import('@/services/online-ordering/presence.service')
+    ;(getAcceptingStatus as jest.Mock).mockImplementation(real.getAcceptingStatus)
+    const ahora = new Date('2026-11-05T02:55:00Z') // miércoles 20:55 en CDMX (UTC-6)
+    jest.useFakeTimers({ now: ahora, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+    try {
+      const day = { enabled: true, ranges: [{ open: '09:00', close: '21:00' }] }
+      const hours = { monday: day, tuesday: day, wednesday: day, thursday: day, friday: day, saturday: day, sunday: day }
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+        venueId: 'v1',
+        enabled: true,
+        requiresAcceptance: false,
+        acceptsPayAtPickup: true,
+        acceptsCardOnline: false,
+        manualPause: false,
+        pausedUntil: null,
+        minOrderAmount: 0,
+        defaultPrepMinutes: 15,
+        hours,
+        lastToPayPollAt: new Date(ahora.getTime() - 30_000),
+        lastInboxPollAt: null,
+      } as any)
+      prismaMock.onlineOrder.count.mockResolvedValue(0)
+      prismaMock.onlineOrderCharge.count.mockResolvedValue(0)
+      const d = await call()
+      expect(d).toMatchObject({ status: 'CLOSED', reason: 'OUTSIDE_HOURS', requiresAcceptance: false })
+      // La tienda puede decir «Ya no recibimos pedidos para pagar en caja hoy · cerramos a las 21:00».
+      expect(d.closesAt).toBe('2026-11-05T03:00:00.000Z')
     } finally {
       jest.useRealTimers()
     }

@@ -1,6 +1,12 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { MAX_PENDING_PER_VENUE } from '@/services/online-ordering/constants'
-import { __resetPresenceDebounceForTests, getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
+import {
+  __resetPresenceDebounceForTests,
+  getAcceptingStatus,
+  storeView,
+  touchInboxPoll,
+  touchToPayPoll,
+} from '@/services/online-ordering/presence.service'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z') // miércoles 12:30 CDMX
 const settingsRow = (o: Record<string, unknown> = {}) => ({
@@ -242,5 +248,60 @@ describe('storeView (ronda 1: un solo armado del estado de la tienda para el pan
       manualPause: false,
     })
     expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
+  })
+})
+
+describe('R56 · «último pedido para pagar en caja»: en «Nadie» la tienda deja de recibir folios 10 min antes del cierre', () => {
+  const dia = (ranges: Array<{ open: string; close: string }>) => ({ enabled: true, ranges })
+  const semana = (ranges: Array<{ open: string; close: string }>) => {
+    const d = dia(ranges)
+    return { monday: d, tuesday: d, wednesday: d, thursday: d, friday: d, saturday: d, sunday: d }
+  }
+  const CIERRE_21 = semana([{ open: '09:00', close: '21:00' }])
+  /** Hora de pared de CDMX (UTC-6) del 14-oct. */
+  const a = (hhmmss: string) => new Date(`2026-10-14T${hhmmss}-06:00`)
+  /** La tienda prendida, con su latido de hace 30 s (de la TPV en «Nadie», de la Bandeja en «Mi equipo»). */
+  const tienda = (ahora: Date, o: Record<string, unknown> = {}) =>
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({
+        requiresAcceptance: false,
+        hours: CIERRE_21,
+        lastToPayPollAt: new Date(ahora.getTime() - 30_000),
+        lastInboxPollAt: new Date(ahora.getTime() - 30_000),
+        ...o,
+      }) as any,
+    )
+
+  it('a las 20:50:01 con cierre a las 21:00: CLOSED / OUTSIDE_HOURS, lo mismo que fuera de horario', async () => {
+    tienda(a('20:50:01'))
+    await expect(getAcceptingStatus('v1', a('20:50:01'))).resolves.toMatchObject({ status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+  })
+
+  it('a las 20:49:59 (y a las 20:50 en punto) sigue OPEN: el folio nace con al menos 10 min para pagar', async () => {
+    for (const hora of ['20:49:59', '20:50:00']) {
+      tienda(a(hora))
+      await expect(getAcceptingStatus('v1', a(hora))).resolves.toMatchObject({ status: 'OPEN', reason: null })
+    }
+  })
+
+  it('franjas contiguas (09–21 + 21–23): el cierre real es a las 23:00, así que a las 20:55 sigue OPEN; a las 22:50:01 ya no', async () => {
+    const contiguas = semana([
+      { open: '09:00', close: '21:00' },
+      { open: '21:00', close: '23:00' },
+    ])
+    tienda(a('20:55:00'), { hours: contiguas })
+    await expect(getAcceptingStatus('v1', a('20:55:00'))).resolves.toMatchObject({ status: 'OPEN' })
+    tienda(a('22:50:01'), { hours: contiguas })
+    await expect(getAcceptingStatus('v1', a('22:50:01'))).resolves.toMatchObject({ status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+  })
+
+  it('«Mi equipo» a las 20:55 sigue OPEN, como hoy (sólo los folios tienen último pedido)', async () => {
+    tienda(a('20:55:00'), { requiresAcceptance: true })
+    await expect(getAcceptingStatus('v1', a('20:55:00'))).resolves.toMatchObject({ status: 'OPEN', reason: null })
+  })
+
+  it('sin horario no hay cierre ni último pedido', async () => {
+    tienda(a('20:55:00'), { hours: null })
+    await expect(getAcceptingStatus('v1', a('20:55:00'))).resolves.toMatchObject({ status: 'OPEN' })
   })
 })

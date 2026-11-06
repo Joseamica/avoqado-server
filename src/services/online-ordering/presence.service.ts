@@ -1,6 +1,13 @@
 import prisma from '@/utils/prismaClient'
-import { isWithinHours } from './hours'
-import { MAX_PENDING_PER_VENUE, PRESENCE_WINDOW_MS, PRESENCE_WRITE_DEBOUNCE_MS, awaitingAcceptanceWhere, liveCardDraftsWhere } from './constants'
+import { closesAt, isWithinHours } from './hours'
+import {
+  FOLIO_LAST_CALL_MINUTES,
+  MAX_PENDING_PER_VENUE,
+  PRESENCE_WINDOW_MS,
+  PRESENCE_WRITE_DEBOUNCE_MS,
+  awaitingAcceptanceWhere,
+  liveCardDraftsWhere,
+} from './constants'
 import { getSettings, preloadReservationHours } from './settings.service'
 import type { AcceptingReason, AcceptingState, AcceptingStatus } from './types'
 
@@ -72,6 +79,12 @@ export async function getAcceptingStatus(
   if (!config.enabled) return done('DISABLED', 'NOT_ENABLED')
   if (config.manualPause || (config.pausedUntil && new Date(config.pausedUntil) > now)) return done('PAUSED', 'MANUAL_PAUSE')
   if (!isWithinHours(config.hours, now, timezone)) return done('CLOSED', 'OUTSIDE_HOURS')
+  // R56: en «Nadie» (`=== false`), el último pedido para pagar en caja es FOLIO_LAST_CALL_MINUTES antes del cierre REAL de la franja
+  // (`closesAt` junta las contiguas). Se dice igual que fuera de horario; `/info` sigue anunciando el cierre real.
+  if (config.requiresAcceptance === false) {
+    const cierre = closesAt(config.hours, now, timezone)
+    if (cierre && cierre.getTime() - now.getTime() < FOLIO_LAST_CALL_MINUTES * 60_000) return done('CLOSED', 'OUTSIDE_HOURS')
+  }
   // «Nadie» (`=== false`: una fila sin el campo no lo es) cuenta a quien puede cobrar folios; «Mi equipo», a la Bandeja abierta.
   const latido = config.requiresAcceptance === false ? lastToPayPollAt : lastInboxPollAt
   if (!latido || now.getTime() - latido.getTime() > PRESENCE_WINDOW_MS) return done('OFFLINE', 'NO_DEVICE')
