@@ -116,7 +116,12 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
-    return reply(res, await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes }))
+    const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes })
+    // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
+    if (r.outcome === 'PAYMENT_REQUIRED') {
+      return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Este pedido se cobra antes de prepararlo' })
+    }
+    return reply(res, r)
   } catch (e) {
     return next(e)
   }

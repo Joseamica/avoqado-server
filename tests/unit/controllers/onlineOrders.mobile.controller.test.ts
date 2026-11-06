@@ -173,6 +173,18 @@ describe('onlineOrders.mobile.controller', () => {
     expect(b.res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ORDER_STATE_CHANGED', status: 'EXPIRED' }))
   })
 
+  it('aceptar con PAYMENT_REQUIRED (un folio sin pagar) responde 409 «se cobra antes de prepararlo»', async () => {
+    ;(acceptOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'PAYMENT_REQUIRED' })
+    const a = mock()
+    await ctrl.accept(a.req, a.res, a.next)
+    expect(a.res.status).toHaveBeenCalledWith(409)
+    expect(a.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'PAYMENT_REQUIRED',
+      error: 'Este pedido se cobra antes de prepararlo',
+    })
+  })
+
   it('R1: ninguna transición recibe `now` del controlador (el reloj se toma DESPUÉS del candado de la orden)', async () => {
     for (const fn of [acceptOnlineOrder, rejectOnlineOrder, markOnlineOrderReady, markOnlineOrderDelivered, cancelOnlineOrderByStaff]) {
       ;(fn as jest.Mock).mockResolvedValue({ outcome: 'OK', status: 'ACCEPTED' })

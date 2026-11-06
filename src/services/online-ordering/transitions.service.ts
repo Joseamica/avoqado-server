@@ -16,6 +16,7 @@ import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/serv
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
+import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { getSettings } from './settings.service'
@@ -148,6 +149,7 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
       id: true,
       status: true,
       paymentMode: true,
+      requiresAcceptance: true,
       acceptDeadlineAt: true,
       order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
     },
@@ -185,6 +187,11 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
   // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
   // un modo ya cobrado de antemano (`PREPAID_MODES`: la tarjeta en línea, que se captura al aceptar) se libra de exigirlo.
   if (a.kind === 'DELIVER' && !PREPAID_MODES.includes(row.paymentMode) && row.order.paymentStatus !== PaymentStatus.PAID) {
+    return { r: 'PAYMENT_REQUIRED' }
+  }
+
+  // Un folio (`requiresAcceptance:false`, QR o liga) no se prepara sin pago: aceptar exige la venta cobrada (`esVentaCerrada`).
+  if (a.kind === 'ACCEPT' && row.requiresAcceptance === false && !esVentaCerrada(row.order.paymentStatus)) {
     return { r: 'PAYMENT_REQUIRED' }
   }
 

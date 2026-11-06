@@ -148,6 +148,8 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
           requestHash: charge.requestHash,
           acceptDeadlineAt: new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000),
           whatsappConsent: request.whatsappConsent,
+          requiresAcceptance: true, // el borrador de tarjeta nació en «Mi equipo»
+          channel: null,
         })
         await tx.onlineOrderCharge.update({ where: { id: charge.id }, data: { onlineOrderId: r.onlineOrderId } })
         return { ...r, orderNumber }

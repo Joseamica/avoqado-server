@@ -1109,6 +1109,8 @@ describe('el armado de la cuenta se comparte (fase 2: la tarjeta crea la cuenta 
       requestHash: online.requestHash,
       acceptDeadlineAt: online.acceptDeadlineAt,
       whatsappConsent: true,
+      requiresAcceptance: true,
+      channel: null,
     })
 
     expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1' })

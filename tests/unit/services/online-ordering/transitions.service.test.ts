@@ -57,8 +57,9 @@ const base = { venueId: 'v1', orderId: 'ord1', staffId: 'staff1', now: NOW }
 const OPEN = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY']
 const PAID = { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: D('206.00') }
 
-const row = (o: { status?: string; order?: Record<string, unknown>; acceptDeadlineAt?: Date } = {}) => ({
+const row = (o: { status?: string; order?: Record<string, unknown>; acceptDeadlineAt?: Date; requiresAcceptance?: boolean } = {}) => ({
   id: 'oo1',
+  requiresAcceptance: o.requiresAcceptance ?? true,
   status: o.status ?? 'PENDING_ACCEPTANCE',
   paymentMode: 'PAY_AT_PICKUP',
   acceptDeadlineAt: o.acceptDeadlineAt ?? new Date(NOW.getTime() + 300_000),
@@ -84,6 +85,25 @@ beforeEach(() => {
 })
 
 describe('acceptOnlineOrder', () => {
+  it('aceptar un folio sin pagar responde PAYMENT_REQUIRED y no escribe nada', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false }) as any)
+    await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('aceptar un pedido de «Mi equipo» sin pagar sigue igual', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: true }) as any)
+    await expect(acceptOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+  })
+
+  it('un folio ya cobrado (PAID) sí se acepta', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(
+      row({ requiresAcceptance: false, order: { paymentStatus: 'PAID', paidAmount: D('10') } }) as any,
+    )
+    await expect(acceptOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK' })
+  })
+
   it('CAS desde «por aceptar» con la hora vigente; confirma la Order sólo si sigue PENDING; arma comanda, avisa y audita', async () => {
     const r = await acceptOnlineOrder({ ...base, estimatedMinutes: 20 })
 

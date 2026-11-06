@@ -251,7 +251,7 @@ export async function writeOnlineOrderInTx(
     externalId: string
     orderNumber: string
     quote: QuoteSnapshot
-    customer: { name: string; phone: string; email: string | null }
+    customer: { name: string; phone: string | null; email: string | null }
     customerId: string | null
     note: string | null
     paymentMode: OnlineOrderPaymentMode
@@ -259,6 +259,8 @@ export async function writeOnlineOrderInTx(
     requestHash: string
     acceptDeadlineAt: Date
     whatsappConsent: boolean
+    requiresAcceptance: boolean
+    channel: 'QR' | 'LINK' | null
   },
 ): Promise<{ orderId: string; onlineOrderId: string }> {
   const quote = fromQuoteSnapshot(i.quote)
@@ -337,6 +339,8 @@ export async function writeOnlineOrderInTx(
       requestHash: i.requestHash,
       acceptDeadlineAt: i.acceptDeadlineAt,
       whatsappConsent: i.whatsappConsent,
+      requiresAcceptance: i.requiresAcceptance,
+      channel: i.channel,
     },
   })
   // S3: `verify` para PEDIR no pone nombre (R7: no activa la cuenta de reservas) y la tienda no lo manda al verificar; sin esto
@@ -541,6 +545,8 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         requestHash,
         acceptDeadlineAt,
         whatsappConsent: input.whatsappConsent === true,
+        requiresAcceptance: true, // R22: hasta T7, todo pedido nace en «Mi equipo»
+        channel: null,
       })
       return {
         orderId: created.orderId,
