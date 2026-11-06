@@ -72,6 +72,11 @@ beforeEach(() => {
     a.where.status === 'ACCEPTED' ? CONTEOS.toDeliver : CONTEOS.toPay) as any)
 })
 
+// T18g: las páginas y los conteos se leen en UNA transacción de sólo lectura (el mock la ejecuta contra el mismo prismaMock).
+beforeEach(() => {
+  ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+})
+
 const listas = () => (prismaMock.onlineOrder.findMany.mock.calls as any[][]).map(c => c[0]).filter(esLista)
 
 describe('listFolios', () => {
@@ -112,6 +117,32 @@ describe('listFolios', () => {
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
       where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
+  })
+
+  it('T18g: páginas y conteos salen de UNA transacción RepeatableRead con tiempos acotados; sin más lecturas que las de hoy', async () => {
+    POR_PAGAR = [row(1)]
+    CONTEOS = { toPay: 1, toDeliver: 0 }
+    prismaMock.$transaction.mockClear()
+    prismaMock.onlineOrder.findMany.mockClear()
+    prismaMock.onlineOrder.count.mockClear()
+    await listFolios({ venueId: 'v1', now: NOW })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    const opts = (prismaMock.$transaction.mock.calls[0] as any[])[1]
+    expect(opts).toMatchObject({ isolationLevel: 'RepeatableRead' })
+    expect(opts.timeout).toBeGreaterThan(0)
+    expect(opts.maxWait).toBeGreaterThan(0)
+    // las mismas consultas de la lista y de los conteos (2 páginas + 2 conteos), todas dentro de esa transacción
+    expect(listas()).toHaveLength(2)
+    expect(prismaMock.onlineOrder.count).toHaveBeenCalledTimes(2)
+  })
+
+  it('T18g: showTile es true con una lista no vacía aunque los conteos digan 0 (un folio que nació entre lecturas)', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ enabled: true, requiresAcceptance: true })
+    POR_PAGAR = [row(1)]
+    CONTEOS = { toPay: 0, toDeliver: 0 }
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay).toHaveLength(1)
+    expect(r).toMatchObject({ showTile: true, pollSeconds: 30 })
   })
 
   it('un folio con abono (PARTIAL) sale en toPay con su remaining y cuenta en counts.toPay; uno cuya cuenta se canceló no sale', async () => {
