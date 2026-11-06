@@ -316,6 +316,7 @@ describe('CRM MCP — crm_list_clients', () => {
         estado: { codigo: 'SIN_COBROS', ultimoCobroAt: new Date('2026-11-07T03:30:00Z') },
         alta: null,
         ultimoComentario: null,
+        ingreso: { codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 4488, otraMoneda: true, pista: 'TARJETA_OTRA_TERMINAL' },
       },
     ],
     nextCursor: 'o9',
@@ -340,6 +341,45 @@ describe('CRM MCP — crm_list_clients', () => {
       ultimoCobro: '2026-11-06',
       dueno: 'Ana Ruiz',
     })
+  })
+
+  it('C1b: el filtro ingreso llega a listClients y cada cliente dice su ingreso, el monto en pesos y la oportunidad', async () => {
+    ;(listClients as jest.Mock).mockResolvedValue(PAGE)
+    const { call } = setup()
+    const answer = await call('crm_list_clients', { ingreso: 'TARJETA_OTRA_TERMINAL' })
+    expect(listClients).toHaveBeenCalledWith(ADMIN, expect.objectContaining({ altas: true, ingreso: 'TARJETA_OTRA_TERMINAL' }))
+    expect(answer.clientes[0]).toMatchObject({
+      ingreso: 'Mensualidad (Pro) y transacciones con tarjeta por Avoqado',
+      transaccionesConTarjeta30Dias: 4488,
+      moneda: 'MXN',
+      transaccionesEnOtraMoneda: true,
+      oportunidad: 'Cobra con tarjeta en otra terminal',
+    })
+  })
+
+  it('C1b: sin ingreso en la fila (servidor sin C1b en el arreglo de prueba) no inventa nada', async () => {
+    ;(listClients as jest.Mock).mockResolvedValue({ ...PAGE, rows: [{ ...PAGE.rows[0], ingreso: undefined }] })
+    const { call } = setup()
+    const answer = await call('crm_list_clients', {})
+    expect(answer.clientes[0]).toMatchObject({
+      ingreso: null,
+      transaccionesConTarjeta30Dias: null,
+      moneda: null,
+      transaccionesEnOtraMoneda: null,
+      oportunidad: null,
+    })
+  })
+
+  it('C1b: un ingreso inválido es error de zod en español', async () => {
+    const c = await connect('manual')
+    try {
+      const answer = await c.client.callTool({ name: 'crm_list_clients', arguments: { ingreso: 'COMISION' } })
+      expect(answer.isError).toBe(true)
+      expect(JSON.stringify(answer.content)).toContain('Ingreso')
+      expect(listClients).not.toHaveBeenCalled()
+    } finally {
+      await c.close()
+    }
   })
 
   it('por defecto 20 y nunca más de 50', async () => {

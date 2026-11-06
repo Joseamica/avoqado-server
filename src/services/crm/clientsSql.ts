@@ -9,8 +9,17 @@ import { BadRequestError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import type { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import type { CrmAccess } from './access.service'
-import { altaPropiaPendienteSql, clientFactsLateral } from './clientFacts'
-import { MOTIVOS_DEL_ALTA, type Estado, type MotivoDelAlta, type Nivel, type Usa } from './clientCodes'
+import { altaPropiaPendienteSql, clientFactsLateral, ingresoSql, transaccionesEnOtraMonedaSql, transaccionesSql } from './clientFacts'
+import {
+  MOTIVOS_DEL_ALTA,
+  PISTAS_DE_INGRESO,
+  type Estado,
+  type Ingreso,
+  type MotivoDelAlta,
+  type Nivel,
+  type PistaDeIngreso,
+  type Usa,
+} from './clientCodes'
 import { REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './realVenueSql'
 
 const DEFAULT_PAGE = 50
@@ -115,6 +124,8 @@ export interface ClientFilters {
   dueno?: 'MIOS' | 'SIN_DUENO' | string
   /** Why a 🟠 stalled — only on accounts in the caller's «Ver». Implies `estado = ALTA_SIN_TARJETA`. */
   motivo?: MotivoDelAlta | 'SIN_MOTIVO'
+  /** C1b: what it leaves Avoqado (`f."ingreso"`), or the seller's opportunity under it (`f."pistaIngreso"`). */
+  ingreso?: Ingreso | PistaDeIngreso
 }
 
 /** The page size the server allows: 50 by default, never above 100. */
@@ -167,7 +178,34 @@ function filtrosSql(access: CrmAccess, filters: ClientFilters): Prisma.Sql {
   else if (dueno === 'SIN_DUENO') parts.push(Prisma.sql`(ca."id" IS NULL OR ca."ownerStaffId" IS NULL)`)
   else if (dueno) parts.push(Prisma.sql`ca."ownerStaffId" = ${dueno}`)
   if (filters.motivo) parts.push(motivoSql(access, filters.motivo))
+  if (filters.ingreso)
+    parts.push(
+      (PISTAS_DE_INGRESO as readonly string[]).includes(filters.ingreso)
+        ? Prisma.sql`f."pistaIngreso" = ${filters.ingreso}`
+        : Prisma.sql`f."ingreso" = ${filters.ingreso}`,
+    )
   return parts.length ? Prisma.sql` AND ${Prisma.join(parts, ' AND ')}` : Prisma.empty
+}
+
+/**
+ * «Ingreso» (C1b) as the cell paints it, over `o`: the SAME expressions the lateral gives the filter (`ingresoSql`), selected
+ * again here so the page computes them only for its own rows (expensive select-list expressions run after the sort and the
+ * limit), plus the card money processed by Avoqado in the window in MXN and whether there was some in another currency. Money
+ * only for whoever has «Ver ventas» (the key that already gates «Cobrado este mes») AND sees the client's CRM account
+ * (`visible`: the scope that opens its ficha — Codex r1 #1); otherwise it never leaves the database.
+ */
+export function ingresoColumnas(now: Date, conVentas: boolean, visible: Prisma.Sql = Prisma.sql`TRUE`): Prisma.Sql {
+  const ingreso = ingresoSql(now)
+  const dinero = (expr: Prisma.Sql, tipo: Prisma.Sql) =>
+    conVentas ? Prisma.sql`CASE WHEN ${visible} THEN ${expr} END` : Prisma.sql`NULL::${tipo}`
+  return Prisma.sql`${ingreso.ingreso} AS "ingreso", ${ingreso.mensualidad} AS "mensualidad", ${ingreso.pista} AS "pistaIngreso",
+    ${dinero(transaccionesSql(now), Prisma.raw('numeric'))} AS "transacciones30d",
+    ${dinero(transaccionesEnOtraMonedaSql(now), Prisma.raw('boolean'))} AS "otraMoneda"`
+}
+
+/** «Ingreso» of ONE organization for its ficha (its route already checked the account's scope): the same columns. */
+export function ingresoDeOrganizacionSql(organizationId: string, now: Date, conVentas: boolean): Prisma.Sql {
+  return Prisma.sql`SELECT ${ingresoColumnas(now, conVentas)} FROM "Organization" o WHERE o."id" = ${organizationId}`
 }
 
 /**
@@ -196,7 +234,7 @@ export function clientsQueries(access: CrmAccess, filters: ClientFilters, now: D
       SELECT o."id", o."name", o."createdAt", ca."id" AS "crmAccountId",
         EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro",
         f."usaMedido", ${USA_VISTO} AS "usaVisto", ${USA_AVISO} AS "usaAviso", ca."usaManual" IS NOT NULL AS "usaEscrito",
-        f."nivel", f."estado", f."ultimoCobroAt"
+        f."nivel", f."estado", f."ultimoCobroAt", ${ingresoColumnas(now, access.ventas, scopeSql(access, 'ca'))}
       ${listed}${after}
       ORDER BY o."createdAt" DESC, o."id" DESC
       LIMIT ${pageSize(filters.limit) + 1}`,

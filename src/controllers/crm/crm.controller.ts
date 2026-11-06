@@ -173,12 +173,13 @@ export async function rescheduleActivityHandler(req: Request, res: Response): Pr
 /** GET /api/v1/crm/clients */
 export async function listClients(req: Request, res: Response): Promise<void> {
   // `validateRequest(listClientsSchema)` already turned the limit into a number.
-  const { rows, nextCursor, total, conteos, legible } = await clients.listClients(
+  const { rows, nextCursor, total, conteos, legible, ingreso } = await clients.listClients(
     req.crmAccess!,
     req.query as unknown as clients.ClientFilters,
   )
-  // `legible: 1` = this server filters and paints the C1 columns; a new SUPERADMIN sends no new filter before seeing it.
-  res.json({ data: rows, meta: { total, nextCursor, legible, conteos } })
+  // `legible: 1` = this server filters and paints the C1 columns; `ingreso: 1`, «Ingreso» (C1b). A new SUPERADMIN sends no
+  // new filter before seeing its flag.
+  res.json({ data: rows, meta: { total, nextCursor, legible, ingreso, conteos } })
 }
 
 /** POST /api/v1/crm/clients/:organizationId/hide — «Ocultar de Clientes» (ruling 39). */

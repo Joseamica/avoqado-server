@@ -3,7 +3,8 @@
  * `orders:comp` por `checkPermission` (PIN de gerente incluido) y deja la acreditación en el request para el servicio.
  */
 import type { NextFunction, Request, Response } from 'express'
-import { checkCortesiaEnDescuento, pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaEnDescuento, conCortesiaSiRegala, pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { RegaloSinPermisoError } from '@/errors/AppError'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import prisma from '@/utils/prismaClient'
 
@@ -103,5 +104,55 @@ describe('D1: descuento suelto que regala pide orders:comp', () => {
     await run(req)
     expect(tieneCortesiaAutorizada(req)).toBe(true)
     expect(pinDeLaCortesia(req)).toBeUndefined()
+  })
+})
+
+// hz:e0b12f00:D1: el servicio descubre que el descuento deja la cuenta en $0 y el controlador pide `orders:comp` (PIN incluido).
+describe('D1·$0: conCortesiaSiRegala', () => {
+  const respuesta = () => {
+    const res: any = { statusCode: null }
+    res.status = jest.fn((code: number) => {
+      res.statusCode = code
+      return res
+    })
+    res.json = jest.fn(() => res)
+    return res
+  }
+
+  it('si no regala: una sola vuelta, sin pedir permiso', async () => {
+    const operacion = jest.fn().mockResolvedValue('ok')
+    expect(await conCortesiaSiRegala(request({}), respuesta(), operacion)).toBe('ok')
+    expect(operacion).toHaveBeenCalledTimes(1)
+    expect(operacion).toHaveBeenCalledWith(undefined)
+    expect(checkPermission).not.toHaveBeenCalled()
+  })
+
+  it('regala y el PIN de un gerente lo autoriza: segunda vuelta con ese gerente', async () => {
+    mockPinConsumido = 'sv-gerente'
+    const operacion = jest.fn().mockRejectedValueOnce(new RegaloSinPermisoError()).mockResolvedValueOnce('ok')
+    expect(await conCortesiaSiRegala(request({}), respuesta(), operacion)).toBe('ok')
+    expect(checkPermission).toHaveBeenCalledWith('orders:comp')
+    expect(operacion).toHaveBeenLastCalledWith({ porPin: 'sv-gerente' })
+  })
+
+  it('regala y quien llama tiene el permiso (sin PIN): segunda vuelta sin gerente', async () => {
+    const operacion = jest.fn().mockRejectedValueOnce(new RegaloSinPermisoError()).mockResolvedValueOnce('ok')
+    expect(await conCortesiaSiRegala(request({}), respuesta(), operacion)).toBe('ok')
+    expect(operacion).toHaveBeenLastCalledWith({ porPin: undefined })
+  })
+
+  it('regala y no hay permiso ni PIN: 403 canónico, una sola vuelta y devuelve undefined', async () => {
+    mockPermissionResult = 'denied'
+    const res = respuesta()
+    const operacion = jest.fn().mockRejectedValueOnce(new RegaloSinPermisoError())
+    expect(await conCortesiaSiRegala(request({}), res, operacion)).toBeUndefined()
+    expect(res.statusCode).toBe(403)
+    expect(operacion).toHaveBeenCalledTimes(1)
+  })
+
+  it('otro error: se propaga sin pedir permiso', async () => {
+    const operacion = jest.fn().mockRejectedValueOnce(new Error('otra cosa'))
+    await expect(conCortesiaSiRegala(request({}), respuesta(), operacion)).rejects.toThrow('otra cosa')
+    expect(checkPermission).not.toHaveBeenCalled()
   })
 })

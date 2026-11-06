@@ -14,11 +14,19 @@ jest.mock('../../../../src/config/env', () => ({
   NODE_ENV: 'production',
 }))
 jest.mock('@/services/tpv/discount.tpv.service')
-jest.mock('@/middlewares/cortesiaPidePermiso.middleware', () => ({
-  ...jest.requireActual('@/middlewares/cortesiaPidePermiso.middleware'),
-  tieneCortesiaAutorizada: jest.fn(() => false),
-  pinDeLaCortesia: jest.fn(() => undefined),
-}))
+jest.mock('@/middlewares/cortesiaPidePermiso.middleware', () => {
+  const tieneCortesiaAutorizada = jest.fn(() => false)
+  const pinDeLaCortesia = jest.fn(() => undefined)
+  return {
+    ...jest.requireActual('@/middlewares/cortesiaPidePermiso.middleware'),
+    tieneCortesiaAutorizada,
+    pinDeLaCortesia,
+    // hz:e0b12f00:D1: el controlador manual pasa por `conCortesiaSiRegala`; su primera vuelta lleva la acreditación del request.
+    conCortesiaSiRegala: jest.fn((req: any, _res: any, operacion: (c: any) => Promise<unknown>) =>
+      operacion((tieneCortesiaAutorizada as jest.Mock)(req) ? { porPin: (pinDeLaCortesia as jest.Mock)(req) } : undefined),
+    ),
+  }
+})
 jest.mock('@/middlewares/permissionFlag.middleware', () => ({
   ...jest.requireActual('@/middlewares/permissionFlag.middleware'),
   tienePermisoEnVenue: jest.fn(),

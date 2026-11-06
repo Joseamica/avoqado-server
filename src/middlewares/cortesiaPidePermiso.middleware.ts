@@ -1,5 +1,6 @@
 import { DiscountType } from '@prisma/client'
 import { NextFunction, Request, Response } from 'express'
+import { RegaloSinPermisoError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
 
@@ -114,4 +115,37 @@ async function traeDescuentoDeCortesia(venueId: string | undefined, body: any, i
   if (!venueId || ids.length === 0) return false
   const comp = await prisma.discount.findFirst({ where: { id: { in: ids }, venueId, type: DiscountType.COMP }, select: { id: true } })
   return comp !== null
+}
+
+/** Lo que el controlador le pasa al servicio cuando quien aplica puede regalar: `porPin` = el gerente cuyo PIN lo autorizó. */
+export type Cortesia = { porPin?: string }
+
+/**
+ * hz:e0b12f00:D1 (founder, 6-nov): un descuento manual que deja en $0 lo que queda de los productos es una cortesía. Sólo el
+ * servicio lo sabe (con SU importe, bajo su candado y después de la búsqueda idempotente: Codex r1 #1 y #5), así que la primera
+ * vuelta va con la acreditación que ya traiga el request. Si el servicio lanza `RegaloSinPermisoError`, se pide `orders:comp`
+ * como en la ruta: `checkPermission` consume el `X-Permission-Override` o contesta el 403 canónico con `overridable`. Si pasa, la
+ * operación se ejecuta OTRA VEZ entera con la acreditación (la primera vuelta ya se revirtió). Devuelve `undefined` si ya se
+ * respondió el 403.
+ */
+export async function conCortesiaSiRegala<T>(
+  req: Request,
+  res: Response,
+  operacion: (cortesia: Cortesia | undefined) => Promise<T>,
+): Promise<T | undefined> {
+  const yaAcreditada = tieneCortesiaAutorizada(req) ? { porPin: pinDeLaCortesia(req) } : undefined
+  try {
+    return await operacion(yaAcreditada)
+  } catch (error) {
+    if (!(error instanceof RegaloSinPermisoError) || yaAcreditada) throw error
+  }
+  let paso = false
+  let fallo: unknown
+  await exigirCortesia(req, res, (error?: unknown) => {
+    if (error) fallo = error
+    else paso = true
+  })
+  if (fallo) throw fallo
+  if (!paso || !tieneCortesiaAutorizada(req)) return undefined
+  return operacion({ porPin: pinDeLaCortesia(req) })
 }

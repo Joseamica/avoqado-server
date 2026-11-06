@@ -141,6 +141,14 @@ describe('GET /crm/clients: los filtros de C1', () => {
     expect(mensajes(parse({ dueno: "x' OR 1=1" }))).toEqual(['El dueño no es válido'])
   })
 
+  it('C1b: acepta cada valor de Ingreso (las cuatro categorías y las dos pistas); otro dice «Ese filtro no existe»', () => {
+    for (const ingreso of ['MENSUALIDAD', 'TRANSACCIONES', 'AMBOS', 'NINGUNO', 'TARJETA_OTRA_TERMINAL', 'SOLO_EFECTIVO']) {
+      const r = parse({ ingreso })
+      expect(r.success && r.data.query).toEqual({ ingreso })
+    }
+    expect(mensajes(parse({ ingreso: 'COMISION' }))).toEqual(['Ese filtro no existe'])
+  })
+
   it('«condicion» ya no es filtro (rediseño r3): se ignora y no llega al servicio', () => {
     const r = parse({ condicion: 'PAGADO', usa: 'POS' })
     expect(r.success).toBe(true)

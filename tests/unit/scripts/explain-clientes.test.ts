@@ -40,6 +40,13 @@ it('🔴 con --compatible no queda ninguna columna nueva de CrmAccount en el tex
   expect(() => compatible('SELECT x."altaMotivo" FROM "CrmAccount" x')).toThrow(/altaMotivo/)
 })
 
+it('C1b: «todos» mide la página CON el monto de tarjeta («Ver ventas»); «propios» sin él', () => {
+  const lines = explainClientes([])
+  const de = (alcance: string) => lines[lines.indexOf(`-- ${alcance} · sin filtro · page`) + 1]
+  expect(de('todos')).toContain('SUM(p."amount")')
+  expect(de('propios')).toContain('NULL::numeric AS "transacciones30d"')
+})
+
 it('🔴 por cada variante salen las tres sentencias de clientsQueries (page, total, conteos), en los dos alcances', () => {
   const heads = encabezados(explainClientes(['--staff', 'cstaffsel0000000000000001']))
   for (const alcance of ['todos', 'propios'])
@@ -64,6 +71,10 @@ it('--conjunto produccion deja sólo las variantes pesadas', () => {
     'nivel=FREE',
     'motivo=PRECIO',
     'dueno=SIN_DUENO',
+    'ingreso=TRANSACCIONES',
+    'ingreso=NINGUNO',
+    'ingreso=TARJETA_OTRA_TERMINAL',
+    'ingreso=SOLO_EFECTIVO',
   ])
   expect(sentencias(explainClientes(['--conjunto', 'produccion']))).toHaveLength(VARIANTES_PRODUCCION.length * 3 * 2)
 })
@@ -82,6 +93,7 @@ it('🔴 C3: con --ids imprime también lo que agrega UNA página (Tarea 5), con
     '-- página · canjes',
     '-- página · aparatos',
     '-- página · alta',
+    '-- página · ingreso de la ficha',
     '-- página · contratos',
     '-- página · comentarios',
   ])
@@ -89,10 +101,12 @@ it('🔴 C3: con --ids imprime también lo que agrega UNA página (Tarea 5), con
     expect(line.startsWith('EXPLAIN (ANALYZE, BUFFERS) SELECT ')).toBe(true)
     expect(line).not.toMatch(/\$\d/)
   }
-  const [sucursales, canjes, aparatos, alta, contratos, comentarios] = sentencias(pagina)
-  for (const line of [sucursales, canjes, aparatos, alta]) expect(line).toContain(`'${ORG}'`)
+  const [sucursales, canjes, aparatos, alta, ingreso, contratos, comentarios] = sentencias(pagina)
+  for (const line of [sucursales, canjes, aparatos, alta, ingreso]) expect(line).toContain(`'${ORG}'`)
+  // C1b: the ficha's «Ingreso» with the card money (the same columns as the page).
+  expect(ingreso).toContain('AS "transacciones30d"')
   expect(contratos).toContain(`'${VENUE}'`)
   expect(comentarios).toContain(`'${CUENTA}'`)
   // Without --sucursales / --cuentas those two are left out, never printed with the wrong kind of id.
-  expect(encabezados(explainClientes(['--ids', ORG]).slice(sinIds.length))).toHaveLength(4)
+  expect(encabezados(explainClientes(['--ids', ORG]).slice(sinIds.length))).toHaveLength(5)
 })

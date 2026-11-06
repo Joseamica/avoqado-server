@@ -1,5 +1,6 @@
 /**
- * The facts «Clientes» shows of each organization — what it uses (terminal, POS), its plan level and whether it charges —
+ * The facts «Clientes» shows of each organization — what it uses (terminal, POS), its plan level, whether it charges and what
+ * it leaves Avoqado (C1b) —
  * each from ONE SQL expression over an Organization aliased `o` (plan C1, task 2). The cell reads these columns, the
  * filter puts the same expressions in the `WHERE` before the cursor and in the total, and the count groups by them: one
  * rule to paint, filter and count. The plan's CONDITION (paid, trial, courtesy…) is not here on purpose: its rule
@@ -16,14 +17,18 @@ import { REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './realVenueSql'
 export {
   CONDICIONES,
   ESTADOS,
+  INGRESOS,
   MOTIVOS_DEL_ALTA,
   NIVELES,
+  PISTAS_DE_INGRESO,
   USA,
   USA_ESCRITO,
   type Condicion,
   type Estado,
+  type Ingreso,
   type MotivoDelAlta,
   type Nivel,
+  type PistaDeIngreso,
   type Usa,
   type UsaEscrito,
 } from './clientCodes'
@@ -127,14 +132,146 @@ const reservationChargedFrom = (paymentSource: Prisma.Sql, desde: Date) => Prism
 const anyRealVenue = (condition: Prisma.Sql) =>
   Prisma.sql`EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND (${condition}))`
 
-/** A real venue of `o` holds `tier` today: a classic row in its access window, or a commercial grant in force. */
-const nivelSql = (tier: 'PRO' | 'PREMIUM', now: Date) =>
-  anyRealVenue(Prisma.sql`EXISTS (
+/** The venue `v` holds `tier` today: a classic row in its access window, or a commercial grant in force. */
+const nivelDeLaSucursalSql = (tier: 'PRO' | 'PREMIUM', now: Date) => Prisma.sql`(EXISTS (
       SELECT 1 FROM "VenueFeature" vf JOIN "Feature" ft ON ft."id" = vf."featureId"
       WHERE vf."venueId" = v."id" AND ft."code" = ${tier === 'PREMIUM' ? Prisma.sql`'PLAN_PREMIUM'` : Prisma.sql`'PLAN_PRO'`}
         AND ${ventanaDeAccesoSql('vf', now)}
     )
-    OR ${concesionComercialSql('v', now, tier)}`)
+    OR ${concesionComercialSql('v', now, tier)})`
+
+/** A real venue of `o` holds `tier` today. */
+const nivelSql = (tier: 'PRO' | 'PREMIUM', now: Date) => anyRealVenue(nivelDeLaSucursalSql(tier, now))
+
+// ── Ingreso (C1b): lo que cada cliente le deja a Avoqado ─────────────────────────────────────────────────────────────
+
+/**
+ * Was this payment (aliased `paymentAlias`) a CARD charged THROUGH Avoqado? Always a card method, and then either an online
+ * channel of Avoqado — the platform's own rule for «en línea de Avoqado» (`fundsFlow = AVOQADO_PROCESSED` or an e-commerce
+ * channel, `sales-summary.dashboard.service.ts`) — or Avoqado's terminal: `source = TPV` is written only by the terminal app
+ * and the AngelPay webhook (`fuenteDelPago`); what an app only RECORDS (a card of another terminal) is `OTHER`, and a
+ * hand-recorded payment carries `EXTERNAL_RECORDED`. Online, only `CREDIT_CARD`/`DEBIT_CARD` (Codex r1 #2): SPEI is
+ * `BANK_TRANSFER`, OXXO is `OTHER` (`metodoDeStripe`) and a Mercado Pago balance is `DIGITAL_WALLET`
+ * (`metodoDeMercadoPago`), so an online wallet cannot be told from a balance. On the terminal a wallet is a tokenized card
+ * read by the processor's SDK. Never `processor` (the terminal writes «TBD») nor the payment's `terminalId` (null when the
+ * serial does not resolve). Superadmin test charges never count. Always true or false, never NULL, so `NOT (…)` keeps its rows.
+ */
+export function pagoPorAvoqadoSql(paymentAlias: string): Prisma.Sql {
+  const p = alias(paymentAlias)
+  return Prisma.sql`(${p}."source" <> 'DASHBOARD_TEST' AND (
+    (${p}."method" IN ('CREDIT_CARD', 'DEBIT_CARD')
+      AND (${p}."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED' OR ${p}."ecommerceMerchantId" IS NOT NULL))
+    OR (${p}."fundsFlow" IS NULL AND ${p}."source" = 'TPV' AND ${p}."method" IN ('CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'))
+  ))`
+}
+
+/**
+ * The currency of a payment `p`: a `Payment` has none of its own; an online one keeps it in its `CheckoutSession`, linked by
+ * `paymentId` (`paymentLink.service.ts`, `venueCheckout.service.ts`) or — a link charged before aed515013 left it empty — found
+ * by `sessionId = Payment.processorId`, the fallback of `pagoDeLaSesion` (Codex r2 #1). Everything else is charged in MXN (the
+ * terminal, the POS, online ordering's fixed `MXN`). Upper case: a link may store it as written. Both lookups are unique keys.
+ */
+export const monedaDelPagoSql = Prisma.sql`UPPER(COALESCE(
+  (SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."paymentId" = p."id"),
+  (SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."sessionId" = p."processorId" AND cs."paymentId" IS NULL),
+  'MXN'))`
+
+/** `paymentCountsAsDrawerCash` (`shared/tenderSemantics.ts`) over `p`, with its precedence: fundsFlow → tender snapshot → method. */
+const efectivoDeCajonSql = Prisma.sql`(CASE WHEN p."fundsFlow" IS NOT NULL THEN p."fundsFlow" = 'CASH_DRAWER'
+  WHEN p."tenderCountsAsCash" IS NOT NULL THEN p."tenderCountsAsCash"
+  ELSE p."method" = 'CASH' END)`
+
+/** A real charge of the venue `v` in the window that answers `condition` (over `p`), on `Payment(venueId, status, createdAt)`. */
+const cobroEnLaVentana = (desde: Date, condition: Prisma.Sql) => Prisma.sql`EXISTS (
+  SELECT 1 FROM "Payment" p
+  WHERE p."venueId" = v."id" AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(desde)}
+    AND ${condition}
+)`
+
+/**
+ * Does the venue `v` pay Avoqado a monthly plan of `tier` (or of any paid tier)? What the database knows is charged, without
+ * Stripe and without picking «the» plan row (that choice stays in JS, `planesPorSucursal`; C1's guard forbids a second one):
+ * - a classic plan row with a Stripe subscription, in its access window (`ventanaDeAccesoSql`) and not a trial — the rule of
+ *   `derivePlanState`: an end in the future is a trial unless a collection grace is in force (then it is overdue, still billed);
+ * - or a plan contract in force (the `where` of `contratosSql` / `planContractOrigin`) on a venue whose level is not Free (its
+ *   grant delivers it).
+ * On every single-origin plan state the parity test seeds, this is exactly «condición PAGADO or CAMPANA» of the page. With two
+ * charging origins at once (a paid Pro and a Premium trial with card) it says what is charged; the Plan cell keeps the
+ * platform's choice of row.
+ */
+function pagaSql(now: Date, tier?: 'PRO' | 'PREMIUM'): Prisma.Sql {
+  const codigos =
+    tier === 'PREMIUM' ? Prisma.sql`'PLAN_PREMIUM'` : tier === 'PRO' ? Prisma.sql`'PLAN_PRO'` : Prisma.sql`'PLAN_PRO', 'PLAN_PREMIUM'`
+  const niveles = tier === 'PREMIUM' ? Prisma.sql`'PREMIUM'` : tier === 'PRO' ? Prisma.sql`'PRO'` : Prisma.sql`'PRO', 'PREMIUM'`
+  return Prisma.sql`(
+    EXISTS (
+      SELECT 1 FROM "VenueFeature" vf JOIN "Feature" ft ON ft."id" = vf."featureId"
+      WHERE vf."venueId" = v."id" AND ft."code" IN (${codigos}) AND vf."stripeSubscriptionId" IS NOT NULL
+        AND ${ventanaDeAccesoSql('vf', now)} AND (vf."endDate" IS NULL OR vf."gracePeriodEndsAt" >= ${utcTs(now)})
+    )
+    OR (
+      EXISTS (
+        SELECT 1 FROM "HybridContract" hc
+        WHERE hc."venueId" = v."id" AND hc."endedAt" IS NULL AND hc."planTier" IN (${niveles})
+          AND (hc."cancelAt" IS NULL OR hc."cancelAt" > ${utcTs(now)})
+      )
+      AND (${nivelDeLaSucursalSql('PRO', now)} OR ${nivelDeLaSucursalSql('PREMIUM', now)})
+    )
+  )`
+}
+
+/**
+ * «Ingreso» (C1b) over an Organization aliased `o`, three standalone expressions with no column of the lateral: the lateral
+ * puts them in `f.*` for the filter, and the page selects these SAME expressions for its cell, so Postgres computes them only
+ * for the rows of the page (after the sort and the limit) unless a filter asks for them.
+ * - `mensualidad`: `PREMIUM` / `PRO`, the highest paid plan Avoqado charges a real venue (`pagaSql`), or null.
+ * - `ingreso`: `INGRESOS` — that, card money through Avoqado in the window (`pagoPorAvoqadoSql`), both or neither.
+ * - `pista`: `PISTAS_DE_INGRESO` — a card recorded outside Avoqado in the window, else (with no card through Avoqado) only
+ *   drawer cash in the window, else null. Asked in order, so a client with card through Avoqado never reads its whole window.
+ */
+export function ingresoSql(now: Date): { ingreso: Prisma.Sql; mensualidad: Prisma.Sql; pista: Prisma.Sql } {
+  const desde = new Date(now.getTime() - WINDOW_MS)
+  const paga = anyRealVenue(pagaSql(now))
+  const porAvoqado = anyRealVenue(cobroEnLaVentana(desde, pagoPorAvoqadoSql('p')))
+  const otraTerminal = anyRealVenue(
+    cobroEnLaVentana(
+      desde,
+      Prisma.sql`p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') AND p."source" NOT IN ('DELIVERY_PLATFORM', 'DASHBOARD_TEST') AND NOT ${pagoPorAvoqadoSql('p')}`,
+    ),
+  )
+  const efectivo = anyRealVenue(cobroEnLaVentana(desde, efectivoDeCajonSql))
+  const noEfectivo = anyRealVenue(cobroEnLaVentana(desde, Prisma.sql`NOT ${efectivoDeCajonSql}`))
+  return {
+    mensualidad: Prisma.sql`(CASE WHEN ${anyRealVenue(pagaSql(now, 'PREMIUM'))} THEN 'PREMIUM' WHEN ${paga} THEN 'PRO' END)`,
+    ingreso: Prisma.sql`(CASE WHEN ${porAvoqado} THEN (CASE WHEN ${paga} THEN 'AMBOS' ELSE 'TRANSACCIONES' END)
+      ELSE (CASE WHEN ${paga} THEN 'MENSUALIDAD' ELSE 'NINGUNO' END) END)`,
+    pista: Prisma.sql`(CASE WHEN ${otraTerminal} THEN 'TARJETA_OTRA_TERMINAL'
+      WHEN ${porAvoqado} THEN NULL
+      WHEN ${efectivo} AND NOT ${noEfectivo} THEN 'SOLO_EFECTIVO' END)`,
+  }
+}
+
+/**
+ * The card money processed by Avoqado in the window over `o`, ONLY in MXN (Codex r1 #3: currencies are never added up), gross:
+ * refunds are their own negative rows and never subtract; tips live in `tipAmount` and stay out, as «Cobrado este mes» of the
+ * ficha. The SAME `pagoPorAvoqadoSql` and window as `ingresoSql`. Only for the rows of a page.
+ */
+export function transaccionesSql(now: Date): Prisma.Sql {
+  return Prisma.sql`(SELECT SUM(p."amount") ${pagosPorAvoqado(now, Prisma.sql`= 'MXN'`)})`
+}
+
+/** Card money through Avoqado in the window in ANOTHER currency: never converted nor added, only flagged. */
+export function transaccionesEnOtraMonedaSql(now: Date): Prisma.Sql {
+  return Prisma.sql`EXISTS (SELECT 1 ${pagosPorAvoqado(now, Prisma.sql`<> 'MXN'`)})`
+}
+
+function pagosPorAvoqado(now: Date, moneda: Prisma.Sql): Prisma.Sql {
+  const desde = new Date(now.getTime() - WINDOW_MS)
+  return Prisma.sql`FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
+    WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL}
+      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(desde)} AND ${pagoPorAvoqadoSql('p')}
+      AND ${monedaDelPagoSql} ${moneda}`
+}
 
 /**
  * `LEFT JOIN LATERAL (…) f ON true` over `o`, with exactly: `f."usaTerminal"`, `f."usaPos"` (booleans), `f."ultimoCobroAt"`
@@ -148,6 +285,8 @@ const nivelSql = (tier: 'PRO' | 'PREMIUM', now: Date) =>
  *   reservation charged from the apps. Charged without a device to blame: `NO_IDENTIFICADO`, never «sin ventas».
  * - Level: the `tier` of `getVenuePlanInfo` per venue (PREMIUM before PRO), the highest of its real venues.
  * - Estado: 🟠 `altaPendienteSql`, then a charge in the window, then a charge ever, then never.
+ * - Ingreso (C1b): `f."mensualidad"` (`PREMIUM` / `PRO`: the highest paid plan Avoqado charges a real venue, else null), `f."ingreso"` (`INGRESOS`: that, card money through Avoqado in the window, both or neither) and
+ *   `f."pistaIngreso"` (`PISTAS_DE_INGRESO`: a card recorded outside Avoqado, or only drawer cash in the window, or null).
  */
 export function clientFactsLateral(now: Date): Prisma.Sql {
   const desde = new Date(now.getTime() - WINDOW_MS)
@@ -160,11 +299,13 @@ export function clientFactsLateral(now: Date): Prisma.Sql {
   const pos = anyRealVenue(Prisma.sql`${paidOrder(Prisma.sql`'AVOQADO_ANDROID', 'AVOQADO_IOS'`, desde)}
     OR ${reservationChargedFrom(Prisma.sql`'APP'`, desde)}`)
   const inWindow = Prisma.sql`x."ultimoCobroAt" >= ${utcTs(desde)}`
+  const ingreso = ingresoSql(now)
 
   // ponytail: se calcula al leer; si a 10× (≈260 clientes) la lista pasa de ~300 ms, estas columnas pasan a una fila por
   // organización que llena `runSweep` cada 5 min y la lista filtra por columnas (spec §5.1.6).
   return Prisma.sql`LEFT JOIN LATERAL (
     SELECT x."usaTerminal", x."usaPos", x."ultimoCobroAt",
+      ${ingreso.mensualidad} AS "mensualidad", ${ingreso.ingreso} AS "ingreso", ${ingreso.pista} AS "pistaIngreso",
       CASE WHEN x."usaTerminal" AND x."usaPos" THEN 'AMBOS'
            WHEN x."usaTerminal" THEN 'TERMINAL'
            WHEN x."usaPos" THEN 'POS'
