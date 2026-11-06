@@ -706,7 +706,7 @@ describe('existing discount policies', () => {
   it('D1: con permiso de cortesía el COMP del catálogo descuenta todo lo que queda', async () => {
     await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100 } })
     const o = await newOrder()
-    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId, undefined, true)).toMatchObject({
+    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId, {})).toMatchObject({
       success: true,
       amount: 100,
     })
@@ -793,6 +793,37 @@ describe('existing discount policies', () => {
       success: false,
       error: 'This discount requires manager approval',
     })
+  })
+  // D2 (hz:f34960c5:D2): «requiere aprobación de gerente» ya no se cumple con cualquier id que mande la app. La cortesía que la
+  // pide la aprueba quien tiene `orders:comp` (el gerente del PIN o, sin PIN, la membresía de quien la aplica, como D1).
+  it('D2: una cortesía que pide aprobación, con permiso de cortesía, la autoriza quien la aplica', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100, requiresApproval: true } })
+    const o = await newOrder()
+    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId, {})).toMatchObject({
+      success: true,
+      amount: 100,
+    })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
+  it('D2: con PIN de gerente, la cortesía que pide aprobación la autoriza quien tecleó el PIN', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100, requiresApproval: true } })
+    const o = await newOrder()
+    await tpv.applyPredefinedDiscount(venueId, o.id, discountId, undefined, { porPin: staffVenueId })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
+  // Fuera de la cortesía no hay todavía un permiso que apruebe: bajo el candado se rechaza aunque llegue un autorizador.
+  it('D2: un % que pide aprobación se rechaza bajo el candado aunque llegue un autorizador, y no escribe', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { requiresApproval: true } })
+    const o = await newOrder()
+    expect(await applyDiscountToOrder(o.id, discountId, staffVenueId, staffVenueId, venueId, true)).toMatchObject({
+      success: false,
+      error: 'This discount requires manager approval',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
   })
   it('predefined keeps its public errors: inactive rule 404, ineligible rule 400', async () => {
     const o = await newOrder()

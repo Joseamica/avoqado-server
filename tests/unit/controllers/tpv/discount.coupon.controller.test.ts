@@ -204,12 +204,21 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     expect(manualMock.mock.calls[0][7]).toBeUndefined()
   })
 
-  it('predefinido: pasa si el request quedó acreditado', async () => {
+  // D2 (hz:f34960c5:D2): la aprobación sale del permiso comprobado en el request (PIN de gerente incluido), nunca del cuerpo.
+  it('predefinido acreditado con PIN: pasa quien tecleó el PIN, no el authorizedById del cuerpo', async () => {
     acreditado.mockReturnValue(true)
+    await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
+      .post('/venues/v1/orders/o1/discounts/apply')
+      .send({ discountId: 'd-comp', authorizedById: 'id-inventado' })
+    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-comp', undefined, { porPin: 'sv-gerente' })
+  })
+
+  it('D2: predefinido sin acreditación: el authorizedById del cuerpo no llega al servicio', async () => {
+    acreditado.mockReturnValue(false)
     await request(app({ userId: 'u-cajera' }))
       .post('/venues/v1/orders/o1/discounts/apply')
-      .send({ discountId: 'd-comp' })
-    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-comp', undefined, undefined, true)
+      .send({ discountId: 'd-aprobar', authorizedById: 'id-inventado' })
+    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-aprobar', undefined, undefined)
   })
 
   // D3 (hz:f34960c5:D3): con la sesión real (sin `staffVenueId`), el servicio recibe la membresía de quien llama.

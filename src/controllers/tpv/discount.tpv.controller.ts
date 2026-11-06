@@ -82,7 +82,8 @@ export async function applyAutomaticDiscounts(req: Request, res: Response, next:
 export async function applyPredefinedDiscount(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, orderId } = req.params
-    const { discountId, authorizedById } = req.body as { discountId: string; authorizedById?: string }
+    // D2 (hz:f34960c5:D2): el `authorizedById` del cuerpo ya no cuenta; la aprobación sale del permiso comprobado en la ruta.
+    const { discountId } = req.body as { discountId: string }
     const staffVenueId = await membresiaDe(req)
 
     const result = await discountTpvService.applyPredefinedDiscount(
@@ -90,8 +91,7 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
       orderId,
       discountId,
       staffVenueId,
-      authorizedById,
-      tieneCortesiaAutorizada(req),
+      tieneCortesiaAutorizada(req) ? { porPin: (req as any).authContext?.overrideAuthorizedBy } : undefined,
     )
 
     if (result.success) {

@@ -209,22 +209,23 @@ export async function applyAutomaticDiscounts(
  * @param orderId - Order ID
  * @param discountId - Discount ID to apply
  * @param staffVenueId - Staff venue ID applying the discount
- * @param authorizedById - Manager's staff venue ID (required for comps/approval)
- * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado.
+ * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él), como en `applyManualDiscount`.
+ *   D2 (hz:f34960c5:D2): el autorizador ya no lo manda el cliente; es el gerente del PIN o quien aplica (`staffVenueId`, D3).
  */
 export async function applyPredefinedDiscount(
   venueId: string,
   orderId: string,
   discountId: string,
   staffVenueId: string | undefined,
-  authorizedById?: string,
-  puedeRegalar = false,
+  cortesia?: { porPin?: string },
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId })
 
   // The engine decides everything on the locked Order, in its own transaction: tenant (404), PAID (400), catalog
   // rule active (404), eligibility with the hand-picked id forced (400, see `forceDiscountId`), amount and tax.
-  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId, puedeRegalar)
+  // D2: una regla que «requiere aprobación» sólo la aprueba ese autorizador, y el motor sólo lo acepta en una cortesía.
+  const authorizedById = cortesia ? (cortesia.porPin ?? staffVenueId) : undefined
+  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId, cortesia !== undefined)
 }
 
 // ==========================================

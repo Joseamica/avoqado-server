@@ -5561,7 +5561,7 @@ router.post(
  *               authorizedById:
  *                 type: string
  *                 format: cuid
- *                 description: Required for discounts that require approval
+ *                 description: Ignored since D2 — approval comes from the manager PIN (x-permission-override) or the caller's own orders:comp; only a COMP rule can be approved
  *     responses:
  *       200:
  *         description: Discount applied successfully

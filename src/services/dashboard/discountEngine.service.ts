@@ -932,6 +932,11 @@ export async function applyDiscountToOrder(
 
     // D1 (hz:f34960c5:D1): el tipo se lee aquí, bajo el candado; regalar la cuenta pide el permiso de cortesía, como D14 y `/comp`.
     if (fresh.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+    // D2 (hz:f34960c5:D2): «requiere aprobación» sólo lo cumple una cortesía, aprobada con `orders:comp`. Para otro tipo no hay
+    // todavía permiso que apruebe: se rechaza aunque llegue un autorizador (antes valía cualquier id que mandara la app).
+    if (fresh.requiresApproval && fresh.type !== 'COMP') {
+      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount requires manager approval' }
+    }
     return applyEvaluatedDiscount(tx, order, fresh, audits, appliedById, authorizedById)
   }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)
