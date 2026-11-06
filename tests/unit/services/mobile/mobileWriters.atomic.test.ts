@@ -38,6 +38,8 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
   assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
   avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+  // Tienda híbrida (R53): «un folio no se junta» también lee `onlineOrder`; se prueba en `folios.integration.test.ts`.
+  assertNotFolioInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))

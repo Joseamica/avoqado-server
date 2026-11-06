@@ -31,3 +31,15 @@ describe('listOrders de las apps: pedidos en línea con tarjeta sin cobrar', () 
     expect((prismaMock.order.count as jest.Mock).mock.calls[0][0].where).toBe(where)
   })
 })
+
+// Tienda híbrida (T11): un folio por pagar (requiresAcceptance:false, PENDING_ACCEPTANCE) no es una cuenta cobrable desde aquí.
+// Un folio vencido con abono tardío ya no está PENDING_ACCEPTANCE y sí sale; un pedido de «Mi equipo» no cambia.
+describe('listOrders de las apps: folios por pagar (T11)', () => {
+  it('excluye el folio PENDING_ACCEPTANCE sin aceptación, y sólo ése', async () => {
+    await listOrders('venue-1', { page: 1, pageSize: 20 })
+    const where = (prismaMock.order.findMany as jest.Mock).mock.calls[0][0].where
+    expect(where.AND).toEqual(
+      expect.arrayContaining([{ NOT: { onlineOrder: { is: { requiresAcceptance: false, status: 'PENDING_ACCEPTANCE' } } } }]),
+    )
+  })
+})

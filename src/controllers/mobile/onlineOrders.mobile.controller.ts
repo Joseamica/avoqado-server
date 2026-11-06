@@ -8,10 +8,11 @@
 import type { NextFunction, Request, Response } from 'express'
 import type { OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
-import { ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
+import { ONLINE_ORDERS_TO_PAY_HEADER, ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
+import { listFolios, type FolioSection } from '@/services/online-ordering/folios.service'
 import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
-import { getAcceptingStatus, storeView, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import { getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -65,18 +66,18 @@ function reply(res: Response, r: TransitionResult) {
 }
 
 /**
- * H3 (r2): ¿quien consulta puede CONTESTAR pedidos en ESTE negocio? `orders:update` efectivo, con la MISMA resolución que
- * `checkPermission` (rol en el negocio + lista propia o permisos personalizados). La consulta del rol ya está memoizada en `req`
- * por el `checkPermission('orders:read')` de la ruta.
+ * H3 (r2): ¿quien consulta tiene `permission` EFECTIVO en ESTE negocio? Misma resolución que `checkPermission` (rol en el negocio +
+ * lista propia o permisos personalizados); la consulta del rol ya está memoizada en `req` por el `checkPermission` de la ruta.
+ * Suplantando, `userId` es el suplantado pero la sesión es de sólo lectura: no puede contestar ni cobrar, así que no late.
  */
-async function canAnswerOrders(req: Request, venueId: string): Promise<boolean> {
-  // Suplantando, `userId` es el suplantado pero la sesión es de sólo lectura: no puede contestar, así que no late.
+async function canDo(req: Request, venueId: string, permission: string): Promise<boolean> {
   if ((req as any).authContext?.isImpersonating) return false
   const userId: string | undefined = (req as any).authContext?.userId
   if (!userId) return false
   const { role, permissionSet } = await resolveUserRoleForVenue({ userId, targetVenueId: venueId, req })
-  return role ? evaluateRolePermission({ venueId, role, permissionSet, permission: 'orders:update' }) : false
+  return role ? evaluateRolePermission({ venueId, role, permissionSet, permission }) : false
 }
+const canAnswerOrders = (req: Request, venueId: string) => canDo(req, venueId, 'orders:update')
 
 export const inbox = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -99,6 +100,31 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
   }
 }
 
+/**
+ * Tienda híbrida (T12): «Por pagar» y «Por entregar». El latido (`x-online-orders-to-pay: 1`) dice a la tienda que hay una caja viva y
+ * sólo cuenta de quien puede COBRAR (`payments:create`, no suplantando); sin la cabecera no late, y el panel nunca la manda.
+ */
+const makeToPay = (puedeLatir: boolean) => async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const section = typeof req.query.section === 'string' ? (req.query.section as FolioSection) : undefined
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
+    const data = await listFolios({ venueId, ...(section ? { section } : {}), ...(cursor ? { cursor } : {}) })
+    const latido =
+      puedeLatir && req.header(ONLINE_ORDERS_TO_PAY_HEADER) === '1' && (await canDo(req, venueId, 'payments:create').catch(() => false))
+    if (latido) await touchToPayPoll(venueId).catch(() => false)
+    const state = await getAcceptingStatus(venueId).catch(() => null)
+    return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** Apps (TPV y POS): la lista con latido. */
+export const toPay = makeToPay(true)
+/** Panel: la MISMA lista, pero el servidor nunca lo cuenta como caja viva (no lee la cabecera), esté o no en CORS. */
+export const toPayPanel = makeToPay(false)
+
 /** Rappi 2b: los pedidos de plataforma que la caja cobra en efectivo (venta, propina y lo de la plataforma, en centavos). */
 export const deliveryCash = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -116,7 +142,12 @@ export const accept = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { venueId, orderId } = req.params
     const estimatedMinutes = typeof req.body?.estimatedMinutes === 'number' ? req.body.estimatedMinutes : undefined
-    return reply(res, await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes }))
+    const r = await acceptOnlineOrder({ venueId, orderId, staffId: staffOf(req), estimatedMinutes })
+    // Aceptar sólo puede exigir pago en un folio (QR o liga): se cobra antes de prepararlo.
+    if (r.outcome === 'PAYMENT_REQUIRED') {
+      return res.status(409).json({ success: false, code: 'PAYMENT_REQUIRED', error: 'Este pedido se cobra antes de prepararlo' })
+    }
+    return reply(res, r)
   } catch (e) {
     return next(e)
   }

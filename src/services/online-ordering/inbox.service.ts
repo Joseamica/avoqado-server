@@ -7,11 +7,13 @@ import {
 } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders } from './cancelledOrderSync'
+import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
 import { BadRequestError } from '@/errors/AppError'
 import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './constants'
+import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
+import type { Reloj } from './types'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
 
@@ -43,6 +45,10 @@ export interface InboxOrder {
   } | null
   /** Apps (2-nov): por qué se rechazó (`PAYMENT_FAILED` = no se pudo cobrar la tarjeta); `null` si no se rechazó. */
   rejectReason: OnlineOrderRejectReason | null
+  /** Tienda híbrida: `false` = folio (se paga en caja, nadie lo acepta); opcional para las apps viejas. */
+  requiresAcceptance: boolean
+  /** Tienda híbrida: de dónde pidió (`QR` o `LINK`); `null` en los pedidos de antes. */
+  channel: 'QR' | 'LINK' | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -65,11 +71,13 @@ const DONE = [
 ]
 const DONE_PAGE_SIZE = 50
 
-const SELECT = {
+export const INBOX_SELECT = {
   id: true,
   status: true,
   paymentMode: true,
   rejectReason: true,
+  requiresAcceptance: true,
+  channel: true,
   acceptDeadlineAt: true,
   estimatedReadyAt: true,
   printClaimedAt: true,
@@ -107,11 +115,11 @@ const SELECT = {
   },
 } satisfies Prisma.OnlineOrderSelect
 
-type Row = Prisma.OnlineOrderGetPayload<{ select: typeof SELECT }>
+type Row = Prisma.OnlineOrderGetPayload<{ select: typeof INBOX_SELECT }>
 
 const money = (d: Prisma.Decimal): number => Number(new Prisma.Decimal(d).toFixed(2))
 
-function toInboxOrder(r: Row, now: Date): InboxOrder {
+export function toInboxOrder(r: Row, now: Date): InboxOrder {
   return {
     orderId: r.order.id,
     onlineOrderId: r.id,
@@ -138,6 +146,8 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
         }
       : null,
     rejectReason: r.rejectReason ?? null,
+    requiresAcceptance: r.requiresAcceptance,
+    channel: (r.channel as InboxOrder['channel']) ?? null, // en el esquema es String? (T1): sólo 'QR' | 'LINK'
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,
@@ -151,8 +161,8 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
 }
 
 /** A8: «<createdAt ISO>_<id>» del último activo de la página: la siguiente sigue DESPUÉS de él (createdAt desc, id desc). */
-const toActiveCursor = (r: Row): string => `${r.createdAt.toISOString()}_${r.id}`
-function fromActiveCursor(cursor: string): { createdAt: Date; id: string } {
+export const toActiveCursor = (r: { createdAt: Date; id: string }): string => `${r.createdAt.toISOString()}_${r.id}`
+export function fromActiveCursor(cursor: string): { createdAt: Date; id: string } {
   const m = ACTIVE_CURSOR_PATTERN.exec(cursor)
   const createdAt = m ? new Date(m[1]) : null
   if (!m || !createdAt || Number.isNaN(createdAt.getTime())) throw new BadRequestError('Cursor inválido', 'INVALID_CURSOR')
@@ -164,7 +174,7 @@ function fromActiveCursor(cursor: string): { createdAt: Date; id: string } {
  * Lo usa el MCP para atender un pedido conociendo su id, sin buscarlo dentro de una página de la bandeja.
  */
 export async function getInboxOrder(p: { venueId: string; orderId: string; now?: Date }): Promise<InboxOrder | null> {
-  const row = await prisma.onlineOrder.findFirst({ where: { venueId: p.venueId, orderId: p.orderId }, select: SELECT })
+  const row = await prisma.onlineOrder.findFirst({ where: { venueId: p.venueId, orderId: p.orderId }, select: INBOX_SELECT })
   return row ? toInboxOrder(row, p.now ?? new Date()) : null
 }
 
@@ -181,20 +191,26 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
   const dayAgo = new Date(now.getTime() - 24 * 3_600_000)
 
   // Antes de leer, y en este orden (ninguna le cuesta la lista; cada una anuncia a SUS ganadores, ya fuera de transacción):
-  // R2 cierra los pedidos cuya cuenta se canceló por otra vía (POS, panel); luego, opción 1 del founder (17-oct), se entrega
-  // solo lo de pagar al recoger que ya quedó pagado.
+  // R2 cierra los pedidos cuya cuenta se canceló por otra vía (POS, panel), releyendo la cuenta bajo el candado de la orden (R12);
+  // luego, opción 1 del founder (17-oct), se entrega solo lo de pagar al recoger que ya quedó pagado; y al final (tienda híbrida,
+  // decisión 18) los folios pagados —también los cerrados que otro cobro terminó de saldar— pasan a «Por entregar».
   const warnSync = (que: string) => (error: unknown) => {
     logger.warn(`[OnlineOrdering] no se pudieron ${que} antes de la bandeja`, {
       venueId: p.venueId,
       error: error instanceof Error ? error.message : String(error),
     })
   }
-  await syncOnlineOrdersOfCancelledOrders(prisma, { venueId: p.venueId }, now)
-    .then(won => announceCancelledElsewhere(won, now))
+  // R52: lo que se escribe bajo el candado de cada fila lee el reloj en ese momento, no la hora de la petición.
+  const fija = p.now
+  const reloj: Reloj = fija ? () => fija : () => new Date()
+  await cerrarCanceladasReleyendo({ venueId: p.venueId }, reloj)
+    .then(won => announceCancelledElsewhere(won, reloj()))
     .catch(warnSync('cerrar los pedidos de cuentas canceladas'))
   await syncOnlineOrdersOfPaidPickups(prisma, { venueId: p.venueId }, now)
     .then(won => announceCollectedAutomatically(won, now))
     .catch(warnSync('entregar los pedidos ya pagados'))
+  await syncPaidFolios({ venueId: p.venueId }, reloj).catch(warnSync('pasar a «Por entregar» los folios pagados'))
+  await syncPaidClosedFolios({ venueId: p.venueId }, reloj).catch(warnSync('revivir los folios cerrados ya saldados'))
 
   const wantPending = filter === 'pending' || filter === 'all'
   const wantActive = filter === 'active' || filter === 'all'
@@ -204,10 +220,11 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
   const [pendingRows, activeRows, doneRows, grouped, doneCount] = await Promise.all([
     wantPending
       ? prisma.onlineOrder.findMany({
-          where: { venueId: p.venueId, status: { in: PENDING } },
+          // Tienda híbrida (R40): un folio sin pagar no es «por aceptar»; la bandeja sólo muestra lo que espera a «Mi equipo».
+          where: { venueId: p.venueId, status: { in: PENDING }, requiresAcceptance: true },
           orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
           take: INBOX_PAGE_SIZE + 1,
-          select: SELECT,
+          select: INBOX_SELECT,
         })
       : Promise.resolve([] as Row[]),
     wantActive
@@ -220,7 +237,7 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
           // I-2: lo más nuevo primero (las apps ordenan en pantalla): si el tope recorta, nunca esconde lo recién aceptado.
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: INBOX_PAGE_SIZE + 1,
-          select: SELECT,
+          select: INBOX_SELECT,
         })
       : Promise.resolve([] as Row[]),
     wantDone
@@ -228,11 +245,11 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
           where: { venueId: p.venueId, status: { in: DONE }, createdAt: { gte: dayAgo } },
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: DONE_PAGE_SIZE + 1,
-          select: SELECT,
+          select: INBOX_SELECT,
         })
       : Promise.resolve([] as Row[]),
     prisma.onlineOrder.groupBy({
-      by: ['status'],
+      by: ['status', 'requiresAcceptance'],
       where: { venueId: p.venueId, status: { in: [...PENDING, ...ACTIVE] } },
       _count: { _all: true },
     }),
@@ -240,14 +257,17 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
     prisma.onlineOrder.count({ where: { venueId: p.venueId, status: { in: DONE }, createdAt: { gte: dayAgo } } }),
   ])
 
-  const count = (statuses: OnlineOrderStatus[]) => grouped.filter(g => statuses.includes(g.status)).reduce((s, g) => s + g._count._all, 0)
+  const count = (statuses: OnlineOrderStatus[], teamOnly = false) =>
+    grouped.filter(g => statuses.includes(g.status) && (!teamOnly || g.requiresAcceptance)).reduce((s, g) => s + g._count._all, 0)
   const counts = {
-    pending: count(PENDING),
+    pending: count(PENDING, true),
     active: count(ACTIVE),
     done: doneCount,
     // 1b: los activos por etapa, del mismo `groupBy` exacto (las pestañas del panel no cuentan sobre una lista con tope).
     accepted: count([OnlineOrderStatus.ACCEPTED]),
     ready: count([OnlineOrderStatus.READY]),
+    // Tienda híbrida (R40): los aceptados de «Mi equipo» (sin folios), lo que muestra la pestaña «En preparación».
+    acceptedTeam: count([OnlineOrderStatus.ACCEPTED], true),
   }
   const truncated = pendingRows.length > INBOX_PAGE_SIZE || activeRows.length > INBOX_PAGE_SIZE || doneRows.length > DONE_PAGE_SIZE
   const pending = pendingRows.slice(0, INBOX_PAGE_SIZE)

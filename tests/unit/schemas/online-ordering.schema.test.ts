@@ -140,3 +140,11 @@ describe('menuProductsSchema: la lista del menú en línea del panel (1b)', () =
     }
   })
 })
+
+describe('settingsPatchBody.requiresAcceptance (tienda híbrida T5)', () => {
+  it('acepta un booleano, rechaza otro tipo y sigue siendo estricto', () => {
+    expect(settingsPatchBody.safeParse({ requiresAcceptance: false }).success).toBe(true)
+    expect(settingsPatchBody.safeParse({ requiresAcceptance: 'no' }).success).toBe(false)
+    expect(settingsPatchBody.safeParse({ requiresAcceptanse: false }).success).toBe(false)
+  })
+})

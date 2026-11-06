@@ -498,6 +498,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
         requestHash: c.requestHash,
         acceptDeadlineAt: new Date(Date.now() + 10 * MIN),
         whatsappConsent: false,
+        requiresAcceptance: true,
+        channel: null,
       })
       await tx.onlineOrderCharge.update({ where: { id: c.id }, data: { status: 'AUTHORIZED', onlineOrderId: created.onlineOrderId } })
     })
@@ -664,6 +666,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
         requestHash: 'otra',
         acceptDeadlineAt: new Date(Date.now() + 10 * MIN),
         whatsappConsent: false,
+        requiresAcceptance: true,
+        channel: null,
       }),
     )
     authSpy.mockResolvedValue(authorized())
@@ -835,6 +839,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
         requestHash: `s2-move-${seq}`,
         acceptDeadlineAt: new Date(Date.now() + 10 * MIN),
         whatsappConsent: false,
+        requiresAcceptance: true,
+        channel: null,
       }),
     )
     await moveOrderToTable(venueId!, pickupOrder.orderId, mesa.id)

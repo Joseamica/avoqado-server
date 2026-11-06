@@ -6,10 +6,12 @@ jest.mock('@/services/online-ordering/inbox.service', () => ({ __esModule: true,
 jest.mock('@/services/online-ordering/presence.service', () => ({
   __esModule: true,
   touchInboxPoll: jest.fn(),
+  touchToPayPoll: jest.fn(),
   getAcceptingStatus: jest.fn(),
   // Ronda 1: el armado del estado es el REAL (uno solo para panel, bandeja y MCP).
   storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
 }))
+jest.mock('@/services/online-ordering/folios.service', () => ({ __esModule: true, listFolios: jest.fn() }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, pauseOnlineOrdering: jest.fn() }))
 jest.mock('@/services/online-ordering/transitions.service', () => ({
   __esModule: true,
@@ -26,7 +28,8 @@ jest.mock('@/services/online-ordering/printClaim.service', () => ({
 }))
 
 import { listInbox } from '@/services/online-ordering/inbox.service'
-import { getAcceptingStatus, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import { listFolios } from '@/services/online-ordering/folios.service'
+import { getAcceptingStatus, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -40,6 +43,7 @@ import * as ctrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 
 const LISTA = { serverTime: 'x', counts: { pending: 0, active: 0, done: 0 }, orders: [], truncated: false }
+const FOLIOS = { serverTime: 'x', counts: { toPay: 0, toDeliver: 0 }, toPay: [], toDeliver: [] }
 /** 1b: el estado de la tienda en la bandeja trae también las dos pausas (la del piso con su hora, y la del gerente). */
 const TIENDA_ABIERTA = { status: 'OPEN', reason: null, pausedUntil: null, manualPause: false }
 /** La fila de `StaffVenue` que `resolveUserRoleForVenue` lee para el rol en este negocio. */
@@ -63,6 +67,8 @@ function mock(over: { query?: object; body?: object; headers?: Record<string, st
 beforeEach(() => {
   ;(listInbox as jest.Mock).mockResolvedValue(LISTA)
   ;(touchInboxPoll as jest.Mock).mockResolvedValue(true)
+  ;(touchToPayPoll as jest.Mock).mockResolvedValue(true)
+  ;(listFolios as jest.Mock).mockResolvedValue(FOLIOS)
   ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ status: 'OPEN', reason: null, config: { pausedUntil: null, manualPause: false } })
   // Por defecto: una cajera activa (CASHIER tiene `orders:update`) sin permisos personalizados del negocio.
   prismaMock.staff.findUnique.mockResolvedValue({ active: true } as any)
@@ -171,6 +177,18 @@ describe('onlineOrders.mobile.controller', () => {
     await ctrl.accept(b.req, b.res, b.next)
     expect(b.res.status).toHaveBeenCalledWith(409)
     expect(b.res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ORDER_STATE_CHANGED', status: 'EXPIRED' }))
+  })
+
+  it('aceptar con PAYMENT_REQUIRED (un folio sin pagar) responde 409 «se cobra antes de prepararlo»', async () => {
+    ;(acceptOnlineOrder as jest.Mock).mockResolvedValueOnce({ outcome: 'PAYMENT_REQUIRED' })
+    const a = mock()
+    await ctrl.accept(a.req, a.res, a.next)
+    expect(a.res.status).toHaveBeenCalledWith(409)
+    expect(a.res.json).toHaveBeenCalledWith({
+      success: false,
+      code: 'PAYMENT_REQUIRED',
+      error: 'Este pedido se cobra antes de prepararlo',
+    })
   })
 
   it('R1: ninguna transición recibe `now` del controlador (el reloj se toma DESPUÉS del candado de la orden)', async () => {
@@ -357,5 +375,55 @@ describe('POST /pause: permiso propio y PIN del gerente', () => {
       permission: 'online-orders:pause',
     })
     expect(req.authContext.overrideAuthorizedBy).toBe('sv_gerente')
+  })
+})
+
+describe('toPay (tienda híbrida T12)', () => {
+  const TO_PAY = { 'x-online-orders-to-pay': '1' }
+  it('la cabecera x-online-orders-to-pay: 1 toca el latido DESPUÉS de listar, sólo si la sesión tiene payments:create', async () => {
+    const { req, res, next } = mock({ query: { section: 'toPay' }, headers: TO_PAY })
+    await ctrl.toPay(req, res, next)
+    expect(listFolios).toHaveBeenCalledWith({ venueId: 'v1', section: 'toPay' })
+    expect(touchToPayPoll).toHaveBeenCalledWith('v1')
+    expect((listFolios as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan((touchToPayPoll as jest.Mock).mock.invocationCallOrder[0])
+    expect(touchInboxPoll).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { ...FOLIOS, store: TIENDA_ABIERTA } })
+  })
+
+  it('m8: el panel (toPayPanel) nunca late, aunque mande la cabecera', async () => {
+    const { req, res, next } = mock({ headers: TO_PAY })
+    await ctrl.toPayPanel(req, res, next)
+    expect(listFolios).toHaveBeenCalled()
+    expect(touchToPayPoll).not.toHaveBeenCalled()
+  })
+
+  it('sin la cabecera no late', async () => {
+    const { req, res, next } = mock()
+    await ctrl.toPay(req, res, next)
+    expect(touchToPayPoll).not.toHaveBeenCalled()
+  })
+
+  it('una sesión sin payments:create (VIEWER) mira sin latir', async () => {
+    prismaMock.staffVenue.findUnique.mockResolvedValue(enElNegocio('VIEWER') as any)
+    const { req, res, next } = mock({ headers: TO_PAY })
+    await ctrl.toPay(req, res, next)
+    expect(touchToPayPoll).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalled()
+  })
+
+  it('una suplantación (sólo lectura) no late aunque el rol suplantado cobre', async () => {
+    const { req, res, next } = mock({ headers: TO_PAY })
+    req.authContext.isImpersonating = true
+    await ctrl.toPay(req, res, next)
+    expect(touchToPayPoll).not.toHaveBeenCalled()
+  })
+
+  it('pasa section y cursor a la lista; un fallo del latido no le cuesta la lista a la caja', async () => {
+    ;(touchToPayPoll as jest.Mock).mockRejectedValue(new Error('db'))
+    const { req, res, next } = mock({ query: { section: 'toDeliver', cursor: 'c' }, headers: TO_PAY })
+    await ctrl.toPay(req, res, next)
+    expect(listFolios).toHaveBeenCalledWith({ venueId: 'v1', section: 'toDeliver', cursor: 'c' })
+    expect(next).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalled()
   })
 })

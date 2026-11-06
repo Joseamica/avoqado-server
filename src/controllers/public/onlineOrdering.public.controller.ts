@@ -5,11 +5,12 @@ import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
 import { assertOrderingPlan } from '@/middlewares/requirePublicVenueFeatureStrict.middleware'
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
+import { closesAt } from '@/services/online-ordering/hours'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
-import { findCardMerchant } from '@/services/online-ordering/card/merchant'
+import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
@@ -65,7 +66,7 @@ export async function getInfo(req: Request, res: Response) {
       }),
     ])
     // Fase 2: la tienda sólo anuncia tarjeta si el switch está prendido Y el comercio puede cobrar hoy.
-    const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, venue.id)) !== null
+    const cardOnline = await cardOnlineAvailable(state.config, prisma, venue.id)
     // Sin ningún medio de pago vivo (pagar al recoger apagado y la tarjeta ya no cobra) la tienda no puede recibir pedidos: no se
     // anuncia OPEN. Se calcula aquí y no en `getAcceptingStatus` (esa lectura está en el camino caliente de crear pedidos).
     const noPaymentMode = state.status === 'OPEN' && !state.config.acceptsPayAtPickup && !cardOnline
@@ -96,6 +97,9 @@ export async function getInfo(req: Request, res: Response) {
             ? state.config.pausedUntil
             : null,
         hours: state.config.hours,
+        // T8 (aditivos): el modo de la tienda («Nadie» = false) y a qué hora cierra la franja vigente (ISO; null sin horario o fuera de él).
+        requiresAcceptance: state.config.requiresAcceptance !== false,
+        closesAt: closesAt(state.config.hours, new Date(), row?.timezone || 'America/Mexico_City')?.toISOString() ?? null,
         paymentModes: { payAtPickup: state.config.acceptsPayAtPickup, cardOnline },
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
@@ -147,9 +151,10 @@ export async function postOrder(req: Request, res: Response) {
       items: any[]
       paymentMode: 'PAY_AT_PICKUP' | 'CARD_ONLINE'
       expectedTotal: string
-      customer: { name: string; phone: string; email?: string }
+      customer: { name: string; phone?: string; email?: string }
       note?: string
       whatsappConsent?: boolean
+      channel?: 'QR' | 'LINK'
     }
     // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
     const opts = { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) }
@@ -163,7 +168,8 @@ export async function postOrder(req: Request, res: Response) {
           idempotencyKey: key,
           items: body.items,
           expectedTotal: body.expectedTotal,
-          customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+          // R7: con tarjeta el esquema exige el teléfono. R29: el borrador de tarjeta no guarda canal.
+          customer: { name: body.customer.name, phone: body.customer.phone as string, email: body.customer.email ?? null },
           note: body.note ?? null,
           whatsappConsent: body.whatsappConsent === true,
         },
@@ -172,8 +178,9 @@ export async function postOrder(req: Request, res: Response) {
       return res.status(draft.replay ? 200 : 201).json({ success: true, data: draft })
     }
 
-    // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. El servicio
-    // exige que el teléfono del pedido sea ése; sin sesión responde 401 PHONE_VERIFICATION_REQUIRED.
+    // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. En «Mi equipo»
+    // el servicio exige que el teléfono del pedido sea ése (sin sesión, 401 PHONE_VERIFICATION_REQUIRED); en «Nadie» basta el
+    // nombre y, sin sesión que coincida, el folio nace anónimo (T7).
     const auth = (req as any).customerAuth as CustomerAuthContext | null
 
     const result = await createOnlineOrder(
@@ -183,9 +190,10 @@ export async function postOrder(req: Request, res: Response) {
         items: body.items,
         paymentMode: 'PAY_AT_PICKUP',
         expectedTotal: body.expectedTotal,
-        customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+        customer: { name: body.customer.name, phone: body.customer.phone ?? null, email: body.customer.email ?? null },
         customerId: auth?.customerId ?? null,
         verifiedPhone: auth?.verifiedPhone ?? null,
+        channel: body.channel ?? null,
         note: body.note ?? null,
         whatsappConsent: body.whatsappConsent === true,
       },

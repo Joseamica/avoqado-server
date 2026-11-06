@@ -36,6 +36,7 @@ import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.contro
 import * as trainingController from '../controllers/tpv/training.tpv.controller'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as angelpayValidationController from '../controllers/tpv/angelpayValidation.tpv.controller'
+import onlineOrdersTpvRoutes from './tpv/onlineOrders.tpv.routes'
 import AppError from '../errors/AppError'
 import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
 import { expandWildcards, resolvePermissions } from '../lib/permissions'
@@ -8519,5 +8520,8 @@ router.post(
   checkPermission('loyalty:read'),
   walletScanController.scanWalletPassHandler,
 )
+
+// Tienda híbrida (R21): los folios de la tienda en línea se cobran y se entregan desde la terminal (subconjunto de /mobile, mismos permisos).
+router.use('/venues/:venueId/online-orders', onlineOrdersTpvRoutes)
 
 export default router

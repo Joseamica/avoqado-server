@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { Prisma } from '@prisma/client'
 import { z } from 'zod'
-import AppError, { BadRequestError } from '@/errors/AppError'
+import AppError from '@/errors/AppError'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -11,6 +11,8 @@ import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from '../confi
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { listFolios } from '@/services/online-ordering/folios.service'
+import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
@@ -62,6 +64,14 @@ const AUDIT: Record<Action, string> = {
   CANCEL: 'ONLINE_ORDER_CANCELLED_VIA_MCP',
 }
 
+/** El mismo texto de la API (`accept` del controlador móvil): un folio no se prepara sin pago. */
+const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
+/** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
+const FOLIO_NO_SE_RECHAZA =
+  'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
+/** Rechazos del servicio al guardar los ajustes que se dicen en texto, sin error (nada se escribió). */
+const AJUSTES_RECHAZADOS = new Set(['NO_PAYMENT_MODE', 'PAY_AT_PICKUP_REQUIRED', 'HOURS_REQUIRED', 'NO_FOLIO_DEVICE'])
+
 /** El texto del cobro (HAS_PAYMENTS) es el mismo de la API del restaurante (`onlineOrders.mobile.controller.ts`). */
 function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
   switch (r.outcome) {
@@ -100,23 +110,40 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos).',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos). Con status=to_pay salen los pedidos de pedir y pagar en caja que aún no se cobran, y con to_deliver los ya cobrados por entregar (cada uno por páginas con cursor).',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
-        .enum(['pending', 'active', 'done', 'all'])
+        .enum(['pending', 'active', 'done', 'all', 'to_pay', 'to_deliver'])
         .optional()
-        .describe('pending = por aceptar · active = en preparación o listos · done = cerrados · all (default)'),
+        .describe(
+          'pending = por aceptar · active = en preparación o listos · done = cerrados · all (default) · to_pay = por pagar en caja · to_deliver = cobrados por entregar',
+        ),
       cursor: activeCursor
         .optional()
-        .describe('Sólo con status=active: el nextCursor de la respuesta anterior, para ver los siguientes pedidos activos'),
+        .describe(
+          'Sólo con status=active, to_pay o to_deliver: el nextCursor (o nextCursors de esa sección) de la respuesta anterior, para ver los siguientes',
+        ),
     },
     async ({ venueId, status, cursor }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
+      // R17: «Por pagar» y «Por entregar» siguen por su propio cursor; nunca se corta en silencio.
+      if (status === 'to_pay' || status === 'to_deliver') {
+        try {
+          const folios = await listFolios({ venueId, section: status === 'to_pay' ? 'toPay' : 'toDeliver', ...(cursor ? { cursor } : {}) })
+          return text({ ok: true, ...folios })
+        } catch (e) {
+          if (e instanceof AppError && e.code === 'INVALID_CURSOR') return text({ ok: false, code: 'INVALID_CURSOR', error: e.message })
+          throw e
+        }
+      }
       // A8: los activos siguen por llave estable; el cursor no aplica a las demás listas.
       if (cursor && status !== 'active') {
-        return text({ ok: false, error: 'El cursor sólo sirve para los pedidos activos (status=active).' })
+        return text({
+          ok: false,
+          error: 'El cursor sólo sirve para los pedidos activos, por pagar o por entregar (status=active, to_pay o to_deliver).',
+        })
       }
       const inbox = await listInbox({ venueId, filter: status ?? 'all', ...(cursor ? { activeCursor: cursor } : {}) })
       return text({ ok: true, ...inbox })
@@ -154,7 +181,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         return text({ ok: true, status: order.status, estimatedReadyAt: null, sinCambios: true, mensaje: 'El pedido ya estaba entregado.' })
       }
       const pendingAction = action === 'ACCEPT' || action === 'REJECT'
-      const vigente: string[] = pendingAction ? ['PENDING_ACCEPTANCE'] : ['ACCEPTED', 'READY']
+      // T13: un folio por pagar («Nadie» acepta) también se puede cancelar; uno de «Mi equipo» por aceptar se rechaza, no se cancela.
+      const folio = order.requiresAcceptance === false
+      // R46: el servicio también responde STALE (la API del POS y del panel), aquí se dice antes de la vista previa.
+      if (action === 'REJECT' && folio) return text({ ok: false, status: order.status, error: FOLIO_NO_SE_RECHAZA })
+      const vigente: string[] = pendingAction
+        ? ['PENDING_ACCEPTANCE']
+        : action === 'CANCEL' && folio
+          ? ['PENDING_ACCEPTANCE', 'ACCEPTED', 'READY']
+          : ['ACCEPTED', 'READY']
       if (!vigente.includes(order.status)) {
         return text({
           ok: false,
@@ -163,6 +198,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             ? 'Ese pedido ya no está por aceptar; no se aplicó nada.'
             : 'Ese pedido no está en preparación ni listo; no se aplicó nada.',
         })
+      }
+
+      if (action === 'ACCEPT' && folio && !esVentaCerrada(order.paymentStatus)) {
+        return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }
 
       const tarjeta = order.paymentMode === 'CARD_ONLINE'
@@ -215,6 +254,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
           status: result.status,
           error: 'No se pudo cobrar la tarjeta; el pedido se rechazó y el dinero apartado se liberó.',
         })
+      }
+      if (action === 'ACCEPT' && result.outcome === 'PAYMENT_REQUIRED') {
+        return text({ ok: false, code: 'PAYMENT_REQUIRED', error: FOLIO_SIN_PAGAR })
       }
       if (result.outcome !== 'OK') return text(fallo(result))
       // A12: ya estaba entregado (se entregó solo entre la vista previa y la confirmación): éxito sin otra bitácora.
@@ -301,7 +343,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       const diff = Object.entries(changes ?? {})
         // Un «no quiero tarjeta» explícito se guarda aunque ya estuviera apagada: su bitácora es la que evita que la tarjeta prendida
         // de fábrica (S1b) se la prenda después.
-        .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor) || (campo === 'acceptsCardOnline' && valor === false))
+        .filter(
+          ([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor) || (campo === 'acceptsCardOnline' && valor === false),
+        )
         .map(([campo, a]) => ({
           campo,
           de: actual[campo],
@@ -325,8 +369,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       } catch (e) {
         // A (2-nov): la tienda se quedaría sin cómo cobrar (p. ej. sólo tarjeta y Stripe sin poder cobrar). Nada se escribió: se dice
         // claro, sin error.
-        if (e instanceof BadRequestError && e.code === 'NO_PAYMENT_MODE') {
-          return text({ ok: false, code: 'NO_PAYMENT_MODE', error: e.message })
+        // «Nadie» (requiresAcceptance:false) trae los suyos: pago en caja, horario y un aparato que cobre folios (409).
+        if (e instanceof AppError && e.code && AJUSTES_RECHAZADOS.has(e.code)) {
+          return text({ ok: false, code: e.code, error: e.message })
         }
         throw e
       }
@@ -459,7 +504,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             efecto: `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.`,
           },
           confirmationToken: issueConfirmation(scope, 'online_order_card_refund', { ...datos, expectedLatestRefundId: vista }),
-          mensaje: 'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId.',
+          mensaje:
+            'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true, el confirmationToken y expectedLatestRefundId.',
         })
       }
 

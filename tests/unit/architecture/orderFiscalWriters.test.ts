@@ -866,6 +866,12 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     markers: NEW_ORDER,
   },
   'src/services/kds/kitchenTicketAuthoring.service.ts#limpiarMarca': { class: 'METADATA', why: 'clears the kitchenPendingAt marker' },
+  // Tienda híbrida T9: un folio que el cobro ya dejó COMPLETED se marca para la cocina aparte (la cuenta no se reescribe).
+  'src/services/online-ordering/folios.service.ts#prepararFolioPagadoEnTx': {
+    class: 'METADATA',
+    why: 'sets the kitchenPendingAt marker of an already-settled folio, under the order lock taken by casTransitionInTx',
+    markers: ['data: { kitchenPendingAt: r.now }'],
+  },
   'src/services/mobile/areaTicket.mobile.service.ts#claimAreaTicket': { class: 'METADATA', why: 'claim fields under a CAS' },
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': {
     class: 'METADATA',
@@ -1261,6 +1267,11 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
   // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
   'src/services/online-ordering/transitions.service.ts#casTransition': 1,
+  // Tienda híbrida T9: pagado ⇒ «Por entregar» (una transacción por folio), el revivir de un folio cerrado ya saldado y la
+  // relectura de la cuenta cancelada (R12), cada una con la Order de UN folio.
+  'src/services/online-ordering/folios.service.ts#prepararFolioPagado': 1,
+  'src/services/online-ordering/folios.service.ts#syncPaidClosedFolios': 1,
+  'src/services/online-ordering/cancelledOrderSync.ts#cerrarCanceladasReleyendo': 1,
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,

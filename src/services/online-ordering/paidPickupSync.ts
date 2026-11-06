@@ -35,6 +35,8 @@ const PAID_ORDER: Prisma.OrderWhereInput = {
  * - Nunca `PENDING_ACCEPTANCE` (un pedido pagado antes de aceptarse lo sigue aceptando una persona, R1); `PARTIAL`, `REFUNDED`
  *   o una cuenta con cualquier reembolso (A3) no cierran. El CAS repite el filtro de la cuenta: un reembolso que cae entre la
  *   lectura y la escritura tampoco se entrega.
+ * - Tienda híbrida (decisión 18): nunca toca un folio (`requiresAcceptance:false`), ni al leer ni en su CAS: «Entregado» de un folio
+ *   sólo lo ponen una persona o el fin del día del negocio.
  * - A5: el CAS de cada fila va aparte; si uno falla se registra y la pasada sigue con las demás (sus ganadoras se anuncian).
  * - Sólo escribe el pedido en línea: la cuenta ya la cerró el cobro.
  */
@@ -50,6 +52,8 @@ export async function syncOnlineOrdersOfPaidPickups(
       where: {
         ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
         paymentMode: OnlineOrderPaymentMode.PAY_AT_PICKUP,
+        // Tienda híbrida (decisión 18): un folio sólo lo entrega una persona o el fin del día del negocio, nunca este cierre.
+        requiresAcceptance: true,
         order: PAID_ORDER,
         OR: [
           { status: OnlineOrderStatus.READY },
@@ -74,6 +78,7 @@ export async function syncOnlineOrdersOfPaidPickups(
         where: {
           id: r.id,
           status: r.status,
+          requiresAcceptance: true,
           order: PAID_ORDER,
           // La escritura repite la confirmación de papel; READY ya es una decisión explícita de la cocina.
           ...(r.status === OnlineOrderStatus.ACCEPTED ? { printedAt: { not: null } } : {}),

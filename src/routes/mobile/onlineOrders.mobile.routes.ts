@@ -10,6 +10,7 @@ import {
   orderActionSchema,
   pauseSchema,
   rejectSchema,
+  toPaySchema,
 } from '@/schemas/online-ordering.schema'
 
 const router = Router({ mergeParams: true })
@@ -17,6 +18,9 @@ const router = Router({ mergeParams: true })
 // R14: sin candado de plan. Perder el plan bloquea pedidos NUEVOS (público) y configurar (panel), nunca atender los que ya
 // existen. Orden: auth → validación → permiso. `:orderId` es el id de la CUENTA (`Order.id`, el `orderId` de la bandeja).
 router.get('/inbox', authenticateTokenMiddleware, validateRequest(inboxSchema), checkPermission('orders:read'), ctrl.inbox)
+// Tienda híbrida (T12): «Por pagar» y «Por entregar» de la caja. Mismo criterio R14 (sin plan) y permiso de lectura de la bandeja;
+// el latido (`x-online-orders-to-pay: 1`) lo decide el manejador según `payments:create`.
+router.get('/to-pay', authenticateTokenMiddleware, validateRequest(toPaySchema), checkPermission('orders:read'), ctrl.toPay)
 // Rappi 2b (decisión «A», 23-oct): la sección «Rappi · por cobrar» de esta misma pantalla. Mismo criterio R14 (sin candado de plan:
 // cobrar un pedido que ya existe nunca se bloquea) y mismo permiso de lectura que la bandeja; cobrar pide el suyo (`payments:create`).
 router.get(
