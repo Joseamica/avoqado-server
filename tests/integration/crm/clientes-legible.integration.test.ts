@@ -1818,6 +1818,8 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
     const filaDe = async (c: { organizationId: string }) => {
       const { name } = await prisma.organization.findUniqueOrThrow({ where: { id: c.organizationId }, select: { name: true } })
       const r = await listClients(todos(), { q: name, altas: true }, NOW)
+      // Con altas=true el SERVIDOR siempre manda conteos.
+      if (!r.conteos) throw new Error('faltan conteos con altas=true')
       return { fila: r.rows.find(row => row.id === c.organizationId)!, conteos: r.conteos }
     }
 
