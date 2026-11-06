@@ -687,7 +687,7 @@ export async function getVenueSeatStatus(req: Request<{ venueId: string }>, res:
  * POST /api/v1/dashboard/venues/:venueId/plan/checkout
  */
 export async function createVenuePlanCheckoutSession(
-  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM' }>,
+  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM'; primerCobroAnunciado?: string }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -702,7 +702,10 @@ export async function createVenuePlanCheckoutSession(
     const tier = req.body.tier ?? 'PRO'
 
     const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
-    const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, { skipOrgCheck })
+    const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, {
+      skipOrgCheck,
+      primerCobroAnunciado: req.body.primerCobroAnunciado,
+    })
 
     res.status(200).json({
       success: true,

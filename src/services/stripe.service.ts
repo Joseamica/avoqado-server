@@ -1144,6 +1144,11 @@ export interface CreatePlanCheckoutSessionInput {
   tierCode?: PlanTierCode
   venueName?: string
   venueSlug?: string
+  /**
+   * D3: fin de la prueba REGALADA del mismo plan. La prueba de Stripe termina ahí (primer cobro ese día) y no se aceptan
+   * códigos promocionales: un cupón de N meses empezaría a contar hoy y se gastaría antes del primer cobro.
+   */
+  trialEnd?: Date
 }
 
 /**
@@ -1175,13 +1180,14 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
           mode: 'subscription',
           customer: input.customerId,
           line_items: [{ price: price.id, quantity: 1 }],
-          allow_promotion_codes: true,
+          allow_promotion_codes: !input.trialEnd,
           // V5-A: sólo tarjeta (un pago diferido dejaría `active` sin haber cobrado) y caducidad de 30 min, el mínimo que
           // Stripe permite: una sesión que nadie abrió no queda viva para siempre.
           payment_method_types: ['card'],
           expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
           subscription_data: {
             description,
+            ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : {}),
             metadata: {
               kind: 'PLAN_CHECKOUT',
               venueId: input.venueId,
