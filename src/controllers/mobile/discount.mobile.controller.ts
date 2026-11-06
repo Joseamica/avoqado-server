@@ -18,6 +18,15 @@ import {
   SIN_CATEGORIAS,
 } from '../../services/dashboard/discount.dashboard.service'
 
+/**
+ * D14 (Codex r3 #1): esta puerta no pasa por Zod y Prisma acepta operaciones como `{ set: … }`; con ellas se saltaba la
+ * regla de «Categorías». El alcance va como texto y la lista como lista de textos.
+ */
+const FORMA_INVALIDA = 'El alcance o la lista de categorías no tienen el formato correcto'
+const formaInvalida = (scope: unknown, categorias: unknown) =>
+  (scope != null && typeof scope !== 'string') ||
+  (categorias != null && !(Array.isArray(categorias) && categorias.every(c => typeof c === 'string')))
+
 // ==========================================
 // LIST DISCOUNTS
 // ==========================================
@@ -136,6 +145,9 @@ export async function createDiscount(req: Request, res: Response) {
       return res.status(400).json({ success: false, message: 'value es requerido' })
     }
     // D14 (Codex r1 #2): iOS manda «Categorías» sin lista; iOS lo lee como «todas» y el panel como «ninguna».
+    if (formaInvalida(scope, targetCategoryIds)) {
+      return res.status(400).json({ success: false, message: FORMA_INVALIDA })
+    }
     if (quedaSinCategorias({ scope, targetCategoryIds })) {
       return res.status(400).json({ success: false, message: SIN_CATEGORIAS })
     }
@@ -276,6 +288,9 @@ export async function updateDiscount(req: Request, res: Response) {
       active,
     } = req.body
 
+    if (formaInvalida(scope, targetCategoryIds)) {
+      return res.status(400).json({ success: false, message: FORMA_INVALIDA })
+    }
     if (quedaSinCategorias({ scope, targetCategoryIds }, existing)) {
       return res.status(400).json({ success: false, message: SIN_CATEGORIAS })
     }

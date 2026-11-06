@@ -85,4 +85,21 @@ describe('Descuentos desde las apps · «Categorías» sin categorías', () => {
     expect((prismaMock.discount.update.mock.calls[0][0] as any).where).toEqual({ id: 'd1', updatedAt: leido.updatedAt })
     expect(res.status).toHaveBeenCalledWith(409)
   })
+
+  it('🔴 el alcance en otra forma (`{ set: "CATEGORY" }`) tampoco se cuela: 400 (Codex r3 #1)', async () => {
+    prismaMock.discount.findFirst.mockResolvedValue(guardado({ scope: 'ORDER', targetCategoryIds: [] }))
+    const r1 = respuesta()
+    await updateDiscount(pedido({ scope: { set: 'CATEGORY' } }, { venueId: 'venue-1', discountId: 'd1' }), r1)
+    expect(r1.status).toHaveBeenCalledWith(400)
+
+    const r2 = respuesta()
+    await createDiscount(pedido({ name: 'Pan', type: 'PERCENTAGE', value: 10, scope: { set: 'CATEGORY' } }), r2)
+    expect(r2.status).toHaveBeenCalledWith(400)
+
+    const r3 = respuesta()
+    await updateDiscount(pedido({ targetCategoryIds: ['c1', 7] }, { venueId: 'venue-1', discountId: 'd1' }), r3)
+    expect(r3.status).toHaveBeenCalledWith(400)
+    expect(prismaMock.discount.update).not.toHaveBeenCalled()
+    expect(prismaMock.discount.create).not.toHaveBeenCalled()
+  })
 })
