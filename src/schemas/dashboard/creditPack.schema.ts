@@ -36,6 +36,8 @@ export const updateCreditPackSchema = z.object({
     currency: z.string().optional(),
     validityDays: z.number().int().positive().nullable().optional(),
     maxPerCustomer: z.number().int().positive().nullable().optional(),
+    // Interruptor «A la venta» del DASHBOARD (mismo efecto que DELETE al apagar).
+    active: z.boolean().optional(),
     displayOrder: z.number().int().min(0).optional(),
     items: z
       .array(
