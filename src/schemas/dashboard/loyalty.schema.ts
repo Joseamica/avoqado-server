@@ -15,6 +15,22 @@ import { LoyaltyTransactionType } from '@prisma/client'
 export const UpdateLoyaltyConfigSchema = z.object({
   body: z.object({
     pointsPerDollar: z.number().min(0, 'Points per dollar must be non-negative').optional(),
+    // D7 (5-nov): el panel y el servicio usan estos nombres; sin ellos `validateRequest` los borraba y el panel respondía 200 sin guardar
+    // (prender o apagar el programa, el bono, el mínimo para canjear, la caducidad). Los nombres de abajo (`enabled`,
+    // `minRedemptionPoints`, `pointsExpirationDays`) se quedan aceptados: ningún cliente los manda hoy y el servicio no los lee.
+    active: z.boolean({ invalid_type_error: 'Activo debe ser verdadero o falso' }).optional(),
+    pointsPerVisit: z.number().int('Los puntos por visita son enteros').min(0, 'Los puntos por visita no pueden ser negativos').optional(),
+    minPointsRedeem: z
+      .number()
+      .int('El mínimo para canjear se cuenta en puntos enteros')
+      .min(0, 'El mínimo para canjear no puede ser negativo')
+      .optional(),
+    pointsExpireDays: z
+      .number()
+      .int('La caducidad se cuenta en días enteros')
+      .min(0, 'La caducidad no puede ser negativa')
+      .nullable()
+      .optional(), // null = los puntos no caducan
     minPurchaseAmount: z.number().min(0, 'Minimum purchase amount must be non-negative').optional(),
     redemptionRate: z.number().min(0, 'Redemption rate must be non-negative').optional(),
     minRedemptionPoints: z.number().int().min(0, 'Minimum redemption points must be non-negative').optional(),

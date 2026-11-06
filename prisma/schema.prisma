@@ -5222,6 +5222,9 @@ model VenueFeature {
   paymentFailureCount Int       @default(0) // Number of consecutive payment failures
 
   renewalReminderSentAt DateTime? // last renewal-reminder email sent (cron dedup, per billing period)
+  /// Prueba REGALADA (sin Stripe): el `endDate` cuyo aviso «tu prueba termina» ya se mandó (plan-renewal-reminder).
+  /// Guarda la FECHA anunciada, no cuándo se mandó: alargar o acortar la prueba la deja distinta y se vuelve a avisar.
+  freeTrialNoticeFor    DateTime?
   winbackSentAt         DateTime? // win-back email sent once after suspension (cron dedup)
 
   /// 🔴 CAS del acceso al plan. Prisma la actualiza en CADA escritura (`@updatedAt`), incluso
@@ -8582,6 +8585,13 @@ model LoyaltyTransaction {
 
   /// Set when this REDEEM produced a discount on a check (see OrderDiscount).
   orderDiscount OrderDiscount?
+
+  /// EARN: cuántos de `points` son el bono por visita (`LoyaltyConfig.pointsPerVisit`). Un reembolso parcial no lo toca; uno completo, sí. Null = sin bono.
+  visitBonusPoints Int?
+  /// EARN: los pesos sobre los que se calcularon `points` (sin propina ni crédito de cambio). Un reembolso quita en proporción a ESTO. Null = filas de antes.
+  baseAmount       Decimal? @db.Decimal(12, 2)
+  /// ADJUST que nace de un reembolso: el `Payment` REFUND que lo causó (sin FK: referencia blanda). Único: una sola reversa por reembolso.
+  refundPaymentId  String? @unique
 
   createdAt DateTime @default(now())
 

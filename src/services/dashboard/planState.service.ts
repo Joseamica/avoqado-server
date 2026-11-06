@@ -27,6 +27,7 @@ import { resolvePlanNotificationTarget } from '@/services/access/planNotificatio
 import { cancellationAuditData, toStripeCancellationDetails, type CancellationInput } from '@/services/shared/cancellationReason'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { precioConDescuentoCents } from '../billing/descuentoDelPlan'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
 const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
@@ -141,6 +142,17 @@ export interface PlanOrigin {
   subscriptionId: string | null
   /** The contract purchase's last billing issue, for "pago pendiente". */
   paymentIssue: string | null
+  /**
+   * D5: CLASSIC con un cupón vigente — lo que paga con el descuento (con IVA), cuánto descuenta y hasta cuándo. `price`
+   * sigue siendo el de lista. Nuevo y opcional: un cliente anterior lo ignora.
+   */
+  discount?: {
+    gross: number
+    percentOff: number | null
+    /** `once`: sólo el siguiente cobro · `repeating`: hasta `endsAt` · `forever`: sin fin. */
+    duration: 'once' | 'repeating' | 'forever'
+    endsAt: string | null
+  } | null
 }
 
 const NO_ORIGIN: PlanOrigin = {
@@ -172,6 +184,15 @@ function classicOrigin(
     currentPeriodEnd,
     cancelAt: stripeSub?.cancelAtPeriodEnd ? currentPeriodEnd : null,
     subscriptionId,
+    discount:
+      stripeSub?.descuento && stripeSub.grossAmountCents != null
+        ? {
+            gross: round2(precioConDescuentoCents(stripeSub.grossAmountCents, stripeSub.descuento) / 100),
+            percentOff: stripeSub.descuento.percentOff,
+            duration: stripeSub.descuento.duration,
+            endsAt: stripeSub.descuento.endsAt ? stripeSub.descuento.endsAt.toISOString() : null,
+          }
+        : null,
   }
 }
 

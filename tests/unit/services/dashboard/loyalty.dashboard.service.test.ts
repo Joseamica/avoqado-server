@@ -273,6 +273,29 @@ describe('Loyalty Dashboard Service', () => {
       expect(points).toBe(50) // floor(50.75 * 1) = 50
     })
 
+    // D7 (5-nov): el bono por visita se configuraba y nunca se entregaba.
+    it('D7: suma el bono por visita una vez a lo que da el gasto', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsPerVisit: 10 }) as any)
+      expect(await calculatePointsForAmount('venue-123', 50.75)).toBe(60)
+    })
+
+    it('D7: sin gasto por peso, la venta da sólo el bono', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(
+        createMockLoyaltyConfig({ pointsPerDollar: new Decimal(0), pointsPerVisit: 10 }) as any,
+      )
+      expect(await calculatePointsForAmount('venue-123', 80)).toBe(10)
+    })
+
+    it('D7: una venta en $0 no da bono', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsPerVisit: 10 }) as any)
+      expect(await calculatePointsForAmount('venue-123', 0)).toBe(0)
+    })
+
+    it('D7: con el programa apagado no da bono', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ active: false, pointsPerVisit: 10 }) as any)
+      expect(await calculatePointsForAmount('venue-123', 100)).toBe(0)
+    })
+
     it('should return 0 if loyalty config is inactive', async () => {
       const mockConfig = createMockLoyaltyConfig({ active: false })
 
@@ -520,6 +543,36 @@ describe('Loyalty Dashboard Service', () => {
       expect(prismaMock.customer.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: 'customer-123' }, data: { loyaltyPoints: { increment: 50 } } }),
       )
+    })
+
+    it('D7: guarda el bono en el EARN y lo suma una sola vez', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ pointsPerVisit: 10 }) as any)
+      prismaMock.loyaltyTransaction.create.mockResolvedValue(createMockTransaction() as any)
+      prismaMock.customer.update.mockResolvedValue({ loyaltyPoints: 60 } as any)
+
+      const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+
+      expect(r.pointsEarned).toBe(60)
+      expect(prismaMock.loyaltyTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          points: 60,
+          visitBonusPoints: 10,
+          baseAmount: new Prisma.Decimal('50.00'),
+          reason: expect.stringContaining('bono por visita'),
+        }),
+      })
+    })
+
+    it('D6: una venta ya devuelta no da puntos: lo decide bajo el candado de la venta', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig() as any)
+      prismaMock.payment.count.mockResolvedValueOnce(1 as never)
+      prismaMock.customer.findUnique.mockResolvedValue({ loyaltyPoints: 7 } as any)
+
+      const r = await earnPoints('venue-123', 'customer-123', 50, 'order-123')
+
+      expect(r).toEqual({ pointsEarned: 0, newBalance: 7 })
+      expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+      expect(prismaMock.customer.update).not.toHaveBeenCalled()
     })
 
     // ── H4, tercera ola (recheck 2 de Codex, 15-oct-2026): UN cliente por venta, también con dos intentos a la vez ─────────

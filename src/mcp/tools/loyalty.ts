@@ -6,7 +6,7 @@ import { createGuard } from '../guard'
 import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
+import { adjustPoints, getLoyaltyTransactions, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
 import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
@@ -15,6 +15,54 @@ import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'customer_loyalty_history',
+    'Point movements of ONE customer of a venue you can access: what they earned, redeemed, lost or had adjusted, newest first, each with its reason and sale. Answers "¿por qué bajaron los puntos de Juan?". A refund shows as ADJUST with negative points, a reason that names the sale, and refundPaymentId; points 0 means nothing could be taken (the customer had already used them). Pass venueId + a search term (name, email or phone).',
+    {
+      venueId: z.string().describe('Venue whose customer to look up (must be in your scope)'),
+      search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      limit: z.number().int().positive().max(50).optional().describe('Movements per page (default 20, newest first)'),
+      page: z.number().int().positive().optional().describe('Page to read (default 1); hasMore says if there is a next one'),
+    },
+    async ({ venueId, search, limit, page }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:read', venueId) // read gate: the same one as the dashboard's history
+      const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const matches = await prisma.customer.findMany({
+        where: { ...base, ...personSearchWhere(search, { contact: true }) },
+        select: { id: true, firstName: true, lastName: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ found: false, message: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+      }
+      const nombre = (m: { firstName: string | null; lastName: string | null }) => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || null
+      const c = matches[0]
+      const historia = await getLoyaltyTransactions(venueId, c.id, { page: page ?? 1, pageSize: limit ?? 20 })
+      return text({
+        found: true,
+        venueId,
+        customer: nombre(c),
+        // If the search was ambiguous, surface the runners-up so the model can disambiguate.
+        ...(matches.length > 1 ? { otherMatches: matches.slice(1).map(nombre) } : {}),
+        currentBalance: historia.currentBalance,
+        totalMovements: historia.meta.totalCount,
+        page: historia.meta.currentPage,
+        hasMore: historia.meta.hasNextPage,
+        movements: historia.data.map(t => ({
+          type: t.type, // EARN | REDEEM | EXPIRE | ADJUST
+          points: t.points,
+          reason: t.reason,
+          orderNumber: t.order?.orderNumber ?? null,
+          refundPaymentId: t.refundPaymentId,
+          date: t.createdAt.toISOString(),
+        })),
+      })
+    },
+  )
 
   server.tool(
     'loyalty_status',

@@ -163,7 +163,7 @@ describe('loadVisibleMenu', () => {
       deletedAt: null,
       availableOnline: true,
       soldByWeight: false,
-      type: { notIn: ['APPOINTMENTS_SERVICE', 'CLASS', 'EVENT', 'DONATION'] },
+      type: { notIn: ['APPOINTMENTS_SERVICE', 'CLASS', 'EVENT', 'DONATION', 'SERVICE'] }, // SERVICE: un paquete de clases cobrado aquí no entrega créditos
     })
     // Grupos y opciones se CUENTAN antes de leerse (sólo los activos), con agregados acotados por `IN` a lo ya leído (nunca un
     // COUNT de relación: Prisma lo compila como un agregado de toda la tabla); se lee sólo lo que cabe, con 1 de más.

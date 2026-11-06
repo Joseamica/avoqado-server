@@ -149,12 +149,14 @@ npm test               # All tests — pesado: igual (ver «Verificación repart
 npm run test:unit      # Unit tests
 npm run test:api       # API integration
 npm run test:workflows # E2E workflows
-npm run lint:fix       # Auto-fix ESLint
-npm run format         # Prettier
+npm run lint:fix       # Auto-fix ESLint — TODO el repo (ver abajo)
+npm run format         # Prettier — TODO el repo (ver abajo)
 npm run studio         # Prisma Studio
 ```
 
-After editing code: `npm run format && npm run lint:fix`
+After editing code, format **only your files**: `npx prettier --write <tus archivos>` and `npx eslint --fix <tus archivos>`.
+🔴 Never `npm run format` / `npm run lint:fix` here: they rewrite the WHOLE repo (`prettier --write .`, `eslint . --fix`), also
+the work of the other ~20 sessions, and passing files (`npm run format -- a.ts`) does NOT narrow them (bit 7-ago, 19-sep, 5-nov).
 
 ## 🔴 "¿Está en el cajón?" y "¿lo deposita Avoqado?" — SIEMPRE por `tenderSemantics`
 

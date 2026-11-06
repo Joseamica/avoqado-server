@@ -61,6 +61,7 @@ describe('get_venue_plan_status', () => {
       currentPeriodEnd: '2026-10-28T00:00:00.000Z',
       cancelAt: null,
       contractId: 'contract_1',
+      discount: null,
     })
     expect(result.pauseOfferEligible).toBe(false)
     expect(result).toMatchObject({ venueId: 'v1', planTier: null, state: 'none' })
@@ -71,5 +72,36 @@ describe('get_venue_plan_status', () => {
     expect(desc).toMatch(/suscripci/i)
     expect(desc).toMatch(/contrato/i)
     expect(desc).toMatch(/cortes/i)
+  })
+
+  // D5 (5-nov-2026): con un cupón vigente, el asistente también sabe lo que de verdad paga y hasta cuándo.
+  it('un negocio con cupón de 30 % recibe lo que paga con descuento y hasta cuándo, además del precio de lista', async () => {
+    getPlanState.mockResolvedValue({
+      hasPlan: true,
+      state: 'active',
+      planTier: 'PRO',
+      trialEndsAt: null,
+      grandfathered: false,
+      origin: {
+        kind: 'CLASSIC',
+        tier: 'PRO',
+        price: { base: 999, gross: 1158.84, currency: 'MXN' },
+        interval: 'month',
+        currentPeriodEnd: '2026-12-05T17:00:00.000Z',
+        cancelAt: null,
+        contractId: null,
+        contractRevision: null,
+        subscriptionId: 'sub_1',
+        paymentIssue: null,
+        discount: { gross: 811.19, percentOff: 30, duration: 'repeating', endsAt: '2027-02-05T17:00:00.000Z' },
+      },
+      pauseOfferEligible: false,
+    })
+    const result = parse(await call('v1'))
+    expect(result.origin).toMatchObject({
+      price: { gross: 1158.84 },
+      discount: { gross: 811.19, percentOff: 30, duration: 'repeating', endsAt: '2027-02-05T17:00:00.000Z' },
+    })
+    expect(tools.get('get_venue_plan_status')!.desc).toMatch(/cup[oó]n/i)
   })
 })

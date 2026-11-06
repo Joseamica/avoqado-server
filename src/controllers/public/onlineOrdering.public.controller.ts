@@ -116,7 +116,7 @@ export async function getMenu(req: Request, res: Response) {
   try {
     return res.json({ success: true, data: await getPublicMenu(venueOf(req).id) })
   } catch (error) {
-    return fail(res, error, 'No se pudo cargar la carta')
+    return fail(res, error, 'No se pudo cargar el menú')
   }
 }
 

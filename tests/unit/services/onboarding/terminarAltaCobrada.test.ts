@@ -21,7 +21,7 @@ jest.mock('@/services/launchCampaigns/hybridPurchase.service', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 
-import { terminarAltaCobrada } from '@/services/onboarding/terminarAltaCobrada'
+import { terminarAltaCobrada, terminarAltaPorPlanRegalado } from '@/services/onboarding/terminarAltaCobrada'
 import * as onboardingProgressService from '@/services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '@/services/onboarding/venueCreation.service'
 import { assertHybridOnboardingPurchase } from '@/services/launchCampaigns/hybridPurchase.service'
@@ -225,5 +225,143 @@ describe('terminarAltaCobrada — el alta con plan confirmado se termina sola', 
     ;(onboardingProgressService.parseV2Plan as jest.Mock).mockReturnValue({ tier: 'PRO', hybridPurchaseId: 'hp-1' })
     await terminarAltaCobrada(ORG, { via: 'cobro' })
     expect(assertHybridOnboardingPurchase).toHaveBeenCalledWith(ORG, 'hp-1', tx)
+  })
+})
+
+// D1 (5-nov-2026): el SUPERADMIN regala el plan («Dar días de prueba», «Asignar plan comp», «Activar Pro») a quien se quedó en
+// la pantalla de la tarjeta. El plan quedaba vivo y el negocio en ONBOARDING: el DASHBOARD lo regresaba a /setup y el POS no lo
+// dejaba entrar (Taqueria El Patio, 5-nov). El plan regalado confirma el plan sin Stripe.
+describe('terminarAltaCobrada — plan regalado por el SUPERADMIN', () => {
+  const regalo = { via: 'plan-regalado' as const, staffId: 'superadmin-1', venueId: VENUE.id }
+
+  it.each(['NONE', 'DECLINED'])(
+    'con el plan del alta en %s, cierra el alta igual que el cobro: progreso, negocio y organización',
+    async estado => {
+      conAlta({ planActivationStatus: estado })
+
+      const r = await terminarAltaCobrada(ORG, regalo)
+
+      expect(r).toEqual(expect.objectContaining({ estado: 'TERMINADA' }))
+      expect(tx.onboardingProgress.updateMany).toHaveBeenCalledWith({
+        where: { organizationId: ORG, completedAt: null, planActivationStatus: { in: ['NONE', 'DECLINED', 'ACTIVE'] } },
+        data: expect.objectContaining({ completedAt: expect.any(Date), currentStep: 7 }),
+      })
+      expect(tx.venue.updateMany).toHaveBeenCalledWith({
+        where: { id: VENUE.id, status: 'ONBOARDING', kycStatus: { notIn: ['PENDING_REVIEW', 'IN_REVIEW'] } },
+        data: { status: 'ACTIVE' },
+      })
+      expect(tx.organization.updateMany).toHaveBeenCalledWith({
+        where: { id: ORG, onboardingCompletedAt: null },
+        data: { onboardingCompletedAt: expect.any(Date) },
+      })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          staffId: 'superadmin-1',
+          action: 'ONBOARDING_COMPLETED',
+          data: expect.objectContaining({ via: 'plan-regalado' }),
+        }),
+      )
+    },
+  )
+
+  it('🔴 Codex D1 r2: documentos enviados a revisión ENTRE la lectura y la escritura → se deshace todo, nada queda', async () => {
+    conAlta({ planActivationStatus: 'NONE' })
+    tx.venue.updateMany.mockResolvedValue({ count: 0 })
+    await expect(terminarAltaCobrada(ORG, regalo)).rejects.toThrow()
+    expect(tx.organization.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN: el cobro no exige nada del KYC al activar (sus documentos se revisan después)', async () => {
+    await terminarAltaCobrada(ORG, { via: 'cobro' })
+    expect(tx.venue.updateMany).toHaveBeenCalledWith({ where: { id: VENUE.id, status: 'ONBOARDING' }, data: { status: 'ACTIVE' } })
+  })
+
+  it('🔴 con un cobro del alta EN CURSO no cierra nada: el cobro decide', async () => {
+    conAlta({ planActivationStatus: 'IN_PROGRESS' })
+    const r = await terminarAltaCobrada(ORG, regalo)
+    expect(r).toEqual({ estado: 'NADA', motivo: 'PLAN_NO_CONFIRMADO' })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 no copia al negocio los datos del asistente (Codex D1 r1 #2): pisaría lo corregido y no se deshace si el cierre falla', async () => {
+    conAlta({ planActivationStatus: 'NONE' })
+    await terminarAltaCobrada(ORG, regalo)
+    expect(venueCreationService.applyBusinessInfoToVenue).not.toHaveBeenCalled()
+  })
+
+  it('el plan del alta que eligió y no pagó no estorba: la guarda híbrida sólo frena una compra pendiente', async () => {
+    conAlta({ planActivationStatus: 'NONE' })
+    ;(onboardingProgressService.parseV2Plan as jest.Mock).mockReturnValue({ tier: 'PRO', hybridPurchaseId: 'hp-sin-pagar' })
+    await terminarAltaCobrada(ORG, regalo)
+    expect(assertHybridOnboardingPurchase).toHaveBeenCalledWith(ORG, undefined, tx)
+  })
+
+  it('🔴 si el alta es de OTRO negocio de la organización, no la cierra', async () => {
+    conAlta({ planActivationStatus: 'NONE' })
+    const r = await terminarAltaCobrada(ORG, { ...regalo, venueId: 'otro-venue' })
+    expect(r).toEqual({ estado: 'NADA', motivo: 'SIN_NEGOCIO' })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('sin términos aceptados tampoco cierra con un regalo', async () => {
+    conAlta({ planActivationStatus: 'NONE', termsAcceptedAt: null })
+    expect(await terminarAltaCobrada(ORG, regalo)).toEqual({ estado: 'NADA', motivo: 'SIN_TERMINOS' })
+  })
+
+  // REGRESIÓN: los caminos del cobro siguen exigiendo el plan cobrado.
+  it.each(['cobro', 'navegador', 'aviso-stripe', 'barrido'] as const)('%s con el plan del alta en NONE sigue sin cerrar', async via => {
+    conAlta({ planActivationStatus: 'NONE' })
+    expect(await terminarAltaCobrada(ORG, { via })).toEqual({ estado: 'NADA', motivo: 'PLAN_NO_CONFIRMADO' })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+})
+
+describe('terminarAltaPorPlanRegalado — sólo el alta vigente sin terminar', () => {
+  const venueConAlta = (
+    status: string,
+    progreso: { completedAt: Date | null; wizardVersion: number } | null,
+    kycStatus = 'NOT_SUBMITTED',
+  ) => ({
+    status,
+    kycStatus,
+    organizationId: ORG,
+    organization: { onboardingProgress: progreso },
+  })
+
+  it('negocio atorado en el alta (ONBOARDING, asistente v2 sin terminar) → la cierra y contesta true', async () => {
+    conAlta({ planActivationStatus: 'NONE' })
+    prismaMock.venue.findUnique.mockResolvedValue(venueConAlta('ONBOARDING', { completedAt: null, wizardVersion: 2 }))
+
+    await expect(terminarAltaPorPlanRegalado(VENUE.id, 'superadmin-1')).resolves.toBe(true)
+    expect(tx.venue.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: VENUE.id, status: 'ONBOARDING' }), data: { status: 'ACTIVE' } }),
+    )
+  })
+
+  it.each([
+    [
+      'en ONBOARDING por revisión de KYC del SUPERADMIN (asistente viejo)',
+      venueConAlta('ONBOARDING', { completedAt: null, wizardVersion: 1 }),
+    ],
+    ['en ONBOARDING sin asistente', venueConAlta('ONBOARDING', null)],
+    ['ya activo', venueConAlta('ACTIVE', { completedAt: null, wizardVersion: 2 })],
+    ['suspendido', venueConAlta('SUSPENDED', { completedAt: null, wizardVersion: 2 })],
+    ['demo (TRIAL)', venueConAlta('TRIAL', { completedAt: null, wizardVersion: 2 })],
+    ['con el alta ya terminada', venueConAlta('ONBOARDING', { completedAt: new Date(), wizardVersion: 2 })],
+    // Codex D1 r1 #1: dado de alta por el SUPERADMIN, con documentos en revisión, cuyo dueño aceptó términos en el asistente nuevo.
+    ['con sus documentos esperando revisión', venueConAlta('ONBOARDING', { completedAt: null, wizardVersion: 2 }, 'PENDING_REVIEW')],
+    ['con sus documentos en revisión', venueConAlta('ONBOARDING', { completedAt: null, wizardVersion: 2 }, 'IN_REVIEW')],
+  ])('🔴 negocio %s → no toca nada', async (_caso, venue) => {
+    prismaMock.venue.findUnique.mockResolvedValue(venue)
+    await expect(terminarAltaPorPlanRegalado(VENUE.id, 'superadmin-1')).resolves.toBe(false)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('un fallo al cerrar NO deshace el regalo: se registra y contesta false', async () => {
+    conAlta({ planActivationStatus: 'NONE' })
+    prismaMock.venue.findUnique.mockResolvedValue(venueConAlta('ONBOARDING', { completedAt: null, wizardVersion: 2 }))
+    prismaMock.$transaction.mockRejectedValue(new Error('P1001'))
+    await expect(terminarAltaPorPlanRegalado(VENUE.id, 'superadmin-1')).resolves.toBe(false)
   })
 })

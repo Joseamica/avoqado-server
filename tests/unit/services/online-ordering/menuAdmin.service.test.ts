@@ -66,6 +66,8 @@ describe('getOnlineMenuSummary: conteos por categoría', () => {
     prod('p7', { soldByWeight: true }), // por peso: la tienda no lo vende
     prod('p8', { type: 'APPOINTMENTS_SERVICE' }), // servicio: no es comida
     prod('p9', { type: 'CLASS', imageUrl: null }),
+    prod('p10', { type: 'SERVICE', name: '12 Clases Lagree' }), // paquete: ni se publica ni cuenta, aunque ya estuviera marcado en línea
+    prod('p11', { type: 'SERVICE', availableOnline: false, imageUrl: null }),
     prod('q1', { categoryId: 'c2' }),
     prod('x1', { venueId: 'v2' }), // de otro negocio
   ]
@@ -128,6 +130,7 @@ describe('listOnlineMenuProducts: lista paginada', () => {
     prod('pc', { name: 'Taco al pastor', active: false }), // inactivo: SÍ sale (el panel lo enseña apagado)
     prod('pd', { name: 'Taco de suadero', availableOnline: false }),
     prod('pe', { name: 'Masaje', type: 'APPOINTMENTS_SERVICE' }),
+    prod('pf', { name: 'Taco en paquete', type: 'SERVICE' }),
     prod('pf', { name: 'Queso por kilo', soldByWeight: true }),
     prod('pg', { name: 'Taco borrado', deletedAt: new Date() }),
     prod('ph', { name: 'Taco ajeno', venueId: 'v2' }),

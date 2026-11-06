@@ -128,6 +128,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   customer_display_design: 'read',
   customer_group_detail: 'read',
   customer_history: 'read',
+  customer_loyalty_history: 'read',
   customers_awaiting_approval: 'read',
   daily_sales: 'read',
   decide_customer_approval: 'write',
@@ -623,7 +624,7 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
               confirmationToken: issueConfirmation(scope, name, confirmationArguments),
               expiresInSeconds: CONFIRMATION_TTL,
               confirmationInstruction:
-                'Muestra el venue y el cambio al usuario. Sólo tras su autorización, usa confirmationArguments con confirm:true y este confirmationToken. No cambies los valores.',
+                'Muestra el venue y el cambio al usuario, en palabras. No le muestres el confirmationToken ni los confirmationArguments: son internos y no los entiende. Sólo tras su autorización, usa confirmationArguments con confirm:true y este confirmationToken. No cambies los valores.',
             }),
           )
         }

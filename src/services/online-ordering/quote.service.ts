@@ -144,7 +144,7 @@ export async function quoteCart(venueId: string, items: CartItemInput[], opts: {
         code: 'PRODUCT_UNAVAILABLE',
         productId: item.productId,
         lineIndex,
-        message: 'Un platillo de tu pedido ya no está disponible.',
+        message: 'Un producto de tu pedido ya no está disponible.',
       })
       continue
     }

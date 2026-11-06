@@ -8,6 +8,7 @@ import { exigirSinObligacionViva } from '@/services/stripe.service'
 import { PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import { exigirQueSePuedaConceder } from '@/services/access/concederPlan'
 import { utcTs } from '@/utils/sqlDates'
+import { terminarAltaPorPlanRegalado } from '@/services/onboarding/terminarAltaCobrada'
 
 // ===== PRODUCTION VENUE FILTER =====
 // Excludes demo/trial venues (LIVE_DEMO, TRIAL) from analytics to prevent skewed metrics
@@ -673,7 +674,7 @@ export async function suspendVenue(venueId: string, reason: string): Promise<voi
 /**
  * Enable a feature for a venue
  */
-export async function enableFeatureForVenue(venueId: string, featureCode: string): Promise<void> {
+export async function enableFeatureForVenue(venueId: string, featureCode: string, actorId?: string): Promise<void> {
   try {
     // Ensure venue exists
     const venue = await prisma.venue.findUnique({ where: { id: venueId } })
@@ -690,8 +691,9 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
     // 🔴 Codex C2: un PLAN no se enciende con un upsert ciego (podía reactivar uno que la entrega retiró o dejar dos
     // planes): va por la cortesía, que revisa Stripe y el otro tier bajo el candado del negocio.
     if (feature.code === 'PLAN_PRO' || feature.code === 'PLAN_PREMIUM') {
-      await assignCompPlan(venueId, feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO')
+      await assignCompPlan(venueId, feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO', actorId)
       logAction({
+        staffId: actorId ?? null,
         venueId,
         action: 'FEATURE_ENABLED_BY_ADMIN',
         entity: 'VenueFeature',
@@ -786,7 +788,12 @@ export async function disableFeatureForVenue(venueId: string, featureCode: strin
  * Grant a DB-only trial for a venue (no Stripe subscription)
  * Sets an endDate that will be expired by the daily cron job
  */
-export async function grantTrialForVenue(venueId: string, featureCode: string, trialDays: number): Promise<{ endDate: Date }> {
+export async function grantTrialForVenue(
+  venueId: string,
+  featureCode: string,
+  trialDays: number,
+  actorId?: string,
+): Promise<{ endDate: Date }> {
   try {
     // Ensure venue exists
     const venue = await prisma.venue.findUnique({ where: { id: venueId } })
@@ -884,6 +891,9 @@ export async function grantTrialForVenue(venueId: string, featureCode: string, t
       endDate,
     })
 
+    // D1: una prueba del PLAN (desde «Dar días de prueba» o la prueba genérica de funciones) saca del alta a quien se
+    // quedó en la pantalla de la tarjeta. Nunca lanza ni deshace la prueba ya concedida.
+    if (esPlan) await terminarAltaPorPlanRegalado(venueId, actorId)
     return { endDate }
   } catch (error) {
     if (error instanceof AppError) throw error
@@ -1002,7 +1012,7 @@ export async function setOrganizationGrandfathered(organizationId: string, value
  *   - 'FREE'    → disable BOTH PLAN_* features (drop to Free)
  * After this, getPlanState derives the right tier (PRO/PREMIUM) or null (Free).
  */
-export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
+export async function assignCompPlan(venueId: string, tier: PlanAdminTier, actorId?: string) {
   const { getPlanState } = await import('./planState.service')
 
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
@@ -1092,6 +1102,7 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
     logAction({ venueId, action: 'FEATURE_DISABLED_BY_ADMIN', entity: 'VenueFeature', entityId: id })
   }
   logAction({
+    staffId: actorId ?? null,
     venueId,
     action: 'PLAN_COMP_ASSIGNED',
     entity: 'Venue',
@@ -1100,6 +1111,8 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
   })
 
   logger.info(`Comp plan ${tier} assigned to venue ${venueId} (no Stripe, no expiry)`)
+  // D1: con el plan ya regalado, quien se quedó en la pantalla de la tarjeta sale del alta (nunca deshace el regalo).
+  if (destino) await terminarAltaPorPlanRegalado(venueId, actorId)
   return getPlanState(venueId)
 }
 
@@ -1109,7 +1122,7 @@ export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
  * endDate and clears any Stripe linkage. `days` must be 1..365 (validated by the caller's Zod
  * schema; re-checked here defensively). Returns the fresh PlanState (state 'trial', trialEndsAt set).
  */
-export async function extendPlanTrial(venueId: string, tier: PlanAdminTrialTier, days: number) {
+export async function extendPlanTrial(venueId: string, tier: PlanAdminTrialTier, days: number, actorId?: string) {
   const { getPlanState } = await import('./planState.service')
 
   if (!Number.isInteger(days) || days < 1 || days > 365) {
@@ -1120,9 +1133,10 @@ export async function extendPlanTrial(venueId: string, tier: PlanAdminTrialTier,
   if (!venue) throw new Error('Venue not found')
 
   const planCode = TIER_TO_PLAN_CODE[tier]
-  await grantTrialForVenue(venueId, planCode, days)
+  await grantTrialForVenue(venueId, planCode, days, actorId)
 
   logAction({
+    staffId: actorId ?? null,
     venueId,
     action: 'PLAN_TRIAL_EXTENDED',
     entity: 'Venue',
