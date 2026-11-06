@@ -70,7 +70,7 @@ const DONE = [
 ]
 const DONE_PAGE_SIZE = 50
 
-const SELECT = {
+export const INBOX_SELECT = {
   id: true,
   status: true,
   paymentMode: true,
@@ -114,11 +114,11 @@ const SELECT = {
   },
 } satisfies Prisma.OnlineOrderSelect
 
-type Row = Prisma.OnlineOrderGetPayload<{ select: typeof SELECT }>
+type Row = Prisma.OnlineOrderGetPayload<{ select: typeof INBOX_SELECT }>
 
 const money = (d: Prisma.Decimal): number => Number(new Prisma.Decimal(d).toFixed(2))
 
-function toInboxOrder(r: Row, now: Date): InboxOrder {
+export function toInboxOrder(r: Row, now: Date): InboxOrder {
   return {
     orderId: r.order.id,
     onlineOrderId: r.id,
@@ -160,8 +160,8 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
 }
 
 /** A8: «<createdAt ISO>_<id>» del último activo de la página: la siguiente sigue DESPUÉS de él (createdAt desc, id desc). */
-const toActiveCursor = (r: Row): string => `${r.createdAt.toISOString()}_${r.id}`
-function fromActiveCursor(cursor: string): { createdAt: Date; id: string } {
+export const toActiveCursor = (r: { createdAt: Date; id: string }): string => `${r.createdAt.toISOString()}_${r.id}`
+export function fromActiveCursor(cursor: string): { createdAt: Date; id: string } {
   const m = ACTIVE_CURSOR_PATTERN.exec(cursor)
   const createdAt = m ? new Date(m[1]) : null
   if (!m || !createdAt || Number.isNaN(createdAt.getTime())) throw new BadRequestError('Cursor inválido', 'INVALID_CURSOR')
@@ -173,7 +173,7 @@ function fromActiveCursor(cursor: string): { createdAt: Date; id: string } {
  * Lo usa el MCP para atender un pedido conociendo su id, sin buscarlo dentro de una página de la bandeja.
  */
 export async function getInboxOrder(p: { venueId: string; orderId: string; now?: Date }): Promise<InboxOrder | null> {
-  const row = await prisma.onlineOrder.findFirst({ where: { venueId: p.venueId, orderId: p.orderId }, select: SELECT })
+  const row = await prisma.onlineOrder.findFirst({ where: { venueId: p.venueId, orderId: p.orderId }, select: INBOX_SELECT })
   return row ? toInboxOrder(row, p.now ?? new Date()) : null
 }
 
@@ -220,7 +220,7 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
           where: { venueId: p.venueId, status: { in: PENDING }, requiresAcceptance: true },
           orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
           take: INBOX_PAGE_SIZE + 1,
-          select: SELECT,
+          select: INBOX_SELECT,
         })
       : Promise.resolve([] as Row[]),
     wantActive
@@ -233,7 +233,7 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
           // I-2: lo más nuevo primero (las apps ordenan en pantalla): si el tope recorta, nunca esconde lo recién aceptado.
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: INBOX_PAGE_SIZE + 1,
-          select: SELECT,
+          select: INBOX_SELECT,
         })
       : Promise.resolve([] as Row[]),
     wantDone
@@ -241,7 +241,7 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
           where: { venueId: p.venueId, status: { in: DONE }, createdAt: { gte: dayAgo } },
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: DONE_PAGE_SIZE + 1,
-          select: SELECT,
+          select: INBOX_SELECT,
         })
       : Promise.resolve([] as Row[]),
     prisma.onlineOrder.groupBy({

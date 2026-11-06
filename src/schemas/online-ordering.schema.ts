@@ -89,6 +89,19 @@ export const inboxSchema = z.object({
       path: ['cursor'],
     }),
 })
+/** Tienda híbrida (T12): `section` elige qué lista sigue; el cursor es el `nextCursors` de ESA sección, así que no viaja solo. */
+export const toPaySchema = z.object({
+  params: venueParams,
+  query: z
+    .object({
+      section: z.enum(['toPay', 'toDeliver'], { errorMap: () => ({ message: 'Sección inválida' }) }).optional(),
+      cursor: activeCursor.optional(),
+    })
+    .refine(q => q.cursor === undefined || q.section !== undefined, {
+      message: 'El cursor necesita la sección (section) a la que sigue',
+      path: ['cursor'],
+    }),
+})
 export const orderActionSchema = z.object({ params: orderParams })
 export const acceptSchema = z.object({
   params: orderParams,

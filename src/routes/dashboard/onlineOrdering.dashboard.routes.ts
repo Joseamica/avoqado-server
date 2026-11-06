@@ -19,6 +19,7 @@ import {
   rejectSchema,
   settingsGetSchema,
   settingsPatchSchema,
+  toPaySchema,
 } from '@/schemas/online-ordering.schema'
 
 const router = Router({ mergeParams: true })
@@ -48,6 +49,8 @@ router.post('/pause', validateRequest(pauseSchema), checkPermission('online-orde
 // La bandeja del panel comparte manejadores con las apps; late sólo si su página de bandeja manda `x-online-orders-tray: 1`
 // (permitida en CORS, H2) y quien mira tiene `orders:update` efectivo (H3).
 router.get('/orders', validateRequest(inboxSchema), checkPermission('orders:read'), orders.inbox)
+// Tienda híbrida (T12): la misma lista de folios, sin latido (el panel no cuenta como caja). ANTES de `/orders/:orderId`, o «to-pay» se leería como id.
+router.get('/orders/to-pay', validateRequest(toPaySchema), checkPermission('orders:read'), orders.toPay)
 // S3 (clientes): UN pedido por su cuenta, para devolver a la tarjeta después de las 24 h de la bandeja. Sin plan (R14).
 router.get('/orders/:orderId', validateRequest(orderActionSchema), checkPermission('orders:read'), admin.getOnlineOrderHandler)
 router.post('/orders/:orderId/accept', validateRequest(acceptSchema), checkPermission('orders:update'), orders.accept)

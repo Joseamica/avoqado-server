@@ -7,8 +7,11 @@ import { FOLIO_PAID_STATUSES } from '@/services/shared/orderBalance'
 import { instanteUtcSql, seAcaboElDiaDelNegocioDeSql } from '@/services/shared/pagadaPeroAbierta'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import prisma from '@/utils/prismaClient'
-import { announceCancelledElsewhere } from './cancelledOrderSync'
-import { SYNC_BATCH_SIZE } from './constants'
+import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from './cancelledOrderSync'
+import { INBOX_PAGE_SIZE, SYNC_BATCH_SIZE, foliosPorPagarWhere } from './constants'
+// Ciclo a propósito: `inbox.service` usa las sincronizaciones de aquí y esta lista usa su forma; todo se usa al llamar, nunca al cargar.
+import { INBOX_SELECT, fromActiveCursor, toActiveCursor, toInboxOrder } from './inbox.service'
+import { getSettings } from './settings.service'
 import { notifyOrderEvent } from './notifications.service'
 import { announceAccepted, casTransitionInTx, prepMinutes, settled, type CasResult, type TransitionResult } from './transitions.service'
 import { emitOnlineOrderUpdated } from './traySocket'
@@ -267,4 +270,74 @@ export async function cerrarFoliosDelDiaTerminado(
   }
   if (won > 0) logger.info('[OnlineOrdering] folios entregados al terminar el día del negocio', { ...scope, count: won })
   return won
+}
+
+export type FolioSection = 'toPay' | 'toDeliver'
+
+/**
+ * Tienda híbrida (T12): la lista de la caja (TPV, POS y panel). «Por pagar» = folios sin saldar (`foliosPorPagarWhere`, R42) y «Por
+ * entregar» = folios pagados que nadie ha entregado (`ACCEPTED`), del más viejo al más nuevo. Cada sección es una página de
+ * `INBOX_PAGE_SIZE` leída con `tope + 1` y sigue por `(createdAt, id)` con el cursor de la Bandeja; `counts` son exactos.
+ * Sin `section`: la primera página de las dos. Con `section` y `cursor`: la siguiente de ésa y la otra vacía.
+ * R43: antes de leer corre lo mismo que la Bandeja, así lo que la caja acaba de cobrar ya está en «Por entregar».
+ */
+export async function listFolios(p: { venueId: string; section?: FolioSection; cursor?: string; now?: Date }) {
+  const now = p.now ?? new Date()
+  const after = p.cursor ? fromActiveCursor(p.cursor) : null
+  const warnSync = (que: string) => (error: unknown) => {
+    logger.warn(`[OnlineOrdering] no se pudieron ${que} antes de la lista de folios`, {
+      venueId: p.venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  await cerrarCanceladasReleyendo({ venueId: p.venueId }, now)
+    .then(won => announceCancelledElsewhere(won, now))
+    .catch(warnSync('cerrar los pedidos de cuentas canceladas'))
+  await syncPaidFolios({ venueId: p.venueId }, now).catch(warnSync('pasar a «Por entregar» los folios pagados'))
+  await syncPaidClosedFolios({ venueId: p.venueId }, now).catch(warnSync('revivir los folios cerrados ya saldados'))
+
+  const porPagar = foliosPorPagarWhere(p.venueId)
+  const porEntregar = { venueId: p.venueId, requiresAcceptance: false, status: OnlineOrderStatus.ACCEPTED }
+  const page = (where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
+    p.section && p.section !== mine
+      ? Promise.resolve([] as Awaited<ReturnType<typeof prisma.onlineOrder.findMany<{ select: typeof INBOX_SELECT }>>>)
+      : prisma.onlineOrder.findMany({
+          where: {
+            ...where,
+            ...(after && p.section === mine
+              ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }
+              : {}),
+          },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: INBOX_PAGE_SIZE + 1,
+          select: INBOX_SELECT,
+        })
+  const [payRows, deliverRows, toPayCount, toDeliverCount, settings] = await Promise.all([
+    page(porPagar, 'toPay'),
+    page(porEntregar, 'toDeliver'),
+    prisma.onlineOrder.count({ where: porPagar }),
+    prisma.onlineOrder.count({ where: porEntregar }),
+    getSettings(p.venueId),
+  ])
+
+  const toPay = payRows.slice(0, INBOX_PAGE_SIZE)
+  const toDeliver = deliverRows.slice(0, INBOX_PAGE_SIZE)
+  const enabled = settings.enabled
+  const requiresAcceptance = settings.requiresAcceptance
+  // El mosaico sigue mientras haya folios vivos aunque se cambie a «Mi equipo» o se apague la tienda: se cobran o vencen.
+  const showTile = (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0
+  return {
+    serverTime: now.toISOString(),
+    enabled,
+    requiresAcceptance,
+    showTile,
+    pollSeconds: showTile ? 30 : 600,
+    counts: { toPay: toPayCount, toDeliver: toDeliverCount },
+    toPay: toPay.map(r => toInboxOrder(r, now)),
+    toDeliver: toDeliver.map(r => toInboxOrder(r, now)),
+    nextCursors: {
+      toPay: payRows.length > INBOX_PAGE_SIZE ? toActiveCursor(toPay[toPay.length - 1]) : null,
+      toDeliver: deliverRows.length > INBOX_PAGE_SIZE ? toActiveCursor(toDeliver[toDeliver.length - 1]) : null,
+    },
+  }
 }

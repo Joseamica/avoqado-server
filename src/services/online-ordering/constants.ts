@@ -1,4 +1,11 @@
-import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, PaymentStatus, type VenueType } from '@prisma/client'
+import {
+  OnlineOrderChargeStatus,
+  OnlineOrderPaymentMode,
+  OnlineOrderStatus,
+  OrderStatus,
+  PaymentStatus,
+  type VenueType,
+} from '@prisma/client'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -78,6 +85,20 @@ export const unpaidFoliosWhere = (venueId: string) => ({
   status: OnlineOrderStatus.PENDING_ACCEPTANCE,
   requiresAcceptance: false,
   order: { paymentStatus: PaymentStatus.PENDING },
+})
+/**
+ * Tienda híbrida (R42, T12): la lista «Por pagar» y `counts.toPay`. Un folio vivo sin saldar: con abono (PARTIAL) también (R41; se
+ * cobra desde esta lista, con «Falta $X»), pero nunca uno cuya cuenta se canceló (R16) o ya quedó saldada (la sincronización lo pasa
+ * a «Por entregar»). NO es `unpaidFoliosWhere`, que sólo mide el tope de folios sin un peso.
+ */
+export const foliosPorPagarWhere = (venueId: string) => ({
+  venueId,
+  status: OnlineOrderStatus.PENDING_ACCEPTANCE,
+  requiresAcceptance: false,
+  order: {
+    status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
+    paymentStatus: { notIn: [PaymentStatus.PAID, PaymentStatus.REFUNDED] },
+  },
 })
 /**
  * Tienda híbrida (T11): para el `AND` de las listas de «cuentas abiertas» (TPV y POS). Un folio por pagar se cobra desde la lista de

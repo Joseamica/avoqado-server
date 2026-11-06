@@ -1,6 +1,6 @@
 /**
  * Tienda híbrida (T3a): los folios sin pagar no son saturación. Todo `onlineOrder.count` con PENDING_ACCEPTANCE dentro de
- * `src/services/online-ordering` debe usar uno de los dos ayudantes de `constants.ts`; un conteo suelto volvería a contar folios.
+ * `src/services/online-ordering` debe usar uno de los tres ayudantes de `constants.ts`; un conteo suelto volvería a contar folios.
  */
 import fs from 'fs'
 import path from 'path'
@@ -14,7 +14,7 @@ const archivosTs = (dir: string): string[] =>
   })
 
 describe('conteos de PENDING_ACCEPTANCE en online-ordering', () => {
-  it('todos usan awaitingAcceptanceWhere o unpaidFoliosWhere', () => {
+  it('todos usan awaitingAcceptanceWhere, unpaidFoliosWhere o foliosPorPagarWhere (R42)', () => {
     const malos: string[] = []
     for (const f of archivosTs(DIR)) {
       const lineas = fs.readFileSync(f, 'utf8').split('\n')
@@ -22,7 +22,7 @@ describe('conteos de PENDING_ACCEPTANCE en online-ordering', () => {
         if (!/onlineOrder\s*\.\s*count\s*\(/.test(l)) return
         // la llamada puede ocupar varias líneas: miramos hasta 4 líneas hacia abajo
         const bloque = lineas.slice(i, i + 5).join(' ')
-        if (/PENDING_ACCEPTANCE/.test(bloque) && !/awaitingAcceptanceWhere|unpaidFoliosWhere/.test(bloque)) {
+        if (/PENDING_ACCEPTANCE/.test(bloque) && !/awaitingAcceptanceWhere|unpaidFoliosWhere|foliosPorPagarWhere/.test(bloque)) {
           malos.push(`${path.relative(DIR, f)}:${i + 1}`)
         }
       })
