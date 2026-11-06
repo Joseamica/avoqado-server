@@ -23,7 +23,7 @@ import { randomUUID } from 'crypto'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { recorrerAudiencia } from '@/services/crm/email/audience.service'
 import { erasedHashes } from '@/services/crm/erase.service'
-import { getAccount } from '@/services/crm/accounts.service'
+import { getAccount, listContacts } from '@/services/crm/accounts.service'
 import { addContact, removeContact, updateAccount, updateContact, type PersonaVista } from '@/services/crm/ficha.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
 import { canonicalPhoneE164 } from '@/utils/phone'
@@ -411,5 +411,36 @@ describe('Tarea 3 · cambiar y quitar persona', () => {
       removeContact(seller(ana, { ver: 'propios', editar: 'propios' }), accountId, contactId, { vio: antes }),
     ).rejects.toMatchObject({ statusCode: 404 })
     expect(await vistaDe(contactId)).toEqual(antes)
+  })
+})
+
+describe('Tarea 4 · la ficha llega a todas las personas', () => {
+  it('🔴 Codex r1 H5: 50 personas por C2 y la 51 por la landing → contactsTotal 51 y listContacts con el cursor de la 50 trae la 51 con su permiso', async () => {
+    const ana = await vendedor('ana-t4a')
+    const email = `t4a-${suffix}@test.mx`
+    emails.push(email)
+    const { id: accountId } = await prisma.crmAccount.create({
+      data: { name: `Negocio t4a ${suffix}`, source: 'LANDING', externalKey: email, stageId: await stage() },
+      select: { id: true },
+    })
+    for (let i = 0; i < 50; i++) {
+      await addContact(seller(ana), accountId, { name: `P${i}`, phone: nextPhone(), esOtroNegocio: true, clientRequestId: llave() })
+    }
+    await applyEntry(await landingEntry(email, new Date(), { marketingConsent: true }))
+
+    const ficha = await getAccount(seller(ana), accountId)
+    expect(ficha.contactsTotal).toBe(51)
+    expect(ficha.contacts).toHaveLength(50)
+    const resto = await listContacts(seller(ana), accountId, { cursor: ficha.contacts[49].id })
+    expect(resto).toMatchObject({ total: 51, nextCursor: null, rows: [expect.objectContaining({ email, consentAt: expect.any(Date) })] })
+    // Sin cursor y con un límite de más: el servidor no trunca a escondidas (51 < 100) y dice el total.
+    expect(await listContacts(seller(ana), accountId, { limit: 500 })).toMatchObject({ total: 51, nextCursor: null })
+    expect((await listContacts(seller(ana), accountId, { limit: 500 })).rows).toHaveLength(51)
+  })
+
+  it('🔴 A «propios» pide las personas de la cuenta de B → 404', async () => {
+    const [ana, beto] = [await vendedor('ana-t4b'), await vendedor('beto-t4b')]
+    const { accountId } = await accountWithPerson(`t4b-${suffix}@test.mx`, { ownerStaffId: beto })
+    await expect(listContacts(seller(ana, { ver: 'propios', editar: 'propios' }), accountId, {})).rejects.toMatchObject({ statusCode: 404 })
   })
 })

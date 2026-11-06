@@ -385,6 +385,28 @@ export const updateContactSchema = z.object({
 /** POST /crm/accounts/:id/contacts/:contactId/remove — quitar a una persona, con la persona que se veía. */
 export const removeContactSchema = z.object({ params: byContact, body: z.object({ vio: personaVista }) })
 
+/**
+ * POST /crm/accounts/:id/notes/v2 — «Comentar» con la llave del intento OBLIGATORIA (C2, Codex r7): un SERVIDOR viejo
+ * contesta 404 a esta ruta antes de escribir. `addNoteSchema` (la ruta de hoy) no cambia, para las pantallas viejas.
+ */
+export const addNoteV2Schema = z.object({
+  params: byId,
+  body: z.object({ text: text(5000, 'Escribe la nota'), clientRequestId: llaveDelIntento }),
+})
+
+/** GET /crm/accounts/:id/contacts — las personas de un negocio, de 50 en 50 (el servidor topa en 100). */
+export const listContactsSchema = z.object({
+  params: byId,
+  query: z.object({
+    cursor: cuid.optional(),
+    limit: z.coerce
+      .number({ invalid_type_error: 'El límite es un número' })
+      .int('El límite es un número entero')
+      .min(1, 'El límite es al menos 1')
+      .optional(),
+  }),
+})
+
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,

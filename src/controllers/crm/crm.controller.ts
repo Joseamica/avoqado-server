@@ -299,3 +299,9 @@ export async function updateContact(req: Request, res: Response): Promise<void> 
 export async function removeContact(req: Request, res: Response): Promise<void> {
   res.json({ data: await ficha.removeContact(req.crmAccess!, req.params.id, req.params.contactId, req.body) })
 }
+
+/** GET /api/v1/crm/accounts/:id/contacts — `{ rows, nextCursor, total }`. */
+export async function listContacts(req: Request, res: Response): Promise<void> {
+  const { cursor, limit } = req.query as { cursor?: string; limit?: number }
+  res.json({ data: await accounts.listContacts(req.crmAccess!, req.params.id, { cursor, limit }) })
+}

@@ -37,6 +37,7 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 import router from '@/routes/crm.routes'
 import * as hubspotImport from '@/services/crm/hubspotImport.service'
 import * as fichaService from '@/services/crm/ficha.service'
+import * as accountsService from '@/services/crm/accounts.service'
 
 const app = express().use(express.json()).use('/crm', router)
 /** With the app's error handler reduced to what these tests read: the status, the code and the message. */
@@ -728,6 +729,46 @@ describe('C2 · ficha editable: las rutas piden «Editar» (o «Ver») antes de 
       expect(fijo.status).toBe(400)
       expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}/remove`).send({ vio })).status).toBe(200)
       expect(quitar).toHaveBeenCalledWith(expect.anything(), ACCOUNT, CONTACT, { vio })
+    })
+  })
+
+  describe('GET /crm/accounts/:id/contacts y POST /crm/accounts/:id/notes/v2', () => {
+    const K = '11111111-1111-4111-8111-111111111111'
+
+    it('GET …/contacts sin «Ver» → 403; con «Ver» → 200 con cursor y límite', async () => {
+      const spy = jest.spyOn(accountsService, 'listContacts').mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
+      spies.push(spy)
+      access({ verScope: null, editarScope: null })
+      expect((await request(app).get(`/crm/accounts/${ACCOUNT}/contacts`)).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+      access({ verScope: 'propios', editarScope: null })
+      const ok = await request(app).get(`/crm/accounts/${ACCOUNT}/contacts?cursor=ccontact00000000000000049&limit=500`)
+      expect(ok.status).toBe(200)
+      expect(spy).toHaveBeenCalledWith(expect.anything(), ACCOUNT, { cursor: 'ccontact00000000000000049', limit: 500 })
+    })
+
+    it('🔴 Codex r7: /notes/v2 sin clientRequestId → 400 y el servicio no se llama; llave no-UUID → 400; sin «Editar» → 403', async () => {
+      const spy = jest.spyOn(accountsService, 'addNote').mockResolvedValue({} as never)
+      spies.push(spy)
+      access({ verScope: 'todos', editarScope: 'todos' })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola' })).status).toBe(400)
+      expect(
+        (await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola', clientRequestId: 'ana@x.mx' })).status,
+      ).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+      access({ verScope: 'todos', editarScope: null })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola', clientRequestId: K })).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('/notes/v2 con llave llega al servicio con ella; /notes con el cuerpo de hoy sigue igual (sin llave)', async () => {
+      const spy = jest.spyOn(accountsService, 'addNote').mockResolvedValue({} as never)
+      spies.push(spy)
+      access({ verScope: 'todos', editarScope: 'todos' })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola', clientRequestId: K })).status).toBe(201)
+      expect(spy).toHaveBeenLastCalledWith(expect.anything(), ACCOUNT, { text: 'Hola', clientRequestId: K })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes`).send({ text: 'Hola', clientRequestId: K })).status).toBe(201)
+      expect(spy).toHaveBeenLastCalledWith(expect.anything(), ACCOUNT, { text: 'Hola' })
     })
   })
 })

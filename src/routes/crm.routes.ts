@@ -58,6 +58,8 @@ import {
   sendAccountEmailV2Schema,
   updateAccountSchema,
   addContactSchema,
+  addNoteV2Schema,
+  listContactsSchema,
   updateContactSchema,
   removeContactSchema,
   sendCampaignSchema,
@@ -139,6 +141,8 @@ router.post('/accounts', editar, validateRequest(createAccountSchema), crmContro
 router.get('/accounts/:id', ver, validateRequest(accountIdSchema), crmController.getAccount)
 // C2 · Ficha editable: the business's data with «lo que se vio» («Editar» with its scope, decided under the row's lock).
 router.patch('/accounts/:id', editar, validateRequest(updateAccountSchema), crmController.updateAccount)
+// The people of an account, 50 at a time (the ficha brings the first 50 and says the total).
+router.get('/accounts/:id/contacts', ver, validateRequest(listContactsSchema), crmController.listContacts)
 router.post('/accounts/:id/contacts', editar, validateRequest(addContactSchema), crmController.addContact)
 router.patch('/accounts/:id/contacts/:contactId', editar, validateRequest(updateContactSchema), crmController.updateContact)
 router.post('/accounts/:id/contacts/:contactId/remove', editar, validateRequest(removeContactSchema), crmController.removeContact)
@@ -159,6 +163,8 @@ router.post('/accounts/:id/reactivate', editar, validateRequest(accountIdSchema)
 // «Eliminar», forever (D7): the real superadmin only — founder, 2-nov — which the service checks; «Configurar» is the door (L7).
 router.post('/accounts/:id/delete', configurar, validateRequest(deleteAccountSchema), crmController.deleteAccount)
 router.post('/accounts/:id/notes', editar, validateRequest(addNoteSchema), crmController.addNote)
+// C2: «Comentar» with the attempt's key, required: an older SERVIDOR answers 404 before writing (Codex r7).
+router.post('/accounts/:id/notes/v2', editar, validateRequest(addNoteV2Schema), crmController.addNote)
 router.post('/accounts/:id/activities', editar, validateRequest(addActivitySchema), crmController.createActivity)
 
 // What is live in Avoqado for one account; «Ver ventas» is decided inside, so without it the ficha says it is hidden.

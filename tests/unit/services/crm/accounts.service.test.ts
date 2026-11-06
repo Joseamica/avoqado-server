@@ -22,6 +22,7 @@ import {
   findDuplicates,
   getAccount,
   getPending,
+  listContacts,
   listAccounts,
   lose,
   moveStage,
@@ -1224,7 +1225,7 @@ describe("the ficha: email events and each contact's consent (phase 2, plan task
     expect(prismaMock.crmEmailMessage.findMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.crmEmailMessage.findMany).toHaveBeenCalledWith({
       where: { id: { in: [MSG_SENT, MSG_IN] }, accountId: ACCOUNT },
-      select: { id: true, subject: true, snippet: true, direction: true, status: true, error: true, fromEmail: true },
+      select: { id: true, subject: true, snippet: true, direction: true, status: true, error: true, fromEmail: true, toEmail: true },
       take: 2,
     })
     const [enviado, recibido, nota, consentimiento] = ficha.timeline.events
@@ -1304,6 +1305,187 @@ describe('«Cerrar negocios» (L9): ganar, perder y reabrir', () => {
     expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
       data: [{ accountId: ACCOUNT, kind: 'REACTIVATED', actorStaffId: SELLER, data: {} }],
       skipDuplicates: true,
+    })
+  })
+})
+
+describe('C2 Tarea 4: la Historia nombra a la persona en vivo, la ficha llega a todas y una nota no se repite', () => {
+  const MARIANA = 'ccontactma0000000000000001'
+  const AJENA = 'ccontactaj0000000000000001'
+  const K = '11111111-1111-4111-8111-111111111111'
+
+  function ficha(events: Array<Record<string, unknown>>, personas: Array<{ id: string; name: string; accountId: string }> = []) {
+    prismaMock.crmAccount.findFirst.mockResolvedValue({
+      ...account(),
+      sucursales: null,
+      modulos: null,
+      sourceDetail: null,
+      referidoPor: null,
+      stageEnteredAt: daysAgo(1),
+      lostReason: null,
+      lostNote: null,
+      wonAt: null,
+      lostAt: null,
+      firstMoneySource: null,
+      consentMarketing: false,
+      consentAt: null,
+      consentSource: null,
+      qualificationAvailable: false,
+      contacts: [],
+    })
+    prismaMock.crmActivity.count.mockResolvedValue(0)
+    prismaMock.crmContact.count.mockResolvedValue(51)
+    prismaMock.crmTimelineEvent.findMany.mockResolvedValue(events)
+    prismaMock.crmTimelineEvent.count.mockResolvedValue(events.length)
+    prismaMock.staff.findMany.mockResolvedValue([])
+    // Como Postgres: sólo las personas de ESTA cuenta, por id.
+    prismaMock.crmContact.findMany.mockImplementation(async ({ where }: any) =>
+      personas.filter(p => where.id.in.includes(p.id) && p.accountId === where.accountId).map(({ id, name }) => ({ id, name })),
+    )
+  }
+  const evento = (kind: string, data: Record<string, unknown>, n = 1) => ({
+    id: `cevent${n}`,
+    kind,
+    actorStaffId: SELLER,
+    data,
+    createdAt: daysAgo(0),
+  })
+
+  it('CONTACT_EDITED de Mariana → contacto.name leído hoy; CONTACT_REMOVED → null; un contactId de OTRA cuenta no trae su nombre', async () => {
+    ficha(
+      [
+        evento('CONTACT_EDITED', { contactId: MARIANA, campos: ['email'] }, 1),
+        evento('CONTACT_REMOVED', { contactId: 'ccontactgone000000000001', eraPrincipal: false }, 2),
+        evento('CONTACT_ADDED', { contactId: AJENA, principal: false }, 3),
+        evento('NOTE', { text: 'x' }, 4),
+      ],
+      [
+        { id: MARIANA, name: 'Mariana López', accountId: ACCOUNT },
+        { id: AJENA, name: 'De otro negocio', accountId: ACCOUNT_B },
+      ],
+    )
+
+    const { timeline, contactsTotal } = await getAccount(access(), ACCOUNT, NOW)
+
+    expect(contactsTotal).toBe(51)
+    const [editado, quitado, ajeno, nota] = timeline.events
+    expect(editado).toMatchObject({ contacto: { id: MARIANA, name: 'Mariana López' } })
+    expect(quitado).toMatchObject({ contacto: null })
+    expect(ajeno).toMatchObject({ contacto: null })
+    expect(nota).not.toHaveProperty('contacto')
+  })
+
+  it('🔴 pasada §a19: un EMAIL_SENT con contactId NO gana contacto', async () => {
+    ficha([evento('EMAIL_SENT', { messageId: 'cmsg1', contactId: MARIANA })], [{ id: MARIANA, name: 'Mariana', accountId: ACCOUNT }])
+    const { timeline } = await getAccount(access(), ACCOUNT, NOW)
+    expect(timeline.events[0]).not.toHaveProperty('contacto')
+    expect(prismaMock.crmContact.findMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una página con 100 eventos de personas hace UNA sola consulta de contactos (sin N+1)', async () => {
+    const events = Array.from({ length: 100 }, (_, i) =>
+      evento('CONTACT_EDITED', { contactId: `ccontact${String(i).padStart(17, '0')}` }, i),
+    )
+    ficha(events)
+    await getAccount(access(), ACCOUNT, NOW)
+    expect(prismaMock.crmContact.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmContact.findMany.mock.calls[0][0]).toMatchObject({ where: { accountId: ACCOUNT }, take: 100 })
+  })
+
+  describe('addNote con llave (POST …/notes/v2)', () => {
+    function nota() {
+      prismaMock.$queryRaw.mockResolvedValue([])
+      prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+      editable()
+      const events: any[] = []
+      prismaMock.crmTimelineEvent.createMany.mockImplementation(async ({ data: [event] }: any) => {
+        if (event.sourceKey && events.some(e => e.sourceKey === event.sourceKey)) return { count: 0 }
+        events.push(event)
+        return { count: 1 }
+      })
+      prismaMock.crmTimelineEvent.findUnique.mockImplementation(
+        async ({ where }: any) => events.find(e => e.sourceKey === where.sourceKey) ?? null,
+      )
+      return events
+    }
+
+    it('🔴 la misma nota con la misma llave dos veces → una NOTE y un toque; sin llave, dos (como hoy)', async () => {
+      const events = nota()
+      await addNote(access(), ACCOUNT, { text: 'Llamar el lunes', clientRequestId: K })
+      await addNote(access(), ACCOUNT, { text: ' Llamar el lunes ', clientRequestId: K })
+      expect(events).toHaveLength(1)
+      expect(prismaMock.crmAccount.updateMany).toHaveBeenCalledTimes(2) // el toque de la primera: updatedAt + lastTouchAt
+
+      await addNote(access(), ACCOUNT, { text: 'Otra' })
+      await addNote(access(), ACCOUNT, { text: 'Otra' })
+      expect(events.filter(e => e.data.text === 'Otra')).toHaveLength(2)
+    })
+
+    it('🔴 Codex r3 H1: la llave K guardó «Llamar el lunes»; llega K con «Llamar el martes» → 409 CRM_LLAVE_CON_OTRO_CONTENIDO, una sola nota', async () => {
+      const events = nota()
+      await addNote(access(), ACCOUNT, { text: 'Llamar el lunes', clientRequestId: K })
+      await expect(addNote(access(), ACCOUNT, { text: 'Llamar el martes', clientRequestId: K })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_LLAVE_CON_OTRO_CONTENIDO',
+      })
+      expect(events).toHaveLength(1)
+    })
+
+    it('🔴 el sourceKey de la nota sólo trae la cuenta y la llave', async () => {
+      const events = nota()
+      await addNote(access(), ACCOUNT, { text: 'Ana López, ana@cafe.mx', clientRequestId: K })
+      expect(events[0].sourceKey).toBe(`nota:${ACCOUNT}:${K}`)
+    })
+  })
+
+  describe('listContacts', () => {
+    const fila = (n: number) => ({
+      id: `ccontact${String(n).padStart(17, '0')}`,
+      name: `P${n}`,
+      phoneE164: null,
+      email: `p${n}@cafe.mx`,
+      role: null,
+      isPrimary: false,
+    })
+
+    it('trae 50 por página con el total, nextCursor y el permiso de cada correo en UNA consulta', async () => {
+      prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+      prismaMock.crmContact.findMany.mockResolvedValue(Array.from({ length: 51 }, (_, i) => fila(i)))
+      prismaMock.crmContact.count.mockResolvedValue(120)
+      prismaMock.crmEmailConsent.findMany.mockResolvedValue([{ email: 'p3@cafe.mx', consentAt: NOW, noticeVersion: 'v1' }])
+
+      const r = await listContacts(access(), ACCOUNT, {})
+
+      expect(r.total).toBe(120)
+      expect(r.rows).toHaveLength(50)
+      expect(r.nextCursor).toBe(fila(49).id)
+      expect(r.rows[3]).toMatchObject({ consentAt: NOW, noticeVersion: 'v1' })
+      expect(r.rows[4]).toMatchObject({ consentAt: null })
+      expect(prismaMock.crmEmailConsent.findMany).toHaveBeenCalledTimes(1)
+      expect(prismaMock.crmContact.findMany.mock.calls[0][0]).toMatchObject({
+        where: { accountId: ACCOUNT },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        take: 51,
+      })
+    })
+
+    it('con cursor salta el de la página anterior; limit 500 → 100; la última página no trae nextCursor', async () => {
+      prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+      prismaMock.crmContact.findMany.mockResolvedValue([fila(50)])
+      prismaMock.crmContact.count.mockResolvedValue(51)
+      const r = await listContacts(access(), ACCOUNT, { cursor: fila(49).id, limit: 500 })
+      expect(prismaMock.crmContact.findMany.mock.calls[0][0]).toMatchObject({ cursor: { id: fila(49).id }, skip: 1, take: 101 })
+      expect(r).toMatchObject({ rows: [expect.objectContaining({ id: fila(50).id })], nextCursor: null, total: 51 })
+    })
+
+    it('🔴 A «propios» pide las personas de la cuenta de B → 404 y no lee personas', async () => {
+      prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+      await expect(listContacts(access(), ACCOUNT_B, {})).rejects.toMatchObject({ statusCode: 404 })
+      expect(prismaMock.crmAccount.findFirst.mock.calls[0][0]).toEqual({
+        where: { AND: [{ id: ACCOUNT_B }, MINE_OR_UNOWNED] },
+        select: { id: true },
+      })
+      expect(prismaMock.crmContact.findMany).not.toHaveBeenCalled()
     })
   })
 })
