@@ -292,7 +292,7 @@ describe('CRM MCP — crm_list_clients', () => {
         estado: { codigo: 'SIN_COBROS', ultimoCobroAt: new Date('2026-11-07T03:30:00Z') },
         alta: null,
         ultimoComentario: null,
-        ingreso: { codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 4488, pista: 'TARJETA_OTRA_TERMINAL' },
+        ingreso: { codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 4488, otraMoneda: true, pista: 'TARJETA_OTRA_TERMINAL' },
       },
     ],
     nextCursor: 'o9',
@@ -327,6 +327,8 @@ describe('CRM MCP — crm_list_clients', () => {
     expect(answer.clientes[0]).toMatchObject({
       ingreso: 'Mensualidad (Pro) y transacciones con tarjeta por Avoqado',
       transaccionesConTarjeta30Dias: 4488,
+      moneda: 'MXN',
+      transaccionesEnOtraMoneda: true,
       oportunidad: 'Cobra con tarjeta en otra terminal',
     })
   })
@@ -335,7 +337,13 @@ describe('CRM MCP — crm_list_clients', () => {
     ;(listClients as jest.Mock).mockResolvedValue({ ...PAGE, rows: [{ ...PAGE.rows[0], ingreso: undefined }] })
     const { call } = setup()
     const answer = await call('crm_list_clients', {})
-    expect(answer.clientes[0]).toMatchObject({ ingreso: null, transaccionesConTarjeta30Dias: null, oportunidad: null })
+    expect(answer.clientes[0]).toMatchObject({
+      ingreso: null,
+      transaccionesConTarjeta30Dias: null,
+      moneda: null,
+      transaccionesEnOtraMoneda: null,
+      oportunidad: null,
+    })
   })
 
   it('C1b: un ingreso inválido es error de zod en español', async () => {

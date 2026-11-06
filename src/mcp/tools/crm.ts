@@ -158,8 +158,10 @@ function cliente(row: FilaDeClientes) {
     motivo: alta?.motivo ?? null,
     perdido: alta?.perdido ?? false,
     ingreso: ingresoTexto(row.ingreso),
-    // Pesos, gross and without tips, over the last 30 days.
+    // MXN pesos, gross and without tips, over the last 30 days. Another currency is never converted nor added: only flagged.
     transaccionesConTarjeta30Dias: row.ingreso?.transacciones30d ?? null,
+    moneda: row.ingreso?.transacciones30d != null ? 'MXN' : null,
+    transaccionesEnOtraMoneda: row.ingreso?.otraMoneda ?? null,
     oportunidad: (row.ingreso?.pista && OPORTUNIDAD_TEXTO[row.ingreso.pista]) ?? null,
   }
 }
@@ -728,7 +730,7 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       'quedaron sin poner tarjeta: por cada uno, qué usa (terminal, POS o ninguno en 30 días, con aviso si alguien lo escribió a ' +
       'mano), su plan (nivel y condición), su estado (cobra, dejó de cobrar, nunca cobró o alta sin tarjeta), la fecha de su ' +
       'último cobro (Ciudad de México), su dueño y su ingreso: si paga mensualidad (nivel), cuánto cobró con tarjeta por ' +
-      'Avoqado en 30 días (pesos, bruto, sin propinas) y la oportunidad (tarjeta en otra terminal o sólo efectivo). Sirve ' +
+      'Avoqado en 30 días (sólo MXN, bruto, sin propinas; lo de otra moneda sólo se marca) y la oportunidad (tarjeta en otra terminal o sólo efectivo). Sirve ' +
       'para preguntas como «clientes que dejaron de cobrar» (estado SIN_COBROS) o «quién cobra con otra terminal» (ingreso ' +
       'TARJETA_OTRA_TERMINAL). Filtros: q (nombre), usa, nivel, estado, motivo (por qué se quedó un alta sin tarjeta), ' +
       'ingreso y dueno (SIN_DUENO o el id de una persona del equipo). De 20 en 20 (hasta 50) con el total, los conteos de altas sin tarjeta y ' +

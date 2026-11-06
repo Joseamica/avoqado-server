@@ -9,7 +9,7 @@ import { BadRequestError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import type { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import type { CrmAccess } from './access.service'
-import { altaPropiaPendienteSql, clientFactsLateral, ingresoSql, transaccionesSql } from './clientFacts'
+import { altaPropiaPendienteSql, clientFactsLateral, ingresoSql, transaccionesEnOtraMonedaSql, transaccionesSql } from './clientFacts'
 import {
   MOTIVOS_DEL_ALTA,
   PISTAS_DE_INGRESO,
@@ -190,17 +190,20 @@ function filtrosSql(access: CrmAccess, filters: ClientFilters): Prisma.Sql {
 /**
  * «Ingreso» (C1b) as the cell paints it, over `o`: the SAME expressions the lateral gives the filter (`ingresoSql`), selected
  * again here so the page computes them only for its own rows (expensive select-list expressions run after the sort and the
- * limit), plus the card money processed by Avoqado in the window — only for whoever has «Ver ventas» (the key that already
- * gates «Cobrado este mes»); without it the amount never leaves the database. Same statement, same snapshot: the sum is not
- * null exactly when the row says TRANSACCIONES or AMBOS.
+ * limit), plus the card money processed by Avoqado in the window in MXN and whether there was some in another currency. Money
+ * only for whoever has «Ver ventas» (the key that already gates «Cobrado este mes») AND sees the client's CRM account
+ * (`visible`: the scope that opens its ficha — Codex r1 #1); otherwise it never leaves the database.
  */
-export function ingresoColumnas(now: Date, conVentas: boolean): Prisma.Sql {
+export function ingresoColumnas(now: Date, conVentas: boolean, visible: Prisma.Sql = Prisma.sql`TRUE`): Prisma.Sql {
   const ingreso = ingresoSql(now)
+  const dinero = (expr: Prisma.Sql, tipo: Prisma.Sql) =>
+    conVentas ? Prisma.sql`CASE WHEN ${visible} THEN ${expr} END` : Prisma.sql`NULL::${tipo}`
   return Prisma.sql`${ingreso.ingreso} AS "ingreso", ${ingreso.mensualidad} AS "mensualidad", ${ingreso.pista} AS "pistaIngreso",
-    ${conVentas ? transaccionesSql(now) : Prisma.sql`NULL::numeric`} AS "transacciones30d"`
+    ${dinero(transaccionesSql(now), Prisma.raw('numeric'))} AS "transacciones30d",
+    ${dinero(transaccionesEnOtraMonedaSql(now), Prisma.raw('boolean'))} AS "otraMoneda"`
 }
 
-/** «Ingreso» of ONE organization for its ficha: the same columns as the row of the list. */
+/** «Ingreso» of ONE organization for its ficha (its route already checked the account's scope): the same columns. */
 export function ingresoDeOrganizacionSql(organizationId: string, now: Date, conVentas: boolean): Prisma.Sql {
   return Prisma.sql`SELECT ${ingresoColumnas(now, conVentas)} FROM "Organization" o WHERE o."id" = ${organizationId}`
 }
@@ -231,7 +234,7 @@ export function clientsQueries(access: CrmAccess, filters: ClientFilters, now: D
       SELECT o."id", o."name", o."createdAt", ca."id" AS "crmAccountId",
         EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro",
         f."usaMedido", ${USA_VISTO} AS "usaVisto", ${USA_AVISO} AS "usaAviso", ca."usaManual" IS NOT NULL AS "usaEscrito",
-        f."nivel", f."estado", f."ultimoCobroAt", ${ingresoColumnas(now, access.ventas)}
+        f."nivel", f."estado", f."ultimoCobroAt", ${ingresoColumnas(now, access.ventas, scopeSql(access, 'ca'))}
       ${listed}${after}
       ORDER BY o."createdAt" DESC, o."id" DESC
       LIMIT ${pageSize(filters.limit) + 1}`,

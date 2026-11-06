@@ -2058,6 +2058,17 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         expect(await ingresoOf(v => tarjeta(v, { source: 'WEB', ecommerceMerchantId }))).toMatchObject({ ingreso: 'TRANSACCIONES' })
       })
 
+      it('🔴 Codex r1 #2: una liga pagada por SPEI (BANK_TRANSFER), por OXXO (OTHER) o con saldo de Mercado Pago (DIGITAL_WALLET en línea) no es tarjeta', async () => {
+        for (const method of ['BANK_TRANSFER', 'OTHER', 'DIGITAL_WALLET'] as const) {
+          expect(await ingresoOf(v => tarjeta(v, { source: 'WEB', method, fundsFlow: 'AVOQADO_PROCESSED' }))).toEqual({
+            ingreso: 'NINGUNO',
+            mensualidad: null,
+            pista: null,
+          })
+          expect(await ingresoOf(v => tarjeta(v, { source: 'WEB', method, ecommerceMerchantId }))).toMatchObject({ ingreso: 'NINGUNO' })
+        }
+      })
+
       it('🔴 cobro de prueba del superadmin (DASHBOARD_TEST) no es ingreso ni «otra terminal»', async () => {
         expect(await ingresoOf(v => tarjeta(v, { source: 'DASHBOARD_TEST' }))).toEqual({
           ingreso: 'NINGUNO',
@@ -2307,14 +2318,44 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         const { rows, total } = await walk(conVentas(), {}, 100)
         expect(total).toBe(8)
         const by = new Map(rows.map(row => [row.id, row.ingreso]))
-        expect(by.get(o.terminal)).toEqual({ codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 350, pista: null })
-        expect(by.get(o.enLinea)).toEqual({ codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 370, pista: null })
-        expect(by.get(o.ambos)).toEqual({ codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 40, pista: null })
-        expect(by.get(o.mensualidad)).toEqual({ codigo: 'MENSUALIDAD', mensualidad: 'PREMIUM', transacciones30d: null, pista: null })
-        expect(by.get(o.otra)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: 'TARJETA_OTRA_TERMINAL' })
-        expect(by.get(o.efectivo)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: 'SOLO_EFECTIVO' })
-        expect(by.get(o.mixto)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: null })
-        expect(by.get(o.nada)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: null })
+        expect(by.get(o.terminal)).toEqual({
+          codigo: 'TRANSACCIONES',
+          mensualidad: null,
+          transacciones30d: 350,
+          otraMoneda: false,
+          pista: null,
+        })
+        expect(by.get(o.enLinea)).toEqual({
+          codigo: 'TRANSACCIONES',
+          mensualidad: null,
+          transacciones30d: 370,
+          otraMoneda: false,
+          pista: null,
+        })
+        expect(by.get(o.ambos)).toEqual({ codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 40, otraMoneda: false, pista: null })
+        expect(by.get(o.mensualidad)).toEqual({
+          codigo: 'MENSUALIDAD',
+          mensualidad: 'PREMIUM',
+          transacciones30d: null,
+          otraMoneda: null,
+          pista: null,
+        })
+        expect(by.get(o.otra)).toEqual({
+          codigo: 'NINGUNO',
+          mensualidad: null,
+          transacciones30d: null,
+          otraMoneda: null,
+          pista: 'TARJETA_OTRA_TERMINAL',
+        })
+        expect(by.get(o.efectivo)).toEqual({
+          codigo: 'NINGUNO',
+          mensualidad: null,
+          transacciones30d: null,
+          otraMoneda: null,
+          pista: 'SOLO_EFECTIVO',
+        })
+        expect(by.get(o.mixto)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, otraMoneda: null, pista: null })
+        expect(by.get(o.nada)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, otraMoneda: null, pista: null })
       })
 
       it('🔴 sin «Ver ventas» la categoría y la pista son las mismas, pero el monto no sale', async () => {
@@ -2322,7 +2363,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         const sin = (await walk(sinVentas(), {}, 100)).rows
         for (const row of sin) {
           const igual = con.find(c => c.id === row.id)!
-          expect(row.ingreso).toEqual({ ...igual.ingreso, transacciones30d: null })
+          expect(row.ingreso).toEqual({ ...igual.ingreso, transacciones30d: null, otraMoneda: null })
         }
         expect(sin.some(row => row.ingreso.codigo === 'TRANSACCIONES')).toBe(true)
       })
@@ -2346,6 +2387,79 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         }
       })
 
+      it('🔴 Codex r1 #1: «propios» CON «Ver ventas» no ve el monto de un cliente de otro vendedor; sí el suyo y el sin dueño', async () => {
+        const B = (await prisma.staff.create({ data: { email: `b-${ING}@test.mx`, firstName: 'Beto', lastName: 'Ingreso' } })).id
+        sellerIds.push(B)
+        const stageId = (await prisma.crmStage.create({ data: { name: `Etapa ${ING}`, order: 902, kind: 'ABIERTA' } })).id
+        crmStageIds.push(stageId)
+        const cuenta = async (organizationId: string, ownerStaffId: string) =>
+          crmAccountIds.push(
+            (await prisma.crmAccount.create({ data: { name: `Cuenta ${ING}`, source: 'MANUAL', stageId, organizationId, ownerStaffId } }))
+              .id,
+          )
+        await cuenta(o.terminal, B)
+        await cuenta(o.enLinea, A)
+        const propiosConVentas = (me: string) =>
+          ({ staffId: me, isSuperadmin: false, ver: 'propios', editar: 'propios', ventas: true }) as unknown as CrmAccess
+        const filas = new Map((await walk(propiosConVentas(A), {}, 100)).rows.map(row => [row.id, row]))
+        expect(filas.get(o.terminal)).toMatchObject({
+          cuentaAjena: true,
+          ingreso: { codigo: 'TRANSACCIONES', transacciones30d: null, otraMoneda: null },
+        })
+        expect(filas.get(o.enLinea)!.ingreso).toMatchObject({ transacciones30d: 370 })
+        expect(filas.get(o.ambos)!.ingreso).toMatchObject({ transacciones30d: 40 })
+        // B, the owner, sees it; and A cannot open its ficha (404), as before.
+        expect((await walk(propiosConVentas(B), {}, 100)).rows.find(row => row.id === o.terminal)!.ingreso).toMatchObject({
+          transacciones30d: 350,
+        })
+        await expect(getClientLive(propiosConVentas(A), o.terminal, NOW)).rejects.toMatchObject({ statusCode: 404 })
+        await prisma.crmAccount.deleteMany({ where: { organizationId: { in: [o.terminal, o.enLinea] } } })
+      })
+
+      it('🔴 Codex r1 #3: 100 USD + 100 MXN con tarjeta por Avoqado → $100 (sólo MXN) y la marca de otra moneda; sólo USD → sin monto y la marca', async () => {
+        const usd = async (venueId: string, amount: string) => {
+          const orderId = await tarjeta(venueId, { source: 'WEB', ecommerceMerchantId, fundsFlow: 'AVOQADO_PROCESSED', amount })
+          const payment = await prisma.payment.findFirstOrThrow({ where: { orderId }, select: { id: true } })
+          await prisma.checkoutSession.create({
+            data: {
+              sessionId: `cs_${ING}_${++n}`,
+              ecommerceMerchantId,
+              amount,
+              currency: 'USD',
+              expiresAt: dentroDe(DAY),
+              status: 'COMPLETED',
+              paymentId: payment.id,
+            },
+          })
+        }
+        const mixto = await orgI('dosMonedas')
+        await usd(mixto, '100.00')
+        await tarjeta(mixto, { source: 'TPV', amount: '100.00' })
+        await usd(await orgI('soloDolares'), '50.00')
+        const by = new Map((await walk(conVentas(), {}, 100)).rows.map(row => [row.id, row.ingreso]))
+        expect(by.get(o.dosMonedas)).toEqual({
+          codigo: 'TRANSACCIONES',
+          mensualidad: null,
+          transacciones30d: 100,
+          otraMoneda: true,
+          pista: null,
+        })
+        expect(by.get(o.soloDolares)).toEqual({
+          codigo: 'TRANSACCIONES',
+          mensualidad: null,
+          transacciones30d: null,
+          otraMoneda: true,
+          pista: null,
+        })
+        expect(by.get(o.terminal)).toMatchObject({ transacciones30d: 350, otraMoneda: false })
+        // The ficha says the same.
+        clockAt(NOW)
+        const ficha = await getClientLive(conVentas(), o.dosMonedas, NOW)
+        jest.useRealTimers()
+        expect(ficha).toMatchObject({ ingreso: { transacciones30d: 100, otraMoneda: true } })
+        await prisma.organization.updateMany({ where: { id: { in: [o.dosMonedas, o.soloDolares] } }, data: { name: `Fuera ${ING}` } })
+      })
+
       it('la ficha (getClientLive) dice lo mismo que la fila, y sin «Ver ventas» sin monto', async () => {
         const fila = (await walk(conVentas(), {}, 100)).rows.find(row => row.id === o.terminal)!
         clockAt(NOW)
@@ -2353,7 +2467,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         const sin = await getClientLive(sinVentas(), o.terminal, NOW)
         jest.useRealTimers()
         expect(con).toMatchObject({ ingreso: fila.ingreso })
-        expect(sin).toMatchObject({ ingreso: { ...fila.ingreso, transacciones30d: null } })
+        expect(sin).toMatchObject({ ingreso: { ...fila.ingreso, transacciones30d: null, otraMoneda: null } })
       })
     })
   })

@@ -69,6 +69,10 @@ describe('clientFacts SQL', () => {
     // C1b: the card of the terminal and the online charge processed by Avoqado.
     const avoqado = pagoPorAvoqadoSql('p').sql
     expect(avoqado).toContain(`p."method" IN ('CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET')`)
+    // Codex r1 #2: online, only a card — SPEI (BANK_TRANSFER), OXXO (OTHER) and a Mercado Pago balance (DIGITAL_WALLET) are not.
+    expect(avoqado.replace(/\s+/g, ' ')).toContain(
+      `(p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') AND (p."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED' OR p."ecommerceMerchantId" IS NOT NULL))`,
+    )
     expect(avoqado).toContain(`p."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED'`)
     expect(avoqado).toContain(`p."source" <> 'DASHBOARD_TEST'`)
     expect(lateral).toContain(`p."source" NOT IN ('DELIVERY_PLATFORM', 'DASHBOARD_TEST')`)

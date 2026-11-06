@@ -146,21 +146,31 @@ const nivelSql = (tier: 'PRO' | 'PREMIUM', now: Date) => anyRealVenue(nivelDeLaS
 // ── Ingreso (C1b): lo que cada cliente le deja a Avoqado ─────────────────────────────────────────────────────────────
 
 /**
- * Was this payment (aliased `paymentAlias`) charged THROUGH Avoqado? The online channels of Avoqado — the platform's own rule
- * for «en línea de Avoqado» (`fundsFlow = AVOQADO_PROCESSED` or an e-commerce channel, `sales-summary.dashboard.service.ts`) —
- * or a card on Avoqado's terminal: `source = TPV` is written only by the terminal app and the AngelPay webhook
- * (`fuenteDelPago`); what an app only RECORDS (a card of another terminal) is `OTHER`, and a hand-recorded payment carries
- * `EXTERNAL_RECORDED`. Never `processor` (the terminal writes «TBD») nor the payment's `terminalId` (null when the serial does
- * not resolve). Superadmin test charges never count. Always true or false, never NULL, so `NOT (…)` keeps its rows.
+ * Was this payment (aliased `paymentAlias`) a CARD charged THROUGH Avoqado? Always a card method, and then either an online
+ * channel of Avoqado — the platform's own rule for «en línea de Avoqado» (`fundsFlow = AVOQADO_PROCESSED` or an e-commerce
+ * channel, `sales-summary.dashboard.service.ts`) — or Avoqado's terminal: `source = TPV` is written only by the terminal app
+ * and the AngelPay webhook (`fuenteDelPago`); what an app only RECORDS (a card of another terminal) is `OTHER`, and a
+ * hand-recorded payment carries `EXTERNAL_RECORDED`. Online, only `CREDIT_CARD`/`DEBIT_CARD` (Codex r1 #2): SPEI is
+ * `BANK_TRANSFER`, OXXO is `OTHER` (`metodoDeStripe`) and a Mercado Pago balance is `DIGITAL_WALLET`
+ * (`metodoDeMercadoPago`), so an online wallet cannot be told from a balance. On the terminal a wallet is a tokenized card
+ * read by the processor's SDK. Never `processor` (the terminal writes «TBD») nor the payment's `terminalId` (null when the
+ * serial does not resolve). Superadmin test charges never count. Always true or false, never NULL, so `NOT (…)` keeps its rows.
  */
 export function pagoPorAvoqadoSql(paymentAlias: string): Prisma.Sql {
   const p = alias(paymentAlias)
   return Prisma.sql`(${p}."source" <> 'DASHBOARD_TEST' AND (
-    ${p}."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED'
-    OR ${p}."ecommerceMerchantId" IS NOT NULL
+    (${p}."method" IN ('CREDIT_CARD', 'DEBIT_CARD')
+      AND (${p}."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED' OR ${p}."ecommerceMerchantId" IS NOT NULL))
     OR (${p}."fundsFlow" IS NULL AND ${p}."source" = 'TPV' AND ${p}."method" IN ('CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'))
   ))`
 }
+
+/**
+ * The currency of a payment `p`: a `Payment` has none of its own; an online one keeps it in its `CheckoutSession` (unique per
+ * payment, `paymentLink.service.ts` and `venueCheckout.service.ts` link it), and everything else is charged in MXN (the
+ * terminal, the POS, online ordering's fixed `MXN`). Upper case: a link may store it as written.
+ */
+const monedaDelPagoSql = Prisma.sql`UPPER(COALESCE((SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."paymentId" = p."id"), 'MXN'))`
 
 /** `paymentCountsAsDrawerCash` (`shared/tenderSemantics.ts`) over `p`, with its precedence: fundsFlow → tender snapshot → method. */
 const efectivoDeCajonSql = Prisma.sql`(CASE WHEN p."fundsFlow" IS NOT NULL THEN p."fundsFlow" = 'CASH_DRAWER'
@@ -238,17 +248,25 @@ export function ingresoSql(now: Date): { ingreso: Prisma.Sql; mensualidad: Prism
 }
 
 /**
- * The card money processed by Avoqado in the window over `o` (pesos, gross: refunds are their own negative rows and never
- * subtract; tips live in `tipAmount` and stay out, as «Cobrado este mes» of the ficha). The SAME `pagoPorAvoqadoSql` and window
- * as `ingresoSql`, so the sum is not null exactly when «Ingreso» says TRANSACCIONES or AMBOS. Only for the rows of a page.
+ * The card money processed by Avoqado in the window over `o`, ONLY in MXN (Codex r1 #3: currencies are never added up), gross:
+ * refunds are their own negative rows and never subtract; tips live in `tipAmount` and stay out, as «Cobrado este mes» of the
+ * ficha. The SAME `pagoPorAvoqadoSql` and window as `ingresoSql`. Only for the rows of a page.
  */
 export function transaccionesSql(now: Date): Prisma.Sql {
+  return Prisma.sql`(SELECT SUM(p."amount") ${pagosPorAvoqado(now, Prisma.sql`= 'MXN'`)})`
+}
+
+/** Card money through Avoqado in the window in ANOTHER currency: never converted nor added, only flagged. */
+export function transaccionesEnOtraMonedaSql(now: Date): Prisma.Sql {
+  return Prisma.sql`EXISTS (SELECT 1 ${pagosPorAvoqado(now, Prisma.sql`<> 'MXN'`)})`
+}
+
+function pagosPorAvoqado(now: Date, moneda: Prisma.Sql): Prisma.Sql {
   const desde = new Date(now.getTime() - WINDOW_MS)
-  return Prisma.sql`(
-    SELECT SUM(p."amount") FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
+  return Prisma.sql`FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
     WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL}
       AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(desde)} AND ${pagoPorAvoqadoSql('p')}
-  )`
+      AND ${monedaDelPagoSql} ${moneda}`
 }
 
 /**
