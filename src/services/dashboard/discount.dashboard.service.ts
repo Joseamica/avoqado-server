@@ -339,7 +339,26 @@ export async function getDiscountById(venueId: string, discountId: string) {
  * @param data - Discount data
  * @param createdById - Staff ID who created the discount
  */
+export const SIN_CATEGORIAS = 'Elige al menos una categoría para un descuento por categorías'
+
+/**
+ * D14: ¿el descuento queda «Categorías» sin ninguna categoría? Se mide sobre lo guardado + el cambio (Codex r1 #1: un cambio
+ * parcial `{targetCategoryIds: []}` o `{scope: 'CATEGORY'}` se colaba). Sólo cuenta si el cambio toca el alcance o la
+ * lista: un descuento viejo que ya estaba así se puede seguir prendiendo o apagando. Lo usan el panel, el MCP y las apps.
+ */
+export function quedaSinCategorias(
+  cambio: { scope?: string | null; targetCategoryIds?: string[] | null },
+  guardado?: { scope: string; targetCategoryIds: string[] },
+): boolean {
+  if (guardado && cambio.scope === undefined && cambio.targetCategoryIds === undefined) return false
+  const scope = cambio.scope ?? guardado?.scope ?? 'ORDER'
+  const categorias = cambio.targetCategoryIds ?? guardado?.targetCategoryIds ?? []
+  return scope === 'CATEGORY' && categorias.length === 0
+}
+
 export async function createDiscount(venueId: string, data: CreateDiscountRequest, createdById?: string) {
+  if (quedaSinCategorias(data)) throw new BadRequestError(SIN_CATEGORIAS)
+
   // Validate customer group if provided
   if (data.customerGroupId) {
     const group = await prisma.customerGroup.findFirst({
@@ -464,6 +483,7 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
   if (!existing) {
     throw new NotFoundError('El descuento no existe')
   }
+  if (quedaSinCategorias(data, existing)) throw new BadRequestError(SIN_CATEGORIAS)
 
   // Validate customer group if provided
   if (data.customerGroupId) {

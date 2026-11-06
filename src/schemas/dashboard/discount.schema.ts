@@ -41,12 +41,20 @@ export const getDiscountsQuerySchema = z.object({
 
 const SIN_CATEGORIAS = 'Elige al menos una categoría para un descuento por categorías'
 
+// Codex r1 #3: los números sin mensaje salían con el de Zod en inglés («Number must be greater than or equal to 1»).
+const Numero = z.number({ invalid_type_error: 'Debe ser un número', required_error: 'Falta un número' })
+const enteroDesde = (n: number) => Numero.int('Debe ser un número entero').min(n, `Debe ser ${n} o más`)
+const NoNegativo = Numero.min(0, 'No puede ser negativo')
+const Porcentaje = NoNegativo.max(100, 'Puede ser hasta 100')
+const Motivo = z.string().max(500, 'El motivo puede tener hasta 500 caracteres')
+const Dias = z.array(enteroDesde(0).max(6, 'El día de la semana va de 0 a 6'))
+
 export const createDiscountBodySchema = z
   .object({
     name: z.string().min(1, 'El nombre es obligatorio').max(100, 'El nombre puede tener hasta 100 caracteres'),
     description: z.string().max(500, 'La descripción puede tener hasta 500 caracteres').optional(),
     type: DiscountTypeSchema,
-    value: z.number().min(0, 'El valor del descuento no puede ser negativo'),
+    value: Numero.min(0, 'El valor del descuento no puede ser negativo'),
     scope: DiscountScopeSchema.default('ORDER'),
 
     // Target IDs
@@ -58,24 +66,24 @@ export const createDiscountBodySchema = z
 
     // Automatic application
     isAutomatic: z.boolean().default(false),
-    priority: z.number().int().min(0).default(0),
+    priority: enteroDesde(0).default(0),
 
     // Rules
-    minPurchaseAmount: z.number().min(0).optional(),
-    maxDiscountAmount: z.number().min(0).optional(),
-    minQuantity: z.number().int().min(1).optional(),
+    minPurchaseAmount: NoNegativo.optional(),
+    maxDiscountAmount: NoNegativo.optional(),
+    minQuantity: enteroDesde(1).optional(),
 
     // BOGO
-    buyQuantity: z.number().int().min(1).optional(),
-    getQuantity: z.number().int().min(1).optional(),
-    getDiscountPercent: z.number().min(0).max(100).optional(),
+    buyQuantity: enteroDesde(1).optional(),
+    getQuantity: enteroDesde(1).optional(),
+    getDiscountPercent: Porcentaje.optional(),
     buyItemIds: z.array(z.string()).optional(),
     getItemIds: z.array(z.string()).optional(),
 
     // Time-based
     validFrom: z.coerce.date().optional(),
     validUntil: z.coerce.date().optional(),
-    daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+    daysOfWeek: Dias.optional(),
     timeFrom: z
       .string()
       .regex(/^\d{2}:\d{2}$/, 'La hora debe tener formato HH:MM')
@@ -86,12 +94,12 @@ export const createDiscountBodySchema = z
       .optional(),
 
     // Usage limits
-    maxTotalUses: z.number().int().min(1).optional(),
-    maxUsesPerCustomer: z.number().int().min(1).optional(),
+    maxTotalUses: enteroDesde(1).optional(),
+    maxUsesPerCustomer: enteroDesde(1).optional(),
 
     // Comp-specific
     requiresApproval: z.boolean().default(false),
-    compReason: z.string().max(500).optional(),
+    compReason: Motivo.optional(),
 
     // Tax handling
     applyBeforeTax: z.boolean().default(true),
@@ -99,7 +107,7 @@ export const createDiscountBodySchema = z
 
     // Stacking
     isStackable: z.boolean().default(false),
-    stackPriority: z.number().int().min(0).default(0),
+    stackPriority: enteroDesde(0).default(0),
 
     // Status
     active: z.boolean().default(true),
@@ -159,7 +167,7 @@ export const updateDiscountBodySchema = z
     name: z.string().min(1, 'El nombre es obligatorio').max(100, 'El nombre puede tener hasta 100 caracteres').optional(),
     description: z.string().max(500, 'La descripción puede tener hasta 500 caracteres').optional().nullable(),
     type: DiscountTypeSchema.optional(),
-    value: z.number().min(0, 'El valor del descuento no puede ser negativo').optional(),
+    value: Numero.min(0, 'El valor del descuento no puede ser negativo').optional(),
     scope: DiscountScopeSchema.optional(),
 
     // Target IDs
@@ -171,24 +179,24 @@ export const updateDiscountBodySchema = z
 
     // Automatic application
     isAutomatic: z.boolean().optional(),
-    priority: z.number().int().min(0).optional(),
+    priority: enteroDesde(0).optional(),
 
     // Rules
-    minPurchaseAmount: z.number().min(0).optional().nullable(),
-    maxDiscountAmount: z.number().min(0).optional().nullable(),
-    minQuantity: z.number().int().min(1).optional().nullable(),
+    minPurchaseAmount: NoNegativo.optional().nullable(),
+    maxDiscountAmount: NoNegativo.optional().nullable(),
+    minQuantity: enteroDesde(1).optional().nullable(),
 
     // BOGO
-    buyQuantity: z.number().int().min(1).optional().nullable(),
-    getQuantity: z.number().int().min(1).optional().nullable(),
-    getDiscountPercent: z.number().min(0).max(100).optional().nullable(),
+    buyQuantity: enteroDesde(1).optional().nullable(),
+    getQuantity: enteroDesde(1).optional().nullable(),
+    getDiscountPercent: Porcentaje.optional().nullable(),
     buyItemIds: z.array(z.string()).optional(),
     getItemIds: z.array(z.string()).optional(),
 
     // Time-based
     validFrom: z.coerce.date().optional().nullable(),
     validUntil: z.coerce.date().optional().nullable(),
-    daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+    daysOfWeek: Dias.optional(),
     timeFrom: z
       .string()
       .regex(/^\d{2}:\d{2}$/, 'La hora debe tener formato HH:MM')
@@ -201,12 +209,12 @@ export const updateDiscountBodySchema = z
       .nullable(),
 
     // Usage limits
-    maxTotalUses: z.number().int().min(1).optional().nullable(),
-    maxUsesPerCustomer: z.number().int().min(1).optional().nullable(),
+    maxTotalUses: enteroDesde(1).optional().nullable(),
+    maxUsesPerCustomer: enteroDesde(1).optional().nullable(),
 
     // Comp-specific
     requiresApproval: z.boolean().optional(),
-    compReason: z.string().max(500).optional().nullable(),
+    compReason: Motivo.optional().nullable(),
 
     // Tax handling
     applyBeforeTax: z.boolean().optional(),
@@ -214,7 +222,7 @@ export const updateDiscountBodySchema = z
 
     // Stacking
     isStackable: z.boolean().optional(),
-    stackPriority: z.number().int().min(0).optional(),
+    stackPriority: enteroDesde(0).optional(),
 
     // Status
     active: z.boolean().optional(),
@@ -232,7 +240,7 @@ export const assignDiscountToCustomerBodySchema = z.object({
   customerId: z.string().min(1, 'Elige un cliente'),
   validFrom: z.coerce.date().optional(),
   validUntil: z.coerce.date().optional(),
-  maxUses: z.number().int().min(1).optional(),
+  maxUses: enteroDesde(1).optional(),
 })
 
 export const removeDiscountFromCustomerParamsSchema = z.object({

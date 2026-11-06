@@ -14,7 +14,7 @@ const venueId = 'c'.padEnd(25, '1')
 const customerId = 'c'.padEnd(25, '2')
 const mensajes = (r: { success: boolean; error?: { issues: { message: string }[] } }) =>
   r.success ? '' : r.error!.issues.map(i => i.message).join(' | ')
-const SIN_INGLES = /invalid|required|must|too long|expected|at least|only contain/i
+const SIN_INGLES = /invalid|required|must|too long|expected|at least|only contain|greater than|less than|integer|number|string/i
 
 describe('D15 · alta de cliente con correo o teléfono vacío', () => {
   it('🔴 sólo teléfono, con el correo vacío como lo manda el panel: pasa y el correo queda ausente', () => {
@@ -125,6 +125,45 @@ describe('D14 · cupones en español', () => {
     const u = updateCouponBodySchema.safeParse({ code: 'A' })
     expect(mensajes(u)).not.toMatch(SIN_INGLES)
     const b = bulkGenerateCouponsBodySchema.safeParse({ discountId: 'd', quantity: 0, prefix: 'ESTE PREFIJO ES LARGO' })
+    expect(b.success).toBe(false)
+    expect(mensajes(b)).not.toMatch(SIN_INGLES)
+  })
+})
+
+describe('D14 · números en cero o negativos (Codex r1 #3): en español', () => {
+  const base = { name: 'Martes de pan', type: 'PERCENTAGE', value: 10 }
+  it('«Usos totales» en 0 y otros números fuera de rango del descuento', () => {
+    for (const caso of [
+      { ...base, maxTotalUses: 0 },
+      { ...base, maxUsesPerCustomer: 0 },
+      { ...base, minPurchaseAmount: -1 },
+      { ...base, maxDiscountAmount: -5 },
+      { ...base, priority: -1 },
+      { ...base, maxTotalUses: 'diez' },
+      { ...base, maxTotalUses: 1.5 },
+      { ...base, compReason: 'x'.repeat(501) },
+    ]) {
+      const r = createDiscountBodySchema.safeParse(caso)
+      expect(r.success).toBe(false)
+      expect(mensajes(r)).not.toMatch(SIN_INGLES)
+    }
+    const u = updateDiscountBodySchema.safeParse({ maxTotalUses: 0 })
+    expect(u.success).toBe(false)
+    expect(mensajes(u)).not.toMatch(SIN_INGLES)
+  })
+
+  it('cupones: maxUses en 0 y compañía', () => {
+    for (const caso of [
+      { discountId: 'd', code: 'HOLA', maxUses: 0 },
+      { discountId: 'd', code: 'HOLA', maxUsesPerCustomer: 0 },
+      { discountId: 'd', code: 'HOLA', minPurchaseAmount: -1 },
+    ]) {
+      const r = createCouponBodySchema.safeParse(caso)
+      expect(r.success).toBe(false)
+      expect(mensajes(r)).not.toMatch(SIN_INGLES)
+    }
+    expect(mensajes(updateCouponBodySchema.safeParse({ maxUses: 0 }))).not.toMatch(SIN_INGLES)
+    const b = bulkGenerateCouponsBodySchema.safeParse({ discountId: 'd', quantity: 5, maxUsesPerCode: 0, codeLength: 2 })
     expect(b.success).toBe(false)
     expect(mensajes(b)).not.toMatch(SIN_INGLES)
   })

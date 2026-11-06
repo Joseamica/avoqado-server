@@ -476,6 +476,36 @@ describe('Discount Dashboard Service', () => {
     })
   })
 
+  describe('D14 · «Categorías» sin categorías (lo guardado + el cambio)', () => {
+    const SIN = 'Elige al menos una categoría para un descuento por categorías'
+
+    it('🔴 editar sólo la lista a [] de un descuento por categorías: 400, no se guarda', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ scope: 'CATEGORY', targetCategoryIds: ['cat-1'] }) as any)
+      await expect(updateDiscount('venue-123', 'discount-123', { targetCategoryIds: [] })).rejects.toThrow(SIN)
+      expect(prismaMock.discount.update).not.toHaveBeenCalled()
+    })
+
+    it('🔴 cambiar a «Categorías» un descuento que no tiene categorías: 400', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ scope: 'ORDER', targetCategoryIds: [] }) as any)
+      await expect(updateDiscount('venue-123', 'discount-123', { scope: 'CATEGORY' })).rejects.toThrow(SIN)
+      expect(prismaMock.discount.update).not.toHaveBeenCalled()
+    })
+
+    it('prender o apagar un descuento viejo que ya estaba sin categorías sigue pudiéndose', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ scope: 'CATEGORY', targetCategoryIds: [] }) as any)
+      prismaMock.discount.update.mockResolvedValue({ ...createMockDiscount({ active: false }), customerGroup: null } as any)
+      await updateDiscount('venue-123', 'discount-123', { active: false })
+      expect(prismaMock.discount.update).toHaveBeenCalled()
+    })
+
+    it('crear por «Categorías» sin lista (MCP u otra puerta sin Zod): 400', async () => {
+      await expect(createDiscount('venue-123', { name: 'Pan', type: 'PERCENTAGE', value: 10, scope: 'CATEGORY' } as any)).rejects.toThrow(
+        SIN,
+      )
+      expect(prismaMock.discount.create).not.toHaveBeenCalled()
+    })
+  })
+
   describe('updateDiscount', () => {
     it('should update discount successfully', async () => {
       const existingDiscount = createMockDiscount()

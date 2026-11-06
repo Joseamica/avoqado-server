@@ -596,6 +596,38 @@ describe('Customer Dashboard Service', () => {
     })
   })
 
+  describe('D15 · correo o teléfono repetido en una carrera (P2002) — en español', () => {
+    it('al editar, si el índice único frena el correo, el 400 sale en español con su código', async () => {
+      prismaMock.customer.findFirst.mockResolvedValueOnce(createMockCustomer({ email: null }) as any).mockResolvedValueOnce(null)
+      prismaMock.customer.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId', 'email'] } }),
+      )
+      await expect(updateCustomer('venue-123', 'customer-123', { email: 'rosa@ejemplo.mx' })).rejects.toThrow(
+        'Ya existe un cliente con el correo rosa@ejemplo.mx en este negocio',
+      )
+    })
+
+    it('al editar, lo mismo con el teléfono', async () => {
+      prismaMock.customer.findFirst.mockResolvedValueOnce(createMockCustomer({ phone: null }) as any).mockResolvedValueOnce(null)
+      prismaMock.customer.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId', 'phone'] } }),
+      )
+      await expect(updateCustomer('venue-123', 'customer-123', { phone: '+525544102263' })).rejects.toThrow(
+        'Ya existe un cliente con el teléfono +525544102263 en este negocio',
+      )
+    })
+
+    it('al dar de alta, también (antes salía un 500)', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId', 'email'] } }),
+      )
+      await expect(createCustomer('venue-123', { email: 'rosa@ejemplo.mx' })).rejects.toThrow(
+        'Ya existe un cliente con el correo rosa@ejemplo.mx en este negocio',
+      )
+    })
+  })
+
   describe('createCustomer — consentimiento vía consent.service', () => {
     beforeEach(() => {
       grantConsentMock.mockReset().mockResolvedValue(undefined)

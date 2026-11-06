@@ -10,6 +10,7 @@
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { quedaSinCategorias, SIN_CATEGORIAS } from '../../services/dashboard/discount.dashboard.service'
 
 // ==========================================
 // LIST DISCOUNTS
@@ -127,6 +128,10 @@ export async function createDiscount(req: Request, res: Response) {
     }
     if (value === undefined || value === null) {
       return res.status(400).json({ success: false, message: 'value es requerido' })
+    }
+    // D14 (Codex r1 #2): iOS manda «Categorías» sin lista; iOS lo lee como «todas» y el panel como «ninguna».
+    if (quedaSinCategorias({ scope, targetCategoryIds })) {
+      return res.status(400).json({ success: false, message: SIN_CATEGORIAS })
     }
 
     // Validate value based on type
@@ -264,6 +269,10 @@ export async function updateDiscount(req: Request, res: Response) {
       stackPriority,
       active,
     } = req.body
+
+    if (quedaSinCategorias({ scope, targetCategoryIds }, existing)) {
+      return res.status(400).json({ success: false, message: SIN_CATEGORIAS })
+    }
 
     // Validate value based on type if provided
     const effectiveType = type ?? existing.type
