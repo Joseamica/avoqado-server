@@ -11,7 +11,7 @@ export const mismoTexto = (a?: string | null, b?: string | null): boolean => (a 
  * La copia del editor está vieja: alguien guardó otra cosa mientras estaba abierto (rediseño de C1: decide el SERVIDOR, no
  * el navegador). Con `ahora`, lo guardado de esos campos, para que el editor lo enseñe sin esperar una recarga.
  */
-export function cambioAlEditar(ahora?: Record<string, unknown>): ConflictError {
+export function cambioAlEditar(ahora?: object): ConflictError {
   return new ConflictError(
     'Cambió mientras lo editabas: revisa y guarda otra vez.',
     'CRM_CAMBIO_AL_EDITAR',
