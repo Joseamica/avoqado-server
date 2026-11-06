@@ -43,9 +43,11 @@ cierra y sale en gris). No quites ese campo.
   SERVIDOR viejo (tras una reversa) la rechaza («Elige a quién le mandas») en vez de mandarle a quien se quitó. No le agregues esa llave.
 - La vista trae `publico` (las tres llaves) y `huellaPublico`; la pantalla nueva la devuelve como `basePublico` al guardar y, si el público
   cambió, es 409 `CRM_CAMPANA_CAMBIO`. Sin `basePublico` (pantalla vieja) sobre una fila v2, 409 `CRM_CAMPANA_PANTALLA_VIEJA`.
-- `excluir` (gana sobre todo; la forma de la resolución, `algo@algo`) e `incluir` (sólo quien deja `sqlCorreoAgregable`; dominio con
-  punto): hasta 500 cada una, sin repetidos (400) y sin reordenar. Lo quitado se quita en SQL y otra vez con el correo con que se manda
-  (`btrim` no quita un U+00A0 de origen; `normalizeEmail` sí).
+- El PATCH de la pantalla nueva manda `audience: { publicos, excluir, incluir }` (la pantalla vieja, `segmentos`; las dos a la vez, 400): un
+  SERVIDOR anterior lo rechaza con 400 «Elige a quién le mandas» y no escribe nada. El esquema lo vuelve `segmentos`.
+- `excluir` (gana sobre todo; la forma de la resolución, `algo@algo`) e `incluir` (sólo quien deja `sqlCorreoAgregable`; dominio con punto):
+  hasta 500 cada una, sin repetidos (400) y sin reordenar. Lo quitado se quita en SQL y otra vez con el correo con que se manda (`btrim` no
+  quita un U+00A0 de origen; `normalizeEmail` sí).
 - «Envíame una prueba» igual a una de las últimas 24 h contesta `{ ok: true, repetida: true }`: no llama a Resend ni deja otra bitácora.
 
 ## Llaves del CRM (plan 2026-11-04, L4–L9): cada ruta pide la suya

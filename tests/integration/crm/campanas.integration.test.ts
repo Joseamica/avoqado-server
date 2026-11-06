@@ -23,6 +23,7 @@ jest.mock('@/services/email/resendQuota', () => ({
 
 import { aparcarLaSiguienteTransaccion, aTiempo, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 import { env } from '@/config/env'
+import { updateCampaignSchema } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
 import * as audience from '@/services/crm/email/audience.service'
 import {
@@ -809,6 +810,26 @@ describe('guardar el público: candado y basePublico', () => {
         publico: { excluir: [correo('caro')] },
       },
     )
+  })
+
+  it('🔴 el PATCH de la pantalla nueva (`publicos` + excluir, por el esquema de la ruta) guarda la v2 con la huella del mismo público con `segmentos`', async () => {
+    // Antes del cambio de nombre: la misma exclusión mandada con `segmentos`.
+    const conSegmentos = await borrador()
+    await updateCampaign(rafa, conSegmentos, { audience: conExcluida('ana'), basePublico: (await getCampaign(conSegmentos)).huellaPublico })
+
+    // Lo que hace la ruta: `validateRequest(updateCampaignSchema)` reemplaza el body y el controlador se lo pasa al servicio.
+    const conPublicos = await borrador()
+    const { body } = updateCampaignSchema.parse({
+      params: { id: conPublicos },
+      body: {
+        audience: { publicos: AUDIENCIA().segmentos, excluir: [correo('ana')] },
+        basePublico: (await getCampaign(conPublicos)).huellaPublico,
+      },
+    })
+    await updateCampaign(rafa, conPublicos, body)
+
+    expect(await guardado(conPublicos)).toEqual({ v: 2, publicos: AUDIENCIA().segmentos, excluir: [correo('ana')], incluir: [] })
+    expect((await getCampaign(conPublicos)).huellaPublico).toBe((await getCampaign(conSegmentos)).huellaPublico)
   })
 
   it('agregar a alguien sin contacto en el CRM es 400 PERSONA_SIN_PERMISO dentro de la transacción; con su contacto, se guarda', async () => {

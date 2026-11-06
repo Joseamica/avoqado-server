@@ -627,6 +627,19 @@ export const audienciaSchema = z
 export type Audiencia = z.infer<typeof audienciaSchema>
 export type Segmento = Audiencia['segmentos'][number]
 
+/**
+ * The PATCH's audience. The new screen sends `publicos` (the v2 row's word): a SERVIDOR before this one requires `segmentos`, so after
+ * a revert it answers 400 «Elige a quién le mandas» and writes nothing, instead of dropping `excluir`/`incluir` and replacing the row
+ * (Codex código r1). The old screen (production `746793a`) still sends `segmentos`. Both keys → 400. Normalized here to the service's
+ * `{ segmentos, excluir, incluir }`, so the hash of an unchanged audience does not move.
+ */
+const audienciaDelPatch = z.preprocess((valor, ctx) => {
+  if (typeof valor !== 'object' || valor === null || !('publicos' in valor)) return valor
+  const { publicos, ...resto } = valor as Record<string, unknown>
+  if ('segmentos' in resto) ctx.addIssue({ code: 'custom', message: 'Manda «publicos» o «segmentos», no los dos' })
+  return { ...resto, segmentos: publicos }
+}, audienciaSchema)
+
 // ── Mass-email campaigns (phase 2, plan task 5) ────────────────────────────────────────────────────────────────────────
 
 const campaignName = text(120, 'El nombre de la campaña es obligatorio')
@@ -697,7 +710,7 @@ export const updateCampaignSchema = z.object({
       name: campaignName.optional(),
       subject: emailSubject.optional(),
       blocks: emailBlocks.optional(),
-      audience: audienciaSchema.optional(),
+      audience: audienciaDelPatch.optional(),
       basePublico: z
         .string({ invalid_type_error: 'La versión que ves no es válida' })
         .min(1, 'La versión que ves no es válida')

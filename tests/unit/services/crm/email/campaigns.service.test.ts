@@ -9,6 +9,8 @@ import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
 import { prismaMock } from '@tests/__helpers__/setup'
 import type { McpScope } from '@/mcp/scope'
+import { validateRequest } from '@/middlewares/validation'
+import { updateCampaignSchema } from '@/schemas/crm.schema'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
 import { contarAudiencia, paginaDeDestinatarios, personasNoElegibles, recorrerAudiencia } from '@/services/crm/email/audience.service'
@@ -516,6 +518,63 @@ describe('el público con excluir e incluir: guardar bajo el candado, forma v2 y
     // Control: una fila SIN listas el SERVIDOR viejo la sigue leyendo igual.
     await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: [] }, basePublico: await huellaPublicoDe() })
     expect(audienciaSchemaViejo.safeParse(escrito()!.data.audience).success).toBe(true)
+  })
+
+  // ── El cuerpo del PATCH: la pantalla nueva manda `publicos`, así la ESCRITURA también falla cerrado ante una reversa ──────
+  // (Codex código r1: un SERVIDOR viejo aceptaba `{ segmentos, excluir }`, zod tiraba `excluir` y reemplazaba la fila sin la exclusión.)
+
+  /** El cuerpo del PATCH del SERVIDOR viejo (`4744d93b2`): sólo `audience` importa aquí (nombre, asunto y bloques no vienen). */
+  const cuerpoViejo = z.object({ audience: audienciaSchemaViejo.optional() })
+  /** Lo que el controlador le pasa al servicio: el `body` ya parseado (`validateRequest` reemplaza `req.body`). */
+  const cuerpoNuevo = (body: unknown) => updateCampaignSchema.parse({ params: { id: CAMP_A }, body }).body
+
+  it('🔴 el esquema VIEJO (copiado tal cual) rechaza el cuerpo nuevo con «Elige a quién le mandas»: un SERVIDOR viejo no escribe nada', () => {
+    const viejo = cuerpoViejo.safeParse({ audience: { publicos: [P], excluir: ['ana@x.com'] }, basePublico: 'hp' })
+    expect(viejo.success).toBe(false)
+    expect(viejo.success ? [] : viejo.error.issues.map(i => [i.path.join('.'), i.message])).toEqual([
+      ['audience.segmentos', 'Elige a quién le mandas'],
+    ])
+    // Control: el cuerpo de la pantalla vieja lo sigue aceptando.
+    expect(cuerpoViejo.safeParse({ audience: { segmentos: [P] } }).success).toBe(true)
+  })
+
+  it('el esquema nuevo acepta `publicos` y le entrega al servicio el mismo { segmentos, excluir, incluir } de hoy (misma huella)', async () => {
+    const conPublicos = cuerpoNuevo({ audience: { publicos: [P, C], excluir: ['ana@x.mx'], incluir: [] }, basePublico: 'hp' })
+    const deHoy = cuerpoNuevo({ audience: { segmentos: [P, C], excluir: ['ana@x.mx'], incluir: [] }, basePublico: 'hp' })
+    expect(conPublicos).toEqual({ audience: { segmentos: [P, C], excluir: ['ana@x.mx'], incluir: [] }, basePublico: 'hp' })
+    // Mismo JSON, llave por llave y en el mismo orden: de él sale la huella.
+    expect(JSON.stringify(conPublicos)).toBe(JSON.stringify(deHoy))
+
+    await updateCampaign(ACTOR, CAMP_A, { ...deHoy, basePublico: await huellaPublicoDe() } as never)
+    const huellaDeHoy = await huellaPublicoDe()
+    guardado = { segmentos: [P] }
+    await updateCampaign(ACTOR, CAMP_A, { ...conPublicos, basePublico: await huellaPublicoDe() } as never)
+    expect(guardado).toEqual({ v: 2, publicos: [P, C], excluir: ['ana@x.mx'], incluir: [] })
+    expect(await huellaPublicoDe()).toBe(huellaDeHoy)
+  })
+
+  it('🔴 la pantalla vieja ({ audience: { segmentos } } sin basePublico) pasa el esquema igual que hoy: 409 PANTALLA_VIEJA con listas, reemplazo sin ellas', async () => {
+    const viejo = cuerpoNuevo({ audience: { segmentos: [P, C] } })
+    expect(viejo).toEqual({ audience: { segmentos: [P, C] } })
+    guardado = { v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] }
+    await expect(updateCampaign(ACTOR, CAMP_A, viejo as never)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PANTALLA_VIEJA',
+    })
+    expect(guardado).toEqual({ v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] })
+
+    guardado = { segmentos: [P] }
+    await updateCampaign(ACTOR, CAMP_A, viejo as never)
+    expect(guardado).toEqual({ segmentos: [P, C] })
+  })
+
+  it('con `publicos` y `segmentos` a la vez: 400 en español y el servicio ni se entera', async () => {
+    const req = { params: { id: CAMP_A }, body: { audience: { publicos: [P], segmentos: [C] }, basePublico: 'hp' }, query: {} } as never
+    const next = jest.fn()
+    await validateRequest(updateCampaignSchema)(req, {} as never, next)
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: 400, message: 'Error de validación: audience: Manda «publicos» o «segmentos», no los dos' }),
+    )
   })
 
   it('pantalla nueva: excluir: [] limpia lo guardado y la fila vuelve a la forma de hoy, con la huella de hoy', async () => {
