@@ -78,4 +78,10 @@ describe('settingsView: ¿Quién confirma? (T5)', () => {
     prismaMock.venue.findUnique.mockResolvedValue({ type: 'RESTAURANT' } as any)
     expect((await settingsView('v1')).suggestedRequiresAcceptance).toBe(true)
   })
+
+  it('un FITNESS_STUDIO sugiere «Nadie» (suggestedRequiresAcceptance false)', async () => {
+    ;(getSettings as jest.Mock).mockResolvedValue({ ...SETTINGS, requiresAcceptance: true, lastToPayPollAt: null })
+    prismaMock.venue.findUnique.mockResolvedValue({ type: 'FITNESS_STUDIO' } as any)
+    expect((await settingsView('v1')).suggestedRequiresAcceptance).toBe(false)
+  })
 })

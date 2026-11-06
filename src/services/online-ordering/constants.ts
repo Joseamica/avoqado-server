@@ -102,11 +102,12 @@ export const NO_ONE_VENUE_TYPES: readonly VenueType[] = [
   'SALON',
   'SPA',
   'FITNESS',
+  'FITNESS_STUDIO',
   'CLINIC',
   'VETERINARY',
   'AUTO_SERVICE',
   'LAUNDRY',
   'REPAIR_SHOP',
-] // ponytail: el brief también nombraba FITNESS_STUDIO, que no existe en `VenueType` (sólo en otro enum); FITNESS ya lo cubre.
+]
 /** Tienda híbrida: «Nadie» sólo se enciende si algún aparato consultó la lista «por cobrar» en este plazo. */
 export const FOLIO_DEVICE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
