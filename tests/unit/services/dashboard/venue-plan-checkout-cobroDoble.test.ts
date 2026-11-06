@@ -112,6 +112,20 @@ describe('createVenuePlanCheckoutSession — quedarse con el plan de una prueba 
     expect(mockCheckout).not.toHaveBeenCalled()
   })
 
+  it('full-testing WARN 1: «hoy $0» pedido para OTRO plan durante la prueba → 409 que explica el plan, no los días', async () => {
+    mockFilasDelPlan.mockResolvedValue([prueba(8 * 24)])
+    await expect(
+      createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PREMIUM', {
+        primerCobroAnunciado: new Date(Date.now() + 8 * 24 * H).toISOString(),
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'COBRO_DIFERIDO_CADUCO',
+      message: expect.stringContaining('sólo puedes quedarte con tu plan actual'),
+    })
+    expect(mockCheckout).not.toHaveBeenCalled()
+  })
+
   it('REGRESIÓN: otro plan durante la prueba, o sin prueba, abre el checkout de siempre (sin trial_end)', async () => {
     mockFilasDelPlan.mockResolvedValue([prueba(8 * 24)])
     await createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PREMIUM')

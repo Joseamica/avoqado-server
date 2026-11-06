@@ -1782,7 +1782,17 @@ export async function createVenuePlanCheckoutSession(
       },
       take: PAID_PLAN_TIER_CODES.length,
     })
-    const trialEnd = finDePruebaDiferible(elegirFilaDelPlan(filas), tierCode, Date.now(), MARGEN_CHECKOUT_MS) ?? undefined
+    const fila = elegirFilaDelPlan(filas)
+    const trialEnd = finDePruebaDiferible(fila, tierCode, Date.now(), MARGEN_CHECKOUT_MS) ?? undefined
+    // D3 full-testing WARN 1: con una prueba regalada de OTRO plan, la razón no es el tiempo sino el plan.
+    const pruebaDeOtroPlan =
+      !!fila && fila.active && !fila.suspendedAt && !fila.stripeSubscriptionId && !!fila.endDate && fila.feature.code !== tierCode
+    if (options.primerCobroAnunciado && !trialEnd && pruebaDeOtroPlan) {
+      throw new ConflictError(
+        'Durante tu prueba sólo puedes quedarte con tu plan actual. Para cambiar de plan, escríbenos a hola@avoqado.io. Hoy no se te cobró nada.',
+        'COBRO_DIFERIDO_CADUCO',
+      )
+    }
     if (options.primerCobroAnunciado && !trialEnd) {
       throw new ConflictError(
         'A tu prueba le quedan menos de 2 días: podrás contratar tu plan en cuanto termine. Hoy no se te cobró nada.',

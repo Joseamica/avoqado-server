@@ -711,8 +711,12 @@ export async function createVenuePlanCheckoutSession(
       url: checkoutUrl,
     })
   } catch (error) {
-    logger.error('Error creating plan checkout session', {
+    // Una negativa esperada (409 de la regla común o de la oferta caducada, 4xx) no es un error del servidor (D3 full-testing).
+    const status = (error as { statusCode?: number })?.statusCode
+    const registrar = status && status < 500 ? logger.warn.bind(logger) : logger.error.bind(logger)
+    registrar('Error creating plan checkout session', {
       error: error instanceof Error ? error.message : 'Unknown error',
+      statusCode: status,
       orgId: req.authContext?.orgId,
       venueId: req.params?.venueId,
     })
