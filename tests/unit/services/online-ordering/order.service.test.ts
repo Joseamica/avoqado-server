@@ -400,6 +400,20 @@ describe('createOnlineOrder', () => {
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
+  it('R84: la espera corta del candado usa TX_OPTIONS, y un P2028 ahí sale tal cual (5xx, la tienda conserva la llave), nunca como el 401', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })
+    const caida = new Prisma.PrismaClientKnownRequestError('Transaction API error: Unable to start a transaction in the given time.', {
+      code: 'P2028',
+      clientVersion: 'x',
+    })
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(caida)
+    const err = await createOnlineOrder(input({ customerId: null }), PUEDE_CREAR).catch((e: unknown) => e)
+    expect(err).toBe(caida)
+    expect(err).not.toHaveProperty('statusCode')
+    expect((err as { code?: string }).code).not.toBe('PHONE_VERIFICATION_REQUIRED')
+    expect((prismaMock.$transaction as jest.Mock).mock.calls[0][1]).toEqual({ timeout: 15_000, maxWait: 5_000 })
+  })
+
   it('R82: con el original EN VUELO (retiene el candado de la llave) el reintento anónimo ESPERA el candado y sólo entonces lee: recibe el folio que el original confirmó', async () => {
     const req = input({ customerId: null })
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })

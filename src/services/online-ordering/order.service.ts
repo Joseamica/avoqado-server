@@ -487,7 +487,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       const folio = await prisma.$transaction(async tx => {
         await lockKey(tx, input.venueId, externalId)
         return findReplay(tx, input.venueId, externalId, requestHash)
-      })
+      }, TX_OPTIONS) // las mismas esperas que la creación: un original que retiene la llave 5-15 s no debe vencer a la espera (P2028)
       if (folio) return folio
     } catch (e) {
       if (!(e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT')) throw e
