@@ -22,6 +22,8 @@ export interface FilaDePlanLeida {
   updatedAt?: Date
   /** ¿Su suscripción sigue pudiendo cobrar? `false` = CONSTA terminada; `null`/ausente = no se consultó y no degrada. */
   cobroVivo?: boolean | null
+  /** El plan de la fila (`PLAN_PRO` / `PLAN_PREMIUM`): desempata cortesías, ver {@link elegirFilaDelPlan}. */
+  feature?: { code: string } | null
 }
 
 const vigente = (f: FilaDePlanLeida, ahora: Date) => !f.endDate || f.endDate.getTime() > ahora.getTime()
@@ -41,10 +43,20 @@ const puntaje = (f: FilaDePlanLeida, ahora: Date) =>
   (f.active && vigente(f, ahora) && !constaMuerto(f) ? 2 : 0) +
   (f.active ? 1 : 0)
 
+/**
+ * 🔴 D21 (5-nov): entre CORTESÍAS (sin vínculo que cobre) empatadas manda la de más acceso, igual que el candado y el menú
+ * (`getVenueBaseTier`: PREMIUM gana). El negocio de demo trae PLAN_PRO y PLAN_PREMIUM de cortesía; por `updatedAt` «Tu plan»
+ * decía Pro mientras el menú decía Premium. El empate de dos suscripciones no se toca: eso es ambigüedad (ver abajo).
+ */
+const premiumDeCortesia = (f: FilaDePlanLeida) => (!vinculoUtil(f) && f.feature?.code === 'PLAN_PREMIUM' ? 1 : 0)
+
 export function elegirFilaDelPlan<T extends FilaDePlanLeida>(filas: T[], ahora: Date = new Date()): T | null {
   if (filas.length === 0) return null
   return [...filas].sort(
-    (a, b) => puntaje(b, ahora) - puntaje(a, ahora) || (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0),
+    (a, b) =>
+      puntaje(b, ahora) - puntaje(a, ahora) ||
+      premiumDeCortesia(b) - premiumDeCortesia(a) ||
+      (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0),
   )[0]
 }
 
