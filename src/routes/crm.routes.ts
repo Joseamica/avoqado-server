@@ -55,6 +55,7 @@ import {
   rescheduleActivitySchema,
   searchOrganizationsSchema,
   sendAccountEmailSchema,
+  sendAccountEmailV2Schema,
   sendCampaignSchema,
   sendTemplateTestSchema,
   templateIdSchema,
@@ -242,6 +243,8 @@ router.get('/gmail', contactar, crmEmailController.gmailStatus)
 router.get('/gmail/connect', contactar, crmEmailController.gmailConnect)
 router.post('/gmail/disconnect', contactar, crmEmailController.gmailDisconnect)
 router.post('/accounts/:id/emails', contactar, validateRequest(sendAccountEmailSchema), crmEmailController.sendAccountEmail)
+// C2: the same send with the address the screen showed (`paraCorreo`); the route above stays for the screens of before.
+router.post('/accounts/:id/emails/v2', contactar, validateRequest(sendAccountEmailV2Schema), crmEmailController.sendAccountEmail)
 
 // «Dar de baja este correo» (the opposition, from the ficha): the person stops receiving anything from Avoqado. «Bajas de
 // correo», que va sola (L1, L8).

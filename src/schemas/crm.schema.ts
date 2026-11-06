@@ -560,6 +560,23 @@ export const sendAccountEmailSchema = z.object({
   }),
 })
 
+/**
+ * POST /crm/accounts/:id/emails/v2 — «Mandar correo» con la dirección que la pantalla enseñó (C2, Codex plan r1 H4 y r6 H1).
+ * `paraCorreo` OBLIGATORIO: un SERVIDOR viejo contesta 404 a esta ruta antes de mandar, en vez de tirar el campo y mandar a
+ * la dirección de ahora. `sendAccountEmailSchema` (la ruta de hoy) no cambia, para las pantallas viejas.
+ */
+export const sendAccountEmailV2Schema = z.object({
+  params: byId,
+  body: sendAccountEmailSchema.shape.body.extend({
+    paraCorreo: z
+      .string({ required_error: 'Falta la dirección a la que se manda', invalid_type_error: 'La dirección no es válida' })
+      .trim()
+      .toLowerCase()
+      .email('La dirección no es válida')
+      .max(254, 'La dirección no es válida'),
+  }),
+})
+
 /** POST /crm/opt-outs — «Dar de baja este correo» (la oposición). El correo se guarda en minúsculas, como el del equipo. */
 export const createOptOutSchema = z.object({
   body: z.object({
