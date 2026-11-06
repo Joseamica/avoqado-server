@@ -112,6 +112,12 @@ async function assertStoreRequirements(
   )
 }
 
+/** R16: el horario de reservas, si existe y es válido, para la PRIMERA fila de ajustes (`updateSettings` y el primer latido de folios). */
+export async function preloadReservationHours(tx: Prisma.TransactionClient, venueId: string): Promise<Prisma.InputJsonValue | undefined> {
+  const reservas = await tx.reservationSettings.findUnique({ where: { venueId }, select: { operatingHours: true } })
+  return isValidOrderingHours(reservas?.operatingHours) ? (reservas!.operatingHours as unknown as Prisma.InputJsonValue) : undefined
+}
+
 /**
  * A6 (P1-05): leer, combinar, validar y escribir van en UNA transacción con el candado del negocio (`pg_advisory_xact_lock`, sin
  * Redis): dos cambios simultáneos («encender» y «quitar pagar al recoger») se serializan y el segundo valida sobre el primero, así
@@ -138,11 +144,7 @@ export async function updateSettings(
     // R16: la primera vez, el horario arranca con el de reservas si existe y es válido. Sin horario la tienda abriría 24 h; la
     // casa ya decidió lo contrario para reparto (`deliveryHours.service.ts`: equivocarse hacia 24/7 mete pedidos de madrugada).
     // H5 (r2): con la validación de PEDIDOS (admite 22:00–02:00), no la de reparto, que descartaría un horario nocturno.
-    let preloadHours: Prisma.InputJsonValue | undefined
-    if (!existing && patch.hours === undefined) {
-      const reservas = await tx.reservationSettings.findUnique({ where: { venueId }, select: { operatingHours: true } })
-      if (isValidOrderingHours(reservas?.operatingHours)) preloadHours = reservas!.operatingHours as unknown as Prisma.InputJsonValue
-    }
+    const preloadHours = !existing && patch.hours === undefined ? await preloadReservationHours(tx, venueId) : undefined
 
     const merged = {
       ...current,

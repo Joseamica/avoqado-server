@@ -1,14 +1,17 @@
 import prisma from '@/utils/prismaClient'
 import { isWithinHours } from './hours'
 import { MAX_PENDING_PER_VENUE, PRESENCE_WINDOW_MS, PRESENCE_WRITE_DEBOUNCE_MS, awaitingAcceptanceWhere, liveCardDraftsWhere } from './constants'
-import { getSettings } from './settings.service'
+import { getSettings, preloadReservationHours } from './settings.service'
 import type { AcceptingReason, AcceptingState, AcceptingStatus } from './types'
 
 // En memoria a propósito (una sola instancia): amortigua la escritura; la verdad es la columna.
 const lastWrite = new Map<string, number>()
+// R11: llave propia del latido de folios; si compartiera mapa, la Bandeja abierta le «comería» el latido a la TPV.
+const lastToPayWrite = new Map<string, number>()
 
 export function __resetPresenceDebounceForTests(): void {
   lastWrite.clear()
+  lastToPayWrite.clear()
 }
 
 /**
@@ -21,6 +24,29 @@ export async function touchInboxPoll(venueId: string, now: Date = new Date()): P
   if (now.getTime() - last < PRESENCE_WRITE_DEBOUNCE_MS) return false
   await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { lastInboxPollAt: now } })
   lastWrite.set(venueId, now.getTime())
+  return true
+}
+
+/**
+ * Tienda híbrida: un aparato que PUEDE cobrar folios (TPV o POS) consultó ahora. Si aún no hay fila de ajustes, el primer latido la
+ * crea apagada y en «Mi equipo» (R37), con el horario de reservas precargado, bajo el mismo candado de `updateSettings`.
+ */
+export async function touchToPayPoll(venueId: string, now: Date = new Date()): Promise<boolean> {
+  const last = lastToPayWrite.get(venueId) ?? 0
+  if (now.getTime() - last < PRESENCE_WRITE_DEBOUNCE_MS) return false
+  const { count } = await prisma.onlineOrderingSettings.updateMany({ where: { venueId }, data: { lastToPayPollAt: now } })
+  if (count === 0) {
+    await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-ordering-settings:' + venueId}))`
+      const hours = await preloadReservationHours(tx, venueId)
+      await tx.onlineOrderingSettings.upsert({
+        where: { venueId },
+        create: { venueId, enabled: false, requiresAcceptance: true, lastToPayPollAt: now, ...(hours ? { hours } : {}) },
+        update: { lastToPayPollAt: now },
+      })
+    })
+  }
+  lastToPayWrite.set(venueId, now.getTime())
   return true
 }
 
@@ -39,14 +65,16 @@ export async function getAcceptingStatus(
     preloaded ?? getSettings(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
   ])
-  const { lastInboxPollAt, ...config } = settings
+  const { lastInboxPollAt, lastToPayPollAt, ...config } = settings
   const timezone = venue?.timezone || 'America/Mexico_City'
   const done = (status: AcceptingStatus, reason: AcceptingReason): AcceptingState => ({ status, reason, config })
 
   if (!config.enabled) return done('DISABLED', 'NOT_ENABLED')
   if (config.manualPause || (config.pausedUntil && new Date(config.pausedUntil) > now)) return done('PAUSED', 'MANUAL_PAUSE')
   if (!isWithinHours(config.hours, now, timezone)) return done('CLOSED', 'OUTSIDE_HOURS')
-  if (!lastInboxPollAt || now.getTime() - lastInboxPollAt.getTime() > PRESENCE_WINDOW_MS) return done('OFFLINE', 'NO_DEVICE')
+  // «Nadie» (`=== false`: una fila sin el campo no lo es) cuenta a quien puede cobrar folios; «Mi equipo», a la Bandeja abierta.
+  const latido = config.requiresAcceptance === false ? lastToPayPollAt : lastInboxPollAt
+  if (!latido || now.getTime() - latido.getTime() > PRESENCE_WINDOW_MS) return done('OFFLINE', 'NO_DEVICE')
 
   // Fase 2: los borradores de tarjeta vigentes también ocupan lugar (el tope de admisión los cuenta igual).
   const pending =

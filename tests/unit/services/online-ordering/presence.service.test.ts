@@ -1,6 +1,6 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { MAX_PENDING_PER_VENUE } from '@/services/online-ordering/constants'
-import { __resetPresenceDebounceForTests, getAcceptingStatus, storeView, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import { __resetPresenceDebounceForTests, getAcceptingStatus, storeView, touchInboxPoll, touchToPayPoll } from '@/services/online-ordering/presence.service'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z') // miércoles 12:30 CDMX
 const settingsRow = (o: Record<string, unknown> = {}) => ({
@@ -38,6 +38,97 @@ describe('touchInboxPoll', () => {
     await expect(touchInboxPoll('v1', NOW)).rejects.toThrow('db')
     await expect(touchInboxPoll('v1', new Date(NOW.getTime() + 5_000))).resolves.toBe(true)
     expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('touchToPayPoll (tienda híbrida: el latido de quien puede cobrar folios)', () => {
+  const tx = () => {
+    const t: any = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: { upsert: jest.fn().mockResolvedValue({}) },
+      reservationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(t))
+    return t
+  }
+
+  it('con fila: escribe lastToPayPollAt y se amortigua 30 s', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    await expect(touchToPayPoll('v1', NOW)).resolves.toBe(true)
+    await expect(touchToPayPoll('v1', new Date(NOW.getTime() + 10_000))).resolves.toBe(false)
+    await expect(touchToPayPoll('v1', new Date(NOW.getTime() + 31_000))).resolves.toBe(true)
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledTimes(2)
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { lastToPayPollAt: NOW } })
+  })
+
+  it('sin fila de ajustes, el primer latido la crea apagada, en «Mi equipo», con lastToPayPollAt (R37)', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 0 })
+    const t = tx()
+    await expect(touchToPayPoll('v1', NOW)).resolves.toBe(true)
+    expect(t.$executeRaw).toHaveBeenCalled() // el candado de ajustes
+    const arg = t.onlineOrderingSettings.upsert.mock.calls[0][0]
+    expect(arg.where).toEqual({ venueId: 'v1' })
+    expect(arg.create).toEqual({ venueId: 'v1', enabled: false, requiresAcceptance: true, lastToPayPollAt: NOW })
+    expect(arg.update).toEqual({ lastToPayPollAt: NOW })
+  })
+
+  it('al crear la fila precarga el horario de reservas, como updateSettings', async () => {
+    const hours = {
+      monday: { enabled: true, ranges: [{ open: '09:00', close: '18:00' }] },
+      tuesday: { enabled: false, ranges: [] },
+      wednesday: { enabled: false, ranges: [] },
+      thursday: { enabled: false, ranges: [] },
+      friday: { enabled: false, ranges: [] },
+      saturday: { enabled: false, ranges: [] },
+      sunday: { enabled: false, ranges: [] },
+    }
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 0 })
+    const t = tx()
+    t.reservationSettings.findUnique.mockResolvedValue({ operatingHours: hours })
+    await touchToPayPoll('v1', NOW)
+    expect(t.onlineOrderingSettings.upsert.mock.calls[0][0].create.hours).toEqual(hours)
+  })
+
+  it('si la escritura falla, el debounce no se mueve', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockRejectedValueOnce(new Error('db')).mockResolvedValueOnce({ count: 1 })
+    await expect(touchToPayPoll('v1', NOW)).rejects.toThrow('db')
+    await expect(touchToPayPoll('v1', new Date(NOW.getTime() + 5_000))).resolves.toBe(true)
+  })
+
+  it('Bandeja y TPV a la vez: los dos latidos se escriben (R11)', async () => {
+    prismaMock.onlineOrderingSettings.updateMany.mockResolvedValue({ count: 1 })
+    await expect(touchInboxPoll('v1', NOW)).resolves.toBe(true)
+    await expect(touchToPayPoll('v1', NOW)).resolves.toBe(true)
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { lastInboxPollAt: NOW } })
+    expect(prismaMock.onlineOrderingSettings.updateMany).toHaveBeenCalledWith({ where: { venueId: 'v1' }, data: { lastToPayPollAt: NOW } })
+  })
+})
+
+describe('getAcceptingStatus — «Nadie» lee el latido de folios', () => {
+  it('con la Bandeja abierta y sin latido de folios en 2 min ⇒ OFFLINE / NO_DEVICE', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({ requiresAcceptance: false, lastToPayPollAt: new Date(NOW.getTime() - 121_000) }) as any,
+    )
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OFFLINE', reason: 'NO_DEVICE' })
+  })
+
+  it('con latido de folios hace 1 min y sin Bandeja ⇒ OPEN', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+      settingsRow({ requiresAcceptance: false, lastInboxPollAt: null, lastToPayPollAt: new Date(NOW.getTime() - 60_000) }) as any,
+    )
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN', reason: null })
+  })
+
+  it('«Mi equipo» sigue leyendo la Bandeja, aunque no haya latido de folios', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow({ requiresAcceptance: true, lastToPayPollAt: null }) as any)
+    await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'OPEN' })
+  })
+
+  it('el estado no filtra los latidos dentro de config', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow({ lastToPayPollAt: NOW }) as any)
+    const st = await getAcceptingStatus('v1', NOW)
+    expect(st.config).not.toHaveProperty('lastToPayPollAt')
+    expect(st.config).not.toHaveProperty('lastInboxPollAt')
   })
 })
 

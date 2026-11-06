@@ -18,6 +18,8 @@ export const PRESENCE_WINDOW_MS = 120_000
 export const PRESENCE_WRITE_DEBOUNCE_MS = 30_000
 /** R13: sólo la pantalla de bandeja en primer plano manda esta cabecera con `1`; es la única que cuenta como «hay alguien». */
 export const ONLINE_ORDERS_TRAY_HEADER = 'x-online-orders-tray'
+/** Tienda híbrida: la TPV y el POS que pueden cobrar folios mandan esta cabecera con `1` (las rutas que la leen son de T12). */
+export const ONLINE_ORDERS_TO_PAY_HEADER = 'x-online-orders-to-pay'
 export const MAX_PENDING_PER_PHONE = 3
 export const MAX_PENDING_PER_VENUE = 30
 export const MAX_CART_LINES = 50
