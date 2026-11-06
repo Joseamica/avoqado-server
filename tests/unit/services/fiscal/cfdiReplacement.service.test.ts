@@ -996,7 +996,7 @@ it('sustituir una autofactura sigue siendo acción del personal y permite efecti
     loadOrderForCfdi: jest.fn().mockResolvedValue(bundle({ autofacturaEnabled: false })),
   })
   expect((await replaceCfdi(params, deps)).status).toBe('REPLACED')
-  expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true }, expect.anything())
+  expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', expect.objectContaining({ permitirEfectivo: true }), expect.anything())
 })
 
 // B3a ronda final F1 (Codex final #1): la sustitución lee los importes del MISMO cargador, con el subtotal BRUTO del escritor nativo.

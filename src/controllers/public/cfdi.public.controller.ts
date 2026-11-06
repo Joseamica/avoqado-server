@@ -99,7 +99,9 @@ const esDelReceptor = (m: string) =>
   /receptor|\bRFC\b|r[eé]gimen|raz[oó]n social|c[oó]digo postal|uso\s*(del\s*)?cfdi|usocfdi|p[uú]blico en general/i.test(m) &&
   // Ronda de la ola (4) (m-a): un motivo de CONCEPTO («Concepto 1 ("Régimen keto")…», o el PAC hablando de un concepto) lleva el nombre del
   // producto: nunca es del receptor.
-  !/emisor|\bCSD\b|certificado|sello|concepto/i.test(m)
+  !/emisor|\bCSD\b|certificado|sello|concepto/i.test(m) &&
+  // D11 (Codex r4): los motivos de «quién factura» hablan del comercio o del negocio y pueden decir «RFC»; son del dueño, nunca del cliente.
+  !/comercio|negocio|sucursal|configuraci[oó]n/i.test(m)
 
 // ─── POST /receipt/:accessKey/cfdi ───────────────────────────────────────────
 

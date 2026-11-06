@@ -29,6 +29,7 @@ import {
   cerrarConflictoTerminado,
   registrarConflictoDeObligacion,
 } from './access/conflictosDeObligacion.service'
+import { descuentoDelPlan, type DescuentoDelPlan } from './billing/descuentoDelPlan'
 import {
   clasificarEstado,
   clasificarSuscripcion,
@@ -1789,8 +1790,11 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   pausedUntil: Date | null
   interval: 'month' | 'year' | null
   grossAmountCents: number | null
+  /** D5: el cupón vigente (uno, entendible) para mostrar lo que de verdad paga; `null` = se muestra el precio de lista. */
+  descuento: DescuentoDelPlan | null
 }> {
-  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId), {
+  // D5: el detalle del cupón viene en la MISMA llamada (expand): sin él, `discounts` sólo trae ids.
+  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts.source.coupon.applies_to'] }), {
     retries: 3,
     shouldRetry: shouldRetryStripeError,
     context: 'stripe.retrievePlanSubscription',
@@ -1809,7 +1813,14 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     pausedUntil: pausaDe(sub),
     interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
+    descuento: descuentoDelPlan(sub as never, productoDe(sub.items.data[0]?.price.product)),
   }
+}
+
+/** El id del producto de un precio de Stripe, venga como id o expandido. */
+function productoDe(product: unknown): string | null {
+  if (typeof product === 'string') return product
+  return product && typeof product === 'object' && 'id' in product ? String((product as { id: string }).id) : null
 }
 
 /**

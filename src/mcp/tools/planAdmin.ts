@@ -19,7 +19,7 @@ export function registerPlanAdminTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'get_venue_plan_status',
-    'Estado del plan de un negocio al que tienes acceso. El plan puede venir de una suscripción clásica, de un contrato de campaña o de una cortesía (prueba o plan regalado): origin dice cuál (kind CLASSIC, CONTRACT, COMP o NONE si no hay plan), con su nivel (tier PRO o PREMIUM), su precio mensual en pesos con IVA (gross) y sin IVA (base), su intervalo, hasta cuándo está pagado (currentPeriodEnd), cuándo deja de renovarse si ya se programó (cancelAt) y el contrato (contractId) cuando viene de uno. Lee origin primero: planTier y state no cuentan los contratos, así que un negocio que paga Premium por contrato trae planTier null y state none, pero origin CONTRACT con tier PREMIUM. También dice si el negocio es GRANDFATHERED (exento del tope de usuarios de Gratis y de todos los muros de pago), cuándo termina una prueba (trialEndsAt) y si hoy se le puede ofrecer pausar el plan en vez de cancelarlo (pauseOfferEligible). Responde «¿en qué plan está este negocio? ¿cuánto paga y hasta cuándo? ¿está grandfathered? ¿cuándo termina su prueba?». Pasa venueId. Sólo lectura: no cambia el plan, la exención ni la prueba.',
+    'Estado del plan de un negocio al que tienes acceso. El plan puede venir de una suscripción clásica, de un contrato de campaña o de una cortesía (prueba o plan regalado): origin dice cuál (kind CLASSIC, CONTRACT, COMP o NONE si no hay plan), con su nivel (tier PRO o PREMIUM), su precio mensual en pesos con IVA (gross) y sin IVA (base), su intervalo, hasta cuándo está pagado (currentPeriodEnd), cuándo deja de renovarse si ya se programó (cancelAt) y el contrato (contractId) cuando viene de uno. Si paga con un cupón, discount trae lo que de verdad paga en pesos con IVA (gross), el porcentaje (percentOff), si es de una vez, por meses o sin fin (duration) y hasta cuándo dura (endsAt); price sigue siendo el precio sin descuento. Lee origin primero: planTier y state no cuentan los contratos, así que un negocio que paga Premium por contrato trae planTier null y state none, pero origin CONTRACT con tier PREMIUM. También dice si el negocio es GRANDFATHERED (exento del tope de usuarios de Gratis y de todos los muros de pago), cuándo termina una prueba (trialEndsAt) y si hoy se le puede ofrecer pausar el plan en vez de cancelarlo (pauseOfferEligible). Responde «¿en qué plan está este negocio? ¿cuánto paga y hasta cuándo? ¿está grandfathered? ¿cuándo termina su prueba?». Pasa venueId. Sólo lectura: no cambia el plan, la exención ni la prueba.',
     {
       venueId: z.string().describe('Venue whose plan status to read (must be in your scope)'),
     },
@@ -43,6 +43,8 @@ export function registerPlanAdminTools(server: McpServer, scope: McpScope) {
               currentPeriodEnd: state.origin.currentPeriodEnd,
               cancelAt: state.origin.cancelAt,
               contractId: state.origin.contractId,
+              // D5: con un cupón vigente, lo que de verdad paga (pesos con IVA) y hasta cuándo; null = paga el precio.
+              discount: state.origin.discount ?? null,
             }
           : null,
         pauseOfferEligible: state.pauseOfferEligible ?? false,

@@ -81,3 +81,80 @@ describe('productWizard — el saldo inicial deja movimiento', () => {
     expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
   })
 })
+
+// PR #273 del DASHBOARD: cambiar sólo mínimo o costo ya no obliga a mandar existencias (el panel releía el saldo y quedaban
+// milisegundos para pisar una venta). Sin `initialStock` el saldo no se toca ni se anota movimiento.
+describe('productWizard paso 3 — mínimo y costo sin existencias', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+    prismaMock.product.findUnique.mockResolvedValue({ id: PRODUCT, venueId: VENUE, recipe: null, updatedAt: new Date(version) } as any)
+    prismaMock.product.update.mockResolvedValue({ id: PRODUCT } as any)
+    prismaMock.inventory.createMany.mockResolvedValue({ count: 0 } as any)
+    prismaMock.inventory.update.mockResolvedValue({ id: 'inv-1' } as any)
+    prismaMock.inventoryMovement.findFirst.mockResolvedValue({ id: 'mov-0' } as any)
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'inv-1', currentStock: 5 }] as any)
+  })
+  const version = '2026-11-05T18:00:00.123Z'
+
+  it('sin existencias: guarda mínimo y costo, no toca el saldo ni deja movimiento', async () => {
+    const r = await setupSimpleStockStep3(VENUE, PRODUCT, { reorderPoint: 4, costPerUnit: 12 } as any)
+
+    const inv = (prismaMock.inventory.update.mock.calls[0][0] as any).data
+    expect(inv).not.toHaveProperty('currentStock')
+    expect(Number(inv.minimumStock)).toBe(4)
+    expect(Number((prismaMock.product.update.mock.calls[0][0] as any).data.cost)).toBe(12)
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+    expect(r.initialStock).toBe(5) // contesta el saldo real
+  })
+
+  it('con versión: la exige al escribir el producto', async () => {
+    await setupSimpleStockStep3(VENUE, PRODUCT, { reorderPoint: 4, costPerUnit: 12, expectedUpdatedAt: version } as any)
+    expect((prismaMock.product.update.mock.calls[0][0] as any).where).toEqual({ id: PRODUCT, updatedAt: new Date(version) })
+  })
+
+  it('con versión vieja al leer: 409 PRODUCT_CHANGED sin tocar el inventario', async () => {
+    prismaMock.product.findUnique.mockResolvedValue({ id: PRODUCT, recipe: null, updatedAt: new Date('2026-11-05T18:00:01.000Z') } as any)
+    await expect(
+      setupSimpleStockStep3(VENUE, PRODUCT, { initialStock: 9, reorderPoint: 4, costPerUnit: 12, expectedUpdatedAt: version } as any),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
+    expect(prismaMock.inventory.update).not.toHaveBeenCalled()
+  })
+
+  it('con versión vieja al escribir (cambió en medio): 409 PRODUCT_CHANGED', async () => {
+    prismaMock.product.update.mockRejectedValueOnce({ code: 'P2025' })
+    await expect(
+      setupSimpleStockStep3(VENUE, PRODUCT, { reorderPoint: 4, costPerUnit: 12, expectedUpdatedAt: version } as any),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
+  })
+
+  it('con receta y versión vieja bajo el candado: 409 antes de cambiar el método', async () => {
+    prismaMock.product.findUnique.mockResolvedValue({ id: PRODUCT, recipe: { id: 'r1' }, updatedAt: new Date(version) } as any)
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ updatedAt: new Date('2026-11-05T18:00:01.000Z') }] as any)
+    await expect(
+      setupSimpleStockStep3(VENUE, PRODUCT, { reorderPoint: 4, costPerUnit: 12, expectedUpdatedAt: version } as any),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
+    expect(prismaMock.product.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('ProductWizardStep3SimpleStockSchema — existencias opcionales y mensajes en español', () => {
+  const { ProductWizardStep3SimpleStockSchema } = jest.requireActual('@/schemas/dashboard/inventory.schema')
+  const params = { venueId: 'cjld2cjxh0000qzrmn831i7rn', productId: 'cjld2cyuq0000t3rmniod1foy' }
+
+  it('acepta mínimo y costo sin existencias', () => {
+    expect(ProductWizardStep3SimpleStockSchema.safeParse({ params, body: { reorderPoint: 3, costPerUnit: 5 } }).success).toBe(true)
+  })
+
+  it('existencias en blanco (null): dice en español qué falta', () => {
+    const r = ProductWizardStep3SimpleStockSchema.safeParse({ params, body: { initialStock: null, reorderPoint: 3, costPerUnit: 5 } })
+    expect(r.success).toBe(false)
+    expect(r.error.issues[0].message).toMatch(/existencias/i)
+    expect(r.error.issues[0].message).not.toMatch(/Expected/)
+  })
+
+  it('acepta la versión esperada en ISO', () => {
+    const body = { reorderPoint: 3, costPerUnit: 5, expectedUpdatedAt: '2026-11-05T18:00:00.123Z' }
+    expect(ProductWizardStep3SimpleStockSchema.safeParse({ params, body }).success).toBe(true)
+  })
+})

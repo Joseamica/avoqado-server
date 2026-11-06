@@ -21,7 +21,10 @@ import {
   extraccionesPendientes,
   getCfdiStatus,
   listCfdisForVenue,
+  loadOrderForCfdiFromDb,
   MOTIVO_CONTRATO_DESCONOCIDO,
+  type MotivoNoFacturable,
+  NoFacturableError,
   PROCESANDO,
 } from '@/services/fiscal/cfdi.service'
 import { vistaPreviaContrato, confirmarContratoIvaIncluido, VistaPreviaContrato } from '@/services/fiscal/confirmarContratoDePrecio.service'
@@ -218,14 +221,24 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       return
     }
 
+    // D11: con el motivo del cargador, el texto dice lo que de verdad falta y dónde se arregla (`motivo` es aditivo). Mismo status de antes.
+    const motivo = err instanceof NoFacturableError ? err.motivo : undefined
+    if (motivo?.code === 'VENTA_NO_ENCONTRADA') {
+      logger.warn(aviso)
+      res.status(404).json({ code: 'ORDER_NOT_FOUND', error: motivo.texto })
+      return
+    }
+
     if (/not found|no fiscal emisor/i.test(message)) {
-      // Testarudo 24-sep: el texto viejo («sin emisor fiscal configurado») mandaba a revisar una configuración
-      // que estaba bien. Éste dice qué revisar y qué caso todavía no se puede facturar.
+      // Testarudo 24-sep: el texto viejo («sin emisor fiscal configurado») mandaba a revisar una configuración que estaba bien. D11: sin
+      // motivo (no debería pasar), un texto que tampoco habla de efectivo.
       logger.warn(aviso)
       res.status(404).json({
         code: 'CFDI_NO_EMISOR',
         error:
-          'No se pudo determinar quién factura esta venta. Revisa en Facturación › Configuración que el comercio con el que se cobró tenga la facturación encendida. Una venta cobrada sin terminal (efectivo o transferencia) sólo se puede facturar si el negocio tiene un solo RFC; con más de un RFC todavía no.',
+          motivo?.texto ??
+          'No se pudo determinar quién factura esta venta. Revisa en Facturación › Configuración que el comercio con el que se cobró tenga la facturación configurada y encendida.',
+        ...(motivo ? { motivo: motivo.code } : {}),
       })
       return
     }
@@ -233,7 +246,7 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     // Merchant gating: facturacionEnabled or autofacturaEnabled is false → 403 (feature disabled, not missing)
     if (/no habilitada/i.test(message)) {
       logger.warn(aviso)
-      res.status(403).json({ error: message })
+      res.status(403).json({ error: motivo?.texto ?? message, ...(motivo ? { motivo: motivo.code } : {}) })
       return
     }
 
@@ -246,6 +259,52 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
 
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al facturar' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/orders/:orderId/cfdi/quien-factura
+ *
+ * D11: antes de capturar los datos del cliente, el panel pregunta si se sabe QUIÉN factura esta venta y si tiene la facturación
+ * encendida. Es la MISMA regla que «Facturar» (el cargador, con `permitirEfectivo` como el personal), sin efectos. Sólo cubre quién
+ * factura: lo demás (receptor, importes, ya facturada) lo sigue diciendo «Facturar». Mismos candados que facturar.
+ */
+export async function quienFacturaLaVentaController(req: Request, res: Response): Promise<void> {
+  const { orderId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    let motivo = undefined as MotivoNoFacturable | undefined
+    const bundle = await loadOrderForCfdiFromDb(orderId, { permitirEfectivo: true, explicar: m => (motivo = m) })
+    // Aislamiento antes de decir nada: una venta de otro negocio (o que no existe) es un 404 sin motivo.
+    if ((bundle ? bundle.venueId : motivo?.venueId) !== venueId) {
+      res.status(404).json({ code: 'ORDER_NOT_FOUND', error: 'Esta venta no existe o no es de este negocio.' })
+      return
+    }
+    // Un motivo con el bundle cargado = otro comercio de la cuenta no factura (el 422 de «Facturar»).
+    if (bundle?.facturacionEnabled && !motivo) {
+      res.status(200).json({ listo: true })
+      return
+    }
+    // Codex r1 #1 y r2 #2/#3: si la venta YA tiene historia fiscal (un intento de factura en cualquier estado, o estuvo en una global), el aviso
+    // previo no se pone: «Facturar» puede retomar lo guardado sin mirar la configuración de hoy (una factura timbrada cuya respuesta se
+    // perdió, una extracción a medias), y sólo el servidor sabe cuál rama toca. Ahí decide al facturar, con el mismo texto del motivo.
+    const historia = await prisma.cfdi.findFirst({
+      where: { venueId, OR: [{ orderId }, { isGlobal: true, manifiestoGlobal: { some: { orderId } } }] },
+      select: { id: true },
+    })
+    if (historia || !motivo) {
+      res.status(200).json({ listo: true })
+      return
+    }
+    res.status(200).json({ listo: false, motivo: motivo.code, error: motivo.texto })
+  } catch (err: unknown) {
+    logger.error(`[cfdi.controller] quién factura la venta ${orderId}: ${err instanceof Error ? err.message : String(err)}`)
+    res.status(500).json({ error: 'No se pudo revisar quién factura esta venta.' })
   }
 }
 

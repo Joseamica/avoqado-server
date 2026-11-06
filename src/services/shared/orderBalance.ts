@@ -314,6 +314,15 @@ export function impuestoQueSeCobraAparte(o: {
 }
 
 /**
+ * D16: el gemelo en SQL de `impuestoQueSeCobraAparte`, para los reportes que suman ventas en la base. Una venta = lo que pagó el
+ * cliente por la mercancía; en una cuenta nativa el subtotal ya trae el IVA, en una con IVA aparte hay que sumárselo (si no,
+ * «Total cobrado» queda por debajo de «Cobraste» justo por el IVA). `t` es la tabla o alias de `Order` ya entre comillas.
+ */
+export function sqlImpuestoQueSeCobraAparte(t = '"Order"'): string {
+  return `(CASE WHEN ${t}."status" IN ('CANCELLED', 'DELETED') OR ${t}."contratoDePrecio" = 'IVA_INCLUIDO' THEN 0 ELSE GREATEST(${t}."taxAmount", 0) END)`
+}
+
+/**
  * El `Order.total` que se GUARDA, a partir de los importes de la cuenta. PURA.
  *
  * ── Por qué existe ──────────────────────────────────────────────────────────
