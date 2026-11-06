@@ -719,7 +719,8 @@ export async function listContacts(access: CrmAccess, accountId: string, opts: {
     prisma.crmContact.findMany({
       where: { accountId },
       select: DETAIL_SELECT.contacts.select,
-      orderBy: DETAIL_SELECT.contacts.orderBy,
+      // The ficha's order (`DETAIL_SELECT.contacts`), written out so the pagination guard sees its unique tiebreak.
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
       take: take + 1,
       ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
     }),
