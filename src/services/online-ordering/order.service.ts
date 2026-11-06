@@ -35,7 +35,8 @@ import {
   liveCardDraftsWhere,
   unpaidFoliosWhere,
 } from './constants'
-import { closesAt } from './hours'
+import { closesAt, isWithinHours } from './hours'
+import type { OnlineOrderingConfig, Reloj } from './types'
 import { MAX_GERENTES_AVISADOS, ROLES_QUE_RECIBEN_EL_AVISO } from '@/services/shared/cuentaCancelada'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
@@ -63,7 +64,9 @@ export interface CreateOnlineOrderInput {
   channel?: 'QR' | 'LINK' | null
   note?: string | null
   whatsappConsent?: boolean
+  /** Una hora fija (pruebas). Sin ella se lee `reloj` (o el del sistema): al empezar, y otra vez justo antes de escribir (R52). */
   now?: Date
+  reloj?: Reloj
 }
 
 export interface CreateOnlineOrderOptions {
@@ -441,7 +444,9 @@ async function admitFolio(tx: Prisma.TransactionClient, venueId: string, now: Da
 }
 
 export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: CreateOnlineOrderOptions): Promise<CreateOnlineOrderResult> {
-  const now = input.now ?? new Date()
+  const fija = input.now
+  const reloj: Reloj = input.reloj ?? (fija ? () => fija : () => new Date())
+  const now = reloj()
   const externalId = `web:${input.idempotencyKey}`
 
   // 1. T7: la identidad sale de la sesión sólo si probó el teléfono del PEDIDO por el OTP de WhatsApp (R6: tenerlo en la ficha no
@@ -522,6 +527,8 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   /** Tienda híbrida: se copia del ajuste al pedido y nunca cambia (`false` = folio de «Nadie»). */
   let requiresAcceptance: boolean
   let acceptDeadlineAt: Date
+  /** R52 (Codex f1 r5): el horario con el que se comprueba, justo antes de escribir, que el folio nace vigente (sólo folios). */
+  let horarioDelFolio: { hours: OnlineOrderingConfig['hours']; timezone: string } | null = null
   try {
     // 2. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
     await opts.assertCanCreate()
@@ -569,7 +576,8 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       // R23: mín(ahora + 30 min, cierre de la franja vigente) en la zona del negocio; sin cierre, sólo 30 min. Se guarda y no se
       // recalcula si cambia el horario.
       const venue = await prisma.venue.findUnique({ where: { id: input.venueId }, select: { timezone: true } })
-      const cierre = closesAt(state.config.hours, now, venue?.timezone || 'America/Mexico_City')
+      horarioDelFolio = { hours: state.config.hours, timezone: venue?.timezone || 'America/Mexico_City' }
+      const cierre = closesAt(state.config.hours, now, horarioDelFolio.timezone)
       const plazo = new Date(now.getTime() + FOLIO_TIMEOUT_MINUTES * 60_000)
       acceptDeadlineAt = cierre && cierre < plazo ? cierre : plazo
     }
@@ -621,6 +629,21 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         if (!requiresAcceptance) await admitFolio(tx, input.venueId, now)
 
         orderNumber = await pickOrderNumber(tx, input.venueId)
+        // R52 (Codex f1 r5): el plazo se calculó con la hora de la petición (R23) y no se estira. Justo antes de escribir, con el reloj
+        // de ESTE momento, el folio tiene que nacer vigente y con la tienda abierta (la misma regla de apertura); si cotizar y esperar
+        // los candados cruzó el cierre (pidió 20:59:59, se escribe 21:00:05), la misma respuesta que fuera de horario, guardada igual.
+        if (horarioDelFolio) {
+          const alEscribir = reloj()
+          if (
+            acceptDeadlineAt.getTime() <= alEscribir.getTime() ||
+            !isWithinHours(horarioDelFolio.hours, alEscribir, horarioDelFolio.timezone)
+          ) {
+            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_CLOSED', {
+              status: 'CLOSED',
+              reason: 'OUTSIDE_HOURS',
+            })
+          }
+        }
       } catch (error) {
         if (!isDefinitiveRejection(error)) throw error
         return saveRejection(tx, error)

@@ -1160,6 +1160,76 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
+  describe('R52 (Codex f1 r5): un folio nunca nace vencido', () => {
+    const SIN_HORA_FIJA = { now: undefined } // la ruta no pasa hora: lee el reloj
+    /** Cotizar y esperar el candado de admisión tarda: el reloj avanza a `escritura` al tomar ese candado. */
+    const relojQueAvanzaEnLaAdmision = (escritura: Date) =>
+      (prismaMock.$executeRaw as jest.Mock).mockImplementation(async (_sql: unknown, llave: string) => {
+        if (llave === ADMISSION_LOCK) jest.setSystemTime(escritura)
+        return 0
+      })
+    const conCierreALas21DeCancun = () => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: HORARIO } })
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Cancun' } as any) // UTC-5 todo el año
+    }
+    const conRelojFalso = async (peticion: Date, fn: () => Promise<void>) => {
+      jest.useFakeTimers({ now: peticion, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+      try {
+        await fn()
+      } finally {
+        jest.useRealTimers()
+      }
+    }
+
+    it('pide a las 20:59:59 y se escribe a las 21:00:05 (cierre 21:00): responde como fuera de horario, guarda ese rechazo y no crea nada', async () => {
+      conCierreALas21DeCancun()
+      await conRelojFalso(new Date('2026-10-15T01:59:59.000Z'), async () => {
+        relojQueAvanzaEnLaAdmision(new Date('2026-10-15T02:00:05.000Z'))
+
+        const err = await createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR).catch((e: unknown) => e)
+
+        // Lo mismo que hoy responde la tienda fuera de horario (paso 3), sin código ni enum nuevos.
+        expect(err).toMatchObject({
+          statusCode: 409,
+          code: 'ORDERING_CLOSED',
+          message: 'La tienda no está recibiendo pedidos en este momento.',
+          details: { status: 'CLOSED', reason: 'OUTSIDE_HOURS' },
+          final: true,
+        })
+        expect(prismaMock.order.create).not.toHaveBeenCalled()
+        expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+        expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
+          ...LLAVE_ANON,
+          responseStatus: 409,
+          responseBody: { code: 'ORDERING_CLOSED', details: { status: 'CLOSED', reason: 'OUTSIDE_HOURS' } },
+        })
+      })
+    })
+
+    it('vecina: a las 20:50, aunque la escritura tarde 6 s, crea el folio con plazo 21:00 (R23: el plazo no se recalcula)', async () => {
+      conCierreALas21DeCancun()
+      await conRelojFalso(new Date('2026-10-15T01:50:00.000Z'), async () => {
+        relojQueAvanzaEnLaAdmision(new Date('2026-10-15T01:50:06.000Z'))
+        const r = await createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR)
+        expect(r).toMatchObject({ replay: false, status: 'PENDING_ACCEPTANCE', acceptDeadlineAt: '2026-10-15T02:00:00.000Z' })
+        expect(prismaMock.onlineOrder.create).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    it('la repetición con la misma llave de un folio que SÍ se creó devuelve su folio aunque ya sea tarde', async () => {
+      conCierreALas21DeCancun()
+      await conRelojFalso(new Date('2026-10-15T01:59:59.000Z'), async () => {
+        relojQueAvanzaEnLaAdmision(new Date('2026-10-15T02:00:05.000Z'))
+        // El envío vivo de la misma llave lo creó mientras éste esperaba: aparece ya dentro del candado de admisión (después de la hora).
+        prismaMock.order.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(existing({ customerId: null, onlineOrder: oo({ requestHash: huellaAnon() }) }) as any)
+        await expect(createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR)).resolves.toMatchObject({ replay: true })
+        expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+      })
+    })
+  })
+
   describe('T3b: tope propio de 60 folios sin pagar y el aviso una vez por hora', () => {
     const LLENO = 60
     /** Cuenta folios sin pagar como `unpaidFoliosWhere` (R18) y nada de «Mi equipo». */
