@@ -10,6 +10,7 @@
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from '../../services/dashboard/reglasDeDescuento'
 
 // ==========================================
 // LIST DISCOUNTS
@@ -128,6 +129,10 @@ export async function createDiscount(req: Request, res: Response) {
     if (value === undefined || value === null) {
       return res.status(400).json({ success: false, message: 'value es requerido' })
     }
+
+    // D14: ANDROID e iOS no pasan por Zod; la regla de alcance y límites es la misma del panel.
+    const invalido = validarCambioDeDescuento(null, { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer })
+    if (invalido) return res.status(400).json({ success: false, message: invalido })
 
     // Validate value based on type
     if (type === 'PERCENTAGE' && (value < 0 || value > 100)) {
@@ -265,6 +270,10 @@ export async function updateDiscount(req: Request, res: Response) {
       active,
     } = req.body
 
+    const cambio = { scope, targetCategoryIds, maxTotalUses, maxUsesPerCustomer }
+    const invalido = validarCambioDeDescuento(existing, cambio)
+    if (invalido) return res.status(400).json({ success: false, message: invalido })
+
     // Validate value based on type if provided
     const effectiveType = type ?? existing.type
     const effectiveValue = value ?? Number(existing.value)
@@ -276,7 +285,7 @@ export async function updateDiscount(req: Request, res: Response) {
     }
 
     const discount = await prisma.discount.update({
-      where: { id: discountId },
+      where: dondeEscribir(discountId, existing, cambio),
       data: {
         ...(name !== undefined && { name: name.trim() }),
         ...(description !== undefined && { description }),
@@ -337,6 +346,7 @@ export async function updateDiscount(req: Request, res: Response) {
       },
     })
   } catch (error) {
+    if (esCambioCruzado(error)) return res.status(409).json({ success: false, message: CAMBIO_CRUZADO })
     logger.error('Error updating discount (mobile)', { error })
     return res.status(500).json({ success: false, message: 'Error al actualizar descuento' })
   }

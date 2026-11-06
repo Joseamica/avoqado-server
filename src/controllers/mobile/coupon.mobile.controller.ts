@@ -10,6 +10,7 @@
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from '../../services/dashboard/reglasDeDescuento'
 import { validateCouponCode } from '../../services/dashboard/coupon.dashboard.service'
 import { textoDeRechazoDeCupon } from '../../services/shared/cuponDeLaVenta'
 
@@ -82,6 +83,9 @@ export async function createCoupon(req: Request, res: Response) {
     if (!discountId) {
       return res.status(400).json({ success: false, message: 'discountId es requerido' })
     }
+    // D14: ANDROID manda los usos tal como se escriben (0 incluido); la regla es la misma del panel.
+    const invalido = validarCambioDeDescuento(null, { maxUses, maxUsesPerCustomer })
+    if (invalido) return res.status(400).json({ success: false, message: invalido })
     if (!code || !code.trim()) {
       return res.status(400).json({ success: false, message: 'code es requerido' })
     }
@@ -186,6 +190,9 @@ export async function updateCoupon(req: Request, res: Response) {
     }
 
     const { code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
+    const cambio = { maxUses, maxUsesPerCustomer }
+    const invalido = validarCambioDeDescuento(existing, cambio)
+    if (invalido) return res.status(400).json({ success: false, message: invalido })
 
     // If updating code, normalize and check uniqueness
     let normalizedCode: string | undefined = undefined
@@ -220,7 +227,7 @@ export async function updateCoupon(req: Request, res: Response) {
     }
 
     const coupon = await prisma.couponCode.update({
-      where: { id: couponId },
+      where: dondeEscribir(couponId, existing, cambio),
       data: {
         ...(normalizedCode !== undefined && { code: normalizedCode }),
         ...(maxUses !== undefined && { maxUses }),
@@ -256,6 +263,7 @@ export async function updateCoupon(req: Request, res: Response) {
       },
     })
   } catch (error) {
+    if (esCambioCruzado(error)) return res.status(409).json({ success: false, message: CAMBIO_CRUZADO })
     logger.error('Error updating coupon (mobile)', { error })
     return res.status(500).json({ success: false, message: 'Error al actualizar cupon' })
   }

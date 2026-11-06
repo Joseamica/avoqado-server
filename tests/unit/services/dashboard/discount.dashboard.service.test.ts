@@ -235,7 +235,7 @@ describe('Discount Dashboard Service', () => {
       prismaMock.discount.findFirst.mockResolvedValue(null)
 
       await expect(getDiscountById('venue-123', 'nonexistent')).rejects.toThrow(NotFoundError)
-      await expect(getDiscountById('venue-123', 'nonexistent')).rejects.toThrow('Discount not found')
+      await expect(getDiscountById('venue-123', 'nonexistent')).rejects.toThrow('El descuento no existe')
     })
 
     it('should enforce multi-tenant isolation (venueId filter)', async () => {
@@ -326,7 +326,7 @@ describe('Discount Dashboard Service', () => {
           type: 'PERCENTAGE',
           value: 150,
         }),
-      ).rejects.toThrow('Percentage discount value must be between 0 and 100')
+      ).rejects.toThrow('El porcentaje del descuento debe estar entre 0 y 100')
     })
 
     it('should throw BadRequestError for negative percentage value', async () => {
@@ -353,7 +353,7 @@ describe('Discount Dashboard Service', () => {
           type: 'FIXED_AMOUNT',
           value: -5,
         }),
-      ).rejects.toThrow('Fixed amount discount value must be positive')
+      ).rejects.toThrow('El monto del descuento no puede ser negativo')
     })
 
     it('should throw BadRequestError if customerGroupId does not exist', async () => {
@@ -374,7 +374,7 @@ describe('Discount Dashboard Service', () => {
           value: 15,
           customerGroupId: 'invalid-group',
         }),
-      ).rejects.toThrow('Customer group not found')
+      ).rejects.toThrow('El grupo de clientes no existe en este negocio')
     })
 
     it('should create discount with valid customerGroupId', async () => {
@@ -419,7 +419,7 @@ describe('Discount Dashboard Service', () => {
           scope: 'QUANTITY',
           buyQuantity: 2,
         }),
-      ).rejects.toThrow('BOGO discounts require both buyQuantity and getQuantity')
+      ).rejects.toThrow('Para «Compra X y lleva Y» indica cuántos se compran y cuántos se llevan')
     })
 
     it('should create BOGO discount with default 100% discount', async () => {
@@ -472,7 +472,7 @@ describe('Discount Dashboard Service', () => {
           value: 20,
           timeFrom: '17:00',
         }),
-      ).rejects.toThrow('timeUntil is required when timeFrom is set')
+      ).rejects.toThrow('Indica también la hora de fin del horario')
     })
   })
 
@@ -574,10 +574,10 @@ describe('Discount Dashboard Service', () => {
   })
 
   describe('cloneDiscount', () => {
-    it('should clone discount with "(Copy)" suffix', async () => {
+    it('should clone discount with "(copia)" suffix', async () => {
       const originalDiscount = createMockDiscount({ name: 'Summer Sale' })
       const clonedDiscount = {
-        ...createMockDiscount({ id: 'discount-clone', name: 'Summer Sale (Copy)', active: false, currentUses: 0 }),
+        ...createMockDiscount({ id: 'discount-clone', name: 'Summer Sale (copia)', active: false, currentUses: 0 }),
         customerGroup: null,
       }
 
@@ -586,12 +586,12 @@ describe('Discount Dashboard Service', () => {
 
       const result = await cloneDiscount('venue-123', 'discount-123')
 
-      expect(result.name).toBe('Summer Sale (Copy)')
+      expect(result.name).toBe('Summer Sale (copia)')
       expect(result.active).toBe(false) // Clone starts inactive
       expect(prismaMock.discount.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            name: 'Summer Sale (Copy)',
+            name: 'Summer Sale (copia)',
             active: false,
             currentUses: 0,
           }),
