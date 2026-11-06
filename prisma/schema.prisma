@@ -8585,6 +8585,13 @@ model LoyaltyTransaction {
   /// Set when this REDEEM produced a discount on a check (see OrderDiscount).
   orderDiscount OrderDiscount?
 
+  /// EARN: cuántos de `points` son el bono por visita (`LoyaltyConfig.pointsPerVisit`). Un reembolso parcial no lo toca; uno completo, sí. Null = sin bono.
+  visitBonusPoints Int?
+  /// EARN: los pesos sobre los que se calcularon `points` (sin propina ni crédito de cambio). Un reembolso quita en proporción a ESTO. Null = filas de antes.
+  baseAmount       Decimal? @db.Decimal(12, 2)
+  /// ADJUST que nace de un reembolso: el `Payment` REFUND que lo causó (sin FK: referencia blanda). Único: una sola reversa por reembolso.
+  refundPaymentId  String? @unique
+
   createdAt DateTime @default(now())
 
   @@index([customerId, createdAt])

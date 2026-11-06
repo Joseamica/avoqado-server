@@ -11246,7 +11246,11 @@ router.get(
  *           schema:
  *             type: object
  *             properties:
+ *               active: { type: boolean }
  *               pointsPerDollar: { type: number, minimum: 0 }
+ *               pointsPerVisit: { type: integer, minimum: 0 }
+ *               minPointsRedeem: { type: integer, minimum: 0 }
+ *               pointsExpireDays: { type: integer, minimum: 0, nullable: true }
  *               minPurchaseAmount: { type: number, minimum: 0 }
  *               redemptionRate: { type: number, minimum: 0 }
  *               minRedemptionPoints: { type: integer, minimum: 0 }

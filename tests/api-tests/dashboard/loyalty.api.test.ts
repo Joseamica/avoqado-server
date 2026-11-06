@@ -58,11 +58,13 @@ beforeAll(async () => {
         minPointsRedeem: 100,
         active: true,
       }),
-    updateLoyaltyConfig: (_req: any, res: any) =>
+    // `recibido`: lo que llegó al controlador DESPUÉS del zod (`validateRequest` reemplaza el cuerpo por lo que el esquema deja pasar).
+    updateLoyaltyConfig: (req: any, res: any) =>
       res.status(200).json({
         venueId: VENUE_ID,
         pointsPerDollar: 2,
         active: true,
+        recibido: req.body,
       }),
     calculatePoints: (_req: any, res: any) => res.status(200).json({ points: 100 }),
     calculateDiscount: (_req: any, res: any) => res.status(200).json({ discount: 5.0 }),
@@ -207,6 +209,50 @@ describe('Loyalty API - Authentication & Authorization', () => {
 
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('pointsPerDollar', 2)
+    })
+
+    // D7 (5-nov): el zod sólo conocía `enabled`, `minRedemptionPoints` y `pointsExpirationDays`, y el panel manda los nombres que lee
+    // el servicio. Respondía 200 sin guardar: apagar el programa, el mínimo, la caducidad y el bono no surtían efecto.
+    it('D7: lo que manda el panel llega completo al servicio (apagar el programa, mínimo, caducidad y bono)', async () => {
+      const token = makeToken('MANAGER', ['loyalty:update'])
+      const delPanel = {
+        active: false,
+        pointsPerDollar: 1,
+        pointsPerVisit: 10,
+        redemptionRate: 0.01,
+        minPointsRedeem: 50,
+        pointsExpireDays: null,
+      }
+      const res = await request(app)
+        .put(`/api/v1/dashboard/venues/${VENUE_ID}/loyalty/config`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(delPanel)
+
+      expect(res.status).toBe(200)
+      expect(res.body.recibido).toEqual(delPanel)
+    })
+
+    it('D7: los nombres viejos se siguen aceptando (nadie los manda hoy, pero no se rompe a quien lo hiciera)', async () => {
+      const token = makeToken('MANAGER', ['loyalty:update'])
+      const viejos = { enabled: true, minRedemptionPoints: 100, pointsExpirationDays: 365 }
+      const res = await request(app)
+        .put(`/api/v1/dashboard/venues/${VENUE_ID}/loyalty/config`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(viejos)
+
+      expect(res.status).toBe(200)
+      expect(res.body.recibido).toEqual(viejos)
+    })
+
+    it('D7: rechaza en español un mínimo o una caducidad negativos', async () => {
+      const token = makeToken('MANAGER', ['loyalty:update'])
+      for (const malo of [{ minPointsRedeem: -1 }, { pointsExpireDays: -5 }, { active: 'sí' }]) {
+        const res = await request(app)
+          .put(`/api/v1/dashboard/venues/${VENUE_ID}/loyalty/config`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(malo)
+        expect(res.status).toBe(400)
+      }
     })
   })
 
