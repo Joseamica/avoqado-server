@@ -20724,6 +20724,11 @@ model OnlineOrderingSettings {
   hours              Json?
   /// Último sondeo de la BANDEJA ABIERTA (cabecera `x-online-orders-tray: 1`): es el «latido» de presencia.
   lastInboxPollAt    DateTime?
+  /// Tienda híbrida: ¿los pedidos nuevos esperan a que alguien los acepte? `true` (default) = como hasta hoy. `false` = pedir por
+  /// QR / pagar en la barra sin aceptación (el pedido nace aceptado).
+  requiresAcceptance Boolean   @default(true)
+  /// Último sondeo de la lista «por cobrar» (pedidos sin aceptación que esperan pago en la barra): latido de presencia.
+  lastToPayPollAt    DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -20764,6 +20769,11 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
+  /// Tienda híbrida: `true` = este pedido pasó (o pasa) por aceptación manual. Las filas viejas quedan en `true`.
+  requiresAcceptance Boolean @default(true)
+  /// Por dónde llegó el pedido: `'QR'` o `'LINK'`. Nulo en los pedidos anteriores a la tienda híbrida.
+  channel            String?
+
   /// Fase 2: el cargo con tarjeta de este pedido (nulo si paga al recoger).
   charge OnlineOrderCharge?
 
@@ -20779,6 +20789,7 @@ model OnlineOrder {
   @@index([venueId, createdAt])
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
+  @@index([venueId, requiresAcceptance, status])
 }
 
 /// Cargo con tarjeta de un pedido en línea (fase 2). Nace ANTES que el pedido (al abrir la sesión de pago), por eso
