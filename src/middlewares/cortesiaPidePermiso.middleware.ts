@@ -71,7 +71,8 @@ export const checkCortesiaEnDescuento = async (req: Request, res: Response, next
   try {
     cortesiasAutorizadas.delete(req)
     const regala =
-      req.body?.type === DiscountType.COMP || (await traeDescuentoDeCortesia(req.params.venueId, { orderDiscountId: req.body?.discountId }, []))
+      req.body?.type === DiscountType.COMP ||
+      (await traeDescuentoDeCortesia(req.params.venueId, { orderDiscountId: req.body?.discountId }, []))
     return regala ? exigirCortesia(req, res, next) : next()
   } catch (error) {
     return next(error)

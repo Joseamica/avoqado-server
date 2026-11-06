@@ -718,9 +718,12 @@ describe('existing discount policies', () => {
     })
     expect((await snapshot(o.id)).discounts).toHaveLength(0)
   })
+  // La sesión de la TPV no trae `staffVenueId` (Codex D1 r1 #1): la membresía se busca por el usuario.
   it('D1: con permiso, la cortesía manual la autoriza quien la aplica, no el id que manda el cliente', async () => {
     const o = await newOrder()
-    expect(await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', staffVenueId, 'id-inventado', true)).toMatchObject({
+    expect(
+      await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, 'id-inventado', { userId: staffId }),
+    ).toMatchObject({
       success: true,
       amount: 100,
     })
@@ -728,9 +731,22 @@ describe('existing discount policies', () => {
       authorizedById: staffVenueId,
     })
   })
+  it('D1: con PIN de gerente, la cortesía manual la autoriza quien tecleó el PIN', async () => {
+    const o = await newOrder()
+    await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, undefined, {
+      userId: 'sin-membresia',
+      porPin: staffVenueId,
+    })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
   it('D1: un descuento manual de % sigue sin pedir permiso de cortesía', async () => {
     const o = await newOrder()
-    expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)).toMatchObject({ success: true, amount: 10 })
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)).toMatchObject({
+      success: true,
+      amount: 10,
+    })
   })
   it('D14: un cupón de % sigue sin pedir permiso de cortesía', async () => {
     const o = await newOrder()

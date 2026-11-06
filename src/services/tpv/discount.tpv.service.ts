@@ -231,8 +231,9 @@ export async function applyPredefinedDiscount(
  * @param value - Discount value
  * @param reason - Reason for the discount
  * @param staffVenueId - Staff venue ID applying the discount
- * @param authorizedById - Ignorado en una cortesía: la autoriza quien la aplica (D1)
- * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado.
+ * @param authorizedById - Ignorado en una cortesía (D1)
+ * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él): su usuario y, si usó el PIN de gerente,
+ *   la membresía de quien lo tecleó. La cortesía la autoriza ese gerente o, sin PIN, la membresía de quien la aplica.
  */
 export async function applyManualDiscount(
   venueId: string,
@@ -242,16 +243,21 @@ export async function applyManualDiscount(
   reason: string,
   staffVenueId: string,
   authorizedById?: string,
-  puedeRegalar = false,
+  cortesia?: { userId?: string; porPin?: string },
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
   // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
-  // D1 (hz:f34960c5:D1): una cortesía manual pide `orders:comp` y la autoriza QUIEN la aplica; antes bastaba cualquier
-  // `authorizedById` que mandara el cliente, sin verificar.
+  // D1 (hz:f34960c5:D1): una cortesía manual pide `orders:comp`; antes bastaba cualquier `authorizedById` que mandara el
+  // cliente, sin verificar. La autoriza el gerente del PIN o, sin PIN, la membresía de quien la aplica (la sesión de la TPV
+  // no trae `staffVenueId`). Sin membresía activa en este negocio, el motor la rechaza como hoy.
   if (type === 'COMP') {
-    if (!puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
-    authorizedById = staffVenueId
+    if (!cortesia) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+    authorizedById =
+      cortesia.porPin ??
+      (cortesia.userId
+        ? (await prisma.staffVenue.findFirst({ where: { venueId, staffId: cortesia.userId, active: true }, select: { id: true } }))?.id
+        : undefined)
   }
   return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId)
 }

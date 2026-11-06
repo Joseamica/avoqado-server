@@ -14,6 +14,10 @@ jest.mock('../../../../src/config/env', () => ({
   NODE_ENV: 'production',
 }))
 jest.mock('@/services/tpv/discount.tpv.service')
+jest.mock('@/middlewares/cortesiaPidePermiso.middleware', () => ({
+  ...jest.requireActual('@/middlewares/cortesiaPidePermiso.middleware'),
+  tieneCortesiaAutorizada: jest.fn(() => false),
+}))
 jest.mock('@/middlewares/permissionFlag.middleware', () => ({
   ...jest.requireActual('@/middlewares/permissionFlag.middleware'),
   tienePermisoEnVenue: jest.fn(),
@@ -25,6 +29,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '@/errors/AppErro
 import { MENSAJE_ORDEN_IMPORTADA } from '@/services/shared/ordenImportada'
 import { globalErrorHandler } from '../../../../src/app'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 
 const applyCouponMock = discountTpvService.applyCouponCode as jest.Mock
 const permisoMock = tienePermisoEnVenue as jest.Mock
@@ -153,5 +158,55 @@ describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () 
 
     expect(res.status).toBe(403)
     expect(res.body).toMatchObject({ success: false, error: 'No tienes permiso para dar cortesías' })
+  })
+})
+
+// D1 (hz:f34960c5:D1): el controlador de la TPV pasa al servicio lo que acreditó `checkCortesiaEnDescuento` en ESTE request.
+describe('D1: descuento predefinido y manual de la TPV reciben la acreditación de cortesía', () => {
+  const manualMock = discountTpvService.applyManualDiscount as jest.Mock
+  const predefinidoMock = discountTpvService.applyPredefinedDiscount as jest.Mock
+  const acreditado = tieneCortesiaAutorizada as jest.Mock
+  function app(auth: Record<string, unknown>) {
+    const a = express()
+    a.use(express.json())
+    a.use((req, _res, next) => {
+      ;(req as any).authContext = { venueId: 'v1', ...auth }
+      next()
+    })
+    a.post('/venues/:venueId/orders/:orderId/discounts/manual', controller.applyManualDiscount)
+    a.post('/venues/:venueId/orders/:orderId/discounts/apply', controller.applyPredefinedDiscount)
+    a.use(globalErrorHandler)
+    return a
+  }
+  beforeEach(() => {
+    manualMock.mockResolvedValue({ success: true, amount: 100, newOrderTotal: 10 })
+    predefinidoMock.mockResolvedValue({ success: true, amount: 100, newOrderTotal: 10 })
+  })
+
+  it('manual con cortesía acreditada y PIN: pasa el usuario y quien tecleó el PIN', async () => {
+    acreditado.mockReturnValue(true)
+    await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
+      .post('/venues/v1/orders/o1/discounts/manual')
+      .send({ type: 'COMP', value: 100, reason: 'Invitación', authorizedById: 'id-inventado' })
+    expect(manualMock).toHaveBeenCalledWith('v1', 'o1', 'COMP', 100, 'Invitación', undefined, 'id-inventado', {
+      userId: 'u-cajera',
+      porPin: 'sv-gerente',
+    })
+  })
+
+  it('manual sin acreditación: el servicio no recibe cortesía', async () => {
+    acreditado.mockReturnValue(false)
+    await request(app({ userId: 'u-cajera' }))
+      .post('/venues/v1/orders/o1/discounts/manual')
+      .send({ type: 'COMP', value: 100, reason: 'x' })
+    expect(manualMock.mock.calls[0][7]).toBeUndefined()
+  })
+
+  it('predefinido: pasa si el request quedó acreditado', async () => {
+    acreditado.mockReturnValue(true)
+    await request(app({ userId: 'u-cajera' }))
+      .post('/venues/v1/orders/o1/discounts/apply')
+      .send({ discountId: 'd-comp' })
+    expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-comp', undefined, undefined, true)
   })
 })

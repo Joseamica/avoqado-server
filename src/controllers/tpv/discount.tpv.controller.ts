@@ -84,7 +84,14 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
     const authContext = (req as any).authContext
     const staffVenueId = authContext?.staffVenueId
 
-    const result = await discountTpvService.applyPredefinedDiscount(venueId, orderId, discountId, staffVenueId, authorizedById, tieneCortesiaAutorizada(req))
+    const result = await discountTpvService.applyPredefinedDiscount(
+      venueId,
+      orderId,
+      discountId,
+      staffVenueId,
+      authorizedById,
+      tieneCortesiaAutorizada(req),
+    )
 
     if (result.success) {
       res.status(200).json({
@@ -135,8 +142,8 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
       reason,
       staffVenueId,
       authorizedById,
-      // D1: lo acredita `checkCortesiaEnDescuento` en la ruta (con PIN de gerente).
-      tieneCortesiaAutorizada(req),
+      // D1: lo acredita `checkCortesiaEnDescuento` en la ruta (con PIN de gerente: `overrideAuthorizedBy`).
+      tieneCortesiaAutorizada(req) ? { userId: authContext?.userId, porPin: authContext?.overrideAuthorizedBy } : undefined,
     )
 
     if (result.success) {
