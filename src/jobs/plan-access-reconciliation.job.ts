@@ -26,9 +26,13 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * Es el mismo patrón con el que el repo ya cerró huecos equivalentes (`cash-drawer-reconciler`,
  * `paid-order-reconciler`): los eventos son el camino rápido, el barrido es la garantía.
  *
+ * 🔴 D4 + D6 (5-nov-2026) amplió los candidatos a toda fila LIGADA a Stripe que la regla única niega: además de los planes
+ * apagados, la prueba vencida cuyo cobro Stripe ya hizo (el aviso de la renovación se perdió: D4) y la suspendida que ya
+ * pagó (sus avisos de recuperación se perdieron, codex r1 #4).
+ *
  * Lo que NO hace, a propósito:
- * - **No levanta una suspensión** (`suspendedAt`): ésa es una decisión deliberada de cobranza y la
- *   levanta el pago, no un barrido.
+ * - **No perdona una suspensión**: la levanta sólo un Stripe `active` (el pago), nunca un `trialing` — lo exige
+ *   `handleSubscriptionUpdated`. El barrido observa el pago; no decide por su cuenta.
  * - **No concede por su cuenta.** Delega en `handleSubscriptionUpdated`, que revalida el estado
  *   vigente y aplica las mismas reglas endurecidas en las auditorías 7ª-10ª. Duplicar aquí la
  *   lógica de dinero sería crear una segunda verdad.
@@ -93,16 +97,25 @@ export class PlanAccessReconciliationJob {
     if (this.corriendo) return { revisados: 0, recuperados: 0, fallidos: 0 }
     this.corriendo = true
     try {
+      const ahora = new Date()
       // Lectura de entrada envuelta por `.claude/rules/cron-jobs.md`: es una lectura pura, segura
       // de repetir durante la estampida de conexiones del minuto en punto.
       const candidatos = await retry(
         () =>
           prisma.venueFeature.findMany({
             where: {
-              active: false,
-              suspendedAt: null,
               stripeSubscriptionId: { not: null },
-              feature: { code: { in: [...PAID_PLAN_TIER_CODES] } },
+              OR: [
+                { active: false, suspendedAt: null, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+                { suspendedAt: { not: null } },
+                // La regla única (ventanaDeAcceso.ts) la niega por fecha: prueba vencida sin gracia vigente.
+                {
+                  active: true,
+                  suspendedAt: null,
+                  endDate: { lt: ahora },
+                  OR: [{ gracePeriodEndsAt: null }, { gracePeriodEndsAt: { lt: ahora } }],
+                },
+              ],
             },
             select: { id: true, venueId: true, stripeSubscriptionId: true, feature: { select: { code: true } } },
             orderBy: { id: 'asc' },

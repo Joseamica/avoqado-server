@@ -187,3 +187,25 @@ describe('🔴 R2 (ronda 3): los dos choques se evalúan por separado', () => {
     expect(choquesAlConcederPlan([], 'f-pro')).toEqual({ propiaLigada: false, otroPlanVivo: false })
   })
 })
+
+// D4 + D6 (5-nov-2026): «vigente» es la regla de ventanaDeAcceso.ts — la gracia de cobranza cuenta.
+describe('vigencia con la gracia de cobranza', () => {
+  const AHORA = new Date('2026-11-20T12:00:00Z')
+  const antes = new Date('2026-11-19T12:00:00Z')
+  const despues = new Date('2026-11-21T12:00:00Z')
+
+  it('🔴 D6: la ligada en gracia (prueba vencida) da acceso y es la que se administra, no una cortesía sin vínculo', () => {
+    // Con la regla vieja la de la gracia contaba como vencida (puntaje 5) y ganaba la cortesía (11).
+    const enGracia = { ...fila({ id: 'pro', active: true, endDate: antes, stripeSubscriptionId: 'sub_1' }), gracePeriodEndsAt: despues }
+    const cortesia = { ...fila({ id: 'premium', active: true, endDate: null }), gracePeriodEndsAt: null }
+    expect(elegirFilaDelPlan([cortesia, enGracia], AHORA)?.id).toBe('pro')
+    expect(elegirFilaDelPlan([enGracia, cortesia], AHORA)?.id).toBe('pro')
+  })
+
+  it('🔴 los 4 días tras una prueba vencidos no cuentan como vigente: pierden contra una activa pagada', () => {
+    const vencida = { ...fila({ id: 'pro', active: true, endDate: antes }), gracePeriodEndsAt: antes }
+    const pagada = { ...fila({ id: 'premium', active: true }), gracePeriodEndsAt: null }
+    expect(elegirFilaDelPlan([vencida, pagada], AHORA)?.id).toBe('premium')
+    expect(elegirFilaDelPlan([pagada, vencida], AHORA)?.id).toBe('premium')
+  })
+})

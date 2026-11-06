@@ -716,6 +716,9 @@ export async function enableFeatureForVenue(venueId: string, featureCode: string
       update: {
         active: true,
         endDate: null,
+        // D4 + D6 (5-nov-2026): con la regla única una gracia de cobranza VENCIDA niega el acceso aunque la fila esté
+        // activa; activar a mano tiene que seguir dando acceso, como antes.
+        gracePeriodEndsAt: null,
         monthlyPrice: feature.monthlyPrice,
       },
     })

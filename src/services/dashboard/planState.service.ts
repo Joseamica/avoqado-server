@@ -13,6 +13,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { derivePlanState, PAID_PLAN_TIER_CODES, IVA_RATE, type PlanStateValue } from '@/services/access/basePlan.service'
 import { getVenueBaseTier } from '@/services/access/basePlan.service'
+import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import {
   retrievePlanSubscription,
@@ -317,7 +318,13 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
   }
 
   const { state, hasPlan } = derivePlanState(
-    { active: vf.active, endDate: vf.endDate, suspendedAt: vf.suspendedAt, gracePeriodEndsAt: vf.gracePeriodEndsAt },
+    {
+      active: vf.active,
+      endDate: vf.endDate,
+      suspendedAt: vf.suspendedAt,
+      gracePeriodEndsAt: vf.gracePeriodEndsAt,
+      stripeSubscriptionId: vf.stripeSubscriptionId,
+    },
     stripeSub ? { status: stripeSub.status, cancelAtPeriodEnd: stripeSub.cancelAtPeriodEnd } : null,
   )
 
@@ -338,7 +345,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
 
   const tier = vf.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'
   const now = new Date()
-  const inWindow = vf.active && !vf.suspendedAt && (!vf.endDate || vf.endDate >= now)
+  const inWindow = daAcceso(vf, now)
   // Paid obligations first (CLASSIC → CONTRACT → COMP → NONE): "Tu plan" is what the owner pays for. A retired classic
   // row never wins, and a courtesy/trial row is not an obligation, so it only shows when nothing is paid.
   let origin: PlanOrigin =

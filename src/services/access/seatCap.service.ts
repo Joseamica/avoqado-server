@@ -1,4 +1,5 @@
 import { InvitationStatus, StaffRole } from '@prisma/client'
+import { ventanaDeAccesoWhere } from './ventanaDeAcceso'
 import prisma from '@/utils/prismaClient'
 import { ForbiddenError } from '@/errors/AppError'
 import { getVenueBaseTier, PAID_PLAN_TIER_CODES } from './basePlan.service'
@@ -191,7 +192,7 @@ export async function assertCanAddSeatsBulk(
   if (venueIds.length === 0) return
   const ids = [...new Set(venueIds)]
   const now = new Date()
-  const activeWindow = { active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: now } }] }
+  const activeWindow = ventanaDeAccesoWhere(now) // la regla única (D4 + D6): la gracia de cobranza cuenta
 
   // 1. Exempt (grandfathered by their own flag OR their org's) → unlimited (cap null).
   //    Unknown venues → fail open (no cap),

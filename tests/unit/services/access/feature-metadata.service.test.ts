@@ -80,6 +80,31 @@ describe('feature-metadata.service', () => {
     })
   })
 
+  // D4 + D6 (5-nov-2026): el estado que ve el DASHBOARD sale de la MISMA regla que el portero (ventanaDeAcceso.ts).
+  describe('resolveFeatureGateState — una sola regla con el portero', () => {
+    const now = new Date('2026-04-20T12:00:00.000Z')
+    const antes = new Date('2026-04-19T12:00:00.000Z')
+    const despues = new Date('2026-04-21T12:00:00.000Z')
+    const fila = (f: Record<string, unknown>) => ({ active: true, endDate: null, suspendedAt: null, gracePeriodEndsAt: null, ...f }) as any
+
+    it.each([
+      [
+        '🔴 D6: prueba vencida + gracia vigente → GRACE_PERIOD (con acceso)',
+        { endDate: antes, gracePeriodEndsAt: despues },
+        'GRACE_PERIOD',
+      ],
+      ['REGRESIÓN v4: pagada con la gracia vencida (aún sin suspender) → ACTIVE, como hoy', { gracePeriodEndsAt: antes }, 'ACTIVE'],
+      ['🔴 apagada con gracia vigente → no dice GRACE_PERIOD (no hay acceso)', { active: false, gracePeriodEndsAt: despues }, 'LOCKED'],
+      ['prueba vencida + gracia vencida → SUSPENDED', { endDate: antes, gracePeriodEndsAt: antes }, 'SUSPENDED'],
+      ['una cortesía vigente gana sobre una gracia vencida → TRIALING', { endDate: despues, gracePeriodEndsAt: antes }, 'TRIALING'],
+      ['REGRESIÓN: prueba vencida activa sin gracia → TRIAL_EXPIRED', { endDate: antes }, 'TRIAL_EXPIRED'],
+      ['REGRESIÓN: apagada con prueba vencida → TRIAL_EXPIRED', { active: false, endDate: antes }, 'TRIAL_EXPIRED'],
+      ['REGRESIÓN: apagada con vencimiento futuro → LOCKED', { active: false, endDate: despues }, 'LOCKED'],
+    ])('%s', (_caso, f, esperado) => {
+      expect(resolveFeatureGateState(fila(f), now)).toBe(esperado)
+    })
+  })
+
   describe('getFeatureMetadataForVenue', () => {
     it('returns metadata for all globally active features and maps missing venue feature to LOCKED', async () => {
       prismaMock.feature.findMany.mockResolvedValue([
