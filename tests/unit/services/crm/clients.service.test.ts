@@ -292,6 +292,15 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
     expect(countQuery(2).values).toContain(OTHER)
   })
 
+  it('🔴 propios con dueno=<su propio id> es «Míos»: responde y amarra al vendedor', async () => {
+    await expect(listClients(access(), { dueno: SELLER }, NOW)).resolves.toMatchObject({ legible: 1 })
+    expect(sqlOf(countQuery())).toContain('ca."ownerStaffId" = ?')
+    expect(countQuery().values).toContain(SELLER)
+    // The same SQL as «Míos».
+    await listClients(access(), { dueno: 'MIOS' }, NOW)
+    expect({ sql: countQuery(1).sql, values: countQuery(1).values }).toEqual({ sql: countQuery().sql, values: countQuery().values })
+  })
+
   it('el tope sigue siendo 100 con filtros', async () => {
     const filters = { limit: 10_000, usa: 'POS', nivel: 'PRO', estado: 'COBRA', dueno: 'MIOS', motivo: 'PRECIO' } as const
     clientsDb([], 935)

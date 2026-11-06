@@ -4,7 +4,7 @@
  */
 import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../services/crm/clientFacts'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../services/crm/clientCodes'
 import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'

@@ -30,6 +30,7 @@ import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import { utcTs } from '../../utils/sqlDates'
+import { REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './realVenueSql'
 import { getInitialStage } from './accounts.service'
 import type { NoticeContent } from './digest.service'
 import {
@@ -80,14 +81,8 @@ const LINK_EVIDENCE = {
 export const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } satisfies Prisma.PaymentWhereInput
 export const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES }, demoExpiresAt: null } satisfies Prisma.VenueWhereInput
 
-/**
- * The same two rules in raw SQL over a venue aliased `v` (ruling 51): «has it charged real money?» is a correlated
- * `EXISTS` that stops at the first charge on `Payment(venueId, status, createdAt)`. A Prisma `payments.some` becomes
- * `IN (SELECT "venueId" FROM "Payment" …)`, which inside an `OR` Postgres runs as a hashed subplan that reads EVERY
- * completed payment of the platform. Only the statuses travel as binds.
- */
-export const REAL_VENUE_SQL = Prisma.sql`v."status"::text IN (${Prisma.join(PRODUCTION_VENUE_STATUSES)}) AND v."demoExpiresAt" IS NULL`
-export const VENUE_HAS_MONEY_SQL = Prisma.sql`EXISTS (SELECT 1 FROM "Payment" p WHERE p."venueId" = v."id" AND p."status" = 'COMPLETED' AND p."amount" > 0)`
+/** The same two rules in raw SQL over a venue aliased `v` (ruling 51): see `realVenueSql.ts`. */
+export { REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL }
 
 type Cursor = { createdAt: Date; id: string }
 

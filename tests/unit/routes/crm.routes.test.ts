@@ -312,6 +312,9 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     expect(badOwner.status).toBe(400)
     expect(badOwner.body.message).toContain('El dueño no es válido')
 
+    // Their own id is «Míos».
+    expect((await request(appWithErrors).get(`/crm/clients?dueno=${ADMIN_ID}`)).status).toBe(200)
+
     // A «propios» seller filtering by somebody else.
     const otro = await request(appWithErrors).get('/crm/clients?dueno=cstaffoth0000000000000001')
     expect(otro.status).toBe(400)

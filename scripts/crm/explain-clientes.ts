@@ -6,7 +6,7 @@
  *
  *   npx tsx scripts/crm/explain-clientes.ts [--staff <id>] [--equipo <orgId>] [--conjunto produccion] [--compatible] --salida explain.sql
  *
- * - `--salida`: the file to write. Without it, stdout — where the server's logger also writes its start-up lines.
+ * - `--salida`: the file to write; without it, stdout.
  * - `--staff`: the seller of «propios» (and the «Míos» of both scopes); without it, a made-up cuid.
  * - `--equipo`: the sales team's organization, excluded as in production (`CrmTeam`); without it, nothing is excluded.
  * - `--conjunto produccion`: only the heaviest variants, so production does not get hundreds of calls.
@@ -14,8 +14,7 @@
  *   (and `altaPerdido` false), and it stops if any name of a new column is left. It measures the heavy part (the facts
  *   lateral and the universe) on today's schema.
  *
- * It needs the server's environment to LOAD (the service graph validates it on import), never to connect: from a worktree
- * without `.env`, `npx tsx -r dotenv/config scripts/crm/explain-clientes.ts dotenv_config_path=../../.env`.
+ * It imports only the leaf `clientsSql.ts` (and its codes): it loads without a `.env` and never connects.
  *
  * Dates are inlined as `'<iso>'::timestamptz`, the type Prisma binds a `Date` with, so `utcTs` reads the same instant here as
  * in the server under any session zone.
@@ -23,8 +22,8 @@
 import { writeFileSync } from 'fs'
 import { Prisma } from '@prisma/client'
 import type { CrmAccess } from '../../src/services/crm/access.service'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../../src/services/crm/clientFacts'
-import { clientsQueries, type ClientFilters } from '../../src/services/crm/clients.service'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../../src/services/crm/clientCodes'
+import { clientsQueries, type ClientFilters } from '../../src/services/crm/clientsSql'
 
 const STAFF_FICTICIO = 'cexplainstaff000000000001'
 
@@ -128,6 +127,4 @@ if (require.main === module) {
   const salida = option(args, '--salida')
   if (salida) writeFileSync(salida, text)
   else process.stdout.write(text)
-  // Importing the service opens nothing, but some module of its graph may leave a timer: this script only prints.
-  process.exit(0)
 }
