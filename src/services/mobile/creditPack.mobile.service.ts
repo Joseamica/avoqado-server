@@ -151,6 +151,11 @@ async function compraDeLaLlave(venueId: string, deliveryKey: string, packId: str
  * la respuesta y la dueña apagó el paquete mientras, el reintento contesta la misma compra, no un rechazo.
  * Sin llave (apps viejas, iOS, MCP) cada llamada crea una compra, como siempre.
  *
+ * Con `cobradoEnOrden` (D17, 5-nov) el paquete se cobró en una orden del carrito, cuyo cobro ya sumó al «Total gastado» del
+ * cliente: la entrega no lo vuelve a sumar. Sin él (ficha del cliente, que cobra a mano sin orden; apps viejas; MCP) suma como siempre.
+ * A propósito (founder, 6-nov, «A»): el gasto del paquete es de quien figura en la venta, como cualquier producto. Si a media
+ * venta dividida cambian de cliente, el receptor del paquete no suma gasto: comprobarlo aquí reabría el doble (Codex r3).
+ *
  * Con `foto` (la que firmó este servidor, ver `leerFotoDelPaquete`) se entrega lo VENDIDO aunque el paquete ya cambió o se apagó:
  * el dinero ya entró. El tope por cliente sí se revisa, con el valor vigente: es una regla del negocio, no parte de lo vendido.
  */
@@ -159,7 +164,7 @@ export async function sellPackInPerson(
   packId: string,
   customerId: string,
   staffId: string,
-  opts?: { note?: string; deliveryKey?: string; foto?: CreditPackSnapshot | null },
+  opts?: { note?: string; deliveryKey?: string; foto?: CreditPackSnapshot | null; cobradoEnOrden?: boolean },
 ) {
   const deliveryKey = opts?.deliveryKey
   if (deliveryKey) {
@@ -216,7 +221,18 @@ export async function sellPackInPerson(
   let purchase
   try {
     purchase = await prisma.$transaction(
-      async tx => grantPackInTx(tx, { pack: vendido, venueId, customerId, staffId, amountPaid, deliveryKey, note: opts?.note }),
+      async tx =>
+        grantPackInTx(tx, {
+          pack: vendido,
+          venueId,
+          customerId,
+          staffId,
+          amountPaid,
+          deliveryKey,
+          note: opts?.note,
+          // 🔴 D17: vendido desde el carrito, el cobro de la orden ya sumó al «Total gastado»; aquí no se repite.
+          countSpend: !opts?.cobradoEnOrden,
+        }),
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     )
   } catch (err) {
