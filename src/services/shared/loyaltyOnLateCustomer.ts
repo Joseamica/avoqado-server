@@ -209,7 +209,13 @@ interface Programa {
  */
 export async function baseDeLealtadDeLaVenta(
   db: Pick<Prisma.TransactionClient, 'payment'>,
-  venta: { id: string; venueId: string; originSystem: string | null; total: Prisma.Decimal | number; tipAmount: Prisma.Decimal | number | null },
+  venta: {
+    id: string
+    venueId: string
+    originSystem: string | null
+    total: Prisma.Decimal | number
+    tipAmount: Prisma.Decimal | number | null
+  },
 ): Promise<number> {
   if (!esPedidoDePlataforma(venta)) return Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0))
   const cobrado = await db.payment.aggregate({
