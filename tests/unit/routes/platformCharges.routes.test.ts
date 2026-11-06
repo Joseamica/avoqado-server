@@ -88,6 +88,18 @@ describe('platformCharges.schemas — lo que entra por el cuerpo', () => {
     )
   })
 
+  it('«¿te debe las fechas pasadas?» (pastDatesOwed) llega al servicio sólo como verdadero o falso; sin él, como siempre', () => {
+    for (const pastDatesOwed of [true, false]) {
+      const r = createChargeSchema.safeParse(body({ ...COBRO, pastDatesOwed }))
+      expect(r.success && r.data.body.pastDatesOwed).toBe(pastDatesOwed)
+    }
+    expect(errores(createChargeSchema, body({ ...COBRO, pastDatesOwed: 'no' }))).toEqual([
+      'Indica con verdadero o falso si el cliente debe las fechas pasadas',
+    ])
+    const sinCampo = createChargeSchema.safeParse(body(COBRO))
+    expect(sinCampo.success && 'pastDatesOwed' in sinCampo.data.body).toBe(false)
+  })
+
   it('«una sola vez» (ONE_TIME) es una periodicidad válida al dar de alta y al editar; las demás siguen pasando', () => {
     for (const frequency of ['WEEKLY', 'BIWEEKLY', 'MONTHLY', 'ONE_TIME']) {
       expect(errores(createChargeSchema, body({ ...COBRO, frequency }))).toEqual([])

@@ -383,6 +383,42 @@ describe('platform-charges/charges.service — createCharge (NEW)', () => {
     }
   })
 
+  describe('«¿te debe las fechas pasadas?» (pastDatesOwed)', () => {
+    const fechas = () => prismaMock.platformChargeOccurrence.createMany.mock.calls[0][0].data.map((d: any) => dia(d.dueDate))
+
+    it('«no, ya me las pagó» (false): lo pasado no se crea, empieza en la primera fecha desde hoy, y el ancla se guarda igual', async () => {
+      await createCharge({ ...entrada({ anchorDate: '2026-10-03' }), pastDatesOwed: false }, 'staff-1', AHORA)
+
+      expect(prismaMock.platformCharge.create.mock.calls[0][0].data.anchorDate).toEqual(new Date('2026-10-03T00:00:00.000Z'))
+      // 3-oct + 7·k: la primera desde hoy (lunes 2-nov) es el sábado 7-nov; las cinco de antes no nacen.
+      expect(fechas()).toEqual(['2026-11-07'])
+      // La bitácora dice que quien dio de alta declaró pagado lo de antes.
+      expect(mockLogAction.mock.calls[0][0]).toMatchObject({ action: 'PLATFORM_CHARGE_CREATED', data: { pastDatesOwed: false } })
+    })
+
+    it('hoy no es pasado: si hoy toca, la de hoy sí nace', async () => {
+      await createCharge({ ...entrada({ anchorDate: '2026-10-05' }), pastDatesOwed: false }, 'staff-1', AHORA)
+
+      expect(fechas()).toEqual(['2026-11-02', '2026-11-09'])
+    })
+
+    it.each([
+      ['sin el campo (clientes viejos)', {}],
+      ['«sí, me las debe» (true)', { pastDatesOwed: true }],
+    ])('%s: lo pasado nace vencido, como siempre', async (_caso, extra) => {
+      await createCharge({ ...entrada({ anchorDate: '2026-10-03' }), ...extra }, 'staff-1', AHORA)
+
+      expect(fechas()).toEqual(['2026-10-03', '2026-10-10', '2026-10-17', '2026-10-24', '2026-10-31', '2026-11-07'])
+      expect(mockLogAction.mock.calls[0][0].data).not.toHaveProperty('pastDatesOwed')
+    })
+
+    it('una sola vez no cambia: su única fecha nace aunque sea pasada (es justo lo que se cobra)', async () => {
+      await createCharge({ ...entrada({ frequency: 'ONE_TIME', anchorDate: '2026-10-20' }), pastDatesOwed: false }, 'staff-1', AHORA)
+
+      expect(fechas()).toEqual(['2026-10-20'])
+    })
+  })
+
   it.each([
     ['MONTHLY', '2026-10-31', ['2026-10-31']], // el 30-nov queda fuera de la ventana
     ['BIWEEKLY', '2026-10-20', ['2026-10-20', '2026-11-05']], // días fijos 5 y 20

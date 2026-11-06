@@ -771,6 +771,40 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
     expect((await post(`/${semanal.id}/pause`, { skipOverdue: true })).status).toBe(200)
     expect(await proximo(semanal)).toBeNull()
   })
+
+  it('«¿te las debe?» por HTTP: con pastDatesOwed=false lo pasado no nace (y la bitácora lo dice); sin el campo nace vencido como siempre', async () => {
+    const hoy = todayInMexico(new Date())
+    const perfil = await nuevoPerfil()
+    const alta = async (extra: object) => {
+      const res = await post('/', {
+        customerType: 'STANDALONE',
+        customerName: unico('Desde antes'),
+        billingTaxProfileId: perfil.id,
+        frequency: 'WEEKLY',
+        anchorDate: addDays(hoy, -21),
+        concepts: [RENTA, LICENCIA],
+        invoiceMode: 'AUTOMATIC',
+        ...extra,
+      })
+      expect(res.status).toBe(201)
+      creado.charges.push(res.body.data.id)
+      return res.body.data.id as string
+    }
+
+    const yaPagado = await alta({ pastDatesOwed: false })
+    expect(await resumen(yaPagado)).toEqual([`${hoy}:PENDING`, `${addDays(hoy, 7)}:PENDING`])
+    const [bitacora] = await bitacoras('PLATFORM_CHARGE_CREATED', yaPagado, 1)
+    expect(bitacora?.data).toMatchObject({ pastDatesOwed: false, anchorDate: addDays(hoy, -21) })
+
+    const comoSiempre = await alta({})
+    expect((await resumen(comoSiempre)).slice(0, 3)).toEqual([
+      `${addDays(hoy, -21)}:PENDING`,
+      `${addDays(hoy, -14)}:PENDING`,
+      `${addDays(hoy, -7)}:PENDING`,
+    ])
+
+    expect((await post('/', { customerType: 'STANDALONE', customerName: unico('X'), pastDatesOwed: 'no' })).status).toBe(400)
+  })
 })
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

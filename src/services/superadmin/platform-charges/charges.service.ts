@@ -78,7 +78,15 @@ export interface ChargeInput {
  * vienen, se ignoran: el servidor los deriva de la factura (conceptos de ella, una sola vez, MANUAL). Sin `invoiceId` siguen siendo obligatorios.
  */
 export type CreateChargeInput = Omit<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'> &
-  Partial<Pick<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'>> & { invoiceId?: string }
+  Partial<Pick<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'>> & {
+    invoiceId?: string
+    /**
+     * «¿Te debe las fechas pasadas?» (founder, 6-nov: «A»). `false` = ya las pagó: las fechas antes de hoy no se crean y el cobro
+     * empieza en la primera desde hoy (el ancla se guarda igual). Sin él, o `true`, lo pasado nace vencido como siempre. Una sola
+     * vez no cambia: su única fecha es lo que se cobra.
+     */
+    pastDatesOwed?: boolean
+  }
 
 export interface ListChargesFilters {
   /** Sin `status` se listan todos los cobros. */
@@ -597,7 +605,8 @@ export async function createCharge(input: CreateChargeInput, actorId: string, no
 
     const created = await tx.platformCharge.create({ data: { ...dbFields(state), createdById: actorId } })
     await lockCharge(tx, created.id)
-    await generateOccurrences(tx, created, state.anchorDate, addDays(today, GENERATE_AHEAD_DAYS))
+    const from = input.pastDatesOwed === false && state.anchorDate < today ? today : state.anchorDate
+    await generateOccurrences(tx, created, from, addDays(today, GENERATE_AHEAD_DAYS))
     if (!cfdi) return { charge: created, state, linked: null }
 
     // Un cobro de una sola vez tiene UNA fecha, y acaba de nacer con el alta.
@@ -615,6 +624,8 @@ export async function createCharge(input: CreateChargeInput, actorId: string, no
     invoiceMode: state.invoiceMode,
     conceptCount: state.concepts.length,
     ...(invoiceId ? { invoiceId } : {}),
+    // Quien dio de alta declaró pagado lo anterior a hoy: por eso esas fechas no existen.
+    ...(input.pastDatesOwed === false ? { pastDatesOwed: false } : {}),
   })
   if (linked) {
     // Lo mismo que deja `linkInvoice` al anexar a una fecha que ya existía.
