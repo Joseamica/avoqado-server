@@ -36,7 +36,17 @@ import {
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, type Condicion, type Estado, type Usa } from '@/services/crm/clientCodes'
+import {
+  ESTADOS,
+  INGRESOS,
+  MOTIVOS_DEL_ALTA,
+  NIVELES,
+  PISTAS_DE_INGRESO,
+  USA,
+  type Condicion,
+  type Estado,
+  type Usa,
+} from '@/services/crm/clientCodes'
 import { listClients } from '@/services/crm/clients.service'
 import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 import { listTemplates } from '@/services/crm/email/templates.service'
@@ -106,6 +116,25 @@ const ESTADO_TEXTO: Record<Estado, string> = {
   NUNCA: 'Nunca ha cobrado',
 }
 const usaTexto = (value: string) => USA_TEXTO[value as Usa] ?? value
+/** C1b: what the client leaves Avoqado, said in words (the level only: the monthly amount is known only to Stripe). */
+function ingresoTexto(ingreso: FilaDeClientes['ingreso'] | undefined): string | null {
+  if (!ingreso) return null
+  const mensualidad = ingreso.mensualidad ? `Mensualidad (${NIVEL_TEXTO[ingreso.mensualidad as keyof typeof NIVEL_TEXTO]})` : ''
+  switch (ingreso.codigo) {
+    case 'AMBOS':
+      return `${mensualidad} y transacciones con tarjeta por Avoqado`
+    case 'MENSUALIDAD':
+      return mensualidad
+    case 'TRANSACCIONES':
+      return 'Transacciones con tarjeta por Avoqado'
+    default:
+      return 'Sin ingreso (ni plan pagado ni tarjeta por Avoqado en 30 días)'
+  }
+}
+const OPORTUNIDAD_TEXTO: Record<string, string> = {
+  TARJETA_OTRA_TERMINAL: 'Cobra con tarjeta en otra terminal',
+  SOLO_EFECTIVO: 'Sólo cobró en efectivo en 30 días',
+}
 
 type FilaDeClientes = Awaited<ReturnType<typeof listClients>>['rows'][number]
 
@@ -128,6 +157,12 @@ function cliente(row: FilaDeClientes) {
     dueno: row.cuenta ? (row.cuenta.owner?.name ?? 'Sin dueño') : row.cuentaAjena ? 'De otra persona' : 'Sin cuenta en el CRM',
     motivo: alta?.motivo ?? null,
     perdido: alta?.perdido ?? false,
+    ingreso: ingresoTexto(row.ingreso),
+    // MXN pesos, gross and without tips, over the last 30 days. Another currency is never converted nor added: only flagged.
+    transaccionesConTarjeta30Dias: row.ingreso?.transacciones30d ?? null,
+    moneda: row.ingreso?.transacciones30d != null ? 'MXN' : null,
+    transaccionesEnOtraMoneda: row.ingreso?.otraMoneda ?? null,
+    oportunidad: (row.ingreso?.pista && OPORTUNIDAD_TEXTO[row.ingreso.pista]) ?? null,
   }
 }
 
@@ -694,9 +729,11 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
     'Lista los clientes de Avoqado (negocios con plan, con un cobro real o ganados en el CRM) y también las altas que se ' +
       'quedaron sin poner tarjeta: por cada uno, qué usa (terminal, POS o ninguno en 30 días, con aviso si alguien lo escribió a ' +
       'mano), su plan (nivel y condición), su estado (cobra, dejó de cobrar, nunca cobró o alta sin tarjeta), la fecha de su ' +
-      'último cobro (Ciudad de México) y su dueño. Sirve para preguntas como «clientes que dejaron de cobrar» (estado ' +
-      'SIN_COBROS). Filtros: q (nombre), usa, nivel, estado, motivo (por qué se quedó un alta sin tarjeta) y dueno ' +
-      '(SIN_DUENO o el id de una persona del equipo). De 20 en 20 (hasta 50) con el total, los conteos de altas sin tarjeta y ' +
+      'último cobro (Ciudad de México), su dueño y su ingreso: si paga mensualidad (nivel), cuánto cobró con tarjeta por ' +
+      'Avoqado en 30 días (sólo MXN, bruto, sin propinas; lo de otra moneda sólo se marca) y la oportunidad (tarjeta en otra terminal o sólo efectivo). Sirve ' +
+      'para preguntas como «clientes que dejaron de cobrar» (estado SIN_COBROS) o «quién cobra con otra terminal» (ingreso ' +
+      'TARJETA_OTRA_TERMINAL). Filtros: q (nombre), usa, nivel, estado, motivo (por qué se quedó un alta sin tarjeta), ' +
+      'ingreso y dueno (SIN_DUENO o el id de una persona del equipo). De 20 en 20 (hasta 50) con el total, los conteos de altas sin tarjeta y ' +
       'el cursor para la siguiente página. Sólo lectura. ' +
       SOLO,
     {
@@ -714,6 +751,15 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         .enum([...MOTIVOS_DEL_ALTA, 'SIN_MOTIVO'], { errorMap: () => ({ message: 'Ese motivo no existe' }) })
         .optional()
         .describe('Por qué se quedó un alta sin tarjeta; SIN_MOTIVO = nadie le ha hablado'),
+      ingreso: z
+        .enum([...INGRESOS, ...PISTAS_DE_INGRESO], {
+          errorMap: () => ({ message: `Ingreso es ${[...INGRESOS, ...PISTAS_DE_INGRESO].join(', ')}` }),
+        })
+        .optional()
+        .describe(
+          'Lo que deja a Avoqado: MENSUALIDAD, TRANSACCIONES (tarjeta por Avoqado en 30 días), AMBOS o NINGUNO; o la oportunidad: ' +
+            'TARJETA_OTRA_TERMINAL o SOLO_EFECTIVO',
+        ),
       // C13: «MIOS» no tiene sentido para el superadmin del MCP.
       dueno: z
         .union([z.literal('SIN_DUENO'), z.string().cuid('El dueño es SIN_DUENO o el id de una persona del equipo')])

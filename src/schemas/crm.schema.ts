@@ -4,7 +4,7 @@
  */
 import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, USA_ESCRITO } from '../services/crm/clientCodes'
+import { ESTADOS, INGRESOS, MOTIVOS_DEL_ALTA, NIVELES, PISTAS_DE_INGRESO, USA, USA_ESCRITO } from '../services/crm/clientCodes'
 import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'
@@ -364,7 +364,8 @@ const clientFilter = <T extends readonly [string, ...string[]]>(values: T) =>
  * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39). The C1 filters: `usa`
  * (with `AVISO`), `nivel`, `estado`, `motivo` (with `SIN_MOTIVO`) and `dueno` (`MIOS`, `SIN_DUENO` or an id — the regex of
  * existing ids accepts the two words; «propios» with an id is a business rule of the service). A `condicion` someone still
- * sends is dropped (not `.strict()`): that filter left C1 in the redesign r3.
+ * sends is dropped (not `.strict()`): that filter left C1 in the redesign r3. C1b: `ingreso` (its four codes and the two
+ * opportunities under it).
  */
 export const listClientsSchema = z.object({
   query: z.object({
@@ -378,6 +379,7 @@ export const listClientsSchema = z.object({
     estado: clientFilter(ESTADOS),
     motivo: clientFilter([...MOTIVOS_DEL_ALTA, 'SIN_MOTIVO']),
     dueno: existing('El dueño no es válido').optional(),
+    ingreso: clientFilter([...INGRESOS, ...PISTAS_DE_INGRESO]),
   }),
 })
 
