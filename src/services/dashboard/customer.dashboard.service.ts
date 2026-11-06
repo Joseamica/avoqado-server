@@ -389,14 +389,32 @@ export async function getCustomerById(venueId: string, customerId: string) {
  * @param performedBy - staffId del actor (authContext.userId del controller). Opcional para no
  *   romper a otros callers (ej. el MCP, que aún no manda actor) — patrón del repo.
  */
+/**
+ * Dos peticiones con el mismo correo o teléfono a la vez pasan las dos la búsqueda de duplicados y el índice único frena a
+ * la segunda: es el mismo «ya existe», no un 500 (Codex r1 #7 de editar cliente; en español desde D15).
+ */
+function contactoRepetido(error: unknown, email?: string, phone?: string) {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    const campos = String(error.meta?.target ?? '')
+    if (campos.includes('phone'))
+      return new BadRequestError(`Ya existe un cliente con el teléfono ${phone} en este negocio`, CUSTOMER_PHONE_TAKEN)
+    if (campos.includes('email'))
+      return new BadRequestError(`Ya existe un cliente con el correo ${email} en este negocio`, CUSTOMER_EMAIL_TAKEN)
+  }
+  return error
+}
+
 export async function createCustomer(venueId: string, data: CreateCustomerRequest, performedBy?: string) {
+  // D15: "" es «sin ese dato» (el alta de las apps llega aquí sin Zod). Guardar "" chocaría con el único por negocio.
+  const phone = data.phone || undefined
+
   // Validate email or phone is provided
-  if (!data.email && !data.phone) {
+  if (!data.email && !phone) {
     throw new BadRequestError('Se requiere email o teléfono')
   }
 
   // Normalize email to lowercase for consistent lookups
-  const normalizedEmail = data.email?.toLowerCase()
+  const normalizedEmail = data.email?.toLowerCase() || undefined
 
   // Check for duplicate email/phone in this venue
   if (normalizedEmail) {
@@ -408,20 +426,20 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     })
 
     if (existingByEmail) {
-      throw new BadRequestError(`Customer with email ${data.email} already exists in this venue`)
+      throw new BadRequestError(`Ya existe un cliente con el correo ${data.email} en este negocio`)
     }
   }
 
-  if (data.phone) {
+  if (phone) {
     const existingByPhone = await prisma.customer.findFirst({
       where: {
         venueId,
-        phone: data.phone,
+        phone,
       },
     })
 
     if (existingByPhone) {
-      throw new BadRequestError(`Customer with phone ${data.phone} already exists in this venue`)
+      throw new BadRequestError(`Ya existe un cliente con el teléfono ${phone} en este negocio`)
     }
   }
 
@@ -435,30 +453,34 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     })
 
     if (!group) {
-      throw new NotFoundError(`Customer group with ID ${data.customerGroupId} not found in this venue`)
+      throw new NotFoundError('El grupo de clientes no existe en este negocio')
     }
   }
 
-  const customer = await prisma.customer.create({
-    data: {
-      venueId, // ✅ CRITICAL: Multi-tenant assignment
-      email: normalizedEmail,
-      phone: data.phone,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      birthDate: data.birthDate,
-      gender: data.gender,
-      customerGroupId: data.customerGroupId,
-      notes: data.notes,
-      tags: data.tags || [],
-      // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — el ledger de
-      // consent.service es el ÚNICO escritor de ese campo (Task 3). El default
-      // Boolean @default(false) de Prisma basta para "sin consentimiento".
-    },
-    include: {
-      customerGroup: true,
-    },
-  })
+  const customer = await prisma.customer
+    .create({
+      data: {
+        venueId, // ✅ CRITICAL: Multi-tenant assignment
+        email: normalizedEmail,
+        phone,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        birthDate: data.birthDate,
+        gender: data.gender,
+        customerGroupId: data.customerGroupId,
+        notes: data.notes,
+        tags: data.tags || [],
+        // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — el ledger de
+        // consent.service es el ÚNICO escritor de ese campo (Task 3). El default
+        // Boolean @default(false) de Prisma basta para "sin consentimiento".
+      },
+      include: {
+        customerGroup: true,
+      },
+    })
+    .catch(error => {
+      throw contactoRepetido(error, data.email, phone)
+    })
 
   logger.info(`Customer created: ${customer.id} (${customer.email || customer.phone})`, {
     venueId,
@@ -579,8 +601,18 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     throw new NotFoundError(`Customer with ID ${customerId} not found`)
   }
 
+  // D15: el panel manda "" en el campo que la persona dejó vacío. Si el cliente no tenía ese dato, no cambia nada; si lo
+  // tenía, no se borra (igual que el POS: los datos de contacto no se vacían) y se dice, en vez de fingir que se guardó.
+  if (data.email === '' && existingCustomer.email) {
+    throw new BadRequestError('El correo del cliente no se puede borrar; escribe uno nuevo o déjalo como estaba')
+  }
+  if (data.phone === '' && existingCustomer.phone) {
+    throw new BadRequestError('El teléfono del cliente no se puede borrar; escribe uno nuevo o déjalo como estaba')
+  }
+  const phone = data.phone || undefined
+
   // Normalize email to lowercase for consistent lookups
-  const normalizedEmail = data.email?.toLowerCase()
+  const normalizedEmail = data.email?.toLowerCase() || undefined
   const existingNormalizedEmail = existingCustomer.email?.toLowerCase()
 
   // Check for duplicate email/phone (excluding current customer)
@@ -594,21 +626,21 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     })
 
     if (duplicateEmail) {
-      throw new BadRequestError(`Customer with email ${data.email} already exists`, CUSTOMER_EMAIL_TAKEN)
+      throw new BadRequestError(`Ya existe un cliente con el correo ${data.email} en este negocio`, CUSTOMER_EMAIL_TAKEN)
     }
   }
 
-  if (data.phone && data.phone !== existingCustomer.phone) {
+  if (phone && phone !== existingCustomer.phone) {
     const duplicatePhone = await prisma.customer.findFirst({
       where: {
         venueId,
-        phone: data.phone,
+        phone,
         id: { not: customerId },
       },
     })
 
     if (duplicatePhone) {
-      throw new BadRequestError(`Customer with phone ${data.phone} already exists`, CUSTOMER_PHONE_TAKEN)
+      throw new BadRequestError(`Ya existe un cliente con el teléfono ${phone} en este negocio`, CUSTOMER_PHONE_TAKEN)
     }
   }
 
@@ -622,7 +654,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     })
 
     if (!group) {
-      throw new NotFoundError(`Customer group with ID ${data.customerGroupId} not found`)
+      throw new NotFoundError('El grupo de clientes no existe en este negocio')
     }
   }
 
@@ -663,7 +695,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
       where: { id: customerId },
       data: {
         email: normalizedEmail,
-        phone: data.phone,
+        phone,
         firstName: data.firstName,
         lastName: data.lastName,
         birthDate: data.birthDate,
@@ -683,12 +715,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     .catch(error => {
       // Dos aparatos asignan el mismo teléfono/correo a la vez: los dos pasan la búsqueda de arriba y el índice único
       // frena al segundo. Es el mismo «ya registrado», no un 500 (Codex r1 #7, editar cliente desde el POS).
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const campos = String(error.meta?.target ?? '')
-        if (campos.includes('phone')) throw new BadRequestError(`Customer with phone ${data.phone} already exists`, CUSTOMER_PHONE_TAKEN)
-        if (campos.includes('email')) throw new BadRequestError(`Customer with email ${data.email} already exists`, CUSTOMER_EMAIL_TAKEN)
-      }
-      throw error
+      throw contactoRepetido(error, data.email, phone)
     })
 
   logger.info(`Customer updated: ${customerId}`, {

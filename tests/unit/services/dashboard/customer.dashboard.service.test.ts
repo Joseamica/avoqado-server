@@ -68,7 +68,9 @@ const createMockCustomer = (overrides: Record<string, any> = {}) => ({
 describe('Customer Dashboard Service', () => {
   beforeEach(() => {
     storeCreditDeClientesMock.mockReset()
-    storeCreditDeClientesMock.mockImplementation(async (_db: unknown, _venueId: string, ids: string[]) => new Map(ids.map(id => [id, null])))
+    storeCreditDeClientesMock.mockImplementation(
+      async (_db: unknown, _venueId: string, ids: string[]) => new Map(ids.map(id => [id, null])),
+    )
   })
 
   beforeEach(() => {
@@ -468,7 +470,7 @@ describe('Customer Dashboard Service', () => {
         createCustomer('venue-123', {
           email: 'test@example.com',
         }),
-      ).rejects.toThrow('Customer with email test@example.com already exists in this venue')
+      ).rejects.toThrow('Ya existe un cliente con el correo test@example.com en este negocio')
     })
 
     it('should throw BadRequestError if phone already exists in venue', async () => {
@@ -479,7 +481,7 @@ describe('Customer Dashboard Service', () => {
         createCustomer('venue-123', {
           phone: '+1234567890',
         }),
-      ).rejects.toThrow('Customer with phone +1234567890 already exists in this venue')
+      ).rejects.toThrow('Ya existe un cliente con el teléfono +1234567890 en este negocio')
     })
 
     it('should throw NotFoundError if customerGroupId does not exist in venue', async () => {
@@ -492,7 +494,7 @@ describe('Customer Dashboard Service', () => {
           email: 'test@example.com',
           customerGroupId: 'invalid-group',
         }),
-      ).rejects.toThrow('Customer group with ID invalid-group not found in this venue')
+      ).rejects.toThrow('El grupo de clientes no existe en este negocio')
     })
 
     it('should create customer with valid customerGroupId', async () => {
@@ -531,6 +533,101 @@ describe('Customer Dashboard Service', () => {
   })
 
   // ── marketingConsent: SOLO vía consent.service (Task 5) ─────────────────────
+  describe('D15 · correo o teléfono vacío ("") — el panel viejo y las apps', () => {
+    it('🔴 alta con correo "" y teléfono: no se guarda "" (chocaría con el único por negocio) ni se busca duplicado de ""', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer({ email: null }) as any)
+
+      await createCustomer('venue-123', { email: '', phone: '+525544102263', firstName: 'Rosa' })
+
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1) // sólo el teléfono
+      const data = prismaMock.customer.create.mock.calls[0][0].data as any
+      expect(data.email).toBeUndefined()
+      expect(data.phone).toBe('+525544102263')
+    })
+
+    it('alta con teléfono "" y correo: el teléfono no se guarda como ""', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockResolvedValue(createMockCustomer({ phone: null }) as any)
+
+      await createCustomer('venue-123', { email: 'rosa@ejemplo.mx', phone: '' })
+
+      const data = prismaMock.customer.create.mock.calls[0][0].data as any
+      expect(data.phone).toBeUndefined()
+    })
+
+    it('alta con los dos "": se rechaza en español', async () => {
+      await expect(createCustomer('venue-123', { email: '', phone: '' })).rejects.toThrow('Se requiere email o teléfono')
+    })
+
+    it('🔴 editar a un cliente SIN correo con el correo "" (lo que manda el panel): no cambia el correo y guarda lo demás', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ email: null }) as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ email: null, firstName: 'Rosa' }) as any)
+
+      await updateCustomer('venue-123', 'customer-123', { email: '', firstName: 'Rosa' })
+
+      const data = prismaMock.customer.update.mock.calls[0][0].data as any
+      expect(data.email).toBeUndefined()
+      expect(data.firstName).toBe('Rosa')
+    })
+
+    it('editar a un cliente SIN teléfono con el teléfono "": no cambia el teléfono', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ phone: null }) as any)
+      prismaMock.customer.update.mockResolvedValue(createMockCustomer({ phone: null }) as any)
+
+      await updateCustomer('venue-123', 'customer-123', { phone: '', firstName: 'Rosa' })
+
+      expect((prismaMock.customer.update.mock.calls[0][0].data as any).phone).toBeUndefined()
+    })
+
+    it('borrar un correo que el cliente SÍ tenía: se rechaza en español (no se borra en silencio ni se finge)', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ email: 'rosa@ejemplo.mx' }) as any)
+
+      await expect(updateCustomer('venue-123', 'customer-123', { email: '' })).rejects.toThrow(BadRequestError)
+      await expect(updateCustomer('venue-123', 'customer-123', { email: '' })).rejects.toThrow(/correo/)
+      expect(prismaMock.customer.update).not.toHaveBeenCalled()
+    })
+
+    it('borrar un teléfono que el cliente SÍ tenía: se rechaza en español', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer({ phone: '+525544102263' }) as any)
+
+      await expect(updateCustomer('venue-123', 'customer-123', { phone: '' })).rejects.toThrow(/teléfono/)
+      expect(prismaMock.customer.update).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('D15 · correo o teléfono repetido en una carrera (P2002) — en español', () => {
+    it('al editar, si el índice único frena el correo, el 400 sale en español con su código', async () => {
+      prismaMock.customer.findFirst.mockResolvedValueOnce(createMockCustomer({ email: null }) as any).mockResolvedValueOnce(null)
+      prismaMock.customer.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId', 'email'] } }),
+      )
+      await expect(updateCustomer('venue-123', 'customer-123', { email: 'rosa@ejemplo.mx' })).rejects.toThrow(
+        'Ya existe un cliente con el correo rosa@ejemplo.mx en este negocio',
+      )
+    })
+
+    it('al editar, lo mismo con el teléfono', async () => {
+      prismaMock.customer.findFirst.mockResolvedValueOnce(createMockCustomer({ phone: null }) as any).mockResolvedValueOnce(null)
+      prismaMock.customer.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId', 'phone'] } }),
+      )
+      await expect(updateCustomer('venue-123', 'customer-123', { phone: '+525544102263' })).rejects.toThrow(
+        'Ya existe un cliente con el teléfono +525544102263 en este negocio',
+      )
+    })
+
+    it('al dar de alta, también (antes salía un 500)', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.customer.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x', meta: { target: ['venueId', 'email'] } }),
+      )
+      await expect(createCustomer('venue-123', { email: 'rosa@ejemplo.mx' })).rejects.toThrow(
+        'Ya existe un cliente con el correo rosa@ejemplo.mx en este negocio',
+      )
+    })
+  })
+
   describe('createCustomer — consentimiento vía consent.service', () => {
     beforeEach(() => {
       grantConsentMock.mockReset().mockResolvedValue(undefined)
@@ -629,7 +726,7 @@ describe('Customer Dashboard Service', () => {
         updateCustomer('venue-123', 'customer-123', {
           email: 'new@example.com',
         }),
-      ).rejects.toThrow('Customer with email new@example.com already exists')
+      ).rejects.toThrow('Ya existe un cliente con el correo new@example.com en este negocio')
     })
 
     it('should allow updating to same email (no duplicate error)', async () => {
@@ -657,7 +754,7 @@ describe('Customer Dashboard Service', () => {
         updateCustomer('venue-123', 'customer-123', {
           phone: '+2222222222',
         }),
-      ).rejects.toThrow('Customer with phone +2222222222 already exists')
+      ).rejects.toThrow('Ya existe un cliente con el teléfono +2222222222 en este negocio')
     })
 
     it('should throw NotFoundError if customerGroupId does not exist in venue', async () => {
@@ -676,7 +773,7 @@ describe('Customer Dashboard Service', () => {
         updateCustomer('venue-123', 'customer-123', {
           customerGroupId: 'invalid-group',
         }),
-      ).rejects.toThrow('Customer group with ID invalid-group not found')
+      ).rejects.toThrow('El grupo de clientes no existe en este negocio')
     })
 
     it('should update customer with valid customerGroupId', async () => {
