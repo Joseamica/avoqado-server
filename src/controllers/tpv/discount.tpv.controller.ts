@@ -12,6 +12,7 @@ import * as discountTpvService from '@/services/tpv/discount.tpv.service'
 import { DiscountType } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import logger from '@/config/logger'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 
 // ==========================================
 // GET AVAILABLE DISCOUNTS
@@ -163,7 +164,9 @@ export async function applyCouponCode(req: Request, res: Response, next: NextFun
     const authContext = (req as any).authContext
     const staffVenueId = authContext?.staffVenueId
 
-    const result = await discountTpvService.applyCouponCode(venueId, orderId, couponCode, staffVenueId)
+    // D14: un cupón de cortesía regala la cuenta; el servicio lo rechaza si quien llama no tiene `orders:comp` (como la venta de D5).
+    const puedeRegalar = await tienePermisoEnVenue(req, 'orders:comp')
+    const result = await discountTpvService.applyCouponCode(venueId, orderId, couponCode, staffVenueId, puedeRegalar)
 
     if (result.success) {
       res.status(200).json({
