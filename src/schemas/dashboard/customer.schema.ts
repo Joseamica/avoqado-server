@@ -6,14 +6,14 @@ import { z } from 'zod'
 
 export const CustomerParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
-    customerId: z.string().cuid('Invalid customer ID'),
+    venueId: z.string().cuid('Negocio inválido'),
+    customerId: z.string().cuid('Cliente inválido'),
   }),
 })
 
 export const VenueIdParamsSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
+    venueId: z.string().cuid('Negocio inválido'),
   }),
 })
 
@@ -89,24 +89,31 @@ const FechaCivil = z
   .transform(s => new Date(`${s.slice(0, 10)}T00:00:00.000Z`))
   .refine(d => !Number.isNaN(d.getTime()), 'Fecha inválida')
 
+/**
+ * D15 (5-nov-2026): el panel manda el campo vacío ("") cuando la persona no escribió correo o teléfono, y el alta sólo
+ * con teléfono tronaba con «Invalid email format». En el alta, "" es «sin ese dato».
+ */
+const vacioEsAusente = (v: unknown) => (v === null || (typeof v === 'string' && v.trim() === '') ? undefined : v)
+const Texto = z.string({ invalid_type_error: 'Debe ser texto' })
+const Genero = z.enum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'], { errorMap: () => ({ message: 'Género no válido' }) })
+const Correo = Texto.email('El correo no es válido')
+const Telefono = Texto.regex(/^\+?[0-9]{10,15}$/, 'El teléfono debe tener de 10 a 15 dígitos')
+
 export const CreateCustomerSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
+    venueId: z.string().cuid('Negocio inválido'),
   }),
   body: z
     .object({
-      email: z.string().email('Invalid email format').optional(),
-      phone: z
-        .string()
-        .regex(/^\+?[0-9]{10,15}$/, 'Phone must be 10-15 digits (with optional + prefix)')
-        .optional(),
-      firstName: z.string().min(1, 'First name is required').max(50, 'First name too long').optional(),
-      lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long').optional(),
+      email: z.preprocess(vacioEsAusente, Correo.optional()),
+      phone: z.preprocess(vacioEsAusente, Telefono.optional()),
+      firstName: Texto.min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
+      lastName: Texto.min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
       birthDate: FechaCivil.optional(),
-      gender: z.enum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY']).optional(),
-      customerGroupId: z.string().cuid('Invalid customer group ID').optional(),
-      notes: z.string().max(1000, 'Notes too long (max 1000 characters)').optional(),
-      tags: z.array(z.string().max(50, 'Tag too long (max 50 characters)')).optional(),
+      gender: Genero.optional(),
+      customerGroupId: z.string().cuid('Grupo de clientes inválido').optional(),
+      notes: Texto.max(1000, 'Las notas no pueden pasar de 1000 caracteres').optional(),
+      tags: z.array(z.string().max(50, 'Cada etiqueta puede tener hasta 50 caracteres')).optional(),
       marketingConsent: z.boolean().default(false),
     })
     .refine(data => data.email || data.phone, {
@@ -117,28 +124,26 @@ export const CreateCustomerSchema = z.object({
 
 export const UpdateCustomerSchema = z.object({
   params: z.object({
-    venueId: z.string().cuid('Invalid venue ID'),
-    customerId: z.string().cuid('Invalid customer ID'),
+    venueId: z.string().cuid('Negocio inválido'),
+    customerId: z.string().cuid('Cliente inválido'),
   }),
   body: z
     .object({
-      email: z.string().email('Invalid email format').optional(),
-      phone: z
-        .string()
-        .regex(/^\+?[0-9]{10,15}$/, 'Phone must be 10-15 digits (with optional + prefix)')
-        .optional(),
-      firstName: z.string().min(1, 'First name is required').max(50, 'First name too long').optional(),
-      lastName: z.string().min(1, 'Last name is required').max(50, 'Last name too long').optional(),
+      // Al editar, "" pasa tal cual: `updateCustomer` decide (sin ese dato antes = no cambia; con dato = no se borra).
+      email: z.union([z.literal(''), Correo], { errorMap: () => ({ message: 'El correo no es válido' }) }).optional(),
+      phone: z.union([z.literal(''), Telefono], { errorMap: () => ({ message: 'El teléfono debe tener de 10 a 15 dígitos' }) }).optional(),
+      firstName: Texto.min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
+      lastName: Texto.min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
       birthDate: FechaCivil.optional(),
-      gender: z.enum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY']).optional(),
-      customerGroupId: z.string().cuid('Invalid customer group ID').nullable().optional(),
-      notes: z.string().max(1000, 'Notes too long (max 1000 characters)').optional(),
-      tags: z.array(z.string().max(50, 'Tag too long (max 50 characters)')).optional(),
+      gender: Genero.optional(),
+      customerGroupId: z.string().cuid('Grupo de clientes inválido').nullable().optional(),
+      notes: Texto.max(1000, 'Las notas no pueden pasar de 1000 caracteres').optional(),
+      tags: z.array(z.string().max(50, 'Cada etiqueta puede tener hasta 50 caracteres')).optional(),
       marketingConsent: z.boolean().optional(),
       active: z.boolean().optional(),
     })
     .refine(data => Object.keys(data).length > 0, {
-      message: 'At least one field is required for update',
+      message: 'Cambia al menos un dato del cliente',
     }),
 })
 

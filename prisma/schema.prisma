@@ -15988,6 +15988,10 @@ model CreditPackPurchase {
   orderItemId String?    @unique
   orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
 
+  // Llave de la entrega que manda el POS (D4, 5-nov): el aparato la guarda antes de cobrar. Una misma llave nunca crea dos
+  // compras: el reintento tras perder la respuesta contesta la misma. Null = app vieja o MCP, como hoy.
+  deliveryKey String?
+
   // Relations
   itemBalances CreditItemBalance[]
   transactions CreditTransaction[]
@@ -15995,6 +15999,7 @@ model CreditPackPurchase {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([venueId, deliveryKey])
   @@index([venueId, customerId, status])
   @@index([customerId])
   @@index([expiresAt])

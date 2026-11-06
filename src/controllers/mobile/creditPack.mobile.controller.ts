@@ -11,6 +11,7 @@ import prisma from '../../utils/prismaClient'
 import { getAvailablePacks } from '../../services/dashboard/creditPack.public.service'
 import { redeemItemManually } from '../../services/dashboard/creditPack.dashboard.service'
 import * as creditPackService from '../../services/mobile/creditPack.mobile.service'
+import { firmarFotoDelPaquete, leerFotoDelPaquete } from '../../services/shared/creditPacksOnPaidOrder'
 
 /**
  * Resolve the caller's StaffVenue.id from their Staff.id + venue — CreditTransaction.createdById
@@ -35,7 +36,8 @@ export const listPacks = async (req: Request, res: Response, next: NextFunction)
     const { venueId } = req.params
     const productId = req.query.productId as string | undefined
     const packs = await getAvailablePacks(venueId, productId)
-    return res.json({ success: true, packs })
+    // `saleProof`: la foto firmada de lo que se vende hoy; la app la devuelve al entregar (D4). Sólo en esta ruta del POS.
+    return res.json({ success: true, packs: packs.map(pack => ({ ...pack, saleProof: firmarFotoDelPaquete(pack) })) })
   } catch (error) {
     next(error)
   }
@@ -62,17 +64,23 @@ export const getBalance = async (req: Request, res: Response, next: NextFunction
 export const sellPack = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, packId } = req.params
-    const { customerId, note } = req.body
+    const { customerId, note, deliveryKey, saleProof } = req.body
 
     if (!customerId) {
       return res.status(400).json({ success: false, message: 'customerId es requerido' })
+    }
+    // Opcional (D4): las apps viejas no la mandan y siguen como hoy. Mismo tope que las llaves del cobro.
+    if (deliveryKey !== undefined && (typeof deliveryKey !== 'string' || !deliveryKey.trim() || deliveryKey.length > 64)) {
+      return res.status(400).json({ success: false, message: 'deliveryKey debe tener entre 1 y 64 caracteres' })
     }
 
     const staffVenueId = await resolveStaffVenueId(venueId, req.authContext?.userId || '')
     // El monto ya NO viaja en el body: lo pone el servidor con el precio de lista.
     // Para una venta con descuento real está el otro carril — se registra el cobro y
     // se acredita con `fulfillCreditPackPurchaseFromPayment`, que toma el monto del cobro.
-    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, { note })
+    // La foto sólo cuenta con llave: sin llave, un reintento crearía otra compra por lo vendido hace días.
+    const foto = deliveryKey ? leerFotoDelPaquete(saleProof) : null
+    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, { note, deliveryKey, foto })
     return res.status(201).json({ success: true, purchase })
   } catch (error) {
     next(error)
