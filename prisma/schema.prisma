@@ -16346,7 +16346,7 @@ model Estimate {
   id               String         @id @default(cuid())
   venueId          String
   venue            Venue          @relation(fields: [venueId], references: [id])
-  estimateNumber   String         @unique
+  estimateNumber   String // Consecutivo de cada negocio: único con venueId, no en toda la base
   customerId       String?
   customerName     String?
   customerEmail    String?
@@ -16366,6 +16366,7 @@ model Estimate {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
+  @@unique([venueId, estimateNumber])
   @@index([venueId])
   @@index([venueId, status])
 }
