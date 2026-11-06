@@ -10,8 +10,11 @@ import { z } from 'zod'
  * 🔴 `validateRequest` QUITA los campos que el schema no nombra: aquí van TODOS los que leen los controllers
  * (`payment.mobile.controller.ts`). Sin `params` a propósito: validarlos reescribiría `req.params` y se perdería el `paymentId`.
  */
-// M3 (ronda 1): `validateRequest` ya antepone el campo («customerId: …»); el mensaje dice una sola vez qué falta.
-const customerId = z.string({ required_error: 'es requerido', invalid_type_error: 'debe ser un texto' }).trim().min(1, 'es requerido')
+// D24 (5-nov): `validateRequest` ya no antepone el campo, así que el mensaje dice cuál es.
+const customerId = z
+  .string({ required_error: 'Falta el cliente', invalid_type_error: 'El cliente debe ir como texto' })
+  .trim()
+  .min(1, 'Falta el cliente')
 
 const cuerpo = {
   required_error: 'El cuerpo de la solicitud es requerido',
@@ -31,9 +34,9 @@ export const attachCustomerToLatestPaymentSchema = z.object({
   body: z.object(
     {
       customerId,
-      amountCents: z.number({ required_error: 'es requerido', invalid_type_error: 'debe ser un número' }),
-      tipCents: z.number({ invalid_type_error: 'debe ser un número' }).nullish(),
-      staffId: z.string({ invalid_type_error: 'debe ser un texto' }).nullish(),
+      amountCents: z.number({ required_error: 'Falta el monto', invalid_type_error: 'El monto debe ser un número' }),
+      tipCents: z.number({ invalid_type_error: 'La propina debe ser un número' }).nullish(),
+      staffId: z.string({ invalid_type_error: 'Quien cobró debe ir como texto' }).nullish(),
     },
     cuerpo,
   ),

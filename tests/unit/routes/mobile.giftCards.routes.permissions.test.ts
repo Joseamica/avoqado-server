@@ -246,7 +246,7 @@ describe('forma de consultar y cobrar con la liga (1b S2)', () => {
   it("lookup con { pageToken: 'corto' } ⇒ 400 «La liga de la tarjeta no es válida»", async () => {
     const { error } = await validar(lookupSchema, { pageToken: 'corto' }, enNegocio)
     expect(error?.statusCode).toBe(400)
-    expect(error?.message).toBe('Error de validación: pageToken: La liga de la tarjeta no es válida')
+    expect(error?.message).toBe('Error de validación: La liga de la tarjeta no es válida')
   })
 
   it('pay-gift-card acepta proof.kind CODE y PAGE_TOKEN', async () => {
@@ -263,12 +263,12 @@ describe('forma de consultar y cobrar con la liga (1b S2)', () => {
   it("pay-gift-card con proof.kind 'WALLET_PASS' ⇒ 400 «Falta cómo se identificó la tarjeta: código, liga o teléfono»", async () => {
     const { error } = await validar(payGiftCardSchema, cobro({ proof: { kind: 'WALLET_PASS', qrToken: 'qr-1' } }), enCuenta)
     expect(error?.statusCode).toBe(400)
-    expect(error?.message).toBe('Error de validación: proof.kind: Falta cómo se identificó la tarjeta: código, liga o teléfono')
+    expect(error?.message).toBe('Error de validación: Falta cómo se identificó la tarjeta: código, liga o teléfono')
   })
 
   it('pay-gift-card con una liga mal formada ⇒ 400 «La liga de la tarjeta no es válida»', async () => {
     const { error } = await validar(payGiftCardSchema, cobro({ proof: { kind: 'PAGE_TOKEN', pageToken: 'corto' } }), enCuenta)
-    expect(error?.message).toBe('Error de validación: proof.pageToken: La liga de la tarjeta no es válida')
+    expect(error?.message).toBe('Error de validación: La liga de la tarjeta no es válida')
   })
 
   it('Q110: iniciadoPor (cuid) e iniciadoPorNombre (≤ 120, recortado) llegan al controller; son opcionales', async () => {
@@ -628,7 +628,7 @@ describe('S5: teléfono + código', () => {
   it('phone/verify con un código que no son 6 números ⇒ 400 «El código son 6 números»', async () => {
     const e = await correr(VERIFICAR, ctrl.phoneVerify, { phone: '+525512345678', code: '12a456' }, 'caja-1')
     expect(e.statusCode).toBe(400)
-    expect(e.message).toBe('Error de validación: code: El código son 6 números')
+    expect(e.message).toBe('Error de validación: El código son 6 números')
   })
 
   it('pay-gift-card y pay-new-order aceptan proof PHONE_OTP { proofToken, giftCardId }', async () => {

@@ -2,7 +2,7 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { MARCA_LEALTAD_REABIERTA } from '../services/shared/lealtadReabierta'
-import { otorgarLealtadRespetandoReembolsos } from '../services/shared/loyaltyOnLateCustomer'
+import { baseDeLealtadDeLaVenta, otorgarLealtadRespetandoReembolsos } from '../services/shared/loyaltyOnLateCustomer'
 import type { awardLoyaltyForPaidOrder } from '../services/shared/loyaltyOnPaidOrder'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -94,6 +94,7 @@ export class LoyaltyReconciliationJob {
               venueId: true,
               total: true,
               tipAmount: true,
+              originSystem: true,
               loyaltyEligibleAt: true,
               loyaltyProcessingAt: true,
               loyaltyAttempts: true,
@@ -161,12 +162,14 @@ export class LoyaltyReconciliationJob {
         }
 
         try {
+          // D13: la base sin propina, y en un pedido de plataforma desde sus cobros (`baseDeLealtadDeLaVenta`).
+          const orderTotal = await baseDeLealtadDeLaVenta(this.dependencies.prisma, order)
           // Con el negocio de la orden en el contexto (candado demo, capa 3).
           const result = await conNegocio(order.venueId, () =>
             this.dependencies.award({
               venueId: order.venueId,
               orderId: order.id,
-              orderTotal: Math.max(0, Number(order.total) - Number(order.tipAmount ?? 0)),
+              orderTotal,
               staffId: order.loyaltyStaffId,
               // 🔴 H5, segunda ola (recheck de Codex): una liga DESPUÉS de este reclamo cambia el cliente y `loyaltyStaffId` a la
               // vez. El envoltorio toma el actor de la MISMA lectura que el cliente que acredita; `staffId` de arriba es sólo el

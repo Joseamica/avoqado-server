@@ -216,7 +216,7 @@ describe('Zod del panel · sólo forma, en español', () => {
     expect(createCouponBodySchema.safeParse({ discountId: 'd1', code: 'PAN10', maxUses: 0 }).success).toBe(true)
     const r = createDiscountBodySchema.safeParse({ ...crear, maxTotalUses: 1.5 })
     expect(r.success).toBe(false)
-    expect(JSON.stringify(r)).toContain('Debe ser un número entero')
+    expect(JSON.stringify(r)).toContain('El límite de usos debe ser un número entero')
   })
 
   it('🔴 D14 v2 r1 #2: formas raras (`{ set: [] }`, alcance inválido) salen en español', () => {

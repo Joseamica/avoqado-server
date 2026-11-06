@@ -48,6 +48,21 @@ describe('Venta en persona con llave de entrega', () => {
     return sellPackInPerson('venue-1', 'pack-1', 'cust-1', 'staff-1', opts as any)
   }
 
+  // 🔴 D17 (hz:433063d4:D17): vendido desde el CARRITO, el cobro de la orden ya sumó al «Total gastado» del cliente; la entrega
+  // no lo vuelve a sumar ($1,700 cobrados marcaban $3,400). Desde la ficha la cajera cobra a mano, sin orden: ahí sí suma.
+  it('🔴 D17: con cobradoEnOrden la entrega no vuelve a sumar al total gastado', async () => {
+    await vender({ deliveryKey: 'llave-1', cobradoEnOrden: true })
+
+    expect(tx.creditPackPurchase.create).toHaveBeenCalled()
+    expect(tx.customer.update).not.toHaveBeenCalled()
+  })
+
+  it('D17: sin cobradoEnOrden (ficha del cliente, apps viejas, MCP) suma como siempre', async () => {
+    await vender({ deliveryKey: 'llave-1' })
+
+    expect(tx.customer.update.mock.calls[0][0].data).toEqual({ totalSpent: { increment: expect.anything() } })
+  })
+
   it('🔴 guarda la llave en la compra', async () => {
     await vender({ deliveryKey: 'llave-1' })
 

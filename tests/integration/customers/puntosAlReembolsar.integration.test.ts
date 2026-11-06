@@ -324,7 +324,7 @@ describe('D6 · al reembolsar se quitan los puntos de esa venta', () => {
 
   it('pago manual con descuento: la proporción sale de lo que dio puntos, no del importe del cobro', async () => {
     const c = await cliente()
-    // $100 de importe con $20 de descuento: la venta es de $80 y da 80 puntos, aunque el cobro guarda 100.
+    // $100 de importe con $20 de descuento: la venta es de $80, da 80 puntos y el cobro guarda 80 (D12, 5-nov).
     const pago = await createManualPayment(venueId, staffId, {
       amount: '100.00',
       discountAmount: '20.00',
@@ -342,9 +342,9 @@ describe('D6 · al reembolsar se quitan los puntos de esa venta', () => {
     expect(await saldo(c)).toBe(0)
   })
 
-  it('pago manual con IVA: devolver todo lo devolvible quita todos, aunque la base de los puntos sea mayor', async () => {
+  it('pago manual con IVA: devolver todo lo cobrado (IVA incluido) quita todos', async () => {
     const c = await cliente()
-    // $100 + $16 de IVA: da 116 puntos, pero el cobro guarda 100 y es lo único que se puede devolver.
+    // $100 + $16 de IVA: da 116 puntos y, desde D12 (5-nov), el cobro guarda 116: se puede devolver todo.
     const pago = await createManualPayment(venueId, staffId, {
       amount: '100.00',
       taxAmount: '16.00',
@@ -353,8 +353,9 @@ describe('D6 · al reembolsar se quitan los puntos de esa venta', () => {
       source: 'POS',
       customerId: c,
     } as Parameters<typeof createManualPayment>[2])
+    expect(pago.amount.toFixed(2)).toBe('116.00')
     expect(await saldo(c)).toBe(116)
-    const r = await reembolsar(pago.id, 10000)
+    const r = await reembolsar(pago.id, 11600)
     await correrElEfecto(r.refundId)
     expect(await saldo(c)).toBe(0)
   })

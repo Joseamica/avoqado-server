@@ -2,6 +2,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { AnyZodObject, ZodError, z } from 'zod' // Import AnyZodObject
 import { BadRequestError, InternalServerError } from '../errors/AppError'
+import { motivosDeZod } from '../utils/zodEnEspanol' // también instala los mensajes de Zod en español (D24)
 
 export const validateRequest = (schema: AnyZodObject) => async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -39,15 +40,7 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
       if (codedIssue) {
         return next(new BadRequestError(codedIssue.message, (codedIssue as any).params.code))
       }
-      const errorMessages = parsedResult.error.errors
-        .map(err => {
-          // Strip internal path prefixes (body., query., params.) — users don't need to see these
-          const path = err.path.filter(p => p !== 'body' && p !== 'query' && p !== 'params')
-          const prefix = path.length > 0 ? `${path.join('.')}: ` : ''
-          return `${prefix}${err.message}`
-        })
-        .join(', ')
-      return next(new BadRequestError(`Error de validación: ${errorMessages}`))
+      return next(new BadRequestError(`Error de validación: ${motivosDeZod(parsedResult.error.issues)}`))
     }
 
     // Assign the successfully parsed (and potentially transformed) data back to req.
@@ -70,14 +63,7 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
     if (error instanceof ZodError) {
       // This catch block might be redundant if safeParseAsync handles all ZodErrors from the parse call itself,
       // but good for other ZodErrors that might occur if schema manipulation was more complex.
-      const errorMessages = error.errors
-        .map(err => {
-          const path = err.path.filter(p => p !== 'body' && p !== 'query' && p !== 'params')
-          const prefix = path.length > 0 ? `${path.join('.')}: ` : ''
-          return `${prefix}${err.message}`
-        })
-        .join(', ')
-      return next(new BadRequestError(`Error de validación: ${errorMessages}`))
+      return next(new BadRequestError(`Error de validación: ${motivosDeZod(error.issues)}`))
     }
     return next(new InternalServerError('An unexpected error occurred during request validation.'))
   }

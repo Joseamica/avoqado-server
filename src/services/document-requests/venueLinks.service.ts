@@ -4,6 +4,7 @@ import { z } from 'zod'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { signPrivateAttachmentUrl, signPrivatePreviewUrl } from '../privateStorage.service'
+import { zodEnEspanol } from '../../utils/zodEnEspanol'
 
 type Tx = Prisma.TransactionClient
 const id = z.string().regex(/^c[a-z0-9]{24}$/, 'Identificador inválido')
@@ -17,7 +18,10 @@ export const selectionSchema = z
 export type Selection = z.infer<typeof selectionSchema>
 const linkInput = selectionSchema.omit({ id: true }).extend({ venueId: id })
 export function validationMessage(issue: z.ZodIssue): string {
-  return /^(Required|Expected|Invalid)/.test(issue.message) ? `Revisa el campo ${issue.path.join('.') || 'solicitud'}` : issue.message
+  // El mensaje por default de Zod no dice qué dato falló; el propio del esquema sí. Desde D24 el default ya sale en
+  // español (no empieza con «Required/Expected/Invalid»), así que se reconoce comparándolo con el del errorMap global.
+  const porDefecto = issue.message === zodEnEspanol(issue, { defaultError: '', data: undefined }).message
+  return porDefecto ? `Revisa el campo ${issue.path.join('.') || 'solicitud'}` : issue.message
 }
 function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.output<T> {
   const result = schema.safeParse(value)

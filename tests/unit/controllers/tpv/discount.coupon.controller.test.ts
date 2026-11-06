@@ -14,14 +14,20 @@ jest.mock('../../../../src/config/env', () => ({
   NODE_ENV: 'production',
 }))
 jest.mock('@/services/tpv/discount.tpv.service')
+jest.mock('@/middlewares/permissionFlag.middleware', () => ({
+  ...jest.requireActual('@/middlewares/permissionFlag.middleware'),
+  tienePermisoEnVenue: jest.fn(),
+}))
 
 import * as controller from '@/controllers/tpv/discount.tpv.controller'
 import * as discountTpvService from '@/services/tpv/discount.tpv.service'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import { MENSAJE_ORDEN_IMPORTADA } from '@/services/shared/ordenImportada'
 import { globalErrorHandler } from '../../../../src/app'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 
 const applyCouponMock = discountTpvService.applyCouponCode as jest.Mock
+const permisoMock = tienePermisoEnVenue as jest.Mock
 
 function appDeCupon() {
   const app = express()
@@ -39,6 +45,7 @@ const aplicar = () => request(appDeCupon()).post('/venues/v1/orders/o1/discounts
 
 beforeEach(() => {
   jest.clearAllMocks()
+  permisoMock.mockResolvedValue(false)
 })
 
 describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () => {
@@ -125,6 +132,26 @@ describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () 
       data: { couponId: 'c1', discountName: 'Promo 10', amount: 10, newOrderTotal: 90 },
       message: 'Coupon "PROMO10" applied successfully',
     })
-    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1')
+    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1', false)
+  })
+
+  // D14: el servicio decide si el cupón regala; el controlador le pasa si QUIEN LLAMA tiene `orders:comp`.
+  it('D14: pasa al servicio el permiso de cortesía de quien llama', async () => {
+    permisoMock.mockResolvedValue(true)
+    applyCouponMock.mockResolvedValue({ success: true, couponId: 'c1', discountName: 'Cortesía', amount: 100, newOrderTotal: 10 })
+
+    await aplicar()
+
+    expect(permisoMock).toHaveBeenCalledWith(expect.anything(), 'orders:comp')
+    expect(applyCouponMock).toHaveBeenCalledWith('v1', 'o1', 'PROMO10', 'sv-1', true)
+  })
+
+  it('D14: el 403 de cortesía llega a la TPV con su texto en `error`', async () => {
+    applyCouponMock.mockRejectedValue(new ForbiddenError('No tienes permiso para dar cortesías'))
+
+    const res = await aplicar()
+
+    expect(res.status).toBe(403)
+    expect(res.body).toMatchObject({ success: false, error: 'No tienes permiso para dar cortesías' })
   })
 })

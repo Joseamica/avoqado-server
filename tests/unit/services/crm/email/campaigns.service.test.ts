@@ -573,7 +573,7 @@ describe('el público con excluir e incluir: guardar bajo el candado, forma v2 y
     const next = jest.fn()
     await validateRequest(updateCampaignSchema)(req, {} as never, next)
     expect(next).toHaveBeenCalledWith(
-      expect.objectContaining({ statusCode: 400, message: 'Error de validación: audience: Manda «publicos» o «segmentos», no los dos' }),
+      expect.objectContaining({ statusCode: 400, message: 'Error de validación: Manda «publicos» o «segmentos», no los dos' }),
     )
   })
 

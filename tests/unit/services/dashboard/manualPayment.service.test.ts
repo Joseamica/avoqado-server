@@ -701,6 +701,73 @@ describe('manualPayment.service', () => {
       })
     })
 
+    // 🔴 D12 (hz:433063d4:D12, 5-nov): con IVA aparte o descuento, el cobro guardaba el «Monto» tecleado y la venta el total.
+    // El cobro debe guardar lo cobrado sin propina (monto + IVA − descuento), como cualquier otro cobro: caja, turno, reportes y
+    // el tope de lo reembolsable leen ese campo.
+    describe('D12 · el cobro de la orden sombra guarda lo cobrado (monto + IVA − descuento)', () => {
+      const tx = (
+        orderCreate: jest.Mock,
+        paymentCreate: jest.Mock,
+        shiftUpdateMany: jest.Mock,
+        vtCreate: jest.Mock,
+        allocCreate: jest.Mock,
+      ) =>
+        txMock({
+          order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: paymentCreate },
+          shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: shiftUpdateMany },
+          orderCustomer: { create: jest.fn() },
+          venueTransaction: { create: vtCreate },
+          paymentAllocation: { create: allocCreate },
+        })
+
+      it('$100 + $16 IVA − $10 descuento + $5 propina ⇒ cobro $106, neto $111, todo cuadra con la venta', async () => {
+        const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-d12' })
+        const paymentCreate = jest.fn(async ({ data }: any) => ({ id: 'pay-d12', ...data }))
+        const shiftUpdateMany = jest.fn().mockResolvedValue({ count: 0 })
+        const vtCreate = jest.fn()
+        const allocCreate = jest.fn()
+        ;(prismaMock.$transaction as jest.Mock).mockImplementation(tx(orderCreate, paymentCreate, shiftUpdateMany, vtCreate, allocCreate))
+
+        await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100.00',
+          taxAmount: '16.00',
+          discountAmount: '10.00',
+          tipAmount: '5.00',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        })
+
+        const venta = orderCreate.mock.calls[0][0].data
+        const cobro = paymentCreate.mock.calls[0][0].data
+        expect(venta.total.toFixed(2)).toBe('111.00')
+        expect(cobro.amount.toFixed(2)).toBe('106.00')
+        expect(cobro.tipAmount.toFixed(2)).toBe('5.00')
+        expect(cobro.netAmount.toFixed(2)).toBe('111.00')
+        expect(vtCreate.mock.calls[0][0].data.grossAmount.toFixed(2)).toBe('111.00')
+        expect(allocCreate.mock.calls[0][0].data.amount.toFixed(2)).toBe('106.00')
+        expect(postCashSaleToDrawerMock.mock.calls[0][0].amount.toFixed(2)).toBe('106.00')
+      })
+
+      it('un descuento mayor que monto + IVA se rechaza aunque la propina lo cubra', async () => {
+        ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+          tx(jest.fn().mockResolvedValue({ id: 's' }), jest.fn(), jest.fn().mockResolvedValue({ count: 0 }), jest.fn(), jest.fn()),
+        )
+
+        await expect(
+          manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+            amount: '10.00',
+            discountAmount: '15.00',
+            tipAmount: '10.00',
+            method: 'CASH',
+            source: 'OTHER',
+            externalSource: 'BUQ',
+          }),
+        ).rejects.toThrow(BadRequestError)
+      })
+    })
+
     it('does NOT subtract REFUND payments when computing paidSoFar (over-pay risk)', async () => {
       // Scenario: order $100, prior payment $80 (COMPLETED), refund $-50 (COMPLETED).
       // Net paid should be $30 → can accept up to $70 more.
@@ -824,8 +891,9 @@ describe('manualPayment.service', () => {
       expect(orderCreate).not.toHaveBeenCalled()
     })
 
-    it('FIX: shadow order with shadowTotal=0 (discount equals subtotal+tax+tip) is accepted', async () => {
-      // amount=50 + tax=10 + tip=5 - discount=65 = 0 → boundary case, must accept (not "less than 0")
+    // D12: el descuento ya no se come la propina; la frontera es «monto + IVA − descuento = 0» (lo cobrado), la propina va aparte.
+    it('FIX: shadow order where discount equals amount+tax (cobrado = 0) is accepted', async () => {
+      // amount=50 + tax=10 - discount=60 = 0 → boundary case, must accept (not "less than 0"); total = la propina
       const orderCreate = jest.fn().mockImplementation(({ data }) => Promise.resolve({ id: 'zero', ...data }))
       ;(prismaMock.$transaction as jest.Mock).mockImplementation(
         txMock({
@@ -837,13 +905,13 @@ describe('manualPayment.service', () => {
         amount: '50',
         tipAmount: '5',
         taxAmount: '10',
-        discountAmount: '65',
+        discountAmount: '60',
         method: 'CASH',
         source: 'OTHER',
         externalSource: 'BUQ',
       })
 
-      expect(orderCreate.mock.calls[0][0].data.total.toString()).toBe('0')
+      expect(orderCreate.mock.calls[0][0].data.total.toString()).toBe('5')
     })
 
     it('handles concurrent overpay race via Serializable (transaction isolation declared)', async () => {

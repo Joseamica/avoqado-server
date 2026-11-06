@@ -8,7 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { NotFoundError } from '@/errors/AppError'
+import { ForbiddenError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
@@ -258,12 +258,14 @@ export async function applyManualDiscount(
  * @param orderId - Order ID
  * @param couponCode - Coupon code to apply
  * @param staffVenueId - Staff venue ID applying the coupon
+ * @param puedeRegalar - Quien llama tiene `orders:comp`. Falla cerrado: sin él, un cupón de cortesía (COMP) se rechaza con 403 (D14).
  */
 export async function applyCouponCode(
   venueId: string,
   orderId: string,
   couponCode: string,
   staffVenueId: string,
+  puedeRegalar = false,
 ): Promise<ApplyCouponResult> {
   logger.info(`🎟️ TPV Applying coupon code`, { venueId, orderId, couponCode })
 
@@ -341,6 +343,8 @@ export async function applyCouponCode(
         error: 'Esta cuenta ya tiene un cupón. Quítalo antes de aplicar otro.',
       }
     }
+    // D14: regalar la cuenta con un cupón pide el permiso de cortesía, igual que la venta de D5 (`order.tpv.service.ts`). Antes del apartado.
+    if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías')
     // D5 (Codex r3 #1): el mismo apartado que la venta nueva, bajo el mismo candado del descuento (lanza el 400 del límite).
     await apartarCupon(tx, venueId, { id: coupon.id, code: coupon.code, discount: { id: discount.id }, minimo: null }, order.customerId)
 

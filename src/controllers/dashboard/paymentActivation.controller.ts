@@ -8,6 +8,7 @@
 import { NextFunction, Request, Response } from 'express'
 import { z } from 'zod'
 import { BadRequestError } from '../../errors/AppError'
+import { motivosDeZod } from '../../utils/zodEnEspanol'
 import {
   assertPaymentActivationAccess,
   getPaymentActivation,
@@ -90,7 +91,7 @@ export async function updateProfile(req: Request, res: Response, next: NextFunct
     const { organizationId } = await assertPaymentActivationAccess(req.params.venueId, userId, role)
     const parsed = paymentActivationProfileSchema.safeParse(req.body)
     if (!parsed.success) {
-      throw new BadRequestError(parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('. '), 'INVALID_PAYMENT_ACTIVATION')
+      throw new BadRequestError(motivosDeZod(parsed.error.issues), 'INVALID_PAYMENT_ACTIVATION')
     }
     const data = await updatePaymentActivationProfile(req.params.venueId, organizationId, parsed.data, userId)
     res.json({ success: true, data })
