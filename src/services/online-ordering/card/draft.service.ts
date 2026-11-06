@@ -34,7 +34,7 @@ import {
 import { getAcceptingStatus } from '../presence.service'
 import { quoteCart, toPublicQuote, type CartItemInput } from '../quote.service'
 import { generateTrackingToken } from '../trackingToken'
-import { chargeMerchant, findCardMerchant, type MerchantSnapshot } from './merchant'
+import { cardOnlineAvailable, chargeMerchant, findCardMerchant, type MerchantSnapshot } from './merchant'
 
 export interface CreateCardDraftInput {
   venueId: string
@@ -199,8 +199,12 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
         })
       }
       // El switch se lee directo de la fila (una columna, sin armar los ajustes completos en este camino caliente).
-      const settings = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { acceptsCardOnline: true } })
-      if (!settings?.acceptsCardOnline) throw notAccepted()
+      const settings = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { acceptsCardOnline: true, requiresAcceptance: true } })
+      // T8: en «Nadie» no hay tarjeta (se paga en caja): el mismo código que el pedido cuando el modo no sirve.
+      if (settings?.requiresAcceptance === false) {
+        throw new BadRequestError('Este negocio no acepta pagar con tarjeta en línea.', 'PAYMENT_MODE_NOT_ACCEPTED')
+      }
+      if (!settings || !(await cardOnlineAvailable(settings, prisma, venueId))) throw notAccepted()
       const merchant = await findCardMerchant(prisma, venueId)
       const connectAccountId = (merchant?.providerCredentials as { connectAccountId?: unknown } | null)?.connectAccountId
       if (!merchant || typeof connectAccountId !== 'string' || !connectAccountId) throw notAccepted()

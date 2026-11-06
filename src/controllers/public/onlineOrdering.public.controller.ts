@@ -5,11 +5,12 @@ import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
 import { assertOrderingPlan } from '@/middlewares/requirePublicVenueFeatureStrict.middleware'
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
+import { closesAt } from '@/services/online-ordering/hours'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { abandonCardPayment, createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
-import { findCardMerchant } from '@/services/online-ordering/card/merchant'
+import { cardOnlineAvailable } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
@@ -65,7 +66,7 @@ export async function getInfo(req: Request, res: Response) {
       }),
     ])
     // Fase 2: la tienda sólo anuncia tarjeta si el switch está prendido Y el comercio puede cobrar hoy.
-    const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, venue.id)) !== null
+    const cardOnline = await cardOnlineAvailable(state.config, prisma, venue.id)
     // Sin ningún medio de pago vivo (pagar al recoger apagado y la tarjeta ya no cobra) la tienda no puede recibir pedidos: no se
     // anuncia OPEN. Se calcula aquí y no en `getAcceptingStatus` (esa lectura está en el camino caliente de crear pedidos).
     const noPaymentMode = state.status === 'OPEN' && !state.config.acceptsPayAtPickup && !cardOnline
@@ -96,6 +97,9 @@ export async function getInfo(req: Request, res: Response) {
             ? state.config.pausedUntil
             : null,
         hours: state.config.hours,
+        // T8 (aditivos): el modo de la tienda («Nadie» = false) y a qué hora cierra la franja vigente (ISO; null sin horario o fuera de él).
+        requiresAcceptance: state.config.requiresAcceptance !== false,
+        closesAt: closesAt(state.config.hours, new Date(), row?.timezone || 'America/Mexico_City')?.toISOString() ?? null,
         paymentModes: { payAtPickup: state.config.acceptsPayAtPickup, cardOnline },
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,

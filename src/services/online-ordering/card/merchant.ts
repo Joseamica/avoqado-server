@@ -43,6 +43,21 @@ export async function findCardMerchant(
   return merchants.find(puedeCobrarUnPedido) ?? null
 }
 
+/**
+ * T8: LA regla de «¿la tarjeta se ofrece?», una sola para GET /info, el pedido y el borrador: el switch prendido, la tienda en «Mi
+ * equipo» (en «Nadie» se pide con el nombre y se paga en caja: sin tarjeta) y una cuenta Stripe que hoy puede cobrar.
+ * Las banderas se miden primero: apagada alguna, no consulta el comercio.
+ */
+export async function cardOnlineAvailable(
+  config: { acceptsCardOnline?: boolean | null; requiresAcceptance?: boolean | null },
+  db: Prisma.TransactionClient,
+  venueId: string,
+): Promise<boolean> {
+  // `requiresAcceptance` sólo con `=== false` es «Nadie» (como `getAcceptingStatus`): un ajuste sin el campo es «Mi equipo».
+  if (!config.acceptsCardOnline || config.requiresAcceptance === false) return false
+  return (await findCardMerchant(db, venueId)) !== null
+}
+
 export type CardMerchantStatus = 'NOT_CONNECTED' | 'NOT_CHARGEABLE' | 'READY'
 
 /** Para el panel: ninguna cuenta Stripe, una que aún no puede cobrar, o lista; una sola consulta, mismo criterio que `findCardMerchant`. */

@@ -124,7 +124,7 @@ beforeEach(() => {
   prismaMock.onlineOrderCharge.update.mockResolvedValue({})
   prismaMock.onlineOrder.count.mockResolvedValue(0)
   prismaMock.order.findUnique.mockResolvedValue(null)
-  prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ acceptsCardOnline: true } as any)
+  prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ acceptsCardOnline: true, requiresAcceptance: true } as any)
   prismaMock.ecommerceMerchant.findMany.mockResolvedValue([MERCHANT] as any)
   createAuthorizationCheckout.mockReset()
   createAuthorizationCheckout.mockResolvedValue({ id: 'cs_1', url: 'https://checkout.stripe.test/cs_1', expiresAt: EXPIRES })
@@ -253,6 +253,13 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ acceptsCardOnline: false } as any)
     await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 400, 'CARD_PAYMENT_NOT_ACCEPTED')
     expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
+  })
+
+  it('T8: un borrador nuevo en «Nadie» → 400 PAYMENT_MODE_NOT_ACCEPTED y nada se crea', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ acceptsCardOnline: true, requiresAcceptance: false } as any)
+    await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 400, 'PAYMENT_MODE_NOT_ACCEPTED')
+    expect(prismaMock.onlineOrderCharge.create).not.toHaveBeenCalled()
+    expect(createAuthorizationCheckout).not.toHaveBeenCalled()
   })
 
   it('sin comercio Stripe cobrable → 400 CARD_PAYMENT_NOT_ACCEPTED', async () => {

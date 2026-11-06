@@ -43,7 +43,7 @@ import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
-import { chargeMerchant, findCardMerchant } from './card/merchant'
+import { chargeMerchant, cardOnlineAvailable } from './card/merchant'
 import { getProvider } from '@/services/payments/provider-registry'
 
 export interface CreateOnlineOrderInput {
@@ -537,7 +537,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     if (!state.config.acceptsPayAtPickup) {
       // S8: la tienda vieja abierta en una pestaña muestra este texto ante un código que no conoce. Si la tarjeta SÍ está disponible
       // (misma regla que `paymentModes.cardOnline` de GET /info), le dice qué hacer. El código no cambia.
-      const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, input.venueId)) !== null
+      const cardOnline = await cardOnlineAvailable(state.config, prisma, input.venueId)
       throw new BadRequestError(
         cardOnline
           ? 'Este negocio ahora cobra con tarjeta en línea. Recarga la página para pagar con tarjeta.'
