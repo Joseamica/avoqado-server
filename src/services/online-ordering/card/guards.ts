@@ -49,6 +49,22 @@ export async function assertCardOrderMoneyFrozenInTx(db: Db, i: { venueId: strin
 }
 
 /**
+ * Tienda híbrida (R53): un folio (`requiresAcceptance = false`) no se junta con otra cuenta ni le mueven artículos (de él a otra, ni
+ * de otra a él): saldría de «Por pagar»/«Por entregar» o mezclaría su dinero. Un pedido de «Mi equipo» sigue como hoy.
+ */
+export const ONLINE_ORDER_FOLIO_NO_SE_JUNTA = 'ONLINE_ORDER_FOLIO_NO_SE_JUNTA' as const
+export async function assertNotFolioInTx(
+  db: Pick<Prisma.TransactionClient, 'onlineOrder'>,
+  i: { venueId: string; orderIds: string[] },
+): Promise<void> {
+  const folio = await db.onlineOrder.findFirst({
+    where: { venueId: i.venueId, orderId: { in: i.orderIds }, requiresAcceptance: false },
+    select: { id: true },
+  })
+  if (folio) throw new ConflictError('Este es un pedido en línea: se cobra en su lista de folios.', ONLINE_ORDER_FOLIO_NO_SE_JUNTA)
+}
+
+/**
  * El cobro de Stripe de un cargo (su `processorId` es el PaymentIntent del cargo, como lo escribe la captura) sólo se devuelve
  * desde Pedidos en línea, que regresa el dinero a la tarjeta. Otro pago de la misma cuenta (p. ej. un cobro tardío de la TPV) sigue
  * su camino de siempre.

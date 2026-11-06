@@ -6,7 +6,11 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   __esModule: true,
-  authenticateTokenMiddleware: (_req: any, _res: any, next: any) => next(),
+  // El token dice a qué negocio pertenece la sesión (`x-test-token-venue`; por defecto v1) para `validateVenueAccess` de la TPV.
+  authenticateTokenMiddleware: (req: any, _res: any, next: any) => {
+    req.authContext = { venueId: req.headers['x-test-token-venue'] ?? 'v1' }
+    next()
+  },
 }))
 // Registra QUÉ esquema validó cada ruta (el objeto real de `@/schemas/online-ordering.schema`), sin validar nada.
 jest.mock('@/middlewares/validation', () => ({
@@ -46,6 +50,8 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
   return {
     __esModule: true,
     inbox: respond,
+    toPay: respond,
+    toPayPanel: respond,
     deliveryCash: respond,
     accept: respond,
     reject: respond,
@@ -81,13 +87,16 @@ jest.mock('@/controllers/dashboard/onlineOrdering.dashboard.controller', () => {
 import * as mobileCtrl from '@/controllers/mobile/onlineOrders.mobile.controller'
 import mobileRouter from '@/routes/mobile/onlineOrders.mobile.routes'
 import dashboardRouter from '@/routes/dashboard/onlineOrdering.dashboard.routes'
+import tpvRouter from '@/routes/tpv/onlineOrders.tpv.routes'
 
 const app = express()
 app.use(express.json())
 app.use('/m/venues/:venueId/online-orders', mobileRouter)
+app.use('/t/venues/:venueId/online-orders', tpvRouter)
 app.use('/d/venues/:venueId/online-ordering', dashboardRouter)
 
 const M = '/m/venues/v1/online-orders'
+const T = '/t/venues/v1/online-orders'
 const P = '/d/venues/v1/online-ordering'
 
 describe('API del restaurante: permiso, candado de plan y esquema por ruta', () => {
@@ -124,6 +133,51 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
   it('Rappi 2b: la lista «Rappi · por cobrar» usa orders:read sin candado de plan, como la bandeja (R14)', async () => {
     const r = await request(app).get(`${M}/delivery-cash`)
     expect(r.body).toEqual({ perms: ['orders:read'], plans: [], schemas: ['deliveryCashSchema'] })
+  })
+
+  it('T12: «Por pagar» usa orders:read sin candado de plan, con toPaySchema, en las apps y en el panel (antes de /orders/:orderId)', async () => {
+    const esperado = { perms: ['orders:read'], plans: [], schemas: ['toPaySchema'] }
+    expect((await request(app).get(`${M}/to-pay`)).body).toEqual(esperado)
+    expect((await request(app).get(`${P}/orders/to-pay`)).body).toEqual(esperado)
+  })
+
+  it('T12 (R21): la TPV alcanza to-pay, accept, cancel, ready, delivered y print/claim|confirm con los permisos de /mobile', async () => {
+    const casos: Array<['get' | 'post', string, string, string]> = [
+      ['get', 'to-pay', 'orders:read', 'toPaySchema'],
+      ['post', 'ord1/accept', 'orders:update', 'acceptSchema'],
+      ['post', 'ord1/ready', 'orders:update', 'orderActionSchema'],
+      ['post', 'ord1/delivered', 'orders:update', 'orderActionSchema'],
+      ['post', 'ord1/cancel', 'orders:cancel-unpaid', 'orderActionSchema'],
+      ['post', 'ord1/print/claim', 'orders:update', 'orderActionSchema'],
+      ['post', 'ord1/print/confirm', 'orders:update', 'orderActionSchema'],
+    ]
+    for (const [metodo, path, perm, schema] of casos) {
+      const r = await request(app)[metodo](`${T}/${path}`)
+      expect({ path, ...r.body }).toEqual({ path, perms: [perm], plans: [], schemas: [schema] })
+    }
+  })
+
+  it('T12 (m1): la TPV exige que el :venueId de la URL sea el del token (validateVenueAccess): otra sucursal ⇒ 403 en cada ruta', async () => {
+    for (const [metodo, path] of [
+      ['get', 'to-pay'],
+      ['post', 'ord1/accept'],
+      ['post', 'ord1/cancel'],
+      ['post', 'ord1/print/claim'],
+    ] as const) {
+      const r = await request(app)[metodo](`${T}/${path}`).set('x-test-token-venue', 'vOtra')
+      expect({ path, status: r.status }).toEqual({ path, status: 403 })
+    }
+  })
+
+  it('T12 (R21): la TPV NO monta bandeja, rechazar, pausar ni efectivo de plataformas', async () => {
+    for (const [metodo, path] of [
+      ['get', 'inbox'],
+      ['get', 'delivery-cash'],
+      ['post', 'pause'],
+      ['post', 'ord1/reject'],
+    ] as const) {
+      expect((await request(app)[metodo](`${T}/${path}`)).status).toBe(404)
+    }
   })
 
   it('PUT /settings exige online-orders:manage y el plan', async () => {

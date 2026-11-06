@@ -5,7 +5,7 @@
  * que la tarjeta quedó apartada (tarea 5). Mismo candado y mismo `externalId` (`web:<llave>`) que pagar al recoger: una llave es
  * de UN solo pedido, en cualquier modo (Codex r2 #5).
  */
-import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, Prisma, type OnlineOrderCharge } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, Prisma, type OnlineOrderCharge } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { getProvider } from '@/services/payments/provider-registry'
@@ -17,7 +17,7 @@ import {
 } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { canonicalPhoneE164 } from '@/utils/phone'
-import { CARD_CHECKOUT_TTL_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, liveCardDraftsWhere } from '../constants'
+import { CARD_CHECKOUT_TTL_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, awaitingAcceptanceWhere, liveCardDraftsWhere } from '../constants'
 import { storefrontBase } from '../notifications.service'
 import {
   TX_OPTIONS,
@@ -34,7 +34,7 @@ import {
 import { getAcceptingStatus } from '../presence.service'
 import { quoteCart, toPublicQuote, type CartItemInput } from '../quote.service'
 import { generateTrackingToken } from '../trackingToken'
-import { chargeMerchant, findCardMerchant, type MerchantSnapshot } from './merchant'
+import { cardOnlineAvailable, chargeMerchant, findCardMerchant, type MerchantSnapshot } from './merchant'
 
 export interface CreateCardDraftInput {
   venueId: string
@@ -199,8 +199,12 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
         })
       }
       // El switch se lee directo de la fila (una columna, sin armar los ajustes completos en este camino caliente).
-      const settings = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { acceptsCardOnline: true } })
-      if (!settings?.acceptsCardOnline) throw notAccepted()
+      const settings = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { acceptsCardOnline: true, requiresAcceptance: true } })
+      // T8: en «Nadie» no hay tarjeta (se paga en caja): el mismo código que el pedido cuando el modo no sirve.
+      if (settings?.requiresAcceptance === false) {
+        throw new BadRequestError('Este negocio no acepta pagar con tarjeta en línea.', 'PAYMENT_MODE_NOT_ACCEPTED')
+      }
+      if (!settings || !(await cardOnlineAvailable(settings, prisma, venueId))) throw notAccepted()
       const merchant = await findCardMerchant(prisma, venueId)
       const connectAccountId = (merchant?.providerCredentials as { connectAccountId?: unknown } | null)?.connectAccountId
       if (!merchant || typeof connectAccountId !== 'string' || !connectAccountId) throw notAccepted()
@@ -250,13 +254,13 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
     // Topes: pedidos por aceptar MÁS borradores con su sesión vigente.
     const liveDrafts = liveCardDraftsWhere(venueId, now)
     const byPhone =
-      (await tx.onlineOrder.count({ where: { venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE, order: { customerPhone: phone } } })) +
+      (await tx.onlineOrder.count({ where: { ...awaitingAcceptanceWhere(venueId), order: { customerPhone: phone } } })) +
       (await tx.onlineOrderCharge.count({ where: { ...liveDrafts, customerPhone: phone } }))
     if (byPhone >= MAX_PENDING_PER_PHONE) {
       throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
     }
     const inVenue =
-      (await tx.onlineOrder.count({ where: { venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE } })) +
+      (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(venueId) })) +
       (await tx.onlineOrderCharge.count({ where: liveDrafts }))
     if (inVenue >= MAX_PENDING_PER_VENUE) {
       throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {

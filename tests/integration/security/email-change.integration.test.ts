@@ -17,6 +17,7 @@ import jwt from 'jsonwebtoken'
 import prisma from '../../../src/utils/prismaClient'
 import { logAction } from '../../../src/services/dashboard/activity-log.service'
 import { confirmarCambioDeCorreo, solicitarCambioDeCorreo } from '../../../src/services/dashboard/cambioDeCorreo.service'
+import { getCrmAccess } from '../../../src/services/crm/access.service'
 
 const sufijo = `ec${Date.now()}`
 const ids: string[] = []
@@ -164,5 +165,73 @@ describe('tercera pasada (25-sep)', () => {
         data: expect.objectContaining({ correoAnterior: yo.email, correoNuevo: nuevo }),
       }),
     )
+  })
+})
+
+/**
+ * D4 (6-nov): las llaves del CRM se buscan por el correo. Contra el disparador REAL de `PlatformAccess` (L11: apaga las 8 finas
+ * en toda escritura que no sube `llavesVersion`): cambiar el correo no le quita a nadie sus llaves, ni las finas.
+ */
+describe('D4: cambiar el correo conserva las llaves del CRM', () => {
+  const FINAS = {
+    cerrar: true,
+    bajas: true,
+    plantillas: true,
+    preparar: true,
+    mandar: true,
+    verCampanas: true,
+    equipo: true,
+    configurar: true,
+  }
+  const filas: string[] = []
+  async function llaves(email: string, createdById: string) {
+    const fila = await prisma.platformAccess.create({
+      data: { email, verScope: 'todos', editarScope: 'propios', contactar: true, ...FINAS, createdById },
+    })
+    filas.push(fila.id)
+    return fila
+  }
+  afterAll(async () => {
+    if (filas.length) await prisma.platformAccess.deleteMany({ where: { id: { in: filas } } })
+  })
+
+  it('🔴 /crm/me contesta lo mismo antes y después: la fila se muda al correo nuevo con las finas prendidas', async () => {
+    const yo = await persona('d4')
+    const fila = await llaves(yo.email, yo.id)
+    const antes = await getCrmAccess(yo.id) // el primer acceso la reclama
+    expect(antes).toMatchObject({ staffId: yo.id, ver: 'todos', editar: 'propios', ...FINAS })
+
+    const nuevo = `d4-nuevo-${sufijo}@test.mx`
+    await solicitarCambioDeCorreo(yo.id, nuevo)
+    await confirmarCambioDeCorreo(tokenDelCorreo())
+
+    expect(await getCrmAccess(yo.id)).toEqual(antes)
+    const guardada = await prisma.platformAccess.findUniqueOrThrow({ where: { id: fila.id } })
+    expect(guardada).toMatchObject({ email: nuevo, staffId: yo.id, ...FINAS })
+    expect(guardada.llavesVersion).toBeGreaterThan(fila.llavesVersion)
+  })
+
+  it('🔴 si el correo nuevo ya tiene OTRAS llaves, no se puede pedir ni confirmar, y nada cambia', async () => {
+    const yo = await persona('d4b')
+    const mia = await llaves(yo.email, yo.id)
+    await getCrmAccess(yo.id)
+    const nuevo = `d4b-nuevo-${sufijo}@test.mx`
+    await solicitarCambioDeCorreo(yo.id, nuevo) // aún no hay otra fila: sale el enlace
+    const token = tokenDelCorreo()
+    const otra = await llaves(nuevo, yo.id)
+
+    await expect(solicitarCambioDeCorreo(yo.id, nuevo)).rejects.toMatchObject({ statusCode: 409, code: 'CRM_KEYS_EMAIL_IN_USE' })
+    await expect(confirmarCambioDeCorreo(token)).rejects.toMatchObject({ statusCode: 409, code: 'CRM_KEYS_EMAIL_IN_USE' })
+    expect((await prisma.staff.findUniqueOrThrow({ where: { id: yo.id } })).email).toBe(yo.email)
+    expect(await prisma.platformAccess.findUniqueOrThrow({ where: { id: mia.id } })).toMatchObject({ email: yo.email, ...FINAS })
+    expect(await prisma.platformAccess.findUniqueOrThrow({ where: { id: otra.id } })).toMatchObject({ staffId: null })
+  })
+
+  it('sin llaves propias, el cambio no escribe ninguna fila de llaves', async () => {
+    const yo = await persona('d4c')
+    await solicitarCambioDeCorreo(yo.id, `d4c-nuevo-${sufijo}@test.mx`)
+    await confirmarCambioDeCorreo(tokenDelCorreo())
+    expect(await prisma.platformAccess.findUnique({ where: { staffId: yo.id } })).toBeNull()
+    expect(await getCrmAccess(yo.id)).toBeNull()
   })
 })

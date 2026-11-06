@@ -65,19 +65,28 @@ export const quoteSchema = z.object({ params: slugParams, body: z.object({ items
 
 export const createOrderSchema = z.object({
   params: slugParams,
-  body: z.object({
-    items,
-    paymentMode: z.enum(['PAY_AT_PICKUP', 'CARD_ONLINE'], { errorMap: () => ({ message: 'Medio de pago no disponible' }) }),
-    // R5: el total que el comensal vio y confirmó; si el del servidor difiere, 409 PRICE_CHANGED.
-    expectedTotal: z.string().regex(/^\d{1,7}\.\d{2}$/, 'Total inválido: pesos con dos decimales, por ejemplo 206.00'),
-    customer: z.object({
-      name: sinControl(CONTROL, z.string().trim().min(2, 'Escribe tu nombre').max(80, 'Nombre demasiado largo')),
-      phone: z.string().trim().min(8, 'Teléfono inválido').max(20, 'Teléfono inválido'),
-      email: z.string().trim().email('Correo inválido').max(120, 'Correo demasiado largo').optional(),
+  body: z
+    .object({
+      items,
+      paymentMode: z.enum(['PAY_AT_PICKUP', 'CARD_ONLINE'], { errorMap: () => ({ message: 'Medio de pago no disponible' }) }),
+      // R5: el total que el comensal vio y confirmó; si el del servidor difiere, 409 PRICE_CHANGED.
+      expectedTotal: z.string().regex(/^\d{1,7}\.\d{2}$/, 'Total inválido: pesos con dos decimales, por ejemplo 206.00'),
+      customer: z.object({
+        name: sinControl(CONTROL, z.string().trim().min(2, 'Escribe tu nombre').max(80, 'Nombre demasiado largo')),
+        // Tienda híbrida (R7): en «Nadie» basta el nombre; «Mi equipo» lo exige el servicio (teléfono probado) y la tarjeta, aquí.
+        phone: z.string().trim().min(8, 'Teléfono inválido').max(20, 'Teléfono inválido').optional(),
+        email: z.string().trim().email('Correo inválido').max(120, 'Correo demasiado largo').optional(),
+      }),
+      note,
+      whatsappConsent: z.boolean().optional(),
+      // Tienda híbrida: por dónde llegó la clienta (el QR de «Compartir tu tienda» lleva `?canal=qr`), sólo para medir.
+      channel: z.enum(['QR', 'LINK'], { errorMap: () => ({ message: 'Canal inválido' }) }).optional(),
+    })
+    .superRefine((b, ctx) => {
+      if (b.paymentMode === 'CARD_ONLINE' && !b.customer.phone) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['customer', 'phone'], message: 'Escribe tu teléfono' })
+      }
     }),
-    note,
-    whatsappConsent: z.boolean().optional(),
-  }),
 })
 
 export const trackingSchema = z.object({

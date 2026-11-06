@@ -119,6 +119,8 @@ beforeEach(() => {
   prismaMock.onlineOrder.create.mockImplementation(async (a: any) => ({ id: 'oo1', ...a.data }) as any)
   // Codex r3: los rechazos guardados de la llave (tabla genérica `IdempotencyRequest`). Por omisión, ninguno.
   prismaMock.idempotencyRequest = { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) }
+  // R47: sin sesión el servicio lee SÓLO el modo de la tienda; sin fila de ajustes es «Mi equipo» (R37).
+  prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
 })
 
 describe('createOnlineOrder', () => {
@@ -216,9 +218,12 @@ describe('createOnlineOrder', () => {
     expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
   })
 
-  it('la misma llave de OTRO cliente es 409 IDEMPOTENCY_KEY_CONFLICT y no entrega el token (R8)', async () => {
-    prismaMock.order.findUnique.mockResolvedValue(existing({ customerId: 'otro-cliente' }) as any)
-    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+  it('la misma llave de OTRO cliente es 409 IDEMPOTENCY_KEY_CONFLICT y no entrega el token (R8: su huella guarda otro cliente)', async () => {
+    const deOtro = existing({ customerId: 'otro-cliente', onlineOrder: oo({ requestHash: huella({ customerId: 'otro-cliente' }) }) })
+    prismaMock.order.findUnique.mockResolvedValue(deOtro as any)
+    const err = await createOnlineOrder(input(), PUEDE_CREAR).catch((e: unknown) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+    expect(JSON.stringify(err) + (err as Error).message).not.toContain('T'.repeat(32))
   })
 
   it('Codex r2 #5: una llave que ya tiene borrador de TARJETA es 409 IDEMPOTENCY_KEY_CONFLICT (final) y no crea nada', async () => {
@@ -354,12 +359,36 @@ describe('createOnlineOrder', () => {
     })
   })
 
-  it('sin sesión de cliente es 401 PHONE_VERIFICATION_REQUIRED (R6)', async () => {
-    await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({
+  it('R47: sin sesión de cliente, en «Mi equipo», es 401 PHONE_VERIFICATION_REQUIRED (R6) leyendo SÓLO el modo de la tienda: ni plan, ni tienda, ni la llave, ni una fila de rechazo', async () => {
+    const assertCanCreate = jest.fn(async () => {})
+    await expect(createOnlineOrder(input({ customerId: null }), { assertCanCreate })).rejects.toMatchObject({
       statusCode: 401,
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledWith({ where: { venueId: 'v1' } })
+    expect(assertCanCreate).not.toHaveBeenCalled()
+    expect(getAcceptingStatus).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('R47: con la tienda cerrada o el plan vencido, el anónimo de «Mi equipo» sigue siendo 401 y no guarda un rechazo `anon:`', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+    const vencido = { assertCanCreate: async () => Promise.reject(new ForbiddenError('Plan vencido', 'PLAN_REQUIRED')) }
+    await expect(createOnlineOrder(input({ customerId: null }), vencido)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
+    await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('con sesión probada no se lee el modo aparte: lo trae la lectura de la tienda (una sola vez)', async () => {
+    await createOnlineOrder(input(), PUEDE_CREAR)
+    expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
+    expect(getAcceptingStatus).toHaveBeenCalledTimes(1)
   })
 
   it('una sesión sin teléfono verificado por WhatsApp (correo, contraseña, token viejo) es 401 (R6)', async () => {
@@ -538,7 +567,12 @@ describe('createOnlineOrder', () => {
       existing({
         id: 'ord9',
         customerId: 'otro-cliente',
-        onlineOrder: oo({ id: 'oo9', status: 'PENDING_ACCEPTANCE', trackingToken: 'W'.repeat(32) }),
+        onlineOrder: oo({
+          id: 'oo9',
+          status: 'PENDING_ACCEPTANCE',
+          trackingToken: 'W'.repeat(32),
+          requestHash: huella({ customerId: 'otro-cliente' }),
+        }),
       }) as any,
     )
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
@@ -697,11 +731,22 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
   })
 
-  it('un 401 PHONE_VERIFICATION_REQUIRED no abre la transacción (sin cliente probado no hay repetición posible)', async () => {
+  it('R47: un 401 PHONE_VERIFICATION_REQUIRED no abre transacción ni toma la llave, y no se guarda', async () => {
     await expect(createOnlineOrder(input({ verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled() // la tienda pide el código y reintenta con la MISMA llave
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('R47 (T7 a): el reintento SIN sesión de un pedido que nació CON sesión es 401, no 409 IDEMPOTENCY_KEY_CONFLICT', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(existing() as any) // su pedido, con la huella de la sesión
+    await expect(createOnlineOrder(input({ customerId: null, verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'PHONE_VERIFICATION_REQUIRED',
+    })
   })
 
   describe('Codex r3: la primera decisión sobre una llave es durable (un envío tardío recibe el mismo rechazo)', () => {
@@ -891,8 +936,472 @@ describe('Codex r4: una sola conexión por envío, y la decisión durable sale m
     })
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT', final: true })
 
-    prismaMock.order.findUnique.mockResolvedValueOnce(existing({ customerId: 'otro-cliente' }) as any)
+    prismaMock.order.findUnique.mockResolvedValueOnce(
+      existing({ customerId: 'otro-cliente', onlineOrder: oo({ requestHash: huella({ customerId: 'otro-cliente' }) }) }) as any,
+    )
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_CONFLICT', final: true })
+  })
+})
+
+describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetición primero)', () => {
+  const NADIE = { ...OPEN, config: { ...OPEN.config, requiresAcceptance: false, hours: null } }
+  const MI_EQUIPO = { ...OPEN, config: { ...OPEN.config, requiresAcceptance: true, hours: null } }
+  /** La clienta de «Nadie»: sin sesión ni teléfono, sólo su nombre; llegó por el QR. */
+  const anon = (o: Record<string, unknown> = {}) =>
+    input({ customerId: null, verifiedPhone: null, customer: { name: 'María G.', email: null }, channel: 'QR', ...o })
+  /** La huella anónima: cliente '' y teléfono ''. */
+  const huellaAnon = (o: Record<string, unknown> = {}) =>
+    onlineOrderRequestHash({
+      venueId: 'v1',
+      customerId: '',
+      paymentMode: 'PAY_AT_PICKUP',
+      expectedTotal: '206.00',
+      items: input().items,
+      customerName: 'María G.',
+      customerPhone: '',
+      ...o,
+    })
+  const LLAVE_ANON = {
+    organizationId: 'venue:v1',
+    actorStaffId: `anon:${KEY}`,
+    endpoint: 'POST /public/ordering/orders',
+    idempotencyKey: KEY,
+  }
+  const dia = { enabled: true, ranges: [{ open: '09:00', close: '21:00' }] }
+  const HORARIO = { monday: dia, tuesday: dia, wednesday: dia, thursday: dia, friday: dia, saturday: dia, sunday: dia }
+
+  beforeEach(() => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(NADIE)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: false })
+  })
+  /** El negocio pasa a «Mi equipo»: lo dicen su fila de ajustes (R47) y la lectura de la tienda. */
+  const aMiEquipo = () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })
+  }
+
+  it('en «Nadie», sin sesión ni teléfono, crea el folio con customerId null, sin teléfono, requiresAcceptance false y channel QR', async () => {
+    const res = await createOnlineOrder(anon(), PUEDE_CREAR)
+
+    expect(res).toMatchObject({ replay: false, status: 'PENDING_ACCEPTANCE', orderNumber: expect.any(String), total: '206.00' })
+    const order = (prismaMock.order.create.mock.calls[0][0] as any).data
+    expect(order).toMatchObject({ customerId: null, customerPhone: null, customerName: 'María G.' })
+    const online = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+    expect(online).toMatchObject({ requiresAcceptance: false, channel: 'QR', paymentMode: 'PAY_AT_PICKUP' })
+    expect(online.requestHash).toBe(huellaAnon()) // la huella anónima usa customerId ''
+    // Sin horario no hay cierre (R23): el plazo es sólo +30 min.
+    expect(new Date(res.acceptDeadlineAt).getTime()).toBe(NOW.getTime() + 30 * 60_000)
+    // Sin teléfono no hay tope por teléfono: sólo la saturación de «Mi equipo» y el tope de folios.
+    const wheres = prismaMock.onlineOrder.count.mock.calls.map(([a]: any[]) => a.where)
+    expect(wheres.some((w: any) => w.order?.customerPhone !== undefined)).toBe(false)
+    expect(wheres).toContainEqual({
+      venueId: 'v1',
+      status: 'PENDING_ACCEPTANCE',
+      requiresAcceptance: false,
+      order: { paymentStatus: 'PENDING' },
+    })
+    expect(prismaMock.onlineOrderCharge.count).not.toHaveBeenCalledWith({
+      where: expect.objectContaining({ customerPhone: expect.anything() }),
+    })
+  })
+
+  it('el plazo es min(ahora + 30 min, cierre) en la zona del NEGOCIO: a las 20:50 con cierre 21:00 ⇒ 21:00; a las 10:00 ⇒ 10:30', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: HORARIO } })
+    // Cancún es UTC-5 todo el año: si se usara la zona de CDMX (UTC-6), 20:50 de Cancún serían 19:50 y el plazo saldría 21:20.
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ timezone: 'America/Cancun' } as any)
+    const tarde = await createOnlineOrder(anon({ now: new Date('2026-10-15T01:50:00.000Z') }), PUEDE_CREAR)
+    expect(tarde.acceptDeadlineAt).toBe('2026-10-15T02:00:00.000Z') // 21:00 de Cancún
+    expect(prismaMock.venue.findUnique).toHaveBeenCalledWith({ where: { id: 'v1' }, select: { timezone: true } })
+
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ timezone: 'America/Cancun' } as any)
+    const temprano = await createOnlineOrder(
+      anon({ now: new Date('2026-10-14T15:00:00.000Z'), idempotencyKey: 'q'.repeat(32) }),
+      PUEDE_CREAR,
+    )
+    expect(temprano.acceptDeadlineAt).toBe('2026-10-14T15:30:00.000Z') // 10:30 de Cancún
+    // Lo que se guarda es ese plazo (no se recalcula después).
+    expect((prismaMock.onlineOrder.create.mock.calls[1][0] as any).data.acceptDeadlineAt.toISOString()).toBe('2026-10-14T15:30:00.000Z')
+  })
+
+  it('R45: en la hora repetida de Tijuana (01:30 PST, 2.ª vez) el plazo es el cierre de las 01:45 que viene (09:45Z), nunca uno ya pasado', async () => {
+    const madrugada = { ...HORARIO, sunday: { enabled: true, ranges: [{ open: '00:00', close: '01:45' }] } }
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: madrugada } })
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ timezone: 'America/Tijuana' } as any)
+    const r = await createOnlineOrder(anon({ now: new Date('2026-11-01T09:30:00.000Z') }), PUEDE_CREAR)
+    expect(r.acceptDeadlineAt).toBe('2026-11-01T09:45:00.000Z')
+  })
+
+  it('R45: si el cierre del día no existe (el reloj salta) y no hay uno futuro, el plazo es ahora + 30 min', async () => {
+    const marzo = { ...HORARIO, sunday: { enabled: true, ranges: [{ open: '01:00', close: '02:30' }] } }
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: marzo } })
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ timezone: 'America/Tijuana' } as any)
+    const r = await createOnlineOrder(anon({ now: new Date('2026-03-08T09:50:00.000Z') }), PUEDE_CREAR)
+    expect(r.acceptDeadlineAt).toBe('2026-03-08T10:20:00.000Z')
+  })
+
+  it('en «Nadie» un pedido de $0.00 responde 400 ZERO_TOTAL «Tu pedido no tiene costo: pídelo directo en caja» (rechazo guardado)', async () => {
+    ;(quoteCart as jest.Mock).mockResolvedValue({ ...QUOTE_OK, subtotal: D('0'), total: D('0') })
+    const err = await createOnlineOrder(anon({ expectedTotal: '0.00' }), PUEDE_CREAR).catch((e: unknown) => e)
+    expect(err).toMatchObject({
+      statusCode: 400,
+      code: 'ZERO_TOTAL',
+      message: 'Tu pedido no tiene costo: pídelo directo en caja.',
+      final: true,
+    })
+    expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
+      ...LLAVE_ANON,
+      requestHash: huellaAnon({ expectedTotal: '0.00' }),
+      responseStatus: 400,
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('una pestaña vieja con teléfono verificado también se acepta en «Nadie» (folio con su cliente y su teléfono)', async () => {
+    const res = await createOnlineOrder(input(), PUEDE_CREAR)
+    expect(res).toMatchObject({ replay: false })
+    expect((prismaMock.order.create.mock.calls[0][0] as any).data).toMatchObject({ customerId: 'cust1', customerPhone: PHONE })
+    const online = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+    expect(online).toMatchObject({ requiresAcceptance: false, channel: null })
+    expect(online.requestHash).toBe(huella())
+  })
+
+  it('R47 (reemplaza la repetición antes del modo de T7): crea en «Nadie», el negocio pasa a «Mi equipo» y la misma llave sin sesión ⇒ 401 sin leer la llave ni guardar nada', async () => {
+    const primero = await createOnlineOrder(anon(), PUEDE_CREAR)
+    const guardado = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+
+    aMiEquipo()
+    prismaMock.order.findUnique.mockClear()
+    prismaMock.order.findUnique.mockResolvedValue(
+      existing({
+        customerId: null,
+        orderNumber: primero.orderNumber,
+        onlineOrder: oo({
+          status: 'PENDING_ACCEPTANCE',
+          trackingToken: primero.trackingToken,
+          requestHash: guardado.requestHash,
+          acceptDeadlineAt: guardado.acceptDeadlineAt,
+        }),
+      }) as any,
+    )
+    prismaMock.idempotencyRequest.create.mockClear()
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+  })
+
+  it("la huella anónima usa customerId '' y el rechazo guardado usa anon:<llave>", async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_CLOSED', final: true })
+    expect(prismaMock.idempotencyRequest.findUnique).toHaveBeenCalledWith({
+      where: { organizationId_actorStaffId_endpoint_idempotencyKey: LLAVE_ANON },
+    })
+    expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
+      ...LLAVE_ANON,
+      requestHash: huellaAnon(),
+    })
+    // Un teléfono escrito SIN sesión no entra a la huella ni al pedido: sigue siendo anónimo.
+    const conTelefono = await createOnlineOrder(anon({ customer: { name: 'María G.', phone: '55 4345 3965' } }), PUEDE_CREAR).catch(e => e)
+    expect(conTelefono).toMatchObject({ code: 'ORDERING_CLOSED' })
+    expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[1][0].data.requestHash).toBe(huellaAnon())
+  })
+
+  it('pedido anónimo, se pierde la respuesta, la caja lo cobra y le liga un cliente: el mismo envío devuelve SU folio y su token, nunca IDEMPOTENCY_KEY_CONFLICT', async () => {
+    const ligado = existing({
+      customerId: 'cliente-que-ligo-la-caja',
+      onlineOrder: oo({ status: 'ACCEPTED', requestHash: huellaAnon() }),
+    })
+    prismaMock.order.findUnique.mockResolvedValue(ligado as any)
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({
+      replay: true,
+      orderId: 'ord1',
+      trackingToken: 'T'.repeat(32),
+      status: 'ACCEPTED',
+    })
+    // También si aparece ya dentro del candado del negocio, y en la carrera (P2002).
+    prismaMock.order.findUnique.mockReset()
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(ligado as any)
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({ replay: true, trackingToken: 'T'.repeat(32) })
+    prismaMock.order.findUnique.mockResolvedValueOnce(ligado as any)
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }),
+    )
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({ replay: true, trackingToken: 'T'.repeat(32) })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('un anónimo y otro anónimo con la misma llave y otra canasta chocan IDEMPOTENCY_KEY_CONFLICT', async () => {
+    const otraCanasta = huellaAnon({ items: [{ productId: 'p2', quantity: 1 }] })
+    prismaMock.order.findUnique.mockResolvedValue(existing({ customerId: null, onlineOrder: oo({ requestHash: otraCanasta }) }) as any)
+    const err = await createOnlineOrder(anon(), PUEDE_CREAR).catch((e: unknown) => e)
+    expect(err).toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT', final: true })
+    expect(JSON.stringify(err) + (err as Error).message).not.toContain('T'.repeat(32))
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('un folio nuevo no emite ORDER_CREATED (las apps viejas no se enteran de un folio sin pagar); «Mi equipo» sí', async () => {
+    await createOnlineOrder(anon(), PUEDE_CREAR)
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(socketManager.broadcastToVenue).not.toHaveBeenCalled()
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
+    await createOnlineOrder(input({ idempotencyKey: 'm'.repeat(32) }), PUEDE_CREAR)
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledTimes(1)
+    expect((prismaMock.onlineOrder.create.mock.calls[1][0] as any).data.requiresAcceptance).toBe(true)
+  })
+
+  it('«Mi equipo» sigue exigiendo PHONE_VERIFICATION_REQUIRED (sin sesión, o con un teléfono que no es el probado)', async () => {
+    aMiEquipo()
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+    await expect(createOnlineOrder(input({ verifiedPhone: '+525511112222' }), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'PHONE_VERIFICATION_REQUIRED',
+    })
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  describe('R52 (Codex f1 r5): un folio nunca nace vencido', () => {
+    afterEach(() => {
+      // Lo que estas pruebas simulan no se queda para las siguientes del archivo.
+      prismaMock.venue.findUnique.mockReset()
+      ;(prismaMock.$executeRaw as jest.Mock).mockReset()
+    })
+    const SIN_HORA_FIJA = { now: undefined } // la ruta no pasa hora: lee el reloj
+    /** Cotizar y esperar el candado de admisión tarda: el reloj avanza a `escritura` al tomar ese candado. */
+    const relojQueAvanzaEnLaAdmision = (escritura: Date) =>
+      (prismaMock.$executeRaw as jest.Mock).mockImplementation(async (_sql: unknown, llave: string) => {
+        if (llave === ADMISSION_LOCK) jest.setSystemTime(escritura)
+        return 0
+      })
+    const conCierreALas21DeCancun = () => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: HORARIO } })
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Cancun' } as any) // UTC-5 todo el año
+    }
+    const conRelojFalso = async (peticion: Date, fn: () => Promise<void>) => {
+      jest.useFakeTimers({ now: peticion, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+      try {
+        await fn()
+      } finally {
+        jest.useRealTimers()
+      }
+    }
+
+    it('pide a las 20:59:59 y se escribe a las 21:00:05 (cierre 21:00): responde como fuera de horario, guarda ese rechazo y no crea nada', async () => {
+      conCierreALas21DeCancun()
+      await conRelojFalso(new Date('2026-10-15T01:59:59.000Z'), async () => {
+        relojQueAvanzaEnLaAdmision(new Date('2026-10-15T02:00:05.000Z'))
+
+        const err = await createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR).catch((e: unknown) => e)
+
+        // Lo mismo que hoy responde la tienda fuera de horario (paso 3), sin código ni enum nuevos.
+        expect(err).toMatchObject({
+          statusCode: 409,
+          code: 'ORDERING_CLOSED',
+          message: 'La tienda no está recibiendo pedidos en este momento.',
+          details: { status: 'CLOSED', reason: 'OUTSIDE_HOURS' },
+          final: true,
+        })
+        expect(prismaMock.order.create).not.toHaveBeenCalled()
+        expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+        expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
+          ...LLAVE_ANON,
+          responseStatus: 409,
+          responseBody: { code: 'ORDERING_CLOSED', details: { status: 'CLOSED', reason: 'OUTSIDE_HOURS' } },
+        })
+      })
+    })
+
+    it('vecina: a las 20:50, aunque la escritura tarde 6 s, crea el folio con plazo 21:00 (R23: el plazo no se recalcula)', async () => {
+      conCierreALas21DeCancun()
+      await conRelojFalso(new Date('2026-10-15T01:50:00.000Z'), async () => {
+        relojQueAvanzaEnLaAdmision(new Date('2026-10-15T01:50:06.000Z'))
+        const r = await createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR)
+        expect(r).toMatchObject({ replay: false, status: 'PENDING_ACCEPTANCE', acceptDeadlineAt: '2026-10-15T02:00:00.000Z' })
+        expect(prismaMock.onlineOrder.create).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    it('la repetición con la misma llave de un folio que SÍ se creó devuelve su folio aunque ya sea tarde', async () => {
+      conCierreALas21DeCancun()
+      await conRelojFalso(new Date('2026-10-15T01:59:59.000Z'), async () => {
+        relojQueAvanzaEnLaAdmision(new Date('2026-10-15T02:00:05.000Z'))
+        // El envío vivo de la misma llave lo creó mientras éste esperaba: aparece ya dentro del candado de admisión (después de la hora).
+        prismaMock.order.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(existing({ customerId: null, onlineOrder: oo({ requestHash: huellaAnon() }) }) as any)
+        await expect(createOnlineOrder(anon(SIN_HORA_FIJA), PUEDE_CREAR)).resolves.toMatchObject({ replay: true })
+        expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+      })
+    })
+  })
+
+  describe('R56: «último pedido para pagar en caja» al crear (con la regla de apertura REAL)', () => {
+    afterEach(() => prismaMock.venue.findUnique.mockReset())
+    /** Hora de pared de Cancún (UTC-5 todo el año) del 14-oct. */
+    const a = (hhmmss: string) => new Date(`2026-10-14T${hhmmss}-05:00`)
+    /** La tienda real: ajustes, latido de hace 30 s y la zona del negocio; `getAcceptingStatus` sin simular. */
+    const tiendaReal = (ahora: Date, o: Record<string, unknown> = {}) => {
+      const real = jest.requireActual(
+        '@/services/online-ordering/presence.service',
+      ) as typeof import('@/services/online-ordering/presence.service')
+      ;(getAcceptingStatus as jest.Mock).mockImplementation(real.getAcceptingStatus)
+      prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Cancun' } as any)
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({
+        venueId: 'v1',
+        enabled: true,
+        requiresAcceptance: false,
+        acceptsPayAtPickup: true,
+        acceptsCardOnline: false,
+        manualPause: false,
+        pausedUntil: null,
+        minOrderAmount: 0,
+        defaultPrepMinutes: 15,
+        hours: HORARIO,
+        lastToPayPollAt: new Date(ahora.getTime() - 30_000),
+        lastInboxPollAt: new Date(ahora.getTime() - 30_000),
+        ...o,
+      } as any)
+    }
+    const fueraDeHorario = {
+      statusCode: 409,
+      code: 'ORDERING_CLOSED',
+      message: 'La tienda no está recibiendo pedidos en este momento.',
+      details: { status: 'CLOSED', reason: 'OUTSIDE_HOURS' },
+    }
+
+    it('a las 20:50:01 con cierre a las 21:00 el folio ya no se recibe: lo mismo que fuera de horario y nada se crea', async () => {
+      tiendaReal(a('20:50:01'))
+      await expect(createOnlineOrder(anon({ now: a('20:50:01') }), PUEDE_CREAR)).rejects.toMatchObject(fueraDeHorario)
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+    })
+
+    it('a las 20:49:59 se crea con plazo 21:00 (al menos 10 min para pagar)', async () => {
+      tiendaReal(a('20:49:59'))
+      const r = await createOnlineOrder(anon({ now: a('20:49:59') }), PUEDE_CREAR)
+      expect(r).toMatchObject({ replay: false, acceptDeadlineAt: a('21:00:00').toISOString() })
+    })
+
+    it('franjas contiguas (09–21 + 21–23): a las 20:55 el cierre real es 23:00, así que se crea con su plazo de 30 min', async () => {
+      const d = {
+        enabled: true,
+        ranges: [
+          { open: '09:00', close: '21:00' },
+          { open: '21:00', close: '23:00' },
+        ],
+      }
+      const contiguas = { monday: d, tuesday: d, wednesday: d, thursday: d, friday: d, saturday: d, sunday: d }
+      tiendaReal(a('20:55:00'), { hours: contiguas })
+      const r = await createOnlineOrder(anon({ now: a('20:55:00') }), PUEDE_CREAR)
+      expect(r.acceptDeadlineAt).toBe(a('21:25:00').toISOString())
+    })
+
+    it('«Mi equipo» a las 20:55 sigue creando como hoy', async () => {
+      tiendaReal(a('20:55:00'), { requiresAcceptance: true })
+      await expect(createOnlineOrder(input({ now: a('20:55:00') }), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+      expect((prismaMock.onlineOrder.create.mock.calls[0][0] as any).data.requiresAcceptance).toBe(true)
+    })
+
+    it('Codex r6: a las 20:59:59 ni siquiera se admite, aunque crear la cuenta tarde 6 s DESPUÉS de comprobar (antes: folio vencido)', async () => {
+      tiendaReal(a('20:59:59'))
+      jest.useFakeTimers({ now: a('20:59:59'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+      try {
+        // Crear la cuenta y sus artículos espera el FOR UPDATE de recetas: la escritura del folio cae a las 21:00:05.
+        prismaMock.order.create.mockImplementation((async () => {
+          jest.setSystemTime(a('21:00:05'))
+          return { id: 'ord1', orderNumber: 'WABCD' }
+        }) as any)
+        await expect(createOnlineOrder(anon({ now: undefined }), PUEDE_CREAR)).rejects.toMatchObject(fueraDeHorario)
+        expect(prismaMock.onlineOrder.create).not.toHaveBeenCalled()
+      } finally {
+        jest.useRealTimers()
+      }
+    })
+  })
+
+  describe('T3b: tope propio de 60 folios sin pagar y el aviso una vez por hora', () => {
+    const LLENO = 60
+    /** Cuenta folios sin pagar como `unpaidFoliosWhere` (R18) y nada de «Mi equipo». */
+    beforeEach(() => prismaMock.staffVenue.findMany.mockResolvedValue([]))
+    afterEach(() => {
+      prismaMock.activityLog.create.mockReset()
+      prismaMock.activityLog.findFirst.mockReset()
+      prismaMock.staffVenue.findMany.mockReset()
+    })
+    const foliosSinPagar = (n: number) =>
+      prismaMock.onlineOrder.count.mockImplementation(async ({ where }: any) =>
+        where.requiresAcceptance === false && where.order?.paymentStatus === 'PENDING' ? n : 0,
+      )
+
+    it('el folio 61 responde 409 TOO_MANY_UNPAID_FOLIOS con «Hay muchos pedidos esperando pago. Pide directo en caja» y la tienda sigue OPEN', async () => {
+      foliosSinPagar(LLENO)
+      const err = await createOnlineOrder(anon(), PUEDE_CREAR).catch((e: unknown) => e)
+      expect(err).toMatchObject({
+        statusCode: 409,
+        code: 'TOO_MANY_UNPAID_FOLIOS',
+        message: 'Hay muchos pedidos esperando pago. Pide directo en caja.',
+        final: true,
+      })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect((prismaMock.idempotencyRequest.create as jest.Mock).mock.calls[0][0].data).toMatchObject({
+        ...LLAVE_ANON,
+        responseStatus: 409,
+      })
+      // La tienda NO se pausa: nada toca sus ajustes (sigue abierta para ver el menú).
+      for (const m of ['update', 'updateMany', 'upsert'] as const) expect(prismaMock.onlineOrderingSettings[m]).not.toHaveBeenCalled()
+
+      // Con 59 sí entra el 60.
+      foliosSinPagar(LLENO - 1)
+      await expect(createOnlineOrder(anon({ idempotencyKey: 'n'.repeat(32) }), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+    })
+
+    it('el tope se cuenta bajo el candado del negocio y sólo para folios: «Mi equipo» con 60 folios vivos no lo ve', async () => {
+      foliosSinPagar(LLENO)
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
+      await expect(createOnlineOrder(input(), PUEDE_CREAR)).resolves.toMatchObject({ replay: false })
+      expect(prismaMock.onlineOrder.count).not.toHaveBeenCalledWith({ where: expect.objectContaining({ requiresAcceptance: false }) })
+    })
+
+    it('el aviso «se llenaron los folios por pagar» sale una vez por hora (dos rechazos en 10 min ⇒ una sola fila en la bitácora)', async () => {
+      foliosSinPagar(LLENO)
+      const filas: any[] = []
+      prismaMock.activityLog.create.mockImplementation(async ({ data }: any) => {
+        filas.push(data)
+        return data
+      })
+      prismaMock.activityLog.findFirst.mockImplementation(
+        async ({ where }: any) =>
+          filas.find(f => f.action === where.action && f.venueId === where.venueId && f.createdAt >= where.createdAt.gte) ?? null,
+      )
+      prismaMock.staffVenue.findMany.mockResolvedValue([{ staffId: 'gerente1' }, { staffId: 'duena1' }] as any)
+
+      const intento = (minutos: number, llave: string) =>
+        createOnlineOrder(anon({ now: new Date(NOW.getTime() + minutos * 60_000), idempotencyKey: llave.repeat(32) }), PUEDE_CREAR).catch(
+          (e: unknown) => e,
+        )
+      await expect(intento(0, 'a')).resolves.toMatchObject({ code: 'TOO_MANY_UNPAID_FOLIOS' })
+      await expect(intento(10, 'b')).resolves.toMatchObject({ code: 'TOO_MANY_UNPAID_FOLIOS' })
+
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({ action: 'ONLINE_ORDERING_UNPAID_FOLIOS_FULL', venueId: 'v1', createdAt: NOW })
+      expect(prismaMock.staffVenue.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: 'v1', active: true, role: { in: ['MANAGER', 'ADMIN', 'OWNER'] } } }),
+      )
+      expect(prismaMock.notification.createMany).toHaveBeenCalledTimes(1)
+      const avisos = (prismaMock.notification.createMany.mock.calls[0][0] as any).data
+      expect(avisos.map((a: any) => a.recipientId)).toEqual(['gerente1', 'duena1'])
+      expect(avisos[0]).toMatchObject({ venueId: 'v1', type: 'ALERT', title: 'Se llenaron los pedidos por pagar' })
+
+      // Dentro del mismo candado: la bitácora se escribe después de tomar el del negocio.
+      const raw = prismaMock.$executeRaw as jest.Mock
+      const admision = raw.mock.calls.findIndex(([, k]) => k === ADMISSION_LOCK)
+      expect(raw.mock.invocationCallOrder[admision]).toBeLessThan(prismaMock.activityLog.create.mock.invocationCallOrder[0])
+
+      // Pasada la hora, otro aviso.
+      await expect(intento(61, 'c')).resolves.toMatchObject({ code: 'TOO_MANY_UNPAID_FOLIOS' })
+      expect(filas).toHaveLength(2)
+      expect(prismaMock.notification.createMany).toHaveBeenCalledTimes(2)
+    })
   })
 })
 
@@ -934,6 +1443,53 @@ describe('getTrackingByToken', () => {
     })
     const cuenta = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
     for (const campo of ['customerPhone', 'customerEmail', 'customerName']) expect(cuenta).not.toHaveProperty(campo)
+  })
+
+  const folioNadie = (over: Record<string, any> = {}, paymentStatus = 'PENDING') =>
+    ({
+      status: 'PENDING_ACCEPTANCE',
+      paymentMode: 'PAY_AT_PICKUP',
+      requiresAcceptance: false,
+      channel: 'QR',
+      acceptDeadlineAt: NOW,
+      estimatedReadyAt: null,
+      rejectReason: null,
+      createdAt: NOW,
+      venueId: 'v1',
+      order: {
+        orderNumber: 'W-0042',
+        total: D('93.00'),
+        paymentStatus,
+        items: [{ productName: 'Flautas', quantity: 1, notes: null, modifiers: [] }],
+        venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
+      },
+      ...over,
+    }) as any
+
+  it('T15: el seguimiento trae requiresAcceptance y channel', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie())
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ requiresAcceptance: false, channel: 'QR' })
+    expect((prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select).toMatchObject({ requiresAcceptance: true, channel: true })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({ requiresAcceptance: true, channel: null }))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ requiresAcceptance: true, channel: null })
+  })
+
+  it('T15 (fija lo de hoy): en «Nadie» canCancel es true mientras no se paga y false con un abono', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie())
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: true })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PARTIAL'))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PAID'))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
+  })
+
+  it('T15 (fija lo de hoy): un folio pagado trae paid true, su folio y sus renglones', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PAID'))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({
+      paid: true,
+      orderNumber: 'W-0042',
+      items: [{ name: 'Flautas', quantity: 1 }],
+    })
   })
 
   it('1b: sin zona en el negocio, el seguimiento usa America/Mexico_City; sin contacto, nulos', async () => {
@@ -1109,6 +1665,8 @@ describe('el armado de la cuenta se comparte (fase 2: la tarjeta crea la cuenta 
       requestHash: online.requestHash,
       acceptDeadlineAt: online.acceptDeadlineAt,
       whatsappConsent: true,
+      requiresAcceptance: true,
+      channel: null,
     })
 
     expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1' })

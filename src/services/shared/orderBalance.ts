@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { PaymentStatus, Prisma } from '@prisma/client'
 import { esRenglonDeVale } from './renglonDeVale'
 
 /**
@@ -225,6 +225,9 @@ export function estadoAlRecibirDinero<S extends string>(status: S, cobrado: Pris
 export function esVentaCerrada(paymentStatus: string | null | undefined): boolean {
   return paymentStatus === 'PAID' || paymentStatus === 'REFUNDED'
 }
+
+/** El espejo para Prisma (`where: { paymentStatus: { in: FOLIO_PAID_STATUSES } }`) de `esVentaCerrada`: deben decir lo mismo. En memoria usa `esVentaCerrada`. */
+export const FOLIO_PAID_STATUSES = [PaymentStatus.PAID, PaymentStatus.REFUNDED]
 
 /**
  * 🔴 R4-2 (Codex r3): el estado con el que se CALCULAN los importes, separado del estado operativo que se GUARDA. Una venta CERRADA

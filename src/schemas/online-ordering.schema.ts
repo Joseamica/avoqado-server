@@ -44,6 +44,7 @@ export const settingsPatchBody = z
     defaultPrepMinutes: z.number().int('Debe ser un número entero').min(1, 'Mínimo 1 minuto').max(240, 'Máximo 240 minutos'),
     acceptsPayAtPickup: z.boolean(),
     acceptsCardOnline: z.boolean(),
+    requiresAcceptance: z.boolean(),
     manualPause: z.boolean(),
     // ISO 8601 en UTC (`…Z`) o con desfase (`…-06:00`): el MCP (tarea 14) comparte este esquema y puede mandar hora local.
     pausedUntil: z.string().datetime({ offset: true, message: 'Fecha inválida' }).nullable(),
@@ -85,6 +86,19 @@ export const inboxSchema = z.object({
     })
     .refine(q => q.cursor === undefined || q.status === 'active', {
       message: 'El cursor sólo sirve para los pedidos activos (status=active)',
+      path: ['cursor'],
+    }),
+})
+/** Tienda híbrida (T12): `section` elige qué lista sigue; el cursor es el `nextCursors` de ESA sección, así que no viaja solo. */
+export const toPaySchema = z.object({
+  params: venueParams,
+  query: z
+    .object({
+      section: z.enum(['toPay', 'toDeliver'], { errorMap: () => ({ message: 'Sección inválida' }) }).optional(),
+      cursor: activeCursor.optional(),
+    })
+    .refine(q => q.cursor === undefined || q.section !== undefined, {
+      message: 'El cursor necesita la sección (section) a la que sigue',
       path: ['cursor'],
     }),
 })

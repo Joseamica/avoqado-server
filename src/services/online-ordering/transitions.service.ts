@@ -5,6 +5,7 @@ import {
   OrderStatus,
   PaymentStatus,
   Prisma,
+  TransactionStatus,
   type OnlineOrderRejectReason,
 } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -16,10 +17,12 @@ import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/serv
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
+import { esVentaCerrada } from '@/services/shared/orderBalance'
 import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { getSettings } from './settings.service'
 import { emitOnlineOrderUpdated } from './traySocket'
+import type { Reloj } from './types'
 
 export type TransitionResult =
   /** `unchanged`: ya estaba en ese estado y no se escribió nada (A12: entregar lo ya entregado). */
@@ -121,7 +124,10 @@ export interface CasArgs {
   kind: TransitionKind
   venueId: string
   orderId: string
+  /** Una hora fija (pruebas, o quien ya la leyó bajo SU candado). Sin ella se lee `reloj` (o el reloj del sistema) bajo el candado. */
   now?: Date
+  /** R52: el reloj del trabajo; se lee aquí, DESPUÉS del candado. */
+  reloj?: Reloj
   onlineData: (now: Date) => Prisma.OnlineOrderUncheckedUpdateManyInput
   /** Campos extra de la `Order` (marca de cocina, `completedAt`); van en la MISMA escritura que mueve su estado. */
   orderExtra?: (now: Date) => Prisma.OrderUncheckedUpdateManyInput
@@ -140,14 +146,16 @@ export interface CasArgs {
 export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs): Promise<CasResult> {
   const rule = RULES[a.kind]
   if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
-  // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida.
-  const now = a.now ?? new Date()
+  // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida. R52: también el
+  // del trabajo (`reloj`), así lo escrito (`expiredAt`, `acceptedAt`…) es la hora de la escritura y no la del inicio de la pasada.
+  const now = a.now ?? a.reloj?.() ?? new Date()
   const row = await tx.onlineOrder.findFirst({
     where: { orderId: a.orderId, venueId: a.venueId },
     select: {
       id: true,
       status: true,
       paymentMode: true,
+      requiresAcceptance: true,
       acceptDeadlineAt: true,
       order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
     },
@@ -174,12 +182,24 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
     return { ...stale(after?.status ?? null), cancelledElsewhere }
   }
   if (!rule.from.includes(row.status)) return stale(row.status)
+  // R46: un folio no se rechaza: se quita con «Cancelar folio» (§12, `orders:cancel-unpaid`). Un REJECTED de folio queda sólo por
+  // datos que lo traigan.
+  if (a.kind === 'REJECT' && row.requiresAcceptance === false) return stale(row.status)
 
   const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
+  // R44: un folio cuyo abono se reembolsó completo (cuenta PARTIAL con dinero neto 0, leído aquí bajo el candado que también toman
+  // los cobros y los reembolsos) se trata como «sin dinero» SÓLO para vencer: queda EXPIRED SIN cancelar su cuenta (la guarda
+  // compartida no cancela una PARTIAL) y sale de «Por pagar». Si después llega dinero, `syncPaidClosedFolios` lo revive.
+  const venceSinCancelar =
+    a.kind === 'EXPIRE' &&
+    row.requiresAcceptance === false &&
+    row.order.paymentStatus === PaymentStatus.PARTIAL &&
+    !(await netoCobradoPorCuenta(tx, [a.orderId])).get(a.orderId)?.gt(0)
+  const cancela = rule.cancels && !venceSinCancelar
   if (rule.cancels) {
     // Ninguna cuenta con dinero —ni con un cobro de terminal en curso— se cancela desde aquí: misma regla que
     // `assertOrderCancellableUnderLock`, sin lanzar (el job y la bandeja necesitan un desenlace, no un error).
-    if (hasMoney) return { r: 'HAS_PAYMENTS' }
+    if (hasMoney && !venceSinCancelar) return { r: 'HAS_PAYMENTS' }
     if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
   }
   // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
@@ -188,8 +208,18 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
     return { r: 'PAYMENT_REQUIRED' }
   }
 
+  // Un folio (`requiresAcceptance:false`, QR o liga) no se prepara sin pago: aceptar exige la venta cobrada (`esVentaCerrada`).
+  if (a.kind === 'ACCEPT' && row.requiresAcceptance === false && !esVentaCerrada(row.order.paymentStatus)) {
+    return { r: 'PAYMENT_REQUIRED' }
+  }
+
   const cas = await tx.onlineOrder.updateMany({
-    where: { id: row.id, status: { in: rule.from }, ...(a.extraWhere?.(now, hasMoney) ?? {}) },
+    where: {
+      id: row.id,
+      status: { in: rule.from },
+      ...(a.extraWhere?.(now, hasMoney) ?? {}),
+      ...(venceSinCancelar ? { requiresAcceptance: false } : {}),
+    },
     data: { status: rule.to, ...a.onlineData(now) },
   })
   if (cas.count !== 1) {
@@ -200,22 +230,24 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
   // 🔴 LEALTAD (hz:a8104ac8:D1): rechazar, vencer o cancelar el pedido anula su venta, y sus canjes vuelven al cliente como al
   // quitar el descuento. Después de ganar el CAS de la fila y antes de escribir la Order: si la Order no se escribe,
   // `OrderNotWritten` revierte también esta devolución (Codex r2).
-  if (rule.cancels)
-    await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
+  if (cancela) await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId: a.venueId, orderId: a.orderId, camino: `pedidoEnLinea:${a.kind}` })
   const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
-  const written = await tx.order.updateMany({
-    where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },
-    data: orderData,
-  })
+  // R44: vencer sin cancelar no escribe la cuenta (queda como la dejó el reembolso).
+  const written = venceSinCancelar
+    ? { count: 0 }
+    : await tx.order.updateMany({
+        where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },
+        data: orderData,
+      })
   // M-1: rechazar, vencer o cancelar sin cancelar la cuenta le diría al comensal «rechazado» o «vencido» con la venta viva
   // (p. ej. una cortesía ya cerrada sin dinero). Se revierte todo y se responde el estado vigente.
-  if (rule.cancels && written.count !== 1) throw new OrderNotWritten(now)
+  if (cancela && written.count !== 1) throw new OrderNotWritten(now)
   const orderWritten = written.count === 1
 
   // Fase 2: cancelar suelta la tarjeta apartada. Se marca aquí, en la MISMA transacción; la liberación con el banco la hace el
   // llamador después del commit, y sólo si esta transición fue la que movió el cargo.
   let releaseChargeId: string | undefined
-  if (rule.cancels && charge?.status === OnlineOrderChargeStatus.AUTHORIZED) {
+  if (cancela && charge?.status === OnlineOrderChargeStatus.AUTHORIZED) {
     const released = await tx.onlineOrderCharge.updateMany({
       where: { id: charge.id, status: OnlineOrderChargeStatus.AUTHORIZED },
       data: { status: OnlineOrderChargeStatus.RELEASING },
@@ -231,6 +263,24 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
     orderStatus: orderWritten ? rule.order.to : null,
     ...(releaseChargeId ? { releaseChargeId } : {}),
   }
+}
+
+/**
+ * R44: dinero NETO de cada cuenta = Σ (amount + tipAmount) de sus `Payment` COMPLETED. Los reembolsos son filas NEGATIVAS (importe y
+ * propina), así que restan solos: es lo cobrado menos lo devuelto de `summarizeRefunds`. Una consulta por lote (sin N+1); una
+ * cuenta sin cobros no sale en el mapa (neto 0).
+ */
+export async function netoCobradoPorCuenta(
+  db: Pick<Prisma.TransactionClient, 'payment'>,
+  orderIds: string[],
+): Promise<Map<string, Prisma.Decimal>> {
+  if (orderIds.length === 0) return new Map()
+  const filas = await db.payment.groupBy({
+    by: ['orderId'],
+    where: { orderId: { in: orderIds }, status: TransactionStatus.COMPLETED },
+    _sum: { amount: true, tipAmount: true },
+  })
+  return new Map(filas.map(f => [f.orderId, new Prisma.Decimal(f._sum.amount ?? 0).plus(f._sum.tipAmount ?? 0)]))
 }
 
 /** Escritura extra en la MISMA transacción, después del CAS (fase 2: el estado del cargo de tarjeta). Lanzar revierte todo. */
@@ -256,7 +306,7 @@ async function casTransition(a: CasArgs, afterCas?: AfterCasInTx): Promise<CasRe
   return result
 }
 
-function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
+export function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
   switch (r.r) {
     case 'STALE':
       return r.confirmingPayment ? { outcome: 'CONFIRMING_PAYMENT' } : { outcome: 'STALE', status: r.status }
@@ -291,6 +341,13 @@ export async function acceptOnlineOrder(i: AcceptInput): Promise<TransitionResul
     // Dinámico: el módulo de la captura importa esta máquina de estados.
     const { acceptCardOnlineOrder } = await import('./card/capture.service')
     return acceptCardOnlineOrder(i)
+  }
+  // Tienda híbrida (decisión 18): aceptar un folio es pasarlo a «Por entregar» por el único camino (`prepararFolioPagado`).
+  const folio = await prisma.onlineOrder.count({ where: { orderId: i.orderId, venueId: i.venueId, requiresAcceptance: false } })
+  if (folio > 0) {
+    // Dinámico: `folios.service` importa esta máquina de estados.
+    const { prepararFolioPagado } = await import('./folios.service')
+    return prepararFolioPagado(i)
   }
   return acceptWithoutCapture(i)
 }
@@ -402,12 +459,13 @@ export async function rejectOnlineOrder(i: {
   return { outcome: 'OK', status: OnlineOrderStatus.REJECTED }
 }
 
-export async function expireOnlineOrder(i: { venueId: string; orderId: string; now?: Date }): Promise<TransitionResult> {
+export async function expireOnlineOrder(i: { venueId: string; orderId: string; now?: Date; reloj?: Reloj }): Promise<TransitionResult> {
   const r = await casTransition({
     kind: 'EXPIRE',
     venueId: i.venueId,
     orderId: i.orderId,
     now: i.now,
+    reloj: i.reloj,
     extraWhere: now => ({ acceptDeadlineAt: { lte: now } }),
     onlineData: now => ({ expiredAt: now }),
   })
@@ -555,6 +613,15 @@ class OnlineOrderChangedDuringCancel extends Error {}
 const STAFF_CANCELLABLE: OnlineOrderStatus[] = [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY]
 
 /**
+ * T13: además, un FOLIO por pagar (`PENDING_ACCEPTANCE` con `requiresAcceptance === false`, la clienta pidió y paga en caja) se
+ * puede cancelar por personal. Un pedido de «Mi equipo» por aceptar no: ése se acepta o se rechaza. Una sola condición, la
+ * misma en la lectura y en el CAS de dentro de la transacción.
+ */
+const STAFF_CANCELLABLE_WHERE = {
+  OR: [{ status: { in: STAFF_CANCELLABLE } }, { status: OnlineOrderStatus.PENDING_ACCEPTANCE, requiresAcceptance: false }],
+}
+
+/**
  * R1: cancelar por personal NO escribe la `Order` a mano. Reutiliza `cancelOrder` de `order.mobile.service.ts` —candado de
  * cocina → orden (`lockTableOrderScope`), retiro de comandas, `assertOrderCancellableUnderLock` (sin dinero ni cobro vivo) y
  * los avisos de después del commit— y hace el CAS del pedido en línea con su gancho `dentroDeLaTx`, en la MISMA transacción.
@@ -569,10 +636,12 @@ export async function cancelOnlineOrderByStaff(i: {
 }): Promise<TransitionResult> {
   const row = await prisma.onlineOrder.findFirst({
     where: { orderId: i.orderId, venueId: i.venueId },
-    select: { id: true, status: true, order: { select: { orderNumber: true } } },
+    select: { id: true, status: true, requiresAcceptance: true, order: { select: { orderNumber: true } } },
   })
   if (!row) return { outcome: 'NOT_FOUND' }
-  if (!STAFF_CANCELLABLE.includes(row.status)) return { outcome: 'STALE', status: row.status }
+  const cancellable =
+    STAFF_CANCELLABLE.includes(row.status) || (row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.requiresAcceptance === false)
+  if (!cancellable) return { outcome: 'STALE', status: row.status }
 
   const { cancelOrder } = await import('@/services/mobile/order.mobile.service')
   let cancelledAt = i.now ?? new Date()
@@ -580,7 +649,7 @@ export async function cancelOnlineOrderByStaff(i: {
     await cancelOrder(i.venueId, i.orderId, undefined, i.staffId ?? undefined, async tx => {
       cancelledAt = i.now ?? new Date() // ya con el candado de la orden
       const cas = await tx.onlineOrder.updateMany({
-        where: { id: row.id, status: { in: STAFF_CANCELLABLE } },
+        where: { id: row.id, ...STAFF_CANCELLABLE_WHERE },
         data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt, cancelledBy: i.staffId ?? 'STAFF' },
       })
       if (cas.count !== 1) throw new OnlineOrderChangedDuringCancel()
