@@ -1572,12 +1572,28 @@ function paymentResultStableUntilAudit(payment: AstCall, audit: AstCall): boolea
   return Boolean(result && ts.isIdentifier(result.name) && objectBindingStableUntilAudit(result.name, audit, new Set(['id']), false))
 }
 
+function isCanonicalDeadlockRetryImport(identifier: ts.Identifier, context: AstCall): boolean {
+  const declarations = identifierSymbol(identifier, context.sourceFile)?.declarations ?? []
+  if (declarations.length !== 1 || !ts.isImportSpecifier(declarations[0])) return false
+  const specifier = declarations[0]
+  const importDeclaration = specifier.parent.parent.parent
+  return Boolean(
+    !specifier.isTypeOnly &&
+      (specifier.propertyName ?? specifier.name).text === 'withDeadlockRetry' &&
+      ts.isImportDeclaration(importDeclaration) &&
+      ts.isStringLiteral(importDeclaration.moduleSpecifier) &&
+      /(^|\/)utils\/serializableRetry$/.test(importDeclaration.moduleSpecifier.text),
+  )
+}
+
 function canonicalTransactionCallbackOwns(parameter: ts.ParameterDeclaration, context: AstCall): boolean {
   const callback = parameter.parent
   if ((!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) || callback.parameters[0] !== parameter) return false
   const invocation = callback.parent
   if (!ts.isCallExpression(invocation) || invocation.arguments[0] !== callback || invocation.questionDotToken) return false
   const callee = invocation.expression
+  // S5b (red por traba): `withDeadlockRetry(cuerpo, …)` de `utils/serializableRetry` abre la misma transacción canónica que `prisma.$transaction`.
+  if (ts.isIdentifier(callee)) return isCanonicalDeadlockRetryImport(callee, context)
   if ((!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) || callee.questionDotToken) return false
   if (staticPropertyName(callee) !== '$transaction') return false
   const receiver = receiverOf(callee)

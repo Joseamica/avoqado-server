@@ -9,6 +9,7 @@
  *    por clienta y su sobre van después de los Payments y antes del Shift.
  */
 import { Prisma, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
+import type { TxConReintento } from '@/utils/serializableRetry'
 import { addDays, addMonths } from 'date-fns'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -26,7 +27,7 @@ import { GiftCardError } from './giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, MAXIMO_POR_SOBRE, formatoPesos } from './giftCardLimits'
 import { TERMINOS_VIGENTES } from './giftCardTerms'
 
-type Tx = Prisma.TransactionClient
+type Tx = TxConReintento
 const CERO = () => new Prisma.Decimal(0)
 const DIAS_DE_GRACIA_TRAS_REVERSO = 90
 const LLAVE_DE_OPERACION = /^[A-Za-z0-9_:-]{8,128}$/

@@ -32,6 +32,7 @@ import {
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -496,25 +497,25 @@ export async function recordRefund(
   // Split between sale (Payment.amount) and tip (Payment.tipAmount). Default
   // is proportional; caller can override with `tipRefundCents` for explicit
   // control ("refund only the sale, keep staff tip intact", etc.).
-  let tipRefund = 0
-  let salesRefund = refundAmountInPesos
+  let tipRefundPedido = 0
+  let salesRefundPedido = refundAmountInPesos
 
   if (typeof refundData.tipRefundCents === 'number') {
     const overrideTip = refundData.tipRefundCents / 100
     // This is the requested bookkeeping split, not yet the authorized split. The terminal
     // processor has already returned the money; the row-locked block below clamps this value
     // to the remaining sale/tip components instead of rejecting and orphaning the refund.
-    tipRefund = Math.round(overrideTip * 100) / 100
-    salesRefund = Math.round((refundAmountInPesos - tipRefund) * 100) / 100
+    tipRefundPedido = Math.round(overrideTip * 100) / 100
+    salesRefundPedido = Math.round((refundAmountInPesos - tipRefundPedido) * 100) / 100
   } else if (originalTipNumber > 0 && totalOriginalAmount > 0) {
     // Default: proportional split.
-    tipRefund = Math.round(((refundAmountInPesos * originalTipNumber) / totalOriginalAmount) * 100) / 100
-    tipRefund = Math.min(tipRefund, originalTipNumber)
-    salesRefund = Math.round((refundAmountInPesos - tipRefund) * 100) / 100
-    if (salesRefund > originalAmountNumber) {
-      const excess = salesRefund - originalAmountNumber
-      salesRefund -= excess
-      tipRefund = Math.round((tipRefund + excess) * 100) / 100
+    tipRefundPedido = Math.round(((refundAmountInPesos * originalTipNumber) / totalOriginalAmount) * 100) / 100
+    tipRefundPedido = Math.min(tipRefundPedido, originalTipNumber)
+    salesRefundPedido = Math.round((refundAmountInPesos - tipRefundPedido) * 100) / 100
+    if (salesRefundPedido > originalAmountNumber) {
+      const excess = salesRefundPedido - originalAmountNumber
+      salesRefundPedido -= excess
+      tipRefundPedido = Math.round((tipRefundPedido + excess) * 100) / 100
     }
   }
 
@@ -560,50 +561,51 @@ export async function recordRefund(
       'REFUND_AUTHORITY_UNAVAILABLE',
     )
   const ejecutarTransaccionDelReembolso = () =>
-    prisma.$transaction(async tx => {
-      if (originalPayment.orderId) {
-        const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: originalPayment.orderId })
-        if (!orderStillBelongsToVenue) throw authorityUnavailable()
-      }
-      // Pedidos en línea fase 2: el cobro de Stripe de un pedido con tarjeta no lo devolvió la terminal (no puede): se devuelve desde
-      // Pedidos en línea. Otro cobro de esa cuenta (uno tardío de la TPV) sigue aquí como siempre. Bajo el candado de la Order.
-      await assertCardRefundGoesThroughOnlineOrders(tx, {
-        venueId,
-        paymentId: originalPayment.id,
-        payment: { orderId: originalPayment.orderId, processorId: originalPayment.processorId ?? null },
-      })
-      // 🔒 Row-lock the original payment for the duration of this tx so
-      // concurrent refund attempts cannot both pass the "remaining refundable"
-      // check with stale data and each create their own refund (D8 race).
-      const expectedOrder = originalPayment.orderId ? Prisma.sql`"orderId" = ${originalPayment.orderId}` : Prisma.sql`"orderId" IS NULL`
-      const lockedRows = await tx.$queryRaw<
-        Array<{
-          id: string
-          venueId: string
-          orderId: string | null
-          status: string
-          type: PaymentType
-          method: PaymentMethod
-          source: PaymentSource
-          fundsFlow: PaymentFundsFlow | null
-          amount: unknown
-          tipAmount: unknown
-          processorData: unknown
-          merchantAccountId: string | null
-          terminalId: string | null
-          processedById: string | null
-          tenderTypeId: string | null
-          tenderRevision: number | null
-          tenderLabel: string | null
-          tenderCountsAsCash: boolean | null
-          tenderCaptureTip: boolean | null
-          tenderSatFormaPago: string | null
-          processor: string | null
-          cardBrand: CardBrand | null
-          maskedPan: string | null
-          entryMode: CardEntryMode | null
-        }>
-      >(Prisma.sql`
+    withDeadlockRetry(
+      async tx => {
+        if (originalPayment.orderId) {
+          const orderStillBelongsToVenue = await lockExistingOrderForPayment(tx, { venueId, orderId: originalPayment.orderId })
+          if (!orderStillBelongsToVenue) throw authorityUnavailable()
+        }
+        // Pedidos en línea fase 2: el cobro de Stripe de un pedido con tarjeta no lo devolvió la terminal (no puede): se devuelve desde
+        // Pedidos en línea. Otro cobro de esa cuenta (uno tardío de la TPV) sigue aquí como siempre. Bajo el candado de la Order.
+        await assertCardRefundGoesThroughOnlineOrders(tx, {
+          venueId,
+          paymentId: originalPayment.id,
+          payment: { orderId: originalPayment.orderId, processorId: originalPayment.processorId ?? null },
+        })
+        // 🔒 Row-lock the original payment for the duration of this tx so
+        // concurrent refund attempts cannot both pass the "remaining refundable"
+        // check with stale data and each create their own refund (D8 race).
+        const expectedOrder = originalPayment.orderId ? Prisma.sql`"orderId" = ${originalPayment.orderId}` : Prisma.sql`"orderId" IS NULL`
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            id: string
+            venueId: string
+            orderId: string | null
+            status: string
+            type: PaymentType
+            method: PaymentMethod
+            source: PaymentSource
+            fundsFlow: PaymentFundsFlow | null
+            amount: unknown
+            tipAmount: unknown
+            processorData: unknown
+            merchantAccountId: string | null
+            terminalId: string | null
+            processedById: string | null
+            tenderTypeId: string | null
+            tenderRevision: number | null
+            tenderLabel: string | null
+            tenderCountsAsCash: boolean | null
+            tenderCaptureTip: boolean | null
+            tenderSatFormaPago: string | null
+            processor: string | null
+            cardBrand: CardBrand | null
+            maskedPan: string | null
+            entryMode: CardEntryMode | null
+          }>
+        >(Prisma.sql`
       SELECT
         id,
         "venueId",
@@ -635,541 +637,546 @@ export async function recordRefund(
         AND ${expectedOrder}
       FOR UPDATE
     `)
-      const locked = lockedRows[0]
-      if (!locked) {
-        throw authorityUnavailable()
-      }
-      if (locked.venueId !== venueId || locked.orderId !== originalPayment.orderId) {
-        throw authorityUnavailable()
-      }
-      if (locked.status !== TransactionStatus.COMPLETED) {
-        throw new BadRequestError(`Cannot refund payment with status: ${locked.status}`)
-      }
-      if (locked.type === PaymentType.REFUND) {
-        throw new BadRequestError('Cannot refund a refund')
-      }
-      // 🔴 El `SELECT` de arriba declara su tipo A MANO, así que TypeScript NO comprueba que el
-      // SQL devuelva de verdad estas columnas. Recortar una en una edición futura vuelve la
-      // guarda del remanente INOFENSIVA, en silencio y para siempre:
-      //
-      //   · sin `amount` → `Number(undefined)` = `NaN` ⇒ `lockedRemaining` es `NaN` ⇒
-      //     `refundAmountInPesos > NaN` es **false** ⇒ TODOS los reembolsos pasan la validación;
-      //   · 🔴 sin `processorData` → aquí NO aparece ningún `NaN` que delate nada: el `?? {}` de
-      //     abajo deja `lockedAlreadyRefunded` en 0 en CADA reembolso, el acumulado se reinicia
-      //     solo y resucita el «$150 sobre $100» que este mismo bloque acaba de cerrar.
-      //
-      // Por eso se comprueba la PRESENCIA de la columna y no sólo que el número sea finito:
-      // `Number.isFinite` es ciego al segundo caso. Y se mira la LLAVE, no el valor, porque
-      // `tipAmount` y `processorData` son nulables: `null` es una fila normal (llave presente),
-      // mientras que una columna que no se pidió no aparece en el objeto. Confundirlos
-      // rechazaría reembolsos buenos.
-      //
-      // Falla RUIDOSO —y por tanto no registra el reembolso— a propósito: el dinero ya salió de
-      // la terminal, así que ninguna de las dos salidas es buena, pero un rechazo sistemático se
-      // nota en minutos y devolver de más no se nota nunca. Es 500 y no 4xx porque el fallo es
-      // del servidor, no de quien llama, y así entra a las alertas por `logger.error`.
-      for (const columna of ['amount', 'tipAmount', 'processorData'] as const) {
-        if (!(columna in locked)) {
-          logger.error('El SELECT … FOR UPDATE del reembolso dejó de traer una columna', {
+        const locked = lockedRows[0]
+        if (!locked) {
+          throw authorityUnavailable()
+        }
+        if (locked.venueId !== venueId || locked.orderId !== originalPayment.orderId) {
+          throw authorityUnavailable()
+        }
+        if (locked.status !== TransactionStatus.COMPLETED) {
+          throw new BadRequestError(`Cannot refund payment with status: ${locked.status}`)
+        }
+        if (locked.type === PaymentType.REFUND) {
+          throw new BadRequestError('Cannot refund a refund')
+        }
+        // 🔴 El `SELECT` de arriba declara su tipo A MANO, así que TypeScript NO comprueba que el
+        // SQL devuelva de verdad estas columnas. Recortar una en una edición futura vuelve la
+        // guarda del remanente INOFENSIVA, en silencio y para siempre:
+        //
+        //   · sin `amount` → `Number(undefined)` = `NaN` ⇒ `lockedRemaining` es `NaN` ⇒
+        //     `refundAmountInPesos > NaN` es **false** ⇒ TODOS los reembolsos pasan la validación;
+        //   · 🔴 sin `processorData` → aquí NO aparece ningún `NaN` que delate nada: el `?? {}` de
+        //     abajo deja `lockedAlreadyRefunded` en 0 en CADA reembolso, el acumulado se reinicia
+        //     solo y resucita el «$150 sobre $100» que este mismo bloque acaba de cerrar.
+        //
+        // Por eso se comprueba la PRESENCIA de la columna y no sólo que el número sea finito:
+        // `Number.isFinite` es ciego al segundo caso. Y se mira la LLAVE, no el valor, porque
+        // `tipAmount` y `processorData` son nulables: `null` es una fila normal (llave presente),
+        // mientras que una columna que no se pidió no aparece en el objeto. Confundirlos
+        // rechazaría reembolsos buenos.
+        //
+        // Falla RUIDOSO —y por tanto no registra el reembolso— a propósito: el dinero ya salió de
+        // la terminal, así que ninguna de las dos salidas es buena, pero un rechazo sistemático se
+        // nota en minutos y devolver de más no se nota nunca. Es 500 y no 4xx porque el fallo es
+        // del servidor, no de quien llama, y así entra a las alertas por `logger.error`.
+        for (const columna of ['amount', 'tipAmount', 'processorData'] as const) {
+          if (!(columna in locked)) {
+            logger.error('El SELECT … FOR UPDATE del reembolso dejó de traer una columna', {
+              venueId,
+              originalPaymentId: refundData.originalPaymentId,
+              columnaFaltante: columna,
+              columnasRecibidas: Object.keys(locked),
+            })
+            throw new InternalServerError(
+              `El candado del reembolso no devolvió la columna "${columna}": no se puede validar el monto reembolsable. ` +
+                'No se registró ningún reembolso.',
+            )
+          }
+        }
+
+        // Tarjetas de regalo (B1): sobres antes que el turno, como en `issueRefund` (Order → Payment → sobres → Shift).
+        if (locked.orderId)
+          await bloquearSobresDelReembolsoEnTx(tx, {
+            venueId,
+            originalPaymentId: locked.id,
+            original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+          })
+
+        const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
+
+        // 🔴 LAS FILAS DE REEMBOLSO, NO SÓLO EL ACUMULADO. Es una consulta más dentro de una
+        // transacción que YA está abierta, y es lo que cierra el último paso de la fuga: un
+        // cobro de $100 + $20 con `refundedAmount: 110` escrito por la regla vieja (dos
+        // reembolsos del dashboard que en realidad suman 120) haría creer a la terminal que
+        // quedan $10 y sacaría **$130 sobre $120**. Con el acumulado solo, lo que protegía este
+        // riel era que ningún cobro vivo tuviera dos reembolsos — o sea una medición, no el
+        // código. `centavosYaDevueltos` toma la MAYOR de las dos evidencias
+        // (`shared/devueltoDeUnCobro.ts`).
+        //
+        // Va DESPUÉS del `FOR UPDATE`: el candado serializa a los escritores del mismo cobro,
+        // así que esta lectura ve lo que ya commiteó quien ganó. Antes del candado sería una
+        // foto vieja, que es exactamente el defecto que cerró la Task 5k.
+        //
+        // Es `findMany` y no `$queryRaw` a propósito: el `select` lo comprueba TypeScript, así
+        // que aquí la columna `tipAmount` no se puede recortar en silencio — que es el descuido
+        // del que esta tarea entera nació. La relación sigue pudiendo crecer, por eso se lee
+        // `MAX + 1`: si existe esa fila extra se rechaza ruidosamente en vez de validar dinero
+        // contra una historia truncada.
+        const filasDeReembolso = await tx.payment.findMany({
+          where: {
+            venueId,
+            type: PaymentType.REFUND,
+            processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
+          },
+          select: { amount: true, tipAmount: true, status: true, processorData: true, tenderType: { select: { systemKind: true } } },
+          take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
+        })
+
+        if (filasDeReembolso.length > MAX_REFUND_ROWS_PER_PAYMENT) {
+          logger.error('El cobro rebasa el máximo verificable de filas de reembolso', {
             venueId,
             originalPaymentId: refundData.originalPaymentId,
-            columnaFaltante: columna,
-            columnasRecibidas: Object.keys(locked),
+            maxRefundRows: MAX_REFUND_ROWS_PER_PAYMENT,
           })
           throw new InternalServerError(
-            `El candado del reembolso no devolvió la columna "${columna}": no se puede validar el monto reembolsable. ` +
+            `El cobro tiene más de ${MAX_REFUND_ROWS_PER_PAYMENT} reembolsos registrados; no se puede validar el monto reembolsable. ` +
               'No se registró ningún reembolso.',
           )
         }
-      }
 
-      // Tarjetas de regalo (B1): sobres antes que el turno, como en `issueRefund` (Order → Payment → sobres → Shift).
-      if (locked.orderId)
-        await bloquearSobresDelReembolsoEnTx(tx, {
-          venueId,
-          originalPaymentId: locked.id,
-          original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
-        })
-
-      const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
-
-      // 🔴 LAS FILAS DE REEMBOLSO, NO SÓLO EL ACUMULADO. Es una consulta más dentro de una
-      // transacción que YA está abierta, y es lo que cierra el último paso de la fuga: un
-      // cobro de $100 + $20 con `refundedAmount: 110` escrito por la regla vieja (dos
-      // reembolsos del dashboard que en realidad suman 120) haría creer a la terminal que
-      // quedan $10 y sacaría **$130 sobre $120**. Con el acumulado solo, lo que protegía este
-      // riel era que ningún cobro vivo tuviera dos reembolsos — o sea una medición, no el
-      // código. `centavosYaDevueltos` toma la MAYOR de las dos evidencias
-      // (`shared/devueltoDeUnCobro.ts`).
-      //
-      // Va DESPUÉS del `FOR UPDATE`: el candado serializa a los escritores del mismo cobro,
-      // así que esta lectura ve lo que ya commiteó quien ganó. Antes del candado sería una
-      // foto vieja, que es exactamente el defecto que cerró la Task 5k.
-      //
-      // Es `findMany` y no `$queryRaw` a propósito: el `select` lo comprueba TypeScript, así
-      // que aquí la columna `tipAmount` no se puede recortar en silencio — que es el descuido
-      // del que esta tarea entera nació. La relación sigue pudiendo crecer, por eso se lee
-      // `MAX + 1`: si existe esa fila extra se rechaza ruidosamente en vez de validar dinero
-      // contra una historia truncada.
-      const filasDeReembolso = await tx.payment.findMany({
-        where: {
-          venueId,
-          type: PaymentType.REFUND,
-          processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
-        },
-        select: { amount: true, tipAmount: true, status: true, processorData: true, tenderType: { select: { systemKind: true } } },
-        take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
-      })
-
-      if (filasDeReembolso.length > MAX_REFUND_ROWS_PER_PAYMENT) {
-        logger.error('El cobro rebasa el máximo verificable de filas de reembolso', {
-          venueId,
-          originalPaymentId: refundData.originalPaymentId,
-          maxRefundRows: MAX_REFUND_ROWS_PER_PAYMENT,
-        })
-        throw new InternalServerError(
-          `El cobro tiene más de ${MAX_REFUND_ROWS_PER_PAYMENT} reembolsos registrados; no se puede validar el monto reembolsable. ` +
-            'No se registró ningún reembolso.',
-        )
-      }
-
-      // Misma definición ÚNICA que el pre-vuelo y que el riel del dashboard: venta + propina,
-      // en centavos enteros (`shared/devueltoDeUnCobro.ts`). Se conserva la copia en pesos
-      // porque la usan el aviso de concurrencia y los mensajes de error, que hablan en pesos.
-      const lockedAlreadyRefundedCents = centavosYaDevueltos({ processorData: lockedProcessorData, filas: filasDeReembolso })
-      const lockedAlreadyRefunded = lockedAlreadyRefundedCents / 100
-      const lockedTotal = Number(locked.amount) + Number(locked.tipAmount ?? 0)
-      // Cinturón además de los tirantes: la llave puede estar y el valor no ser un número
-      // (una cadena que no parsea, por ejemplo). Comparar contra `NaN` da `false` igual.
-      if (!Number.isFinite(lockedTotal)) {
-        logger.error('El importe del pago bloqueado no es un número: no se puede validar el reembolso', {
-          venueId,
-          originalPaymentId: refundData.originalPaymentId,
-          amount: locked.amount,
-          tipAmount: locked.tipAmount,
-        })
-        throw new InternalServerError(
-          'El importe del cobro original no es un número: no se puede validar el monto reembolsable. No se registró ningún reembolso.',
-        )
-      }
-      // La comparación se hace en CENTAVOS ENTEROS. Antes se restaban pesos y hacía falta una
-      // tolerancia de `+0.001` para absorber el error de punto flotante; con enteros no hay
-      // residuo que tolerar y el límite es exacto. Los centavos de ESTE reembolso se derivan
-      // igual que los que se guardan en la fila (`amountCents`, más abajo), así que la fila y
-      // el acumulado no pueden desalinearse ni por un centavo.
-      const esteReembolsoCents = Math.round(refundAmountInPesos * 100)
-      const lockedTotalCents = Math.round(Number(locked.amount) * 100) + Math.round(Number(locked.tipAmount ?? 0) * 100)
-      const lockedRemainingCents = lockedTotalCents - lockedAlreadyRefundedCents
-      const lockedRemaining = lockedRemainingCents / 100
-      // Cambio de producto (rM1, decisión «A») y saldo a favor (S7): el SDK ya devolvió. Si un cambio o un saldo a favor usó este
-      // cobro sin pasar por el banco, se anota hasta lo que el banco todavía tiene; el cambio va a revisar y el saldo se congela con
-      // su anomalía (`exchangeTerminalRefund.ts`).
-      const noPasoPorElBanco = laTerminalYaDevolvio(locked) ? centavosQueNoPasaronPorElBanco(filasDeReembolso) : 0
-      if (esteReembolsoCents > lockedRemainingCents + noPasoPorElBanco) {
-        throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
-      }
-      const anotadaDeMas = esteReembolsoCents > lockedRemainingCents
-      const anotadaTrasUnCambio = anotadaDeMas && centavosQueUsaronLosCambios(filasDeReembolso) > 0
-      // S7: los sobres que recibieron saldo de este cobro se apartan AQUÍ, antes del turno (Order → Payment → sobres → Shift, como el
-      // cobro con saldo). Sólo con exceso: sin él no hay nada duplicado.
-      const saldoDelCobro = anotadaDeMas ? await sobresDeSaldoDelCobroEnTx(tx, { venueId, paymentId: locked.id }) : null
-
-      // ═══════════════════════════════════════════════════════════════════════
-      // Turno del NEGOCIO: observar → reclamar OPEN o conciliar post-corte
-      // ═══════════════════════════════════════════════════════════════════════
-      // `claimedAt`/CLOSING es el corte. El lookup ve el candidato más reciente aunque esté
-      // CLOSING; sólo OPEN puede ganar un `updateMany` tenant-safe que decrementa venta/propina
-      // y autoriza `shiftId`. CLOSING y claim-lost jamás se esperan, reintentan o mutan: el
-      // Payment queda sin turno y, después de existir con su id real, se crea en esta misma
-      // transacción una conciliación con candidato, estado, razón, canal y montos. Sin candidato
-      // se conserva por ahora el comportamiento previo, excepto cuando el total histórico tiene
-      // un delta venta/propina sin clasificar: esa anomalía se concilia aun sin candidato.
-      // The total guard cannot protect the two accounting components on its own.
-      // Example: sale $100 + tip $20, with $90 of sale already refunded. Another $30
-      // sale-only refund fits the $30 total remainder, but cannot all be booked as sale.
-      //
-      // The processor has already returned the money when this endpoint runs. Rejecting an
-      // impossible requested split would therefore leave real money without a refund row.
-      // Clamp the requested tip portion to the feasible range instead: first consume the
-      // requested component, then spill only the unavoidable remainder into the other one.
-      // New TPVs prevent this combination in their UI; this branch keeps installed APKs and
-      // retries safe during rollout.
-      const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(filasDeReembolso)
-      const classifiedRefundedCents = refundedSalesCents + refundedTipsCents
-      const unclassifiedPriorRefundCents = Math.max(0, lockedAlreadyRefundedCents - classifiedRefundedCents)
-      const originalSalesCents = Math.round(Number(locked.amount) * 100)
-      const originalTipsCents = Math.round(Number(locked.tipAmount ?? 0) * 100)
-      const requestedTipCents = Math.round(tipRefund * 100)
-      const reparto = ajustarRepartoAComponentesRestantes({
-        originalSalesCents,
-        originalTipsCents,
-        // Si falta historia clasificable, estos ceros sólo validan que el split del EVENTO
-        // actual cabe en los componentes originales; no pretenden asignar el delta histórico.
-        refundedSalesCents: unclassifiedPriorRefundCents > 0 ? 0 : refundedSalesCents,
-        refundedTipsCents: unclassifiedPriorRefundCents > 0 ? 0 : refundedTipsCents,
-        refundCents: esteReembolsoCents,
-        requestedTipCents,
-      })
-
-      if (reparto.tipRefundCents !== requestedTipCents) {
-        logger.warn('Refund tip split adjusted to the remaining sale/tip balance', {
-          venueId,
-          originalPaymentId: refundData.originalPaymentId,
-          requestedTipCents,
-          feasibleTipCents: reparto.tipRefundCents,
-          remainingSalesCents: reparto.remainingSalesCents,
-          remainingTipsCents: reparto.remainingTipsCents,
-          refundCents: esteReembolsoCents,
-        })
-      }
-
-      tipRefund = reparto.tipRefundCents / 100
-      salesRefund = reparto.salesRefundCents / 100
-
-      const salesRefundPesos = new Decimal(salesRefund)
-      const tipRefundPesos = new Decimal(tipRefund)
-      const shiftClaim = await claimShiftForRefund(tx, {
-        venueId,
-        salesRefundPesos,
-        tipRefundPesos,
-        forcePendingReason: unclassifiedPriorRefundCents > 0 ? ('UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const) : undefined,
-      })
-      const shiftId = shiftClaim.shiftId
-
-      // Create new Payment record with type=REFUND
-      const refundPayment = await tx.payment.create({
-        data: {
-          venueId,
-          orderId: locked.orderId, // Link to the Order proven by this locked row
-          shiftId: shiftId || undefined,
-          processedById: userId,
-          // Merchant/terminal are tenant-bearing relations. The body is wire-compatible
-          // input only; neither can override the Payment row held FOR UPDATE.
-          merchantAccountId: locked.merchantAccountId,
-          terminalId: locked.terminalId,
-
-          // Negative amount/tip mirror the original split.
-          amount: new Decimal(salesRefund === 0 ? 0 : -salesRefund),
-          tipAmount: new Decimal(tipRefund === 0 ? 0 : -tipRefund),
-
-          // Payment info
-          method: locked.method,
-          // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
-          // `method`. Un cobro del POS con un tipo del catálogo se puede devolver desde la
-          // terminal: sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
-          // legacy (`method === 'CASH'` = false) y el arqueo seguiría exigiendo un efectivo
-          // que YA salió. Espejo exacto de `refund.dashboard.service.ts`.
-          //
-          // La COMISIÓN no se hereda a propósito: que la plataforma devuelva su porcentaje
-          // cuando el cliente cancela es un acuerdo comercial que no conocemos.
-          tenderTypeId: locked.tenderTypeId || undefined,
-          tenderRevision: locked.tenderTypeId && locked.tenderRevision != null ? locked.tenderRevision : undefined,
-          tenderLabel: locked.tenderTypeId && locked.tenderLabel != null ? locked.tenderLabel : undefined,
-          tenderCountsAsCash: locked.tenderTypeId && locked.tenderCountsAsCash != null ? locked.tenderCountsAsCash : undefined,
-          tenderCaptureTip: locked.tenderTypeId && locked.tenderCaptureTip != null ? locked.tenderCaptureTip : undefined,
-          tenderSatFormaPago: locked.tenderTypeId && locked.tenderSatFormaPago != null ? locked.tenderSatFormaPago : undefined,
-          fundsFlow: locked.fundsFlow || undefined,
-          source: locked.source,
-          status: 'COMPLETED',
-          type: PaymentType.REFUND,
-
-          // Processor info — defaults to 'blumon' for backwards compat with
-          // pre-2.31 TPVs that don't send the field. Newer TPVs send 'angelpay'
-          // for Nexgo refunds so downstream reports can separate them.
-          processor: locked.processor ?? 'blumon',
-
-          // 🛡️ Sin esta línea el `@@unique([venueId, idempotencyKey])` del modelo no protege
-          // NADA en los reembolsos: el índice existe desde siempre y nadie lo poblaba, así que
-          // dos POST idénticos creaban dos filas. `undefined` (no `null`) para no tocar el
-          // comportamiento de los APK viejos, que no mandan llave.
-          idempotencyKey: llaveIdempotencia,
-          processorData: {
+        // Misma definición ÚNICA que el pre-vuelo y que el riel del dashboard: venta + propina,
+        // en centavos enteros (`shared/devueltoDeUnCobro.ts`). Se conserva la copia en pesos
+        // porque la usan el aviso de concurrencia y los mensajes de error, que hablan en pesos.
+        const lockedAlreadyRefundedCents = centavosYaDevueltos({ processorData: lockedProcessorData, filas: filasDeReembolso })
+        const lockedAlreadyRefunded = lockedAlreadyRefundedCents / 100
+        const lockedTotal = Number(locked.amount) + Number(locked.tipAmount ?? 0)
+        // Cinturón además de los tirantes: la llave puede estar y el valor no ser un número
+        // (una cadena que no parsea, por ejemplo). Comparar contra `NaN` da `false` igual.
+        if (!Number.isFinite(lockedTotal)) {
+          logger.error('El importe del pago bloqueado no es un número: no se puede validar el reembolso', {
+            venueId,
             originalPaymentId: refundData.originalPaymentId,
-            // Codex r1 de D2: es la misma tarjeta; si era internacional, la devolución también (el reporte la pone en su renglón).
-            ...(cobroInternacional(originalPayment.processorData) ? { isInternational: true } : {}),
-            refundReason: refundData.reason,
-            isPartialRefund: refundData.isPartialRefund,
-            currency: refundData.currency,
-            blumonSerialNumber: refundData.blumonSerialNumber,
-            // Parity fields with dashboard/mobile refunds so downstream
-            // consumers (backfill script, reports) treat TPV refunds uniformly.
-            amountCents: Math.round(refundAmountInPesos * 100),
-            amount: refundAmountInPesos,
-            // Sólo `true` cuando el decremento inline realmente ganó el claim. El backfill
-            // exige además `shiftId`, así que un pendiente sin turno no puede atribuirse dos veces.
-            shiftBackfilled: shiftId !== null,
-            ...(unclassifiedPriorRefundCents > 0
-              ? {
-                  shiftAttributionStatus: 'PENDING',
-                  shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
-                }
-              : {}),
-            // 🔴 LA INTENCIÓN DEL CAJERO VIAJA CON EL DINERO cuando no se pudo honrar.
+            amount: locked.amount,
+            tipAmount: locked.tipAmount,
+          })
+          throw new InternalServerError(
+            'El importe del cobro original no es un número: no se puede validar el monto reembolsable. No se registró ningún reembolso.',
+          )
+        }
+        // La comparación se hace en CENTAVOS ENTEROS. Antes se restaban pesos y hacía falta una
+        // tolerancia de `+0.001` para absorber el error de punto flotante; con enteros no hay
+        // residuo que tolerar y el límite es exacto. Los centavos de ESTE reembolso se derivan
+        // igual que los que se guardan en la fila (`amountCents`, más abajo), así que la fila y
+        // el acumulado no pueden desalinearse ni por un centavo.
+        const esteReembolsoCents = Math.round(refundAmountInPesos * 100)
+        const lockedTotalCents = Math.round(Number(locked.amount) * 100) + Math.round(Number(locked.tipAmount ?? 0) * 100)
+        const lockedRemainingCents = lockedTotalCents - lockedAlreadyRefundedCents
+        const lockedRemaining = lockedRemainingCents / 100
+        // Cambio de producto (rM1, decisión «A») y saldo a favor (S7): el SDK ya devolvió. Si un cambio o un saldo a favor usó este
+        // cobro sin pasar por el banco, se anota hasta lo que el banco todavía tiene; el cambio va a revisar y el saldo se congela con
+        // su anomalía (`exchangeTerminalRefund.ts`).
+        const noPasoPorElBanco = laTerminalYaDevolvio(locked) ? centavosQueNoPasaronPorElBanco(filasDeReembolso) : 0
+        if (esteReembolsoCents > lockedRemainingCents + noPasoPorElBanco) {
+          throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
+        }
+        const anotadaDeMas = esteReembolsoCents > lockedRemainingCents
+        const anotadaTrasUnCambio = anotadaDeMas && centavosQueUsaronLosCambios(filasDeReembolso) > 0
+        // S7: los sobres que recibieron saldo de este cobro se apartan AQUÍ, antes del turno (Order → Payment → sobres → Shift, como el
+        // cobro con saldo). Sólo con exceso: sin él no hay nada duplicado.
+        const saldoDelCobro = anotadaDeMas ? await sobresDeSaldoDelCobroEnTx(tx, { venueId, paymentId: locked.id }) : null
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Turno del NEGOCIO: observar → reclamar OPEN o conciliar post-corte
+        // ═══════════════════════════════════════════════════════════════════════
+        // `claimedAt`/CLOSING es el corte. El lookup ve el candidato más reciente aunque esté
+        // CLOSING; sólo OPEN puede ganar un `updateMany` tenant-safe que decrementa venta/propina
+        // y autoriza `shiftId`. CLOSING y claim-lost jamás se esperan, reintentan o mutan: el
+        // Payment queda sin turno y, después de existir con su id real, se crea en esta misma
+        // transacción una conciliación con candidato, estado, razón, canal y montos. Sin candidato
+        // se conserva por ahora el comportamiento previo, excepto cuando el total histórico tiene
+        // un delta venta/propina sin clasificar: esa anomalía se concilia aun sin candidato.
+        // The total guard cannot protect the two accounting components on its own.
+        // Example: sale $100 + tip $20, with $90 of sale already refunded. Another $30
+        // sale-only refund fits the $30 total remainder, but cannot all be booked as sale.
+        //
+        // The processor has already returned the money when this endpoint runs. Rejecting an
+        // impossible requested split would therefore leave real money without a refund row.
+        // Clamp the requested tip portion to the feasible range instead: first consume the
+        // requested component, then spill only the unavoidable remainder into the other one.
+        // New TPVs prevent this combination in their UI; this branch keeps installed APKs and
+        // retries safe during rollout.
+        const { salesCents: refundedSalesCents, tipCents: refundedTipsCents } = centavosDevueltosPorComponente(filasDeReembolso)
+        const classifiedRefundedCents = refundedSalesCents + refundedTipsCents
+        const unclassifiedPriorRefundCents = Math.max(0, lockedAlreadyRefundedCents - classifiedRefundedCents)
+        const originalSalesCents = Math.round(Number(locked.amount) * 100)
+        const originalTipsCents = Math.round(Number(locked.tipAmount ?? 0) * 100)
+        const requestedTipCents = Math.round(tipRefundPedido * 100)
+        const reparto = ajustarRepartoAComponentesRestantes({
+          originalSalesCents,
+          originalTipsCents,
+          // Si falta historia clasificable, estos ceros sólo validan que el split del EVENTO
+          // actual cabe en los componentes originales; no pretenden asignar el delta histórico.
+          refundedSalesCents: unclassifiedPriorRefundCents > 0 ? 0 : refundedSalesCents,
+          refundedTipsCents: unclassifiedPriorRefundCents > 0 ? 0 : refundedTipsCents,
+          refundCents: esteReembolsoCents,
+          requestedTipCents,
+        })
+
+        if (reparto.tipRefundCents !== requestedTipCents) {
+          logger.warn('Refund tip split adjusted to the remaining sale/tip balance', {
+            venueId,
+            originalPaymentId: refundData.originalPaymentId,
+            requestedTipCents,
+            feasibleTipCents: reparto.tipRefundCents,
+            remainingSalesCents: reparto.remainingSalesCents,
+            remainingTipsCents: reparto.remainingTipsCents,
+            refundCents: esteReembolsoCents,
+          })
+        }
+
+        // R65 b: el reparto vive DENTRO del cuerpo (un intento abortado por 40P01 no deja el del anterior) y sale en el retorno.
+        const tipRefund = reparto.tipRefundCents / 100
+        const salesRefund = reparto.salesRefundCents / 100
+
+        const salesRefundPesos = new Decimal(salesRefund)
+        const tipRefundPesos = new Decimal(tipRefund)
+        const shiftClaim = await claimShiftForRefund(tx, {
+          venueId,
+          salesRefundPesos,
+          tipRefundPesos,
+          forcePendingReason: unclassifiedPriorRefundCents > 0 ? ('UNCLASSIFIED_REFUND_COMPONENT_HISTORY' as const) : undefined,
+        })
+        const shiftId = shiftClaim.shiftId
+
+        // Create new Payment record with type=REFUND
+        const refundPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId: locked.orderId, // Link to the Order proven by this locked row
+            shiftId: shiftId || undefined,
+            processedById: userId,
+            // Merchant/terminal are tenant-bearing relations. The body is wire-compatible
+            // input only; neither can override the Payment row held FOR UPDATE.
+            merchantAccountId: locked.merchantAccountId,
+            terminalId: locked.terminalId,
+
+            // Negative amount/tip mirror the original split.
+            amount: new Decimal(salesRefund === 0 ? 0 : -salesRefund),
+            tipAmount: new Decimal(tipRefund === 0 ? 0 : -tipRefund),
+
+            // Payment info
+            method: locked.method,
+            // 🔴 El reembolso hereda la IDENTIDAD y la SEMÁNTICA del tipo original, no sólo el
+            // `method`. Un cobro del POS con un tipo del catálogo se puede devolver desde la
+            // terminal: sin esto, devolver un vale que SÍ entraba al cajón caía al fallback
+            // legacy (`method === 'CASH'` = false) y el arqueo seguiría exigiendo un efectivo
+            // que YA salió. Espejo exacto de `refund.dashboard.service.ts`.
             //
-            // Aquí no se puede rechazar —el SDK ya devolvió el dinero, y rechazar dejaría un
-            // reembolso REAL sin fila—, así que el reparto se re-encaja. Lo que no puede pasar
-            // es que eso sea invisible: el asiento `REFUND_SPLIT_NOT_HONORED` va post-commit y
-            // sin `await`, o sea que puede perderse (excepción tragada, proceso que muere) y
-            // dejar cero rastro de que alguien pidió respetar la propina. Lo señaló una
-            // auditoría adversarial (Codex gpt-6-astra, xhigh, 2026-09-12).
-            //
-            // Esto se escribe DENTRO de la misma transacción que crea el reembolso: si el
-            // reembolso existe, la intención existe. La bitácora sigue —es lo que un dueño
-            // audita— pero ya no es la única copia. Y sólo aparece cuando hubo discrepancia:
-            // el camino normal no lleva estas llaves.
-            ...(reparto.tipRefundCents !== requestedTipCents
-              ? {
-                  splitHonored: false,
-                  requestedTipCents,
-                  appliedTipCents: reparto.tipRefundCents,
-                  remainingSalesCentsAtRefund: reparto.remainingSalesCents,
-                  remainingTipsCentsAtRefund: reparto.remainingTipsCents,
-                }
-              : {}),
+            // La COMISIÓN no se hereda a propósito: que la plataforma devuelva su porcentaje
+            // cuando el cliente cancela es un acuerdo comercial que no conocemos.
+            tenderTypeId: locked.tenderTypeId || undefined,
+            tenderRevision: locked.tenderTypeId && locked.tenderRevision != null ? locked.tenderRevision : undefined,
+            tenderLabel: locked.tenderTypeId && locked.tenderLabel != null ? locked.tenderLabel : undefined,
+            tenderCountsAsCash: locked.tenderTypeId && locked.tenderCountsAsCash != null ? locked.tenderCountsAsCash : undefined,
+            tenderCaptureTip: locked.tenderTypeId && locked.tenderCaptureTip != null ? locked.tenderCaptureTip : undefined,
+            tenderSatFormaPago: locked.tenderTypeId && locked.tenderSatFormaPago != null ? locked.tenderSatFormaPago : undefined,
+            fundsFlow: locked.fundsFlow || undefined,
+            source: locked.source,
+            status: 'COMPLETED',
+            type: PaymentType.REFUND,
+
+            // Processor info — defaults to 'blumon' for backwards compat with
+            // pre-2.31 TPVs that don't send the field. Newer TPVs send 'angelpay'
+            // for Nexgo refunds so downstream reports can separate them.
+            processor: locked.processor ?? 'blumon',
+
+            // 🛡️ Sin esta línea el `@@unique([venueId, idempotencyKey])` del modelo no protege
+            // NADA en los reembolsos: el índice existe desde siempre y nadie lo poblaba, así que
+            // dos POST idénticos creaban dos filas. `undefined` (no `null`) para no tocar el
+            // comportamiento de los APK viejos, que no mandan llave.
+            idempotencyKey: llaveIdempotencia,
+            processorData: {
+              originalPaymentId: refundData.originalPaymentId,
+              // Codex r1 de D2: es la misma tarjeta; si era internacional, la devolución también (el reporte la pone en su renglón).
+              ...(cobroInternacional(originalPayment.processorData) ? { isInternational: true } : {}),
+              refundReason: refundData.reason,
+              isPartialRefund: refundData.isPartialRefund,
+              currency: refundData.currency,
+              blumonSerialNumber: refundData.blumonSerialNumber,
+              // Parity fields with dashboard/mobile refunds so downstream
+              // consumers (backfill script, reports) treat TPV refunds uniformly.
+              amountCents: Math.round(refundAmountInPesos * 100),
+              amount: refundAmountInPesos,
+              // Sólo `true` cuando el decremento inline realmente ganó el claim. El backfill
+              // exige además `shiftId`, así que un pendiente sin turno no puede atribuirse dos veces.
+              shiftBackfilled: shiftId !== null,
+              ...(unclassifiedPriorRefundCents > 0
+                ? {
+                    shiftAttributionStatus: 'PENDING',
+                    shiftAttributionPendingReason: 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY',
+                  }
+                : {}),
+              // 🔴 LA INTENCIÓN DEL CAJERO VIAJA CON EL DINERO cuando no se pudo honrar.
+              //
+              // Aquí no se puede rechazar —el SDK ya devolvió el dinero, y rechazar dejaría un
+              // reembolso REAL sin fila—, así que el reparto se re-encaja. Lo que no puede pasar
+              // es que eso sea invisible: el asiento `REFUND_SPLIT_NOT_HONORED` va post-commit y
+              // sin `await`, o sea que puede perderse (excepción tragada, proceso que muere) y
+              // dejar cero rastro de que alguien pidió respetar la propina. Lo señaló una
+              // auditoría adversarial (Codex gpt-6-astra, xhigh, 2026-09-12).
+              //
+              // Esto se escribe DENTRO de la misma transacción que crea el reembolso: si el
+              // reembolso existe, la intención existe. La bitácora sigue —es lo que un dueño
+              // audita— pero ya no es la única copia. Y sólo aparece cuando hubo discrepancia:
+              // el camino normal no lleva estas llaves.
+              ...(reparto.tipRefundCents !== requestedTipCents
+                ? {
+                    splitHonored: false,
+                    requestedTipCents,
+                    appliedTipCents: reparto.tipRefundCents,
+                    remainingSalesCentsAtRefund: reparto.remainingSalesCents,
+                    remainingTipsCentsAtRefund: reparto.remainingTipsCents,
+                  }
+                : {}),
+            },
+
+            // Authorization from Blumon SDK CancelIcc
+            authorizationNumber: refundData.authorizationNumber,
+            referenceNumber: refundData.referenceNumber,
+
+            // Card identity belongs to the locked original Payment. A legacy
+            // request may still send these fields, but it cannot fill or replace
+            // durable authority when the original row has nulls.
+            cardBrand: locked.cardBrand,
+            maskedPan: locked.maskedPan,
+            entryMode: locked.entryMode,
+
+            // Fee calculation (no fees on refunds typically)
+            feePercentage: new Decimal(0),
+            feeAmount: new Decimal(0),
+            netAmount: new Decimal(-refundAmountInPesos),
           },
+        })
 
-          // Authorization from Blumon SDK CancelIcc
-          authorizationNumber: refundData.authorizationNumber,
-          referenceNumber: refundData.referenceNumber,
+        if (shiftClaim.pendingReason) {
+          await recordPendingPaymentShiftReconciliation(tx, {
+            reconciliationEnabled,
+            claim: shiftClaim,
+            venueId,
+            paymentId: refundPayment.id,
+            orderId: locked.orderId,
+            // Actor de auditoría: identidad autenticada del request, nunca el staffId
+            // declarativo del body que controla el cliente.
+            staffId: userId,
+            channel: 'recordRefund',
+            amountPesos: salesRefundPesos.negated(),
+            tipPesos: tipRefundPesos.negated(),
+            unclassifiedPriorRefundPesos: unclassifiedPriorRefundCents > 0 ? new Decimal(unclassifiedPriorRefundCents).div(100) : undefined,
+          })
+        }
 
-          // Card identity belongs to the locked original Payment. A legacy
-          // request may still send these fields, but it cannot fill or replace
-          // durable authority when the original row has nulls.
-          cardBrand: locked.cardBrand,
-          maskedPan: locked.maskedPan,
-          entryMode: locked.entryMode,
+        // ═══════════════════════════════════════════════════════════════════════
+        // Update original payment's processorData with refund tracking
+        // ═══════════════════════════════════════════════════════════════════════
+        // 🔴 TODO lo de aquí abajo sale de la foto BLOQUEADA (`lockedProcessorData`,
+        // `lockedAlreadyRefunded`, `locked.amount`), NUNCA de `processorData` /
+        // `alreadyRefunded` / `originalAmountNumber`, que se leyeron con el `findUnique` del
+        // STEP 1 — FUERA de la transacción y, por tanto, antes de que existiera candado alguno.
+        //
+        // Hasta el 3-sep-2026 este bloque validaba con la foto bloqueada y ESCRIBÍA con la
+        // vieja, y eso devolvía dinero de más. Cobro de $100, dos reembolsos concurrentes de
+        // $60 y $40: los dos leen `refundedAmount = 0` fuera del candado; A escribe 60; B toma
+        // el candado, ve correctamente `lockedRemaining = 40` y pasa — pero escribía
+        // `0 + 40 = 40`, **borrando los 60 de A** y su historial. Un tercero de $50 leía «40
+        // devueltos», pasaba, y salían **$150 sobre $100**.
+        //
+        // El `FOR UPDATE` de arriba serializa las transacciones, así que la foto bloqueada SÍ
+        // ve lo que escribió quien ganó: acumular sobre ella es lo que cierra la carrera. Y el
+        // spread tiene que partir de `lockedProcessorData` por lo mismo — con la foto vieja se
+        // borra cualquier llave que otro escritor haya puesto en medio (el webhook de AngelPay
+        // estampa `angelpayWebhook` sobre esta misma columna: `angelpay-webhook.service.ts`).
+        //
+        // Prueba: `tests/unit/services/tpv/refund.acumuladoBajoCandado.test.ts`, donde las dos
+        // fotos DIFIEREN a propósito (exterior 0, bloqueada 60). Con el mismo valor en ambas la
+        // prueba pasaría con el defecto vivo.
+        // Se acumula en CENTAVOS ENTEROS y los dos campos persistidos se derivan del MISMO
+        // entero (`acumuladoPersistido`): sumar pesos con `+` deriva, y derivar cada campo por
+        // su cuenta es cómo empiezan a contradecirse.
+        const nuevoDevueltoCents = lockedAlreadyRefundedCents + esteReembolsoCents
+        const acumulado = acumuladoPersistido(nuevoDevueltoCents)
+        const newRefundedAmount = acumulado.refundedAmount
 
-          // Fee calculation (no fees on refunds typically)
-          feePercentage: new Decimal(0),
-          feeAmount: new Decimal(0),
-          netAmount: new Decimal(-refundAmountInPesos),
-        },
-      })
+        // 🔎 Si las dos fotos NO coinciden es que otro reembolso del MISMO cobro entró entre la
+        // lectura del STEP 1 y este candado: exactamente la carrera de arriba. Con el defecto
+        // vivo esto era invisible; dejarlo dicho es la única forma de saber si pasa de verdad
+        // en producción. Importes en PESOS. No cambia el resultado: sólo lo cuenta.
+        if (lockedAlreadyRefunded !== alreadyRefunded) {
+          logger.warn('Reembolso concurrente sobre el mismo cobro: se acumula sobre la foto BLOQUEADA', {
+            venueId,
+            originalPaymentId: refundData.originalPaymentId,
+            devueltoAlLeerFueraDelCandado: alreadyRefunded,
+            devueltoBajoElCandado: lockedAlreadyRefunded,
+            esteReembolso: refundAmountInPesos,
+            totalDevueltoTrasEste: newRefundedAmount,
+          })
+        }
+        // 🔴 Se compara contra el TOTAL (venta + propina), que es la misma base sobre la que se
+        // mide el acumulado. Desde dic-2025 hasta la Task 5r esta línea usaba `locked.amount`
+        // —la VENTA sola—, así que con propina el dato PERSISTIDO y el que el historial de la
+        // terminal SIRVE se contradecían: devolver $100 de un cobro de $100 + $20 se guardaba
+        // como «totalmente reembolsado» mientras `payment.tpv.service.ts:1439`, que recalcula
+        // contra `amount + tipAmount`, respondía que no. Mismo cobro, dos respuestas.
+        //
+        // ⚠️ Sigue leyéndose del candado y no de `originalAmountNumber` por coherencia con el
+        // resto del bloque: valen HOY lo mismo siempre —un reembolso nunca toca la columna
+        // `amount` del cobro original, crea una fila aparte— y ninguna prueba puede
+        // distinguirlas sin fabricar un estado imposible.
+        const isFullyRefunded = nuevoDevueltoCents >= lockedTotalCents
 
-      if (shiftClaim.pendingReason) {
-        await recordPendingPaymentShiftReconciliation(tx, {
-          reconciliationEnabled,
-          claim: shiftClaim,
-          venueId,
-          paymentId: refundPayment.id,
-          orderId: locked.orderId,
-          // Actor de auditoría: identidad autenticada del request, nunca el staffId
-          // declarativo del body que controla el cliente.
+        // Build refund history array safely as plain JSON
+        const existingHistory = Array.isArray(lockedProcessorData.refundHistory) ? lockedProcessorData.refundHistory : []
+
+        const newRefundEntry = {
+          refundId: refundPayment.id,
+          amount: refundAmountInPesos,
+          reason: refundData.reason,
           staffId: userId,
-          channel: 'recordRefund',
-          amountPesos: salesRefundPesos.negated(),
-          tipPesos: tipRefundPesos.negated(),
-          unclassifiedPriorRefundPesos: unclassifiedPriorRefundCents > 0 ? new Decimal(unclassifiedPriorRefundCents).div(100) : undefined,
+          timestamp: new Date().toISOString(),
+        }
+
+        // Mirror the dashboard/mobile `refunds[]` schema so readers that only know
+        // the new format (e.g. `transaction.mobile.service.ts:208`) can aggregate
+        // TPV-originated refunds without special casing. Keep `refundHistory`
+        // intact for backwards compatibility with legacy readers.
+        const existingRefundsArray = Array.isArray(lockedProcessorData.refunds) ? (lockedProcessorData.refunds as Prisma.JsonArray) : []
+        const newRefundsEntry = {
+          refundPaymentId: refundPayment.id,
+          amount: refundAmountInPesos,
+          amountCents: esteReembolsoCents,
+          reason: refundData.reason,
+          at: new Date().toISOString(),
+        }
+
+        // Build updated processorData as plain object for Prisma JSON field
+        const updatedProcessorData = {
+          ...lockedProcessorData,
+          // `refundedAmount` (pesos) y `refundedAmountCents` salen del MISMO entero, y su
+          // significado es el ÚNICO de `shared/devueltoDeUnCobro.ts`: venta + propina.
+          ...acumulado,
+          isFullyRefunded,
+          lastRefundId: refundPayment.id,
+          lastRefundAt: new Date().toISOString(),
+          refundHistory: [...(existingHistory as Prisma.JsonArray), newRefundEntry],
+          refunds: [...existingRefundsArray, newRefundsEntry],
+        } as Prisma.InputJsonValue
+
+        await tx.payment.update({
+          where: {
+            id: refundData.originalPaymentId,
+            venueId,
+            orderId: locked.orderId,
+            status: TransactionStatus.COMPLETED,
+            type: locked.type,
+          },
+          data: {
+            processorData: updatedProcessorData,
+          },
         })
-      }
 
-      // ═══════════════════════════════════════════════════════════════════════
-      // Update original payment's processorData with refund tracking
-      // ═══════════════════════════════════════════════════════════════════════
-      // 🔴 TODO lo de aquí abajo sale de la foto BLOQUEADA (`lockedProcessorData`,
-      // `lockedAlreadyRefunded`, `locked.amount`), NUNCA de `processorData` /
-      // `alreadyRefunded` / `originalAmountNumber`, que se leyeron con el `findUnique` del
-      // STEP 1 — FUERA de la transacción y, por tanto, antes de que existiera candado alguno.
-      //
-      // Hasta el 3-sep-2026 este bloque validaba con la foto bloqueada y ESCRIBÍA con la
-      // vieja, y eso devolvía dinero de más. Cobro de $100, dos reembolsos concurrentes de
-      // $60 y $40: los dos leen `refundedAmount = 0` fuera del candado; A escribe 60; B toma
-      // el candado, ve correctamente `lockedRemaining = 40` y pasa — pero escribía
-      // `0 + 40 = 40`, **borrando los 60 de A** y su historial. Un tercero de $50 leía «40
-      // devueltos», pasaba, y salían **$150 sobre $100**.
-      //
-      // El `FOR UPDATE` de arriba serializa las transacciones, así que la foto bloqueada SÍ
-      // ve lo que escribió quien ganó: acumular sobre ella es lo que cierra la carrera. Y el
-      // spread tiene que partir de `lockedProcessorData` por lo mismo — con la foto vieja se
-      // borra cualquier llave que otro escritor haya puesto en medio (el webhook de AngelPay
-      // estampa `angelpayWebhook` sobre esta misma columna: `angelpay-webhook.service.ts`).
-      //
-      // Prueba: `tests/unit/services/tpv/refund.acumuladoBajoCandado.test.ts`, donde las dos
-      // fotos DIFIEREN a propósito (exterior 0, bloqueada 60). Con el mismo valor en ambas la
-      // prueba pasaría con el defecto vivo.
-      // Se acumula en CENTAVOS ENTEROS y los dos campos persistidos se derivan del MISMO
-      // entero (`acumuladoPersistido`): sumar pesos con `+` deriva, y derivar cada campo por
-      // su cuenta es cómo empiezan a contradecirse.
-      const nuevoDevueltoCents = lockedAlreadyRefundedCents + esteReembolsoCents
-      const acumulado = acumuladoPersistido(nuevoDevueltoCents)
-      const newRefundedAmount = acumulado.refundedAmount
-
-      // 🔎 Si las dos fotos NO coinciden es que otro reembolso del MISMO cobro entró entre la
-      // lectura del STEP 1 y este candado: exactamente la carrera de arriba. Con el defecto
-      // vivo esto era invisible; dejarlo dicho es la única forma de saber si pasa de verdad
-      // en producción. Importes en PESOS. No cambia el resultado: sólo lo cuenta.
-      if (lockedAlreadyRefunded !== alreadyRefunded) {
-        logger.warn('Reembolso concurrente sobre el mismo cobro: se acumula sobre la foto BLOQUEADA', {
-          venueId,
-          originalPaymentId: refundData.originalPaymentId,
-          devueltoAlLeerFueraDelCandado: alreadyRefunded,
-          devueltoBajoElCandado: lockedAlreadyRefunded,
-          esteReembolso: refundAmountInPesos,
-          totalDevueltoTrasEste: newRefundedAmount,
+        // Mirror dashboard/mobile: create a VenueTransaction row so accounting
+        // reports see the outgoing refund alongside the original charge.
+        await tx.venueTransaction.create({
+          data: {
+            venueId,
+            paymentId: refundPayment.id,
+            type: 'REFUND',
+            grossAmount: new Decimal(-refundAmountInPesos),
+            feeAmount: new Decimal(0),
+            netAmount: new Decimal(-refundAmountInPesos),
+            status: 'SETTLED',
+          },
         })
-      }
-      // 🔴 Se compara contra el TOTAL (venta + propina), que es la misma base sobre la que se
-      // mide el acumulado. Desde dic-2025 hasta la Task 5r esta línea usaba `locked.amount`
-      // —la VENTA sola—, así que con propina el dato PERSISTIDO y el que el historial de la
-      // terminal SIRVE se contradecían: devolver $100 de un cobro de $100 + $20 se guardaba
-      // como «totalmente reembolsado» mientras `payment.tpv.service.ts:1439`, que recalcula
-      // contra `amount + tipAmount`, respondía que no. Mismo cobro, dos respuestas.
-      //
-      // ⚠️ Sigue leyéndose del candado y no de `originalAmountNumber` por coherencia con el
-      // resto del bloque: valen HOY lo mismo siempre —un reembolso nunca toca la columna
-      // `amount` del cobro original, crea una fila aparte— y ninguna prueba puede
-      // distinguirlas sin fabricar un estado imposible.
-      const isFullyRefunded = nuevoDevueltoCents >= lockedTotalCents
 
-      // Build refund history array safely as plain JSON
-      const existingHistory = Array.isArray(lockedProcessorData.refundHistory) ? lockedProcessorData.refundHistory : []
+        // El decremento de `Shift.totalSales`/`totalTips` NO va aquí: ES el claim del bloque
+        // «turno» de arriba, y tiene que ocurrir ANTES del `payment.create` para poder sellar el
+        // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
-      const newRefundEntry = {
-        refundId: refundPayment.id,
-        amount: refundAmountInPesos,
-        reason: refundData.reason,
-        staffId: userId,
-        timestamp: new Date().toISOString(),
-      }
-
-      // Mirror the dashboard/mobile `refunds[]` schema so readers that only know
-      // the new format (e.g. `transaction.mobile.service.ts:208`) can aggregate
-      // TPV-originated refunds without special casing. Keep `refundHistory`
-      // intact for backwards compatibility with legacy readers.
-      const existingRefundsArray = Array.isArray(lockedProcessorData.refunds) ? (lockedProcessorData.refunds as Prisma.JsonArray) : []
-      const newRefundsEntry = {
-        refundPaymentId: refundPayment.id,
-        amount: refundAmountInPesos,
-        amountCents: esteReembolsoCents,
-        reason: refundData.reason,
-        at: new Date().toISOString(),
-      }
-
-      // Build updated processorData as plain object for Prisma JSON field
-      const updatedProcessorData = {
-        ...lockedProcessorData,
-        // `refundedAmount` (pesos) y `refundedAmountCents` salen del MISMO entero, y su
-        // significado es el ÚNICO de `shared/devueltoDeUnCobro.ts`: venta + propina.
-        ...acumulado,
-        isFullyRefunded,
-        lastRefundId: refundPayment.id,
-        lastRefundAt: new Date().toISOString(),
-        refundHistory: [...(existingHistory as Prisma.JsonArray), newRefundEntry],
-        refunds: [...existingRefundsArray, newRefundsEntry],
-      } as Prisma.InputJsonValue
-
-      await tx.payment.update({
-        where: {
-          id: refundData.originalPaymentId,
-          venueId,
-          orderId: locked.orderId,
-          status: TransactionStatus.COMPLETED,
-          type: locked.type,
-        },
-        data: {
-          processorData: updatedProcessorData,
-        },
-      })
-
-      // Mirror dashboard/mobile: create a VenueTransaction row so accounting
-      // reports see the outgoing refund alongside the original charge.
-      await tx.venueTransaction.create({
-        data: {
-          venueId,
-          paymentId: refundPayment.id,
-          type: 'REFUND',
-          grossAmount: new Decimal(-refundAmountInPesos),
-          feeAmount: new Decimal(0),
-          netAmount: new Decimal(-refundAmountInPesos),
-          status: 'SETTLED',
-        },
-      })
-
-      // El decremento de `Shift.totalSales`/`totalTips` NO va aquí: ES el claim del bloque
-      // «turno» de arriba, y tiene que ocurrir ANTES del `payment.create` para poder sellar el
-      // pago sólo si ganó. Mismo split proporcional, una sola escritura.
-
-      await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
-      // Tarjetas de regalo (B1/B2, R2): aquí el SDK YA devolvió el dinero. Una venta de tarjetas sin cancelación iniciada NO se rechaza
-      // —dejaría el dinero fuera sin asiento y el sobre vivo—: sus sobres se desactivan y queda una anomalía para revisarla.
-      const tarjetas = locked.orderId
-        ? await alRegistrarReembolsoEnTx(tx, {
+        await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
+        // Tarjetas de regalo (B1/B2, R2): aquí el SDK YA devolvió el dinero. Una venta de tarjetas sin cancelación iniciada NO se rechaza
+        // —dejaría el dinero fuera sin asiento y el sobre vivo—: sus sobres se desactivan y queda una anomalía para revisarla.
+        const tarjetas = locked.orderId
+          ? await alRegistrarReembolsoEnTx(tx, {
+              venueId,
+              originalPaymentId: locked.id,
+              refundPaymentId: refundPayment.id,
+              amount: new Decimal(refundData.amount).div(100),
+              staffId: userId,
+              dineroYaDevuelto: true,
+              // A1 (cierre): la misma aritmética del tope de arriba, en centavos y bajo el candado del cobro.
+              devuelveTodoElCobro: esteReembolsoCents >= lockedRemainingCents,
+              original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+            })
+          : { cuentaCancelada: false }
+        // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
+        await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
+        if (anotadaTrasUnCambio)
+          await mandarCambiosARevisarEnTx(tx, {
+            venueId,
+            filas: filasDeReembolso,
+            originalPaymentId: locked.id,
+            refundPaymentId: refundPayment.id,
+            refundCents: esteReembolsoCents,
+            staffId: userId ?? null,
+          })
+        // S7 (opción 1): el saldo a favor de este cobro quedó duplicado con lo que devolvió el banco → anomalía y sobres congelados.
+        if (saldoDelCobro)
+          await avisarYCongelarSaldoDuplicadoEnTx(tx, {
             venueId,
             originalPaymentId: locked.id,
             refundPaymentId: refundPayment.id,
-            amount: new Decimal(refundData.amount).div(100),
+            refundCents: esteReembolsoCents,
+            duplicadoCents: duplicadoCents({
+              totalCents: lockedTotalCents,
+              devueltoAntesCents: lockedAlreadyRefundedCents,
+              esteCents: esteReembolsoCents,
+            }),
+            folio: originalPayment.order?.orderNumber ?? locked.id.slice(-6),
             staffId: userId,
-            dineroYaDevuelto: true,
-            // A1 (cierre): la misma aritmética del tope de arriba, en centavos y bajo el candado del cobro.
-            devuelveTodoElCobro: esteReembolsoCents >= lockedRemainingCents,
-            original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+            saldo: saldoDelCobro,
           })
-        : { cuentaCancelada: false }
-      // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
-      await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
-      if (anotadaTrasUnCambio)
-        await mandarCambiosARevisarEnTx(tx, {
-          venueId,
-          filas: filasDeReembolso,
-          originalPaymentId: locked.id,
-          refundPaymentId: refundPayment.id,
-          refundCents: esteReembolsoCents,
-          staffId: userId ?? null,
-        })
-      // S7 (opción 1): el saldo a favor de este cobro quedó duplicado con lo que devolvió el banco → anomalía y sobres congelados.
-      if (saldoDelCobro)
-        await avisarYCongelarSaldoDuplicadoEnTx(tx, {
-          venueId,
-          originalPaymentId: locked.id,
-          refundPaymentId: refundPayment.id,
-          refundCents: esteReembolsoCents,
-          duplicadoCents: duplicadoCents({
-            totalCents: lockedTotalCents,
-            devueltoAntesCents: lockedAlreadyRefundedCents,
-            esteCents: esteReembolsoCents,
+
+        // «Regresa lo que salió menos lo que ya regresó» (28-oct): si con esta devolución la venta queda toda devuelta, lo que vuelve
+        // al almacén se decide AQUÍ, bajo el candado de la orden, restando lo que ya regresó por un cambio o por el panel. El stock
+        // se aplica después del commit (y el barrido lo recupera). Antes se decidía fuera de la transacción: dos devoluciones a la
+        // vez reponían dos veces, y una pieza ya regresada volvía a entrar.
+        const regreso =
+          locked.orderId && (await quedaTodaDevueltaEnTx(tx, venueId, locked.orderId, salesRefund))
+            ? await anotarRegresoDeLaVentaEnTx(tx, { venueId, orderId: locked.orderId, refundPaymentId: refundPayment.id, staffId: userId })
+            : null
+
+        return {
+          refundPayment,
+          tipRefund,
+          salesRefund,
+          postCommitAuthority: Object.freeze({
+            regreso,
+            orderId: locked.orderId,
+            method: locked.method,
+            fundsFlow: locked.fundsFlow,
+            tenderTypeId: locked.tenderTypeId,
+            tenderCountsAsCash: locked.tenderCountsAsCash,
+            // Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx.
+            cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
+            // 🔴 El reparto que NO se pudo honrar viaja fuera de la transacción para dejar rastro.
+            // Va aquí, y no como una escritura dentro de `tx`, por la misma razón que este riel no
+            // rechaza: cuando esto corre el procesador YA devolvió el dinero, así que un fallo de
+            // la bitácora no puede tumbar la transacción y dejar el reembolso sin asiento.
+            repartoNoHonrado:
+              reparto.tipRefundCents !== requestedTipCents
+                ? Object.freeze({
+                    requestedTipCents,
+                    appliedTipCents: reparto.tipRefundCents,
+                    remainingSalesCents: reparto.remainingSalesCents,
+                    remainingTipsCents: reparto.remainingTipsCents,
+                    refundCents: esteReembolsoCents,
+                  })
+                : null,
           }),
-          folio: originalPayment.order?.orderNumber ?? locked.id.slice(-6),
-          staffId: userId,
-          saldo: saldoDelCobro,
-        })
-
-      // «Regresa lo que salió menos lo que ya regresó» (28-oct): si con esta devolución la venta queda toda devuelta, lo que vuelve
-      // al almacén se decide AQUÍ, bajo el candado de la orden, restando lo que ya regresó por un cambio o por el panel. El stock
-      // se aplica después del commit (y el barrido lo recupera). Antes se decidía fuera de la transacción: dos devoluciones a la
-      // vez reponían dos veces, y una pieza ya regresada volvía a entrar.
-      const regreso =
-        locked.orderId && (await quedaTodaDevueltaEnTx(tx, venueId, locked.orderId, salesRefund))
-          ? await anotarRegresoDeLaVentaEnTx(tx, { venueId, orderId: locked.orderId, refundPaymentId: refundPayment.id, staffId: userId })
-          : null
-
-      return {
-        refundPayment,
-        postCommitAuthority: Object.freeze({
-          regreso,
-          orderId: locked.orderId,
-          method: locked.method,
-          fundsFlow: locked.fundsFlow,
-          tenderTypeId: locked.tenderTypeId,
-          tenderCountsAsCash: locked.tenderCountsAsCash,
-          // Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx.
-          cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
-          // 🔴 El reparto que NO se pudo honrar viaja fuera de la transacción para dejar rastro.
-          // Va aquí, y no como una escritura dentro de `tx`, por la misma razón que este riel no
-          // rechaza: cuando esto corre el procesador YA devolvió el dinero, así que un fallo de
-          // la bitácora no puede tumbar la transacción y dejar el reembolso sin asiento.
-          repartoNoHonrado:
-            reparto.tipRefundCents !== requestedTipCents
-              ? Object.freeze({
-                  requestedTipCents,
-                  appliedTipCents: reparto.tipRefundCents,
-                  remainingSalesCents: reparto.remainingSalesCents,
-                  remainingTipsCents: reparto.remainingTipsCents,
-                  refundCents: esteReembolsoCents,
-                })
-              : null,
-        }),
-      }
-    }, ORDER_LOCK_WAIT_BUDGET)
+        }
+      },
+      { etiqueta: 'recordRefund', ...ORDER_LOCK_WAIT_BUDGET },
+    )
 
   let transactionResult: Awaited<ReturnType<typeof ejecutarTransaccionDelReembolso>>
   try {

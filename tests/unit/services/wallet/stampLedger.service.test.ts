@@ -486,11 +486,12 @@ describe('reverseStampForOrder: la red por traba (40P01) publica sólo el intent
     prismaMock.stampCard.update.mockResolvedValue({ id: 'sc1' } as any)
     jest.spyOn(activityLog, 'logAction').mockReturnValue(undefined as any)
     jest.spyOn(passUpdate, 'notifyCustomerPassUpdated').mockResolvedValue(undefined as any)
-    // El cuerpo corre completo y LUEGO Postgres aborta la transacción (la traba se detecta ya con trabajo hecho).
-    let intento = 0
+    // Por ORDEN de llamada: la 1ª es la lectura bajo el candado de la venta; la 2ª es el primer intento de la reversa, cuyo cuerpo
+    // corre completo y LUEGO Postgres lo aborta (la traba se detecta ya con trabajo hecho); la 3ª es el intento ganador.
+    let llamada = 0
     prismaMock.$transaction.mockImplementation((async (cb: any) => {
       const r = await cb(prismaMock)
-      if (typeof r === 'boolean' && intento++ === 0) throw traba()
+      if (++llamada === 2) throw traba()
       return r
     }) as any)
   })
@@ -507,6 +508,7 @@ describe('reverseStampForOrder: la red por traba (40P01) publica sólo el intent
     const r = await reverseStampForOrder('v1', 'o1')
 
     expect(r).toEqual({ reversed: false, stampCardId: 'sc1' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
     expect(activityLog.logAction).not.toHaveBeenCalled()
     expect(passUpdate.notifyCustomerPassUpdated).not.toHaveBeenCalled()
   })
@@ -517,6 +519,7 @@ describe('reverseStampForOrder: la red por traba (40P01) publica sólo el intent
     const r = await reverseStampForOrder('v1', 'o1')
 
     expect(r).toEqual({ reversed: true, stampCardId: 'sc1' })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
     expect(activityLog.logAction).toHaveBeenCalledTimes(1)
     expect(passUpdate.notifyCustomerPassUpdated).toHaveBeenCalledTimes(1)
   })

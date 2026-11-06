@@ -9,6 +9,7 @@ import type { OrderInventoryWarning } from '../tpv/payment.tpv.service'
 import type { StoreCreditDelReembolso } from '../storeCredit/saldoAbonado'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -452,36 +453,43 @@ export async function cancelExchange(input: {
 }): Promise<ExchangeResponse> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const result = await prisma.$transaction(async tx => {
-        const initial = await tx.exchange.findFirst({ where: { id: input.exchangeId, venueId: input.venueId } })
-        if (!initial) throw new NotFoundError('No se encontró el cambio en esta sucursal.')
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange:v1:' + input.venueId + ':' + initial.idempotencyKey}, 0))::text`
-        const exchange = await tx.exchange.findFirstOrThrow({ where: { id: input.exchangeId, venueId: input.venueId } })
-        if (!exchange.result) throw new Error('EXCHANGE_RESULT_MISSING')
-        if (exchange.status === 'CANCELLED') return { exchange: exchange.result as unknown as ExchangeResponse }
-        if (exchange.status !== 'PENDING_PAYMENT' || exchange.settlementKind !== 'COLLECT' || exchange.settlementMethod !== 'CARD_TERMINAL')
-          throw new ExchangeError('EXCHANGE_ALREADY_SETTLED', 'Este cambio ya se cerró; no se puede cancelar.', 409)
-        const order = await tx.order.findFirstOrThrow({
-          where: { id: exchange.newOrderId, venueId: input.venueId },
-          select: { status: true },
-        })
-        if (order.status === 'CANCELLED' || order.status === 'DELETED') {
-          await lockExistingOrderForPayment(tx, { venueId: input.venueId, orderId: exchange.newOrderId })
-          return { exchange: await releaseExchangeInTx(tx, input) }
-        }
-        let released!: ExchangeResponse
-        const cancelledOrder = await cancelOrderInTransaction(
-          tx,
-          input.venueId,
-          exchange.newOrderId,
-          'Cambio cancelado: no se cobró la diferencia',
-          input.actorStaffId ?? undefined,
-          async locked => {
-            released = await releaseExchangeInTx(locked, input)
-          },
-        )
-        return { exchange: released, cancelledOrder }
-      }, ORDER_LOCK_WAIT_BUDGET)
+      const result = await withDeadlockRetry(
+        async tx => {
+          const initial = await tx.exchange.findFirst({ where: { id: input.exchangeId, venueId: input.venueId } })
+          if (!initial) throw new NotFoundError('No se encontró el cambio en esta sucursal.')
+          await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange:v1:' + input.venueId + ':' + initial.idempotencyKey}, 0))::text`
+          const exchange = await tx.exchange.findFirstOrThrow({ where: { id: input.exchangeId, venueId: input.venueId } })
+          if (!exchange.result) throw new Error('EXCHANGE_RESULT_MISSING')
+          if (exchange.status === 'CANCELLED') return { exchange: exchange.result as unknown as ExchangeResponse }
+          if (
+            exchange.status !== 'PENDING_PAYMENT' ||
+            exchange.settlementKind !== 'COLLECT' ||
+            exchange.settlementMethod !== 'CARD_TERMINAL'
+          )
+            throw new ExchangeError('EXCHANGE_ALREADY_SETTLED', 'Este cambio ya se cerró; no se puede cancelar.', 409)
+          const order = await tx.order.findFirstOrThrow({
+            where: { id: exchange.newOrderId, venueId: input.venueId },
+            select: { status: true },
+          })
+          if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+            await lockExistingOrderForPayment(tx, { venueId: input.venueId, orderId: exchange.newOrderId })
+            return { exchange: await releaseExchangeInTx(tx, input) }
+          }
+          let released!: ExchangeResponse
+          const cancelledOrder = await cancelOrderInTransaction(
+            tx,
+            input.venueId,
+            exchange.newOrderId,
+            'Cambio cancelado: no se cobró la diferencia',
+            input.actorStaffId ?? undefined,
+            async locked => {
+              released = await releaseExchangeInTx(locked, input)
+            },
+          )
+          return { exchange: released, cancelledOrder }
+        },
+        { etiqueta: 'cancelExchange', ...ORDER_LOCK_WAIT_BUDGET },
+      )
       if (result.cancelledOrder)
         await bestEffort(input.exchangeId, 'cancelledOrder', () =>
           publishCancelledOrder(input.venueId, result.cancelledOrder!, input.actorStaffId ?? undefined, input.reason),

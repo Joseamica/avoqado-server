@@ -7,6 +7,7 @@
  */
 import { Prisma, type GiftCardDeliveryChannel, type GiftCardStatus, type OrderSource, type OrderStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
 import { validateStaffVenue } from '@/utils/staff-venue.util'
@@ -333,7 +334,7 @@ export async function createGiftCardOrder(
   const fuente = (input.source && FUENTES.has(input.source) ? input.source : FUENTE_POR_OMISION) as OrderSource
 
   try {
-    const cuenta = await prisma.$transaction(
+    const cuenta = await withDeadlockRetry(
       async tx => {
         const turno = await turnoAbiertoDelNegocio(tx, venueId)
         const ids: string[] = []
@@ -408,7 +409,7 @@ export async function createGiftCardOrder(
           select: SELECT_CUENTA,
         })
       },
-      { timeout: 15_000, maxWait: 5_000 },
+      { etiqueta: 'createGiftCardOrder', timeout: 15_000, maxWait: 5_000 },
     )
     return respuesta(cuenta, false, { ahora, timezone: DEFAULT_TIMEZONE })
   } catch (error) {

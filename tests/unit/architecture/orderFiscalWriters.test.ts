@@ -137,6 +137,16 @@ function hasCallerTransaction(arg: ts.Expression | undefined): boolean {
   return !(ts.isIdentifier(value) && value.text === 'undefined') && !ts.isVoidExpression(value)
 }
 
+/** `{ etiqueta: 'x', ...OPCIONES }` de `withDeadlockRetry` vale lo que `OPCIONES`; con propiedades propias (timeout, maxWait) se deja el literal. */
+function opcionesDelReintento(options: ts.Expression | undefined): ts.Expression | undefined {
+  if (!options || !ts.isObjectLiteralExpression(options)) return options
+  const spreads = options.properties.filter(ts.isSpreadAssignment)
+  const otras = options.properties.filter(
+    p => !ts.isSpreadAssignment(p) && !(ts.isPropertyAssignment(p) && p.name.getText() === 'etiqueta'),
+  )
+  return spreads.length === 1 && otras.length === 0 ? spreads[0].expression : options
+}
+
 /** Resolve a named callback in its nearest lexical block, never an unrelated top-level homonym. */
 function transactionCallback(callback: ts.Expression, call: ts.CallExpression): ts.Node {
   if (!ts.isIdentifier(callback)) return callback
@@ -193,11 +203,12 @@ function scanSources() {
         const callee = calleeName(n)
         if (callee) calls.push({ callee, owner: keyOf(n), file: rel, args: n.arguments.map(a => a.getText(sf)), argNodes: n.arguments })
         const callback = n.arguments[0]
-        if (callee === '$transaction' && callback && !ts.isArrayLiteralExpression(callback))
+        // S5b (red por traba): `withDeadlockRetry(cuerpo, { etiqueta, ...opciones })` abre la misma transacción que `$transaction(cuerpo, opciones)`.
+        if ((callee === '$transaction' || callee === 'withDeadlockRetry') && callback && !ts.isArrayLiteralExpression(callback))
           transactions.push({
             owner: keyOf(n),
             line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
-            options: n.arguments[1],
+            options: callee === 'withDeadlockRetry' ? opcionesDelReintento(n.arguments[1]) : n.arguments[1],
             callees: calleesOf(transactionCallback(callback, n)),
           })
         if (ts.isPropertyAccessExpression(n.expression) && ts.isPropertyAccessExpression(n.expression.expression)) {

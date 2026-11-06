@@ -17,6 +17,7 @@ import AppError, { BadRequestError, ServiceUnavailableError } from '@/errors/App
 import { normalizeEmail } from '@/lib/otp'
 import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { estadoDeCancelacionDeVenta, mismoDiaDelVenue, type CancelacionDeVenta } from './giftCardCancel.service'
 import { decryptGiftCardCode, formatGiftCardCode } from './giftCardCode'
@@ -33,7 +34,7 @@ import { MAX_SOBRES_POR_CUENTA } from './giftCardLimits'
 import { WHERE_RENGLON_DE_TARJETA, esCuentaDeTarjetasSeleccionada } from './giftCardMarks'
 import { registrarSalidaDelSecreto, type AuditoriaDeTarjetas } from './giftCardSurface.service'
 
-type Tx = Prisma.TransactionClient
+type Tx = TxConReintento
 
 export const TEXTO_SIN_SECRETO = 'No se pudo mostrar el código. Intenta otra vez.'
 const NOTA_DE_CAMBIO_DE_DESTINO = 'Cambio de destino de la entrega'
@@ -356,21 +357,24 @@ export async function reenviarTarjeta(
   _quien: QuienPregunta,
   p: { operationKey: string; destino?: NuevoDestino },
 ): Promise<ResultadoDeReenvio> {
-  return prisma.$transaction(async tx => {
-    const card = await bloquearVigente(tx, venueId, giftCardId, new Date())
-    const f = await releerEntrega(tx, giftCardId)
-    // m2 (revisión de S7): una llave = una operación. La de un cambio de destino (o de cualquier operación de la libreta) no
-    // sirve para reenviar. Bajo el candado del sobre: el cambio escribe su renglón con ese mismo candado tomado.
-    const deLaLibreta = await tx.giftCardActivity.findUnique({
-      where: { venueId_operationKey: { venueId, operationKey: p.operationKey } },
-      select: { id: true },
-    })
-    if (deLaLibreta) throw llaveReusada()
-    if (p.destino && !esElDestinoActual({ ...card, recipientEmail: f.recipientEmail }, p.destino)) {
-      throw new BadRequestError('Para mandarla a otro teléfono o correo usa «Cambiar destino».', 'GIFT_CARD_USE_CHANGE_DESTINATION')
-    }
-    return reenviarEnTx(tx, card, f, p.operationKey)
-  }, ORDER_LOCK_WAIT_BUDGET)
+  return withDeadlockRetry(
+    async tx => {
+      const card = await bloquearVigente(tx, venueId, giftCardId, new Date())
+      const f = await releerEntrega(tx, giftCardId)
+      // m2 (revisión de S7): una llave = una operación. La de un cambio de destino (o de cualquier operación de la libreta) no
+      // sirve para reenviar. Bajo el candado del sobre: el cambio escribe su renglón con ese mismo candado tomado.
+      const deLaLibreta = await tx.giftCardActivity.findUnique({
+        where: { venueId_operationKey: { venueId, operationKey: p.operationKey } },
+        select: { id: true },
+      })
+      if (deLaLibreta) throw llaveReusada()
+      if (p.destino && !esElDestinoActual({ ...card, recipientEmail: f.recipientEmail }, p.destino)) {
+        throw new BadRequestError('Para mandarla a otro teléfono o correo usa «Cambiar destino».', 'GIFT_CARD_USE_CHANGE_DESTINATION')
+      }
+      return reenviarEnTx(tx, card, f, p.operationKey)
+    },
+    { etiqueta: 'reenviarTarjeta', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 }
 
 /**
@@ -388,60 +392,67 @@ export async function cambiarDestinoDeTarjeta(
   if (p.destino.deliveryChannel === 'WHATSAPP' && telefono === null) {
     throw new BadRequestError('El teléfono no es válido.', 'GIFT_CARD_PHONE_INVALID')
   }
-  return prisma.$transaction(async tx => {
-    const card = await bloquearVigente(tx, venueId, giftCardId, new Date())
-    const f = await releerEntrega(tx, giftCardId)
-    const actual: Destino = { ...card, recipientEmail: f.recipientEmail }
-    // B-S4 3: la nota es fija, así que la huella de la libreta no distingue destinos; la repetición se reconoce aquí, bajo el
-    // candado: la misma llave con el destino que ya quedó es la misma respuesta; con otro, la llave ya se usó.
-    const previa = await tx.giftCardActivity.findUnique({
-      where: { venueId_operationKey: { venueId, operationKey: p.operationKey } },
-      select: { giftCardId: true, type: true },
-    })
-    if (previa) {
-      if (previa.giftCardId !== giftCardId || previa.type !== 'CODE_REPLACED' || !esElDestinoActual(actual, p.destino)) {
-        throw llaveReusada()
+  return withDeadlockRetry(
+    async tx => {
+      const card = await bloquearVigente(tx, venueId, giftCardId, new Date())
+      const f = await releerEntrega(tx, giftCardId)
+      const actual: Destino = { ...card, recipientEmail: f.recipientEmail }
+      // B-S4 3: la nota es fija, así que la huella de la libreta no distingue destinos; la repetición se reconoce aquí, bajo el
+      // candado: la misma llave con el destino que ya quedó es la misma respuesta; con otro, la llave ya se usó.
+      const previa = await tx.giftCardActivity.findUnique({
+        where: { venueId_operationKey: { venueId, operationKey: p.operationKey } },
+        select: { giftCardId: true, type: true },
+      })
+      if (previa) {
+        if (previa.giftCardId !== giftCardId || previa.type !== 'CODE_REPLACED' || !esElDestinoActual(actual, p.destino)) {
+          throw llaveReusada()
+        }
+        return {
+          giftCardId,
+          deliveryStatus: f.deliveryStatus,
+          repuesta: true,
+          ultimos4: f.codeLast4,
+          replay: true,
+          destinoAnterior: null,
+          destinoNuevo: null,
+        }
       }
+      // m2 (revisión de S7): la llave de un reenvío queda en la entrega, no en la libreta. Hacia el MISMO destino es su repetición
+      // (abajo, como reenvío); hacia otro, la llave ya se usó. Leída bajo el mismo candado que la escribe (`reinicioDeEntrega`).
+      const esElMismo = esElDestinoActual(actual, p.destino)
+      if (f.deliveryOperationKey === p.operationKey && !esElMismo) throw llaveReusada()
+      if (esElMismo) return reenviarEnTx(tx, card, f, p.operationKey)
+
+      // La libreta rechaza con los textos de la 1a una tarjeta usada o guardada en la cartera de un cliente.
+      const { nuevoCodigo } = await operarSobreDeGerenteEnTx(tx, {
+        venueId,
+        giftCardId,
+        staffId: quien.staffId,
+        operationKey: p.operationKey,
+        op: { tipo: 'REEMPLAZAR_CODIGO', reason: 'CUSTOMER_REQUEST', note: NOTA_DE_CAMBIO_DE_DESTINO },
+      })
+      const nuevo: Destino = {
+        deliveryChannel: p.destino.deliveryChannel,
+        recipientPhone: telefono,
+        recipientEmail: p.destino.deliveryChannel === 'EMAIL' ? normalizeEmail(p.destino.recipientEmail) : null,
+      }
+      await tx.giftCard.update({
+        where: { id: giftCardId },
+        data: { ...nuevo, ...reinicioDeEntrega(p.operationKey) },
+        select: { id: true },
+      })
       return {
         giftCardId,
-        deliveryStatus: f.deliveryStatus,
+        deliveryStatus: 'PENDING',
         repuesta: true,
-        ultimos4: f.codeLast4,
-        replay: true,
-        destinoAnterior: null,
-        destinoNuevo: null,
+        ultimos4: nuevoCodigo?.last4 ?? f.codeLast4,
+        replay: false,
+        destinoAnterior: enmascararDestino(actual),
+        destinoNuevo: enmascararDestino(nuevo),
       }
-    }
-    // m2 (revisión de S7): la llave de un reenvío queda en la entrega, no en la libreta. Hacia el MISMO destino es su repetición
-    // (abajo, como reenvío); hacia otro, la llave ya se usó. Leída bajo el mismo candado que la escribe (`reinicioDeEntrega`).
-    const esElMismo = esElDestinoActual(actual, p.destino)
-    if (f.deliveryOperationKey === p.operationKey && !esElMismo) throw llaveReusada()
-    if (esElMismo) return reenviarEnTx(tx, card, f, p.operationKey)
-
-    // La libreta rechaza con los textos de la 1a una tarjeta usada o guardada en la cartera de un cliente.
-    const { nuevoCodigo } = await operarSobreDeGerenteEnTx(tx, {
-      venueId,
-      giftCardId,
-      staffId: quien.staffId,
-      operationKey: p.operationKey,
-      op: { tipo: 'REEMPLAZAR_CODIGO', reason: 'CUSTOMER_REQUEST', note: NOTA_DE_CAMBIO_DE_DESTINO },
-    })
-    const nuevo: Destino = {
-      deliveryChannel: p.destino.deliveryChannel,
-      recipientPhone: telefono,
-      recipientEmail: p.destino.deliveryChannel === 'EMAIL' ? normalizeEmail(p.destino.recipientEmail) : null,
-    }
-    await tx.giftCard.update({ where: { id: giftCardId }, data: { ...nuevo, ...reinicioDeEntrega(p.operationKey) }, select: { id: true } })
-    return {
-      giftCardId,
-      deliveryStatus: 'PENDING',
-      repuesta: true,
-      ultimos4: nuevoCodigo?.last4 ?? f.codeLast4,
-      replay: false,
-      destinoAnterior: enmascararDestino(actual),
-      destinoNuevo: enmascararDestino(nuevo),
-    }
-  }, ORDER_LOCK_WAIT_BUDGET)
+    },
+    { etiqueta: 'cambiarDestinoDeTarjeta', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 }
 
 // ─── El teléfono de un saldo a favor (S8a) ───
@@ -455,7 +466,10 @@ export async function cambiarTelefonoDeSaldoAFavor(
   giftCardId: string,
   p: { telefono: string; staffId: string; expectedPhoneLast4?: string; ipAddress?: string; userAgent?: string },
 ): Promise<{ phoneLast4: string }> {
-  return prisma.$transaction(tx => cambiarTelefonoDeSaldoAFavorEnTx(tx, { venueId, giftCardId, ...p }), ORDER_LOCK_WAIT_BUDGET)
+  return withDeadlockRetry(tx => cambiarTelefonoDeSaldoAFavorEnTx(tx, { venueId, giftCardId, ...p }), {
+    etiqueta: 'cambiarTelefonoDeSaldoAFavor',
+    ...ORDER_LOCK_WAIT_BUDGET,
+  })
 }
 
 // ─── Mostrar el código (Q42, Q102) ───
@@ -568,24 +582,27 @@ export async function revelarCodigosDeLaCuenta(
 ): Promise<{ orderId: string; tarjetas: Array<CertificadoDeTarjeta & { id: string }> }> {
   const timezone = await zonaDelNegocio(venueId)
   const filas = await sinSecretoSiFalla(venueId, () =>
-    prisma.$transaction(async tx => {
-      const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: selectDeLaCuenta({ id: true } as const) })
-      const ids = sobresDe(orden).map(s => s.id)
-      const activas = (await lockGiftCardsForUpdate(tx, ids)).filter(c => c.venueId === venueId && c.status === 'ACTIVE')
-      if (activas.length === 0) return []
-      if (activas.some(c => c.activatedAt === null || !mismoDiaDelVenue(c.activatedAt, ahora, timezone))) throw revelarNoPermitido()
-      const leidas = await tx.giftCard.findMany({
-        where: { id: { in: activas.map(c => c.id) }, venueId },
-        select: SELECT_DEL_CERTIFICADO,
-        take: activas.length,
-      })
-      const enOrden = ids.flatMap(id => leidas.filter(f => f.id === id))
-      await registrarSalidaDelSecreto(
-        tx,
-        enOrden.map(f => renglonDeSalida(venueId, f.id, p.auditoria, { operationKey: p.operationKey, motivo: 'PRINT' })),
-      )
-      return enOrden
-    }, ORDER_LOCK_WAIT_BUDGET),
+    withDeadlockRetry(
+      async tx => {
+        const orden = await tx.order.findFirst({ where: { id: orderId, venueId }, select: selectDeLaCuenta({ id: true } as const) })
+        const ids = sobresDe(orden).map(s => s.id)
+        const activas = (await lockGiftCardsForUpdate(tx, ids)).filter(c => c.venueId === venueId && c.status === 'ACTIVE')
+        if (activas.length === 0) return []
+        if (activas.some(c => c.activatedAt === null || !mismoDiaDelVenue(c.activatedAt, ahora, timezone))) throw revelarNoPermitido()
+        const leidas = await tx.giftCard.findMany({
+          where: { id: { in: activas.map(c => c.id) }, venueId },
+          select: SELECT_DEL_CERTIFICADO,
+          take: activas.length,
+        })
+        const enOrden = ids.flatMap(id => leidas.filter(f => f.id === id))
+        await registrarSalidaDelSecreto(
+          tx,
+          enOrden.map(f => renglonDeSalida(venueId, f.id, p.auditoria, { operationKey: p.operationKey, motivo: 'PRINT' })),
+        )
+        return enOrden
+      },
+      { etiqueta: 'revelarCodigosDeLaCuenta', ...ORDER_LOCK_WAIT_BUDGET },
+    ),
   )
   return { orderId, tarjetas: filas.map(f => ({ id: f.id, ...certificado(f, timezone) })) }
 }
@@ -603,17 +620,20 @@ export async function revelarCodigo(
 ): Promise<CertificadoDeTarjeta> {
   const timezone = await zonaDelNegocio(venueId)
   const fila = await sinSecretoSiFalla(venueId, () =>
-    prisma.$transaction(async tx => {
-      const card = await bloquearVigente(tx, venueId, giftCardId, ahora)
-      // `usada` no cambia `revelarPideGerente`.
-      if (!p.comoGerente && accionesSobreLaTarjeta(quien, { ...card, usada: false }, ahora, timezone).revelarPideGerente) {
-        throw revelarNoPermitido()
-      }
-      const f = await tx.giftCard.findUnique({ where: { id: giftCardId }, select: SELECT_DEL_CERTIFICADO })
-      if (!f) throw tarjetaNoEncontrada()
-      await registrarSalidaDelSecreto(tx, [renglonDeSalida(venueId, giftCardId, p.auditoria, p)])
-      return f
-    }, ORDER_LOCK_WAIT_BUDGET),
+    withDeadlockRetry(
+      async tx => {
+        const card = await bloquearVigente(tx, venueId, giftCardId, ahora)
+        // `usada` no cambia `revelarPideGerente`.
+        if (!p.comoGerente && accionesSobreLaTarjeta(quien, { ...card, usada: false }, ahora, timezone).revelarPideGerente) {
+          throw revelarNoPermitido()
+        }
+        const f = await tx.giftCard.findUnique({ where: { id: giftCardId }, select: SELECT_DEL_CERTIFICADO })
+        if (!f) throw tarjetaNoEncontrada()
+        await registrarSalidaDelSecreto(tx, [renglonDeSalida(venueId, giftCardId, p.auditoria, p)])
+        return f
+      },
+      { etiqueta: 'revelarCodigo', ...ORDER_LOCK_WAIT_BUDGET },
+    ),
   )
   return certificado(fila, timezone)
 }

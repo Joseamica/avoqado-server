@@ -236,9 +236,9 @@
       "clase": "SENTENCIA",
       "etiqueta": "marcarEntregaFallidaPorMensaje"
     },
-    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
-      "clase": "SENTENCIA",
-      "etiqueta": "reclamarEntregas"
+    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregasEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "reclamarEntregasEnTx"
     },
     "src/services/giftCards/giftCardDelivery.service.ts#soltar": {
       "clase": "SENTENCIA",
@@ -774,7 +774,7 @@
     "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
       "etiqueta": "reclamarEntregas",
       "cantidad": 1,
-      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas. El UPDATE vive en reclamarEntregasEnTx(p, tx), sin db = prisma por omisión; reclamarEntregas(p) abre el reintento."
     },
     "src/services/giftCards/giftCardDelivery.service.ts#soltar": {
       "etiqueta": "soltar",

@@ -45,6 +45,7 @@ import {
   entregarTarjetas,
   marcarEntregaFallidaPorMensaje,
   reclamarEntregas,
+  reclamarEntregasEnTx,
 } from '@/services/giftCards/giftCardDelivery.service'
 import { processWhatsappWebhook } from '@/services/whatsappWebhook.service'
 import { handleResendWebhook } from '@/controllers/webhooks/resend.webhook.controller'
@@ -165,7 +166,7 @@ describe('el reclamo en la fila', () => {
     // A reclama y NO confirma; B llega mientras A sostiene las filas. B termina sola (las salta) o se queda esperando el
     // candado de A: se le da la oportunidad de las dos antes de que A confirme.
     const a = await prisma.$transaction(async tx => {
-      const deA = await reclamarEntregas({ ahora, ids }, tx)
+      const deA = await reclamarEntregasEnTx({ ahora, ids }, tx)
       const pidA = await pidDe(tx)
       reclamoB = reclamarEntregas({ ahora, ids })
       reclamoB.then(
