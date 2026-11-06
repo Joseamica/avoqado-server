@@ -681,9 +681,14 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
 
 /**
  * Accounts that already have a person with this phone or email (spec §5.2: they warn, they are not unique). A «propios»
- * seller learns WHOSE another seller's account is, so they can ask — never which one or its name.
+ * seller learns WHOSE another seller's account is, so they can ask — never which one or its name. `exceptAccountId` (C2):
+ * the account being edited is not «another business» (its own people are checked apart, `CRM_PERSONA_YA_ESTA`).
  */
-export async function findDuplicates(access: CrmAccess, contact: { phone?: string | null; email?: string | null }) {
+export async function findDuplicates(
+  access: CrmAccess,
+  contact: { phone?: string | null; email?: string | null },
+  opts: { exceptAccountId?: string } = {},
+) {
   const phoneE164 = contact.phone ? canonicalPhoneE164(contact.phone) : null
   const email = contact.email?.trim().toLowerCase() || null
   const by: Prisma.CrmContactWhereInput[] = []
@@ -692,7 +697,7 @@ export async function findDuplicates(access: CrmAccess, contact: { phone?: strin
   if (!by.length) return []
 
   const accounts = await prisma.crmAccount.findMany({
-    where: { contacts: { some: { OR: by } } },
+    where: { contacts: { some: { OR: by } }, ...(opts.exceptAccountId ? { id: { not: opts.exceptAccountId } } : {}) },
     select: { id: true, name: true, ownerStaffId: true, owner: { select: { firstName: true, lastName: true } } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: DUPLICATES_CAP,

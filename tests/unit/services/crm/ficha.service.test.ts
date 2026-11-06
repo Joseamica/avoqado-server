@@ -8,7 +8,8 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { updateAccount } from '@/services/crm/ficha.service'
+import { findDuplicates } from '@/services/crm/accounts.service'
+import { addContact, updateAccount } from '@/services/crm/ficha.service'
 
 type Row = Record<string, any>
 
@@ -304,5 +305,186 @@ describe('Tarea 1 · updateAccount: datos del negocio con «lo que se vio»', ()
       code: 'CRM_NO_ES_TUYO',
     })
     expect(db.accounts[0].giro).toBe('Cafetería')
+  })
+})
+
+// ── Tarea 2 · Agregar persona ─────────────────────────────────────────────────────────────────────────────────────────
+
+const K1 = '11111111-1111-4111-8111-111111111111'
+const K2 = '22222222-2222-4222-8222-222222222222'
+
+function seedContact(over: Row = {}) {
+  const row = {
+    id: `ccontact${String(db.contacts.length + 1).padStart(17, '0')}`,
+    accountId: ACCOUNT,
+    name: 'Beto',
+    email: null,
+    phoneE164: null,
+    role: null,
+    isPrimary: false,
+    createdAt: new Date(Date.now() - 60_000),
+    ...over,
+  }
+  db.contacts.push(row)
+  return row
+}
+const persona = (over: Row = {}) => ({ name: 'Ana López', phone: '55 1234 5678', email: 'ana@cafe.mx', clientRequestId: K1, ...over })
+
+describe('Tarea 2 · addContact: agregar persona', () => {
+  it('la primera persona nace principal; el evento y el ActivityLog no llevan nombre, correo ni teléfono', async () => {
+    seedAccount()
+    const r = await addContact(access(), ACCOUNT, persona())
+    await flush()
+
+    expect(r).toMatchObject({ permisoDelCorreo: false, consentimientoRegistrado: false, repetido: false })
+    expect(db.contacts).toEqual([
+      expect.objectContaining({ id: r.contactId, name: 'Ana López', email: 'ana@cafe.mx', phoneE164: '+525512345678', isPrimary: true }),
+    ])
+    expect(eventos('CONTACT_ADDED')).toEqual([
+      expect.objectContaining({
+        sourceKey: `contacto:${ACCOUNT}:${K1}`,
+        data: expect.objectContaining({ contactId: r.contactId, principal: true }),
+      }),
+    ])
+    const todo = JSON.stringify({ events: db.events, logs: db.logs })
+    for (const dato of ['Ana', 'ana@cafe.mx', '5512345678']) expect(todo).not.toContain(dato)
+    expect(db.logs).toEqual([
+      expect.objectContaining({ action: 'CRM_CONTACT_ADDED', data: expect.objectContaining({ contactId: r.contactId }) }),
+    ])
+  })
+
+  it('isPrimary true → las demás quedan en false; sin isPrimary, la segunda no es principal', async () => {
+    seedAccount()
+    const beto = seedContact({ isPrimary: true })
+    const r = await addContact(access(), ACCOUNT, persona({ isPrimary: true }))
+    expect(beto.isPrimary).toBe(false)
+    expect(db.contacts.find(c => c.id === r.contactId)!.isPrimary).toBe(true)
+    const r2 = await addContact(access(), ACCOUNT, persona({ name: 'Caro', phone: null, email: 'caro@cafe.mx', clientRequestId: K2 }))
+    expect(db.contacts.find(c => c.id === r2.contactId)!.isPrimary).toBe(false)
+  })
+
+  it('🔴 correo de otra persona del mismo negocio → 409 CRM_PERSONA_YA_ESTA con su contactId', async () => {
+    seedAccount()
+    const beto = seedContact({ email: 'ana@cafe.mx' })
+    await expect(addContact(access(), ACCOUNT, persona({ email: 'ANA@cafe.mx', phone: null }))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_PERSONA_YA_ESTA',
+      details: { contactId: beto.id },
+    })
+    expect(db.contacts).toHaveLength(1)
+  })
+
+  it('🔴 teléfono de otro negocio → 409 CRM_POSIBLE_DUPLICADO con duplicates; con esOtroNegocio → se crea', async () => {
+    seedAccount()
+    db.accounts.push({ id: 'caccountb0000000000000001', name: 'Otro', ownerStaffId: null })
+    seedContact({ accountId: 'caccountb0000000000000001', phoneE164: '+525512345678' })
+
+    await expect(addContact(access(), ACCOUNT, persona({ email: null }))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_POSIBLE_DUPLICADO',
+      details: { duplicates: [expect.objectContaining({ id: 'caccountb0000000000000001' })] },
+    })
+    // El reenvío con «es otro negocio», con la MISMA llave (el primero no creó nada): una sola persona.
+    const r = await addContact(access(), ACCOUNT, persona({ email: null, esOtroNegocio: true }))
+    expect(db.contacts.filter(c => c.accountId === ACCOUNT)).toEqual([expect.objectContaining({ id: r.contactId })])
+  })
+
+  it('🔴 findDuplicates con exceptAccountId no devuelve la propia cuenta', async () => {
+    seedAccount()
+    seedContact({ phoneE164: '+525599999999' })
+    await expect(findDuplicates(access(), { phone: '+525599999999' })).resolves.toHaveLength(1)
+    await expect(findDuplicates(access(), { phone: '+525599999999' }, { exceptAccountId: ACCOUNT })).resolves.toEqual([])
+  })
+
+  it('🔴 la persona 51 entra (no hay tope)', async () => {
+    seedAccount()
+    for (let i = 0; i < 50; i++) seedContact({ name: `P${i}` })
+    await addContact(access(), ACCOUNT, persona())
+    expect(db.contacts).toHaveLength(51)
+  })
+
+  it('🔴 casilla sobre un correo que ya tenía permiso → no lo pisa; consentimientoRegistrado false, permisoDelCorreo true', async () => {
+    seedAccount()
+    const previo = { email: 'ana@cafe.mx', source: 'LANDING', accountId: 'cotra' }
+    db.consents.push(previo)
+    const r = await addContact(access(), ACCOUNT, persona({ aceptaCorreos: true }))
+    expect(r).toMatchObject({ permisoDelCorreo: true, consentimientoRegistrado: false })
+    expect(db.consents).toEqual([previo])
+  })
+
+  it('con casilla sobre un correo sin permiso → escribe la fila MANUAL de ese correo y lo dice', async () => {
+    seedAccount()
+    const r = await addContact(access(), ACCOUNT, persona({ aceptaCorreos: true }))
+    await flush()
+    expect(r).toMatchObject({ permisoDelCorreo: true, consentimientoRegistrado: true })
+    expect(db.consents).toEqual([
+      expect.objectContaining({ email: 'ana@cafe.mx', source: 'MANUAL', accountId: ACCOUNT, grantedById: STAFF }),
+    ])
+    expect(db.logs.map(log => log.action)).toEqual(expect.arrayContaining(['CRM_CONTACT_ADDED', 'CRM_EMAIL_CONSENT_RECORDED']))
+  })
+
+  it('sin casilla → permisoDelCorreo false y sin fila', async () => {
+    seedAccount()
+    expect(await addContact(access(), ACCOUNT, persona())).toMatchObject({ permisoDelCorreo: false })
+    expect(db.consents).toEqual([])
+  })
+
+  it('🔴 la misma llave con el mismo contenido dos veces (también sólo con nombre) → una persona, un evento, un ActivityLog; la segunda repetido sin toque', async () => {
+    const account = seedAccount()
+    const primera = await addContact(access(), ACCOUNT, { name: 'Sólo Nombre', clientRequestId: K1 })
+    await flush()
+    const toque = account.lastTouchAt
+    const segunda = await addContact(access(), ACCOUNT, { name: ' Sólo Nombre ', clientRequestId: K1 })
+    await flush()
+
+    expect(segunda).toMatchObject({ contactId: primera.contactId, repetido: true })
+    expect(db.contacts).toHaveLength(1)
+    expect(eventos('CONTACT_ADDED')).toHaveLength(1)
+    expect(db.logs.filter(log => log.action === 'CRM_CONTACT_ADDED')).toHaveLength(1)
+    expect(account.lastTouchAt).toBe(toque)
+  })
+
+  it('🔴 Codex r3 H1: la llave K creó a Ana; K con otro correo, otro nombre o la casilla que no tenía → 409 CRM_LLAVE_CON_OTRO_CONTENIDO con ahora', async () => {
+    seedAccount()
+    const { contactId } = await addContact(access(), ACCOUNT, persona())
+    for (const otro of [{ email: 'ana2@cafe.mx' }, { name: 'Ana María' }, { aceptaCorreos: true }]) {
+      await expect(addContact(access(), ACCOUNT, persona(otro))).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_LLAVE_CON_OTRO_CONTENIDO',
+        details: { ahora: expect.objectContaining({ name: 'Ana López', email: 'ana@cafe.mx' }) },
+      })
+    }
+    expect(db.contacts).toEqual([expect.objectContaining({ id: contactId })])
+    expect(db.consents).toEqual([])
+  })
+
+  it('🔴 Codex r3 H2: K creó a Ana; se quita a Ana; llega K igual → 409 CRM_LLAVE_YA_NO_ESTA (nunca un id muerto)', async () => {
+    seedAccount()
+    const { contactId } = await addContact(access(), ACCOUNT, persona())
+    db.contacts = db.contacts.filter(c => c.id !== contactId)
+    await expect(addContact(access(), ACCOUNT, persona())).rejects.toMatchObject({ statusCode: 409, code: 'CRM_LLAVE_YA_NO_ESTA' })
+  })
+
+  it('🔴 agregar → quitar → volver a agregar el mismo correo con otra llave → se crea otra vez', async () => {
+    seedAccount()
+    const { contactId } = await addContact(access(), ACCOUNT, persona())
+    db.contacts = db.contacts.filter(c => c.id !== contactId)
+    const otra = await addContact(access(), ACCOUNT, persona({ clientRequestId: K2 }))
+    expect(otra.contactId).not.toBe(contactId)
+    expect(db.contacts).toHaveLength(1)
+  })
+
+  it('🔴 Codex r3 H3: el CONTACT_ADDED completo (sourceKey incluido) y el ActivityLog no contienen nombre, correo ni teléfono', async () => {
+    seedAccount()
+    await addContact(access(), ACCOUNT, persona({ name: 'Zoila Única', email: 'zoila@unica.mx', phone: '55 8765 4321', role: 'Gerente' }))
+    await flush()
+    const todo = JSON.stringify({ events: db.events, logs: db.logs })
+    for (const dato of ['Zoila', 'zoila@unica.mx', '87654321', 'Gerente']) expect(todo).not.toContain(dato)
+  })
+
+  it('🔴 A «propios» sobre la cuenta de B → 404, nada escrito', async () => {
+    seedAccount({ ownerStaffId: OTRO })
+    await expect(addContact(access({ ver: 'propios', editar: 'propios' }), ACCOUNT, persona())).rejects.toMatchObject({ statusCode: 404 })
+    expect(db.contacts).toEqual([])
   })
 })

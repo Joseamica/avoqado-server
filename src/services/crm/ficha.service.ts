@@ -8,10 +8,14 @@
  * `CRM_CAMBIO_AL_EDITAR` con `ahora`; (4) escribir. Ningún evento ni ActivityLog lleva datos de personas.
  */
 import { Prisma } from '@prisma/client'
+import { ConflictError } from '../../errors/AppError'
+import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { normalizeEmail } from '../marketing/emailSuppression.service'
 import type { CrmAccess } from './access.service'
-import { lockEditableTx, touchNoEarlierTx } from './accounts.service'
+import { findDuplicates, lockEditableTx, touchNoEarlierTx } from './accounts.service'
+import { escribirConsentimientoDelEquipoTx } from './consent.service'
 import { cambioAlEditar, mismoTexto } from './loQueSeVio'
 import { addEvent } from './timeline.service'
 
@@ -103,4 +107,181 @@ export async function updateAccount(
     })
   }
   return { accountId, cambiados }
+}
+
+// ── Personas ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Una persona tal como la enseña la ficha: lo que viaja en `vio` y en `ahora`. */
+export interface PersonaVista {
+  name: string
+  phoneE164: string | null
+  email: string | null
+  role: string | null
+  isPrimary: boolean
+}
+
+const PERSONA_SELECT = { id: true, name: true, phoneE164: true, email: true, role: true, isPrimary: true } as const
+
+const vista = ({ name, phoneE164, email, role, isPrimary }: PersonaVista): PersonaVista => ({ name, phoneE164, email, role, isPrimary })
+const correo = (email?: string | null) => (email?.trim() ? normalizeEmail(email) : null)
+const telefono = (phone?: string | null) => (phone?.trim() ? canonicalPhoneE164(phone) : null)
+
+/** ¿Este correo ya tiene su fila de permiso? */
+async function tienePermisoTx(tx: Prisma.TransactionClient, email: string | null): Promise<boolean> {
+  if (!email) return false
+  return !!(await tx.crmEmailConsent.findUnique({ where: { email }, select: { id: true } }))
+}
+
+/** Otra persona de ESTE negocio con ese correo o ese teléfono (nunca dos en una cuenta, ruling 65 b). */
+async function personaDelNegocioTx(
+  tx: Prisma.TransactionClient,
+  accountId: string,
+  datos: { email: string | null; phoneE164: string | null },
+  exceptoId?: string,
+) {
+  const por: Prisma.CrmContactWhereInput[] = []
+  if (datos.email) por.push({ email: { equals: datos.email, mode: 'insensitive' } })
+  if (datos.phoneE164) por.push({ phoneE164: datos.phoneE164 })
+  if (!por.length) return null
+  return tx.crmContact.findFirst({
+    where: { accountId, OR: por, ...(exceptoId ? { id: { not: exceptoId } } : {}) },
+    select: { id: true },
+  })
+}
+
+/** Las dos reglas de duplicados, sólo para el correo o teléfono que se escribe: del mismo negocio, y de otro. */
+async function revisarDuplicadosTx(
+  tx: Prisma.TransactionClient,
+  access: CrmAccess,
+  accountId: string,
+  datos: { email: string | null; phoneE164: string | null },
+  opts: { esOtroNegocio?: boolean; exceptoId?: string },
+) {
+  const misma = await personaDelNegocioTx(tx, accountId, datos, opts.exceptoId)
+  if (misma) throw new ConflictError('Esa persona ya está en este negocio', 'CRM_PERSONA_YA_ESTA', { contactId: misma.id })
+  if (opts.esOtroNegocio || (!datos.email && !datos.phoneE164)) return
+  const duplicates = await findDuplicates(access, { phone: datos.phoneE164, email: datos.email }, { exceptAccountId: accountId })
+  if (duplicates.length) throw new ConflictError('Ya hay un negocio con ese teléfono o correo', 'CRM_POSIBLE_DUPLICADO', { duplicates })
+}
+
+/** La casilla «Aceptó recibir correos»: sólo para ESE correo, sin pisar uno que ya había (ni uno eliminado por D7). */
+async function casillaTx(tx: Prisma.TransactionClient, access: CrmAccess, accountId: string, email: string, at: Date) {
+  return escribirConsentimientoDelEquipoTx(tx, { emails: [email], accountId, source: 'MANUAL', staffId: access.staffId, at })
+}
+
+function registrarPermiso(access: CrmAccess, accountId: string, organizationId: string | null, personas: number) {
+  if (personas <= 0) return
+  void logAction({
+    staffId: access.staffId,
+    venueId: null,
+    organizationId,
+    action: 'CRM_EMAIL_CONSENT_RECORDED',
+    entity: 'CrmAccount',
+    entityId: accountId,
+    data: { source: 'MANUAL', personas },
+  })
+}
+
+const organizacionTx = async (tx: Prisma.TransactionClient, accountId: string) =>
+  (await tx.crmAccount.findUniqueOrThrow({ where: { id: accountId }, select: { organizationId: true } })).organizationId
+
+export interface AgregarPersonaInput {
+  name: string
+  phone?: string | null
+  email?: string | null
+  role?: string | null
+  isPrimary?: boolean
+  aceptaCorreos?: boolean
+  esOtroNegocio?: boolean
+  /** Llave opaca (UUID) por CONTENIDO, como Stripe: el reintento del mismo contenido la reusa; otro contenido, otra llave. */
+  clientRequestId: string
+}
+
+/**
+ * «+ Agregar persona». Una llave ya usada se compara con lo que esa llave creó, leído HOY: igual → éxito `repetido` sin
+ * escribir; distinto → 409 `CRM_LLAVE_CON_OTRO_CONTENIDO`; lo creado ya no está → 409 `CRM_LLAVE_YA_NO_ESTA`. Una llave
+ * nueva nunca mira altas viejas: agregar → quitar → agregar el mismo correo crea otra vez.
+ */
+export async function addContact(
+  access: CrmAccess,
+  accountId: string,
+  input: AgregarPersonaInput,
+): Promise<{ contactId: string; permisoDelCorreo: boolean; consentimientoRegistrado: boolean; repetido: boolean }> {
+  const now = new Date()
+  const pedido = {
+    name: input.name.trim(),
+    phoneE164: telefono(input.phone),
+    email: correo(input.email),
+    role: (input.role ?? '').trim() || null,
+  }
+  const casilla = input.aceptaCorreos === true && !!pedido.email
+  const sourceKey = `contacto:${accountId}:${input.clientRequestId}`
+
+  const r = await prisma.$transaction(async tx => {
+    await lockEditableTx(tx, access, accountId)
+
+    const previo = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: { data: true } })
+    if (previo) {
+      const data = (previo.data ?? {}) as { contactId?: string; casilla?: boolean; consentimiento?: boolean }
+      const hoy = data.contactId
+        ? await tx.crmContact.findFirst({ where: { id: data.contactId, accountId }, select: PERSONA_SELECT })
+        : null
+      if (!hoy) throw new ConflictError('Lo que guardaste con este intento ya no está: alguien lo quitó', 'CRM_LLAVE_YA_NO_ESTA')
+      const permiso = await tienePermisoTx(tx, hoy.email)
+      const mismo =
+        mismoTexto(hoy.name, pedido.name) &&
+        hoy.phoneE164 === pedido.phoneE164 &&
+        hoy.email === pedido.email &&
+        mismoTexto(hoy.role, pedido.role) &&
+        (input.isPrimary !== true || hoy.isPrimary) &&
+        (data.casilla ?? false) === casilla &&
+        // Con la casilla, el permiso sigue ahí — salvo que no se pudo escribir (correo eliminado por D7).
+        (!casilla || permiso || data.consentimiento === false)
+      if (!mismo) {
+        throw new ConflictError('Ese intento guardó otra cosa: revisa y guarda otra vez', 'CRM_LLAVE_CON_OTRO_CONTENIDO', {
+          ahora: vista(hoy),
+        })
+      }
+      return { contactId: hoy.id, permiso, escritas: 0, repetido: true, organizationId: null }
+    }
+
+    await revisarDuplicadosTx(tx, access, accountId, pedido, { esOtroNegocio: input.esOtroNegocio })
+    const hayOtras = (await tx.crmContact.count({ where: { accountId } })) > 0
+    const principal = input.isPrimary === true || !hayOtras
+    if (principal && hayOtras) await tx.crmContact.updateMany({ where: { accountId, isPrimary: true }, data: { isPrimary: false } })
+    const { id: contactId } = await tx.crmContact.create({
+      data: { accountId, ...pedido, isPrimary: principal },
+      select: { id: true },
+    })
+    const escritas = casilla ? await casillaTx(tx, access, accountId, pedido.email!, now) : 0
+    const permiso = await tienePermisoTx(tx, pedido.email)
+    await touchNoEarlierTx(tx, accountId, now)
+    await addEvent(tx, {
+      accountId,
+      kind: 'CONTACT_ADDED',
+      actorStaffId: access.staffId,
+      sourceKey,
+      data: { contactId, principal, casilla, consentimiento: casilla && permiso },
+    })
+    return { contactId, permiso, escritas, repetido: false, organizationId: await organizacionTx(tx, accountId) }
+  })
+
+  if (!r.repetido) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId: r.organizationId,
+      action: 'CRM_CONTACT_ADDED',
+      entity: 'CrmContact',
+      entityId: r.contactId,
+      data: {
+        accountId,
+        contactId: r.contactId,
+        campos: Object.keys(pedido).filter(k => pedido[k as keyof typeof pedido] !== null),
+        consentimiento: casilla,
+      },
+    })
+    registrarPermiso(access, accountId, r.organizationId, r.escritas)
+  }
+  return { contactId: r.contactId, permisoDelCorreo: r.permiso, consentimientoRegistrado: r.escritas > 0, repetido: r.repetido }
 }

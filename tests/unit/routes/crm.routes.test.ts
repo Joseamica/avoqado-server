@@ -655,4 +655,40 @@ describe('C2 · ficha editable: las rutas piden «Editar» (o «Ver») antes de 
       expect(spy).toHaveBeenCalledWith(expect.objectContaining({ staffId: ADMIN_ID, editar: 'propios' }), ACCOUNT, body)
     })
   })
+
+  describe('POST /crm/accounts/:id/contacts', () => {
+    const body = { name: 'Ana', email: 'ana@cafe.mx', clientRequestId: '11111111-1111-4111-8111-111111111111' }
+
+    it('🔴 sin «Editar» → 403 y el servicio no se llama; con «Editar» → 201', async () => {
+      const spy = espiar('addContact', {
+        contactId: 'ccontact00000000000000001',
+        permisoDelCorreo: false,
+        consentimientoRegistrado: false,
+        repetido: false,
+      })
+      access({ verScope: 'todos', editarScope: null })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts`).send(body)).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+      access({ verScope: 'propios', editarScope: 'propios' })
+      const res = await request(app).post(`/crm/accounts/${ACCOUNT}/contacts`).send(body)
+      expect(res.status).toBe(201)
+      expect(spy).toHaveBeenCalledWith(expect.anything(), ACCOUNT, body)
+    })
+
+    it('🔴 clientRequestId «ana@ejemplo.mx» o cualquier no-UUID → 400; la casilla sin correo → 400', async () => {
+      const spy = espiar('addContact', {})
+      access({ verScope: 'todos', editarScope: 'todos' })
+      for (const malo of [
+        { ...body, clientRequestId: 'ana@ejemplo.mx' },
+        { ...body, clientRequestId: undefined },
+      ]) {
+        expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts`).send(malo)).status).toBe(400)
+      }
+      const sinCorreo = await request(app)
+        .post(`/crm/accounts/${ACCOUNT}/contacts`)
+        .send({ name: 'Ana', aceptaCorreos: true, clientRequestId: body.clientRequestId })
+      expect(sinCorreo.status).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+    })
+  })
 })

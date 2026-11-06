@@ -284,3 +284,8 @@ export async function applyHubspotImport(req: Request, res: Response): Promise<v
 export async function updateAccount(req: Request, res: Response): Promise<void> {
   res.json({ data: await ficha.updateAccount(req.crmAccess!, req.params.id, req.body) })
 }
+
+/** POST /api/v1/crm/accounts/:id/contacts — «+ Agregar persona». 201 with the person's id and what happened to the box. */
+export async function addContact(req: Request, res: Response): Promise<void> {
+  res.status(201).json({ data: await ficha.addContact(req.crmAccess!, req.params.id, req.body) })
+}

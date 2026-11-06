@@ -9,11 +9,12 @@
  *   TEST_DATABASE_URL='postgresql://postgres:<password>@localhost:5432/avoqado_crm_test_<date>' \
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/concurrencia.integration.test.ts --ci
  */
+import { randomUUID } from 'crypto'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, moveStage, takeAccount } from '@/services/crm/accounts.service'
 import { completeActivity } from '@/services/crm/activities.service'
 import { ensureClientAccount } from '@/services/crm/clients.service'
-import { updateAccount } from '@/services/crm/ficha.service'
+import { addContact, updateAccount } from '@/services/crm/ficha.service'
 import { updateTeamMember } from '@/services/crm/teamVenue.service'
 import { addEvent } from '@/services/crm/timeline.service'
 import prisma from '@/utils/prismaClient'
@@ -306,5 +307,46 @@ describe('CRM: two sellers on the same account at once', () => {
     expect(['Bar', 'Restaurante']).toContain(giro)
     expect(rejected[0]).toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR', details: { ahora: { giro } } })
     expect(await prisma.crmTimelineEvent.count({ where: { accountId: id, kind: 'ACCOUNT_EDIT' } })).toBe(1)
+  })
+
+  it('🔴 C2 T2: dos «agregar» con isPrimary true a la vez → exactamente una principal', async () => {
+    const id = await newAccount({ ownerStaffId: ana })
+    await prisma.crmContact.create({ data: { accountId: id, name: 'Vieja', isPrimary: true } })
+
+    await Promise.all([
+      addContact(seller(ana!), id, {
+        name: 'Uno',
+        phone: '5511110001',
+        isPrimary: true,
+        esOtroNegocio: true,
+        clientRequestId: randomUUID(),
+      }),
+      addContact(seller(beto!), id, {
+        name: 'Dos',
+        phone: '5511110002',
+        isPrimary: true,
+        esOtroNegocio: true,
+        clientRequestId: randomUUID(),
+      }),
+    ])
+
+    expect(await prisma.crmContact.count({ where: { accountId: id, isPrimary: true } })).toBe(1)
+    expect(await prisma.crmContact.count({ where: { accountId: id } })).toBe(3)
+  })
+
+  it('🔴 C2 T2: dos «agregar» del mismo correo a la vez en el mismo negocio → una persona y un 409 CRM_PERSONA_YA_ESTA', async () => {
+    const id = await newAccount({ ownerStaffId: ana })
+    const email = `misma-${suffix}@test.mx`
+
+    const { fulfilled, rejected } = settle(
+      await Promise.allSettled([
+        addContact(seller(ana!), id, { name: 'Ana', email, esOtroNegocio: true, clientRequestId: randomUUID() }),
+        addContact(seller(beto!), id, { name: 'Ana', email, esOtroNegocio: true, clientRequestId: randomUUID() }),
+      ]),
+    )
+
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toEqual([expect.objectContaining({ statusCode: 409, code: 'CRM_PERSONA_YA_ESTA' })])
+    expect(await prisma.crmContact.count({ where: { accountId: id } })).toBe(1)
   })
 })

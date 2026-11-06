@@ -298,6 +298,28 @@ export const updateAccountSchema = z.object({
     }),
 })
 
+/** Sí o no de la ficha. */
+const siNo = (que: string) => z.boolean({ invalid_type_error: `${que} es sí o no` }).optional()
+
+/**
+ * POST /crm/accounts/:id/contacts — «+ Agregar persona» (C2). La casilla sólo con correo; `clientRequestId` es la llave del
+ * intento (UUID, obligatoria).
+ */
+export const addContactSchema = z.object({
+  params: byId,
+  body: contactSchema
+    .extend({
+      isPrimary: siNo('Principal'),
+      aceptaCorreos: siNo('Aceptó recibir correos'),
+      esOtroNegocio: siNo('Es otro negocio'),
+      clientRequestId: llaveDelIntento,
+    })
+    .refine(contact => contact.aceptaCorreos !== true || !!contact.email, {
+      message: 'Para que reciba correos, escribe su correo',
+      path: ['email'],
+    }),
+})
+
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,

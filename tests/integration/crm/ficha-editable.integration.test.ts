@@ -19,8 +19,11 @@ jest.mock('@/services/integrations/hubspot.client', () => ({
   isHubspotEnabled: () => false,
 }))
 
+import { randomUUID } from 'crypto'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { updateAccount } from '@/services/crm/ficha.service'
+import { recorrerAudiencia } from '@/services/crm/email/audience.service'
+import { erasedHashes } from '@/services/crm/erase.service'
+import { addContact, updateAccount } from '@/services/crm/ficha.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
 import prisma from '@/utils/prismaClient'
 
@@ -34,6 +37,7 @@ const accountIds: string[] = []
 const emails: string[] = []
 const stageIds: string[] = []
 const staffIds: string[] = []
+const erasedKeys: string[] = []
 
 /** Un vendedor que ve y edita todo (o sólo lo suyo), sobre una persona de verdad (los eventos llevan su id). */
 const seller = (staffId: string, over: Partial<CrmAccess> = {}): CrmAccess =>
@@ -101,9 +105,9 @@ async function accountWithPerson(email: string, over: Record<string, unknown> = 
   return { accountId: account.id, contactId: account.contacts[0].id }
 }
 
-async function landingEntry(email: string, receivedAt = new Date()) {
+async function landingEntry(email: string, receivedAt = new Date(), over: Record<string, unknown> = {}) {
   emails.push(email)
-  const saved = await saveLandingEntry(form(email), receivedAt)
+  const saved = await saveLandingEntry(form(email, over), receivedAt)
   expect(saved).not.toBeNull()
   await recordSignupOutcome(saved!.entryId, null)
   return saved!.entryId
@@ -123,6 +127,8 @@ async function untilSomeoneWaitsForTheRow() {
 
 afterAll(async () => {
   // Every delete is keyed by ids or emails this file created: never a `where` that could be undefined.
+  await prisma.crmEmailConsent.deleteMany({ where: { email: { contains: suffix } } })
+  if (erasedKeys.length) await prisma.crmErased.deleteMany({ where: { keyHash: { in: erasedKeys } } })
   if (emails.length) {
     await prisma.crmAccount.deleteMany({ where: { source: 'LANDING', externalKey: { in: emails } } })
     await prisma.crmInboundEntry.deleteMany({ where: { externalKey: { in: emails } } })
@@ -239,5 +245,48 @@ describe('Tarea 1 · PATCH /crm/accounts/:id: los datos del negocio con «lo que
     expect(await guardando).toMatchObject({ statusCode: 404 })
     expect(await prisma.crmAccount.findUnique({ where: { id: accountId } })).toBeNull()
     expect(await prisma.crmTimelineEvent.count({ where: { accountId } })).toBe(0)
+  })
+})
+
+/** Los correos de esta prueba que la campaña PROSPECTOS alcanza. */
+async function enProspectos(prefijo: string) {
+  const vistos: string[] = []
+  await recorrerAudiencia({ segmentos: [{ tipo: 'PROSPECTOS' }] }, async lote => {
+    vistos.push(...lote.map(d => d.email).filter(email => email.startsWith(prefijo) && email.includes(suffix)))
+  })
+  return vistos.sort()
+}
+const llave = () => randomUUID()
+
+describe('Tarea 2 · POST /crm/accounts/:id/contacts: agregar persona', () => {
+  it('🔴 casilla sobre un correo eliminado por D7 (lápida) → la persona entra, sin permiso, consentimientoRegistrado false', async () => {
+    const ana = await vendedor('ana-t2a')
+    const { accountId } = await accountWithPerson(`t2a-beto-${suffix}@test.mx`)
+    const email = `t2a-ana-${suffix}@test.mx`
+    const [hash] = erasedHashes({ keys: [], emails: [email], phones: [], organizationId: null }).person
+    erasedKeys.push(hash)
+    await prisma.crmErased.create({ data: { keyHash: hash, erasedAt: new Date() } })
+
+    const r = await addContact(seller(ana), accountId, { name: 'Ana', email, aceptaCorreos: true, clientRequestId: llave() })
+
+    expect(r).toMatchObject({ permisoDelCorreo: false, consentimientoRegistrado: false, repetido: false })
+    expect(await prisma.crmContact.count({ where: { id: r.contactId, accountId } })).toBe(1)
+    expect(await prisma.crmEmailConsent.findUnique({ where: { email } })).toBeNull()
+  })
+
+  it('🔴 sin casilla la persona no entra a PROSPECTOS; con casilla, sí, y la casilla autoriza exactamente el correo escrito', async () => {
+    const ana = await vendedor('ana-t2b')
+    const { accountId } = await accountWithPerson(`t2b-beto-${suffix}@test.mx`)
+    await addContact(seller(ana), accountId, { name: 'Sin', email: `t2b-sin-${suffix}@test.mx`, clientRequestId: llave() })
+    await addContact(seller(ana), accountId, {
+      name: 'Con',
+      email: ` T2B-Con-${suffix}@Test.mx `,
+      aceptaCorreos: true,
+      clientRequestId: llave(),
+    })
+
+    expect(await enProspectos('t2b-')).toEqual([`t2b-con-${suffix}@test.mx`])
+    const permisos = await prisma.crmEmailConsent.findMany({ where: { accountId }, select: { email: true, source: true }, take: 5 })
+    expect(permisos).toEqual([{ email: `t2b-con-${suffix}@test.mx`, source: 'MANUAL' }])
   })
 })
