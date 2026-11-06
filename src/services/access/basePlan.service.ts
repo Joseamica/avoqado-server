@@ -4,6 +4,7 @@ import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
 import { grantedCapabilityCodes, hasCapabilityGrant, venuesWithCapabilityGrant } from './capabilityGrants.service'
 import { esperarTodas } from '@/services/customer-display/pollWork' // PURO y sin imports: no arrastra nada
+import { daAcceso, ventanaDeAccesoWhere, type FilaConVentana } from './ventanaDeAcceso'
 
 // Re-exported so the grandfather resolver is discoverable from the access service everyone
 // already imports. Callers OUTSIDE this module should prefer importing from './grandfather'
@@ -184,15 +185,16 @@ export function cruzaPlanYSuelta(origen: string, destino: string): boolean {
   return esPlan(origen) !== esPlan(destino)
 }
 
-/** Active-window predicate shared by every base-plan query: active, not suspended, trial null/future. */
-export function isActiveWindow(vf: { active: boolean; suspendedAt: Date | null; endDate: Date | null }, now: Date = new Date()): boolean {
-  if (!vf.active || vf.suspendedAt) return false
-  if (vf.endDate && vf.endDate < now) return false // trial expired unpaid
-  return true
+/**
+ * ¿La fila da acceso hoy? Es la regla única de `ventanaDeAcceso.ts` (D4 + D6): activa, sin suspender, y vigente por su
+ * vencimiento o por su gracia de cobranza. Se conserva el nombre porque media plataforma la importa de aquí.
+ */
+export function isActiveWindow(vf: FilaConVentana, now: Date = new Date()): boolean {
+  return daAcceso(vf, now)
 }
 
-/** Prisma `where` fragment for the active window (used by batch findMany queries). */
-const activeWindowWhere = (now: Date) => ({ active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: now } }] })
+/** La misma regla como `where` de Prisma (consultas por lote). */
+export const activeWindowWhere = ventanaDeAccesoWhere
 
 /**
  * The venue's currently-entitled base tier, or null if none is active.
@@ -220,7 +222,7 @@ async function getContractBaseTier(venueId: string): Promise<BaseTier | null> {
 export async function getVenueBaseTier(venueId: string, options: { legacyOnly?: boolean } = {}): Promise<BaseTier | null> {
   const rows = await prisma.venueFeature.findMany({
     where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
-    select: { active: true, suspendedAt: true, endDate: true, feature: { select: { code: true } } },
+    select: { active: true, suspendedAt: true, endDate: true, gracePeriodEndsAt: true, feature: { select: { code: true } } },
   })
   const now = new Date()
   let hasPro = false
@@ -244,7 +246,7 @@ export async function getVenueBaseTier(venueId: string, options: { legacyOnly?: 
 export async function venueHasActiveBasePlan(venueId: string): Promise<boolean> {
   const vf = await prisma.venueFeature.findFirst({
     where: { venueId, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
-    select: { active: true, suspendedAt: true, endDate: true },
+    select: { active: true, suspendedAt: true, endDate: true, gracePeriodEndsAt: true },
   })
   if (vf && isActiveWindow(vf)) return true
   return (await getContractBaseTier(venueId)) !== null
@@ -397,7 +399,7 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
 
   const vf = await prisma.venueFeature.findFirst({
     where: { venueId, feature: { code: featureCode } },
-    select: { active: true, endDate: true, suspendedAt: true },
+    select: { active: true, endDate: true, suspendedAt: true, gracePeriodEndsAt: true },
   })
   // 1. Grandfather: the venue's own active grant for this code always wins.
   if (vf && isActiveWindow(vf)) return true
@@ -552,6 +554,8 @@ export interface DerivePlanFeatureInput {
   endDate: Date | null
   suspendedAt: Date | null
   gracePeriodEndsAt: Date | null
+  /** ¿Ligada a Stripe? Sólo decide CÓMO se dice «sin acceso»: `suspended` (hay cobranza) o `canceled` (cortesía local). */
+  stripeSubscriptionId?: string | null
 }
 
 /** The minimal Stripe subscription fields derivePlanState needs. */
@@ -581,9 +585,13 @@ export function derivePlanState(
     state = 'suspended'
   } else if (!vf.active) {
     state = 'canceled'
-  } else if ((vf.gracePeriodEndsAt && now < vf.gracePeriodEndsAt) || sub?.status === 'past_due') {
+  } else if (!daAcceso(vf, now)) {
+    // 🔴 D4 + D6: la MISMA regla que el portero. Sin acceso por fecha nunca se dice `active`/`past_due`/`trial` (el
+    // DASHBOARD lee `past_due` como «con acceso»): con cobranza de por medio es `suspended`; una cortesía local, `canceled`.
+    state = vf.gracePeriodEndsAt || vf.stripeSubscriptionId || sub ? 'suspended' : 'canceled'
+  } else if ((vf.gracePeriodEndsAt && now <= vf.gracePeriodEndsAt) || sub?.status === 'past_due') {
     state = 'past_due'
-  } else if (vf.endDate && vf.endDate > now) {
+  } else if (vf.endDate && vf.endDate >= now) {
     state = 'trial'
   } else if (sub?.cancelAtPeriodEnd === true) {
     state = 'canceling'

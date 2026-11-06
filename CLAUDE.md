@@ -21,6 +21,9 @@ new capability, **STOP and ask the founder which paid tier it falls under** — 
 decision is unfinished: it either leaks paid value into a lower tier or hides a free capability behind a paywall. This repo is the
 **authoritative** gate — get it right here first.
 
+- **¿Una fila de `VenueFeature` da acceso?** SIEMPRE `daAcceso` / `ventanaDeAccesoWhere` de `src/services/access/ventanaDeAcceso.ts`
+  (la gracia de cobranza vigente cuenta; D4 + D6, 5-nov-2026). Nunca reimplementes `active`/`suspendedAt`/`endDate` a mano: así
+  nacieron siete lectores que contestaban distinto.
 - **Backend (authoritative):** `src/services/access/basePlan.service.ts` + `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory
   gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes: read
   `PREMIUM_ONLY_CODES` in `basePlan.service.ts` (CFDI, INVENTORY_TRACKING, COMMISSIONS and more) — never trust a copy in a doc.

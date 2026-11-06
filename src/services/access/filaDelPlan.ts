@@ -1,3 +1,5 @@
+import { daAcceso } from './ventanaDeAcceso'
+
 /**
  * ¿Cuál de las filas de plan de un negocio es la que se ADMINISTRA (se muestra, se cancela, se reintenta)? ¿Y se puede
  * conceder un plan encima de lo que ya hay?
@@ -17,14 +19,18 @@ export interface FilaDePlanLeida {
   active: boolean
   suspendedAt: Date | null
   stripeSubscriptionId: string | null
-  /** Fin de la concesión (prueba, cortesía con vencimiento). Pasado ⇒ ya no da acceso. */
+  /** Fin de la concesión (prueba, cortesía con vencimiento). Pasado ⇒ ya no da acceso (salvo gracia vigente). */
   endDate?: Date | null
+  /** Gracia de cobranza (D4 + D6): vigente da acceso aunque la prueba ya venció; vencida lo quita. */
+  gracePeriodEndsAt?: Date | null
   updatedAt?: Date
   /** ¿Su suscripción sigue pudiendo cobrar? `false` = CONSTA terminada; `null`/ausente = no se consultó y no degrada. */
   cobroVivo?: boolean | null
 }
 
-const vigente = (f: FilaDePlanLeida, ahora: Date) => !f.endDate || f.endDate.getTime() > ahora.getTime()
+/** Vigente por su vencimiento o por su gracia: la regla de `ventanaDeAcceso.ts` sin `active`/`suspendedAt` (el puntaje los pesa aparte). */
+const vigente = (f: FilaDePlanLeida, ahora: Date) =>
+  daAcceso({ active: true, suspendedAt: null, endDate: f.endDate ?? null, gracePeriodEndsAt: f.gracePeriodEndsAt ?? null }, ahora)
 /** Un vínculo sólo cuenta si no CONSTA terminado: la ignorancia no degrada, la evidencia sí. */
 const vinculoUtil = (f: FilaDePlanLeida) => !!f.stripeSubscriptionId && f.cobroVivo !== false
 /** Su suscripción TERMINÓ y nos consta: el `active` que conserve es un residuo local que la conciliación va a quitar. */

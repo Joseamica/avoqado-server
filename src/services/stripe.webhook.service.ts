@@ -1,4 +1,5 @@
 import { handleHybridStripeEvent } from './launchCampaigns/hybridLifecycle.service'
+import { daAcceso, type FilaConVentana } from './access/ventanaDeAcceso'
 import { programarCierreDelAltaPorAviso } from './onboarding/altaPorAvisoDeStripe'
 /**
  * Stripe Webhook Event Handlers
@@ -157,8 +158,9 @@ async function procedeActivar(
   venueFeature: { active: boolean; suspendedAt: Date | null },
   subscriptionId: string,
 ): Promise<{ procede: boolean; estado?: Stripe.Subscription.Status }> {
-  if (venueFeature.active && !venueFeature.suspendedAt) return { procede: true }
-
+  // 🔴 Codex D6 r2 #3: sin atajo para la fila activa. Desde D4 + D6 también se repara una fila activa con gracia de
+  // cobranza o con la prueba vencida, y una factura VIEJA pagada fuera de orden con la suscripción todavía `past_due`
+  // borraba la deuda sin preguntar. Se pregunta siempre.
   const estado = await estadoDeLaSuscripcion(subscriptionId)
   return { procede: veredictoDeActivacion(venueFeature, estado), estado }
 }
@@ -171,8 +173,11 @@ async function procedeActivar(
  * Preguntar sólo por `active` dejaba al negocio pagando sin acceso, para siempre.
  * (Cuarta auditoría de Codex, 19-sep.)
  */
-function necesitaReactivacion(venueFeature: { active: boolean; suspendedAt: Date | null }): boolean {
-  return !venueFeature.active || venueFeature.suspendedAt != null
+function necesitaReactivacion(venueFeature: FilaConVentana): boolean {
+  // 🔴 D4 + D6 (5-nov-2026): también una fila ACTIVA que la regla única niega (la prueba venció y el aviso de la
+  // renovación no llegó) o que trae una gracia de cobranza: un pago la deja al corriente. Sin esto quedaban la gracia y
+  // la prueba vencida, y el negocio perdía el plan aunque ya hubiera pagado.
+  return !venueFeature.active || venueFeature.suspendedAt != null || venueFeature.gracePeriodEndsAt != null || !daAcceso(venueFeature)
 }
 
 /**
