@@ -13,7 +13,9 @@
  *    ahí el empleado sella de más a su amiga y nadie se entera.
  */
 import { Prisma } from '@prisma/client'
-import { getStampCardStatus, grantStamp } from '../../../../src/services/wallet/stampLedger.service'
+import { getStampCardStatus, grantStamp, reverseStampForOrder } from '../../../../src/services/wallet/stampLedger.service'
+import * as activityLog from '../../../../src/services/dashboard/activity-log.service'
+import * as passUpdate from '../../../../src/services/wallet/notifyPassUpdated.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = { id: 'v1', timezone: 'America/Mexico_City' }
@@ -466,5 +468,56 @@ describe('getStampCardStatus', () => {
 
     prismaMock.stampCard.findFirst.mockResolvedValueOnce(null)
     expect(await getStampCardStatus('v1', 'c1')).toMatchObject({ stampCardId: null, stampsEarned: 0, stampsRequired: 7 })
+  })
+})
+
+describe('reverseStampForOrder: la red por traba (40P01) publica sólo el intento ganador (R65 b)', () => {
+  const traba = () => Object.assign(new Error('deadlock detected'), { code: '40P01' })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.stampEvent.findFirst.mockResolvedValue({ id: 'se1', stampCardId: 'sc1', quantity: 1 } as any)
+    prismaMock.stampCard.findUnique.mockImplementation((async (a: any) =>
+      a?.select?.rewards
+        ? { completedAt: null, rewards: [] }
+        : { id: 'sc1', venueId: 'v1', customerId: 'c1', cycle: 1, stampsEarned: 2, completedAt: null }) as any)
+    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc1' } as any)
+    prismaMock.stampEvent.create.mockResolvedValue({ id: 'se2' } as any)
+    prismaMock.stampCard.update.mockResolvedValue({ id: 'sc1' } as any)
+    jest.spyOn(activityLog, 'logAction').mockReturnValue(undefined as any)
+    jest.spyOn(passUpdate, 'notifyCustomerPassUpdated').mockResolvedValue(undefined as any)
+    // El cuerpo corre completo y LUEGO Postgres aborta la transacción (la traba se detecta ya con trabajo hecho).
+    let intento = 0
+    prismaMock.$transaction.mockImplementation((async (cb: any) => {
+      const r = await cb(prismaMock)
+      if (typeof r === 'boolean' && intento++ === 0) throw traba()
+      return r
+    }) as any)
+  })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
+    prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+  })
+
+  it('el intento abortado ya había dicho «revertida»; el ganador no encuentra qué revertir ⇒ nada se publica', async () => {
+    // yaRevertido (fuera) = 0, intento 1 (dentro) = 0 → escribe y aborta, intento 2 (dentro) = 1 → otra reversa ya existe.
+    prismaMock.stampEvent.count.mockResolvedValueOnce(0).mockResolvedValueOnce(0).mockResolvedValueOnce(1)
+
+    const r = await reverseStampForOrder('v1', 'o1')
+
+    expect(r).toEqual({ reversed: false, stampCardId: 'sc1' })
+    expect(activityLog.logAction).not.toHaveBeenCalled()
+    expect(passUpdate.notifyCustomerPassUpdated).not.toHaveBeenCalled()
+  })
+
+  it('si el segundo intento es el que revierte, la bitácora y el aviso salen UNA sola vez', async () => {
+    prismaMock.stampEvent.count.mockResolvedValue(0)
+
+    const r = await reverseStampForOrder('v1', 'o1')
+
+    expect(r).toEqual({ reversed: true, stampCardId: 'sc1' })
+    expect(activityLog.logAction).toHaveBeenCalledTimes(1)
+    expect(passUpdate.notifyCustomerPassUpdated).toHaveBeenCalledTimes(1)
   })
 })

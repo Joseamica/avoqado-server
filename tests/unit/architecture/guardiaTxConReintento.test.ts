@@ -98,6 +98,18 @@ const conTipo: { escribir(tx: TxConReintento): Promise<void> } = {
 export async function metodoConTipo(tx: TxConReintento) {
   await conTipo.escribir(tx)
 }
+type Manejador = { escribir(tx: TxConReintento): Promise<void>; 'con-guion'(tx: TxConReintento): Promise<void> }
+const conUnion: Manejador | undefined = {
+  async escribir(tx: TxConReintento) {
+    await escribir(tx)
+  },
+  async 'con-guion'(tx: TxConReintento) {
+    await escribir(tx)
+  },
+}
+export async function metodoConUnion(tx: TxConReintento) {
+  await conUnion?.escribir(tx)
+}
 export { escribir }
 `
 
@@ -145,6 +157,16 @@ const FALLAN: Array<[string, string, string]> = [
     'metodoEnAny',
     '(11)',
     `const h: any = { async a(tx: TxConReintento) { await escribir(tx) } }\nexport function g() { return h.a(prisma) }`,
+  ],
+  [
+    'metodoEntreComillas',
+    '(11)',
+    `const h: Record<string, Function> = { async 'a'(tx: TxConReintento) { await escribir(tx) } }\nexport function g() { return h.a(prisma) }`,
+  ],
+  [
+    'metodoEnUnionConMapa',
+    '(11)',
+    `const h: Record<string, Function> | undefined = { async a(tx: TxConReintento) { await escribir(tx) } }\nexport function g() { return h?.a(prisma) }`,
   ],
   ['variableInferida', '(9)', `export async function f(tx: TxConReintento) { const t = tx }`],
   ['apply', '(11)', `export function f() { return escribir.apply(null, [prisma as any]) }`],

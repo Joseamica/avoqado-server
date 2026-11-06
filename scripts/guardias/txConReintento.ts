@@ -277,9 +277,12 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
       // `Record<string, Function>` o `any` lo convierte en algo que se llama con cualquier cliente). Sin tipo esperado (`servicio =
       // { … }`), pasa: su tipo es el del método.
       if (ts.isMethodDeclaration(n) && ts.isObjectLiteralExpression(n.parent) && conParametroMarcado(n)) {
-        const esperado = checker.getContextualType(n.parent)
+        const contextual = checker.getContextualType(n.parent)
+        // `Manejador | undefined` (y `T | null`): se mira el tipo sin lo nulo, o una unión legítima caería como falso positivo.
+        const esperado = contextual && checker.getNonNullableType(contextual)
         if (esperado) {
-          const propiedad = esperado.getProperty(n.name.getText())
+          const nombre = nombreDePropiedad(n.name) // resuelve también `'a'(tx)` y `['a'](tx)`
+          const propiedad = nombre === undefined ? undefined : esperado.getProperty(nombre)
           const tipo = propiedad ? checker.getTypeOfSymbol(propiedad) : (esperado.getStringIndexType() ?? esperado.getNumberIndexType())
           if (!tipo || !esEscritor(tipo))
             hallazgos.push(
@@ -305,6 +308,13 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
     if (ts.isExportAssignment(p) || ts.isTypeQueryNode(p)) return true
     return esCuerpoDeApertura(n)
   }
+}
+
+/** El texto de un nombre de propiedad escrito como identificador, comillas, número o `['literal']`; si no es literal, undefined. */
+function nombreDePropiedad(nombre: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(nombre) || ts.isStringLiteralLike(nombre) || ts.isNumericLiteral(nombre)) return nombre.text
+  if (ts.isComputedPropertyName(nombre) && ts.isStringLiteralLike(nombre.expression)) return nombre.expression.text
+  return undefined
 }
 
 function esNombreDeDeclaracion(n: ts.Identifier): boolean {

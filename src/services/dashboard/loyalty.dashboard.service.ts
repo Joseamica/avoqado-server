@@ -19,6 +19,7 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { StampRewardType, LoyaltyTransactionType, Prisma, StampEventType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
@@ -487,7 +488,7 @@ async function acreditarPuntosTrasElSello(ctx: {
     // con el candado de la VENTA como PRIMERA sentencia (el mismo que toma `grantStamp` después del suyo). Dos intentos que
     // validaron a clientes distintos se forman aquí: el segundo ve los puntos o el sello del primero y no acredita. La
     // deduplicación de antes era por cliente + venta, así que no excluía a otro cliente.
-    const escribirPuntos = async (tx: Prisma.TransactionClient) => {
+    const escribirPuntos = async (tx: TxConReintento) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
       const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
         where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
@@ -549,7 +550,10 @@ async function acreditarPuntosTrasElSello(ctx: {
     const escribirConReintento = async () => {
       for (let intento = 0; ; intento++) {
         try {
-          return await prisma.$transaction(escribirPuntos, PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA)
+          return await withDeadlockRetry(escribirPuntos, {
+            etiqueta: 'acreditarPuntosTrasElSello',
+            ...PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA,
+          })
         } catch (error) {
           if (!seVencioLaTransaccion(error) || intento >= REINTENTOS_POR_VENCIMIENTO) throw error
           logger.warn('⚠️ [LOYALTY] Points transaction expired (P2028); retrying', { venueId, orderId, customerId, intento: intento + 1 })
@@ -696,7 +700,7 @@ export async function adjustPoints(
   // 🔴 D1 (24-oct): la lectura de arriba sólo da el mensaje. Lo que impide el saldo negativo es la resta CONDICIONAL: dos
   // gerentes que leyeron 10 y quitan 6 a la vez ya no dejan −2 (el segundo espera la fila, ve 4 y no mueve nada).
   // El tiempo es explícito (Codex r1): con los 5 s por defecto de Prisma, un ajuste que espera la fila tomada por otro vencía.
-  const updatedCustomer = await prisma.$transaction(
+  const updatedCustomer = await withDeadlockRetry(
     async tx => {
       const moved = await tx.customer.updateMany({
         where: { id: customerId, venueId, loyaltyPoints: { gte: -points } },
@@ -718,7 +722,7 @@ export async function adjustPoints(
       })
       return tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { etiqueta: 'adjustPoints', timeout: 15_000, maxWait: 5_000 },
   )
 
   logAction({
@@ -884,22 +888,25 @@ export async function expireOldPoints(venueId: string): Promise<{ customersAffec
 
     if (pointsToExpire > 0) {
       // Create EXPIRE transaction and update customer balance
-      await prisma.$transaction([
-        prisma.loyaltyTransaction.create({
-          data: {
-            customerId: transaction.customerId,
-            type: LoyaltyTransactionType.EXPIRE,
-            points: -pointsToExpire,
-            reason: `Expired ${pointsToExpire} points from transaction ${transaction.id} (older than ${config.pointsExpireDays} days)`,
-          },
-        }),
-        prisma.customer.update({
-          where: { id: transaction.customerId },
-          data: {
-            loyaltyPoints: { decrement: pointsToExpire },
-          },
-        }),
-      ])
+      await withDeadlockRetry(
+        async tx => {
+          await tx.loyaltyTransaction.create({
+            data: {
+              customerId: transaction.customerId,
+              type: LoyaltyTransactionType.EXPIRE,
+              points: -pointsToExpire,
+              reason: `Expired ${pointsToExpire} points from transaction ${transaction.id} (older than ${config.pointsExpireDays} days)`,
+            },
+          })
+          await tx.customer.update({
+            where: { id: transaction.customerId },
+            data: {
+              loyaltyPoints: { decrement: pointsToExpire },
+            },
+          })
+        },
+        { etiqueta: 'expireOldPoints' },
+      )
 
       totalPointsExpired += pointsToExpire
       affectedCustomerIds.add(transaction.customerId)

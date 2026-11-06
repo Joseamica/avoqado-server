@@ -1,5 +1,6 @@
 import { LoyaltyConfig, LoyaltyTransactionType, Prisma, StampEventType, StampRewardStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
@@ -195,7 +196,7 @@ type DentroDelCandado =
  * llama sólo cuando la cartilla ACABA de llegar a su meta: sin ese candado, el paso D2 («¿hay otra abierta?» → crear) no es seguro.
  */
 async function completarCartilla(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   card: { id: string; cycle: number },
   config: StampConfigView,
   venueId: string,
@@ -259,7 +260,7 @@ async function completarCartilla(
  * Abre la cartilla de un cliente que no tiene ninguna abierta: ciclo = último + 1, con la meta de HOY, que queda congelada en
  * ella. Dentro del candado del cliente, como `completarCartilla`.
  */
-async function abrirCartilla(tx: Prisma.TransactionClient, venueId: string, customerId: string, stampsRequired: number) {
+async function abrirCartilla(tx: TxConReintento, venueId: string, customerId: string, stampsRequired: number) {
   const ultima = await tx.stampCard.findFirst({
     where: { venueId, customerId },
     orderBy: { cycle: 'desc' },
@@ -297,91 +298,94 @@ export async function grantStamp(
       : null
 
   try {
-    const resultado = await prisma.$transaction(async (tx): Promise<DentroDelCandado> => {
-      // 🔴 PRIMERA sentencia (auditoría A #3): un candado por (negocio, cliente). Dos ventas DISTINTAS del mismo cliente se
-      // forman aquí; la segunda lee el tope y la cartilla DESPUÉS de que la primera hizo commit. Sin él, las dos pasaban el
-      // tope de 1 al día, o las dos llenaban la misma cartilla y el sello de la segunda se perdía al chocar con el premio.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+    const resultado = await withDeadlockRetry(
+      async (tx): Promise<DentroDelCandado> => {
+        // 🔴 PRIMERA sentencia (auditoría A #3): un candado por (negocio, cliente). Dos ventas DISTINTAS del mismo cliente se
+        // forman aquí; la segunda lee el tope y la cartilla DESPUÉS de que la primera hizo commit. Sin él, las dos pasaban el
+        // tope de 1 al día, o las dos llenaban la misma cartilla y el sello de la segunda se perdía al chocar con el premio.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
 
-      // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): y en seguida el candado de la VENTA —el mismo que toma la escritura
-      // de los puntos en `earnPoints`—. Los puntos y el sello de una venta son de UN cliente: dos intentos pueden validar a
-      // clientes distintos (la TPV cambió al primario entre uno y otro) antes del primer EARN, y el candado de arriba es por
-      // CLIENTE, no los forma. Siempre en este orden: candado del cliente → candado de la venta; nadie toma el inverso.
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+        // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): y en seguida el candado de la VENTA —el mismo que toma la escritura
+        // de los puntos en `earnPoints`—. Los puntos y el sello de una venta son de UN cliente: dos intentos pueden validar a
+        // clientes distintos (la TPV cambió al primario entre uno y otro) antes del primer EARN, y el candado de arriba es por
+        // CLIENTE, no los forma. Siempre en este orden: candado del cliente → candado de la venta; nadie toma el inverso.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
 
-      // 🔴 F2 (rulings del código, 15-oct-2026): la PRIMERA lectura dentro de los candados es el sello de ESTA orden. Dos llamadas
-      // de la MISMA venta a la vez (doble toque, liga + reconciliador) pasan las dos el atajo de afuera; la segunda espera aquí
-      // y, sin esta relectura, contaba el sello que la primera acababa de dar como «el de hoy» y respondía DAILY_LIMIT: falso
-      // para esta venta, que sí quedó sellada. (Un segundo sello, de quien sea, también lo impide el índice único por venta.)
-      const propio = await tx.stampEvent.findFirst({
-        where: { venueId, orderId, type: StampEventType.EARN },
-        select: { id: true, stampCardId: true },
-      })
-      if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
+        // 🔴 F2 (rulings del código, 15-oct-2026): la PRIMERA lectura dentro de los candados es el sello de ESTA orden. Dos llamadas
+        // de la MISMA venta a la vez (doble toque, liga + reconciliador) pasan las dos el atajo de afuera; la segunda espera aquí
+        // y, sin esta relectura, contaba el sello que la primera acababa de dar como «el de hoy» y respondía DAILY_LIMIT: falso
+        // para esta venta, que sí quedó sellada. (Un segundo sello, de quien sea, también lo impide el índice único por venta.)
+        const propio = await tx.stampEvent.findFirst({
+          where: { venueId, orderId, type: StampEventType.EARN },
+          select: { id: true, stampCardId: true },
+        })
+        if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
 
-      // 🔴 D3 (24-oct): una venta ya devuelta no da sello, la misma regla que la lealtad tardía (`ventaTieneReembolso`). Se lee
-      // bajo el candado de la venta: si la devolución entra DESPUÉS de esta lectura, su reversa espera ese mismo candado (ver
-      // `reverseStampForOrder`) y quita el sello que esta transacción deje.
-      if (await ventaTieneReembolso(tx, { venueId, orderId })) return { otorgado: false, reason: 'ORDER_REFUNDED' }
+        // 🔴 D3 (24-oct): una venta ya devuelta no da sello, la misma regla que la lealtad tardía (`ventaTieneReembolso`). Se lee
+        // bajo el candado de la venta: si la devolución entra DESPUÉS de esta lectura, su reversa espera ese mismo candado (ver
+        // `reverseStampForOrder`) y quita el sello que esta transacción deje.
+        if (await ventaTieneReembolso(tx, { venueId, orderId })) return { otorgado: false, reason: 'ORDER_REFUNDED' }
 
-      // H4, tercera ola: si OTRO cliente ya recibió los PUNTOS de esta venta, este sello tampoco se da.
-      const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
-        where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
-        select: { customerId: true },
-      })
-      if (puntosDeOtro) return { otorgado: false, reason: 'OTHER_CUSTOMER' }
+        // H4, tercera ola: si OTRO cliente ya recibió los PUNTOS de esta venta, este sello tampoco se da.
+        const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
+          where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
+          select: { customerId: true },
+        })
+        if (puntosDeOtro) return { otorgado: false, reason: 'OTHER_CUSTOMER' }
 
-      // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado.
-      if (tz) {
-        const hoy = await tx.stampEvent.count({
-          where: {
+        // 🔴 El tope se cuenta en el día del VENUE, y DENTRO del candado.
+        if (tz) {
+          const hoy = await tx.stampEvent.count({
+            where: {
+              venueId,
+              type: StampEventType.EARN,
+              stampCard: { customerId },
+              createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+            },
+          })
+          if (hoy >= config.maxStampsPerDay) return { otorgado: false, reason: 'DAILY_LIMIT_REACHED' }
+        }
+
+        // La cartilla en curso, o una nueva — también DENTRO del candado. `stampsRequired` se COPIA aquí y queda congelado: si
+        // el negocio cambia la regla mañana, quien ya empezó conserva la suya.
+        // 🔴 La abierta MÁS VIEJA (D2): una devolución puede reabrir una cartilla llena cuando ya existe la siguiente; se termina
+        // primero la reabierta. Con una sola abierta (lo normal) es la misma de siempre.
+        let card = await tx.stampCard.findFirst({
+          where: { venueId, customerId, completedAt: null },
+          orderBy: { cycle: 'asc' },
+        })
+        if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
+
+        await tx.stampEvent.create({
+          data: {
+            stampCardId: card.id,
             venueId,
+            orderId,
             type: StampEventType.EARN,
-            stampCard: { customerId },
-            createdAt: { gte: venueStartOfDay(tz), lte: venueEndOfDay(tz) },
+            quantity: 1,
+            createdById: options.staffVenueId,
+            terminalId: options.terminalId,
           },
         })
-        if (hoy >= config.maxStampsPerDay) return { otorgado: false, reason: 'DAILY_LIMIT_REACHED' }
-      }
+        // El contador se mueve en la MISMA transacción que su evento: si viven
+        // separados, un fallo a medias deja el cache mintiendo sobre el libro.
+        const actualizada = await tx.stampCard.update({
+          where: { id: card.id },
+          data: { stampsEarned: { increment: 1 } },
+          select: { stampsEarned: true, stampsRequired: true },
+        })
 
-      // La cartilla en curso, o una nueva — también DENTRO del candado. `stampsRequired` se COPIA aquí y queda congelado: si
-      // el negocio cambia la regla mañana, quien ya empezó conserva la suya.
-      // 🔴 La abierta MÁS VIEJA (D2): una devolución puede reabrir una cartilla llena cuando ya existe la siguiente; se termina
-      // primero la reabierta. Con una sola abierta (lo normal) es la misma de siempre.
-      let card = await tx.stampCard.findFirst({
-        where: { venueId, customerId, completedAt: null },
-        orderBy: { cycle: 'asc' },
-      })
-      if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
+        const ganados = actualizada.stampsEarned
+        const meta = actualizada.stampsRequired ?? card.stampsRequired
+        if (ganados < meta) return { otorgado: true, cardId: card.id, ganados, meta, completed: false }
 
-      await tx.stampEvent.create({
-        data: {
-          stampCardId: card.id,
-          venueId,
-          orderId,
-          type: StampEventType.EARN,
-          quantity: 1,
-          createdById: options.staffVenueId,
-          terminalId: options.terminalId,
-        },
-      })
-      // El contador se mueve en la MISMA transacción que su evento: si viven
-      // separados, un fallo a medias deja el cache mintiendo sobre el libro.
-      const actualizada = await tx.stampCard.update({
-        where: { id: card.id },
-        data: { stampsEarned: { increment: 1 } },
-        select: { stampsEarned: true, stampsRequired: true },
-      })
+        // ── La cartilla se llenó ────────────────────────────────────────────────
+        const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
 
-      const ganados = actualizada.stampsEarned
-      const meta = actualizada.stampsRequired ?? card.stampsRequired
-      if (ganados < meta) return { otorgado: true, cardId: card.id, ganados, meta, completed: false }
-
-      // ── La cartilla se llenó ────────────────────────────────────────────────
-      const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
-
-      return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId }
-    }, PRESUPUESTO_DEL_SELLO)
+        return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId }
+      },
+      { etiqueta: 'grantStamp', ...PRESUPUESTO_DEL_SELLO },
+    )
 
     if (!resultado.otorgado) {
       return resultado.reason === 'ALREADY_STAMPED'
@@ -529,31 +533,30 @@ export async function reverseStampForOrder(
   if (!original) return { reversed: false }
   const customerId = original.customerId
 
-  let revertida = false
   // 🔴 Quinta ola (recheck 4 de Codex, 15-oct-2026): el MISMO presupuesto que `grantStamp` (`PRESUPUESTO_DEL_SELLO`), porque
   // espera el mismo candado del cliente y un otorgamiento puede retenerlo hasta 15 s mientras espera el de su venta. Con los
   // 5 s por defecto, la reversión de un reembolso se vencía y el sello de la venta devuelta quedaba vivo (el reembolso sólo lo
   // registra). Y si aun así se vence (P2028), hasta 2 reintentos (100 ms, 300 ms): es idempotente porque cada intento vuelve a
   // tomar el candado y relee las reversas de la venta antes de escribir, con el índice único de la reversa detrás.
   const revertirConReintento = () =>
-    reintentarSiSeVence(venueId, orderId, () => {
-      revertida = false
-      return prisma.$transaction(revertirDentroDelCandado, PRESUPUESTO_DEL_SELLO)
-    })
-  const revertirDentroDelCandado = async (tx: Prisma.TransactionClient) => {
+    reintentarSiSeVence(venueId, orderId, () =>
+      withDeadlockRetry(revertirDentroDelCandado, { etiqueta: 'reverseStampForOrder', ...PRESUPUESTO_DEL_SELLO }),
+    )
+  // R65 b: «revertida» sale en el RETORNO del cuerpo; un intento abortado (40P01 o P2028) no deja nada a medias.
+  const revertirDentroDelCandado = async (tx: TxConReintento): Promise<boolean> => {
     // 🔴 PRIMERA sentencia: el candado (negocio, cliente). Un otorgamiento del mismo cliente que esté completando la cartilla
     // termina antes de que aquí se lea nada.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
 
     // Otra reversión de esta venta pudo hacer commit mientras ésta esperaba el candado.
     const reversasDentro = await tx.stampEvent.count({ where: { venueId, orderId, type: StampEventType.REVERSAL } })
-    if (reversasDentro > 0) return
+    if (reversasDentro > 0) return false
 
     const card = await tx.stampCard.findUnique({
       where: { id: otorgado.stampCardId },
       select: { id: true, venueId: true, customerId: true, cycle: true, stampsEarned: true, completedAt: true },
     })
-    if (!card) return
+    if (!card) return false
 
     // 🔴 ¿De qué cartilla sale el sello? (D3, 21-oct, founder: «A, como Square»). UNA sola regla para todos los estados
     // (varias llenas, varias abiertas por D2, canjes de por medio): de una cartilla que TENGA el sello, en este orden:
@@ -626,10 +629,11 @@ export async function reverseStampForOrder(
         data: { stampsEarned: { decrement: cantidad }, ...(reabrir ? { completedAt: null } : {}) },
       })
     }
-    revertida = true
+    return true
   }
+  let revertida: boolean
   try {
-    await revertirConReintento()
+    revertida = await revertirConReintento()
   } catch (error: any) {
     if (error?.code === 'P2002') {
       logger.info('Reversa de sello duplicada evitada por el índice único', { venueId, orderId })
@@ -721,69 +725,73 @@ export async function adjustStamps(venueId: string, customerId: string, input: A
   const customer = await prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { id: true } })
   if (!customer) throw new NotFoundError('Cliente no encontrado')
 
-  const resultado = await prisma.$transaction(async (tx): Promise<AdjustStampsResult> => {
-    // 🔴 PRIMERA sentencia: el MISMO candado (negocio, cliente) que `grantStamp` y la reversa. Una venta o una devolución del
-    // cliente termina antes de que aquí se lea la cartilla. No hay venta, así que no hay segundo candado.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+  const resultado = await withDeadlockRetry(
+    async (tx): Promise<AdjustStampsResult> => {
+      // 🔴 PRIMERA sentencia: el MISMO candado (negocio, cliente) que `grantStamp` y la reversa. Una venta o una devolución del
+      // cliente termina antes de que aquí se lea la cartilla. No hay venta, así que no hay segundo candado.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
 
-    // F3: la config se lee DESPUÉS del candado, y esa UNA lectura compara y abre la cartilla. Sin `FOR SHARE` a propósito: con
-    // una sola lectura, cualquier orden contra un cambio de config de otro admin es válido (el ajuste fue antes, con lo que vio
-    // el gerente, o después, y da 409).
-    const config = await tx.loyaltyConfig.findUnique({ where: { venueId } })
-    if (!config || !config.active || !config.stampsEnabled) throw new ConflictError('El programa de sellos está apagado', 'STAMPS_DISABLED')
+      // F3: la config se lee DESPUÉS del candado, y esa UNA lectura compara y abre la cartilla. Sin `FOR SHARE` a propósito: con
+      // una sola lectura, cualquier orden contra un cambio de config de otro admin es válido (el ajuste fue antes, con lo que vio
+      // el gerente, o después, y da 409).
+      const config = await tx.loyaltyConfig.findUnique({ where: { venueId } })
+      if (!config || !config.active || !config.stampsEnabled)
+        throw new ConflictError('El programa de sellos está apagado', 'STAMPS_DISABLED')
 
-    // La abierta MÁS VIEJA: la que llena `grantStamp` y la que muestra `getStampCardStatus` (D2).
-    let card = await tx.stampCard.findFirst({
-      where: { venueId, customerId, completedAt: null },
-      orderBy: { cycle: 'asc' },
-      select: { id: true, cycle: true, stampsEarned: true, stampsRequired: true },
-    })
-    const version = await contarVersionDeCartilla(card?.id ?? null, tx)
-    // La meta va en la MISMA comparación, antes de abrir la cartilla y antes de validar el total (F1).
-    const stampsRequired = card?.stampsRequired ?? config.stampsRequired
-    if (
-      (card?.id ?? null) !== input.expectedStampCardId ||
-      (card?.stampsEarned ?? 0) !== input.expectedStampsEarned ||
-      version !== input.expectedVersion ||
-      stampsRequired !== input.expectedStampsRequired
-    ) {
-      // La foto COMPLETA de hoy: el cliente la reemplaza entera y sólo un acto nuevo del usuario la usa.
-      throw new ConflictError('Los sellos de este cliente cambiaron mientras tanto', 'STAMPS_CHANGED', {
-        stampCardId: card?.id ?? null,
-        stampsEarned: card?.stampsEarned ?? 0,
-        stampsRequired,
-        version,
-        rewardLabel: config.stampRewardLabel,
+      // La abierta MÁS VIEJA: la que llena `grantStamp` y la que muestra `getStampCardStatus` (D2).
+      let card = await tx.stampCard.findFirst({
+        where: { venueId, customerId, completedAt: null },
+        orderBy: { cycle: 'asc' },
+        select: { id: true, cycle: true, stampsEarned: true, stampsRequired: true },
       })
-    }
-    // Sin cartilla (y se esperaba ninguna): se abre igual que con el primer sello. Si el ajuste rebota abajo, se revierte.
-    if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
+      const version = await contarVersionDeCartilla(card?.id ?? null, tx)
+      // La meta va en la MISMA comparación, antes de abrir la cartilla y antes de validar el total (F1).
+      const stampsRequired = card?.stampsRequired ?? config.stampsRequired
+      if (
+        (card?.id ?? null) !== input.expectedStampCardId ||
+        (card?.stampsEarned ?? 0) !== input.expectedStampsEarned ||
+        version !== input.expectedVersion ||
+        stampsRequired !== input.expectedStampsRequired
+      ) {
+        // La foto COMPLETA de hoy: el cliente la reemplaza entera y sólo un acto nuevo del usuario la usa.
+        throw new ConflictError('Los sellos de este cliente cambiaron mientras tanto', 'STAMPS_CHANGED', {
+          stampCardId: card?.id ?? null,
+          stampsEarned: card?.stampsEarned ?? 0,
+          stampsRequired,
+          version,
+          rewardLabel: config.stampRewardLabel,
+        })
+      }
+      // Sin cartilla (y se esperaba ninguna): se abre igual que con el primer sello. Si el ajuste rebota abajo, se revierte.
+      if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
 
-    const from = card.stampsEarned
-    const to = input.stampsEarned
-    if (to < 0 || to > card.stampsRequired) throw new BadRequestError('No puede pasar de la meta de la tarjeta', 'ABOVE_GOAL')
-    if (to === from) throw new BadRequestError('No hay cambio', 'NO_CHANGE')
-    const delta = to - from
+      const from = card.stampsEarned
+      const to = input.stampsEarned
+      if (to < 0 || to > card.stampsRequired) throw new BadRequestError('No puede pasar de la meta de la tarjeta', 'ABOVE_GOAL')
+      if (to === from) throw new BadRequestError('No hay cambio', 'NO_CHANGE')
+      const delta = to - from
 
-    await tx.stampEvent.create({
-      data: {
-        stampCardId: card.id,
-        venueId,
-        orderId: null,
-        type: StampEventType.ADJUST,
-        quantity: delta,
-        reason,
-        createdById: input.staffVenueId ?? null,
-      },
-    })
-    // El contador en la MISMA transacción que su asiento. Valor absoluto: dentro del candado, todo el que lo mueve está formado.
-    await tx.stampCard.update({ where: { id: card.id }, data: { stampsEarned: to } })
+      await tx.stampEvent.create({
+        data: {
+          stampCardId: card.id,
+          venueId,
+          orderId: null,
+          type: StampEventType.ADJUST,
+          quantity: delta,
+          reason,
+          createdById: input.staffVenueId ?? null,
+        },
+      })
+      // El contador en la MISMA transacción que su asiento. Valor absoluto: dentro del candado, todo el que lo mueve está formado.
+      await tx.stampCard.update({ where: { id: card.id }, data: { stampsEarned: to } })
 
-    const base = { stampCardId: card.id, from, to, delta, stampsRequired: card.stampsRequired }
-    if (to < card.stampsRequired) return { ...base, completed: false }
-    const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
-    return { ...base, completed: true, rewardId }
-  }, PRESUPUESTO_DEL_SELLO)
+      const base = { stampCardId: card.id, from, to, delta, stampsRequired: card.stampsRequired }
+      if (to < card.stampsRequired) return { ...base, completed: false }
+      const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
+      return { ...base, completed: true, rewardId }
+    },
+    { etiqueta: 'adjustStamps', ...PRESUPUESTO_DEL_SELLO },
+  )
 
   // La tarjeta del teléfono refleja el ajuste, como con un sello (en segundo plano; nunca lanza).
   enSegundoPlano('aviso', notifyCustomerPassUpdated(venueId, customerId))
