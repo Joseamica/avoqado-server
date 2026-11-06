@@ -8,6 +8,7 @@ import {
   UNRESOLVED_FINANCIAL_OUTCOME,
   desenlaceCanonico,
   terminalPaymentService,
+  unresolvedFinancialOutcomeSql,
 } from '@/services/terminal-payment.service'
 import { utcTs } from '@/utils/sqlDates'
 import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
@@ -2795,6 +2796,31 @@ describe('el predicado de bloqueo y el desenlace canónico no pueden divergir', 
     expect({ sqlDeMenos: sqlDeMenos.slice(0, 5), sqlDeMas: sqlDeMas.slice(0, 5) }).toEqual({ sqlDeMenos: [], sqlDeMas: [] })
     expect(enSql.size).toBe(enFuncion.size)
     expect(enSql.size).toBeGreaterThan(0)
+  })
+
+  it('🔴 R50 (tienda híbrida): el MISMO predicado en SQL crudo (`unresolvedFinancialOutcomeSql`, el NOT EXISTS de los barridos de vencer) bloquea EXACTAMENTE las filas de `UNRESOLVED_FINANCIAL_OUTCOME`', async () => {
+    const enPrisma = await prisma.terminalPaymentRequest.findMany({
+      where: { venueId: venueTabla, ...UNRESOLVED_FINANCIAL_OUTCOME },
+      select: { requestId: true },
+    })
+    const enCrudo = await prisma.$queryRaw<Array<{ requestId: string }>>`
+      SELECT r."requestId" FROM "TerminalPaymentRequest" r WHERE r."venueId" = ${venueTabla} AND ${unresolvedFinancialOutcomeSql('r')}`
+    const prismaIds = new Set(enPrisma.map(r => r.requestId))
+    const crudoIds = new Set(enCrudo.map(r => r.requestId))
+    const porFila = (id: string) => JSON.stringify(universo.find(f => f.requestId === id))
+    // «De menos» en el crudo es el lado que cuesta dinero: un barrido vencería (cancelaría) una cuenta con un cobro sin desenlace.
+    expect({
+      crudoDeMenos: [...prismaIds]
+        .filter(id => !crudoIds.has(id))
+        .slice(0, 5)
+        .map(porFila),
+      crudoDeMas: [...crudoIds]
+        .filter(id => !prismaIds.has(id))
+        .slice(0, 5)
+        .map(porFila),
+    }).toEqual({ crudoDeMenos: [], crudoDeMas: [] })
+    expect(crudoIds.size).toBe(prismaIds.size)
+    expect(crudoIds.size).toBeGreaterThan(0)
   })
 
   it('P1 la sonda alcanza TODO lo que bloquea: nada retiene una terminal sin tener salida', async () => {

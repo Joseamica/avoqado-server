@@ -12,6 +12,7 @@
  * marca `kitchenPendingAt` que dejó cada paso, con el armado real, y cuenta las comandas de la cuenta.
  */
 import { randomUUID } from 'crypto'
+import type { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
@@ -22,7 +23,14 @@ import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.serv
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
-import { cerrarFoliosDelDiaTerminado, listFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
+import {
+  cerrarFoliosDelDiaTerminado,
+  leerFoliosConAbonoDevuelto,
+  leerPedidosVencidos,
+  listFolios,
+  syncPaidFolios,
+  type CursorDeVencer,
+} from '@/services/online-ordering/folios.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import {
   acceptOnlineOrder,
@@ -492,6 +500,92 @@ describe('R44 · folio con su abono reembolsado completo (cuenta PARTIAL, dinero
     expect((await pedido(onlineOrderId)).status).toBe('PENDING_ACCEPTANCE')
     expect(await cuenta(orderId)).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' })
     expect(await porPagar()).toContain(orderId)
+  })
+})
+
+describe('R50 · las lecturas de vencer excluyen EN SU SQL la cuenta con un cobro de terminal sin desenlace (contra Postgres)', () => {
+  // El cobro «de otro negocio» no cuelga de la fixture (sin llave foránea): se borra aquí.
+  afterEach(() => prisma.terminalPaymentRequest.deleteMany({ where: { venueId: `${f.venueId}-otro` } }))
+
+  /** Todas las páginas de una lectura, con su cursor, y sólo lo de este negocio (la base desechable la comparten otras suites). */
+  async function leidos(leer: typeof leerPedidosVencidos, now = new Date()) {
+    const filas: Array<{ id: string; orderId: string; acceptDeadlineAt: Date }> = []
+    let despues: CursorDeVencer | null = null
+    for (let pagina = 0; pagina < 50; pagina++) {
+      const lote = await leer(now, despues)
+      filas.push(...lote.filter(r => r.venueId === f.venueId))
+      if (lote.length < 100) break
+      const ultimo = lote[lote.length - 1]
+      despues = { at: ultimo.acceptDeadlineAt, id: ultimo.id }
+    }
+    return filas
+  }
+  const cobroDeTerminal = (orderId: string, extra: Partial<Prisma.TerminalPaymentRequestUncheckedCreateInput> = {}) =>
+    prisma.terminalPaymentRequest.create({
+      data: {
+        requestId: randomUUID(),
+        venueId: f.venueId,
+        terminalId: `r50-${randomUUID().slice(0, 8)}`,
+        status: 'TIMED_OUT',
+        amountCents: CIEN,
+        orderId,
+        expiresAt: new Date(Date.now() - 60_000),
+        ...extra,
+      },
+    })
+  const abonoDevuelto = async () => {
+    const folio = await nuevoFolio()
+    const abono = await efectivoDelPos(folio.orderId, CINCUENTA)
+    await issueRefund({ venueId: f.venueId, paymentId: abono.paymentId, amount: CINCUENTA, reason: 'RETURNED_GOODS', staffId: f.staffId })
+    await prisma.onlineOrder.update({ where: { id: folio.onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 60_000) } })
+    return folio
+  }
+
+  it('vencer principal: el cobro TIMED_OUT (incierto) saca de la lectura a su folio; el acreditado como «no se cobró» y el que no tiene cobro sí salen, también de «Mi equipo»', async () => {
+    const incierto = await nuevoFolio({ vencido: true })
+    await cobroDeTerminal(incierto.orderId)
+    const acreditado = await nuevoFolio({ vencido: true })
+    await cobroDeTerminal(acreditado.orderId, { status: 'FAILED', failureCode: 'TPV_NEVER_RECEIVED' })
+    const equipo = await nuevoFolio({ vencido: true, equipo: true })
+    // Otro negocio con el mismo número de orden no cuenta: la guarda pregunta por el negocio de la orden.
+    const otroNegocio = await nuevoFolio({ vencido: true })
+    await cobroDeTerminal(otroNegocio.orderId, { venueId: `${f.venueId}-otro` })
+
+    const ids = (await leidos(leerPedidosVencidos)).map(r => r.orderId)
+
+    expect(ids).toEqual(expect.arrayContaining([acreditado.orderId, equipo.orderId, otroNegocio.orderId]))
+    expect(ids).not.toContain(incierto.orderId)
+    // La guarda real del vencimiento dice lo mismo que el SQL.
+    expect(await expireOnlineOrder({ venueId: f.venueId, orderId: incierto.orderId })).toEqual({ outcome: 'HAS_PAYMENTS' })
+    await vencer(acreditado.orderId)
+  })
+
+  it('abono devuelto (neto 0): el cobro incierto lo saca de la lectura; sin cobro sale; la guarda real coincide', async () => {
+    await prisma.shift.create({ data: { venueId: f.venueId, staffId: f.staffId, startTime: new Date(), status: 'OPEN', startingCash: 0 } })
+    const incierto = await abonoDevuelto()
+    await cobroDeTerminal(incierto.orderId, { status: 'UNKNOWN' })
+    const libre = await abonoDevuelto()
+
+    const ids = (await leidos(leerFoliosConAbonoDevuelto)).map(r => r.orderId)
+
+    expect(ids).toContain(libre.orderId)
+    expect(ids).not.toContain(incierto.orderId)
+    expect(await expireOnlineOrder({ venueId: f.venueId, orderId: incierto.orderId })).toEqual({ outcome: 'HAS_PAYMENTS' })
+    await vencer(libre.orderId)
+  })
+
+  it('el cursor sigue DESPUÉS de la fila dada (la fecha va y vuelve exacta por `utcTs`)', async () => {
+    const a = await nuevoFolio({ vencido: true })
+    const b = await nuevoFolio({ vencido: true })
+    await prisma.onlineOrder.update({ where: { id: b.onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 30_000) } })
+    const propios = await leidos(leerPedidosVencidos)
+    const primero = propios.find(r => r.orderId === a.orderId)!
+    expect(primero.acceptDeadlineAt.getTime()).toBe((await pedido(a.onlineOrderId)).acceptDeadlineAt.getTime())
+
+    const despues = (await leerPedidosVencidos(new Date(), { at: primero.acceptDeadlineAt, id: primero.id })).map(r => r.orderId)
+
+    expect(despues).not.toContain(a.orderId)
+    expect(despues).toContain(b.orderId)
   })
 })
 

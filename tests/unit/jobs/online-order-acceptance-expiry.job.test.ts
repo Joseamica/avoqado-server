@@ -1,5 +1,4 @@
 // tests/unit/jobs/online-order-acceptance-expiry.job.test.ts
-import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -17,9 +16,10 @@ import { OnlineOrderAcceptanceExpiryJob } from '@/jobs/online-order-acceptance-e
 import { DATABASE_JOB_SCHEDULES } from '@/jobs/jobSchedules'
 
 const NOW = new Date('2026-10-14T18:30:10.000Z')
+const AT = new Date('2026-10-14T18:00:00.000Z')
 const CANDIDATES = [
-  { orderId: 'ord1', venueId: 'v1' },
-  { orderId: 'ord2', venueId: 'v2' },
+  { id: 'oo1', orderId: 'ord1', venueId: 'v1', acceptDeadlineAt: AT },
+  { id: 'oo2', orderId: 'ord2', venueId: 'v2', acceptDeadlineAt: AT },
 ]
 
 async function retryOnce<T>(operation: () => Promise<T>, options: { shouldRetry?: (e: unknown) => boolean }): Promise<T> {
@@ -35,7 +35,7 @@ function harness(
   o: {
     candidates?: typeof CANDIDATES
     expireOrder?: jest.Mock
-    findMany?: jest.Mock
+    leerVencidos?: jest.Mock
     leerAbonosDevueltos?: jest.Mock
     syncCancelled?: jest.Mock
     syncPaidPickups?: jest.Mock
@@ -45,7 +45,7 @@ function harness(
   } = {},
 ) {
   const cron = { start: jest.fn(), stop: jest.fn() }
-  const findMany = o.findMany ?? jest.fn().mockResolvedValue(o.candidates ?? CANDIDATES)
+  const leerVencidos = o.leerVencidos ?? jest.fn().mockResolvedValue(o.candidates ?? CANDIDATES)
   const expireOrder = o.expireOrder ?? jest.fn().mockResolvedValue({ outcome: 'OK', status: 'EXPIRED' })
   const syncCancelled = o.syncCancelled ?? jest.fn().mockResolvedValue(0)
   const syncPaidPickups = o.syncPaidPickups ?? jest.fn().mockResolvedValue(0)
@@ -55,7 +55,6 @@ function harness(
   const leerAbonosDevueltos = o.leerAbonosDevueltos ?? jest.fn().mockResolvedValue([])
   const now = jest.fn(() => NOW)
   const job = new OnlineOrderAcceptanceExpiryJob({
-    prisma: { onlineOrder: { findMany } } as never,
     cron: cron as never,
     expireOrder,
     retryEntry: retryOnce as never,
@@ -64,13 +63,14 @@ function harness(
     syncPaidFolios,
     syncPaidClosedFolios,
     cerrarFoliosDelDia,
+    leerVencidos,
     leerAbonosDevueltos,
     now,
   })
   return {
     job,
     cron,
-    findMany,
+    leerVencidos,
     leerAbonosDevueltos,
     expireOrder,
     syncCancelled,
@@ -89,25 +89,15 @@ beforeEach(() => {
 })
 
 describe('online-order-acceptance-expiry.job', () => {
-  it('primero sincroniza las cuentas canceladas por otra vía, luego lo pagado al recoger, y luego lee sólo lo vencido SIN dinero y con la cuenta ABIERTA (R1, R2, A13)', async () => {
+  it('primero sincroniza las cuentas canceladas por otra vía, luego lo pagado al recoger, y luego lee lo vencido (su SQL —sin dinero, cuenta ABIERTA, R1/A13/R50— se prueba en folios.service.test)', async () => {
     const h = harness({ candidates: [] })
     await h.job.checkNow()
     // A10: cada sincronización recibe el envoltorio de reintento SÓLO para su lectura de candidatos.
     expect(h.syncCancelled).toHaveBeenCalledWith(NOW, expect.any(Function))
     expect(h.syncPaidPickups).toHaveBeenCalledWith(NOW, expect.any(Function))
     expect(h.syncCancelled.mock.invocationCallOrder[0]).toBeLessThan(h.syncPaidPickups.mock.invocationCallOrder[0])
-    expect(h.syncPaidPickups.mock.invocationCallOrder[0]).toBeLessThan(h.findMany.mock.invocationCallOrder[0])
-    expect(h.findMany).toHaveBeenCalledWith({
-      where: {
-        status: 'PENDING_ACCEPTANCE',
-        acceptDeadlineAt: { lte: NOW },
-        // A13: una cuenta ya cerrada sin dinero (cortesía, COMPLETED) no se vuelve a intentar vencer en cada pasada.
-        order: { paymentStatus: 'PENDING', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } },
-      },
-      select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
-      orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
-      take: 100,
-    })
+    expect(h.syncPaidPickups.mock.invocationCallOrder[0]).toBeLessThan(h.leerVencidos.mock.invocationCallOrder[0])
+    expect(h.leerVencidos).toHaveBeenCalledWith(NOW, null) // la primera página, sin cursor
   })
 
   it('tienda híbrida (decisión 18): después de lo pagado al recoger y ANTES de vencer, pasa los folios pagados y los cerrados ya saldados a «Por entregar»', async () => {
@@ -121,7 +111,7 @@ describe('online-order-acceptance-expiry.job', () => {
     // R38: el fin del día va DESPUÉS de lo que mete folios a la lista y ANTES de vencer.
     expect(h.cerrarFoliosDelDia).toHaveBeenCalledWith(NOW, expect.any(Function))
     expect(orden(h.syncPaidClosedFolios)).toBeLessThan(orden(h.cerrarFoliosDelDia))
-    expect(orden(h.cerrarFoliosDelDia)).toBeLessThan(orden(h.findMany))
+    expect(orden(h.cerrarFoliosDelDia)).toBeLessThan(orden(h.leerVencidos))
   })
 
   it('un fallo al pasar folios a «Por entregar» no detiene la otra pasada ni el vencimiento', async () => {
@@ -145,11 +135,11 @@ describe('online-order-acceptance-expiry.job', () => {
       acceptDeadlineAt: at,
     }))
     const vencible = { id: 'oo-999', orderId: 'ord-ok', venueId: 'v2', acceptDeadlineAt: at }
-    const findMany = jest.fn().mockResolvedValueOnce(bloqueados).mockResolvedValueOnce([vencible])
+    const leerVencidos = jest.fn().mockResolvedValueOnce(bloqueados).mockResolvedValueOnce([vencible])
     const expireOrder = jest.fn(async (i: { orderId: string }) =>
       i.orderId === 'ord-ok' ? { outcome: 'OK', status: 'EXPIRED' } : { outcome: 'HAS_PAYMENTS' },
     )
-    const h = harness({ findMany, expireOrder: expireOrder as unknown as jest.Mock })
+    const h = harness({ leerVencidos, expireOrder: expireOrder as unknown as jest.Mock })
 
     await expect(h.job.checkNow()).resolves.toEqual({
       scanned: 101,
@@ -162,84 +152,21 @@ describe('online-order-acceptance-expiry.job', () => {
     })
     expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v2', orderId: 'ord-ok', now: NOW })
     // la segunda página arranca DESPUÉS del último leído, no otra vez desde el principio
-    const segunda = findMany.mock.calls[1][0]
-    expect(segunda.where.OR).toEqual([{ acceptDeadlineAt: { gt: at } }, { acceptDeadlineAt: at, id: { gt: 'oo-099' } }])
-    expect(findMany).toHaveBeenCalledTimes(2) // la segunda página vino incompleta: la pasada termina
-  })
-
-  it('R49 (Codex r2): 1,000 folios con abono VIVO y vencidos (más que las 10 páginas) no tapan a un pedido posterior sin dinero de otro negocio: vence en la MISMA pasada', async () => {
-    // Base simulada como la de Codex: el barrido lee lo que su filtro pide. Los abonos vivos son PARTIAL con neto $50.
-    const viejo = new Date('2026-10-14T10:00:00.000Z')
-    const abonos = Array.from({ length: 1000 }, (_, i) => ({
-      id: `oo-a${String(i).padStart(4, '0')}`,
-      orderId: `abono${i}`,
-      venueId: `v-folios-${i % 7}`,
-      acceptDeadlineAt: viejo,
-      order: { paymentStatus: 'PARTIAL' },
-    }))
-    const posterior = {
-      id: 'oo-z',
-      orderId: 'equipo-sin-dinero',
-      venueId: 'v-otro',
-      acceptDeadlineAt: new Date('2026-10-14T18:00:00.000Z'),
-      order: { paymentStatus: 'PENDING' },
-    }
-    const filas = [...abonos, posterior]
-    const despuesDe = (f: (typeof filas)[number], cursor: any) => {
-      if (!cursor) return true
-      const at = f.acceptDeadlineAt.getTime()
-      const cursorAt = cursor[0].acceptDeadlineAt.gt.getTime()
-      return at > cursorAt || (at === cursorAt && f.id > cursor[1].id.gt)
-    }
-    const findMany = jest.fn(async ({ where, take }: any) => {
-      const pideAbonos = JSON.stringify(where).includes('PARTIAL')
-      return filas
-        .filter(f => f.order.paymentStatus === 'PENDING' || pideAbonos)
-        .filter(f => despuesDe(f, where.OR))
-        .slice(0, take)
-    })
-    const D = (v: string) => new Prisma.Decimal(v)
-    const groupBy = jest.fn(async ({ where }: any) =>
-      where.orderId.in.map((orderId: string) => ({ orderId, _sum: { amount: D('50.00'), tipAmount: D('0.00') } })),
-    )
-    const expireOrder = jest.fn(async (i: { orderId: string }) =>
-      i.orderId.startsWith('abono') ? { outcome: 'HAS_PAYMENTS' } : { outcome: 'OK', status: 'EXPIRED' },
-    )
-    const job = new OnlineOrderAcceptanceExpiryJob({
-      prisma: { onlineOrder: { findMany }, payment: { groupBy } } as never,
-      cron: { start: jest.fn(), stop: jest.fn() } as never,
-      expireOrder: expireOrder as never,
-      retryEntry: retryOnce as never,
-      syncCancelled: jest.fn().mockResolvedValue(0),
-      syncPaidPickups: jest.fn().mockResolvedValue(0),
-      syncPaidFolios: jest.fn().mockResolvedValue(0),
-      syncPaidClosedFolios: jest.fn().mockResolvedValue(0),
-      cerrarFoliosDelDia: jest.fn().mockResolvedValue(0),
-      // La pasada aparte filtra el neto 0 en SQL: un abono vivo nunca sale de ella.
-      leerAbonosDevueltos: jest.fn().mockResolvedValue([]),
-      now: () => NOW,
-    } as never)
-
-    for (let pasada = 0; pasada < 2; pasada++) {
-      expireOrder.mockClear()
-      const r = await job.checkNow()
-      expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v-otro', orderId: 'equipo-sin-dinero', now: NOW })
-      expect(r).toMatchObject({ expired: 1, errors: 0 })
-      expect(expireOrder.mock.calls.some(([i]: any[]) => i.orderId.startsWith('abono'))).toBe(false)
-    }
+    expect(leerVencidos).toHaveBeenNthCalledWith(2, NOW, { at, id: 'oo-099' })
+    expect(leerVencidos).toHaveBeenCalledTimes(2) // la segunda página vino incompleta: la pasada termina
   })
 
   it('R49: la pasada aparte vence lo que su consulta (neto 0 en SQL) devuelve, con el mismo vencer bajo candado; su lectura va con reintento y su fallo no detiene el barrido', async () => {
     const leerAbonosDevueltos = jest.fn().mockResolvedValue([
-      { id: 'oo-d1', orderId: 'devuelto1', venueId: 'v3' },
-      { id: 'oo-d2', orderId: 'devuelto2', venueId: 'v4' },
+      { id: 'oo-d1', orderId: 'devuelto1', venueId: 'v3', acceptDeadlineAt: AT },
+      { id: 'oo-d2', orderId: 'devuelto2', venueId: 'v4', acceptDeadlineAt: AT },
     ])
     const expireOrder = jest.fn(async (i: { orderId: string }) =>
       i.orderId === 'devuelto2' ? { outcome: 'HAS_PAYMENTS' } : { outcome: 'OK', status: 'EXPIRED' },
     )
     const h = harness({ leerAbonosDevueltos, expireOrder })
     await expect(h.job.checkNow()).resolves.toMatchObject({ scanned: 4, expired: 3, noop: 1, errors: 0 })
-    expect(leerAbonosDevueltos).toHaveBeenCalledWith(NOW)
+    expect(leerAbonosDevueltos).toHaveBeenCalledWith(NOW, null)
     expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v3', orderId: 'devuelto1', now: NOW })
     expect(expireOrder).toHaveBeenCalledWith({ venueId: 'v4', orderId: 'devuelto2', now: NOW })
 
@@ -289,7 +216,7 @@ describe('online-order-acceptance-expiry.job', () => {
     // La base simulada distingue las tres lecturas de la pasada por su filtro.
     prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
       if (a.where.paymentMode) return [{ id: 'oo-P', orderId: 'ord-P', venueId: 'v2', status: 'READY', order: { orderNumber: 'WP' } }]
-      // R2 lee cuentas CANCELADAS; el vencimiento lee cuentas ABIERTAS (A13): las dos llevan `order.status.in`.
+      // R2 lee cuentas CANCELADAS (`order.status.in`); las lecturas de vencer van inyectadas.
       if (a.where.order?.status?.in?.includes('CANCELLED')) {
         return [{ id: 'oo-C', orderId: 'ord-C', venueId: 'v1', order: { orderNumber: 'WC', status: 'CANCELLED' } }]
       }
@@ -299,7 +226,8 @@ describe('online-order-acceptance-expiry.job', () => {
     const job = new OnlineOrderAcceptanceExpiryJob({
       cron: { start: jest.fn(), stop: jest.fn() } as never,
       now: () => NOW,
-      leerAbonosDevueltos: jest.fn().mockResolvedValue([]), // su SQL tiene su propia prueba
+      leerVencidos: jest.fn().mockResolvedValue([]), // las lecturas de vencer tienen su propia prueba
+      leerAbonosDevueltos: jest.fn().mockResolvedValue([]),
     })
 
     await expect(job.checkNow()).resolves.toMatchObject({ synced: 1, collected: 1, scanned: 0 })
@@ -337,6 +265,7 @@ describe('online-order-acceptance-expiry.job', () => {
       now: () => NOW,
       retryEntry: retryEntry as never,
       cerrarFoliosDelDia: jest.fn().mockResolvedValue(0), // el fin del día (T9b) tiene su propia prueba
+      leerVencidos: jest.fn().mockResolvedValue([]),
       leerAbonosDevueltos: jest.fn().mockResolvedValue([]),
     })
 
@@ -350,8 +279,8 @@ describe('online-order-acceptance-expiry.job', () => {
 
   it('un tick encimado se salta y suelta el candado al terminar', async () => {
     let release!: (rows: typeof CANDIDATES) => void
-    const findMany = jest.fn().mockReturnValue(new Promise(r => (release = r)))
-    const h = harness({ findMany })
+    const leerVencidos = jest.fn().mockReturnValue(new Promise(r => (release = r)))
+    const h = harness({ leerVencidos })
     const first = h.job.checkNow()
     await expect(h.job.checkNow()).resolves.toEqual({
       scanned: 0,
@@ -365,7 +294,7 @@ describe('online-order-acceptance-expiry.job', () => {
     })
     release([])
     await first
-    findMany.mockResolvedValue([])
+    leerVencidos.mockResolvedValue([])
     await expect(h.job.checkNow()).resolves.toEqual({ scanned: 0, expired: 0, noop: 0, errors: 0, synced: 0, collected: 0, porEntregar: 0 })
   })
 

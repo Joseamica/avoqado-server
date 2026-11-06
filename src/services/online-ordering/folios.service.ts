@@ -274,27 +274,61 @@ export async function cerrarFoliosDelDiaTerminado(
   return won
 }
 
+/** Un pedido a vencer, con su llave estable (`acceptDeadlineAt`, `id`): el trabajo sigue DESPUÉS de ella dentro de la pasada. */
+export interface CandidatoAVencer {
+  id: string
+  orderId: string
+  venueId: string
+  acceptDeadlineAt: Date
+}
+export type CursorDeVencer = { at: Date; id: string }
+
 /**
- * R44/R49: folios por pagar cuyo abono se devolvió completo, con el plazo vencido y la cuenta abierta en PARTIAL. El dinero neto
- * (Σ amount + tipAmount de los `Payment` COMPLETED; los reembolsos son filas negativas) se filtra EN esta consulta: un abono vivo
- * nunca sale de aquí, así que no gasta páginas del barrido de vencer (Codex r2). El trabajo vence cada uno bajo el candado de la
- * orden, releyendo el neto (`casTransitionInTx`, R44).
- * ponytail: una página por pasada; los que vencen salen del conjunto, y uno frenado por un cobro vivo de terminal es pasajero.
+ * R50: lo vencido por pagar con la cuenta abierta, una página por llave estable. El SQL excluye TODO lo que el vencimiento bajo el
+ * candado (`casTransitionInTx`, `EXPIRE`) rechazaría de forma durable —cada lectura su dinero (`cuenta`), y las dos la cuenta con un
+ * cobro de terminal sin desenlace acreditado, con el MISMO predicado y la misma llave (negocio y orden) que la guarda
+ * (`findLiveTerminalCharge`)—, así que lo que se lea y no venza sólo puede ser una carrera pasajera, y no gasta páginas.
  */
-export function leerFoliosConAbonoDevuelto(now: Date) {
-  return prisma.$queryRaw<Array<{ id: string; orderId: string; venueId: string }>>`
-    SELECT oo.id, oo."orderId", oo."venueId"
+async function leerVencidos(now: Date, despues: CursorDeVencer | null, cuenta: Prisma.Sql): Promise<CandidatoAVencer[]> {
+  // Dinámico, como la guarda (`orderCancelGuard`): el servicio de terminal arrastra sockets y alertas.
+  const { unresolvedFinancialOutcomeSql } = await import('@/services/terminal-payment.service')
+  return prisma.$queryRaw<CandidatoAVencer[]>`
+    SELECT oo.id, oo."orderId", oo."venueId", oo."acceptDeadlineAt"
     FROM "OnlineOrder" oo
     JOIN "Order" o ON o.id = oo."orderId"
-    WHERE oo."requiresAcceptance" = false
-      AND oo.status = 'PENDING_ACCEPTANCE'
+    WHERE oo.status = 'PENDING_ACCEPTANCE'
       AND oo."acceptDeadlineAt" <= ${utcTs(now)}
-      AND o."paymentStatus" = 'PARTIAL'
       AND o.status::text IN (${Prisma.join([...OPEN_ORDER_STATUSES])})
-      AND COALESCE((SELECT SUM(p.amount + p."tipAmount") FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED'), 0) <= 0
+      AND ${cuenta}
+      AND NOT EXISTS (
+        SELECT 1 FROM "TerminalPaymentRequest" r
+        WHERE r."venueId" = oo."venueId" AND r."orderId" = oo."orderId" AND ${unresolvedFinancialOutcomeSql('r')}
+      )
+      ${despues ? Prisma.sql`AND (oo."acceptDeadlineAt", oo.id) > (${utcTs(despues.at)}, ${despues.id})` : Prisma.empty}
     ORDER BY oo."acceptDeadlineAt" ASC, oo.id ASC
     LIMIT ${EXPIRY_BATCH_SIZE}`
 }
+
+/**
+ * R1/R49: el barrido principal. Sólo cuentas sin un peso (`PENDING`), de folios y de «Mi equipo»: uno ya cobrado no vence, y un abono
+ * (PARTIAL) nunca entra aquí: el devuelto va en `leerFoliosConAbonoDevuelto` y el vivo no vence (R18).
+ */
+export const leerPedidosVencidos = (now: Date, despues: CursorDeVencer | null) =>
+  leerVencidos(now, despues, Prisma.sql`o."paymentStatus" = 'PENDING'`)
+
+/**
+ * R44/R49: folios por pagar cuyo abono se devolvió completo (cuenta PARTIAL). El dinero neto (Σ amount + tipAmount de los `Payment`
+ * COMPLETED; los reembolsos son filas negativas) se filtra EN esta consulta: un abono vivo nunca sale de aquí (Codex r2). El trabajo
+ * vence cada uno bajo el candado de la orden, releyendo el neto (`casTransitionInTx`, R44).
+ */
+export const leerFoliosConAbonoDevuelto = (now: Date, despues: CursorDeVencer | null) =>
+  leerVencidos(
+    now,
+    despues,
+    Prisma.sql`oo."requiresAcceptance" = false
+      AND o."paymentStatus" = 'PARTIAL'
+      AND COALESCE((SELECT SUM(p.amount + p."tipAmount") FROM "Payment" p WHERE p."orderId" = o.id AND p.status = 'COMPLETED'), 0) <= 0`,
+  )
 
 export type FolioSection = 'toPay' | 'toDeliver'
 

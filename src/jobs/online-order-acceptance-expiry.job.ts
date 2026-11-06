@@ -2,12 +2,15 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from '../services/online-ordering/cancelledOrderSync'
-import { EXPIRY_BATCH_SIZE, OPEN_ORDER_STATUSES } from '../services/online-ordering/constants'
+import { EXPIRY_BATCH_SIZE } from '../services/online-ordering/constants'
 import {
   cerrarFoliosDelDiaTerminado,
   leerFoliosConAbonoDevuelto,
+  leerPedidosVencidos,
   syncPaidClosedFolios,
   syncPaidFolios,
+  type CandidatoAVencer,
+  type CursorDeVencer,
 } from '../services/online-ordering/folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
 import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
@@ -18,18 +21,13 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 
 type CronHandle = Pick<CronJob, 'start' | 'stop'>
 
-/** H7: tope de páginas por pasada (10 × 100 candidatos). Sin estado entre pasadas: la siguiente vuelve a empezar. */
+/** H7/R50: tope de páginas por lectura y pasada (10 × 100 candidatos). Sin estado entre pasadas: la siguiente vuelve a empezar. */
 const EXPIRY_MAX_PAGES = 10
 
-interface ExpiryCandidate {
-  id: string
-  orderId: string
-  venueId: string
-  acceptDeadlineAt: Date
-}
+/** R50: una lectura de candidatos a vencer, una página después del cursor (el SQL ya excluye lo que se rechazaría de forma durable). */
+type LeerVencidos = (now: Date, despues: CursorDeVencer | null) => Promise<CandidatoAVencer[]>
 
 interface OnlineOrderAcceptanceExpiryDependencies {
-  prisma: typeof prisma
   cron?: CronHandle
   now: () => Date
   expireOrder: typeof expireOnlineOrder
@@ -47,8 +45,10 @@ interface OnlineOrderAcceptanceExpiryDependencies {
   syncPaidClosedFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
   /** Decisión 18 (T9b): folios en «Por entregar» cuyo día del negocio terminó pasan a «Entregado», después de lo anterior y antes de vencer. */
   cerrarFoliosDelDia: (now: Date, readEntry: ReadCandidates) => Promise<number>
-  /** R44/R49: los folios cuyo abono se devolvió completo (neto 0 filtrado en SQL), para su pasada aparte. */
-  leerAbonosDevueltos: (now: Date) => Promise<Array<{ orderId: string; venueId: string }>>
+  /** R1/R49/R50: lo vencido sin un peso con la cuenta abierta (folios y «Mi equipo»). */
+  leerVencidos: LeerVencidos
+  /** R44/R49/R50: los folios cuyo abono se devolvió completo (neto 0 filtrado en SQL), para su pasada aparte. */
+  leerAbonosDevueltos: LeerVencidos
 }
 
 interface ExpiryResult {
@@ -64,7 +64,6 @@ interface ExpiryResult {
 }
 
 const defaults: OnlineOrderAcceptanceExpiryDependencies = {
-  prisma,
   now: () => new Date(),
   expireOrder: expireOnlineOrder,
   retryEntry: retry,
@@ -84,6 +83,7 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
   syncPaidFolios: (now, readEntry) => syncPaidFolios({}, now, readEntry),
   syncPaidClosedFolios: (now, readEntry) => syncPaidClosedFolios({}, now, readEntry),
   cerrarFoliosDelDia: (now, readEntry) => cerrarFoliosDelDiaTerminado({}, now, readEntry),
+  leerVencidos: leerPedidosVencidos,
   leerAbonosDevueltos: leerFoliosConAbonoDevuelto,
 }
 
@@ -175,9 +175,8 @@ export class OnlineOrderAcceptanceExpiryJob {
       let expired = 0
       let noop = 0
       let errors = 0
-      let cursor: { at: Date; id: string } | null = null
       /** Vence un candidato bajo su candado; si ya cambió (STALE) o tiene dinero (HAS_PAYMENTS), cuenta como noop. */
-      const vencer = async (c: { orderId: string; venueId: string }) => {
+      const vencer = async (c: CandidatoAVencer) => {
         try {
           const r = await this.dependencies.expireOrder({ venueId: c.venueId, orderId: c.orderId, now })
           if (r.outcome === 'OK') expired += 1
@@ -187,46 +186,42 @@ export class OnlineOrderAcceptanceExpiryJob {
           logger.error('Online-order expiry candidate failed', { orderId: c.orderId, venueId: c.venueId, error })
         }
       }
+      /**
+       * H7/R50: página tras página por llave estable (acceptDeadlineAt, id), con el cursor DENTRO de la pasada: lo que el candado
+       * rechaza no se relee. El SQL de cada lectura ya excluye lo que se rechazaría de forma durable (dinero, cobro de terminal sin
+       * desenlace), así que lo leído y no vencido es una carrera pasajera o un error: si hay, queda un aviso con el conteo.
+       */
+      const barrer = async (pasada: string, leer: LeerVencidos) => {
+        const vencidosAntes = expired
+        let leidos = 0
+        let despues: CursorDeVencer | null = null
+        for (let page = 0; page < EXPIRY_MAX_PAGES; page++) {
+          const after: CursorDeVencer | null = despues
+          const candidates: CandidatoAVencer[] = await this.readEntry(`online-order-acceptance-expiry.${pasada}`)(() => leer(now, after))
+          for (const candidate of candidates) await vencer(candidate)
+          scanned += candidates.length
+          leidos += candidates.length
+          if (candidates.length < EXPIRY_BATCH_SIZE) break
+          const last = candidates[candidates.length - 1]
+          despues = { at: last.acceptDeadlineAt, id: last.id }
+        }
+        const sinVencer = leidos - (expired - vencidosAntes)
+        if (sinVencer > 0) {
+          logger.warn('[Online-order expiry] candidatos leídos que no vencieron (carrera pasajera o error: lo durable lo excluye el SQL)', {
+            pasada,
+            leidos,
+            sinVencer,
+          })
+        }
+      }
 
-      // R44/R49: los folios cuyo abono se devolvió completo van en su PASADA APARTE. Su lectura ya filtra el neto 0 en SQL, así un
-      // abono vivo nunca entra a ninguna página de abajo (Codex r2). Cada uno se vence bajo el candado, releyendo el neto (R44).
+      // R44/R49: los folios cuyo abono se devolvió completo van en su PASADA APARTE; su fallo no detiene el barrido principal.
       try {
-        const devueltos = await this.readEntry('online-order-acceptance-expiry.abonosDevueltos')(() =>
-          this.dependencies.leerAbonosDevueltos(now),
-        )
-        for (const candidate of devueltos) await vencer(candidate)
-        scanned += devueltos.length
+        await barrer('abonosDevueltos', this.dependencies.leerAbonosDevueltos)
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron vencer los folios con abono devuelto (la pasada sigue)', { error })
       }
-
-      // H7: por llave estable (acceptDeadlineAt, id), página tras página, también cuando un candidato sale `noop` (un cobro de
-      // terminal incierto lo deja bloqueado): 100 bloqueados delante no detienen a los que siguen.
-      for (let page = 0; page < EXPIRY_MAX_PAGES; page++) {
-        const after = cursor
-        // R1: sólo pedidos sin dinero y cuya cuenta sigue ABIERTA (A13): uno ya cobrado no vence, y una cuenta cerrada sin
-        // dinero (cortesía) no se puede cancelar, así que intentarlo en cada pasada sólo gasta un candado. R49: sólo PENDING; un
-        // abono (PARTIAL) nunca entra aquí: el devuelto va en la pasada aparte de arriba y el vivo no vence (R18).
-        const candidates = (await this.readEntry('online-order-acceptance-expiry.findDue')(() =>
-          this.dependencies.prisma.onlineOrder.findMany({
-            where: {
-              status: 'PENDING_ACCEPTANCE',
-              acceptDeadlineAt: { lte: now },
-              order: { paymentStatus: 'PENDING', status: { in: [...OPEN_ORDER_STATUSES] } },
-              ...(after ? { OR: [{ acceptDeadlineAt: { gt: after.at } }, { acceptDeadlineAt: after.at, id: { gt: after.id } }] } : {}),
-            },
-            select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
-            orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
-            take: EXPIRY_BATCH_SIZE,
-          }),
-        )) as ExpiryCandidate[]
-
-        for (const candidate of candidates) await vencer(candidate)
-        scanned += candidates.length
-        if (candidates.length < EXPIRY_BATCH_SIZE) break
-        const last = candidates[candidates.length - 1]
-        cursor = { at: last.acceptDeadlineAt, id: last.id }
-      }
+      await barrer('findDue', this.dependencies.leerVencidos)
 
       return { scanned, expired, noop, errors, synced, collected, porEntregar }
     } catch (error) {

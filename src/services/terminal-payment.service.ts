@@ -591,6 +591,31 @@ export const UNRESOLVED_FINANCIAL_OUTCOME: Prisma.TerminalPaymentRequestWhereInp
   ],
 }
 
+/**
+ * R50 (tienda híbrida): `UNRESOLVED_FINANCIAL_OUTCOME` en SQL crudo, rama por rama y con las MISMAS constantes, para el `NOT EXISTS`
+ * con el que los barridos acotados de vencer excluyen en su lectura la cuenta que la guarda de cancelar
+ * (`findChargeBlockingOrderCancel`) rechazaría; Prisma no puede, porque `orderId` es referencia blanda (no hay relación desde `Order`).
+ * `r` es el alias de la tabla en la consulta (código nuestro, nunca entrada). La tabla completa de
+ * `terminalPaymentRecovery.integration.test.ts` prueba contra Postgres que las dos formas bloquean exactamente las mismas filas:
+ * si cambias una, cambia la otra.
+ */
+export function unresolvedFinancialOutcomeSql(r: string): Prisma.Sql {
+  const col = (nombre: string) => Prisma.raw(`${r}."${nombre}"`)
+  const status = Prisma.raw(`${r}.status::text`)
+  const evidencia = Prisma.raw(`(${r}."resultJson" #> '{outcomeEvidence}')`)
+  return Prisma.sql`(
+    ${status} IN (${Prisma.join([...SLOT_HELD, TerminalPaymentRequestStatus.TIMED_OUT])})
+    OR (${status} = ${TerminalPaymentRequestStatus.COMPLETED} AND (${col('paymentId')} IS NULL OR ${col('paymentId')} = ''))
+    OR (${status} = ${TerminalPaymentRequestStatus.FAILED} AND ${col('failureCode')} IS NULL)
+    OR (${status} = ${TerminalPaymentRequestStatus.FAILED} AND ${col('failureCode')} IS NOT NULL
+      AND left(${col('failureCode')}, ${Prisma.raw(String(PREFIJO_LAPIDA.length))}) <> ${PREFIJO_LAPIDA}
+      AND ${col('failureCode')} NOT IN (${Prisma.join(Object.keys(CODIGOS_SIN_COBRO))})
+      AND (${col('failureCode')} <> 'TPV_CONFIRMED_NO_CHARGE' OR ${evidencia} IS NULL
+        OR ${evidencia} NOT IN (${Prisma.join(EVIDENCIA_ACREDITADA_DE_TERMINAL.map(e => Prisma.sql`to_jsonb(${e}::text)`))})))
+    OR (${status} = ${TerminalPaymentRequestStatus.CANCELLED} AND (${col('cancelDisposition')} IS NULL OR ${col('cancelDisposition')} <> 'ACCEPTED'))
+  )`
+}
+
 /* ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  * EL INTERRUPTOR POR VENUE (I.6 del diseño v3, 11-sep-2026)
  *
