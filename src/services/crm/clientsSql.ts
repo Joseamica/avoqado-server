@@ -9,7 +9,7 @@ import { BadRequestError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import type { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import type { CrmAccess } from './access.service'
-import { altaPropiaPendienteSql, clientFactsLateral, transaccionesSql } from './clientFacts'
+import { altaPropiaPendienteSql, clientFactsLateral, ingresoSql, transaccionesSql } from './clientFacts'
 import {
   MOTIVOS_DEL_ALTA,
   PISTAS_DE_INGRESO,
@@ -188,22 +188,21 @@ function filtrosSql(access: CrmAccess, filters: ClientFilters): Prisma.Sql {
 }
 
 /**
- * «Ingreso» (C1b) as the cell paints it, over `o` and `f`: the code, the paid level, the opportunity, and the card money
- * processed by Avoqado in the window — summed ONLY for a row that says TRANSACCIONES or AMBOS, and only for whoever has «Ver
- * ventas» (the key that already gates «Cobrado este mes»); without it the amount never leaves the database.
+ * «Ingreso» (C1b) as the cell paints it, over `o`: the SAME expressions the lateral gives the filter (`ingresoSql`), selected
+ * again here so the page computes them only for its own rows (expensive select-list expressions run after the sort and the
+ * limit), plus the card money processed by Avoqado in the window — only for whoever has «Ver ventas» (the key that already
+ * gates «Cobrado este mes»); without it the amount never leaves the database. Same statement, same snapshot: the sum is not
+ * null exactly when the row says TRANSACCIONES or AMBOS.
  */
 export function ingresoColumnas(now: Date, conVentas: boolean): Prisma.Sql {
-  const transacciones = conVentas
-    ? Prisma.sql`CASE WHEN f."ingreso" IN ('TRANSACCIONES', 'AMBOS') THEN ${transaccionesSql(now)} END`
-    : Prisma.sql`NULL::numeric`
-  return Prisma.sql`f."ingreso", f."mensualidad", f."pistaIngreso", ${transacciones} AS "transacciones30d"`
+  const ingreso = ingresoSql(now)
+  return Prisma.sql`${ingreso.ingreso} AS "ingreso", ${ingreso.mensualidad} AS "mensualidad", ${ingreso.pista} AS "pistaIngreso",
+    ${conVentas ? transaccionesSql(now) : Prisma.sql`NULL::numeric`} AS "transacciones30d"`
 }
 
-/** «Ingreso» of ONE organization for its ficha: the same lateral and columns as the list. */
+/** «Ingreso» of ONE organization for its ficha: the same columns as the row of the list. */
 export function ingresoDeOrganizacionSql(organizationId: string, now: Date, conVentas: boolean): Prisma.Sql {
-  return Prisma.sql`SELECT ${ingresoColumnas(now, conVentas)}
-    FROM "Organization" o ${clientFactsLateral(now)}
-    WHERE o."id" = ${organizationId}`
+  return Prisma.sql`SELECT ${ingresoColumnas(now, conVentas)} FROM "Organization" o WHERE o."id" = ${organizationId}`
 }
 
 /**

@@ -207,9 +207,40 @@ function pagaSql(now: Date, tier?: 'PRO' | 'PREMIUM'): Prisma.Sql {
 }
 
 /**
+ * «Ingreso» (C1b) over an Organization aliased `o`, three standalone expressions with no column of the lateral: the lateral
+ * puts them in `f.*` for the filter, and the page selects these SAME expressions for its cell, so Postgres computes them only
+ * for the rows of the page (after the sort and the limit) unless a filter asks for them.
+ * - `mensualidad`: `PREMIUM` / `PRO`, the highest paid plan Avoqado charges a real venue (`pagaSql`), or null.
+ * - `ingreso`: `INGRESOS` — that, card money through Avoqado in the window (`pagoPorAvoqadoSql`), both or neither.
+ * - `pista`: `PISTAS_DE_INGRESO` — a card recorded outside Avoqado in the window, else (with no card through Avoqado) only
+ *   drawer cash in the window, else null. Asked in order, so a client with card through Avoqado never reads its whole window.
+ */
+export function ingresoSql(now: Date): { ingreso: Prisma.Sql; mensualidad: Prisma.Sql; pista: Prisma.Sql } {
+  const desde = new Date(now.getTime() - WINDOW_MS)
+  const paga = anyRealVenue(pagaSql(now))
+  const porAvoqado = anyRealVenue(cobroEnLaVentana(desde, pagoPorAvoqadoSql('p')))
+  const otraTerminal = anyRealVenue(
+    cobroEnLaVentana(
+      desde,
+      Prisma.sql`p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') AND p."source" NOT IN ('DELIVERY_PLATFORM', 'DASHBOARD_TEST') AND NOT ${pagoPorAvoqadoSql('p')}`,
+    ),
+  )
+  const efectivo = anyRealVenue(cobroEnLaVentana(desde, efectivoDeCajonSql))
+  const noEfectivo = anyRealVenue(cobroEnLaVentana(desde, Prisma.sql`NOT ${efectivoDeCajonSql}`))
+  return {
+    mensualidad: Prisma.sql`(CASE WHEN ${anyRealVenue(pagaSql(now, 'PREMIUM'))} THEN 'PREMIUM' WHEN ${paga} THEN 'PRO' END)`,
+    ingreso: Prisma.sql`(CASE WHEN ${porAvoqado} THEN (CASE WHEN ${paga} THEN 'AMBOS' ELSE 'TRANSACCIONES' END)
+      ELSE (CASE WHEN ${paga} THEN 'MENSUALIDAD' ELSE 'NINGUNO' END) END)`,
+    pista: Prisma.sql`(CASE WHEN ${otraTerminal} THEN 'TARJETA_OTRA_TERMINAL'
+      WHEN ${porAvoqado} THEN NULL
+      WHEN ${efectivo} AND NOT ${noEfectivo} THEN 'SOLO_EFECTIVO' END)`,
+  }
+}
+
+/**
  * The card money processed by Avoqado in the window over `o` (pesos, gross: refunds are their own negative rows and never
  * subtract; tips live in `tipAmount` and stay out, as «Cobrado este mes» of the ficha). The SAME `pagoPorAvoqadoSql` and window
- * as `f."ingreso"`, so the sum is positive exactly when the row says TRANSACCIONES or AMBOS. Only for the rows that show it.
+ * as `ingresoSql`, so the sum is not null exactly when «Ingreso» says TRANSACCIONES or AMBOS. Only for the rows of a page.
  */
 export function transaccionesSql(now: Date): Prisma.Sql {
   const desde = new Date(now.getTime() - WINDOW_MS)
@@ -246,27 +277,13 @@ export function clientFactsLateral(now: Date): Prisma.Sql {
   const pos = anyRealVenue(Prisma.sql`${paidOrder(Prisma.sql`'AVOQADO_ANDROID', 'AVOQADO_IOS'`, desde)}
     OR ${reservationChargedFrom(Prisma.sql`'APP'`, desde)}`)
   const inWindow = Prisma.sql`x."ultimoCobroAt" >= ${utcTs(desde)}`
-  // C1b: a card charged outside Avoqado (the POS or the panel recorded it), and a real charge in the window that is not drawer
-  // cash. Asked in the pista's CASE, in order, so a client with card through Avoqado never reads its whole window.
-  const otraTerminal = anyRealVenue(
-    cobroEnLaVentana(
-      desde,
-      Prisma.sql`p."method" IN ('CREDIT_CARD', 'DEBIT_CARD') AND p."source" NOT IN ('DELIVERY_PLATFORM', 'DASHBOARD_TEST') AND NOT ${pagoPorAvoqadoSql('p')}`,
-    ),
-  )
-  const noSoloEfectivo = anyRealVenue(cobroEnLaVentana(desde, Prisma.sql`NOT ${efectivoDeCajonSql}`))
+  const ingreso = ingresoSql(now)
 
   // ponytail: se calcula al leer; si a 10× (≈260 clientes) la lista pasa de ~300 ms, estas columnas pasan a una fila por
   // organización que llena `runSweep` cada 5 min y la lista filtra por columnas (spec §5.1.6).
   return Prisma.sql`LEFT JOIN LATERAL (
-    SELECT x."usaTerminal", x."usaPos", x."ultimoCobroAt", x."mensualidad",
-      CASE WHEN x."mensualidad" IS NOT NULL AND x."porAvoqado" THEN 'AMBOS'
-           WHEN x."mensualidad" IS NOT NULL THEN 'MENSUALIDAD'
-           WHEN x."porAvoqado" THEN 'TRANSACCIONES'
-           ELSE 'NINGUNO' END AS "ingreso",
-      CASE WHEN ${otraTerminal} THEN 'TARJETA_OTRA_TERMINAL'
-           WHEN x."porAvoqado" THEN NULL
-           WHEN ${inWindow} AND NOT ${noSoloEfectivo} THEN 'SOLO_EFECTIVO' END AS "pistaIngreso",
+    SELECT x."usaTerminal", x."usaPos", x."ultimoCobroAt",
+      ${ingreso.mensualidad} AS "mensualidad", ${ingreso.ingreso} AS "ingreso", ${ingreso.pista} AS "pistaIngreso",
       CASE WHEN x."usaTerminal" AND x."usaPos" THEN 'AMBOS'
            WHEN x."usaTerminal" THEN 'TERMINAL'
            WHEN x."usaPos" THEN 'POS'
@@ -288,9 +305,7 @@ export function clientFactsLateral(now: Date): Prisma.Sql {
           ) lc
           WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL}
         ) AS "ultimoCobroAt",
-        CASE WHEN ${nivelSql('PREMIUM', now)} THEN 'PREMIUM' WHEN ${nivelSql('PRO', now)} THEN 'PRO' ELSE 'FREE' END AS "nivel",
-        CASE WHEN ${anyRealVenue(pagaSql(now, 'PREMIUM'))} THEN 'PREMIUM' WHEN ${anyRealVenue(pagaSql(now))} THEN 'PRO' END AS "mensualidad",
-        ${anyRealVenue(cobroEnLaVentana(desde, pagoPorAvoqadoSql('p')))} AS "porAvoqado"
+        CASE WHEN ${nivelSql('PREMIUM', now)} THEN 'PREMIUM' WHEN ${nivelSql('PRO', now)} THEN 'PRO' ELSE 'FREE' END AS "nivel"
     ) x
   ) f ON true`
 }

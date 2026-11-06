@@ -14,8 +14,9 @@ import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { altaPendienteSql } from '@/services/crm/clientFacts'
+import { altaPendienteSql, ingresoSql } from '@/services/crm/clientFacts'
 import { planesPorSucursal } from '@/services/crm/clientPage'
+import { ingresoColumnas } from '@/services/crm/clientsSql'
 import {
   clientsQueries,
   ensureClientAccount,
@@ -206,7 +207,8 @@ describe('listClients', () => {
     // The total counts the same thing the page lists, with the same binds.
     const count = countQuery()
     expect(filterOf(count)).toBe(filterOf(page))
-    expect(count.values).toEqual(page.values.slice(PRODUCTION_VENUE_STATUSES.length, -1))
+    // The page's select list adds its own binds before the filter: `yaCobro` and «Ingreso» (C1b) for the page's rows.
+    expect(count.values).toEqual(page.values.slice(PRODUCTION_VENUE_STATUSES.length + ingresoColumnas(NOW, false).values.length, -1))
   })
 
   it('sin_equipo_creado_no_excluye_nada_de_mas', async () => {
@@ -511,16 +513,27 @@ describe('Ingreso (C1b)', () => {
     expect(countQuery(1).values).toContain('TARJETA_OTRA_TERMINAL')
   })
 
-  it('🔴 el monto sólo se suma con «Ver ventas», en la misma sentencia de la página y sólo para TRANSACCIONES o AMBOS', async () => {
+  it('🔴 el monto sólo se suma con «Ver ventas», en la misma sentencia de la página y nunca en el total', async () => {
     await listClients(access({ ventas: false }), {}, NOW)
     expect(sqlOf(pageQuery(0))).toContain('NULL::numeric AS "transacciones30d"')
     expect(sqlOf(pageQuery(0))).not.toContain('SUM(p."amount")')
     await listClients(access({ ventas: true }), {}, NOW)
     const page = sqlOf(pageQuery(1))
-    expect(page).toContain(`CASE WHEN f."ingreso" IN ('TRANSACCIONES', 'AMBOS') THEN ( SELECT SUM(p."amount")`)
+    expect(page).toContain('( SELECT SUM(p."amount")')
     expect(page).toContain(`p."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED'`)
-    // Never in the total: it only paints.
     expect(sqlOf(countQuery(1))).not.toContain('SUM(p."amount")')
+  })
+
+  it('🔴 una sola expresión: la celda selecciona el mismo texto de ingresoSql que la lateral le da al filtro', async () => {
+    await listClients(access({ ventas: true }), { ingreso: 'AMBOS' }, NOW)
+    const page = pageQuery(0).sql
+    const { ingreso, mensualidad, pista } = ingresoSql(NOW)
+    for (const expr of [ingreso, mensualidad, pista]) {
+      // Once in the lateral (what the filter reads) and once in the select list (what the cell paints).
+      expect(page.split(expr.sql).length - 1).toBe(2)
+    }
+    // The total only has the lateral's copy.
+    expect(countQuery(0).sql.split(ingreso.sql).length - 1).toBe(1)
   })
 
   it('cada fila trae su ingreso (el monto en pesos, número) y meta dice ingreso: 1', async () => {
@@ -904,7 +917,7 @@ describe('getLive', () => {
     expect((live as { venues: Array<{ id: string; demo: boolean }> }).venues.map(v => v.demo)).toEqual([false, true, true])
   })
 
-  it('C1b: la ficha lee el ingreso de la organización con la misma lateral de la lista; el monto sólo con «Ver ventas»', async () => {
+  it('C1b: la ficha lee el ingreso de la organización con la misma expresión de la lista; el monto sólo con «Ver ventas»', async () => {
     linked()
     const fila = {
       ingreso: 'TRANSACCIONES',
@@ -918,7 +931,8 @@ describe('getLive', () => {
       ingreso: { codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 350, pista: 'TARJETA_OTRA_TERMINAL' },
     })
     const consulta = rawQueries().find(query => query.sql.includes('AS "pistaIngreso"'))!
-    expect(consulta.sql).toContain('LEFT JOIN LATERAL')
+    // The same expression the list paints and the filter reads.
+    expect(consulta.sql).toContain(ingresoSql(NOW).ingreso.sql)
     expect(consulta.values).toContain(ORG)
     expect(consulta.sql).toContain('SUM(p."amount")')
 
