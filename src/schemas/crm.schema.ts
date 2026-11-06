@@ -4,6 +4,7 @@
  */
 import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, USA_ESCRITO } from '../services/crm/clientCodes'
 import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'
@@ -354,9 +355,16 @@ export const hubspotImportFilesSchema = z.object(
 
 const listQuery = listAccountsSchema.shape.query.shape
 
+/** A filter of «Clientes» (C1): one of its values, or «Ese filtro no existe». */
+const clientFilter = <T extends readonly [string, ...string[]]>(values: T) =>
+  z.enum(values, { errorMap: () => ({ message: 'Ese filtro no existe' }) }).optional()
+
 /**
  * GET /crm/clients. The cursor is an Organization id (not always a cuid); the service caps the page at 100. `ocultos=true`
- * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39).
+ * lists only the hidden organizations, and the service honors it only for «Administrar» (ruling 39). The C1 filters: `usa`
+ * (with `AVISO`), `nivel`, `estado`, `motivo` (with `SIN_MOTIVO`) and `dueno` (`MIOS`, `SIN_DUENO` or an id — the regex of
+ * existing ids accepts the two words; «propios» with an id is a business rule of the service). A `condicion` someone still
+ * sends is dropped (not `.strict()`): that filter left C1 in the redesign r3.
  */
 export const listClientsSchema = z.object({
   query: z.object({
@@ -364,6 +372,12 @@ export const listClientsSchema = z.object({
     cursor: existing('El cursor no es válido').optional(),
     limit: listQuery.limit,
     ocultos: flagQuery,
+    altas: flagQuery,
+    usa: clientFilter([...USA, 'AVISO']),
+    nivel: clientFilter(NIVELES),
+    estado: clientFilter(ESTADOS),
+    motivo: clientFilter([...MOTIVOS_DEL_ALTA, 'SIN_MOTIVO']),
+    dueno: existing('El dueño no es válido').optional(),
   }),
 })
 
@@ -373,6 +387,58 @@ export const listClientsSchema = z.object({
  */
 export const hideClientSchema = z.object({
   params: z.object({ organizationId: existing('El id de la organización no es válido', 'Falta la organización') }),
+})
+
+/** POST /crm/accounts/:id/usa — «✋ a mano»: a value with its reason, or `null` («Leerlo solo») to clear it (C1). */
+const PORQUE_USA = 'Escribe por qué (3 a 140 letras)'
+export const usaSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      valor: z.enum(USA_ESCRITO, { errorMap: () => ({ message: 'Ese valor no existe' }) }).nullable(),
+      porque: z.string({ invalid_type_error: PORQUE_USA }).trim().min(3, PORQUE_USA).max(140, PORQUE_USA).optional(),
+      /** What the editor saw when opening it: the server answers 409 CRM_CAMBIO_AL_EDITAR if it is no longer what is saved. */
+      vio: z
+        .object(
+          {
+            valor: z.enum(USA_ESCRITO, { errorMap: () => ({ message: 'Lo que viste no es un valor válido' }) }).nullable(),
+            porque: z.string({ invalid_type_error: 'Lo que viste no es un texto' }).max(500, 'Lo que viste es muy largo').nullable(),
+          },
+          { invalid_type_error: 'Lo que viste no es válido' },
+        )
+        .optional(),
+    })
+    .refine(({ valor, porque }) => valor === null || !!porque, { message: PORQUE_USA, path: ['porque'] }),
+})
+
+/** POST /crm/accounts/:id/alta — «¿Por qué se quedó?»: a reason from the list (text only for «Otro») and/or «Perdido» (C1). */
+export const altaMotivoSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      motivo: z.enum(MOTIVOS_DEL_ALTA, { errorMap: () => ({ message: 'Ese motivo no existe' }) }).nullable(),
+      texto: z
+        .string({ invalid_type_error: 'El motivo debe ser un texto' })
+        .trim()
+        .max(200, 'El motivo es muy largo (máximo 200 letras)')
+        .optional(),
+      perdido: z.boolean({ required_error: 'Falta decir si se perdió', invalid_type_error: 'Falta decir si se perdió' }),
+      /** What the editor saw when opening it: the server answers 409 CRM_CAMBIO_AL_EDITAR if it is no longer what is saved. */
+      vio: z
+        .object(
+          {
+            motivo: z.enum(MOTIVOS_DEL_ALTA, { errorMap: () => ({ message: 'Lo que viste no es un motivo válido' }) }).nullable(),
+            texto: z.string({ invalid_type_error: 'Lo que viste no es un texto' }).max(500, 'Lo que viste es muy largo').nullable(),
+            perdido: z.boolean({ required_error: 'Falta lo que viste', invalid_type_error: 'Falta lo que viste' }),
+          },
+          { invalid_type_error: 'Lo que viste no es válido' },
+        )
+        .optional(),
+    })
+    .superRefine(({ motivo, texto }, ctx) => {
+      if (motivo === 'OTRO' && !texto) ctx.addIssue({ code: 'custom', message: 'Escribe el motivo', path: ['texto'] })
+      if (motivo !== 'OTRO' && texto) ctx.addIssue({ code: 'custom', message: 'El texto sólo va con «Otro»', path: ['texto'] })
+    }),
 })
 
 /** A calendar day that exists: «2026-02-30» has the shape and is not one. */

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import * as organizationController from '../../controllers/dashboard/organizations.superadmin.controller'
 import * as orgPaymentController from '../../controllers/dashboard/organization-payment.superadmin.controller'
 import { validateRequest } from '../../middlewares/validation'
+import { setOrganizationGrandfatheredSchema } from '../../schemas/superadmin/organizationGrandfathered.schema'
 import { z } from 'zod'
 
 const router = Router()
@@ -60,20 +61,6 @@ const updateOrganizationSchema = z.object({
     phone: z.string().min(1).optional(),
     taxId: z.string().optional().nullable(),
     type: z.enum(['RESTAURANT', 'RETAIL', 'SERVICE', 'ENTERTAINMENT', 'HOSPITALITY', 'HEALTHCARE', 'OTHER']).optional(),
-  }),
-})
-
-// Toggle GRANDFATHERED for the whole organization (inherited by every venue, present and future).
-// Spanish messages: the validation middleware surfaces them straight to the user.
-const setOrganizationGrandfatheredSchema = z.object({
-  params: z.object({
-    organizationId: z.string().cuid('El ID de la organización no es válido'),
-  }),
-  body: z.object({
-    grandfathered: z.boolean({
-      required_error: 'El campo "grandfathered" es requerido',
-      invalid_type_error: 'El campo "grandfathered" debe ser un booleano (true o false)',
-    }),
   }),
 })
 

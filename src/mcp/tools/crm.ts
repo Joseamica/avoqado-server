@@ -36,6 +36,8 @@ import {
   type Pending,
 } from '@/services/crm/accounts.service'
 import { addActivity } from '@/services/crm/activities.service'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, type Condicion, type Estado, type Usa } from '@/services/crm/clientCodes'
+import { listClients } from '@/services/crm/clients.service'
 import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 import { listTemplates } from '@/services/crm/email/templates.service'
 import { deleteAccount, ErasedIdentityError, sameName } from '@/services/crm/erase.service'
@@ -76,6 +78,57 @@ function porNombre<T extends { name: string }>(items: T[], name: string | undefi
   if (!name) return null
   const matches = items.filter(item => normal(item.name) === normal(name))
   return matches.length === 1 ? matches[0] : null
+}
+
+// ── «Clientes» (C1): lo que el SUPERADMIN pinta, dicho en texto ─────────────────────────────────────────────────────
+
+const USA_TEXTO: Record<Usa, string> = {
+  AMBOS: 'Terminal y POS',
+  TERMINAL: 'Sólo terminal',
+  POS: 'Sólo POS',
+  NO_IDENTIFICADO: 'Vendió · aparato no identificado (30 días)',
+  NINGUNO: 'Sin ventas en 30 días',
+}
+const CONDICION_TEXTO: Record<Condicion, string> = {
+  PAGADO: 'pagado',
+  CAMPANA: 'campaña',
+  PRUEBA_CON_TARJETA: 'prueba con tarjeta',
+  PRUEBA_SIN_TARJETA: 'prueba sin tarjeta',
+  CORTESIA: 'cortesía',
+  DE_ANTES: 'cliente de antes',
+  GRATIS: 'gratis',
+}
+const NIVEL_TEXTO = { FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' } as const
+const ESTADO_TEXTO: Record<Estado, string> = {
+  ALTA_SIN_TARJETA: 'Alta sin tarjeta',
+  COBRA: 'Cobra (último cobro en 30 días)',
+  SIN_COBROS: 'Cobró alguna vez, ya no en 30 días',
+  NUNCA: 'Nunca ha cobrado',
+}
+const usaTexto = (value: string) => USA_TEXTO[value as Usa] ?? value
+
+type FilaDeClientes = Awaited<ReturnType<typeof listClients>>['rows'][number]
+
+function cliente(row: FilaDeClientes) {
+  const { usa, plan, estado, alta } = row
+  const condicion = plan.condicion ? ` · ${CONDICION_TEXTO[plan.condicion]}` : ''
+  const aceptada = plan.campanaAceptada
+  // Sólo qué aceptó y cuándo; nunca «vigente» ni «hasta» (el fin del descuento lo sabe Stripe).
+  const campana = aceptada
+    ? ` · aceptó la campaña «${aceptada.nombre}» ($${aceptada.precioMensual}/mes × ${aceptada.meses} meses) el ${fecha(aceptada.aceptadaEl, 'yyyy-MM-dd')}`
+    : ''
+  return {
+    id: row.id,
+    organizacion: row.name,
+    usa: usaTexto(usa.visto),
+    aviso: usa.aviso ? `Escrito a mano: ${usaTexto(usa.visto)}; lo medido dice: ${usaTexto(usa.medido)}` : null,
+    plan: `${NIVEL_TEXTO[plan.nivel]}${condicion}${plan.pagoVencido ? ' · pago vencido' : ''}${plan.variaPorSucursal ? ' · varía por sucursal' : ''}${campana}`,
+    estado: ESTADO_TEXTO[estado.codigo as Estado] ?? estado.codigo,
+    ultimoCobro: fecha(estado.ultimoCobroAt, 'yyyy-MM-dd'),
+    dueno: row.cuenta ? (row.cuenta.owner?.name ?? 'Sin dueño') : row.cuentaAjena ? 'De otra persona' : 'Sin cuenta en el CRM',
+    motivo: alta?.motivo ?? null,
+    perdido: alta?.perdido ?? false,
+  }
 }
 
 /** One business as the routine reads it. In «Vencidas» and «Hoy» it also says which activity is the caller's (ruling 61). */
@@ -632,6 +685,53 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         return {
           ok: true,
           ...Object.fromEntries(sections.map(([name, section]) => [name, { total: section.total, negocios: section.rows.map(negocio) }])),
+        }
+      }),
+  )
+
+  server.tool(
+    'crm_list_clients',
+    'Lista los clientes de Avoqado (negocios con plan, con un cobro real o ganados en el CRM) y también las altas que se ' +
+      'quedaron sin poner tarjeta: por cada uno, qué usa (terminal, POS o ninguno en 30 días, con aviso si alguien lo escribió a ' +
+      'mano), su plan (nivel y condición), su estado (cobra, dejó de cobrar, nunca cobró o alta sin tarjeta), la fecha de su ' +
+      'último cobro (Ciudad de México) y su dueño. Sirve para preguntas como «clientes que dejaron de cobrar» (estado ' +
+      'SIN_COBROS). Filtros: q (nombre), usa, nivel, estado, motivo (por qué se quedó un alta sin tarjeta) y dueno ' +
+      '(SIN_DUENO o el id de una persona del equipo). De 20 en 20 (hasta 50) con el total, los conteos de altas sin tarjeta y ' +
+      'el cursor para la siguiente página. Sólo lectura. ' +
+      SOLO,
+    {
+      q: z.string().trim().max(100).optional().describe('Texto a buscar en el nombre del negocio'),
+      usa: z
+        .enum([...USA, 'AVISO'], { errorMap: () => ({ message: `Usa es ${[...USA, 'AVISO'].join(', ')}` }) })
+        .optional()
+        .describe('Qué usa: AMBOS, TERMINAL, POS, NO_IDENTIFICADO, NINGUNO, o AVISO (alguien lo escribió a mano y difiere de lo medido)'),
+      nivel: z.enum(NIVELES, { errorMap: () => ({ message: `El nivel es ${NIVELES.join(', ')}` }) }).optional(),
+      estado: z
+        .enum(ESTADOS, { errorMap: () => ({ message: `El estado es ${ESTADOS.join(', ')}` }) })
+        .optional()
+        .describe('COBRA, SIN_COBROS (cobró alguna vez, ya no), NUNCA o ALTA_SIN_TARJETA'),
+      motivo: z
+        .enum([...MOTIVOS_DEL_ALTA, 'SIN_MOTIVO'], { errorMap: () => ({ message: 'Ese motivo no existe' }) })
+        .optional()
+        .describe('Por qué se quedó un alta sin tarjeta; SIN_MOTIVO = nadie le ha hablado'),
+      // C13: «MIOS» no tiene sentido para el superadmin del MCP.
+      dueno: z
+        .union([z.literal('SIN_DUENO'), z.string().cuid('El dueño es SIN_DUENO o el id de una persona del equipo')])
+        .optional()
+        .describe('SIN_DUENO o el id de la persona del equipo dueña de la cuenta'),
+      cursor: z.string().trim().min(1).max(100).optional().describe('El «siguiente» de la página anterior'),
+      limit: z.number().int('El límite es un número entero').min(1, 'El límite es de 1 a 50').max(50, 'El límite es de 1 a 50').optional(),
+    },
+    async ({ limit, ...filters }) =>
+      conLlave(scope, 'crm:ver', async access => {
+        const page = await listClients(access, { ...filters, limit: limit ?? 20, altas: true })
+        return {
+          ok: true,
+          total: page.total,
+          hayMas: page.nextCursor !== null,
+          nextCursor: page.nextCursor,
+          conteos: page.conteos,
+          clientes: page.rows.map(cliente),
         }
       }),
   )

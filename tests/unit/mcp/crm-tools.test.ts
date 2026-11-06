@@ -27,6 +27,7 @@ import { NotFoundError } from '@/errors/AppError'
 import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 import { listTemplates } from '@/services/crm/email/templates.service'
 import { getReports } from '@/services/crm/reports.service'
+import { listClients } from '@/services/crm/clients.service'
 
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/services/crm/access.service', () => ({
@@ -49,6 +50,8 @@ jest.mock('@/services/crm/activities.service', () => ({ addActivity: jest.fn() }
 // «Eliminar» is tested on its own (erase.service.test.ts); here only who reaches it, and the two steps.
 jest.mock('@/services/crm/erase.service', () => ({ ...jest.requireActual('@/services/crm/erase.service'), deleteAccount: jest.fn() }))
 jest.mock('@/services/crm/reports.service', () => ({ getReports: jest.fn() }))
+// «Clientes» is tested on its own; here the tool only asks it and words the answer.
+jest.mock('@/services/crm/clients.service', () => ({ listClients: jest.fn() }))
 // The email phase: the tools only read through these two, which are tested on their own.
 jest.mock('@/services/crm/email/templates.service', () => ({
   ...jest.requireActual('@/services/crm/email/templates.service'),
@@ -71,6 +74,7 @@ const CRM_TOOLS = [
   'crm_delete_account',
   'crm_pending',
   'crm_pipeline_summary',
+  'crm_list_clients',
   'crm_list_email_templates',
   'crm_campaign_status',
 ]
@@ -83,6 +87,7 @@ const EFFECTS: Record<string, 'read' | 'write'> = {
   crm_delete_account: 'write',
   crm_pending: 'read',
   crm_pipeline_summary: 'read',
+  crm_list_clients: 'read',
   crm_list_email_templates: 'read',
   crm_campaign_status: 'read',
 }
@@ -128,6 +133,7 @@ const ARGS: Record<string, Record<string, unknown>> = {
   crm_delete_account: { accountId: ACC, confirmName: 'Tacos Lupe' },
   crm_pending: {},
   crm_pipeline_summary: {},
+  crm_list_clients: {},
   crm_list_email_templates: {},
   crm_campaign_status: {},
 }
@@ -261,6 +267,97 @@ describe('CRM MCP — catalogs', () => {
 
 // ── Who can call them ─────────────────────────────────────────────────────────────────────────────────────────────────
 
+describe('CRM MCP — crm_list_clients', () => {
+  const PAGE = {
+    rows: [
+      {
+        id: 'o1',
+        name: 'Café Uno',
+        createdAt: new Date('2026-10-01T10:00:00Z'),
+        yaCobro: true,
+        cuenta: { id: ACC, owner: { id: 's1', name: 'Ana Ruiz' }, stage: { id: 'st', name: 'Demo', kind: 'ABIERTA' } },
+        cuentaAjena: false,
+        usa: { visto: 'POS', medido: 'AMBOS', manual: true, aviso: true, detalle: null, aparatos: { terminales: 1, pos: 2 } },
+        plan: {
+          nivel: 'PRO',
+          condicion: 'CORTESIA',
+          campana: null,
+          campanaAceptada: null,
+          pagoVencido: false,
+          variaPorSucursal: false,
+          sucursalesLeidas: 1,
+          sucursalesTotales: 1,
+        },
+        // 2026-11-07 03:30 UTC = 6 nov 21:30 in Mexico City.
+        estado: { codigo: 'SIN_COBROS', ultimoCobroAt: new Date('2026-11-07T03:30:00Z') },
+        alta: null,
+        ultimoComentario: null,
+      },
+    ],
+    nextCursor: 'o9',
+    total: 12,
+    conteos: { altaSinTarjeta: 0, porMotivo: {}, perdidos: 0 },
+    legible: 1,
+  }
+
+  it('estado SIN_COBROS: pide a listClients altas=true (booleano), el filtro y el tope, y devuelve el total', async () => {
+    ;(listClients as jest.Mock).mockResolvedValue(PAGE)
+    const { call } = setup()
+    const answer = await call('crm_list_clients', { estado: 'SIN_COBROS', limit: 5 })
+    expect(listClients).toHaveBeenCalledWith(ADMIN, expect.objectContaining({ altas: true, estado: 'SIN_COBROS', limit: 5 }))
+    expect(answer).toMatchObject({ ok: true, total: 12, hayMas: true, nextCursor: 'o9' })
+    expect(answer.clientes).toHaveLength(1)
+    expect(answer.clientes[0]).toMatchObject({
+      organizacion: 'Café Uno',
+      usa: 'Sólo POS',
+      aviso: expect.stringContaining('Terminal y POS'),
+      plan: expect.stringMatching(/^Pro · cortesía/),
+      estado: expect.stringContaining('Cobró alguna vez'),
+      ultimoCobro: '2026-11-06',
+      dueno: 'Ana Ruiz',
+    })
+  })
+
+  it('por defecto 20 y nunca más de 50', async () => {
+    ;(listClients as jest.Mock).mockResolvedValue({ ...PAGE, rows: [], nextCursor: null })
+    const { call } = setup()
+    await call('crm_list_clients', {})
+    expect(listClients).toHaveBeenLastCalledWith(ADMIN, expect.objectContaining({ limit: 20 }))
+  })
+
+  it('un usa inválido: error de zod en español', async () => {
+    const c = await connect('manual')
+    try {
+      const answer = await c.client.callTool({ name: 'crm_list_clients', arguments: { usa: 'MARTE' } })
+      expect(answer.isError).toBe(true)
+      expect(JSON.stringify(answer.content)).toContain('Usa')
+      expect(listClients).not.toHaveBeenCalled()
+    } finally {
+      await c.close()
+    }
+  })
+
+  it('dueno: «MIOS» no existe en el MCP (C13): sólo SIN_DUENO o un id', async () => {
+    const c = await connect('manual')
+    try {
+      expect((await c.client.callTool({ name: 'crm_list_clients', arguments: { dueno: 'MIOS' } })).isError).toBe(true)
+      expect(listClients).not.toHaveBeenCalled()
+      ;(listClients as jest.Mock).mockResolvedValue({ ...PAGE, rows: [], nextCursor: null })
+      await c.client.callTool({ name: 'crm_list_clients', arguments: { dueno: 'SIN_DUENO' } })
+      expect(listClients).toHaveBeenCalledWith(ADMIN, expect.objectContaining({ dueno: 'SIN_DUENO' }))
+    } finally {
+      await c.close()
+    }
+  })
+
+  it('sin la llave «crm:ver» se niega y no pregunta', async () => {
+    ;(getCrmAccess as jest.Mock).mockResolvedValue({ ...ADMIN, ver: null })
+    const { call } = setup()
+    expect(await call('crm_list_clients', {})).toMatchObject({ ok: false, error: expect.stringContaining('crm:ver') })
+    expect(listClients).not.toHaveBeenCalled()
+  })
+})
+
 describe('CRM MCP — access', () => {
   it('llamada_directa_sin_superadmin_rechazada: a handler registered for a SUPERADMIN refuses once the connection is not one', async () => {
     const { scope, call } = setup()
@@ -275,6 +372,7 @@ describe('CRM MCP — access', () => {
       addNote,
       addActivity,
       getReports,
+      listClients,
       listTemplates,
       listCampaigns,
       getCampaign,
@@ -298,6 +396,7 @@ describe('CRM MCP — access', () => {
       addNote,
       addActivity,
       getReports,
+      listClients,
       listTemplates,
       listCampaigns,
       getCampaign,

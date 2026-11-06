@@ -9,7 +9,7 @@
 
 import { processIntents, requiredPermissionForIntent } from '@/services/mobile/sync.mobile.service'
 import prisma from '@/utils/prismaClient'
-import { BadRequestError, ConflictError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError } from '@/errors/AppError'
 import { cardOnlineOrderError } from '@/services/online-ordering/card/guards'
 import { MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 import * as tableService from '@/services/tpv/table.tpv.service'
@@ -1044,8 +1044,27 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(
       baseParams([{ id: 'i12', type: 'APPLY_DISCOUNT', payload: { localOrderId: 'local-D', discountId: 'disc-1' } }]),
     )
-    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF)
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, true)
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-10', version: 4 } })
+  })
+
+  it('D1: APPLY_DISCOUNT le pasa al servicio si quien encoló tiene orders:comp (sin él, falso)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 4 })
+    const params = baseParams([{ id: 'i12-d1', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', discountId: 'disc-1' } }])
+    params.authorizeIntent.mockImplementation((_intent: any, permission: string) => permission !== 'orders:comp')
+    await processIntents(params)
+    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'APPLY_DISCOUNT' }), 'orders:comp')
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF, false)
+  })
+
+  it('D1: el 403 de cortesía en APPLY_DISCOUNT queda REJECTED, nunca RETRY', async () => {
+    ;(orderMobileService.applyOrderDiscount as jest.Mock).mockRejectedValueOnce(
+      new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED'),
+    )
+    const acks = await processIntents(
+      baseParams([{ id: 'i12-d1b', type: 'APPLY_DISCOUNT', payload: { orderId: 'order-10', discountId: 'disc-1' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
   })
 
   it('MOVE_ORDER a mesa que se ocupó mientras tanto → REJECTED de negocio, no crash', async () => {

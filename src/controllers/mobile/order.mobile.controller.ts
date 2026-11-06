@@ -902,7 +902,7 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
     }
     const operation = parseHttpOperation(req.body)
     if (!operation) {
-      const result = await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId)
+      const result = await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId, tieneCortesiaAutorizada(req))
       return res.json({ success: true, data: result })
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
@@ -912,7 +912,14 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
     const manifest = parsed.data
     let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
-      const r = await orderMobileService.applyOrderDiscountInTransaction(tx, venueId, orderId, manifest.refs.discountId, staffId)
+      const r = await orderMobileService.applyOrderDiscountInTransaction(
+        tx,
+        venueId,
+        orderId,
+        manifest.refs.discountId,
+        staffId,
+        tieneCortesiaAutorizada(req),
+      )
       auditData = { discountId: manifest.refs.discountId, name: r.row.name, amount: Number(r.row.amount) }
       return {
         response: {

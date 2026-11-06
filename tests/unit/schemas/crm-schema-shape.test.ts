@@ -115,3 +115,105 @@ describe('POST /crm/accounts: la casilla «Aceptó recibir correos»', () => {
     expect(mensajes(parse({ name: 'Paola', email: 'p@cafe.mx', aceptaCorreos: 'si' }))).toContain('Aceptó recibir correos es sí o no')
   })
 })
+
+describe('GET /crm/clients: los filtros de C1', () => {
+  const { listClientsSchema } = jest.requireActual('@/schemas/crm.schema')
+  const parse = (query: Record<string, string>) => listClientsSchema.safeParse({ query })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map((i: { message: string }) => i.message))
+
+  it('acepta cada valor de Usa (con AVISO), Plan, Estado y Motivo (con SIN_MOTIVO)', () => {
+    for (const usa of ['AMBOS', 'TERMINAL', 'POS', 'NO_IDENTIFICADO', 'NINGUNO', 'AVISO']) expect(parse({ usa }).success).toBe(true)
+    for (const nivel of ['FREE', 'PRO', 'PREMIUM']) expect(parse({ nivel }).success).toBe(true)
+    for (const estado of ['ALTA_SIN_TARJETA', 'COBRA', 'SIN_COBROS', 'NUNCA']) expect(parse({ estado }).success).toBe(true)
+    for (const motivo of ['PRECIO', 'NO_QUISO_TARJETA', 'SOLO_VEIA', 'OTRO_SISTEMA', 'PROBLEMA_TECNICO', 'DESPUES', 'OTRO', 'SIN_MOTIVO'])
+      expect(parse({ motivo }).success).toBe(true)
+    for (const dueno of ['MIOS', 'SIN_DUENO', 'cstaffoth0000000000000001']) expect(parse({ dueno }).success).toBe(true)
+  })
+
+  it('un valor que no existe dice «Ese filtro no existe»; ENTERPRISE no es un nivel', () => {
+    for (const query of [{ usa: 'OTRA' }, { nivel: 'ENTERPRISE' }, { estado: 'PAGANDO' }, { motivo: 'CARO' }] as Array<
+      Record<string, string>
+    >)
+      expect(mensajes(parse(query))).toEqual(['Ese filtro no existe'])
+  })
+
+  it('un dueño con forma rara dice «El dueño no es válido»', () => {
+    expect(mensajes(parse({ dueno: "x' OR 1=1" }))).toEqual(['El dueño no es válido'])
+  })
+
+  it('«condicion» ya no es filtro (rediseño r3): se ignora y no llega al servicio', () => {
+    const r = parse({ condicion: 'PAGADO', usa: 'POS' })
+    expect(r.success).toBe(true)
+    expect(r.success && r.data.query).toEqual({ usa: 'POS' })
+  })
+})
+
+describe('POST /crm/accounts/:id/usa: el «✋ a mano» (C1, tarea 7)', () => {
+  const { usaSchema } = jest.requireActual('@/schemas/crm.schema')
+  const parse = (body: Record<string, unknown>) => usaSchema.safeParse({ params: { id: 'caccounta0000000000000001' }, body })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map((i: { message: string }) => i.message))
+
+  it('un valor sin porqué dice «Escribe por qué (3 a 140 letras)»; con porqué de 2 letras, igual', () => {
+    expect(mensajes(parse({ valor: 'TERMINAL' }))).toEqual(['Escribe por qué (3 a 140 letras)'])
+    expect(mensajes(parse({ valor: 'TERMINAL', porque: 'ab' }))).toEqual(['Escribe por qué (3 a 140 letras)'])
+    expect(parse({ valor: 'TERMINAL', porque: 'Lo vi en su local' }).success).toBe(true)
+  })
+
+  it('«OTRO», NINGUNO y NO_IDENTIFICADO no se escriben a mano → 400', () => {
+    for (const valor of ['OTRO', 'NINGUNO', 'NO_IDENTIFICADO']) expect(parse({ valor, porque: 'porque sí' }).success).toBe(false)
+  })
+
+  it('«Leerlo solo» (valor null) es válido sin porqué', () => {
+    expect(parse({ valor: null }).success).toBe(true)
+  })
+
+  it('el porqué pasa por trim y tiene tope de 140', () => {
+    expect(parse({ valor: 'POS', porque: 'x'.repeat(141) }).success).toBe(false)
+    expect(parse({ valor: 'POS', porque: '   a   ' }).success).toBe(false)
+  })
+
+  it('«vio» (lo que el editor vio) es opcional; con forma { valor, porque } pasa y llega al servicio', () => {
+    const r = parse({ valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } })
+    expect(r.success && r.data.body.vio).toEqual({ valor: 'TERMINAL', porque: 'Lo dijo la dueña' })
+    expect(parse({ valor: 'POS', porque: 'Lo vi en su local', vio: { valor: null, porque: null } }).success).toBe(true)
+    expect(parse({ valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'OTRO', porque: null } }).success).toBe(false)
+    expect(parse({ valor: 'POS', porque: 'Lo vi en su local', vio: 'POS' }).success).toBe(false)
+  })
+})
+
+describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)', () => {
+  const { altaMotivoSchema } = jest.requireActual('@/schemas/crm.schema')
+  const parse = (body: Record<string, unknown>) => altaMotivoSchema.safeParse({ params: { id: 'caccounta0000000000000001' }, body })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map((i: { message: string }) => i.message))
+
+  it('«Otro» sin texto dice «Escribe el motivo»', () => {
+    expect(mensajes(parse({ motivo: 'OTRO', perdido: false }))).toEqual(['Escribe el motivo'])
+    expect(parse({ motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: false }).success).toBe(true)
+  })
+
+  it('un texto con un motivo que no es «Otro» (o sin motivo) dice «El texto sólo va con «Otro»»', () => {
+    expect(mensajes(parse({ motivo: 'PRECIO', texto: 'caro', perdido: false }))).toEqual(['El texto sólo va con «Otro»'])
+    expect(mensajes(parse({ motivo: null, texto: 'caro', perdido: false }))).toEqual(['El texto sólo va con «Otro»'])
+  })
+
+  it('un texto vacío con un motivo de la lista se acepta (se ignora); con «Otro» sigue pidiendo el motivo; un texto que no es texto avisa en español', () => {
+    expect(parse({ motivo: 'PRECIO', texto: '   ', perdido: false }).success).toBe(true)
+    expect(mensajes(parse({ motivo: 'OTRO', texto: '  ', perdido: false }))).toEqual(['Escribe el motivo'])
+    expect(mensajes(parse({ motivo: 'OTRO', texto: 5, perdido: false }))).toEqual(['El motivo debe ser un texto'])
+  })
+
+  it('motivo null con Perdido es válido; un motivo fuera de la lista y el texto de 201 letras no', () => {
+    expect(parse({ motivo: null, perdido: true }).success).toBe(true)
+    expect(parse({ motivo: 'TERMINO', perdido: false }).success).toBe(false)
+    expect(parse({ motivo: 'OTRO', texto: 'x'.repeat(201), perdido: false }).success).toBe(false)
+    expect(parse({ motivo: 'PRECIO' }).success).toBe(false)
+  })
+
+  it('«vio» (lo que el editor vio) es opcional; con forma { motivo, texto, perdido } pasa y llega al servicio', () => {
+    const r = parse({ motivo: 'PRECIO', perdido: true, vio: { motivo: 'OTRO', texto: 'Se fue', perdido: false } })
+    expect(r.success && r.data.body.vio).toEqual({ motivo: 'OTRO', texto: 'Se fue', perdido: false })
+    expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null, perdido: false } }).success).toBe(true)
+    expect(parse({ motivo: null, perdido: true, vio: { motivo: 'TERMINO', texto: null, perdido: false } }).success).toBe(false)
+    expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null } }).success).toBe(false)
+  })
+})

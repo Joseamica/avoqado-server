@@ -17,12 +17,21 @@ export const checkCuponPermissionIfPresent = (req: Request, res: Response, next:
 export const checkDescuentoManualPermissionIfPresent = (req: Request, res: Response, next: NextFunction) =>
   traeDescuentoManual(req.body) ? checkPermission('discounts:apply')(req, res, next) : next()
 
-const cortesiasAutorizadas = new WeakMap<Request, { venueId: string; userId: string }>()
+const cortesiasAutorizadas = new WeakMap<Request, { venueId: string; userId: string; porPin?: string }>()
 
 /** Sólo acredita orders:comp comprobado por este middleware, en este request, negocio y sesión. */
 export function tieneCortesiaAutorizada(req: Request): boolean {
   const autorizada = cortesiasAutorizadas.get(req)
   return !!autorizada && autorizada.venueId === req.params.venueId && autorizada.userId === req.authContext?.userId
+}
+
+/**
+ * D1 (Codex r4 #3): la membresía del gerente cuyo PIN autorizó ESTA cortesía (`orders:comp`). `authContext.overrideAuthorizedBy`
+ * es genérico: si el PIN se usó antes para otro permiso del mismo request (p. ej. `discounts:apply`), ese gerente no aprobó la
+ * cortesía y no debe quedar como su autorizador.
+ */
+export function pinDeLaCortesia(req: Request): string | undefined {
+  return tieneCortesiaAutorizada(req) ? cortesiasAutorizadas.get(req)?.porPin : undefined
 }
 
 /**
@@ -53,18 +62,45 @@ export const checkCortesiaPermissionIfPresent = async (req: Request, res: Respon
     cortesiasAutorizadas.delete(req)
     const items: any[] = Array.isArray(req.body?.items) ? req.body.items : []
     if (items.some(item => item?.isCortesia === true) || (await traeDescuentoDeCortesia(req.params.venueId, req.body, items))) {
-      const venueId = req.params.venueId
-      const userId = req.authContext?.userId
-      return checkPermission('orders:comp')(req, res, error => {
-        if (error) return next(error)
-        if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId })
-        next()
-      })
+      return exigirCortesia(req, res, next)
     }
     return next()
   } catch (error) {
     return next(error)
   }
+}
+
+/**
+ * D1 (hz:f34960c5:D1): aplicar un descuento SUELTO a una cuenta abierta que regala — uno del catálogo tipo COMP (`discountId`) o
+ * uno manual `type: COMP` — pide `orders:comp`, como la cortesía y el cupón de cortesía (D14). Se monta en
+ * `POST /tpv/.../discounts/apply`, `POST /tpv/.../discounts/manual` y `POST /mobile/.../orders/:orderId/discounts`. El servicio
+ * vuelve a mirar el tipo bajo el candado de la orden y falla cerrado sin la acreditación (`tieneCortesiaAutorizada`).
+ */
+export const checkCortesiaEnDescuento = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    cortesiasAutorizadas.delete(req)
+    const regala =
+      req.body?.type === DiscountType.COMP ||
+      (await traeDescuentoDeCortesia(req.params.venueId, { orderDiscountId: req.body?.discountId }, []))
+    return regala ? exigirCortesia(req, res, next) : next()
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/** Pasa por `checkPermission('orders:comp')` (PIN de gerente y `overridable` incluidos) y, si pasa, acredita ESTE request. */
+function exigirCortesia(req: Request, res: Response, next: NextFunction) {
+  const venueId = req.params.venueId
+  const userId = req.authContext?.userId
+  const pinAntes = (req as any).authContext?.overrideAuthorizedBy as string | undefined
+  return checkPermission('orders:comp')(req, res, error => {
+    if (error) return next(error)
+    // Sólo cuenta el PIN que consumió ESTE check (el token es de un solo uso: si cambió el autorizador, fue por `orders:comp`).
+    const pinDespues = (req as any).authContext?.overrideAuthorizedBy as string | undefined
+    const porPin = pinDespues && pinDespues !== pinAntes ? pinDespues : undefined
+    if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })
+    next()
+  })
 }
 
 async function traeDescuentoDeCortesia(venueId: string | undefined, body: any, items: any[]): Promise<boolean> {

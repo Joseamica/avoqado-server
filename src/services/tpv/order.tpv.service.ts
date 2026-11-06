@@ -1005,6 +1005,11 @@ async function buildCreateOrderResponse(orderId: string): Promise<Order & { tabl
   }
 }
 
+const MENSAJE_PIDE_APROBACION = 'Este descuento requiere aprobación de un gerente y todavía no se puede aplicar en la terminal.'
+/** D2: un % o fijo que pide aprobación no tiene aprobador (decisión pendiente del founder); una cortesía sí (`orders:comp`). */
+const pideAprobacionSinAprobador = (discount: { requiresApproval?: boolean | null; type: string }) =>
+  discount.requiresApproval === true && discount.type !== 'COMP'
+
 export async function createOrderWithItems(
   venueId: string,
   input: TpvCreateOrderWithItemsInput,
@@ -1124,6 +1129,9 @@ export async function createOrderWithItems(
   if (discounts.some(discount => discount.type === 'COMP') && (input.canCompItems !== true || !input.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
+  // D2 (Codex D1 r4 #1): «requiere aprobación de gerente» tampoco se salta al crear la venta. Una cortesía la aprueba `orders:comp`
+  // (arriba); un % o fijo que la pide no tiene aprobador todavía y se rechaza, como en `/discounts/apply` y `/discounts/coupon`.
+  if (discounts.some(pideAprobacionSinAprobador)) throw new BadRequestError(MENSAJE_PIDE_APROBACION)
 
   const preparedLines: PreparedCheckoutLine[] = input.items.map(item => {
     if (item.isCortesia && item.itemDiscountId) {
@@ -1174,6 +1182,7 @@ export async function createOrderWithItems(
   if (cupon?.discount.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
     throw new ForbiddenError('No tienes permiso para dar cortesías')
   }
+  if (cupon && pideAprobacionSinAprobador(cupon.discount)) throw new BadRequestError(MENSAJE_PIDE_APROBACION)
   const orderDiscount =
     cupon?.discount ?? (input.orderDiscountId ? discounts.find(discount => discount.id === input.orderDiscountId)! : null)
   const orderDiscountPesos = cupon

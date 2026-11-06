@@ -98,6 +98,8 @@ export interface CouponValidationResult {
       value: number
       scope: string
       maxDiscountAmount: number | null
+      /** D2 (Codex D1 r3 #1): el cupón hereda la «aprobación de gerente» de su descuento. */
+      requiresApproval?: boolean
     }
   }
   error?: string
@@ -620,6 +622,7 @@ export async function validateCouponCode(
           scope: true,
           maxDiscountAmount: true,
           active: true,
+          requiresApproval: true,
           // D5: lo que el cupón hereda del descuento si no trae lo suyo (el esquema: sus campos «override»).
           validFrom: true,
           validUntil: true,
@@ -742,6 +745,7 @@ export async function validateCouponCode(
         value: Number(coupon.discount.value),
         scope: coupon.discount.scope,
         maxDiscountAmount: coupon.discount.maxDiscountAmount ? Number(coupon.discount.maxDiscountAmount) : null,
+        requiresApproval: coupon.discount.requiresApproval,
       },
     },
   }

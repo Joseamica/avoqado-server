@@ -10,7 +10,7 @@
  */
 
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
@@ -897,6 +897,7 @@ function orderNotFound(venueId?: string): ApplyDiscountResult {
  * @param authorizedById - Staff ID authorizing (for comps)
  * @param venueId - Authoritative tenant. With it, a missing Order THROWS instead of returning an error result (TPV contract).
  *   A catalog id (`discount` as a string) that is inactive or ineligible throws on its own, with or without `venueId`.
+ * @param puedeRegalar - Quien aplica tiene `orders:comp`. Falla cerrado: sin él, un descuento COMP (regala la cuenta) es 403 (D1).
  */
 export async function applyDiscountToOrder(
   orderId: string,
@@ -904,6 +905,7 @@ export async function applyDiscountToOrder(
   appliedById?: string,
   authorizedById?: string,
   venueId?: string,
+  puedeRegalar = false,
 ): Promise<ApplyDiscountResult> {
   const audits: LogActionParams[] = []
   const result = await prisma.$transaction(async tx => {
@@ -928,7 +930,17 @@ export async function applyDiscountToOrder(
       return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount cannot be applied to this order' }
     }
 
-    return applyEvaluatedDiscount(tx, order, fresh, audits, appliedById, authorizedById)
+    // D1 (hz:f34960c5:D1): el tipo se lee aquí, bajo el candado; regalar la cuenta pide el permiso de cortesía, como D14 y `/comp`.
+    if (fresh.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+    // D2 (hz:f34960c5:D2): «requiere aprobación» sólo lo cumple una cortesía, aprobada con `orders:comp`. Para otro tipo no hay
+    // todavía permiso que apruebe: se rechaza aunque llegue un autorizador (antes valía cualquier id que mandara la app).
+    if (fresh.requiresApproval && fresh.type !== 'COMP') {
+      return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount requires manager approval' }
+    }
+    // Aquí una COMP ya trae `orders:comp` verificado: ésa ES la aprobación, aunque no quede autorizador registrado (dueño de la
+    // organización sin membresía en la sucursal, como la cortesía manual).
+    const aprobada = fresh.type === 'COMP' && fresh.requiresApproval ? { ...fresh, requiresApproval: false } : fresh
+    return applyEvaluatedDiscount(tx, order, aprobada, audits, appliedById, authorizedById)
   }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)
   return result
@@ -1076,8 +1088,12 @@ async function applyEvaluatedDiscount(
   // bitácora y el retorno mienten cuando el recorte entra en juego.
   logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${appliedAmount})`)
 
+  // D3 (Codex D1 r3 #2): `appliedById`/`authorizedById` son `StaffVenue.id`; la bitácora (`ActivityLog.staffId`) quiere a la
+  // PERSONA. Con el id de la membresía la inserción violaba la FK y quedaba «sin identificar».
+  const actor = appliedById ?? authorizedById
+  const staffId = actor ? ((await tx.staffVenue.findUnique({ where: { id: actor }, select: { staffId: true } }))?.staffId ?? null) : null
   audits.push({
-    staffId: appliedById ?? authorizedById ?? null,
+    staffId,
     venueId: order.venueId,
     action: 'DISCOUNT_APPLIED',
     entity: 'Order',
@@ -1308,16 +1324,19 @@ export async function applyAutomaticDiscounts(
  * @param authorizedById - Manager ID if comp
  * @param compReason - Reason for comp
  * @param venueId - Authoritative tenant (TPV). With it, a missing Order THROWS instead of returning an error result
+ * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, una cortesía (COMP) es 403. El
+ *   `authorizedById` ya no decide: es sólo quién quedó registrado (puede faltar, p. ej. dueño sin membresía en la sucursal).
  */
 export async function applyManualDiscount(
   orderId: string,
   type: DiscountType,
   value: number,
   name: string,
-  appliedById: string,
+  appliedById: string | undefined,
   authorizedById?: string,
   compReason?: string,
   venueId?: string,
+  puedeRegalar = false,
 ): Promise<ApplyDiscountResult> {
   return prisma.$transaction(async tx => {
     // The remaining base below comes from THIS read, under the canonical Order lock.
@@ -1362,9 +1381,8 @@ export async function applyManualDiscount(
         break
       case 'COMP':
         amount = remainingDiscountable // Full remaining amount
-        if (!authorizedById) {
-          return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Comp requires manager authorization' }
-        }
+        // D1 (Codex r2 #2): decide el permiso verificado, no que venga un `authorizedById`.
+        if (!puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
         break
     }
 
