@@ -4,17 +4,22 @@
  * filter variant (all with `altas: true`, plus today's list without filters nor `altas`), with the scope «todos» and
  * «propios». No database and no Prisma call: it only prints, values inlined as literals, to feed `psql -f`.
  *
- *   npx tsx scripts/crm/explain-clientes.ts [--staff <id>] [--equipo <orgId>] [--conjunto produccion] [--compatible] --salida explain.sql
+ *   npx tsx scripts/crm/explain-clientes.ts [--staff <id>] [--equipo <orgId>] [--conjunto produccion] [--compatible]
+ *     [--ids <orgId,…> [--sucursales <venueId,…>] [--cuentas <accountId,…>]] --salida explain.sql
  *
  * - `--salida`: the file to write; without it, stdout.
  * - `--staff`: the seller of «propios» (and the «Míos» of both scopes); without it, a made-up cuid.
  * - `--equipo`: the sales team's organization, excluded as in production (`CrmTeam`); without it, nothing is excluded.
  * - `--conjunto produccion`: only the heaviest variants, so production does not get hundreds of calls.
+ * - `--ids`: also print what ONE page adds (task 5, C3) for these organizations — their venues, redemptions, devices and
+ *   signups; with `--sucursales`, their contracts; with `--cuentas`, the newest note of each account. The very builders of
+ *   `clientPageSql.ts` that the page runs. Use a real page's ids (at most 100).
  * - `--compatible`: for production BEFORE the C1 migration (Codex r1 #6): the new `CrmAccount` columns become typed NULLs
  *   (and `altaPerdido` false), and it stops if any name of a new column is left. It measures the heavy part (the facts
  *   lateral and the universe) on today's schema.
  *
- * It imports only the leaf `clientsSql.ts` (and its codes): it loads without a `.env` and never connects.
+ * It imports only the leaves `clientsSql.ts` and `clientPageSql.ts` (and its codes): it loads without a `.env` and never
+ * connects.
  *
  * Dates are inlined as `'<iso>'::timestamptz`, the type Prisma binds a `Date` with, so `utcTs` reads the same instant here as
  * in the server under any session zone.
@@ -23,6 +28,7 @@ import { writeFileSync } from 'fs'
 import { Prisma } from '@prisma/client'
 import type { CrmAccess } from '../../src/services/crm/access.service'
 import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../../src/services/crm/clientCodes'
+import { altaSql, aparatosSql, canjesSql, comentariosSql, contratosSql, sucursalesSql } from '../../src/services/crm/clientPageSql'
 import { clientsQueries, type ClientFilters } from '../../src/services/crm/clientsSql'
 
 const STAFF_FICTICIO = 'cexplainstaff000000000001'
@@ -97,6 +103,24 @@ function option(args: string[], name: string): string | undefined {
   return at >= 0 ? args[at + 1] : undefined
 }
 
+const lista = (args: string[], name: string) => (option(args, name) ?? '').split(',').filter(Boolean)
+
+/** C3: what one page adds, for the ids given — the same `clientPageSql.ts` builders `listClients` runs. */
+function sentenciasDeLaPagina(args: string[], now: Date): Array<[string, Prisma.Sql]> {
+  const ids = lista(args, '--ids')
+  if (!ids.length) return []
+  const sucursales = lista(args, '--sucursales')
+  const cuentas = lista(args, '--cuentas')
+  return [
+    ['sucursales', sucursalesSql(ids, now)],
+    ['canjes', canjesSql(ids)],
+    ['aparatos', aparatosSql(ids)],
+    ['alta', altaSql(ids)],
+    ...(sucursales.length ? [['contratos', contratosSql(sucursales, now)] as [string, Prisma.Sql]] : []),
+    ...(cuentas.length ? [['comentarios', comentariosSql(cuentas)] as [string, Prisma.Sql]] : []),
+  ]
+}
+
 /** The lines to print: a `-- <alcance> · <variante> · <sentencia>` header before each `EXPLAIN …;`. */
 export function explainClientes(args: string[], now = new Date()): string[] {
   const staffId = option(args, '--staff') ?? STAFF_FICTICIO
@@ -108,15 +132,22 @@ export function explainClientes(args: string[], now = new Date()): string[] {
     ['propios', { ...base, isSuperadmin: false, ver: 'propios' }],
   ]
   const lines: string[] = []
+  const explain = (sql: Prisma.Sql) => {
+    const text = inline(sql)
+    return `EXPLAIN (ANALYZE, BUFFERS) ${args.includes('--compatible') ? compatible(text) : text};`
+  }
   for (const [alcance, access] of alcances) {
     for (const variante of variantes) {
       const queries = clientsQueries(access, variante.filters, now, equipo)
       for (const sentencia of ['page', 'total', 'conteos'] as const) {
-        const text = inline(queries[sentencia])
         lines.push(`-- ${alcance} · ${variante.nombre} · ${sentencia}`)
-        lines.push(`EXPLAIN (ANALYZE, BUFFERS) ${args.includes('--compatible') ? compatible(text) : text};`)
+        lines.push(explain(queries[sentencia]))
       }
     }
+  }
+  for (const [nombre, sql] of sentenciasDeLaPagina(args, now)) {
+    lines.push(`-- página · ${nombre}`)
+    lines.push(explain(sql))
   }
   return lines
 }

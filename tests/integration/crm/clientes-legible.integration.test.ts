@@ -29,6 +29,9 @@ import type { CrmAccess } from '@/services/crm/access.service'
 import { clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@/services/crm/clientFacts'
 import { scopeWhere } from '@/services/crm/access.service'
 import { clientsFilter, getClientLive, listClients, scopeSql, type ClientFilters } from '@/services/crm/clients.service'
+import { planDeLaPagina, planesPorSucursal } from '@/services/crm/clientPage'
+import * as planStateService from '@/services/dashboard/planState.service'
+import * as stripeService from '@/services/stripe.service'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `cfacts${Date.now()}`
@@ -939,7 +942,14 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
     it('🔴 A ve el valor y manual=true del ✋ que puso B en su cuenta, pero detalle = null', async () => {
       const seenByA = (await walk(propios(A))).rows.find(row => row.id === o.terminal)!
       expect(seenByA).toMatchObject({ cuenta: null, cuentaAjena: true })
-      expect(seenByA.usa).toEqual({ visto: 'POS', medido: 'TERMINAL', manual: true, aviso: true, detalle: null })
+      expect(seenByA.usa).toEqual({
+        visto: 'POS',
+        medido: 'TERMINAL',
+        manual: true,
+        aviso: true,
+        detalle: null,
+        aparatos: { terminales: 0, pos: 0 },
+      })
 
       const seenByB = (await walk(propios(B))).rows.find(row => row.id === o.terminal)!
       expect(seenByB.usa.detalle).toEqual({ porque: 'Lo vi en su local', por: { id: B, name: 'Beto Propios' }, at: hace(DAY) })
@@ -991,6 +1001,533 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       expect(deA.conteos).toMatchObject({ altaSinTarjeta: 3, porMotivo: { PRECIO: 1, SIN_MOTIVO: 1 } })
       const deTodos = await listClients(todos(), { q: LEG }, NOW)
       expect(deTodos.conteos).toMatchObject({ altaSinTarjeta: 3, porMotivo: { PRECIO: 2, SIN_MOTIVO: 1 } })
+    })
+  })
+
+  // ── Lo de la página: plan con las reglas canónicas, aparatos, datos del alta, último comentario y conteos (Tarea 5) ─
+
+  describe('lo de la página (Tarea 5)', () => {
+    const PAG = `pag${Date.now()}`
+    let A: string
+    let B: string
+    let stageId: string
+    const launchCampaignIds: string[] = []
+    const propios = (me: string) => ({ staffId: me, isSuperadmin: false, ver: 'propios', editar: 'propios' }) as unknown as CrmAccess
+    const todos = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
+    let stripeCaido: jest.SpyInstance
+
+    async function orgP(key: string, over: { seatCapExempt?: boolean } = {}) {
+      const { id } = await prisma.organization.create({
+        data: { name: `Pag ${PAG} ${key}`, email: `pag-${PAG}-${key}@test.mx`, phone: '5555555555' },
+      })
+      organizationIds.push(id)
+      return { organizationId: id, venueId: await venue(id, over) }
+    }
+    async function altaP(key: string, progress: Partial<Prisma.OnboardingProgressUncheckedCreateInput> = {}) {
+      const made = await orgP(key)
+      await prisma.onboardingProgress.create({
+        data: { organizationId: made.organizationId, completedSteps: [], acquisitionSource: 'landing', ...progress },
+      })
+      return made
+    }
+    async function cuenta(organizationId: string, ownerStaffId: string | null, extra: Partial<Prisma.CrmAccountUncheckedCreateInput> = {}) {
+      const { id } = await prisma.crmAccount.create({
+        data: { name: `Cuenta ${PAG}`, source: 'MANUAL', stageId, organizationId, ownerStaffId, ...extra },
+      })
+      crmAccountIds.push(id)
+      return id
+    }
+    async function campana(name: string) {
+      const key = `lc${PAG}${++n}`
+      const { id } = await prisma.launchCampaign.create({
+        data: {
+          code: key,
+          name,
+          landingSlug: key,
+          planTier: 'PRO',
+          advertisedPriceCents: 1000,
+          discountMonths: 3,
+          validFrom: hace(30 * DAY),
+          validUntil: dentroDe(30 * DAY),
+          redemptionCap: 10,
+        },
+      })
+      launchCampaignIds.push(id)
+      return id
+    }
+    async function canje(organizationId: string, campaignId: string, over: Partial<Prisma.LaunchCampaignRedemptionUncheckedCreateInput>) {
+      await prisma.launchCampaignRedemption.create({
+        data: {
+          campaignId,
+          organizationId,
+          offerVersion: 1,
+          planTier: 'PRO',
+          advertisedPriceCents: 1000,
+          // The amounts check of the table: list − discount = advertised, at least $10.
+          discountAmountCents: 15000,
+          discountMonths: 3,
+          listPriceCents: 16000,
+          stripeCouponId: `coupon_${PAG}_${++n}`,
+          // APPLIED means Stripe charged: it carries its subscription (a check of the table).
+          stripeSubscriptionId: over.status === 'APPLIED' ? `sub_lc_${PAG}_${n}` : null,
+          ...over,
+        },
+      })
+    }
+    /** One page of «Clientes» for this block's key (or a narrower one), with the canonical clock at `NOW`. */
+    async function pagina(access: CrmAccess, filters: ClientFilters = {}) {
+      clockAt(NOW)
+      try {
+        return await listClients(access, { q: PAG, altas: true, limit: 100, ...filters }, NOW)
+      } finally {
+        jest.useRealTimers()
+      }
+    }
+    const filaDe = async (organizationId: string, access: CrmAccess = todos(), filters: ClientFilters = {}) =>
+      (await pagina(access, filters)).rows.find(row => row.id === organizationId)
+
+    beforeAll(async () => {
+      A = (await prisma.staff.create({ data: { email: `a-${PAG}@test.mx`, firstName: 'Ana', lastName: 'Página' } })).id
+      B = (await prisma.staff.create({ data: { email: `b-${PAG}@test.mx`, firstName: 'Beto', lastName: 'Página' } })).id
+      sellerIds.push(A, B)
+      stageId = (await prisma.crmStage.create({ data: { name: `Etapa ${PAG}`, order: 901, kind: 'ABIERTA' } })).id
+      crmStageIds.push(stageId)
+      // The oracle runs with Stripe down: `getPlanState` degrades to nulls, and that is what the list mirrors.
+      stripeCaido = jest.spyOn(stripeService, 'retrievePlanSubscription').mockRejectedValue(new Error('Stripe caído (prueba)'))
+    })
+
+    afterAll(async () => {
+      stripeCaido.mockRestore()
+      // A redemption holds its organization (`Restrict`): out before the outer cleanup.
+      if (organizationIds.length) await prisma.launchCampaignRedemption.deleteMany({ where: { organizationId: { in: organizationIds } } })
+      if (launchCampaignIds.length) {
+        await prisma.onboardingProgress.updateMany({
+          where: { launchCampaignId: { in: launchCampaignIds } },
+          data: { launchCampaignId: null },
+        })
+        await prisma.launchCampaign.deleteMany({ where: { id: { in: launchCampaignIds } } })
+      }
+    })
+
+    afterEach(() => jest.useRealTimers())
+
+    describe('plan: sólo reglas canónicas (rediseño r3)', () => {
+      type Sembrada = { name: string; organizationId: string; venueId: string; condicion: string | null }
+      const sembradas: Sembrada[] = []
+
+      beforeAll(async () => {
+        const add = async (
+          name: string,
+          condicion: string | null,
+          build: (venueId: string) => Promise<unknown>,
+          over: { seatCapExempt?: boolean } = {},
+        ) => {
+          const made = await orgP(`or${sembradas.length}`, over)
+          await build(made.venueId)
+          sembradas.push({ name, condicion, ...made })
+        }
+        await add('Pro con Stripe', 'PAGADO', v => planRow(v, 'PRO', { stripeSubscriptionId: `sub_opro_${PAG}` }))
+        await add('Premium de cortesía', 'CORTESIA', v => planRow(v, 'PREMIUM'))
+        await add('prueba vigente sin Stripe', 'PRUEBA_SIN_TARJETA', v => planRow(v, 'PRO', { endDate: dentroDe(3 * DAY) }))
+        await add('prueba vigente con Stripe', 'PRUEBA_CON_TARJETA', v =>
+          planRow(v, 'PRO', { endDate: dentroDe(3 * DAY), stripeSubscriptionId: `sub_otrial_${PAG}` }),
+        )
+        await add('gracia vigente con prueba vencida, con Stripe', 'PAGADO', v =>
+          planRow(v, 'PRO', { endDate: hace(DAY), gracePeriodEndsAt: dentroDe(2 * DAY), stripeSubscriptionId: `sub_ograce_${PAG}` }),
+        )
+        await add('gracia vigente con prueba vencida, sin Stripe', 'CORTESIA', v =>
+          planRow(v, 'PRO', { endDate: hace(DAY), gracePeriodEndsAt: dentroDe(2 * DAY) }),
+        )
+        await add('prueba vencida sin Stripe', 'GRATIS', v => planRow(v, 'PRO', { endDate: hace(DAY) }))
+        await add('primer pago fallido', 'GRATIS', v =>
+          planRow(v, 'PRO', { active: false, suspendedAt: hace(DAY), stripeSubscriptionId: `sub_ofail1_${PAG}`, paymentFailureCount: 1 }),
+        )
+        await add('cuarto intento', 'GRATIS', v =>
+          planRow(v, 'PREMIUM', {
+            active: false,
+            suspendedAt: hace(2 * DAY),
+            gracePeriodEndsAt: dentroDe(DAY),
+            stripeSubscriptionId: `sub_ofail4_${PAG}`,
+            paymentFailureCount: 4,
+          }),
+        )
+        await add('corte de los 14 días', 'GRATIS', v => planRow(v, 'PRO', { active: false, suspendedAt: hace(15 * DAY) }))
+        await add('suscripción borrada', 'GRATIS', v => planRow(v, 'PRO', { active: false, stripeSubscriptionId: `sub_ogone_${PAG}` }))
+        await add('cortesía y luego Gratis', 'GRATIS', v => planRow(v, 'PREMIUM', { active: false, endDate: hace(3_600_000) }))
+        await add('dos filas (retirada + vigente)', 'PAGADO', async v => {
+          await planRow(v, 'PREMIUM', { active: false, endDate: hace(5 * DAY) })
+          await planRow(v, 'PRO', { stripeSubscriptionId: `sub_otwo_${PAG}` })
+        })
+        await add('🔴 Codex r3 #1: prueba Pro cancelada con endDate futuro + Premium suspendido después', 'GRATIS', async v => {
+          await planRow(v, 'PRO', { active: false, endDate: dentroDe(10 * DAY) })
+          await planRow(v, 'PREMIUM', { active: false, suspendedAt: hace(DAY), stripeSubscriptionId: `sub_or3_${PAG}` })
+        })
+        await add('🔴 Codex r3 #2: contrato Premium con concesión vigente y SIN fila clásica', 'CAMPANA', v =>
+          contract(v, 'PREMIUM', hace(10 * DAY), dentroDe(20 * DAY)),
+        )
+        await add('contrato Pro con concesión vigente y la fila clásica retirada', 'CAMPANA', async v => {
+          await planRow(v, 'PRO', { active: false, endDate: hace(5 * DAY) })
+          await contract(v, 'PRO', hace(10 * DAY), dentroDe(20 * DAY))
+        })
+        await add('contrato con la concesión vencida', 'GRATIS', v => contract(v, 'PREMIUM', hace(40 * DAY), hace(10 * DAY)))
+        await add('grandfather sin plan', 'DE_ANTES', async () => undefined, { seatCapExempt: true })
+      })
+
+      it('🔴 oráculo: con Stripe caído, estado, origen y nivel de cada sucursal = getPlanState y getVenuePlanInfo', async () => {
+        clockAt(NOW)
+        const leidas = await planesPorSucursal(
+          sembradas.map(s => s.organizationId),
+          NOW,
+        )
+        const oraculo: Record<string, { nivel: string; estado: string; origen: string }> = {}
+        for (const s of sembradas) {
+          const state = await planStateService.getPlanState(s.venueId)
+          oraculo[s.venueId] = { nivel: (await getVenuePlanInfo(s.venueId)).tier, estado: state.state, origen: state.origin!.kind }
+        }
+        jest.useRealTimers()
+        // The degraded path of the oracle really ran (rows with a Stripe subscription asked and failed).
+        expect(stripeCaido).toHaveBeenCalled()
+        expect(leidas).toHaveLength(sembradas.length)
+        const porSucursal = new Map(leidas.map(leida => [leida.venueId, leida]))
+        for (const s of sembradas) {
+          const leida = porSucursal.get(s.venueId)!
+          expect({ name: s.name, nivel: leida.nivel, estado: leida.estado, origen: leida.origen }).toEqual({
+            name: s.name,
+            ...oraculo[s.venueId],
+          })
+          expect({ name: s.name, condicion: leida.condicion }).toEqual({ name: s.name, condicion: s.condicion })
+        }
+        // Every origin and several levels are covered, so the parity is not vacuous.
+        expect(new Set(leidas.map(leida => leida.origen))).toEqual(new Set(['CLASSIC', 'CONTRACT', 'COMP', 'NONE']))
+        expect(new Set(leidas.map(leida => leida.nivel))).toEqual(new Set(['FREE', 'PRO', 'PREMIUM']))
+      })
+
+      it('pagoVencido: prueba vencida con gracia vigente → PRO, condición según su origen (PAGADO / CORTESIA) y pagoVencido', async () => {
+        const conStripe = sembradas.find(s => s.name === 'gracia vigente con prueba vencida, con Stripe')!
+        const sinStripe = sembradas.find(s => s.name === 'gracia vigente con prueba vencida, sin Stripe')!
+        clockAt(NOW)
+        const planes = await planDeLaPagina([conStripe.organizationId, sinStripe.organizationId], NOW)
+        jest.useRealTimers()
+        expect(planes.get(conStripe.organizationId)).toMatchObject({ nivel: 'PRO', condicion: 'PAGADO', pagoVencido: true })
+        expect(planes.get(sinStripe.organizationId)).toMatchObject({ nivel: 'PRO', condicion: 'CORTESIA', pagoVencido: true })
+      })
+
+      it('🔴 Codex r3 #1: prueba Pro cancelada con endDate futuro + Premium suspendido después → GRATIS sin marca', async () => {
+        const caso = sembradas.find(s => s.name.startsWith('🔴 Codex r3 #1'))!
+        clockAt(NOW)
+        const plan = (await planDeLaPagina([caso.organizationId], NOW)).get(caso.organizationId)!
+        jest.useRealTimers()
+        expect(plan).toEqual({
+          nivel: 'FREE',
+          condicion: 'GRATIS',
+          campana: null,
+          campanaAceptada: null,
+          pagoVencido: false,
+          variaPorSucursal: false,
+          sucursalesLeidas: 1,
+          sucursalesTotales: 1,
+        })
+      })
+
+      it('el contrato sin fila clásica lleva el nombre de su publicación como campaña', async () => {
+        const caso = sembradas.find(s => s.name.startsWith('🔴 Codex r3 #2'))!
+        clockAt(NOW)
+        const plan = (await planDeLaPagina([caso.organizationId], NOW)).get(caso.organizationId)!
+        jest.useRealTimers()
+        const { name } = await prisma.hybridOfferPublication.findFirstOrThrow({
+          where: { contracts: { some: { venueId: caso.venueId } } },
+          select: { name: true },
+        })
+        expect(plan).toMatchObject({ nivel: 'PREMIUM', condicion: 'CAMPANA', campana: name })
+      })
+
+      it('dos sucursales: la del nivel más alto manda y «varía por sucursal»; pagoVencido si alguna', async () => {
+        const { organizationId, venueId } = await orgP('mix')
+        await planRow(venueId, 'PRO', { endDate: hace(DAY), gracePeriodEndsAt: dentroDe(2 * DAY), stripeSubscriptionId: `sub_mix1_${PAG}` })
+        await planRow(await venue(organizationId), 'PREMIUM')
+        clockAt(NOW)
+        const plan = (await planDeLaPagina([organizationId], NOW)).get(organizationId)!
+        jest.useRealTimers()
+        expect(plan).toMatchObject({
+          nivel: 'PREMIUM',
+          condicion: 'CORTESIA',
+          pagoVencido: true,
+          variaPorSucursal: true,
+          sucursalesLeidas: 2,
+        })
+      })
+    })
+
+    describe('la campaña de lanzamiento ($10): una nota, no una condición', () => {
+      it('🔴 canje APPLIED de $10 × 3 meses → condición canónica PAGADO (igual que getPlanState) y campanaAceptada con lo aceptado', async () => {
+        const { organizationId, venueId } = await orgP('canje')
+        await planRow(venueId, 'PRO', { stripeSubscriptionId: `sub_canje_${PAG}` })
+        const reservedAt = hace(2 * DAY)
+        await canje(organizationId, await campana(`Lanzamiento ${PAG}`), {
+          status: 'APPLIED',
+          reservedAt,
+          appliedAt: hace(2 * DAY - 60_000),
+        })
+        const row = await filaDe(organizationId)
+        clockAt(NOW)
+        const oraculo = await planStateService.getPlanState(venueId)
+        jest.useRealTimers()
+        expect([oraculo.origin!.kind, oraculo.state]).toEqual(['CLASSIC', 'active'])
+        expect(row!.plan).toMatchObject({
+          nivel: 'PRO',
+          condicion: 'PAGADO',
+          campanaAceptada: { nombre: `Lanzamiento ${PAG}`, precioMensual: 10, meses: 3, aceptadaEl: reservedAt },
+        })
+      })
+
+      it('🔴 Codex r4 #2: reservado el 6-nov y recuperado (APPLIED) el 9-nov → aceptadaEl = 6-nov; sin «vigente», «hasta» ni fin calculado', async () => {
+        const { organizationId, venueId } = await orgP('recuperado')
+        await planRow(venueId, 'PRO', { stripeSubscriptionId: `sub_recup_${PAG}` })
+        const seis = new Date('2026-11-06T16:00:00.000Z')
+        await canje(organizationId, await campana(`Recuperada ${PAG}`), {
+          status: 'APPLIED',
+          reservedAt: seis,
+          appliedAt: new Date('2026-11-09T16:00:00.000Z'),
+        })
+        const row = await filaDe(organizationId)
+        expect(row!.plan.campanaAceptada).toEqual({ nombre: `Recuperada ${PAG}`, precioMensual: 10, meses: 3, aceptadaEl: seis })
+        const texto = JSON.stringify(row!.plan)
+        expect(texto).not.toMatch(/vigente|hasta|fin|ends|until|appliedAt/i)
+        expect(Object.keys(row!.plan.campanaAceptada!).sort()).toEqual(['aceptadaEl', 'meses', 'nombre', 'precioMensual'])
+      })
+
+      it('canje RELEASED o sólo RESERVED → campanaAceptada null', async () => {
+        const liberado = await orgP('liberado')
+        await planRow(liberado.venueId, 'PRO', { stripeSubscriptionId: `sub_lib_${PAG}` })
+        await canje(liberado.organizationId, await campana(`Liberada ${PAG}`), { status: 'RELEASED', releasedAt: hace(DAY) })
+        const reservado = await orgP('reservado')
+        await planRow(reservado.venueId, 'PRO', { stripeSubscriptionId: `sub_res_${PAG}` })
+        await canje(reservado.organizationId, await campana(`Reservada ${PAG}`), { status: 'RESERVED' })
+        expect((await filaDe(liberado.organizationId))!.plan.campanaAceptada).toBeNull()
+        expect((await filaDe(reservado.organizationId))!.plan.campanaAceptada).toBeNull()
+      })
+    })
+
+    it('con 21 sucursales → sucursalesLeidas 20 y el nivel sigue siendo el de SQL (la condición queda vacía)', async () => {
+      const { organizationId } = await orgP('veintiuno')
+      // Twenty more, older-to-newer, the newest (21st) with Premium: SQL sees it, the page does not read it.
+      let ultima = ''
+      for (let i = 0; i < 20; i++) {
+        const key = `${PAG}v21x${i}`
+        ultima = (
+          await prisma.venue.create({
+            data: {
+              organizationId,
+              name: `N ${key}`,
+              slug: `v-${key}`,
+              status: VenueStatus.ACTIVE,
+              createdAt: new Date(Date.now() + (i + 1) * 60_000),
+            },
+          })
+        ).id
+        venueIds.push(ultima)
+      }
+      await planRow(ultima, 'PREMIUM')
+      const row = await filaDe(organizationId)
+      expect(row!.plan).toMatchObject({ nivel: 'PREMIUM', condicion: null, sucursalesLeidas: 20, sucursalesTotales: 21 })
+    })
+
+    it('🔴 una página de 100 organizaciones no llama a Stripe ni a getPlanState', async () => {
+      const CIEN = `cien${Date.now()}`
+      const orgs = await prisma.organization.createManyAndReturn({
+        data: Array.from({ length: 100 }, (_, i) => ({
+          name: `Cien ${CIEN} ${i}`,
+          email: `cien-${CIEN}-${i}@test.mx`,
+          phone: '5555555555',
+        })),
+        select: { id: true },
+      })
+      organizationIds.push(...orgs.map(o => o.id))
+      const venues = await prisma.venue.createManyAndReturn({
+        data: orgs.map((o, i) => ({ organizationId: o.id, name: `N ${CIEN}${i}`, slug: `v-${CIEN}-${i}`, status: VenueStatus.ACTIVE })),
+        select: { id: true },
+      })
+      venueIds.push(...venues.map(v => v.id))
+      await prisma.venueFeature.createMany({
+        data: venues.map((v, i) => ({
+          venueId: v.id,
+          featureId: planProId,
+          monthlyPrice: 999,
+          active: true,
+          stripeSubscriptionId: `sub_cien_${CIEN}_${i}`,
+          startDate: hace(30 * DAY),
+        })),
+      })
+      const planState = jest.spyOn(planStateService, 'getPlanState')
+      stripeCaido.mockClear()
+      try {
+        const page = await pagina(todos(), { q: CIEN })
+        expect(page.rows).toHaveLength(100)
+        expect(page.rows.every(row => row.plan.condicion === 'PAGADO')).toBe(true)
+        expect(planState).not.toHaveBeenCalled()
+        expect(stripeCaido).not.toHaveBeenCalled()
+      } finally {
+        planState.mockRestore()
+      }
+    })
+
+    it('aparatos: 3 TPV_ANDROID (1 RETIRED), 1 POS_ANDROID, 1 PRINTER_KITCHEN → { terminales: 2, pos: 1 }', async () => {
+      const { organizationId, venueId } = await orgP('aparatos')
+      await sale(venueId, { source: 'TPV', payment: { source: 'TPV' } })
+      await terminal(venueId, 'TPV_ANDROID')
+      await terminal(venueId, 'TPV_ANDROID')
+      await prisma.terminal.update({ where: { id: await terminal(venueId, 'TPV_ANDROID') }, data: { status: 'RETIRED' } })
+      await terminal(venueId, 'POS_ANDROID')
+      await terminal(venueId, 'PRINTER_KITCHEN')
+      expect((await filaDe(organizationId))!.usa.aparatos).toEqual({ terminales: 2, pos: 1 })
+    })
+
+    describe('datos del alta (sólo en las filas 🟠)', () => {
+      it('una alta con campaña de $10 → oferta CAMPANA con su nombre; una sin campaña → LISTA; C8: con oferta híbrida → OFERTA con su slug', async () => {
+        const conCampana = await altaP('altaCampana', { launchCampaignId: await campana(`Diez ${PAG}`) })
+        const lista = await altaP('altaLista')
+        const oferta = await altaP('altaOferta', { v2SetupData: { hybrid: { hybridOfferSlug: 'combo-pro-10' } } })
+        expect((await filaDe(conCampana.organizationId))!.alta!.oferta).toEqual({ tipo: 'CAMPANA', nombre: `Diez ${PAG}` })
+        expect((await filaDe(lista.organizationId))!.alta!.oferta).toEqual({ tipo: 'LISTA', nombre: null })
+        expect((await filaDe(oferta.organizationId))!.alta!.oferta).toEqual({ tipo: 'OFERTA', nombre: 'combo-pro-10' })
+      })
+
+      it('acquisitionSource landing_oferta → LANDING; dashboard_signup → DIRECTO; con negocioCreadoAt y ultimaVezAt', async () => {
+        const landing = await altaP('altaLanding', { acquisitionSource: 'landing_oferta' })
+        const directo = await altaP('altaDirecto', { acquisitionSource: 'dashboard_signup' })
+        const row = (await filaDe(landing.organizationId))!
+        expect(row.alta!.origen).toBe('LANDING')
+        expect((await filaDe(directo.organizationId))!.alta!.origen).toBe('DIRECTO')
+        const [{ createdAt }, { updatedAt }] = await Promise.all([
+          prisma.venue.findUniqueOrThrow({ where: { id: landing.venueId }, select: { createdAt: true } }),
+          prisma.onboardingProgress.findUniqueOrThrow({ where: { organizationId: landing.organizationId }, select: { updatedAt: true } }),
+        ])
+        expect([row.alta!.negocioCreadoAt, row.alta!.ultimaVezAt]).toEqual([createdAt, updatedAt])
+      })
+
+      it('planActivationStatus DECLINED → RECHAZADA; IN_PROGRESS → SIN_TERMINAR; attempt 0 → NO_INTENTO (sin inventar el motivo del banco)', async () => {
+        const rechazada = await altaP('altaRechazada', { planActivationStatus: 'DECLINED', planActivationAttempt: 1 })
+        const enCurso = await altaP('altaEnCurso', { planActivationStatus: 'IN_PROGRESS' })
+        const nada = await altaP('altaNada')
+        const alta = (await filaDe(rechazada.organizationId))!.alta!
+        expect(alta.tarjeta).toBe('RECHAZADA')
+        expect(Object.keys(alta)).not.toContain('motivoDelBanco')
+        expect((await filaDe(enCurso.organizationId))!.alta!.tarjeta).toBe('SIN_TERMINAR')
+        expect((await filaDe(nada.organizationId))!.alta!.tarjeta).toBe('NO_INTENTO')
+      })
+
+      it('una fila que no es 🟠 trae alta null', async () => {
+        const { organizationId, venueId } = await orgP('cobra')
+        await prisma.onboardingProgress.create({ data: { organizationId, completedSteps: [], acquisitionSource: 'landing' } })
+        await sale(venueId, { source: 'TPV', payment: { source: 'TPV' } })
+        const row = (await filaDe(organizationId))!
+        expect([row.estado.codigo, row.alta]).toEqual(['COBRA', null])
+      })
+
+      it('el motivo y «Perdido» de una cuenta ajena no salen (cuentaAjena lo explica)', async () => {
+        const deB = await altaP('altaMotivoB')
+        await cuenta(deB.organizationId, B, { altaMotivo: 'OTRO', altaMotivoTexto: 'Lo pensará', altaPerdido: true })
+        const paraA = (await filaDe(deB.organizationId, propios(A)))!
+        expect(paraA.cuentaAjena).toBe(true)
+        expect(paraA.alta).toMatchObject({ motivo: null, motivoTexto: null, perdido: false })
+        const paraB = (await filaDe(deB.organizationId, propios(B)))!
+        expect(paraB.alta).toMatchObject({ motivo: 'OTRO', motivoTexto: 'Lo pensará', perdido: true })
+      })
+
+      it('liveOf de una alta sin tarjeta trae sus datos del alta', async () => {
+        const { organizationId } = await altaP('altaVivo', { acquisitionSource: 'dashboard_signup', planActivationStatus: 'DECLINED' })
+        const live = await getClientLive(todos(), organizationId, NOW)
+        expect(live).toMatchObject({
+          alta: { terminada: false, origen: 'DIRECTO', tarjeta: 'RECHAZADA', oferta: { tipo: 'LISTA', nombre: null } },
+        })
+      })
+    })
+
+    describe('último comentario', () => {
+      it('🔴 el último comentario de la cuenta de B no le sale a A (ni el texto ni el autor); a B, el más nuevo', async () => {
+        const { organizationId } = await altaP('notaB')
+        const accountId = await cuenta(organizationId, B)
+        await prisma.crmTimelineEvent.create({
+          data: { accountId, kind: 'NOTE', actorStaffId: B, data: { text: 'La vieja' }, createdAt: hace(2 * DAY) },
+        })
+        await prisma.crmTimelineEvent.create({
+          data: { accountId, kind: 'NOTE', actorStaffId: B, data: { text: 'Quiere Pro' }, createdAt: hace(DAY) },
+        })
+        await prisma.crmTimelineEvent.create({
+          data: { accountId, kind: 'STAGE_CHANGE', actorStaffId: B, data: {}, createdAt: hace(1000) },
+        })
+        const paraA = (await filaDe(organizationId, propios(A)))!
+        expect([paraA.cuentaAjena, paraA.ultimoComentario]).toEqual([true, null])
+        expect(JSON.stringify(paraA)).not.toContain('Quiere Pro')
+        expect((await filaDe(organizationId, propios(B)))!.ultimoComentario).toEqual({
+          texto: 'Quiere Pro',
+          autor: { id: B, name: 'Beto Página' },
+          at: hace(DAY),
+        })
+      })
+
+      it('un comentario de 300 letras sale recortado a 140 con «…»', async () => {
+        const { organizationId } = await altaP('notaLarga')
+        const accountId = await cuenta(organizationId, A)
+        await prisma.crmTimelineEvent.create({ data: { accountId, kind: 'NOTE', actorStaffId: A, data: { text: 'ñ'.repeat(300) } } })
+        const { texto } = (await filaDe(organizationId, propios(A)))!.ultimoComentario!
+        expect([...texto]).toHaveLength(140)
+        expect(texto).toBe(`${'ñ'.repeat(139)}…`)
+      })
+    })
+
+    describe('conteos por motivo (sobre el universo con q y ocultos)', () => {
+      const CONT = `cont${Date.now()}`
+      beforeAll(async () => {
+        const alta = async (key: string) => {
+          const { id } = await prisma.organization.create({
+            data: { name: `Cont ${CONT} ${key}`, email: `cont-${CONT}-${key}@test.mx`, phone: '5555555555' },
+          })
+          organizationIds.push(id)
+          await venue(id)
+          await prisma.onboardingProgress.create({ data: { organizationId: id, completedSteps: [], acquisitionSource: 'landing' } })
+          return id
+        }
+        await cuenta(await alta('a1'), A, { altaMotivo: 'PRECIO' })
+        await cuenta(await alta('a2'), A, { altaMotivo: 'PRECIO' })
+        await cuenta(await alta('a3'), A)
+        await cuenta(await alta('b1'), B, { altaMotivo: 'PRECIO' })
+      })
+      const conteosDe = async (access: CrmAccess, filters: ClientFilters = {}) =>
+        (await listClients(access, { q: CONT, ...filters }, NOW)).conteos
+
+      it('🔴 3 🟠 de A (PRECIO, PRECIO, sin motivo) y 1 de B con PRECIO → para A PRECIO 2, SIN_MOTIVO 1, DE_OTRO 1; para «todos» PRECIO 3', async () => {
+        const deA = await conteosDe(propios(A))
+        expect(deA).toMatchObject({ altaSinTarjeta: 4, porMotivo: { PRECIO: 2, SIN_MOTIVO: 1, DE_OTRO: 1, OTRO: 0 }, perdidos: 0 })
+        const deTodos = await conteosDe(todos())
+        expect(deTodos).toMatchObject({ altaSinTarjeta: 4, porMotivo: { PRECIO: 3, SIN_MOTIVO: 1, DE_OTRO: 0 } })
+        // The reasons add up to the stalled signups for each viewer.
+        for (const c of [deA, deTodos]) expect(Object.values(c.porMotivo).reduce((a, b) => a + b, 0)).toBe(c.altaSinTarjeta)
+      })
+
+      it('conteos no cambia al filtrar por usa o por motivo', async () => {
+        const base = await conteosDe(propios(A))
+        expect(await conteosDe(propios(A), { usa: 'TERMINAL' })).toEqual(base)
+        expect(await conteosDe(propios(A), { motivo: 'PRECIO' })).toEqual(base)
+        expect(await conteosDe(propios(A), { estado: 'COBRA', altas: true })).toEqual(base)
+      })
+
+      it('🔴 A busca por nombre la organización de B marcada perdida → perdidos = 0, DE_OTRO = 1, y la fila no dice «Perdido»', async () => {
+        const PERD = `perd${Date.now()}`
+        const { id } = await prisma.organization.create({
+          data: { name: `Perd ${PERD}`, email: `perd-${PERD}@test.mx`, phone: '5555555555' },
+        })
+        organizationIds.push(id)
+        await venue(id)
+        await prisma.onboardingProgress.create({ data: { organizationId: id, completedSteps: [], acquisitionSource: 'landing' } })
+        await cuenta(id, B, { altaMotivo: 'PRECIO', altaPerdido: true })
+        const paraA = await listClients(propios(A), { q: PERD, altas: true }, NOW)
+        expect(paraA.conteos).toMatchObject({ altaSinTarjeta: 1, perdidos: 0, porMotivo: { DE_OTRO: 1, PRECIO: 0 } })
+        expect(paraA.rows[0].alta).toMatchObject({ perdido: false, motivo: null })
+        const paraB = await listClients(propios(B), { q: PERD, altas: true }, NOW)
+        expect(paraB.conteos).toMatchObject({ perdidos: 1, porMotivo: { DE_OTRO: 0, PRECIO: 1 } })
+        expect(paraB.rows[0].alta).toMatchObject({ perdido: true })
+      })
     })
   })
 })

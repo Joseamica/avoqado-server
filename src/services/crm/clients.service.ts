@@ -17,7 +17,18 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { scopeWhere, type CrmAccess } from './access.service'
-import { autoresDelUsa, conteosDe, usaDeLaFila } from './clientPage'
+import type { Nivel } from './clientCodes'
+import {
+  altaDeLaFila,
+  altaFactsOf,
+  aparatosDe,
+  autoresDelUsa,
+  conteosDe,
+  planDeLaFila,
+  planDeLaPagina,
+  ultimosComentarios,
+  usaDeLaFila,
+} from './clientPage'
 import { checkDueno, clientsFilter, clientsQueries, pageSize, type ClientFilters } from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
 import { MONEY, REAL_VENUE } from './sweep.service'
@@ -45,7 +56,7 @@ type PageRow = {
   usaVisto: string
   usaAviso: boolean
   usaEscrito: boolean
-  nivel: string
+  nivel: Nivel
   estado: string
   ultimoCobroAt: Date | null
 }
@@ -56,7 +67,9 @@ type PageRow = {
  * linked CRM account shows its owner and stage only inside the caller's scope (`cuentaAjena` says there is one).
  * `yaCobro` is «Ya cobró» / «Aún no cobra». An organization marked hidden (Prime, or any internal or test one, ruling 39)
  * never takes a slot of the page nor counts in the total; `ocultos` with «Configurar el CRM» lists only those.
- * `legible: 1` tells a client this server filters and paints the C1 columns (Usa, Plan, Estado).
+ * `legible: 1` tells a client this server filters and paints the C1 columns (Usa, Plan, Estado). Each row also carries, read
+ * for the page only (task 5): its devices, its plan's condition by the platform's own rules, a 🟠's signup and the newest
+ * note of an account the caller sees; `conteos` counts the 🟠 by reason.
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
   checkDueno(access, filters.dueno)
@@ -83,13 +96,25 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
           usaManualPorque: true,
           usaManualById: true,
           usaManualAt: true,
+          altaMotivo: true,
+          altaMotivoTexto: true,
+          altaPerdido: true,
         },
         orderBy: [{ id: 'asc' }],
         take: linked.length,
       })
     : []
   const byOrganization = new Map(visible.map(account => [account.organizationId, account]))
-  const autores = await autoresDelUsa(visible)
+  // What the page adds (task 5), each in ONE query for the whole page and only for its ids: who wrote the ✋, the plan by
+  // the platform's own rules, the devices, the signup of the 🟠 rows and the newest note of the accounts the caller sees.
+  const ids = page.map(organization => organization.id)
+  const [autores, planes, aparatos, altas, comentarios] = await Promise.all([
+    autoresDelUsa(visible),
+    planDeLaPagina(ids, now),
+    aparatosDe(ids),
+    altaFactsOf(page.filter(organization => organization.estado === 'ALTA_SIN_TARJETA').map(organization => organization.id)),
+    ultimosComentarios(visible.map(account => account.id)),
+  ])
 
   return {
     rows: page.map(organization => {
@@ -107,9 +132,12 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
             }
           : null,
         cuentaAjena: !!organization.crmAccountId && !account,
-        usa: usaDeLaFila(organization, account, autores),
-        plan: { nivel: organization.nivel },
+        usa: { ...usaDeLaFila(organization, account, autores), aparatos: aparatos.get(organization.id) ?? { terminales: 0, pos: 0 } },
+        plan: planDeLaFila(organization.id, organization.nivel, planes.get(organization.id)),
         estado: { codigo: organization.estado, ultimoCobroAt: organization.ultimoCobroAt },
+        // Only a 🟠: what the signup left; its reason and «Perdido» only for an account the caller sees.
+        alta: organization.estado === 'ALTA_SIN_TARJETA' ? altaDeLaFila(altas.get(organization.id), account) : null,
+        ultimoComentario: (account && comentarios.get(account.id)) ?? null,
       }
     }),
     nextCursor: found.length > limit ? page[page.length - 1].id : null,
@@ -186,7 +214,7 @@ export async function getClientLive(access: CrmAccess, organizationId: string, n
 
 /** What is live in Avoqado for one Organization, read when the ficha opens (see `getLive`). */
 async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
-  const [venues, sucursales, owner, onboarding, terminales, ventasMes] = await Promise.all([
+  const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts] = await Promise.all([
     prisma.venue.findMany({
       where: { organizationId },
       select: { id: true, name: true, status: true, kycStatus: true, _count: { select: { terminals: true } } },
@@ -202,6 +230,7 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     prisma.onboardingProgress.findUnique({ where: { organizationId }, select: { completedSteps: true, completedAt: true } }),
     prisma.terminal.count({ where: { venue: { organizationId } } }),
     access.ventas ? monthSales(organizationId, now) : null,
+    altaFactsOf([organizationId]),
   ])
   const plans = await enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id))
   const steps = onboarding?.completedSteps
@@ -227,6 +256,8 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
           hechos: onboarding.completedAt ? ONBOARDING_STEPS : Math.min(done, ONBOARDING_STEPS),
           totales: ONBOARDING_STEPS,
           terminada: !!onboarding.completedAt,
+          // An unfinished signup also says what the database knows of it (the same facts as the 🟠 row of the list).
+          ...(onboarding.completedAt ? {} : altaFacts.get(organizationId)),
         }
       : null,
     ventasMes,

@@ -7,7 +7,10 @@
  * never carries a card, shows sales only with «Ver ventas», takes the plan from the contract when there is no classic
  * row, and counts «the month» on Mexico City's calendar.
  */
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { Prisma, TransactionStatus, VenueStatus } from '@prisma/client'
+import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
@@ -116,14 +119,17 @@ beforeEach(() => {
  * test answers the page with these rows, the total with this number and the count with zeros.
  */
 function clientsDb(rows: Array<Record<string, unknown>> = [], total = rows.length) {
+  // What the page adds (task 5: venues, devices, signup, comments) reads only the page's ids and finds nothing here.
   prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
-    isConteo(query) ? [{ altaSinTarjeta: 0 }] : isTotal(query) ? [{ total }] : rows,
+    isConteo(query) ? [{ altaSinTarjeta: 0 }] : isTotal(query) ? [{ total }] : isPage(query) ? rows : [],
   )
 }
 const isConteo = (query: Prisma.Sql) => query.sql.includes('AS "altaSinTarjeta"')
-const isTotal = (query: Prisma.Sql) => query.sql.includes('AS "total"')
+const isTotal = (query: Prisma.Sql) => query.sql.includes('AS "total"') && !query.sql.includes('ROW_NUMBER()')
+/** The universe's page and the client check of `getClientLive`: the statements that answer organizations with their account. */
+const isPage = (query: Prisma.Sql) => query.sql.includes('AS "crmAccountId"')
 const rawQueries = () => (prismaMock.$queryRaw.mock.calls as Array<[Prisma.Sql]>).map(([query]) => query)
-const pageQuery = (n = 0) => rawQueries().filter(query => !isTotal(query) && !isConteo(query))[n]
+const pageQuery = (n = 0) => rawQueries().filter(isPage)[n]
 const countQuery = (n = 0) => rawQueries().filter(isTotal)[n]
 /** What follows `FROM "Organization" o`: the filter of the page (before its order) and of the total. */
 const filterOf = (query: Prisma.Sql) => {
@@ -382,9 +388,18 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
     const result = await listClients(access(), filters, NOW)
 
     const expected = clientsQueries(access(), filters, NOW, TEAM_ORG)
-    expect(rawQueries().map(query => ({ sql: query.sql, values: query.values }))).toEqual(
+    const universo = rawQueries().filter(query => query.sql.includes('FROM "Organization" o'))
+    expect(universo.map(query => ({ sql: query.sql, values: query.values }))).toEqual(
       [expected.page, expected.total, expected.conteos].map(query => ({ sql: query.sql, values: query.values })),
     )
+    // Task 5: what the page adds only ever receives the page's ids (never the universe's lateral).
+    const deLaPagina = rawQueries().filter(query => !query.sql.includes('FROM "Organization" o'))
+    expect(deLaPagina.length).toBeGreaterThan(0)
+    for (const query of deLaPagina) {
+      expect(query.sql).not.toContain('"usaMedido"')
+      const ids = query.values.filter((value): value is string => typeof value === 'string' && /^c[a-z0-9]{24}$/.test(value))
+      for (const id of ids) expect([ORG, ORG_2, ACCOUNT]).toContain(id)
+    }
     // The rest only reads the page: its organizations, and the authors of what the caller may see.
     expect(prismaMock.crmAccount.findMany.mock.calls[0][0].where).toEqual({
       AND: [{ organizationId: { in: [ORG, ORG_2] } }, MINE_OR_UNOWNED],
@@ -417,7 +432,14 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
     clientsDb([client()])
     const result = await listClients(access(), {}, NOW)
     expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
-    expect(result.rows[0].usa).toEqual({ visto: 'TERMINAL', medido: 'TERMINAL', manual: false, aviso: false, detalle: null })
+    expect(result.rows[0].usa).toEqual({
+      visto: 'TERMINAL',
+      medido: 'TERMINAL',
+      manual: false,
+      aviso: false,
+      detalle: null,
+      aparatos: { terminales: 0, pos: 0 },
+    })
     expect(result.conteos).toEqual({
       altaSinTarjeta: 0,
       porMotivo: {
@@ -442,6 +464,168 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
     expect(conteos.values).toContain('%tacos%')
     expect(conteos.values).not.toContain('POS')
     expect(conteos.values).not.toContain('COBRA')
+  })
+})
+
+describe('lo de la página (C1, Tarea 5)', () => {
+  const cuid = (prefix: string, i: number) => `${prefix}${String(i).padStart(25 - prefix.length, '0')}`
+
+  /**
+   * A page of `n` stalled signups, each with a visible account that has a ✋, a reason and a note, one venue with a classic
+   * plan row, devices and its signup: every extra of the page has something to read.
+   */
+  function paginaDb(n: number) {
+    const orgs = Array.from({ length: n }, (_, i) => cuid('corgpag', i))
+    const cuentas = orgs.map((_, i) => cuid('cctapag', i))
+    const sucursales = orgs.map((_, i) => cuid('cvenpag', i))
+    clientsDb(
+      orgs.map((id, i) => client({ id, crmAccountId: cuentas[i], estado: 'ALTA_SIN_TARJETA', usaEscrito: true, usaVisto: 'POS' })),
+      n,
+    )
+    const base = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => {
+      if (isPage(query) || isTotal(query) || isConteo(query)) return base(query)
+      if (query.sql.includes('ROW_NUMBER()'))
+        return orgs.map((organizationId, i) => ({
+          id: sucursales[i],
+          organizationId,
+          seatCapExempt: false,
+          orgSeatCapExempt: false,
+          total: 1,
+          concesionPro: false,
+          concesionPremium: false,
+        }))
+      if (query.sql.includes('"Terminal"')) return orgs.map(organizationId => ({ organizationId, terminales: 1, pos: 1 }))
+      if (query.sql.includes('"OnboardingProgress" op LEFT JOIN'))
+        return orgs.map(organizationId => ({
+          organizationId,
+          ultimaVezAt: NOW,
+          campana: null,
+          ofertaSlug: null,
+          acquisitionSource: 'landing',
+          planActivationStatus: 'NONE',
+          planActivationAttempt: 0,
+          negocioCreadoAt: NOW,
+        }))
+      if (query.sql.includes('"CrmTimelineEvent"'))
+        return cuentas.map(accountId => ({ accountId, actorStaffId: OTHER, createdAt: NOW, texto: 'Le marqué' }))
+      return base(query)
+    })
+    prismaMock.crmAccount.findMany.mockResolvedValue(
+      orgs.map((organizationId, i) => ({
+        id: cuentas[i],
+        organizationId,
+        owner: null,
+        stage: { id: GANADO, name: 'Ganado', kind: 'GANADA' },
+        usaManual: 'POS',
+        usaManualPorque: null,
+        usaManualById: OTHER,
+        usaManualAt: NOW,
+        altaMotivo: 'PRECIO',
+        altaMotivoTexto: null,
+        altaPerdido: false,
+      })),
+    )
+    prismaMock.staff.findMany.mockResolvedValue([{ id: OTHER, firstName: 'Ana', lastName: 'Pérez' }])
+    prismaMock.venueFeature.findMany.mockResolvedValue(
+      sucursales.map(venueId => ({
+        venueId,
+        active: true,
+        endDate: null,
+        suspendedAt: null,
+        gracePeriodEndsAt: null,
+        stripeSubscriptionId: null,
+        updatedAt: NOW,
+        feature: { code: 'PLAN_PRO' },
+      })),
+    )
+  }
+  const consultas = () =>
+    prismaMock.$queryRaw.mock.calls.length +
+    prismaMock.crmAccount.findMany.mock.calls.length +
+    prismaMock.staff.findMany.mock.calls.length +
+    prismaMock.venueFeature.findMany.mock.calls.length
+
+  beforeEach(() => prismaMock.venueFeature.findMany.mockReset())
+  afterEach(() => prismaMock.venueFeature.findMany.mockResolvedValue([]))
+
+  it('🔴 una página de 50 hace el mismo número de consultas que una de 2 (sin N+1), y lo trae todo', async () => {
+    paginaDb(2)
+    const dos = await listClients(access({ ver: 'todos' }), { altas: true }, NOW)
+    const deDos = consultas()
+
+    for (const mock of [prismaMock.$queryRaw, prismaMock.crmAccount.findMany, prismaMock.staff.findMany]) mock.mockClear()
+    prismaMock.venueFeature.findMany.mockReset()
+    paginaDb(50)
+    const cincuenta = await listClients(access({ ver: 'todos' }), { altas: true }, NOW)
+
+    expect(consultas()).toBe(deDos)
+    expect(cincuenta.rows).toHaveLength(50)
+    // Every extra arrived, so the count above covers all of them.
+    for (const row of [...dos.rows, ...cincuenta.rows]) {
+      expect(row.usa.aparatos).toEqual({ terminales: 1, pos: 1 })
+      expect(row.alta).toMatchObject({ motivo: 'PRECIO', origen: 'LANDING', tarjeta: 'NO_INTENTO', oferta: { tipo: 'LISTA' } })
+      expect(row.ultimoComentario).toEqual({ texto: 'Le marqué', autor: { id: OTHER, name: 'Ana Pérez' }, at: NOW })
+      expect(row.plan).toMatchObject({ nivel: 'FREE', sucursalesLeidas: 1, sucursalesTotales: 1 })
+    }
+    // The plan rows of the page in ONE bounded read: at most two plan rows per venue (`@@unique([venueId, featureId])`).
+    expect(prismaMock.venueFeature.findMany.mock.calls[0][0]).toMatchObject({ take: 100 })
+  })
+
+  it('🔴 C12: si el nivel de SQL y el de la página no coinciden con todas las sucursales leídas, manda SQL, la condición queda vacía y avisa sin datos de personas', async () => {
+    paginaDb(1)
+    // SQL says PREMIUM; the page reads one venue with a Pro row.
+    const base = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+      isPage(query) ? [client({ id: cuid('corgpag', 0), nivel: 'PREMIUM' })] : base(query),
+    )
+    jest.mocked(logger.warn).mockClear()
+
+    const { rows } = await listClients(access({ ver: 'todos' }), {}, NOW)
+
+    expect(rows[0].plan).toMatchObject({ nivel: 'PREMIUM', condicion: null, campana: null })
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    const [, datos] = jest.mocked(logger.warn).mock.calls[0] as unknown as [string, Record<string, unknown>]
+    expect(datos).toEqual({ organizationId: cuid('corgpag', 0), nivelSql: 'PREMIUM', nivelPagina: 'PRO' })
+  })
+
+  it('con más de 20 sucursales la diferencia es esperada: manda SQL, condición vacía y sin aviso', async () => {
+    paginaDb(1)
+    const base = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => {
+      if (isPage(query)) return [client({ id: cuid('corgpag', 0), nivel: 'PREMIUM' })]
+      const rows = await base(query)
+      return query.sql.includes('ROW_NUMBER()') ? rows.map((row: Record<string, unknown>) => ({ ...row, total: 21 })) : rows
+    })
+    jest.mocked(logger.warn).mockClear()
+
+    const { rows } = await listClients(access({ ver: 'todos' }), {}, NOW)
+
+    expect(rows[0].plan).toMatchObject({ nivel: 'PREMIUM', condicion: null, sucursalesLeidas: 1, sucursalesTotales: 21 })
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('🔴 arquitectura: la condición sale de elegirFilaDelPlan y derivePlanState importados; nadie más puntúa filas de plan', () => {
+    const fuente = (archivo: string) => readFileSync(join(__dirname, '../../../../src/services/crm', archivo), 'utf8')
+    const pagina = fuente('clientPage.ts')
+    expect(pagina).toMatch(/import \{[^}]*\belegirFilaDelPlan\b[^}]*\} from '\.\.\/access\/filaDelPlan'/)
+    expect(pagina).toMatch(/import \{[^}]*\bderivePlanState\b[^}]*\} from '\.\.\/access\/basePlan\.service'/)
+    expect(pagina).toMatch(/import \{[^}]*\bdaAcceso\b[^}]*\} from '\.\.\/access\/ventanaDeAcceso'/)
+    expect(pagina).toMatch(/elegirFilaDelPlan\(/)
+    expect(pagina).toMatch(/derivePlanState\(/)
+    for (const archivo of ['clientPage.ts', 'clientPageSql.ts', 'clientFacts.ts', 'clientsSql.ts', 'clients.service.ts']) {
+      const texto = fuente(archivo)
+      // No own scoring of plan rows: no score, no «which row wins» of its own, no Stripe liveness of its own.
+      expect({ archivo, puntua: /\bpuntaje\b|\bscore\b|cobroVivo|function elegir|elegirFila(?!DelPlan)/.test(texto) }).toEqual({
+        archivo,
+        puntua: false,
+      })
+      // And the derivation of the state is never re-written: no other place decides `trial` / `past_due` / `suspended`.
+      expect({ archivo, deriva: /'past_due'\s*:|state\s*=\s*'(trial|suspended|canceled|active)'/.test(texto) }).toEqual({
+        archivo,
+        deriva: false,
+      })
+    }
   })
 })
 

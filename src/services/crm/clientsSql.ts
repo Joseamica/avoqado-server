@@ -172,6 +172,8 @@ function filtrosSql(access: CrmAccess, filters: ClientFilters): Prisma.Sql {
 
 /**
  * EVERY statement of «Clientes» that walks the universe (Codex r2 #3): the page, its total and the count of 🟠 by reason.
+ * In the count, a 🟠 whose account the caller does not see is `DE_OTRO` (whatever its reason, lost or not) and `perdidos`
+ * counts only the caller's own (Codex r1 #3), so the reasons of a 🟠 always add up to `altaSinTarjeta`.
  * `listClients` runs exactly these (a test pins it) and `scripts/crm/explain-clientes.ts` measures exactly these. The page
  * and the total share one `FROM … WHERE` (filters before the cursor); the count is always over the widened universe
  * (`altas`) with the search and «Ocultos» only, so the header never moves when filtering (C16).
@@ -202,7 +204,9 @@ export function clientsQueries(access: CrmAccess, filters: ClientFilters, now: D
     total: Prisma.sql`SELECT COUNT(*)::int AS "total" ${listed}`,
     conteos: Prisma.sql`
       SELECT COUNT(*) FILTER (WHERE ${ES_ALTA})::int AS "altaSinTarjeta", ${Prisma.join(porMotivo, ', ')},
-        COUNT(*) FILTER (WHERE ${motivoSql(access, 'SIN_MOTIVO')})::int AS "SIN_MOTIVO"
+        COUNT(*) FILTER (WHERE ${motivoSql(access, 'SIN_MOTIVO')})::int AS "SIN_MOTIVO",
+        COUNT(*) FILTER (WHERE ${ES_ALTA} AND ca."id" IS NOT NULL AND NOT ${scopeSql(access, 'ca')})::int AS "DE_OTRO",
+        COUNT(*) FILTER (WHERE ${ES_ALTA} AND ${scopeSql(access, 'ca')} AND ca."altaPerdido")::int AS "perdidos"
       ${from(true)}`,
   }
 }

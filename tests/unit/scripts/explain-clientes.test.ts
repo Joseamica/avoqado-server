@@ -67,3 +67,32 @@ it('--conjunto produccion deja sólo las variantes pesadas', () => {
   ])
   expect(sentencias(explainClientes(['--conjunto', 'produccion']))).toHaveLength(VARIANTES_PRODUCCION.length * 3 * 2)
 })
+
+it('🔴 C3: con --ids imprime también lo que agrega UNA página (Tarea 5), con los mismos constructores de clientPageSql', () => {
+  const ORG = 'corgpagina000000000000001'
+  const VENUE = 'cvenuepagina0000000000001'
+  const CUENTA = 'ccuentapagina000000000001'
+  const sinIds = explainClientes([])
+  expect(encabezados(sinIds).some(line => line.startsWith('-- página'))).toBe(false)
+
+  const lines = explainClientes(['--ids', ORG, '--sucursales', VENUE, '--cuentas', CUENTA])
+  const pagina = lines.slice(sinIds.length)
+  expect(encabezados(pagina)).toEqual([
+    '-- página · sucursales',
+    '-- página · canjes',
+    '-- página · aparatos',
+    '-- página · alta',
+    '-- página · contratos',
+    '-- página · comentarios',
+  ])
+  for (const line of sentencias(pagina)) {
+    expect(line.startsWith('EXPLAIN (ANALYZE, BUFFERS) SELECT ')).toBe(true)
+    expect(line).not.toMatch(/\$\d/)
+  }
+  const [sucursales, canjes, aparatos, alta, contratos, comentarios] = sentencias(pagina)
+  for (const line of [sucursales, canjes, aparatos, alta]) expect(line).toContain(`'${ORG}'`)
+  expect(contratos).toContain(`'${VENUE}'`)
+  expect(comentarios).toContain(`'${CUENTA}'`)
+  // Without --sucursales / --cuentas those two are left out, never printed with the wrong kind of id.
+  expect(encabezados(explainClientes(['--ids', ORG]).slice(sinIds.length))).toHaveLength(4)
+})
