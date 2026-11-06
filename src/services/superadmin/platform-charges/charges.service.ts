@@ -22,7 +22,15 @@ import prisma from '@/utils/prismaClient'
 import { attachInvoiceInTx, conceptsFromInvoice } from './invoice-link.service'
 import { lockCharge, withChargeLock } from './lock'
 import { invoiceName } from './occurrences.service'
-import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
+import {
+  addDays,
+  calendarDayToDb,
+  dbToCalendarDay,
+  isSamePeriodAsMarked,
+  nextDueDate,
+  occurrenceDatesBetween,
+  todayInMexico,
+} from './schedule'
 import { computeChargeTotals, hasSatKeys } from './totals'
 import { LINKED_LIVE, LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
 
@@ -776,7 +784,8 @@ export function pageParams(filters: { page?: number; pageSize?: number }): { pag
  */
 export async function listCharges(
   filters: ListChargesFilters,
-): Promise<{ rows: PlatformCharge[]; total: number; page: number; pageSize: number }> {
+  now: Date = new Date(),
+): Promise<{ rows: ChargeWithNextDue[]; total: number; page: number; pageSize: number }> {
   const where: Prisma.PlatformChargeWhereInput = {}
   if (filters.status === 'active') where.pausedAt = null
   else if (filters.status === 'paused') where.pausedAt = { not: null }
@@ -794,7 +803,42 @@ export async function listCharges(
     }),
     prisma.platformCharge.count({ where }),
   ])
-  return { rows, total, page, pageSize }
+  return { rows: await withNextDueDates(rows, now), total, page, pageSize }
+}
+
+export type ChargeWithNextDue = PlatformCharge & { nextDueDate: CalendarDay | null }
+
+/**
+ * «Próximo cobro» de cada fila de la página: dos consultas agregadas para toda la página (la primera pendiente y la última pagada
+ * u omitida), nunca una por fila. Un cobro pausado no genera fechas: no tiene próximo.
+ */
+async function withNextDueDates(rows: PlatformCharge[], now: Date): Promise<ChargeWithNextDue[]> {
+  if (rows.length === 0) return []
+  const chargeId = { in: rows.map(row => row.id) }
+  const [pending, marked] = await Promise.all([
+    prisma.platformChargeOccurrence.groupBy({ by: ['chargeId'], where: { chargeId, status: 'PENDING' }, _min: { dueDate: true } }),
+    prisma.platformChargeOccurrence.groupBy({
+      by: ['chargeId'],
+      where: { chargeId, status: { in: ['PAID', 'SKIPPED'] } },
+      _max: { dueDate: true },
+    }),
+  ])
+  const day = (date: Date | null | undefined): CalendarDay | null => (date ? dbToCalendarDay(date) : null)
+  const firstPending = new Map(pending.map(group => [group.chargeId, day(group._min?.dueDate)]))
+  const lastMarked = new Map(marked.map(group => [group.chargeId, day(group._max?.dueDate)]))
+  const today = todayInMexico(now)
+  return rows.map(row => ({
+    ...row,
+    nextDueDate: row.pausedAt
+      ? null
+      : nextDueDate(
+          row.frequency,
+          dbToCalendarDay(row.anchorDate),
+          today,
+          firstPending.get(row.id) ?? null,
+          lastMarked.get(row.id) ?? null,
+        ),
+  }))
 }
 
 /**

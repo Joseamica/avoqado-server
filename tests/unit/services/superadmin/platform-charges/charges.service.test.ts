@@ -1586,14 +1586,62 @@ describe('platform-charges/charges.service — listCharges (NEW)', () => {
   beforeEach(() => {
     prismaMock.platformCharge.findMany.mockResolvedValue([cobro()])
     prismaMock.platformCharge.count.mockResolvedValue(1)
+    prismaMock.platformChargeOccurrence.groupBy.mockResolvedValue([])
   })
 
   it('sin filtros: primera página de 50, orden estable y el total real', async () => {
-    const resultado = await listCharges({})
+    const resultado = await listCharges({}, AHORA)
 
     expect(prismaMock.platformCharge.findMany).toHaveBeenCalledWith({ where: {}, orderBy: ORDEN, skip: 0, take: 50 })
     expect(prismaMock.platformCharge.count).toHaveBeenCalledWith({ where: {} })
-    expect(resultado).toEqual({ rows: [cobro()], total: 1, page: 1, pageSize: 50 })
+    // Semanal de lunes desde el 5-oct, sin fechas marcadas: hoy lunes 2-nov toca.
+    expect(resultado).toEqual({ rows: [{ ...cobro(), nextDueDate: '2026-11-02' }], total: 1, page: 1, pageSize: 50 })
+  })
+
+  it('«Próximo cobro»: dos consultas agregadas para TODA la página (nunca una por fila), con lo pendiente y lo último marcado', async () => {
+    prismaMock.platformCharge.findMany.mockResolvedValue([
+      cobro({ id: 'amaena', frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-08-27') }),
+      cobro({ id: 'iq', frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-11-01') }),
+      cobro({ id: 'galeterie', frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-10') }),
+      cobro({ id: 'pausado', frequency: 'MONTHLY', anchorDate: calendarDayToDb('2026-10-28'), pausedAt: new Date('2026-11-01T10:00:00Z') }),
+    ])
+    prismaMock.platformChargeOccurrence.groupBy.mockImplementation(async ({ where }: any) =>
+      where.status === 'PENDING'
+        ? [{ chargeId: 'galeterie', _min: { dueDate: calendarDayToDb('2026-11-10') } }]
+        : [
+            { chargeId: 'iq', _max: { dueDate: calendarDayToDb('2026-11-01') } },
+            { chargeId: 'pausado', _max: { dueDate: calendarDayToDb('2026-10-28') } },
+          ],
+    )
+
+    const { rows } = await listCharges({}, AHORA)
+
+    expect(rows.map(row => [row.id, row.nextDueDate])).toEqual([
+      ['amaena', '2026-11-27'],
+      ['iq', '2026-12-01'],
+      ['galeterie', '2026-11-10'],
+      ['pausado', null], // pausado no genera fechas: no hay próximo cobro
+    ])
+    const ids = { in: ['amaena', 'iq', 'galeterie', 'pausado'] }
+    expect(prismaMock.platformChargeOccurrence.groupBy).toHaveBeenCalledTimes(2)
+    expect(prismaMock.platformChargeOccurrence.groupBy).toHaveBeenCalledWith({
+      by: ['chargeId'],
+      where: { chargeId: ids, status: 'PENDING' },
+      _min: { dueDate: true },
+    })
+    expect(prismaMock.platformChargeOccurrence.groupBy).toHaveBeenCalledWith({
+      by: ['chargeId'],
+      where: { chargeId: ids, status: { in: ['PAID', 'SKIPPED'] } },
+      _max: { dueDate: true },
+    })
+  })
+
+  it('una página vacía no consulta las fechas', async () => {
+    prismaMock.platformCharge.findMany.mockResolvedValue([])
+    prismaMock.platformCharge.count.mockResolvedValue(0)
+
+    expect(await listCharges({}, AHORA)).toEqual({ rows: [], total: 0, page: 1, pageSize: 50 })
+    expect(prismaMock.platformChargeOccurrence.groupBy).not.toHaveBeenCalled()
   })
 
   it.each([
