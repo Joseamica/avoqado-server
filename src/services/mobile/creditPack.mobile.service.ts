@@ -142,32 +142,6 @@ async function compraDeLaLlave(venueId: string, deliveryKey: string, packId: str
 }
 
 /**
- * 🔴 D17 (hz:433063d4:D17): ¿la orden que cobró este paquete ya le suma su «Total gastado» a ESTE cliente? Al saldarse, la orden
- * suma a todos sus clientes ligados (`updateCustomerMetrics`), con el paquete adentro. Se busca por las llaves de sus cobros
- * (efectivo/otra forma: `Payment.idempotencyKey`; tarjeta: `TerminalPaymentRequest.requestId`).
- *  · Ligada a este cliente ⇒ true: la entrega no suma.
- *  · De OTRO cliente (se cambió a media venta dividida, Codex D12-D17 r2) ⇒ false: la entrega suma a quien recibe el paquete.
- *  · Sin rastro todavía (el cobro sin red no ha subido) ⇒ true: el carrito liga a su cliente a la orden que crea.
- *    ponytail: si además se cambió de cliente sin red, ese paquete no le suma; se arreglaría guardando la orden en la fila.
- */
-async function laOrdenYaLeCuenta(venueId: string, customerId: string, cobros: string[]): Promise<boolean> {
-  const [pagos, solicitudes] = await Promise.all([
-    prisma.payment.findMany({ where: { venueId, idempotencyKey: { in: cobros } }, select: { orderId: true }, take: cobros.length }),
-    prisma.terminalPaymentRequest.findMany({
-      where: { venueId, requestId: { in: cobros } },
-      select: { orderId: true },
-      take: cobros.length,
-    }),
-  ])
-  const ordenes = [...new Set([...pagos, ...solicitudes].map(c => c.orderId).filter((id): id is string => Boolean(id)))]
-  if (ordenes.length === 0) return true
-  const ligadas = await prisma.order.count({
-    where: { id: { in: ordenes }, venueId, OR: [{ customerId }, { orderCustomers: { some: { customerId } } }] },
-  })
-  return ligadas > 0
-}
-
-/**
  * Grant a credit pack to a customer after an in-person sale. Mirrors
  * fulfillPurchase's creation (purchase + per-item balances + PURCHASE ledger
  * entries + customer.totalSpent) but records the POS payment instead of a Stripe
@@ -177,9 +151,8 @@ async function laOrdenYaLeCuenta(venueId: string, customerId: string, cobros: st
  * la respuesta y la dueña apagó el paquete mientras, el reintento contesta la misma compra, no un rechazo.
  * Sin llave (apps viejas, iOS, MCP) cada llamada crea una compra, como siempre.
  *
- * Con `cobrosDeLaOrden` (D17, 6-nov) el paquete se cobró en una orden del carrito: son las llaves de esos cobros. Si la orden es de
- * ESTE cliente, su cobro le suma el «Total gastado» al saldarse y la entrega no lo repite (`laOrdenYaLeCuenta`). Sin ellas (ficha del
- * cliente, que cobra a mano sin orden; apps viejas; MCP) suma como siempre.
+ * Con `cobradoEnOrden` (D17, 5-nov) el paquete se cobró en una orden del carrito, cuyo cobro ya sumó al «Total gastado» del
+ * cliente: la entrega no lo vuelve a sumar. Sin él (ficha del cliente, que cobra a mano sin orden; apps viejas; MCP) suma como siempre.
  *
  * Con `foto` (la que firmó este servidor, ver `leerFotoDelPaquete`) se entrega lo VENDIDO aunque el paquete ya cambió o se apagó:
  * el dinero ya entró. El tope por cliente sí se revisa, con el valor vigente: es una regla del negocio, no parte de lo vendido.
@@ -189,7 +162,7 @@ export async function sellPackInPerson(
   packId: string,
   customerId: string,
   staffId: string,
-  opts?: { note?: string; deliveryKey?: string; foto?: CreditPackSnapshot | null; cobrosDeLaOrden?: string[] },
+  opts?: { note?: string; deliveryKey?: string; foto?: CreditPackSnapshot | null; cobradoEnOrden?: boolean },
 ) {
   const deliveryKey = opts?.deliveryKey
   if (deliveryKey) {
@@ -243,9 +216,6 @@ export async function sellPackInPerson(
       }
     : (pack as PackWithItems)
 
-  const cobros = opts?.cobrosDeLaOrden ?? []
-  const countSpend = !(cobros.length > 0 && (await laOrdenYaLeCuenta(venueId, customerId, cobros)))
-
   let purchase
   try {
     purchase = await prisma.$transaction(
@@ -258,8 +228,8 @@ export async function sellPackInPerson(
           amountPaid,
           deliveryKey,
           note: opts?.note,
-          // 🔴 D17: vendido desde el carrito a ese mismo cliente, el cobro de la orden ya le suma el «Total gastado».
-          countSpend,
+          // 🔴 D17: vendido desde el carrito, el cobro de la orden ya sumó al «Total gastado»; aquí no se repite.
+          countSpend: !opts?.cobradoEnOrden,
         }),
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     )
