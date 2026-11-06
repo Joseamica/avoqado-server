@@ -196,9 +196,9 @@ export function installCrmInboundFake(prismaMock: any) {
     db.contacts.push({ id, ...data })
     return { id }
   })
-  /** The first person of an account matching exact values — `null` meaning «has none» — oldest first, as Postgres does. */
+  /** The first person of an account matching exact values — `null` meaning «has none» — or `in`, oldest first, as Postgres does. */
   prismaMock.crmContact.findFirst.mockImplementation(async ({ where }: Row) => {
-    const found = db.contacts.find(contact => Object.entries(where).every(([field, value]) => (contact[field] ?? null) === value))
+    const found = db.contacts.find(contact => contactMatches(contact, where))
     return found ? { id: found.id } : null
   })
   prismaMock.crmContact.update.mockImplementation(async ({ where, data }: Row) => {

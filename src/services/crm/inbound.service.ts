@@ -239,7 +239,15 @@ export async function resolveAccountTx(tx: Prisma.TransactionClient, who: Identi
     const compatible = !who.organizationId || !locked.organizationId || locked.organizationId === who.organizationId
     if (candidate.via === 'KEY' && !compatible) throw new IdentityConflictError(locked.id, locked.organizationId!)
     const still = candidate.via === 'ORGANIZATION' ? locked.organizationId === who.organizationId : compatible
-    if (still) return { id: locked.id, organizationId: locked.organizationId, via: candidate.via }
+    if (!still) continue
+    // C2 (Codex plan r1 H1): a seller may take that email or phone off the account while this writer waits for the row.
+    // Found by a person, it must still have one under the lock; otherwise it is looked for again.
+    if (candidate.via === 'EMAIL' || candidate.via === 'PHONE') {
+      const person = candidate.via === 'EMAIL' ? { email: { in: who.emails } } : { phoneE164: { in: who.phones } }
+      const holder = await tx.crmContact.findFirst({ where: { accountId: locked.id, ...person }, select: { id: true } })
+      if (!holder) continue
+    }
+    return { id: locked.id, organizationId: locked.organizationId, via: candidate.via }
   }
   throw new Error('The CRM account of this person kept changing while it was being resolved; the caller retries it')
 }
