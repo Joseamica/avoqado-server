@@ -67,6 +67,11 @@ export async function createManualPayment(
   const tipAmount = new Prisma.Decimal(input.tipAmount ?? '0')
   const taxAmount = new Prisma.Decimal(input.taxAmount ?? '0')
   const discountAmount = new Prisma.Decimal(input.discountAmount ?? '0')
+  // 🔴 D12: lo COBRADO sin propina, lo que guarda el cobro (como cualquier otro). En la orden sombra el «Monto» es el subtotal:
+  // el cliente pagó monto + IVA − descuento. Antes el cobro guardaba el monto solo y no cuadraba con la venta (caja, turno,
+  // reportes y el tope de lo reembolsable leen el cobro). Con orden existente el IVA y el descuento no aplican.
+  const cobrado = input.orderId ? amount : amount.plus(taxAmount).minus(discountAmount)
+  if (cobrado.lessThan(0)) throw new BadRequestError('El descuento no puede exceder el monto más el IVA')
   if (input.idempotencyKey !== undefined && !/^[A-Za-z0-9_-]{8,64}$/.test(input.idempotencyKey)) {
     throw new BadRequestError('La llave de idempotencia debe tener de 8 a 64 caracteres alfanuméricos, guiones o guiones bajos')
   }
@@ -244,7 +249,7 @@ export async function createManualPayment(
         // dinero), porque mover el claim al final devuelve el agujero que este cambio cerró.
         const shiftClaim = await claimShiftForCapturedPayment(tx, {
           venueId,
-          amountPesos: amount,
+          amountPesos: cobrado,
           tipPesos: tipAmount,
           // Una Order se cuenta al primer cobro durable; abonos posteriores no la
           // vuelven a contar. La sombra nace y se salda con este primer cobro.
@@ -372,10 +377,7 @@ export async function createManualPayment(
           //   + tipAmount
           //   = total (what the client actually paid).
           isShadow = true
-          const shadowTotal = amount.plus(taxAmount).minus(discountAmount).plus(tipAmount)
-          if (shadowTotal.lessThan(0)) {
-            throw new BadRequestError('El descuento no puede exceder el subtotal más impuestos y propina')
-          }
+          const shadowTotal = cobrado.plus(tipAmount)
           const orderNumber = `ORD-MANUAL-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
           const shadow = await tx.order.create({
             data: {
@@ -445,7 +447,7 @@ export async function createManualPayment(
         // Gross/net amounts include tip — same convention as TPV recordFastPayment.
         // VenueTransaction.grossAmount and Payment.netAmount must include tip so
         // settlement reports total the actual cash collected, not just the sale price.
-        const grossWithTip = amount.plus(tipAmount)
+        const grossWithTip = cobrado.plus(tipAmount)
 
         const payment = await tx.payment.create({
           data: {
@@ -453,7 +455,7 @@ export async function createManualPayment(
             orderId: anchorOrderId,
             shiftId,
             idempotencyKey: input.idempotencyKey ?? null,
-            amount,
+            amount: cobrado,
             tipAmount,
             method: input.method,
             source: input.source,
@@ -491,7 +493,7 @@ export async function createManualPayment(
           orderId: anchorOrderId,
           staffId,
           channel: 'manualPayment',
-          amountPesos: amount,
+          amountPesos: cobrado,
           tipPesos: tipAmount,
           reconciliationEnabled,
         })
@@ -522,7 +524,7 @@ export async function createManualPayment(
           data: {
             paymentId: payment.id,
             orderId: anchorOrderId,
-            amount,
+            amount: cobrado,
           },
         })
 
@@ -589,7 +591,7 @@ export async function createManualPayment(
           orderId: anchorOrderId,
           venueId,
           staffId,
-          amount: amount.toFixed(2),
+          amount: cobrado.toFixed(2),
           source: input.source,
           externalSource: input.externalSource,
           shadowOrder: isShadow,
