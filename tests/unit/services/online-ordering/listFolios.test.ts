@@ -107,7 +107,8 @@ describe('listFolios', () => {
     expect(r.toPay[0].paidAt).toBeNull()
     expect(r.toDeliver[0].paidAt).toBe(PAGADO_A.toISOString())
     const lista = listas()[0]
-    expect(lista.select.order.select.payments).toMatchObject({ where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 })
+    expect(lista.select.order.select.payments).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
+      where: { status: 'COMPLETED', type: { not: 'REFUND' } }, orderBy: { createdAt: 'desc' }, take: 1 })
     expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
   })
 

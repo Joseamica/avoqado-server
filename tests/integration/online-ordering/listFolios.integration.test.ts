@@ -5,6 +5,7 @@
  */
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
+import { getTrackingByToken } from '@/services/online-ordering/order.service'
 import { listFolios } from '@/services/online-ordering/folios.service'
 import { expireOnlineOrder, markOnlineOrderDelivered, markOnlineOrderReady } from '@/services/online-ordering/transitions.service'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
@@ -176,6 +177,35 @@ describe('T12 · listFolios contra Postgres', () => {
     // el pedido de «Mi equipo» nunca es folio
     expect(numeros([...r.toPay, ...r.toDeliver])).not.toContain(deEquipo.orderId)
     expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: cancelado.onlineOrderId } })).status).toBe('CANCELLED_BY_STAFF')
+  })
+
+  it('T18b: paidAt es la hora del COBRO aunque después haya un reembolso COMPLETED; el seguimiento público trae nombre, paidAt y precios por renglón', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    const antes = await getTrackingByToken(
+      (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).trackingToken,
+    )
+    expect(antes).toMatchObject({ paid: false, paidAt: null, customerName: 'Ana ITEST' })
+
+    await efectivoDeLaTpv(orderId, CIEN)
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { orderId, status: 'COMPLETED', type: { not: 'REFUND' } } })
+    // un reembolso COMPLETED posterior (negativo) NO puede volverse «la hora de pago»
+    const { id: _id, createdAt: _c, updatedAt: _u, ...resto } = cobro as any
+    await prisma.payment.create({
+      data: {
+        ...resto,
+        idempotencyKey: null,
+        type: 'REFUND',
+        amount: -cobro.amount,
+        createdAt: new Date(cobro.createdAt.getTime() + 60_000),
+      },
+    })
+
+    const token = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).trackingToken
+    const t = await getTrackingByToken(token)
+    expect(t).toMatchObject({ paid: true, paidAt: cobro.createdAt.toISOString(), customerName: 'Ana ITEST', total: 100 })
+    expect(t!.items[0]).toMatchObject({ name: 'Flautas', quantity: 1, unitPrice: 100, total: 100 })
+    const r = await listFolios({ venueId: f.venueId })
+    expect(r.toDeliver.find(x => x.orderId === orderId)?.paidAt).toBe(cobro.createdAt.toISOString())
   })
 
   it('un folio que el dinero tardío pasó a ACCEPTED sale en toDeliver', async () => {
