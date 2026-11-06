@@ -273,6 +273,54 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
     }
   })
 
+  it('C1: los filtros nuevos piden «Ver»; con ella, 200 y meta.legible = 1; un valor que no existe es 400', async () => {
+    // The admin of the team from `beforeEach`: «Ver negocios» off.
+    const forbidden = await request(app).get('/crm/clients?usa=POS')
+    expect(forbidden.status).toBe(403)
+    expect(forbidden.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'propios',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+    })
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$queryRaw.mockImplementation(async (query: { sql: string }) =>
+      query.sql.includes('AS "altaSinTarjeta"') ? [{ altaSinTarjeta: 0 }] : query.sql.includes('AS "total"') ? [{ total: 0 }] : [],
+    )
+
+    const ok = await request(appWithErrors).get('/crm/clients?usa=POS&nivel=PRO&estado=COBRA&dueno=MIOS&motivo=SIN_MOTIVO&altas=true')
+    expect(ok.status).toBe(200)
+    expect(ok.body.meta).toMatchObject({ total: 0, nextCursor: null, legible: 1, conteos: { altaSinTarjeta: 0 } })
+    for (const query of ['usa=AVISO', 'motivo=SIN_MOTIVO', 'condicion=PAGADO']) {
+      expect((await request(appWithErrors).get(`/crm/clients?${query}`)).status).toBe(200)
+    }
+
+    for (const query of ['usa=OTRA', 'nivel=ENTERPRISE', 'estado=OTRO', 'motivo=CARO']) {
+      const bad = await request(appWithErrors).get(`/crm/clients?${query}`)
+      expect(bad.status).toBe(400)
+      expect(bad.body.message).toContain('Ese filtro no existe')
+    }
+    const badOwner = await request(appWithErrors).get('/crm/clients?dueno=a%20b')
+    expect(badOwner.status).toBe(400)
+    expect(badOwner.body.message).toContain('El dueño no es válido')
+
+    // Their own id is «Míos».
+    expect((await request(appWithErrors).get(`/crm/clients?dueno=${ADMIN_ID}`)).status).toBe(200)
+
+    // A «propios» seller filtering by somebody else.
+    const otro = await request(appWithErrors).get('/crm/clients?dueno=cstaffoth0000000000000001')
+    expect(otro.status).toBe(400)
+    expect(otro.body).toMatchObject({ code: 'CRM_FILTRO_DE_DUENO', message: 'Con «Ver: propios» sólo puedes filtrar «Míos» o «Sin dueño»' })
+  })
+
   it('ocultar_y_regresar_piden_configurar (L7)', async () => {
     const ORG = 'corgprime0000000000000001'
     prismaMock.organization.findUnique.mockResolvedValue({ id: ORG, name: 'Grupo de pruebas' })
@@ -306,6 +354,48 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
       expect(res.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
     }
     expect(prismaMock.crmHiddenClient.createMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /crm/clients/:organizationId/cuenta (C1, tarea 6)', () => {
+  const PATH = '/crm/clients/corgclient000000000000001/cuenta'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+
+  it('🔴 sin «Editar» → 403; con «Ver» y sin «Editar» → 403; con «Editar: propios» → 200', async () => {
+    // The admin of the team from `beforeEach`: no «Editar».
+    expect((await request(app).post(PATH)).status).toBe(403)
+    access({ verScope: 'propios', editarScope: null })
+    const ver = await request(app).post(PATH)
+    expect(ver.status).toBe(403)
+    expect(ver.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+    expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
+
+    access({ verScope: 'propios', editarScope: 'propios' })
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$queryRaw.mockImplementation(async (query: { sql: string }) =>
+      query.sql.includes('AS "esCliente"') ? [{ id: 'corgclient000000000000001', name: 'Tacos', esCliente: true }] : [],
+    )
+    prismaMock.crmStage.count.mockResolvedValue(1)
+    prismaMock.crmLostReason.count.mockResolvedValue(1)
+    prismaMock.crmStage.findFirst.mockResolvedValue({ id: 'cstagegana000000000000001' })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: 'caccounta0000000000000001' })
+    const ok = await request(appWithErrors).post(PATH)
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', creada: false })
   })
 })
 
@@ -442,5 +532,79 @@ describe('GET /crm/me con las llaves finas', () => {
       campanas: false,
       admin: false,
     })
+  })
+})
+
+describe('POST /crm/accounts/:id/usa (C1, tarea 7)', () => {
+  const PATH = '/crm/accounts/caccounta0000000000000001/usa'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+
+  it('🔴 sin «Editar» → 403 y no escribe; con «Editar» → 200', async () => {
+    access({ verScope: 'propios', editarScope: null })
+    const sin = await request(app).post(PATH).send({ valor: null })
+    expect(sin.status).toBe(403)
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+
+    access({ verScope: 'propios', editarScope: 'propios' })
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: 'caccounta0000000000000001' })
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual: 'POS', organizationId: 'corgclient000000000000001' })
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+    // `appWithErrors` has no body parser: this one sends JSON, so it goes through `app` and reads the 200 as is.
+    const ok = await request(app).post(PATH).send({ valor: null })
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', usaManual: null })
+  })
+})
+
+describe('POST /crm/accounts/:id/alta (C1, tarea 8)', () => {
+  const PATH = '/crm/accounts/caccounta0000000000000001/alta'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+
+  it('🔴 sin «Editar» → 403 y no escribe; con «Editar» → 200', async () => {
+    access({ verScope: 'propios', editarScope: null })
+    const sin = await request(app).post(PATH).send({ motivo: 'PRECIO', perdido: false })
+    expect(sin.status).toBe(403)
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+
+    access({ verScope: 'propios', editarScope: 'propios' })
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: 'caccounta0000000000000001' })
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({
+      altaMotivo: 'PRECIO',
+      altaMotivoTexto: null,
+      altaPerdido: false,
+      organizationId: 'corgclient000000000000001',
+    })
+    prismaMock.$queryRaw.mockResolvedValue([{ pendiente: 1 }])
+    const ok = await request(app).post(PATH).send({ motivo: 'PRECIO', perdido: false })
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', motivo: 'PRECIO', texto: null, perdido: false })
   })
 })

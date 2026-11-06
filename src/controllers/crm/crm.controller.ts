@@ -172,8 +172,12 @@ export async function rescheduleActivityHandler(req: Request, res: Response): Pr
 /** GET /api/v1/crm/clients */
 export async function listClients(req: Request, res: Response): Promise<void> {
   // `validateRequest(listClientsSchema)` already turned the limit into a number.
-  const { rows, nextCursor, total } = await clients.listClients(req.crmAccess!, req.query as unknown as clients.ClientFilters)
-  res.json({ data: rows, meta: { total, nextCursor } })
+  const { rows, nextCursor, total, conteos, legible } = await clients.listClients(
+    req.crmAccess!,
+    req.query as unknown as clients.ClientFilters,
+  )
+  // `legible: 1` = this server filters and paints the C1 columns; a new SUPERADMIN sends no new filter before seeing it.
+  res.json({ data: rows, meta: { total, nextCursor, legible, conteos } })
 }
 
 /** POST /api/v1/crm/clients/:organizationId/hide — «Ocultar de Clientes» (ruling 39). */
@@ -184,6 +188,21 @@ export async function hideClient(req: Request, res: Response): Promise<void> {
 /** POST /api/v1/crm/clients/:organizationId/unhide */
 export async function unhideClient(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.unhideClient(req.crmAccess!, req.params.organizationId) })
+}
+
+/** POST /api/v1/crm/clients/:organizationId/cuenta — the client's CRM account, made once (C1, task 6). */
+export async function ensureClientAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.ensureClientAccount(req.crmAccess!, req.params.organizationId) })
+}
+
+/** POST /api/v1/crm/accounts/:id/usa — «✋ a mano» en Usa (C1, task 7). */
+export async function setUsa(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.setUsa(req.crmAccess!, req.params.id, req.body) })
+}
+
+/** POST /api/v1/crm/accounts/:id/alta — «¿Por qué se quedó?» (C1, task 8). */
+export async function setAltaMotivo(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.setAltaMotivo(req.crmAccess!, req.params.id, req.body) })
 }
 
 /** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */

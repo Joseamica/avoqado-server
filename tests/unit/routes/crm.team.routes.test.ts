@@ -117,6 +117,12 @@ describe('crm team routes', () => {
       // Ruling 39 y L7: ocultar una organización interna o de prueba de «Clientes» es de quien configura el CRM.
       { route: 'POST /clients/:organizationId/hide', keys: configurar },
       { route: 'POST /clients/:organizationId/unhide', keys: configurar },
+      // C1: la cuenta del CRM de un cliente que no la tiene; «Editar» con su alcance.
+      { route: 'POST /clients/:organizationId/cuenta', keys: editar },
+      // C1 tarea 7: «✋ a mano» en Usa.
+      { route: 'POST /accounts/:id/usa', keys: editar },
+      // C1 tarea 8: «¿Por qué se quedó?».
+      { route: 'POST /accounts/:id/alta', keys: editar },
       // Ruling 47: what is live for a client without a CRM account, with the same key as the account's.
       { route: 'GET /clients/:organizationId/live', keys: ver },
       { route: 'GET /reports', keys: ver },

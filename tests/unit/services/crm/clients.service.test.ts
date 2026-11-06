@@ -7,15 +7,34 @@
  * never carries a card, shows sales only with «Ver ventas», takes the plan from the contract when there is no classic
  * row, and counts «the month» on Mexico City's calendar.
  */
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import { Prisma, TransactionStatus, VenueStatus } from '@prisma/client'
+import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { getClientLive, getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
+import { altaPendienteSql } from '@/services/crm/clientFacts'
+import { planesPorSucursal } from '@/services/crm/clientPage'
+import {
+  clientsQueries,
+  ensureClientAccount,
+  getClientLive,
+  getLive,
+  hideClient,
+  listClients,
+  setAltaMotivo,
+  setUsa,
+  unhideClient,
+} from '@/services/crm/clients.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '@/services/dashboard/planState.service'
 
 jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
+jest.mock('@/services/crm/accounts.service', () => ({
+  ...jest.requireActual('@/services/crm/accounts.service'),
+  ensureCrmDefaults: jest.fn(),
+}))
 jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn(), notifyReturningProspect: jest.fn() }))
 
 const SELLER = 'cstaffsel0000000000000001'
@@ -91,6 +110,8 @@ const planState = (over: Partial<PlanState> = {}): PlanState => ({
 
 const MODELS = [
   'crmAccount',
+  'crmStage',
+  'crmTimelineEvent',
   'crmTeam',
   'crmHiddenClient',
   'organization',
@@ -99,6 +120,7 @@ const MODELS = [
   'onboardingProgress',
   'terminal',
   'payment',
+  'staff',
 ] as const
 
 beforeEach(() => {
@@ -111,15 +133,22 @@ beforeEach(() => {
 })
 
 /**
- * «Clientes» reads in raw SQL (ruling 51): the page and its total. Each test answers the page with these rows and the
- * total with this number.
+ * «Clientes» reads in raw SQL (ruling 51): the page, its total and the count by reason of the stalled signups (C1). Each
+ * test answers the page with these rows, the total with this number and the count with zeros.
  */
 function clientsDb(rows: Array<Record<string, unknown>> = [], total = rows.length) {
-  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (query.sql.includes('COUNT(*)') ? [{ total }] : rows))
+  // What the page adds (task 5: venues, devices, signup, comments) reads only the page's ids and finds nothing here.
+  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+    isConteo(query) ? [{ altaSinTarjeta: 0 }] : isTotal(query) ? [{ total }] : isPage(query) ? rows : [],
+  )
 }
+const isConteo = (query: Prisma.Sql) => query.sql.includes('AS "altaSinTarjeta"')
+const isTotal = (query: Prisma.Sql) => query.sql.includes('AS "total"') && !query.sql.includes('ROW_NUMBER()')
+/** The universe's page and the client check of `getClientLive`: the statements that answer organizations with their account. */
+const isPage = (query: Prisma.Sql) => query.sql.includes('AS "crmAccountId"')
 const rawQueries = () => (prismaMock.$queryRaw.mock.calls as Array<[Prisma.Sql]>).map(([query]) => query)
-const pageQuery = (n = 0) => rawQueries().filter(query => !query.sql.includes('COUNT(*)'))[n]
-const countQuery = (n = 0) => rawQueries().filter(query => query.sql.includes('COUNT(*)'))[n]
+const pageQuery = (n = 0) => rawQueries().filter(isPage)[n]
+const countQuery = (n = 0) => rawQueries().filter(isTotal)[n]
 /** What follows `FROM "Organization" o`: the filter of the page (before its order) and of the total. */
 const filterOf = (query: Prisma.Sql) => {
   const from = query.sql.slice(query.sql.indexOf('FROM "Organization" o')).replace(/\s+/g, ' ')
@@ -133,6 +162,13 @@ const client = (over: Record<string, unknown> = {}) => ({
   createdAt: new Date('2026-09-01T12:00:00.000Z'),
   crmAccountId: null,
   yaCobro: true,
+  usaMedido: 'TERMINAL',
+  usaVisto: 'TERMINAL',
+  usaAviso: false,
+  usaEscrito: false,
+  nivel: 'FREE',
+  estado: 'COBRA',
+  ultimoCobroAt: new Date('2026-10-30T20:00:00.000Z'),
   ...over,
 })
 
@@ -261,6 +297,432 @@ describe('listClients', () => {
   })
 })
 
+describe('filtros, columnas y total de C1 (Tarea 4)', () => {
+  const sqlOf = (query: Prisma.Sql) => query.sql.replace(/\s+/g, ' ')
+
+  it('🔴 propios con dueno=<otro id> → 400 CRM_FILTRO_DE_DUENO y no consulta', async () => {
+    await expect(listClients(access(), { dueno: OTHER }, NOW)).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'CRM_FILTRO_DE_DUENO',
+      message: 'Con «Ver: propios» sólo puedes filtrar «Míos» o «Sin dueño»',
+    })
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.crmTeam.findUnique).not.toHaveBeenCalled()
+
+    // «Míos» and «Sin dueño» are fine for a «propios» seller; any owner is fine with «Ver: todos».
+    await expect(listClients(access(), { dueno: 'MIOS' }, NOW)).resolves.toBeDefined()
+    await expect(listClients(access(), { dueno: 'SIN_DUENO' }, NOW)).resolves.toBeDefined()
+    await expect(listClients(access({ ver: 'todos' }), { dueno: OTHER }, NOW)).resolves.toBeDefined()
+    expect(countQuery(2).values).toContain(OTHER)
+  })
+
+  it('🔴 propios con dueno=<su propio id> es «Míos»: responde y amarra al vendedor', async () => {
+    await expect(listClients(access(), { dueno: SELLER }, NOW)).resolves.toMatchObject({ legible: 1 })
+    expect(sqlOf(countQuery())).toContain('ca."ownerStaffId" = ?')
+    expect(countQuery().values).toContain(SELLER)
+    // The same SQL as «Míos».
+    await listClients(access(), { dueno: 'MIOS' }, NOW)
+    expect({ sql: countQuery(1).sql, values: countQuery(1).values }).toEqual({ sql: countQuery().sql, values: countQuery().values })
+  })
+
+  it('el tope sigue siendo 100 con filtros', async () => {
+    const filters = { limit: 10_000, usa: 'POS', nivel: 'PRO', estado: 'COBRA', dueno: 'MIOS', motivo: 'PRECIO' } as const
+    clientsDb([], 935)
+    await expect(listClients(access(), filters, NOW)).resolves.toMatchObject({ total: 935, legible: 1 })
+    expect(pageQuery().values.at(-1)).toBe(101)
+    expect(countQuery().sql).not.toMatch(/LIMIT \?\s*$/)
+    expect(pageQuery().sql).toMatch(/LIMIT \?\s*$/)
+  })
+
+  it('cada filtro va en el WHERE de la página y del total, antes del cursor', async () => {
+    await listClients(access(), { usa: 'POS', nivel: 'PRO', estado: 'COBRA', cursor: ORG_2 }, NOW)
+    for (const query of [pageQuery(), countQuery()]) {
+      const sql = sqlOf(query)
+      expect(sql).toContain('LEFT JOIN "CrmAccount" ca ON ca."organizationId" = o."id"')
+      expect(sql).toContain('LEFT JOIN LATERAL')
+      expect(sql).toContain('COALESCE(ca."usaManual", f."usaMedido") = ?')
+      expect(sql).toContain('f."nivel" = ?')
+      expect(sql).toContain('f."estado" = ?')
+      expect(query.values).toEqual(expect.arrayContaining(['POS', 'PRO', 'COBRA']))
+    }
+    // The cursor only in the page, after the filters.
+    const page = sqlOf(pageQuery())
+    expect(page.indexOf('f."estado" = ?')).toBeLessThan(page.indexOf('(o."createdAt", o."id") <'))
+    expect(sqlOf(countQuery())).not.toContain('(o."createdAt", o."id") <')
+  })
+
+  it('usa=AVISO es lo escrito distinto de lo medido', async () => {
+    await listClients(access(), { usa: 'AVISO' }, NOW)
+    expect(sqlOf(countQuery())).toContain('(ca."usaManual" IS NOT NULL AND ca."usaManual" <> f."usaMedido")')
+    expect(countQuery().values).not.toContain('AVISO')
+  })
+
+  it('dueño: MIOS es el mío, SIN_DUENO es sin cuenta o sin dueño, un id es ese dueño (con «todos»)', async () => {
+    await listClients(access(), { dueno: 'MIOS' }, NOW)
+    expect(sqlOf(countQuery(0))).toContain('ca."ownerStaffId" = ?')
+    expect(countQuery(0).values).toContain(SELLER)
+    await listClients(access(), { dueno: 'SIN_DUENO' }, NOW)
+    expect(sqlOf(countQuery(1))).toContain('(ca."id" IS NULL OR ca."ownerStaffId" IS NULL)')
+    await listClients(access({ ver: 'todos' }), { dueno: OTHER }, NOW)
+    expect(countQuery(2).values).toContain(OTHER)
+  })
+
+  it('🔴 motivo sólo sobre cuentas en el alcance de quien mira, y siempre de un 🟠', async () => {
+    await listClients(access(), { motivo: 'PRECIO' }, NOW)
+    const precio = sqlOf(countQuery(0))
+    expect(precio).toContain(`f."estado" = 'ALTA_SIN_TARJETA'`)
+    expect(precio).toContain('(ca."ownerStaffId" = ? OR ca."ownerStaffId" IS NULL) AND ca."altaMotivo" = ?')
+    expect(countQuery(0).values).toEqual(expect.arrayContaining([SELLER, 'PRECIO']))
+
+    await listClients(access(), { motivo: 'SIN_MOTIVO' }, NOW)
+    expect(sqlOf(countQuery(1))).toContain(
+      '(ca."id" IS NULL OR ((ca."ownerStaffId" = ? OR ca."ownerStaffId" IS NULL) AND ca."altaMotivo" IS NULL))',
+    )
+    // «todos» sees every account.
+    await listClients(access({ ver: 'todos' }), { motivo: 'PRECIO' }, NOW)
+    expect(sqlOf(countQuery(2))).toContain('TRUE AND ca."altaMotivo" = ?')
+  })
+
+  it('🔴 listClients corre como sentencias de universo exactamente page, total y conteos de clientsQueries (texto igual), y las demás consultas sólo reciben ids de la página', async () => {
+    clientsDb([
+      client({ id: ORG, crmAccountId: ACCOUNT, usaVisto: 'POS', usaAviso: true, usaEscrito: true }),
+      client({ id: ORG_2, crmAccountId: ACCOUNT_B, usaVisto: 'AMBOS', usaAviso: true, usaEscrito: true }),
+    ])
+    prismaMock.crmAccount.findMany.mockResolvedValue([
+      {
+        id: ACCOUNT,
+        organizationId: ORG,
+        owner: null,
+        stage: { id: GANADO, name: 'Ganado', kind: 'GANADA' },
+        usaManual: 'POS',
+        usaManualPorque: 'Lo vi en su local',
+        usaManualById: OTHER,
+        usaManualAt: new Date('2026-10-29T17:00:00.000Z'),
+      },
+    ])
+    prismaMock.staff.findMany.mockResolvedValue([{ id: OTHER, firstName: 'Ana', lastName: 'Pérez' }])
+    const filters = { usa: 'POS', altas: true, q: 'tacos' } as const
+
+    const result = await listClients(access(), filters, NOW)
+
+    const expected = clientsQueries(access(), filters, NOW, TEAM_ORG)
+    const universo = rawQueries().filter(query => query.sql.includes('FROM "Organization" o'))
+    expect(universo.map(query => ({ sql: query.sql, values: query.values }))).toEqual(
+      [expected.page, expected.total, expected.conteos].map(query => ({ sql: query.sql, values: query.values })),
+    )
+    // Task 5: what the page adds only ever receives the page's ids (never the universe's lateral).
+    const deLaPagina = rawQueries().filter(query => !query.sql.includes('FROM "Organization" o'))
+    expect(deLaPagina.length).toBeGreaterThan(0)
+    for (const query of deLaPagina) {
+      expect(query.sql).not.toContain('"usaMedido"')
+      const ids = query.values.filter((value): value is string => typeof value === 'string' && /^c[a-z0-9]{24}$/.test(value))
+      for (const id of ids) expect([ORG, ORG_2, ACCOUNT]).toContain(id)
+    }
+    // The rest only reads the page: its organizations, and the authors of what the caller may see.
+    expect(prismaMock.crmAccount.findMany.mock.calls[0][0].where).toEqual({
+      AND: [{ organizationId: { in: [ORG, ORG_2] } }, MINE_OR_UNOWNED],
+    })
+    expect(prismaMock.staff.findMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.staff.findMany.mock.calls[0][0]).toMatchObject({ where: { id: { in: [OTHER] } }, take: 1 })
+
+    expect(result).toMatchObject({ legible: 1, total: 2 })
+    expect(result.rows[0]).toMatchObject({
+      usa: {
+        visto: 'POS',
+        medido: 'TERMINAL',
+        manual: true,
+        aviso: true,
+        detalle: { porque: 'Lo vi en su local', por: { id: OTHER, name: 'Ana Pérez' }, at: new Date('2026-10-29T17:00:00.000Z') },
+      },
+      plan: { nivel: 'FREE' },
+      estado: { codigo: 'COBRA', ultimoCobroAt: new Date('2026-10-30T20:00:00.000Z') },
+      cuentaAjena: false,
+    })
+    // A colleague's ✋: the value and the mark, never who, why or when.
+    expect(result.rows[1]).toMatchObject({
+      usa: { visto: 'AMBOS', medido: 'TERMINAL', manual: true, aviso: true, detalle: null },
+      cuenta: null,
+      cuentaAjena: true,
+    })
+  })
+
+  it('sin ✋ visible no busca autores, y conteos llega con todas las llaves en cero', async () => {
+    clientsDb([client()])
+    const result = await listClients(access(), { altas: true }, NOW)
+    expect(prismaMock.staff.findMany).not.toHaveBeenCalled()
+    expect(result.rows[0].usa).toEqual({
+      visto: 'TERMINAL',
+      medido: 'TERMINAL',
+      manual: false,
+      aviso: false,
+      detalle: null,
+      aparatos: { terminales: 0, pos: 0 },
+    })
+    expect(result.conteos).toEqual({
+      altaSinTarjeta: 0,
+      porMotivo: {
+        PRECIO: 0,
+        NO_QUISO_TARJETA: 0,
+        SOLO_VEIA: 0,
+        OTRO_SISTEMA: 0,
+        PROBLEMA_TECNICO: 0,
+        DESPUES: 0,
+        OTRO: 0,
+        SIN_MOTIVO: 0,
+        DE_OTRO: 0,
+      },
+      perdidos: 0,
+    })
+  })
+
+  it('🔴 sin altas=true (el SUPERADMIN viejo) no se cuenta nada ni viene conteos; lo demás es igual', async () => {
+    clientsDb([client()])
+    const sin = await listClients(access(), { q: 'tacos' }, NOW)
+    expect(sin).not.toHaveProperty('conteos')
+    expect(rawQueries().some(isConteo)).toBe(false)
+    expect(sin).toMatchObject({ legible: 1, total: 1, nextCursor: null })
+    expect(sin.rows).toHaveLength(1)
+  })
+
+  it('🔴 conteos siempre sobre el universo ampliado (altas), con la búsqueda y sin los demás filtros', async () => {
+    await listClients(access(), { usa: 'POS', estado: 'COBRA', q: 'tacos', altas: true }, NOW)
+    const conteos = rawQueries().find(isConteo)!
+    expect(conteos.sql).toContain('op."acquisitionSource" IS NOT NULL')
+    expect(conteos.values).toContain('%tacos%')
+    expect(conteos.values).not.toContain('POS')
+    expect(conteos.values).not.toContain('COBRA')
+  })
+})
+
+describe('lo de la página (C1, Tarea 5)', () => {
+  const cuid = (prefix: string, i: number) => `${prefix}${String(i).padStart(25 - prefix.length, '0')}`
+
+  /**
+   * A page of `n` stalled signups, each with a visible account that has a ✋, a reason and a note, one venue with a classic
+   * plan row, devices and its signup: every extra of the page has something to read.
+   */
+  function paginaDb(n: number) {
+    const orgs = Array.from({ length: n }, (_, i) => cuid('corgpag', i))
+    const cuentas = orgs.map((_, i) => cuid('cctapag', i))
+    const sucursales = orgs.map((_, i) => cuid('cvenpag', i))
+    clientsDb(
+      orgs.map((id, i) => client({ id, crmAccountId: cuentas[i], estado: 'ALTA_SIN_TARJETA', usaEscrito: true, usaVisto: 'POS' })),
+      n,
+    )
+    const base = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => {
+      if (isPage(query) || isTotal(query) || isConteo(query)) return base(query)
+      if (query.sql.includes('ROW_NUMBER()'))
+        return orgs.map((organizationId, i) => ({
+          id: sucursales[i],
+          organizationId,
+          seatCapExempt: false,
+          orgSeatCapExempt: false,
+          total: 1,
+          concesionPro: false,
+          concesionPremium: false,
+        }))
+      if (query.sql.includes('"Terminal"')) return orgs.map(organizationId => ({ organizationId, terminales: 1, pos: 1 }))
+      if (query.sql.includes('"OnboardingProgress" op LEFT JOIN'))
+        return orgs.map(organizationId => ({
+          organizationId,
+          ultimaVezAt: NOW,
+          campana: null,
+          ofertaSlug: null,
+          acquisitionSource: 'landing',
+          planActivationStatus: 'NONE',
+          planActivationAttempt: 0,
+          negocioCreadoAt: NOW,
+        }))
+      if (query.sql.includes('"CrmTimelineEvent"'))
+        return cuentas.map(accountId => ({ accountId, actorStaffId: OTHER, createdAt: NOW, texto: 'Le marqué' }))
+      return base(query)
+    })
+    prismaMock.crmAccount.findMany.mockResolvedValue(
+      orgs.map((organizationId, i) => ({
+        id: cuentas[i],
+        organizationId,
+        owner: null,
+        stage: { id: GANADO, name: 'Ganado', kind: 'GANADA' },
+        usaManual: 'POS',
+        usaManualPorque: null,
+        usaManualById: OTHER,
+        usaManualAt: NOW,
+        altaMotivo: 'PRECIO',
+        altaMotivoTexto: null,
+        altaPerdido: false,
+      })),
+    )
+    prismaMock.staff.findMany.mockResolvedValue([{ id: OTHER, firstName: 'Ana', lastName: 'Pérez' }])
+    prismaMock.venueFeature.findMany.mockResolvedValue(
+      sucursales.map(venueId => ({
+        venueId,
+        active: true,
+        endDate: null,
+        suspendedAt: null,
+        gracePeriodEndsAt: null,
+        stripeSubscriptionId: null,
+        updatedAt: NOW,
+        feature: { code: 'PLAN_PRO' },
+      })),
+    )
+  }
+  const consultas = () =>
+    prismaMock.$queryRaw.mock.calls.length +
+    prismaMock.crmAccount.findMany.mock.calls.length +
+    prismaMock.staff.findMany.mock.calls.length +
+    prismaMock.venueFeature.findMany.mock.calls.length
+
+  beforeEach(() => prismaMock.venueFeature.findMany.mockReset())
+  afterEach(() => prismaMock.venueFeature.findMany.mockResolvedValue([]))
+
+  it('🔴 una página de 50 hace el mismo número de consultas que una de 2 (sin N+1), y lo trae todo', async () => {
+    paginaDb(2)
+    const dos = await listClients(access({ ver: 'todos' }), { altas: true }, NOW)
+    const deDos = consultas()
+
+    for (const mock of [prismaMock.$queryRaw, prismaMock.crmAccount.findMany, prismaMock.staff.findMany]) mock.mockClear()
+    prismaMock.venueFeature.findMany.mockReset()
+    paginaDb(50)
+    const cincuenta = await listClients(access({ ver: 'todos' }), { altas: true }, NOW)
+
+    expect(consultas()).toBe(deDos)
+    expect(cincuenta.rows).toHaveLength(50)
+    // Every extra arrived, so the count above covers all of them.
+    for (const row of [...dos.rows, ...cincuenta.rows]) {
+      expect(row.usa.aparatos).toEqual({ terminales: 1, pos: 1 })
+      expect(row.alta).toMatchObject({ motivo: 'PRECIO', origen: 'LANDING', tarjeta: 'NO_INTENTO', oferta: { tipo: 'LISTA' } })
+      expect(row.ultimoComentario).toEqual({ texto: 'Le marqué', autor: { id: OTHER, name: 'Ana Pérez' }, at: NOW })
+      expect(row.plan).toMatchObject({ nivel: 'FREE', sucursalesLeidas: 1, sucursalesTotales: 1 })
+    }
+    // The plan rows of the page in ONE bounded read: at most two plan rows per venue (`@@unique([venueId, featureId])`).
+    expect(prismaMock.venueFeature.findMany.mock.calls[0][0]).toMatchObject({ take: 100 })
+  })
+
+  it('🔴 C12: si el nivel de SQL y el de la página no coinciden con todas las sucursales leídas, manda SQL, la condición queda vacía y avisa sin datos de personas', async () => {
+    paginaDb(1)
+    // SQL says PREMIUM; the page reads one venue with a Pro row.
+    const base = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+      isPage(query) ? [client({ id: cuid('corgpag', 0), nivel: 'PREMIUM' })] : base(query),
+    )
+    jest.mocked(logger.warn).mockClear()
+
+    const { rows } = await listClients(access({ ver: 'todos' }), {}, NOW)
+
+    expect(rows[0].plan).toMatchObject({ nivel: 'PREMIUM', condicion: null, campana: null })
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    const [, datos] = jest.mocked(logger.warn).mock.calls[0] as unknown as [string, Record<string, unknown>]
+    expect(datos).toEqual({ organizationId: cuid('corgpag', 0), nivelSql: 'PREMIUM', nivelPagina: 'PRO' })
+  })
+
+  it('con más de 20 sucursales la diferencia es esperada: manda SQL, condición vacía y sin aviso', async () => {
+    paginaDb(1)
+    const base = prismaMock.$queryRaw.getMockImplementation()!
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => {
+      if (isPage(query)) return [client({ id: cuid('corgpag', 0), nivel: 'PREMIUM' })]
+      const rows = await base(query)
+      return query.sql.includes('ROW_NUMBER()') ? rows.map((row: Record<string, unknown>) => ({ ...row, total: 21 })) : rows
+    })
+    jest.mocked(logger.warn).mockClear()
+
+    const { rows } = await listClients(access({ ver: 'todos' }), {}, NOW)
+
+    expect(rows[0].plan).toMatchObject({ nivel: 'PREMIUM', condicion: null, sucursalesLeidas: 1, sucursalesTotales: 21 })
+    expect(logger.warn).not.toHaveBeenCalled()
+  })
+
+  it('🔴 T5-1: una fila con Stripe que ya no da acceso (vencida, sin gracia) nunca dice PAGADO: cae al contrato (CAMPANA) o a nada', async () => {
+    const vencida = {
+      venueId: VENUE,
+      active: true,
+      endDate: new Date('2026-09-01T00:00:00.000Z'),
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      stripeSubscriptionId: 'sub_vencida',
+      updatedAt: NOW,
+      feature: { code: 'PLAN_PRO' },
+    }
+    prismaMock.venueFeature.findMany.mockResolvedValue([vencida])
+    const conContrato = (contrato: boolean) =>
+      prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+        query.sql.includes('ROW_NUMBER()')
+          ? [
+              {
+                id: VENUE,
+                organizationId: ORG,
+                seatCapExempt: false,
+                orgSeatCapExempt: false,
+                total: 1,
+                concesionPro: true,
+                concesionPremium: false,
+              },
+            ]
+          : query.sql.includes('"HybridOfferPublication"') && contrato
+            ? [{ venueId: VENUE, planTier: 'PRO', name: 'Combo Pro' }]
+            : [],
+      )
+
+    conContrato(true)
+    expect(await planesPorSucursal([ORG], NOW)).toMatchObject([{ nivel: 'PRO', condicion: 'CAMPANA', campana: 'Combo Pro' }])
+    conContrato(false)
+    expect(await planesPorSucursal([ORG], NOW)).toMatchObject([{ nivel: 'PRO', condicion: null }])
+    // With access, the same row is PAGADO (regression).
+    prismaMock.venueFeature.findMany.mockResolvedValue([{ ...vencida, endDate: null }])
+    expect(await planesPorSucursal([ORG], NOW)).toMatchObject([{ nivel: 'PRO', condicion: 'PAGADO' }])
+  })
+
+  it('🔴 arquitectura: la condición sale de elegirFilaDelPlan y derivePlanState importados; nadie más puntúa filas de plan', () => {
+    const fuente = (archivo: string) => readFileSync(join(__dirname, '../../../../src/services/crm', archivo), 'utf8')
+    const pagina = fuente('clientPage.ts')
+    expect(pagina).toMatch(/import \{[^}]*\belegirFilaDelPlan\b[^}]*\} from '\.\.\/access\/filaDelPlan'/)
+    expect(pagina).toMatch(/import \{[^}]*\bderivePlanState\b[^}]*\} from '\.\.\/access\/basePlan\.service'/)
+    expect(pagina).toMatch(/import \{[^}]*\bdaAcceso\b[^}]*\} from '\.\.\/access\/ventanaDeAcceso'/)
+    expect(pagina).toMatch(/elegirFilaDelPlan\(/)
+    expect(pagina).toMatch(/derivePlanState\(/)
+    for (const archivo of ['clientPage.ts', 'clientPageSql.ts', 'clientFacts.ts', 'clientsSql.ts', 'clients.service.ts']) {
+      const texto = fuente(archivo)
+      // No own scoring of plan rows: no score, no «which row wins» of its own, no Stripe liveness of its own.
+      expect({ archivo, puntua: /\bpuntaje\b|\bscore\b|cobroVivo|function elegir|elegirFila(?!DelPlan)/.test(texto) }).toEqual({
+        archivo,
+        puntua: false,
+      })
+      // And the derivation of the state is never re-written: no other place decides `trial` / `past_due` / `suspended`.
+      expect({ archivo, deriva: /'past_due'\s*:|state\s*=\s*'(trial|suspended|canceled|active)'/.test(texto) }).toEqual({
+        archivo,
+        deriva: false,
+      })
+    }
+  })
+})
+
+describe('altas sin tarjeta (C1, P1 = A)', () => {
+  const ALTA = `op."acquisitionSource" IS NOT NULL`
+
+  it('sin altas=1 el universo es exactamente clientSql: no aparece la rama de altas', async () => {
+    await listClients(access(), {}, NOW)
+    expect(pageQuery().sql).not.toContain(ALTA)
+    expect(countQuery().sql).not.toContain(ALTA)
+  })
+
+  it('con altas=1 la lista y el total suman la rama de altas, y ésta también excluye al equipo', async () => {
+    await listClients(access(), { altas: true }, NOW)
+    for (const query of [pageQuery(), countQuery()]) {
+      expect(query.sql).toContain(ALTA)
+      expect(query.sql).toMatch(/OR \(o\."id" <> \? AND /)
+      expect(query.sql).toContain('NOT EXISTS (SELECT 1 FROM "CrmHiddenClient"')
+    }
+  })
+
+  it('getClientLive abre siempre sobre el universo ampliado (la ficha de un 🟠 se abre)', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([])
+    prismaMock.venue.count.mockResolvedValue(0)
+    clientsDb([])
+    await expect(getClientLive(access(), ORG, NOW)).rejects.toBeDefined()
+    expect(rawQueries()[0].sql).toContain(ALTA)
+  })
+})
+
 describe('organizaciones ocultas (ruling 39)', () => {
   const HIDDEN = 'NOT EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")'
   const ONLY_HIDDEN = /(?<!NOT )EXISTS \(SELECT 1 FROM "CrmHiddenClient" h WHERE h\."organizationId" = o\."id"\)/
@@ -346,8 +808,43 @@ describe('getLive', () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue({ completedSteps: [1, 2, 3], completedAt: null })
     prismaMock.terminal.count.mockResolvedValue(2)
     prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: over.ventas ?? new Prisma.Decimal('1500.50') } })
+    prismaMock.organization.findUnique.mockResolvedValue({ seatCapExempt: false })
     jest.mocked(getPlanState).mockResolvedValue(planState())
   }
+
+  it('vivo_dice_si_la_organizacion_es_cliente_de_antes (Organization.seatCapExempt)', async () => {
+    linked()
+    expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ deAntes: false })
+    prismaMock.organization.findUnique.mockResolvedValue({ seatCapExempt: true })
+    expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ deAntes: true })
+    expect(prismaMock.organization.findUnique).toHaveBeenLastCalledWith({ where: { id: ORG }, select: { seatCapExempt: true } })
+  })
+
+  it('🔴 vivo: los hechos del alta sólo se leen de una organización 🟠 (la misma regla altaPendienteSql que pinta la fila)', async () => {
+    linked()
+    await getLive(access(), ACCOUNT, NOW)
+    const alta = rawQueries().find(query => query.sql.includes('"OnboardingProgress" op LEFT JOIN'))!
+    expect(alta.sql.replace(/\s+/g, ' ')).toContain(altaPendienteSql().sql.replace(/\s+/g, ' '))
+  })
+
+  it('vivo: cada sucursal dice si es de demostración (demo), con la misma regla de «sucursal real» de la lista', async () => {
+    linked({
+      venues: [
+        { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', demoExpiresAt: null, _count: { terminals: 2 } },
+        { id: VENUE_2, name: 'Demo', status: VenueStatus.LIVE_DEMO, kycStatus: null, demoExpiresAt: null, _count: { terminals: 0 } },
+        {
+          id: 'cvenueccc0000000000000001',
+          name: 'Prueba',
+          status: 'ACTIVE',
+          kycStatus: null,
+          demoExpiresAt: NOW,
+          _count: { terminals: 0 },
+        },
+      ],
+    })
+    const live = await getLive(access(), ACCOUNT, NOW)
+    expect((live as { venues: Array<{ id: string; demo: boolean }> }).venues.map(v => v.demo)).toEqual([false, true, true])
+  })
 
   it('vivo_sin_llave_ventas_no_trae_ventas', async () => {
     linked()
@@ -589,5 +1086,476 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     await expect(getClientLive(access({ ventas: true }), ORG, NOW)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_NO_ES_CLIENTE' })
     expect(prismaMock.venue.findMany).not.toHaveBeenCalled()
     expect(getPlanState).not.toHaveBeenCalled()
+  })
+})
+
+describe('ensureClientAccount (C1, tarea 6)', () => {
+  const STAGE = 'cstagegana000000000000001'
+  const ABIERTA = 'cstageabie000000000000001'
+  /** What the client check answers: the organization and whether it is a client by `clientSql` (false = only a stalled signup). */
+  function org(row: { esCliente: boolean } | null) {
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+      query.sql.includes('AS "esCliente"') && row ? [{ id: ORG, name: 'Tacos El Güero', ...row }] : [],
+    )
+  }
+  beforeEach(() => {
+    jest.mocked(logAction).mockClear()
+    prismaMock.crmStage.findFirst.mockImplementation((async (args: { where: { kind: string } }) => ({
+      id: args.where.kind === 'GANADA' ? STAGE : ABIERTA,
+    })) as never)
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('🔴 oculta, del equipo o que no es cliente → 404 CRM_NO_ES_CLIENTE y no escribe', async () => {
+    org(null)
+    await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_NO_ES_CLIENTE' })
+    expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('un cliente real: etapa GANADA, fuente CLIENTE, sin dueño ni wonAt; evento y ActivityLog sin el nombre de nadie', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+
+    await expect(ensureClientAccount(access(), ORG)).resolves.toEqual({ accountId: ACCOUNT, creada: true })
+    expect(prismaMock.crmStage.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { kind: 'GANADA' } }))
+    const data = (prismaMock.crmAccount.createMany.mock.calls[0][0] as { data: Array<Record<string, unknown>> }).data[0]
+    expect(data).toMatchObject({ name: 'Tacos El Güero', source: 'CLIENTE', stageId: STAGE, organizationId: ORG })
+    expect(data).not.toHaveProperty('ownerStaffId')
+    expect(data).not.toHaveProperty('wonAt')
+    expect(prismaMock.crmAccount.createMany).toHaveBeenCalledWith(expect.objectContaining({ skipDuplicates: true }))
+    expect(prismaMock.crmAccount.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { AND: [{ organizationId: ORG }, MINE_OR_UNOWNED] } }),
+    )
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({ accountId: ACCOUNT, kind: 'SYSTEM', actorStaffId: SELLER, data: { event: 'CLIENT_ACCOUNT_OPENED' } }),
+      ],
+      skipDuplicates: true,
+    })
+    expect(logAction).toHaveBeenCalledTimes(1)
+    const logged = jest.mocked(logAction).mock.calls[0][0]
+    expect(logged).toMatchObject({
+      staffId: SELLER,
+      venueId: null,
+      organizationId: ORG,
+      action: 'CRM_CLIENT_ACCOUNT_CREATED',
+      entityId: ACCOUNT,
+      data: { organizationId: ORG, source: 'CLIENTE' },
+    })
+    expect(JSON.stringify(logged)).not.toContain('Tacos')
+  })
+
+  it('una alta sin tarjeta: la primera etapa ABIERTA y fuente ALTA, nunca GANADA', async () => {
+    org({ esCliente: false })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+
+    await ensureClientAccount(access(), ORG)
+    expect(prismaMock.crmStage.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { kind: 'ABIERTA' }, orderBy: [{ order: 'asc' }, { id: 'asc' }] }),
+    )
+    const data = (prismaMock.crmAccount.createMany.mock.calls[0][0] as { data: Array<Record<string, unknown>> }).data[0]
+    expect(data).toMatchObject({ source: 'ALTA', stageId: ABIERTA })
+  })
+
+  it('con una cuenta visible → creada: false, sin evento ni ActivityLog', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+
+    await expect(ensureClientAccount(access(), ORG)).resolves.toEqual({ accountId: ACCOUNT, creada: false })
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con la cuenta de B y A «propios» → 404 CRM_ACCOUNT_NOT_FOUND', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_ACCOUNT_NOT_FOUND' })
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 carrera: el insert de A no inserta (count 0) porque otro la creó y B ya la tomó → 404, sin evento ni ActivityLog', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ code: 'CRM_ACCOUNT_NOT_FOUND' })
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('setUsa (C1, tarea 7)', () => {
+  /** What the account holds before: `touchTx` reads it with ROW_SELECT and `setUsa` with its own select (the same mock). */
+  const cuenta = (usaManual: string | null, usaManualPorque: string | null = null) =>
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual, usaManualPorque, organizationId: ORG } as never)
+  beforeEach(() => {
+    jest.mocked(logAction).mockClear()
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT } as never)
+    prismaMock.crmAccount.update.mockResolvedValue({} as never)
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('escribe las cuatro columnas, el evento USA_CHANGE con el porqué y el ActivityLog sin el porqué', async () => {
+    cuenta(null)
+    await expect(setUsa(access(), ACCOUNT, { valor: 'TERMINAL', porque: 'Lo vi en su local' })).resolves.toEqual({
+      accountId: ACCOUNT,
+      usaManual: 'TERMINAL',
+    })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { usaManual: 'TERMINAL', usaManualPorque: 'Lo vi en su local', usaManualById: SELLER, usaManualAt: expect.any(Date) },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          accountId: ACCOUNT,
+          kind: 'USA_CHANGE',
+          actorStaffId: SELLER,
+          data: { valor: 'TERMINAL', porque: 'Lo vi en su local' },
+        }),
+      ],
+      skipDuplicates: true,
+    })
+    const logged = jest.mocked(logAction).mock.calls[0][0]
+    expect(logged).toMatchObject({
+      action: 'CRM_CLIENT_USA_SET',
+      venueId: null,
+      organizationId: ORG,
+      entityId: ACCOUNT,
+      data: { valor: 'TERMINAL' },
+    })
+    expect(JSON.stringify(logged)).not.toContain('local')
+  })
+
+  it('«Leerlo solo» limpia las cuatro columnas, deja su evento y CRM_CLIENT_USA_CLEARED sin datos', async () => {
+    cuenta('POS')
+    await expect(setUsa(access(), ACCOUNT, { valor: null })).resolves.toEqual({ accountId: ACCOUNT, usaManual: null })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { usaManual: null, usaManualPorque: null, usaManualById: null, usaManualAt: null },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ kind: 'USA_CHANGE', data: { valor: null } })],
+      skipDuplicates: true,
+    })
+    expect(jest.mocked(logAction).mock.calls[0][0]).toMatchObject({ action: 'CRM_CLIENT_USA_CLEARED', data: {} })
+  })
+
+  it('limpiar algo ya limpio no deja evento ni ActivityLog ni escribe', async () => {
+    cuenta(null)
+    await expect(setUsa(access(), ACCOUNT, { valor: null })).resolves.toEqual({ accountId: ACCOUNT, usaManual: null })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 guardar el MISMO ✋ (mismo valor y mismo porqué) no deja evento ni ActivityLog ni toca lastTouchAt', async () => {
+    cuenta('POS', 'Lo vi en su local')
+    await expect(setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local' })).resolves.toEqual({
+      accountId: ACCOUNT,
+      usaManual: 'POS',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('el mismo valor con otro porqué sí escribe (es otra razón)', async () => {
+    cuenta('POS', 'Lo vi en su local')
+    await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Me lo dijo la dueña' })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledTimes(1)
+  })
+
+  describe('«vio»: lo que el editor vio (el SERVIDOR decide si cambió mientras tanto)', () => {
+    const noEscribio = () => {
+      expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+      expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // ni lastTouchAt
+      expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    }
+
+    it('coincide con lo guardado → escribe como siempre', async () => {
+      cuenta('TERMINAL', 'Lo dijo la dueña')
+      await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('se compara normalizado: espacios del porqué y null contra «» no son un cambio', async () => {
+      cuenta('TERMINAL', 'Lo dijo la dueña')
+      await setUsa(access(), ACCOUNT, {
+        valor: 'POS',
+        porque: 'Lo vi en su local',
+        vio: { valor: 'TERMINAL', porque: '  Lo dijo la dueña ' },
+      })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      prismaMock.crmAccount.update.mockClear()
+      cuenta(null, null)
+      await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: null, porque: '' } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+
+    it('🔴 otro valor guardado → 409 CRM_CAMBIO_AL_EDITAR con su mensaje, y no escribe nada', async () => {
+      cuenta('AMBOS', 'Lo cambió otra persona')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMBIO_AL_EDITAR',
+        message: 'Cambió mientras lo editabas: revisa y guarda otra vez.',
+      })
+      noEscribio()
+    })
+
+    it('🔴 mismo valor con otro porqué guardado → 409 (alguien más lo reescribió)', async () => {
+      cuenta('TERMINAL', 'Otra razón')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: null, vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } }),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR' })
+      noEscribio()
+    })
+
+    it('🔴 vio null («Leerlo solo») pero alguien ya escribió un ✋ → 409', async () => {
+      cuenta('POS', 'Lo vi en su local')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: 'TERMINAL', porque: 'La tiene en caja', vio: { valor: null, porque: null } }),
+      ).rejects.toMatchObject({
+        code: 'CRM_CAMBIO_AL_EDITAR',
+      })
+      noEscribio()
+    })
+
+    it('lo que se pide ya está guardado (reintento del propio guardado) → no-op aunque vio sea lo de antes', async () => {
+      cuenta('POS', 'Lo vi en su local')
+      await expect(
+        setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local', vio: { valor: 'TERMINAL', porque: 'Lo dijo la dueña' } }),
+      ).resolves.toEqual({ accountId: ACCOUNT, usaManual: 'POS' })
+      noEscribio()
+    })
+
+    it('sin vio, otro valor guardado se pisa como hoy', async () => {
+      cuenta('AMBOS', 'Lo cambió otra persona')
+      await setUsa(access(), ACCOUNT, { valor: 'POS', porque: 'Lo vi en su local' })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('🔴 A «propios» sobre la cuenta de B (no la ve) → 404 y no escribe', async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(setUsa(access(), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ver: todos, editar: propios sobre la de B → 403 CRM_NO_ES_TUYO', async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: ACCOUNT_B } as never)
+    await expect(setUsa(access({ ver: 'todos' }), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_NO_ES_TUYO',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('setAltaMotivo (C1, tarea 8)', () => {
+  /** What the account holds before, and whether its organization still matches the pending signup (`AS "pendiente"`). */
+  const cuenta = (
+    over: Partial<{ altaMotivo: string | null; altaMotivoTexto: string | null; altaPerdido: boolean; organizationId: string | null }> = {},
+    pendiente = true,
+  ) => {
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({
+      altaMotivo: null,
+      altaMotivoTexto: null,
+      altaPerdido: false,
+      organizationId: ORG,
+      ...over,
+    } as never)
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+      query.sql.includes('AS "pendiente"') ? (pendiente ? [{ pendiente: 1 }] : []) : [],
+    )
+  }
+  beforeEach(() => {
+    jest.mocked(logAction).mockClear()
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT } as never)
+    prismaMock.crmAccount.update.mockResolvedValue({} as never)
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('escribe motivo, texto y Perdido, deja su evento ALTA_MOTIVO y un ActivityLog sin el texto', async () => {
+    cuenta()
+    await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true })).resolves.toEqual({
+      accountId: ACCOUNT,
+      motivo: 'OTRO',
+      texto: 'Se fue con su cuñado',
+      perdido: true,
+    })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { altaMotivo: 'OTRO', altaMotivoTexto: 'Se fue con su cuñado', altaPerdido: true },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          accountId: ACCOUNT,
+          kind: 'ALTA_MOTIVO',
+          actorStaffId: SELLER,
+          data: { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true },
+        }),
+      ],
+      skipDuplicates: true,
+    })
+    const logged = jest.mocked(logAction).mock.calls[0][0]
+    expect(logged).toMatchObject({
+      action: 'CRM_CLIENT_ALTA_MOTIVO_SET',
+      venueId: null,
+      organizationId: ORG,
+      entityId: ACCOUNT,
+      data: { motivo: 'OTRO', perdido: true },
+    })
+    expect(JSON.stringify(logged)).not.toContain('cuñado')
+  })
+
+  it('un motivo de la lista borra el texto de antes', async () => {
+    cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'viejo' })
+    await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { altaMotivo: 'PRECIO', altaMotivoTexto: null, altaPerdido: false },
+    })
+  })
+
+  it('🔴 una cuenta cuya organización ya activó → 409 CRM_ALTA_TERMINADA y nada escrito', async () => {
+    cuenta({}, false)
+    await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_ALTA_TERMINADA',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una cuenta sin organización → 409 CRM_NO_ES_ALTA (nunca dice «ya terminó»)', async () => {
+    cuenta({ organizationId: null })
+    await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_NO_ES_ALTA',
+      message: 'Este cliente no tiene un alta pendiente',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+  })
+
+  it('el mismo valor que ya tiene no deja evento ni ActivityLog ni escribe', async () => {
+    cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
+    await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  describe('«vio»: lo que el editor vio (el SERVIDOR decide si cambió mientras tanto)', () => {
+    const noEscribio = () => {
+      expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+      expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // ni lastTouchAt
+      expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    }
+
+    it('coincide con lo guardado → escribe como siempre', async () => {
+      cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'Se fue', altaPerdido: false })
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: 'OTRO', texto: 'Se fue', perdido: false } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('se compara normalizado: espacios del texto y null contra «» no son un cambio', async () => {
+      cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'Se fue', altaPerdido: false })
+      await setAltaMotivo(access(), ACCOUNT, {
+        motivo: 'PRECIO',
+        perdido: true,
+        vio: { motivo: 'OTRO', texto: ' Se fue  ', perdido: false },
+      })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+      prismaMock.crmAccount.update.mockClear()
+      cuenta()
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: null, texto: '', perdido: false } })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+
+    it('🔴 otro motivo guardado → 409 CRM_CAMBIO_AL_EDITAR con su mensaje, y no escribe nada', async () => {
+      cuenta({ altaMotivo: 'DESPUES' })
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: null, texto: null, perdido: false } }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_CAMBIO_AL_EDITAR',
+        message: 'Cambió mientras lo editabas: revisa y guarda otra vez.',
+      })
+      noEscribio()
+    })
+
+    it('🔴 otro texto o otro «Perdido» guardado → 409', async () => {
+      cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'Otra historia', altaPerdido: false })
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, {
+          motivo: 'OTRO',
+          texto: 'Se fue',
+          perdido: true,
+          vio: { motivo: 'OTRO', texto: 'Se fue', perdido: false },
+        }),
+      ).rejects.toMatchObject({ code: 'CRM_CAMBIO_AL_EDITAR' })
+      cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, { motivo: null, perdido: true, vio: { motivo: 'PRECIO', texto: null, perdido: false } }),
+      ).rejects.toMatchObject({ code: 'CRM_CAMBIO_AL_EDITAR' })
+      noEscribio()
+    })
+
+    it('lo que se pide ya está guardado (reintento del propio guardado) → no-op aunque vio sea lo de antes', async () => {
+      cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true, vio: { motivo: null, texto: null, perdido: false } })
+      noEscribio()
+    })
+
+    it('el alta ya terminó → sigue siendo CRM_ALTA_TERMINADA aunque vio no coincida', async () => {
+      cuenta({ altaMotivo: 'DESPUES' }, false)
+      await expect(
+        setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false, vio: { motivo: null, texto: null, perdido: false } }),
+      ).rejects.toMatchObject({ code: 'CRM_ALTA_TERMINADA' })
+    })
+
+    it('sin vio, otro motivo guardado se pisa como hoy', async () => {
+      cuenta({ altaMotivo: 'DESPUES' })
+      await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })
+      expect(prismaMock.crmAccount.update).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('🔴 A «propios» sobre la de B (no la ve) → 404 y no escribe', async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(setAltaMotivo(access(), ACCOUNT_B, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ver: todos, editar: propios sobre la de B → 403 CRM_NO_ES_TUYO', async () => {
+    prismaMock.crmAccount.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: ACCOUNT_B } as never)
+    await expect(setAltaMotivo(access({ ver: 'todos' }), ACCOUNT_B, { motivo: null, perdido: true })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_NO_ES_TUYO',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
   })
 })

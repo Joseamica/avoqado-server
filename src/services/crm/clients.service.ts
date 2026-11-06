@@ -10,20 +10,36 @@
  */
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
-import { NotFoundError } from '../../errors/AppError'
+import { ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
+import { isProductionVenue } from '../../lib/venueStatus.constants'
 import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
-import { utcTs } from '../../utils/sqlDates'
-import { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
+import { ensureCrmDefaults, lockEditableTx, touchNoEarlierTx } from './accounts.service'
 import { scopeWhere, type CrmAccess } from './access.service'
+import type { MotivoDelAlta, Nivel, UsaEscrito } from './clientCodes'
+import { altaPendienteSql } from './clientFacts'
+import {
+  altaDeLaFila,
+  altaFactsOf,
+  aparatosDe,
+  autoresDelUsa,
+  conteosDe,
+  planDeLaFila,
+  planDeLaPagina,
+  ultimosComentarios,
+  usaDeLaFila,
+} from './clientPage'
+import { checkDueno, clientSql, clientsFilter, clientsQueries, pageSize, type ClientFilters } from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
-import { MONEY, REAL_VENUE, REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './sweep.service'
+import { addEvent } from './timeline.service'
+import { MONEY, REAL_VENUE } from './sweep.service'
 
-const DEFAULT_PAGE = 50
-const MAX_PAGE = 100
+// The SQL lives in the leaf `clientsSql.ts`; these were imported from here before it existed.
+export { clientSql, clientsFilter, clientsQueries, planVigenteSql, scopeSql, type ClientFilters, type PaidPlan } from './clientsSql'
+
 // ponytail: the ficha shows an organization's first 20 venues (plan read per venue, Stripe included) and says how many
 // there are; page them if a client with more ever needs the rest in the ficha.
 const VENUES_CAP = 20
@@ -32,89 +48,22 @@ const PLANS_AT_ONCE = 4
 /** The steps of the signup, the same count as `getOnboardingCompletionPercentage`. */
 const ONBOARDING_STEPS = 8
 
-/** The paid plans, with the `Feature.code` of its classic row and the `HybridContract.planTier` of a commercial contract. */
-const PAID_PLANS = {
-  PRO: { featureCode: 'PLAN_PRO', contractTier: Prisma.sql`'PRO'` },
-  PREMIUM: { featureCode: 'PLAN_PREMIUM', contractTier: Prisma.sql`'PREMIUM'` },
-} as const satisfies Record<string, { featureCode: (typeof PAID_PLAN_TIER_CODES)[number]; contractTier: Prisma.Sql }>
-export type PaidPlan = keyof typeof PAID_PLANS
-
-/**
- * The «paid plan in force» rule over a venue aliased `v`, shared by «Clientes» (who is a client) and the campaign
- * audiences (which plan a client has), so the two never say different things. A venue holds a paid plan when it has the
- * classic row in force without a trial end (as `endDate` means in the schema) or a commercial contract in force (the same
- * rule as `planContractOrigin`, whose `planTier` can exist with no classic row). `plans` narrows which tiers count; the
- * default is any paid one. GRATIS is the absence of it: `NOT planVigenteSql(now)`.
- *
- * Two correlated EXISTS (ruling 51), each stopping at its first row on `VenueFeature(venueId)` and
- * `HybridContract(venueId, …)`.
- */
-export function planVigenteSql(now: Date, plans: readonly PaidPlan[] = ['PRO', 'PREMIUM']): Prisma.Sql {
-  return Prisma.sql`(
-          EXISTS (
-            SELECT 1 FROM "VenueFeature" vf JOIN "Feature" f ON f."id" = vf."featureId"
-            WHERE vf."venueId" = v."id" AND f."code" IN (${Prisma.join(plans.map(plan => PAID_PLANS[plan].featureCode))})
-              AND vf."active" = true AND vf."suspendedAt" IS NULL AND vf."endDate" IS NULL
-          )
-          OR EXISTS (
-            SELECT 1 FROM "HybridContract" hc
-            WHERE hc."venueId" = v."id" AND hc."endedAt" IS NULL AND hc."planTier" IN (${Prisma.join(
-              plans.map(plan => PAID_PLANS[plan].contractTier),
-              ', ',
-            )})
-              AND (hc."cancelAt" IS NULL OR hc."cancelAt" > ${utcTs(now)})
-          )
-        )`
-}
-
-/**
- * Ruling 35: who is a client — over an Organization aliased `o`, in ONE bounded query over the tables `getPlanState`
- * reads, never `getPlanState` per row: a REAL venue that charged real money, holds a paid plan in force (`planVigenteSql`)
- * or a commercial contract in force; or a CRM account a seller won. Never the sales team's own organization (ruling 14).
- *
- * Raw SQL with correlated EXISTS (ruling 51): as Prisma relation filters inside this OR, «charged real money» became a
- * hashed subplan over every completed payment of the platform, on every page and every total. Each EXISTS here stops at
- * the first row, on `Payment(venueId, status, createdAt)`, `VenueFeature(venueId)` and `HybridContract(venueId, …)`.
- */
-export function clientSql(teamOrgId: string | null, now: Date): Prisma.Sql {
-  return Prisma.sql`${teamOrgId ? Prisma.sql`o."id" <> ${teamOrgId} AND ` : Prisma.empty}(
-    EXISTS (
-      SELECT 1 FROM "Venue" v
-      WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL}
-        AND (
-          ${VENUE_HAS_MONEY_SQL}
-          OR ${planVigenteSql(now)}
-        )
-    )
-    OR EXISTS (
-      SELECT 1 FROM "CrmAccount" ca JOIN "CrmStage" cs ON cs."id" = ca."stageId"
-      WHERE ca."organizationId" = o."id" AND cs."kind" = 'GANADA'
-    )
-  )`
-}
-
-/** A typed «%» or «_» is a letter, not a wildcard: `ILIKE`'s default escape is the backslash. */
-const likeContaining = (text: string) => `%${text.replace(/[\\%_]/g, '\\$&')}%`
-
-/**
- * The clients «Clientes» lists, as a filter over `o`: the client rule, the hidden ones out — or only them (ruling 39) —
- * and the name search, all in the database, before the page and in the total.
- */
-function clientsFilter(teamOrgId: string | null, now: Date, opts: { onlyHidden: boolean; q?: string }): Prisma.Sql {
-  const hidden = Prisma.sql`EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")`
-  return Prisma.sql`${clientSql(teamOrgId, now)}
-    AND ${opts.onlyHidden ? hidden : Prisma.sql`NOT ${hidden}`}${opts.q ? Prisma.sql` AND o."name" ILIKE ${likeContaining(opts.q)}` : Prisma.empty}`
-}
-
-export interface ClientFilters {
-  q?: string
-  cursor?: string
-  limit?: number
-  /** Only the hidden ones (ruling 39), to bring one back. Only with «Configurar el CRM» (L7); for anyone else it is ignored. */
-  ocultos?: boolean
-}
-
 const fullName = (person: { firstName: string; lastName: string }) => `${person.firstName} ${person.lastName}`.trim()
+
+type PageRow = {
+  id: string
+  name: string
+  createdAt: Date
+  crmAccountId: string | null
+  yaCobro: boolean
+  usaMedido: string
+  usaVisto: string
+  usaAviso: boolean
+  usaEscrito: boolean
+  nivel: Nivel
+  estado: string
+  ultimoCobroAt: Date | null
+}
 
 /**
  * «Clientes», a page at a time: filters and search in the database, the page capped at 100 by the server, the real total.
@@ -122,26 +71,20 @@ const fullName = (person: { firstName: string; lastName: string }) => `${person.
  * linked CRM account shows its owner and stage only inside the caller's scope (`cuentaAjena` says there is one).
  * `yaCobro` is «Ya cobró» / «Aún no cobra». An organization marked hidden (Prime, or any internal or test one, ruling 39)
  * never takes a slot of the page nor counts in the total; `ocultos` with «Configurar el CRM» lists only those.
+ * `legible: 1` tells a client this server filters and paints the C1 columns (Usa, Plan, Estado). Each row also carries, read
+ * for the page only (task 5): its devices, its plan's condition by the platform's own rules, a 🟠's signup and the newest
+ * note of an account the caller sees; `conteos` counts the 🟠 by reason, only when the request lists them (`altas=true`).
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
-  const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
-  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: !!(filters.ocultos && access.configurar), q: filters.q })
-  // After the cursor's row in the same (createdAt DESC, id DESC) order; an unknown cursor leaves nothing after it.
-  const after = filters.cursor
-    ? Prisma.sql` AND (o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ${filters.cursor})`
-    : Prisma.empty
-
-  const [found, [{ total }]] = await Promise.all([
-    prisma.$queryRaw<Array<{ id: string; name: string; createdAt: Date; crmAccountId: string | null; yaCobro: boolean }>>(Prisma.sql`
-      SELECT o."id", o."name", o."createdAt",
-        (SELECT ca."id" FROM "CrmAccount" ca WHERE ca."organizationId" = o."id") AS "crmAccountId",
-        EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro"
-      FROM "Organization" o
-      WHERE ${filter}${after}
-      ORDER BY o."createdAt" DESC, o."id" DESC
-      LIMIT ${limit + 1}`),
-    // One more than the page says whether there is a next one; the total counts the same filter, without the cursor.
-    prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`SELECT COUNT(*)::int AS "total" FROM "Organization" o WHERE ${filter}`),
+  checkDueno(access, filters.dueno)
+  const limit = pageSize(filters.limit)
+  const queries = clientsQueries(access, filters, now, await teamOrganizationId())
+  // The count of 🟠 only for whoever lists the signups (`altas=true`): an old SUPERADMIN never sends it nor reads it.
+  const conAltas = filters.altas === true
+  const [found, [{ total }], conteo] = await Promise.all([
+    prisma.$queryRaw<PageRow[]>(queries.page),
+    prisma.$queryRaw<Array<{ total: number }>>(queries.total),
+    conAltas ? prisma.$queryRaw<Array<Record<string, number>>>(queries.conteos) : null,
   ])
   const page = found.slice(0, limit)
 
@@ -155,12 +98,29 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
           organizationId: true,
           owner: { select: { id: true, firstName: true, lastName: true } },
           stage: { select: { id: true, name: true, kind: true } },
+          usaManual: true,
+          usaManualPorque: true,
+          usaManualById: true,
+          usaManualAt: true,
+          altaMotivo: true,
+          altaMotivoTexto: true,
+          altaPerdido: true,
         },
         orderBy: [{ id: 'asc' }],
         take: linked.length,
       })
     : []
   const byOrganization = new Map(visible.map(account => [account.organizationId, account]))
+  // What the page adds (task 5), each in ONE query for the whole page and only for its ids: who wrote the ✋, the plan by
+  // the platform's own rules, the devices, the signup of the 🟠 rows and the newest note of the accounts the caller sees.
+  const ids = page.map(organization => organization.id)
+  const [autores, planes, aparatos, altas, comentarios] = await Promise.all([
+    autoresDelUsa(visible),
+    planDeLaPagina(ids, now),
+    aparatosDe(ids),
+    altaFactsOf(page.filter(organization => organization.estado === 'ALTA_SIN_TARJETA').map(organization => organization.id)),
+    ultimosComentarios(visible.map(account => account.id)),
+  ])
 
   return {
     rows: page.map(organization => {
@@ -178,10 +138,18 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
             }
           : null,
         cuentaAjena: !!organization.crmAccountId && !account,
+        usa: { ...usaDeLaFila(organization, account, autores), aparatos: aparatos.get(organization.id) ?? { terminales: 0, pos: 0 } },
+        plan: planDeLaFila(organization.id, organization.nivel, planes.get(organization.id)),
+        estado: { codigo: organization.estado, ultimoCobroAt: organization.ultimoCobroAt },
+        // Only a 🟠: what the signup left; its reason and «Perdido» only for an account the caller sees.
+        alta: organization.estado === 'ALTA_SIN_TARJETA' ? altaDeLaFila(altas.get(organization.id), account) : null,
+        ultimoComentario: (account && comentarios.get(account.id)) ?? null,
       }
     }),
     nextCursor: found.length > limit ? page[page.length - 1].id : null,
     total,
+    ...(conteo ? { conteos: conteosDe(conteo[0]) } : {}),
+    legible: 1 as const,
   }
 }
 
@@ -235,7 +203,7 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
  * client) answers the same 404 as `GET /accounts/:id/live` — this route never goes around the account scope.
  */
 export async function getClientLive(access: CrmAccess, organizationId: string, now = new Date()) {
-  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: false })
+  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: false, conAltas: true })
   const [client] = await prisma.$queryRaw<Array<{ id: string; crmAccountId: string | null }>>(Prisma.sql`
     SELECT o."id", (SELECT ca."id" FROM "CrmAccount" ca WHERE ca."organizationId" = o."id") AS "crmAccountId"
     FROM "Organization" o WHERE o."id" = ${organizationId} AND ${filter}`)
@@ -252,10 +220,10 @@ export async function getClientLive(access: CrmAccess, organizationId: string, n
 
 /** What is live in Avoqado for one Organization, read when the ficha opens (see `getLive`). */
 async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
-  const [venues, sucursales, owner, onboarding, terminales, ventasMes] = await Promise.all([
+  const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts, org] = await Promise.all([
     prisma.venue.findMany({
       where: { organizationId },
-      select: { id: true, name: true, status: true, kycStatus: true, _count: { select: { terminals: true } } },
+      select: { id: true, name: true, status: true, kycStatus: true, demoExpiresAt: true, _count: { select: { terminals: true } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: VENUES_CAP,
     }),
@@ -268,6 +236,8 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     prisma.onboardingProgress.findUnique({ where: { organizationId }, select: { completedSteps: true, completedAt: true } }),
     prisma.terminal.count({ where: { venue: { organizationId } } }),
     access.ventas ? monthSales(organizationId, now) : null,
+    altaFactsOf([organizationId]),
+    prisma.organization.findUnique({ where: { id: organizationId }, select: { seatCapExempt: true } }),
   ])
   const plans = await enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id))
   const steps = onboarding?.completedSteps
@@ -276,10 +246,14 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
   return {
     ligada: true as const,
     organizationId,
+    // «Cliente de antes» is the organization's mark (what `plan/grandfathered` writes), not a plan condition of one store.
+    deAntes: org?.seatCapExempt === true,
     venues: venues.map((venue, i) => ({
       id: venue.id,
       name: venue.name,
       status: venue.status,
+      // Not a real store (the `REAL_VENUE` rule of the list): a plan is never offered on it (the drawer «Plan…» hides it).
+      demo: !isProductionVenue(venue.status) || venue.demoExpiresAt !== null,
       // Spec §5.10 (ruling 40): the seller never sees KYC, not even its status. Sólo «Configurar el CRM» (L7).
       ...(access.configurar ? { kycStatus: venue.kycStatus } : {}),
       terminales: venue._count.terminals,
@@ -293,11 +267,186 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
           hechos: onboarding.completedAt ? ONBOARDING_STEPS : Math.min(done, ONBOARDING_STEPS),
           totales: ONBOARDING_STEPS,
           terminada: !!onboarding.completedAt,
+          // An unfinished signup also says what the database knows of it (the same facts as the 🟠 row of the list).
+          ...(onboarding.completedAt ? {} : altaFacts.get(organizationId)),
         }
       : null,
     ventasMes,
     ventasBloqueadas: !access.ventas,
   }
+}
+
+/**
+ * Task 6 — `POST /crm/clients/:organizationId/cuenta`: the CRM account of a client that has none, made once (the «Usa» ✋ and
+ * the signup's reason are written on it). The organization must be listed in «Clientes» (altas sin tarjeta included) or it is
+ * a 404. A real client opens as «Ganado» (source `CLIENTE`); a stalled signup in the first open stage (source `ALTA`) — never
+ * «Ganado», which would make it a client for the campaigns. Neither has an owner nor `wonAt`.
+ *
+ * Insert first (`skipDuplicates`: the Organization is unique) and ONE read after it, through the caller's «Ver» scope
+ * (Codex r1 #5): an account somebody else made and took is a 404, never handed back. A tombstone of D7 does not stop it:
+ * this is a person asking on purpose (§5.2).
+ */
+export async function ensureClientAccount(access: CrmAccess, organizationId: string): Promise<{ accountId: string; creada: boolean }> {
+  const teamOrgId = await teamOrganizationId()
+  const now = new Date()
+  const [client] = await prisma.$queryRaw<Array<{ id: string; name: string; esCliente: boolean }>>(Prisma.sql`
+    SELECT o."id", o."name", ${clientSql(teamOrgId, now)} AS "esCliente"
+    FROM "Organization" o WHERE o."id" = ${organizationId} AND ${clientsFilter(teamOrgId, now, { onlyHidden: false, conAltas: true })}`)
+  if (!client) throw new NotFoundError('Esa organización no es cliente', 'CRM_NO_ES_CLIENTE')
+
+  const [kind, source] = client.esCliente ? (['GANADA', 'CLIENTE'] as const) : (['ABIERTA', 'ALTA'] as const)
+  await ensureCrmDefaults()
+  const stage = await prisma.crmStage.findFirst({ where: { kind }, orderBy: [{ order: 'asc' }, { id: 'asc' }], select: { id: true } })
+  if (!stage) throw new InternalServerError(`El CRM no tiene la etapa ${kind === 'GANADA' ? 'Ganado' : 'abierta'}`)
+
+  const result = await prisma.$transaction(async tx => {
+    const { count } = await tx.crmAccount.createMany({
+      data: [{ name: client.name, source, stageId: stage.id, organizationId }],
+      skipDuplicates: true,
+    })
+    const account = await tx.crmAccount.findFirst({
+      where: { AND: [{ organizationId }, scopeWhere(access, 'ver')] },
+      select: { id: true },
+    })
+    if (!account) throw new NotFoundError('No encontramos ese negocio', 'CRM_ACCOUNT_NOT_FOUND')
+    if (count === 1) {
+      await addEvent(tx, { accountId: account.id, kind: 'SYSTEM', actorStaffId: access.staffId, data: { event: 'CLIENT_ACCOUNT_OPENED' } })
+    }
+    return { accountId: account.id, creada: count === 1 }
+  })
+  if (result.creada) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId,
+      action: 'CRM_CLIENT_ACCOUNT_CREATED',
+      entity: 'CrmAccount',
+      entityId: result.accountId,
+      data: { organizationId, source },
+    })
+  }
+  return result
+}
+
+/** «Lo que viste» against what is saved: trimmed, and '' is the same as null. */
+const mismoTexto = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim() === (b ?? '').trim()
+/** The editor's copy is stale: someone saved something else while it was open (C1 redesign: the SERVER decides, not the browser). */
+const cambioAlEditar = () => new ConflictError('Cambió mientras lo editabas: revisa y guarda otra vez.', 'CRM_CAMBIO_AL_EDITAR')
+
+/**
+ * «✋ a mano» en Usa (C1, tarea 7): a seller with «Editar» writes what the client uses, with the reason, or clears it
+ * (`valor: null`, «Leerlo solo»). The reason lives only in the timeline event: the ActivityLog never carries it. Clearing
+ * what is already clear, or writing the same value with the same reason, writes nothing (no event, no touch).
+ * `vio` is what the editor saw when opening it: if what is saved is something else, 409 `CRM_CAMBIO_AL_EDITAR` and nothing is
+ * written. Asking for what is already saved stays a no-op even then (a retry of one's own save is never a conflict).
+ */
+export async function setUsa(
+  access: CrmAccess,
+  accountId: string,
+  input: { valor: UsaEscrito | null; porque?: string; vio?: { valor: UsaEscrito | null; porque: string | null } },
+): Promise<{ accountId: string; usaManual: UsaEscrito | null }> {
+  const now = new Date()
+  const { valor } = input
+  const changed = await prisma.$transaction(async tx => {
+    await lockEditableTx(tx, access, accountId)
+    const before = await tx.crmAccount.findUniqueOrThrow({
+      where: { id: accountId },
+      select: { usaManual: true, usaManualPorque: true, organizationId: true },
+    })
+    // The same thing again (clear on clear, or the same value with the same reason) writes nothing, as `setAltaMotivo`.
+    if (before.usaManual === valor && (valor === null || before.usaManualPorque === input.porque)) return null
+    const { vio } = input
+    if (vio && (vio.valor !== before.usaManual || (vio.valor !== null && !mismoTexto(vio.porque, before.usaManualPorque))))
+      throw cambioAlEditar()
+    await touchNoEarlierTx(tx, accountId, now)
+    await tx.crmAccount.update({
+      where: { id: accountId },
+      data:
+        valor === null
+          ? { usaManual: null, usaManualPorque: null, usaManualById: null, usaManualAt: null }
+          : { usaManual: valor, usaManualPorque: input.porque, usaManualById: access.staffId, usaManualAt: now },
+    })
+    await addEvent(tx, {
+      accountId,
+      kind: 'USA_CHANGE',
+      actorStaffId: access.staffId,
+      data: valor === null ? { valor: null } : { valor, porque: input.porque! },
+    })
+    return before
+  })
+  if (changed) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId: changed.organizationId,
+      action: valor === null ? 'CRM_CLIENT_USA_CLEARED' : 'CRM_CLIENT_USA_SET',
+      entity: 'CrmAccount',
+      entityId: accountId,
+      data: valor === null ? {} : { valor },
+    })
+  }
+  return { accountId, usaManual: valor }
+}
+
+/**
+ * «¿Por qué se quedó?» (C1, tarea 8): a seller with «Editar» writes why a stalled signup stopped (from the fixed list, with
+ * text for «Otro») and/or marks it «Perdido» (its own flag, not the Embudo's «Perder»). «Terminó el alta» is never written:
+ * once the organization stops being a pending signup (`altaPendienteSql`, the rule that paints the 🟠) it is a 409 and
+ * nothing is written. The text lives only in the timeline event: the ActivityLog never carries it. The same value again
+ * writes nothing. `lockEditableTx` locks the row without touching it (a no-op never resets «Estancado»), so the pending check and the write see the same account.
+ * `vio` is what the editor saw when opening it: if what is saved is something else, 409 `CRM_CAMBIO_AL_EDITAR` and nothing is
+ * written (as in `setUsa`, the same value again stays a no-op).
+ */
+export async function setAltaMotivo(
+  access: CrmAccess,
+  accountId: string,
+  input: {
+    motivo: MotivoDelAlta | null
+    texto?: string
+    perdido: boolean
+    vio?: { motivo: MotivoDelAlta | null; texto: string | null; perdido: boolean }
+  },
+): Promise<{ accountId: string; motivo: MotivoDelAlta | null; texto: string | null; perdido: boolean }> {
+  const now = new Date()
+  const { motivo, perdido } = input
+  const texto = motivo === 'OTRO' ? (input.texto ?? null) : null
+  const changed = await prisma.$transaction(async tx => {
+    await lockEditableTx(tx, access, accountId)
+    const before = await tx.crmAccount.findUniqueOrThrow({
+      where: { id: accountId },
+      select: { altaMotivo: true, altaMotivoTexto: true, altaPerdido: true, organizationId: true },
+    })
+    if (!before.organizationId) throw new ConflictError('Este cliente no tiene un alta pendiente', 'CRM_NO_ES_ALTA')
+    const pendiente = await tx.$queryRaw<Array<{ pendiente: number }>>(
+      Prisma.sql`SELECT 1 AS "pendiente" FROM "Organization" o WHERE o."id" = ${before.organizationId} AND ${altaPendienteSql()} LIMIT 1`,
+    )
+    if (!pendiente.length) throw new ConflictError('Ya terminó su alta: ya no hace falta el motivo', 'CRM_ALTA_TERMINADA')
+    if (before.altaMotivo === motivo && before.altaMotivoTexto === texto && before.altaPerdido === perdido) return null
+    const { vio } = input
+    if (vio && (vio.motivo !== before.altaMotivo || !mismoTexto(vio.texto, before.altaMotivoTexto) || vio.perdido !== before.altaPerdido))
+      throw cambioAlEditar()
+    await touchNoEarlierTx(tx, accountId, now)
+    await tx.crmAccount.update({ where: { id: accountId }, data: { altaMotivo: motivo, altaMotivoTexto: texto, altaPerdido: perdido } })
+    await addEvent(tx, {
+      accountId,
+      kind: 'ALTA_MOTIVO',
+      actorStaffId: access.staffId,
+      data: texto ? { motivo, texto, perdido } : { motivo, perdido },
+    })
+    return before
+  })
+  if (changed) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId: changed.organizationId,
+      action: 'CRM_CLIENT_ALTA_MOTIVO_SET',
+      entity: 'CrmAccount',
+      entityId: accountId,
+      data: { motivo, perdido },
+    })
+  }
+  return { accountId, motivo, texto, perdido }
 }
 
 // ── Hidden organizations (ruling 39) ──────────────────────────────────────────────────────────────────────────────────

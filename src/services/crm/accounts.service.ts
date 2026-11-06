@@ -328,6 +328,20 @@ async function touchTx(tx: Prisma.TransactionClient, access: CrmAccess, id: stri
   return tx.crmAccount.findUniqueOrThrow({ where: { id }, select: ROW_SELECT })
 }
 
+/**
+ * Takes the row's lock WITHOUT touching it, for writers that may turn out to change nothing (a no-op must not reset
+ * «Estancado»): lock first, then the same scope check as `touchTx` (404 if not visible, 403 if visible but not theirs).
+ * A writer that does change something calls `touchNoEarlierTx` afterwards.
+ */
+export async function lockEditableTx(tx: Prisma.TransactionClient, access: CrmAccess, id: string) {
+  await tx.$queryRaw(Prisma.sql`SELECT 1 FROM "CrmAccount" WHERE "id" = ${id} FOR UPDATE`)
+  const mine = await tx.crmAccount.findFirst({ where: { AND: [{ id }, scopeWhere(access, 'editar')] }, select: { id: true } })
+  if (mine) return
+  const visible = await tx.crmAccount.findFirst({ where: { AND: [{ id }, scopeWhere(access, 'ver')] }, select: { id: true } })
+  if (visible) throw new ForbiddenError('Sólo puedes cambiar tus negocios y los que no tienen dueño', 'CRM_NO_ES_TUYO')
+  throw accountNotFound()
+}
+
 /** `touchTx` with the caller's «Editar» scope: notes, activities, stage changes, losing and winning. */
 export function touchEditableTx(tx: Prisma.TransactionClient, access: CrmAccess, id: string, now: Date) {
   return touchTx(tx, access, id, scopeWhere(access, 'editar'), now)
