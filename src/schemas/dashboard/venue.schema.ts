@@ -249,6 +249,8 @@ export const createPlanCheckoutSessionSchema = z.object({
       .enum(['monthly', 'annual'], { errorMap: () => ({ message: "El intervalo debe ser 'monthly' o 'annual'" }) })
       .default('monthly'),
     tier: z.enum(['PRO', 'PREMIUM'], { errorMap: () => ({ message: "El plan debe ser 'PRO' o 'PREMIUM'" }) }).default('PRO'),
+    // D3: la fecha del primer cobro que Facturación mostró en «Quedarme con mi plan». Opcional: los clientes de siempre no la mandan.
+    primerCobroAnunciado: z.string().datetime({ message: 'La fecha del primer cobro no es válida' }).optional(),
   }),
 })
 

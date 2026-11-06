@@ -6,6 +6,7 @@ import {
   IssueCfdiDeps,
   getCfdiStatus,
   MOTIVO_AUTOFACTURA_CON_DEVOLUCION,
+  NoFacturableError,
 } from '../../../../src/services/fiscal/cfdi.service'
 import { ConflictError } from '../../../../src/errors/AppError'
 import prisma from '../../../../src/utils/prismaClient'
@@ -468,6 +469,42 @@ describe('issueCfdiForOrder', () => {
     await expect(issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)).rejects.toThrow(/no habilitada/i)
     expect(deps.resolveProvider).not.toHaveBeenCalled()
     expect(deps.persistCfdi).not.toHaveBeenCalled()
+  })
+
+  // D11: el error lleva el motivo del cargador (el `message` de siempre), y nunca el de una venta de otro negocio.
+  describe('D11: el motivo viaja con el error', () => {
+    const conMotivo = (bundle: any, motivo: any) =>
+      jest.fn().mockImplementation(async (_id: string, opts: any) => {
+        opts?.explicar?.(motivo)
+        return bundle
+      })
+    const COMERCIO = { code: 'COMERCIO_SIN_CONFIGURAR', texto: 'El comercio «PAX» no tiene la facturación configurada.', venueId: 'v1' }
+
+    it('sin emisor ⇒ NoFacturableError con el mensaje de siempre y el motivo', async () => {
+      const deps = makeDeps({ loadOrderForCfdi: conMotivo(null, COMERCIO) })
+      const err = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps).catch(e => e)
+      expect(err).toBeInstanceOf(NoFacturableError)
+      expect(err.message).toBe('Order o1 not found or has no fiscal emisor configured')
+      expect(err.motivo).toEqual(COMERCIO)
+      expect(deps.resolveProvider).not.toHaveBeenCalled()
+    })
+
+    it('SEGURIDAD: el motivo de una venta de OTRO negocio no viaja: es «not found»', async () => {
+      const deps = makeDeps({ loadOrderForCfdi: conMotivo(null, { ...COMERCIO, venueId: 'otro' }) })
+      const err = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps).catch(e => e)
+      expect(err).not.toBeInstanceOf(NoFacturableError)
+      expect(err.message).toBe('Order o1 not found')
+    })
+
+    it('facturación apagada ⇒ el mensaje de siempre («no habilitada») con su motivo', async () => {
+      const apagada = { code: 'SIN_COMERCIO_ENCENDIDO', texto: 'TEXTO', venueId: 'v1' }
+      const bundle = await (makeDeps().loadOrderForCfdi as jest.Mock)()
+      const deps = makeDeps({ loadOrderForCfdi: conMotivo({ ...bundle, facturacionEnabled: false }, apagada) })
+      const err = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1' }, deps).catch(e => e)
+      expect(err).toBeInstanceOf(NoFacturableError)
+      expect(err.message).toMatch(/no habilitada/)
+      expect(err.motivo).toEqual(apagada)
+    })
   })
 
   it('rejects AUTOFACTURA_A flow when autofacturaEnabled is false, never calls the PAC', async () => {

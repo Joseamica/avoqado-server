@@ -3129,6 +3129,10 @@ describe('C2 · OF-2 (M3) — el aviso de facturación apagada es del comercio d
     const apagado = await vista(conCobro(), { merchantAccountId: null, ecommerceMerchantId: null }, null, [{ facturacionEnabled: false }])
     expect(apagado.preview!.avisoFacturacionApagada).toBe(AVISO)
   })
+  it('D11 opción A: sin comercio en el cobro y el RFC SIN comercios ligados («el RFC basta») ⇒ sin aviso de apagada', async () => {
+    const st = await vista(conCobro(), { merchantAccountId: null, ecommerceMerchantId: null }, null, [])
+    expect(st.preview).not.toHaveProperty('avisoFacturacionApagada')
+  })
 })
 
 // C2 · ronda QA (D7): el panel y los diálogos de la nota escribían la original «F12» y la lista «F-12». `etiqueta` (aditivo) trae el formato

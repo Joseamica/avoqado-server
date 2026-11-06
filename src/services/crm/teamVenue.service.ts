@@ -9,11 +9,15 @@
  */
 import { InvitationStatus, Prisma, StaffRole, VenueStatus, VerificationStatus } from '@prisma/client'
 import { ConflictError, ForbiddenError, InternalServerError, NotFoundError, ValidationError } from '../../errors/AppError'
+import logger from '../../config/logger'
 import { CRM_KEY_LABELS, type CrmKey } from '../../lib/permissions'
 import type { CrmKeysInput } from '../../schemas/crm.schema'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
-import { inviteTeamMember } from '../dashboard/team.dashboard.service'
+import { inviteTeamMember, urlDeEntradaAlCrm } from '../dashboard/team.dashboard.service'
+import emailService from '../email.service'
+import { correoAccesoCrm } from './correoInvitacionCrm'
+import { puedeMandarFueraDeProduccion } from './email/testAllowlist'
 import {
   CRM_KEY_SELECT,
   effectiveKeys,
@@ -188,8 +192,24 @@ export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId
 const staffByEmail = (email: string) => prisma.staff.findUnique({ where: { email }, select: { id: true, active: true } })
 
 /**
+ * D4: tells someone who already had an account that they now have the CRM (`correoAccesoCrm`). Outside production, only to
+ * `CRM_CORREO_PRUEBAS`, like every CRM email. `true` = Resend took it.
+ */
+async function avisarAcceso(actorStaffId: string, email: string): Promise<boolean> {
+  if (!puedeMandarFueraDeProduccion(email)) return false
+  const actor = await prisma.staff.findUnique({ where: { id: actorStaffId }, select: { firstName: true, lastName: true } })
+  const correo = correoAccesoCrm({
+    inviterName: `${actor?.firstName ?? ''} ${actor?.lastName ?? ''}`.trim() || 'Avoqado',
+    crmUrl: urlDeEntradaAlCrm(),
+    resetUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/forgot-password`,
+    email,
+  })
+  return emailService.sendEmail({ to: email, ...correo })
+}
+
+/**
  * Gives keys to a person by email. Someone with a working Avoqado account gets a VIEWER seat in the internal venue right
- * away; anyone else, the team invitation to it.
+ * away, plus an email saying so (D4); anyone else, the team invitation to it.
  */
 export async function addTeamMember(actor: CrmAccess, input: { email: string; firstName: string; lastName: string; keys: CrmKeysInput }) {
   const email = input.email.trim().toLowerCase()
@@ -230,7 +250,13 @@ export async function addTeamMember(actor: CrmAccess, input: { email: string; fi
       update: { active: true, endDate: null },
       create: { staffId: staff.id, venueId, role: StaffRole.VIEWER, active: true },
     })
-    return { id: row.id, email, keys: effectiveKeys(row), invited }
+    // D4: there is no invitation to accept, but they still have to learn they're in (a seller added on 4-nov got nothing). The seat is
+    // already written: a failed notice never undoes the grant.
+    const accessEmailSent = await avisarAcceso(actor.staffId, email).catch(error => {
+      logger.warn('CRM: no salió el aviso de acceso a quien ya tenía cuenta', { email, error })
+      return false
+    })
+    return { id: row.id, email, keys: effectiveKeys(row), invited, accessEmailSent }
   }
 
   // A new invitation every time: an expired one leaves no way in, and «it never arrived» is why people add again.

@@ -576,3 +576,62 @@ describe('updateProduct — la bitácora dice quién lo cambió y de cuánto a c
     expect(bitacora()).toMatchObject({ staffId: 'staff-1', data: { changes: ['name'], impersonating: true } })
   })
 })
+
+// Codex r4 #1 (PR #273 del DASHBOARD): una activación de inventario atrasada no deshace un apagado posterior. El asistente manda la
+// versión que obtuvo en su paso anterior; si alguien cambió el producto en medio, 409 en español y nada se escribe.
+describe('updateProduct — versión esperada (expectedUpdatedAt)', () => {
+  beforeEach(() => jest.clearAllMocks())
+  const version = '2026-11-05T18:00:00.123Z'
+
+  it('con versión: la exige en la escritura y no la guarda como campo', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY' }))
+
+    await productService.updateProduct(
+      'venue-xyz',
+      'product-abc',
+      { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: version } as any,
+      humanActor,
+    )
+
+    const updateCall = prismaMock.product.update.mock.calls[0][0]
+    expect(updateCall.where).toEqual({ id: 'product-abc', updatedAt: new Date(version) })
+    expect(updateCall.data).not.toHaveProperty('expectedUpdatedAt')
+  })
+
+  it('con versión vieja: 409 PRODUCT_CHANGED en español', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.product.update.mockRejectedValueOnce({ code: 'P2025' })
+
+    await expect(
+      productService.updateProduct('venue-xyz', 'product-abc', { trackInventory: true, expectedUpdatedAt: version } as any, humanActor),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED', message: expect.stringContaining('cambió mientras se guardaba') })
+  })
+
+  // Codex r2 de la ronda 5: que lo pedido coincida con lo que hay NO prueba que sea una repetición (otra ventana pudo guardar costo y
+  // mínimo con el inventario prendido). Con versión vieja, siempre 409.
+  it('versión vieja aunque lo pedido ya sea lo que hay: igual exige la versión (409)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(
+      makeMockProduct({ trackInventory: true, inventoryMethod: 'QUANTITY', updatedAt: new Date('2026-11-05T18:00:01.000Z') }),
+    )
+    prismaMock.product.update.mockRejectedValueOnce({ code: 'P2025' })
+    await expect(
+      productService.updateProduct(
+        'venue-xyz',
+        'product-abc',
+        { trackInventory: true, inventoryMethod: 'QUANTITY', expectedUpdatedAt: version } as any,
+        humanActor,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'PRODUCT_CHANGED' })
+    expect(prismaMock.product.update.mock.calls[0][0].where).toEqual({ id: 'product-abc', updatedAt: new Date(version) })
+  })
+
+  it('sin versión (ANDROID, MCP, paneles viejos): igual que hoy', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.product.update.mockResolvedValue(makeMockProduct())
+
+    await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Otro' }, humanActor)
+
+    expect(prismaMock.product.update.mock.calls[0][0].where).toEqual({ id: 'product-abc' })
+  })
+})

@@ -21,6 +21,9 @@ new capability, **STOP and ask the founder which paid tier it falls under** — 
 decision is unfinished: it either leaks paid value into a lower tier or hides a free capability behind a paywall. This repo is the
 **authoritative** gate — get it right here first.
 
+- **¿Una fila de `VenueFeature` da acceso?** SIEMPRE `daAcceso` / `ventanaDeAccesoWhere` de `src/services/access/ventanaDeAcceso.ts`
+  (la gracia de cobranza vigente cuenta; D4 + D6, 5-nov-2026). Nunca reimplementes `active`/`suspendedAt`/`endDate` a mano: así
+  nacieron siete lectores que contestaban distinto.
 - **Backend (authoritative):** `src/services/access/basePlan.service.ts` + `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory
   gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes: read
   `PREMIUM_ONLY_CODES` in `basePlan.service.ts` (CFDI, INVENTORY_TRACKING, COMMISSIONS and more) — never trust a copy in a doc.
@@ -149,12 +152,14 @@ npm test               # All tests — pesado: igual (ver «Verificación repart
 npm run test:unit      # Unit tests
 npm run test:api       # API integration
 npm run test:workflows # E2E workflows
-npm run lint:fix       # Auto-fix ESLint
-npm run format         # Prettier
+npm run lint:fix       # Auto-fix ESLint — TODO el repo (ver abajo)
+npm run format         # Prettier — TODO el repo (ver abajo)
 npm run studio         # Prisma Studio
 ```
 
-After editing code: `npm run format && npm run lint:fix`
+After editing code, format **only your files**: `npx prettier --write <tus archivos>` and `npx eslint --fix <tus archivos>`.
+🔴 Never `npm run format` / `npm run lint:fix` here: they rewrite the WHOLE repo (`prettier --write .`, `eslint . --fix`), also
+the work of the other ~20 sessions, and passing files (`npm run format -- a.ts`) does NOT narrow them (bit 7-ago, 19-sep, 5-nov).
 
 ## 🔴 "¿Está en el cajón?" y "¿lo deposita Avoqado?" — SIEMPRE por `tenderSemantics`
 

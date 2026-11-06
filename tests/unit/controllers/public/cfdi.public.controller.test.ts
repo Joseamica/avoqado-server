@@ -329,6 +329,25 @@ describe('autofacturaController (POST /receipt/:accessKey/cfdi)', () => {
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 
+  it('🔴 D11 (Codex r4): un motivo del COMERCIO que menciona «RFC» no viaja al cliente, aunque la segunda lectura ya no lo repita', async () => {
+    const motivos = [
+      'El comercio «Caja 2» no tiene la facturación configurada. En Facturación › Configuración, elige con qué RFC factura ese comercio y enciende su facturación.',
+      'La cuenta se cobró con comercios de RFC distinto; factúrala por separado.',
+      'El comercio con el que se cobró esta venta factura con el RFC de otra sucursal, así que no se puede facturar desde este negocio. Escríbenos a soporte para revisarlo.',
+    ]
+    for (const motivo of motivos) {
+      jest.clearAllMocks()
+      mockFindReceipt.mockResolvedValue(makeReceipt())
+      mockFindCfdi.mockResolvedValue(null)
+      mockIssueCfdi.mockResolvedValue({ status: 'VALIDATION_FAILED', cfdi: { id: 'cfdi-draft' }, reasons: [motivo] })
+      mockLoadOrder.mockResolvedValue({ ...makeBundle(), unsupportedReasons: [] })
+      const res = makeRes()
+      await autofacturaController(makeReq({ accessKey: 'key-abc' }) as any, res as any)
+      expect(res.status).toHaveBeenCalledWith(409)
+      expect(JSON.stringify((res.json as jest.Mock).mock.calls)).not.toContain(motivo)
+    }
+  })
+
   it('🔴 I-1: bloqueo fiscal (2 × NET $1.04, IVA $0.17 c/u, cobro $2.42): el 422 público NO lleva los motivos del comercio, que van al log', async () => {
     const motivo = motivoNoCuadra(241, 242)
     mockFindReceipt.mockResolvedValue(makeReceipt())

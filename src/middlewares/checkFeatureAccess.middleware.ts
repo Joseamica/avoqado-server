@@ -18,6 +18,7 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { venueHasFeatureAccess, venueIsExemptFromPlanGating } from '@/services/access/basePlan.service'
+import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { resolveRequestVenueId } from './checkPermission.middleware'
 import { esSuperadminReal } from '@/services/access/rolVigente'
 
@@ -132,16 +133,18 @@ export function checkFeatureAccess(featureCode: string) {
       // tier + `elPlanConcede` y seguía negando CHATBOT —gratis para todos, sin depender de
       // plan— si había una fila vieja vencida (Codex, 21-sep). Así este portero y el resto de la
       // plataforma no pueden volver a contestar distinto.
-      if ((venueFeature.endDate && venueFeature.endDate < new Date()) || venueFeature.suspendedAt) {
+      // 🔴 D4 + D6 (5-nov-2026): «¿esta fila da acceso?» lo decide la regla única (ventanaDeAcceso.ts): la gracia de
+      // cobranza vigente da acceso aunque la prueba ya venció, y una gracia vencida lo quita.
+      const now = new Date()
+      if (!daAcceso(venueFeature, now)) {
         if (await venueHasFeatureAccess(venueId, featureCode)) {
           ;(req as any).venueFeature = { featureCode, grantedBy: 'BASE_PLAN' }
           return next()
         }
       }
 
-      // Check if trial has expired (endDate is in the past)
-      const now = new Date()
-      if (venueFeature.endDate && venueFeature.endDate < now) {
+      // Check if trial has expired (endDate is in the past, sin gracia de cobranza)
+      if (!daAcceso(venueFeature, now) && !venueFeature.suspendedAt && !venueFeature.gracePeriodEndsAt) {
         logger.warn('⚠️ Feature access denied: Trial expired', {
           venueId,
           userId,
@@ -160,8 +163,8 @@ export function checkFeatureAccess(featureCode: string) {
         return
       }
 
-      // Check if subscription is suspended due to payment failure
-      if (venueFeature.suspendedAt) {
+      // Check if subscription is suspended due to payment failure (o su gracia de cobranza ya venció)
+      if (!daAcceso(venueFeature, now)) {
         logger.warn('⚠️ Feature access denied: Subscription suspended', {
           venueId,
           userId,
@@ -340,8 +343,9 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return next()
       }
 
-      // Query for any active feature in the list
-      const venueFeature = await prisma.venueFeature.findFirst({
+      // Query for any active feature in the list: gana la que da acceso (regla única, ventanaDeAcceso.ts).
+      const now = new Date()
+      const candidatas = await prisma.venueFeature.findMany({
         where: {
           venueId,
           active: true,
@@ -354,7 +358,10 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         include: {
           feature: true,
         },
+        orderBy: { id: 'asc' },
+        take: featureCodes.length,
       })
+      const venueFeature = candidatas.find(f => daAcceso(f, now)) ?? candidatas[0]
 
       if (!venueFeature) {
         logger.warn('⚠️ Feature access denied: No active features found', {
@@ -372,9 +379,8 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return
       }
 
-      // Check trial expiration
-      const now = new Date()
-      if (venueFeature.endDate && venueFeature.endDate < now) {
+      // Check trial expiration (sin gracia de cobranza)
+      if (!daAcceso(venueFeature, now) && !venueFeature.suspendedAt && !venueFeature.gracePeriodEndsAt) {
         logger.warn('⚠️ Feature access denied: Trial expired', {
           venueId,
           userId,
@@ -392,8 +398,8 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return
       }
 
-      // Check if subscription is suspended due to payment failure
-      if (venueFeature.suspendedAt) {
+      // Check if subscription is suspended due to payment failure (o su gracia de cobranza ya venció)
+      if (!daAcceso(venueFeature, now)) {
         logger.warn('⚠️ Feature access denied: Subscription suspended', {
           venueId,
           userId,
@@ -496,13 +502,11 @@ export async function hasFeatureAccess(
     }
 
     const now = new Date()
-    if (
-      (venueFeature.suspendedAt || (venueFeature.endDate && venueFeature.endDate < now)) &&
-      (await venueHasFeatureAccess(venueId, featureCode))
-    ) {
+    // 🔴 D4 + D6: la regla única (ventanaDeAcceso.ts) — el reductor sin red de las apps también decide con ella.
+    if (!daAcceso(venueFeature, now) && (await venueHasFeatureAccess(venueId, featureCode))) {
       return { hasAccess: true, isTrialing: false, trialEndsAt: null }
     }
-    if (venueFeature.endDate && venueFeature.endDate < now) {
+    if (!daAcceso(venueFeature, now) && !venueFeature.suspendedAt && !venueFeature.gracePeriodEndsAt) {
       return {
         hasAccess: false,
         isTrialing: true,
@@ -511,8 +515,8 @@ export async function hasFeatureAccess(
       }
     }
 
-    // Check if subscription is suspended
-    if (venueFeature.suspendedAt) {
+    // Check if subscription is suspended (o su gracia de cobranza ya venció)
+    if (!daAcceso(venueFeature, now)) {
       return {
         hasAccess: false,
         isTrialing: false,

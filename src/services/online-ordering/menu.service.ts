@@ -17,12 +17,16 @@ import {
   MENU_MAX_PRODUCTS_TOTAL,
 } from './constants'
 
-/** R17: tipos que no son comida para recoger. */
+/**
+ * R17: tipos que la tienda no entrega. SERVICE incluido: cobrar aquí un paquete de clases («12 Clases Lagree») no da créditos.
+ * Lo REGULAR que también es clase («1 Sesión Iyashi») no se distingue por tipo: hasta la etapa de paquetes sólo lo avisa el panel.
+ */
 export const NON_FOOD_PRODUCT_TYPES: ProductType[] = [
   ProductType.APPOINTMENTS_SERVICE,
   ProductType.CLASS,
   ProductType.EVENT,
   ProductType.DONATION,
+  ProductType.SERVICE,
 ]
 
 /** R17: lo que la tienda en línea puede vender. Lo comparten la carta y el cotizador: lo que no se ve, no se vende. */

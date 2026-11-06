@@ -1,6 +1,7 @@
 import { grantedCapabilityCodes } from './capabilityGrants.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { daAcceso } from './ventanaDeAcceso'
 import {
   getVenueBaseTier,
   venueIsExemptFromPlanGating,
@@ -52,23 +53,21 @@ export function resolveFeatureGateState(venueFeature: VenueFeatureSnapshot | nul
     return 'SUSPENDED'
   }
 
-  if (venueFeature.gracePeriodEndsAt && venueFeature.gracePeriodEndsAt > now) {
-    return 'GRACE_PERIOD'
+  // 🔴 D4 + D6 (5-nov-2026): con acceso o sin él lo decide la MISMA regla que el portero (ventanaDeAcceso.ts). Antes una
+  // gracia vencida sobre un plan pagado salía ACTIVE y una fila apagada con gracia salía GRACE_PERIOD, mientras el
+  // portero negaba.
+  if (daAcceso(venueFeature, now)) {
+    if (venueFeature.gracePeriodEndsAt && venueFeature.gracePeriodEndsAt >= now) return 'GRACE_PERIOD'
+    return venueFeature.endDate ? 'TRIALING' : 'ACTIVE'
   }
 
-  if (venueFeature.endDate && venueFeature.endDate > now && venueFeature.active) {
-    return 'TRIALING'
+  if (!venueFeature.active) {
+    return venueFeature.endDate && venueFeature.endDate <= now ? 'TRIAL_EXPIRED' : 'LOCKED'
   }
 
-  if (venueFeature.endDate && venueFeature.endDate <= now) {
-    return 'TRIAL_EXPIRED'
-  }
-
-  if (venueFeature.active && !venueFeature.endDate) {
-    return 'ACTIVE'
-  }
-
-  return 'LOCKED'
+  // Activa sin acceso: venció su gracia de cobranza (impago) o su prueba.
+  if (venueFeature.gracePeriodEndsAt) return 'SUSPENDED'
+  return 'TRIAL_EXPIRED'
 }
 
 function buildFeatureCheckoutUrl(venueId: string): string {

@@ -412,7 +412,7 @@ async function esNegocioDelEquipoDeVentas(venueId: string): Promise<boolean> {
 }
 
 /** La entrada del SUPERADMIN, donde vive el CRM. */
-function urlDeEntradaAlCrm(): string {
+export function urlDeEntradaAlCrm(): string {
   return `${(process.env.SUPERADMIN_URL || 'https://superadmin.avoqado.io').replace(/\/$/, '')}/login`
 }
 

@@ -14,7 +14,14 @@ import { aCentavos } from '@/services/shared/repartoDescuento'
  * `AVISO_TURNO_CERRADO` (S3 «Efectivo sin red en el turno correcto»): el aviso al gerente de una venta de la cola que quedó APARTE
  * porque su turno (o su caja sin turno) ya se había cerrado. Nace en la transacción del cobro y es el ÚNICO emisor de ese aviso.
  */
-export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST' | 'AVISO_TURNO_CERRADO'
+export type PaymentEffectKind =
+  | 'REVIEW'
+  | 'RECEIPT'
+  | 'REFERRAL'
+  | 'COMMISSION'
+  | 'TRANSACTION_COST'
+  | 'AVISO_TURNO_CERRADO'
+  | 'LOYALTY_POINTS_REVERSAL'
 export type PaymentEffectInput = {
   venueId: string
   paymentId: string
@@ -208,7 +215,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       id: claim.id,
       claimToken: claim.claimToken,
       status: 'PROCESSING',
-      kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO'] },
+      kind: { in: ['RECEIPT', 'REFERRAL', 'TRANSACTION_COST', 'AVISO_TURNO_CERRADO', 'LOYALTY_POINTS_REVERSAL'] },
     },
   })
   if (external) {
@@ -276,6 +283,20 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
           data: { status: 'PENDING', nextAttemptAt: new Date(Date.now() + 5 * 60_000), claimToken: null, leaseUntil: null, attempts: 0 },
         })
         return false
+      }
+    } else if (external.kind === 'LOYALTY_POINTS_REVERSAL') {
+      const { quitarPuntosPorReembolso } = await import('../shared/puntosAlReembolsar')
+      try {
+        await quitarPuntosPorReembolso(external.venueId, external.paymentId)
+      } catch (error) {
+        // La fila sólo guarda un código: sin esto, una reversa que falla seis veces queda en DEAD_LETTER sin que nadie se entere.
+        logger.error('[LEALTAD] no se pudieron quitar los puntos de una venta reembolsada; se reintenta hasta DEAD_LETTER', {
+          venueId: external.venueId,
+          refundPaymentId: external.paymentId,
+          intento: claim.attempts,
+          ...rastroDelError(error),
+        })
+        throw error
       }
     } else if ((external.payload as { operation?: string }).operation === 'REFUND') {
       const { revertQualifiedReferral } = await import('../referrals/referralRefund.service')
@@ -438,6 +459,24 @@ export async function enqueuePaymentCommissionInTx(
   }
 }
 
+/**
+ * D6 (5-nov): la reversa de los puntos que la venta dio nace en la MISMA transacción que el reembolso: si el proceso muere después del
+ * commit, el trabajador la termina, y un fallo de lealtad nunca tumba un reembolso. Sin venta con puntos, no hace nada.
+ */
+export function enqueueLoyaltyPointsReversalInTx(
+  tx: Prisma.TransactionClient,
+  refund: { venueId: string; refundPaymentId: string; orderId: string | null },
+): Promise<void> {
+  return enqueuePaymentEffect(tx, {
+    venueId: refund.venueId,
+    paymentId: refund.refundPaymentId,
+    orderId: refund.orderId,
+    kind: 'LOYALTY_POINTS_REVERSAL',
+    dedupeKey: `loyalty-points-refund:${refund.refundPaymentId}:v1`,
+    payload: {},
+  })
+}
+
 /** Refund money and its deferred reversals commit together under the original Order lock. */
 export async function enqueueRefundPaymentEffectsInTx(
   tx: Prisma.TransactionClient,
@@ -501,4 +540,5 @@ export async function enqueueRefundPaymentEffectsInTx(
     dedupeKey: `referral-refund:${refundPaymentId}:v1`,
     payload: { operation: 'REFUND' },
   })
+  await enqueueLoyaltyPointsReversalInTx(tx, { venueId: payment.venueId, refundPaymentId, orderId: payment.orderId })
 }

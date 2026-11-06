@@ -132,7 +132,7 @@ describe('POST /superadmin/venues/:venueId/plan/comp', () => {
 
     await assignVenueCompPlan(req, res, next)
 
-    expect(mockedAssignComp).toHaveBeenCalledWith('venue-1', 'PRO')
+    expect(mockedAssignComp).toHaveBeenCalledWith('venue-1', 'PRO', 'superadmin-1')
     expect(res.__json.success).toBe(true)
     expect(res.__json.data.planTier).toBe('PRO')
     expect(res.__json.data.stripeSubscriptionId).toBeNull()
@@ -147,7 +147,7 @@ describe('POST /superadmin/venues/:venueId/plan/comp', () => {
 
     await assignVenueCompPlan(req, res, next)
 
-    expect(mockedAssignComp).toHaveBeenCalledWith('venue-1', 'FREE')
+    expect(mockedAssignComp).toHaveBeenCalledWith('venue-1', 'FREE', 'superadmin-1')
     expect(res.__json.data.planTier).toBeNull()
   })
 
@@ -173,7 +173,7 @@ describe('POST /superadmin/venues/:venueId/plan/trial', () => {
 
     await extendVenuePlanTrial(req, res, next)
 
-    expect(mockedExtendTrial).toHaveBeenCalledWith('venue-1', 'PRO', 14)
+    expect(mockedExtendTrial).toHaveBeenCalledWith('venue-1', 'PRO', 14, 'superadmin-1')
     expect(res.__json.success).toBe(true)
     expect(res.__json.data.state).toBe('trial')
     expect(res.__json.data.trialEndsAt).toBe(ends)

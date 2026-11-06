@@ -31,6 +31,7 @@ import { sinCamposReservados } from '../../services/access/camposReservados'
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import { toLegacyVenuePayload } from '../../utils/legacyProductPayload'
 import { esSuperadminDeLaSesion } from '../../services/access/rolVigente'
 
@@ -686,7 +687,7 @@ export async function getVenueSeatStatus(req: Request<{ venueId: string }>, res:
  * POST /api/v1/dashboard/venues/:venueId/plan/checkout
  */
 export async function createVenuePlanCheckoutSession(
-  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM' }>,
+  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM'; primerCobroAnunciado?: string }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -701,18 +702,25 @@ export async function createVenuePlanCheckoutSession(
     const tier = req.body.tier ?? 'PRO'
 
     const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
-    const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, { skipOrgCheck })
+    const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, {
+      skipOrgCheck,
+      primerCobroAnunciado: req.body.primerCobroAnunciado,
+    })
 
     res.status(200).json({
       success: true,
       url: checkoutUrl,
     })
   } catch (error) {
-    logger.error('Error creating plan checkout session', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      orgId: req.authContext?.orgId,
-      venueId: req.params?.venueId,
-    })
+    // A refusal on purpose («ya tiene un plan», «compra en curso») is a warn, not an error in Better Stack (D7, 5-nov).
+    if (error instanceof AppError && error.statusCode < 500)
+      logger.warn('Plan checkout refused', { message: error.message, statusCode: error.statusCode, venueId: req.params?.venueId })
+    else
+      logger.error('Error creating plan checkout session', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        orgId: req.authContext?.orgId,
+        venueId: req.params?.venueId,
+      })
     next(error)
   }
 }
