@@ -15,8 +15,10 @@
  */
 import {
   OrderSource,
+  PaymentFundsFlow,
   PaymentMethod,
   PaymentSource,
+  PaymentType,
   PaymentStatus,
   Prisma,
   TerminalType,
@@ -73,6 +75,9 @@ type Facts = {
   usaMedido: string
   nivel: string
   estado: string
+  ingreso: string
+  mensualidad: string | null
+  pistaIngreso: string | null
 }
 
 async function factsOf(ids: string[]): Promise<Map<string, Facts>> {
@@ -149,6 +154,12 @@ async function sale(
       method?: PaymentMethod
       terminalId?: string
       at?: Date
+      /** C1b: who moves the money, the online channel, the tip, a custom tender's cash flag and a refund. */
+      fundsFlow?: PaymentFundsFlow
+      ecommerceMerchantId?: string
+      tipAmount?: string
+      tenderCountsAsCash?: boolean
+      type?: PaymentType
     }
   },
 ) {
@@ -177,6 +188,11 @@ async function sale(
       source: p.source ?? 'OTHER',
       status: p.status ?? 'COMPLETED',
       terminalId: p.terminalId,
+      fundsFlow: p.fundsFlow,
+      ecommerceMerchantId: p.ecommerceMerchantId,
+      tipAmount: p.tipAmount ?? '0',
+      tenderCountsAsCash: p.tenderCountsAsCash,
+      type: p.type,
       feePercentage: '0',
       feeAmount: '0',
       netAmount: p.amount ?? '100.00',
@@ -1231,6 +1247,27 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         expect(new Set(leidas.map(leida => leida.nivel))).toEqual(new Set(['FREE', 'PRO', 'PREMIUM']))
       })
 
+      it('🔴 C1b: f.mensualidad = el nivel de la sucursal si su condición canónica (planesPorSucursal) es PAGADO o CAMPANA; si no, null', async () => {
+        const facts = await factsOf(sembradas.map(s => s.organizationId))
+        clockAt(NOW)
+        const leidas = await planesPorSucursal(
+          sembradas.map(s => s.organizationId),
+          NOW,
+        )
+        jest.useRealTimers()
+        const deLaOrganizacion = new Map(leidas.map(leida => [leida.organizationId, leida]))
+        for (const s of sembradas) {
+          const leida = deLaOrganizacion.get(s.organizationId)!
+          const paga = leida.condicion === 'PAGADO' || leida.condicion === 'CAMPANA'
+          expect({ name: s.name, mensualidad: facts.get(s.organizationId)!.mensualidad }).toEqual({
+            name: s.name,
+            mensualidad: paga ? leida.nivel : null,
+          })
+        }
+        // Not vacuous: paid, campaign of each level and nothing.
+        expect(new Set(sembradas.map(s => facts.get(s.organizationId)!.mensualidad))).toEqual(new Set([null, 'PRO', 'PREMIUM']))
+      })
+
       it('pagoVencido: prueba vencida con gracia vigente → PRO, condición según su origen (PAGADO / CORTESIA) y pagoVencido', async () => {
         const conStripe = sembradas.find(s => s.name === 'gracia vigente con prueba vencida, con Stripe')!
         const sinStripe = sembradas.find(s => s.name === 'gracia vigente con prueba vencida, sin Stripe')!
@@ -1946,6 +1983,377 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       await expect(setAltaMotivo(todos(), sinOrg.id, { motivo: null, perdido: true })).rejects.toMatchObject({
         statusCode: 409,
         code: 'CRM_NO_ES_ALTA',
+      })
+    })
+  })
+  // ── «Ingreso» (C1b): lo que cada cliente le deja a Avoqado ──────────────────────────────────────────────────────────
+
+  describe('Ingreso (C1b)', () => {
+    const ING = `ing${Date.now()}`
+    let ecommerceMerchantId: string
+    let providerId: string
+    const ingresoOf = async (build: (venueId: string) => Promise<unknown>) => {
+      const { organizationId, venueId } = await orgWithVenue()
+      await build(venueId)
+      const f = await factOf(organizationId)
+      return { ingreso: f.ingreso, mensualidad: f.mensualidad, pista: f.pistaIngreso }
+    }
+    const tarjeta = (venueId: string, payment: NonNullable<Parameters<typeof sale>[1]['payment']>) =>
+      sale(venueId, { source: 'TPV', payment: { method: 'CREDIT_CARD', ...payment } })
+    const efectivo = (venueId: string, payment: NonNullable<Parameters<typeof sale>[1]['payment']> = {}) =>
+      sale(venueId, { source: 'TPV', payment: { method: 'CASH', source: 'TPV', ...payment } })
+
+    beforeAll(async () => {
+      providerId = (
+        await prisma.paymentProvider.upsert({
+          where: { code: `C1B_${ING}` },
+          create: { code: `C1B_${ING}`, name: 'Blumon E-commerce (prueba C1b)', type: 'PAYMENT_PROCESSOR' },
+          update: {},
+        })
+      ).id
+      const { venueId } = await orgWithVenue()
+      ecommerceMerchantId = (
+        await prisma.ecommerceMerchant.create({
+          data: {
+            venueId,
+            businessName: 'Tienda en línea C1b',
+            contactEmail: `${ING}@example.test`,
+            publicKey: `pk_test_${ING}`,
+            secretKeyHash: `hash-${ING}`,
+            providerId,
+            providerCredentials: {},
+          },
+        })
+      ).id
+    })
+
+    afterAll(async () => {
+      // The channel holds its venue; the payments keep their row (`SetNull`) until the outer cleanup.
+      await prisma.ecommerceMerchant.deleteMany({ where: { id: ecommerceMerchantId } })
+      await prisma.paymentProvider.deleteMany({ where: { id: providerId } })
+    })
+
+    describe('tarjeta por Avoqado (R1)', () => {
+      it('tarjeta en una TPV_ANDROID (source TPV) → TRANSACCIONES', async () => {
+        expect(await ingresoOf(async v => tarjeta(v, { source: 'TPV', terminalId: await terminal(v, TerminalType.TPV_ANDROID) }))).toEqual({
+          ingreso: 'TRANSACCIONES',
+          mensualidad: null,
+          pista: null,
+        })
+      })
+
+      it('🔴 tarjeta de una terminal vieja cuyo serial no resolvió (source TPV, sin terminalId) → TRANSACCIONES', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'TPV' }))).toMatchObject({ ingreso: 'TRANSACCIONES' })
+      })
+
+      it('débito y billetera digital en la terminal → TRANSACCIONES', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'TPV', method: 'DEBIT_CARD' }))).toMatchObject({ ingreso: 'TRANSACCIONES' })
+        expect(await ingresoOf(v => tarjeta(v, { source: 'TPV', method: 'DIGITAL_WALLET' }))).toMatchObject({ ingreso: 'TRANSACCIONES' })
+      })
+
+      it('liga de pago con Stripe (WEB, AVOQADO_PROCESSED) y Blumon E-commerce (WEB, con canal y sin fundsFlow) → TRANSACCIONES', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'WEB', fundsFlow: 'AVOQADO_PROCESSED' }))).toMatchObject({
+          ingreso: 'TRANSACCIONES',
+        })
+        expect(await ingresoOf(v => tarjeta(v, { source: 'WEB', ecommerceMerchantId }))).toMatchObject({ ingreso: 'TRANSACCIONES' })
+      })
+
+      it('🔴 cobro de prueba del superadmin (DASHBOARD_TEST) no es ingreso ni «otra terminal»', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'DASHBOARD_TEST' }))).toEqual({
+          ingreso: 'NINGUNO',
+          mensualidad: null,
+          pista: null,
+        })
+      })
+
+      it('🔴 pedido de delivery pagado en la plataforma (EXTERNAL_RECORDED) no es ingreso ni «otra terminal»', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'DELIVERY_PLATFORM', fundsFlow: 'EXTERNAL_RECORDED' }))).toEqual({
+          ingreso: 'NINGUNO',
+          mensualidad: null,
+          pista: null,
+        })
+      })
+
+      it('🔴 PENDING, $0.00 y un reembolso (negativo) no cuentan', async () => {
+        expect(
+          await ingresoOf(async v => {
+            await tarjeta(v, { source: 'TPV', status: 'PENDING' })
+            await tarjeta(v, { source: 'TPV', amount: '0.00' })
+            await tarjeta(v, { source: 'TPV', amount: '-100.00', type: 'REFUND' })
+          }),
+        ).toMatchObject({ ingreso: 'NINGUNO' })
+      })
+
+      it('🔴 hace exactamente 30 días cuenta; hace 30 días + 1 s no', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'TPV', at: hace(30 * DAY) }))).toMatchObject({ ingreso: 'TRANSACCIONES' })
+        expect(await ingresoOf(v => tarjeta(v, { source: 'TPV', at: hace(30 * DAY + 1000) }))).toEqual({
+          ingreso: 'NINGUNO',
+          mensualidad: null,
+          pista: null,
+        })
+      })
+
+      it('🔴 la tarjeta de una sucursal TRIAL (demo) no cuenta; la real, sólo con efectivo → 💵', async () => {
+        const organizationId = await org()
+        await efectivo(await venue(organizationId))
+        await tarjeta(await venue(organizationId, { status: VenueStatus.TRIAL, demoExpiresAt: dentroDe(10 * DAY) }), { source: 'TPV' })
+        const f = await factOf(organizationId)
+        expect([f.ingreso, f.pistaIngreso]).toEqual(['NINGUNO', 'SOLO_EFECTIVO'])
+      })
+    })
+
+    describe('pistas: otra terminal (R2) y sólo efectivo (R3)', () => {
+      it('🔴 tarjeta que el POS sólo anotó (OTHER, sin fundsFlow) → NINGUNO con «tarjeta en otra terminal»', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'OTHER' }))).toEqual({
+          ingreso: 'NINGUNO',
+          mensualidad: null,
+          pista: 'TARJETA_OTRA_TERMINAL',
+        })
+      })
+
+      it('🔴 tarjeta anotada desde la terminal por /mobile (OTHER, EXTERNAL_RECORDED, con terminalId de una TPV) → otra terminal, nunca TRANSACCIONES', async () => {
+        expect(
+          await ingresoOf(async v =>
+            tarjeta(v, { source: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', terminalId: await terminal(v, TerminalType.TPV_ANDROID) }),
+          ),
+        ).toEqual({ ingreso: 'NINGUNO', mensualidad: null, pista: 'TARJETA_OTRA_TERMINAL' })
+      })
+
+      it('🔴 pago con tarjeta anotado a mano en el panel con fuente TPV (EXTERNAL_RECORDED) → otra terminal, nunca TRANSACCIONES', async () => {
+        expect(await ingresoOf(v => tarjeta(v, { source: 'TPV', fundsFlow: 'EXTERNAL_RECORDED', method: 'DEBIT_CARD' }))).toEqual({
+          ingreso: 'NINGUNO',
+          mensualidad: null,
+          pista: 'TARJETA_OTRA_TERMINAL',
+        })
+      })
+
+      it('tarjeta por Avoqado y además en otra terminal → TRANSACCIONES con la pista', async () => {
+        expect(
+          await ingresoOf(async v => {
+            await tarjeta(v, { source: 'TPV' })
+            await tarjeta(v, { source: 'OTHER' })
+          }),
+        ).toEqual({ ingreso: 'TRANSACCIONES', mensualidad: null, pista: 'TARJETA_OTRA_TERMINAL' })
+      })
+
+      it('efectivo en la terminal y en el POS (CASH_DRAWER), y un vale que cuenta como efectivo → 💵 sólo efectivo', async () => {
+        expect(
+          await ingresoOf(async v => {
+            await efectivo(v)
+            await efectivo(v, { source: 'APP', fundsFlow: 'CASH_DRAWER' })
+            await efectivo(v, { source: 'OTHER', method: 'OTHER', tenderCountsAsCash: true })
+          }),
+        ).toEqual({ ingreso: 'NINGUNO', mensualidad: null, pista: 'SOLO_EFECTIVO' })
+      })
+
+      it('efectivo y una transferencia anotada → sin pista (no es sólo efectivo ni tarjeta)', async () => {
+        expect(
+          await ingresoOf(async v => {
+            await efectivo(v)
+            await efectivo(v, { source: 'OTHER', method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
+          }),
+        ).toEqual({ ingreso: 'NINGUNO', mensualidad: null, pista: null })
+      })
+
+      it('efectivo y tarjeta por Avoqado → TRANSACCIONES, sin «sólo efectivo»', async () => {
+        expect(
+          await ingresoOf(async v => {
+            await efectivo(v)
+            await tarjeta(v, { source: 'TPV' })
+          }),
+        ).toEqual({ ingreso: 'TRANSACCIONES', mensualidad: null, pista: null })
+      })
+
+      it('sin cobros en 30 días → sin pista', async () => {
+        expect(await ingresoOf(v => efectivo(v, { at: hace(40 * DAY) }))).toEqual({ ingreso: 'NINGUNO', mensualidad: null, pista: null })
+      })
+    })
+
+    describe('mensualidad (R5)', () => {
+      it('Pro con Stripe → MENSUALIDAD PRO; con tarjeta por Avoqado → AMBOS', async () => {
+        expect(await ingresoOf(v => planRow(v, 'PRO', { stripeSubscriptionId: `sub_ing1_${ING}` }))).toEqual({
+          ingreso: 'MENSUALIDAD',
+          mensualidad: 'PRO',
+          pista: null,
+        })
+        expect(
+          await ingresoOf(async v => {
+            await planRow(v, 'PREMIUM', { stripeSubscriptionId: `sub_ing2_${ING}` })
+            await tarjeta(v, { source: 'TPV' })
+          }),
+        ).toEqual({ ingreso: 'AMBOS', mensualidad: 'PREMIUM', pista: null })
+      })
+
+      it('cortesía, prueba con tarjeta y prueba sin tarjeta → no es mensualidad', async () => {
+        expect(await ingresoOf(v => planRow(v, 'PREMIUM'))).toMatchObject({ ingreso: 'NINGUNO', mensualidad: null })
+        expect(
+          await ingresoOf(v => planRow(v, 'PRO', { endDate: dentroDe(3 * DAY), stripeSubscriptionId: `sub_ing3_${ING}` })),
+        ).toMatchObject({ ingreso: 'NINGUNO', mensualidad: null })
+        expect(await ingresoOf(v => planRow(v, 'PRO', { endDate: dentroDe(3 * DAY) }))).toMatchObject({ ingreso: 'NINGUNO' })
+      })
+
+      it('🔴 dos orígenes que cobran a la vez (Pro pagado y Premium en prueba con tarjeta): Ingreso dice lo que se cobra (Pro), sea cual sea la fila que elige el Plan', async () => {
+        const dosFilas = async (primera: 'PRO_PAGADO' | 'PREMIUM_PRUEBA') => {
+          const { organizationId, venueId } = await orgWithVenue()
+          const pro = await planRow(venueId, 'PRO', { stripeSubscriptionId: `sub_tie_pro_${primera}_${ING}` })
+          const premium = await planRow(venueId, 'PREMIUM', {
+            endDate: dentroDe(5 * DAY),
+            stripeSubscriptionId: `sub_tie_pre_${primera}_${ING}`,
+          })
+          const [vieja, nueva] = primera === 'PRO_PAGADO' ? [pro, premium] : [premium, pro]
+          await prisma.$executeRaw`UPDATE "VenueFeature" SET "updatedAt" = ${hace(2 * DAY)} WHERE "id" = ${vieja.id}`
+          await prisma.$executeRaw`UPDATE "VenueFeature" SET "updatedAt" = ${hace(DAY)} WHERE "id" = ${nueva.id}`
+          return organizationId
+        }
+        const proPrimero = await dosFilas('PRO_PAGADO')
+        const premiumPrimero = await dosFilas('PREMIUM_PRUEBA')
+        const facts = await factsOf([proPrimero, premiumPrimero])
+        clockAt(NOW)
+        const leidas = await planesPorSucursal([proPrimero, premiumPrimero], NOW)
+        jest.useRealTimers()
+        const condicion = (id: string) => leidas.find(leida => leida.organizationId === id)!.condicion
+        // The Plan cell picks the newest row (the trial, or the paid Pro); Ingreso says what is charged either way.
+        expect([condicion(proPrimero), facts.get(proPrimero)!.mensualidad]).toEqual(['PRUEBA_CON_TARJETA', 'PRO'])
+        expect([condicion(premiumPrimero), facts.get(premiumPrimero)!.mensualidad]).toEqual(['PAGADO', 'PRO'])
+      })
+
+      it('dos sucursales: una paga Pro y otra tiene Premium de cortesía → MENSUALIDAD PRO (el nivel de la que paga)', async () => {
+        const organizationId = await org()
+        await planRow(await venue(organizationId), 'PRO', { stripeSubscriptionId: `sub_ing4_${ING}` })
+        await planRow(await venue(organizationId), 'PREMIUM')
+        const f = await factOf(organizationId)
+        expect([f.nivel, f.ingreso, f.mensualidad]).toEqual(['PREMIUM', 'MENSUALIDAD', 'PRO'])
+      })
+
+      it('campaña (contrato vigente sin fila clásica) → MENSUALIDAD con su nivel', async () => {
+        expect(await ingresoOf(v => contract(v, 'PREMIUM', hace(10 * DAY), dentroDe(20 * DAY)))).toMatchObject({
+          ingreso: 'MENSUALIDAD',
+          mensualidad: 'PREMIUM',
+        })
+      })
+    })
+
+    describe('en la lista, el filtro, el monto y la ficha', () => {
+      const o: Record<string, string> = {}
+      let A: string
+      const conVentas = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', ventas: true }) as unknown as CrmAccess
+      const sinVentas = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', ventas: false }) as unknown as CrmAccess
+      const propios = (me: string) =>
+        ({ staffId: me, isSuperadmin: false, ver: 'propios', editar: 'propios', ventas: false }) as unknown as CrmAccess
+      type Row = Awaited<ReturnType<typeof listClients>>['rows'][number]
+
+      async function orgI(key: string) {
+        const { id } = await prisma.organization.create({
+          data: { name: `Ing ${ING} ${key}`, email: `ing-${ING}-${key}@test.mx`, phone: '5555555555' },
+        })
+        organizationIds.push(id)
+        o[key] = id
+        return venue(id)
+      }
+      async function walk(access: CrmAccess, filters: ClientFilters = {}, limit = 2) {
+        const rows: Row[] = []
+        const totals = new Set<number>()
+        let cursor: string | undefined
+        do {
+          clockAt(NOW)
+          const page = await listClients(access, { ...filters, q: ING, altas: true, limit, cursor }, NOW).finally(() =>
+            jest.useRealTimers(),
+          )
+          expect(page.ingreso).toBe(1)
+          rows.push(...page.rows)
+          totals.add(page.total)
+          cursor = page.nextCursor ?? undefined
+        } while (cursor)
+        expect(totals.size).toBe(1)
+        return { rows, total: [...totals][0] }
+      }
+
+      beforeAll(async () => {
+        A = (await prisma.staff.create({ data: { email: `a-${ING}@test.mx`, firstName: 'Ana', lastName: 'Ingreso' } })).id
+        sellerIds.push(A)
+        // Terminal: $100 (+$10 de propina), $200 sin terminalId, $50 débito; un reembolso de −$100 no resta (bruto).
+        const terminalV = await orgI('terminal')
+        const tpv = await terminal(terminalV, TerminalType.TPV_ANDROID)
+        await tarjeta(terminalV, { source: 'TPV', terminalId: tpv, amount: '100.00', tipAmount: '10.00' })
+        await tarjeta(terminalV, { source: 'TPV', amount: '200.00' })
+        await tarjeta(terminalV, { source: 'TPV', method: 'DEBIT_CARD', amount: '50.00' })
+        await tarjeta(terminalV, { source: 'TPV', amount: '-100.00', type: 'REFUND' })
+        await efectivo(terminalV, { amount: '999.00' })
+        // En línea: liga de Stripe $300 y Blumon E-commerce $70.
+        const enLinea = await orgI('enLinea')
+        await tarjeta(enLinea, { source: 'WEB', fundsFlow: 'AVOQADO_PROCESSED', amount: '300.00' })
+        await tarjeta(enLinea, { source: 'WEB', ecommerceMerchantId, amount: '70.00' })
+        // Las dos: Pro con Stripe y $40 en la terminal.
+        const ambos = await orgI('ambos')
+        await planRow(ambos, 'PRO', { stripeSubscriptionId: `sub_ing_list_${ING}` })
+        await tarjeta(ambos, { source: 'TPV', amount: '40.00' })
+        // Sólo mensualidad Premium, sin cobros.
+        await planRow(await orgI('mensualidad'), 'PREMIUM', { stripeSubscriptionId: `sub_ing_list2_${ING}` })
+        // Tarjeta en otra terminal (el POS la anotó) y efectivo.
+        const otra = await orgI('otra')
+        await tarjeta(otra, { source: 'OTHER', amount: '500.00' })
+        await efectivo(otra)
+        // Sólo efectivo.
+        await efectivo(await orgI('efectivo'))
+        // Efectivo y transferencia: sin pista.
+        const mixto = await orgI('mixto')
+        await efectivo(mixto)
+        await efectivo(mixto, { source: 'OTHER', method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
+        // Cortesía sin cobros: nada.
+        await planRow(await orgI('nada'), 'PRO')
+      })
+
+      it('cada fila pinta su ingreso, su nivel pagado, su pista y su monto bruto sin propinas (con «Ver ventas»)', async () => {
+        const { rows, total } = await walk(conVentas(), {}, 100)
+        expect(total).toBe(8)
+        const by = new Map(rows.map(row => [row.id, row.ingreso]))
+        expect(by.get(o.terminal)).toEqual({ codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 350, pista: null })
+        expect(by.get(o.enLinea)).toEqual({ codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 370, pista: null })
+        expect(by.get(o.ambos)).toEqual({ codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 40, pista: null })
+        expect(by.get(o.mensualidad)).toEqual({ codigo: 'MENSUALIDAD', mensualidad: 'PREMIUM', transacciones30d: null, pista: null })
+        expect(by.get(o.otra)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: 'TARJETA_OTRA_TERMINAL' })
+        expect(by.get(o.efectivo)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: 'SOLO_EFECTIVO' })
+        expect(by.get(o.mixto)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: null })
+        expect(by.get(o.nada)).toEqual({ codigo: 'NINGUNO', mensualidad: null, transacciones30d: null, pista: null })
+      })
+
+      it('🔴 sin «Ver ventas» la categoría y la pista son las mismas, pero el monto no sale', async () => {
+        const con = (await walk(conVentas(), {}, 100)).rows
+        const sin = (await walk(sinVentas(), {}, 100)).rows
+        for (const row of sin) {
+          const igual = con.find(c => c.id === row.id)!
+          expect(row.ingreso).toEqual({ ...igual.ingreso, transacciones30d: null })
+        }
+        expect(sin.some(row => row.ingreso.codigo === 'TRANSACCIONES')).toBe(true)
+      })
+
+      it('🔴 para cada valor del filtro ingreso: total = filas recorridas que pintan ese valor; las cuatro categorías suman el total', async () => {
+        const pinta = (row: Row, value: string) =>
+          value === 'TARJETA_OTRA_TERMINAL' || value === 'SOLO_EFECTIVO' ? row.ingreso.pista === value : row.ingreso.codigo === value
+        for (const access of [propios(A), conVentas()]) {
+          const base = await walk(access)
+          expect(base.rows).toHaveLength(base.total)
+          let suma = 0
+          for (const value of ['MENSUALIDAD', 'TRANSACCIONES', 'AMBOS', 'NINGUNO', 'TARJETA_OTRA_TERMINAL', 'SOLO_EFECTIVO'] as const) {
+            const filtered = await walk(access, { ingreso: value })
+            expect({ value, total: filtered.total }).toEqual({ value, total: filtered.rows.length })
+            expect(filtered.rows.every(row => pinta(row, value))).toBe(true)
+            expect({ value, total: filtered.total }).toEqual({ value, total: base.rows.filter(row => pinta(row, value)).length })
+            expect({ value, total: filtered.total }).not.toEqual({ value, total: 0 })
+            if (!value.includes('_')) suma += filtered.total
+          }
+          expect(suma).toBe(base.total)
+        }
+      })
+
+      it('la ficha (getClientLive) dice lo mismo que la fila, y sin «Ver ventas» sin monto', async () => {
+        const fila = (await walk(conVentas(), {}, 100)).rows.find(row => row.id === o.terminal)!
+        clockAt(NOW)
+        const con = await getClientLive(conVentas(), o.terminal, NOW)
+        const sin = await getClientLive(sinVentas(), o.terminal, NOW)
+        jest.useRealTimers()
+        expect(con).toMatchObject({ ingreso: fila.ingreso })
+        expect(sin).toMatchObject({ ingreso: { ...fila.ingreso, transacciones30d: null } })
       })
     })
   })

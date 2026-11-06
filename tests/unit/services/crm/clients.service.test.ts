@@ -494,6 +494,64 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
   })
 })
 
+describe('Ingreso (C1b)', () => {
+  const sqlOf = (query: Prisma.Sql) => query.sql.replace(/\s+/g, ' ')
+
+  it('el filtro ingreso va en el WHERE de la página y del total, antes del cursor: categoría sobre f.ingreso, pista sobre f.pistaIngreso', async () => {
+    await listClients(access(), { ingreso: 'TRANSACCIONES', cursor: ORG_2 }, NOW)
+    await listClients(access(), { ingreso: 'TARJETA_OTRA_TERMINAL' }, NOW)
+    for (const query of [pageQuery(0), countQuery(0)]) {
+      expect(sqlOf(query)).toContain('f."ingreso" = ?')
+      expect(query.values).toContain('TRANSACCIONES')
+    }
+    const page = sqlOf(pageQuery(0))
+    expect(page.indexOf('f."ingreso" = ?')).toBeLessThan(page.indexOf('(o."createdAt", o."id") <'))
+    expect(sqlOf(countQuery(1))).toContain('f."pistaIngreso" = ?')
+    expect(sqlOf(countQuery(1))).not.toContain('f."ingreso" = ?')
+    expect(countQuery(1).values).toContain('TARJETA_OTRA_TERMINAL')
+  })
+
+  it('🔴 el monto sólo se suma con «Ver ventas», en la misma sentencia de la página y sólo para TRANSACCIONES o AMBOS', async () => {
+    await listClients(access({ ventas: false }), {}, NOW)
+    expect(sqlOf(pageQuery(0))).toContain('NULL::numeric AS "transacciones30d"')
+    expect(sqlOf(pageQuery(0))).not.toContain('SUM(p."amount")')
+    await listClients(access({ ventas: true }), {}, NOW)
+    const page = sqlOf(pageQuery(1))
+    expect(page).toContain(`CASE WHEN f."ingreso" IN ('TRANSACCIONES', 'AMBOS') THEN ( SELECT SUM(p."amount")`)
+    expect(page).toContain(`p."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED'`)
+    // Never in the total: it only paints.
+    expect(sqlOf(countQuery(1))).not.toContain('SUM(p."amount")')
+  })
+
+  it('cada fila trae su ingreso (el monto en pesos, número) y meta dice ingreso: 1', async () => {
+    clientsDb([
+      client({ ingreso: 'AMBOS', mensualidad: 'PRO', pistaIngreso: null, transacciones30d: new Prisma.Decimal('4488.00') }),
+      client({
+        id: ORG_2,
+        ingreso: 'NINGUNO',
+        mensualidad: null,
+        pistaIngreso: 'TARJETA_OTRA_TERMINAL',
+        transacciones30d: null,
+      }),
+    ])
+    const result = await listClients(access({ ventas: true }), {}, NOW)
+    expect(result).toMatchObject({ ingreso: 1, legible: 1 })
+    expect(result.rows[0].ingreso).toEqual({ codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 4488, pista: null })
+    expect(result.rows[1].ingreso).toEqual({
+      codigo: 'NINGUNO',
+      mensualidad: null,
+      transacciones30d: null,
+      pista: 'TARJETA_OTRA_TERMINAL',
+    })
+  })
+
+  it('🔴 aunque la base devolviera un monto, sin «Ver ventas» la fila no lo lleva', async () => {
+    clientsDb([client({ ingreso: 'TRANSACCIONES', mensualidad: null, pistaIngreso: null, transacciones30d: new Prisma.Decimal('10') })])
+    const result = await listClients(access({ ventas: false }), {}, NOW)
+    expect(result.rows[0].ingreso).toEqual({ codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: null, pista: null })
+  })
+})
+
 describe('lo de la página (C1, Tarea 5)', () => {
   const cuid = (prefix: string, i: number) => `${prefix}${String(i).padStart(25 - prefix.length, '0')}`
 
@@ -844,6 +902,35 @@ describe('getLive', () => {
     })
     const live = await getLive(access(), ACCOUNT, NOW)
     expect((live as { venues: Array<{ id: string; demo: boolean }> }).venues.map(v => v.demo)).toEqual([false, true, true])
+  })
+
+  it('C1b: la ficha lee el ingreso de la organización con la misma lateral de la lista; el monto sólo con «Ver ventas»', async () => {
+    linked()
+    const fila = {
+      ingreso: 'TRANSACCIONES',
+      mensualidad: null,
+      pistaIngreso: 'TARJETA_OTRA_TERMINAL',
+      transacciones30d: new Prisma.Decimal('350'),
+    }
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (query.sql.includes('AS "pistaIngreso"') ? [fila] : []))
+    const con = await getLive(access({ ventas: true }), ACCOUNT, NOW)
+    expect(con).toMatchObject({
+      ingreso: { codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 350, pista: 'TARJETA_OTRA_TERMINAL' },
+    })
+    const consulta = rawQueries().find(query => query.sql.includes('AS "pistaIngreso"'))!
+    expect(consulta.sql).toContain('LEFT JOIN LATERAL')
+    expect(consulta.values).toContain(ORG)
+    expect(consulta.sql).toContain('SUM(p."amount")')
+
+    prismaMock.$queryRaw.mockClear()
+    const sin = await getLive(access({ ventas: false }), ACCOUNT, NOW)
+    expect(sin).toMatchObject({ ingreso: { codigo: 'TRANSACCIONES', transacciones30d: null } })
+    expect(rawQueries().find(query => query.sql.includes('AS "pistaIngreso"'))!.sql).not.toContain('SUM(p."amount")')
+  })
+
+  it('C1b: si la lectura del ingreso no trae fila, la ficha dice ingreso null (no inventa)', async () => {
+    linked()
+    expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ ingreso: null })
   })
 
   it('vivo_sin_llave_ventas_no_trae_ventas', async () => {

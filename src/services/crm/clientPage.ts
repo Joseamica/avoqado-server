@@ -64,6 +64,27 @@ export function usaDeLaFila(row: UsaDeLaFila, visible: UsaEscritoVisible | undef
   }
 }
 
+/** «Ingreso» of a row as `ingresoColumnas` selects it (C1b). */
+export interface IngresoDeLaFila {
+  ingreso: string
+  mensualidad: string | null
+  pistaIngreso: string | null
+  transacciones30d: { toString(): string } | number | null
+}
+
+/**
+ * The «Ingreso» cell: the code, the paid level, the opportunity and the card money through Avoqado in 30 days in pesos — the
+ * amount only for whoever has «Ver ventas», even if the database sent one.
+ */
+export function ingresoDeLaFila(row: IngresoDeLaFila, conVentas: boolean) {
+  return {
+    codigo: row.ingreso,
+    mensualidad: row.mensualidad,
+    transacciones30d: conVentas && row.transacciones30d != null ? Number(row.transacciones30d.toString()) : null,
+    pista: row.pistaIngreso,
+  }
+}
+
 /** The count of stalled signups by reason, every key present (zeros included). */
 export function conteosDe(row: Record<string, number | undefined> | undefined) {
   const of = (key: string) => row?.[key] ?? 0

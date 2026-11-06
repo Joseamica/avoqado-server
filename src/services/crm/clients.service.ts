@@ -27,12 +27,14 @@ import {
   aparatosDe,
   autoresDelUsa,
   conteosDe,
+  ingresoDeLaFila,
+  type IngresoDeLaFila,
   planDeLaFila,
   planDeLaPagina,
   ultimosComentarios,
   usaDeLaFila,
 } from './clientPage'
-import { checkDueno, clientSql, clientsFilter, clientsQueries, pageSize, type ClientFilters } from './clientsSql'
+import { checkDueno, clientSql, clientsFilter, clientsQueries, ingresoDeOrganizacionSql, pageSize, type ClientFilters } from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
 import { addEvent } from './timeline.service'
 import { MONEY, REAL_VENUE } from './sweep.service'
@@ -50,7 +52,7 @@ const ONBOARDING_STEPS = 8
 
 const fullName = (person: { firstName: string; lastName: string }) => `${person.firstName} ${person.lastName}`.trim()
 
-type PageRow = {
+type PageRow = IngresoDeLaFila & {
   id: string
   name: string
   createdAt: Date
@@ -144,12 +146,16 @@ export async function listClients(access: CrmAccess, filters: ClientFilters = {}
         // Only a 🟠: what the signup left; its reason and «Perdido» only for an account the caller sees.
         alta: organization.estado === 'ALTA_SIN_TARJETA' ? altaDeLaFila(altas.get(organization.id), account) : null,
         ultimoComentario: (account && comentarios.get(account.id)) ?? null,
+        // C1b: from the same lateral the filter reads; the amount only with «Ver ventas».
+        ingreso: ingresoDeLaFila(organization, access.ventas),
       }
     }),
     nextCursor: found.length > limit ? page[page.length - 1].id : null,
     total,
     ...(conteo ? { conteos: conteosDe(conteo[0]) } : {}),
     legible: 1 as const,
+    /** C1b: this server paints and filters «Ingreso»; a new SUPERADMIN sends no `ingreso` filter before seeing it. */
+    ingreso: 1 as const,
   }
 }
 
@@ -220,7 +226,7 @@ export async function getClientLive(access: CrmAccess, organizationId: string, n
 
 /** What is live in Avoqado for one Organization, read when the ficha opens (see `getLive`). */
 async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
-  const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts, org] = await Promise.all([
+  const [venues, sucursales, owner, onboarding, terminales, ventasMes, altaFacts, org, [ingreso]] = await Promise.all([
     prisma.venue.findMany({
       where: { organizationId },
       select: { id: true, name: true, status: true, kycStatus: true, demoExpiresAt: true, _count: { select: { terminals: true } } },
@@ -238,6 +244,8 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     access.ventas ? monthSales(organizationId, now) : null,
     altaFactsOf([organizationId]),
     prisma.organization.findUnique({ where: { id: organizationId }, select: { seatCapExempt: true } }),
+    // C1b: «Ingreso» with the same lateral and columns as the row of «Clientes».
+    prisma.$queryRaw<IngresoDeLaFila[]>(ingresoDeOrganizacionSql(organizationId, now, access.ventas)),
   ])
   const plans = await enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id))
   const steps = onboarding?.completedSteps
@@ -273,6 +281,7 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
       : null,
     ventasMes,
     ventasBloqueadas: !access.ventas,
+    ingreso: ingreso ? ingresoDeLaFila(ingreso, access.ventas) : null,
   }
 }
 

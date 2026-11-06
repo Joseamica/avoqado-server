@@ -4,7 +4,13 @@
  * catch on another day: an enum value bound as text (`"OrderSource" = text` fails in Postgres) and a fact read from a
  * column that does not prove a device (`Order.terminalId`, `lastHeartbeat`).
  */
-import { altaPendienteSql, clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@/services/crm/clientFacts'
+import {
+  altaPendienteSql,
+  clientFactsLateral,
+  concesionComercialSql,
+  pagoPorAvoqadoSql,
+  ventanaDeAccesoSql,
+} from '@/services/crm/clientFacts'
 
 const NOW = new Date('2026-11-06T18:00:00.000Z')
 const ENUM_VALUES = [
@@ -26,10 +32,31 @@ const ENUM_VALUES = [
   'PLAN_PREMIUM',
   'PRO',
   'PREMIUM',
+  // C1b: Payment.method, Payment.source, Payment.fundsFlow and the codes of «Ingreso»
+  'CREDIT_CARD',
+  'DEBIT_CARD',
+  'DIGITAL_WALLET',
+  'CASH',
+  'DASHBOARD_TEST',
+  'DELIVERY_PLATFORM',
+  'AVOQADO_PROCESSED',
+  'CASH_DRAWER',
+  'MENSUALIDAD',
+  'TRANSACCIONES',
+  'AMBOS',
+  'NINGUNO',
+  'TARJETA_OTRA_TERMINAL',
+  'SOLO_EFECTIVO',
 ]
 
 describe('clientFacts SQL', () => {
-  const all = [clientFactsLateral(NOW), altaPendienteSql(), ventanaDeAccesoSql('vf', NOW), concesionComercialSql('v', NOW, 'PRO')]
+  const all = [
+    clientFactsLateral(NOW),
+    altaPendienteSql(),
+    ventanaDeAccesoSql('vf', NOW),
+    concesionComercialSql('v', NOW, 'PRO'),
+    pagoPorAvoqadoSql('p'),
+  ]
 
   it('los valores de enum van como literales SQL, nunca como bind de texto (igual que REAL_VENUE_SQL)', () => {
     for (const sql of all) {
@@ -39,6 +66,21 @@ describe('clientFacts SQL', () => {
     expect(lateral).toContain(`o2."source" IN ('AVOQADO_ANDROID', 'AVOQADO_IOS')`)
     expect(lateral).toContain(`t."type" IN ('TPV_ANDROID', 'TPV_IOS')`)
     expect(lateral).toContain(`o2."paymentStatus" IN ('PAID', 'PARTIAL')`)
+    // C1b: the card of the terminal and the online charge processed by Avoqado.
+    const avoqado = pagoPorAvoqadoSql('p').sql
+    expect(avoqado).toContain(`p."method" IN ('CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET')`)
+    expect(avoqado).toContain(`p."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED'`)
+    expect(avoqado).toContain(`p."source" <> 'DASHBOARD_TEST'`)
+    expect(lateral).toContain(`p."source" NOT IN ('DELIVERY_PLATFORM', 'DASHBOARD_TEST')`)
+  })
+
+  it('C1b: «tarjeta por Avoqado» nunca se decide por processor (la TPV escribe «TBD») ni por el terminalId del cobro', () => {
+    const avoqado = pagoPorAvoqadoSql('p').sql
+    expect(avoqado).not.toContain('processor')
+    expect(avoqado).not.toContain('terminalId')
+    // Null-safe: NOT (…) of a payment without fundsFlow must be true or false, never NULL (that would drop the row).
+    expect(avoqado).not.toMatch(/"fundsFlow" = 'AVOQADO_PROCESSED'/)
+    expect(() => pagoPorAvoqadoSql('p; DROP')).toThrow()
   })
 
   it('las fechas viajan con utcTs, nunca como Date pelona', () => {

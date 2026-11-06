@@ -1,5 +1,6 @@
 /**
- * The codes of «Clientes» (plan C1): what it uses, its plan level and condition, its state and why a signup stalled. A LEAF
+ * The codes of «Clientes» (plan C1, C1b): what it uses, its plan level and condition, its state, why a signup stalled and what
+ * it leaves Avoqado. A LEAF
  * (no imports): the request schema, the SQL and the screens read the same lists without loading any service.
  */
 export const USA = ['AMBOS', 'TERMINAL', 'POS', 'NO_IDENTIFICADO', 'NINGUNO'] as const
@@ -16,3 +17,9 @@ export const ESTADOS = ['ALTA_SIN_TARJETA', 'COBRA', 'SIN_COBROS', 'NUNCA'] as c
 export type Estado = (typeof ESTADOS)[number]
 export const MOTIVOS_DEL_ALTA = ['PRECIO', 'NO_QUISO_TARJETA', 'SOLO_VEIA', 'OTRO_SISTEMA', 'PROBLEMA_TECNICO', 'DESPUES', 'OTRO'] as const
 export type MotivoDelAlta = (typeof MOTIVOS_DEL_ALTA)[number]
+/** What a client leaves Avoqado (C1b): a paid plan, card money processed by Avoqado in 30 days, both or neither. They add up. */
+export const INGRESOS = ['MENSUALIDAD', 'TRANSACCIONES', 'AMBOS', 'NINGUNO'] as const
+export type Ingreso = (typeof INGRESOS)[number]
+/** The seller's opportunity under «Ingreso»: card charged on another terminal, or nothing but cash in 30 days. */
+export const PISTAS_DE_INGRESO = ['TARJETA_OTRA_TERMINAL', 'SOLO_EFECTIVO'] as const
+export type PistaDeIngreso = (typeof PISTAS_DE_INGRESO)[number]

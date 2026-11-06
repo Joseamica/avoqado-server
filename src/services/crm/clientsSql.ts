@@ -9,8 +9,17 @@ import { BadRequestError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import type { PAID_PLAN_TIER_CODES } from '../access/basePlan.service'
 import type { CrmAccess } from './access.service'
-import { altaPropiaPendienteSql, clientFactsLateral } from './clientFacts'
-import { MOTIVOS_DEL_ALTA, type Estado, type MotivoDelAlta, type Nivel, type Usa } from './clientCodes'
+import { altaPropiaPendienteSql, clientFactsLateral, transaccionesSql } from './clientFacts'
+import {
+  MOTIVOS_DEL_ALTA,
+  PISTAS_DE_INGRESO,
+  type Estado,
+  type Ingreso,
+  type MotivoDelAlta,
+  type Nivel,
+  type PistaDeIngreso,
+  type Usa,
+} from './clientCodes'
 import { REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './realVenueSql'
 
 const DEFAULT_PAGE = 50
@@ -115,6 +124,8 @@ export interface ClientFilters {
   dueno?: 'MIOS' | 'SIN_DUENO' | string
   /** Why a 🟠 stalled — only on accounts in the caller's «Ver». Implies `estado = ALTA_SIN_TARJETA`. */
   motivo?: MotivoDelAlta | 'SIN_MOTIVO'
+  /** C1b: what it leaves Avoqado (`f."ingreso"`), or the seller's opportunity under it (`f."pistaIngreso"`). */
+  ingreso?: Ingreso | PistaDeIngreso
 }
 
 /** The page size the server allows: 50 by default, never above 100. */
@@ -167,7 +178,32 @@ function filtrosSql(access: CrmAccess, filters: ClientFilters): Prisma.Sql {
   else if (dueno === 'SIN_DUENO') parts.push(Prisma.sql`(ca."id" IS NULL OR ca."ownerStaffId" IS NULL)`)
   else if (dueno) parts.push(Prisma.sql`ca."ownerStaffId" = ${dueno}`)
   if (filters.motivo) parts.push(motivoSql(access, filters.motivo))
+  if (filters.ingreso)
+    parts.push(
+      (PISTAS_DE_INGRESO as readonly string[]).includes(filters.ingreso)
+        ? Prisma.sql`f."pistaIngreso" = ${filters.ingreso}`
+        : Prisma.sql`f."ingreso" = ${filters.ingreso}`,
+    )
   return parts.length ? Prisma.sql` AND ${Prisma.join(parts, ' AND ')}` : Prisma.empty
+}
+
+/**
+ * «Ingreso» (C1b) as the cell paints it, over `o` and `f`: the code, the paid level, the opportunity, and the card money
+ * processed by Avoqado in the window — summed ONLY for a row that says TRANSACCIONES or AMBOS, and only for whoever has «Ver
+ * ventas» (the key that already gates «Cobrado este mes»); without it the amount never leaves the database.
+ */
+export function ingresoColumnas(now: Date, conVentas: boolean): Prisma.Sql {
+  const transacciones = conVentas
+    ? Prisma.sql`CASE WHEN f."ingreso" IN ('TRANSACCIONES', 'AMBOS') THEN ${transaccionesSql(now)} END`
+    : Prisma.sql`NULL::numeric`
+  return Prisma.sql`f."ingreso", f."mensualidad", f."pistaIngreso", ${transacciones} AS "transacciones30d"`
+}
+
+/** «Ingreso» of ONE organization for its ficha: the same lateral and columns as the list. */
+export function ingresoDeOrganizacionSql(organizationId: string, now: Date, conVentas: boolean): Prisma.Sql {
+  return Prisma.sql`SELECT ${ingresoColumnas(now, conVentas)}
+    FROM "Organization" o ${clientFactsLateral(now)}
+    WHERE o."id" = ${organizationId}`
 }
 
 /**
@@ -196,7 +232,7 @@ export function clientsQueries(access: CrmAccess, filters: ClientFilters, now: D
       SELECT o."id", o."name", o."createdAt", ca."id" AS "crmAccountId",
         EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL} AND ${VENUE_HAS_MONEY_SQL}) AS "yaCobro",
         f."usaMedido", ${USA_VISTO} AS "usaVisto", ${USA_AVISO} AS "usaAviso", ca."usaManual" IS NOT NULL AS "usaEscrito",
-        f."nivel", f."estado", f."ultimoCobroAt"
+        f."nivel", f."estado", f."ultimoCobroAt", ${ingresoColumnas(now, access.ventas)}
       ${listed}${after}
       ORDER BY o."createdAt" DESC, o."id" DESC
       LIMIT ${pageSize(filters.limit) + 1}`,
