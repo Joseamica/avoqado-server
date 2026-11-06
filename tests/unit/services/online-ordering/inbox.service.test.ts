@@ -84,9 +84,9 @@ beforeEach(() => {
     return [row('C', 'COMPLETED')]
   }) as any)
   prismaMock.onlineOrder.groupBy.mockResolvedValue([
-    { status: 'PENDING_ACCEPTANCE', _count: { _all: 2 } },
-    { status: 'ACCEPTED', _count: { _all: 1 } },
-    { status: 'READY', _count: { _all: 3 } },
+    { status: 'PENDING_ACCEPTANCE', requiresAcceptance: true, _count: { _all: 2 } },
+    { status: 'ACCEPTED', requiresAcceptance: true, _count: { _all: 1 } },
+    { status: 'READY', requiresAcceptance: true, _count: { _all: 3 } },
   ] as any)
   prismaMock.onlineOrder.count.mockResolvedValue(7)
 })
@@ -104,7 +104,7 @@ describe('listInbox', () => {
   it('arma conteos exactos (también los cerrados del periodo, H10), ordena lo pendiente primero y marca needsPrint sólo lo aceptado sin imprimir', async () => {
     const r = await listInbox({ venueId: 'v1', now: NOW })
     // 1b: los activos también por etapa (aceptados 1 + listos 3 = 4), del mismo `groupBy` exacto.
-    expect(r.counts).toEqual({ pending: 2, active: 4, done: 7, accepted: 1, ready: 3 })
+    expect(r.counts).toEqual({ pending: 2, active: 4, done: 7, accepted: 1, ready: 3, acceptedTeam: 1 })
     const cerrados = (prismaMock.onlineOrder.count.mock.calls[0][0] as any).where
     expect(cerrados).toMatchObject({ venueId: 'v1', createdAt: { gte: new Date(NOW.getTime() - 24 * 3_600_000) } })
     expect(r.orders.map(o => o.orderNumber)).toEqual(['WA', 'WB', 'WC'])
@@ -135,9 +135,66 @@ describe('listInbox', () => {
   })
 
   it('1b: una etapa sin pedidos cuenta 0 (no desaparece del objeto)', async () => {
-    prismaMock.onlineOrder.groupBy.mockResolvedValueOnce([{ status: 'READY', _count: { _all: 5 } }] as any)
+    prismaMock.onlineOrder.groupBy.mockResolvedValueOnce([{ status: 'READY', requiresAcceptance: true, _count: { _all: 5 } }] as any)
     const r = await listInbox({ venueId: 'v1', now: NOW })
-    expect(r.counts).toEqual({ pending: 0, active: 5, done: 7, accepted: 0, ready: 5 })
+    expect(r.counts).toEqual({ pending: 0, active: 5, done: 7, accepted: 0, ready: 5, acceptedTeam: 0 })
+  })
+
+  it('tienda híbrida: un folio por pagar no sale en pending ni en counts.pending', async () => {
+    prismaMock.onlineOrder.groupBy.mockResolvedValueOnce([
+      { status: 'PENDING_ACCEPTANCE', requiresAcceptance: true, _count: { _all: 2 } },
+      { status: 'PENDING_ACCEPTANCE', requiresAcceptance: false, _count: { _all: 9 } },
+    ] as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.counts.pending).toBe(2)
+    const gb = (prismaMock.onlineOrder.groupBy.mock.calls.at(-1)![0] as any).by
+    expect(gb).toEqual(['status', 'requiresAcceptance'])
+    const lista = prismaMock.onlineOrder.findMany.mock.calls
+      .map((c: unknown[]) => c[0] as any)
+      .find((a: any) => !esSincronizacion(a) && (a.where.status.in as string[]).includes('PENDING_ACCEPTANCE'))
+    expect(lista.where).toMatchObject({ venueId: 'v1', requiresAcceptance: true })
+  })
+
+  it('tienda híbrida: counts.acceptedTeam no cuenta folios y counts.accepted sí', async () => {
+    prismaMock.onlineOrder.groupBy.mockResolvedValueOnce([
+      { status: 'ACCEPTED', requiresAcceptance: true, _count: { _all: 1 } },
+      { status: 'ACCEPTED', requiresAcceptance: false, _count: { _all: 4 } },
+    ] as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.counts).toMatchObject({ accepted: 5, acceptedTeam: 1 })
+  })
+
+  it('tienda híbrida: active y counts.active siguen trayendo folios pagados (apps viejas)', async () => {
+    prismaMock.onlineOrder.groupBy.mockResolvedValueOnce([
+      { status: 'ACCEPTED', requiresAcceptance: false, _count: { _all: 2 } },
+      { status: 'READY', requiresAcceptance: false, _count: { _all: 3 } },
+    ] as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.counts.active).toBe(5)
+    const lista = prismaMock.onlineOrder.findMany.mock.calls
+      .map((c: unknown[]) => c[0] as any)
+      .find((a: any) => !esSincronizacion(a) && (a.where.status.in as string[]).includes('ACCEPTED'))
+    expect(lista.where.requiresAcceptance).toBeUndefined()
+  })
+
+  it('tienda híbrida: InboxOrder trae requiresAcceptance y channel (campos nuevos)', async () => {
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
+      esSincronizacion(a) ? [] : [row('F', 'PENDING_ACCEPTANCE', { requiresAcceptance: false, channel: 'QR' })]) as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.orders[0]).toMatchObject({ requiresAcceptance: false, channel: 'QR' })
+    const lista = prismaMock.onlineOrder.findMany.mock.calls
+      .map((c: unknown[]) => c[0] as any)
+      .find((a: any) => a.select?.order?.select?.items)
+    expect(lista.select).toMatchObject({ requiresAcceptance: true, channel: true })
+  })
+
+  it('tienda híbrida: getInboxOrder sí devuelve un folio por pagar, con requiresAcceptance false', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce(
+      row('F', 'PENDING_ACCEPTANCE', { requiresAcceptance: false, channel: null }) as any,
+    )
+    const o = await getInboxOrder({ venueId: 'v1', orderId: 'ord-F', now: NOW })
+    expect(o).toMatchObject({ status: 'PENDING_ACCEPTANCE', requiresAcceptance: false, channel: null })
+    expect((prismaMock.onlineOrder.findFirst.mock.calls[0][0] as any).where).toEqual({ venueId: 'v1', orderId: 'ord-F' })
   })
 
   it('`orderId` es el id de la CUENTA (Order.id): la llave de las acciones y del reclamo de impresión; `onlineOrderId` es otro', async () => {
@@ -373,7 +430,7 @@ describe('fase 2: cardStatus en la bandeja', () => {
     unaSola(row('A', 'PENDING_ACCEPTANCE')) // sin `charge`: paga al recoger
     const o = (await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]
     for (const k of LLAVES_ANTES) expect(o).toHaveProperty(k)
-    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason'].sort())
+    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason', 'requiresAcceptance', 'channel'].sort())
     expect(o.cardStatus).toBeNull()
     expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()

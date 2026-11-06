@@ -44,6 +44,10 @@ export interface InboxOrder {
   } | null
   /** Apps (2-nov): por qué se rechazó (`PAYMENT_FAILED` = no se pudo cobrar la tarjeta); `null` si no se rechazó. */
   rejectReason: OnlineOrderRejectReason | null
+  /** Tienda híbrida: `false` = folio (se paga en caja, nadie lo acepta); opcional para las apps viejas. */
+  requiresAcceptance: boolean
+  /** Tienda híbrida: de dónde pidió (`QR` o `LINK`); `null` en los pedidos de antes. */
+  channel: 'QR' | 'LINK' | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -71,6 +75,8 @@ const SELECT = {
   status: true,
   paymentMode: true,
   rejectReason: true,
+  requiresAcceptance: true,
+  channel: true,
   acceptDeadlineAt: true,
   estimatedReadyAt: true,
   printClaimedAt: true,
@@ -139,6 +145,8 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
         }
       : null,
     rejectReason: r.rejectReason ?? null,
+    requiresAcceptance: r.requiresAcceptance,
+    channel: (r.channel as InboxOrder['channel']) ?? null, // en el esquema es String? (T1): sólo 'QR' | 'LINK'
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,
@@ -208,7 +216,8 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
   const [pendingRows, activeRows, doneRows, grouped, doneCount] = await Promise.all([
     wantPending
       ? prisma.onlineOrder.findMany({
-          where: { venueId: p.venueId, status: { in: PENDING } },
+          // Tienda híbrida (R40): un folio sin pagar no es «por aceptar»; la bandeja sólo muestra lo que espera a «Mi equipo».
+          where: { venueId: p.venueId, status: { in: PENDING }, requiresAcceptance: true },
           orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
           take: INBOX_PAGE_SIZE + 1,
           select: SELECT,
@@ -236,7 +245,7 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
         })
       : Promise.resolve([] as Row[]),
     prisma.onlineOrder.groupBy({
-      by: ['status'],
+      by: ['status', 'requiresAcceptance'],
       where: { venueId: p.venueId, status: { in: [...PENDING, ...ACTIVE] } },
       _count: { _all: true },
     }),
@@ -244,14 +253,17 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
     prisma.onlineOrder.count({ where: { venueId: p.venueId, status: { in: DONE }, createdAt: { gte: dayAgo } } }),
   ])
 
-  const count = (statuses: OnlineOrderStatus[]) => grouped.filter(g => statuses.includes(g.status)).reduce((s, g) => s + g._count._all, 0)
+  const count = (statuses: OnlineOrderStatus[], teamOnly = false) =>
+    grouped.filter(g => statuses.includes(g.status) && (!teamOnly || g.requiresAcceptance)).reduce((s, g) => s + g._count._all, 0)
   const counts = {
-    pending: count(PENDING),
+    pending: count(PENDING, true),
     active: count(ACTIVE),
     done: doneCount,
     // 1b: los activos por etapa, del mismo `groupBy` exacto (las pestañas del panel no cuentan sobre una lista con tope).
     accepted: count([OnlineOrderStatus.ACCEPTED]),
     ready: count([OnlineOrderStatus.READY]),
+    // Tienda híbrida (R40): los aceptados de «Mi equipo» (sin folios), lo que muestra la pestaña «En preparación».
+    acceptedTeam: count([OnlineOrderStatus.ACCEPTED], true),
   }
   const truncated = pendingRows.length > INBOX_PAGE_SIZE || activeRows.length > INBOX_PAGE_SIZE || doneRows.length > DONE_PAGE_SIZE
   const pending = pendingRows.slice(0, INBOX_PAGE_SIZE)
