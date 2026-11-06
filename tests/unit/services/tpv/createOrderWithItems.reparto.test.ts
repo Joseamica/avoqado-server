@@ -266,10 +266,17 @@ describe('/tpv: descuento libre que deja los productos en $0 ⇒ cortesía', () 
     tx.paymentAllocation = { create: jest.fn(async () => ({ id: 'pa-1' })) }
   }
 
-  it('con permiso: se crea y la fila queda autorizada por quien la aplicó', async () => {
+  it('con permiso: se crea y la fila queda autorizada por quien cobra (lo resuelve el controlador)', async () => {
+    armarVentaEnCero()
+    await venta({ discount: 100, total: 0, canCompItems: true, performedBy: 'user-1', regaloAutorizadoPor: 'sv-quien-cobra' })
+    expect(creadas[0]).toMatchObject({ name: 'Descuento de la cuenta', amount: new Prisma.Decimal(100), authorizedById: 'sv-quien-cobra' })
+  })
+
+  // Codex r2 #1: el vendedor del cuerpo (`staffId` → 'sv-1') no es quien autorizó.
+  it('sin autorizador resuelto: no se atribuye al vendedor del cuerpo', async () => {
     armarVentaEnCero()
     await venta({ discount: 100, total: 0, canCompItems: true, performedBy: 'user-1' })
-    expect(creadas[0]).toMatchObject({ name: 'Descuento de la cuenta', amount: new Prisma.Decimal(100), authorizedById: 'sv-1' })
+    expect(creadas[0].authorizedById).toBeUndefined()
   })
 
   it('con el PIN de un gerente: la fila queda autorizada por el gerente del PIN', async () => {

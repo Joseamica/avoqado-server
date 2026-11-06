@@ -1398,7 +1398,8 @@ export async function applyManualDiscount(
     const regala = Math.round(amount * 100) >= Math.round(remainingDiscountable * 100)
     if (regala && type !== 'COMP') {
       if (!puedeRegalar) throw new RegaloSinPermisoError()
-      if (autorizadorSiRegala) authorizedById = autorizadorSiRegala
+      // Codex r2 #2: en un regalo nunca queda el `authorizedById` del cliente; sin autorizador verificado, queda vacío.
+      authorizedById = autorizadorSiRegala
     }
 
     // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.

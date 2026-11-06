@@ -3,6 +3,7 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import { conCortesiaSiRegala, tieneCortesiaAutorizada } from '../../middlewares/cortesiaPidePermiso.middleware'
+import { membresiaDeQuienLlama } from '../../services/tpv/discount.tpv.service'
 import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
 
@@ -113,12 +114,13 @@ export async function createOrderWithItems(req: Request<{ venueId: string }, any
     const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
 
     // hz:e0b12f00:D1: si el descuento libre resulta dejar la cuenta en $0, el servicio lo dice y aquí se pide `orders:comp` (PIN).
-    const order = await conCortesiaSiRegala(req, res, cortesia =>
+    const order = await conCortesiaSiRegala(req, res, async cortesia =>
       orderTpvService.createOrderWithItems(venueId, {
         ...req.body,
         // Después del spread: son del actor autenticado, nunca campos del cliente ni del vendedor seleccionado.
         canCompItems: canCompItems || !!cortesia,
-        regaloAutorizadoPor: cortesia?.porPin,
+        // Codex r2 #1: el gerente del PIN o la membresía de quien COBRA (no el vendedor elegido en `staffId`).
+        regaloAutorizadoPor: cortesia ? (cortesia.porPin ?? (await membresiaDeQuienLlama(venueId, req.authContext?.userId))) : undefined,
         performedBy: req.authContext?.userId,
         deviceSerialNumber: req.authContext?.terminalSerialNumber,
       }),

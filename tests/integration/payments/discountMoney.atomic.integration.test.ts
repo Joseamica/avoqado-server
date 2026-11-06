@@ -820,6 +820,14 @@ describe('existing discount policies', () => {
         isComp: false,
       })
     })
+    // Codex r2 #2: el dueño de la organización sin membresía puede regalar con su permiso, pero no elige el nombre del autorizador.
+    it('con permiso y sin membresía: el authorizedById del cliente no queda', async () => {
+      const o = await newOrder()
+      await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 100, 'Regalo', undefined, staffVenueId, {})
+      expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+        authorizedById: null,
+      })
+    })
     it('con PIN de gerente: la autoriza quien tecleó el PIN', async () => {
       const o = await newOrder()
       await tpv.applyManualDiscount(venueId, o.id, 'FIXED_AMOUNT', 100, 'Regalo', undefined, undefined, { porPin: staffVenueId })

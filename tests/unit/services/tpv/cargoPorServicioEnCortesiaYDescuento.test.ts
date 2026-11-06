@@ -293,6 +293,7 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
       reason: 'Cortesía total',
       staffId: STAFF_ID,
       expectedVersion: 1,
+      puedeRegalar: true, // hz:e0b12f00:D1: dejar en $0 los productos pide permiso de cortesía
     })
 
     expect(datosGuardados().total).toBe(35)

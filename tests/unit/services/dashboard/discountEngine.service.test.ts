@@ -1732,7 +1732,8 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
     // subtotal 1000, ya descontados 400 → quedan 600. Un 100% debe descontar 600, no 1000.
     prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 400) as never)
 
-    const result = await applyManualDiscount('order-neg', 'PERCENTAGE', 100, 'comp total', 'staff-1')
+    // hz:e0b12f00:D1: dejar en $0 lo que queda es una cortesía; con su permiso (9º argumento) el cálculo es el de siempre.
+    const result = await applyManualDiscount('order-neg', 'PERCENTAGE', 100, 'comp total', 'staff-1', undefined, undefined, undefined, true)
 
     expect(result.amount).toBe(600)
     expect(Number(lastOrderUpdate().discountAmount)).toBe(1000) // nunca > subtotal

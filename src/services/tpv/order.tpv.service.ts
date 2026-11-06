@@ -701,7 +701,7 @@ type TpvCreateOrderWithItemsInput = {
   /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
   canCompItems?: boolean
   performedBy?: string
-  /** Server-owned (hz:e0b12f00:D1): el gerente cuyo PIN autorizó un descuento libre que deja la cuenta en $0. */
+  /** Server-owned (hz:e0b12f00:D1): quien autorizó un descuento libre que deja la cuenta en $0 (el gerente del PIN o la membresía de quien cobra). */
   regaloAutorizadoPor?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
@@ -1399,7 +1399,8 @@ export async function createOrderWithItems(
             orderId: order.id,
             montoPesos: orderDiscountPesos,
             appliedById: activeStaffVenue.id,
-            ...(descuentoLibreRegala ? { authorizedById: input.regaloAutorizadoPor ?? activeStaffVenue.id } : {}),
+            // Codex r2 #1: el autorizador lo resuelve el controlador (gerente del PIN o quien cobra), nunca el vendedor del cuerpo.
+            ...(descuentoLibreRegala ? { authorizedById: input.regaloAutorizadoPor } : {}),
           }),
         })
       }
