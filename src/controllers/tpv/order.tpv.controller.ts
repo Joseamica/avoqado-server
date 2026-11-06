@@ -109,7 +109,7 @@ export async function createOrderWithItems(req: Request<{ venueId: string }, any
   try {
     const venueId = req.params.venueId
     const items = req.body.items
-    const needsCompAuthority = !!req.body.orderDiscountId || items.some((item: any) => item.isCortesia === true || !!item.itemDiscountId)
+    const needsCompAuthority = !!req.body.orderDiscountId || !!req.body.couponCode || items.some((item: any) => item.isCortesia === true || !!item.itemDiscountId)
     const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
 
     const order = await orderTpvService.createOrderWithItems(venueId, {

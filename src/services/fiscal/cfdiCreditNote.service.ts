@@ -2427,7 +2427,8 @@ async function facturacionApagada(fiscalEmisorId: string, venueId: string, proce
     select: { facturacionEnabled: true },
     take: 50,
   })
-  return !configs.some(c => c.facturacionEnabled)
+  // D11 opción A («el RFC basta»): un RFC sin ningún comercio ligado factura desde el panel; no está «apagada».
+  return configs.length > 0 && !configs.some(c => c.facturacionEnabled)
 }
 
 // ─── deps reales (DB + storage). Los tests inyectan las suyas. ───────────────

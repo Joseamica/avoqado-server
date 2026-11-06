@@ -13,13 +13,19 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 
 jest.mock('@/services/email.service', () => ({
   __esModule: true,
-  // D3: invitar al equipo de ventas manda el correo del CRM (`sendCrmTeamInvitation`).
-  default: { sendTeamInvitation: jest.fn().mockResolvedValue(true), sendCrmTeamInvitation: jest.fn().mockResolvedValue(true) },
+  // D3: invitar al equipo de ventas manda el correo del CRM (`sendCrmTeamInvitation`). D4: a quien ya tiene cuenta, el aviso
+  // de acceso (`sendEmail`).
+  default: {
+    sendTeamInvitation: jest.fn().mockResolvedValue(true),
+    sendCrmTeamInvitation: jest.fn().mockResolvedValue(true),
+    sendEmail: jest.fn().mockResolvedValue(true),
+  },
 }))
 jest.mock('@/services/dashboard/venueRoleConfig.dashboard.service', () => ({
   getRoleDisplayName: jest.fn().mockResolvedValue('Visor'),
 }))
 
+import emailService from '@/services/email.service'
 import * as teamDashboard from '@/services/dashboard/team.dashboard.service'
 import { getVenueSeatCap } from '@/services/access/seatCap.service'
 import { addTeamMemberSchema, removeTeamMemberSchema, updateTeamMemberSchema } from '@/schemas/crm.schema'
@@ -497,6 +503,70 @@ describe('addTeamMember', () => {
     expect(prismaMock.platformAccess.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ update: expect.objectContaining({ active: true, staffId: null, verScope: 'propios' }) }),
     )
+  })
+
+  describe('D4: quien ya tiene cuenta recibe un aviso de que ya puede entrar (hz:e0c38c0d:D4)', () => {
+    // 4-nov: un vendedor con cuenta activa recibió el asiento y no le llegó nada; el founder esperaba un correo.
+    const listaDePrueba = process.env.CRM_CORREO_PRUEBAS
+    afterEach(() => {
+      if (listaDePrueba === undefined) delete process.env.CRM_CORREO_PRUEBAS
+      else process.env.CRM_CORREO_PRUEBAS = listaDePrueba
+    })
+    const anaYaTieneCuenta = () =>
+      prismaMock.staff.findUnique.mockImplementation(async ({ where }: any) =>
+        where.id === ADMIN_ID
+          ? { id: ADMIN_ID, firstName: 'Founder', lastName: 'Avoqado' }
+          : where.email === 'ana@avoqado.io'
+            ? { id: SELLER_ID, active: true }
+            : null,
+      )
+
+    it('🔴 cuenta_activa_recibe_aviso_de_acceso', async () => {
+      process.env.CRM_CORREO_PRUEBAS = 'ana@avoqado.io'
+      anaYaTieneCuenta()
+
+      await expect(addTeamMember(actor(), newMember())).resolves.toEqual(expect.objectContaining({ invited: false, accessEmailSent: true }))
+
+      expect(invite).not.toHaveBeenCalled()
+      expect(emailService.sendEmail).toHaveBeenCalledTimes(1)
+      const enviado = jest.mocked(emailService.sendEmail).mock.calls[0][0]
+      expect(enviado).toEqual(expect.objectContaining({ to: 'ana@avoqado.io', subject: 'Ya tienes acceso al CRM de ventas de Avoqado' }))
+      expect(enviado.html).toContain('Founder Avoqado')
+      expect(enviado.html).toMatch(/href="https?:\/\/[^"]+\/login"/)
+      expect(enviado.html).not.toContain('/invite/')
+    })
+
+    it('fuera_de_produccion_sin_lista_de_prueba_no_sale_y_el_alta_sigue', async () => {
+      delete process.env.CRM_CORREO_PRUEBAS
+      anaYaTieneCuenta()
+
+      await expect(addTeamMember(actor(), newMember())).resolves.toEqual(
+        expect.objectContaining({ invited: false, accessEmailSent: false }),
+      )
+
+      expect(emailService.sendEmail).not.toHaveBeenCalled()
+      expect(prismaMock.staffVenue.upsert).toHaveBeenCalledTimes(1)
+    })
+
+    it('si_el_aviso_truena_el_alta_no_se_cae', async () => {
+      process.env.CRM_CORREO_PRUEBAS = 'ana@avoqado.io'
+      anaYaTieneCuenta()
+      jest.mocked(emailService.sendEmail).mockRejectedValueOnce(new Error('Resend caído'))
+
+      await expect(addTeamMember(actor(), newMember())).resolves.toEqual(
+        expect.objectContaining({ invited: false, accessEmailSent: false }),
+      )
+      expect(prismaMock.staffVenue.upsert).toHaveBeenCalledTimes(1)
+    })
+
+    it('quien_no_tiene_cuenta_sigue_con_la_invitacion_y_sin_aviso', async () => {
+      process.env.CRM_CORREO_PRUEBAS = 'ana@avoqado.io'
+
+      await expect(addTeamMember(actor(), newMember())).resolves.toEqual(expect.objectContaining({ invited: true }))
+
+      expect(invite).toHaveBeenCalledTimes(1)
+      expect(emailService.sendEmail).not.toHaveBeenCalled()
+    })
   })
 })
 

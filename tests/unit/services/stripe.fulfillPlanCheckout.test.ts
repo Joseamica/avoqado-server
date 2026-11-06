@@ -497,7 +497,9 @@ describe('🔴 V5-A: nunca pisar otra obligación viva (dos pestañas, dos check
       conSuscripciones(sub('sub_new', 'past_due', 'plan_premium_monthly'))
 
       await fulfillPlanCheckout(makeSession())
-      expect(vf.create.mock.calls[0][0].data).toMatchObject({ gracePeriodEndsAt: GRACIA, paymentFailureCount: 2 })
+      // 🔴 codex r1 #5 (D4 + D6): viaja también el ACCESO de la fila de origen. Antes se escribía `active:false` y la gracia
+      // que todavía le quedaba al negocio se perdía al cambiar de plan.
+      expect(vf.create.mock.calls[0][0].data).toMatchObject({ gracePeriodEndsAt: GRACIA, paymentFailureCount: 2, active: true })
     })
   })
 

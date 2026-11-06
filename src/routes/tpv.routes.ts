@@ -131,7 +131,7 @@ import {
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent, checkDescuentoManualPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaPermissionIfPresent, checkCuponPermissionIfPresent, checkDescuentoManualPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
@@ -733,6 +733,7 @@ router.post(
   // 403), y el candado lee el cuerpo ya parseado, el mismo que recibe el controlador.
   checkCortesiaPermissionIfPresent,
   checkDescuentoManualPermissionIfPresent,
+  checkCuponPermissionIfPresent,
   orderController.createOrderWithItems,
 )
 

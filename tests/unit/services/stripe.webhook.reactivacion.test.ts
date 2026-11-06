@@ -318,7 +318,14 @@ describe('qué estado de Stripe autoriza qué', () => {
   })
 
   it('un registro ya ACTIVO y sano no consulta a Stripe (no hay nada que decidir)', async () => {
-    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({ ...planSuspendido, active: true, suspendedAt: null })
+    // «Sano» = sin suspensión, sin gracia de cobranza y con acceso (D4 + D6: una gracia pendiente o una prueba vencida sí se reparan).
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      endDate: null,
+    })
     const { suscripcionVigente } = await import('@/services/stripe.service')
     ;(suscripcionVigente as jest.Mock).mockClear()
 
@@ -578,5 +585,56 @@ describe('una activación en TRIAL conserva su vencimiento', () => {
     expect(prisma.venueFeature.updateMany).toHaveBeenCalled()
     const data = (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0][0].data
     expect(data).toHaveProperty('endDate', null)
+  })
+})
+
+// D4 + D6 (5-nov-2026): un pago que llega con la fila ACTIVA también repara lo que la regla única niega o la cobranza dejó.
+describe('un pago repara una prueba vencida o una gracia pendiente (D4 + D6)', () => {
+  const escritura = () =>
+    ((prisma.venueFeature.update as jest.Mock).mock.calls[0] ?? (prisma.venueFeature.updateMany as jest.Mock).mock.calls[0])?.[0]
+  const ayer = new Date(Date.now() - 86_400_000)
+  const manana = new Date(Date.now() + 86_400_000)
+
+  it('🔴 D4: prueba vencida + Stripe ya cobró (el aviso de la renovación no llegó) → queda pagado, sin vencimiento', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      gracePeriodEndsAt: null,
+      paymentFailureCount: 0,
+      endDate: ayer,
+    })
+    await handleInvoicePaymentSucceeded(facturaPagada)
+    expect(escritura()?.data).toMatchObject({ active: true, endDate: null, suspendedAt: null, gracePeriodEndsAt: null })
+  })
+
+  it('🔴 D6: pagó durante la gracia → limpia gracia, contador y la prueba vencida', async () => {
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      paymentFailureCount: 1,
+      gracePeriodEndsAt: manana,
+      endDate: ayer,
+    })
+    await handleInvoicePaymentSucceeded(facturaPagada)
+    expect(escritura()?.data).toMatchObject({ active: true, endDate: null, gracePeriodEndsAt: null, paymentFailureCount: 0 })
+  })
+
+  it('🔴 Codex D6 r2 #3: una SUELTA en gracia con una factura vieja que llega pagada y Stripe en `past_due` → NO borra la deuda', async () => {
+    const { estadoDeLaSuscripcion } = await import('@/services/stripe.service')
+    ;(estadoDeLaSuscripcion as jest.Mock).mockResolvedValue('past_due')
+    ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue({
+      ...planSuspendido,
+      active: true,
+      suspendedAt: null,
+      paymentFailureCount: 1,
+      gracePeriodEndsAt: manana,
+      endDate: null,
+      feature: { id: 'feat_inv', code: 'INVENTORY_TRACKING', name: 'Inventario' },
+    })
+    await handleInvoicePaymentSucceeded(facturaPagada)
+    expect(estadoDeLaSuscripcion).toHaveBeenCalled()
+    expect(escritura()).toBeUndefined()
   })
 })

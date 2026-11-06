@@ -29,6 +29,8 @@ function subSummary(overrides: Record<string, unknown> = {}) {
     pausedUntil: null as Date | null,
     interval: 'month' as const,
     grossAmountCents: 115884,
+    // D5: el cupón vigente que lee retrievePlanSubscription; sin cupón, null (lo que ya asumía cada aserción).
+    descuento: null as import('@/services/billing/descuentoDelPlan').DescuentoDelPlan | null,
     ...overrides,
   }
 }
@@ -261,6 +263,8 @@ describe('planState.service', () => {
         contractRevision: null,
         subscriptionId: 'sub_123',
         paymentIssue: null,
+        // D5: sin cupón → sin descuento.
+        discount: null,
       })
     })
 

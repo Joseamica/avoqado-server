@@ -152,6 +152,13 @@ beforeEach(() => {
   // Todo escritor toma el candado canónico de la orden (SELECT … FOR UPDATE): la fila existe.
   prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-sc' }] as never)
   prismaMock.discount.findMany.mockResolvedValue([reglaDeCatalogo()] as never)
+  // D5: aplicar un cupón aparta su uso bajo el candado del descuento y relee sus contadores (aquí, sin límites).
+  prismaMock.couponCode.findFirst.mockResolvedValue({
+    currentUses: 0,
+    maxUses: null,
+    maxUsesPerCustomer: null,
+    discount: { id: 'd-1', currentUses: 0, maxTotalUses: null, maxUsesPerCustomer: null },
+  } as never)
   prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1' } as never)
   prismaMock.order.update.mockResolvedValue({} as never)
   prismaMock.discount.update.mockResolvedValue({} as never)

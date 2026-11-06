@@ -204,6 +204,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Tarjetas 1b (entrega): UN UPDATE en autocommit cuya subconsulta toma sobres por id ASC con FOR UPDATE SKIP LOCKED; nunca espera ni retiene Order ni Payment."
+    },
+    "src/services/shared/puntosAlReembolsar.ts#reversaEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sola Order, FOR KEY SHARE (lo que su llave foránea pediría al escribir la reversa), ANTES del cliente: el mismo orden que el reembolso y earnPoints. Quien la repite en bucle (quitarDevolucionesDelCambioEnTx) vuelve a la MISMA Order."
     }
   },
   "callers": {
@@ -1271,6 +1276,16 @@
       "count": 1,
       "loops": 0,
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/shared/puntosAlReembolsar.ts#quitarPuntosPorReembolso#reversaEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una devolución por transacción: el candado consultivo de la venta y luego su única Order (FOR KEY SHARE) antes del cliente; no retiene Payments ni GiftCards."
+    },
+    "src/services/shared/puntosAlReembolsar.ts#quitarDevolucionesDelCambioEnTx#reversaEnTx": {
+      "count": 1,
+      "loops": 1,
+      "reason": "El bucle recorre devoluciones, no Orders: cada vuelta pide la MISMA Order del EARN (FOR KEY SHARE), que la transacción de earnPoints ya liga por la llave foránea del EARN. Nunca aparta una Order nueva."
     }
   }
 }

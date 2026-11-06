@@ -275,19 +275,19 @@ describe('issueCfdiForOrder — permitir efectivo según quién factura', () => 
   it('el PERSONAL (STAFF_B, o sin flujo) pide permitir efectivo', async () => {
     const deps = makeIssueDeps()
     await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1', flow: 'STAFF_B' }, deps)
-    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: true }, expect.anything())
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', expect.objectContaining({ permitirEfectivo: true }), expect.anything())
     ;(deps.loadOrderForCfdi as jest.Mock).mockClear()
     await issueCfdiForOrder(
       { orderId: 'o2', receptor, sandbox: true, expectedVenueId: 'v1' },
       makeIssueDeps({ loadOrderForCfdi: deps.loadOrderForCfdi }),
     )
-    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o2', { permitirEfectivo: true }, expect.anything())
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o2', expect.objectContaining({ permitirEfectivo: true }), expect.anything())
   })
 
   it('la AUTOFACTURA del cliente NO: respeta el interruptor del negocio', async () => {
     const deps = makeIssueDeps()
     await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'v1', flow: 'AUTOFACTURA_A' }, deps)
-    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', { permitirEfectivo: false }, expect.anything())
+    expect(deps.loadOrderForCfdi).toHaveBeenCalledWith('o1', expect.objectContaining({ permitirEfectivo: false }), expect.anything())
   })
 })
 

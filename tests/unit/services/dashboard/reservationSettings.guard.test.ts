@@ -45,6 +45,12 @@ describe('updateReservationSettings — online-charging guard', () => {
   })
 
   it('rejects an upfront default other than at_venue without a chargeable rail', async () => {
+    // Fila guardada con todo en «Pagar en el local»: prender cualquiera de los dos es una transición real.
+    prismaMock.reservationSettings.findUnique.mockResolvedValue({
+      depositMode: 'none',
+      appointmentUpfrontDefault: 'at_venue',
+      classUpfrontDefault: 'at_venue',
+    } as never)
     prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
     await expect(updateReservationSettings(VENUE, { classUpfrontDefault: 'required' })).rejects.toThrow(BadRequestError)
     await expect(updateReservationSettings(VENUE, { appointmentUpfrontDefault: 'optional' })).rejects.toThrow(BadRequestError)
@@ -115,14 +121,43 @@ describe('updateReservationSettings — online-charging guard', () => {
       expect(prismaMock.reservationSettings.upsert).not.toHaveBeenCalled()
     })
 
-    it('still blocks classUpfrontDefault=required on a brand-new venue — does NOT use the required business-default as a free pass', async () => {
-      // classUpfrontDefault's getDefaultConfig() display-default is 'required' (a
-      // product choice for fresh venues), which must NOT be mistaken by the guard
-      // for "this venue already had cobro activated by a human".
+    // D18 (5-nov-2026, grabando tutoriales): un negocio SIN fila de ajustes ya reserva clases con
+    // 'required' (default de getDefaultConfig y de la base). El panel le muestra ese valor y lo reenvía
+    // al guardar CUALQUIER cosa; compararlo contra 'at_venue' daba 400 a todo el formulario (no podía ni
+    // prender sus reservas en línea). Reenviar lo que ya rige no prende ningún cobro nuevo.
+    it('D18: allows a brand-new venue (no row, no rail) to save while resending the class default it already runs on', async () => {
       prismaMock.reservationSettings.findUnique.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
+      await updateReservationSettings(VENUE, {
+        publicBooking: { enabled: true },
+        deposits: { enabled: false, mode: 'none' },
+        payments: { appointmentUpfrontDefault: 'at_venue', classUpfrontDefault: 'required' },
+      } as never)
+      expect(prismaMock.reservationSettings.upsert).toHaveBeenCalledTimes(1)
+    })
+
+    it('still blocks turning class prepay ON when the saved row says at_venue (genuine transition)', async () => {
+      prismaMock.reservationSettings.findUnique.mockResolvedValue({
+        depositMode: 'none',
+        appointmentUpfrontDefault: 'at_venue',
+        classUpfrontDefault: 'at_venue',
+      } as never)
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
       await expect(updateReservationSettings(VENUE, { classUpfrontDefault: 'required' })).rejects.toThrow(BadRequestError)
       expect(prismaMock.reservationSettings.upsert).not.toHaveBeenCalled()
+    })
+
+    it('still blocks appointment prepay on a brand-new venue (its default is at_venue)', async () => {
+      prismaMock.reservationSettings.findUnique.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
+      await expect(updateReservationSettings(VENUE, { appointmentUpfrontDefault: 'required' })).rejects.toThrow(BadRequestError)
+      expect(prismaMock.reservationSettings.upsert).not.toHaveBeenCalled()
+    })
+
+    it('the rejection says in Spanish what is missing and the way out', async () => {
+      prismaMock.reservationSettings.findUnique.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
+      await expect(updateReservationSettings(VENUE, { depositMode: 'deposit' })).rejects.toThrow(/Stripe.*Pagar en el local/s)
     })
 
     it('allows activating cobro on a brand-new venue when it DOES have a chargeable rail', async () => {

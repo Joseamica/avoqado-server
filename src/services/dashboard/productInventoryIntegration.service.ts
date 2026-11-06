@@ -3,6 +3,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { deductStockForModifiers, deductStockForRecipe, OrderModifierForInventory } from './rawMaterial.service'
 import { logAction } from './activity-log.service'
 import { ensureQuantityInventoryRow } from './quantityInventoryRow'
@@ -547,27 +548,15 @@ export async function getProductInventoryStatus(venueId: string, productId: stri
  * Returns recommendation based on venue type and features
  */
 export async function shouldProductUseInventory(venueId: string) {
-  const venue = await prisma.venue.findUnique({
-    where: { id: venueId },
-    include: {
-      features: {
-        where: {
-          feature: {
-            code: 'INVENTORY_TRACKING',
-          },
-        },
-        select: {
-          active: true,
-        },
-      },
-    },
-  })
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
 
   if (!venue) {
     throw new AppError('Venue not found', 404)
   }
 
-  const hasInventoryFeature = venue.features.some(f => f.active)
+  // D4 + D6 (5-nov-2026): el mismo resolver que el portero de inventario. Antes bastaba una fila `active` propia (una
+  // prueba vencida o una gracia de cobranza vencida contaban) y un plan PREMIUM sin fila propia no contaba.
+  const hasInventoryFeature = await venueHasFeatureAccess(venueId, 'INVENTORY_TRACKING')
 
   return {
     hasInventoryFeature,

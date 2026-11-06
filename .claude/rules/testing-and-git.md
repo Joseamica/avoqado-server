@@ -110,13 +110,15 @@ scripts / debug - permissions.ts
 
 ## Code Quality: Auto-Format Policy
 
-After editing TypeScript/JavaScript files, run:
+After editing TypeScript/JavaScript files, format **only the files you touched**:
 
 ```bash
-npm run format && npm run lint:fix
+npx prettier --write <tus archivos>
+npx eslint --fix <tus archivos>
 ```
 
-This ensures zero prettier/eslint warnings in commits.
+This ensures zero prettier/eslint warnings in commits. 🔴 Not `npm run format` / `npm run lint:fix`: they run over the WHOLE repo
+(`prettier --write .`, `eslint . --fix`) and rewrite other sessions' files; adding file names after `--` does not narrow them.
 
 ---
 

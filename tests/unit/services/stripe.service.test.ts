@@ -1073,7 +1073,9 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
         const result = await stripeService.retrievePlanSubscription(mockSubId)
 
-        expect(mockStripeInstance.subscriptions.retrieve).toHaveBeenCalledWith(mockSubId)
+        expect(mockStripeInstance.subscriptions.retrieve).toHaveBeenCalledWith(mockSubId, {
+          expand: ['discounts.source.coupon.applies_to'],
+        })
         expect(result).toEqual({
           status: 'active',
           cancelAtPeriodEnd: true,
@@ -1083,7 +1085,25 @@ describe('Stripe Service - Comprehensive Tests', () => {
           interval: 'month',
           grossAmountCents: 115884,
           pausedUntil: null,
+          // D5: un cupón sin su detalle (sólo id) no se adivina: se muestra el precio de lista.
+          descuento: null,
         })
+      })
+
+      it('D5: con el cupón expandido (30 % por 3 meses) devuelve el descuento con su fecha de fin', async () => {
+        const fin = 1801000000
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_d5',
+          status: 'active',
+          created: 1735689600,
+          discounts: [
+            { id: 'di_1', source: { type: 'coupon', coupon: { id: 'RETENTION_30_3M', percent_off: 30, duration: 'repeating' } }, end: fin },
+          ],
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+        const result = await stripeService.retrievePlanSubscription('sub_d5')
+        expect(result.descuento).toEqual({ percentOff: 30, amountOffCents: null, duration: 'repeating', endsAt: new Date(fin * 1000) })
+        expect(result.grossAmountCents).toBe(115884)
       })
 
       /**
@@ -1213,6 +1233,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
           interval: null, // 'week' is neither month nor year
           grossAmountCents: null,
           pausedUntil: null,
+          descuento: null,
         })
       })
 

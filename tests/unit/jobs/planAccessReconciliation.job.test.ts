@@ -89,15 +89,31 @@ describe('plan-access-reconciliation', () => {
     }
   })
 
-  it('🔴 sólo mira planes base INACTIVOS, sin suspensión y CON vínculo', async () => {
+  it('🔴 mira sólo filas LIGADAS a Stripe que no dan acceso: planes apagados, suspendidas y vencidas por fecha (D4)', async () => {
     await nuevoJob().runNow()
 
     const where = (prisma.venueFeature.findMany as jest.Mock).mock.calls[0][0].where
-    expect(where.active).toBe(false)
-    // Una suspensión es una decisión deliberada de cobranza: este barrido no la levanta.
-    expect(where.suspendedAt).toBeNull()
     expect(where.stripeSubscriptionId).toEqual({ not: null })
-    expect(where.feature.code.in).toEqual(expect.arrayContaining(['PLAN_PRO', 'PLAN_PREMIUM']))
+    const [apagadas, suspendidas, vencidas] = where.OR
+    // Como siempre: planes base apagados sin suspensión.
+    expect(apagadas).toMatchObject({ active: false, suspendedAt: null })
+    expect(apagadas.feature.code.in).toEqual(expect.arrayContaining(['PLAN_PRO', 'PLAN_PREMIUM']))
+    // codex r1 #4: una suspendida que YA pagó y cuyos avisos se perdieron. La suspensión sólo la levanta Stripe `active`
+    // (handleSubscriptionUpdated lo exige): el barrido observa el pago, no lo perdona.
+    expect(suspendidas).toEqual({ suspendedAt: { not: null } })
+    // 🔴 D4: activa, sin suspender, con la prueba vencida y sin gracia vigente — la regla única la niega.
+    expect(vencidas).toMatchObject({ active: true, suspendedAt: null, endDate: { lt: expect.any(Date) } })
+    expect(vencidas.OR).toEqual([{ gracePeriodEndsAt: null }, { gracePeriodEndsAt: { lt: expect.any(Date) } }])
+  })
+
+  it('🔴 D4: una prueba vencida cuyo cobro Stripe ya hizo (avisos perdidos) se repara y se audita', async () => {
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([fila({ feature: { code: 'INVENTORY_TRACKING' } })])
+    mockRetrieve.mockResolvedValue({ id: 'sub_1', status: 'active' })
+
+    const r = await nuevoJob().runNow()
+
+    expect(r.recuperados).toBe(1)
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'PLAN_ACCESS_RECONCILED' }))
   })
 
   it('🔴 la consulta está ACOTADA y con orden estable (regla de queries del repo)', async () => {

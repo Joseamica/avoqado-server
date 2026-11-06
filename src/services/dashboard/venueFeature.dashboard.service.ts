@@ -5,6 +5,7 @@
  */
 
 import Stripe from 'stripe'
+import { daAcceso, ventanaDeAccesoWhere } from '@/services/access/ventanaDeAcceso'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -68,10 +69,7 @@ export async function sueltasQueAbsorbeElPlan(venueId: string, tier: BaseTier): 
     // de cancelar o de calcular un crédito — y no acreditar periodos impagados.
     where: {
       venueId,
-      OR: [
-        { stripeSubscriptionId: { not: null } },
-        { active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: ahora } }] },
-      ],
+      OR: [{ stripeSubscriptionId: { not: null } }, ventanaDeAccesoWhere(ahora)],
     },
     // Acotada: un negocio tiene un puñado de funciones; el tope evita una lectura sin fin.
     take: 100,
@@ -609,6 +607,11 @@ export async function getVenueFeatureStatus(venueId: string) {
         endDate: vf.endDate,
         stripeSubscriptionId: vf.stripeSubscriptionId,
         stripePriceId: vf.stripePriceId,
+        // D4 + D6 (5-nov-2026), campos nuevos opcionales: `active` no dice si hay acceso (una prueba vencida o una gracia
+        // de cobranza vencida siguen `active`). Esto sí: la regla única del portero.
+        accessGranted: daAcceso(vf),
+        gracePeriodEndsAt: vf.gracePeriodEndsAt,
+        suspendedAt: vf.suspendedAt,
       })),
       // Premium features unlocked solely by the active base plan (no à-la-carte
       // VenueFeature row exists). Synthesized to the active-feature shape so the

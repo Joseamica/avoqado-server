@@ -8,6 +8,34 @@ import { UpdateLoyaltyConfigSchema, AdjustStampsSchema } from '@/schemas/dashboa
  * llegar al servicio — la pantalla mandaría "prende los sellos" y el servidor
  * respondería 200 sin haber prendido nada. Ya pasó en este repo con `migrateMerchant`.
  */
+describe('UpdateLoyaltyConfigSchema — bono por visita (D7)', () => {
+  const parse = (body: Record<string, unknown>) => UpdateLoyaltyConfigSchema.safeParse({ body, params: { venueId: 'v1' }, query: {} })
+
+  it('deja pasar el bono: el panel lo manda al guardar', () => {
+    const r = parse({ pointsPerVisit: 10, pointsPerDollar: 1 })
+    expect(r.success && r.data.body).toEqual({ pointsPerVisit: 10, pointsPerDollar: 1 })
+  })
+
+  it('rechaza un bono negativo o con decimales', () => {
+    expect(parse({ pointsPerVisit: -1 }).success).toBe(false)
+    expect(parse({ pointsPerVisit: 1.5 }).success).toBe(false)
+  })
+
+  it('deja pasar lo demás que manda el panel: prender o apagar, el mínimo y la caducidad (o sin caducidad)', () => {
+    const r = parse({ active: false, minPointsRedeem: 50, pointsExpireDays: null })
+    expect(r.success && r.data.body).toEqual({ active: false, minPointsRedeem: 50, pointsExpireDays: null })
+    expect(parse({ pointsExpireDays: 365 }).success).toBe(true)
+  })
+
+  it('rechaza, en español, un mínimo o una caducidad negativos o con decimales', () => {
+    for (const malo of [{ minPointsRedeem: -1 }, { minPointsRedeem: 1.5 }, { pointsExpireDays: -5 }, { pointsExpireDays: 2.5 }]) {
+      const r = parse(malo)
+      expect(r.success).toBe(false)
+      if (!r.success) expect(r.error.issues[0].message).toMatch(/[áéíóúñ]|no puede|enteros/)
+    }
+  })
+})
+
 describe('UpdateLoyaltyConfigSchema — campos de sellos', () => {
   const parse = (body: Record<string, unknown>) => UpdateLoyaltyConfigSchema.safeParse({ body, params: { venueId: 'v1' }, query: {} })
 
