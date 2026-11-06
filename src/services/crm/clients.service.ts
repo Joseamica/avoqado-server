@@ -16,9 +16,9 @@ import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
-import { ensureCrmDefaults } from './accounts.service'
+import { ensureCrmDefaults, touchEditableTx } from './accounts.service'
 import { scopeWhere, type CrmAccess } from './access.service'
-import type { Nivel } from './clientCodes'
+import type { Nivel, UsaEscrito } from './clientCodes'
 import {
   altaDeLaFila,
   altaFactsOf,
@@ -317,6 +317,51 @@ export async function ensureClientAccount(access: CrmAccess, organizationId: str
     })
   }
   return result
+}
+
+/**
+ * «✋ a mano» en Usa (C1, tarea 7): a seller with «Editar» writes what the client uses, with the reason, or clears it
+ * (`valor: null`, «Leerlo solo»). The reason lives only in the timeline event: the ActivityLog never carries it. Clearing
+ * what is already clear writes nothing.
+ */
+export async function setUsa(
+  access: CrmAccess,
+  accountId: string,
+  input: { valor: UsaEscrito | null; porque?: string },
+): Promise<{ accountId: string; usaManual: UsaEscrito | null }> {
+  const now = new Date()
+  const { valor } = input
+  const changed = await prisma.$transaction(async tx => {
+    await touchEditableTx(tx, access, accountId, now)
+    const before = await tx.crmAccount.findUniqueOrThrow({ where: { id: accountId }, select: { usaManual: true, organizationId: true } })
+    if (valor === null && before.usaManual === null) return null
+    await tx.crmAccount.update({
+      where: { id: accountId },
+      data:
+        valor === null
+          ? { usaManual: null, usaManualPorque: null, usaManualById: null, usaManualAt: null }
+          : { usaManual: valor, usaManualPorque: input.porque, usaManualById: access.staffId, usaManualAt: now },
+    })
+    await addEvent(tx, {
+      accountId,
+      kind: 'USA_CHANGE',
+      actorStaffId: access.staffId,
+      data: valor === null ? { valor: null } : { valor, porque: input.porque! },
+    })
+    return before
+  })
+  if (changed) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId: changed.organizationId,
+      action: valor === null ? 'CRM_CLIENT_USA_CLEARED' : 'CRM_CLIENT_USA_SET',
+      entity: 'CrmAccount',
+      entityId: accountId,
+      data: valor === null ? {} : { valor },
+    })
+  }
+  return { accountId, usaManual: valor }
 }
 
 // ── Hidden organizations (ruling 39) ──────────────────────────────────────────────────────────────────────────────────

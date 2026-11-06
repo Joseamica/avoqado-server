@@ -147,3 +147,28 @@ describe('GET /crm/clients: los filtros de C1', () => {
     expect(r.success && r.data.query).toEqual({ usa: 'POS' })
   })
 })
+
+describe('POST /crm/accounts/:id/usa: el «✋ a mano» (C1, tarea 7)', () => {
+  const { usaSchema } = jest.requireActual('@/schemas/crm.schema')
+  const parse = (body: Record<string, unknown>) => usaSchema.safeParse({ params: { id: 'caccounta0000000000000001' }, body })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map((i: { message: string }) => i.message))
+
+  it('un valor sin porqué dice «Escribe por qué (3 a 140 letras)»; con porqué de 2 letras, igual', () => {
+    expect(mensajes(parse({ valor: 'TERMINAL' }))).toEqual(['Escribe por qué (3 a 140 letras)'])
+    expect(mensajes(parse({ valor: 'TERMINAL', porque: 'ab' }))).toEqual(['Escribe por qué (3 a 140 letras)'])
+    expect(parse({ valor: 'TERMINAL', porque: 'Lo vi en su local' }).success).toBe(true)
+  })
+
+  it('«OTRO», NINGUNO y NO_IDENTIFICADO no se escriben a mano → 400', () => {
+    for (const valor of ['OTRO', 'NINGUNO', 'NO_IDENTIFICADO']) expect(parse({ valor, porque: 'porque sí' }).success).toBe(false)
+  })
+
+  it('«Leerlo solo» (valor null) es válido sin porqué', () => {
+    expect(parse({ valor: null }).success).toBe(true)
+  })
+
+  it('el porqué pasa por trim y tiene tope de 140', () => {
+    expect(parse({ valor: 'POS', porque: 'x'.repeat(141) }).success).toBe(false)
+    expect(parse({ valor: 'POS', porque: '   a   ' }).success).toBe(false)
+  })
+})

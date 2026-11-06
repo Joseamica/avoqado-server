@@ -195,6 +195,11 @@ export async function ensureClientAccount(req: Request, res: Response): Promise<
   res.json({ data: await clients.ensureClientAccount(req.crmAccess!, req.params.organizationId) })
 }
 
+/** POST /api/v1/crm/accounts/:id/usa — «✋ a mano» en Usa (C1, task 7). */
+export async function setUsa(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.setUsa(req.crmAccess!, req.params.id, req.body) })
+}
+
 /** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */
 export async function getLive(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.getLive(req.crmAccess!, req.params.id) })

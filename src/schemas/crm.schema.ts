@@ -4,7 +4,7 @@
  */
 import { StaffRole } from '@prisma/client'
 import { z } from 'zod'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../services/crm/clientCodes'
+import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA, USA_ESCRITO } from '../services/crm/clientCodes'
 import { bloquesCampanaSchema } from '../services/marketing/campaignBlocks'
 import { canonicalPhoneE164 } from '../utils/phone'
 import { EXISTING_ID_REGEX } from './common/existingId.schema'
@@ -387,6 +387,18 @@ export const listClientsSchema = z.object({
  */
 export const hideClientSchema = z.object({
   params: z.object({ organizationId: existing('El id de la organización no es válido', 'Falta la organización') }),
+})
+
+/** POST /crm/accounts/:id/usa — «✋ a mano»: a value with its reason, or `null` («Leerlo solo») to clear it (C1). */
+const PORQUE_USA = 'Escribe por qué (3 a 140 letras)'
+export const usaSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      valor: z.enum(USA_ESCRITO, { errorMap: () => ({ message: 'Ese valor no existe' }) }).nullable(),
+      porque: z.string({ invalid_type_error: PORQUE_USA }).trim().min(3, PORQUE_USA).max(140, PORQUE_USA).optional(),
+    })
+    .refine(({ valor, porque }) => valor === null || !!porque, { message: PORQUE_USA, path: ['porque'] }),
 })
 
 /** A calendar day that exists: «2026-02-30» has the shape and is not one. */

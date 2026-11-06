@@ -21,6 +21,7 @@ import { preserveContext } from '../observability/preserveContext'
 import { assertFormaNuevaDeLlaves } from '../services/crm/teamVenue.service'
 import {
   accountIdSchema,
+  usaSchema,
   addActivitySchema,
   addNoteSchema,
   addTeamMemberSchema,
@@ -159,6 +160,8 @@ router.post('/clients/:organizationId/hide', configurar, validateRequest(hideCli
 router.post('/clients/:organizationId/unhide', configurar, validateRequest(hideClientSchema), crmController.unhideClient)
 // The CRM account of a client that has none, made once (C1): «Editar» with its scope; the service reads it through «Ver».
 router.post('/clients/:organizationId/cuenta', editar, validateRequest(hideClientSchema), crmController.ensureClientAccount)
+// «✋ a mano» en Usa (C1): «Editar» with its scope, decided inside the transaction.
+router.post('/accounts/:id/usa', editar, validateRequest(usaSchema), crmController.setUsa)
 // What is live for a client without a CRM account (ruling 47): the same answer and locks as `/accounts/:id/live`.
 router.get('/clients/:organizationId/live', ver, validateRequest(hideClientSchema), crmController.getClientLive)
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)

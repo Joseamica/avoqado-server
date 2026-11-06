@@ -30,6 +30,7 @@ import { clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@
 import { scopeWhere } from '@/services/crm/access.service'
 import {
   ensureClientAccount,
+  setUsa,
   clientsFilter,
   getClientLive,
   listClients,
@@ -1646,6 +1647,94 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       await cuentaDe(organizationId)
       const despues = await getReports(todos(), { desde, hasta }, NOW)
       expect(despues.ganados).toEqual(antes.ganados)
+    })
+  })
+  describe('«✋ a mano» en Usa (Tarea 7)', () => {
+    const todos = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
+
+    /** A client (it sold) with its CRM account; `ventas` = how many days ago its sales were (the source decides what is measured). */
+    async function cliente(ventas: Array<{ source: OrderSource; dias: number }>) {
+      const made = await orgWithVenue()
+      for (const v of ventas)
+        await sale(made.venueId, { source: v.source, at: hace(v.dias * DAY), payment: { source: v.source === 'TPV' ? 'TPV' : 'APP' } })
+      const { accountId } = await ensureClientAccount(todos(), made.organizationId)
+      crmAccountIds.push(accountId)
+      const { name } = await prisma.organization.findUniqueOrThrow({ where: { id: made.organizationId }, select: { name: true } })
+      const fila = async () => (await listClients(todos(), { q: name }, NOW)).rows.find(row => row.id === made.organizationId)!
+      return { ...made, accountId, fila }
+    }
+    const usaEvents = (accountId: string) =>
+      prisma.crmTimelineEvent.findMany({
+        where: { accountId, kind: 'USA_CHANGE' },
+        orderBy: { createdAt: 'asc' },
+        select: { data: true, actorStaffId: true },
+        take: 10,
+      })
+
+    it('✋ POS con lo medido TERMINAL → la lista dice visto POS, manual, aviso; el ActivityLog no lleva el porqué', async () => {
+      const c = await cliente([{ source: 'TPV', dias: 3 }])
+      await expect(setUsa(todos(), c.accountId, { valor: 'POS', porque: 'Lo vi en su local' })).resolves.toEqual({
+        accountId: c.accountId,
+        usaManual: 'POS',
+      })
+      expect((await c.fila()).usa).toMatchObject({ visto: 'POS', medido: 'TERMINAL', manual: true, aviso: true })
+      expect(await usaEvents(c.accountId)).toEqual([{ data: { valor: 'POS', porque: 'Lo vi en su local' }, actorStaffId: staffId }])
+      const call = jest
+        .mocked(logAction)
+        .mock.calls.map(([x]) => x)
+        .find(x => x.entityId === c.accountId && x.action === 'CRM_CLIENT_USA_SET')!
+      expect(call).toMatchObject({ venueId: null, organizationId: c.organizationId, data: { valor: 'POS' } })
+      expect(JSON.stringify(call)).not.toContain('local')
+    })
+
+    it('🔴 lo medido cambia después (sale una venta POS): visto sigue POS y el aviso se apaga solo', async () => {
+      const c = await cliente([{ source: 'TPV', dias: 40 }])
+      await setUsa(todos(), c.accountId, { valor: 'POS', porque: 'Usa la tableta' })
+      expect((await c.fila()).usa).toMatchObject({ visto: 'POS', medido: 'NINGUNO', aviso: true })
+      await sale(c.venueId, { source: 'AVOQADO_ANDROID', payment: { source: 'APP' } })
+      expect((await c.fila()).usa).toMatchObject({ visto: 'POS', medido: 'POS', manual: true, aviso: false })
+    })
+
+    it('✋ TERMINAL en un cliente que no vendió en 30 días → aviso', async () => {
+      const c = await cliente([{ source: 'TPV', dias: 40 }])
+      await setUsa(todos(), c.accountId, { valor: 'TERMINAL', porque: 'La tiene en caja' })
+      expect((await c.fila()).usa).toMatchObject({ visto: 'TERMINAL', medido: 'NINGUNO', aviso: true })
+    })
+
+    it('«Leerlo solo» → manual false, visto = medido, su evento; repetirlo no deja otro', async () => {
+      const c = await cliente([{ source: 'TPV', dias: 3 }])
+      await setUsa(todos(), c.accountId, { valor: 'POS', porque: 'Lo vi en su local' })
+      await setUsa(todos(), c.accountId, { valor: null })
+      expect((await c.fila()).usa).toMatchObject({ visto: 'TERMINAL', medido: 'TERMINAL', manual: false, aviso: false })
+      expect(
+        await prisma.crmAccount.findUniqueOrThrow({
+          where: { id: c.accountId },
+          select: { usaManual: true, usaManualPorque: true, usaManualById: true, usaManualAt: true },
+        }),
+      ).toEqual({
+        usaManual: null,
+        usaManualPorque: null,
+        usaManualById: null,
+        usaManualAt: null,
+      })
+      expect((await usaEvents(c.accountId)).map(e => (e.data as { valor: string | null }).valor)).toEqual(['POS', null])
+      await setUsa(todos(), c.accountId, { valor: null })
+      expect(await usaEvents(c.accountId)).toHaveLength(2)
+    })
+
+    it('dos personas lo ponen a la vez → dos eventos USA_CHANGE y queda el último', async () => {
+      const c = await cliente([{ source: 'TPV', dias: 3 }])
+      await Promise.all([
+        setUsa(todos(), c.accountId, { valor: 'POS', porque: 'Primera persona' }),
+        setUsa(todos(), c.accountId, { valor: 'AMBOS', porque: 'Segunda persona' }),
+      ])
+      const eventos = await usaEvents(c.accountId)
+      expect(eventos).toHaveLength(2)
+      const guardado = await prisma.crmAccount.findUniqueOrThrow({
+        where: { id: c.accountId },
+        select: { usaManual: true, usaManualPorque: true },
+      })
+      expect(eventos[1].data).toEqual({ valor: guardado.usaManual, porque: guardado.usaManualPorque })
     })
   })
 })

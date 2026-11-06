@@ -17,6 +17,8 @@ export const TIMELINE_KINDS = [
   'REACTIVATED',
   'ENTRY_APPLIED',
   'SYSTEM',
+  // «✋ a mano» en Usa (C1): `data`: `{ valor: AMBOS|TERMINAL|POS|null, porque?: string }`; null = «Leerlo solo».
+  'USA_CHANGE',
   // Correo uno a uno (fase 2): `data` sólo lleva ids; el asunto, el extracto y el estado se leen de `CrmEmailMessage`.
   'EMAIL_SENT',
   'EMAIL_RECEIVED',

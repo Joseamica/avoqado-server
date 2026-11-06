@@ -534,3 +534,37 @@ describe('GET /crm/me con las llaves finas', () => {
     })
   })
 })
+
+describe('POST /crm/accounts/:id/usa (C1, tarea 7)', () => {
+  const PATH = '/crm/accounts/caccounta0000000000000001/usa'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+
+  it('🔴 sin «Editar» → 403 y no escribe; con «Editar» → 200', async () => {
+    access({ verScope: 'propios', editarScope: null })
+    const sin = await request(app).post(PATH).send({ valor: null })
+    expect(sin.status).toBe(403)
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+
+    access({ verScope: 'propios', editarScope: 'propios' })
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual: 'POS', organizationId: 'corgclient000000000000001' })
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+    // `appWithErrors` has no body parser: this one sends JSON, so it goes through `app` and reads the 200 as is.
+    const ok = await request(app).post(PATH).send({ valor: null })
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', usaManual: null })
+  })
+})

@@ -21,6 +21,7 @@ import {
   getLive,
   hideClient,
   listClients,
+  setUsa,
   unhideClient,
 } from '@/services/crm/clients.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -1096,6 +1097,91 @@ describe('ensureClientAccount (C1, tarea 6)', () => {
     prismaMock.crmAccount.findFirst.mockResolvedValue(null)
     await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ code: 'CRM_ACCOUNT_NOT_FOUND' })
     expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('setUsa (C1, tarea 7)', () => {
+  /** What the account holds before: `touchTx` reads it with ROW_SELECT and `setUsa` with its own select (the same mock). */
+  const cuenta = (usaManual: string | null) =>
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual, organizationId: ORG } as never)
+  beforeEach(() => {
+    jest.mocked(logAction).mockClear()
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.update.mockResolvedValue({} as never)
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('escribe las cuatro columnas, el evento USA_CHANGE con el porqué y el ActivityLog sin el porqué', async () => {
+    cuenta(null)
+    await expect(setUsa(access(), ACCOUNT, { valor: 'TERMINAL', porque: 'Lo vi en su local' })).resolves.toEqual({
+      accountId: ACCOUNT,
+      usaManual: 'TERMINAL',
+    })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { usaManual: 'TERMINAL', usaManualPorque: 'Lo vi en su local', usaManualById: SELLER, usaManualAt: expect.any(Date) },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          accountId: ACCOUNT,
+          kind: 'USA_CHANGE',
+          actorStaffId: SELLER,
+          data: { valor: 'TERMINAL', porque: 'Lo vi en su local' },
+        }),
+      ],
+      skipDuplicates: true,
+    })
+    const logged = jest.mocked(logAction).mock.calls[0][0]
+    expect(logged).toMatchObject({
+      action: 'CRM_CLIENT_USA_SET',
+      venueId: null,
+      organizationId: ORG,
+      entityId: ACCOUNT,
+      data: { valor: 'TERMINAL' },
+    })
+    expect(JSON.stringify(logged)).not.toContain('local')
+  })
+
+  it('«Leerlo solo» limpia las cuatro columnas, deja su evento y CRM_CLIENT_USA_CLEARED sin datos', async () => {
+    cuenta('POS')
+    await expect(setUsa(access(), ACCOUNT, { valor: null })).resolves.toEqual({ accountId: ACCOUNT, usaManual: null })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { usaManual: null, usaManualPorque: null, usaManualById: null, usaManualAt: null },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ kind: 'USA_CHANGE', data: { valor: null } })],
+      skipDuplicates: true,
+    })
+    expect(jest.mocked(logAction).mock.calls[0][0]).toMatchObject({ action: 'CRM_CLIENT_USA_CLEARED', data: {} })
+  })
+
+  it('limpiar algo ya limpio no deja evento ni ActivityLog ni escribe', async () => {
+    cuenta(null)
+    await expect(setUsa(access(), ACCOUNT, { valor: null })).resolves.toEqual({ accountId: ACCOUNT, usaManual: null })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 A «propios» sobre la cuenta de B (no la ve) → 404 y no escribe', async () => {
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(setUsa(access(), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ver: todos, editar: propios sobre la de B → 403 CRM_NO_ES_TUYO', async () => {
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT_B })
+    await expect(setUsa(access({ ver: 'todos' }), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_NO_ES_TUYO',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })
 })
