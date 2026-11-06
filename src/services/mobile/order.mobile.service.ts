@@ -43,7 +43,7 @@ import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoD
 import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { importePorPesoDeLaPeticionCents } from '../shared/importePorPeso'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
-import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
+import { assertCardOrderMoneyFrozenInTx, assertNotCardOnlineOrderInTx, assertNotFolioInTx } from '../online-ordering/card/guards'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -2685,6 +2685,7 @@ export async function splitOrderItemsInTransaction(
   }
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
+  await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -2881,6 +2882,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
   }
   // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
+  await assertNotFolioInTx(tx, { venueId, orderIds: [orderId] })
   const source = await tx.order.findFirst({
     where: { id: orderId, venueId },
     select: {
@@ -3069,6 +3071,7 @@ export async function mergeOrdersInTransaction(
   // Pedidos en línea fase 2: juntar cambia el dinero de las dos cuentas; ninguna puede ser un pedido de tarjeta sin cobrar.
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: targetOrderId })
   await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId: sourceOrderId })
+  await assertNotFolioInTx(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },

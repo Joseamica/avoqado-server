@@ -20,7 +20,7 @@ import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { updateOrder } from '@/services/dashboard/order.dashboard.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.service'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { mergeOrders, payCashOrder, splitOrderBySeat } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
 import {
@@ -907,5 +907,28 @@ describe('T13 · «Cancelar folio» (personal) sobre un folio por pagar', () => 
     }
     // Informativo (no se exige >0 de cada lado: sería inestable; para eso están los órdenes (a) y (b)).
     console.info(`T13 carrera: ganó el cobro ${ganoCobro}, ganó «Cancelar folio» ${ganoCancelar}`)
+  })
+})
+
+describe('R53 · un folio no se junta ni se divide con otra cuenta (Postgres real)', () => {
+  const FOLIO_NO_SE_JUNTA = { statusCode: 409, code: 'ONLINE_ORDER_FOLIO_NO_SE_JUNTA' }
+
+  it('de folio a otra cuenta, de otra al folio y dividir: 409 y el folio queda intacto (sigue «Por pagar», con su renglón)', async () => {
+    const folio = await nuevoFolio()
+    const otra = await nuevoFolio({ equipo: true })
+    await expect(mergeOrders(f.venueId, otra.orderId, folio.orderId)).rejects.toMatchObject(FOLIO_NO_SE_JUNTA)
+    await expect(mergeOrders(f.venueId, folio.orderId, otra.orderId)).rejects.toMatchObject(FOLIO_NO_SE_JUNTA)
+    await expect(splitOrderBySeat(f.venueId, folio.orderId)).rejects.toMatchObject(FOLIO_NO_SE_JUNTA)
+    const c = await cuenta(folio.orderId)
+    expect(c.status).toBe('PENDING')
+    expect(await prisma.orderItem.count({ where: { orderId: folio.orderId } })).toBe(1)
+    expect(await prisma.orderItem.count({ where: { orderId: otra.orderId } })).toBe(1)
+    expect((await pedido(folio.onlineOrderId)).status).toBe('PENDING_ACCEPTANCE')
+  })
+
+  it('un pedido de «Mi equipo» no lo frena esta guarda', async () => {
+    const a = await nuevoFolio({ equipo: true })
+    const b = await nuevoFolio({ equipo: true })
+    await mergeOrders(f.venueId, a.orderId, b.orderId).catch(e => expect(e.code).not.toBe('ONLINE_ORDER_FOLIO_NO_SE_JUNTA'))
   })
 })
