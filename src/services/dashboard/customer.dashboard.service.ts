@@ -369,7 +369,7 @@ export async function getCustomerById(venueId: string, customerId: string) {
   })
 
   if (!customer) {
-    throw new NotFoundError(`Customer with ID ${customerId} not found`)
+    throw new NotFoundError('El cliente no existe')
   }
 
   const saldoAFavor = await storeCreditDeClientes(prisma, venueId, [customer.id])
@@ -598,7 +598,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
   })
 
   if (!existingCustomer) {
-    throw new NotFoundError(`Customer with ID ${customerId} not found`)
+    throw new NotFoundError('El cliente no existe')
   }
 
   // D15: el panel manda "" en el campo que la persona dejó vacío. Si el cliente no tenía ese dato, no cambia nada; si lo
@@ -747,7 +747,7 @@ export async function deleteCustomer(venueId: string, customerId: string) {
   })
 
   if (!customer) {
-    throw new NotFoundError(`Customer with ID ${customerId} not found`)
+    throw new NotFoundError('El cliente no existe')
   }
 
   // Soft delete (set active=false)
@@ -904,7 +904,7 @@ export async function settleCustomerBalance(
   })
 
   if (!customer) {
-    throw new NotFoundError(`Customer with ID ${customerId} not found`)
+    throw new NotFoundError('El cliente no existe')
   }
 
   const pendingOrders = customer.orderAssociations || []

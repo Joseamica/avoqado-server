@@ -386,7 +386,7 @@ describe('Customer Dashboard Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
 
       await expect(getCustomerById('venue-123', 'nonexistent')).rejects.toThrow(NotFoundError)
-      await expect(getCustomerById('venue-123', 'nonexistent')).rejects.toThrow('Customer with ID nonexistent not found')
+      await expect(getCustomerById('venue-123', 'nonexistent')).rejects.toThrow('El cliente no existe')
     })
 
     it('should enforce multi-tenant isolation (venueId filter)', async () => {
@@ -712,7 +712,7 @@ describe('Customer Dashboard Service', () => {
         updateCustomer('venue-123', 'nonexistent', {
           firstName: 'Test',
         }),
-      ).rejects.toThrow('Customer with ID nonexistent not found')
+      ).rejects.toThrow('El cliente no existe')
     })
 
     it('should throw BadRequestError if new email already exists (different customer)', async () => {
@@ -936,7 +936,7 @@ describe('Customer Dashboard Service', () => {
       prismaMock.customer.findFirst.mockResolvedValue(null)
 
       await expect(deleteCustomer('venue-123', 'nonexistent')).rejects.toThrow(NotFoundError)
-      await expect(deleteCustomer('venue-123', 'nonexistent')).rejects.toThrow('Customer with ID nonexistent not found')
+      await expect(deleteCustomer('venue-123', 'nonexistent')).rejects.toThrow('El cliente no existe')
     })
 
     it('should enforce multi-tenant isolation (venueId filter)', async () => {

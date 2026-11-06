@@ -60,3 +60,24 @@ describe('D15 · alta de cliente con correo o teléfono vacío', () => {
     expect(mensajes(r2)).not.toMatch(SIN_INGLES)
   })
 })
+
+describe('D15 · lo que quedaba en inglés (Codex D15 r1 #2)', () => {
+  it('correo null con teléfono: pasa como «sin correo»', () => {
+    const r = CreateCustomerSchema.safeParse({ params: { venueId }, body: { email: null, phone: '5544102263' } })
+    expect(mensajes(r)).toBe('')
+    expect(r.success && r.data.body.email).toBeUndefined()
+  })
+
+  it('género desconocido o nombre que no es texto: en español', () => {
+    for (const body of [
+      { phone: '5544102263', gender: 'X' },
+      { phone: '5544102263', firstName: 5 },
+    ]) {
+      const r = CreateCustomerSchema.safeParse({ params: { venueId }, body })
+      expect(r.success).toBe(false)
+      expect(mensajes(r)).not.toMatch(SIN_INGLES)
+    }
+    const u = UpdateCustomerSchema.safeParse({ params: { venueId, customerId }, body: { gender: 'X' } })
+    expect(mensajes(u)).not.toMatch(SIN_INGLES)
+  })
+})
