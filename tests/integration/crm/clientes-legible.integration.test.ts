@@ -1002,6 +1002,20 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       expect(seenByAll.usa.detalle).toEqual(seenByB.usa.detalle)
     })
 
+    it('🔴 C2 Tarea 5 · paridad: usa y estado de lo vivo = los de la fila de la lista, en las 9 organizaciones sembradas', async () => {
+      const { rows } = await walk(todos(), {}, 100)
+      for (const row of rows) {
+        const live = (await getClientLive(todos(), row.id, NOW)) as Record<string, any>
+        expect({ id: row.id, usa: live.usa, estado: live.estado }).toEqual({ id: row.id, usa: row.usa, estado: row.estado })
+      }
+    })
+
+    it('🔴 C2 Tarea 5: el porqué del ✋ de la cuenta de B no le llega a A por lo vivo (404, como la ficha)', async () => {
+      await expect(getClientLive(propios(A), o.terminal, NOW)).rejects.toMatchObject({ statusCode: 404 })
+      const deB = (await getClientLive(propios(B), o.terminal, NOW)) as Record<string, any>
+      expect(deB.usa.detalle).toEqual({ porque: 'Lo vi en su local', por: { id: B, name: 'Beto Propios' }, at: hace(DAY) })
+    })
+
     it('🔴 motivo=PRECIO para A no trae la cuenta de B con motivo PRECIO', async () => {
       expect((await walk(propios(A), { motivo: 'PRECIO' })).ids).toEqual([o.altaA])
       expect(new Set((await walk(todos(), { motivo: 'PRECIO' })).ids)).toEqual(new Set([o.altaA, o.altaB]))
@@ -2492,5 +2506,40 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         expect(sin).toMatchObject({ ingreso: { ...fila.ingreso, transacciones30d: null, otraMoneda: null } })
       })
     })
+  })
+})
+
+describe('C2 Tarea 5 · «Cobrado · 30 días» y RFC en lo vivo', () => {
+  const conVentas = (ventas: boolean) => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', ventas }) as unknown as CrmAccess
+
+  it('cobrado30: un cobro real de hace 3 días cuenta y uno de hace 31 no; el de una sucursal demo tampoco; sin «Ver ventas», null', async () => {
+    const { organizationId, venueId } = await orgWithVenue()
+    const demo = await venue(organizationId, { status: VenueStatus.LIVE_DEMO })
+    await sale(venueId, { source: 'TPV', at: hace(3 * DAY), payment: { amount: '250.00' } })
+    await sale(venueId, { source: 'TPV', at: hace(31 * DAY), payment: { amount: '999.00' } })
+    await sale(demo, { source: 'TPV', at: hace(DAY), payment: { amount: '777.00' } })
+
+    const live = (await getClientLive(conVentas(true), organizationId, NOW)) as Record<string, any>
+    expect(Number(live.cobrado30)).toBe(250)
+    expect(live.cobrado30OtraMoneda).toBe(false)
+
+    const sin = (await getClientLive(conVentas(false), organizationId, NOW)) as Record<string, any>
+    expect(sin).toMatchObject({ cobrado30: null, cobrado30OtraMoneda: null, ventasBloqueadas: true })
+  })
+
+  it('fiscal: dos sucursales con el mismo RFC del emisor → uno; Venue.rfc (KYC) nunca se lee', async () => {
+    const { organizationId, venueId } = await orgWithVenue()
+    const otra = await venue(organizationId)
+    await sale(venueId, { source: 'TPV', at: hace(DAY) })
+    await prisma.venue.update({ where: { id: venueId }, data: { rfc: 'KYCX010101KYC' } })
+    for (const id of [venueId, otra]) {
+      await prisma.fiscalEmisor.create({
+        data: { venueId: id, rfc: 'CAFE010101AB1', legalName: 'Café Uno SA de CV', regimenFiscal: '601', lugarExpedicion: '06700' },
+      })
+    }
+
+    const live = (await getClientLive(conVentas(false), organizationId, NOW)) as Record<string, any>
+    expect(live.fiscal).toEqual([{ rfc: 'CAFE010101AB1', razonSocial: 'Café Uno SA de CV' }])
+    expect(JSON.stringify(live)).not.toContain('KYCX010101KYC')
   })
 })

@@ -36,8 +36,18 @@ import {
   planDeLaPagina,
   ultimosComentarios,
   usaDeLaFila,
+  type UsaDeLaFila,
 } from './clientPage'
-import { checkDueno, clientSql, clientsFilter, clientsQueries, ingresoDeOrganizacionSql, pageSize, type ClientFilters } from './clientsSql'
+import {
+  checkDueno,
+  clientSql,
+  clientsFilter,
+  clientsQueries,
+  hechosDeUnaOrganizacion,
+  ingresoDeOrganizacionSql,
+  pageSize,
+  type ClientFilters,
+} from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
 import { addEvent } from './timeline.service'
 
@@ -192,6 +202,42 @@ async function monthSales(organizationId: string, now: Date): Promise<{ total: P
   return { total: row?.ventasMXN ?? new Prisma.Decimal(0), otraMoneda: row?.otraMoneda ?? false }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * C2 Tarea 5 — «Cobrado · 30 días»: every real charge of its real venues since 30 × 24 h ago (inclusive), with the SAME rules
+ * as «Cobrado este mes» (`monthSales`): only MXN is added; another currency is only flagged, never converted.
+ */
+async function cobradoEn30Dias(organizationId: string, now: Date): Promise<{ total: Prisma.Decimal; otraMoneda: boolean }> {
+  const desde = new Date(now.getTime() - 30 * DAY_MS)
+  const [row] = await prisma.$queryRaw<Array<{ cobradoMXN: Prisma.Decimal | null; otraMoneda: boolean }>>(Prisma.sql`
+    SELECT SUM(p."amount") FILTER (WHERE ${monedaDelPagoSql} = 'MXN') AS "cobradoMXN",
+      COALESCE(BOOL_OR(${monedaDelPagoSql} <> 'MXN'), false) AS "otraMoneda"
+    FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
+    WHERE v."organizationId" = ${organizationId} AND ${REAL_VENUE_SQL}
+      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(desde)}`)
+  return { total: row?.cobradoMXN ?? new Prisma.Decimal(0), otraMoneda: row?.otraMoneda ?? false }
+}
+
+const FISCAL_CAP = 5
+
+/**
+ * C2 Tarea 5 (Duda 3): RFC and business name from the invoice issuer (`FiscalEmisor`) of its first venues, never
+ * `Venue.rfc`/`legalName` (KYC, ruling 40). No repeated RFC, at most 5.
+ */
+async function fiscalDe(venueIds: string[]): Promise<Array<{ rfc: string; razonSocial: string }>> {
+  if (!venueIds.length) return []
+  const emisores = await prisma.fiscalEmisor.findMany({
+    where: { venueId: { in: venueIds } },
+    select: { rfc: true, legalName: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: venueIds.length * 2,
+  })
+  const unicos = new Map<string, string>()
+  for (const emisor of emisores) if (!unicos.has(emisor.rfc)) unicos.set(emisor.rfc, emisor.legalName)
+  return [...unicos].slice(0, FISCAL_CAP).map(([rfc, razonSocial]) => ({ rfc, razonSocial }))
+}
+
 /**
  * The ficha's live part (spec §5.5): for an account linked to an Organization, its venues with their effective plan and
  * status (KYC only for «Administrar», ruling 40); the signup's progress; the owner's last sign-in; how many venues and
@@ -255,7 +301,22 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     // C1b: «Ingreso» with the same lateral and columns as the row of «Clientes».
     prisma.$queryRaw<IngresoDeLaFila[]>(ingresoDeOrganizacionSql(organizationId, now, access.ventas)),
   ])
-  const plans = await enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id))
+  // C2 Tarea 5: «Usa» and «Estado» as the list paints them, the money of 30 days and the RFC — a fixed number of queries.
+  const [plans, [hechos], visibles, aparatos, cobrado30, fiscal] = await Promise.all([
+    enParaleloAcotado(venues, PLANS_AT_ONCE, venue => getPlanState(venue.id)),
+    prisma.$queryRaw<Array<UsaDeLaFila & { estado: string; ultimoCobroAt: Date | null }>>(hechosDeUnaOrganizacion(organizationId, now)),
+    // Who wrote the ✋ and why, only from an account in the caller's «Ver» (as the list).
+    prisma.crmAccount.findMany({
+      where: { AND: [{ organizationId }, scopeWhere(access, 'ver')] },
+      select: { usaManual: true, usaManualPorque: true, usaManualById: true, usaManualAt: true },
+      orderBy: [{ id: 'asc' }],
+      take: 1,
+    }),
+    aparatosDe([organizationId]),
+    access.ventas ? cobradoEn30Dias(organizationId, now) : null,
+    fiscalDe(venues.map(venue => venue.id)),
+  ])
+  const autores = await autoresDelUsa(visibles)
   const steps = onboarding?.completedSteps
   const done = Array.isArray(steps) ? steps.length : 0
 
@@ -292,6 +353,14 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     ventasMesOtraMoneda: ventasMes?.otraMoneda ?? null,
     ventasBloqueadas: !access.ventas,
     ingreso: ingreso ? ingresoDeLaFila(ingreso, access.ventas) : null,
+    usa: hechos
+      ? { ...usaDeLaFila(hechos, visibles[0], autores), aparatos: aparatos.get(organizationId) ?? { terminales: 0, pos: 0 } }
+      : null,
+    estado: hechos ? { codigo: hechos.estado, ultimoCobroAt: hechos.ultimoCobroAt } : null,
+    /** C2: everything charged in 30 days (MXN); only with «Ver ventas». */
+    cobrado30: cobrado30?.total ?? null,
+    cobrado30OtraMoneda: cobrado30?.otraMoneda ?? null,
+    fiscal,
   }
 }
 

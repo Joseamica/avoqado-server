@@ -209,6 +209,19 @@ export function ingresoDeOrganizacionSql(organizationId: string, now: Date, conV
 }
 
 /**
+ * C2 Tarea 5: «Usa» and «Estado» of ONE organization for its ficha, with the SAME lateral and columns as the row of
+ * «Clientes» (`clientsQueries().page`), so the ficha and the list never say different things.
+ */
+export function hechosDeUnaOrganizacion(organizationId: string, now: Date): Prisma.Sql {
+  return Prisma.sql`SELECT f."usaMedido", ${USA_VISTO} AS "usaVisto", ${USA_AVISO} AS "usaAviso", ca."usaManual" IS NOT NULL AS "usaEscrito",
+      f."estado", f."ultimoCobroAt"
+    FROM "Organization" o
+    LEFT JOIN "CrmAccount" ca ON ca."organizationId" = o."id"
+    ${clientFactsLateral(now)}
+    WHERE o."id" = ${organizationId}`
+}
+
+/**
  * EVERY statement of «Clientes» that walks the universe (Codex r2 #3): the page, its total and the count of 🟠 by reason.
  * In the count, a 🟠 whose account the caller does not see is `DE_OTRO` (whatever its reason, lost or not) and `perdidos`
  * counts only the caller's own (Codex r1 #3), so the reasons of a 🟠 always add up to `altaSinTarjeta`.
