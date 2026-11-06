@@ -1299,23 +1299,23 @@ describe('Discount Engine Service', () => {
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
       prismaMock.order.findUnique.mockResolvedValue(mockOrder)
       prismaMock.discount.findMany.mockResolvedValue([
-        createMockDbDiscount({ id: 'd1', name: 'Comp', type: 'COMP', value: new Decimal(100), requiresApproval: true }),
+        createMockDbDiscount({ id: 'd1', name: 'Diez', type: 'PERCENTAGE', value: new Decimal(10), requiresApproval: true }),
       ])
 
       const discount = {
         discountId: 'd1',
-        name: 'Comp',
-        type: 'COMP' as DiscountType,
-        value: 100,
-        amount: 100,
+        name: 'Diez',
+        type: 'PERCENTAGE' as DiscountType,
+        value: 10,
+        amount: 10,
         taxReduction: 0,
         applicableItems: [],
         isAutomatic: false,
         requiresApproval: true, // Requires approval
       }
 
-      // D1: con el permiso de cortesía (el descuento es COMP), para probar sólo la aprobación.
-      const result = await applyDiscountToOrder('order-123', discount, 'staff-1', undefined, undefined, true) // No authorizedById
+      // D2: un % que pide aprobación no tiene aprobador todavía: se rechaza aunque llegue uno.
+      const result = await applyDiscountToOrder('order-123', discount, 'staff-1', 'manager-1')
 
       expect(result.success).toBe(false)
       expect(result.error).toBe('This discount requires manager approval')

@@ -815,6 +815,11 @@ describe('existing discount policies', () => {
       authorizedById: staffVenueId,
     })
   })
+  it('D2: con permiso de cortesía y sin membresía en el negocio, la cortesía que pide aprobación se aplica', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100, requiresApproval: true } })
+    const o = await newOrder()
+    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, undefined, {})).toMatchObject({ success: true, amount: 100 })
+  })
   // Fuera de la cortesía no hay todavía un permiso que apruebe: bajo el candado se rechaza aunque llegue un autorizador.
   it('D2: un % que pide aprobación se rechaza bajo el candado aunque llegue un autorizador, y no escribe', async () => {
     await prisma.discount.update({ where: { id: discountId }, data: { requiresApproval: true } })

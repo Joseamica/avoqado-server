@@ -937,7 +937,10 @@ export async function applyDiscountToOrder(
     if (fresh.requiresApproval && fresh.type !== 'COMP') {
       return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount requires manager approval' }
     }
-    return applyEvaluatedDiscount(tx, order, fresh, audits, appliedById, authorizedById)
+    // Aquí una COMP ya trae `orders:comp` verificado: ésa ES la aprobación, aunque no quede autorizador registrado (dueño de la
+    // organización sin membresía en la sucursal, como la cortesía manual).
+    const aprobada = fresh.type === 'COMP' && fresh.requiresApproval ? { ...fresh, requiresApproval: false } : fresh
+    return applyEvaluatedDiscount(tx, order, aprobada, audits, appliedById, authorizedById)
   }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)
   return result
