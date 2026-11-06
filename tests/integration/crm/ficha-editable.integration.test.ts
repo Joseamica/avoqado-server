@@ -23,8 +23,10 @@ import { randomUUID } from 'crypto'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { recorrerAudiencia } from '@/services/crm/email/audience.service'
 import { erasedHashes } from '@/services/crm/erase.service'
-import { addContact, updateAccount } from '@/services/crm/ficha.service'
+import { getAccount } from '@/services/crm/accounts.service'
+import { addContact, removeContact, updateAccount, updateContact, type PersonaVista } from '@/services/crm/ficha.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
+import { canonicalPhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `crmf${Date.now()}`
@@ -288,5 +290,126 @@ describe('Tarea 2 · POST /crm/accounts/:id/contacts: agregar persona', () => {
     expect(await enProspectos('t2b-')).toEqual([`t2b-con-${suffix}@test.mx`])
     const permisos = await prisma.crmEmailConsent.findMany({ where: { accountId }, select: { email: true, source: true }, take: 5 })
     expect(permisos).toEqual([{ email: `t2b-con-${suffix}@test.mx`, source: 'MANUAL' }])
+  })
+})
+
+const PERSONA = { name: true, phoneE164: true, email: true, role: true, isPrimary: true } as const
+const vistaDe = (id: string) => prisma.crmContact.findUniqueOrThrow({ where: { id }, select: PERSONA }) as Promise<PersonaVista>
+
+describe('Tarea 3 · cambiar y quitar persona', () => {
+  it('🔴 quitar a una persona con correos enviados → el mensaje queda con contactId null y la Historia lo sigue pintando', async () => {
+    const ana = await vendedor('ana-t3a')
+    const { accountId, contactId } = await accountWithPerson(`t3a-${suffix}@test.mx`)
+    const mensaje = await prisma.crmEmailMessage.create({
+      data: {
+        accountId,
+        contactId,
+        staffId: ana,
+        direction: 'SALIDA',
+        fromEmail: `ana-t3a-${suffix}@test.mx`,
+        toEmail: `t3a-${suffix}@test.mx`,
+        subject: 'Hola',
+        status: 'ENVIADO',
+      },
+    })
+    await prisma.crmTimelineEvent.create({
+      data: {
+        accountId,
+        kind: 'EMAIL_SENT',
+        actorStaffId: ana,
+        data: { messageId: mensaje.id, contactId },
+        sourceKey: `email:${mensaje.id}`,
+      },
+    })
+
+    await expect(removeContact(seller(ana), accountId, contactId, { vio: await vistaDe(contactId) })).resolves.toEqual({
+      contactId,
+      yaNoEstaba: false,
+    })
+
+    expect(await prisma.crmEmailMessage.findUniqueOrThrow({ where: { id: mensaje.id } })).toMatchObject({ contactId: null })
+    const ficha = await getAccount(seller(ana), accountId)
+    expect(ficha.timeline.events.find(event => event.kind === 'EMAIL_SENT')).toMatchObject({ email: { subject: 'Hola' } })
+    expect(ficha.timeline.events.find(event => event.kind === 'CONTACT_REMOVED')).toMatchObject({
+      data: { contactId, eraPrincipal: true },
+    })
+  })
+
+  /** Una persona sólo con teléfono a la que la landing le llena el correo (personGapTx), mientras la ficha la veía. */
+  async function personaQueLlenaLaLanding(alias: string) {
+    const ana = await vendedor(`ana-${alias}`)
+    const phone = nextPhone()
+    const { id: accountId, contacts } = await prisma.crmAccount.create({
+      data: {
+        name: `Negocio ${alias} ${suffix}`,
+        source: 'MANUAL',
+        stageId: await stage(),
+        contacts: { create: { name: 'Mariana', phoneE164: canonicalPhoneE164(phone), isPrimary: true } },
+      },
+      select: { id: true, contacts: { select: { id: true } } },
+    })
+    accountIds.push(accountId)
+    const contactId = contacts[0].id
+    const vio = await vistaDe(contactId)
+    const email = `${alias}-${suffix}@test.mx`
+    await applyEntry(await landingEntry(email, new Date(), { phone }))
+    expect(await vistaDe(contactId)).toMatchObject({ email })
+    return { ana, accountId, contactId, vio, email }
+  }
+
+  it('🔴 la landing llena el correo y el vendedor guarda sólo el nombre con el vio de antes → 200: el nombre nuevo y el correo de la landing se quedan', async () => {
+    const { ana, accountId, contactId, vio, email } = await personaQueLlenaLaLanding('t3b')
+
+    await expect(updateContact(seller(ana), accountId, contactId, { cambios: { name: 'Mariana López' }, vio })).resolves.toMatchObject({
+      cambiados: ['name'],
+    })
+    expect(await vistaDe(contactId)).toMatchObject({ name: 'Mariana López', email })
+  })
+
+  it('🔴 el mismo caso, pero el vendedor cambia el correo o marca la casilla → 409 con ahora', async () => {
+    const { ana, accountId, contactId, vio, email } = await personaQueLlenaLaLanding('t3c')
+
+    await expect(
+      updateContact(seller(ana), accountId, contactId, { cambios: { email: `otro-t3c-${suffix}@test.mx` }, vio }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR', details: { ahora: expect.objectContaining({ email }) } })
+    await expect(
+      updateContact(seller(ana), accountId, contactId, { cambios: { role: 'Dueña' }, vio, aceptaCorreos: true }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR' })
+    expect(await vistaDe(contactId)).toMatchObject({ email, role: null })
+  })
+
+  it('🔴 el correo nuevo no entra al público PROSPECTOS; el viejo sí (conserva su permiso)', async () => {
+    const ana = await vendedor('ana-t3d')
+    const viejo = `t3d-viejo-${suffix}@test.mx`
+    const { accountId } = await accountWithPerson(`t3d-beto-${suffix}@test.mx`)
+    const { contactId } = await addContact(seller(ana), accountId, {
+      name: 'Ana',
+      email: viejo,
+      aceptaCorreos: true,
+      clientRequestId: llave(),
+    })
+    expect(await enProspectos('t3d-')).toEqual([viejo])
+
+    const r = await updateContact(seller(ana), accountId, contactId, {
+      cambios: { email: `t3d-nuevo-${suffix}@test.mx` },
+      vio: await vistaDe(contactId),
+    })
+
+    expect(r).toMatchObject({ permisoDelCorreo: false, correoAnteriorConPermiso: true })
+    expect(await enProspectos('t3d-')).toEqual([viejo])
+  })
+
+  it('🔴 A «propios» cambia una persona de la cuenta de B → 404 y la base no cambia', async () => {
+    const [ana, beto] = [await vendedor('ana-t3e'), await vendedor('beto-t3e')]
+    const { accountId, contactId } = await accountWithPerson(`t3e-${suffix}@test.mx`, { ownerStaffId: beto })
+    const antes = await vistaDe(contactId)
+
+    await expect(
+      updateContact(seller(ana, { ver: 'propios', editar: 'propios' }), accountId, contactId, { cambios: { name: 'X' }, vio: antes }),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    await expect(
+      removeContact(seller(ana, { ver: 'propios', editar: 'propios' }), accountId, contactId, { vio: antes }),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    expect(await vistaDe(contactId)).toEqual(antes)
   })
 })

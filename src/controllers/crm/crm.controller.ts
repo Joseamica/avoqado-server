@@ -289,3 +289,13 @@ export async function updateAccount(req: Request, res: Response): Promise<void> 
 export async function addContact(req: Request, res: Response): Promise<void> {
   res.status(201).json({ data: await ficha.addContact(req.crmAccess!, req.params.id, req.body) })
 }
+
+/** PATCH /api/v1/crm/accounts/:id/contacts/:contactId — change a person, with what the screen showed (`vio`). */
+export async function updateContact(req: Request, res: Response): Promise<void> {
+  res.json({ data: await ficha.updateContact(req.crmAccess!, req.params.id, req.params.contactId, req.body) })
+}
+
+/** POST /api/v1/crm/accounts/:id/contacts/:contactId/remove — remove a person (`yaNoEstaba` when it was already gone). */
+export async function removeContact(req: Request, res: Response): Promise<void> {
+  res.json({ data: await ficha.removeContact(req.crmAccess!, req.params.id, req.params.contactId, req.body) })
+}

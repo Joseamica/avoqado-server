@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { createAccountSchema, updateAccountSchema } from '@/schemas/crm.schema'
+import { createAccountSchema, removeContactSchema, updateAccountSchema, updateContactSchema } from '@/schemas/crm.schema'
 
 /**
  * CRM propio, tarea 1: la forma del esquema que usan las tareas siguientes, leída del DMMF (no necesita base).
@@ -250,5 +250,32 @@ describe('C2 · updateAccountSchema (PATCH /crm/accounts/:id)', () => {
     const r = parse({ cambios: { giro: '', referidoPor: null }, vio: { giro: 'x'.repeat(500), referidoPor: 'Luis' } })
     expect(r.success).toBe(true)
     expect(r.success && r.data.body.cambios).toEqual({ giro: null, referidoPor: null })
+  })
+})
+
+describe('C2 · updateContactSchema y removeContactSchema', () => {
+  const params = { id: 'caccounta0000000000000001', contactId: 'ccontacta0000000000000001' }
+  const vio = { name: 'Ana', phoneE164: null, email: 'ana@cafe.mx', role: null, isPrimary: true }
+  const mensajes = (body: unknown) => {
+    const r = updateContactSchema.safeParse({ params, body })
+    return r.success ? [] : r.error.issues.map(issue => issue.message)
+  }
+
+  it('cambios vacío sin casilla → «Di qué cambias»; con la casilla sola, vale', () => {
+    expect(mensajes({ cambios: {}, vio })).toContain('Di qué cambias')
+    expect(mensajes({ cambios: {}, vio, aceptaCorreos: true })).toEqual([])
+  })
+  it('un dato que no es de la persona → «Ese dato no se edita aquí»; vio incompleto → 400', () => {
+    expect(mensajes({ cambios: { accountId: 'x' }, vio })).toContain('Ese dato no se edita aquí')
+    expect(mensajes({ cambios: { role: 'X' }, vio: { name: 'Ana' } }).length).toBeGreaterThan(0)
+  })
+  it('correo en minúsculas, teléfono inválido → 400, "" borra', () => {
+    const r = updateContactSchema.safeParse({ params, body: { cambios: { email: ' Ana@Cafe.MX ', role: '' }, vio } })
+    expect(r.success && r.data.body.cambios).toEqual({ email: 'ana@cafe.mx', role: null })
+    expect(mensajes({ cambios: { phone: '12' }, vio })).toContain('El teléfono no es válido')
+  })
+  it('quitar pide la persona que se veía', () => {
+    expect(removeContactSchema.safeParse({ params, body: { vio } }).success).toBe(true)
+    expect(removeContactSchema.safeParse({ params, body: {} }).success).toBe(false)
   })
 })

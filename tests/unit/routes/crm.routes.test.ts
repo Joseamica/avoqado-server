@@ -691,4 +691,43 @@ describe('C2 · ficha editable: las rutas piden «Editar» (o «Ver») antes de 
       expect(spy).not.toHaveBeenCalled()
     })
   })
+
+  describe('PATCH /crm/accounts/:id/contacts/:contactId y POST …/remove', () => {
+    const CONTACT = 'ccontacta0000000000000001'
+    const vio = { name: 'Ana', phoneE164: null, email: 'ana@cafe.mx', role: null, isPrimary: true }
+
+    it('🔴 las dos rutas sin «Editar» → 403 y el servicio no se llama', async () => {
+      const cambiar = espiar('updateContact', {})
+      const quitar = espiar('removeContact', {})
+      access({ verScope: 'todos', editarScope: null })
+      expect(
+        (
+          await request(app)
+            .patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`)
+            .send({ cambios: { role: 'X' }, vio })
+        ).status,
+      ).toBe(403)
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}/remove`).send({ vio })).status).toBe(403)
+      expect(cambiar).not.toHaveBeenCalled()
+      expect(quitar).not.toHaveBeenCalled()
+    })
+
+    it('con «Editar» llegan al servicio; cambios vacío sin casilla → 400 «Di qué cambias»; con la casilla sola, sí', async () => {
+      const cambiar = espiar('updateContact', { contactId: CONTACT, cambiados: [] })
+      const quitar = espiar('removeContact', { contactId: CONTACT, yaNoEstaba: false })
+      access({ verScope: 'todos', editarScope: 'todos' })
+      expect((await request(app).patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`).send({ cambios: {}, vio })).status).toBe(400)
+      const casilla = await request(app)
+        .patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`)
+        .send({ cambios: {}, vio, aceptaCorreos: true })
+      expect(casilla.status).toBe(200)
+      expect(cambiar).toHaveBeenCalledWith(expect.anything(), ACCOUNT, CONTACT, { cambios: {}, vio, aceptaCorreos: true })
+      const fijo = await request(app)
+        .patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`)
+        .send({ cambios: { accountId: 'x' }, vio })
+      expect(fijo.status).toBe(400)
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}/remove`).send({ vio })).status).toBe(200)
+      expect(quitar).toHaveBeenCalledWith(expect.anything(), ACCOUNT, CONTACT, { vio })
+    })
+  })
 })

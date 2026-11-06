@@ -8,7 +8,7 @@
  * `CRM_CAMBIO_AL_EDITAR` con `ahora`; (4) escribir. Ningún evento ni ActivityLog lleva datos de personas.
  */
 import { Prisma } from '@prisma/client'
-import { ConflictError } from '../../errors/AppError'
+import { ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
@@ -284,4 +284,170 @@ export async function addContact(
     registrarPermiso(access, accountId, r.organizationId, r.escritas)
   }
   return { contactId: r.contactId, permisoDelCorreo: r.permiso, consentimientoRegistrado: r.escritas > 0, repetido: r.repetido }
+}
+
+export type CampoDePersona = 'name' | 'phone' | 'email' | 'role' | 'isPrimary'
+const CAMPOS_DE_PERSONA: CampoDePersona[] = ['name', 'phone', 'email', 'role', 'isPrimary']
+
+export interface CambiarPersonaInput {
+  cambios: Partial<{ name: string; phone: string | null; email: string | null; role: string | null; isPrimary: boolean }>
+  vio: PersonaVista
+  aceptaCorreos?: boolean
+  esOtroNegocio?: boolean
+}
+
+/** El campo de la persona tal como se guarda (el teléfono, canónico; el correo, normalizado). */
+function guardable(campo: CampoDePersona, valor: unknown): unknown {
+  if (campo === 'phone') return telefono(valor as string | null)
+  if (campo === 'email') return correo(valor as string | null)
+  if (campo === 'name') return (valor as string).trim()
+  if (campo === 'role') return textoOnull(valor as string | null)
+  return valor === true
+}
+const columna = (campo: CampoDePersona) => (campo === 'phone' ? 'phoneE164' : campo)
+
+/** Lo de la persona contra un valor: texto sin espacios de más, el correo sin mayúsculas, el resto exacto. */
+function mismaPersona(campo: CampoDePersona, guardado: PersonaVista, valor: unknown): boolean {
+  const ahora = guardado[columna(campo) as keyof PersonaVista]
+  if (campo === 'isPrimary') return ahora === valor
+  if (campo === 'email') return mismoTexto(correo(ahora as string | null), correo(valor as string | null))
+  return mismoTexto(ahora as string | null, valor as string | null)
+}
+
+const personaNoExiste = () => new NotFoundError('Alguien más quitó a esta persona', 'CRM_PERSONA_NO_EXISTE')
+
+/**
+ * Cambiar a una persona (C2), en el orden fijo: candado; la persona de ESTA cuenta; «¿ya está hecho?» (nada que cambiar y,
+ * con la casilla, el correo pedido ya es el guardado y ya tiene su permiso) → éxito sin escribir; `vio` de cada campo que
+ * cambia y, con la casilla y sin correo en `cambios`, también `vio.email` (lo que se autoriza es la dirección que se vio);
+ * duplicados sólo del correo o teléfono que cambia; escribir. Un correo nuevo no hereda el permiso del anterior.
+ */
+export async function updateContact(
+  access: CrmAccess,
+  accountId: string,
+  contactId: string,
+  input: CambiarPersonaInput,
+): Promise<{
+  contactId: string
+  cambiados: CampoDePersona[]
+  permisoDelCorreo: boolean
+  consentimientoRegistrado: boolean
+  correoAnteriorConPermiso: boolean
+}> {
+  const now = new Date()
+  const r = await prisma.$transaction(async tx => {
+    await lockEditableTx(tx, access, accountId)
+    const guardado = await tx.crmContact.findFirst({ where: { id: contactId, accountId }, select: PERSONA_SELECT })
+    if (!guardado) throw personaNoExiste()
+
+    const cambiados = CAMPOS_DE_PERSONA.filter(
+      campo => campo in input.cambios && !mismaPersona(campo, guardado, guardable(campo, input.cambios[campo])),
+    )
+    const conCorreo = 'email' in input.cambios
+    const correoFinal = conCorreo ? correo(input.cambios.email) : guardado.email
+    const casilla = input.aceptaCorreos === true
+
+    // «¿Ya está hecho?» (Codex r2 H4): el reintento de lo mismo, con su permiso ya escrito, nunca es conflicto.
+    if (!cambiados.length) {
+      const correoDeLaCasilla = conCorreo ? correo(input.cambios.email) : correo(input.vio.email)
+      const permiso = await tienePermisoTx(tx, guardado.email)
+      if (!casilla || (correoDeLaCasilla === guardado.email && permiso)) {
+        return { cambiados, permiso, escritas: 0, anteriorConPermiso: false, organizationId: null }
+      }
+    }
+
+    const aComparar: CampoDePersona[] = [...cambiados]
+    if (casilla && !conCorreo) aComparar.push('email')
+    if (aComparar.some(campo => !mismaPersona(campo, guardado, input.vio[columna(campo) as keyof PersonaVista]))) {
+      throw cambioAlEditar(vista(guardado))
+    }
+    if (casilla && !correoFinal) throw new ValidationError('Para que reciba correos, escribe su correo', 'CRM_SIN_CORREO')
+
+    const nuevos = {
+      email: cambiados.includes('email') ? correoFinal : null,
+      phoneE164: cambiados.includes('phone') ? telefono(input.cambios.phone) : null,
+    }
+    await revisarDuplicadosTx(tx, access, accountId, nuevos, { esOtroNegocio: input.esOtroNegocio, exceptoId: contactId })
+
+    if (cambiados.includes('isPrimary') && input.cambios.isPrimary === true) {
+      await tx.crmContact.updateMany({ where: { accountId, isPrimary: true, id: { not: contactId } }, data: { isPrimary: false } })
+    }
+    if (cambiados.length) {
+      const data = Object.fromEntries(cambiados.map(campo => [columna(campo), guardable(campo, input.cambios[campo])]))
+      await tx.crmContact.update({ where: { id: contactId }, data, select: { id: true } })
+    }
+    const escritas = casilla ? await casillaTx(tx, access, accountId, correoFinal!, now) : 0
+    const permiso = await tienePermisoTx(tx, correoFinal)
+    const anteriorConPermiso = cambiados.includes('email') && (await tienePermisoTx(tx, guardado.email))
+    if (cambiados.length || escritas > 0) {
+      await touchNoEarlierTx(tx, accountId, now)
+      await addEvent(tx, {
+        accountId,
+        kind: 'CONTACT_EDITED',
+        actorStaffId: access.staffId,
+        data: { contactId, campos: cambiados, ...(escritas > 0 ? { consentimiento: true } : {}) },
+      })
+    }
+    return { cambiados, permiso, escritas, anteriorConPermiso, organizationId: await organizacionTx(tx, accountId) }
+  })
+
+  if (r.cambiados.length || r.escritas > 0) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId: r.organizationId,
+      action: 'CRM_CONTACT_UPDATED',
+      entity: 'CrmContact',
+      entityId: contactId,
+      data: { contactId, campos: r.cambiados },
+    })
+    registrarPermiso(access, accountId, r.organizationId, r.escritas)
+  }
+  return {
+    contactId,
+    cambiados: r.cambiados,
+    permisoDelCorreo: r.permiso,
+    consentimientoRegistrado: r.escritas > 0,
+    correoAnteriorConPermiso: r.anteriorConPermiso,
+  }
+}
+
+/**
+ * Quitar a una persona (C2). Quien ya no está en esta cuenta es éxito (`yaNoEstaba`: el reintento tras perder la
+ * respuesta; no dice quién la quitó ni si existe en otra cuenta). Con un `vio` viejo, 409 y nada borrado. Sus correos
+ * enviados quedan en la Historia sin persona (`contactId` nulo). Quitar a la principal no promueve a nadie.
+ */
+export async function removeContact(
+  access: CrmAccess,
+  accountId: string,
+  contactId: string,
+  input: { vio: PersonaVista },
+): Promise<{ contactId: string; yaNoEstaba: boolean }> {
+  const r = await prisma.$transaction(async tx => {
+    await lockEditableTx(tx, access, accountId)
+    const guardado = await tx.crmContact.findFirst({ where: { id: contactId, accountId }, select: PERSONA_SELECT })
+    if (!guardado) return null
+    const viejo = CAMPOS_DE_PERSONA.some(campo => !mismaPersona(campo, guardado, input.vio[columna(campo) as keyof PersonaVista]))
+    if (viejo) throw cambioAlEditar(vista(guardado))
+    await tx.crmContact.delete({ where: { id: contactId } })
+    await touchNoEarlierTx(tx, accountId, new Date())
+    await addEvent(tx, {
+      accountId,
+      kind: 'CONTACT_REMOVED',
+      actorStaffId: access.staffId,
+      data: { contactId, eraPrincipal: guardado.isPrimary },
+    })
+    return { organizationId: await organizacionTx(tx, accountId) }
+  })
+  if (!r) return { contactId, yaNoEstaba: true }
+  void logAction({
+    staffId: access.staffId,
+    venueId: null,
+    organizationId: r.organizationId,
+    action: 'CRM_CONTACT_REMOVED',
+    entity: 'CrmContact',
+    entityId: contactId,
+    data: { contactId },
+  })
+  return { contactId, yaNoEstaba: false }
 }

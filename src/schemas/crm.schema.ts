@@ -320,6 +320,71 @@ export const addContactSchema = z.object({
     }),
 })
 
+const byContact = z.object({ id: cuid, contactId: cuid })
+const blankIsNull = (value: unknown) => (typeof value === 'string' && value.trim() === '' ? null : value)
+/** La persona como la enseñó la ficha: completa, para comparar lo que cambia (y todo, al quitarla). */
+const personaVista = z.object(
+  {
+    name: z.string({ required_error: 'Falta lo que se veía antes de cambiarlo' }).max(500, 'Máximo 500 caracteres'),
+    phoneE164: z.string({ invalid_type_error: 'Debe ser texto' }).max(40, 'Máximo 40 caracteres').nullable(),
+    email: z.string({ invalid_type_error: 'Debe ser texto' }).max(500, 'Máximo 500 caracteres').nullable(),
+    role: z.string({ invalid_type_error: 'Debe ser texto' }).max(500, 'Máximo 500 caracteres').nullable(),
+    isPrimary: z.boolean({ required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Principal es sí o no' }),
+  },
+  { required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Falta lo que se veía antes de cambiarlo' },
+)
+
+/**
+ * PATCH /crm/accounts/:id/contacts/:contactId — cambiar a una persona (C2). `cambios` vacío sólo con la casilla
+ * («Aceptó recibir correos»): marcarla sola sí es un cambio.
+ */
+export const updateContactSchema = z.object({
+  params: byContact,
+  body: z
+    .object({
+      cambios: z
+        .object(
+          {
+            name: text(200, 'El nombre de la persona es obligatorio'),
+            phone: z.preprocess(
+              blankIsNull,
+              z
+                .string({ invalid_type_error: 'El teléfono no es válido' })
+                .trim()
+                .max(30, 'El teléfono no es válido')
+                .refine(value => canonicalPhoneE164(value) !== null, 'El teléfono no es válido')
+                .nullable(),
+            ),
+            email: z.preprocess(
+              blankIsNull,
+              z
+                .string({ invalid_type_error: 'El correo no es válido' })
+                .trim()
+                .toLowerCase()
+                .email('El correo no es válido')
+                .max(254, 'El correo es demasiado largo')
+                .nullable(),
+            ),
+            role: nullableText(100),
+            isPrimary: z.boolean({ invalid_type_error: 'Principal es sí o no' }),
+          },
+          { required_error: 'Di qué cambias', invalid_type_error: 'Di qué cambias' },
+        )
+        .partial()
+        .strict('Ese dato no se edita aquí'),
+      vio: personaVista,
+      aceptaCorreos: siNo('Aceptó recibir correos'),
+      esOtroNegocio: siNo('Es otro negocio'),
+    })
+    .refine(body => Object.keys(body.cambios).length > 0 || body.aceptaCorreos === true, {
+      message: 'Di qué cambias',
+      path: ['cambios'],
+    }),
+})
+
+/** POST /crm/accounts/:id/contacts/:contactId/remove — quitar a una persona, con la persona que se veía. */
+export const removeContactSchema = z.object({ params: byContact, body: z.object({ vio: personaVista }) })
+
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,

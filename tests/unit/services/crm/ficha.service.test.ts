@@ -9,7 +9,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { findDuplicates } from '@/services/crm/accounts.service'
-import { addContact, updateAccount } from '@/services/crm/ficha.service'
+import { addContact, removeContact, updateAccount, updateContact } from '@/services/crm/ficha.service'
 
 type Row = Record<string, any>
 
@@ -486,5 +486,210 @@ describe('Tarea 2 · addContact: agregar persona', () => {
     seedAccount({ ownerStaffId: OTRO })
     await expect(addContact(access({ ver: 'propios', editar: 'propios' }), ACCOUNT, persona())).rejects.toMatchObject({ statusCode: 404 })
     expect(db.contacts).toEqual([])
+  })
+})
+
+// ── Tarea 3 · Cambiar y quitar persona ────────────────────────────────────────────────────────────────────────────────
+
+const vistaDe = (row: Row) => ({ name: row.name, phoneE164: row.phoneE164, email: row.email, role: row.role, isPrimary: row.isPrimary })
+
+describe('Tarea 3 · updateContact: cambiar persona', () => {
+  it('🔴 cambiar sólo el puesto de una persona cuyo correo tiene otro negocio → guarda (no compara lo que no cambia)', async () => {
+    seedAccount()
+    db.accounts.push({ id: 'caccountb0000000000000001', name: 'Otro', ownerStaffId: null })
+    seedContact({ accountId: 'caccountb0000000000000001', email: 'mariana@cafe.mx' })
+    const mariana = seedContact({ name: 'Mariana', email: 'mariana@cafe.mx', isPrimary: true })
+
+    const r = await updateContact(access(), ACCOUNT, mariana.id, { cambios: { role: 'Gerente' }, vio: vistaDe(mariana) })
+    await flush()
+
+    expect(r).toMatchObject({ contactId: mariana.id, cambiados: ['role'], correoAnteriorConPermiso: false })
+    expect(mariana.role).toBe('Gerente')
+    expect(eventos('CONTACT_EDITED')).toEqual([expect.objectContaining({ data: { contactId: mariana.id, campos: ['role'] } })])
+    expect(db.logs).toEqual([expect.objectContaining({ action: 'CRM_CONTACT_UPDATED', data: { contactId: mariana.id, campos: ['role'] } })])
+  })
+
+  it('🔴 persona de OTRA cuenta con este accountId → 404 CRM_PERSONA_NO_EXISTE', async () => {
+    seedAccount()
+    db.accounts.push({ id: 'caccountb0000000000000001', name: 'Otro', ownerStaffId: null })
+    const ajena = seedContact({ accountId: 'caccountb0000000000000001' })
+    await expect(updateContact(access(), ACCOUNT, ajena.id, { cambios: { role: 'X' }, vio: vistaDe(ajena) })).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'CRM_PERSONA_NO_EXISTE',
+    })
+  })
+
+  it('vio.email viejo al cambiar el correo → 409 con ahora (la persona completa)', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'ana2@cafe.mx' })
+    await expect(
+      updateContact(access(), ACCOUNT, ana.id, { cambios: { email: 'ana3@cafe.mx' }, vio: { ...vistaDe(ana), email: 'ana@cafe.mx' } }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR', details: { ahora: vistaDe(ana) } })
+    expect(ana.email).toBe('ana2@cafe.mx')
+  })
+
+  it('🔴 Codex r1 H2: B cambió el correo; A cambia sólo el puesto y marca la casilla con su vio.email viejo → 409, sin permiso', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'nuevo@cafe.mx' })
+    await expect(
+      updateContact(access(), ACCOUNT, ana.id, {
+        cambios: { role: 'Dueña' },
+        vio: { ...vistaDe(ana), email: 'viejo@cafe.mx' },
+        aceptaCorreos: true,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR' })
+    expect(db.consents).toEqual([])
+  })
+
+  it('🔴 Codex r1 H3: sólo la casilla (cambios vacío) sobre una persona sin permiso → escribe la fila, CONTACT_EDITED {campos: [], consentimiento: true} y toque', async () => {
+    const account = seedAccount()
+    const antes = account.lastTouchAt
+    const ana = seedContact({ name: 'Ana', email: 'ana@cafe.mx' })
+    const r = await updateContact(access(), ACCOUNT, ana.id, { cambios: {}, vio: vistaDe(ana), aceptaCorreos: true })
+    await flush()
+    expect(r).toMatchObject({ cambiados: [], permisoDelCorreo: true, consentimientoRegistrado: true })
+    expect(db.consents).toEqual([expect.objectContaining({ email: 'ana@cafe.mx', source: 'MANUAL' })])
+    expect(eventos('CONTACT_EDITED')).toEqual([expect.objectContaining({ data: { contactId: ana.id, campos: [], consentimiento: true } })])
+    expect(account.lastTouchAt.getTime()).toBeGreaterThan(antes.getTime())
+    expect(db.logs.map(log => log.action)).toEqual(expect.arrayContaining(['CRM_CONTACT_UPDATED', 'CRM_EMAIL_CONSENT_RECORDED']))
+  })
+
+  it('sólo la casilla sobre un correo que ya tenía permiso → no-op (sin evento ni toque), permisoDelCorreo true', async () => {
+    const account = seedAccount()
+    const antes = account.lastTouchAt
+    const ana = seedContact({ name: 'Ana', email: 'ana@cafe.mx' })
+    db.consents.push({ email: 'ana@cafe.mx', source: 'LANDING' })
+    const r = await updateContact(access(), ACCOUNT, ana.id, { cambios: {}, vio: vistaDe(ana), aceptaCorreos: true })
+    await flush()
+    expect(r).toMatchObject({ cambiados: [], permisoDelCorreo: true, consentimientoRegistrado: false })
+    expect(db.events).toEqual([])
+    expect(db.logs).toEqual([])
+    expect(account.lastTouchAt).toBe(antes)
+  })
+
+  it('sólo la casilla sin correo → 422 CRM_SIN_CORREO', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', phoneE164: '+525512345678' })
+    await expect(updateContact(access(), ACCOUNT, ana.id, { cambios: {}, vio: vistaDe(ana), aceptaCorreos: true })).rejects.toMatchObject({
+      code: 'CRM_SIN_CORREO',
+    })
+  })
+
+  it('🔴 Codex r2 H4: { cambios.email nuevo@, vio.email anterior@, casilla } dos veces (la primera respuesta se perdió) → la segunda, éxito sin escribir', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'anterior@cafe.mx' })
+    const pedido = { cambios: { email: 'nuevo@cafe.mx' }, vio: vistaDe(ana), aceptaCorreos: true }
+    await updateContact(access(), ACCOUNT, ana.id, pedido)
+    await flush()
+    const [eventosAntes, logsAntes, toque] = [db.events.length, db.logs.length, db.accounts[0].lastTouchAt]
+
+    const r = await updateContact(access(), ACCOUNT, ana.id, pedido)
+    await flush()
+    expect(r).toMatchObject({ cambiados: [], permisoDelCorreo: true, consentimientoRegistrado: false })
+    expect([db.events.length, db.logs.length, db.accounts[0].lastTouchAt]).toEqual([eventosAntes, logsAntes, toque])
+  })
+
+  it('🔴 sólo la casilla dos veces → la segunda, éxito sin escribir', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'ana@cafe.mx' })
+    await updateContact(access(), ACCOUNT, ana.id, { cambios: {}, vio: vistaDe(ana), aceptaCorreos: true })
+    const n = db.events.length
+    await expect(updateContact(access(), ACCOUNT, ana.id, { cambios: {}, vio: vistaDe(ana), aceptaCorreos: true })).resolves.toMatchObject({
+      consentimientoRegistrado: false,
+    })
+    expect(db.events.length).toBe(n)
+  })
+
+  it('🔴 la casilla sola con vio.email viejo sigue siendo 409 aunque el correo de ahora ya tenga permiso', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'nuevo@cafe.mx' })
+    db.consents.push({ email: 'nuevo@cafe.mx', source: 'LANDING' })
+    await expect(
+      updateContact(access(), ACCOUNT, ana.id, { cambios: {}, vio: { ...vistaDe(ana), email: 'viejo@cafe.mx' }, aceptaCorreos: true }),
+    ).rejects.toMatchObject({ code: 'CRM_CAMBIO_AL_EDITAR' })
+  })
+
+  it('🔴 correo cambiado que tenía permiso: el nuevo sin fila, el viejo conserva la suya, correoAnteriorConPermiso true', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'viejo@cafe.mx' })
+    db.consents.push({ email: 'viejo@cafe.mx', source: 'LANDING' })
+    const r = await updateContact(access(), ACCOUNT, ana.id, { cambios: { email: 'nuevo@cafe.mx' }, vio: vistaDe(ana) })
+    expect(r).toMatchObject({ cambiados: ['email'], permisoDelCorreo: false, correoAnteriorConPermiso: true })
+    expect(db.consents.map(c => c.email)).toEqual(['viejo@cafe.mx'])
+  })
+
+  it('el correo nuevo de otra persona del mismo negocio → CRM_PERSONA_YA_ESTA; de otro negocio → CRM_POSIBLE_DUPLICADO', async () => {
+    seedAccount()
+    const beto = seedContact({ name: 'Beto', email: 'beto@cafe.mx' })
+    const ana = seedContact({ name: 'Ana', email: 'ana@cafe.mx' })
+    await expect(updateContact(access(), ACCOUNT, ana.id, { cambios: { email: 'beto@cafe.mx' }, vio: vistaDe(ana) })).rejects.toMatchObject(
+      { code: 'CRM_PERSONA_YA_ESTA', details: { contactId: beto.id } },
+    )
+    db.accounts.push({ id: 'caccountb0000000000000001', name: 'Otro', ownerStaffId: null })
+    seedContact({ accountId: 'caccountb0000000000000001', phoneE164: '+525500000001' })
+    await expect(updateContact(access(), ACCOUNT, ana.id, { cambios: { phone: '55 0000 0001' }, vio: vistaDe(ana) })).rejects.toMatchObject(
+      { code: 'CRM_POSIBLE_DUPLICADO' },
+    )
+    await expect(
+      updateContact(access(), ACCOUNT, ana.id, { cambios: { phone: '55 0000 0001' }, vio: vistaDe(ana), esOtroNegocio: true }),
+    ).resolves.toMatchObject({ cambiados: ['phone'] })
+    expect(ana.phoneE164).toBe('+525500000001')
+  })
+
+  it('hacerla principal deja a las demás en false', async () => {
+    seedAccount()
+    const beto = seedContact({ name: 'Beto', isPrimary: true })
+    const ana = seedContact({ name: 'Ana' })
+    await updateContact(access(), ACCOUNT, ana.id, { cambios: { isPrimary: true }, vio: vistaDe(ana) })
+    expect([beto.isPrimary, ana.isPrimary]).toEqual([false, true])
+  })
+
+  it('🔴 A «propios» cambia una persona de la cuenta de B → 404', async () => {
+    seedAccount({ ownerStaffId: OTRO })
+    const ana = seedContact({ name: 'Ana' })
+    await expect(
+      updateContact(access({ ver: 'propios', editar: 'propios' }), ACCOUNT, ana.id, { cambios: { name: 'X' }, vio: vistaDe(ana) }),
+    ).rejects.toMatchObject({ statusCode: 404 })
+    expect(ana.name).toBe('Ana')
+  })
+})
+
+describe('Tarea 3 · removeContact: quitar persona', () => {
+  it('quita, CONTACT_REMOVED {contactId, eraPrincipal}, ActivityLog sólo con el id; quitar a la principal no promueve a nadie', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', isPrimary: true })
+    const beto = seedContact({ name: 'Beto' })
+    await expect(removeContact(access(), ACCOUNT, ana.id, { vio: vistaDe(ana) })).resolves.toEqual({ contactId: ana.id, yaNoEstaba: false })
+    await flush()
+    expect(db.contacts).toEqual([beto])
+    expect(beto.isPrimary).toBe(false)
+    expect(eventos('CONTACT_REMOVED')).toEqual([expect.objectContaining({ data: { contactId: ana.id, eraPrincipal: true } })])
+    expect(db.logs).toEqual([expect.objectContaining({ action: 'CRM_CONTACT_REMOVED', data: { contactId: ana.id } })])
+  })
+
+  it('quitar con vio viejo → 409, nada borrado', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'nuevo@cafe.mx' })
+    await expect(removeContact(access(), ACCOUNT, ana.id, { vio: { ...vistaDe(ana), email: 'viejo@cafe.mx' } })).rejects.toMatchObject({
+      code: 'CRM_CAMBIO_AL_EDITAR',
+      details: { ahora: vistaDe(ana) },
+    })
+    expect(db.contacts).toHaveLength(1)
+  })
+
+  it('🔴 pasada §c3: quitar dos veces (la primera respuesta se perdió) → yaNoEstaba sin escribir; con un contactId de otra cuenta, lo mismo', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana' })
+    await removeContact(access(), ACCOUNT, ana.id, { vio: vistaDe(ana) })
+    const n = db.events.length
+    await expect(removeContact(access(), ACCOUNT, ana.id, { vio: vistaDe(ana) })).resolves.toEqual({ contactId: ana.id, yaNoEstaba: true })
+    db.accounts.push({ id: 'caccountb0000000000000001', name: 'Otro', ownerStaffId: null })
+    const ajena = seedContact({ accountId: 'caccountb0000000000000001' })
+    await expect(removeContact(access(), ACCOUNT, ajena.id, { vio: vistaDe(ajena) })).resolves.toEqual({
+      contactId: ajena.id,
+      yaNoEstaba: true,
+    })
+    expect(db.events.length).toBe(n)
+    expect(db.contacts).toEqual([ajena])
   })
 })
