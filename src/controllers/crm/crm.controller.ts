@@ -249,5 +249,11 @@ export async function previewHubspotImport(req: Request, res: Response): Promise
 /** POST /api/v1/crm/import/hubspot/apply */
 export async function applyHubspotImport(req: Request, res: Response): Promise<void> {
   const { contactos, negocios } = hubspotCsvs(req)
-  res.json({ data: await applyHubspot(req.crmAccess!, contactos, negocios) })
+  // A multipart FIELD, not a URL param: a SERVIDOR that does not know it refuses the upload (`fields: 0`) instead of
+  // importing without the consent the person asked for.
+  const box = req.body?.aceptaronCorreos
+  if (box !== undefined && box !== 'true' && box !== 'false') {
+    throw new ValidationError('La casilla de los correos no es válida', 'CRM_IMPORT_ARCHIVO_INVALIDO')
+  }
+  res.json({ data: await applyHubspot(req.crmAccess!, contactos, negocios, { aceptaronCorreos: box === 'true' }) })
 }

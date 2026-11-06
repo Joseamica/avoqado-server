@@ -82,7 +82,8 @@ export function interpretarBusquedaDeClientes(raw: unknown): CustomerSearch | nu
   return words.length ? { kind: 'WORDS', words } : null
 }
 
-const escaparLike = (s: string) => s.replace(/[!%_]/g, m => `!${m}`)
+/** Para un `LIKE … ESCAPE '!'`: `%`, `_` y `!` del texto dejan de ser comodín. La usan todas las búsquedas con `%texto%`. */
+export const escaparLike = (s: string) => s.replace(/[!%_]/g, m => `!${m}`)
 
 const columnaPlegada = (columna: 'firstName' | 'lastName' | 'email') =>
   Prisma.sql`translate(lower(coalesce(${Prisma.raw(`"${columna}"`)}, '')), ${ACENTOS_DE}, ${ACENTOS_A})`

@@ -14,6 +14,9 @@ export type Vars = Partial<Record<Variable, string | null>>
 /** `{{ nombre }}`: el nombre va sin llaves y sin espacios alrededor. Un `{{` sin su `}}` es texto, no variable. */
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g
 
+/** Igual que `PLACEHOLDER`, pero captura los espacios/tabuladores de justo antes. */
+const CON_ESPACIO_PREVIO = /([ \t]*)\{\{([^{}]*)\}\}/g
+
 /** Las que no están en la lista cerrada, en orden y sin repetir (para decir «Variable desconocida: {{x}}» al guardar). */
 export function variablesDesconocidas(texto: string): string[] {
   const conocidas: readonly string[] = VARIABLES
@@ -42,9 +45,12 @@ export function aplicarVariables(bloques: BloqueCampana[], asunto: string, vars:
   const dato = valores(vars)
   // Una sola pasada: lo que se pone no se vuelve a revisar, así que un valor con `{{vendedor}}` adentro queda como texto.
   const sustituir = (texto: string) =>
-    texto.replace(PLACEHOLDER, (completo, nombre: string) => {
+    texto.replace(CON_ESPACIO_PREVIO, (completo, espacio: string, nombre: string) => {
       const llave = nombre.trim()
-      return (VARIABLES as readonly string[]).includes(llave) ? dato[llave as Variable] : completo
+      if (!(VARIABLES as readonly string[]).includes(llave)) return completo
+      const valor = dato[llave as Variable]
+      // una variable vacía se lleva su espacio para que no quede "Hola ,"
+      return valor ? espacio + valor : ''
     })
 
   return {

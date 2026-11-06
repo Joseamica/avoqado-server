@@ -27,6 +27,7 @@
  */
 import { Prisma } from '@prisma/client'
 import Papa from 'papaparse'
+import { z } from 'zod'
 import logger from '../../config/logger'
 import { ValidationError } from '../../errors/AppError'
 import { canonicalPhoneE164 } from '../../utils/phone'
@@ -34,11 +35,14 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import type { CrmAccess } from './access.service'
 import { getInitialStage, listLostReasons, listStages } from './accounts.service'
+import { escribirConsentimientoDelEquipoTx } from './consent.service'
 import { ErasedIdentityError } from './erase.service'
 import { accountForTx, addPersonTx, cleanText, personGapWith, type UpsertBySourceInput } from './inbound.service'
 import { addEvent } from './timeline.service'
 
 const IMPORTACION = 'IMPORTACION'
+/** The same rule as «Nuevo prospecto» (`crm.schema`): a malformed email in the file never gets a consent. */
+const emailSchema = z.string().email().max(254)
 /** Records per transaction: a failure costs one batch, never the ones before it. */
 const BATCH = 200
 const BATCH_TX = { maxWait: 10_000, timeout: 60_000 }
@@ -111,6 +115,8 @@ export interface HubspotApplied extends HubspotPreview {
   aplicados: number
   /** Records of the batches that failed: importing again completes them. */
   fallaron: number
+  /** People who got the team's e-mail consent in this run; only present when the box was ticked. */
+  conPermiso?: number
 }
 
 // ── Reading a file ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -563,7 +569,7 @@ export async function previewHubspot(contactsCsv: string, dealsCsv: string): Pro
  * What writing one record did: created it, found its key already imported, found its person already in the CRM, or found
  * them deleted from the CRM (D7) — a file is always from before, so it never brings them back.
  */
-type Written = { created: true } | { created: false; repeatedIn: string | null } | { created: false; erased: true }
+type Written = { created: true; conPermiso: number } | { created: false; repeatedIn: string | null } | { created: false; erased: true }
 
 /**
  * Creates ONE account, unless the CRM already has it — its key (another import got there first, or an earlier run of
@@ -571,7 +577,12 @@ type Written = { created: true } | { created: false; repeatedIn: string | null }
  * WhatsApp or another record may have brought that person since the plan was read. Then nothing is written. Its people
  * go in only with the account, each through the same incorporation as everywhere (`addPersonTx`), never twice.
  */
-async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, actorStaffId: string): Promise<Written> {
+async function createTx(
+  tx: Prisma.TransactionClient,
+  record: PlannedAccount,
+  actorStaffId: string,
+  aceptaronCorreos: boolean,
+): Promise<Written> {
   const [primary, ...others] = record.contacts
   const values = (pick: (contact: ContactInput) => string | null | undefined) => [
     ...new Set(record.contacts.flatMap(contact => pick(contact) ?? [])),
@@ -601,7 +612,17 @@ async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, ac
     data: { event: 'CREATED', source: IMPORTACION, via: IMPORTACION, externalKey: record.externalKey, stage: record.stageName },
   })
   if (record.won) await addEvent(tx, { accountId: account.id, kind: 'NOTE', actorStaffId: null, data: { text: WON_NOTE } })
-  return { created: true }
+  // The box: only for the people THIS run created (a repeated one keeps whatever consent it had), and only valid emails.
+  const conPermiso = aceptaronCorreos
+    ? await escribirConsentimientoDelEquipoTx(tx, {
+        emails: values(contact => contact.email).filter(email => emailSchema.safeParse(email).success),
+        accountId: account.id,
+        source: 'IMPORTACION',
+        staffId: actorStaffId,
+        at: new Date(),
+      })
+    : 0
+  return { created: true, conPermiso }
 }
 
 /**
@@ -610,12 +631,18 @@ async function createTx(tx: Prisma.TransactionClient, record: PlannedAccount, ac
  * before anything is written. The answer carries the preview's counts plus what this run created (`aplicados`) and what
  * failed; a deal whose person reached the CRM between the plan and the write adds its aviso (ruling 36).
  *
- * ponytail: the whole import runs inside the one HTTP request, ~6–8 sequential queries per record. Today (~1k records)
+ * ponytail: the whole import runs inside the one HTTP request, ~6–8 sequential queries per record (+2 with the consent box: the tombstone lookup and the insert). Today (~1k records)
  * that is seconds; a full 5 MB file (~25k contacts) is minutes. Nothing is lost if the client gives up — the server
  * finishes, and importing the same files again completes whatever did not land — so for a one-time admin import that is
  * enough. Upgrade path: a background job with progress, like the exports.
  */
-export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsCsv: string): Promise<HubspotApplied> {
+export async function applyHubspot(
+  actor: CrmAccess,
+  contactsCsv: string,
+  dealsCsv: string,
+  opciones: { aceptaronCorreos?: boolean } = {},
+): Promise<HubspotApplied> {
+  const aceptaronCorreos = opciones.aceptaronCorreos === true
   const { summary, records, unreadable } = await plan(contactsCsv, dealsCsv)
   if (unreadable) {
     const reasons = summary.conError.map(error => `${error.archivo}: ${error.razon}`).join('; ')
@@ -625,17 +652,20 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
   let aplicados = 0
   let fallaron = 0
   let eliminados = 0
+  let conPermiso = 0
   const repeatedDeals: Array<{ deal: NonNullable<PlannedAccount['deal']>; accountId: string }> = []
   for (const batch of chunksOf(records, BATCH)) {
     try {
       const written = await prisma.$transaction(async tx => {
         const results: Array<{ record: PlannedAccount; result: Written }> = []
-        for (const record of batch) results.push({ record, result: await createTx(tx, record, actor.staffId) })
+        for (const record of batch) results.push({ record, result: await createTx(tx, record, actor.staffId, aceptaronCorreos) })
         return results
       }, BATCH_TX)
       for (const { record, result } of written) {
-        if (result.created) aplicados++
-        else if ('erased' in result) eliminados++
+        if (result.created) {
+          aplicados++
+          conPermiso += result.conPermiso
+        } else if ('erased' in result) eliminados++
         else if (result.repeatedIn && record.deal) repeatedDeals.push({ deal: record.deal, accountId: result.repeatedIn })
       }
     } catch (error) {
@@ -670,6 +700,8 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
       aplicados,
       fallaron,
       eliminados,
+      aceptaronCorreos,
+      ...(aceptaronCorreos ? { conPermiso } : {}),
     },
   })
   return {
@@ -678,5 +710,6 @@ export async function applyHubspot(actor: CrmAccess, contactsCsv: string, dealsC
     avisosTotal: summary.avisosTotal + lateAvisos.length,
     aplicados,
     fallaron,
+    ...(aceptaronCorreos ? { conPermiso } : {}),
   }
 }

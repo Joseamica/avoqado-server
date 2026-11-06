@@ -186,6 +186,37 @@ export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId
 }
 
 /**
+ * Who a test email can go to: every active member whose keys somebody claimed, whose Staff is still active and whose email
+ * still leads to that row (the same «still the same person» rule as `listTeamOptions`). The test's destination is validated
+ * against THIS list on the server, never trusted from the screen.
+ *
+ * ponytail: one page of 100 members; a team that grows past it needs a search box.
+ */
+export async function miembrosConCorreo(): Promise<Array<{ staffId: string; name: string; email: string }>> {
+  const rows = await prisma.platformAccess.findMany({
+    where: { active: true, staffId: { not: null } },
+    select: { staffId: true, email: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: MAX_PAGE_SIZE,
+  })
+  if (!rows.length) return []
+  const people = await prisma.staff.findMany({
+    where: { active: true, id: { in: rows.flatMap(row => (row.staffId ? [row.staffId] : [])) } },
+    select: { id: true, email: true, firstName: true, lastName: true },
+    take: MAX_PAGE_SIZE,
+  })
+  return rows.flatMap(row => {
+    const person = people.find(candidate => candidate.id === row.staffId && candidate.email.toLowerCase() === row.email)
+    return person ? [{ staffId: person.id, name: `${person.firstName} ${person.lastName}`.trim(), email: row.email }] : []
+  })
+}
+
+/** La lista de «¿a quién le mando la prueba?»: los mismos que valida el servidor, sólo nombres. `tu` = quien la pide. */
+export async function listarDestinosDePrueba(actor: CrmAccess): Promise<Array<{ staffId: string; name: string; tu: boolean }>> {
+  return (await miembrosConCorreo()).map(({ staffId, name }) => ({ staffId, name, tu: staffId === actor.staffId }))
+}
+
+/**
  * A Staff by the exact lowercase email: the same rule as login, password reset, Google and invitation acceptance (ruling
  * 16). An account stored with capitals can never log in, so it must not count as "already has an account".
  */

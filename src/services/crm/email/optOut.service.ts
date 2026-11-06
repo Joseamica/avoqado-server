@@ -5,7 +5,7 @@
  *
  * 🔴 Los dos se revisan SIEMPRE justo antes de mandar, no sólo al armar la audiencia: una baja puede llegar a media campaña.
  */
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { logAction } from '../../dashboard/activity-log.service'
 import { filtrarSuprimidos, normalizeEmail } from '../../marketing/emailSuppression.service'
@@ -56,6 +56,16 @@ export async function filtrarBloqueados(tx: Prisma.TransactionClient, emails: st
   })
   const suprimidos = await filtrarSuprimidos(tx, normalizados)
   return new Set([...bajas.map(b => b.email), ...suprimidos])
+}
+
+/**
+ * La MISMA regla que `filtrarBloqueados` / `isBlocked`, para usarla dentro de un SQL (quién se puede agregar, «Ver quiénes»): ¿este
+ * correo pidió la baja o está suprimido por rebote o queja? Quien la llama pasa el correo ya NORMALIZADO, como lo guardan las dos tablas.
+ * 🔴 Alias propios (`bq_o`, `bq_s`): con `o` o `s` taparía a la `Organization` o al `Staff` de la consulta de afuera, y un correo como
+ * `s."email"` se compararía contra la propia fila de la baja.
+ */
+export function sqlBloqueado(email: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`(EXISTS (SELECT 1 FROM "CrmEmailOptOut" bq_o WHERE bq_o."email" = ${email}) OR EXISTS (SELECT 1 FROM "EmailSuppression" bq_s WHERE bq_s."email" = ${email}))`
 }
 
 /**

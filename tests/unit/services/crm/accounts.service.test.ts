@@ -6,6 +6,7 @@
  * 403); the server — not the client — caps every list and says the real total; «today» is Mexico City's day, never the
  * server's; and an admin who renames «Prospecto» never gets it back on the next deploy.
  */
+import { createHash } from 'node:crypto'
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { updateStageSchema } from '@/schemas/crm.schema'
@@ -512,6 +513,130 @@ describe('who sees and changes what', () => {
     expect(prismaMock.crmAccount.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ giro: 'Cafetería', qualifiedAt: expect.any(Date) }) }),
     )
+  })
+
+  describe('el alta a mano y el permiso de correo (casilla «Aceptó recibir correos»)', () => {
+    const base = { name: 'Café Tlalpan', contact: { name: 'Paola Méndez', email: ' Paola@Cafe.MX ' } }
+
+    function prepara(createCount = 1) {
+      seeded()
+      prismaMock.crmStage.findFirst.mockResolvedValue(stage())
+      prismaMock.crmAccount.create.mockResolvedValue({ id: NEW_ACCOUNT })
+      prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue(account({ id: NEW_ACCOUNT }))
+      prismaMock.crmEmailConsent.createMany.mockResolvedValue({ count: createCount })
+      prismaMock.crmErased.findMany.mockResolvedValue([])
+      prismaMock.crmEmailConsent.findUnique.mockResolvedValue({ id: 'cconsent00000000000000001' })
+      ;(logAction as jest.Mock).mockClear()
+    }
+
+    it('🔴 un correo eliminado del CRM (D7) no recibe permiso: el alta entra y la respuesta dice false', async () => {
+      prepara()
+      prismaMock.crmErased.findMany.mockResolvedValue([{ keyHash: createHash('sha256').update('EMAIL:paola@cafe.mx').digest('hex') }])
+      prismaMock.crmEmailConsent.findUnique.mockResolvedValue(null)
+      const row = await createManual(
+        access(),
+        { ...base, contact: { ...base.contact, aceptaCorreos: true } },
+        { confirmarOtroNegocio: true },
+      )
+
+      expect(prismaMock.crmEmailConsent.createMany).not.toHaveBeenCalled()
+      expect(row.consentimientoRegistrado).toBe(false)
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_EMAIL_CONSENT_RECORDED' }))
+    })
+
+    it('con la casilla escribe el permiso de ESE correo con MANUAL, quién y cuándo, dentro de la transacción', async () => {
+      prepara()
+      await createManual(access(), { ...base, contact: { ...base.contact, aceptaCorreos: true } }, { confirmarOtroNegocio: true })
+
+      expect(prismaMock.crmEmailConsent.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            email: 'paola@cafe.mx',
+            accountId: NEW_ACCOUNT,
+            entryId: null,
+            grantedById: SELLER,
+            consentAt: expect.any(Date),
+            source: 'MANUAL',
+            noticeVersion: 'casilla-del-equipo-v1',
+          },
+        ],
+        skipDuplicates: true,
+      })
+      expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+        data: [
+          {
+            accountId: NEW_ACCOUNT,
+            kind: 'FIELD_CHANGE',
+            actorStaffId: SELLER,
+            sourceKey: `consent:MANUAL:${NEW_ACCOUNT}`,
+            data: { campo: 'consentimiento' },
+          },
+        ],
+        skipDuplicates: true,
+      })
+      // Same transaction as the account: the consent write happens while the callback runs.
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    })
+
+    it('sin la casilla no escribe nada y la cuenta se crea igual', async () => {
+      prepara()
+      const row = await createManual(access(), base, { confirmarOtroNegocio: true })
+
+      expect(prismaMock.crmAccount.create).toHaveBeenCalled()
+      expect(prismaMock.crmEmailConsent.createMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_EMAIL_CONSENT_RECORDED' }))
+      expect(row).toMatchObject({ consentimientoRegistrado: false })
+    })
+
+    it('🔴 un correo que ya tenía permiso de la landing no se pisa (skipDuplicates) y no deja evento ni ActivityLog', async () => {
+      prepara(0)
+      const row = await createManual(
+        access(),
+        { ...base, contact: { ...base.contact, aceptaCorreos: true } },
+        { confirmarOtroNegocio: true },
+      )
+
+      expect(prismaMock.crmEmailConsent.createMany).toHaveBeenCalledWith(expect.objectContaining({ skipDuplicates: true }))
+      expect(prismaMock.crmEmailConsent.upsert).not.toHaveBeenCalled()
+      expect(prismaMock.crmEmailConsent.update).not.toHaveBeenCalled()
+      expect(prismaMock.crmEmailConsent.updateMany).not.toHaveBeenCalled()
+      const consentEvents = prismaMock.crmTimelineEvent.createMany.mock.calls.filter(
+        ([a]: any) => a.data[0].data.campo === 'consentimiento',
+      )
+      expect(consentEvents).toEqual([])
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_EMAIL_CONSENT_RECORDED' }))
+      // ...but the permit is there (the old one), so the answer says so.
+      expect(row).toMatchObject({ consentimientoRegistrado: true })
+    })
+
+    it('el ActivityLog no lleva el correo', async () => {
+      prepara()
+      await createManual(access(), { ...base, contact: { ...base.contact, aceptaCorreos: true } }, { confirmarOtroNegocio: true })
+
+      const call = (logAction as jest.Mock).mock.calls.map(([a]) => a).find(a => a.action === 'CRM_EMAIL_CONSENT_RECORDED')
+      expect(call).toMatchObject({ staffId: SELLER, data: { source: 'MANUAL', personas: 1 } })
+      expect(JSON.stringify(call)).not.toContain('paola')
+    })
+
+    it('la respuesta dice consentimientoRegistrado: true con casilla y correo, false sin casilla, y false sin correo', async () => {
+      prepara()
+      const con = await createManual(
+        access(),
+        { ...base, contact: { ...base.contact, aceptaCorreos: true } },
+        { confirmarOtroNegocio: true },
+      )
+      expect(con).toMatchObject({ consentimientoRegistrado: true })
+
+      prepara()
+      prismaMock.crmEmailConsent.createMany.mockClear()
+      const sinCorreo = await createManual(
+        access(),
+        { name: 'Café', contact: { name: 'Paola', phone: '55 1234 5678', aceptaCorreos: true } },
+        { confirmarOtroNegocio: true },
+      )
+      expect(sinCorreo).toMatchObject({ consentimientoRegistrado: false })
+      expect(prismaMock.crmEmailConsent.createMany).not.toHaveBeenCalled()
+    })
   })
 
   it('reasignar_sin_todos_ni_equipo_403 (L6)', async () => {

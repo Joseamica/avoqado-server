@@ -1298,6 +1298,7 @@ describe('la casilla «Quiero recibir novedades de Avoqado por correo» (CRM fas
         email: EMAIL,
         accountId: db.accounts[0].id,
         entryId,
+        grantedById: null,
         consentAt: RECEIVED,
         source: 'LANDING',
         noticeVersion: '2026-11-01',
@@ -1370,6 +1371,36 @@ describe('la casilla «Quiero recibir novedades de Avoqado por correo» (CRM fas
         consentAt: RECEIVED,
         noticeVersion: '2026-10-02',
       }),
+    ])
+  })
+
+  it.each(['MANUAL', 'IMPORTACION'])(
+    '🔴 una fila %s (grantedById = Rafa) reescrita por la landing queda LANDING con grantedById null, su entryId y su noticeVersion',
+    async source => {
+      db.consents.push({
+        id: 'cconsent00000000000000002',
+        email: EMAIL,
+        accountId: null,
+        entryId: null,
+        grantedById: 'cstaffrafa0000000000000001',
+        consentAt: new Date(Date.now() - 40 * DAY),
+        source,
+        noticeVersion: 'casilla-del-equipo-v1',
+        createdAt: new Date(Date.now() - 40 * DAY),
+      })
+
+      const entryId = await landingSubmit({ ...FORM, marketingConsent: true })
+
+      expect(db.consents).toEqual([
+        expect.objectContaining({ email: EMAIL, source: 'LANDING', grantedById: null, entryId, noticeVersion: '2026-10-02' }),
+      ])
+    },
+  )
+
+  it('la landing sigue escribiendo entryId, LANDING y su noticeVersion (vecina)', async () => {
+    const entryId = await landingSubmit({ ...FORM, marketingConsent: true })
+    expect(db.consents).toEqual([
+      expect.objectContaining({ email: EMAIL, source: 'LANDING', entryId, noticeVersion: '2026-10-02', grantedById: null }),
     ])
   })
 

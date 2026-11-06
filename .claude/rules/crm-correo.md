@@ -37,20 +37,36 @@ quien sólo tiene `mandar` nunca confirma una versión que otra persona cambió 
 la `huella` que contó y firmó, y la pantalla sólo deja mandar si es la que enseña (una reversa a un SERVIDOR viejo no la manda: «Mandar» se
 cierra y sale en gris). No quites ese campo.
 
+## 🔴 Personas quitadas y agregadas: el público v2 (plan B, 5-nov)
+
+- Sin personas sueltas la fila es `{ segmentos }`; con ellas, `{ v: 2, publicos, excluir, incluir }` y **nunca** `segmentos`: así un
+  SERVIDOR viejo (tras una reversa) la rechaza («Elige a quién le mandas») en vez de mandarle a quien se quitó. No le agregues esa llave.
+- La vista trae `publico` (las tres llaves) y `huellaPublico`; la pantalla nueva la devuelve como `basePublico` al guardar y, si el público
+  cambió, es 409 `CRM_CAMPANA_CAMBIO`. Sin `basePublico` (pantalla vieja) sobre una fila v2, 409 `CRM_CAMPANA_PANTALLA_VIEJA`.
+- El PATCH de la pantalla nueva manda `audience: { publicos, excluir, incluir }` (la pantalla vieja, `segmentos`; las dos a la vez, 400): un
+  SERVIDOR anterior lo rechaza con 400 «Elige a quién le mandas» y no escribe nada. El esquema lo vuelve `segmentos`.
+- `excluir` (gana sobre todo; la forma de la resolución, `algo@algo`) e `incluir` (sólo quien deja `sqlCorreoAgregable`; dominio con punto):
+  hasta 500 cada una, sin repetidos (400) y sin reordenar. Lo quitado se quita en SQL y otra vez con el correo con que se manda (`btrim` no
+  quita un U+00A0 de origen; `normalizeEmail` sí).
+- «Envíame una prueba» igual a una de las últimas 24 h contesta `{ ok: true, repetida: true }`: no llama a Resend ni deja otra bitácora.
+
 ## Llaves del CRM (plan 2026-11-04, L4–L9): cada ruta pide la suya
 
-| Llave                                                       | Abre                                                                                                                                                                                    |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crm:plantillas`                                            | crear, editar, archivar y desarchivar plantillas, y su correo de prueba                                                                                                                 |
-| `crm:contactar` · `crm:plantillas` · `crm:preparar`         | leer plantillas (también `crm_list_email_templates`); `/templates/preview` además con `crm:ver-campanas`                                                                                |
-| `crm:plantillas` · `crm:preparar`                           | subir una imagen                                                                                                                                                                        |
-| `crm:ver-campanas` (la traen también `preparar` y `mandar`) | lista, detalle y conteo de campañas (también `crm_campaign_status`)                                                                                                                     |
-| `crm:preparar`                                              | crear y editar una campaña, y su prueba                                                                                                                                                 |
-| `crm:mandar`                                                | mandar y cancelar                                                                                                                                                                       |
-| `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                 |
-| `crm:configurar`                                            | etapas y motivos (leerlos también con `crm:ver`), ocultar clientes y ver los ocultos y el KYC, importar de HubSpot, la puerta de «Eliminar» (que sigue siendo sólo del superadmin real) |
-| `crm:bajas`                                                 | `POST /opt-outs`, sola                                                                                                                                                                  |
-| `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, y mover un GANADO o PERDIDO a una etapa abierta. «Regresar al embudo» sólo desarchiva: pide «Editar», como archivar                                                      |
+| Llave                                                       | Abre                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crm:plantillas`                                            | crear, editar, archivar y desarchivar plantillas, y su correo de prueba                                                                                                                                                                                          |
+| `crm:contactar` · `crm:plantillas` · `crm:preparar`         | leer plantillas (también `crm_list_email_templates`); `/templates/preview` además con `crm:ver-campanas`                                                                                                                                                         |
+| `crm:plantillas` · `crm:preparar`                           | subir una imagen                                                                                                                                                                                                                                                 |
+| `crm:ver-campanas` (la traen también `preparar` y `mandar`) | lista, detalle y conteo de campañas (también `crm_campaign_status`)                                                                                                                                                                                              |
+| `crm:ver-campanas`                                          | `GET /campaigns/:id/recipients` «Ver quiénes» (sólo en BORRADOR, 409 si no): una consulta SQL por página, `LIMIT` ≤ 100 impuesto en el servidor, cursor opaco, **sin total** (la pantalla usa el «Le llega a N»); las bajas se quitan en SQL con `sqlBloqueado`. |
+| `crm:preparar`                                              | crear y editar una campaña, y su prueba                                                                                                                                                                                                                          |
+| `crm:preparar`                                              | `GET /campaign-people?q=` «Agregar»: sólo personas **visibles** del CRM (nunca archivada, oculto ni equipo), frase sin acentos, 20 filas + `hayMas`; dice `aceptoCorreos`, `bloqueado` y `agregable` (`sqlCorreoAgregable`, la del PATCH)                        |
+| `crm:plantillas` · `crm:preparar`                           | `GET /test-recipients`: a quién mandar la prueba (sólo nombres, nunca correos)                                                                                                                                                                                   |
+| `crm:mandar`                                                | mandar y cancelar                                                                                                                                                                                                                                                |
+| `crm:equipo`                                                | `/team` (listar, agregar, cambiar, quitar); reasignar y `/team/options` también con «Editar: todos»; los «sin dueño» del resumen diario                                                                                                                          |
+| `crm:configurar`                                            | etapas y motivos (leerlos también con `crm:ver`), ocultar clientes y ver los ocultos y el KYC, importar de HubSpot, la puerta de «Eliminar» (que sigue siendo sólo del superadmin real)                                                                          |
+| `crm:bajas`                                                 | `POST /opt-outs`, sola                                                                                                                                                                                                                                           |
+| `crm:cerrar` (sólo con «Editar», en su alcance)             | ganar, perder, y mover un GANADO o PERDIDO a una etapa abierta. «Regresar al embudo» sólo desarchiva: pide «Editar», como archivar                                                                                                                               |
 
 🔴 `crm:campanas` y `crm:admin` (y `access.campanas`/`access.admin`) son sólo el espejo para la pantalla vieja: ninguna ruta, servicio ni
 herramienta del MCP decide con ellos (lo vigilan `tests/unit/architecture/crmEspejoDeLlaves.test.ts` en servicios, controladores, rutas y
@@ -58,10 +74,18 @@ MCP, y `tests/unit/routes/crm.team.routes.test.ts` en las rutas). 🔴 El dispar
 `UPDATE` que no suba `llavesVersion`: código nuevo que escribe esa fila y debe conservarlas suma `llavesVersion: { increment: 1 }`;
 cualquier otra escritura las apaga.
 
+🔴 **`conjuntoHash` y `CRM_CAMPANA_PUBLICO_CAMBIO`:** el token de la vista previa firma también `conjuntoHash` (sha256 de los correos
+resueltos, después de bajas, en el orden del recorrido: correo `COLLATE "C"`). Al encolar se recalcula en la misma pasada que crea las
+deliveries; si cambiaron las PERSONAS (aunque el total sea igual) es 409 `CRM_CAMPANA_PUBLICO_CAMBIO` («El público cambió: revisa otra
+vez»), y si sólo creció sigue siendo `CRM_CAMPANA_PUBLICO_CRECIO`. Un token firmado antes del despliegue (sin `conjuntoHash`) se valida como
+siempre.
+
 ## 🔴 La liga de baja de «Envíame una prueba» es REAL
 
 `sendTestToSelf` firma `platformUnsubscribeUrl` con el correo de quien prueba. Si lo usa (Rafa, por ejemplo), su correo queda bloqueado y
-hoy no hay ruta para revertirlo. Para probar la baja, usa una dirección de `CRM_CORREO_PRUEBAS` que no sea la tuya.
+hoy no hay ruta para revertirlo. Para probar la baja, usa una dirección de `CRM_CORREO_PRUEBAS` que no sea la tuya. La prueba puede ir a
+otra persona del equipo (`destinoStaffId`, validado en el servidor contra `miembrosConCorreo`; sin él, a quien la pide): la liga de baja se
+firma con el correo del DESTINO.
 
 ## Interruptor y jobs (`src/jobs/jobSchedules.ts`)
 
@@ -127,6 +151,15 @@ cabeceras: lee `x-resend-daily-quota` y `x-resend-monthly-quota` de cada respues
 - Sin `x-resend-daily-quota` en una respuesta exitosa, la cuenta ya es de pago: se dice una vez y no hay pausa diaria. Al subir de plan, pon
   `RESEND_MONTHLY_QUOTA` (y `RESEND_DAILY_QUOTA` si aplica), o el aviso del mes saldría al 80 % de 3,000.
 - La pausa vive en la memoria del proceso: tras un reinicio se rearma con la primera respuesta de Resend.
+
+## El permiso de correo (`consent.service.ts`)
+
+Una fila de `CrmEmailConsent` por correo (único). Tres entradas: la **landing** (casilla del formulario), el **alta a mano** (casilla
+«Aceptó recibir correos») y la **importación de HubSpot** (casilla «Las personas de estos archivos aceptaron…», campo multipart
+`aceptaronCorreos`, no parámetro de URL: un SERVIDOR viejo rechaza el campo con 422 en vez de importar sin el permiso). Las dos del equipo
+pasan por `escribirConsentimientoDelEquipoTx`: `skipDuplicates`, así que **nunca pisa** un permiso que ya había (ni su autor); **se salta**
+(sin contar ni lanzar) el correo eliminado del CRM (D7), como la landing; sólo cuenta lo que escribió. La importación sólo lo escribe para
+lo que CREA y sólo con correos bien formados; su respuesta trae `conPermiso`. Sin casilla la persona entra al CRM y no a campañas.
 
 ## Gmail del vendedor
 
