@@ -570,27 +570,37 @@ const audienceSegmentSchema = z.discriminatedUnion(
 /** How many people can be removed (`excluir`) or added (`incluir`) by hand to a campaign, each list. */
 export const MAX_PERSONAS_SUELTAS = 500
 
-const correoDePersona = z
-  .string({ invalid_type_error: 'El correo no es válido' })
-  .trim()
-  .toLowerCase()
-  .max(254, 'El correo no es válido')
-  .regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, 'El correo no es válido')
+const correoDePersona = (forma: RegExp) =>
+  z
+    .string({ invalid_type_error: 'El correo no es válido' })
+    .trim()
+    .toLowerCase()
+    .max(254, 'El correo no es válido')
+    .regex(forma, 'El correo no es válido')
 
 /**
  * People removed or added by hand. 🔴 Never reordered or deduplicated: the screen compares the saved JSON with its own to count, so
  * a repeated email is a 400, not something the server quietly fixes.
  */
-const personasSueltas = z
-  .array(correoDePersona, { invalid_type_error: 'Las personas van en una lista' })
-  .max(MAX_PERSONAS_SUELTAS, `Máximo ${MAX_PERSONAS_SUELTAS} personas`)
-  .superRefine((correos, ctx) => {
-    const vistos = new Set<string>()
-    correos.forEach((correo, i) => {
-      if (vistos.has(correo)) ctx.addIssue({ code: 'custom', path: [i], message: 'Esa persona ya está en la lista' })
-      vistos.add(correo)
+const personasSueltas = (correo: ReturnType<typeof correoDePersona>) =>
+  z
+    .array(correo, { invalid_type_error: 'Las personas van en una lista' })
+    .max(MAX_PERSONAS_SUELTAS, `Máximo ${MAX_PERSONAS_SUELTAS} personas`)
+    .superRefine((correos, ctx) => {
+      const vistos = new Set<string>()
+      correos.forEach((correo, i) => {
+        if (vistos.has(correo)) ctx.addIssue({ code: 'custom', path: [i], message: 'Esa persona ya está en la lista' })
+        vistos.add(correo)
+      })
     })
-  })
+
+/** To ADD someone: a domain with a dot. */
+const correoAgregable = correoDePersona(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)
+/**
+ * To REMOVE someone: the SAME shape the resolution lets through (`seleccionDistinta`, `audience.service.ts`), so everyone listed in
+ * «Ver quiénes» and counted can also be removed (`juan@gmail` included).
+ */
+const correoQuitable = correoDePersona(/^[^@\s]+@[^@\s]+$/)
 
 /**
  * Who a campaign goes to: 0 to 3 publics (a draft can be left empty), ONE of each type, plus the people removed (`excluir`, wins over
@@ -602,8 +612,8 @@ export const audienciaSchema = z
     segmentos: z
       .array(audienceSegmentSchema, { required_error: 'Elige a quién le mandas', invalid_type_error: 'Elige a quién le mandas' })
       .max(3, 'Máximo 3 públicos'),
-    excluir: personasSueltas.optional(),
-    incluir: personasSueltas.optional(),
+    excluir: personasSueltas(correoQuitable).optional(),
+    incluir: personasSueltas(correoAgregable).optional(),
   })
   .superRefine((audience, ctx) => {
     const seen = new Set<string>()

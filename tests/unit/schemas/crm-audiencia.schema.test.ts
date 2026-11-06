@@ -92,6 +92,18 @@ describe('audienciaSchema — excluir e incluir', () => {
     }
   })
 
+  it('🔴 quitar acepta la MISMA forma que la resolución (`juan@gmail`, sin punto en el dominio); agregar sigue pidiendo el punto', () => {
+    // «Ver quiénes» lista y el conteo cuenta a `juan@gmail` (la resolución sólo pide algo@algo): tiene que poderse quitar.
+    expect(audienciaSchema.parse({ segmentos: [], excluir: [' Juan@Gmail '] }).excluir).toEqual(['juan@gmail'])
+    expect(mensajes({ segmentos: [], incluir: ['juan@gmail'] })).toEqual(['El correo no es válido'])
+    // Lo que la resolución tampoco deja pasar sigue siendo 400 al quitar.
+    for (const malo of ['ana', '@x.mx', 'ana@', 'a@b@c', 'a na@x', '', `${'a'.repeat(250)}@x.mx`, 7]) {
+      expect(mensajes({ segmentos: [], excluir: [malo] })).toEqual(['El correo no es válido'])
+    }
+    // Y el repetido sigue igual en las dos listas.
+    expect(mensajes({ segmentos: [], excluir: ['juan@gmail', 'JUAN@gmail'] })).toEqual(['Esa persona ya está en la lista'])
+  })
+
   it('🔴 un público viejo sin las llaves nuevas sale igual, sin llaves extra', () => {
     const viejo = {
       segmentos: [
