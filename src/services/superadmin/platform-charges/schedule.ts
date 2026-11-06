@@ -139,3 +139,23 @@ export function occurrenceDatesBetween(
   }
   return dates
 }
+
+/**
+ * El próximo día de cobro de un cobro, para la columna «Próximo cobro» de la pestaña «Cobros» (las fechas se crean 7 días antes,
+ * así que la lista de «Fechas de cobro» todavía no la tiene). Lo vencido sin pagar va primero: es lo que toca cobrar. Si no hay,
+ * la primera fecha del calendario desde hoy que no esté ya pagada u omitida, con la MISMA regla de periodo que el generador
+ * (`isSamePeriodAsMarked`): así esta columna dice la fecha que el generador va a crear. Una sola vez sin pendiente no tiene próximo.
+ * El ancla vive a ±366 días de hoy: 400 días alcanzan para encontrar siempre la primera.
+ */
+export function nextDueDate(
+  frequency: PlatformChargeFrequency,
+  anchorDate: CalendarDay,
+  today: CalendarDay,
+  firstPending: CalendarDay | null,
+  lastMarked: CalendarDay | null,
+): CalendarDay | null {
+  if (firstPending) return firstPending
+  if (frequency === 'ONE_TIME') return null
+  const dates = occurrenceDatesBetween(frequency, anchorDate, today, addDays(today, 400))
+  return dates.find(day => !lastMarked || (day > lastMarked && !isSamePeriodAsMarked(frequency, lastMarked, day))) ?? null
+}
