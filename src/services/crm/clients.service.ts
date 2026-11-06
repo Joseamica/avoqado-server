@@ -10,7 +10,7 @@
  */
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
-import { InternalServerError, NotFoundError } from '../../errors/AppError'
+import { ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
@@ -18,7 +18,8 @@ import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { ensureCrmDefaults, touchEditableTx } from './accounts.service'
 import { scopeWhere, type CrmAccess } from './access.service'
-import type { Nivel, UsaEscrito } from './clientCodes'
+import type { MotivoDelAlta, Nivel, UsaEscrito } from './clientCodes'
+import { altaPropiaPendienteSql } from './clientFacts'
 import {
   altaDeLaFila,
   altaFactsOf,
@@ -362,6 +363,57 @@ export async function setUsa(
     })
   }
   return { accountId, usaManual: valor }
+}
+
+/**
+ * «¿Por qué se quedó?» (C1, tarea 8): a seller with «Editar» writes why a stalled signup stopped (from the fixed list, with
+ * text for «Otro») and/or marks it «Perdido» (its own flag, not the Embudo's «Perder»). «Terminó el alta» is never written:
+ * once the organization stops being a pending signup (`altaPropiaPendienteSql`, the rule the list paints) it is a 409 and
+ * nothing is written. The text lives only in the timeline event: the ActivityLog never carries it. The same value again
+ * writes nothing. `touchEditableTx` locks the row, so the pending check and the write see the same account.
+ */
+export async function setAltaMotivo(
+  access: CrmAccess,
+  accountId: string,
+  input: { motivo: MotivoDelAlta | null; texto?: string; perdido: boolean },
+): Promise<{ accountId: string; motivo: MotivoDelAlta | null; texto: string | null; perdido: boolean }> {
+  const now = new Date()
+  const { motivo, perdido } = input
+  const texto = motivo === 'OTRO' ? (input.texto ?? null) : null
+  const changed = await prisma.$transaction(async tx => {
+    await touchEditableTx(tx, access, accountId, now)
+    const before = await tx.crmAccount.findUniqueOrThrow({
+      where: { id: accountId },
+      select: { altaMotivo: true, altaMotivoTexto: true, altaPerdido: true, organizationId: true },
+    })
+    const pendiente = before.organizationId
+      ? await tx.$queryRaw<Array<{ pendiente: number }>>(
+          Prisma.sql`SELECT 1 AS "pendiente" FROM "Organization" o WHERE o."id" = ${before.organizationId} AND ${altaPropiaPendienteSql()} LIMIT 1`,
+        )
+      : []
+    if (!pendiente.length) throw new ConflictError('Ya terminó su alta: ya no hace falta el motivo', 'CRM_ALTA_TERMINADA')
+    if (before.altaMotivo === motivo && before.altaMotivoTexto === texto && before.altaPerdido === perdido) return null
+    await tx.crmAccount.update({ where: { id: accountId }, data: { altaMotivo: motivo, altaMotivoTexto: texto, altaPerdido: perdido } })
+    await addEvent(tx, {
+      accountId,
+      kind: 'ALTA_MOTIVO',
+      actorStaffId: access.staffId,
+      data: texto ? { motivo, texto, perdido } : { motivo, perdido },
+    })
+    return before
+  })
+  if (changed) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId: changed.organizationId,
+      action: 'CRM_CLIENT_ALTA_MOTIVO_SET',
+      entity: 'CrmAccount',
+      entityId: accountId,
+      data: { motivo, perdido },
+    })
+  }
+  return { accountId, motivo, texto, perdido }
 }
 
 // ── Hidden organizations (ruling 39) ──────────────────────────────────────────────────────────────────────────────────

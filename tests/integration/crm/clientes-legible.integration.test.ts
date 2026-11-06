@@ -30,6 +30,7 @@ import { clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@
 import { scopeWhere } from '@/services/crm/access.service'
 import {
   ensureClientAccount,
+  setAltaMotivo,
   setUsa,
   clientsFilter,
   getClientLive,
@@ -1735,6 +1736,75 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         select: { usaManual: true, usaManualPorque: true },
       })
       expect(eventos[1].data).toEqual({ valor: guardado.usaManual, porque: guardado.usaManualPorque })
+    })
+  })
+  describe('«¿Por qué se quedó?» (Tarea 8)', () => {
+    const todos = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
+    async function altaConCuenta() {
+      const organizationId = await org()
+      const venueId = await venue(organizationId)
+      await prisma.onboardingProgress.create({ data: { organizationId, completedSteps: [], acquisitionSource: 'landing' } })
+      const { accountId } = await ensureClientAccount(todos(), organizationId)
+      crmAccountIds.push(accountId)
+      return { organizationId, venueId, accountId }
+    }
+    const eventos = (accountId: string) =>
+      prisma.crmTimelineEvent.findMany({
+        where: { accountId, kind: 'ALTA_MOTIVO' },
+        orderBy: { createdAt: 'asc' },
+        select: { data: true },
+        take: 10,
+      })
+
+    it('escribe motivo, texto y Perdido; el ActivityLog no lleva el texto; repetirlo no deja otro evento', async () => {
+      const c = await altaConCuenta()
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true })
+      expect(
+        await prisma.crmAccount.findUniqueOrThrow({
+          where: { id: c.accountId },
+          select: { altaMotivo: true, altaMotivoTexto: true, altaPerdido: true },
+        }),
+      ).toEqual({
+        altaMotivo: 'OTRO',
+        altaMotivoTexto: 'Se fue con su cuñado',
+        altaPerdido: true,
+      })
+      expect(await eventos(c.accountId)).toEqual([{ data: { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true } }])
+      const call = jest
+        .mocked(logAction)
+        .mock.calls.map(([x]) => x)
+        .find(x => x.entityId === c.accountId && x.action === 'CRM_CLIENT_ALTA_MOTIVO_SET')!
+      expect(call).toMatchObject({ venueId: null, organizationId: c.organizationId, data: { motivo: 'OTRO', perdido: true } })
+      expect(JSON.stringify(call)).not.toContain('cuñado')
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true })
+      expect(await eventos(c.accountId)).toHaveLength(1)
+    })
+
+    it('🔴 cuando el negocio ya activó (cobró) → 409 CRM_ALTA_TERMINADA y no escribe', async () => {
+      const c = await altaConCuenta()
+      await sale(c.venueId, { source: 'TPV', payment: { source: 'TPV' } })
+      await expect(setAltaMotivo(todos(), c.accountId, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_ALTA_TERMINADA',
+      })
+      expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: c.accountId }, select: { altaMotivo: true } })).toEqual({
+        altaMotivo: null,
+      })
+      expect(await eventos(c.accountId)).toHaveLength(0)
+    })
+
+    it('🔴 una cuenta del CRM sin organización → 409 CRM_ALTA_TERMINADA', async () => {
+      const { organizationId } = await altaConCuenta()
+      const solo = await prisma.crmAccount.findFirstOrThrow({ where: { organizationId }, select: { stageId: true } })
+      const sinOrg = await prisma.crmAccount.create({
+        data: { name: `Sin org ${suffix}`, source: 'MANUAL', stageId: solo.stageId },
+        select: { id: true },
+      })
+      crmAccountIds.push(sinOrg.id)
+      await expect(setAltaMotivo(todos(), sinOrg.id, { motivo: null, perdido: true })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'CRM_ALTA_TERMINADA',
+      })
     })
   })
 })

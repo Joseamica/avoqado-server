@@ -200,6 +200,11 @@ export async function setUsa(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.setUsa(req.crmAccess!, req.params.id, req.body) })
 }
 
+/** POST /api/v1/crm/accounts/:id/alta — «¿Por qué se quedó?» (C1, task 8). */
+export async function setAltaMotivo(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.setAltaMotivo(req.crmAccess!, req.params.id, req.body) })
+}
+
 /** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */
 export async function getLive(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.getLive(req.crmAccess!, req.params.id) })

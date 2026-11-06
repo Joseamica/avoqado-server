@@ -21,6 +21,7 @@ import {
   getLive,
   hideClient,
   listClients,
+  setAltaMotivo,
   setUsa,
   unhideClient,
 } from '@/services/crm/clients.service'
@@ -1183,5 +1184,119 @@ describe('setUsa (C1, tarea 7)', () => {
     })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+describe('setAltaMotivo (C1, tarea 8)', () => {
+  /** What the account holds before, and whether its organization still matches the pending signup (`AS "pendiente"`). */
+  const cuenta = (
+    over: Partial<{ altaMotivo: string | null; altaMotivoTexto: string | null; altaPerdido: boolean; organizationId: string | null }> = {},
+    pendiente = true,
+  ) => {
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({
+      altaMotivo: null,
+      altaMotivoTexto: null,
+      altaPerdido: false,
+      organizationId: ORG,
+      ...over,
+    } as never)
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+      query.sql.includes('AS "pendiente"') ? (pendiente ? [{ pendiente: 1 }] : []) : [],
+    )
+  }
+  beforeEach(() => {
+    jest.mocked(logAction).mockClear()
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.update.mockResolvedValue({} as never)
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('escribe motivo, texto y Perdido, deja su evento ALTA_MOTIVO y un ActivityLog sin el texto', async () => {
+    cuenta()
+    await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true })).resolves.toEqual({
+      accountId: ACCOUNT,
+      motivo: 'OTRO',
+      texto: 'Se fue con su cuñado',
+      perdido: true,
+    })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { altaMotivo: 'OTRO', altaMotivoTexto: 'Se fue con su cuñado', altaPerdido: true },
+    })
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          accountId: ACCOUNT,
+          kind: 'ALTA_MOTIVO',
+          actorStaffId: SELLER,
+          data: { motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: true },
+        }),
+      ],
+      skipDuplicates: true,
+    })
+    const logged = jest.mocked(logAction).mock.calls[0][0]
+    expect(logged).toMatchObject({
+      action: 'CRM_CLIENT_ALTA_MOTIVO_SET',
+      venueId: null,
+      organizationId: ORG,
+      entityId: ACCOUNT,
+      data: { motivo: 'OTRO', perdido: true },
+    })
+    expect(JSON.stringify(logged)).not.toContain('cuñado')
+  })
+
+  it('un motivo de la lista borra el texto de antes', async () => {
+    cuenta({ altaMotivo: 'OTRO', altaMotivoTexto: 'viejo' })
+    await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })
+    expect(prismaMock.crmAccount.update).toHaveBeenCalledWith({
+      where: { id: ACCOUNT },
+      data: { altaMotivo: 'PRECIO', altaMotivoTexto: null, altaPerdido: false },
+    })
+  })
+
+  it('🔴 una cuenta cuya organización ya activó → 409 CRM_ALTA_TERMINADA y nada escrito', async () => {
+    cuenta({}, false)
+    await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_ALTA_TERMINADA',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una cuenta sin organización → 409 CRM_ALTA_TERMINADA', async () => {
+    cuenta({ organizationId: null })
+    await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_ALTA_TERMINADA',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+  })
+
+  it('el mismo valor que ya tiene no deja evento ni ActivityLog ni escribe', async () => {
+    cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
+    await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 A «propios» sobre la de B (no la ve) → 404 y no escribe', async () => {
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(setAltaMotivo(access(), ACCOUNT_B, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({ statusCode: 404 })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 ver: todos, editar: propios sobre la de B → 403 CRM_NO_ES_TUYO', async () => {
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT_B })
+    await expect(setAltaMotivo(access({ ver: 'todos' }), ACCOUNT_B, { motivo: null, perdido: true })).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_NO_ES_TUYO',
+    })
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
   })
 })

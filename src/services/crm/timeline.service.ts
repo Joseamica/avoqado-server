@@ -19,6 +19,8 @@ export const TIMELINE_KINDS = [
   'SYSTEM',
   // «✋ a mano» en Usa (C1): `data`: `{ valor: AMBOS|TERMINAL|POS|null, porque?: string }`; null = «Leerlo solo».
   'USA_CHANGE',
+  // «¿Por qué se quedó?» (C1): `data`: `{ motivo: MotivoDelAlta|null, texto?: string, perdido: boolean }`.
+  'ALTA_MOTIVO',
   // Correo uno a uno (fase 2): `data` sólo lleva ids; el asunto, el extracto y el estado se leen de `CrmEmailMessage`.
   'EMAIL_SENT',
   'EMAIL_RECEIVED',

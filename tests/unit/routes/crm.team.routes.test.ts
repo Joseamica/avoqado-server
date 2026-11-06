@@ -121,6 +121,8 @@ describe('crm team routes', () => {
       { route: 'POST /clients/:organizationId/cuenta', keys: editar },
       // C1 tarea 7: «✋ a mano» en Usa.
       { route: 'POST /accounts/:id/usa', keys: editar },
+      // C1 tarea 8: «¿Por qué se quedó?».
+      { route: 'POST /accounts/:id/alta', keys: editar },
       // Ruling 47: what is live for a client without a CRM account, with the same key as the account's.
       { route: 'GET /clients/:organizationId/live', keys: ver },
       { route: 'GET /reports', keys: ver },

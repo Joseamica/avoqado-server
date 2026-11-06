@@ -172,3 +172,26 @@ describe('POST /crm/accounts/:id/usa: el «✋ a mano» (C1, tarea 7)', () => {
     expect(parse({ valor: 'POS', porque: '   a   ' }).success).toBe(false)
   })
 })
+
+describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)', () => {
+  const { altaMotivoSchema } = jest.requireActual('@/schemas/crm.schema')
+  const parse = (body: Record<string, unknown>) => altaMotivoSchema.safeParse({ params: { id: 'caccounta0000000000000001' }, body })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map((i: { message: string }) => i.message))
+
+  it('«Otro» sin texto dice «Escribe el motivo»', () => {
+    expect(mensajes(parse({ motivo: 'OTRO', perdido: false }))).toEqual(['Escribe el motivo'])
+    expect(parse({ motivo: 'OTRO', texto: 'Se fue con su cuñado', perdido: false }).success).toBe(true)
+  })
+
+  it('un texto con un motivo que no es «Otro» (o sin motivo) dice «El texto sólo va con «Otro»»', () => {
+    expect(mensajes(parse({ motivo: 'PRECIO', texto: 'caro', perdido: false }))).toEqual(['El texto sólo va con «Otro»'])
+    expect(mensajes(parse({ motivo: null, texto: 'caro', perdido: false }))).toEqual(['El texto sólo va con «Otro»'])
+  })
+
+  it('motivo null con Perdido es válido; un motivo fuera de la lista y el texto de 201 letras no', () => {
+    expect(parse({ motivo: null, perdido: true }).success).toBe(true)
+    expect(parse({ motivo: 'TERMINO', perdido: false }).success).toBe(false)
+    expect(parse({ motivo: 'OTRO', texto: 'x'.repeat(201), perdido: false }).success).toBe(false)
+    expect(parse({ motivo: 'PRECIO' }).success).toBe(false)
+  })
+})

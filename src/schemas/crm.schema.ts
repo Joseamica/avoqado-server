@@ -401,6 +401,21 @@ export const usaSchema = z.object({
     .refine(({ valor, porque }) => valor === null || !!porque, { message: PORQUE_USA, path: ['porque'] }),
 })
 
+/** POST /crm/accounts/:id/alta — «¿Por qué se quedó?»: a reason from the list (text only for «Otro») and/or «Perdido» (C1). */
+export const altaMotivoSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      motivo: z.enum(MOTIVOS_DEL_ALTA, { errorMap: () => ({ message: 'Ese motivo no existe' }) }).nullable(),
+      texto: z.string().trim().min(1, 'Escribe el motivo').max(200, 'El motivo es muy largo (máximo 200 letras)').optional(),
+      perdido: z.boolean({ required_error: 'Falta decir si se perdió', invalid_type_error: 'Falta decir si se perdió' }),
+    })
+    .superRefine(({ motivo, texto }, ctx) => {
+      if (motivo === 'OTRO' && !texto) ctx.addIssue({ code: 'custom', message: 'Escribe el motivo', path: ['texto'] })
+      if (motivo !== 'OTRO' && texto) ctx.addIssue({ code: 'custom', message: 'El texto sólo va con «Otro»', path: ['texto'] })
+    }),
+})
+
 /** A calendar day that exists: «2026-02-30» has the shape and is not one. */
 const isRealDay = (value: string) => {
   const date = new Date(`${value}T00:00:00.000Z`)

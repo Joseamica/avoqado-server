@@ -568,3 +568,41 @@ describe('POST /crm/accounts/:id/usa (C1, tarea 7)', () => {
     expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', usaManual: null })
   })
 })
+
+describe('POST /crm/accounts/:id/alta (C1, tarea 8)', () => {
+  const PATH = '/crm/accounts/caccounta0000000000000001/alta'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+
+  it('🔴 sin «Editar» → 403 y no escribe; con «Editar» → 200', async () => {
+    access({ verScope: 'propios', editarScope: null })
+    const sin = await request(app).post(PATH).send({ motivo: 'PRECIO', perdido: false })
+    expect(sin.status).toBe(403)
+    expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+
+    access({ verScope: 'propios', editarScope: 'propios' })
+    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({
+      altaMotivo: 'PRECIO',
+      altaMotivoTexto: null,
+      altaPerdido: false,
+      organizationId: 'corgclient000000000000001',
+    })
+    prismaMock.$queryRaw.mockResolvedValue([{ pendiente: 1 }])
+    const ok = await request(app).post(PATH).send({ motivo: 'PRECIO', perdido: false })
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', motivo: 'PRECIO', texto: null, perdido: false })
+  })
+})
