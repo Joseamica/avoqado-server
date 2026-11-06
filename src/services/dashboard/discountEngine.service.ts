@@ -10,7 +10,7 @@
  */
 
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
@@ -897,6 +897,7 @@ function orderNotFound(venueId?: string): ApplyDiscountResult {
  * @param authorizedById - Staff ID authorizing (for comps)
  * @param venueId - Authoritative tenant. With it, a missing Order THROWS instead of returning an error result (TPV contract).
  *   A catalog id (`discount` as a string) that is inactive or ineligible throws on its own, with or without `venueId`.
+ * @param puedeRegalar - Quien aplica tiene `orders:comp`. Falla cerrado: sin él, un descuento COMP (regala la cuenta) es 403 (D1).
  */
 export async function applyDiscountToOrder(
   orderId: string,
@@ -904,6 +905,7 @@ export async function applyDiscountToOrder(
   appliedById?: string,
   authorizedById?: string,
   venueId?: string,
+  puedeRegalar = false,
 ): Promise<ApplyDiscountResult> {
   const audits: LogActionParams[] = []
   const result = await prisma.$transaction(async tx => {
@@ -928,6 +930,8 @@ export async function applyDiscountToOrder(
       return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'This discount cannot be applied to this order' }
     }
 
+    // D1 (hz:f34960c5:D1): el tipo se lee aquí, bajo el candado; regalar la cuenta pide el permiso de cortesía, como D14 y `/comp`.
+    if (fresh.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
     return applyEvaluatedDiscount(tx, order, fresh, audits, appliedById, authorizedById)
   }, ORDER_LOCK_WAIT_BUDGET)
   for (const audit of audits) void logAction(audit)

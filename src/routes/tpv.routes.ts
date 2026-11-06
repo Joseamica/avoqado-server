@@ -131,7 +131,7 @@ import {
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent, checkCuponPermissionIfPresent, checkDescuentoManualPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaPermissionIfPresent, checkCuponPermissionIfPresent, checkDescuentoManualPermissionIfPresent, checkCortesiaEnDescuento } from '../middlewares/cortesiaPidePermiso.middleware'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
@@ -5568,6 +5568,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('discounts:apply'),
   validateRequest(applyPredefinedDiscountSchema),
+  // D1 (hz:f34960c5:D1): si el descuento regala (COMP), pide `orders:comp`. Después de validar el cuerpo.
+  checkCortesiaEnDescuento,
   discountController.applyPredefinedDiscount,
 )
 
@@ -5627,6 +5629,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('discounts:apply'),
   validateRequest(applyManualDiscountSchema),
+  // D1 (hz:f34960c5:D1): si el descuento regala (COMP), pide `orders:comp`. Después de validar el cuerpo.
+  checkCortesiaEnDescuento,
   discountController.applyManualDiscount,
 )
 

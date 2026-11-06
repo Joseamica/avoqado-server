@@ -2437,6 +2437,8 @@ export async function applyOrderDiscountInTransaction(
   orderId: string,
   discountId: string,
   _staffId?: string,
+  /** Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, un descuento COMP es 403. */
+  puedeRegalar = false,
 ) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
 
@@ -2461,6 +2463,8 @@ export async function applyOrderDiscountInTransaction(
   const discount = await tx.discount.findFirst({ where: { id: discountId, venueId } })
   if (!discount) throw new NotFoundError('Descuento no encontrado')
   validateDiscountActive(discount)
+  // D1 (hz:f34960c5:D1): el tipo se lee bajo el candado; regalar la cuenta pide el permiso de cortesía, como `/comp` y D14.
+  if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
   if (discount.scope !== 'ORDER') {
     throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
   }
@@ -2515,9 +2519,9 @@ export async function applyOrderDiscountInTransaction(
   return { row, totals }
 }
 
-export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string) {
+export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string, puedeRegalar = false) {
   const { row, totals } = await prisma.$transaction(
-    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId),
+    tx => applyOrderDiscountInTransaction(tx, venueId, orderId, discountId, staffId, puedeRegalar),
     ORDER_LOCK_WAIT_BUDGET,
   )
 

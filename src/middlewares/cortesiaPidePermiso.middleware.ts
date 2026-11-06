@@ -53,18 +53,40 @@ export const checkCortesiaPermissionIfPresent = async (req: Request, res: Respon
     cortesiasAutorizadas.delete(req)
     const items: any[] = Array.isArray(req.body?.items) ? req.body.items : []
     if (items.some(item => item?.isCortesia === true) || (await traeDescuentoDeCortesia(req.params.venueId, req.body, items))) {
-      const venueId = req.params.venueId
-      const userId = req.authContext?.userId
-      return checkPermission('orders:comp')(req, res, error => {
-        if (error) return next(error)
-        if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId })
-        next()
-      })
+      return exigirCortesia(req, res, next)
     }
     return next()
   } catch (error) {
     return next(error)
   }
+}
+
+/**
+ * D1 (hz:f34960c5:D1): aplicar un descuento SUELTO a una cuenta abierta que regala — uno del catálogo tipo COMP (`discountId`) o
+ * uno manual `type: COMP` — pide `orders:comp`, como la cortesía y el cupón de cortesía (D14). Se monta en
+ * `POST /tpv/.../discounts/apply`, `POST /tpv/.../discounts/manual` y `POST /mobile/.../orders/:orderId/discounts`. El servicio
+ * vuelve a mirar el tipo bajo el candado de la orden y falla cerrado sin la acreditación (`tieneCortesiaAutorizada`).
+ */
+export const checkCortesiaEnDescuento = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    cortesiasAutorizadas.delete(req)
+    const regala =
+      req.body?.type === DiscountType.COMP || (await traeDescuentoDeCortesia(req.params.venueId, { orderDiscountId: req.body?.discountId }, []))
+    return regala ? exigirCortesia(req, res, next) : next()
+  } catch (error) {
+    return next(error)
+  }
+}
+
+/** Pasa por `checkPermission('orders:comp')` (PIN de gerente y `overridable` incluidos) y, si pasa, acredita ESTE request. */
+function exigirCortesia(req: Request, res: Response, next: NextFunction) {
+  const venueId = req.params.venueId
+  const userId = req.authContext?.userId
+  return checkPermission('orders:comp')(req, res, error => {
+    if (error) return next(error)
+    if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId })
+    next()
+  })
 }
 
 async function traeDescuentoDeCortesia(venueId: string | undefined, body: any, items: any[]): Promise<boolean> {

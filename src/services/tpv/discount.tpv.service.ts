@@ -200,6 +200,7 @@ export async function applyAutomaticDiscounts(
  * @param discountId - Discount ID to apply
  * @param staffVenueId - Staff venue ID applying the discount
  * @param authorizedById - Manager's staff venue ID (required for comps/approval)
+ * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado.
  */
 export async function applyPredefinedDiscount(
   venueId: string,
@@ -207,12 +208,13 @@ export async function applyPredefinedDiscount(
   discountId: string,
   staffVenueId: string,
   authorizedById?: string,
+  puedeRegalar = false,
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId })
 
   // The engine decides everything on the locked Order, in its own transaction: tenant (404), PAID (400), catalog
   // rule active (404), eligibility with the hand-picked id forced (400, see `forceDiscountId`), amount and tax.
-  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId)
+  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId, puedeRegalar)
 }
 
 // ==========================================
@@ -229,7 +231,8 @@ export async function applyPredefinedDiscount(
  * @param value - Discount value
  * @param reason - Reason for the discount
  * @param staffVenueId - Staff venue ID applying the discount
- * @param authorizedById - Manager's staff venue ID (required for comps)
+ * @param authorizedById - Ignorado en una cortesía: la autoriza quien la aplica (D1)
+ * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado.
  */
 export async function applyManualDiscount(
   venueId: string,
@@ -239,10 +242,17 @@ export async function applyManualDiscount(
   reason: string,
   staffVenueId: string,
   authorizedById?: string,
+  puedeRegalar = false,
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
   // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
+  // D1 (hz:f34960c5:D1): una cortesía manual pide `orders:comp` y la autoriza QUIEN la aplica; antes bastaba cualquier
+  // `authorizedById` que mandara el cliente, sin verificar.
+  if (type === 'COMP') {
+    if (!puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+    authorizedById = staffVenueId
+  }
   return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId)
 }
 

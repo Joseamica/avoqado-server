@@ -13,6 +13,7 @@ import { DiscountType } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import logger from '@/config/logger'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 
 // ==========================================
 // GET AVAILABLE DISCOUNTS
@@ -83,7 +84,7 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
     const authContext = (req as any).authContext
     const staffVenueId = authContext?.staffVenueId
 
-    const result = await discountTpvService.applyPredefinedDiscount(venueId, orderId, discountId, staffVenueId, authorizedById)
+    const result = await discountTpvService.applyPredefinedDiscount(venueId, orderId, discountId, staffVenueId, authorizedById, tieneCortesiaAutorizada(req))
 
     if (result.success) {
       res.status(200).json({
@@ -126,7 +127,17 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
     const authContext = (req as any).authContext
     const staffVenueId = authContext?.staffVenueId
 
-    const result = await discountTpvService.applyManualDiscount(venueId, orderId, type, value, reason, staffVenueId, authorizedById)
+    const result = await discountTpvService.applyManualDiscount(
+      venueId,
+      orderId,
+      type,
+      value,
+      reason,
+      staffVenueId,
+      authorizedById,
+      // D1: lo acredita `checkCortesiaEnDescuento` en la ruta (con PIN de gerente).
+      tieneCortesiaAutorizada(req),
+    )
 
     if (result.success) {
       res.status(200).json({
