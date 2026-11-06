@@ -9,7 +9,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, DiscountScope, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
@@ -350,11 +350,26 @@ export function quedaSinCategorias(
   cambio: { scope?: string | null; targetCategoryIds?: string[] | null },
   guardado?: { scope: string; targetCategoryIds: string[] },
 ): boolean {
-  if (guardado && cambio.scope === undefined && cambio.targetCategoryIds === undefined) return false
+  if (guardado && !tocaCategorias(cambio)) return false
   const scope = cambio.scope ?? guardado?.scope ?? 'ORDER'
   const categorias = cambio.targetCategoryIds ?? guardado?.targetCategoryIds ?? []
-  return scope === 'CATEGORY' && categorias.length === 0
+  // Una lista con otra forma (p. ej. `{ set: [] }` de Prisma por la puerta sin Zod) cuenta como vacía (Codex r2 #2).
+  return scope === 'CATEGORY' && (!Array.isArray(categorias) || categorias.length === 0)
 }
+
+export const tocaCategorias = (cambio: { scope?: unknown; targetCategoryIds?: unknown }) =>
+  cambio.scope !== undefined || cambio.targetCategoryIds !== undefined
+
+export const CAMBIO_CRUZADO = 'Alguien más cambió este descuento mientras lo editabas; vuelve a abrirlo e inténtalo otra vez'
+
+/**
+ * Codex r2 #3: dos cambios parciales a la vez (uno pone «Categorías», otro vacía la lista) pasaban la regla por separado y
+ * juntos la rompían. Un cambio que toca alcance o lista escribe sólo si el descuento sigue como se leyó (`updatedAt`).
+ */
+export const dondeEscribir = (id: string, guardado: { updatedAt: Date }, cambio: { scope?: unknown; targetCategoryIds?: unknown }) =>
+  tocaCategorias(cambio) ? { id, updatedAt: guardado.updatedAt } : { id }
+
+export const esCambioCruzado = (error: unknown) => (error as { code?: string } | null)?.code === 'P2025'
 
 export async function createDiscount(venueId: string, data: CreateDiscountRequest, createdById?: string) {
   if (quedaSinCategorias(data)) throw new BadRequestError(SIN_CATEGORIAS)
@@ -509,54 +524,58 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
     }
   }
 
-  const discount = await prisma.discount.update({
-    where: { id: discountId },
-    data: {
-      ...(data.name !== undefined && { name: data.name }),
-      ...(data.description !== undefined && { description: data.description }),
-      ...(data.type !== undefined && { type: data.type }),
-      ...(data.value !== undefined && { value: data.value }),
-      ...(data.scope !== undefined && { scope: data.scope }),
-      ...(data.targetItemIds !== undefined && { targetItemIds: data.targetItemIds }),
-      ...(data.targetCategoryIds !== undefined && { targetCategoryIds: data.targetCategoryIds }),
-      ...(data.targetModifierIds !== undefined && { targetModifierIds: data.targetModifierIds }),
-      ...(data.targetModifierGroupIds !== undefined && { targetModifierGroupIds: data.targetModifierGroupIds }),
-      ...(data.customerGroupId !== undefined && { customerGroupId: data.customerGroupId }),
-      ...(data.isAutomatic !== undefined && { isAutomatic: data.isAutomatic }),
-      ...(data.priority !== undefined && { priority: data.priority }),
-      ...(data.minPurchaseAmount !== undefined && { minPurchaseAmount: data.minPurchaseAmount }),
-      ...(data.maxDiscountAmount !== undefined && { maxDiscountAmount: data.maxDiscountAmount }),
-      ...(data.minQuantity !== undefined && { minQuantity: data.minQuantity }),
-      ...(data.buyQuantity !== undefined && { buyQuantity: data.buyQuantity }),
-      ...(data.getQuantity !== undefined && { getQuantity: data.getQuantity }),
-      ...(data.getDiscountPercent !== undefined && { getDiscountPercent: data.getDiscountPercent }),
-      ...(data.buyItemIds !== undefined && { buyItemIds: data.buyItemIds }),
-      ...(data.getItemIds !== undefined && { getItemIds: data.getItemIds }),
-      ...(data.validFrom !== undefined && { validFrom: data.validFrom }),
-      ...(data.validUntil !== undefined && { validUntil: data.validUntil }),
-      ...(data.daysOfWeek !== undefined && { daysOfWeek: data.daysOfWeek }),
-      ...(data.timeFrom !== undefined && { timeFrom: data.timeFrom }),
-      ...(data.timeUntil !== undefined && { timeUntil: data.timeUntil }),
-      ...(data.maxTotalUses !== undefined && { maxTotalUses: data.maxTotalUses }),
-      ...(data.maxUsesPerCustomer !== undefined && { maxUsesPerCustomer: data.maxUsesPerCustomer }),
-      ...(data.requiresApproval !== undefined && { requiresApproval: data.requiresApproval }),
-      ...(data.compReason !== undefined && { compReason: data.compReason }),
-      ...(data.applyBeforeTax !== undefined && { applyBeforeTax: data.applyBeforeTax }),
-      ...(data.modifyTaxBasis !== undefined && { modifyTaxBasis: data.modifyTaxBasis }),
-      ...(data.isStackable !== undefined && { isStackable: data.isStackable }),
-      ...(data.stackPriority !== undefined && { stackPriority: data.stackPriority }),
-      ...(data.active !== undefined && { active: data.active }),
-    },
-    include: {
-      customerGroup: {
-        select: {
-          id: true,
-          name: true,
-          color: true,
+  const discount = await prisma.discount
+    .update({
+      where: dondeEscribir(discountId, existing, data),
+      data: {
+        ...(data.name !== undefined && { name: data.name }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(data.type !== undefined && { type: data.type }),
+        ...(data.value !== undefined && { value: data.value }),
+        ...(data.scope !== undefined && { scope: data.scope }),
+        ...(data.targetItemIds !== undefined && { targetItemIds: data.targetItemIds }),
+        ...(data.targetCategoryIds !== undefined && { targetCategoryIds: data.targetCategoryIds }),
+        ...(data.targetModifierIds !== undefined && { targetModifierIds: data.targetModifierIds }),
+        ...(data.targetModifierGroupIds !== undefined && { targetModifierGroupIds: data.targetModifierGroupIds }),
+        ...(data.customerGroupId !== undefined && { customerGroupId: data.customerGroupId }),
+        ...(data.isAutomatic !== undefined && { isAutomatic: data.isAutomatic }),
+        ...(data.priority !== undefined && { priority: data.priority }),
+        ...(data.minPurchaseAmount !== undefined && { minPurchaseAmount: data.minPurchaseAmount }),
+        ...(data.maxDiscountAmount !== undefined && { maxDiscountAmount: data.maxDiscountAmount }),
+        ...(data.minQuantity !== undefined && { minQuantity: data.minQuantity }),
+        ...(data.buyQuantity !== undefined && { buyQuantity: data.buyQuantity }),
+        ...(data.getQuantity !== undefined && { getQuantity: data.getQuantity }),
+        ...(data.getDiscountPercent !== undefined && { getDiscountPercent: data.getDiscountPercent }),
+        ...(data.buyItemIds !== undefined && { buyItemIds: data.buyItemIds }),
+        ...(data.getItemIds !== undefined && { getItemIds: data.getItemIds }),
+        ...(data.validFrom !== undefined && { validFrom: data.validFrom }),
+        ...(data.validUntil !== undefined && { validUntil: data.validUntil }),
+        ...(data.daysOfWeek !== undefined && { daysOfWeek: data.daysOfWeek }),
+        ...(data.timeFrom !== undefined && { timeFrom: data.timeFrom }),
+        ...(data.timeUntil !== undefined && { timeUntil: data.timeUntil }),
+        ...(data.maxTotalUses !== undefined && { maxTotalUses: data.maxTotalUses }),
+        ...(data.maxUsesPerCustomer !== undefined && { maxUsesPerCustomer: data.maxUsesPerCustomer }),
+        ...(data.requiresApproval !== undefined && { requiresApproval: data.requiresApproval }),
+        ...(data.compReason !== undefined && { compReason: data.compReason }),
+        ...(data.applyBeforeTax !== undefined && { applyBeforeTax: data.applyBeforeTax }),
+        ...(data.modifyTaxBasis !== undefined && { modifyTaxBasis: data.modifyTaxBasis }),
+        ...(data.isStackable !== undefined && { isStackable: data.isStackable }),
+        ...(data.stackPriority !== undefined && { stackPriority: data.stackPriority }),
+        ...(data.active !== undefined && { active: data.active }),
+      },
+      include: {
+        customerGroup: {
+          select: {
+            id: true,
+            name: true,
+            color: true,
+          },
         },
       },
-    },
-  })
+    })
+    .catch(error => {
+      throw esCambioCruzado(error) && tocaCategorias(data) ? new ConflictError(CAMBIO_CRUZADO) : error
+    })
 
   logger.info(`🎟️ Discount updated: ${discount.name} (${discount.id})`)
 
@@ -618,11 +637,14 @@ export async function cloneDiscount(venueId: string, discountId: string, created
   if (!original) {
     throw new NotFoundError('El descuento no existe')
   }
+  // Codex r2 #1: duplicar uno viejo «Categorías» sin categorías haría nacer otro igual.
+  if (quedaSinCategorias({ scope: original.scope, targetCategoryIds: original.targetCategoryIds }))
+    throw new BadRequestError(SIN_CATEGORIAS)
 
   const clone = await prisma.discount.create({
     data: {
       venueId,
-      name: `${original.name} (Copy)`,
+      name: `${original.name} (copia)`,
       description: original.description,
       type: original.type,
       value: original.value,

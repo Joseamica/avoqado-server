@@ -10,7 +10,13 @@
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { quedaSinCategorias, SIN_CATEGORIAS } from '../../services/dashboard/discount.dashboard.service'
+import {
+  CAMBIO_CRUZADO,
+  dondeEscribir,
+  esCambioCruzado,
+  quedaSinCategorias,
+  SIN_CATEGORIAS,
+} from '../../services/dashboard/discount.dashboard.service'
 
 // ==========================================
 // LIST DISCOUNTS
@@ -285,7 +291,7 @@ export async function updateDiscount(req: Request, res: Response) {
     }
 
     const discount = await prisma.discount.update({
-      where: { id: discountId },
+      where: dondeEscribir(discountId, existing, { scope, targetCategoryIds }),
       data: {
         ...(name !== undefined && { name: name.trim() }),
         ...(description !== undefined && { description }),
@@ -346,6 +352,9 @@ export async function updateDiscount(req: Request, res: Response) {
       },
     })
   } catch (error) {
+    if (esCambioCruzado(error) && (req.body?.scope !== undefined || req.body?.targetCategoryIds !== undefined)) {
+      return res.status(409).json({ success: false, message: CAMBIO_CRUZADO })
+    }
     logger.error('Error updating discount (mobile)', { error })
     return res.status(500).json({ success: false, message: 'Error al actualizar descuento' })
   }

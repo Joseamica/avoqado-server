@@ -12,7 +12,8 @@ import {
   getActiveAutomaticDiscounts,
 } from '../../../../src/services/dashboard/discount.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
-import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../../../src/errors/AppError'
+import { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // Helper to create mock discount
@@ -498,6 +499,37 @@ describe('Discount Dashboard Service', () => {
       expect(prismaMock.discount.update).toHaveBeenCalled()
     })
 
+    it('🔴 duplicar un descuento viejo «Categorías» sin categorías: 400, no nace otro igual (Codex r2 #1)', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ scope: 'CATEGORY', targetCategoryIds: [] }) as any)
+      await expect(cloneDiscount('venue-123', 'discount-123')).rejects.toThrow(SIN)
+      expect(prismaMock.discount.create).not.toHaveBeenCalled()
+    })
+
+    it('duplicar pone «(copia)», no «(Copy)»', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount() as any)
+      prismaMock.discount.create.mockResolvedValue({ ...createMockDiscount({ name: 'Test Discount (copia)' }), customerGroup: null } as any)
+      await cloneDiscount('venue-123', 'discount-123')
+      expect((prismaMock.discount.create.mock.calls[0][0] as any).data.name).toBe('Test Discount (copia)')
+    })
+
+    it('🔴 dos cambios a la vez (alcance y lista): el que toca categorías escribe sólo si nadie cambió el descuento (Codex r2 #3)', async () => {
+      const leido = createMockDiscount({ scope: 'ORDER', targetCategoryIds: ['cat-1'], updatedAt: new Date('2026-11-05T10:00:00Z') })
+      prismaMock.discount.findFirst.mockResolvedValue(leido as any)
+      prismaMock.discount.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('no row', { code: 'P2025', clientVersion: 'x' }),
+      )
+
+      await expect(updateDiscount('venue-123', 'discount-123', { scope: 'CATEGORY' })).rejects.toThrow(ConflictError)
+      expect((prismaMock.discount.update.mock.calls[0][0] as any).where).toEqual({ id: 'discount-123', updatedAt: leido.updatedAt })
+    })
+
+    it('un cambio que no toca alcance ni lista no exige la versión (prender/apagar sigue igual)', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount() as any)
+      prismaMock.discount.update.mockResolvedValue({ ...createMockDiscount({ active: false }), customerGroup: null } as any)
+      await updateDiscount('venue-123', 'discount-123', { active: false })
+      expect((prismaMock.discount.update.mock.calls[0][0] as any).where).toEqual({ id: 'discount-123' })
+    })
+
     it('crear por «Categorías» sin lista (MCP u otra puerta sin Zod): 400', async () => {
       await expect(createDiscount('venue-123', { name: 'Pan', type: 'PERCENTAGE', value: 10, scope: 'CATEGORY' } as any)).rejects.toThrow(
         SIN,
@@ -604,10 +636,10 @@ describe('Discount Dashboard Service', () => {
   })
 
   describe('cloneDiscount', () => {
-    it('should clone discount with "(Copy)" suffix', async () => {
+    it('should clone discount with "(copia)" suffix', async () => {
       const originalDiscount = createMockDiscount({ name: 'Summer Sale' })
       const clonedDiscount = {
-        ...createMockDiscount({ id: 'discount-clone', name: 'Summer Sale (Copy)', active: false, currentUses: 0 }),
+        ...createMockDiscount({ id: 'discount-clone', name: 'Summer Sale (copia)', active: false, currentUses: 0 }),
         customerGroup: null,
       }
 
@@ -616,12 +648,12 @@ describe('Discount Dashboard Service', () => {
 
       const result = await cloneDiscount('venue-123', 'discount-123')
 
-      expect(result.name).toBe('Summer Sale (Copy)')
+      expect(result.name).toBe('Summer Sale (copia)')
       expect(result.active).toBe(false) // Clone starts inactive
       expect(prismaMock.discount.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            name: 'Summer Sale (Copy)',
+            name: 'Summer Sale (copia)',
             active: false,
             currentUses: 0,
           }),

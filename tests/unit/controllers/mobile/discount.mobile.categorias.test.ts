@@ -62,4 +62,27 @@ describe('Descuentos desde las apps · «Categorías» sin categorías', () => {
     expect(r2.status).toHaveBeenCalledWith(400)
     expect(prismaMock.discount.update).not.toHaveBeenCalled()
   })
+
+  it('🔴 la lista en otra forma (`{ set: [] }`) no se cuela: 400 (Codex r2 #2)', async () => {
+    const r1 = respuesta()
+    await createDiscount(pedido({ name: 'Pan', type: 'PERCENTAGE', value: 10, scope: 'CATEGORY', targetCategoryIds: { set: [] } }), r1)
+    expect(r1.status).toHaveBeenCalledWith(400)
+    expect(prismaMock.discount.create).not.toHaveBeenCalled()
+
+    prismaMock.discount.findFirst.mockResolvedValue(guardado({ scope: 'CATEGORY', targetCategoryIds: ['c1'] }))
+    const r2 = respuesta()
+    await updateDiscount(pedido({ targetCategoryIds: { set: [] } }, { venueId: 'venue-1', discountId: 'd1' }), r2)
+    expect(r2.status).toHaveBeenCalledWith(400)
+    expect(prismaMock.discount.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 editar alcance o lista escribe sólo si nadie cambió el descuento; si sí, 409 en español (Codex r2 #3)', async () => {
+    const leido = guardado({ scope: 'ORDER', targetCategoryIds: ['c1'], updatedAt: new Date('2026-11-05T10:00:00Z') })
+    prismaMock.discount.findFirst.mockResolvedValue(leido)
+    prismaMock.discount.update.mockRejectedValue(Object.assign(new Error('no row'), { code: 'P2025' }))
+    const res = respuesta()
+    await updateDiscount(pedido({ scope: 'CATEGORY', targetCategoryIds: ['c1'] }, { venueId: 'venue-1', discountId: 'd1' }), res)
+    expect((prismaMock.discount.update.mock.calls[0][0] as any).where).toEqual({ id: 'd1', updatedAt: leido.updatedAt })
+    expect(res.status).toHaveBeenCalledWith(409)
+  })
 })
