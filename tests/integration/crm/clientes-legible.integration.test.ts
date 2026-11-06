@@ -28,7 +28,17 @@ import { getVenueBaseTier, getVenuePlanInfo } from '@/services/access/basePlan.s
 import type { CrmAccess } from '@/services/crm/access.service'
 import { clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@/services/crm/clientFacts'
 import { scopeWhere } from '@/services/crm/access.service'
-import { clientsFilter, getClientLive, listClients, scopeSql, type ClientFilters } from '@/services/crm/clients.service'
+import {
+  ensureClientAccount,
+  clientsFilter,
+  getClientLive,
+  listClients,
+  scopeSql,
+  type ClientFilters,
+} from '@/services/crm/clients.service'
+import { erasedAtTx, erasedHashes } from '@/services/crm/erase.service'
+import { getReports } from '@/services/crm/reports.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { planDeLaPagina, planesPorSucursal } from '@/services/crm/clientPage'
 import * as planStateService from '@/services/dashboard/planState.service'
 import * as stripeService from '@/services/stripe.service'
@@ -1528,6 +1538,114 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
         expect(paraB.conteos).toMatchObject({ perdidos: 1, porMotivo: { DE_OTRO: 0, PRECIO: 1 } })
         expect(paraB.rows[0].alta).toMatchObject({ perdido: true })
       })
+    })
+  })
+
+  // ── Asegurar la cuenta de un cliente que no la tiene (Tarea 6) ───────────────────────────────────────────────────────
+
+  describe('asegurar la cuenta (Tarea 6)', () => {
+    const CU = `cu${Date.now()}`
+    const todos = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
+    const erasedHashesMade: string[] = []
+
+    async function cliente() {
+      const made = await orgWithVenue()
+      await sale(made.venueId, { source: 'TPV', payment: { source: 'TPV' } })
+      return made.organizationId
+    }
+    async function cuentaDe(organizationId: string) {
+      const account = await prisma.crmAccount.findUniqueOrThrow({ where: { organizationId }, include: { stage: true } })
+      crmAccountIds.push(account.id)
+      return account
+    }
+    const eventos = (accountId: string) =>
+      prisma.crmTimelineEvent.findMany({ where: { accountId, kind: 'SYSTEM' }, select: { data: true, actorStaffId: true }, take: 10 })
+
+    beforeAll(async () => {
+      // The shared catalog may hold no «Ganado» (only stages other suites made): this file's own, first by order.
+      const stage = await prisma.crmStage.create({ data: { name: `Ganado ${CU}`, order: -1000, kind: 'GANADA' } })
+      const abierta = await prisma.crmStage.create({ data: { name: `Abierta ${CU}`, order: -1000, kind: 'ABIERTA' } })
+      crmStageIds.push(stage.id, abierta.id)
+    })
+
+    afterAll(async () => {
+      if (erasedHashesMade.length) await prisma.crmErased.deleteMany({ where: { keyHash: { in: erasedHashesMade } } })
+    })
+
+    it('cliente → etapa GANADA, sin dueño, wonAt nulo, fuente CLIENTE y su evento', async () => {
+      const organizationId = await cliente()
+      const out = await ensureClientAccount(todos(), organizationId)
+      expect(out.creada).toBe(true)
+      const account = await cuentaDe(organizationId)
+      expect(account).toMatchObject({ id: out.accountId, source: 'CLIENTE', ownerStaffId: null, wonAt: null })
+      expect(account.stage.kind).toBe('GANADA')
+      expect(account.name).toContain('Org ')
+      expect(await eventos(account.id)).toEqual([{ data: { event: 'CLIENT_ACCOUNT_OPENED' }, actorStaffId: staffId }])
+      // `logAction` is mocked in this project: what is audited is what the mock received.
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CRM_CLIENT_ACCOUNT_CREATED',
+          entityId: account.id,
+          venueId: null,
+          organizationId,
+          data: { organizationId, source: 'CLIENTE' },
+        }),
+      )
+      // The second call finds it: nothing new.
+      await expect(ensureClientAccount(todos(), organizationId)).resolves.toEqual({ accountId: account.id, creada: false })
+      expect(await eventos(account.id)).toHaveLength(1)
+    })
+
+    it('alta sin tarjeta → etapa ABIERTA, fuente ALTA', async () => {
+      const organizationId = await org()
+      await venue(organizationId)
+      await prisma.onboardingProgress.create({ data: { organizationId, completedSteps: [], acquisitionSource: 'landing' } })
+      await ensureClientAccount(todos(), organizationId)
+      const account = await cuentaDe(organizationId)
+      expect(account).toMatchObject({ source: 'ALTA', ownerStaffId: null, wonAt: null })
+      expect(account.stage.kind).toBe('ABIERTA')
+    })
+
+    it('🔴 una organización que no es cliente es 404 CRM_NO_ES_CLIENTE y no crea nada', async () => {
+      const { organizationId } = await orgWithVenue()
+      await expect(ensureClientAccount(todos(), organizationId)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_NO_ES_CLIENTE' })
+      expect(await prisma.crmAccount.count({ where: { organizationId } })).toBe(0)
+    })
+
+    it('🔴 con una lápida de esa organización se crea igual (es una persona a propósito), y la lápida sigue frenando al barrido', async () => {
+      const organizationId = await cliente()
+      const { organization } = erasedHashes({ keys: [], emails: [], phones: [], organizationId })
+      await prisma.crmErased.create({ data: { keyHash: organization!, scope: '', erasedAt: hace(DAY) } })
+      erasedHashesMade.push(organization!)
+      await expect(ensureClientAccount(todos(), organizationId)).resolves.toMatchObject({ creada: true })
+      await cuentaDe(organizationId)
+      // The tombstone is untouched: every automatic writer still meets it.
+      expect(await erasedAtTx(prisma, { keys: [], emails: [], phones: [], organizationId })).not.toBeNull()
+    })
+
+    it('🔴 la cuenta ya es de B y A es «propios» → 404 CRM_ACCOUNT_NOT_FOUND, sin evento ni bitácora nuevos', async () => {
+      const A = (await prisma.staff.create({ data: { email: `a-${CU}@test.mx`, firstName: 'Ana', lastName: 'Cuenta' } })).id
+      const B = (await prisma.staff.create({ data: { email: `b-${CU}@test.mx`, firstName: 'Beto', lastName: 'Cuenta' } })).id
+      sellerIds.push(A, B)
+      const organizationId = await cliente()
+      await ensureClientAccount(todos(), organizationId)
+      const account = await cuentaDe(organizationId)
+      await prisma.crmAccount.update({ where: { id: account.id }, data: { ownerStaffId: B } })
+      const propios = { staffId: A, isSuperadmin: false, ver: 'propios', editar: 'propios' } as unknown as CrmAccess
+      await expect(ensureClientAccount(propios, organizationId)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_ACCOUNT_NOT_FOUND' })
+      expect(await eventos(account.id)).toHaveLength(1)
+      expect(jest.mocked(logAction).mock.calls.filter(([call]) => call.entityId === account.id)).toHaveLength(1)
+    })
+
+    it('vecina: los reportes de ganados del mes no cuentan la cuenta creada (lee wonAt)', async () => {
+      const desde = '2026-11-01'
+      const hasta = '2026-11-30'
+      const antes = await getReports(todos(), { desde, hasta }, NOW)
+      const organizationId = await cliente()
+      await ensureClientAccount(todos(), organizationId)
+      await cuentaDe(organizationId)
+      const despues = await getReports(todos(), { desde, hasta }, NOW)
+      expect(despues.ganados).toEqual(antes.ganados)
     })
   })
 })

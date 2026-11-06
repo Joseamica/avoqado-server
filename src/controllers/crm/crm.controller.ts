@@ -190,6 +190,11 @@ export async function unhideClient(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.unhideClient(req.crmAccess!, req.params.organizationId) })
 }
 
+/** POST /api/v1/crm/clients/:organizationId/cuenta — the client's CRM account, made once (C1, task 6). */
+export async function ensureClientAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await clients.ensureClientAccount(req.crmAccess!, req.params.organizationId) })
+}
+
 /** GET /api/v1/crm/accounts/:id/live — `{ ligada: false }` when the account has no Organization yet. */
 export async function getLive(req: Request, res: Response): Promise<void> {
   res.json({ data: await clients.getLive(req.crmAccess!, req.params.id) })

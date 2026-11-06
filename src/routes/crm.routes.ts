@@ -157,6 +157,8 @@ router.get('/clients', ver, validateRequest(listClientsSchema), crmController.li
 // Prime or any internal or test organization never listed as a client (ruling 39): «Configurar el CRM» hides it and brings it back.
 router.post('/clients/:organizationId/hide', configurar, validateRequest(hideClientSchema), crmController.hideClient)
 router.post('/clients/:organizationId/unhide', configurar, validateRequest(hideClientSchema), crmController.unhideClient)
+// The CRM account of a client that has none, made once (C1): «Editar» with its scope; the service reads it through «Ver».
+router.post('/clients/:organizationId/cuenta', editar, validateRequest(hideClientSchema), crmController.ensureClientAccount)
 // What is live for a client without a CRM account (ruling 47): the same answer and locks as `/accounts/:id/live`.
 router.get('/clients/:organizationId/live', ver, validateRequest(hideClientSchema), crmController.getClientLive)
 router.get('/reports', ver, validateRequest(reportsSchema), crmController.getReports)

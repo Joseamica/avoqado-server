@@ -14,11 +14,23 @@ import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { clientsQueries, getClientLive, getLive, hideClient, listClients, unhideClient } from '@/services/crm/clients.service'
+import {
+  clientsQueries,
+  ensureClientAccount,
+  getClientLive,
+  getLive,
+  hideClient,
+  listClients,
+  unhideClient,
+} from '@/services/crm/clients.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '@/services/dashboard/planState.service'
 
 jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
+jest.mock('@/services/crm/accounts.service', () => ({
+  ...jest.requireActual('@/services/crm/accounts.service'),
+  ensureCrmDefaults: jest.fn(),
+}))
 jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn(), notifyReturningProspect: jest.fn() }))
 
 const SELLER = 'cstaffsel0000000000000001'
@@ -94,6 +106,8 @@ const planState = (over: Partial<PlanState> = {}): PlanState => ({
 
 const MODELS = [
   'crmAccount',
+  'crmStage',
+  'crmTimelineEvent',
   'crmTeam',
   'crmHiddenClient',
   'organization',
@@ -984,5 +998,104 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     await expect(getClientLive(access({ ventas: true }), ORG, NOW)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_NO_ES_CLIENTE' })
     expect(prismaMock.venue.findMany).not.toHaveBeenCalled()
     expect(getPlanState).not.toHaveBeenCalled()
+  })
+})
+
+describe('ensureClientAccount (C1, tarea 6)', () => {
+  const STAGE = 'cstagegana000000000000001'
+  const ABIERTA = 'cstageabie000000000000001'
+  /** What the client check answers: the organization and whether it is a client by `clientSql` (false = only a stalled signup). */
+  function org(row: { esCliente: boolean } | null) {
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) =>
+      query.sql.includes('AS "esCliente"') && row ? [{ id: ORG, name: 'Tacos El Güero', ...row }] : [],
+    )
+  }
+  beforeEach(() => {
+    jest.mocked(logAction).mockClear()
+    prismaMock.crmStage.findFirst.mockImplementation((async (args: { where: { kind: string } }) => ({
+      id: args.where.kind === 'GANADA' ? STAGE : ABIERTA,
+    })) as never)
+    prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('🔴 oculta, del equipo o que no es cliente → 404 CRM_NO_ES_CLIENTE y no escribe', async () => {
+    org(null)
+    await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_NO_ES_CLIENTE' })
+    expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('un cliente real: etapa GANADA, fuente CLIENTE, sin dueño ni wonAt; evento y ActivityLog sin el nombre de nadie', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+
+    await expect(ensureClientAccount(access(), ORG)).resolves.toEqual({ accountId: ACCOUNT, creada: true })
+    expect(prismaMock.crmStage.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { kind: 'GANADA' } }))
+    const data = (prismaMock.crmAccount.createMany.mock.calls[0][0] as { data: Array<Record<string, unknown>> }).data[0]
+    expect(data).toMatchObject({ name: 'Tacos El Güero', source: 'CLIENTE', stageId: STAGE, organizationId: ORG })
+    expect(data).not.toHaveProperty('ownerStaffId')
+    expect(data).not.toHaveProperty('wonAt')
+    expect(prismaMock.crmAccount.createMany).toHaveBeenCalledWith(expect.objectContaining({ skipDuplicates: true }))
+    expect(prismaMock.crmAccount.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { AND: [{ organizationId: ORG }, MINE_OR_UNOWNED] } }),
+    )
+    expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({ accountId: ACCOUNT, kind: 'SYSTEM', actorStaffId: SELLER, data: { event: 'CLIENT_ACCOUNT_OPENED' } }),
+      ],
+      skipDuplicates: true,
+    })
+    expect(logAction).toHaveBeenCalledTimes(1)
+    const logged = jest.mocked(logAction).mock.calls[0][0]
+    expect(logged).toMatchObject({
+      staffId: SELLER,
+      venueId: null,
+      organizationId: ORG,
+      action: 'CRM_CLIENT_ACCOUNT_CREATED',
+      entityId: ACCOUNT,
+      data: { organizationId: ORG, source: 'CLIENTE' },
+    })
+    expect(JSON.stringify(logged)).not.toContain('Tacos')
+  })
+
+  it('una alta sin tarjeta: la primera etapa ABIERTA y fuente ALTA, nunca GANADA', async () => {
+    org({ esCliente: false })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+
+    await ensureClientAccount(access(), ORG)
+    expect(prismaMock.crmStage.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { kind: 'ABIERTA' }, orderBy: [{ order: 'asc' }, { id: 'asc' }] }),
+    )
+    const data = (prismaMock.crmAccount.createMany.mock.calls[0][0] as { data: Array<Record<string, unknown>> }).data[0]
+    expect(data).toMatchObject({ source: 'ALTA', stageId: ABIERTA })
+  })
+
+  it('con una cuenta visible → creada: false, sin evento ni ActivityLog', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT })
+
+    await expect(ensureClientAccount(access(), ORG)).resolves.toEqual({ accountId: ACCOUNT, creada: false })
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con la cuenta de B y A «propios» → 404 CRM_ACCOUNT_NOT_FOUND', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ statusCode: 404, code: 'CRM_ACCOUNT_NOT_FOUND' })
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 carrera: el insert de A no inserta (count 0) porque otro la creó y B ya la tomó → 404, sin evento ni ActivityLog', async () => {
+    org({ esCliente: true })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue(null)
+    await expect(ensureClientAccount(access(), ORG)).rejects.toMatchObject({ code: 'CRM_ACCOUNT_NOT_FOUND' })
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
   })
 })

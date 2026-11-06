@@ -357,6 +357,48 @@ describe('clientes, datos vivos, reportes y exportar (tarea 9)', () => {
   })
 })
 
+describe('POST /crm/clients/:organizationId/cuenta (C1, tarea 6)', () => {
+  const PATH = '/crm/clients/corgclient000000000000001/cuenta'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+
+  it('🔴 sin «Editar» → 403; con «Ver» y sin «Editar» → 403; con «Editar: propios» → 200', async () => {
+    // The admin of the team from `beforeEach`: no «Editar».
+    expect((await request(app).post(PATH)).status).toBe(403)
+    access({ verScope: 'propios', editarScope: null })
+    const ver = await request(app).post(PATH)
+    expect(ver.status).toBe(403)
+    expect(ver.body).toMatchObject({ code: 'CRM_FORBIDDEN' })
+    expect(prismaMock.crmAccount.createMany).not.toHaveBeenCalled()
+
+    access({ verScope: 'propios', editarScope: 'propios' })
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.$queryRaw.mockImplementation(async (query: { sql: string }) =>
+      query.sql.includes('AS "esCliente"') ? [{ id: 'corgclient000000000000001', name: 'Tacos', esCliente: true }] : [],
+    )
+    prismaMock.crmStage.count.mockResolvedValue(1)
+    prismaMock.crmLostReason.count.mockResolvedValue(1)
+    prismaMock.crmStage.findFirst.mockResolvedValue({ id: 'cstagegana000000000000001' })
+    prismaMock.crmAccount.createMany.mockResolvedValue({ count: 0 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: 'caccounta0000000000000001' })
+    const ok = await request(appWithErrors).post(PATH)
+    expect(ok.status).toBe(200)
+    expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', creada: false })
+  })
+})
+
 describe('reagendar (ruling 55)', () => {
   it('reagendar_pide_editar_y_una_fecha_valida', async () => {
     // The admin of the team from `beforeEach`: «Administrar», without «Editar negocios».

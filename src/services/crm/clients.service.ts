@@ -10,12 +10,13 @@
  */
 import { OrgRole, Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
-import { NotFoundError } from '../../errors/AppError'
+import { InternalServerError, NotFoundError } from '../../errors/AppError'
 import { enParaleloAcotado } from '../../utils/concurrencyLimiter'
 import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
+import { ensureCrmDefaults } from './accounts.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import type { Nivel } from './clientCodes'
 import {
@@ -29,8 +30,9 @@ import {
   ultimosComentarios,
   usaDeLaFila,
 } from './clientPage'
-import { checkDueno, clientsFilter, clientsQueries, pageSize, type ClientFilters } from './clientsSql'
+import { checkDueno, clientSql, clientsFilter, clientsQueries, pageSize, type ClientFilters } from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
+import { addEvent } from './timeline.service'
 import { MONEY, REAL_VENUE } from './sweep.service'
 
 // The SQL lives in the leaf `clientsSql.ts`; these were imported from here before it existed.
@@ -263,6 +265,58 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
     ventasMes,
     ventasBloqueadas: !access.ventas,
   }
+}
+
+/**
+ * Task 6 — `POST /crm/clients/:organizationId/cuenta`: the CRM account of a client that has none, made once (the «Usa» ✋ and
+ * the signup's reason are written on it). The organization must be listed in «Clientes» (altas sin tarjeta included) or it is
+ * a 404. A real client opens as «Ganado» (source `CLIENTE`); a stalled signup in the first open stage (source `ALTA`) — never
+ * «Ganado», which would make it a client for the campaigns. Neither has an owner nor `wonAt`.
+ *
+ * Insert first (`skipDuplicates`: the Organization is unique) and ONE read after it, through the caller's «Ver» scope
+ * (Codex r1 #5): an account somebody else made and took is a 404, never handed back. A tombstone of D7 does not stop it:
+ * this is a person asking on purpose (§5.2).
+ */
+export async function ensureClientAccount(access: CrmAccess, organizationId: string): Promise<{ accountId: string; creada: boolean }> {
+  const teamOrgId = await teamOrganizationId()
+  const now = new Date()
+  const [client] = await prisma.$queryRaw<Array<{ id: string; name: string; esCliente: boolean }>>(Prisma.sql`
+    SELECT o."id", o."name", ${clientSql(teamOrgId, now)} AS "esCliente"
+    FROM "Organization" o WHERE o."id" = ${organizationId} AND ${clientsFilter(teamOrgId, now, { onlyHidden: false, conAltas: true })}`)
+  if (!client) throw new NotFoundError('Esa organización no es cliente', 'CRM_NO_ES_CLIENTE')
+
+  const [kind, source] = client.esCliente ? (['GANADA', 'CLIENTE'] as const) : (['ABIERTA', 'ALTA'] as const)
+  await ensureCrmDefaults()
+  const stage = await prisma.crmStage.findFirst({ where: { kind }, orderBy: [{ order: 'asc' }, { id: 'asc' }], select: { id: true } })
+  if (!stage) throw new InternalServerError(`El CRM no tiene la etapa ${kind === 'GANADA' ? 'Ganado' : 'abierta'}`)
+
+  const result = await prisma.$transaction(async tx => {
+    const { count } = await tx.crmAccount.createMany({
+      data: [{ name: client.name, source, stageId: stage.id, organizationId }],
+      skipDuplicates: true,
+    })
+    const account = await tx.crmAccount.findFirst({
+      where: { AND: [{ organizationId }, scopeWhere(access, 'ver')] },
+      select: { id: true },
+    })
+    if (!account) throw new NotFoundError('No encontramos ese negocio', 'CRM_ACCOUNT_NOT_FOUND')
+    if (count === 1) {
+      await addEvent(tx, { accountId: account.id, kind: 'SYSTEM', actorStaffId: access.staffId, data: { event: 'CLIENT_ACCOUNT_OPENED' } })
+    }
+    return { accountId: account.id, creada: count === 1 }
+  })
+  if (result.creada) {
+    void logAction({
+      staffId: access.staffId,
+      venueId: null,
+      organizationId,
+      action: 'CRM_CLIENT_ACCOUNT_CREATED',
+      entity: 'CrmAccount',
+      entityId: result.accountId,
+      data: { organizationId, source },
+    })
+  }
+  return result
 }
 
 // ── Hidden organizations (ruling 39) ──────────────────────────────────────────────────────────────────────────────────
