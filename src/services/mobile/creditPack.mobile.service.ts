@@ -11,7 +11,8 @@
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import type { CreditPackSnapshot } from '@/services/shared/creditPacksOnPaidOrder'
 
 type PackWithItems = {
   id: string
@@ -34,6 +35,7 @@ type PackWithItems = {
  *
  * `orderItemId` ata la compra al renglón que la vendió (su unicidad es la llave de la entrega desde la foto, 0.d).
  * `countSpend: false` no suma a `totalSpent`: lo usa esa entrega porque el cobro de la orden ya lo cuenta.
+ * `deliveryKey` es la llave de la entrega del POS: su unicidad por negocio deja a lo más una compra (D4).
  */
 export async function grantPackInTx(
   tx: Prisma.TransactionClient,
@@ -45,11 +47,12 @@ export async function grantPackInTx(
     amountPaid: Prisma.Decimal
     paymentId?: string | null
     orderItemId?: string | null
+    deliveryKey?: string | null
     note?: string
     countSpend?: boolean
   },
 ) {
-  const { pack, venueId, customerId, staffId, amountPaid, paymentId, orderItemId, note, countSpend = true } = args
+  const { pack, venueId, customerId, staffId, amountPaid, paymentId, orderItemId, deliveryKey, note, countSpend = true } = args
 
   if (pack.maxPerCustomer != null) {
     const priorCount = await tx.creditPackPurchase.count({
@@ -77,6 +80,7 @@ export async function grantPackInTx(
       status: CreditPurchaseStatus.ACTIVE,
       ...(paymentId ? { paymentId } : {}),
       ...(orderItemId ? { orderItemId } : {}),
+      ...(deliveryKey ? { deliveryKey } : {}),
     },
   })
 
@@ -123,19 +127,59 @@ const PURCHASE_INCLUDE = {
 } as const
 
 /**
+ * La compra que ya hizo esta llave, si la hay. Es de otro paquete o de otro cliente sólo si alguien reusó la llave: nunca se
+ * contesta una compra ajena como si fuera la suya.
+ */
+async function compraDeLaLlave(venueId: string, deliveryKey: string, packId: string, customerId: string) {
+  const compra = await prisma.creditPackPurchase.findUnique({
+    where: { venueId_deliveryKey: { venueId, deliveryKey } },
+    include: PURCHASE_INCLUDE,
+  })
+  if (compra && (compra.creditPackId !== packId || compra.customerId !== customerId)) {
+    throw new ConflictError('Esa llave de entrega ya se usó en otra venta')
+  }
+  return compra
+}
+
+/**
  * Grant a credit pack to a customer after an in-person sale. Mirrors
  * fulfillPurchase's creation (purchase + per-item balances + PURCHASE ledger
  * entries + customer.totalSpent) but records the POS payment instead of a Stripe
  * session. `amountPaid` defaults to the pack's list price.
+ *
+ * 🔴 D4 (5-nov): con `deliveryKey` la entrega es idempotente. La llave se mira ANTES que el paquete y el cliente: si se perdió
+ * la respuesta y la dueña apagó el paquete mientras, el reintento contesta la misma compra, no un rechazo.
+ * Sin llave (apps viejas, iOS, MCP) cada llamada crea una compra, como siempre.
+ *
+ * Con `foto` (la que firmó este servidor, ver `leerFotoDelPaquete`) se entrega lo VENDIDO aunque el paquete ya cambió o se apagó:
+ * el dinero ya entró. El tope por cliente sí se revisa, con el valor vigente: es una regla del negocio, no parte de lo vendido.
  */
-export async function sellPackInPerson(venueId: string, packId: string, customerId: string, staffId: string, opts?: { note?: string }) {
+export async function sellPackInPerson(
+  venueId: string,
+  packId: string,
+  customerId: string,
+  staffId: string,
+  opts?: { note?: string; deliveryKey?: string; foto?: CreditPackSnapshot | null },
+) {
+  const deliveryKey = opts?.deliveryKey
+  if (deliveryKey) {
+    const previa = await compraDeLaLlave(venueId, deliveryKey, packId, customerId)
+    if (previa) {
+      logger.info('⏭️ [CREDIT PACK] Llave ya entregada: se contesta la misma compra', { purchaseId: previa.id, venueId, deliveryKey })
+      return previa
+    }
+  }
+
   const pack = await prisma.creditPack.findUnique({
     where: { id: packId },
     include: { items: true },
   })
   if (!pack || pack.venueId !== venueId) throw new NotFoundError('Paquete no encontrado')
-  if (!pack.active) throw new BadRequestError('El paquete no está activo')
-  if (pack.items.length === 0) throw new BadRequestError('El paquete no incluye artículos')
+  const foto = opts?.foto?.creditPackId === packId ? opts.foto : null
+  if (!foto) {
+    if (!pack.active) throw new BadRequestError('El paquete no está activo')
+    if (pack.items.length === 0) throw new BadRequestError('El paquete no incluye artículos')
+  }
 
   const customer = await prisma.customer.findFirst({
     where: { id: customerId, venueId },
@@ -143,18 +187,45 @@ export async function sellPackInPerson(venueId: string, packId: string, customer
   })
   if (!customer) throw new NotFoundError('Cliente no encontrado')
 
+  if (foto) {
+    // SIN filtrar active/deletedAt: un producto archivado se entrega igual; sólo falta si se borró de verdad o es de otro negocio.
+    const ids = foto.items.map(i => i.productId)
+    const productos = await prisma.product.findMany({ where: { id: { in: ids }, venueId }, select: { id: true }, take: ids.length })
+    if (productos.length !== ids.length) throw new BadRequestError('Un producto del paquete vendido ya no existe en este negocio')
+  }
+
   // 🔴 El monto lo pone el SERVIDOR, nunca quien llama. Antes venía en el body
   // (`opts.amountPaid`), así que un cliente podía acreditarse un paquete de $1,500
   // declarando que pagó $1 — y `Customer.totalSpent` y los reportes se lo creían.
   // Para una venta con descuento real existe el otro carril: el cobro se registra
   // como Payment y se acredita con `fulfillCreditPackPurchaseFromPayment`, que toma
-  // el monto del cobro.
-  const amountPaid = new Prisma.Decimal(pack.price)
+  // el monto del cobro. La foto también es del servidor: sólo llega aquí si él la firmó.
+  const amountPaid = new Prisma.Decimal(foto?.price ?? pack.price)
+  const vendido: PackWithItems = foto
+    ? {
+        id: pack.id,
+        venueId,
+        price: amountPaid,
+        active: true,
+        validityDays: foto.validityDays,
+        maxPerCustomer: pack.maxPerCustomer,
+        items: foto.items.map(i => ({ id: null, productId: i.productId, quantity: i.quantity })),
+      }
+    : (pack as PackWithItems)
 
-  const purchase = await prisma.$transaction(
-    async tx => grantPackInTx(tx, { pack: pack as PackWithItems, venueId, customerId, staffId, amountPaid, note: opts?.note }),
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-  )
+  let purchase
+  try {
+    purchase = await prisma.$transaction(
+      async tx => grantPackInTx(tx, { pack: vendido, venueId, customerId, staffId, amountPaid, deliveryKey, note: opts?.note }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    )
+  } catch (err) {
+    // Dos a la vez con la misma llave: pasa una sola. La perdedora tropieza con el índice único (P2002), con la serialización
+    // (P2034) o con el tope que ya cuenta a la ganadora; sea cual sea, si la llave ya tiene compra, ésa es la respuesta.
+    const ganadora = deliveryKey ? await compraDeLaLlave(venueId, deliveryKey, packId, customerId) : null
+    if (ganadora) return ganadora
+    throw err
+  }
 
   logger.info('✅ [CREDIT PACK] In-person sale', { purchaseId: purchase.id, venueId, packId, customerId, staffId })
 

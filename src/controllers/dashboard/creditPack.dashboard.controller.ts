@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as creditPackService from '../../services/dashboard/creditPack.dashboard.service'
+import { firmarFotoDelPaquete } from '../../services/shared/creditPacksOnPaidOrder'
 import { BadRequestError, ForbiddenError } from '../../errors/AppError'
 
 /**
@@ -23,7 +24,8 @@ export async function getCreditPacks(req: Request, res: Response, next: NextFunc
   try {
     const venueId = resolveVenueId(req)
     const packs = await creditPackService.getCreditPacks(venueId)
-    res.json(packs)
+    // `saleProof`: el POS de ANDROID lee esta lista. Es la foto firmada de lo que hoy se vende; la devuelve al entregar (D4).
+    res.json(packs.map(pack => ({ ...pack, saleProof: pack.active ? firmarFotoDelPaquete(pack) : null })))
   } catch (error) {
     next(error)
   }
