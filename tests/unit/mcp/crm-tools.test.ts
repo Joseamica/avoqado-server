@@ -1623,4 +1623,19 @@ describe('crm_update_account y crm_set_contact (C2, Tarea 6)', () => {
       ahora: { ...VIO_MCP, nombre: 'Ana María' },
     })
   })
+
+  it('🔴 Codex código r2: una persona con nombre de 601 caracteres se puede quitar por MCP (vio sin tope menor que lo guardado)', async () => {
+    ;(removeContact as jest.Mock).mockResolvedValueOnce({ contactId: CONTACT, yaNoEstaba: false })
+    const c = await connect('manual')
+    try {
+      const answer = await c.client.callTool({
+        name: 'crm_set_contact',
+        arguments: { accountId: ACC, accion: 'QUITAR', contactId: CONTACT, vio: { ...VIO_MCP, nombre: 'N'.repeat(601) } },
+      })
+      expect(answer.isError).toBeFalsy()
+      expect(removeContact).toHaveBeenCalledWith(ADMIN, ACC, CONTACT, { vio: { ...ANA, name: 'N'.repeat(601) } })
+    } finally {
+      await c.close()
+    }
+  })
 })

@@ -287,3 +287,32 @@ describe('C2 · updateContactSchema y removeContactSchema', () => {
     expect(removeContactSchema.safeParse({ params, body: {} }).success).toBe(false)
   })
 })
+
+describe('Codex código r2: «vio» acepta lo que la base pueda tener; los valores nuevos siguen con su tope', () => {
+  const params = { id: 'caccounta0000000000000001', contactId: 'ccontacta0000000000000001' }
+  // HubSpot junta nombre y apellido de hasta 500 cada uno: una persona puede tener un nombre de 1,001 caracteres.
+  const largo = 'N'.repeat(601)
+  const vio = { name: largo, phoneE164: '+525512345678', email: `${'a'.repeat(600)}@cafe.mx`, role: 'R'.repeat(700), isPrimary: true }
+
+  it('🔴 una persona con nombre de 601 caracteres se puede corregir a uno corto y se puede quitar', () => {
+    expect(updateContactSchema.safeParse({ params, body: { cambios: { name: 'Ana' }, vio } }).success).toBe(true)
+    expect(updateContactSchema.safeParse({ params, body: { cambios: {}, vio, aceptaCorreos: true } }).success).toBe(true)
+    expect(removeContactSchema.safeParse({ params, body: { vio } }).success).toBe(true)
+  })
+
+  it('🔴 los datos del negocio: vio largo pasa; el valor nuevo sigue con su tope', () => {
+    const body = (cambios: Record<string, unknown>) => ({
+      params: { id: params.id },
+      body: {
+        cambios,
+        vio: { name: 'X'.repeat(1001), giro: 'G'.repeat(900), referidoPor: 'R'.repeat(900), modulos: Array(150).fill('m') },
+      },
+    })
+    expect(updateAccountSchema.safeParse(body({ name: 'Café' })).success).toBe(true)
+    expect(updateAccountSchema.safeParse(body({ name: 'X'.repeat(201) })).success).toBe(false)
+  })
+
+  it('el nombre nuevo de la persona sigue con su tope de 200', () => {
+    expect(updateContactSchema.safeParse({ params, body: { cambios: { name: 'X'.repeat(201) }, vio } }).success).toBe(false)
+  })
+})

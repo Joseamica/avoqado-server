@@ -244,8 +244,12 @@ const sucursalesSchema = z
   .int('Las sucursales son un número entero')
   .min(0, 'Las sucursales no pueden ser negativas')
   .max(10000, 'Máximo 10,000 sucursales')
-/** Lo que la pantalla enseñaba: puede ser más largo que lo editable (la landing guarda hasta 500 por texto). */
-const vioText = z.string({ invalid_type_error: 'Debe ser texto' }).max(500, 'Máximo 500 caracteres').nullable()
+/**
+ * Lo que la pantalla enseñaba: SIN tope propio (Codex código r2). Tiene que poder devolver cualquier valor que la base tenga, y
+ * hay escritores que guardan más que lo editable (HubSpot junta nombre y apellido de 500 cada uno; las columnas son `text`).
+ * Lo acota el límite del cuerpo de la petición. Los valores NUEVOS de `cambios` siguen con su tope.
+ */
+const vioText = z.string({ invalid_type_error: 'Debe ser texto' }).nullable()
 /** Una llave opaca por CONTENIDO (como Stripe): nunca puede traer un correo, un teléfono ni un nombre. */
 const llaveDelIntento = z
   .string({ required_error: 'Falta el identificador del intento', invalid_type_error: 'El identificador del intento no es válido' })
@@ -285,7 +289,7 @@ export const updateAccountSchema = z.object({
             giro: vioText,
             ventasRango: vioText,
             sucursales: z.number({ invalid_type_error: 'Las sucursales son un número' }).int().nullable(),
-            modulos: z.array(z.string().max(500, 'Máximo 500 caracteres por módulo')).max(100).nullable(),
+            modulos: z.array(z.string({ invalid_type_error: 'Cada módulo es texto' })).nullable(),
             referidoPor: vioText,
           },
           { required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Falta lo que se veía antes de cambiarlo' },
@@ -325,10 +329,11 @@ const blankIsNull = (value: unknown) => (typeof value === 'string' && value.trim
 /** La persona como la enseñó la ficha: completa, para comparar lo que cambia (y todo, al quitarla). */
 const personaVista = z.object(
   {
-    name: z.string({ required_error: 'Falta lo que se veía antes de cambiarlo' }).max(500, 'Máximo 500 caracteres'),
-    phoneE164: z.string({ invalid_type_error: 'Debe ser texto' }).max(40, 'Máximo 40 caracteres').nullable(),
-    email: z.string({ invalid_type_error: 'Debe ser texto' }).max(500, 'Máximo 500 caracteres').nullable(),
-    role: z.string({ invalid_type_error: 'Debe ser texto' }).max(500, 'Máximo 500 caracteres').nullable(),
+    // Sin tope propio, como `vioText` (Codex código r2): lo que la base tenga.
+    name: z.string({ required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Debe ser texto' }),
+    phoneE164: vioText,
+    email: vioText,
+    role: vioText,
     isPrimary: z.boolean({ required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Principal es sí o no' }),
   },
   { required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Falta lo que se veía antes de cambiarlo' },

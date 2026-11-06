@@ -672,12 +672,13 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         .describe('Sólo los datos que cambias'),
       vio: z
         .object({
-          nombre: z.string().max(500).nullable().optional(),
-          giro: z.string().max(500).nullable().optional(),
-          ventasRango: z.string().max(500).nullable().optional(),
+          // Sin tope propio (Codex código r2): lo que la base tenga.
+          nombre: z.string().nullable().optional(),
+          giro: z.string().nullable().optional(),
+          ventasRango: z.string().nullable().optional(),
           sucursales: z.number().int().nullable().optional(),
-          modulos: z.array(z.string().max(500)).max(100).nullable().optional(),
-          referidoPor: z.string().max(500).nullable().optional(),
+          modulos: z.array(z.string()).nullable().optional(),
+          referidoPor: z.string().nullable().optional(),
         })
         .optional()
         .describe('Lo que tenías de cada dato que cambias, tal como lo contestó la primera llamada'),
@@ -737,10 +738,11 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
       esOtroNegocio: z.boolean().optional().describe('Sí, es otro negocio: guardar aunque el teléfono o el correo ya sea de otro'),
       vio: z
         .object({
-          nombre: z.string().max(500),
-          telefono: z.string().max(40).nullable(),
-          correo: z.string().max(500).nullable(),
-          puesto: z.string().max(500).nullable(),
+          // Sin tope propio (Codex código r2): lo que la base tenga.
+          nombre: z.string(),
+          telefono: z.string().nullable(),
+          correo: z.string().nullable(),
+          puesto: z.string().nullable(),
           principal: z.boolean(),
         })
         .optional()
