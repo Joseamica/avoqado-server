@@ -705,7 +705,13 @@ describe('manualPayment.service', () => {
     // El cobro debe guardar lo cobrado sin propina (monto + IVA − descuento), como cualquier otro cobro: caja, turno, reportes y
     // el tope de lo reembolsable leen ese campo.
     describe('D12 · el cobro de la orden sombra guarda lo cobrado (monto + IVA − descuento)', () => {
-      const tx = (orderCreate: jest.Mock, paymentCreate: jest.Mock, shiftUpdateMany: jest.Mock, vtCreate: jest.Mock, allocCreate: jest.Mock) =>
+      const tx = (
+        orderCreate: jest.Mock,
+        paymentCreate: jest.Mock,
+        shiftUpdateMany: jest.Mock,
+        vtCreate: jest.Mock,
+        allocCreate: jest.Mock,
+      ) =>
         txMock({
           order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
           payment: { count: jest.fn().mockResolvedValue(0), create: paymentCreate },
