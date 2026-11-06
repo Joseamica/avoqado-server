@@ -49,6 +49,8 @@ export interface InboxOrder {
   requiresAcceptance: boolean
   /** Tienda híbrida: de dónde pidió (`QR` o `LINK`); `null` en los pedidos de antes. */
   channel: 'QR' | 'LINK' | null
+  /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. Opcional para las apps viejas. */
+  paidAt?: string | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -95,6 +97,8 @@ export const INBOX_SELECT = {
       customerName: true,
       customerPhone: true,
       specialRequests: true,
+      // T18b: la hora en que se pagó = el último cobro COMPLETED, en la misma lectura (sin consulta por folio).
+      payments: { where: { status: 'COMPLETED' as const }, orderBy: { createdAt: 'desc' as const }, take: 1, select: { createdAt: true } },
       // Topes que nunca recortan lo que pidió el comensal: la tienda crea la cuenta con ≤ MAX_CART_LINES renglones y ≤ 30
       // opciones por renglón (esquema público `onlineOrdering.schema.ts`). El doble de renglones deja lugar a lo que la caja
       // agregue después a la cuenta; 50 opciones cubren las 30 del pedido.
@@ -148,6 +152,7 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
     rejectReason: r.rejectReason ?? null,
     requiresAcceptance: r.requiresAcceptance,
     channel: (r.channel as InboxOrder['channel']) ?? null, // en el esquema es String? (T1): sólo 'QR' | 'LINK'
+    paidAt: r.order.paymentStatus === 'PAID' ? (r.order.payments?.[0]?.createdAt.toISOString() ?? null) : null,
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,

@@ -731,9 +731,21 @@ export interface PublicTracking {
   venueTimezone: string
   /** 1b: domicilio y teléfono del NEGOCIO (nunca los del comensal). */
   venueContact: VenueContact
-  items: Array<{ name: string; quantity: number; note: string | null; modifiers: Array<{ name: string; quantity: number }> }>
+  /** T18b: `unitPrice` y `total` del renglón en pesos (opcionales para quien ya lee esta respuesta). */
+  items: Array<{
+    name: string
+    quantity: number
+    note: string | null
+    unitPrice?: number
+    total?: number
+    modifiers: Array<{ name: string; quantity: number }>
+  }>
   total: number
   paid: boolean
+  /** T18b: el nombre con que se hizo el pedido (nunca teléfono ni correo). */
+  customerName?: string | null
+  /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. */
+  paidAt?: string | null
   estimatedReadyAt: string | null
   acceptDeadlineAt: string
   rejectReason: OnlineOrderRejectReason | null
@@ -895,11 +907,20 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           orderNumber: true,
           total: true,
           paymentStatus: true,
+          customerName: true,
+          payments: { where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,
             orderBy: [{ sequence: 'asc' }, { id: 'asc' }],
-            select: { productName: true, quantity: true, notes: true, modifiers: { take: 50, select: { name: true, quantity: true } } },
+            select: {
+              productName: true,
+              quantity: true,
+              notes: true,
+              unitPrice: true,
+              total: true,
+              modifiers: { take: 50, select: { name: true, quantity: true } },
+            },
           },
         },
       },
@@ -921,10 +942,14 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       name: i.productName ?? '',
       quantity: i.quantity,
       note: i.notes ?? null,
+      unitPrice: Number(new Prisma.Decimal(i.unitPrice).toFixed(2)),
+      total: Number(new Prisma.Decimal(i.total).toFixed(2)),
       modifiers: i.modifiers.map(m => ({ name: m.name ?? '', quantity: m.quantity })),
     })),
     total: Number(new Prisma.Decimal(row.order.total).toFixed(2)),
     paid: row.order.paymentStatus === PaymentStatus.PAID,
+    customerName: row.order.customerName ?? null,
+    paidAt: row.order.paymentStatus === PaymentStatus.PAID ? (row.order.payments[0]?.createdAt.toISOString() ?? null) : null,
     estimatedReadyAt: row.estimatedReadyAt ? row.estimatedReadyAt.toISOString() : null,
     acceptDeadlineAt: row.acceptDeadlineAt.toISOString(),
     rejectReason: row.rejectReason ?? null,

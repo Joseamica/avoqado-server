@@ -458,7 +458,7 @@ describe('fase 2: cardStatus en la bandeja', () => {
     unaSola(row('A', 'PENDING_ACCEPTANCE')) // sin `charge`: paga al recoger
     const o = (await listInbox({ venueId: 'v1', filter: 'pending', now: NOW })).orders[0]
     for (const k of LLAVES_ANTES) expect(o).toHaveProperty(k)
-    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason', 'requiresAcceptance', 'channel'].sort())
+    expect(Object.keys(o).sort()).toEqual([...LLAVES_ANTES, 'cardStatus', 'card', 'rejectReason', 'requiresAcceptance', 'channel', 'paidAt'].sort())
     expect(o.cardStatus).toBeNull()
     expect(o.rejectReason).toBeNull()
     expect(o.card).toBeNull()

@@ -166,7 +166,10 @@ describe('T12 · listFolios contra Postgres', () => {
     const r = await listFolios({ venueId: f.venueId })
 
     expect(numeros(r.toPay)).toEqual([sinDinero.orderId, conAbono.orderId])
-    expect(r.toPay[1]).toMatchObject({ paymentStatus: 'PARTIAL', remaining: 50, total: 100 })
+    expect(r.toPay[1]).toMatchObject({ paymentStatus: 'PARTIAL', remaining: 50, total: 100, paidAt: null })
+    // T18b: el folio saldado trae la hora del cobro real (Payment COMPLETED), en la misma lectura de la página
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { orderId: cobrado.orderId, status: 'COMPLETED' } })
+    expect(r.toDeliver[0].paidAt).toBe(cobro.createdAt.toISOString())
     expect(r.counts).toEqual({ toPay: 2, toDeliver: 1 })
     expect(numeros(r.toDeliver)).toEqual([cobrado.orderId])
     expect(r).toMatchObject({ showTile: true, nextCursors: { toPay: null, toDeliver: null } })

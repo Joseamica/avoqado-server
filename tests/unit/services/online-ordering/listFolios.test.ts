@@ -24,6 +24,7 @@ import { listFolios } from '@/services/online-ordering/folios.service'
 import { INBOX_PAGE_SIZE } from '@/services/online-ordering/constants'
 
 const NOW = new Date('2026-11-06T18:30:00.000Z')
+const PAGADO_A = new Date('2026-11-06T17:45:00.000Z')
 const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?: string } = {}) => ({
   id: `oo${String(n).padStart(3, '0')}`,
   status: o.status ?? 'PENDING_ACCEPTANCE',
@@ -47,6 +48,7 @@ const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?
     customerPhone: null,
     specialRequests: null,
     items: [],
+    payments: o.paymentStatus === 'PAID' ? [{ createdAt: PAGADO_A }] : [],
   },
 })
 
@@ -96,6 +98,17 @@ describe('listFolios', () => {
       expect(q.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }])
       expect(q.take).toBe(INBOX_PAGE_SIZE + 1)
     }
+  })
+
+  it('T18b: cada folio trae paidAt (hora del cobro que lo saldó, null si no está pagado) en la MISMA lectura, sin consultas por folio', async () => {
+    POR_PAGAR = [row(1)]
+    POR_ENTREGAR = [row(3, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })]
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay[0].paidAt).toBeNull()
+    expect(r.toDeliver[0].paidAt).toBe(PAGADO_A.toISOString())
+    const lista = listas()[0]
+    expect(lista.select.order.select.payments).toMatchObject({ where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 })
+    expect(prismaMock.payment.findMany).not.toHaveBeenCalled()
   })
 
   it('un folio con abono (PARTIAL) sale en toPay con su remaining y cuenta en counts.toPay; uno cuya cuenta se canceló no sale', async () => {

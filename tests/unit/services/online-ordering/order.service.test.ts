@@ -1419,7 +1419,11 @@ describe('getTrackingByToken', () => {
         orderNumber: 'WABCD',
         total: D('206.00'),
         paymentStatus: 'PENDING',
-        items: [{ productName: 'Flautas', quantity: 2, notes: null, modifiers: [{ name: 'Salsa verde', quantity: 1 }] }],
+        items: [
+          { productName: 'Flautas', quantity: 2, notes: null, unitPrice: D('103.00'), total: D('206.00'), modifiers: [{ name: 'Salsa verde', quantity: 1 }] },
+        ],
+        customerName: 'Ana',
+        payments: [],
         venue: {
           name: 'Flautas Coyoacán',
           slug: 'flautas-coyoacan',
@@ -1442,7 +1446,8 @@ describe('getTrackingByToken', () => {
       venueContact: { address: 'Av. Coyoacán 123, CDMX, CDMX, 04000', phone: '5512345678' },
     })
     const cuenta = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
-    for (const campo of ['customerPhone', 'customerEmail', 'customerName']) expect(cuenta).not.toHaveProperty(campo)
+    // T18b: el nombre SÍ sale (lo dio la misma clienta); teléfono y correo nunca.
+    for (const campo of ['customerPhone', 'customerEmail']) expect(cuenta).not.toHaveProperty(campo)
   })
 
   const folioNadie = (over: Record<string, any> = {}, paymentStatus = 'PENDING') =>
@@ -1460,11 +1465,58 @@ describe('getTrackingByToken', () => {
         orderNumber: 'W-0042',
         total: D('93.00'),
         paymentStatus,
-        items: [{ productName: 'Flautas', quantity: 1, notes: null, modifiers: [] }],
+        customerName: 'María G.',
+        payments: [],
+        items: [{ productName: 'Flautas', quantity: 1, notes: null, unitPrice: D('93.00'), total: D('93.00'), modifiers: [] }],
         venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
       },
       ...over,
     }) as any
+
+  it('T18b: folio por pagar ⇒ customerName, paidAt null y renglones con unitPrice/total en pesos; nunca teléfono ni correo', async () => {
+    const base = folioNadie()
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      ...base,
+      order: {
+        ...base.order,
+        customerName: 'María G.',
+        payments: [],
+        items: [{ productName: 'Flautas', quantity: 2, notes: null, unitPrice: D('46.50'), total: D('93.00'), modifiers: [] }],
+      },
+    })
+    const t = await getTrackingByToken('T'.repeat(32))
+    expect(t).toMatchObject({ customerName: 'María G.', paidAt: null })
+    expect(t!.items[0]).toMatchObject({ unitPrice: 46.5, total: 93 })
+    expect(JSON.stringify(t)).not.toMatch(/customerPhone|customerEmail/)
+    const cuenta = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select
+    expect(cuenta).toMatchObject({ customerName: true })
+    expect(cuenta).not.toHaveProperty('customerPhone')
+    expect(cuenta.items.select).toMatchObject({ unitPrice: true, total: true })
+  })
+
+  it('T18b: folio pagado ⇒ paidAt es la hora del último cobro COMPLETED; pagado sin cobro legible ⇒ null', async () => {
+    const base = folioNadie({}, 'PAID')
+    const at = new Date('2026-11-06T17:05:00.000Z')
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      ...base,
+      order: { ...base.order, customerName: 'María G.', payments: [{ createdAt: at }] },
+    })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: true, paidAt: at.toISOString() })
+    const pagos = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select.payments
+    expect(pagos).toMatchObject({ where: { status: 'COMPLETED' }, orderBy: { createdAt: 'desc' }, take: 1 })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({ ...base, order: { ...base.order, customerName: null, payments: [] } })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
+  })
+
+  it('T18b: «Mi equipo» y tarjeta traen los mismos campos (aditivos)', async () => {
+    const base = folioNadie({ requiresAcceptance: true, paymentMode: 'CARD_ONLINE' }, 'PAID')
+    const at = new Date('2026-11-06T17:05:00.000Z')
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      ...base,
+      order: { ...base.order, customerName: 'Luis', payments: [{ createdAt: at }] },
+    })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: 'Luis', paidAt: at.toISOString() })
+  })
 
   it('T15: el seguimiento trae requiresAcceptance y channel', async () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie())
