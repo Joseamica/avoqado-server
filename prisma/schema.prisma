@@ -4353,6 +4353,7 @@ model Order {
   @@index([venueId, customerIdentifier, paymentStatus])
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
+  @@index([venueId, source, createdAt]) // CRM «Usa»: órdenes por origen en 30 días (migración CONCURRENTLY aparte)
 }
 
 // Junction table for many-to-many Order <-> Customer relationship
@@ -21118,6 +21119,7 @@ model CrmHiddenClient {
 
 /// Un negocio del CRM: va de prospecto a cliente en UN solo registro y se liga a su Organization.
 /// Abierto, ganado o perdido se deduce del `kind` de su etapa; no se guarda dos veces.
+/// `source` gana `CLIENTE | ALTA` (C1, Tarea 6): cuentas abiertas desde Clientes o desde un alta sin tarjeta.
 model CrmAccount {
   id          String   @id @default(cuid())
   name        String
@@ -21165,6 +21167,17 @@ model CrmAccount {
   // Cuándo se recibió la entrada de la landing que fijó la calificación (ruling 50): una entrada más vieja que el barrido
   // reparó tarde no pisa lo que dijo una más nueva. null = ninguna entrada de la landing la ha fijado.
   qualifiedAt            DateTime?
+
+  // «Usa» escrito a mano (✋) en la lista de Clientes. null = se lee solo (lo medido).
+  usaManual       String? // AMBOS | TERMINAL | POS; null = se lee solo
+  usaManualPorque String? // por qué lo escribió la persona
+  usaManualById   String? // Staff que lo escribió (sin FK: la historia no depende del staff)
+  usaManualAt     DateTime?
+
+  // Alta sin tarjeta: por qué se quedó. PRECIO | NO_QUISO_TARJETA | SOLO_VEIA | OTRO_SISTEMA | PROBLEMA_TECNICO | DESPUES | OTRO
+  altaMotivo      String?
+  altaMotivoTexto String? // sólo con OTRO (1–200)
+  altaPerdido     Boolean @default(false) // marca a mano «Perdido» del alta; no es el «Perder» del embudo
 
   contacts       CrmContact[]
   activities     CrmActivity[]
