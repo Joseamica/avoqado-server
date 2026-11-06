@@ -94,10 +94,11 @@ const FechaCivil = z
  * con teléfono tronaba con «Invalid email format». En el alta, "" es «sin ese dato».
  */
 const vacioEsAusente = (v: unknown) => (v === null || (typeof v === 'string' && v.trim() === '') ? undefined : v)
-const Texto = z.string({ invalid_type_error: 'Debe ser texto' })
+// D24: `validateRequest` ya no antepone el campo, así que el tipo equivocado dice cuál es.
+const Texto = (q: string) => z.string({ invalid_type_error: `Se esperaba texto en ${q}` })
 const Genero = z.enum(['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'], { errorMap: () => ({ message: 'Género no válido' }) })
-const Correo = Texto.email('El correo no es válido')
-const Telefono = Texto.regex(/^\+?[0-9]{10,15}$/, 'El teléfono debe tener de 10 a 15 dígitos')
+const Correo = Texto('el correo').email('El correo no es válido')
+const Telefono = Texto('el teléfono').regex(/^\+?[0-9]{10,15}$/, 'El teléfono debe tener de 10 a 15 dígitos')
 
 export const CreateCustomerSchema = z.object({
   params: z.object({
@@ -107,12 +108,12 @@ export const CreateCustomerSchema = z.object({
     .object({
       email: z.preprocess(vacioEsAusente, Correo.optional()),
       phone: z.preprocess(vacioEsAusente, Telefono.optional()),
-      firstName: Texto.min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
-      lastName: Texto.min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
+      firstName: Texto('el nombre').min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
+      lastName: Texto('el apellido').min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
       birthDate: FechaCivil.optional(),
       gender: Genero.optional(),
       customerGroupId: z.string().cuid('Grupo de clientes inválido').optional(),
-      notes: Texto.max(1000, 'Las notas no pueden pasar de 1000 caracteres').optional(),
+      notes: Texto('las notas').max(1000, 'Las notas no pueden pasar de 1000 caracteres').optional(),
       tags: z.array(z.string().max(50, 'Cada etiqueta puede tener hasta 50 caracteres')).optional(),
       marketingConsent: z.boolean().default(false),
     })
@@ -132,12 +133,12 @@ export const UpdateCustomerSchema = z.object({
       // Al editar, "" pasa tal cual: `updateCustomer` decide (sin ese dato antes = no cambia; con dato = no se borra).
       email: z.union([z.literal(''), Correo], { errorMap: () => ({ message: 'El correo no es válido' }) }).optional(),
       phone: z.union([z.literal(''), Telefono], { errorMap: () => ({ message: 'El teléfono debe tener de 10 a 15 dígitos' }) }).optional(),
-      firstName: Texto.min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
-      lastName: Texto.min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
+      firstName: Texto('el nombre').min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
+      lastName: Texto('el apellido').min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
       birthDate: FechaCivil.optional(),
       gender: Genero.optional(),
       customerGroupId: z.string().cuid('Grupo de clientes inválido').nullable().optional(),
-      notes: Texto.max(1000, 'Las notas no pueden pasar de 1000 caracteres').optional(),
+      notes: Texto('las notas').max(1000, 'Las notas no pueden pasar de 1000 caracteres').optional(),
       tags: z.array(z.string().max(50, 'Cada etiqueta puede tener hasta 50 caracteres')).optional(),
       marketingConsent: z.boolean().optional(),
       active: z.boolean().optional(),

@@ -1081,7 +1081,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       const res = await api().post(`${BASE}/balances/${BALANCE_ID}/adjust`).set('Authorization', `Bearer ${token}`).send({ quantity: 5 })
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
-      expect(res.body.message).toMatch(/razon|requerida|required/i)
+      expect(res.body.message).toBe('Error de validación: Escribe la razón')
     })
 
     it('should return 400 when reason is empty string', async () => {
@@ -1210,7 +1210,7 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       const res = await api().post(`${BASE}/purchases/${PURCHASE_ID}/refund`).set('Authorization', `Bearer ${token}`).send({})
       expect(res.status).toBe(400)
       expect(res.body).toHaveProperty('message')
-      expect(res.body.message).toMatch(/razon|requerida|required/i)
+      expect(res.body.message).toBe('Error de validación: Escribe la razón')
     })
 
     it('should return 400 when reason is empty string', async () => {

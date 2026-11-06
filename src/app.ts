@@ -9,6 +9,7 @@ import express, { Express, Request as ExpressRequest, Response as ExpressRespons
 // after `express` is loaded and before any router is mounted. Proven by
 // tests/unit/middlewares/async-error-guardrail.test.ts.
 import 'express-async-errors'
+import './utils/zodEnEspanol' // D24: mensajes por default de Zod en español para todo el proceso (validación, controladores, MCP)
 import jwt from 'jsonwebtoken'
 import type { StringValue } from 'ms'
 import cors from 'cors'

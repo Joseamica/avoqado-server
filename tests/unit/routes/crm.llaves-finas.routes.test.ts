@@ -199,7 +199,7 @@ describe('sólo «Mandar campañas» (Review Focus 1)', () => {
     for (const huella of [123, 'x'.repeat(201), '']) {
       const res = await request(app).post(`/crm/campaigns/${CAMPAIGN}/preview`).send({ huella })
       expect(res.status).toBe(400)
-      expect(res.body.message).toMatch(/^Error de validación: huella: La versión que ves no es válida/)
+      expect(res.body.message).toMatch(/^Error de validación: La versión que ves no es válida/)
     }
     expect(contarAudiencia).not.toHaveBeenCalled()
   })

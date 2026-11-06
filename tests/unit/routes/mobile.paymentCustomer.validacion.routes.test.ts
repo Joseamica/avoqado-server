@@ -97,9 +97,9 @@ describe('POST /mobile/venues/:venueId/payments/:paymentId/customer — body val
   ])('🔴 customerId %s ⇒ 400 en español, sin llegar al controller (antes: 500)', async (_caso, body) => {
     const { error } = await correr(POR_PAGO, body, params)
     expect(error?.statusCode).toBe(400)
-    expect(error?.message).toMatch(/^Error de validación: customerId: /)
+    expect(error?.message).toMatch(/^Error de validación: (Falta el cliente|El cliente debe ir como texto)$/)
     expect(error?.message).not.toMatch(/Expected|Required|Invalid/)
-    // M3 (ronda 1): el campo se dice UNA vez (lo antepone validateRequest), no «customerId: customerId es requerido».
+    // D24: validateRequest ya no antepone el campo; el mensaje del esquema dice cuál es.
     expect(error?.message).not.toMatch(/\b(\w+): \1\b/)
     expect(mockAttach).not.toHaveBeenCalled()
   })
@@ -133,16 +133,15 @@ describe('POST /mobile/venues/:venueId/payments/customer — body validado (últ
   ])('🔴 %s ⇒ 400 en español, sin llegar al controller (antes: 500)', async (_caso, body) => {
     const { error } = await correr(ULTIMO_PAGO, body, params)
     expect(error?.statusCode).toBe(400)
-    expect(error?.message).toMatch(/customerId: /)
-    expect(error?.message).not.toMatch(/\b(\w+): \1\b/) // M3
+    expect(error?.message).toMatch(/^Error de validación: (Falta el cliente|El cliente debe ir como texto)$/)
     expect(mockAttachLatest).not.toHaveBeenCalled()
   })
 
   it.each<[string, unknown, RegExp]>([
-    ['staffId número', { customerId: 'c1', amountCents: 5000, staffId: 123 }, /staffId: /],
-    ['tipCents texto', { customerId: 'c1', amountCents: 5000, tipCents: 'diez' }, /tipCents: /],
-    ['amountCents texto', { customerId: 'c1', amountCents: '5000' }, /amountCents: /],
-    ['amountCents ausente', { customerId: 'c1' }, /amountCents: /],
+    ['staffId número', { customerId: 'c1', amountCents: 5000, staffId: 123 }, /Quien cobró debe ir como texto/],
+    ['tipCents texto', { customerId: 'c1', amountCents: 5000, tipCents: 'diez' }, /La propina debe ser un número/],
+    ['amountCents texto', { customerId: 'c1', amountCents: '5000' }, /El monto debe ser un número/],
+    ['amountCents ausente', { customerId: 'c1' }, /Falta el monto/],
   ])('%s ⇒ 400 en español (antes: 500 o un pago que nunca se encontraba)', async (_caso, body, campo) => {
     const { error } = await correr(ULTIMO_PAGO, body, params)
     expect(error?.statusCode).toBe(400)
@@ -154,7 +153,7 @@ describe('POST /mobile/venues/:venueId/payments/customer — body validado (últ
 
   it('M3: el mensaje dice una vez qué falta', async () => {
     const { error } = await correr(ULTIMO_PAGO, { amountCents: 5000 }, params)
-    expect(error?.message).toBe('Error de validación: customerId: es requerido')
+    expect(error?.message).toBe('Error de validación: Falta el cliente')
   })
 
   it('🔴 regresión: lo que mandan Android e iOS llega COMPLETO al controller (validateRequest no se come ningún campo)', async () => {

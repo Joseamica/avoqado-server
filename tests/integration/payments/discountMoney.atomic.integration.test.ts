@@ -148,6 +148,7 @@ beforeEach(async () => {
   await prisma.discount.update({
     where: { id: discountId },
     data: {
+      type: 'PERCENTAGE',
       value: 10,
       active: true,
       requiresApproval: false,
@@ -674,6 +675,27 @@ describe('new serialized discount behavior', () => {
 })
 
 describe('existing discount policies', () => {
+  // D14: el cupón de cortesía regala la cuenta; por la ruta vieja de la TPV pide `orders:comp`, igual que la venta de D5.
+  it('D14: un cupón de cortesía sin permiso de cortesía responde 403 y no escribe ni aparta nada', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100 } })
+    const o = await newOrder()
+    await expect(tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId)).rejects.toMatchObject({
+      statusCode: 403,
+      message: 'No tienes permiso para dar cortesías',
+    })
+    const after = await snapshot(o.id)
+    expect(after.discounts).toHaveLength(0)
+    expect(await prisma.couponRedemption.count({ where: { orderId: o.id } })).toBe(0)
+  })
+  it('D14: con permiso de cortesía el cupón COMP descuenta todo lo que queda', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100 } })
+    const o = await newOrder()
+    expect(await tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId, true)).toMatchObject({ success: true, amount: 100 })
+  })
+  it('D14: un cupón de % sigue sin pedir permiso de cortesía', async () => {
+    const o = await newOrder()
+    expect(await tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId)).toMatchObject({ success: true, amount: 10 })
+  })
   it('automatic discounts needing approval remain skipped', async () => {
     await prisma.discount.update({ where: { id: discountId }, data: { requiresApproval: true } })
     const o = await newOrder()
