@@ -85,7 +85,12 @@ export const sellPack = async (req: Request, res: Response, next: NextFunction) 
     // se acredita con `fulfillCreditPackPurchaseFromPayment`, que toma el monto del cobro.
     // La foto sólo cuenta con llave: sin llave, un reintento crearía otra compra por lo vendido hace días.
     const foto = deliveryKey ? leerFotoDelPaquete(saleProof) : null
-    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, { note, deliveryKey, foto, cobradoEnOrden })
+    const purchase = await creditPackService.sellPackInPerson(venueId, packId, customerId, staffVenueId, {
+      note,
+      deliveryKey,
+      foto,
+      cobradoEnOrden,
+    })
     return res.status(201).json({ success: true, purchase })
   } catch (error) {
     next(error)
