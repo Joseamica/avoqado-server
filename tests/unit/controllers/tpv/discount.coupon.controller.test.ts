@@ -17,6 +17,7 @@ jest.mock('@/services/tpv/discount.tpv.service')
 jest.mock('@/middlewares/cortesiaPidePermiso.middleware', () => ({
   ...jest.requireActual('@/middlewares/cortesiaPidePermiso.middleware'),
   tieneCortesiaAutorizada: jest.fn(() => false),
+  pinDeLaCortesia: jest.fn(() => undefined),
 }))
 jest.mock('@/middlewares/permissionFlag.middleware', () => ({
   ...jest.requireActual('@/middlewares/permissionFlag.middleware'),
@@ -29,7 +30,7 @@ import { BadRequestError, ForbiddenError, NotFoundError } from '@/errors/AppErro
 import { MENSAJE_ORDEN_IMPORTADA } from '@/services/shared/ordenImportada'
 import { globalErrorHandler } from '../../../../src/app'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 
 const applyCouponMock = discountTpvService.applyCouponCode as jest.Mock
 const permisoMock = tienePermisoEnVenue as jest.Mock
@@ -190,6 +191,7 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
 
   it('manual con cortesía acreditada y PIN: pasa el usuario y quien tecleó el PIN', async () => {
     acreditado.mockReturnValue(true)
+    ;(pinDeLaCortesia as jest.Mock).mockReturnValueOnce('sv-gerente')
     await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
       .post('/venues/v1/orders/o1/discounts/manual')
       .send({ type: 'COMP', value: 100, reason: 'Invitación', authorizedById: 'id-inventado' })
@@ -207,6 +209,7 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
   // D2 (hz:f34960c5:D2): la aprobación sale del permiso comprobado en el request (PIN de gerente incluido), nunca del cuerpo.
   it('predefinido acreditado con PIN: pasa quien tecleó el PIN, no el authorizedById del cuerpo', async () => {
     acreditado.mockReturnValue(true)
+    ;(pinDeLaCortesia as jest.Mock).mockReturnValueOnce('sv-gerente')
     await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
       .post('/venues/v1/orders/o1/discounts/apply')
       .send({ discountId: 'd-comp', authorizedById: 'id-inventado' })

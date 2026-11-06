@@ -17,12 +17,21 @@ export const checkCuponPermissionIfPresent = (req: Request, res: Response, next:
 export const checkDescuentoManualPermissionIfPresent = (req: Request, res: Response, next: NextFunction) =>
   traeDescuentoManual(req.body) ? checkPermission('discounts:apply')(req, res, next) : next()
 
-const cortesiasAutorizadas = new WeakMap<Request, { venueId: string; userId: string }>()
+const cortesiasAutorizadas = new WeakMap<Request, { venueId: string; userId: string; porPin?: string }>()
 
 /** Sólo acredita orders:comp comprobado por este middleware, en este request, negocio y sesión. */
 export function tieneCortesiaAutorizada(req: Request): boolean {
   const autorizada = cortesiasAutorizadas.get(req)
   return !!autorizada && autorizada.venueId === req.params.venueId && autorizada.userId === req.authContext?.userId
+}
+
+/**
+ * D1 (Codex r4 #3): la membresía del gerente cuyo PIN autorizó ESTA cortesía (`orders:comp`). `authContext.overrideAuthorizedBy`
+ * es genérico: si el PIN se usó antes para otro permiso del mismo request (p. ej. `discounts:apply`), ese gerente no aprobó la
+ * cortesía y no debe quedar como su autorizador.
+ */
+export function pinDeLaCortesia(req: Request): string | undefined {
+  return tieneCortesiaAutorizada(req) ? cortesiasAutorizadas.get(req)?.porPin : undefined
 }
 
 /**
@@ -83,9 +92,13 @@ export const checkCortesiaEnDescuento = async (req: Request, res: Response, next
 function exigirCortesia(req: Request, res: Response, next: NextFunction) {
   const venueId = req.params.venueId
   const userId = req.authContext?.userId
+  const pinAntes = (req as any).authContext?.overrideAuthorizedBy as string | undefined
   return checkPermission('orders:comp')(req, res, error => {
     if (error) return next(error)
-    if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId })
+    // Sólo cuenta el PIN que consumió ESTE check (el token es de un solo uso: si cambió el autorizador, fue por `orders:comp`).
+    const pinDespues = (req as any).authContext?.overrideAuthorizedBy as string | undefined
+    const porPin = pinDespues && pinDespues !== pinAntes ? pinDespues : undefined
+    if (venueId && userId) cortesiasAutorizadas.set(req, { venueId, userId, ...(porPin ? { porPin } : {}) })
     next()
   })
 }

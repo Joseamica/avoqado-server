@@ -3,15 +3,18 @@
  * `orders:comp` por `checkPermission` (PIN de gerente incluido) y deja la acreditación en el request para el servicio.
  */
 import type { NextFunction, Request, Response } from 'express'
-import { checkCortesiaEnDescuento, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { checkCortesiaEnDescuento, pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import prisma from '@/utils/prismaClient'
 
 let mockPermissionResult: 'granted' | 'denied' = 'granted'
+/** Simula el PIN de gerente que consume ESTE check (checkPermission deja `authContext.overrideAuthorizedBy`). */
+let mockPinConsumido: string | undefined
 
 jest.mock('@/middlewares/checkPermission.middleware', () => ({
-  checkPermission: jest.fn(() => (_req: Request, res: Response, next: NextFunction) => {
+  checkPermission: jest.fn(() => (req: Request, res: Response, next: NextFunction) => {
     if (mockPermissionResult === 'denied') return res.status(403).json({ error: 'Forbidden' })
+    if (mockPinConsumido) (req as any).authContext.overrideAuthorizedBy = mockPinConsumido
     return next()
   }),
 }))
@@ -38,6 +41,7 @@ async function run(req: Request) {
 beforeEach(() => {
   jest.clearAllMocks()
   mockPermissionResult = 'granted'
+  mockPinConsumido = undefined
   findFirst.mockResolvedValue(null)
 })
 
@@ -83,5 +87,21 @@ describe('D1: descuento suelto que regala pide orders:comp', () => {
     expect(findFirst).not.toHaveBeenCalled()
     expect(checkPermission).not.toHaveBeenCalled()
     expect(next).toHaveBeenCalledWith()
+  })
+
+  // Codex D1 r4 #3: un PIN usado antes para OTRO permiso del request no aprueba la cortesía.
+  it('el PIN que consumió el check de cortesía queda como su autorizador', async () => {
+    mockPinConsumido = 'sv-gerente'
+    const req = request({ type: 'COMP', value: 100, reason: 'x' })
+    await run(req)
+    expect(pinDeLaCortesia(req)).toBe('sv-gerente')
+  })
+
+  it('un PIN previo de otro permiso (discounts:apply) no se registra como aprobador de la cortesía', async () => {
+    const req = request({ type: 'COMP', value: 100, reason: 'x' })
+    ;(req as any).authContext.overrideAuthorizedBy = 'sv-gerente-de-descuentos'
+    await run(req)
+    expect(tieneCortesiaAutorizada(req)).toBe(true)
+    expect(pinDeLaCortesia(req)).toBeUndefined()
   })
 })

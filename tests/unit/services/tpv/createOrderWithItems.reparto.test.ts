@@ -206,3 +206,30 @@ describe('/tpv con un descuento VENCIDO (en línea) ⇒ 400 como siempre', () =>
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 })
+
+// D2 (Codex D1 r4 #1): crear la venta en la TPV no es la puerta de atrás de la «aprobación de gerente».
+describe('/tpv: un descuento de % que pide aprobación ⇒ 400 y no crea la venta', () => {
+  const venta = (extra: Record<string, unknown>) =>
+    createOrderWithItems('venue-1', {
+      items: [{ productId: 'cafe', quantity: 1, unitPrice: 100 }],
+      staffId: 'staff-1',
+      taxAmount: 0,
+      subtotal: 100,
+      total: 90,
+      tip: 0,
+      ...extra,
+    } as any)
+
+  it('descuento de cuenta del catálogo con aprobación ⇒ 400', async () => {
+    armarTx([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      catalogo('orden10', { type: 'PERCENTAGE', value: new Prisma.Decimal(10), scope: 'ORDER', requiresApproval: true }),
+    ] as any)
+
+    await expect(venta({ orderDiscountId: 'orden10', discount: 10 })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('requiere aprobación'),
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+})
