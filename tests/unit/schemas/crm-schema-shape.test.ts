@@ -188,6 +188,12 @@ describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)',
     expect(mensajes(parse({ motivo: null, texto: 'caro', perdido: false }))).toEqual(['El texto sólo va con «Otro»'])
   })
 
+  it('un texto vacío con un motivo de la lista se acepta (se ignora); con «Otro» sigue pidiendo el motivo; un texto que no es texto avisa en español', () => {
+    expect(parse({ motivo: 'PRECIO', texto: '   ', perdido: false }).success).toBe(true)
+    expect(mensajes(parse({ motivo: 'OTRO', texto: '  ', perdido: false }))).toEqual(['Escribe el motivo'])
+    expect(mensajes(parse({ motivo: 'OTRO', texto: 5, perdido: false }))).toEqual(['El motivo debe ser un texto'])
+  })
+
   it('motivo null con Perdido es válido; un motivo fuera de la lista y el texto de 201 letras no', () => {
     expect(parse({ motivo: null, perdido: true }).success).toBe(true)
     expect(parse({ motivo: 'TERMINO', perdido: false }).success).toBe(false)

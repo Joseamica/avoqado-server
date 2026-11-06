@@ -16,10 +16,10 @@ import { DEFAULT_TIMEZONE, formatInVenueTimezone } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
-import { ensureCrmDefaults, touchEditableTx } from './accounts.service'
+import { ensureCrmDefaults, lockEditableTx, touchNoEarlierTx } from './accounts.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import type { MotivoDelAlta, Nivel, UsaEscrito } from './clientCodes'
-import { altaPropiaPendienteSql } from './clientFacts'
+import { altaPendienteSql } from './clientFacts'
 import {
   altaDeLaFila,
   altaFactsOf,
@@ -333,9 +333,10 @@ export async function setUsa(
   const now = new Date()
   const { valor } = input
   const changed = await prisma.$transaction(async tx => {
-    await touchEditableTx(tx, access, accountId, now)
+    await lockEditableTx(tx, access, accountId)
     const before = await tx.crmAccount.findUniqueOrThrow({ where: { id: accountId }, select: { usaManual: true, organizationId: true } })
     if (valor === null && before.usaManual === null) return null
+    await touchNoEarlierTx(tx, accountId, now)
     await tx.crmAccount.update({
       where: { id: accountId },
       data:
@@ -368,9 +369,9 @@ export async function setUsa(
 /**
  * «¿Por qué se quedó?» (C1, tarea 8): a seller with «Editar» writes why a stalled signup stopped (from the fixed list, with
  * text for «Otro») and/or marks it «Perdido» (its own flag, not the Embudo's «Perder»). «Terminó el alta» is never written:
- * once the organization stops being a pending signup (`altaPropiaPendienteSql`, the rule the list paints) it is a 409 and
+ * once the organization stops being a pending signup (`altaPendienteSql`, the rule that paints the 🟠) it is a 409 and
  * nothing is written. The text lives only in the timeline event: the ActivityLog never carries it. The same value again
- * writes nothing. `touchEditableTx` locks the row, so the pending check and the write see the same account.
+ * writes nothing. `lockEditableTx` locks the row without touching it (a no-op never resets «Estancado»), so the pending check and the write see the same account.
  */
 export async function setAltaMotivo(
   access: CrmAccess,
@@ -381,18 +382,18 @@ export async function setAltaMotivo(
   const { motivo, perdido } = input
   const texto = motivo === 'OTRO' ? (input.texto ?? null) : null
   const changed = await prisma.$transaction(async tx => {
-    await touchEditableTx(tx, access, accountId, now)
+    await lockEditableTx(tx, access, accountId)
     const before = await tx.crmAccount.findUniqueOrThrow({
       where: { id: accountId },
       select: { altaMotivo: true, altaMotivoTexto: true, altaPerdido: true, organizationId: true },
     })
-    const pendiente = before.organizationId
-      ? await tx.$queryRaw<Array<{ pendiente: number }>>(
-          Prisma.sql`SELECT 1 AS "pendiente" FROM "Organization" o WHERE o."id" = ${before.organizationId} AND ${altaPropiaPendienteSql()} LIMIT 1`,
-        )
-      : []
+    if (!before.organizationId) throw new ConflictError('Este cliente no tiene un alta pendiente', 'CRM_NO_ES_ALTA')
+    const pendiente = await tx.$queryRaw<Array<{ pendiente: number }>>(
+      Prisma.sql`SELECT 1 AS "pendiente" FROM "Organization" o WHERE o."id" = ${before.organizationId} AND ${altaPendienteSql()} LIMIT 1`,
+    )
     if (!pendiente.length) throw new ConflictError('Ya terminó su alta: ya no hace falta el motivo', 'CRM_ALTA_TERMINADA')
     if (before.altaMotivo === motivo && before.altaMotivoTexto === texto && before.altaPerdido === perdido) return null
+    await touchNoEarlierTx(tx, accountId, now)
     await tx.crmAccount.update({ where: { id: accountId }, data: { altaMotivo: motivo, altaMotivoTexto: texto, altaPerdido: perdido } })
     await addEvent(tx, {
       accountId,

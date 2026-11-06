@@ -1109,6 +1109,7 @@ describe('setUsa (C1, tarea 7)', () => {
   beforeEach(() => {
     jest.mocked(logAction).mockClear()
     prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT } as never)
     prismaMock.crmAccount.update.mockResolvedValue({} as never)
     prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
   })
@@ -1163,12 +1164,12 @@ describe('setUsa (C1, tarea 7)', () => {
     cuenta(null)
     await expect(setUsa(access(), ACCOUNT, { valor: null })).resolves.toEqual({ accountId: ACCOUNT, usaManual: null })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
     expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })
 
   it('🔴 A «propios» sobre la cuenta de B (no la ve) → 404 y no escribe', async () => {
-    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
     prismaMock.crmAccount.findFirst.mockResolvedValue(null)
     await expect(setUsa(access(), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({ statusCode: 404 })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
@@ -1176,8 +1177,7 @@ describe('setUsa (C1, tarea 7)', () => {
   })
 
   it('🔴 ver: todos, editar: propios sobre la de B → 403 CRM_NO_ES_TUYO', async () => {
-    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
-    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT_B })
+    prismaMock.crmAccount.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: ACCOUNT_B } as never)
     await expect(setUsa(access({ ver: 'todos' }), ACCOUNT_B, { valor: 'POS', porque: 'porque sí' })).rejects.toMatchObject({
       statusCode: 403,
       code: 'CRM_NO_ES_TUYO',
@@ -1207,6 +1207,7 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
   beforeEach(() => {
     jest.mocked(logAction).mockClear()
     prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT } as never)
     prismaMock.crmAccount.update.mockResolvedValue({} as never)
     prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
   })
@@ -1265,11 +1266,12 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
     expect(logAction).not.toHaveBeenCalled()
   })
 
-  it('🔴 una cuenta sin organización → 409 CRM_ALTA_TERMINADA', async () => {
+  it('🔴 una cuenta sin organización → 409 CRM_NO_ES_ALTA (nunca dice «ya terminó»)', async () => {
     cuenta({ organizationId: null })
     await expect(setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({
       statusCode: 409,
-      code: 'CRM_ALTA_TERMINADA',
+      code: 'CRM_NO_ES_ALTA',
+      message: 'Este cliente no tiene un alta pendiente',
     })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
   })
@@ -1278,12 +1280,12 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
     cuenta({ altaMotivo: 'PRECIO', altaPerdido: true })
     await setAltaMotivo(access(), ACCOUNT, { motivo: 'PRECIO', perdido: true })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+    expect(prismaMock.crmAccount.updateMany).not.toHaveBeenCalled() // no touch: «Estancado» is not reset
     expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })
 
   it('🔴 A «propios» sobre la de B (no la ve) → 404 y no escribe', async () => {
-    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
     prismaMock.crmAccount.findFirst.mockResolvedValue(null)
     await expect(setAltaMotivo(access(), ACCOUNT_B, { motivo: 'PRECIO', perdido: false })).rejects.toMatchObject({ statusCode: 404 })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
@@ -1291,8 +1293,7 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
   })
 
   it('🔴 ver: todos, editar: propios sobre la de B → 403 CRM_NO_ES_TUYO', async () => {
-    prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 0 })
-    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: ACCOUNT_B })
+    prismaMock.crmAccount.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: ACCOUNT_B } as never)
     await expect(setAltaMotivo(access({ ver: 'todos' }), ACCOUNT_B, { motivo: null, perdido: true })).rejects.toMatchObject({
       statusCode: 403,
       code: 'CRM_NO_ES_TUYO',

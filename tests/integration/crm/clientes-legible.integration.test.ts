@@ -1780,6 +1780,68 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       expect(await eventos(c.accountId)).toHaveLength(1)
     })
 
+    const filaDe = async (c: { organizationId: string }) => {
+      const { name } = await prisma.organization.findUniqueOrThrow({ where: { id: c.organizationId }, select: { name: true } })
+      const r = await listClients(todos(), { q: name, altas: true }, NOW)
+      return { fila: r.rows.find(row => row.id === c.organizationId)!, conteos: r.conteos }
+    }
+
+    it('PRECIO → la fila 🟠 dice PRECIO y conteos.porMotivo.PRECIO sube', async () => {
+      const c = await altaConCuenta()
+      const antes = (await filaDe(c)).conteos
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'PRECIO', perdido: false })
+      const { fila, conteos } = await filaDe(c)
+      expect(fila.alta).toMatchObject({ motivo: 'PRECIO', perdido: false })
+      expect(conteos.porMotivo.PRECIO).toBe(antes.porMotivo.PRECIO + 1)
+    })
+
+    it('perdido:true → perdidos sube y la fila sigue 🟠 con «Perdido»', async () => {
+      const c = await altaConCuenta()
+      const antes = (await filaDe(c)).conteos
+      await setAltaMotivo(todos(), c.accountId, { motivo: null, perdido: true })
+      const { fila, conteos } = await filaDe(c)
+      expect(fila.alta).toMatchObject({ perdido: true, motivo: null })
+      expect(conteos.perdidos).toBe(antes.perdidos + 1)
+      expect(conteos.altaSinTarjeta).toBe(antes.altaSinTarjeta)
+    })
+
+    it('🔴 al activar después, la fila deja de ser 🟠 y el motivo queda sólo en la Historia', async () => {
+      const c = await altaConCuenta()
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'OTRO', texto: 'Esperaba a su socio', perdido: false })
+      await sale(c.venueId, { source: 'TPV', payment: { source: 'TPV' } })
+      const { fila } = await filaDe(c)
+      expect(fila.alta).toBeNull()
+      expect(JSON.stringify(fila)).not.toContain('socio')
+      expect(await eventos(c.accountId)).toEqual([{ data: { motivo: 'OTRO', texto: 'Esperaba a su socio', perdido: false } }])
+    })
+
+    it('un 🟠 que no es alta propia (sin acquisitionSource y sin sucursal real) acepta el motivo: manda la misma regla que lo pinta', async () => {
+      const organizationId = await org()
+      await venue(organizationId)
+      await prisma.onboardingProgress.create({ data: { organizationId, completedSteps: [] } })
+      const { accountId } = await ensureClientAccount(todos(), organizationId).catch(async () => {
+        // Not listed as an «alta propia»: the account is made by hand, as a seller linking the organization would.
+        const stage = await prisma.crmStage.findFirstOrThrow({ where: { kind: 'ABIERTA' }, select: { id: true } })
+        const made = await prisma.crmAccount.create({
+          data: { name: `Mano ${suffix}`, source: 'MANUAL', stageId: stage.id, organizationId },
+          select: { id: true },
+        })
+        return { accountId: made.id }
+      })
+      crmAccountIds.push(accountId)
+      await expect(setAltaMotivo(todos(), accountId, { motivo: 'DESPUES', perdido: false })).resolves.toMatchObject({ motivo: 'DESPUES' })
+    })
+
+    it('un no-op no mueve lastTouchAt', async () => {
+      const c = await altaConCuenta()
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'PRECIO', perdido: false })
+      const leer = () => prisma.crmAccount.findUniqueOrThrow({ where: { id: c.accountId }, select: { lastTouchAt: true } })
+      const antes = await leer()
+      await new Promise(r => setTimeout(r, 20))
+      await setAltaMotivo(todos(), c.accountId, { motivo: 'PRECIO', perdido: false })
+      expect(await leer()).toEqual(antes)
+    })
+
     it('🔴 cuando el negocio ya activó (cobró) → 409 CRM_ALTA_TERMINADA y no escribe', async () => {
       const c = await altaConCuenta()
       await sale(c.venueId, { source: 'TPV', payment: { source: 'TPV' } })
@@ -1793,7 +1855,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       expect(await eventos(c.accountId)).toHaveLength(0)
     })
 
-    it('🔴 una cuenta del CRM sin organización → 409 CRM_ALTA_TERMINADA', async () => {
+    it('🔴 una cuenta del CRM sin organización → 409 CRM_NO_ES_ALTA', async () => {
       const { organizationId } = await altaConCuenta()
       const solo = await prisma.crmAccount.findFirstOrThrow({ where: { organizationId }, select: { stageId: true } })
       const sinOrg = await prisma.crmAccount.create({
@@ -1803,7 +1865,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       crmAccountIds.push(sinOrg.id)
       await expect(setAltaMotivo(todos(), sinOrg.id, { motivo: null, perdido: true })).rejects.toMatchObject({
         statusCode: 409,
-        code: 'CRM_ALTA_TERMINADA',
+        code: 'CRM_NO_ES_ALTA',
       })
     })
   })

@@ -407,7 +407,11 @@ export const altaMotivoSchema = z.object({
   body: z
     .object({
       motivo: z.enum(MOTIVOS_DEL_ALTA, { errorMap: () => ({ message: 'Ese motivo no existe' }) }).nullable(),
-      texto: z.string().trim().min(1, 'Escribe el motivo').max(200, 'El motivo es muy largo (máximo 200 letras)').optional(),
+      texto: z
+        .string({ invalid_type_error: 'El motivo debe ser un texto' })
+        .trim()
+        .max(200, 'El motivo es muy largo (máximo 200 letras)')
+        .optional(),
       perdido: z.boolean({ required_error: 'Falta decir si se perdió', invalid_type_error: 'Falta decir si se perdió' }),
     })
     .superRefine(({ motivo, texto }, ctx) => {

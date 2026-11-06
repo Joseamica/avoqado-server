@@ -560,6 +560,7 @@ describe('POST /crm/accounts/:id/usa (C1, tarea 7)', () => {
 
     access({ verScope: 'propios', editarScope: 'propios' })
     prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: 'caccounta0000000000000001' })
     prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({ usaManual: 'POS', organizationId: 'corgclient000000000000001' })
     prismaMock.crmTimelineEvent.createMany.mockResolvedValue({ count: 1 })
     // `appWithErrors` has no body parser: this one sends JSON, so it goes through `app` and reads the 200 as is.
@@ -594,6 +595,7 @@ describe('POST /crm/accounts/:id/alta (C1, tarea 8)', () => {
 
     access({ verScope: 'propios', editarScope: 'propios' })
     prismaMock.crmAccount.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ id: 'caccounta0000000000000001' })
     prismaMock.crmAccount.findUniqueOrThrow.mockResolvedValue({
       altaMotivo: 'PRECIO',
       altaMotivoTexto: null,
