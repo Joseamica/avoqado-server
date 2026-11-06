@@ -13,6 +13,8 @@ export interface OnlineOrderingConfig {
   manualPause: boolean
   pausedUntil: string | null
   hours: HorarioSemanal | null
+  /** Tienda híbrida: `true` = «Mi equipo» confirma cada pedido; `false` = «Nadie» (nace aceptado y se paga en caja). */
+  requiresAcceptance: boolean
 }
 
 export type OnlineOrderingSettingsPatch = Partial<OnlineOrderingConfig>

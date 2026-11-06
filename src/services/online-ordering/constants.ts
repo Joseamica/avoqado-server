@@ -1,4 +1,4 @@
-import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, PaymentStatus } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderPaymentMode, OnlineOrderStatus, PaymentStatus, type VenueType } from '@prisma/client'
 
 /** Estados del pedido en línea que todavía esperan algo del restaurante. */
 export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
@@ -83,3 +83,30 @@ export const CARD_CHECKOUT_TTL_MINUTES = 30
 export const CARD_STUCK_ALERT_MINUTES = 15
 /** Fase 2: cargos por pasada del conciliador; lo que sobre lo toma la siguiente. */
 export const CARD_RECONCILE_BATCH = 50
+
+/** Tienda híbrida (R37): giros para los que el panel SUGIERE «Nadie» (sobre `Venue.type`). Sólo sugiere; el servidor nunca lo elige solo. */
+export const NO_ONE_VENUE_TYPES: readonly VenueType[] = [
+  'RETAIL_STORE',
+  'JEWELRY',
+  'CLOTHING',
+  'ELECTRONICS',
+  'PHARMACY',
+  'CONVENIENCE_STORE',
+  'SUPERMARKET',
+  'LIQUOR_STORE',
+  'FURNITURE',
+  'HARDWARE',
+  'BOOKSTORE',
+  'PET_STORE',
+  'TELECOMUNICACIONES',
+  'SALON',
+  'SPA',
+  'FITNESS',
+  'CLINIC',
+  'VETERINARY',
+  'AUTO_SERVICE',
+  'LAUNDRY',
+  'REPAIR_SHOP',
+] // ponytail: el brief también nombraba FITNESS_STUDIO, que no existe en `VenueType` (sólo en otro enum); FITNESS ya lo cubre.
+/** Tienda híbrida: «Nadie» sólo se enciende si algún aparato consultó la lista «por cobrar» en este plazo. */
+export const FOLIO_DEVICE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
