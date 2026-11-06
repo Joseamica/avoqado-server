@@ -9,6 +9,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { LIMITE_INVALIDO, limiteInvalido } from '@/services/dashboard/discount.dashboard.service'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
@@ -294,6 +295,7 @@ export async function createCouponCode(venueId: string, data: CreateCouponCodeRe
   if (!discount) {
     throw new NotFoundError('El descuento no existe')
   }
+  if (limiteInvalido({ maxUses: data.maxUses, maxUsesPerCustomer: data.maxUsesPerCustomer })) throw new BadRequestError(LIMITE_INVALIDO)
 
   // Normalize code to uppercase
   const normalizedCode = data.code.toUpperCase().trim()
@@ -373,6 +375,9 @@ export async function updateCouponCode(venueId: string, couponId: string, data: 
   })
   if (!existing) {
     throw new NotFoundError('El cupón no existe')
+  }
+  if (limiteInvalido({ maxUses: data.maxUses, maxUsesPerCustomer: data.maxUsesPerCustomer }, existing)) {
+    throw new BadRequestError(LIMITE_INVALIDO)
   }
 
   // If updating code, normalize and check uniqueness

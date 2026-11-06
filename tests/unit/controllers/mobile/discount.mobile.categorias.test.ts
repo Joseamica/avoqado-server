@@ -102,4 +102,42 @@ describe('Descuentos desde las apps · «Categorías» sin categorías', () => {
     expect(prismaMock.discount.update).not.toHaveBeenCalled()
     expect(prismaMock.discount.create).not.toHaveBeenCalled()
   })
+
+  it('🔴 iOS reenvía el alcance igual al apagar uno viejo «Categorías» sin categorías: pasa (Codex r4 #1)', async () => {
+    prismaMock.discount.findFirst.mockResolvedValue(guardado({ scope: 'CATEGORY', targetCategoryIds: [], updatedAt: new Date() }))
+    prismaMock.discount.update.mockResolvedValue(
+      guardado({ scope: 'CATEGORY', active: false, minPurchaseAmount: null, maxDiscountAmount: null, getDiscountPercent: null }),
+    )
+    const res = respuesta()
+    await updateDiscount(
+      pedido({ name: 'Pan', type: 'PERCENTAGE', value: 10, scope: 'CATEGORY', active: false }, { venueId: 'venue-1', discountId: 'd1' }),
+      res,
+    )
+    expect(res.status).not.toHaveBeenCalledWith(400)
+    expect(prismaMock.discount.update).toHaveBeenCalled()
+  })
+
+  it('🔴 límites de uso en 0 o negativos: 400 al crear y al cambiarlos; un 0 viejo reenviado igual pasa (Codex r4 #2)', async () => {
+    const r1 = respuesta()
+    await createDiscount(pedido({ name: 'Pan', type: 'PERCENTAGE', value: 10, maxTotalUses: 0 }), r1)
+    expect(r1.status).toHaveBeenCalledWith(400)
+    expect(r1.json).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado' }),
+    )
+    expect(prismaMock.discount.create).not.toHaveBeenCalled()
+
+    prismaMock.discount.findFirst.mockResolvedValue(guardado({ maxUsesPerCustomer: null }))
+    const r2 = respuesta()
+    await updateDiscount(pedido({ maxUsesPerCustomer: -1 }, { venueId: 'venue-1', discountId: 'd1' }), r2)
+    expect(r2.status).toHaveBeenCalledWith(400)
+    expect(prismaMock.discount.update).not.toHaveBeenCalled()
+
+    prismaMock.discount.findFirst.mockResolvedValue(guardado({ maxTotalUses: 0 }))
+    prismaMock.discount.update.mockResolvedValue(
+      guardado({ maxTotalUses: 0, minPurchaseAmount: null, maxDiscountAmount: null, getDiscountPercent: null }),
+    )
+    const r3 = respuesta()
+    await updateDiscount(pedido({ maxTotalUses: 0, active: false }, { venueId: 'venue-1', discountId: 'd1' }), r3)
+    expect(r3.status).not.toHaveBeenCalledWith(400)
+  })
 })

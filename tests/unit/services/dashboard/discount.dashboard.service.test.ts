@@ -530,11 +530,46 @@ describe('Discount Dashboard Service', () => {
       expect((prismaMock.discount.update.mock.calls[0][0] as any).where).toEqual({ id: 'discount-123' })
     })
 
+    it('🔴 un descuento viejo «Categorías» sin categorías se apaga aunque el alcance llegue repetido (como lo manda iOS; Codex r4 #1)', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ scope: 'CATEGORY', targetCategoryIds: [] }) as any)
+      prismaMock.discount.update.mockResolvedValue({ ...createMockDiscount({ active: false }), customerGroup: null } as any)
+      await updateDiscount('venue-123', 'discount-123', { scope: 'CATEGORY', active: false, name: 'Otro nombre' })
+      await updateDiscount('venue-123', 'discount-123', { scope: 'CATEGORY', targetCategoryIds: [], active: false })
+      expect(prismaMock.discount.update).toHaveBeenCalledTimes(2)
+    })
+
     it('crear por «Categorías» sin lista (MCP u otra puerta sin Zod): 400', async () => {
       await expect(createDiscount('venue-123', { name: 'Pan', type: 'PERCENTAGE', value: 10, scope: 'CATEGORY' } as any)).rejects.toThrow(
         SIN,
       )
       expect(prismaMock.discount.create).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('D14 · límites de uso (Codex r4 #2/#3)', () => {
+    const LIM = 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado'
+    it('🔴 crear con 0 o negativos (MCP u otra puerta sin Zod): 400', async () => {
+      await expect(createDiscount('venue-123', { name: 'Pan', type: 'PERCENTAGE', value: 10, maxTotalUses: 0 } as any)).rejects.toThrow(LIM)
+      await expect(
+        createDiscount('venue-123', { name: 'Pan', type: 'PERCENTAGE', value: 10, maxUsesPerCustomer: -1 } as any),
+      ).rejects.toThrow(LIM)
+      expect(prismaMock.discount.create).not.toHaveBeenCalled()
+    })
+    it('🔴 editar a 0 un límite que era 5: 400; un 0 viejo reenviado igual pasa', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ maxTotalUses: 5 }) as any)
+      await expect(updateDiscount('venue-123', 'discount-123', { maxTotalUses: 0 })).rejects.toThrow(LIM)
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ maxTotalUses: 0 }) as any)
+      prismaMock.discount.update.mockResolvedValue({ ...createMockDiscount(), customerGroup: null } as any)
+      await updateDiscount('venue-123', 'discount-123', { maxTotalUses: 0, active: false })
+      expect(prismaMock.discount.update).toHaveBeenCalledTimes(1)
+    })
+    it('🔴 null vuelve ilimitado un límite que era 5 (vaciar el campo en el panel)', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue(createMockDiscount({ maxTotalUses: 5, maxUsesPerCustomer: 2 }) as any)
+      prismaMock.discount.update.mockResolvedValue({ ...createMockDiscount(), customerGroup: null } as any)
+      await updateDiscount('venue-123', 'discount-123', { maxTotalUses: null, maxUsesPerCustomer: null })
+      const data = (prismaMock.discount.update.mock.calls[0][0] as any).data
+      expect(data.maxTotalUses).toBeNull()
+      expect(data.maxUsesPerCustomer).toBeNull()
     })
   })
 

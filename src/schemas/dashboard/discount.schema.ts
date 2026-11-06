@@ -209,8 +209,9 @@ export const updateDiscountBodySchema = z
       .nullable(),
 
     // Usage limits
-    maxTotalUses: enteroDesde(1).optional().nullable(),
-    maxUsesPerCustomer: enteroDesde(1).optional().nullable(),
+    // Al editar, 0 o negativo lo decide el servicio frente a lo guardado (limiteInvalido); null = sin límite.
+    maxTotalUses: Numero.int('Debe ser un número entero').optional().nullable(),
+    maxUsesPerCustomer: Numero.int('Debe ser un número entero').optional().nullable(),
 
     // Comp-specific
     requiresApproval: z.boolean().optional(),

@@ -147,9 +147,10 @@ describe('D14 · números en cero o negativos (Codex r1 #3): en español', () =>
       expect(r.success).toBe(false)
       expect(mensajes(r)).not.toMatch(SIN_INGLES)
     }
-    const u = updateDiscountBodySchema.safeParse({ maxTotalUses: 0 })
-    expect(u.success).toBe(false)
-    expect(mensajes(u)).not.toMatch(SIN_INGLES)
+    // Al editar, el 0 lo decide el servicio frente a lo guardado (un 0 viejo reenviado igual pasa); null = sin límite.
+    expect(updateDiscountBodySchema.safeParse({ maxTotalUses: 0 }).success).toBe(true)
+    expect(updateDiscountBodySchema.safeParse({ maxTotalUses: null }).success).toBe(true)
+    expect(mensajes(updateDiscountBodySchema.safeParse({ maxTotalUses: 1.5 }))).not.toMatch(SIN_INGLES)
   })
 
   it('cupones: maxUses en 0 y compañía', () => {
@@ -162,7 +163,8 @@ describe('D14 · números en cero o negativos (Codex r1 #3): en español', () =>
       expect(r.success).toBe(false)
       expect(mensajes(r)).not.toMatch(SIN_INGLES)
     }
-    expect(mensajes(updateCouponBodySchema.safeParse({ maxUses: 0 }))).not.toMatch(SIN_INGLES)
+    expect(updateCouponBodySchema.safeParse({ maxUses: 0 }).success).toBe(true) // lo decide el servicio
+    expect(updateCouponBodySchema.safeParse({ maxUses: null }).success).toBe(true)
     const b = bulkGenerateCouponsBodySchema.safeParse({ discountId: 'd', quantity: 5, maxUsesPerCode: 0, codeLength: 2 })
     expect(b.success).toBe(false)
     expect(mensajes(b)).not.toMatch(SIN_INGLES)

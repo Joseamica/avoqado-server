@@ -14,6 +14,8 @@ import {
   CAMBIO_CRUZADO,
   dondeEscribir,
   esCambioCruzado,
+  LIMITE_INVALIDO,
+  limiteInvalido,
   quedaSinCategorias,
   SIN_CATEGORIAS,
 } from '../../services/dashboard/discount.dashboard.service'
@@ -147,6 +149,9 @@ export async function createDiscount(req: Request, res: Response) {
     // D14 (Codex r1 #2): iOS manda «Categorías» sin lista; iOS lo lee como «todas» y el panel como «ninguna».
     if (formaInvalida(scope, targetCategoryIds)) {
       return res.status(400).json({ success: false, message: FORMA_INVALIDA })
+    }
+    if (limiteInvalido({ maxTotalUses, maxUsesPerCustomer })) {
+      return res.status(400).json({ success: false, message: LIMITE_INVALIDO })
     }
     if (quedaSinCategorias({ scope, targetCategoryIds })) {
       return res.status(400).json({ success: false, message: SIN_CATEGORIAS })
@@ -290,6 +295,9 @@ export async function updateDiscount(req: Request, res: Response) {
 
     if (formaInvalida(scope, targetCategoryIds)) {
       return res.status(400).json({ success: false, message: FORMA_INVALIDA })
+    }
+    if (limiteInvalido({ maxTotalUses, maxUsesPerCustomer }, existing)) {
+      return res.status(400).json({ success: false, message: LIMITE_INVALIDO })
     }
     if (quedaSinCategorias({ scope, targetCategoryIds }, existing)) {
       return res.status(400).json({ success: false, message: SIN_CATEGORIAS })

@@ -76,8 +76,9 @@ export const updateCouponBodySchema = z.object({
     .max(30, 'El código puede tener hasta 30 caracteres')
     .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
-  maxUses: enteroDesde(1).optional().nullable(),
-  maxUsesPerCustomer: enteroDesde(1).optional().nullable(),
+  // Al editar, 0 o negativo lo decide el servicio frente a lo guardado (limiteInvalido); null = sin límite.
+  maxUses: Numero.int('Debe ser un número entero').optional().nullable(),
+  maxUsesPerCustomer: Numero.int('Debe ser un número entero').optional().nullable(),
   minPurchaseAmount: NoNegativo.optional().nullable(),
   validFrom: z.coerce.date().optional().nullable(),
   validUntil: z.coerce.date().optional().nullable(),

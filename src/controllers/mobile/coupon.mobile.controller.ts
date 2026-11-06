@@ -9,6 +9,7 @@
 
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
+import { LIMITE_INVALIDO, limiteInvalido } from '../../services/dashboard/discount.dashboard.service'
 import logger from '../../config/logger'
 
 // ==========================================
@@ -76,6 +77,10 @@ export async function createCoupon(req: Request, res: Response) {
   try {
     const { venueId } = req.params
     const { discountId, code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
+    // D14 (Codex r4 #2): ANDROID manda los usos tal como se escriben; 0 dejaba el cupón agotado desde el inicio.
+    if (limiteInvalido({ maxUses, maxUsesPerCustomer })) {
+      return res.status(400).json({ success: false, message: LIMITE_INVALIDO })
+    }
 
     if (!discountId) {
       return res.status(400).json({ success: false, message: 'discountId es requerido' })
@@ -184,6 +189,10 @@ export async function updateCoupon(req: Request, res: Response) {
     }
 
     const { code, maxUses, maxUsesPerCustomer, minPurchaseAmount, validFrom, validUntil, active } = req.body
+    // Un 0 viejo que ANDROID reenvía igual al editar otra cosa pasa; sólo se revisa lo que cambia.
+    if (limiteInvalido({ maxUses, maxUsesPerCustomer }, existing)) {
+      return res.status(400).json({ success: false, message: LIMITE_INVALIDO })
+    }
 
     // If updating code, normalize and check uniqueness
     let normalizedCode: string | undefined = undefined

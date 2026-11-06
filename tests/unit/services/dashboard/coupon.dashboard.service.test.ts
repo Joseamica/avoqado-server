@@ -309,6 +309,28 @@ describe('Coupon Dashboard Service', () => {
     })
   })
 
+  describe('D14 · límites de uso (Codex r4 #2): 0 y negativos no, null = sin límite', () => {
+    const LIM = 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado'
+    it('🔴 crear con 0 usos: 400 en español', async () => {
+      prismaMock.discount.findFirst.mockResolvedValue({ id: 'discount-123', venueId: 'venue-123' } as any)
+      prismaMock.couponCode.findUnique.mockResolvedValue(null)
+      await expect(createCouponCode('venue-123', { discountId: 'discount-123', code: 'PAN10', maxUses: 0 })).rejects.toThrow(LIM)
+      expect(prismaMock.couponCode.create).not.toHaveBeenCalled()
+    })
+    it('🔴 editar a 0 un cupón que tenía 5: 400', async () => {
+      prismaMock.couponCode.findFirst.mockResolvedValue(createMockCoupon({ maxUses: 5 }) as any)
+      await expect(updateCouponCode('venue-123', 'coupon-123', { maxUses: 0 })).rejects.toThrow(LIM)
+      expect(prismaMock.couponCode.update).not.toHaveBeenCalled()
+    })
+    it('un 0 viejo que se reenvía igual pasa, y null lo vuelve ilimitado', async () => {
+      prismaMock.couponCode.findFirst.mockResolvedValue(createMockCoupon({ maxUses: 0 }) as any)
+      prismaMock.couponCode.update.mockResolvedValue({ ...createMockCoupon(), discount: { id: 'discount-123', value: new Decimal(10) } } as any)
+      await updateCouponCode('venue-123', 'coupon-123', { maxUses: 0, active: false })
+      await updateCouponCode('venue-123', 'coupon-123', { maxUses: null })
+      expect((prismaMock.couponCode.update.mock.calls[1][0] as any).data.maxUses).toBeNull()
+    })
+  })
+
   describe('updateCouponCode', () => {
     it('should update coupon code successfully', async () => {
       const existingCoupon = createMockCoupon()

@@ -350,15 +350,43 @@ export function quedaSinCategorias(
   cambio: { scope?: string | null; targetCategoryIds?: string[] | null },
   guardado?: { scope: string; targetCategoryIds: string[] },
 ): boolean {
-  if (guardado && !tocaCategorias(cambio)) return false
+  if (guardado && !cambiaCategorias(cambio, guardado)) return false
   const scope = cambio.scope ?? guardado?.scope ?? 'ORDER'
   const categorias = cambio.targetCategoryIds ?? guardado?.targetCategoryIds ?? []
   // Una lista con otra forma (p. ej. `{ set: [] }` de Prisma por la puerta sin Zod) cuenta como vacía (Codex r2 #2).
   return scope === 'CATEGORY' && (!Array.isArray(categorias) || categorias.length === 0)
 }
 
-export const tocaCategorias = (cambio: { scope?: unknown; targetCategoryIds?: unknown }) =>
-  cambio.scope !== undefined || cambio.targetCategoryIds !== undefined
+/**
+ * ¿El cambio mueve de verdad el alcance o la lista frente a lo guardado? Las apps (iOS) reenvían `scope` igual al apagar o
+ * renombrar: eso no cuenta (Codex r4 #1). Una lista con otra forma sí cuenta.
+ */
+export function cambiaCategorias(
+  cambio: { scope?: unknown; targetCategoryIds?: unknown },
+  guardado: { scope: string; targetCategoryIds: string[] },
+): boolean {
+  const lista = cambio.targetCategoryIds
+  const mismaLista =
+    lista === undefined ||
+    (Array.isArray(lista) &&
+      lista.length === guardado.targetCategoryIds.length &&
+      lista.every(id => guardado.targetCategoryIds.includes(id)))
+  return (cambio.scope !== undefined && cambio.scope !== guardado.scope) || !mismaLista
+}
+
+export const LIMITE_INVALIDO = 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado'
+
+/**
+ * D14 (Codex r4 #2): un límite de usos va de 1 en adelante; `null` = sin límite. Al editar sólo se revisa lo que cambia frente
+ * a lo guardado: un 0 viejo que una app reenvía igual al editar otra cosa pasa. Lo usan panel, MCP y apps, en descuentos y cupones.
+ */
+export function limiteInvalido(cambio: Record<string, unknown>, guardado?: Record<string, unknown>): boolean {
+  return Object.entries(cambio).some(([campo, valor]) => {
+    if (valor === undefined || valor === null) return false
+    if (guardado && guardado[campo] === valor) return false
+    return !(typeof valor === 'number' && Number.isInteger(valor) && valor >= 1)
+  })
+}
 
 export const CAMBIO_CRUZADO = 'Alguien más cambió este descuento mientras lo editabas; vuelve a abrirlo e inténtalo otra vez'
 
@@ -366,13 +394,19 @@ export const CAMBIO_CRUZADO = 'Alguien más cambió este descuento mientras lo e
  * Codex r2 #3: dos cambios parciales a la vez (uno pone «Categorías», otro vacía la lista) pasaban la regla por separado y
  * juntos la rompían. Un cambio que toca alcance o lista escribe sólo si el descuento sigue como se leyó (`updatedAt`).
  */
-export const dondeEscribir = (id: string, guardado: { updatedAt: Date }, cambio: { scope?: unknown; targetCategoryIds?: unknown }) =>
-  tocaCategorias(cambio) ? { id, updatedAt: guardado.updatedAt } : { id }
+export const dondeEscribir = (
+  id: string,
+  guardado: { updatedAt: Date; scope: string; targetCategoryIds: string[] },
+  cambio: { scope?: unknown; targetCategoryIds?: unknown },
+) => (cambiaCategorias(cambio, guardado) ? { id, updatedAt: guardado.updatedAt } : { id })
 
 export const esCambioCruzado = (error: unknown) => (error as { code?: string } | null)?.code === 'P2025'
 
 export async function createDiscount(venueId: string, data: CreateDiscountRequest, createdById?: string) {
   if (quedaSinCategorias(data)) throw new BadRequestError(SIN_CATEGORIAS)
+  if (limiteInvalido({ maxTotalUses: data.maxTotalUses, maxUsesPerCustomer: data.maxUsesPerCustomer })) {
+    throw new BadRequestError(LIMITE_INVALIDO)
+  }
 
   // Validate customer group if provided
   if (data.customerGroupId) {
@@ -499,6 +533,9 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
     throw new NotFoundError('El descuento no existe')
   }
   if (quedaSinCategorias(data, existing)) throw new BadRequestError(SIN_CATEGORIAS)
+  if (limiteInvalido({ maxTotalUses: data.maxTotalUses, maxUsesPerCustomer: data.maxUsesPerCustomer }, existing)) {
+    throw new BadRequestError(LIMITE_INVALIDO)
+  }
 
   // Validate customer group if provided
   if (data.customerGroupId) {
@@ -574,7 +611,7 @@ export async function updateDiscount(venueId: string, discountId: string, data: 
       },
     })
     .catch(error => {
-      throw esCambioCruzado(error) && tocaCategorias(data) ? new ConflictError(CAMBIO_CRUZADO) : error
+      throw esCambioCruzado(error) && cambiaCategorias(data, existing) ? new ConflictError(CAMBIO_CRUZADO) : error
     })
 
   logger.info(`🎟️ Discount updated: ${discount.name} (${discount.id})`)
