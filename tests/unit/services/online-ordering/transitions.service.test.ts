@@ -346,6 +346,23 @@ describe('rejectOnlineOrder', () => {
 })
 
 describe('expireOnlineOrder', () => {
+  it('R52: con un reloj (el trabajo de cada 30 s), la hora se lee DESPUÉS del candado: el CAS y `expiredAt` usan la hora de la escritura', async () => {
+    const PASADA = new Date('2026-10-14T18:30:00.000Z')
+    const BAJO_CANDADO = new Date('2026-10-14T18:30:07.000Z')
+    let ahora = PASADA
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async () => {
+      ahora = BAJO_CANDADO // la espera del candado de la orden
+      return [{ id: 'ord1' }]
+    })
+    await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', reloj: () => ahora })).resolves.toEqual({
+      outcome: 'OK',
+      status: 'EXPIRED',
+    })
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+    expect(cas.where.acceptDeadlineAt).toEqual({ lte: BAJO_CANDADO })
+    expect(cas.data).toEqual({ status: 'EXPIRED', expiredAt: BAJO_CANDADO })
+  })
+
   it('sólo vence si la hora ya pasó y se audita con actor de sistema', async () => {
     const r = await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
     const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any

@@ -135,7 +135,7 @@ describe('cerrarCanceladasReleyendo (R12: la bandeja, las listas y el job releen
   it('lee con tope (cliente raíz) y cierra cada candidato en SU transacción, con el candado antes de un CAS que vuelve a exigir la cuenta cancelada', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([fila('A'), fila('B', 'DELETED')] as any)
 
-    const won = await cerrarCanceladasReleyendo({ venueId: 'v1' }, NOW)
+    const won = await cerrarCanceladasReleyendo({ venueId: 'v1' }, () => NOW)
 
     expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledWith({
       where: { venueId: 'v1', status: { in: OPEN }, order: CANCELADA },
@@ -164,7 +164,7 @@ describe('cerrarCanceladasReleyendo (R12: la bandeja, las listas y el job releen
       return leidas
     }) as any)
 
-    const won = await cerrarCanceladasReleyendo({ venueId: 'v1' }, NOW)
+    const won = await cerrarCanceladasReleyendo({ venueId: 'v1' }, () => NOW)
 
     expect(won).toEqual([])
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
@@ -179,10 +179,34 @@ describe('cerrarCanceladasReleyendo (R12: la bandeja, las listas y el job releen
       .mockRejectedValueOnce(new Error('lock timeout'))
     const error = jest.spyOn(logger, 'error')
 
-    const won = await cerrarCanceladasReleyendo({}, NOW)
+    const won = await cerrarCanceladasReleyendo({}, () => NOW)
 
     expect(won.map(w => w.id)).toEqual(['oo-C'])
     expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ onlineOrderId: 'oo-B' }))
     expect((prismaMock.onlineOrder.findMany.mock.calls[0][0] as any).where).not.toHaveProperty('venueId')
+  })
+})
+
+describe('R52 · cerrarCanceladasReleyendo lee el reloj al escribir', () => {
+  it('`cancelledAt` es la hora leída DESPUÉS del candado de la orden, no la hora con la que empezó la pasada o la petición', async () => {
+    const PASADA = new Date('2026-11-06T09:59:50.000Z')
+    const BAJO_CANDADO = new Date('2026-11-06T10:00:05.000Z')
+    let ahora = PASADA
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) => {
+      ahora = BAJO_CANDADO // la espera del candado
+      return [{ id: orderId }]
+    })
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.onlineOrder.findMany.mockResolvedValue([fila('A')] as any)
+
+    const won = await cerrarCanceladasReleyendo({}, () => ahora)
+
+    expect(won.map(w => w.id)).toEqual(['oo-A'])
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({
+      status: 'CANCELLED_BY_STAFF',
+      cancelledAt: BAJO_CANDADO,
+      cancelledBy: CANCELLED_ELSEWHERE,
+    })
   })
 })

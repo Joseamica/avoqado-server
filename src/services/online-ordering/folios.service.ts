@@ -17,7 +17,7 @@ import { getSettings } from './settings.service'
 import { notifyOrderEvent } from './notifications.service'
 import { announceAccepted, casTransitionInTx, prepMinutes, settled, type CasResult, type TransitionResult } from './transitions.service'
 import { emitOnlineOrderUpdated } from './traySocket'
-import type { ReadCandidates } from './types'
+import type { ReadCandidates, Reloj } from './types'
 
 /**
  * R18: la cuenta de un folio está SALDADA (`FOLIO_PAID_STATUSES`, el espejo de `esVentaCerrada`) y viva. R5: NO excluye las cuentas
@@ -53,7 +53,7 @@ const VENTANA_DE_CERRADOS_MS = 7 * 24 * 3_600_000
  */
 export async function prepararFolioPagadoEnTx(
   tx: Prisma.TransactionClient,
-  a: { venueId: string; orderId: string; marcarCocina: boolean; minutes: number; now?: Date },
+  a: { venueId: string; orderId: string; marcarCocina: boolean; minutes: number; now?: Date; reloj?: Reloj },
 ): Promise<CasResult | { r: 'NOT_FOLIO' }> {
   const pedido = await tx.onlineOrder.findFirst({
     where: { orderId: a.orderId, venueId: a.venueId },
@@ -67,6 +67,7 @@ export async function prepararFolioPagadoEnTx(
     venueId: a.venueId,
     orderId: a.orderId,
     now: a.now,
+    reloj: a.reloj, // R52: se lee bajo el candado
     onlineData: now => ({ acceptedAt: now, estimatedReadyAt: new Date(now.getTime() + a.minutes * 60_000) }),
     orderExtra: now => (a.marcarCocina ? { kitchenPendingAt: now } : {}),
   })
@@ -86,11 +87,13 @@ export async function prepararFolioPagado(i: {
   staffId: string | null
   estimatedMinutes?: number
   now?: Date
+  /** R52: el reloj de la pasada que lo llama; se lee bajo el candado. */
+  reloj?: Reloj
 }): Promise<TransitionResult> {
   const minutes = await prepMinutes(i.venueId, i.estimatedMinutes)
   const marcarCocina = await debeMarcarCocina(i.venueId, { orderId: i.orderId }) // nunca lanza
   const r = await prisma.$transaction(
-    tx => prepararFolioPagadoEnTx(tx, { venueId: i.venueId, orderId: i.orderId, marcarCocina, minutes, now: i.now }),
+    tx => prepararFolioPagadoEnTx(tx, { venueId: i.venueId, orderId: i.orderId, marcarCocina, minutes, now: i.now, reloj: i.reloj }),
     ORDER_LOCK_WAIT_BUDGET,
   )
   if (r.r === 'NOT_FOLIO') return { outcome: 'NOT_FOUND' }
@@ -108,10 +111,11 @@ export async function prepararFolioPagado(i: {
  * Decisión 18: todo folio por pagar cuya cuenta ya quedó saldada —por cualquier camino: la TPV, el POS, el panel, «Liquidar saldo»,
  * o pagado y reembolsado— pasa a «Por entregar». Lectura con tope (lo que sobre lo toma la siguiente pasada) y una transacción por
  * fila (`prepararFolioPagado`), que relee bajo el candado. Compite con el «aceptar» del aparato por el mismo CAS: gana uno.
+ * R52: `acceptedAt` lee `reloj` bajo el candado de cada fila, nunca la hora con la que empezó la pasada.
  */
 export async function syncPaidFolios(
   scope: { venueId?: string },
-  now: Date,
+  reloj: Reloj,
   readCandidates: ReadCandidates = read => read(),
 ): Promise<number> {
   const rows = await readCandidates(() =>
@@ -130,7 +134,7 @@ export async function syncPaidFolios(
   let won = 0
   for (const row of rows) {
     try {
-      const r = await prepararFolioPagado({ venueId: row.venueId, orderId: row.orderId, staffId: null, now })
+      const r = await prepararFolioPagado({ venueId: row.venueId, orderId: row.orderId, staffId: null, reloj })
       if (r.outcome === 'OK') won += 1
     } catch (error) {
       logger.error('[OnlineOrdering] no se pudo pasar a «Por entregar» un folio ya pagado (la pasada sigue)', {
@@ -149,19 +153,22 @@ export async function syncPaidFolios(
  * las cuentas abiertas, que no pasa por `conciliarPedidoEnLinea`), esta pasada lo revive a «Por entregar» (`ACCEPTED`), nunca a
  * «Entregado». Una transacción por fila, bajo el candado de la orden, y un CAS que repite el estado leído y la cuenta saldada. No
  * marca la cocina (decisión 19: la comanda, si sale, es del cobro que saldó) ni toca la cuenta.
+ * R52 (Codex f1 r4): `acceptedAt` es el reloj leído BAJO el candado. Con la hora de la pasada, una pasada de las 03:59:50 que revive a
+ * las 04:00:10 un folio saldado a las 04:00:05 lo fechaba «ayer», y el fin del día lo sacaba de «Por entregar» en la siguiente.
  */
 export async function syncPaidClosedFolios(
   scope: { venueId?: string },
-  now: Date,
+  reloj: Reloj,
   readCandidates: ReadCandidates = read => read(),
 ): Promise<number> {
+  const desde = new Date(reloj().getTime() - VENTANA_DE_CERRADOS_MS)
   const rows = await readCandidates(() =>
     prisma.onlineOrder.findMany({
       where: {
         ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
         requiresAcceptance: false,
         status: { in: FOLIO_CERRADO },
-        updatedAt: { gte: new Date(now.getTime() - VENTANA_DE_CERRADOS_MS) },
+        updatedAt: { gte: desde },
         order: CUENTA_SALDADA,
       },
       select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
@@ -172,22 +179,23 @@ export async function syncPaidClosedFolios(
   let won = 0
   for (const row of rows) {
     try {
-      const movido = await prisma.$transaction(async tx => {
-        if (!(await lockExistingOrderForPayment(tx, { venueId: row.venueId, orderId: row.orderId }))) return false
+      const acceptedAt = await prisma.$transaction(async tx => {
+        if (!(await lockExistingOrderForPayment(tx, { venueId: row.venueId, orderId: row.orderId }))) return null
+        const ahora = reloj() // R52: ya con el candado
         const cas = await tx.onlineOrder.updateMany({
           where: { id: row.id, status: row.status, requiresAcceptance: false, order: CUENTA_SALDADA },
-          data: { status: OnlineOrderStatus.ACCEPTED, acceptedAt: now },
+          data: { status: OnlineOrderStatus.ACCEPTED, acceptedAt: ahora },
         })
-        return cas.count === 1
+        return cas.count === 1 ? ahora : null
       }, ORDER_LOCK_WAIT_BUDGET)
-      if (!movido) continue
+      if (!acceptedAt) continue
       won += 1
       emitOnlineOrderUpdated({
         venueId: row.venueId,
         orderId: row.orderId,
         orderNumber: row.order.orderNumber,
         onlineStatus: OnlineOrderStatus.ACCEPTED,
-        now,
+        now: acceptedAt,
       })
       void notifyOrderEvent(row.orderId, 'ACCEPTED')
       void logAction({
@@ -217,14 +225,19 @@ export async function syncPaidClosedFolios(
  * (estado y `completedAt`): ni la cuenta, ni el dinero, ni la cocina; por eso no necesita el candado de la orden y basta el CAS por
  * fila sobre el estado, el `acceptedAt` (un folio revivido hoy no sale por un día viejo) y la cuenta viva (una cancelación no termina «Entregado»), con `requiresAcceptance:false` (si una persona lo entregó antes, el CAS pierde y no cuenta).
  * Lectura con tope (lo que sobre lo toma la siguiente pasada) y una escritura por fila; anuncia después, con actor de sistema.
+ * R52: el día se decide con el reloj leído al hacer ESTA lectura (no con la hora de la pasada), y nunca se cierra un folio que entró
+ * a la lista después de ese instante (`acceptedAt <= ahora`; la regla del día ya lo excluye salvo que la hora local retroceda en el
+ * corte). El CAS repite `acceptedAt`, así la decisión vale hasta la escritura (el reloj sólo avanza), y `completedAt` es la hora de
+ * la escritura.
  */
 export async function cerrarFoliosDelDiaTerminado(
   scope: { venueId?: string },
-  now: Date,
+  reloj: Reloj,
   readCandidates: ReadCandidates = read => read(),
 ): Promise<number> {
-  const rows = await readCandidates(
-    () => prisma.$queryRaw<
+  const rows = await readCandidates(() => {
+    const ahora = reloj() // R52: el día se decide al leer, también en cada reintento de la lectura
+    return prisma.$queryRaw<
       Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; acceptedAt: Date; orderNumber: string }>
     >`
       SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."acceptedAt", o."orderNumber"
@@ -234,16 +247,18 @@ export async function cerrarFoliosDelDiaTerminado(
         AND oo.status IN ('ACCEPTED', 'READY')
         AND o.status NOT IN ('CANCELLED', 'DELETED')
         ${scope.venueId !== undefined ? Prisma.sql`AND oo."venueId" = ${scope.venueId}` : Prisma.empty}
-        AND ${Prisma.raw(seAcaboElDiaDelNegocioDeSql('oo."acceptedAt"', 'oo."venueId"', instanteUtcSql(now)))}
+        AND oo."acceptedAt" <= ${utcTs(ahora)}
+        AND ${Prisma.raw(seAcaboElDiaDelNegocioDeSql('oo."acceptedAt"', 'oo."venueId"', instanteUtcSql(ahora)))}
       ORDER BY oo.id ASC
-      LIMIT ${SYNC_BATCH_SIZE}`,
-  )
+      LIMIT ${SYNC_BATCH_SIZE}`
+  })
   let won = 0
   for (const row of rows) {
     try {
+      const completedAt = reloj() // R52: la hora de la escritura
       const cas = await prisma.onlineOrder.updateMany({
         where: { id: row.id, status: row.status, requiresAcceptance: false, acceptedAt: row.acceptedAt, order: CUENTA_VIVA },
-        data: { status: OnlineOrderStatus.COMPLETED, completedAt: now },
+        data: { status: OnlineOrderStatus.COMPLETED, completedAt },
       })
       if (cas.count !== 1) continue
       won += 1
@@ -252,7 +267,7 @@ export async function cerrarFoliosDelDiaTerminado(
         orderId: row.orderId,
         orderNumber: row.orderNumber,
         onlineStatus: OnlineOrderStatus.COMPLETED,
-        now,
+        now: completedAt,
       })
       void logAction({
         staffId: null,
@@ -338,9 +353,12 @@ export type FolioSection = 'toPay' | 'toDeliver'
  * `INBOX_PAGE_SIZE` leída con `tope + 1` y sigue por `(createdAt, id)` con el cursor de la Bandeja; `counts` son exactos.
  * Sin `section`: la primera página de las dos. Con `section` y `cursor`: la siguiente de ésa y la otra vacía.
  * R43: antes de leer corre lo mismo que la Bandeja, así lo que la caja acaba de cobrar ya está en «Por entregar».
+ * R52: las sincronizaciones reciben el reloj (lo leen bajo el candado de cada fila), no la hora de la petición; `now` fija el reloj
+ * en las pruebas. La respuesta lleva la hora de después de sincronizar.
  */
 export async function listFolios(p: { venueId: string; section?: FolioSection; cursor?: string; now?: Date }) {
-  const now = p.now ?? new Date()
+  const fija = p.now
+  const reloj: Reloj = fija ? () => fija : () => new Date()
   // El cursor es de UNA sección: sin ella no hay forma no ambigua de aplicarlo (la ruta ya lo frena; esto cubre a quien llame directo).
   if (p.cursor && !p.section) throw new BadRequestError('El cursor necesita la sección a la que sigue', 'INVALID_CURSOR')
   const after = p.cursor ? fromActiveCursor(p.cursor) : null
@@ -350,11 +368,12 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
       error: error instanceof Error ? error.message : String(error),
     })
   }
-  await cerrarCanceladasReleyendo({ venueId: p.venueId }, now)
-    .then(won => announceCancelledElsewhere(won, now))
+  await cerrarCanceladasReleyendo({ venueId: p.venueId }, reloj)
+    .then(won => announceCancelledElsewhere(won, reloj()))
     .catch(warnSync('cerrar los pedidos de cuentas canceladas'))
-  await syncPaidFolios({ venueId: p.venueId }, now).catch(warnSync('pasar a «Por entregar» los folios pagados'))
-  await syncPaidClosedFolios({ venueId: p.venueId }, now).catch(warnSync('revivir los folios cerrados ya saldados'))
+  await syncPaidFolios({ venueId: p.venueId }, reloj).catch(warnSync('pasar a «Por entregar» los folios pagados'))
+  await syncPaidClosedFolios({ venueId: p.venueId }, reloj).catch(warnSync('revivir los folios cerrados ya saldados'))
+  const now = reloj()
 
   const porPagar = foliosPorPagarWhere(p.venueId)
   const porEntregar = { venueId: p.venueId, requiresAcceptance: false, status: OnlineOrderStatus.ACCEPTED }

@@ -25,6 +25,13 @@ export interface AcceptingState {
   config: OnlineOrderingConfig
 }
 
+/**
+ * R52 (parada «reloj viejo»): el reloj que se lee EN EL MOMENTO de escribir una hora bajo el candado o en un CAS, o de decidir algo de
+ * días o plazos. Nunca una hora capturada al empezar la pasada o la petición: ésa sólo elige candidatos. En producción es
+ * `() => new Date()`; las pruebas lo fijan o lo hacen avanzar.
+ */
+export type Reloj = () => Date
+
 /** A10: cómo se hace la lectura de candidatos de una sincronización (el job la envuelve en su reintento por conexión). */
 export type ReadCandidates = <T>(read: () => Promise<T>) => Promise<T>
 

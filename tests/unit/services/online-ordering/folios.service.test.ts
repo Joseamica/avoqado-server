@@ -190,7 +190,7 @@ describe('syncPaidFolios', () => {
       { orderId: 'ord2', venueId: 'v1' },
     ] as any)
 
-    await expect(syncPaidFolios({ venueId: 'v1' }, NOW)).resolves.toBe(2)
+    await expect(syncPaidFolios({ venueId: 'v1' }, () => NOW)).resolves.toBe(2)
 
     expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledWith({
       where: { venueId: 'v1', requiresAcceptance: false, status: 'PENDING_ACCEPTANCE', order: CUENTA_SALDADA },
@@ -201,7 +201,7 @@ describe('syncPaidFolios', () => {
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
     expect(logAction).toHaveBeenCalledTimes(2)
     // El job lo corre para todos los negocios.
-    await syncPaidFolios({}, NOW)
+    await syncPaidFolios({}, () => NOW)
     expect((prismaMock.onlineOrder.findMany.mock.calls[1][0] as any).where).not.toHaveProperty('venueId')
   })
 
@@ -213,7 +213,7 @@ describe('syncPaidFolios', () => {
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('se cayó la conexión'))
     const read = jest.fn((leer: () => Promise<unknown>) => leer())
 
-    await expect(syncPaidFolios({}, NOW, read as any)).resolves.toBe(1)
+    await expect(syncPaidFolios({}, () => NOW, read as any)).resolves.toBe(1)
     expect(read).toHaveBeenCalledTimes(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ orderId: 'ord1' }))
   })
@@ -221,7 +221,7 @@ describe('syncPaidFolios', () => {
   it('una fila que perdió contra el aparato (STALE) no cuenta', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([{ orderId: 'ord1', venueId: 'v1' }] as any)
     prismaMock.onlineOrder.findFirst.mockResolvedValue(folio({ status: 'ACCEPTED' }) as any)
-    await expect(syncPaidFolios({ venueId: 'v1' }, NOW)).resolves.toBe(0)
+    await expect(syncPaidFolios({ venueId: 'v1' }, () => NOW)).resolves.toBe(0)
   })
 })
 
@@ -236,7 +236,7 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
 
   it('R4: lee sólo folios cerrados en los últimos 7 días con la cuenta saldada y viva, con tope y orden estable', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([])
-    await syncPaidClosedFolios({ venueId: 'v1' }, NOW)
+    await syncPaidClosedFolios({ venueId: 'v1' }, () => NOW)
     expect(prismaMock.onlineOrder.findMany).toHaveBeenCalledWith({
       where: {
         venueId: 'v1',
@@ -254,7 +254,7 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
   it('cada fila en su transacción, bajo el candado de la orden, con un CAS que repite el estado leído y la cuenta saldada; sin marca de cocina', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A'), cerrado('B', 'REJECTED')] as any)
 
-    await expect(syncPaidClosedFolios({}, NOW)).resolves.toBe(2)
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(2)
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
@@ -291,7 +291,7 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
     prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 0 })
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([{ id: 'ord-A' }]).mockResolvedValueOnce([])
 
-    await expect(syncPaidClosedFolios({}, NOW)).resolves.toBe(0)
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(0)
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
     expect(notifyOrderEvent).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
@@ -300,7 +300,7 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
   it('una fila que truena se registra y la pasada sigue', async () => {
     prismaMock.onlineOrder.findMany.mockResolvedValue([cerrado('A'), cerrado('B')] as any)
     ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce(new Error('candado'))
-    await expect(syncPaidClosedFolios({}, NOW)).resolves.toBe(1)
+    await expect(syncPaidClosedFolios({}, () => NOW)).resolves.toBe(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ onlineOrderId: 'oo-A' }))
   })
 })
@@ -328,7 +328,7 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
 
   it('lee con tope sólo folios (requiresAcceptance = false) ACCEPTED o READY cuyo día del negocio de `acceptedAt` ya terminó, con el corte de las 04:00', async () => {
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([])
-    await expect(cerrarFoliosDelDiaTerminado({ venueId: 'v1' }, NOW)).resolves.toBe(0)
+    await expect(cerrarFoliosDelDiaTerminado({ venueId: 'v1' }, () => NOW)).resolves.toBe(0)
     const sql = sqlLeido()
     expect(sql).toContain('"requiresAcceptance" = false')
     expect(sql).toMatch(/IN \('ACCEPTED', 'READY'\)/)
@@ -342,7 +342,7 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
 
   it('cada fila: un CAS sobre el estado leído y requiresAcceptance:false que sólo escribe estado y completedAt; avisa y audita después', async () => {
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([fila('A'), fila('B', 'READY')])
-    await expect(cerrarFoliosDelDiaTerminado({}, NOW)).resolves.toBe(2)
+    await expect(cerrarFoliosDelDiaTerminado({}, () => NOW)).resolves.toBe(2)
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(1, {
       where: { id: 'oo-A', status: 'ACCEPTED', requiresAcceptance: false, acceptedAt: ACEPTADO, order: CUENTA_VIVA },
       data: { status: 'COMPLETED', completedAt: NOW },
@@ -366,7 +366,7 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
   it('si el CAS pierde (una persona lo entregó antes) no cuenta ni avisa; una fila que truena se registra y la pasada sigue', async () => {
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([fila('A'), fila('B'), fila('C')])
     prismaMock.onlineOrder.updateMany.mockRejectedValueOnce(new Error('conexión')).mockResolvedValueOnce({ count: 0 })
-    await expect(cerrarFoliosDelDiaTerminado({}, NOW)).resolves.toBe(1)
+    await expect(cerrarFoliosDelDiaTerminado({}, () => NOW)).resolves.toBe(1)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('folio'), expect.objectContaining({ onlineOrderId: 'oo-A' }))
     expect(logAction).toHaveBeenCalledTimes(1)
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ entityId: 'oo-C' }))
@@ -374,7 +374,7 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
 
   it('la lectura pasa por `readCandidates` (el job la reintenta)', async () => {
     const readCandidates = jest.fn(async () => [])
-    await expect(cerrarFoliosDelDiaTerminado({}, NOW, readCandidates as any)).resolves.toBe(0)
+    await expect(cerrarFoliosDelDiaTerminado({}, () => NOW, readCandidates as any)).resolves.toBe(0)
     expect(readCandidates).toHaveBeenCalledTimes(1)
     expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
   })
@@ -442,4 +442,77 @@ describe('las lecturas de vencer (R49 y R50: lo durable se excluye en el SQL; ll
       expect(values.slice(-3)).toEqual([CURSOR.at, CURSOR.id, 100])
     },
   )
+})
+
+/**
+ * R52 (parada «reloj viejo», Codex f1 r4): toda hora que se ESCRIBE bajo el candado o en un CAS, y la que decide días, se lee en ese
+ * momento con el reloj que se inyecta (en producción `() => new Date()`); la hora de la pasada sólo elige candidatos. Aquí el reloj
+ * avanza cuando el candado se suelta: lo escrito debe ser la hora de DESPUÉS.
+ */
+describe('R52 · la hora se lee al escribir o decidir, no al empezar la pasada', () => {
+  // 03:59:50 y 04:00:05 en México (UTC-6): la pasada empezó el día anterior y el folio se escribe el día nuevo.
+  const PASADA = new Date('2026-11-06T09:59:50.000Z')
+  const BAJO_CANDADO = new Date('2026-11-06T10:00:05.000Z')
+  /** El reloj marca PASADA hasta que se toma el candado de la orden; desde ahí, BAJO_CANDADO. */
+  let ahora: Date
+  const reloj = () => ahora
+  beforeEach(() => {
+    ahora = PASADA
+    ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) => {
+      ahora = BAJO_CANDADO // la espera del candado cruzó las 04:00
+      return [{ id: orderId }]
+    })
+  })
+
+  it('syncPaidClosedFolios escribe `acceptedAt` con el reloj leído DESPUÉS del candado (no la hora de la pasada) y avisa con esa hora', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([
+      { id: 'oo-A', orderId: 'ord-A', venueId: 'v1', status: 'EXPIRED', order: { orderNumber: 'F-A' } },
+    ] as any)
+    await expect(syncPaidClosedFolios({}, reloj)).resolves.toBe(1)
+    // La ventana de 7 días se cuenta con el reloj de la lectura.
+    expect((prismaMock.onlineOrder.findMany.mock.calls[0][0] as any).where.updatedAt).toEqual({
+      gte: new Date(PASADA.getTime() - 7 * 24 * 3_600_000),
+    })
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'ACCEPTED', acceptedAt: BAJO_CANDADO })
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledWith(
+      'v1',
+      'order_updated',
+      expect.objectContaining({ orderId: 'ord-A', timestamp: BAJO_CANDADO.toISOString() }),
+    )
+  })
+
+  it('syncPaidFolios: «Por entregar» con `acceptedAt`, hora estimada y marca de cocina del reloj leído bajo el candado', async () => {
+    prismaMock.onlineOrder.findMany.mockResolvedValue([{ orderId: 'ord1', venueId: 'v1' }] as any)
+    await expect(syncPaidFolios({}, reloj)).resolves.toBe(1)
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({
+      status: 'ACCEPTED',
+      acceptedAt: BAJO_CANDADO,
+      estimatedReadyAt: new Date(BAJO_CANDADO.getTime() + 15 * 60_000),
+    })
+    expect((prismaMock.order.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'CONFIRMED', kitchenPendingAt: BAJO_CANDADO })
+  })
+
+  it('cerrarFoliosDelDiaTerminado decide el día con el reloj de la lectura, nunca cierra un folio aceptado DESPUÉS de esa hora, y escribe `completedAt` al escribir', async () => {
+    const DECIDE = new Date('2026-11-07T10:00:01.000Z') // 04:00:01 del día siguiente
+    const ESCRIBE = new Date('2026-11-07T10:00:02.000Z')
+    const horas = [DECIDE, ESCRIBE]
+    const relojDelCierre = jest.fn(() => horas.shift() ?? ESCRIBE)
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([
+      { id: 'oo-A', orderId: 'ord-A', venueId: 'v1', status: 'ACCEPTED', orderNumber: 'F-A', acceptedAt: BAJO_CANDADO },
+    ])
+    await expect(cerrarFoliosDelDiaTerminado({}, relojDelCierre)).resolves.toBe(1)
+    const [strings, ...valores] = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
+    // El texto en su orden: cada parte fija seguida de su fragmento `Prisma.raw` (los valores enlazados no cuentan aquí).
+    const fragmento = (x: any): string => (x && typeof x === 'object' && 'strings' in x ? x.strings.join(' ') : '')
+    const sql = (strings as string[]).reduce((acc, parte, i) => acc + parte + (i < valores.length ? fragmento(valores[i]) : ''), '')
+    // La guarda: lo aceptado después de decidir no se toca (con `utcTs`, contra la hora de la lectura)…
+    expect(sql).toMatch(/oo\."acceptedAt" <= \(\s*AT TIME ZONE 'UTC'\)/)
+    const guarda = valores.find(
+      (v: any) => v && typeof v === 'object' && 'strings' in v && v.strings.join('').includes("AT TIME ZONE 'UTC'"),
+    )
+    expect(guarda.values).toEqual([DECIDE])
+    // …y el día se compara contra ese mismo instante.
+    expect(sql).toContain("TIMESTAMP '2026-11-07 10:00:01.000'")
+    expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'COMPLETED', completedAt: ESCRIBE })
+  })
 })

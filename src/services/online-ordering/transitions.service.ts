@@ -22,6 +22,7 @@ import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { getSettings } from './settings.service'
 import { emitOnlineOrderUpdated } from './traySocket'
+import type { Reloj } from './types'
 
 export type TransitionResult =
   /** `unchanged`: ya estaba en ese estado y no se escribió nada (A12: entregar lo ya entregado). */
@@ -123,7 +124,10 @@ export interface CasArgs {
   kind: TransitionKind
   venueId: string
   orderId: string
+  /** Una hora fija (pruebas, o quien ya la leyó bajo SU candado). Sin ella se lee `reloj` (o el reloj del sistema) bajo el candado. */
   now?: Date
+  /** R52: el reloj del trabajo; se lee aquí, DESPUÉS del candado. */
+  reloj?: Reloj
   onlineData: (now: Date) => Prisma.OnlineOrderUncheckedUpdateManyInput
   /** Campos extra de la `Order` (marca de cocina, `completedAt`); van en la MISMA escritura que mueve su estado. */
   orderExtra?: (now: Date) => Prisma.OrderUncheckedUpdateManyInput
@@ -142,8 +146,9 @@ export interface CasArgs {
 export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs): Promise<CasResult> {
   const rule = RULES[a.kind]
   if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
-  // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida.
-  const now = a.now ?? new Date()
+  // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida. R52: también el
+  // del trabajo (`reloj`), así lo escrito (`expiredAt`, `acceptedAt`…) es la hora de la escritura y no la del inicio de la pasada.
+  const now = a.now ?? a.reloj?.() ?? new Date()
   const row = await tx.onlineOrder.findFirst({
     where: { orderId: a.orderId, venueId: a.venueId },
     select: {
@@ -454,12 +459,13 @@ export async function rejectOnlineOrder(i: {
   return { outcome: 'OK', status: OnlineOrderStatus.REJECTED }
 }
 
-export async function expireOnlineOrder(i: { venueId: string; orderId: string; now?: Date }): Promise<TransitionResult> {
+export async function expireOnlineOrder(i: { venueId: string; orderId: string; now?: Date; reloj?: Reloj }): Promise<TransitionResult> {
   const r = await casTransition({
     kind: 'EXPIRE',
     venueId: i.venueId,
     orderId: i.orderId,
     now: i.now,
+    reloj: i.reloj,
     extraWhere: now => ({ acceptDeadlineAt: { lte: now } }),
     onlineData: now => ({ expiredAt: now }),
   })

@@ -622,7 +622,7 @@ describe('T9 · carreras con candados reales', () => {
     )
     await candadoTomado
 
-    const bandeja = cerrarCanceladasReleyendo({ venueId: f.venueId }, new Date())
+    const bandeja = cerrarCanceladasReleyendo({ venueId: f.venueId }, () => new Date())
     await esperarBloqueadoPor(pidDelDinero, 'la sincronización nunca esperó el candado que retiene el cobro')
     soltar()
     await dinero
@@ -637,7 +637,7 @@ describe('T9 · carreras con candados reales', () => {
 
     const [aparato, sincronizados] = await Promise.all([
       acceptOnlineOrder({ venueId: f.venueId, orderId, staffId: f.staffId }),
-      syncPaidFolios({ venueId: f.venueId }, new Date()),
+      syncPaidFolios({ venueId: f.venueId }, () => new Date()),
     ])
 
     expect((aparato.outcome === 'OK' ? 1 : 0) + sincronizados).toBe(1)
@@ -690,7 +690,7 @@ describe('T9b · «Entregado» sólo por una persona o al terminar el día del n
     })
     return x
   }
-  const cierra = async (hora: Date) => cerrarFoliosDelDiaTerminado({ venueId: f.venueId }, hora)
+  const cierra = async (hora: Date) => cerrarFoliosDelDiaTerminado({ venueId: f.venueId }, () => hora)
   const estado = async (id: string) => (await pedido(id)).status
 
   it('aceptado a las 23:50 sigue en la lista a las 03:59 y sale a las 04:00 (zona del negocio)', async () => {
@@ -766,6 +766,48 @@ describe('T9b · «Entregado» sólo por una persona o al terminar el día del n
     const r = await entregarPorPersona(x.orderId)
     expect(r.outcome).toBe('OK')
     expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(0)
+  })
+})
+
+describe('R52 · reloj viejo: la pasada que empieza antes de las 04:00 no fecha «ayer» un folio que se salda después (contra Postgres)', () => {
+  // México no tiene horario de verano desde 2022: en noviembre la hora local es UTC-6.
+  const Z = (iso: string) => new Date(`${iso}-06:00`)
+  /** El trabajo de cada 30 s, con sus dependencias reales (sin cron) y el reloj que se le da. */
+  const pasarElTrabajo = (now: () => Date) =>
+    new OnlineOrderAcceptanceExpiryJob({ cron: { start: jest.fn(), stop: jest.fn() } as never, now }).checkNow()
+
+  it('pasada desde las 03:59:50; la cajera salda el folio vencido a las 04:00:05 ⇒ revive con `acceptedAt` ≥ 04:00:05 y el fin del día no lo toca hasta mañana a las 04:00', async () => {
+    await prisma.venue.update({ where: { id: f.venueId }, data: { timezone: 'America/Mexico_City' } })
+    const x = await nuevoFolio()
+    // El folio venció a las 03:30 y otro cobro terminó de saldar su cuenta (la cuenta ya PAID y cerrada por la TPV; los caminos de
+    // dinero reales tienen sus pruebas arriba): es candidato de `syncPaidClosedFolios`.
+    await prisma.onlineOrder.update({
+      where: { id: x.onlineOrderId },
+      data: { status: 'EXPIRED', expiredAt: Z('2026-11-06T03:30:00'), updatedAt: Z('2026-11-06T03:30:00') },
+    })
+    await prisma.order.update({
+      where: { id: x.orderId },
+      data: { status: 'COMPLETED', paymentStatus: 'PAID', paidAmount: 100, remainingBalance: 0 },
+    })
+
+    // La pasada toma su hora a las 03:59:50; todo lo que lee el reloj después (la escritura bajo el candado) ya marca 04:00:05.
+    const reloj = jest.fn().mockReturnValueOnce(Z('2026-11-06T03:59:50')).mockReturnValue(Z('2026-11-06T04:00:05'))
+    await pasarElTrabajo(reloj)
+
+    const revivido = await pedido(x.onlineOrderId)
+    expect(revivido.status).toBe('ACCEPTED')
+    expect(revivido.acceptedAt!.getTime()).toBeGreaterThanOrEqual(Z('2026-11-06T04:00:05').getTime())
+
+    // Las pasadas siguientes del mismo día del negocio no lo sacan de «Por entregar»…
+    for (const hora of [Z('2026-11-06T04:00:40'), Z('2026-11-06T23:59:00'), Z('2026-11-07T03:59:59')]) {
+      await pasarElTrabajo(() => hora)
+      expect((await pedido(x.onlineOrderId)).status).toBe('ACCEPTED')
+    }
+    // …y sale al terminar SU día: mañana a las 04:00.
+    await pasarElTrabajo(() => Z('2026-11-07T04:00:00'))
+    const entregado = await pedido(x.onlineOrderId)
+    expect(entregado.status).toBe('COMPLETED')
+    expect(entregado.completedAt).toEqual(Z('2026-11-07T04:00:00'))
   })
 })
 

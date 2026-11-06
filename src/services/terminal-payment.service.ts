@@ -579,6 +579,9 @@ export const UNRESOLVED_FINANCIAL_OUTCOME: Prisma.TerminalPaymentRequestWhereInp
       AND: [
         { failureCode: { not: null } },
         // …ni lápida de admisión (probó que el cobro no se creó)…
+        // ⚠️ Codex f1 r4: Prisma pasa `startsWith` a LIKE y su `_` es comodín ('REJECTEDX…' también coincide), mientras la función
+        // (`codigo.startsWith`) y el SQL de los barridos (`left(...)`) comparan el prefijo literal. Hoy ningún escritor pone un código
+        // 'REJECTED' + otra letra; si alguno llega a hacerlo, las tres formas dejan de decir lo mismo. No se cambia la guarda.
         { NOT: { failureCode: { startsWith: PREFIJO_LAPIDA } } },
         // …ni uno de los códigos que acreditan por sí solos…
         { failureCode: { notIn: Object.keys(CODIGOS_SIN_COBRO) } },
@@ -597,7 +600,8 @@ export const UNRESOLVED_FINANCIAL_OUTCOME: Prisma.TerminalPaymentRequestWhereInp
  * (`findChargeBlockingOrderCancel`) rechazaría; Prisma no puede, porque `orderId` es referencia blanda (no hay relación desde `Order`).
  * `r` es el alias de la tabla en la consulta (código nuestro, nunca entrada). La tabla completa de
  * `terminalPaymentRecovery.integration.test.ts` prueba contra Postgres que las dos formas bloquean exactamente las mismas filas:
- * si cambias una, cambia la otra.
+ * si cambias una, cambia la otra. La lápida se compara aquí como prefijo LITERAL (`left`), igual que `desenlaceCanonico`; el
+ * `startsWith` de Prisma trata `_` como comodín (ver su nota): sólo difieren con un código 'REJECTED' + otra letra, que nadie escribe.
  */
 export function unresolvedFinancialOutcomeSql(r: string): Prisma.Sql {
   const col = (nombre: string) => Prisma.raw(`${r}."${nombre}"`)

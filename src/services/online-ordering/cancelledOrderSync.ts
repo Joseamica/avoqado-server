@@ -6,7 +6,7 @@ import prisma from '@/utils/prismaClient'
 import { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES, SYNC_BATCH_SIZE } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { emitOnlineOrderUpdated } from './traySocket'
-import type { ReadCandidates } from './types'
+import type { ReadCandidates, Reloj } from './types'
 
 // Viven en `constants.ts` (sin dependencias) para que el cobro capturado (`shared/cuentaCancelada.ts`) cierre el pedido con los
 // MISMOS valores sin cargar este módulo (correo, WhatsApp, sockets). Se reexportan: los que ya los importaban de aquí siguen igual.
@@ -89,10 +89,11 @@ export async function syncOnlineOrdersOfCancelledOrders(
  * lectura y el candado el dinero tardío reabrió la cuenta y pasó el folio a «Por entregar» (`conciliarPedidoEnLinea`), no lo toca.
  * Antes el CAS sólo repetía «pedido abierto», y `ACCEPTED` lo es: una lectura vieja cancelaba lo que el dinero acababa de revivir.
  * Devuelve a los ganadores, ya confirmados: quien llama los anuncia con `announceCancelledElsewhere`.
+ * R52: `cancelledAt` lee `reloj` ya con el candado, no la hora con la que empezó la pasada o la petición.
  */
 export async function cerrarCanceladasReleyendo(
   scope: { venueId?: string },
-  now: Date,
+  reloj: Reloj,
   readCandidates: ReadCandidates = read => read(),
 ): Promise<CancelledElsewhere[]> {
   const rows = await readCandidates(() =>
@@ -115,7 +116,7 @@ export async function cerrarCanceladasReleyendo(
         if (!(await lockExistingOrderForPayment(tx, { venueId: r.venueId, orderId: r.orderId }))) return false
         const cas = await tx.onlineOrder.updateMany({
           where: { id: r.id, status: { in: OPEN_ONLINE_STATUSES }, order: CUENTA_CANCELADA },
-          data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: now, cancelledBy: CANCELLED_ELSEWHERE },
+          data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: reloj(), cancelledBy: CANCELLED_ELSEWHERE },
         })
         return cas.count === 1
       }, ORDER_LOCK_WAIT_BUDGET)

@@ -226,8 +226,10 @@ describe('listInbox', () => {
 
   it('tienda híbrida (decisión 18): después de R2 y de lo pagado al recoger, pasa los folios pagados a «Por entregar» y revive los cerrados ya saldados, antes de las listas', async () => {
     await listInbox({ venueId: 'v1', now: NOW })
-    expect(syncPaidFolios).toHaveBeenCalledWith({ venueId: 'v1' }, NOW)
-    expect(syncPaidClosedFolios).toHaveBeenCalledWith({ venueId: 'v1' }, NOW)
+    // R52: reciben el reloj (con `now` fijo, el de la prueba), no una hora.
+    expect(syncPaidFolios).toHaveBeenCalledWith({ venueId: 'v1' }, expect.any(Function))
+    expect(syncPaidClosedFolios).toHaveBeenCalledWith({ venueId: 'v1' }, expect.any(Function))
+    expect((syncPaidFolios as jest.Mock).mock.calls[0][1]()).toEqual(NOW)
     const lecturas = prismaMock.onlineOrder.findMany.mock
     const pagadoAlRecoger = lecturas.calls.findIndex((c: any[]) => c[0].where.paymentMode)
     const primeraLista = lecturas.calls.findIndex((c: any[]) => !esSincronizacion(c[0]))
@@ -236,6 +238,32 @@ describe('listInbox', () => {
       (syncPaidClosedFolios as jest.Mock).mock.invocationCallOrder[0],
     )
     expect((syncPaidClosedFolios as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(lecturas.invocationCallOrder[primeraLista])
+  })
+
+  it('R52: sin `now` (la ruta), R2 escribe `cancelledAt` con la hora de DESPUÉS del candado y las sincronizaciones de folios reciben el reloj', async () => {
+    const PETICION = new Date('2026-11-06T09:59:50.000Z')
+    const BAJO_CANDADO = new Date('2026-11-06T10:00:05.000Z')
+    const LUEGO = new Date('2026-11-06T10:00:09.000Z')
+    jest.useFakeTimers({ now: PETICION, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+    try {
+      ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) => {
+        jest.setSystemTime(BAJO_CANDADO)
+        return [{ id: orderId }]
+      })
+      CANCELADAS = [sync('X')]
+      prismaMock.onlineOrder.updateMany.mockResolvedValueOnce({ count: 1 })
+
+      await listInbox({ venueId: 'v1' })
+
+      expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toMatchObject({ cancelledAt: BAJO_CANDADO })
+      for (const sincronizacion of [syncPaidFolios, syncPaidClosedFolios]) {
+        const reloj = (sincronizacion as jest.Mock).mock.calls[0][1]
+        jest.setSystemTime(LUEGO)
+        expect(reloj()).toEqual(LUEGO) // un reloj que se lee al escribir, no una hora fija
+      }
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('si una sincronización de folios falla, la bandeja igual se lista y lo registra', async () => {

@@ -13,6 +13,7 @@ import { ACTIVE_CURSOR_PATTERN, INBOX_PAGE_SIZE, MAX_CART_LINES } from './consta
 import { syncPaidClosedFolios, syncPaidFolios } from './folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from './paidPickupSync'
 import { onlineOrderNeedsPrint } from './printClaim.service'
+import type { Reloj } from './types'
 
 export type InboxFilter = 'pending' | 'active' | 'done' | 'all'
 
@@ -199,14 +200,17 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
       error: error instanceof Error ? error.message : String(error),
     })
   }
-  await cerrarCanceladasReleyendo({ venueId: p.venueId }, now)
-    .then(won => announceCancelledElsewhere(won, now))
+  // R52: lo que se escribe bajo el candado de cada fila lee el reloj en ese momento, no la hora de la petición.
+  const fija = p.now
+  const reloj: Reloj = fija ? () => fija : () => new Date()
+  await cerrarCanceladasReleyendo({ venueId: p.venueId }, reloj)
+    .then(won => announceCancelledElsewhere(won, reloj()))
     .catch(warnSync('cerrar los pedidos de cuentas canceladas'))
   await syncOnlineOrdersOfPaidPickups(prisma, { venueId: p.venueId }, now)
     .then(won => announceCollectedAutomatically(won, now))
     .catch(warnSync('entregar los pedidos ya pagados'))
-  await syncPaidFolios({ venueId: p.venueId }, now).catch(warnSync('pasar a «Por entregar» los folios pagados'))
-  await syncPaidClosedFolios({ venueId: p.venueId }, now).catch(warnSync('revivir los folios cerrados ya saldados'))
+  await syncPaidFolios({ venueId: p.venueId }, reloj).catch(warnSync('pasar a «Por entregar» los folios pagados'))
+  await syncPaidClosedFolios({ venueId: p.venueId }, reloj).catch(warnSync('revivir los folios cerrados ya saldados'))
 
   const wantPending = filter === 'pending' || filter === 'all'
   const wantActive = filter === 'active' || filter === 'all'

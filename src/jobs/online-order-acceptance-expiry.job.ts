@@ -14,7 +14,7 @@ import {
 } from '../services/online-ordering/folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
 import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
-import type { ReadCandidates } from '../services/online-ordering/types'
+import type { ReadCandidates, Reloj } from '../services/online-ordering/types'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -34,17 +34,18 @@ interface OnlineOrderAcceptanceExpiryDependencies {
   retryEntry: typeof retry
   /**
    * R2: cierra (y anuncia) los pedidos cuya cuenta se canceló por otra vía, en TODOS los negocios, antes de buscar vencidos.
-   * A10: `readEntry` reintenta por conexión SÓLO su lectura de candidatos.
+   * A10: `readEntry` reintenta por conexión SÓLO su lectura de candidatos. R52: escribe bajo el candado de cada pedido, así que
+   * recibe el reloj, no la hora de la pasada.
    */
-  syncCancelled: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  syncCancelled: (reloj: Reloj, readEntry: ReadCandidates) => Promise<number>
   /** Opción 1 del founder (17-oct): entrega (y anuncia) lo de pagar al recoger que ya quedó pagado, después de R2. */
   syncPaidPickups: (now: Date, readEntry: ReadCandidates) => Promise<number>
   /** Tienda híbrida (decisión 18): folios pagados a «Por entregar», después de `syncPaidPickups` y antes de vencer. */
-  syncPaidFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  syncPaidFolios: (reloj: Reloj, readEntry: ReadCandidates) => Promise<number>
   /** Tabla 7b, regla 2: folios cerrados que otro cobro terminó de saldar, de vuelta en «Por entregar». */
-  syncPaidClosedFolios: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  syncPaidClosedFolios: (reloj: Reloj, readEntry: ReadCandidates) => Promise<number>
   /** Decisión 18 (T9b): folios en «Por entregar» cuyo día del negocio terminó pasan a «Entregado», después de lo anterior y antes de vencer. */
-  cerrarFoliosDelDia: (now: Date, readEntry: ReadCandidates) => Promise<number>
+  cerrarFoliosDelDia: (reloj: Reloj, readEntry: ReadCandidates) => Promise<number>
   /** R1/R49/R50: lo vencido sin un peso con la cuenta abierta (folios y «Mi equipo»). */
   leerVencidos: LeerVencidos
   /** R44/R49/R50: los folios cuyo abono se devolvió completo (neto 0 filtrado en SQL), para su pasada aparte. */
@@ -69,9 +70,9 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
   retryEntry: retry,
   // I-1: el job ya corre fuera de una transacción, así que anuncia a sus ganadores justo después de la llamada.
   // R12: cada candidato se cierra en su transacción, releyendo la cuenta bajo el candado de la orden.
-  syncCancelled: async (now, readEntry) => {
-    const won = await cerrarCanceladasReleyendo({}, now, readEntry)
-    announceCancelledElsewhere(won, now)
+  syncCancelled: async (reloj, readEntry) => {
+    const won = await cerrarCanceladasReleyendo({}, reloj, readEntry)
+    announceCancelledElsewhere(won, reloj())
     return won.length
   },
   syncPaidPickups: async (now, readEntry) => {
@@ -80,9 +81,9 @@ const defaults: OnlineOrderAcceptanceExpiryDependencies = {
     return won.length
   },
   // Anuncian a sus ganadores ellas mismas (cada fila confirma en su propia transacción).
-  syncPaidFolios: (now, readEntry) => syncPaidFolios({}, now, readEntry),
-  syncPaidClosedFolios: (now, readEntry) => syncPaidClosedFolios({}, now, readEntry),
-  cerrarFoliosDelDia: (now, readEntry) => cerrarFoliosDelDiaTerminado({}, now, readEntry),
+  syncPaidFolios: (reloj, readEntry) => syncPaidFolios({}, reloj, readEntry),
+  syncPaidClosedFolios: (reloj, readEntry) => syncPaidClosedFolios({}, reloj, readEntry),
+  cerrarFoliosDelDia: (reloj, readEntry) => cerrarFoliosDelDiaTerminado({}, reloj, readEntry),
   leerVencidos: leerPedidosVencidos,
   leerAbonosDevueltos: leerFoliosConAbonoDevuelto,
 }
@@ -135,15 +136,20 @@ export class OnlineOrderAcceptanceExpiryJob {
     let porEntregar = 0
 
     try {
-      const now = this.dependencies.now()
+      // R52: `now` (la hora de la pasada) SÓLO elige candidatos. Lo que se escribe bajo un candado o en un CAS (`acceptedAt`,
+      // `cancelledAt`, `expiredAt`, `completedAt`) y lo que decide días o plazos lee `reloj` en ese momento: una pasada que empieza a
+      // las 03:59:50 y escribe a las 04:00:05 no fecha «ayer» lo que pasó hoy.
+      const reloj = this.dependencies.now
+      const now = reloj()
 
       // R2: sólo su lectura de candidatos va con reintento (A10); sus CAS no. Si falla, la pasada sigue.
       try {
-        synced = await this.dependencies.syncCancelled(now, this.readEntry('online-order-acceptance-expiry.syncCancelled'))
+        synced = await this.dependencies.syncCancelled(reloj, this.readEntry('online-order-acceptance-expiry.syncCancelled'))
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron cerrar los pedidos de cuentas canceladas (la pasada sigue)', { error })
       }
-      // Después de R2, con la misma regla: reintento sólo en la lectura.
+      // Después de R2, con la misma regla: reintento sólo en la lectura. «Mi equipo» como en develop: su `completedAt` sigue con la
+      // hora de la pasada (R52 lo clasifica AJENO: no toca folios ni decide días).
       try {
         collected = await this.dependencies.syncPaidPickups(now, this.readEntry('online-order-acceptance-expiry.syncPaidPickups'))
       } catch (error) {
@@ -151,13 +157,13 @@ export class OnlineOrderAcceptanceExpiryJob {
       }
       // Tienda híbrida (decisión 18): lo pagado pasa a «Por entregar» ANTES de vencer, con la misma regla de reintento.
       try {
-        porEntregar += await this.dependencies.syncPaidFolios(now, this.readEntry('online-order-acceptance-expiry.syncPaidFolios'))
+        porEntregar += await this.dependencies.syncPaidFolios(reloj, this.readEntry('online-order-acceptance-expiry.syncPaidFolios'))
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron pasar a «Por entregar» los folios pagados (la pasada sigue)', { error })
       }
       try {
         porEntregar += await this.dependencies.syncPaidClosedFolios(
-          now,
+          reloj,
           this.readEntry('online-order-acceptance-expiry.syncPaidClosedFolios'),
         )
       } catch (error) {
@@ -166,7 +172,7 @@ export class OnlineOrderAcceptanceExpiryJob {
 
       // Decisión 18 (T9b): al final de lo que mete folios a la lista (así un folio revivido hoy no sale por un día viejo) y antes de vencer.
       try {
-        await this.dependencies.cerrarFoliosDelDia(now, this.readEntry('online-order-acceptance-expiry.cerrarFoliosDelDia'))
+        await this.dependencies.cerrarFoliosDelDia(reloj, this.readEntry('online-order-acceptance-expiry.cerrarFoliosDelDia'))
       } catch (error) {
         logger.error('Online-order expiry: no se pudieron entregar los folios del día terminado (la pasada sigue)', { error })
       }
@@ -178,7 +184,7 @@ export class OnlineOrderAcceptanceExpiryJob {
       /** Vence un candidato bajo su candado; si ya cambió (STALE) o tiene dinero (HAS_PAYMENTS), cuenta como noop. */
       const vencer = async (c: CandidatoAVencer) => {
         try {
-          const r = await this.dependencies.expireOrder({ venueId: c.venueId, orderId: c.orderId, now })
+          const r = await this.dependencies.expireOrder({ venueId: c.venueId, orderId: c.orderId, reloj })
           if (r.outcome === 'OK') expired += 1
           else noop += 1
         } catch (error) {

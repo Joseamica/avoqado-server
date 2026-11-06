@@ -12,6 +12,10 @@ jest.mock('@/services/online-ordering/cancelledOrderSync', () => ({
   cerrarCanceladasReleyendo: jest.fn(async () => []),
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, getSettings: jest.fn() }))
+jest.mock('@/services/online-ordering/notifications.service', () => ({
+  __esModule: true,
+  notifyOrderEvent: jest.fn(async () => undefined),
+}))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({ __esModule: true, socketManager: { broadcastToVenue: jest.fn() } }))
 
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
@@ -168,5 +172,35 @@ describe('listFolios', () => {
     expect(sincPagados).toBeLessThan(sincCerrados)
     expect(sincCerrados).toBeLessThan(primeraLista)
     warn.mockRestore()
+  })
+
+  it('R52: sin `now` (las rutas), lo que las sincronizaciones escriben bajo el candado lleva la hora de la escritura, no la de la petición', async () => {
+    const PETICION = new Date('2026-11-06T09:59:50.000Z') // 03:59:50 en México
+    const BAJO_CANDADO = new Date('2026-11-06T10:00:05.000Z') // 04:00:05: ya es el día nuevo del negocio
+    jest.useFakeTimers({ now: PETICION, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+    try {
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+      ;(prismaMock.$queryRaw as jest.Mock).mockImplementation(async (_sql: unknown, orderId: string) => {
+        jest.setSystemTime(BAJO_CANDADO) // la espera del candado de la orden cruzó las 04:00
+        return [{ id: orderId }]
+      })
+      prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+      const listasYConteos = prismaMock.onlineOrder.findMany.getMockImplementation()!
+      prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
+        !esLista(a) && a.where.status?.in
+          ? [{ id: 'oo-A', orderId: 'ord-A', venueId: 'v1', status: 'EXPIRED', order: { orderNumber: 'F-A' } }] // un folio cerrado ya saldado
+          : listasYConteos(a)) as any)
+
+      const r = await listFolios({ venueId: 'v1' })
+
+      expect((prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any).data).toEqual({ status: 'ACCEPTED', acceptedAt: BAJO_CANDADO })
+      expect(r.serverTime).toBe(BAJO_CANDADO.toISOString()) // la respuesta lleva la hora de después de sincronizar
+      // R2 (simulada aquí) recibe el reloj, no la hora de la petición.
+      const relojR2 = (cerrarCanceladasReleyendo as jest.Mock).mock.calls[0][1]
+      expect(typeof relojR2).toBe('function')
+      expect(relojR2()).toEqual(BAJO_CANDADO)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })
