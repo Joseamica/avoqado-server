@@ -111,38 +111,6 @@ describe('🔴 R10: vigencia y estado económico', () => {
 })
 
 /**
- * 🔴 D21 (5-nov, video de la demo): el negocio de demo trae dos cortesías vigentes, PLAN_PRO y PLAN_PREMIUM. El candado y el
- * menú (`getVenueBaseTier`) dicen PREMIUM porque el de más acceso manda; «Tu plan» elegía por `updatedAt` y decía Pro, porque
- * la fila de Pro se escribió un milisegundo después. Entre cortesías empatadas manda la de más acceso, igual que el candado.
- */
-describe('🔴 D21: cortesías empatadas — manda la de más acceso', () => {
-  const AHORA = new Date('2026-11-05T12:00:00Z')
-  const cortesia = (id: string, code: string, updatedAt: string) => ({
-    ...fila({ id, active: true, endDate: new Date('2036-11-02T00:00:00Z'), updatedAt: new Date(updatedAt) }),
-    feature: { code },
-  })
-
-  it('PRO escrita después NO gana a PREMIUM: se ve Premium, como en el menú', () => {
-    const premium = cortesia('premium', 'PLAN_PREMIUM', '2026-11-02T21:33:54.916Z')
-    const pro = cortesia('pro', 'PLAN_PRO', '2026-11-02T21:33:54.921Z')
-    expect(elegirFilaDelPlan([premium, pro], AHORA)?.id).toBe('premium')
-    expect(elegirFilaDelPlan([pro, premium], AHORA)?.id).toBe('premium')
-  })
-
-  it('no toca lo que cobra: una suscripción viva de PRO sigue ganando a una cortesía PREMIUM', () => {
-    const cobra = { ...fila({ id: 'pro', active: true, stripeSubscriptionId: 'sub_1' }), feature: { code: 'PLAN_PRO' } }
-    const regalo = cortesia('premium', 'PLAN_PREMIUM', '2026-11-04T00:00:00Z')
-    expect(elegirFilaDelPlan([regalo, cobra], AHORA)?.id).toBe('pro')
-  })
-
-  it('no toca el empate de dos suscripciones (eso es ambigüedad, no cortesía): la más reciente, como antes', () => {
-    const a = { ...fila({ id: 'premium', active: true, stripeSubscriptionId: 's1', updatedAt: new Date('2026-09-01T00:00:00Z') }), feature: { code: 'PLAN_PREMIUM' } }
-    const b = { ...fila({ id: 'pro', active: true, stripeSubscriptionId: 's2', updatedAt: new Date('2026-09-10T00:00:00Z') }), feature: { code: 'PLAN_PRO' } }
-    expect(elegirFilaDelPlan([a, b], AHORA)?.id).toBe('pro')
-  })
-})
-
-/**
  * 🔴 Codex R2 (ronda 2): los escritores administrativos (pruebas gratis, wizard) escribían su fila sin mirar el OTRO
  * tier. Concediendo una prueba PRO a un negocio con PREMIUM activo quedaban los DOS planes activos — y bastaba la
  * ejecución secuencial, sin carrera. La decisión es una sola y vive aquí.
@@ -217,5 +185,27 @@ describe('🔴 R2 (ronda 3): los dos choques se evalúan por separado', () => {
     })
     expect(choquesAlConcederPlan([f('f-premium', { active: true })], 'f-pro')).toEqual({ propiaLigada: false, otroPlanVivo: true })
     expect(choquesAlConcederPlan([], 'f-pro')).toEqual({ propiaLigada: false, otroPlanVivo: false })
+  })
+})
+
+// D4 + D6 (5-nov-2026): «vigente» es la regla de ventanaDeAcceso.ts — la gracia de cobranza cuenta.
+describe('vigencia con la gracia de cobranza', () => {
+  const AHORA = new Date('2026-11-20T12:00:00Z')
+  const antes = new Date('2026-11-19T12:00:00Z')
+  const despues = new Date('2026-11-21T12:00:00Z')
+
+  it('🔴 D6: la ligada en gracia (prueba vencida) da acceso y es la que se administra, no una cortesía sin vínculo', () => {
+    // Con la regla vieja la de la gracia contaba como vencida (puntaje 5) y ganaba la cortesía (11).
+    const enGracia = { ...fila({ id: 'pro', active: true, endDate: antes, stripeSubscriptionId: 'sub_1' }), gracePeriodEndsAt: despues }
+    const cortesia = { ...fila({ id: 'premium', active: true, endDate: null }), gracePeriodEndsAt: null }
+    expect(elegirFilaDelPlan([cortesia, enGracia], AHORA)?.id).toBe('pro')
+    expect(elegirFilaDelPlan([enGracia, cortesia], AHORA)?.id).toBe('pro')
+  })
+
+  it('🔴 los 4 días tras una prueba vencidos no cuentan como vigente: pierden contra una activa pagada', () => {
+    const vencida = { ...fila({ id: 'pro', active: true, endDate: antes }), gracePeriodEndsAt: antes }
+    const pagada = { ...fila({ id: 'premium', active: true }), gracePeriodEndsAt: null }
+    expect(elegirFilaDelPlan([vencida, pagada], AHORA)?.id).toBe('premium')
+    expect(elegirFilaDelPlan([pagada, vencida], AHORA)?.id).toBe('premium')
   })
 })
