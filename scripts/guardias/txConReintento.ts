@@ -6,14 +6,18 @@
  *       identificador que resuelve a un parámetro (o a un elemento desestructurado de un parámetro) cuyo tipo declarado la lleva; y
  *       una variable que la lleva;
  *  (10) una aserción (`as`, `<T>`) cuyo destino la lleva, salvo las de `castsPermitidos` del JSON (un solo lugar, Ruling 29);
- *  (11) un escritor (función con un parámetro que lleva la marca) usado como valor y no en posición de llamada: como argumento,
- *       en una variable, propiedad o arreglo, `Reflect.apply`, `.call`, `.apply`, `.bind`. Salvo el cuerpo de `withDeadlockRetry`,
- *       de `withSerializableRetry` con `reintentarInterbloqueo`, o de un opener genérico del JSON, y los import/export que sólo la
- *       nombran (`const { f } = await import('…')` cuenta como un import, Ruling 22);
+ *  (11) un escritor (función con un parámetro que lleva la marca, también por la restricción de un genérico `<T extends
+ *       TxConReintento>`) usado como valor y no en posición de llamada: como argumento, en una variable, propiedad, índice
+ *       (`s['f']`) o arreglo, `Reflect.apply`, `.call`, `.apply`, `.bind`. Salvo el cuerpo de `withDeadlockRetry`, de
+ *       `withSerializableRetry` con `reintentarInterbloqueo`, o de un opener genérico del JSON, y los import/export que sólo la
+ *       nombran (`const { f } = await import('…')` cuenta como un import, Ruling 22). Y un método de objeto con la marca donde el
+ *       tipo esperado de esa propiedad no es un escritor (`const h: Record<string, Function> = { async a(tx) {…} }`), y un objeto
+ *       con escritores ensanchado a `any`/`unknown` (`(servicio as any).f(prisma)`, `const s: any = servicio`);
  *  (12) las sobrecargas de un escritor que no llevan la marca en la misma posición, y un parámetro que la mezcla con un cliente
  *       sin marca (`TxConReintento | Prisma.TransactionClient`).
- * Techo (R74): protege contra el olvido y el código ordinario; la elusión deliberada (`eval`, `require` dinámico, generar código)
- * queda para la revisión de código.
+ * Techo (R74): protege contra el olvido y el código ordinario; la elusión deliberada (`eval`, `require` dinámico, generar código,
+ * o ensanchar con `as any` algo que no es el escritor ni su objeto, p. ej. un módulo entero o `globalThis`) queda para la revisión
+ * de código.
  *
  * Uso: `npm run guard:tx-con-reintento` (por avq-verify, con la memoria del typecheck). Hasta el paso 8 la marca está apagada y
  * `corridaSobreSrc` es false: corre, informa y sale con 0. Desde el paso 8 sale con 1 si falta la marca o hay hallazgos.
@@ -85,10 +89,13 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
     let r = cache.get(t)
     if (r !== undefined) return r
     cache.set(t, false)
+    const restriccion = t.flags & ts.TypeFlags.TypeParameter ? checker.getBaseConstraintOfType(t) : undefined
     r = t.isUnion()
       ? t.types.some(lleva)
-      : !!(t.flags & (ts.TypeFlags.Object | ts.TypeFlags.Intersection)) &&
-        checker.getPropertiesOfType(t).some(p => p.escapedName === nombreMarca)
+      : restriccion
+        ? restriccion !== t && lleva(restriccion)
+        : !!(t.flags & (ts.TypeFlags.Object | ts.TypeFlags.Intersection)) &&
+          checker.getPropertiesOfType(t).some(p => p.escapedName === nombreMarca)
     cache.set(t, r)
     return r
   }
@@ -100,6 +107,10 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
     t
       .getCallSignatures()
       .some(s => s.getParameters().some(p => p.valueDeclaration && marcado(checker.getTypeOfSymbolAtLocation(p, p.valueDeclaration))))
+  /** Un escritor, o un objeto que tiene uno como propiedad (un servicio). */
+  const llevaEscritor = (t: ts.Type) =>
+    esEscritor(t) || (!!(t.flags & ts.TypeFlags.Object) && checker.getPropertiesOfType(t).some(p => esEscritor(checker.getTypeOfSymbol(p))))
+  const abierto = (t: ts.Type) => !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))
 
   /** ¿Esta llamada abre la red? Índice del argumento que es el cuerpo, o -1. */
   const cuerpoDeApertura = (c: ts.CallExpression): number => {
@@ -141,6 +152,8 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
   const conParametroMarcado = (f: ts.SignatureDeclaration) => f.parameters.some(p => marcado(checker.getTypeAtLocation(p)))
   for (const sf of fuentes)
     ts.forEachChild(sf, function visitar(n: ts.Node) {
+      // Un import por defecto de un escritor (`import otroNombre from './escritor'`) también lo nombra.
+      if (ts.isImportClause(n) && n.name && esEscritor(checker.getTypeAtLocation(n.name))) nombres.add(n.name.text)
       if ((ts.isFunctionLike(n) || ts.isFunctionTypeNode(n)) && conParametroMarcado(n as ts.SignatureDeclaration)) {
         const nombre = (n as ts.SignatureDeclaration).name ?? ((n.parent as ts.NamedDeclaration | undefined)?.name as ts.Node | undefined)
         if (nombre && (ts.isIdentifier(nombre) || ts.isPrivateIdentifier(nombre))) nombres.add(nombre.text)
@@ -192,16 +205,53 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
       // (9) Donde se espera la marca, sólo un parámetro que ya la lleva. Y ninguna variable la lleva.
       if (ts.isVariableDeclaration(n) && marcado(checker.getTypeAtLocation(n.name)))
         hallazgos.push(`(9) ${donde(n)}: una variable no puede llevar TxConReintento; pásalo como parámetro`)
-      if (ts.isExpression(n) && enRanura(n)) {
+      if (ts.isExpression(n) && !ts.isSpreadElement(n) && enRanura(n)) {
         const esperado = checker.getContextualType(n)
         const e = sinParentesis(n)
         const permitido =
           (ts.isIdentifier(e) && esParametroMarcado(e)) ||
-          ((ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)) && (opciones.castsPermitidos[llave(e)]?.cantidad ?? 0) > 0)
-        if (esperado && marcado(esperado) && !permitido)
+          // Sólo la aserción A LA MARCA de una función listada (la que (10) ya limita a su cantidad); `tx as any` no.
+          ((ts.isAsExpression(e) || ts.isTypeAssertionExpression(e)) &&
+            marcado(checker.getTypeFromTypeNode(e.type)) &&
+            (opciones.castsPermitidos[llave(e)]?.cantidad ?? 0) > 0)
+        // En una llamada genérica (`<T extends TxConReintento>(tx: T)`) el tipo esperado ya viene instanciado (con `as any`, T = any):
+        // se mira también el parámetro DECLARADO de la firma.
+        const declarado = () => {
+          const c = n.parent
+          if (!ts.isCallExpression(c) && !ts.isNewExpression(c)) return false
+          const params = checker.getResolvedSignature(c)?.declaration?.parameters
+          const p = params?.[Math.min(c.arguments?.indexOf(n) ?? 0, params.length - 1)]
+          return !!p && marcado(checker.getTypeAtLocation(p))
+        }
+        if (((esperado && marcado(esperado)) || declarado()) && !permitido)
           hallazgos.push(
             `(9) ${donde(n)}: donde se espera TxConReintento sólo va un parámetro que ya lo es (nada de any, aserciones, variables ni resultados)`,
           )
+        const valor =
+          ts.isIdentifier(e) || ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) || e.kind === ts.SyntaxKind.ThisKeyword
+        if (esperado && abierto(esperado) && valor) {
+          const tipo = checker.getTypeAtLocation(e)
+          if (!esEscritor(tipo) && llevaEscritor(tipo))
+            hallazgos.push(`(11) ${donde(n)}: un objeto con escritores ensanchado a any/unknown deja llamarlos con cualquier cliente`)
+        }
+      }
+      // (9) Un argumento esparcido (`escribir(...args)`) en la posición de un parámetro con la marca.
+      if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && n.arguments?.some(ts.isSpreadElement)) {
+        const firma = checker.getResolvedSignature(n)
+        const i = n.arguments.findIndex(ts.isSpreadElement)
+        if (
+          firma
+            ?.getParameters()
+            .slice(i)
+            .some(p => marcado(checker.getTypeOfSymbolAtLocation(p, n)))
+        )
+          hallazgos.push(`(9) ${donde(n.arguments[i])}: un argumento esparcido no puede llenar un parámetro TxConReintento`)
+      }
+      // (11) Una aserción a any/unknown que esconde un escritor o un objeto con escritores.
+      if ((ts.isAsExpression(n) || ts.isTypeAssertionExpression(n)) && abierto(checker.getTypeFromTypeNode(n.type))) {
+        const tipo = checker.getTypeAtLocation(n.expression)
+        if (!esEscritor(tipo) && llevaEscritor(tipo))
+          hallazgos.push(`(11) ${donde(n)}: «as any» sobre un objeto con escritores deja llamarlos con cualquier cliente`)
       }
       if (ts.isShorthandPropertyAssignment(n)) {
         const esperado = checker.getContextualType(n.parent)?.getProperty(n.name.text)
@@ -214,6 +264,7 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
       const referencia =
         (ts.isIdentifier(n) && nombres.has(n.text) && !esNombreDeDeclaracion(n)) ||
         (ts.isPropertyAccessExpression(n) && nombres.has(n.name.text)) ||
+        (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && nombres.has(n.argumentExpression.text)) ||
         (ts.isShorthandPropertyAssignment(n) && nombres.has(n.name.text))
       if (referencia) {
         const tipo = ts.isShorthandPropertyAssignment(n)
@@ -221,6 +272,20 @@ export function revisarPrograma(programa: ts.Program, opciones: OpcionesDeLaGuar
           : checker.getTypeAtLocation(n)
         if (esEscritor(tipo) && !seLlama(n))
           hallazgos.push(`(11) ${donde(n)}: un escritor sólo se llama (escribir(tx)); nunca se pasa, guarda ni enlaza`)
+      }
+      // Un método de objeto con la marca: si el objeto tiene un tipo esperado, esa propiedad tiene que ser un escritor (una tabla
+      // `Record<string, Function>` o `any` lo convierte en algo que se llama con cualquier cliente). Sin tipo esperado (`servicio =
+      // { … }`), pasa: su tipo es el del método.
+      if (ts.isMethodDeclaration(n) && ts.isObjectLiteralExpression(n.parent) && conParametroMarcado(n)) {
+        const esperado = checker.getContextualType(n.parent)
+        if (esperado) {
+          const propiedad = esperado.getProperty(n.name.getText())
+          const tipo = propiedad ? checker.getTypeOfSymbol(propiedad) : (esperado.getStringIndexType() ?? esperado.getNumberIndexType())
+          if (!tipo || !esEscritor(tipo))
+            hallazgos.push(
+              `(11) ${donde(n)}: un método con TxConReintento en un objeto cuyo tipo no lo pide como escritor (tabla de despacho)`,
+            )
+        }
       }
       if (esFuncionLiteral(n) && conParametroMarcado(n) && !esDeclaracion(n) && !esCuerpoDeApertura(n))
         hallazgos.push(

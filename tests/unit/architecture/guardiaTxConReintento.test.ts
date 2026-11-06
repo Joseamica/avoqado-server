@@ -38,6 +38,9 @@ export const servicio = {
     await tx.discount.delete({})
   },
 }
+export default async function porDefecto(tx: TxConReintento): Promise<void> {
+  await tx.discount.delete({})
+}
 `,
   'src/services/mobile/http-operation.mobile.service.ts': `
 import { withDeadlockRetry, TxConReintento } from '../../utils/serializableRetry'
@@ -87,6 +90,14 @@ export async function desestructurado({ tx }: { tx: TxConReintento }) {
 export async function opcional(tx?: TxConReintento) {
   if (tx) await escribir(tx)
 }
+const conTipo: { escribir(tx: TxConReintento): Promise<void> } = {
+  async escribir(tx: TxConReintento) {
+    await escribir(tx)
+  },
+}
+export async function metodoConTipo(tx: TxConReintento) {
+  await conTipo.escribir(tx)
+}
 export { escribir }
 `
 
@@ -124,6 +135,33 @@ const FALLAN: Array<[string, string, string]> = [
   ['union', '(12)', `export async function mezcla(tx: TxConReintento | Cliente) { await escribir(tx as TxConReintento) }`],
   ['segundoCast', '(10)', `export async function recordOrderPayment() { await prisma.$transaction(tx => escribir(tx as TxConReintento)) }`],
   ['crudo', '(9)', `export async function f() { await prisma.$transaction(async tx => escribir(tx)) }`],
+  // Fix round 1 de la revisión (Important 2, m1, m2, m6 y la sonda del revisor).
+  [
+    'metodoEnMapa',
+    '(11)',
+    `const h: Record<string, Function> = { async a(tx: TxConReintento) { await escribir(tx) } }\nexport function g() { return h.a(prisma) }`,
+  ],
+  [
+    'metodoEnAny',
+    '(11)',
+    `const h: any = { async a(tx: TxConReintento) { await escribir(tx) } }\nexport function g() { return h.a(prisma) }`,
+  ],
+  ['variableInferida', '(9)', `export async function f(tx: TxConReintento) { const t = tx }`],
+  ['apply', '(11)', `export function f() { return escribir.apply(null, [prisma as any]) }`],
+  ['receptorAny', '(11)', `export async function f() { await (servicio as any).escribir(prisma) }`],
+  ['servicioEnAny', '(11)', `export async function f() { const s: any = servicio; await s.escribir(prisma) }`],
+  [
+    'genericoAcotado',
+    '(9)',
+    `export async function escribirG<T extends TxConReintento>(tx: T) { await tx.discount.delete({}) }\nexport async function f() { await escribirG(prisma as any) }`,
+  ],
+  ['porIndice', '(11)', `export function f() { return Reflect.apply(servicio['escribir'], undefined, [prisma]) }`],
+  [
+    'importPorDefecto',
+    '(11)',
+    `import otroNombre from './escritor'\nexport function f() { return Reflect.apply(otroNombre, undefined, [prisma]) }`,
+  ],
+  ['spread', '(9)', `export async function f() { const args = [prisma] as unknown as [any]; await escribir(...args) }`],
 ]
 
 function programa(archivos: Record<string, string>): { programa: ts.Program; raiz: string } {
@@ -191,6 +229,18 @@ describe('guardia de la marca TxConReintento (verificador de tipos)', () => {
     const suyos = resultado.hallazgos.filter(h => h.includes(`src/${archivo}.ts:`))
     expect(suyos.some(h => h.startsWith(regla))).toBe(true)
   })
+
+  it('dentro de la función listada en castsPermitidos sólo pasa la aserción A LA MARCA: `escribir(tx as any)` y `escribir(prisma as any)` fallan (Important 1)', () => {
+    const pago = BASE['src/services/tpv/payment.tpv.service.ts'].replace(
+      '  await prisma.$transaction(tx => cuerpo(tx as TxConReintento))\n',
+      '  await prisma.$transaction(tx => cuerpo(tx as TxConReintento))\n  await prisma.$transaction(async tx => { await escribir(tx as any) })\n  await escribir(prisma as any)\n',
+    )
+    const r = ejecutar({ ...juguete(), 'src/services/tpv/payment.tpv.service.ts': pago })
+    const suyos = r.hallazgos.filter(h => h.includes('src/services/tpv/payment.tpv.service.ts:'))
+    expect(suyos.filter(h => h.startsWith('(9)') && h.includes('tx as any'))).toHaveLength(1)
+    expect(suyos.filter(h => h.startsWith('(9)') && h.includes('prisma as any'))).toHaveLength(1)
+    expect(suyos.filter(h => h.includes('tx as TxConReintento'))).toEqual([])
+  }, 60_000)
 
   it('renombrar el alias o el archivo no cambia el resultado (identidad del símbolo)', () => {
     const renombrados: Record<string, string> = {}

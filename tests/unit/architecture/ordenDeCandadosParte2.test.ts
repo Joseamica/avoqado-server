@@ -10,10 +10,12 @@
  *  contiene tiene su cliente por omisión `= prisma`; (8) los padres se derivan de `schema.prisma` y deben ser los del JSON.
  * Transacciones — (4) ninguna `$transaction([…])` en arreglo con una de esas escrituras; (5)/(6) los `as TxConReintento` de `src/`
  *  son exactamente los de `castsPermitidos` (y el efecto que justifica el de `recordOrderPayment` sigue ahí); (7) una función que
- *  recibe `tx` no abre `withDeadlockRetry` (salvo la rama sin `tx` de una función de `cuerposRevisados`, Ruling 21).
+ *  recibe `tx` no abre `withDeadlockRetry` (salvo una función de `cuerposRevisados`, Ruling 21: la exime ENTERA, porque esta prueba
+ *  no separa ramas; sólo se lista una función cuya única apertura es la rama que corre sin `tx`, y eso lo comprueba la revisión).
  * Cuerpos de `withDeadlockRetry`, con su cierre de llamadas resuelto por `import` (también `await import`): (a) ningún efecto fuera
  *  de la base; (b) ninguna escritura con el cliente global ni `logAction` sin `tx`; (c) no abre otra transacción (misma excepción);
- *  (d) no escribe nada declarado fuera de él; (e) no se lo pasa a una función que muta ese parámetro.
+ *  (d) no escribe nada declarado fuera de él (asignación, `++`, `.push/.add/.set/.splice/.delete/.unshift/.pop/.shift/.clear`,
+ *  `Object.assign(afuera, …)`, propiedades); (e) no se lo pasa a una función que muta ese parámetro.
  * Inventario — cada función con una escritura está en `escritores` (clase y etiqueta) y cada apertura en `aperturas`; falta o sobra,
  *  falla.
  *
@@ -68,10 +70,13 @@ const CAMBIOS = new Set(['update', 'updateMany', 'updateManyAndReturn', 'upsert'
 const ASESOR_DEL_CUPON = new Set(['apartarCupon', 'bloquearDescuento'])
 const CRUDAS = new Set(['$queryRaw', '$executeRaw', '$queryRawUnsafe', '$executeRawUnsafe'])
 const ABREN = new Set(['$transaction', 'withDeadlockRetry', 'withSerializableRetry'])
-const MUTADORES = new Set(['push', 'add', 'set', 'splice', 'delete'])
-/** (a) Efectos fuera de la base (y `verifyIdToken`, Ruling 15). */
+const MUTADORES = new Set(['push', 'add', 'set', 'splice', 'delete', 'unshift', 'pop', 'shift', 'clear'])
+/** (a) Efectos fuera de la base (y `verifyIdToken`, Ruling 15). Sin `/i`: `send` + MAYÚSCULA (`sendEmail`, no `sendero`). */
 const EFECTO_POR_NOMBRE =
-  /^(emit|broadcast|notify)|^(send|enviar|mandar)[A-Z]|whatsapp|^(setTimeout|setImmediate|fetch|axios|opsAlert|finalizeCouponsForOrder|verifyIdToken)$/i
+  /^(emit|broadcast|notify|publish)|^(send|enviar|mandar)[A-Z]|^(setTimeout|setImmediate|fetch|axios|opsAlert|finalizeCouponsForOrder|verifyIdToken)$/
+const EFECTO_WHATSAPP = /whatsapp/i
+/** Métodos que mandan algo afuera sea cual sea el receptor: `messaging().send(…)`, `canal.publish(…)` (RabbitMQ). */
+const EFECTO_POR_METODO = new Set(['send', 'publish'])
 const EFECTO_POR_RECEPTOR =
   /^(socketManager|stripe|axios|mercadoPago|mercadopago|blumon\w*|angelPay\w*|emailService|resend|twilio|whatsapp\w*)$/i
 
@@ -463,18 +468,24 @@ const ASIGNACIONES = new Set([
   ts.SyntaxKind.AmpersandAmpersandEqualsToken,
   ts.SyntaxKind.QuestionQuestionEqualsToken,
 ])
-/** Lo que un nodo escribe: asignación, `+=`, `++`, `.push/.add/.set/.splice/.delete`, propiedades. Devuelve [raíz, lo escrito]. */
-function escrituras(nodo: ts.Node): Array<[ts.Expression, ts.Expression]> {
-  const out: Array<[ts.Expression, ts.Expression]> = []
+type Escritura = { raiz: ts.Expression; escrito: ts.Expression; reasigna: boolean }
+/**
+ * Lo que un nodo escribe: asignación, `+=`, `++`, los MUTADORES, `Object.assign(x, …)` y propiedades. `reasigna` = sólo cambia la
+ * variable local (`x = …`, `x++`), no lo que apunta.
+ */
+function escrituras(nodo: ts.Node): Escritura[] {
+  const out: Escritura[] = []
+  const nuevo = (escrito: ts.Expression, reasigna: boolean) => out.push({ raiz: raiz(escrito), escrito, reasigna })
   const visitar = (n: ts.Node) => {
-    if (ts.isBinaryExpression(n) && ASIGNACIONES.has(n.operatorToken.kind)) out.push([raiz(n.left), n.left])
+    if (ts.isBinaryExpression(n) && ASIGNACIONES.has(n.operatorToken.kind)) nuevo(n.left, ts.isIdentifier(sinAserciones(n.left)))
     if (
       (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
       [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(n.operator)
     )
-      out.push([raiz(n.operand), n.operand])
+      nuevo(n.operand, ts.isIdentifier(sinAserciones(n.operand)))
     if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && MUTADORES.has(n.expression.name.text))
-      out.push([raiz(n.expression.expression), n.expression])
+      nuevo(n.expression, false)
+    if (ts.isCallExpression(n) && n.expression.getText() === 'Object.assign' && n.arguments[0]) nuevo(n.arguments[0], false)
     ts.forEachChild(n, visitar)
   }
   visitar(nodo)
@@ -499,7 +510,8 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
         const nombre = llamadaDe(n)
         const receptor = ts.isPropertyAccessExpression(n.expression) ? raiz(n.expression.expression) : undefined
         const nombreReceptor = receptor && ts.isIdentifier(receptor) ? receptor.text : ''
-        if (EFECTO_POR_NOMBRE.test(nombre) || EFECTO_POR_RECEPTOR.test(nombreReceptor))
+        const metodo = ts.isPropertyAccessExpression(n.expression) && EFECTO_POR_METODO.has(nombre)
+        if (EFECTO_POR_NOMBRE.test(nombre) || EFECTO_WHATSAPP.test(nombre) || EFECTO_POR_RECEPTOR.test(nombreReceptor) || metodo)
           r.efectos.push(`${donde(n)} ${n.expression.getText().slice(0, 50)}`)
         if (ABREN.has(nombre) && !revisada) r.abre.push(`${donde(n)} ${nombre}`)
         if (nombre === 'logAction' && !n.arguments.some(a => ts.isIdentifier(a) && a.text === 'tx'))
@@ -561,7 +573,7 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
     const m = moduloDe(cuerpo)
     const afuera = (e: ts.Expression) =>
       e.kind === ts.SyntaxKind.ThisKeyword || (ts.isIdentifier(e) && !dentro.has(e.text) && !m.globales.has(e.text) && e.text !== 'prisma')
-    for (const [r, escrito] of escrituras(cuerpo))
+    for (const { raiz: r, escrito } of escrituras(cuerpo))
       if (afuera(r)) out.push(`(d) ${donde}: escribe «${escrito.getText()}», declarado fuera del cuerpo (${m.archivo}:${linea(escrito)})`)
     const visitar = (n: ts.Node) => {
       if (ts.isCallExpression(n)) {
@@ -571,7 +583,7 @@ function analizarCuerpos(modulos: Map<string, Modulo>, rev: Revisado, genericos:
           if (!p || !ts.isIdentifier(p.name) || !ts.isIdentifier(a) || !afuera(a) || !destino?.body) return
           const nombre = p.name.text
           // `param = otro` sólo cambia la variable local; `param.push(…)` o `param.x = …` cambian lo del llamador.
-          const muta = escrituras(destino.body).some(([r, escrito]) => ts.isIdentifier(r) && r.text === nombre && escrito !== r)
+          const muta = escrituras(destino.body).some(e => ts.isIdentifier(e.raiz) && e.raiz.text === nombre && !e.reasigna)
           if (muta)
             out.push(
               `(e) ${donde}: le pasa «${a.text}», declarado fuera del cuerpo, a ${llamadaDe(n)}, que muta ese parámetro (${m.archivo}:${linea(n)})`,
@@ -870,6 +882,16 @@ describe('Red por traba: la forma que el tipo no ve (S5b)', () => {
       expect(con(h, '(c)', 'withDeadlockRetry')).toHaveLength(1)
     })
 
+    it('messaging().send, canal.publish y sendX son efectos; sendero() no (sin /i: send + MAYÚSCULA)', () => {
+      const h = hallazgos({
+        'src/a.ts': `${CLIENTE}export async function f() {\n  await withDeadlockRetry(async tx => {\n    await messaging().send({})\n    canal.publish('cola', 'x')\n    await sendPushToStaff('s')\n    sendero(1)\n  }, { etiqueta: 'f' })\n}\ndeclare const canal: any\ndeclare function messaging(): any\ndeclare function sendPushToStaff(s: string): Promise<void>\ndeclare function sendero(n: number): void`,
+      })
+      expect(con(h, '(a)', 'messaging().send')).toHaveLength(1)
+      expect(con(h, '(a)', 'canal.publish')).toHaveLength(1)
+      expect(con(h, '(a)', 'sendPushToStaff')).toHaveLength(1)
+      expect(con(h, '(a)', 'sendero')).toEqual([])
+    })
+
     it('`const { f } = await import(…)` y `(await import(…)).f(tx)` se siguen como un import (Ruling 22)', () => {
       const h = hallazgos({
         'src/a.ts': `${CLIENTE}export async function f() {\n  await withDeadlockRetry(async tx => {\n    const { ayudante } = await import('./b')\n    await ayudante(tx)\n    await (await import('./c')).otro(tx)\n  }, { etiqueta: 'f' })\n}`,
@@ -899,6 +921,15 @@ describe('Red por traba: la forma que el tipo no ve (S5b)', () => {
       expect(con(h, '(d)', '«dentro.push»')).toEqual([])
     })
 
+    it('unshift, pop, shift, clear y Object.assign(afuera, …) también escriben afuera (m5)', () => {
+      const h = hallazgos({
+        'src/a.ts': `${CLIENTE}export async function f() {\n  const lista: number[] = []\n  const mapa = new Map()\n  const estado = { x: 0 }\n  await withDeadlockRetry(async tx => {\n    lista.unshift(1)\n    lista.pop()\n    lista.shift()\n    mapa.clear()\n    Object.assign(estado, { x: 1 })\n    Object.assign({}, estado)\n  }, { etiqueta: 'f' })\n}`,
+      })
+      for (const escrito of ['«lista.unshift»', '«lista.pop»', '«lista.shift»', '«mapa.clear»', '«estado»'])
+        expect(con(h, '(d)', escrito)).toHaveLength(1)
+      expect(con(h, '(d)')).toHaveLength(5)
+    })
+
     it('el cuerpo por nombre también se revisa (la asignación a `revertida`)', () => {
       const h = hallazgos({
         'src/a.ts': `${CLIENTE}export async function reverse() {\n  let revertida = false\n  const dentroDelCandado = async (tx: TxConReintento) => { revertida = true }\n  await withDeadlockRetry(dentroDelCandado, { etiqueta: 'reverse' })\n  return revertida\n}`,
@@ -917,6 +948,16 @@ describe('Red por traba: la forma que el tipo no ve (S5b)', () => {
         'src/b.ts': 'export async function aplicar(_tx: unknown, audits: string[]) { audits.push("x") }',
       })
       expect(con(dentro, '(e)')).toEqual([])
+      const conAssign = hallazgos({
+        'src/a.ts': `${CLIENTE}import { aplicar } from './b'\nexport async function f() {\n  const estado = { n: 0 }\n  await withDeadlockRetry(async tx => { await aplicar(tx, estado) }, { etiqueta: 'f' })\n}`,
+        'src/b.ts': 'export async function aplicar(_tx: unknown, estado: { n: number }) { Object.assign(estado, { n: 1 }) }',
+      })
+      expect(con(conAssign, '(e)', '«estado»')).toHaveLength(1)
+      const reasigna = hallazgos({
+        'src/a.ts': `${CLIENTE}import { aplicar } from './b'\nexport async function f() {\n  const estado = { n: 0 }\n  await withDeadlockRetry(async tx => { await aplicar(tx, estado) }, { etiqueta: 'f' })\n}`,
+        'src/b.ts': 'export async function aplicar(_tx: unknown, estado: { n: number }) { estado = { n: 1 }; return estado }',
+      })
+      expect(con(reasigna, '(e)')).toEqual([])
     })
 
     it('una función que recibe tx y llama withDeadlockRetry falla; la rama sin tx de una función revisada pasa (Ruling 21)', () => {

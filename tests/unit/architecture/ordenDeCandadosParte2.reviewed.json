@@ -4,7 +4,7 @@
     "corridaSobreSrc: false hasta el paso 8 (ahí se prende la marca); con true, la prueba y la guardia exigen todo src/.",
     "escritores: toda función con una escritura o candado de Discount, CouponCode, CouponRedemption, StampReward, StampCard, StampEvent, Customer, LoyaltyTransaction o GiftCard (directa, del asesor del cupón o indirecta por un padre). EN_TX = corre dentro de una transacción que alguien abre; SENTENCIA = hoy con el cliente global: cada sentencia en su propio withDeadlockRetry.",
     "aperturas: cada withDeadlockRetry (o withSerializableRetry con reintentarInterbloqueo: serializable) por función, con etiqueta = el nombre de la función. Semilla medida el 6-nov sobre 48b98c5a7: las 95 transacciones de la tabla del brief (sin la excepción recordOrderPayment), executeHttpOperation (Ruling 16) y las 39 sentencias de las 34 funciones SENTENCIA. nota = lo que el paso 3-7 tiene que hacer además de envolver.",
-    "cuerposRevisados: archivo#función → motivo; exime de (c) y (7) la rama sin tx de esa función (Ruling 21).",
+    "cuerposRevisados: archivo#función → motivo (Ruling 21). Exime de (c) y (7) la función ENTERA, no sólo su rama sin tx (la prueba no separa ramas): se lista sólo una función cuya única apertura es la rama que corre sin tx, y la revisión de código lo comprueba.",
     "Lo que S6–S13 agreguen entra aquí en su tarea."
   ],
   "corridaSobreSrc": false,
@@ -572,8 +572,7 @@
     },
     "src/services/dashboard/customer.dashboard.service.ts#decideCustomerApprovalFromDashboard": {
       "etiqueta": "decideCustomerApprovalFromDashboard",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:949: sesionesDeValesCerradas, settled, postingIds)."
+      "cantidad": 1
     },
     "src/services/dashboard/customer.dashboard.service.ts#deleteCustomer": {
       "etiqueta": "deleteCustomer",
@@ -583,7 +582,7 @@
     "src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance": {
       "etiqueta": "settleCustomerBalance",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:949: sesionesDeValesCerradas, settled, postingIds)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): sesionesDeValesCerradas, settled, postingIds."
     },
     "src/services/dashboard/customer.dashboard.service.ts#updateCustomer": {
       "etiqueta": "updateCustomer",
@@ -592,8 +591,7 @@
     },
     "src/services/dashboard/customer.dashboard.service.ts#updateCustomerMetrics": {
       "etiqueta": "updateCustomerMetrics",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:949: sesionesDeValesCerradas, settled, postingIds)."
+      "cantidad": 1
     },
     "src/services/dashboard/customerGroup.dashboard.service.ts#assignCustomersToGroup": {
       "etiqueta": "assignCustomersToGroup",
@@ -628,17 +626,17 @@
     "src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
       "etiqueta": "applyAutomaticDiscounts",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:909: audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079); :1119: audits; :1248: audits, por parámetro (:1079; r5 #2))."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): audits, por parámetro (:1079; r5 #2)."
     },
     "src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder": {
       "etiqueta": "applyDiscountToOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:909: audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079); :1119: audits; :1248: audits, por parámetro (:1079; r5 #2))."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079)."
     },
     "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
       "etiqueta": "removeDiscountFromOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:909: audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079); :1119: audits; :1248: audits, por parámetro (:1079; r5 #2))."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): audits."
     },
     "src/services/dashboard/loyalty.dashboard.service.ts#acreditarPuntosTrasElSello": {
       "etiqueta": "acreditarPuntosTrasElSello",
@@ -657,42 +655,41 @@
     "src/services/dashboard/manualPayment.service.ts#createManualPayment": {
       "etiqueta": "createManualPayment",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:175: sesionState, replayed, metricsState, loyaltyOrderId, loyaltyCustomerId, loyaltyOrderTotal, loyaltyShouldEarn, metricsCustomerIds, postingState)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): sesionState, replayed, metricsState, loyaltyOrderId, loyaltyCustomerId, loyaltyOrderTotal, loyaltyShouldEarn, metricsCustomerIds, postingState."
     },
     "src/services/dashboard/order.dashboard.service.ts#cancelarCuentaSinCobrar": {
       "etiqueta": "cancelarCuentaSinCobrar",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId)."
+      "cantidad": 1
     },
     "src/services/dashboard/order.dashboard.service.ts#deleteOrder": {
       "etiqueta": "deleteOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): valesSoltados."
     },
     "src/services/dashboard/order.dashboard.service.ts#settleOrder": {
       "etiqueta": "settleOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId."
     },
     "src/services/dashboard/order.dashboard.service.ts#updateOrder": {
       "etiqueta": "updateOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId). Siempre por withDeadlockRetry, también sin cambio de mesa, estado ni cliente (update recibe TxConReintento)."
+      "nota": "Siempre por withDeadlockRetry, también sin cambio de mesa, estado ni cliente (update recibe TxConReintento)."
     },
     "src/services/dashboard/paymentLink.service.ts#completeCharge": {
       "etiqueta": "completeCharge",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:2267: postingId, orderIdForReferral; :3119: loyaltyBase, postingId, orderIdForReferral; :4130: postingId, orderIdForReferral)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): loyaltyBase, postingId, orderIdForReferral."
     },
     "src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout": {
       "etiqueta": "finalizeMercadoPagoCheckout",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:2267: postingId, orderIdForReferral; :3119: loyaltyBase, postingId, orderIdForReferral; :4130: postingId, orderIdForReferral)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): postingId, orderIdForReferral."
     },
     "src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout": {
       "etiqueta": "finalizePaymentLinkCheckout",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:2267: postingId, orderIdForReferral; :3119: loyaltyBase, postingId, orderIdForReferral; :4130: postingId, orderIdForReferral)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): postingId, orderIdForReferral."
     },
     "src/services/dashboard/refund.dashboard.service.ts#issueRefund": {
       "etiqueta": "issueRefund",
@@ -716,7 +713,7 @@
     "src/services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder": {
       "etiqueta": "ingestDeliveryOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:287: nuevaState, renglonesCreados, postingState)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): nuevaState, renglonesCreados, postingState."
     },
     "src/services/demo/negociosDemo.service.ts#recrearNegocio": {
       "etiqueta": "recrearNegocio",
@@ -795,7 +792,7 @@
     "src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout": {
       "etiqueta": "cancelAreaTicketCheckout",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:1908: ordenCancelada)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): ordenCancelada."
     },
     "src/services/mobile/auth.mobile.service.ts#deleteOwnAccount": {
       "etiqueta": "deleteOwnAccount",
@@ -882,7 +879,7 @@
     "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
       "etiqueta": "cleanDemoData",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:120: result)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): result."
     },
     "src/services/onboarding/demoSeed.service.ts#seedCustomers": {
       "etiqueta": "seedCustomers",
@@ -968,38 +965,35 @@
     },
     "src/services/tpv/order.tpv.service.ts#compItems": {
       "etiqueta": "compItems",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+      "cantidad": 1
     },
     "src/services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder": {
       "etiqueta": "createAndAddCustomerToOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): nuevoClienteId, cobrada."
     },
     "src/services/tpv/order.tpv.service.ts#createOrderWithItems": {
       "etiqueta": "createOrderWithItems",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+      "cantidad": 1
     },
     "src/services/tpv/order.tpv.service.ts#removeOrderItem": {
       "etiqueta": "removeOrderItem",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+      "cantidad": 1
     },
     "src/services/tpv/order.tpv.service.ts#voidItems": {
       "etiqueta": "voidItems",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): valesSoltados."
     },
     "src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment": {
       "etiqueta": "updateOrderTotalsForStandalonePayment",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:1957: reabiertaEnEstaPasada, tpvPostingId)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): reabiertaEnEstaPasada, tpvPostingId."
     },
     "src/services/tpv/refund.tpv.service.ts#recordRefund": {
       "etiqueta": "recordRefund",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:563: tipRefund, salesRefund)."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): tipRefund, salesRefund."
     },
     "src/services/wallet/redeemStampReward.service.ts#redeemStampReward": {
       "etiqueta": "redeemStampReward",
@@ -1007,18 +1001,16 @@
     },
     "src/services/wallet/stampLedger.service.ts#adjustStamps": {
       "etiqueta": "adjustStamps",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:541: revertida)."
+      "cantidad": 1
     },
     "src/services/wallet/stampLedger.service.ts#grantStamp": {
       "etiqueta": "grantStamp",
-      "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:541: revertida)."
+      "cantidad": 1
     },
     "src/services/wallet/stampLedger.service.ts#reverseStampForOrder": {
       "etiqueta": "reverseStampForOrder",
       "cantidad": 1,
-      "nota": "Lo de afuera al retorno (:541: revertida). El reintento por traba va DENTRO de su lazo de hoy por vencimiento (P2028): reemplaza su prisma.$transaction."
+      "nota": "Lo de afuera al retorno (R65 b, repetirNoDuplica): revertida. El reintento por traba va DENTRO de su lazo de hoy por vencimiento (P2028): reemplaza su prisma.$transaction."
     }
   }
 }
