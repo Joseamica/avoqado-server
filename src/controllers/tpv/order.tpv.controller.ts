@@ -120,7 +120,9 @@ export async function createOrderWithItems(req: Request<{ venueId: string }, any
         // Después del spread: son del actor autenticado, nunca campos del cliente ni del vendedor seleccionado.
         canCompItems: canCompItems || !!cortesia,
         // Codex r2 #1: el gerente del PIN o la membresía de quien COBRA (no el vendedor elegido en `staffId`).
-        regaloAutorizadoPor: cortesia ? (cortesia.porPin ?? (await membresiaDeQuienLlama(venueId, req.authContext?.userId))) : undefined,
+        // Codex r3 #1: también cuando el permiso llegó por otra razón (un descuento de artículo activa `canCompItems`).
+        regaloAutorizadoPor:
+          cortesia?.porPin ?? (canCompItems || cortesia ? await membresiaDeQuienLlama(venueId, req.authContext?.userId) : undefined),
         performedBy: req.authContext?.userId,
         deviceSerialNumber: req.authContext?.terminalSerialNumber,
       }),

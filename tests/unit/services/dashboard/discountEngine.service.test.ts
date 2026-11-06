@@ -1752,7 +1752,8 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
   it('FIXED_AMOUNT mayor al remanente se recorta al remanente', async () => {
     prismaMock.order.findUnique.mockResolvedValue(orderAt(888, 500) as never)
 
-    const result = await applyManualDiscount('order-neg', 'FIXED_AMOUNT', 888, 'birthdayexperience', 'staff-1')
+    // hz:e0b12f00:D1: agota lo que queda, así que va con permiso de cortesía (9º argumento).
+    const result = await applyManualDiscount('order-neg', 'FIXED_AMOUNT', 888, 'birthdayexperience', 'staff-1', undefined, undefined, undefined, true)
 
     expect(result.amount).toBe(388) // no 888
     expect(Number(lastOrderUpdate().total)).toBe(0)
