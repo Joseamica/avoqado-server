@@ -47,7 +47,7 @@ const row = (n: number, o: { paymentStatus?: string; remaining?: string; status?
     customerName: 'María',
     customerPhone: null,
     specialRequests: null,
-    items: [],
+    items: [{ productName: 'Flautas', productId: 'p1', product: null, quantity: 2, notes: null, unitPrice: new Prisma.Decimal('93.00'), total: new Prisma.Decimal('186.00'), modifiers: [] }],
     payments: o.paymentStatus === 'PAID' ? [{ createdAt: PAGADO_A }] : [],
   },
 })
@@ -104,6 +104,7 @@ describe('listFolios', () => {
     POR_PAGAR = [row(1)]
     POR_ENTREGAR = [row(3, { status: 'ACCEPTED', paymentStatus: 'PAID', remaining: '0.00' })]
     const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toPay[0].items[0]).toMatchObject({ unitPrice: 93, total: 186 })
     expect(r.toPay[0].paidAt).toBeNull()
     expect(r.toDeliver[0].paidAt).toBe(PAGADO_A.toISOString())
     const lista = listas()[0]

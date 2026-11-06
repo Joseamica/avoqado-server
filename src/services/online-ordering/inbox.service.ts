@@ -58,6 +58,9 @@ export interface InboxOrder {
     name: string
     quantity: number
     note: string | null
+    /** T18c: precio base por unidad y total del renglón (con extras), en PESOS; opcionales para las apps viejas. */
+    unitPrice?: number
+    total?: number
     modifiers: Array<{ name: string; quantity: number }>
   }>
 }
@@ -112,6 +115,8 @@ export const INBOX_SELECT = {
           product: { select: { categoryId: true } },
           quantity: true,
           notes: true,
+          unitPrice: true,
+          total: true,
           modifiers: { take: 50, select: { name: true, quantity: true } },
         },
       },
@@ -160,6 +165,8 @@ export function toInboxOrder(r: Row, now: Date): InboxOrder {
       name: i.productName ?? '',
       quantity: i.quantity,
       note: i.notes ?? null,
+      unitPrice: money(i.unitPrice),
+      total: money(i.total),
       modifiers: i.modifiers.map(m => ({ name: m.name ?? '', quantity: m.quantity })),
     })),
   }
