@@ -166,11 +166,15 @@ export function pagoPorAvoqadoSql(paymentAlias: string): Prisma.Sql {
 }
 
 /**
- * The currency of a payment `p`: a `Payment` has none of its own; an online one keeps it in its `CheckoutSession` (unique per
- * payment, `paymentLink.service.ts` and `venueCheckout.service.ts` link it), and everything else is charged in MXN (the
- * terminal, the POS, online ordering's fixed `MXN`). Upper case: a link may store it as written.
+ * The currency of a payment `p`: a `Payment` has none of its own; an online one keeps it in its `CheckoutSession`, linked by
+ * `paymentId` (`paymentLink.service.ts`, `venueCheckout.service.ts`) or — a link charged before aed515013 left it empty — found
+ * by `sessionId = Payment.processorId`, the fallback of `pagoDeLaSesion` (Codex r2 #1). Everything else is charged in MXN (the
+ * terminal, the POS, online ordering's fixed `MXN`). Upper case: a link may store it as written. Both lookups are unique keys.
  */
-const monedaDelPagoSql = Prisma.sql`UPPER(COALESCE((SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."paymentId" = p."id"), 'MXN'))`
+export const monedaDelPagoSql = Prisma.sql`UPPER(COALESCE(
+  (SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."paymentId" = p."id"),
+  (SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."sessionId" = p."processorId" AND cs."paymentId" IS NULL),
+  'MXN'))`
 
 /** `paymentCountsAsDrawerCash` (`shared/tenderSemantics.ts`) over `p`, with its precedence: fundsFlow → tender snapshot → method. */
 const efectivoDeCajonSql = Prisma.sql`(CASE WHEN p."fundsFlow" IS NOT NULL THEN p."fundsFlow" = 'CASH_DRAWER'

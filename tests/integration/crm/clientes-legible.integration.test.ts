@@ -2432,6 +2432,19 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
             },
           })
         }
+        // Codex r2 #1: a link charged before aed515013 left `CheckoutSession.paymentId` empty; its session is found by
+        // `sessionId = Payment.processorId` (the fallback of `pagoDeLaSesion`).
+        const usdAntigua = async (venueId: string, amount: string) => {
+          const orderId = await tarjeta(venueId, { source: 'WEB', ecommerceMerchantId, fundsFlow: 'AVOQADO_PROCESSED', amount })
+          const sessionId = `pi_${ING}_${++n}`
+          await prisma.payment.updateMany({ where: { orderId }, data: { processorId: sessionId } })
+          await prisma.checkoutSession.create({
+            data: { sessionId, ecommerceMerchantId, amount, currency: 'usd', expiresAt: dentroDe(DAY), status: 'COMPLETED' },
+          })
+        }
+        const antigua = await orgI('ligaAntigua')
+        await usdAntigua(antigua, '100.00')
+        await tarjeta(antigua, { source: 'TPV', amount: '100.00' })
         const mixto = await orgI('dosMonedas')
         await usd(mixto, '100.00')
         await tarjeta(mixto, { source: 'TPV', amount: '100.00' })
@@ -2451,13 +2464,22 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
           otraMoneda: true,
           pista: null,
         })
+        expect(by.get(o.ligaAntigua)).toMatchObject({ transacciones30d: 100, otraMoneda: true })
         expect(by.get(o.terminal)).toMatchObject({ transacciones30d: 350, otraMoneda: false })
-        // The ficha says the same.
+        // The ficha says the same, and «Cobrado este mes» (Codex r2 #3) adds only MXN too and flags the rest.
         clockAt(NOW)
         const ficha = await getClientLive(conVentas(), o.dosMonedas, NOW)
         jest.useRealTimers()
-        expect(ficha).toMatchObject({ ingreso: { transacciones30d: 100, otraMoneda: true } })
-        await prisma.organization.updateMany({ where: { id: { in: [o.dosMonedas, o.soloDolares] } }, data: { name: `Fuera ${ING}` } })
+        expect(ficha).toMatchObject({ ingreso: { transacciones30d: 100, otraMoneda: true }, ventasMesOtraMoneda: true })
+        expect(ficha.ligada && ficha.ventasMes?.toString()).toBe('100')
+        clockAt(NOW)
+        const fichaTerminal = await getClientLive(conVentas(), o.terminal, NOW)
+        jest.useRealTimers()
+        expect(fichaTerminal).toMatchObject({ ventasMesOtraMoneda: false })
+        await prisma.organization.updateMany({
+          where: { id: { in: [o.dosMonedas, o.soloDolares, o.ligaAntigua] } },
+          data: { name: `Fuera ${ING}` },
+        })
       })
 
       it('la ficha (getClientLive) dice lo mismo que la fila, y sin «Ver ventas» sin monto', async () => {

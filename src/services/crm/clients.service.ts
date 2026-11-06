@@ -20,7 +20,9 @@ import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { ensureCrmDefaults, lockEditableTx, touchNoEarlierTx } from './accounts.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import type { MotivoDelAlta, Nivel, UsaEscrito } from './clientCodes'
-import { altaPendienteSql } from './clientFacts'
+import { altaPendienteSql, monedaDelPagoSql } from './clientFacts'
+import { REAL_VENUE_SQL } from './realVenueSql'
+import { utcTs } from '../../utils/sqlDates'
 import {
   altaDeLaFila,
   altaFactsOf,
@@ -37,7 +39,6 @@ import {
 import { checkDueno, clientSql, clientsFilter, clientsQueries, ingresoDeOrganizacionSql, pageSize, type ClientFilters } from './clientsSql'
 import { teamOrganizationId } from './inbound.service'
 import { addEvent } from './timeline.service'
-import { MONEY, REAL_VENUE } from './sweep.service'
 
 // The SQL lives in the leaf `clientsSql.ts`; these were imported from here before it existed.
 export { clientSql, clientsFilter, clientsQueries, planVigenteSql, scopeSql, type ClientFilters, type PaidPlan } from './clientsSql'
@@ -175,13 +176,19 @@ function teamMonth(now: Date): { gte: Date; lt: Date } {
   return { gte: first(year, month), lt: first(next.year, next.month) }
 }
 
-/** What the organization charged for real this month, in pesos. */
-async function monthSales(organizationId: string, now: Date): Promise<Prisma.Decimal> {
-  const { _sum } = await prisma.payment.aggregate({
-    where: { ...MONEY, createdAt: teamMonth(now), venue: { organizationId, ...REAL_VENUE } },
-    _sum: { amount: true },
-  })
-  return _sum.amount ?? new Prisma.Decimal(0)
+/**
+ * What the organization charged for real this month, in MXN pesos (`MONEY` and `REAL_VENUE` in SQL), and whether it also charged
+ * in another currency: currencies are never added up (Codex r2 #3, the rule of «Ingreso», `monedaDelPagoSql`).
+ */
+async function monthSales(organizationId: string, now: Date): Promise<{ total: Prisma.Decimal; otraMoneda: boolean }> {
+  const { gte, lt } = teamMonth(now)
+  const [row] = await prisma.$queryRaw<Array<{ ventasMXN: Prisma.Decimal | null; otraMoneda: boolean }>>(Prisma.sql`
+    SELECT SUM(p."amount") FILTER (WHERE ${monedaDelPagoSql} = 'MXN') AS "ventasMXN",
+      COALESCE(BOOL_OR(${monedaDelPagoSql} <> 'MXN'), false) AS "otraMoneda"
+    FROM "Venue" v JOIN "Payment" p ON p."venueId" = v."id"
+    WHERE v."organizationId" = ${organizationId} AND ${REAL_VENUE_SQL}
+      AND p."status" = 'COMPLETED' AND p."amount" > 0 AND p."createdAt" >= ${utcTs(gte)} AND p."createdAt" < ${utcTs(lt)}`)
+  return { total: row?.ventasMXN ?? new Prisma.Decimal(0), otraMoneda: row?.otraMoneda ?? false }
 }
 
 /**
@@ -279,7 +286,9 @@ async function liveOf(access: CrmAccess, organizationId: string, now: Date) {
           ...(onboarding.completedAt ? {} : altaFacts.get(organizationId)),
         }
       : null,
-    ventasMes,
+    ventasMes: ventasMes?.total ?? null,
+    /** C1b (Codex r2 #3): it also charged in another currency this month (not added to `ventasMes`). Only with «Ver ventas». */
+    ventasMesOtraMoneda: ventasMes?.otraMoneda ?? null,
     ventasBloqueadas: !access.ventas,
     ingreso: ingreso ? ingresoDeLaFila(ingreso, access.ventas) : null,
   }

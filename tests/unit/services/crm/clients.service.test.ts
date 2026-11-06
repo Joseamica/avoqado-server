@@ -14,7 +14,7 @@ import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { altaPendienteSql, ingresoSql } from '@/services/crm/clientFacts'
+import { altaPendienteSql, ingresoSql, monedaDelPagoSql } from '@/services/crm/clientFacts'
 import { planesPorSucursal } from '@/services/crm/clientPage'
 import { ingresoColumnas } from '@/services/crm/clientsSql'
 import {
@@ -154,6 +154,14 @@ const countQuery = (n = 0) => rawQueries().filter(isTotal)[n]
 const filterOf = (query: Prisma.Sql) => {
   const from = query.sql.slice(query.sql.indexOf('FROM "Organization" o')).replace(/\s+/g, ' ')
   return (from.includes('ORDER BY') ? from.slice(0, from.indexOf('ORDER BY')) : from).trim()
+}
+
+/** The month query of the ficha («Cobrado este mes»): one raw statement over the organization's real venues. */
+const isMes = (query: Prisma.Sql) => query.sql.includes('AS "ventasMXN"')
+/** Answers the month query with `row` and everything else as before. */
+function mesDb(row: { ventasMXN: Prisma.Decimal | null; otraMoneda: boolean }) {
+  const antes = prismaMock.$queryRaw.getMockImplementation()
+  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (isMes(query) ? [row] : antes ? antes(query) : []))
 }
 
 /** A row of the page as the SQL returns it. */
@@ -598,7 +606,9 @@ describe('Ingreso (C1b)', () => {
   it('🔴 Codex r1 #3: el monto sólo suma MXN (la moneda sale de la sesión de pago) y lo de otra moneda sólo se marca', async () => {
     await listClients(access({ ventas: true, ver: 'todos' }), {}, NOW)
     const page = sqlOf(pageQuery(0))
-    const moneda = `UPPER(COALESCE((SELECT cs."currency" FROM "CheckoutSession" cs WHERE cs."paymentId" = p."id"), 'MXN'))`
+    const moneda = monedaDelPagoSql.sql.replace(/\s+/g, ' ')
+    // Codex r2 #1: a link from before aed515013 (no `paymentId`) is found by its `sessionId`.
+    expect(moneda).toContain(`cs."sessionId" = p."processorId" AND cs."paymentId" IS NULL`)
     expect(page).toContain(`${moneda} = 'MXN'`)
     expect(page).toContain(`${moneda} <> 'MXN'`)
     expect(page).toContain('AS "otraMoneda"')
@@ -992,42 +1002,41 @@ describe('getLive', () => {
     linked()
     const live = await getLive(access({ ventas: false }), ACCOUNT, NOW)
 
-    expect(live).toMatchObject({ ligada: true, ventasMes: null, ventasBloqueadas: true })
+    expect(live).toMatchObject({ ligada: true, ventasMes: null, ventasMesOtraMoneda: null, ventasBloqueadas: true })
     // Not even read: what the seller may not see never leaves the database.
-    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    expect(rawQueries().some(isMes)).toBe(false)
   })
 
-  it('vivo_con_llave_ventas_suma_el_mes_de_ciudad_de_mexico', async () => {
+  it('vivo_con_llave_ventas_suma_el_mes_de_ciudad_de_mexico (sólo MXN; otra moneda se marca, Codex r2 #3)', async () => {
     linked()
+    mesDb({ ventasMXN: new Prisma.Decimal('1500.50'), otraMoneda: true })
     const live = await getLive(access({ ventas: true }), ACCOUNT, NOW)
 
-    expect(live).toMatchObject({ ventasBloqueadas: false })
+    expect(live).toMatchObject({ ventasBloqueadas: false, ventasMesOtraMoneda: true })
     expect(live.ligada && live.ventasMes?.toString()).toBe('1500.5')
-    // October in Mexico City: 1-oct 00:00 (06:00Z) up to, not including, 1-nov 00:00 (06:00Z). Real money, real venues.
-    expect(prismaMock.payment.aggregate).toHaveBeenCalledWith({
-      where: {
-        ...MONEY,
-        createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lt: new Date('2026-11-01T06:00:00.000Z') },
-        venue: { organizationId: ORG, ...REAL_VENUE },
-      },
-      _sum: { amount: true },
-    })
+    // October in Mexico City: 1-oct 00:00 (06:00Z) up to, not including, 1-nov 00:00 (06:00Z). Real money, real venues, MXN.
+    const mes = rawQueries().filter(isMes)
+    expect(mes[0].values).toEqual(expect.arrayContaining([ORG, new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T06:00:00.000Z')]))
+    const sql = mes[0].sql.replace(/\s+/g, ' ')
+    expect(sql).toContain(`p."status" = 'COMPLETED' AND p."amount" > 0`)
+    expect(sql).toContain('v."demoExpiresAt" IS NULL')
+    expect(sql).toContain(`= 'MXN') AS "ventasMXN"`)
+    expect(sql).toContain(`cs."sessionId" = p."processorId" AND cs."paymentId" IS NULL`)
 
     // 21:00 of 31-oct in Mexico City is already November in UTC: still October here.
     await getLive(access({ ventas: true }), ACCOUNT, new Date('2026-11-01T03:00:00.000Z'))
-    expect(prismaMock.payment.aggregate.mock.calls[1][0].where.createdAt).toEqual({
-      gte: new Date('2026-10-01T06:00:00.000Z'),
-      lt: new Date('2026-11-01T06:00:00.000Z'),
-    })
+    expect(rawQueries().filter(isMes)[1].values).toEqual(
+      expect.arrayContaining([new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T06:00:00.000Z')]),
+    )
 
     // December rolls over to January of the next year; a month without sales is $0, not null.
-    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null } })
+    mesDb({ ventasMXN: null, otraMoneda: false })
     const december = await getLive(access({ ventas: true }), ACCOUNT, new Date('2026-12-15T18:00:00.000Z'))
-    expect(prismaMock.payment.aggregate.mock.calls[2][0].where.createdAt).toEqual({
-      gte: new Date('2026-12-01T06:00:00.000Z'),
-      lt: new Date('2027-01-01T06:00:00.000Z'),
-    })
+    expect(rawQueries().filter(isMes)[2].values).toEqual(
+      expect.arrayContaining([new Date('2026-12-01T06:00:00.000Z'), new Date('2027-01-01T06:00:00.000Z')]),
+    )
     expect(december.ligada && december.ventasMes?.toString()).toBe('0')
+    expect(december).toMatchObject({ ventasMesOtraMoneda: false })
   })
 
   it('vivo_plan_por_contrato_sin_fila_clasica', async () => {
@@ -1185,8 +1194,9 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     expect(seller).toEqual(await getLive(access({ ventas: false }), ACCOUNT, NOW))
     expect(seller).toMatchObject({ ligada: true, organizationId: ORG, ventasMes: null, ventasBloqueadas: true })
     expect(seller.venues[0]).not.toHaveProperty('kycStatus')
-    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    expect(rawQueries().some(isMes)).toBe(false)
     // The same locks: «Ver ventas» brings the month, «Configurar el CRM» the KYC.
+    mesDb({ ventasMXN: new Prisma.Decimal('1500.50'), otraMoneda: false })
     const admin = await getClientLive(access({ ventas: true, configurar: true }), ORG, NOW)
     expect(admin).toMatchObject({ ventasBloqueadas: false, venues: [expect.objectContaining({ kycStatus: 'VERIFIED' })] })
     expect(admin.ventasMes?.toString()).toBe('1500.5')
