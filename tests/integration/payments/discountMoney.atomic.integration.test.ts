@@ -741,6 +741,18 @@ describe('existing discount policies', () => {
       authorizedById: staffVenueId,
     })
   })
+  // Codex D1 r2 #2: el dueño de la organización tiene el permiso aunque no tenga membresía en la sucursal.
+  it('D1: con permiso y sin membresía en el negocio, la cortesía manual se aplica sin autorizador registrado', async () => {
+    const o = await newOrder()
+    expect(
+      await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, undefined, {
+        userId: 'dueno-sin-membresia',
+      }),
+    ).toMatchObject({ success: true, amount: 100 })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: null,
+    })
+  })
   it('D1: un descuento manual de % sigue sin pedir permiso de cortesía', async () => {
     const o = await newOrder()
     expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)).toMatchObject({

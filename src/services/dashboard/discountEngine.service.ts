@@ -1312,6 +1312,8 @@ export async function applyAutomaticDiscounts(
  * @param authorizedById - Manager ID if comp
  * @param compReason - Reason for comp
  * @param venueId - Authoritative tenant (TPV). With it, a missing Order THROWS instead of returning an error result
+ * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, una cortesía (COMP) es 403. El
+ *   `authorizedById` ya no decide: es sólo quién quedó registrado (puede faltar, p. ej. dueño sin membresía en la sucursal).
  */
 export async function applyManualDiscount(
   orderId: string,
@@ -1322,6 +1324,7 @@ export async function applyManualDiscount(
   authorizedById?: string,
   compReason?: string,
   venueId?: string,
+  puedeRegalar = false,
 ): Promise<ApplyDiscountResult> {
   return prisma.$transaction(async tx => {
     // The remaining base below comes from THIS read, under the canonical Order lock.
@@ -1366,9 +1369,8 @@ export async function applyManualDiscount(
         break
       case 'COMP':
         amount = remainingDiscountable // Full remaining amount
-        if (!authorizedById) {
-          return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Comp requires manager authorization' }
-        }
+        // D1 (Codex r2 #2): decide el permiso verificado, no que venga un `authorizedById`.
+        if (!puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
         break
     }
 

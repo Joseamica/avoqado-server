@@ -1314,7 +1314,8 @@ describe('Discount Engine Service', () => {
         requiresApproval: true, // Requires approval
       }
 
-      const result = await applyDiscountToOrder('order-123', discount, 'staff-1') // No authorizedById
+      // D1: con el permiso de cortesía (el descuento es COMP), para probar sólo la aprobación.
+      const result = await applyDiscountToOrder('order-123', discount, 'staff-1', undefined, undefined, true) // No authorizedById
 
       expect(result.success).toBe(false)
       expect(result.error).toBe('This discount requires manager approval')
@@ -1356,7 +1357,7 @@ describe('Discount Engine Service', () => {
         requiresApproval: true,
       }
 
-      const result = await applyDiscountToOrder('order-123', discount, 'staff-1', 'manager-1') // With authorization
+      const result = await applyDiscountToOrder('order-123', discount, 'staff-1', 'manager-1', undefined, true) // With authorization (+ D1: permiso de cortesía)
 
       expect(result.success).toBe(true)
     })
@@ -1537,10 +1538,11 @@ describe('Discount Engine Service', () => {
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
       prismaMock.order.findUnique.mockResolvedValue(mockOrder)
 
-      const result = await applyManualDiscount('order-123', 'COMP', 0, 'Full comp', 'staff-1') // No authorization
-
-      expect(result.success).toBe(false)
-      expect(result.error).toBe('Comp requires manager authorization')
+      // D1: sin el permiso de cortesía verificado es 403, aunque venga un autorizador.
+      await expect(applyManualDiscount('order-123', 'COMP', 0, 'Full comp', 'staff-1', 'manager-1')).rejects.toMatchObject({
+        statusCode: 403,
+        message: 'No tienes permiso para dar cortesías',
+      })
     })
 
     it('should apply COMP with authorization', async () => {
@@ -1568,6 +1570,8 @@ describe('Discount Engine Service', () => {
         'staff-1',
         'manager-1', // With authorization
         'Cold food',
+        undefined,
+        true, // D1: permiso de cortesía verificado
       )
 
       expect(result.success).toBe(true)
@@ -1789,11 +1793,10 @@ describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de 
   it('COMP sigue descontando el remanente y sigue exigiendo autorización', async () => {
     prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 300) as never)
 
-    const sinAutorizar = await applyManualDiscount('order-neg', 'COMP', 0, 'Cortesía', 'staff-1')
-    expect(sinAutorizar.success).toBe(false)
-    expect(sinAutorizar.error).toMatch(/authorization/i)
+    // D1: sin el permiso de cortesía verificado es 403, aunque traiga autorizador.
+    await expect(applyManualDiscount('order-neg', 'COMP', 0, 'Cortesía', 'staff-1', 'manager-1')).rejects.toMatchObject({ statusCode: 403 })
 
-    const autorizado = await applyManualDiscount('order-neg', 'COMP', 0, 'Cortesía', 'staff-1', 'manager-1')
+    const autorizado = await applyManualDiscount('order-neg', 'COMP', 0, 'Cortesía', 'staff-1', 'manager-1', undefined, undefined, true)
     expect(autorizado.amount).toBe(700)
     expect(Number(lastOrderUpdate().total)).toBe(0)
   })

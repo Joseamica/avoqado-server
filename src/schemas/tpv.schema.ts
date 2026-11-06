@@ -766,20 +766,9 @@ export const applyManualDiscountSchema = z.object({
         message: 'El porcentaje de descuento debe estar entre 1 y 100.',
         path: ['value'],
       },
-    )
-    .refine(
-      data => {
-        // COMP requires authorization
-        if (data.type === 'COMP' && !data.authorizedById) {
-          return false
-        }
-        return true
-      },
-      {
-        message: 'Los descuentos tipo COMP requieren autorización de un manager.',
-        path: ['authorizedById'],
-      },
     ),
+  // D1 (hz:f34960c5:D1, Codex r2 #1): la cortesía ya no exige `authorizedById` del cliente (se ignora): la autoriza el permiso
+  // `orders:comp` o el PIN de gerente en `checkCortesiaEnDescuento`, que corre DESPUÉS de este esquema.
 })
 
 export const applyCouponCodeSchema = z.object({

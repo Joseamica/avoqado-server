@@ -360,17 +360,24 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
       ordenConCargo({ subtotal: new Decimal(253), serviceChargeAmount: new Decimal(0), total: new Decimal(253) }) as never,
     )
 
-    const result = await applyDiscountToOrder('order-sc', {
-      discountId: 'd-comp',
-      name: 'Cortesía',
-      type: 'COMP' as DiscountType,
-      value: 100,
-      amount: 253,
-      taxReduction: 40.48, // 253 × 0.16, el 0.16 fijo de antes de D16; el motor re-evalúa bajo el candado y no la usa
-      applicableItems: [],
-      isAutomatic: false,
-      requiresApproval: false,
-    } as any)
+    const result = await applyDiscountToOrder(
+      'order-sc',
+      {
+        discountId: 'd-comp',
+        name: 'Cortesía',
+        type: 'COMP' as DiscountType,
+        value: 100,
+        amount: 253,
+        taxReduction: 40.48, // 253 × 0.16, el 0.16 fijo de antes de D16; el motor re-evalúa bajo el candado y no la usa
+        applicableItems: [],
+        isAutomatic: false,
+        requiresApproval: false,
+      } as any,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    ) // D1: con permiso de cortesía; aquí se prueba el impuesto
 
     expect(result.success).toBe(true)
     expect(totalGuardado()).toBe(0)
@@ -391,17 +398,24 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
     // Esta orden SÍ trae cargo ($100), así que trae su fila.
     prismaMock.orderServiceCharge.findMany.mockResolvedValue([filaFija(100)] as never)
 
-    const result = await applyDiscountToOrder('order-sc', {
-      discountId: 'd-comp',
-      name: 'Cortesía',
-      type: 'COMP' as DiscountType,
-      value: 100,
-      amount: 253,
-      taxReduction: 40.48,
-      applicableItems: [],
-      isAutomatic: false,
-      requiresApproval: false,
-    } as any)
+    const result = await applyDiscountToOrder(
+      'order-sc',
+      {
+        discountId: 'd-comp',
+        name: 'Cortesía',
+        type: 'COMP' as DiscountType,
+        value: 100,
+        amount: 253,
+        taxReduction: 40.48,
+        applicableItems: [],
+        isAutomatic: false,
+        requiresApproval: false,
+      } as any,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    ) // D1: con permiso de cortesía; aquí se prueba el impuesto
 
     expect(result.success).toBe(true)
     // Mercancía 0 + impuesto 0 (no −40.48) + cargo 100 + propina 20
