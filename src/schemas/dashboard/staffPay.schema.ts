@@ -131,7 +131,10 @@ export const fechaRequeridaQuerySchema = z.object({ fecha: fechaSchema })
 export const listaPeriodosQuerySchema = z.object({ antesDe: fechaSchema.optional() })
 export const cerrarPeriodoSchema = z.object({
   fecha: fechaSchema,
-  huellaEsperada: z.string().regex(/^[a-f0-9]{64}$/, 'Revisa el cierre antes de confirmarlo'),
+  // D24: sin el campo delante, la huella ausente también dice qué revisar (antes: «huellaEsperada: Required»).
+  huellaEsperada: z
+    .string({ required_error: 'Revisa el cierre antes de confirmarlo' })
+    .regex(/^[a-f0-9]{64}$/, 'Revisa el cierre antes de confirmarlo'),
   confirmarHuerfanas: z.boolean().default(false),
 })
 export const periodParamsSchema = venueParamsSchema.extend({ periodId: z.string().cuid('Periodo inválido') })
@@ -186,7 +189,9 @@ export const differencesQuerySchema = z.object({
 export const destinoQuerySchema = z.object({ destinoFecha: fechaSchema.optional() })
 export const liquidarSchema = z.object({
   periodoOrigenId: z.string().cuid('Periodo inválido'),
-  huellaEsperada: z.string().regex(/^[a-f0-9]{64}$/, 'Revisa la diferencia antes de liquidarla'),
+  huellaEsperada: z
+    .string({ required_error: 'Revisa la diferencia antes de liquidarla' })
+    .regex(/^[a-f0-9]{64}$/, 'Revisa la diferencia antes de liquidarla'),
   /** Sin `:`: cada línea guarda `${solicitudId}:${persona}` (la misma regla que el service). */
   solicitudId: z.string().regex(/^[A-Za-z0-9_.-]{8,100}$/, 'Clave de solicitud inválida'),
   destinoFecha: fechaSchema.optional(),
