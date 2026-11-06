@@ -81,7 +81,12 @@ function limite(
 export const zodEnEspanol: z.ZodErrorMap = (issue, ctx) => {
   switch (issue.code) {
     case ZodIssueCode.invalid_type:
-      if (issue.received === ZodParsedType.undefined) return { message: 'Este dato es obligatorio' }
+      if (issue.received === ZodParsedType.undefined) {
+        // Sin el campo delante (validateRequest ya no lo pone), «obligatorio» a secas no decía QUÉ falta (credit-packs,
+        // 6-nov). Se nombra el último segmento de la ruta; un esquema que quiera un texto propio usa `required_error`.
+        const campo = [...issue.path].reverse().find(p => typeof p === 'string')
+        return { message: campo ? `Falta el dato «${campo}»` : 'Falta un dato obligatorio' }
+      }
       return { message: `Se esperaba ${tipo(issue.expected)} y llegó ${tipo(issue.received)}` }
     case ZodIssueCode.invalid_literal:
       return {

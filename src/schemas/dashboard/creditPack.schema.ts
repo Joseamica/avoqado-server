@@ -7,9 +7,9 @@ import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
 
 export const createCreditPackSchema = z.object({
   body: z.object({
-    name: z.string().min(1, 'El nombre es requerido'),
+    name: z.string({ required_error: 'Escribe el nombre' }).min(1, 'El nombre es requerido'),
     description: z.string().optional(),
-    price: z.number().positive('El precio debe ser mayor a 0'),
+    price: z.number({ required_error: 'Escribe el precio' }).positive('El precio debe ser mayor a 0'),
     currency: z.string().default('MXN'),
     validityDays: z.number().int().positive('Los dias de vigencia deben ser mayor a 0').optional(),
     maxPerCustomer: z.number().int().positive('El limite por cliente debe ser mayor a 0').optional(),
@@ -20,6 +20,7 @@ export const createCreditPackSchema = z.object({
           productId: z.string().min(1, 'El producto es requerido'),
           quantity: z.number().int().positive('La cantidad debe ser mayor a 0'),
         }),
+        { required_error: 'Agrega al menos un producto al paquete' },
       )
       .min(1, 'El paquete debe tener al menos un item'),
   }),
@@ -82,16 +83,16 @@ export const redeemBodySchema = z.object({
 export const adjustBodySchema = z.object({
   body: z.object({
     quantity: z
-      .number()
-      .int()
+      .number({ required_error: 'Escribe la cantidad', invalid_type_error: 'La cantidad debe ser un número' })
+      .int('La cantidad debe ser un número entero')
       .refine(n => n !== 0, 'La cantidad no puede ser 0'),
-    reason: z.string().min(1, 'La razon es requerida'),
+    reason: z.string({ required_error: 'Escribe la razón' }).min(1, 'Escribe la razón'),
   }),
 })
 
 export const refundBodySchema = z.object({
   body: z.object({
-    reason: z.string().min(1, 'La razon es requerida'),
+    reason: z.string({ required_error: 'Escribe la razón' }).min(1, 'Escribe la razón'),
   }),
 })
 
