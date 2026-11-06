@@ -4,7 +4,9 @@ import { uploadAnnouncementImage } from '../../services/announcements/announceme
 import * as gmail from '../../services/crm/email/gmailOAuth.service'
 import { mandarCorreo } from '../../services/crm/email/gmailSend.service'
 import { optOut } from '../../services/crm/email/optOut.service'
+import * as audience from '../../services/crm/email/audience.service'
 import * as campaigns from '../../services/crm/email/campaigns.service'
+import { listarDestinosDePrueba } from '../../services/crm/teamVenue.service'
 import * as templates from '../../services/crm/email/templates.service'
 
 // Email templates, preview, «Envíame una prueba» and images (phase 2). `req.crmAccess` is the caller's own keys, read by
@@ -48,7 +50,7 @@ export async function previewTemplate(req: Request, res: Response): Promise<void
 
 /** POST /api/v1/crm/templates/test — «Envíame una prueba». A refusal is a 200 with `ok: false` and why, never a 500. */
 export async function sendTemplateTest(req: Request, res: Response): Promise<void> {
-  res.json({ data: await templates.sendTestToSelf(req.crmAccess!, req.body) })
+  res.json({ data: await templates.sendTemplateTest(req.crmAccess!, req.body) })
 }
 
 /** POST /api/v1/crm/uploads/image — a picture for an `image` block; its public URL. */
@@ -81,6 +83,18 @@ export async function getCampaign(req: Request, res: Response): Promise<void> {
   res.json({ data: await campaigns.getCampaign(req.params.id) })
 }
 
+/** GET /api/v1/crm/campaigns/:id/recipients — «Ver quiénes»: una página, sin total (la pantalla usa el «Le llega a N»). */
+export async function listRecipients(req: Request, res: Response): Promise<void> {
+  const { rows, nextCursor, hasMore } = await campaigns.listRecipients(req.params.id, req.query as unknown as campaigns.ListRecipientsQuery)
+  res.json({ data: rows, meta: { nextCursor, hasMore } })
+}
+
+/** GET /api/v1/crm/campaign-people?q= — «Agregar»: personas del CRM (visibles) con su permiso y su baja; siempre a lo más 20. */
+export async function searchCampaignPeople(req: Request, res: Response): Promise<void> {
+  const { rows, hayMas } = await audience.buscarPersonasParaCampana((req.query as { q: string }).q)
+  res.json({ data: rows, meta: { hayMas } })
+}
+
 /** POST /api/v1/crm/campaigns — a draft from a template. */
 export async function createCampaign(req: Request, res: Response): Promise<void> {
   res.status(201).json({ data: await campaigns.createCampaign(req.crmAccess!, req.body) })
@@ -98,7 +112,12 @@ export async function previewCampaign(req: Request, res: Response): Promise<void
 
 /** POST /api/v1/crm/campaigns/:id/test — «Envíame una prueba» of this version. A refusal is a 200 with `ok: false` and why. */
 export async function sendCampaignTest(req: Request, res: Response): Promise<void> {
-  res.json({ data: await campaigns.sendCampaignTest(req.crmAccess!, req.params.id) })
+  res.json({ data: await campaigns.sendCampaignTest(req.crmAccess!, req.params.id, req.body ?? {}) })
+}
+
+/** GET /api/v1/crm/test-recipients — a quién se le puede mandar la prueba: sólo nombres, nunca correos. */
+export async function testRecipients(req: Request, res: Response): Promise<void> {
+  res.json({ data: await listarDestinosDePrueba(req.crmAccess!) })
 }
 
 /** POST /api/v1/crm/campaigns/:id/send — «Mandar a N personas». */

@@ -187,7 +187,13 @@ export const createAccountSchema = z.object({
       .enum(MANUAL_SOURCES, { errorMap: () => ({ message: 'A mano, la fuente es «MANUAL», «REFERIDO» u «OTRO»' }) })
       .default('MANUAL'),
     referidoPor: optionalText(200),
-    contact: contactSchema.optional(),
+    contact: contactSchema
+      .extend({ aceptaCorreos: z.boolean({ invalid_type_error: 'Aceptó recibir correos es sí o no' }).optional() })
+      .refine(contact => contact.aceptaCorreos !== true || !!contact.email, {
+        message: 'Para que reciba correos, escribe su correo',
+        path: ['email'],
+      })
+      .optional(),
     confirmarOtroNegocio: z.boolean({ invalid_type_error: 'Confirmar es sí o no' }).optional(),
   }),
 })
@@ -468,7 +474,9 @@ export const previewTemplateSchema = z.object({
 })
 
 /** POST /crm/templates/test — «Envíame una prueba». */
-export const sendTemplateTestSchema = z.object({ body: z.object({ subject: emailSubject, blocks: emailBlocks }) })
+export const sendTemplateTestSchema = z.object({
+  body: z.object({ subject: emailSubject, blocks: emailBlocks, destinoStaffId: cuid.optional() }),
+})
 
 /**
  * POST /crm/accounts/:id/emails — «Mandar correo» desde el Gmail del vendedor. `clientRequestId` lo genera el diálogo al
@@ -559,13 +567,53 @@ const audienceSegmentSchema = z.discriminatedUnion(
   { errorMap: () => ({ message: 'Ese público no existe' }) },
 )
 
-/** Who a campaign goes to: 1 to 3 publics, ONE of each type. Who actually receives it is the service's, in SQL. */
+/** How many people can be removed (`excluir`) or added (`incluir`) by hand to a campaign, each list. */
+export const MAX_PERSONAS_SUELTAS = 500
+
+const correoDePersona = (forma: RegExp) =>
+  z
+    .string({ invalid_type_error: 'El correo no es válido' })
+    .trim()
+    .toLowerCase()
+    .max(254, 'El correo no es válido')
+    .regex(forma, 'El correo no es válido')
+
+/**
+ * People removed or added by hand. 🔴 Never reordered or deduplicated: the screen compares the saved JSON with its own to count, so
+ * a repeated email is a 400, not something the server quietly fixes.
+ */
+const personasSueltas = (correo: ReturnType<typeof correoDePersona>) =>
+  z
+    .array(correo, { invalid_type_error: 'Las personas van en una lista' })
+    .max(MAX_PERSONAS_SUELTAS, `Máximo ${MAX_PERSONAS_SUELTAS} personas`)
+    .superRefine((correos, ctx) => {
+      const vistos = new Set<string>()
+      correos.forEach((correo, i) => {
+        if (vistos.has(correo)) ctx.addIssue({ code: 'custom', path: [i], message: 'Esa persona ya está en la lista' })
+        vistos.add(correo)
+      })
+    })
+
+/** To ADD someone: a domain with a dot. */
+const correoAgregable = correoDePersona(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)
+/**
+ * To REMOVE someone: the SAME shape the resolution lets through (`seleccionDistinta`, `audience.service.ts`), so everyone listed in
+ * «Ver quiénes» and counted can also be removed (`juan@gmail` included).
+ */
+const correoQuitable = correoDePersona(/^[^@\s]+@[^@\s]+$/)
+
+/**
+ * Who a campaign goes to: 0 to 3 publics (a draft can be left empty), ONE of each type, plus the people removed (`excluir`, wins over
+ * everything) and added (`incluir`, only eligible people: the service checks it) by hand. Keys in THIS order: the hash of an audience
+ * is its JSON. Who actually receives it is the service's, in SQL.
+ */
 export const audienciaSchema = z
   .object({
     segmentos: z
       .array(audienceSegmentSchema, { required_error: 'Elige a quién le mandas', invalid_type_error: 'Elige a quién le mandas' })
-      .min(1, 'Elige al menos un público')
       .max(3, 'Máximo 3 públicos'),
+    excluir: personasSueltas(correoQuitable).optional(),
+    incluir: personasSueltas(correoAgregable).optional(),
   })
   .superRefine((audience, ctx) => {
     const seen = new Set<string>()
@@ -578,6 +626,19 @@ export const audienciaSchema = z
 
 export type Audiencia = z.infer<typeof audienciaSchema>
 export type Segmento = Audiencia['segmentos'][number]
+
+/**
+ * The PATCH's audience. The new screen sends `publicos` (the v2 row's word): a SERVIDOR before this one requires `segmentos`, so after
+ * a revert it answers 400 «Elige a quién le mandas» and writes nothing, instead of dropping `excluir`/`incluir` and replacing the row
+ * (Codex código r1). The old screen (production `746793a`) still sends `segmentos`. Both keys → 400. Normalized here to the service's
+ * `{ segmentos, excluir, incluir }`, so the hash of an unchanged audience does not move.
+ */
+const audienciaDelPatch = z.preprocess((valor, ctx) => {
+  if (typeof valor !== 'object' || valor === null || !('publicos' in valor)) return valor
+  const { publicos, ...resto } = valor as Record<string, unknown>
+  if ('segmentos' in resto) ctx.addIssue({ code: 'custom', message: 'Manda «publicos» o «segmentos», no los dos' })
+  return { ...resto, segmentos: publicos }
+}, audienciaSchema)
 
 // ── Mass-email campaigns (phase 2, plan task 5) ────────────────────────────────────────────────────────────────────────
 
@@ -592,8 +653,32 @@ export const listCampaignsSchema = z.object({
   }),
 })
 
-/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/test and /cancel */
+/** GET /crm/campaigns/:id/recipients — «Ver quiénes». El cursor es opaco (el servicio lo valida); `q` es la búsqueda de siempre. */
+export const listRecipientsSchema = z.object({
+  params: byId,
+  query: z.object({
+    cursor: z.string({ invalid_type_error: 'La página pedida no es válida' }).max(400, 'La página pedida no es válida').optional(),
+    limit: listAccountsSchema.shape.query.shape.limit,
+    q: listAccountsSchema.shape.query.shape.q,
+  }),
+})
+
+/** GET /crm/campaign-people — buscar a quién agregar. Sin `limit`: el servidor trae siempre 20 (y `hayMas`). */
+export const searchCampaignPeopleSchema = z.object({
+  query: z.object({
+    q: z
+      .string({ required_error: 'Escribe al menos 2 letras', invalid_type_error: 'Escribe al menos 2 letras' })
+      .trim()
+      .min(2, 'Escribe al menos 2 letras')
+      .max(100, 'Máximo 100 caracteres'),
+  }),
+})
+
+/** GET /crm/campaigns/:id and POST /crm/campaigns/:id/cancel */
 export const campaignIdSchema = z.object({ params: byId })
+
+/** POST /crm/campaigns/:id/test — sin body, como siempre; `destinoStaffId` (otra persona del equipo) es opcional. */
+export const campaignTestSchema = z.object({ params: byId, body: z.object({ destinoStaffId: cuid.optional() }).optional() })
 
 /** POST /crm/campaigns/:id/preview — `huella`, optional: the version the screen shows (H3). Without it (old screen), as before. */
 export const previewCampaignSchema = z.object({
@@ -614,7 +699,10 @@ export const createCampaignSchema = z.object({
   body: z.object({ name: campaignName, templateId: z.string({ required_error: 'Elige una plantilla' }).cuid('La plantilla no es válida') }),
 })
 
-/** PATCH /crm/campaigns/:id — only what changes, only while it is a draft (the service answers 409 otherwise). */
+/**
+ * PATCH /crm/campaigns/:id — only what changes, only while it is a draft (the service answers 409 otherwise). `basePublico`, optional:
+ * the `huellaPublico` of the audience the screen read; with it, saving an audience that someone else changed meanwhile is a 409.
+ */
 export const updateCampaignSchema = z.object({
   params: byId,
   body: z
@@ -622,9 +710,15 @@ export const updateCampaignSchema = z.object({
       name: campaignName.optional(),
       subject: emailSubject.optional(),
       blocks: emailBlocks.optional(),
-      audience: audienciaSchema.optional(),
+      audience: audienciaDelPatch.optional(),
+      basePublico: z
+        .string({ invalid_type_error: 'La versión que ves no es válida' })
+        .min(1, 'La versión que ves no es válida')
+        .max(200, 'La versión que ves no es válida')
+        .optional(),
     })
-    .refine(somethingToChange, 'No hay nada que cambiar'),
+    // `basePublico` alone changes nothing.
+    .refine(({ basePublico: _base, ...cambios }) => somethingToChange(cambios), 'No hay nada que cambiar'),
 })
 
 /** POST /crm/campaigns/:id/send — the token the preview gave, which ties what was seen to what is sent. */

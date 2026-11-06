@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client'
+import { createAccountSchema } from '@/schemas/crm.schema'
 
 /**
  * CRM propio, tarea 1: la forma del esquema que usan las tareas siguientes, leída del DMMF (no necesita base).
@@ -77,5 +78,40 @@ describe('CRM propio — forma del esquema', () => {
       expect(haciaElCrm.length).toBeGreaterThan(0)
       for (const f of haciaElCrm) expect({ campo: f.name, columnas: f.relationFromFields ?? [] }).toEqual({ campo: f.name, columnas: [] })
     }
+  })
+})
+
+describe('esquemas de la prueba con destino', () => {
+  const { sendTemplateTestSchema, campaignTestSchema } = jest.requireActual('@/schemas/crm.schema')
+  const id = 'cstaffotro0000000000000001'
+  it('la plantilla acepta destinoStaffId opcional y sigue exigiendo subject y blocks', () => {
+    const blocks = [{ type: 'paragraph', text: 'Hola' }]
+    expect(sendTemplateTestSchema.safeParse({ body: { subject: 'Hola', blocks } }).success).toBe(true)
+    expect(sendTemplateTestSchema.safeParse({ body: { subject: 'Hola', blocks, destinoStaffId: id } }).success).toBe(true)
+    expect(sendTemplateTestSchema.safeParse({ body: { blocks } }).success).toBe(false)
+  })
+  it('la campaña acepta body ausente, vacío o con destino', () => {
+    for (const body of [undefined, {}, { destinoStaffId: id }])
+      expect(campaignTestSchema.safeParse({ params: { id }, body }).success).toBe(true)
+    expect(campaignTestSchema.safeParse({ params: { id }, body: { destinoStaffId: 'x' } }).success).toBe(false)
+  })
+})
+
+describe('POST /crm/accounts: la casilla «Aceptó recibir correos»', () => {
+  const parse = (contact: Record<string, unknown>) => createAccountSchema.safeParse({ body: { name: 'Café', contact } })
+  const mensajes = (r: ReturnType<typeof parse>) => (r.success ? [] : r.error.issues.map(i => i.message))
+
+  it('aceptaCorreos: true sin correo es 400 con «Para que reciba correos, escribe su correo»', () => {
+    expect(mensajes(parse({ name: 'Paola', aceptaCorreos: true }))).toContain('Para que reciba correos, escribe su correo')
+  })
+
+  it('aceptaCorreos: true con correo pasa, y false sin correo también', () => {
+    expect(parse({ name: 'Paola', email: 'p@cafe.mx', aceptaCorreos: true }).success).toBe(true)
+    expect(parse({ name: 'Paola', aceptaCorreos: false }).success).toBe(true)
+    expect(parse({ name: 'Paola' }).success).toBe(true)
+  })
+
+  it("aceptaCorreos: 'si' es «Aceptó recibir correos es sí o no»", () => {
+    expect(mensajes(parse({ name: 'Paola', email: 'p@cafe.mx', aceptaCorreos: 'si' }))).toContain('Aceptó recibir correos es sí o no')
   })
 })

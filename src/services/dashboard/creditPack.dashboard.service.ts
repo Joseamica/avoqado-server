@@ -181,6 +181,7 @@ export async function updateCreditPack(
     validityDays?: number | null
     maxPerCustomer?: number | null
     displayOrder?: number
+    active?: boolean
     items?: { productId: string; quantity: number }[]
   },
 ) {
@@ -253,6 +254,7 @@ export async function updateCreditPack(
         ...(data.validityDays !== undefined && { validityDays: data.validityDays }),
         ...(data.maxPerCustomer !== undefined && { maxPerCustomer: data.maxPerCustomer }),
         ...(data.displayOrder !== undefined && { displayOrder: data.displayOrder }),
+        ...(data.active !== undefined && { active: data.active }),
         ...(stripePriceId && { stripePriceId }),
       },
       include: {

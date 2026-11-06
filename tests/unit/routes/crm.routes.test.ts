@@ -35,6 +35,7 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 }))
 
 import router from '@/routes/crm.routes'
+import * as hubspotImport from '@/services/crm/hubspotImport.service'
 
 const app = express().use(express.json()).use('/crm', router)
 /** With the app's error handler reduced to what these tests read: the status, the code and the message. */
@@ -172,6 +173,43 @@ describe('importar lo de HubSpot', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.data).toMatchObject({ nuevos: 1, archivados: 1 })
+  })
+
+  describe('la casilla «Aceptaron recibir correos»', () => {
+    const apply = () =>
+      request(appWithErrors).post('/crm/import/hubspot/apply').attach('contactos', DEALS, 'c.csv').attach('negocios', DEALS, 'n.csv')
+    const applied = { aplicados: 0 } as never
+
+    it('aceptaronCorreos=true llega al servicio', async () => {
+      const spy = jest.spyOn(hubspotImport, 'applyHubspot').mockResolvedValue(applied)
+      const res = await apply().field('aceptaronCorreos', 'true')
+      expect(res.status).toBe(200)
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.any(String), expect.any(String), { aceptaronCorreos: true })
+      spy.mockRestore()
+    })
+
+    it('sin el campo (o con false) es como hoy: sin casilla', async () => {
+      const spy = jest.spyOn(hubspotImport, 'applyHubspot').mockResolvedValue(applied)
+      await apply()
+      await apply().field('aceptaronCorreos', 'false')
+      expect(spy.mock.calls.map(call => call[3])).toEqual([{ aceptaronCorreos: false }, { aceptaronCorreos: false }])
+      spy.mockRestore()
+    })
+
+    it('aceptaronCorreos=quiza es 422 y no importa nada', async () => {
+      const spy = jest.spyOn(hubspotImport, 'applyHubspot').mockResolvedValue(applied)
+      const res = await apply().field('aceptaronCorreos', 'quiza')
+      expect(res.status).toBe(422)
+      expect(res.body).toEqual({ code: 'CRM_IMPORT_ARCHIVO_INVALIDO', message: 'La casilla de los correos no es válida' })
+      expect(spy).not.toHaveBeenCalled()
+      spy.mockRestore()
+    })
+
+    it('dos campos de texto es 422 como hoy', async () => {
+      const res = await apply().field('aceptaronCorreos', 'true').field('otro', 'x')
+      expect(res.status).toBe(422)
+      expect(res.body.code).toBe('CRM_IMPORT_ARCHIVO_INVALIDO')
+    })
   })
 
   it('sin_configurar_es_403 (L7)', async () => {

@@ -1,5 +1,6 @@
 import { registerDiscountTools } from '../../../src/mcp/tools/discounts'
 import type { McpScope } from '../../../src/mcp/scope'
+import { z } from 'zod'
 
 const mockDiscountFind = jest.fn()
 const mockCreateCoupon = jest.fn()
@@ -30,13 +31,22 @@ jest.mock('@/utils/prismaClient', () => ({
   },
 }))
 
+const esquemas = new Map<string, Record<string, z.ZodTypeAny>>()
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('create_coupon')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerDiscountTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerDiscountTools(
+    {
+      tool: (...a: unknown[]) => {
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+        esquemas.set(a[0] as string, a[2] as never)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => jest.clearAllMocks())
 
@@ -58,6 +68,19 @@ describe('create_coupon (write)', () => {
     const amb = parse(await call({ venueId: 'v1', discountName: 'verano', code: 'AB' }))
     expect(amb.ambiguous).toBe(true)
     expect(mockCreateCoupon).not.toHaveBeenCalled()
+  })
+
+  it('🔴 D14 v2 r1 #2: 0 usos → error en español de la regla única, no se crea', async () => {
+    const out = parse(await call({ venueId: 'v1', discountName: 'Verano', code: 'verano20', maxUses: 0, confirm: true }))
+    expect(out).toEqual({ ok: false, error: 'Los límites de uso van de 1 en adelante; déjalo vacío para que sea ilimitado' })
+    expect(mockCreateCoupon).not.toHaveBeenCalled()
+  })
+
+  it('🔴 D14 v2 r2 #2: 1.5 o "5" en los límites responden en español', () => {
+    const esquema = z.object(esquemas.get('create_coupon')!)
+    const base = { venueId: 'v1', discountName: 'Verano', code: 'VERANO20' }
+    expect(JSON.stringify(esquema.safeParse({ ...base, maxUses: 1.5 }))).toContain('El límite de usos debe ser un número entero')
+    expect(JSON.stringify(esquema.safeParse({ ...base, maxUsesPerCustomer: '5' }))).toContain('El límite de usos debe ser un número')
   })
 
   it('without confirm → previews the coupon, does NOT create (M3)', async () => {

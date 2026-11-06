@@ -3,21 +3,44 @@
  * salen de UNA consulta agrupada para toda la página y, con los 7 estados de una delivery presentes, su suma es el `total`
  * que se encoló. El `total` y los contadores no pueden contar historias distintas.
  */
+import { createHash } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { StaffRole } from '@prisma/client'
+import { z } from 'zod'
 import { prismaMock } from '@tests/__helpers__/setup'
 import type { McpScope } from '@/mcp/scope'
+import { validateRequest } from '@/middlewares/validation'
+import { updateCampaignSchema } from '@/schemas/crm.schema'
 import { registerCrmTools } from '@/mcp/tools/crm'
 import { getCrmAccess } from '@/services/crm/access.service'
-import { contarAudiencia } from '@/services/crm/email/audience.service'
-import { cancelCampaign, getCampaign, listCampaigns, previewSend } from '@/services/crm/email/campaigns.service'
+import { contarAudiencia, paginaDeDestinatarios, personasNoElegibles, recorrerAudiencia } from '@/services/crm/email/audience.service'
+import {
+  cancelCampaign,
+  enqueueCampaign,
+  getCampaign,
+  listCampaigns,
+  listRecipients,
+  previewSend,
+  sendCampaignTest,
+  updateCampaign,
+} from '@/services/crm/email/campaigns.service'
+import { contentHash, enviarPrueba } from '@/services/crm/email/templates.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { campanasPausadasPorCupo } from '@/services/email/resendQuota'
 
+jest.mock('@/services/crm/email/templates.service', () => ({
+  ...jest.requireActual('@/services/crm/email/templates.service'),
+  enviarPrueba: jest.fn(),
+}))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/services/email/resendQuota', () => ({ campanasPausadasPorCupo: jest.fn(() => false) }))
 // A quién le llega es SQL del servicio de públicos: aquí basta el conteo.
 jest.mock('@/services/crm/email/audience.service', () => ({
   ...jest.requireActual('@/services/crm/email/audience.service'),
   contarAudiencia: jest.fn(),
+  recorrerAudiencia: jest.fn(),
+  paginaDeDestinatarios: jest.fn(),
+  personasNoElegibles: jest.fn(),
 }))
 jest.mock('@/services/crm/access.service', () => ({
   ...jest.requireActual('@/services/crm/access.service'),
@@ -306,5 +329,573 @@ describe('previewSend — la confirmación se ata a la versión que se ve (huell
     const huella = await huellaVista({ audience: guadalajara })
     prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(borrador({ audience: guadalajara, status: 'ENVIADA' }) as never)
     await expect(previewSend(ACTOR, CAMP_A, huella)).rejects.toMatchObject({ code: 'CRM_CAMPANA_NO_EDITABLE' })
+  })
+})
+
+describe('sendCampaignTest', () => {
+  const OTRA = 'cstaffotra00000000000001'
+  const actor = { staffId: STAFF } as never
+  const campana = { subject: 'Lo nuevo', blocks: [{ type: 'paragraph', text: 'Hola' }] }
+  beforeEach(() => {
+    ;(enviarPrueba as jest.Mock).mockReset()
+    prismaMock.crmCampaign.findUnique.mockResolvedValue(campana as never)
+    prismaMock.crmCampaign.updateMany.mockResolvedValue({ count: 1 } as never)
+  })
+
+  it('pasa el destino, escribe testSentHash sólo si salió y su bitácora dice { para, llave } sin correo', async () => {
+    ;(enviarPrueba as jest.Mock).mockResolvedValue({ resultado: { ok: true, destino: { nombre: 'Ana' } }, llave: 'crm-prueba:a:b:h' })
+    await expect(sendCampaignTest(actor, CAMP_A, { destinoStaffId: OTRA })).resolves.toEqual({ ok: true, destino: { nombre: 'Ana' } })
+    expect(enviarPrueba).toHaveBeenCalledWith(actor, expect.objectContaining({ destinoStaffId: OTRA }))
+    expect(prismaMock.crmCampaign.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { testSentHash: contentHash(campana.subject, campana.blocks as never) } }),
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CRM_CAMPAIGN_TEST_SENT', entityId: CAMP_A, data: { para: OTRA, llave: 'crm-prueba:a:b:h' } }),
+    )
+  })
+
+  it('no salió: ni testSentHash ni bitácora; repetida: testSentHash sí, bitácora no', async () => {
+    ;(enviarPrueba as jest.Mock).mockResolvedValueOnce({ resultado: { ok: false, motivo: 'x' } })
+    await sendCampaignTest(actor, CAMP_A)
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+    ;(enviarPrueba as jest.Mock).mockResolvedValueOnce({ resultado: { ok: true, repetida: true }, llave: 'k' })
+    await sendCampaignTest(actor, CAMP_A)
+    expect(prismaMock.crmCampaign.updateMany).toHaveBeenCalledTimes(1)
+    expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+// ── Plan B, tarea 4 (rediseño tras Codex r2 y r3): el público gana `excluir` e `incluir` y se guarda bajo el candado ──────
+
+// El `audienciaSchema` de ANTES de la tarea 4, copiado tal cual: es como lee el público un SERVIDOR viejo después de una reversa.
+const MAX_FILTER_VALUES_VIEJO = 50
+const textFilterViejo = (singular: string, plural: string) =>
+  z
+    .array(
+      z
+        .string({ invalid_type_error: `Cada ${singular} es un texto con letras` })
+        .trim()
+        .min(1, `Cada ${singular} es un texto con letras`)
+        .max(100, 'Máximo 100 caracteres'),
+      { invalid_type_error: `Los ${plural} van en una lista` },
+    )
+    .max(MAX_FILTER_VALUES_VIEJO, `Máximo ${MAX_FILTER_VALUES_VIEJO} ${plural}`)
+    .optional()
+const audienceRolesViejo = z
+  .array(z.nativeEnum(StaffRole, { errorMap: () => ({ message: 'Ese rol no existe' }) }), {
+    required_error: 'Elige al menos un rol',
+    invalid_type_error: 'Elige al menos un rol',
+  })
+  .min(1, 'Elige al menos un rol')
+  .max(Object.keys(StaffRole).length, 'Hay roles repetidos')
+const audienceSegmentSchemaViejo = z.discriminatedUnion(
+  'tipo',
+  [
+    z.object({
+      tipo: z.literal('PROSPECTOS'),
+      etapas: z
+        .array(z.string({ invalid_type_error: 'El id de la etapa no es válido' }).cuid('El id de la etapa no es válido'))
+        .max(MAX_FILTER_VALUES_VIEJO, `Máximo ${MAX_FILTER_VALUES_VIEJO} etapas`)
+        .optional(),
+    }),
+    z.object({
+      tipo: z.literal('CLIENTES'),
+      giros: textFilterViejo('giro', 'giros'),
+      ciudades: textFilterViejo('ciudad', 'ciudades'),
+      planes: z
+        .array(z.enum(['GRATIS', 'PRO', 'PREMIUM'], { errorMap: () => ({ message: 'Ese plan no existe' }) }))
+        .max(3, 'Hay planes repetidos')
+        .optional(),
+    }),
+    z.object({
+      tipo: z.literal('USUARIOS'),
+      roles: audienceRolesViejo,
+      giros: textFilterViejo('giro', 'giros'),
+      ciudades: textFilterViejo('ciudad', 'ciudades'),
+      soloClientes: z.boolean({ invalid_type_error: 'Solo clientes es sí o no' }).optional(),
+    }),
+  ],
+  { errorMap: () => ({ message: 'Ese público no existe' }) },
+)
+const audienciaSchemaViejo = z
+  .object({
+    segmentos: z
+      .array(audienceSegmentSchemaViejo, { required_error: 'Elige a quién le mandas', invalid_type_error: 'Elige a quién le mandas' })
+      .min(1, 'Elige al menos un público')
+      .max(3, 'Máximo 3 públicos'),
+  })
+  .superRefine((audience, ctx) => {
+    const seen = new Set<string>()
+    audience.segmentos.forEach((segment, i) => {
+      if (seen.has(segment.tipo))
+        ctx.addIssue({ code: 'custom', path: ['segmentos', i, 'tipo'], message: 'Ese público ya está en la lista' })
+      seen.add(segment.tipo)
+    })
+  })
+
+const sha256 = (texto: string) => createHash('sha256').update(texto).digest('hex')
+/** Lo que trae el token por dentro (cuerpo base64url antes del punto). */
+const cuerpoDelToken = (token: string) => JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf-8'))
+
+describe('el público con excluir e incluir: guardar bajo el candado, forma v2 y huellas', () => {
+  const ACTOR = { staffId: STAFF } as never
+  const P = { tipo: 'PROSPECTOS' as const }
+  const C = { tipo: 'CLIENTES' as const }
+  const SUBJECT = 'Lo nuevo de Avoqado'
+  const BLOCKS = [{ type: 'paragraph', text: 'Hola {{nombre}}' }]
+  /** La fila guardada: `updateMany` la cambia, y las lecturas siguientes (la del candado y `getCampaign`) la ven. */
+  let guardado: unknown
+  const borrador = () => ({ ...fila(CAMP_A, 0), status: 'BORRADOR', enqueuedAt: null, audience: guardado })
+  const huellaPublicoDe = async () => (await getCampaign(CAMP_A)).huellaPublico
+
+  beforeEach(() => {
+    guardado = { segmentos: [P] }
+    prismaMock.crmCampaign.findUnique.mockReset().mockImplementation((() => Promise.resolve(borrador())) as never)
+    prismaMock.crmCampaign.updateMany.mockReset().mockImplementation(((args: { data: { audience?: unknown } }) => {
+      if (args.data.audience !== undefined) guardado = args.data.audience
+      return Promise.resolve({ count: 1 })
+    }) as never)
+    prismaMock.$queryRaw.mockReset().mockResolvedValue([{ id: CAMP_A }] as never)
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue([] as never)
+    ;(personasNoElegibles as jest.Mock).mockReset().mockResolvedValue([])
+    ;(contarAudiencia as jest.Mock).mockReset().mockResolvedValue({ total: 3, porSegmento: { PROSPECTOS: 3 }, bloqueados: 0 })
+  })
+
+  const escrito = () => prismaMock.crmCampaign.updateMany.mock.calls.at(-1)?.[0] as { data: { audience?: unknown } } | undefined
+
+  // ── Compatibilidad: un público sin listas es el de hoy ────────────────────────────────────────────────────────────
+
+  it('🔴 la huella de un público sin excluir/incluir no cambió: sha256(contentHash + ":" + sha256(JSON del público de hoy))', async () => {
+    const vista = await getCampaign(CAMP_A)
+    const delPublico = sha256(JSON.stringify({ segmentos: [P] }))
+    expect(vista.huella).toBe(sha256(`${contentHash(SUBJECT, BLOCKS as never)}:${delPublico}`))
+    expect(vista.huellaPublico).toBe(delPublico)
+    // El token de la vista previa firma el MISMO audienceHash de hoy: un token firmado antes del despliegue sigue valiendo.
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    expect(cuerpoDelToken(token!).audienceHash).toBe(delPublico)
+    // La pantalla vieja sigue leyendo `audience` como hoy, y la nueva lee `publico` con las tres llaves.
+    expect(vista.audience).toEqual({ segmentos: [P] })
+    expect(vista.publico).toEqual({ segmentos: [P], excluir: [], incluir: [] })
+  })
+
+  it('excluir o incluir cambian la huella, la huellaPublico y el audienceHash del token', async () => {
+    const antes = await getCampaign(CAMP_A)
+    const tokenAntes = cuerpoDelToken((await previewSend(ACTOR, CAMP_A)).token!)
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: ['ana@x.mx'] }, basePublico: antes.huellaPublico })
+    const conExcluir = await getCampaign(CAMP_A)
+    expect(conExcluir.huella).not.toBe(antes.huella)
+    expect(conExcluir.huellaPublico).not.toBe(antes.huellaPublico)
+    expect(cuerpoDelToken((await previewSend(ACTOR, CAMP_A)).token!).audienceHash).not.toBe(tokenAntes.audienceHash)
+
+    await updateCampaign(ACTOR, CAMP_A, {
+      audience: { segmentos: [P], excluir: ['ana@x.mx'], incluir: ['beto@x.mx'] },
+      basePublico: conExcluir.huellaPublico,
+    })
+    expect((await getCampaign(CAMP_A)).huellaPublico).not.toBe(conExcluir.huellaPublico)
+  })
+
+  // ── La forma guardada que falla cerrado ante una reversa ─────────────────────────────────────────────────────────
+
+  it('con listas, guarda la forma v2 { v: 2, publicos, excluir, incluir } y la vista trae publico completo y audience { segmentos: [] }', async () => {
+    const base = await huellaPublicoDe()
+    const vista = await updateCampaign(ACTOR, CAMP_A, {
+      audience: { segmentos: [P, C], excluir: ['b@x.mx', 'a@x.mx'], incluir: ['z@x.mx'] },
+      basePublico: base,
+    })
+    expect(escrito()!.data.audience).toEqual({ v: 2, publicos: [P, C], excluir: ['b@x.mx', 'a@x.mx'], incluir: ['z@x.mx'] })
+    expect(Object.keys(escrito()!.data.audience as object)).not.toContain('segmentos')
+    // La pantalla nueva lee `publico`, en el MISMO orden que mandó; la vieja ve «sin público» y no puede mandar.
+    expect(vista.publico).toEqual({ segmentos: [P, C], excluir: ['b@x.mx', 'a@x.mx'], incluir: ['z@x.mx'] })
+    expect(vista.audience).toEqual({ segmentos: [] })
+  })
+
+  it('🔴 una fila v2 parseada con el audienciaSchema VIEJO (copiado tal cual) falla con «Elige a quién le mandas»: un SERVIDOR viejo no cuenta ni manda', async () => {
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: ['ana@x.mx'] }, basePublico: await huellaPublicoDe() })
+    const viejo = audienciaSchemaViejo.safeParse(escrito()!.data.audience)
+    expect(viejo.success).toBe(false)
+    expect(viejo.success ? [] : viejo.error.issues.map(i => i.message)).toEqual(['Elige a quién le mandas'])
+    // Control: una fila SIN listas el SERVIDOR viejo la sigue leyendo igual.
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: [] }, basePublico: await huellaPublicoDe() })
+    expect(audienciaSchemaViejo.safeParse(escrito()!.data.audience).success).toBe(true)
+  })
+
+  // ── El cuerpo del PATCH: la pantalla nueva manda `publicos`, así la ESCRITURA también falla cerrado ante una reversa ──────
+  // (Codex código r1: un SERVIDOR viejo aceptaba `{ segmentos, excluir }`, zod tiraba `excluir` y reemplazaba la fila sin la exclusión.)
+
+  /** El cuerpo del PATCH del SERVIDOR viejo (`4744d93b2`): sólo `audience` importa aquí (nombre, asunto y bloques no vienen). */
+  const cuerpoViejo = z.object({ audience: audienciaSchemaViejo.optional() })
+  /** Lo que el controlador le pasa al servicio: el `body` ya parseado (`validateRequest` reemplaza `req.body`). */
+  const cuerpoNuevo = (body: unknown) => updateCampaignSchema.parse({ params: { id: CAMP_A }, body }).body
+
+  it('🔴 el esquema VIEJO (copiado tal cual) rechaza el cuerpo nuevo con «Elige a quién le mandas»: un SERVIDOR viejo no escribe nada', () => {
+    const viejo = cuerpoViejo.safeParse({ audience: { publicos: [P], excluir: ['ana@x.com'] }, basePublico: 'hp' })
+    expect(viejo.success).toBe(false)
+    expect(viejo.success ? [] : viejo.error.issues.map(i => [i.path.join('.'), i.message])).toEqual([
+      ['audience.segmentos', 'Elige a quién le mandas'],
+    ])
+    // Control: el cuerpo de la pantalla vieja lo sigue aceptando.
+    expect(cuerpoViejo.safeParse({ audience: { segmentos: [P] } }).success).toBe(true)
+  })
+
+  it('el esquema nuevo acepta `publicos` y le entrega al servicio el mismo { segmentos, excluir, incluir } de hoy (misma huella)', async () => {
+    const conPublicos = cuerpoNuevo({ audience: { publicos: [P, C], excluir: ['ana@x.mx'], incluir: [] }, basePublico: 'hp' })
+    const deHoy = cuerpoNuevo({ audience: { segmentos: [P, C], excluir: ['ana@x.mx'], incluir: [] }, basePublico: 'hp' })
+    expect(conPublicos).toEqual({ audience: { segmentos: [P, C], excluir: ['ana@x.mx'], incluir: [] }, basePublico: 'hp' })
+    // Mismo JSON, llave por llave y en el mismo orden: de él sale la huella.
+    expect(JSON.stringify(conPublicos)).toBe(JSON.stringify(deHoy))
+
+    await updateCampaign(ACTOR, CAMP_A, { ...deHoy, basePublico: await huellaPublicoDe() } as never)
+    const huellaDeHoy = await huellaPublicoDe()
+    guardado = { segmentos: [P] }
+    await updateCampaign(ACTOR, CAMP_A, { ...conPublicos, basePublico: await huellaPublicoDe() } as never)
+    expect(guardado).toEqual({ v: 2, publicos: [P, C], excluir: ['ana@x.mx'], incluir: [] })
+    expect(await huellaPublicoDe()).toBe(huellaDeHoy)
+  })
+
+  it('🔴 la pantalla vieja ({ audience: { segmentos } } sin basePublico) pasa el esquema igual que hoy: 409 PANTALLA_VIEJA con listas, reemplazo sin ellas', async () => {
+    const viejo = cuerpoNuevo({ audience: { segmentos: [P, C] } })
+    expect(viejo).toEqual({ audience: { segmentos: [P, C] } })
+    guardado = { v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] }
+    await expect(updateCampaign(ACTOR, CAMP_A, viejo as never)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PANTALLA_VIEJA',
+    })
+    expect(guardado).toEqual({ v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] })
+
+    guardado = { segmentos: [P] }
+    await updateCampaign(ACTOR, CAMP_A, viejo as never)
+    expect(guardado).toEqual({ segmentos: [P, C] })
+  })
+
+  it('con `publicos` y `segmentos` a la vez: 400 en español y el servicio ni se entera', async () => {
+    const req = { params: { id: CAMP_A }, body: { audience: { publicos: [P], segmentos: [C] }, basePublico: 'hp' }, query: {} } as never
+    const next = jest.fn()
+    await validateRequest(updateCampaignSchema)(req, {} as never, next)
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: 400, message: 'Error de validación: Manda «publicos» o «segmentos», no los dos' }),
+    )
+  })
+
+  it('pantalla nueva: excluir: [] limpia lo guardado y la fila vuelve a la forma de hoy, con la huella de hoy', async () => {
+    const deHoy = await huellaPublicoDe()
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: ['ana@x.mx'] }, basePublico: deHoy })
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: [], incluir: [] }, basePublico: await huellaPublicoDe() })
+    expect(escrito()!.data.audience).toEqual({ segmentos: [P] })
+    expect(await huellaPublicoDe()).toBe(deHoy)
+  })
+
+  // ── basePublico y la pantalla vieja ──────────────────────────────────────────────────────────────────────────────
+
+  it('🔴 dos PATCH nuevos con el mismo basePublico: el segundo es 409 CRM_CAMPANA_CAMBIO y la exclusión del primero sigue', async () => {
+    const base = await huellaPublicoDe()
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: ['ana@x.mx'] }, basePublico: base })
+    prismaMock.crmCampaign.updateMany.mockClear()
+    await expect(
+      updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: ['beto@x.mx'] }, basePublico: base }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_CAMBIO' })
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+    expect(guardado).toEqual({ v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] })
+  })
+
+  it('🔴 pantalla vieja (sin basePublico) sobre una campaña con listas: 409 CRM_CAMPANA_PANTALLA_VIEJA y no escribe nada', async () => {
+    guardado = { v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] }
+    await expect(updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P, C] } })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PANTALLA_VIEJA',
+      message: 'Recarga la página: esta campaña tiene personas quitadas o agregadas que esta pantalla no conoce',
+    })
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+    expect(guardado).toEqual({ v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] })
+  })
+
+  it('pantalla vieja sin listas guardadas: reemplaza como hoy, con la forma de hoy', async () => {
+    const vista = await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P, C] } })
+    expect(escrito()!.data.audience).toEqual({ segmentos: [P, C] })
+    expect(vista.audience).toEqual({ segmentos: [P, C] })
+  })
+
+  it('un PATCH viejo sólo de contenido no toma el candado ni toca el público (como hoy), aunque haya listas', async () => {
+    guardado = { v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] }
+    await updateCampaign(ACTOR, CAMP_A, { subject: 'Otro asunto' })
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(escrito()!.data).toEqual({ subject: 'Otro asunto' })
+    expect(guardado).toEqual({ v: 2, publicos: [P], excluir: ['ana@x.mx'], incluir: [] })
+  })
+
+  it('el candado se toma ANTES de leer, en una transacción, y una campaña que ya no es BORRADOR da 409 NO_EDITABLE sin escribir', async () => {
+    const base = await huellaPublicoDe()
+    prismaMock.crmCampaign.findUnique.mockClear()
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [C] }, basePublico: base })
+    expect(prismaMock.$transaction).toHaveBeenCalled()
+    const sql = (prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')
+    expect(sql).toMatch(/SELECT "id" FROM "CrmCampaign" WHERE "id" = \? FOR UPDATE/)
+    const candado = prismaMock.$queryRaw.mock.invocationCallOrder[0]
+    const lectura = prismaMock.crmCampaign.findUnique.mock.invocationCallOrder[0]
+    expect(candado).toBeLessThan(lectura)
+
+    prismaMock.crmCampaign.updateMany.mockClear()
+    prismaMock.crmCampaign.findUnique.mockImplementation((() => Promise.resolve({ ...borrador(), status: 'ENVIANDO' })) as never)
+    await expect(updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P] } })).rejects.toMatchObject({ code: 'CRM_CAMPANA_NO_EDITABLE' })
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+  })
+
+  // ── incluir: sólo se revisan los correos NUEVOS ──────────────────────────────────────────────────────────────────
+
+  it('PATCH con incluir: un correo nuevo no elegible es 400 CRM_CAMPANA_PERSONA_SIN_PERMISO con sus correos; uno ya guardado no se vuelve a revisar', async () => {
+    guardado = { v: 2, publicos: [P], excluir: [], incluir: ['ya@x.mx'] }
+    ;(personasNoElegibles as jest.Mock).mockResolvedValue(['nuevo@x.mx'])
+    await expect(
+      updateCampaign(ACTOR, CAMP_A, {
+        audience: { segmentos: [P], incluir: ['ya@x.mx', 'nuevo@x.mx', 'otro@x.mx'] },
+        basePublico: await huellaPublicoDe(),
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'CRM_CAMPANA_PERSONA_SIN_PERMISO',
+      message: 'Estas personas no se pueden agregar: no aceptaron recibir correos, se dieron de baja o ya no están en el CRM',
+      details: { correos: ['nuevo@x.mx'] },
+    })
+    // Sólo los nuevos, y dentro de la transacción (con su `tx`).
+    expect(personasNoElegibles).toHaveBeenCalledWith(['nuevo@x.mx', 'otro@x.mx'], prismaMock)
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+
+    // Todos elegibles: se guarda.
+    ;(personasNoElegibles as jest.Mock).mockResolvedValue([])
+    await updateCampaign(ACTOR, CAMP_A, {
+      audience: { segmentos: [P], incluir: ['ya@x.mx', 'nuevo@x.mx'] },
+      basePublico: await huellaPublicoDe(),
+    })
+    expect(guardado).toEqual({ v: 2, publicos: [P], excluir: [], incluir: ['ya@x.mx', 'nuevo@x.mx'] })
+  })
+
+  it('🔴 un CLIENTE sin consentimiento: quitar → guardar → regresar → guardar, sin 400 (excluir nunca pasa por la revisión)', async () => {
+    // Nadie sería elegible: si «quitar» o «regresar» pasaran por la revisión, truenan.
+    ;(personasNoElegibles as jest.Mock).mockImplementation(async (correos: string[]) => correos)
+    guardado = { segmentos: [C] }
+    await updateCampaign(ACTOR, CAMP_A, {
+      audience: { segmentos: [C], excluir: ['dueno@cliente.mx'] },
+      basePublico: await huellaPublicoDe(),
+    })
+    expect(guardado).toEqual({ v: 2, publicos: [C], excluir: ['dueno@cliente.mx'], incluir: [] })
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [C], excluir: [] }, basePublico: await huellaPublicoDe() })
+    expect(guardado).toEqual({ segmentos: [C] })
+  })
+
+  it('la bitácora dice qué llaves cambiaron, sin correos ni basePublico', async () => {
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], excluir: ['ana@x.mx'] }, basePublico: await huellaPublicoDe() })
+    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CRM_CAMPAIGN_UPDATED', data: { cambios: ['audience'] } }))
+    expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toContain('ana@x.mx')
+  })
+
+  // ── La vista previa con 0 personas no firma ──────────────────────────────────────────────────────────────────────
+
+  it('vista previa con 0 personas: total 0 y token null (el campo sigue); con 3, token como hoy', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce({ total: 0, porSegmento: { PROSPECTOS: 0 }, bloqueados: 2 })
+    const vacia = await previewSend(ACTOR, CAMP_A)
+    expect(vacia).toMatchObject({ total: 0, bloqueados: 2, token: null })
+    expect(vacia).toHaveProperty('token', null)
+    const llena = await previewSend(ACTOR, CAMP_A)
+    expect(llena.token).toEqual(expect.any(String))
+    expect(cuerpoDelToken(llena.token!)).toMatchObject({ campaignId: CAMP_A, total: 3 })
+  })
+
+  it('vista previa de un borrador sin públicos ni incluir: total 0 sin recorrer la base', async () => {
+    guardado = { segmentos: [] }
+    const real = jest.requireActual('@/services/crm/email/audience.service') as typeof import('@/services/crm/email/audience.service')
+    ;(contarAudiencia as jest.Mock).mockImplementationOnce(real.contarAudiencia)
+    const vista = await previewSend(ACTOR, CAMP_A)
+    expect(vista).toMatchObject({ total: 0, bloqueados: 0, token: null })
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.crmTeam.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('encolar con el token de una vista previa vieja después de agregar a alguien: 409 CRM_CAMPANA_CAMBIO', async () => {
+    prismaMock.crmCampaign.findUnique.mockImplementation((() =>
+      Promise.resolve({ ...borrador(), testSentHash: contentHash(SUBJECT, BLOCKS as never) })) as never)
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    await updateCampaign(ACTOR, CAMP_A, { audience: { segmentos: [P], incluir: ['nueva@x.mx'] }, basePublico: await huellaPublicoDe() })
+    prismaMock.crmCampaign.updateMany.mockClear()
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_CAMBIO' })
+    expect(prismaMock.crmCampaign.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+// ── Plan B, tarea 5 (Codex r1 #5): lo que se confirma son PERSONAS, no un número ──────────────────────────────────────────
+// La vista previa firma `conjuntoHash` (los correos que contó, ya sin bajas) en el TOKEN; el encolado lo recalcula en la misma pasada que
+// crea las deliveries. Si salió Ana y entró Brenda (mismo total), 409 PUBLICO_CAMBIO y se deshace todo. La `huella` de versión no cambia.
+describe('conjuntoHash: se confirman las mismas personas, no sólo cuántas', () => {
+  const ACTOR = { staffId: STAFF } as never
+  const SUBJECT = 'Lo nuevo de Avoqado'
+  const BLOCKS = [{ type: 'paragraph', text: 'Hola {{nombre}}' }]
+  const borrador = () => ({
+    ...fila(CAMP_A, 0),
+    status: 'BORRADOR',
+    enqueuedAt: null,
+    testSentHash: contentHash(SUBJECT, BLOCKS as never),
+  })
+  const DOS = ['ana@x.mx', 'beto@x.mx'].map(email => ({ email, reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} }))
+  const conteo = (conjuntoHash?: string) => ({
+    total: 2,
+    porSegmento: { PROSPECTOS: 2, CLIENTES: 0, USUARIOS: 0, AGREGADOS: 0 },
+    bloqueados: 0,
+    ...(conjuntoHash === undefined ? {} : { conjuntoHash }),
+  })
+  /** El recorrido del encolado entrega a DOS personas cuyo conjunto da `conjuntoHash`. */
+  const recorre = (conjuntoHash: string, personas = DOS) =>
+    (recorrerAudiencia as jest.Mock).mockImplementationOnce(async (_a: unknown, alLote: (l: unknown[]) => Promise<void>) => {
+      await alLote(personas)
+      return { entregados: personas.length, conjuntoHash }
+    })
+
+  beforeEach(() => {
+    prismaMock.crmCampaign.findUnique.mockReset().mockResolvedValue(borrador() as never)
+    prismaMock.crmCampaign.updateMany.mockReset().mockResolvedValue({ count: 1 } as never)
+    prismaMock.crmCampaign.update.mockReset().mockResolvedValue({} as never)
+    prismaMock.crmCampaignDelivery.createMany
+      .mockReset()
+      .mockImplementation(((args: { data: unknown[] }) => Promise.resolve({ count: args.data.length })) as never)
+    prismaMock.crmCampaignDelivery.groupBy.mockResolvedValue([] as never)
+    prismaMock.$queryRaw.mockReset().mockResolvedValue([{ id: CAMP_A }] as never)
+    ;(contarAudiencia as jest.Mock).mockReset()
+    ;(recorrerAudiencia as jest.Mock).mockReset()
+  })
+
+  it('el token firma el conjuntoHash del conteo; la respuesta no lo trae', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const vista = await previewSend(ACTOR, CAMP_A)
+    expect(cuerpoDelToken(vista.token!)).toMatchObject({ campaignId: CAMP_A, total: 2, conjuntoHash: 'h-ana-beto' })
+    expect(vista).not.toHaveProperty('conjuntoHash')
+  })
+
+  it('las mismas personas: encola', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    recorre('h-ana-beto')
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).resolves.toEqual({ total: 2 })
+  })
+
+  it('🔴 mismo total, otras personas: 409 CRM_CAMPANA_PUBLICO_CAMBIO con confirmado y actual, y no se escribe el total', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    recorre('h-brenda-beto')
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PUBLICO_CAMBIO',
+      message: 'El público cambió: revisa otra vez',
+      details: { confirmado: 2, actual: 2 },
+    })
+    expect(prismaMock.crmCampaign.update).not.toHaveBeenCalled()
+  })
+
+  it('si creció sigue siendo PUBLICO_CRECIO (aunque el conjunto también cambió)', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto'))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    recorre('h-tres', [...DOS, { email: 'caro@x.mx', reason: 'PROSPECTO', publico: 'PROSPECTOS', vars: {} }])
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMPANA_PUBLICO_CRECIO',
+      details: { confirmado: 2, actual: 3 },
+    })
+  })
+
+  it('un token sin conjuntoHash (firmado antes del despliegue) se acepta como hoy', async () => {
+    // Sin conjuntoHash en el conteo, la vista previa firma el cuerpo de antes: { v, campaignId, contentHash, audienceHash, total, exp }.
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo())
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    expect(Object.keys(cuerpoDelToken(token!)).sort()).toEqual(['audienceHash', 'campaignId', 'contentHash', 'exp', 'total', 'v'])
+    recorre('cualquier-conjunto')
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).resolves.toEqual({ total: 2 })
+  })
+
+  it('un conjuntoHash que no es texto vuelve inválido al token', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo(123 as never))
+    const { token } = await previewSend(ACTOR, CAMP_A)
+    await expect(enqueueCampaign(ACTOR, CAMP_A, token!)).rejects.toMatchObject({ code: 'CRM_CAMPANA_CONFIRMACION_INVALIDA' })
+    expect(recorrerAudiencia).not.toHaveBeenCalled()
+  })
+
+  it('la huella de versión que devuelve la vista previa no cambia con conjuntoHash', async () => {
+    ;(contarAudiencia as jest.Mock).mockResolvedValueOnce(conteo('h-ana-beto')).mockResolvedValueOnce(conteo('h-brenda-beto'))
+    const a = await previewSend(ACTOR, CAMP_A)
+    const b = await previewSend(ACTOR, CAMP_A)
+    expect(a.huella).toBe(b.huella)
+    expect(a.huella).toBe((await getCampaign(CAMP_A)).huella)
+    expect(cuerpoDelToken(a.token!).conjuntoHash).not.toBe(cuerpoDelToken(b.token!).conjuntoHash)
+  })
+})
+
+describe('listRecipients — «Ver quiénes»: una consulta por página, sin total', () => {
+  const borrador = { status: 'BORRADOR', audience: { segmentos: [{ tipo: 'PROSPECTOS' }] } }
+  const cursorDe = (correo: string) => Buffer.from(correo).toString('base64url')
+  const destinatario = (email: string, publico: 'PROSPECTOS' | 'AGREGADOS' = 'PROSPECTOS') => ({
+    email,
+    name: 'José',
+    reason: 'PROSPECTO',
+    publico,
+    vars: { negocio: 'Cafetería' },
+    accountId: 'cacc',
+  })
+
+  beforeEach(() => {
+    ;(paginaDeDestinatarios as jest.Mock).mockReset().mockResolvedValue({ filas: [destinatario('a@x.mx')], siguiente: null })
+    ;(contarAudiencia as jest.Mock).mockClear()
+    prismaMock.crmCampaign.findUnique.mockReset().mockResolvedValue(borrador as never)
+  })
+
+  it('🔴 ninguna página llama a contarAudiencia y la respuesta no trae total', async () => {
+    const primera = await listRecipients(CAMP_A, {})
+    const segunda = await listRecipients(CAMP_A, { cursor: cursorDe('a@x.mx') })
+    expect(contarAudiencia).not.toHaveBeenCalled()
+    expect(primera).not.toHaveProperty('total')
+    expect(segunda).not.toHaveProperty('total')
+    expect(primera).toEqual({
+      rows: [{ email: 'a@x.mx', nombre: 'José', negocio: 'Cafetería', motivo: 'PROSPECTO', accountId: 'cacc' }],
+      nextCursor: null,
+      hasMore: false,
+    })
+  })
+
+  it('el cursor que entrega es opaco (base64url del último correo) y el que recibe se decodifica', async () => {
+    ;(paginaDeDestinatarios as jest.Mock).mockResolvedValue({ filas: [destinatario('a@x.mx')], siguiente: 'z@x.mx' })
+    const pagina = await listRecipients(CAMP_A, { cursor: cursorDe('m@x.mx'), q: 'jose' })
+    expect(pagina).toMatchObject({ nextCursor: cursorDe('z@x.mx'), hasMore: true })
+    expect(paginaDeDestinatarios).toHaveBeenCalledWith(expect.anything(), { desde: 'm@x.mx', limit: 50, buscar: 'jose' })
+  })
+
+  it.each([
+    [5000, 100],
+    [0, 1],
+    [-3, 1],
+    [7, 7],
+    [undefined, 50],
+  ])('un limit de %s se recorta a %s', async (pedido, esperado) => {
+    await listRecipients(CAMP_A, { limit: pedido as number | undefined })
+    expect((paginaDeDestinatarios as jest.Mock).mock.calls[0][1].limit).toBe(esperado)
+  })
+
+  it('un cursor basura es 400 CRM_CURSOR_INVALIDO y no consulta la lista', async () => {
+    for (const cursor of ['!!!', 'zzzz', cursorDe('sin-arroba'), Buffer.from([0xff, 0xfe, 0x40]).toString('base64url')]) {
+      await expect(listRecipients(CAMP_A, { cursor })).rejects.toMatchObject({ statusCode: 400, code: 'CRM_CURSOR_INVALIDO' })
+    }
+    expect(paginaDeDestinatarios).not.toHaveBeenCalled()
+  })
+
+  it.each(['ENVIANDO', 'ENVIADA', 'CANCELADA'])('una campaña %s es 409 CRM_CAMPANA_NO_EDITABLE', async status => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValue({ ...borrador, status } as never)
+    await expect(listRecipients(CAMP_A, {})).rejects.toMatchObject({ statusCode: 409, code: 'CRM_CAMPANA_NO_EDITABLE' })
+    expect(paginaDeDestinatarios).not.toHaveBeenCalled()
+  })
+
+  it('una campaña que no existe es 404 y una página vacía es una lista vacía', async () => {
+    prismaMock.crmCampaign.findUnique.mockResolvedValueOnce(null)
+    await expect(listRecipients(CAMP_A, {})).rejects.toMatchObject({ statusCode: 404 })
+    ;(paginaDeDestinatarios as jest.Mock).mockResolvedValue({ filas: [], siguiente: null })
+    expect(await listRecipients(CAMP_A, {})).toEqual({ rows: [], nextCursor: null, hasMore: false })
+  })
+
+  it('el motivo de una persona agregada es AGREGADO', async () => {
+    ;(paginaDeDestinatarios as jest.Mock).mockResolvedValue({ filas: [destinatario('b@x.mx', 'AGREGADOS')], siguiente: null })
+    expect((await listRecipients(CAMP_A, {})).rows[0].motivo).toBe('AGREGADO')
   })
 })

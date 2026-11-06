@@ -10,6 +10,7 @@
  */
 import { z } from 'zod'
 import { BadRequestError } from '../errors/AppError'
+import { motivosDeZod } from '../utils/zodEnEspanol'
 
 export const actualizarOrganizacionBody = z
   .object({
@@ -46,6 +47,5 @@ export function cuerpoEditableDeOrganizacion(cuerpo: unknown): ActualizarOrganiz
       { campos: sobrantes },
     )
   }
-  const motivos = resultado.error.issues.map(issue => (issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
-  throw new BadRequestError(`Error de validación: ${motivos.join(', ')}`)
+  throw new BadRequestError(`Error de validación: ${motivosDeZod(resultado.error.issues)}`)
 }

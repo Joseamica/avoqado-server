@@ -13,14 +13,21 @@ import {
   getTemplate,
   listTemplates,
   previewTemplate,
+  sendTemplateTest,
   sendTestToSelf,
+  NO_PUEDE_RECIBIR,
   unarchiveTemplate,
   updateTemplate,
 } from '@/services/crm/email/templates.service'
 import emailService from '@/services/email.service'
+import { miembrosConCorreo } from '@/services/crm/teamVenue.service'
 import { verifyPlatformUnsubscribeToken } from '@/utils/platformUnsubscribeToken'
 
 jest.mock('@/services/email.service', () => ({ __esModule: true, default: { sendEmailWithResult: jest.fn() } }))
+
+jest.mock('@/services/crm/teamVenue.service', () => ({ miembrosConCorreo: jest.fn() }))
+const equipo = miembrosConCorreo as jest.Mock
+const OTRA = 'cstaffotra00000000000001'
 
 const send = emailService.sendEmailWithResult as jest.Mock
 
@@ -81,11 +88,14 @@ beforeEach(() => {
     prismaMock.staff.findUnique,
     prismaMock.crmEmailOptOut.findUnique,
     prismaMock.emailSuppression.findUnique,
+    prismaMock.activityLog.findFirst,
+    equipo,
     send,
   ])
     fn.mockReset()
   prismaMock.staff.findUnique.mockResolvedValue({ email: 'Rafa@Avoqado.io', firstName: 'Rafa', lastName: 'Pérez' })
   send.mockResolvedValue({ ok: true, resendId: 'resend-1', transient: false })
+  equipo.mockResolvedValue([{ staffId: OTRA, name: 'Ana Ruiz', email: 'ana@avoqado.io' }])
   setList(undefined)
 })
 
@@ -534,5 +544,151 @@ describe('sendTestToSelf', () => {
     prismaMock.staff.findUnique.mockResolvedValue(null)
     await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'No encontramos tu correo' })
     expect(send).not.toHaveBeenCalled()
+  })
+
+  describe('rediseño r2/r3: verdad, destino y repetida', () => {
+    it('🔴 un correo que no puede recibir (superadmin@superadmin.com) da el motivo verdadero antes que la lista de prueba, sin Resend', async () => {
+      prismaMock.staff.findUnique.mockResolvedValue({ email: 'superadmin@superadmin.com', firstName: 'S', lastName: 'A' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: NO_PUEDE_RECIBIR })
+      expect(NO_PUEDE_RECIBIR).toBe('Ese correo no puede recibir: mándala a alguien del equipo')
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('si Resend devuelve UNDELIVERABLE_RECIPIENT dice NO_PUEDE_RECIBIR', async () => {
+      setList('rafa@avoqado.io')
+      send.mockResolvedValue({ ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: NO_PUEDE_RECIBIR })
+    })
+
+    it('con destino del equipo va al correo de ESA persona, con la liga de baja de SU correo, y eco destino', async () => {
+      setList('ana@avoqado.io')
+      await expect(sendTestToSelf(actor(), { ...input, destinoStaffId: OTRA })).resolves.toEqual({
+        ok: true,
+        destino: { nombre: 'Ana Ruiz' },
+      })
+      const email = send.mock.calls[0][0]
+      expect(email.to).toBe('ana@avoqado.io')
+      const liga = /^<(.+)>$/.exec(email.headers['List-Unsubscribe'])![1]
+      expect(verifyPlatformUnsubscribeToken(new URL(liga).searchParams.get('token'))).toEqual({ email: 'ana@avoqado.io' })
+      // El vendedor sigue siendo quien la pide.
+      expect(email.html).toContain('soy Rafa Pérez')
+    })
+
+    it('🔴 un destino que no es del equipo es 400 CRM_PRUEBA_DESTINO_INVALIDO y no sale nada', async () => {
+      setList('rafa@avoqado.io')
+      await expect(sendTestToSelf(actor(), { ...input, destinoStaffId: 'cnoesdelequipo00000000001' })).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'CRM_PRUEBA_DESTINO_INVALIDO',
+        message: 'Esa persona no es del equipo del CRM',
+      })
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('el destino igual a quien la pide es como sin destino (misma llave, sin eco, sin consultar al equipo)', async () => {
+      setList('rafa@avoqado.io')
+      await expect(sendTestToSelf(actor(), { ...input, destinoStaffId: STAFF })).resolves.toEqual({ ok: true })
+      await sendTestToSelf(actor(), input)
+      expect(send.mock.calls[0][0].idempotencyKey).toBe(send.mock.calls[1][0].idempotencyKey)
+      expect(equipo).not.toHaveBeenCalled()
+    })
+
+    it('fuera de producción el destino también tiene que estar en CRM_CORREO_PRUEBAS (y el eco ya lleva el nombre)', async () => {
+      setList('rafa@avoqado.io')
+      await expect(sendTestToSelf(actor(), { ...input, destinoStaffId: OTRA })).resolves.toEqual({
+        ok: false,
+        motivo: 'fuera de la lista de prueba',
+        destino: { nombre: 'Ana Ruiz' },
+      })
+      expect(send).not.toHaveBeenCalled()
+    })
+
+    it('el bloqueo de OTRA persona dice «ese correo…»; el propio sigue «tu correo…»', async () => {
+      setList('ana@avoqado.io')
+      prismaMock.crmEmailOptOut.findUnique.mockResolvedValue({ id: 'cbaja' })
+      await expect(sendTestToSelf(actor(), { ...input, destinoStaffId: OTRA })).resolves.toEqual({
+        ok: false,
+        motivo: 'ese correo se dio de baja de los correos de Avoqado',
+        destino: { nombre: 'Ana Ruiz' },
+      })
+    })
+
+    it('la llave con destino lleva su staffId: crm-prueba:<STAFF>:<OTRA>:<huella>', async () => {
+      setList('ana@avoqado.io')
+      await sendTestToSelf(actor(), { ...input, destinoStaffId: OTRA })
+      expect(send.mock.calls[0][0].idempotencyKey).toMatch(new RegExp(`^crm-prueba:${STAFF}:${OTRA}:[0-9a-f]{64}$`))
+    })
+
+    it('🔴 la segunda prueba igual en 24 h contesta { ok: true, repetida: true } y NO llama a Resend', async () => {
+      setList('rafa@avoqado.io')
+      prismaMock.activityLog.findFirst.mockResolvedValue({ id: 'clog' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: true, repetida: true })
+      expect(send).not.toHaveBeenCalled()
+      const args = prismaMock.activityLog.findFirst.mock.calls[0][0]
+      expect(args.where).toMatchObject({
+        staffId: STAFF,
+        action: { in: ['CRM_CAMPAIGN_TEST_SENT', 'CRM_EMAIL_TEMPLATE_TEST_SENT'] },
+        data: { path: ['llave'], equals: expect.stringMatching(new RegExp(`^crm-prueba:${STAFF}:[0-9a-f]{64}$`)) },
+      })
+      const desde = (args.where.createdAt as { gte: Date }).gte.getTime()
+      expect(Date.now() - desde).toBeGreaterThan(24 * 3600_000 - 5_000)
+      expect(Date.now() - desde).toBeLessThan(24 * 3600_000 + 5_000)
+    })
+
+    it('la repetida a otra persona lleva su destino en el eco', async () => {
+      setList('ana@avoqado.io')
+      prismaMock.activityLog.findFirst.mockResolvedValue({ id: 'clog' })
+      await expect(sendTestToSelf(actor(), { ...input, destinoStaffId: OTRA })).resolves.toEqual({
+        ok: true,
+        repetida: true,
+        destino: { nombre: 'Ana Ruiz' },
+      })
+    })
+
+    it('sin bitácora (la primera fue incierta o la bitácora falló) vuelve a Resend con la MISMA llave; si la consulta falla, también', async () => {
+      setList('rafa@avoqado.io')
+      send.mockRejectedValueOnce(new Error('socket hang up'))
+      await sendTestToSelf(actor(), input)
+      prismaMock.activityLog.findFirst.mockRejectedValueOnce(new Error('db'))
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: true })
+      expect(send).toHaveBeenCalledTimes(2)
+      expect(send.mock.calls[1][0].idempotencyKey).toBe(send.mock.calls[0][0].idempotencyKey)
+    })
+
+    it('la repetida se mira DESPUÉS de la lista de prueba y del bloqueo', async () => {
+      prismaMock.activityLog.findFirst.mockResolvedValue({ id: 'clog' })
+      await expect(sendTestToSelf(actor(), input)).resolves.toEqual({ ok: false, motivo: 'fuera de la lista de prueba' })
+      expect(prismaMock.activityLog.findFirst).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('sendTemplateTest', () => {
+    it('deja CRM_EMAIL_TEMPLATE_TEST_SENT con llave y para, sin correo, sólo si salió y no era repetida', async () => {
+      setList('rafa@avoqado.io')
+      await sendTemplateTest(actor(), input)
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          staffId: STAFF,
+          venueId: null,
+          action: 'CRM_EMAIL_TEMPLATE_TEST_SENT',
+          entity: 'CrmEmailTemplate',
+          data: { para: STAFF, llave: send.mock.calls[0][0].idempotencyKey },
+        }),
+      )
+      expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toContain('@')
+    })
+
+    it('con destino, para es el staffId del destino; si no salió o fue repetida, no deja bitácora', async () => {
+      setList('ana@avoqado.io')
+      await sendTemplateTest(actor(), { ...input, destinoStaffId: OTRA })
+      expect(logAction).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ para: OTRA }) }))
+      ;(logAction as jest.Mock).mockClear()
+
+      prismaMock.activityLog.findFirst.mockResolvedValue({ id: 'clog' })
+      await sendTemplateTest(actor(), { ...input, destinoStaffId: OTRA })
+      send.mockResolvedValue({ ok: false, transient: false, errorCode: 'validation_error' })
+      prismaMock.activityLog.findFirst.mockResolvedValue(null)
+      await sendTemplateTest(actor(), { ...input, destinoStaffId: OTRA, subject: 'otro' })
+      expect(logAction).not.toHaveBeenCalled()
+    })
   })
 })

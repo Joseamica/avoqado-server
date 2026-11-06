@@ -10,6 +10,7 @@ import type { Prisma } from '@prisma/client'
 import { env } from '../../../config/env'
 import logger from '../../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../../errors/AppError'
+import { classifyUndeliverable } from '../../../utils/undeliverableEmail'
 import { platformUnsubscribeUrl } from '../../../utils/platformUnsubscribeToken'
 import prisma from '../../../utils/prismaClient'
 import { logAction } from '../../dashboard/activity-log.service'
@@ -17,6 +18,7 @@ import emailService from '../../email.service'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import { renderizarBloques } from '../../marketing/campaignRenderer'
 import { scopeWhere, type CrmAccess } from '../access.service'
+import { miembrosConCorreo } from '../teamVenue.service'
 import { cabecerasDeBaja, pieDeCampana } from './footer'
 import { isBlocked, type Bloqueo } from './optOut.service'
 import { MOTIVO_FUERA_DE_LA_LISTA, puedeMandarFueraDeProduccion } from './testAllowlist'
@@ -54,10 +56,47 @@ const NO_SABEMOS_SI_SALIO_LA_PRUEBA =
  * validación, sin configurar, demo) es un «no» que se sabe.
  */
 /** El bloqueo en palabras: la pantalla lo pinta tal cual, «Este intento no salió: …». */
-const MOTIVO_BLOQUEO: Record<Bloqueo, string> = {
-  BAJA: 'tu correo se dio de baja de los correos de Avoqado',
-  REBOTE: 'tu correo rebotó: ya no le mandamos nada',
-  QUEJA: 'tu correo marcó un envío como spam: ya no le mandamos nada',
+const motivoDeBloqueo = (bloqueo: Bloqueo, propio: boolean): string => {
+  const de = propio ? 'tu correo' : 'ese correo'
+  return {
+    BAJA: `${de} se dio de baja de los correos de Avoqado`,
+    REBOTE: `${de} rebotó: ya no le mandamos nada`,
+    QUEJA: `${de} marcó un envío como spam: ya no le mandamos nada`,
+  }[bloqueo]
+}
+/** La razón verdadera cuando el correo no puede recibir (placeholder, dominio de ejemplo…): se dice antes que cualquier otra. */
+export const NO_PUEDE_RECIBIR = 'Ese correo no puede recibir: mándala a alguien del equipo'
+/** Qué resultado vuelve de una prueba: campos nuevos opcionales (una pantalla vieja los ignora). */
+export type ResultadoDePrueba = { ok: boolean; motivo?: string; incierto?: true; repetida?: true; destino?: { nombre: string } }
+export type EntradaDePrueba = { subject: string; blocks: BloqueCampana[]; destinoStaffId?: string }
+const ACCIONES_DE_PRUEBA = ['CRM_CAMPAIGN_TEST_SENT', 'CRM_EMAIL_TEMPLATE_TEST_SENT']
+const VENTANA_DE_PRUEBA_MS = 24 * 60 * 60 * 1000
+
+/** crm-prueba:<quien la pide>[:<otra persona>]:<huella>. Sin destino, la de siempre; lleva sólo ids, nunca un correo. */
+export function llaveDePrueba(actorStaffId: string, destinoStaffId: string | null, huella: string): string {
+  return ['crm-prueba', actorStaffId, ...(destinoStaffId ? [destinoStaffId] : []), huella].join(':')
+}
+
+/**
+ * ¿Ya salió una prueba con esta llave en las últimas 24 h? Lo dice la bitácora (sólo se escribe si salió). Si la consulta falla
+ * se contesta «no»: se va a Resend con la MISMA llave y Resend no duplica.
+ */
+export async function pruebaYaSalio(actorStaffId: string, llave: string, ahora: Date): Promise<boolean> {
+  try {
+    const fila = await prisma.activityLog.findFirst({
+      where: {
+        staffId: actorStaffId,
+        action: { in: ACCIONES_DE_PRUEBA },
+        createdAt: { gte: new Date(ahora.getTime() - VENTANA_DE_PRUEBA_MS) },
+        data: { path: ['llave'], equals: llave },
+      },
+      select: { id: true },
+    })
+    return !!fila
+  } catch (error) {
+    logger.warn('[CRM] The test email log could not be checked', { error: error instanceof Error ? error.message : String(error) })
+    return false
+  }
 }
 const PUDO_SALIR = new Set([
   'application_error',
@@ -258,45 +297,63 @@ export async function previewTemplate(
 }
 
 /**
- * «Envíame una prueba»: el correo, con el pie y las cabeceras de baja de uno de verdad, al `Staff.email` de quien lo pide.
- * Nunca truena: lo que no sale vuelve como `{ ok: false, motivo }`, y lo que pudo haber salido además con `incierto: true`.
+ * «Envíame una prueba»: el correo, con el pie y las cabeceras de baja de uno de verdad, al `Staff.email` de quien lo pide o,
+ * si se elige, de otra persona del equipo del CRM. Nunca truena por lo que pasa al mandar: lo que no sale vuelve como
+ * `{ ok: false, motivo }`, y lo que pudo haber salido además con `incierto: true`. Devuelve también la llave usada, para que
+ * quien llama deje su bitácora.
  */
-export async function sendTestToSelf(
-  actor: CrmAccess,
-  input: { subject: string; blocks: BloqueCampana[] },
-): Promise<{ ok: boolean; motivo?: string; incierto?: true }> {
+export async function enviarPrueba(actor: CrmAccess, input: EntradaDePrueba): Promise<{ resultado: ResultadoDePrueba; llave?: string }> {
+  const otro = input.destinoStaffId && input.destinoStaffId !== actor.staffId ? input.destinoStaffId : null
+  let destino: { nombre: string } | undefined
+  let to: string
   const staff = await prisma.staff.findUnique({
     where: { id: actor.staffId },
     select: { email: true, firstName: true, lastName: true },
   })
-  if (!staff?.email) return { ok: false, motivo: 'No encontramos tu correo' }
-  const to = staff.email.trim().toLowerCase()
+  if (otro) {
+    // 🔴 Se valida en el servidor: sólo una persona del equipo (no se confía en lo que manda la pantalla).
+    const miembro = (await miembrosConCorreo()).find(m => m.staffId === otro)
+    if (!miembro) throw new BadRequestError('Esa persona no es del equipo del CRM', 'CRM_PRUEBA_DESTINO_INVALIDO')
+    to = miembro.email.trim().toLowerCase()
+    destino = { nombre: miembro.name }
+  } else {
+    if (!staff?.email) return { resultado: { ok: false, motivo: 'No encontramos tu correo' } }
+    to = staff.email.trim().toLowerCase()
+  }
+  const conEco = (r: ResultadoDePrueba): ResultadoDePrueba => (destino ? { ...r, destino } : r)
+
+  // La razón más de fondo primero: a un correo que no puede recibir no le sirve ninguna lista.
+  if (classifyUndeliverable(to)) return { resultado: conEco({ ok: false, motivo: NO_PUEDE_RECIBIR }) }
 
   // 🔴 Fuera de producción sólo sale a la lista de prueba.
-  if (!puedeMandarFueraDeProduccion(to)) return { ok: false, motivo: MOTIVO_FUERA_DE_LA_LISTA }
+  if (!puedeMandarFueraDeProduccion(to)) return { resultado: conEco({ ok: false, motivo: MOTIVO_FUERA_DE_LA_LISTA }) }
 
   // 🔴 Quien se dio de baja, rebotó o se quejó no recibe ni la prueba: así «Envíame una prueba» tampoco habilita el envío a
   // una dirección que ya no debe recibir nada de Avoqado. Si la base falla, la prueba no sale (nunca un error por «libre»).
   try {
     const bloqueo = await isBlocked(to)
-    if (bloqueo) return { ok: false, motivo: MOTIVO_BLOQUEO[bloqueo] }
+    if (bloqueo) return { resultado: conEco({ ok: false, motivo: motivoDeBloqueo(bloqueo, !otro) }) }
   } catch (error) {
     logger.error('[CRM] The test email could not check the suppression lists', {
       staffId: actor.staffId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
+    return { resultado: conEco({ ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }) }
   }
 
-  const vendedor = `${staff.firstName} ${staff.lastName}`.trim() || null
-  const urlDeBaja = platformUnsubscribeUrl(to)
-  const correo = armarCorreo(input.subject, input.blocks, { ...EJEMPLO, vendedor }, pieDeCampana('PROSPECTO', null, urlDeBaja))
+  const vendedor = staff ? `${staff.firstName} ${staff.lastName}`.trim() || null : null
   // Dos toques seguidos con lo mismo son UNA prueba (Resend recuerda la llave 24 h). El vendedor entra en la huella porque
   // es parte de lo que sale: Resend rechaza una llave repetida con otro contenido.
   const huella = createHash('sha256')
     .update(contentHash(input.subject, input.blocks) + (vendedor ?? ''))
     .digest('hex')
+  const llave = llaveDePrueba(actor.staffId, otro, huella)
 
+  // Ya salió igual en las últimas 24 h: no se llama a Resend (y no se anuncia como nueva).
+  if (await pruebaYaSalio(actor.staffId, llave, new Date())) return { resultado: conEco({ ok: true, repetida: true }), llave }
+
+  const urlDeBaja = platformUnsubscribeUrl(to)
+  const correo = armarCorreo(input.subject, input.blocks, { ...EJEMPLO, vendedor }, pieDeCampana('PROSPECTO', null, urlDeBaja))
   try {
     const result = await emailService.sendEmailWithResult({
       to,
@@ -306,17 +363,39 @@ export async function sendTestToSelf(
       from: env.CRM_CAMPAIGN_FROM,
       replyTo: env.CRM_CAMPAIGN_REPLY_TO,
       headers: cabecerasDeBaja(urlDeBaja),
-      idempotencyKey: `crm-prueba:${actor.staffId}:${huella}`,
+      idempotencyKey: llave,
     })
-    if (result.ok) return { ok: true }
+    if (result.ok) return { resultado: conEco({ ok: true }), llave }
     logger.warn('[CRM] The test email did not go out', { staffId: actor.staffId, error: result.errorCode ?? 'not sent' })
-    if (!result.errorCode || PUDO_SALIR.has(result.errorCode)) return { ok: false, incierto: true, motivo: NO_SABEMOS_SI_SALIO_LA_PRUEBA }
-    return { ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }
+    if (result.errorCode === 'UNDELIVERABLE_RECIPIENT') return { resultado: conEco({ ok: false, motivo: NO_PUEDE_RECIBIR }) }
+    if (!result.errorCode || PUDO_SALIR.has(result.errorCode)) {
+      return { resultado: conEco({ ok: false, incierto: true, motivo: NO_SABEMOS_SI_SALIO_LA_PRUEBA }) }
+    }
+    return { resultado: conEco({ ok: false, motivo: NO_SE_PUDO_MANDAR_LA_PRUEBA }) }
   } catch (error) {
     logger.error('[CRM] The test email could not be sent', {
       staffId: actor.staffId,
       error: error instanceof Error ? error.message : String(error),
     })
-    return { ok: false, incierto: true, motivo: NO_SABEMOS_SI_SALIO_LA_PRUEBA }
+    return { resultado: conEco({ ok: false, incierto: true, motivo: NO_SABEMOS_SI_SALIO_LA_PRUEBA }) }
   }
+}
+
+export async function sendTestToSelf(actor: CrmAccess, input: EntradaDePrueba): Promise<ResultadoDePrueba> {
+  return (await enviarPrueba(actor, input)).resultado
+}
+
+/** La prueba de una plantilla: igual, y si SALIÓ de verdad (no repetida) deja su bitácora, con la llave y sin correo. */
+export async function sendTemplateTest(actor: CrmAccess, input: EntradaDePrueba): Promise<ResultadoDePrueba> {
+  const { resultado, llave } = await enviarPrueba(actor, input)
+  if (resultado.ok && !resultado.repetida) {
+    void logAction({
+      staffId: actor.staffId,
+      venueId: null,
+      action: 'CRM_EMAIL_TEMPLATE_TEST_SENT',
+      entity: 'CrmEmailTemplate',
+      data: { para: input.destinoStaffId ?? actor.staffId, llave },
+    })
+  }
+  return resultado
 }

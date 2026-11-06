@@ -86,6 +86,20 @@ describe('LoyaltyReconciliationJob', () => {
     expect(award).toHaveBeenCalledWith(expect.objectContaining({ orderTotal: 90 }))
   })
 
+  // 🔴 D13 (hz:433063d4:D13): un pedido de plataforma pagado por la app guarda el total YA sin propina; restarla otra vez daba
+  // 80 puntos en vez de 100. La base sale de sus cobros (sin reembolsos).
+  it('D13: un pedido de plataforma toma la base de sus cobros, sin restar la propina otra vez', async () => {
+    const { job, order, award } = setup()
+    const payment = { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Decimal(100) } }) }
+    ;(job as any).dependencies.prisma.payment = payment
+    order.findMany.mockResolvedValue([
+      candidate({ originSystem: 'DELIVERY_PLATFORM', total: new Decimal(100), tipAmount: new Decimal(20) }),
+    ])
+    await job.runNow()
+    expect(award).toHaveBeenCalledWith(expect.objectContaining({ orderTotal: 100 }))
+    expect(payment.aggregate.mock.calls[0][0].where).toMatchObject({ orderId: 'order-1', venueId: 'venue-1', status: 'COMPLETED' })
+  })
+
   it('keeps a failed order pending and releases the lease for a later retry', async () => {
     const { job, order, award } = setup()
     award.mockResolvedValue({ complete: false, errors: ['loyalty:cust-legacy'] })

@@ -77,12 +77,15 @@ export function installCrmInboundFake(prismaMock: any) {
     prismaMock.crmTimelineEvent.createMany,
     prismaMock.crmTimelineEvent.findUnique,
     prismaMock.crmEmailConsent.upsert,
+    prismaMock.crmEmailConsent.createMany,
+    prismaMock.crmEmailConsent.findUnique,
     prismaMock.crmAccount.delete,
     prismaMock.crmContact.findMany,
     prismaMock.crmInboundEntry.deleteMany,
     prismaMock.crmErased.createMany,
     prismaMock.crmErased.updateMany,
     prismaMock.crmErased.findFirst,
+    prismaMock.crmErased.findMany,
     prismaMock.activityLog.create,
     prismaMock.staff.findUnique,
     prismaMock.crmTeam.findUnique,
@@ -221,6 +224,20 @@ export function installCrmInboundFake(prismaMock: any) {
     return { ...(row ?? db.consents[db.consents.length - 1]) }
   })
 
+  // The team's consent (the box): ON CONFLICT (email) DO NOTHING, so it never overwrites an existing row.
+  prismaMock.crmEmailConsent.createMany.mockImplementation(async ({ data }: Row) => {
+    let count = 0
+    for (const row of data) {
+      if (db.consents.some(consent => consent.email === row.email)) continue
+      db.consents.push({ id: nextId('cons'), createdAt: new Date(), ...row })
+      count++
+    }
+    return { count }
+  })
+  prismaMock.crmEmailConsent.findUnique.mockImplementation(
+    async ({ where }: Row) => db.consents.find(consent => consent.email === where.email) ?? null,
+  )
+
   // «Eliminar» (D7): the account goes with its people and its timeline (onDelete: Cascade), and its entries are deleted by
   // `accountId` or by `id`.
   prismaMock.crmAccount.delete.mockImplementation(async ({ where }: Row) => {
@@ -266,6 +283,13 @@ export function installCrmInboundFake(prismaMock: any) {
     const found = db.erased.filter(row => erasedMatches(row, where)).sort((a, b) => b.erasedAt.getTime() - a.erasedAt.getTime())[0]
     return found ? { erasedAt: found.erasedAt } : null
   })
+  prismaMock.crmErased.findMany.mockImplementation(async ({ where, take, distinct }: Row) =>
+    db.erased
+      .filter(row => erasedMatches(row, where))
+      .filter((row, i, rows) => !distinct || rows.findIndex(other => other.keyHash === row.keyHash) === i)
+      .slice(0, take ?? Infinity)
+      .map(row => ({ keyHash: row.keyHash })),
+  )
   prismaMock.activityLog.create.mockImplementation(async ({ data }: Row) => {
     db.logs.push(data)
     return { id: nextId('log') }

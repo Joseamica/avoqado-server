@@ -30,21 +30,29 @@ export const getRedemptionsQuerySchema = z.object({
   customerId: z.string().optional(),
 })
 
+// Codex r1 #3: los números sin mensaje salían con el de Zod en inglés.
+// D24 (5-nov): `validateRequest` ya no antepone el campo, así que cada número dice cuál es (frases sin género).
+const Numero = (q: string) => z.number({ invalid_type_error: `${q} debe ser un número`, required_error: `Falta: ${q.toLowerCase()}` })
+const enteroDesde = (n: number, q: string) => Numero(q).int(`${q} debe ser un número entero`).min(n, `${q} debe ser ${n} o más`)
+const NoNegativo = (q: string) => Numero(q).min(0, `${q} debe ser 0 o más`)
+// D14 v2: los límites de uso sólo validan la forma; 0, negativos y lo guardado los decide validarCambioDeDescuento.
+const Limite = (q: string) => Numero(q).int(`${q} debe ser un número entero`)
+
 // ==========================================
 // CREATE SCHEMAS
 // ==========================================
 
 export const createCouponBodySchema = z
   .object({
-    discountId: z.string().min(1, 'Discount ID is required'),
+    discountId: z.string().min(1, 'Elige el descuento del cupón'),
     code: z
       .string()
-      .min(3, 'Code must be at least 3 characters')
-      .max(30, 'Code must be at most 30 characters')
-      .regex(/^[A-Za-z0-9-_]+$/, 'Code can only contain letters, numbers, hyphens, and underscores'),
-    maxUses: z.number().int().min(1).optional(),
-    maxUsesPerCustomer: z.number().int().min(1).optional(),
-    minPurchaseAmount: z.number().min(0).optional(),
+      .min(3, 'El código debe tener al menos 3 caracteres')
+      .max(30, 'El código puede tener hasta 30 caracteres')
+      .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos'),
+    maxUses: Limite('El límite de usos').optional(),
+    maxUsesPerCustomer: Limite('El límite de usos por cliente').optional(),
+    minPurchaseAmount: NoNegativo('La compra mínima').optional(),
     validFrom: z.coerce.date().optional(),
     validUntil: z.coerce.date().optional(),
     active: z.boolean().default(true),
@@ -57,7 +65,7 @@ export const createCouponBodySchema = z
       }
       return true
     },
-    { message: 'validFrom must be before validUntil' },
+    { message: 'La fecha de inicio debe ser antes de la fecha de fin' },
   )
 
 // ==========================================
@@ -67,13 +75,14 @@ export const createCouponBodySchema = z
 export const updateCouponBodySchema = z.object({
   code: z
     .string()
-    .min(3, 'Code must be at least 3 characters')
-    .max(30, 'Code must be at most 30 characters')
-    .regex(/^[A-Za-z0-9-_]+$/, 'Code can only contain letters, numbers, hyphens, and underscores')
+    .min(3, 'El código debe tener al menos 3 caracteres')
+    .max(30, 'El código puede tener hasta 30 caracteres')
+    .regex(/^[A-Za-z0-9-_]+$/, 'El código sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
-  maxUses: z.number().int().min(1).optional().nullable(),
-  maxUsesPerCustomer: z.number().int().min(1).optional().nullable(),
-  minPurchaseAmount: z.number().min(0).optional().nullable(),
+  // null = sin límite
+  maxUses: Limite('El límite de usos').optional().nullable(),
+  maxUsesPerCustomer: Limite('El límite de usos por cliente').optional().nullable(),
+  minPurchaseAmount: NoNegativo('La compra mínima').optional().nullable(),
   validFrom: z.coerce.date().optional().nullable(),
   validUntil: z.coerce.date().optional().nullable(),
   active: z.boolean().optional(),
@@ -84,16 +93,16 @@ export const updateCouponBodySchema = z.object({
 // ==========================================
 
 export const bulkGenerateCouponsBodySchema = z.object({
-  discountId: z.string().min(1, 'Discount ID is required'),
+  discountId: z.string().min(1, 'Elige el descuento del cupón'),
   prefix: z
     .string()
-    .max(10, 'Prefix must be at most 10 characters')
-    .regex(/^[A-Za-z0-9-_]*$/, 'Prefix can only contain letters, numbers, hyphens, and underscores')
+    .max(10, 'El prefijo puede tener hasta 10 caracteres')
+    .regex(/^[A-Za-z0-9-_]*$/, 'El prefijo sólo puede tener letras, números, guiones y guiones bajos')
     .optional(),
-  quantity: z.number().int().min(1, 'Quantity must be at least 1').max(1000, 'Quantity must be at most 1000'),
-  codeLength: z.number().int().min(4).max(20).default(8),
-  maxUsesPerCode: z.number().int().min(1).optional(),
-  maxUsesPerCustomer: z.number().int().min(1).optional(),
+  quantity: enteroDesde(1, 'La cantidad').min(1, 'La cantidad debe ser al menos 1').max(1000, 'La cantidad puede ser hasta 1000'),
+  codeLength: enteroDesde(4, 'El largo del código').max(20, 'El largo del código puede ser hasta 20').default(8),
+  maxUsesPerCode: Limite('El límite de usos por código').optional(),
+  maxUsesPerCustomer: Limite('El límite de usos por cliente').optional(),
   validFrom: z.coerce.date().optional(),
   validUntil: z.coerce.date().optional(),
 })
@@ -103,8 +112,8 @@ export const bulkGenerateCouponsBodySchema = z.object({
 // ==========================================
 
 export const validateCouponBodySchema = z.object({
-  code: z.string().min(1, 'Code is required'),
-  orderTotal: z.number().min(0).optional(),
+  code: z.string().min(1, 'Escribe el código'),
+  orderTotal: NoNegativo('El total de la cuenta').optional(),
   customerId: z.string().optional(),
 })
 
@@ -123,12 +132,12 @@ export const recordRedemptionBodySchema = z.object({
 // ==========================================
 
 export const couponParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
-  couponId: z.string().min(1, 'Coupon ID is required'),
+  venueId: z.string().min(1, 'Falta el negocio'),
+  couponId: z.string().min(1, 'Falta el cupón'),
 })
 
 export const venueParamsSchema = z.object({
-  venueId: z.string().min(1, 'Venue ID is required'),
+  venueId: z.string().min(1, 'Falta el negocio'),
 })
 
 // ==========================================

@@ -450,6 +450,17 @@ describe('Credit Pack Dashboard Service', () => {
       expect(prismaMock.$transaction).toHaveBeenCalled()
     })
 
+    it('guarda active (interruptor «A la venta»), igual que Desactivar', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ price: new Decimal(600) }))
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack({ active: false }))
+
+      await updateCreditPack('venue-123', 'pack-123', { active: false })
+
+      expect(prismaMock.creditPack.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ active: false }) }),
+      )
+    })
+
     it('should throw NotFoundError when pack does not exist', async () => {
       prismaMock.creditPack.findFirst.mockResolvedValue(null)
 

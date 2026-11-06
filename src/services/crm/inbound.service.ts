@@ -572,7 +572,15 @@ async function consentTx(
     if (error instanceof ErasedIdentityError) return
     throw error
   }
-  const data = { accountId, entryId: entry.id, consentAt: entry.receivedAt, source: LANDING, noticeVersion: form.consent.noticeVersion }
+  // `grantedById: null`: a row the team wrote (MANUAL / IMPORTACION) that the person now confirms on the form loses its seller.
+  const data = {
+    accountId,
+    entryId: entry.id,
+    grantedById: null,
+    consentAt: entry.receivedAt,
+    source: LANDING,
+    noticeVersion: form.consent.noticeVersion,
+  }
   await tx.crmEmailConsent.upsert({ where: { email }, create: { email, ...data }, update: data, select: { id: true } })
   await addEvent(tx, {
     accountId,

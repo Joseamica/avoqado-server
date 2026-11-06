@@ -4,9 +4,9 @@
  *
  * 🔴 Lo que no se negocia:
  *  - Nunca sale un contenido que no se probó ni se confirmó. «Envíame una prueba» deja la huella de ESA versión
- *    (`testSentHash`) y la vista previa firma contenido + público + conteo (token de 15 min); el encolado revisa las dos
- *    cosas con la fila de la campaña BLOQUEADA, así que una edición que llega a la vez espera y luego ya no la encuentra en
- *    BORRADOR (o el envío encuentra el contenido cambiado y da 409).
+ *    (`testSentHash`) y la vista previa firma contenido + público + conteo + las PERSONAS contadas (`conjuntoHash`; token de
+ *    15 min); el encolado revisa todo con la fila de la campaña BLOQUEADA, así que una edición que llega a la vez espera y
+ *    luego ya no la encuentra en BORRADOR (o el envío encuentra el contenido cambiado, o a otras personas, y da 409).
  *  - El encolado es UNA transacción: o quedan la campaña en ENVIANDO y TODAS sus deliveries, o nada. El remitente nunca ve
  *    una campaña a medias.
  */
@@ -20,9 +20,9 @@ import { logAction } from '../../dashboard/activity-log.service'
 import { campanasPausadasPorCupo } from '../../email/resendQuota'
 import type { BloqueCampana } from '../../marketing/campaignBlocks'
 import type { CrmAccess } from '../access.service'
-import { contarAudiencia, recorrerAudiencia } from './audience.service'
+import { contarAudiencia, paginaDeDestinatarios, personasNoElegibles, recorrerAudiencia } from './audience.service'
 import { PUDO_SALIR_EN_UN_INTENTO_ANTERIOR } from './campaignSender.service'
-import { assertSinVariablesDesconocidas, contentHash, sendTestToSelf } from './templates.service'
+import { assertSinVariablesDesconocidas, contentHash, enviarPrueba } from './templates.service'
 
 export type EstadoDeCampana = 'BORRADOR' | 'ENVIANDO' | 'ENVIADA' | 'CANCELADA'
 
@@ -61,27 +61,56 @@ function noEditable(status: string): ConflictError {
 
 const bloquesDe = (fila: { blocks: Prisma.JsonValue }) => fila.blocks as unknown as BloqueCampana[]
 
-/** El público guardado, con la misma forma que pide la ruta. Un BORRADOR recién creado todavía no tiene ninguno. */
+// ── Cómo se guarda el público (plan B, tarea 4; rediseño tras Codex r2, Familia 2) ──────────────────────────────────────
+// Sin personas sueltas, la fila es la de siempre (`{ segmentos }`): la misma huella y el mismo token que antes del despliegue. Con
+// personas quitadas o agregadas, la fila es `{ v: 2, publicos, excluir, incluir }`, SIN la llave `segmentos`: el `audienciaSchema` de un
+// SERVIDOR viejo la exige («Elige a quién le mandas»), así que tras una reversa no cuenta, no firma y no le manda a nadie que se quitó.
+
+const esV2 = (raw: Prisma.JsonValue): raw is Prisma.JsonObject =>
+  typeof raw === 'object' && raw !== null && !Array.isArray(raw) && raw.v === 2
+
+/** El público guardado, en cualquiera de las dos formas, o null si el JSON no es un público. Nunca truena. */
+function leerPublico(raw: Prisma.JsonValue): Audiencia | null {
+  const forma = esV2(raw) ? { segmentos: raw.publicos, excluir: raw.excluir, incluir: raw.incluir } : raw
+  const parsed = audienciaSchema.safeParse(forma)
+  return parsed.success ? parsed.data : null
+}
+
+/** La fila que se guarda: la de hoy sin personas sueltas; la v2 (que un SERVIDOR viejo no puede leer) con ellas. */
+function formaGuardada(audiencia: Audiencia): Prisma.InputJsonValue {
+  const excluir = audiencia.excluir ?? []
+  const incluir = audiencia.incluir ?? []
+  const forma =
+    excluir.length || incluir.length ? { v: 2, publicos: audiencia.segmentos, excluir, incluir } : { segmentos: audiencia.segmentos }
+  return forma as unknown as Prisma.InputJsonValue
+}
+
+/** El público guardado, para contar y mandar. Un borrador sin públicos es válido (cuenta 0); sólo un JSON corrupto truena. */
 function audienciaDe(raw: Prisma.JsonValue): Audiencia {
-  const parsed = audienciaSchema.safeParse(raw)
-  if (!parsed.success) {
-    throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Elige a quién le mandas', 'CRM_CAMPANA_SIN_PUBLICO')
-  }
-  return parsed.data
+  const publico = leerPublico(raw)
+  if (!publico) throw new BadRequestError('Elige a quién le mandas', 'CRM_CAMPANA_SIN_PUBLICO')
+  return publico
 }
 
 /** La huella del público: zod devuelve las llaves en el orden del esquema, así que el mismo público da la misma huella. */
 const audienceHash = (audiencia: Audiencia) => createHash('sha256').update(JSON.stringify(audiencia)).digest('hex')
 
 /**
+ * La huella del público GUARDADO (`huellaPublico` en la vista; la pantalla la devuelve como `basePublico` al guardarlo). Sin personas
+ * sueltas es el `audienceHash` de hoy. Un JSON corrupto también la tiene.
+ */
+function huellaDelPublico(raw: Prisma.JsonValue): string {
+  const publico = leerPublico(raw)
+  return publico ? audienceHash(publico) : createHash('sha256').update(JSON.stringify(raw)).digest('hex')
+}
+
+/**
  * La huella de la VERSIÓN que se ve: contenido + público (H3, Codex código r2). La vista la entrega y la pantalla la devuelve al
  * pedir la vista previa; si alguien cambió la campaña mientras tanto, no se firma nada. Un borrador sin público también la tiene.
  */
 function huellaDe(fila: { subject: string; blocks: Prisma.JsonValue; audience: Prisma.JsonValue }): string {
-  const publico = audienciaSchema.safeParse(fila.audience)
-  const delPublico = publico.success ? audienceHash(publico.data) : JSON.stringify(fila.audience)
   return createHash('sha256')
-    .update(`${contentHash(fila.subject, bloquesDe(fila))}:${delPublico}`)
+    .update(`${contentHash(fila.subject, bloquesDe(fila))}:${huellaDelPublico(fila.audience)}`)
     .digest('hex')
 }
 
@@ -99,6 +128,11 @@ interface Confirmacion {
   contentHash: string
   audienceHash: string
   total: number
+  /**
+   * Las personas que se contaron (sha256 de sus correos, ya sin bajas, en el orden del recorrido): mismo total con otra gente no es lo
+   * que se confirmó (Codex r1 #5). Ausente en un token firmado antes del despliegue: ése se valida como antes (dura 15 min).
+   */
+  conjuntoHash?: string
   exp: number
 }
 
@@ -126,6 +160,7 @@ function leerConfirmacion(token: string): Confirmacion | null {
       typeof p.contentHash === 'string' &&
       typeof p.audienceHash === 'string' &&
       Number.isInteger(p.total) &&
+      (p.conjuntoHash === undefined || typeof p.conjuntoHash === 'string') &&
       typeof p.exp === 'number'
     return forma ? p : null
   } catch {
@@ -156,11 +191,19 @@ async function contadoresDe(ids: string[]): Promise<Map<string, Record<string, n
  * Lo que ve la pantalla: sin la huella cruda de la prueba, con «¿ya te mandaste la prueba de esta versión?», los contadores, si la
  * campaña espera al cupo de Resend (`pausadaPorCupo`, campo nuevo y opcional: hasta las 18:00 de CDMX, cuando Resend reinicia su día;
  * sólo si sigue enviando) y la `huella` de esta versión (campo nuevo y opcional) para atar la vista previa a lo que se ve.
+ *
+ * El público (plan B, tarea 4): `publico` (nuevo) siempre con sus tres llaves, en el orden en que se guardó, y `huellaPublico` (nuevo),
+ * que la pantalla nueva manda como `basePublico` al guardarlo. `audience` se queda para la pantalla vieja: el JSON de hoy en una fila sin
+ * personas sueltas; en una fila v2, `{ segmentos: [] }` (ve «sin público», no puede mandar y, si guarda, recibe 409 PANTALLA_VIEJA).
  */
 function vista(fila: Fila, contadores: Record<string, number> = {}) {
   const { testSentHash, ...resto } = fila
+  const publico = leerPublico(fila.audience)
   return {
     ...resto,
+    audience: esV2(fila.audience) ? { segmentos: [] } : fila.audience,
+    publico: { segmentos: publico?.segmentos ?? [], excluir: publico?.excluir ?? [], incluir: publico?.incluir ?? [] },
+    huellaPublico: huellaDelPublico(fila.audience),
     pruebaVigente: testSentHash === contentHash(fila.subject, bloquesDe(fila)),
     contadores,
     pausadaPorCupo: fila.status === 'ENVIANDO' && campanasPausadasPorCupo(),
@@ -194,6 +237,48 @@ export async function listCampaigns(q: ListCampaignsQuery = {}) {
     rows: rows.map(r => vista(r, contadores.get(r.id))),
     nextCursor: found.length > limit ? rows[rows.length - 1].id : null,
     total,
+  }
+}
+
+export interface ListRecipientsQuery {
+  cursor?: string
+  limit?: number
+  q?: string
+}
+
+const MOTIVO_DE_PUBLICO = { PROSPECTOS: 'PROSPECTO', CLIENTES: 'CLIENTE', USUARIOS: 'USUARIO', AGREGADOS: 'AGREGADO' } as const
+
+/** El cursor es el correo en base64url; uno que no hace el viaje de ida y vuelta (o no es un correo) es 400. */
+function leerCursor(cursor: string | undefined): string | undefined {
+  if (cursor === undefined) return undefined
+  const correo = Buffer.from(cursor, 'base64url').toString('utf8')
+  if (!correo || correo.includes('\u0000') || !correo.includes('@') || Buffer.from(correo).toString('base64url') !== cursor) {
+    throw new BadRequestError('La página pedida no es válida', 'CRM_CURSOR_INVALIDO')
+  }
+  return correo
+}
+
+/**
+ * «Ver quiénes»: a quién le llega un BORRADOR, una consulta por página (tope 100 impuesto aquí) y SIN total: la pantalla usa el
+ * «Le llega a N» que ya tiene. Sólo lo que la pantalla enseña (correo, nombre, negocio, por qué le llega y su cuenta).
+ */
+export async function listRecipients(id: string, q: ListRecipientsQuery = {}) {
+  const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { status: true, audience: true } })
+  if (!fila) throw notFound()
+  if (fila.status !== 'BORRADOR') throw noEditable(fila.status)
+  const limit = Math.min(Math.max(Math.trunc(Number.isFinite(q.limit) ? (q.limit as number) : DEFAULT_PAGE), 1), MAX_PAGE)
+  const desde = leerCursor(q.cursor)
+  const { filas, siguiente } = await paginaDeDestinatarios(audienciaDe(fila.audience), { desde, limit, buscar: q.q })
+  return {
+    rows: filas.map(d => ({
+      email: d.email,
+      nombre: d.name ?? null,
+      negocio: d.vars.negocio ?? null,
+      motivo: MOTIVO_DE_PUBLICO[d.publico],
+      accountId: d.accountId ?? null,
+    })),
+    nextCursor: siguiente === null ? null : Buffer.from(siguiente).toString('base64url'),
+    hasMore: siguiente !== null,
   }
 }
 
@@ -231,36 +316,95 @@ export async function createCampaign(actor: CrmAccess, input: { name: string; te
   return vista(fila)
 }
 
-/** Sólo en BORRADOR, con un CAS: si la campaña ya se encoló (aunque sea un instante antes), 409 y no se toca nada. */
-export async function updateCampaign(
-  actor: CrmAccess,
-  id: string,
-  input: { name?: string; subject?: string; blocks?: BloqueCampana[]; audience?: Audiencia },
-) {
-  const antes = await prisma.crmCampaign.findUnique({ where: { id }, select: { status: true, subject: true, blocks: true } })
+type CambiosDeCampana = { name?: string; subject?: string; blocks?: BloqueCampana[]; audience?: Audiencia }
+
+/**
+ * ¿Se puede guardar este público sobre el guardado? (con la fila ya bloqueada).
+ *  - Con `basePublico` (pantalla nueva): si el público guardado ya no es el que leyó, 409 CAMBIO: nadie pisa en silencio lo que otro
+ *    quitó o agregó.
+ *  - Sin él (pantalla vieja): si lo guardado tiene personas sueltas que esa pantalla no conoce, 409 PANTALLA_VIEJA; si no, reemplaza
+ *    como siempre.
+ *  - Sólo los correos NUEVOS de `incluir` pasan por la revisión de quién se puede agregar. Quitar o regresar a alguien nunca.
+ */
+async function revisarPublico(db: Prisma.TransactionClient, guardadoRaw: Prisma.JsonValue, nuevo: Audiencia, basePublico?: string) {
+  const guardado = leerPublico(guardadoRaw)
+  if (basePublico !== undefined) {
+    if (huellaDelPublico(guardadoRaw) !== basePublico) {
+      throw new ConflictError(
+        'Alguien cambió a quién le llega esta campaña mientras la editabas. Ya te enseñamos la versión nueva: revísala y vuelve a hacer tu cambio.',
+        'CRM_CAMPANA_CAMBIO',
+      )
+    }
+  } else if (guardado?.excluir?.length || guardado?.incluir?.length) {
+    throw new ConflictError(
+      'Recarga la página: esta campaña tiene personas quitadas o agregadas que esta pantalla no conoce',
+      'CRM_CAMPANA_PANTALLA_VIEJA',
+    )
+  }
+  const yaEstaban = new Set(guardado?.incluir ?? [])
+  const correos = await personasNoElegibles(
+    (nuevo.incluir ?? []).filter(correo => !yaEstaban.has(correo)),
+    db,
+  )
+  if (correos.length) {
+    throw new BadRequestError(
+      'Estas personas no se pueden agregar: no aceptaron recibir correos, se dieron de baja o ya no están en el CRM',
+      'CRM_CAMPANA_PERSONA_SIN_PERMISO',
+      { correos },
+    )
+  }
+}
+
+/** Revisa y escribe los cambios de un BORRADOR con `db` (la transacción con la fila bloqueada, si cambia el público). */
+async function escribirCambios(db: Prisma.TransactionClient, id: string, cambios: CambiosDeCampana, basePublico?: string) {
+  const antes = await db.crmCampaign.findUnique({ where: { id }, select: { status: true, subject: true, blocks: true, audience: true } })
   if (!antes) throw notFound()
   if (antes.status !== 'BORRADOR') throw noEditable(antes.status)
-  if (input.subject !== undefined || input.blocks !== undefined) {
-    assertSinVariablesDesconocidas(input.subject ?? antes.subject, input.blocks ?? bloquesDe(antes))
+  if (cambios.subject !== undefined || cambios.blocks !== undefined) {
+    assertSinVariablesDesconocidas(cambios.subject ?? antes.subject, cambios.blocks ?? bloquesDe(antes))
   }
+  if (cambios.audience !== undefined) await revisarPublico(db, antes.audience, cambios.audience, basePublico)
 
-  const { count } = await prisma.crmCampaign.updateMany({
+  const { count } = await db.crmCampaign.updateMany({
     where: { id, status: 'BORRADOR' },
     data: {
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.subject !== undefined ? { subject: input.subject } : {}),
-      ...(input.blocks !== undefined ? { blocks: input.blocks as unknown as Prisma.InputJsonValue } : {}),
-      ...(input.audience !== undefined ? { audience: input.audience as unknown as Prisma.InputJsonValue } : {}),
+      ...(cambios.name !== undefined ? { name: cambios.name } : {}),
+      ...(cambios.subject !== undefined ? { subject: cambios.subject } : {}),
+      ...(cambios.blocks !== undefined ? { blocks: cambios.blocks as unknown as Prisma.InputJsonValue } : {}),
+      ...(cambios.audience !== undefined ? { audience: formaGuardada(cambios.audience) } : {}),
     },
   })
   if (!count) throw yaSeManda()
+}
+
+/**
+ * Sólo en BORRADOR, con un CAS: si la campaña ya se encoló (aunque sea un instante antes), 409 y no se toca nada. Si cambia el público,
+ * todo corre en UNA transacción con la fila bloqueada (el candado de `enqueueCampaign`): leer, comparar con `basePublico`, revisar a
+ * los agregados y escribir, sin que otro PATCH ni un envío se metan en medio. `basePublico` = la `huellaPublico` que leyó la pantalla.
+ */
+export async function updateCampaign(actor: CrmAccess, id: string, input: CambiosDeCampana & { basePublico?: string }) {
+  const { basePublico, ...cambios } = input
+  if (cambios.audience === undefined) {
+    // Sólo contenido: el CAS de siempre. La prueba y el contenido nunca cambian el público, así que no chocan con `basePublico`.
+    await escribirCambios(prisma, id, cambios)
+  } else {
+    await prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT "id" FROM "CrmCampaign" WHERE "id" = ${id} FOR UPDATE`
+        await escribirCambios(tx, id, cambios, basePublico)
+      },
+      // Puede esperar el candado detrás de un envío que encola miles: el mismo plazo que él, para contestar 409 y no un error.
+      { timeout: 120_000 },
+    )
+  }
   void logAction({
     staffId: actor.staffId,
     venueId: null,
     action: 'CRM_CAMPAIGN_UPDATED',
     entity: 'CrmCampaign',
     entityId: id,
-    data: { cambios: Object.keys(input) },
+    // Qué llaves cambiaron: nunca los correos de las personas quitadas o agregadas (D1).
+    data: { cambios: Object.keys(cambios) },
   })
   return getCampaign(id)
 }
@@ -270,6 +414,8 @@ export async function updateCampaign(
 /**
  * A cuántos les llega ahora mismo, por público, cuántos se quedan fuera por baja, y el token para confirmar ESTO. Con `huella` (la de
  * la versión que pinta la pantalla), si la campaña ya cambió: 409 y no se firma nada. Sin ella (la pantalla vieja), igual que antes.
+ * Con 0 personas no se firma: `token: null` (el campo sigue; el encolado también rechaza sin destinatarios). El token también firma a
+ * QUIÉNES se contó (`conjuntoHash`), que no sale en la respuesta ni cambia la `huella`.
  */
 export async function previewSend(_actor: CrmAccess, id: string, huella?: string) {
   const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { status: true, subject: true, blocks: true, audience: true } })
@@ -282,14 +428,18 @@ export async function previewSend(_actor: CrmAccess, id: string, huella?: string
     )
   }
   const audiencia = audienciaDe(fila.audience)
-  const { total, porSegmento, bloqueados } = await contarAudiencia(audiencia)
-  const token = firmarConfirmacion({
-    campaignId: id,
-    contentHash: contentHash(fila.subject, bloquesDe(fila)),
-    audienceHash: audienceHash(audiencia),
-    total,
-    exp: Date.now() + VIGENCIA_MS,
-  })
+  const { total, porSegmento, bloqueados, conjuntoHash } = await contarAudiencia(audiencia)
+  const token =
+    total > 0
+      ? firmarConfirmacion({
+          campaignId: id,
+          contentHash: contentHash(fila.subject, bloquesDe(fila)),
+          audienceHash: audienceHash(audiencia),
+          total,
+          conjuntoHash,
+          exp: Date.now() + VIGENCIA_MS,
+        })
+      : null
   // `huella` (campo nuevo): la versión que se contó y se firmó. La pantalla sólo deja mandar si es la que enseña, así un
   // SERVIDOR viejo (que no la manda ni la revisa) nunca confirma una versión distinta (H3, Codex código r4).
   return { total, porSegmento, bloqueados, token, huella: huellaDe(fila) }
@@ -299,14 +449,28 @@ export async function previewSend(_actor: CrmAccess, id: string, huella?: string
  * «Envíame una prueba» con el contenido de la campaña. 🔴 Sólo una prueba que SALIÓ (`ok: true`) habilita el envío: una
  * omitida por la lista de prueba o rechazada por Resend no escribe la huella.
  */
-export async function sendCampaignTest(actor: CrmAccess, id: string) {
+export async function sendCampaignTest(actor: CrmAccess, id: string, opciones: { destinoStaffId?: string } = {}) {
   const fila = await prisma.crmCampaign.findUnique({ where: { id }, select: { subject: true, blocks: true } })
   if (!fila) throw notFound()
-  const resultado = await sendTestToSelf(actor, { subject: fila.subject, blocks: bloquesDe(fila) })
+  const { resultado, llave } = await enviarPrueba(actor, {
+    subject: fila.subject,
+    blocks: bloquesDe(fila),
+    destinoStaffId: opciones.destinoStaffId,
+  })
   if (resultado.ok) {
     // La huella de lo que se probó, no de lo que haya ahora: si alguien editó mientras tanto, la nueva versión pide su prueba.
     await prisma.crmCampaign.updateMany({ where: { id }, data: { testSentHash: contentHash(fila.subject, bloquesDe(fila)) } })
-    void logAction({ staffId: actor.staffId, venueId: null, action: 'CRM_CAMPAIGN_TEST_SENT', entity: 'CrmCampaign', entityId: id })
+    // Una repetida no deja otra bitácora (la primera sigue contando); la llave y el «para» no llevan correos.
+    if (!resultado.repetida) {
+      void logAction({
+        staffId: actor.staffId,
+        venueId: null,
+        action: 'CRM_CAMPAIGN_TEST_SENT',
+        entity: 'CrmCampaign',
+        entityId: id,
+        data: { para: opciones.destinoStaffId ?? actor.staffId, llave },
+      })
+    }
   }
   return resultado
 }
@@ -351,7 +515,7 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
       // 2. Las deliveries, por lote (recorrerAudiencia ya junta repetidos y quita bloqueados; `skipDuplicates` es la segunda capa).
       // ponytail: una transacción alcanza hasta ~50 mil destinatarios; más allá, un estado PREPARANDO reanudable.
       let creadas = 0
-      await recorrerAudiencia(audiencia, async lote => {
+      const { conjuntoHash } = await recorrerAudiencia(audiencia, async lote => {
         const { count: n } = await tx.crmCampaignDelivery.createMany({
           data: lote.map(d => ({
             campaignId: id,
@@ -367,7 +531,7 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
         creadas += n
       })
 
-      // Más de los que se confirmaron: se deshace todo. Menos (alguien se dio de baja) sí sigue.
+      // Más de los que se confirmaron: se deshace todo, con el código de siempre.
       if (creadas > confirmado) {
         throw new ConflictError(
           `El público creció (${confirmado} → ${creadas}): revísalo y confirma otra vez`,
@@ -379,6 +543,11 @@ export async function enqueueCampaign(actor: CrmAccess, id: string, token: strin
         )
       }
       if (creadas === 0) throw new ConflictError('No hay a quién mandarle esta campaña', 'CRM_CAMPANA_SIN_DESTINATARIOS')
+      // Las mismas cuántas no son las mismas personas (Codex r1 #5): si salió alguien y entró otro, o alguien se dio de baja, lo que
+      // sale ya no es lo que se confirmó. Se deshace todo. Un token de antes del despliegue (sin `conjuntoHash`) sigue como antes.
+      if (confirmacion.conjuntoHash !== undefined && confirmacion.conjuntoHash !== conjuntoHash) {
+        throw new ConflictError('El público cambió: revisa otra vez', 'CRM_CAMPANA_PUBLICO_CAMBIO', { confirmado, actual: creadas })
+      }
 
       // 3. El total.
       await tx.crmCampaign.update({ where: { id }, data: { total: creadas } })

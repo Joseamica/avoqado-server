@@ -21445,9 +21445,10 @@ model CrmEmailConsent {
   email         String      @unique // normalizado (minúsculas)
   accountId     String? // sólo para filtrar por etapa
   account       CrmAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  entryId       String // la CrmInboundEntry que lo trajo
-  consentAt     DateTime // cuando se RECIBIÓ la entrada
-  source        String // LANDING
+  entryId       String? // la CrmInboundEntry de la landing que lo trajo; null si lo dio el equipo
+  grantedById   String? // quién marcó la casilla (Staff); null en la landing
+  consentAt     DateTime // cuando se RECIBIÓ la entrada (o se dio el alta)
+  source        String // LANDING | MANUAL | IMPORTACION
   noticeVersion String
   createdAt     DateTime    @default(now())
 

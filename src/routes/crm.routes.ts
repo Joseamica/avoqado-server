@@ -25,6 +25,7 @@ import {
   addNoteSchema,
   addTeamMemberSchema,
   campaignIdSchema,
+  campaignTestSchema,
   completeActivitySchema,
   createAccountSchema,
   createCampaignSchema,
@@ -37,6 +38,8 @@ import {
   hideClientSchema,
   listAccountsSchema,
   listCampaignsSchema,
+  listRecipientsSchema,
+  searchCampaignPeopleSchema,
   listClientsSchema,
   listTeamSchema,
   listTemplatesSchema,
@@ -183,11 +186,17 @@ router.post('/templates/:id/unarchive', plantillas, validateRequest(templateIdSc
 router.get('/campaigns', verCampanas, validateRequest(listCampaignsSchema), crmEmailController.listCampaigns)
 router.post('/campaigns', preparar, validateRequest(createCampaignSchema), crmEmailController.createCampaign)
 router.get('/campaigns/:id', verCampanas, validateRequest(campaignIdSchema), crmEmailController.getCampaign)
+// «Ver quiénes»: la lista de a quién le llega un borrador, una consulta por página y sin total.
+router.get('/campaigns/:id/recipients', verCampanas, validateRequest(listRecipientsSchema), crmEmailController.listRecipients)
+// «Agregar»: busca a quién sumar a un borrador, sólo entre personas visibles del CRM. Sólo quien edita el público.
+router.get('/campaign-people', preparar, validateRequest(searchCampaignPeopleSchema), crmEmailController.searchCampaignPeople)
 router.patch('/campaigns/:id', preparar, validateRequest(updateCampaignSchema), crmEmailController.updateCampaign)
 router.post('/campaigns/:id/preview', verCampanas, validateRequest(previewCampaignSchema), crmEmailController.previewCampaign)
-router.post('/campaigns/:id/test', preparar, validateRequest(campaignIdSchema), crmEmailController.sendCampaignTest)
+router.post('/campaigns/:id/test', preparar, validateRequest(campaignTestSchema), crmEmailController.sendCampaignTest)
 router.post('/campaigns/:id/send', mandar, validateRequest(sendCampaignSchema), crmEmailController.sendCampaign)
 router.post('/campaigns/:id/cancel', mandar, validateRequest(campaignIdSchema), crmEmailController.cancelCampaign)
+// A quién se le puede mandar la prueba: sólo nombres (nunca correos); la ven quienes pueden pedirla.
+router.get('/test-recipients', requireCrm(['crm:plantillas', 'crm:preparar']), crmEmailController.testRecipients)
 
 // A picture for an `image` block: in memory, at most 5 MB, only the three types `uploadAnnouncementImage` accepts.
 const IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -234,8 +243,9 @@ router.post('/opt-outs', requireCrm('crm:bajas'), validateRequest(createOptOutSc
 // «Importar lo de HubSpot», once: the contacts CSV and the deals CSV, in memory, at most 5 MB each.
 const HUBSPOT_FILE_MAX_BYTES = 5 * 1024 * 1024
 // `+ 1`: busboy cuts a file that REACHES the limit, so a file of exactly 5 MB would not pass with the bare number.
-// `fields: 0`: nothing but the two files.
-const hubspotUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: HUBSPOT_FILE_MAX_BYTES + 1, files: 2, fields: 0 } })
+// `fields: 1`: the two files and the box `aceptaronCorreos` (an older SERVIDOR has 0: it refuses the field, so no import
+// goes without the consent that was asked for).
+const hubspotUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: HUBSPOT_FILE_MAX_BYTES + 1, files: 2, fields: 1 } })
 const readHubspotFiles = preserveContext(
   hubspotUpload.fields([
     { name: 'contactos', maxCount: 1 },

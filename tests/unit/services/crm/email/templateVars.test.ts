@@ -64,6 +64,32 @@ describe('aplicarVariables', () => {
     expect((r.bloques[3] as { url: string }).url).toBe('https://x.mx/?n={{nombre}}')
   })
 
+  it('«Hola {{nombre}},» sin nombre ni negocio queda «Hola,» (sin espacio de más), en asunto y bloques', () => {
+    const r = aplicarVariables([{ type: 'heading', text: 'Hola {{nombre}},' }], 'Hola {{nombre}}', {})
+    expect(r.bloques[0]).toEqual({ type: 'heading', text: 'Hola,' })
+    expect(r.asunto).toBe('Hola')
+  })
+
+  it('la variable vacía se lleva sólo los espacios de ANTES: «Hola {{nombre}} y bienvenido» queda «Hola y bienvenido»', () => {
+    const r = aplicarVariables([{ type: 'paragraph', text: 'Hola   {{nombre}} y bienvenido' }], 'x', {})
+    expect(r.bloques[0]).toEqual({ type: 'paragraph', text: 'Hola y bienvenido' })
+  })
+
+  it('con nombre no cambia nada: «Hola {{nombre}},» con Ana es «Hola Ana,»', () => {
+    const r = aplicarVariables([{ type: 'heading', text: 'Hola {{nombre}},' }], 'x', { nombre: 'Ana' })
+    expect(r.bloques[0]).toEqual({ type: 'heading', text: 'Hola Ana,' })
+  })
+
+  it('una variable desconocida conserva su espacio y sus llaves: «Hola {{precio}},» queda igual', () => {
+    const r = aplicarVariables([{ type: 'heading', text: 'Hola {{precio}},' }], 'x', {})
+    expect(r.bloques[0]).toEqual({ type: 'heading', text: 'Hola {{precio}},' })
+  })
+
+  it('sin nombre cae en el negocio como siempre: «Hola {{nombre}},» con negocio «Café Lalo» es «Hola Café Lalo,»', () => {
+    const r = aplicarVariables([{ type: 'heading', text: 'Hola {{nombre}},' }], 'x', { negocio: 'Café Lalo' })
+    expect(r.bloques[0]).toEqual({ type: 'heading', text: 'Hola Café Lalo,' })
+  })
+
   it('no toca los bloques de entrada', () => {
     const copia = JSON.parse(JSON.stringify(bloques))
     aplicarVariables(bloques, 'x', { nombre: 'Ana' })

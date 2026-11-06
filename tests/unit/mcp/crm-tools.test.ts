@@ -1074,6 +1074,7 @@ describe('CRM MCP — email (read only)', () => {
     subject: 'Lo nuevo de Avoqado',
     blocks: BLOCKS,
     audience: { segmentos: [{ tipo: 'PROSPECTOS' }, { tipo: 'CLIENTES', planes: ['PRO'] }] },
+    publico: { segmentos: [{ tipo: 'PROSPECTOS' }, { tipo: 'CLIENTES', planes: ['PRO'] }], excluir: [], incluir: [] },
     status: 'ENVIANDO',
     total: 40,
     createdById: SUPER.staffId,
@@ -1155,6 +1156,8 @@ describe('CRM MCP — email (read only)', () => {
       estado: 'ENVIANDO',
       asunto: 'Lo nuevo de Avoqado',
       publicos: ['PROSPECTOS', 'CLIENTES'],
+      personasAgregadas: 0,
+      personasQuitadas: 0,
       total: 40,
       pruebaVigente: true,
       contadores: { pendientes: 9, enCurso: 0, enviados: 25, reintentos: 2, fallidos: 3, omitidos: 1, desconocidos: 0 },
@@ -1186,6 +1189,25 @@ describe('CRM MCP — email (read only)', () => {
     expect(answer).toMatchObject({
       ok: true,
       campana: { id: CAMP, estado: 'ENVIADA', terminada: '2026-11-03 12:00', contadores: { enviados: 38, desconocidos: 2, pendientes: 0 } },
+    })
+  })
+
+  it('crm_campaign_status dice personasAgregadas y personasQuitadas (0 en una campaña vieja), y los públicos salen de `publico`', async () => {
+    ;(getCampaign as jest.Mock).mockResolvedValue(
+      campaignView({
+        // Una fila con listas: la pantalla vieja ve `audience` sin públicos; la herramienta lee `publico`.
+        audience: { segmentos: [] },
+        publico: { segmentos: [{ tipo: 'USUARIOS', roles: ['OWNER'] }], excluir: ['a@x.mx', 'b@x.mx', 'c@x.mx'], incluir: ['d@x.mx'] },
+      }),
+    )
+    const answer = await setup().call('crm_campaign_status', { campaignId: CAMP })
+    expect(answer.campana).toMatchObject({ publicos: ['USUARIOS'], personasAgregadas: 1, personasQuitadas: 3 })
+    // Cuántas, nunca quiénes.
+    expect(JSON.stringify(answer)).not.toContain('a@x.mx')
+    ;(getCampaign as jest.Mock).mockResolvedValue(campaignView())
+    expect((await setup().call('crm_campaign_status', { campaignId: CAMP })).campana).toMatchObject({
+      personasAgregadas: 0,
+      personasQuitadas: 0,
     })
   })
 
