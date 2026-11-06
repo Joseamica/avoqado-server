@@ -6,6 +6,9 @@ import express from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { authorizeRole } from '../middlewares/authorizeRole.middleware'
 import { StaffRole } from '@prisma/client'
+import { validateRequest } from '../middlewares/validation'
+import * as organizationController from '../controllers/dashboard/organizations.superadmin.controller'
+import { setOrganizationGrandfatheredSchema } from './superadmin/organization.routes'
 
 // Import superadmin sub-routes
 import kycReviewRoutes from './superadmin/kycReview.routes'
@@ -64,6 +67,12 @@ router.use('/launch-campaigns', launchCampaignRoutes)
 router.use('/hybrid-campaigns', hybridCampaignRoutes)
 // Precios de lista y «% de descuento» (spec 2026-09-30). Hereda el guardia de SUPERADMIN del padre.
 router.use('/hybrid-pricing', hybridPricingRoutes)
+// «Cliente de antes» de toda la organización (CRM C1): mismo controlador y esquema que la ruta legacy de /dashboard/superadmin.
+router.post(
+  '/organizations/:organizationId/plan/grandfathered',
+  validateRequest(setOrganizationGrandfatheredSchema),
+  organizationController.setOrganizationPlanGrandfathered,
+)
 router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)

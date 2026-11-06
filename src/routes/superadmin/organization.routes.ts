@@ -65,7 +65,7 @@ const updateOrganizationSchema = z.object({
 
 // Toggle GRANDFATHERED for the whole organization (inherited by every venue, present and future).
 // Spanish messages: the validation middleware surfaces them straight to the user.
-const setOrganizationGrandfatheredSchema = z.object({
+export const setOrganizationGrandfatheredSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('El ID de la organización no es válido'),
   }),
