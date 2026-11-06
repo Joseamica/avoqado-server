@@ -1504,7 +1504,8 @@ describe('getTrackingByToken', () => {
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: true, paidAt: at.toISOString() })
     const pagos = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select.payments
     expect(pagos).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
-      where: { status: 'COMPLETED', type: { not: 'REFUND' } }, orderBy: { createdAt: 'desc' }, take: 1 })
+      // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
     prismaMock.onlineOrder.findUnique.mockResolvedValue({ ...base, order: { ...base.order, customerName: null, payments: [] } })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
   })

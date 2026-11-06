@@ -908,7 +908,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           total: true,
           paymentStatus: true,
           customerName: true,
-          payments: { where: { status: 'COMPLETED', type: { not: 'REFUND' } }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
+          payments: { // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
+          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,

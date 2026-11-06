@@ -208,6 +208,17 @@ describe('T12 · listFolios contra Postgres', () => {
     expect(r.toDeliver.find(x => x.orderId === orderId)?.paidAt).toBe(cobro.createdAt.toISOString())
   })
 
+  it('T18b: un cobro con Payment.type NULL (filas históricas) también da paidAt', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await efectivoDeLaTpv(orderId, CIEN)
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { orderId, status: 'COMPLETED' } })
+    await prisma.payment.update({ where: { id: cobro.id }, data: { type: null } })
+    const token = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).trackingToken
+    expect(await getTrackingByToken(token)).toMatchObject({ paid: true, paidAt: cobro.createdAt.toISOString() })
+    const r = await listFolios({ venueId: f.venueId })
+    expect(r.toDeliver.find(x => x.orderId === orderId)?.paidAt).toBe(cobro.createdAt.toISOString())
+  })
+
   it('un folio que el dinero tardío pasó a ACCEPTED sale en toDeliver', async () => {
     const { orderId, onlineOrderId } = await nuevoFolio({ vencido: true })
     expect(await expireOnlineOrder({ venueId: f.venueId, orderId })).toMatchObject({ outcome: 'OK', status: 'EXPIRED' })

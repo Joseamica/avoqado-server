@@ -98,7 +98,7 @@ export const INBOX_SELECT = {
       customerPhone: true,
       specialRequests: true,
       // T18b: la hora en que se pagó = el último cobro COMPLETED, en la misma lectura (sin consulta por folio).
-      payments: { where: { status: 'COMPLETED' as const, type: { not: 'REFUND' as const } }, orderBy: { createdAt: 'desc' as const }, take: 1, select: { createdAt: true } },
+      payments: { where: { status: 'COMPLETED' as const, OR: [{ type: null }, { type: { not: 'REFUND' as const } }] }, orderBy: { createdAt: 'desc' as const }, take: 1, select: { createdAt: true } },
       // Topes que nunca recortan lo que pidió el comensal: la tienda crea la cuenta con ≤ MAX_CART_LINES renglones y ≤ 30
       // opciones por renglón (esquema público `onlineOrdering.schema.ts`). El doble de renglones deja lugar a lo que la caja
       // agregue después a la cuenta; 50 opciones cubren las 30 del pedido.
