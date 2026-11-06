@@ -1,0 +1,1024 @@
+{
+  "_léeme": [
+    "S5b (red por traba; R63–R65, R74). Lo leen ordenDeCandadosParte2.test.ts y la guardia scripts/guardias/txConReintento.ts: castsPermitidos y openersGenericos viven SÓLO aquí (Ruling 29).",
+    "corridaSobreSrc: false hasta el paso 8 (ahí se prende la marca); con true, la prueba y la guardia exigen todo src/.",
+    "escritores: toda función con una escritura o candado de Discount, CouponCode, CouponRedemption, StampReward, StampCard, StampEvent, Customer, LoyaltyTransaction o GiftCard (directa, del asesor del cupón o indirecta por un padre). EN_TX = corre dentro de una transacción que alguien abre; SENTENCIA = hoy con el cliente global: cada sentencia en su propio withDeadlockRetry.",
+    "aperturas: cada withDeadlockRetry (o withSerializableRetry con reintentarInterbloqueo: serializable) por función, con etiqueta = el nombre de la función. Semilla medida el 6-nov sobre 48b98c5a7: las 95 transacciones de la tabla del brief (sin la excepción recordOrderPayment), executeHttpOperation (Ruling 16) y las 39 sentencias de las 34 funciones SENTENCIA. nota = lo que el paso 3-7 tiene que hacer además de envolver.",
+    "cuerposRevisados: archivo#función → motivo; exime de (c) y (7) la rama sin tx de esa función (Ruling 21).",
+    "Lo que S6–S13 agreguen entra aquí en su tarea."
+  ],
+  "corridaSobreSrc": false,
+  "padresConAccionReferencial": ["Consumer", "CustomerGroup", "Order", "Staff", "StaffVenue", "Venue"],
+  "openersGenericos": {
+    "src/services/mobile/http-operation.mobile.service.ts#executeHttpOperation": {
+      "cuerpo": 1,
+      "motivo": "Ruling 16: abre la transacción y recibe el cuerpo (mutate) por parámetro; sus 15 manejadores son cuerpos de la red."
+    }
+  },
+  "castsPermitidos": {
+    "src/utils/serializableRetry.ts#withDeadlockRetry": {
+      "cantidad": 1,
+      "motivo": "La llamada interna: el único lugar que convierte el tx de $transaction en TxConReintento."
+    },
+    "src/utils/serializableRetry.ts#withSerializableRetry": {
+      "cantidad": 1,
+      "motivo": "La misma llamada interna, en la sobrecarga con reintentarInterbloqueo."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordOrderPayment": {
+      "cantidad": 1,
+      "motivo": "La única excepción (R63 b): no se envuelve porque su cuerpo tiene efectos fuera de la base (bitácora y correo a operaciones) y repetirlo los repetiría. Se escribe tx => cuerpo(tx as TxConReintento) (Ruling 21). Si alguna vez es la víctima de una traba, la terminal reenvía el cobro con su llave.",
+      "efectos": [
+        {
+          "archivo": "src/services/tpv/registroRepetido.ts",
+          "funcion": "consolidarRegistroRepetidoDetallado",
+          "llamada": "avisarAprobacionTardiaTrasVentana"
+        },
+        {
+          "archivo": "src/services/tpv/registroRepetido.ts",
+          "funcion": "consolidarRegistroRepetidoDetallado",
+          "llamada": "logAction"
+        },
+        {
+          "archivo": "src/services/terminal-payment.service.ts",
+          "funcion": "TerminalPaymentService.punteroSinProcedencia",
+          "llamada": "logAction"
+        }
+      ]
+    }
+  },
+  "cuerposRevisados": {},
+  "escritores": {
+    "src/controllers/dashboard/referrals/referrals.controller.ts#generateCustomerCodeHandler": {
+      "clase": "SENTENCIA",
+      "etiqueta": "generateCustomerCodeHandler"
+    },
+    "src/controllers/mobile/coupon.mobile.controller.ts#createCoupon": {
+      "clase": "SENTENCIA",
+      "etiqueta": "createCoupon"
+    },
+    "src/controllers/mobile/coupon.mobile.controller.ts#deleteCoupon": {
+      "clase": "SENTENCIA",
+      "etiqueta": "deleteCoupon"
+    },
+    "src/controllers/mobile/coupon.mobile.controller.ts#updateCoupon": {
+      "clase": "SENTENCIA",
+      "etiqueta": "updateCoupon"
+    },
+    "src/controllers/mobile/discount.mobile.controller.ts#createDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "createDiscount"
+    },
+    "src/controllers/mobile/discount.mobile.controller.ts#deleteDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "deleteDiscount"
+    },
+    "src/controllers/mobile/discount.mobile.controller.ts#updateDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "updateDiscount"
+    },
+    "src/controllers/public/customerEmail.public.controller.ts#postBirthdateCapture": {
+      "clase": "SENTENCIA",
+      "etiqueta": "postBirthdateCapture"
+    },
+    "src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce": {
+      "clase": "EN_TX",
+      "etiqueta": "AbandonedOrdersCleanupJob.runOnce"
+    },
+    "src/mcp/tools/customers.ts#registerCustomerTools": {
+      "clase": "SENTENCIA",
+      "etiqueta": "registerCustomerTools"
+    },
+    "src/services/aggregators/core/customerIdentity.service.ts#resolvePassCustomer": {
+      "clase": "EN_TX",
+      "etiqueta": "resolvePassCustomer"
+    },
+    "src/services/cleanup/liveDemoCleanup.service.ts#deleteVenueDataTx": {
+      "clase": "EN_TX",
+      "etiqueta": "deleteVenueDataTx"
+    },
+    "src/services/consumer/reservation.consumer.service.ts#ensureVenueCustomer": {
+      "clase": "EN_TX",
+      "etiqueta": "ensureVenueCustomer"
+    },
+    "src/services/customer/consent.service.ts#writeConsent": {
+      "clase": "EN_TX",
+      "etiqueta": "writeConsent"
+    },
+    "src/services/customer/customerName.ts#ponerNombreSiFalta": {
+      "clase": "EN_TX",
+      "etiqueta": "ponerNombreSiFalta"
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#bulkGenerateCouponCodes": {
+      "clase": "SENTENCIA",
+      "etiqueta": "bulkGenerateCouponCodes"
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#createCouponCode": {
+      "clase": "SENTENCIA",
+      "etiqueta": "createCouponCode"
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#deleteCouponCode": {
+      "clase": "SENTENCIA",
+      "etiqueta": "deleteCouponCode"
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
+      "clase": "EN_TX",
+      "etiqueta": "recordCouponRedemption"
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#updateCouponCode": {
+      "clase": "SENTENCIA",
+      "etiqueta": "updateCouponCode"
+    },
+    "src/services/dashboard/creditPack.public.service.ts#findOrCreateCustomer": {
+      "clase": "SENTENCIA",
+      "etiqueta": "findOrCreateCustomer"
+    },
+    "src/services/dashboard/creditPack.public.service.ts#fulfillPurchase": {
+      "clase": "EN_TX",
+      "etiqueta": "fulfillPurchase"
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#createCustomer": {
+      "clase": "SENTENCIA",
+      "etiqueta": "createCustomer"
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#deleteCustomer": {
+      "clase": "SENTENCIA",
+      "etiqueta": "deleteCustomer"
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#updateCustomer": {
+      "clase": "SENTENCIA",
+      "etiqueta": "updateCustomer"
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#updateCustomerMetrics": {
+      "clase": "EN_TX",
+      "etiqueta": "updateCustomerMetrics"
+    },
+    "src/services/dashboard/customerGroup.dashboard.service.ts#assignCustomersToGroup": {
+      "clase": "SENTENCIA",
+      "etiqueta": "assignCustomersToGroup"
+    },
+    "src/services/dashboard/customerGroup.dashboard.service.ts#removeCustomersFromGroup": {
+      "clase": "SENTENCIA",
+      "etiqueta": "removeCustomersFromGroup"
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#cloneDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "cloneDiscount"
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#createDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "createDiscount"
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#deleteDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "deleteDiscount"
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#updateDiscount": {
+      "clase": "SENTENCIA",
+      "etiqueta": "updateDiscount"
+    },
+    "src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
+      "clase": "EN_TX",
+      "etiqueta": "applyAutomaticDiscounts"
+    },
+    "src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount": {
+      "clase": "EN_TX",
+      "etiqueta": "applyEvaluatedDiscount"
+    },
+    "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
+      "clase": "EN_TX",
+      "etiqueta": "removeDiscountFromOrder"
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#acreditarPuntosTrasElSello": {
+      "clase": "EN_TX",
+      "etiqueta": "acreditarPuntosTrasElSello"
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#adjustPoints": {
+      "clase": "EN_TX",
+      "etiqueta": "adjustPoints"
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#expireOldPoints": {
+      "clase": "EN_TX",
+      "etiqueta": "expireOldPoints"
+    },
+    "src/services/dashboard/paymentLink.service.ts#contarUsoDelDescuento": {
+      "clase": "EN_TX",
+      "etiqueta": "contarUsoDelDescuento"
+    },
+    "src/services/dashboard/team.dashboard.service.ts#hardDeleteTeamMember": {
+      "clase": "EN_TX",
+      "etiqueta": "hardDeleteTeamMember"
+    },
+    "src/services/dashboard/venue.dashboard.service.ts#deleteVenue": {
+      "clase": "EN_TX",
+      "etiqueta": "deleteVenue"
+    },
+    "src/services/demo/negociosDemo.service.ts#seedCustomers": {
+      "clase": "SENTENCIA",
+      "etiqueta": "seedCustomers"
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#cambiarDestinoDeTarjeta": {
+      "clase": "EN_TX",
+      "etiqueta": "cambiarDestinoDeTarjeta"
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#reenviarEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "reenviarEnTx"
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#cerrarAtoradas": {
+      "clase": "SENTENCIA",
+      "etiqueta": "cerrarAtoradas"
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#escribirResultado": {
+      "clase": "SENTENCIA",
+      "etiqueta": "escribirResultado"
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#marcarEntregaFallidaPorMensaje": {
+      "clase": "SENTENCIA",
+      "etiqueta": "marcarEntregaFallidaPorMensaje"
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
+      "clase": "SENTENCIA",
+      "etiqueta": "reclamarEntregas"
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#soltar": {
+      "clase": "SENTENCIA",
+      "etiqueta": "soltar"
+    },
+    "src/services/giftCards/giftCardLedger.ts#abonarSaldoAFavorEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "abonarSaldoAFavorEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#activarSobresDeCuentaPagadaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "activarSobresDeCuentaPagadaEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#cambiarTelefonoDeSaldoAFavorEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "cambiarTelefonoDeSaldoAFavorEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#canjearSobresEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "canjearSobresEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#desactivarSobresDeCuentaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "desactivarSobresDeCuentaEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#desactivarSobresPendientesDeCuentaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "desactivarSobresPendientesDeCuentaEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#lockGiftCardsForUpdate": {
+      "clase": "EN_TX",
+      "etiqueta": "lockGiftCardsForUpdate"
+    },
+    "src/services/giftCards/giftCardLedger.ts#operarSobreDeGerenteEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "operarSobreDeGerenteEnTx"
+    },
+    "src/services/giftCards/giftCardLedger.ts#revertirCanjeEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "revertirCanjeEnTx"
+    },
+    "src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder": {
+      "clase": "EN_TX",
+      "etiqueta": "createGiftCardOrder"
+    },
+    "src/services/mobile/auth.mobile.service.ts#deleteOwnAccount": {
+      "clase": "EN_TX",
+      "etiqueta": "deleteOwnAccount"
+    },
+    "src/services/mobile/creditPack.mobile.service.ts#grantPackInTx": {
+      "clase": "EN_TX",
+      "etiqueta": "grantPackInTx"
+    },
+    "src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction": {
+      "clase": "EN_TX",
+      "etiqueta": "redeemPointsToOrderInTransaction"
+    },
+    "src/services/mobile/loyalty.mobile.service.ts#refundLoyaltyForOrderDiscount": {
+      "clase": "EN_TX",
+      "etiqueta": "refundLoyaltyForOrderDiscount"
+    },
+    "src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "crearVentaDeMostradorEnTx"
+    },
+    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
+      "clase": "SENTENCIA",
+      "etiqueta": "terminarVentaDeMostrador"
+    },
+    "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
+      "clase": "EN_TX",
+      "etiqueta": "cleanDemoData"
+    },
+    "src/services/onboarding/demoSeed.service.ts#seedCustomers": {
+      "clase": "SENTENCIA",
+      "etiqueta": "seedCustomers"
+    },
+    "src/services/public/customerBookingAccess.service.ts#activateCustomerAccount": {
+      "clase": "EN_TX",
+      "etiqueta": "activateCustomerAccount"
+    },
+    "src/services/public/customerBookingAccess.service.ts#decideCustomerApproval": {
+      "clase": "EN_TX",
+      "etiqueta": "decideCustomerApproval"
+    },
+    "src/services/public/customerBookingAccess.service.ts#lockCustomer": {
+      "clase": "EN_TX",
+      "etiqueta": "lockCustomer"
+    },
+    "src/services/public/customerPortal.public.service.ts#updateProfile": {
+      "clase": "SENTENCIA",
+      "etiqueta": "updateProfile"
+    },
+    "src/services/public/otpAuth.public.service.ts#resolveIdentity": {
+      "clase": "EN_TX",
+      "etiqueta": "resolveIdentity"
+    },
+    "src/services/referrals/referralProgram.service.ts#backfillLegacyReferralCodes": {
+      "clase": "SENTENCIA",
+      "etiqueta": "backfillLegacyReferralCodes"
+    },
+    "src/services/referrals/referralQualification.service.ts#mintPercentCoupon": {
+      "clase": "EN_TX",
+      "etiqueta": "mintPercentCoupon"
+    },
+    "src/services/referrals/referralQualification.service.ts#mintPermanentDiscount": {
+      "clase": "EN_TX",
+      "etiqueta": "mintPermanentDiscount"
+    },
+    "src/services/referrals/referralQualification.service.ts#onOrderPaid": {
+      "clase": "EN_TX",
+      "etiqueta": "onOrderPaid"
+    },
+    "src/services/referrals/referralRefund.service.ts#revertQualifiedReferral": {
+      "clase": "EN_TX",
+      "etiqueta": "revertQualifiedReferral"
+    },
+    "src/services/referrals/referralRefund.service.ts#revokeTierRewardInTx": {
+      "clase": "EN_TX",
+      "etiqueta": "revokeTierRewardInTx"
+    },
+    "src/services/shared/cuponDeLaVenta.ts#apartarCupon": {
+      "clase": "EN_TX",
+      "etiqueta": "apartarCupon"
+    },
+    "src/services/shared/cuponDeLaVenta.ts#canjearCuponEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "canjearCuponEnTx"
+    },
+    "src/services/shared/porCobrar.ts#apartarClientesDelFiado": {
+      "clase": "EN_TX",
+      "etiqueta": "apartarClientesDelFiado"
+    },
+    "src/services/shared/puntosAlReembolsar.ts#reversaEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "reversaEnTx"
+    },
+    "src/services/superadmin/staffDeletion.service.ts#deleteOrRetainStaffWithH1ProvenanceTx": {
+      "clase": "EN_TX",
+      "etiqueta": "deleteOrRetainStaffWithH1ProvenanceTx"
+    },
+    "src/services/tpv/customer.tpv.service.ts#quickCreateCustomer": {
+      "clase": "SENTENCIA",
+      "etiqueta": "quickCreateCustomer"
+    },
+    "src/services/tpv/discount.tpv.service.ts#applyCouponCode": {
+      "clase": "EN_TX",
+      "etiqueta": "applyCouponCode"
+    },
+    "src/services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder": {
+      "clase": "EN_TX",
+      "etiqueta": "createAndAddCustomerToOrder"
+    },
+    "src/services/tpv/order.tpv.service.ts#createOrderWithItems": {
+      "clase": "EN_TX",
+      "etiqueta": "createOrderWithItems"
+    },
+    "src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx": {
+      "clase": "EN_TX",
+      "etiqueta": "canjearPremioEnTx"
+    },
+    "src/services/wallet/redeemStampReward.service.ts#refundStampRewardForOrderDiscount": {
+      "clase": "EN_TX",
+      "etiqueta": "refundStampRewardForOrderDiscount"
+    },
+    "src/services/wallet/stampLedger.service.ts#abrirCartilla": {
+      "clase": "EN_TX",
+      "etiqueta": "abrirCartilla"
+    },
+    "src/services/wallet/stampLedger.service.ts#adjustStamps": {
+      "clase": "EN_TX",
+      "etiqueta": "adjustStamps"
+    },
+    "src/services/wallet/stampLedger.service.ts#completarCartilla": {
+      "clase": "EN_TX",
+      "etiqueta": "completarCartilla"
+    },
+    "src/services/wallet/stampLedger.service.ts#grantStamp": {
+      "clase": "EN_TX",
+      "etiqueta": "grantStamp"
+    },
+    "src/services/wallet/stampLedger.service.ts#reverseStampForOrder": {
+      "clase": "EN_TX",
+      "etiqueta": "reverseStampForOrder"
+    }
+  },
+  "aperturas": {
+    "src/controllers/dashboard/referrals/referrals.controller.ts#generateCustomerCodeHandler": {
+      "etiqueta": "generateCustomerCodeHandler",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/mobile/coupon.mobile.controller.ts#createCoupon": {
+      "etiqueta": "createCoupon",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/mobile/coupon.mobile.controller.ts#deleteCoupon": {
+      "etiqueta": "deleteCoupon",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/mobile/coupon.mobile.controller.ts#updateCoupon": {
+      "etiqueta": "updateCoupon",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/mobile/discount.mobile.controller.ts#createDiscount": {
+      "etiqueta": "createDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/mobile/discount.mobile.controller.ts#deleteDiscount": {
+      "etiqueta": "deleteDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/mobile/discount.mobile.controller.ts#updateDiscount": {
+      "etiqueta": "updateDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/public/customerEmail.public.controller.ts#postBirthdateCapture": {
+      "etiqueta": "postBirthdateCapture",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/controllers/public/reservation.public.controller.ts#createClassReservation": {
+      "etiqueta": "createClassReservation",
+      "cantidad": 1,
+      "serializable": true
+    },
+    "src/controllers/public/reservation.public.controller.ts#createHold": {
+      "etiqueta": "createHold",
+      "cantidad": 1
+    },
+    "src/controllers/tpv/order-table.tpv.controller.ts#cancelOrder": {
+      "etiqueta": "cancelOrder",
+      "cantidad": 1
+    },
+    "src/controllers/tpv/order-table.tpv.controller.ts#mergeOrders": {
+      "etiqueta": "mergeOrders",
+      "cantidad": 1
+    },
+    "src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce": {
+      "etiqueta": "runOnce",
+      "cantidad": 1
+    },
+    "src/jobs/giftCardReconciliation.job.ts#activarCuentaEnDb": {
+      "etiqueta": "activarCuentaEnDb",
+      "cantidad": 1
+    },
+    "src/mcp/tools/customers.ts#registerCustomerTools": {
+      "etiqueta": "registerCustomerTools",
+      "cantidad": 2,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/aggregators/core/bookingIngestion.service.ts#ingestBookingRequested": {
+      "etiqueta": "ingestBookingRequested",
+      "cantidad": 1,
+      "serializable": true
+    },
+    "src/services/aggregators/core/visit.service.ts#ingestCheckin": {
+      "etiqueta": "ingestCheckin",
+      "cantidad": 1,
+      "serializable": true
+    },
+    "src/services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment": {
+      "etiqueta": "settleOrderForConfirmedCryptoPayment",
+      "cantidad": 1
+    },
+    "src/services/cleanup/liveDemoCleanup.service.ts#createDisposableDemoSessionDeletion": {
+      "etiqueta": "createDisposableDemoSessionDeletion",
+      "cantidad": 1,
+      "nota": "cliente: db (el inyectado)."
+    },
+    "src/services/consumer/reservation.consumer.service.ts#createClassReservationForConsumer": {
+      "etiqueta": "createClassReservationForConsumer",
+      "cantidad": 1,
+      "serializable": true
+    },
+    "src/services/consumer/reservation.consumer.service.ts#ensureVenueCustomerActivated": {
+      "etiqueta": "ensureVenueCustomerActivated",
+      "cantidad": 1
+    },
+    "src/services/customer/consent.service.ts#writeConsent": {
+      "etiqueta": "writeConsent",
+      "cantidad": 1
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#bulkGenerateCouponCodes": {
+      "etiqueta": "bulkGenerateCouponCodes",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#createCouponCode": {
+      "etiqueta": "createCouponCode",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#deleteCouponCode": {
+      "etiqueta": "deleteCouponCode",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#recordCouponRedemption": {
+      "etiqueta": "recordCouponRedemption",
+      "cantidad": 1
+    },
+    "src/services/dashboard/coupon.dashboard.service.ts#updateCouponCode": {
+      "etiqueta": "updateCouponCode",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/creditPack.public.service.ts#createCheckoutSession": {
+      "etiqueta": "createCheckoutSession",
+      "cantidad": 1
+    },
+    "src/services/dashboard/creditPack.public.service.ts#findOrCreateCustomer": {
+      "etiqueta": "findOrCreateCustomer",
+      "cantidad": 2,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/creditPack.public.service.ts#fulfillPurchase": {
+      "etiqueta": "fulfillPurchase",
+      "cantidad": 1
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#createCustomer": {
+      "etiqueta": "createCustomer",
+      "cantidad": 2,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#decideCustomerApprovalFromDashboard": {
+      "etiqueta": "decideCustomerApprovalFromDashboard",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:949: sesionesDeValesCerradas, settled, postingIds)."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#deleteCustomer": {
+      "etiqueta": "deleteCustomer",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance": {
+      "etiqueta": "settleCustomerBalance",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:949: sesionesDeValesCerradas, settled, postingIds)."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#updateCustomer": {
+      "etiqueta": "updateCustomer",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#updateCustomerMetrics": {
+      "etiqueta": "updateCustomerMetrics",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:949: sesionesDeValesCerradas, settled, postingIds)."
+    },
+    "src/services/dashboard/customerGroup.dashboard.service.ts#assignCustomersToGroup": {
+      "etiqueta": "assignCustomersToGroup",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/customerGroup.dashboard.service.ts#removeCustomersFromGroup": {
+      "etiqueta": "removeCustomersFromGroup",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#cloneDiscount": {
+      "etiqueta": "cloneDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#createDiscount": {
+      "etiqueta": "createDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#deleteDiscount": {
+      "etiqueta": "deleteDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/discount.dashboard.service.ts#updateDiscount": {
+      "etiqueta": "updateDiscount",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts": {
+      "etiqueta": "applyAutomaticDiscounts",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:909: audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079); :1119: audits; :1248: audits, por parámetro (:1079; r5 #2))."
+    },
+    "src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder": {
+      "etiqueta": "applyDiscountToOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:909: audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079); :1119: audits; :1248: audits, por parámetro (:1079; r5 #2))."
+    },
+    "src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder": {
+      "etiqueta": "removeDiscountFromOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:909: audits, por parámetro (applyEvaluatedDiscount hace audits.push en :1079); :1119: audits; :1248: audits, por parámetro (:1079; r5 #2))."
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#acreditarPuntosTrasElSello": {
+      "etiqueta": "acreditarPuntosTrasElSello",
+      "cantidad": 1,
+      "nota": "El reintento por traba va DENTRO de su lazo de hoy por vencimiento (P2028): reemplaza su prisma.$transaction."
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#adjustPoints": {
+      "etiqueta": "adjustPoints",
+      "cantidad": 1
+    },
+    "src/services/dashboard/loyalty.dashboard.service.ts#expireOldPoints": {
+      "etiqueta": "expireOldPoints",
+      "cantidad": 1,
+      "nota": "Hoy es $transaction([…]) en arreglo: pasa a callback con las dos escrituras sobre tx (r5 #3)."
+    },
+    "src/services/dashboard/manualPayment.service.ts#createManualPayment": {
+      "etiqueta": "createManualPayment",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:175: sesionState, replayed, metricsState, loyaltyOrderId, loyaltyCustomerId, loyaltyOrderTotal, loyaltyShouldEarn, metricsCustomerIds, postingState)."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#cancelarCuentaSinCobrar": {
+      "etiqueta": "cancelarCuentaSinCobrar",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId)."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#deleteOrder": {
+      "etiqueta": "deleteOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId)."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#settleOrder": {
+      "etiqueta": "settleOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId)."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#updateOrder": {
+      "etiqueta": "updateOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:817: valesSoltados; :987: sesionDeValesCerrada, baseParaLealtad, postingId, settlementPaymentId). Siempre por withDeadlockRetry, también sin cambio de mesa, estado ni cliente (update recibe TxConReintento)."
+    },
+    "src/services/dashboard/paymentLink.service.ts#completeCharge": {
+      "etiqueta": "completeCharge",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:2267: postingId, orderIdForReferral; :3119: loyaltyBase, postingId, orderIdForReferral; :4130: postingId, orderIdForReferral)."
+    },
+    "src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout": {
+      "etiqueta": "finalizeMercadoPagoCheckout",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:2267: postingId, orderIdForReferral; :3119: loyaltyBase, postingId, orderIdForReferral; :4130: postingId, orderIdForReferral)."
+    },
+    "src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout": {
+      "etiqueta": "finalizePaymentLinkCheckout",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:2267: postingId, orderIdForReferral; :3119: loyaltyBase, postingId, orderIdForReferral; :4130: postingId, orderIdForReferral)."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund": {
+      "etiqueta": "issueRefund",
+      "cantidad": 1
+    },
+    "src/services/dashboard/reservation.dashboard.service.ts#createReservation": {
+      "etiqueta": "createReservation",
+      "cantidad": 1,
+      "serializable": true
+    },
+    "src/services/dashboard/team.dashboard.service.ts#hardDeleteTeamMember": {
+      "etiqueta": "hardDeleteTeamMember",
+      "cantidad": 1,
+      "serializable": true,
+      "nota": "Gana reintentarInterbloqueo en su withSerializableRetry (r6 #1, X11)."
+    },
+    "src/services/dashboard/venue.dashboard.service.ts#deleteVenue": {
+      "etiqueta": "deleteVenue",
+      "cantidad": 1
+    },
+    "src/services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder": {
+      "etiqueta": "ingestDeliveryOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:287: nuevaState, renglonesCreados, postingState)."
+    },
+    "src/services/demo/negociosDemo.service.ts#recrearNegocio": {
+      "etiqueta": "recrearNegocio",
+      "cantidad": 1
+    },
+    "src/services/demo/negociosDemo.service.ts#seedCustomers": {
+      "etiqueta": "seedCustomers",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/exchanges/exchange.service.ts#cancelExchange": {
+      "etiqueta": "cancelExchange",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta": {
+      "etiqueta": "iniciarCancelacionDeVenta",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCancel.service.ts#liberarCancelacionDeVenta": {
+      "etiqueta": "liberarCancelacionDeVenta",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#cambiarDestinoDeTarjeta": {
+      "etiqueta": "cambiarDestinoDeTarjeta",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#cambiarTelefonoDeSaldoAFavor": {
+      "etiqueta": "cambiarTelefonoDeSaldoAFavor",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#reenviarTarjeta": {
+      "etiqueta": "reenviarTarjeta",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#revelarCodigo": {
+      "etiqueta": "revelarCodigo",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#revelarCodigosDeLaCuenta": {
+      "etiqueta": "revelarCodigosDeLaCuenta",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#cerrarAtoradas": {
+      "etiqueta": "cerrarAtoradas",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#escribirResultado": {
+      "etiqueta": "escribirResultado",
+      "cantidad": 2,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#marcarEntregaFallidaPorMensaje": {
+      "etiqueta": "marcarEntregaFallidaPorMensaje",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
+      "etiqueta": "reclamarEntregas",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#soltar": {
+      "etiqueta": "soltar",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder": {
+      "etiqueta": "createGiftCardOrder",
+      "cantidad": 1
+    },
+    "src/services/giftCards/giftCardSurface.service.ts#operarSobreDeGerente": {
+      "etiqueta": "operarSobreDeGerente",
+      "cantidad": 1
+    },
+    "src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout": {
+      "etiqueta": "cancelAreaTicketCheckout",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:1908: ordenCancelada)."
+    },
+    "src/services/mobile/auth.mobile.service.ts#deleteOwnAccount": {
+      "etiqueta": "deleteOwnAccount",
+      "cantidad": 1
+    },
+    "src/services/mobile/comp-item.mobile.service.ts#compOrderItem": {
+      "etiqueta": "compOrderItem",
+      "cantidad": 1
+    },
+    "src/services/mobile/comp-item.mobile.service.ts#compWholeOrder": {
+      "etiqueta": "compWholeOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/cortesia-pendiente.mobile.service.ts#revisarCortesiaPendiente": {
+      "etiqueta": "revisarCortesiaPendiente",
+      "cantidad": 1
+    },
+    "src/services/mobile/creditPack.mobile.service.ts#fulfillCreditPackPurchaseFromPayment": {
+      "etiqueta": "fulfillCreditPackPurchaseFromPayment",
+      "cantidad": 1
+    },
+    "src/services/mobile/creditPack.mobile.service.ts#sellPackInPerson": {
+      "etiqueta": "sellPackInPerson",
+      "cantidad": 1
+    },
+    "src/services/mobile/http-operation.mobile.service.ts#executeHttpOperation": {
+      "etiqueta": "executeHttpOperation",
+      "cantidad": 1,
+      "nota": "Ruling 16 (transacción nº 97): opener genérico; su mutate recibe TxConReintento y los 15 manejadores devuelven su auditData en el resultado."
+    },
+    "src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrder": {
+      "etiqueta": "redeemPointsToOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#cancelOrder": {
+      "etiqueta": "cancelOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#createOrderWithItems": {
+      "etiqueta": "createOrderWithItems",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction": {
+      "etiqueta": "executeExchangeInTransaction",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#mergeOrders": {
+      "etiqueta": "mergeOrders",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#payCashOrder": {
+      "etiqueta": "payCashOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder": {
+      "etiqueta": "payGiftCardBalanceOnOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#payGiftCardOnNewOrder": {
+      "etiqueta": "payGiftCardOnNewOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#removeOrderDiscount": {
+      "etiqueta": "removeOrderDiscount",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder": {
+      "etiqueta": "returnGiftBalanceAndCancelOrder",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#splitOrderBySeat": {
+      "etiqueta": "splitOrderBySeat",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#splitOrderItems": {
+      "etiqueta": "splitOrderItems",
+      "cantidad": 1
+    },
+    "src/services/mobile/order.mobile.service.ts#terminarVentaDeMostrador": {
+      "etiqueta": "terminarVentaDeMostrador",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/onboarding/demoCleanup.service.ts#cleanDemoData": {
+      "etiqueta": "cleanDemoData",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:120: result)."
+    },
+    "src/services/onboarding/demoSeed.service.ts#seedCustomers": {
+      "etiqueta": "seedCustomers",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/online-ordering/card/capture.service.ts#finishCapture": {
+      "etiqueta": "finishCapture",
+      "cantidad": 1
+    },
+    "src/services/online-ordering/card/confirm.service.ts#confirmCardAuthorization": {
+      "etiqueta": "confirmCardAuthorization",
+      "cantidad": 1
+    },
+    "src/services/online-ordering/folios.service.ts#prepararFolioPagado": {
+      "etiqueta": "prepararFolioPagado",
+      "cantidad": 1
+    },
+    "src/services/online-ordering/order.service.ts#createOnlineOrder": {
+      "etiqueta": "createOnlineOrder",
+      "cantidad": 1
+    },
+    "src/services/online-ordering/transitions.service.ts#casTransition": {
+      "etiqueta": "casTransition",
+      "cantidad": 1
+    },
+    "src/services/promotions/promotion.service.ts#removePromotionFromOrder": {
+      "etiqueta": "removePromotionFromOrder",
+      "cantidad": 1
+    },
+    "src/services/public/customerPortal.public.service.ts#updateProfile": {
+      "etiqueta": "updateProfile",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/public/otpAuth.public.service.ts#verifyOtp": {
+      "etiqueta": "verifyOtp",
+      "cantidad": 1
+    },
+    "src/services/referrals/referralProgram.service.ts#backfillLegacyReferralCodes": {
+      "etiqueta": "backfillLegacyReferralCodes",
+      "cantidad": 1,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/referrals/referralQualification.service.ts#onOrderPaid": {
+      "etiqueta": "onOrderPaid",
+      "cantidad": 1
+    },
+    "src/services/referrals/referralRefund.service.ts#revertQualifiedReferral": {
+      "etiqueta": "revertQualifiedReferral",
+      "cantidad": 1
+    },
+    "src/services/referrals/referralRefund.service.ts#revokeTierReward": {
+      "etiqueta": "revokeTierReward",
+      "cantidad": 1
+    },
+    "src/services/reservation/appointmentSlotHold.service.ts#mintNormalAppointmentHold": {
+      "etiqueta": "mintNormalAppointmentHold",
+      "cantidad": 1,
+      "serializable": true
+    },
+    "src/services/shared/cuponDeLaVenta.ts#finalizeCouponsForOrder": {
+      "etiqueta": "finalizeCouponsForOrder",
+      "cantidad": 1
+    },
+    "src/services/shared/puntosAlReembolsar.ts#quitarPuntosPorReembolso": {
+      "etiqueta": "quitarPuntosPorReembolso",
+      "cantidad": 1
+    },
+    "src/services/superadmin/staffDeletion.service.ts#createStaffDeletionService": {
+      "etiqueta": "createStaffDeletionService",
+      "cantidad": 1,
+      "nota": "cliente: dependencies.prisma (r6 #1)."
+    },
+    "src/services/tpv/customer.tpv.service.ts#quickCreateCustomer": {
+      "etiqueta": "quickCreateCustomer",
+      "cantidad": 2,
+      "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
+    },
+    "src/services/tpv/discount.tpv.service.ts#applyCouponCode": {
+      "etiqueta": "applyCouponCode",
+      "cantidad": 1
+    },
+    "src/services/tpv/order.tpv.service.ts#compItems": {
+      "etiqueta": "compItems",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+    },
+    "src/services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder": {
+      "etiqueta": "createAndAddCustomerToOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+    },
+    "src/services/tpv/order.tpv.service.ts#createOrderWithItems": {
+      "etiqueta": "createOrderWithItems",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+    },
+    "src/services/tpv/order.tpv.service.ts#removeOrderItem": {
+      "etiqueta": "removeOrderItem",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+    },
+    "src/services/tpv/order.tpv.service.ts#voidItems": {
+      "etiqueta": "voidItems",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:3123: valesSoltados; :4286: nuevoClienteId, cobrada)."
+    },
+    "src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment": {
+      "etiqueta": "updateOrderTotalsForStandalonePayment",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:1957: reabiertaEnEstaPasada, tpvPostingId)."
+    },
+    "src/services/tpv/refund.tpv.service.ts#recordRefund": {
+      "etiqueta": "recordRefund",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:563: tipRefund, salesRefund)."
+    },
+    "src/services/wallet/redeemStampReward.service.ts#redeemStampReward": {
+      "etiqueta": "redeemStampReward",
+      "cantidad": 1
+    },
+    "src/services/wallet/stampLedger.service.ts#adjustStamps": {
+      "etiqueta": "adjustStamps",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:541: revertida)."
+    },
+    "src/services/wallet/stampLedger.service.ts#grantStamp": {
+      "etiqueta": "grantStamp",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:541: revertida)."
+    },
+    "src/services/wallet/stampLedger.service.ts#reverseStampForOrder": {
+      "etiqueta": "reverseStampForOrder",
+      "cantidad": 1,
+      "nota": "Lo de afuera al retorno (:541: revertida). El reintento por traba va DENTRO de su lazo de hoy por vencimiento (P2028): reemplaza su prisma.$transaction."
+    }
+  }
+}

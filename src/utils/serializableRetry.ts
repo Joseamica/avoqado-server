@@ -156,12 +156,12 @@ export async function withDeadlockRetry<T>(fn: (tx: TxConReintento) => Promise<T
   const { etiqueta, cliente, timeout, maxWait, isolationLevel } = opciones
   const transaccion = Object.fromEntries(Object.entries({ timeout, maxWait, isolationLevel }).filter(([, v]) => v !== undefined))
   const db = cliente ?? prisma
+  // El único lugar (con el de `withSerializableRetry`) que convierte un `tx` en `TxConReintento` (castsPermitidos del JSON).
+  const cuerpo = (tx: Prisma.TransactionClient) => fn(tx as TxConReintento)
   for (let intento = 1; ; intento += 1) {
     try {
       // Sin opciones, la misma llamada de hoy (sólo el cuerpo): así no cambian los dobles de quien se envuelve.
-      return Object.keys(transaccion).length
-        ? await db.$transaction(tx => fn(tx as TxConReintento), transaccion)
-        : await db.$transaction(tx => fn(tx as TxConReintento))
+      return Object.keys(transaccion).length ? await db.$transaction(cuerpo, transaccion) : await db.$transaction(cuerpo)
     } catch (error) {
       if (!isDeadlockError(error) || intento >= REINTENTO_POR_INTERBLOQUEO.intentos) throw error
       logger.warn('interbloqueo (40P01): se reintenta la transacción', { etiqueta, intento })
