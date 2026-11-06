@@ -2,6 +2,9 @@
 import {
   ContratoDePrecio,
   KitchenStatus,
+  NotificationChannel,
+  NotificationPriority,
+  NotificationType,
   OnlineOrderChargeStatus,
   OnlineOrderPaymentMode,
   OnlineOrderStatus,
@@ -21,7 +24,19 @@ import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
 import { canonicalPhoneE164, phonesMatch } from '@/utils/phone'
 import { ponerNombreSiFalta } from '@/services/customer/customerName'
-import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, OPEN_ORDER_STATUSES, awaitingAcceptanceWhere, liveCardDraftsWhere } from './constants'
+import {
+  ACCEPT_TIMEOUT_MINUTES,
+  FOLIO_TIMEOUT_MINUTES,
+  MAX_PENDING_PER_PHONE,
+  MAX_PENDING_PER_VENUE,
+  MAX_UNPAID_FOLIOS_PER_VENUE,
+  OPEN_ORDER_STATUSES,
+  awaitingAcceptanceWhere,
+  liveCardDraftsWhere,
+  unpaidFoliosWhere,
+} from './constants'
+import { closesAt } from './hours'
+import { MAX_GERENTES_AVISADOS, ROLES_QUE_RECIBEN_EL_AVISO } from '@/services/shared/cuentaCancelada'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
@@ -38,11 +53,14 @@ export interface CreateOnlineOrderInput {
   paymentMode: 'PAY_AT_PICKUP'
   /** R5: el total que el comensal vio y confirmó, en pesos con 2 decimales («206.00»). */
   expectedTotal: string
-  customer: { name: string; phone: string; email?: string | null }
+  /** T7: en «Nadie» basta el nombre; el teléfono sólo cuenta si es el que probó la sesión (pestaña vieja o «Mi equipo»). */
+  customer: { name: string; phone?: string | null; email?: string | null }
   /** De la sesión de cliente (`req.customerAuth`), nunca del cuerpo. */
   customerId: string | null
   /** R6/H1: el teléfono que probó el OTP de WhatsApp (reclamo `verifiedPhone` del token de PEDIDOS, tarea 7b). */
   verifiedPhone: string | null
+  /** Tienda híbrida: por dónde llegó la clienta (`?canal=qr` del QR de «Compartir tu tienda»), sólo para medir. */
+  channel?: 'QR' | 'LINK' | null
   note?: string | null
   whatsappConsent?: boolean
   now?: Date
@@ -102,15 +120,15 @@ export function onlineOrderRequestHash(r: {
 }
 
 /**
- * Pedido ya creado con esta llave. R8: sólo se repite para QUIEN lo hizo; con otro cliente la llave choca. M-3/A1: y sólo si es la
- * MISMA solicitud (su huella): con otro carrito o total la llave también choca (el comensal creería que pidió lo nuevo). Sin
- * huella guardada, también choca.
+ * Pedido ya creado con esta llave. Lo decide SÓLO la huella (M-3/A1): se repite si es la MISMA solicitud; con otro carrito o total
+ * la llave choca (el comensal creería que pidió lo nuevo). R8: la huella guarda la identidad con la que NACIÓ el pedido, así que
+ * otro cliente también choca. T7 (codex-plan-r6 #2): no se compara `Order.customerId`, que la caja cambia al ligar un cliente
+ * (`order.mobile.service.ts`); el reintento de un folio anónimo ya cobrado recibe SU folio. Sin huella guardada, también choca.
  */
 async function findReplay(
   db: Prisma.TransactionClient,
   venueId: string,
   externalId: string,
-  customerId: string,
   requestHash: string,
 ): Promise<CreateOnlineOrderResult | null> {
   const existing = await db.order.findUnique({
@@ -119,14 +137,10 @@ async function findReplay(
       id: true,
       orderNumber: true,
       total: true,
-      customerId: true,
       onlineOrder: { select: { id: true, status: true, trackingToken: true, acceptDeadlineAt: true, requestHash: true } },
     },
   })
   if (!existing?.onlineOrder) return null
-  if (existing.customerId !== customerId) {
-    throw final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
-  }
   if (existing.onlineOrder.requestHash !== requestHash) {
     throw final(
       new ConflictError(
@@ -166,9 +180,10 @@ export function lockKey(tx: Prisma.TransactionClient, venueId: string, externalI
  * `customer:` nunca chocan con sus ids de organización y de staff. ponytail: sin purga (sólo nacen al rechazar, volumen bajo);
  * si crecen, borrar por `expiresAt` (ya indexado).
  */
-const rejectionKey = (venueId: string, customerId: string, idempotencyKey: string) => ({
+const rejectionKey = (venueId: string, customerId: string | null, idempotencyKey: string) => ({
   organizationId: `venue:${venueId}`,
-  actorStaffId: `customer:${customerId}`,
+  // T7: el folio anónimo de «Nadie» no tiene cliente: la llave misma (`anon:` nunca choca con `customer:<id>`).
+  actorStaffId: customerId ? `customer:${customerId}` : `anon:${idempotencyKey}`,
   endpoint: 'POST /public/ordering/orders',
   idempotencyKey,
 })
@@ -372,34 +387,86 @@ export function emitOnlineOrderCreated(venueId: string, r: { orderId: string; or
   }
 }
 
+/** T3b: la acción de bitácora del aviso «se llenaron los folios por pagar» (una por hora y negocio). */
+const UNPAID_FOLIOS_FULL_ACTION = 'ONLINE_ORDERING_UNPAID_FOLIOS_FULL'
+
+/**
+ * T3b: tope propio de folios SIN dinero (R18: uno con abono no ocupa lugar), dentro del candado de admisión. Al llenarse, la tienda
+ * sigue abierta (se ve el menú) y se recupera sola: cada folio vence en 30 min o menos. El aviso al negocio sale una vez por hora,
+ * con su bitácora, en la misma transacción (que confirma: el rechazo se guarda), como `cuentaCancelada.ts`.
+ */
+async function admitFolio(tx: Prisma.TransactionClient, venueId: string, now: Date): Promise<void> {
+  const sinPagar = await tx.onlineOrder.count({ where: unpaidFoliosWhere(venueId) })
+  if (sinPagar < MAX_UNPAID_FOLIOS_PER_VENUE) return
+  const avisado = await tx.activityLog.findFirst({
+    where: { venueId, action: UNPAID_FOLIOS_FULL_ACTION, createdAt: { gte: new Date(now.getTime() - 3600_000) } },
+    select: { id: true },
+  })
+  if (!avisado) {
+    const data = { sinPagar, tope: MAX_UNPAID_FOLIOS_PER_VENUE }
+    await tx.activityLog.create({
+      data: { action: UNPAID_FOLIOS_FULL_ACTION, entity: 'Venue', entityId: venueId, venueId, data, createdAt: now },
+    })
+    const gerentes = await tx.staffVenue.findMany({
+      where: { venueId, active: true, role: { in: ROLES_QUE_RECIBEN_EL_AVISO } },
+      select: { staffId: true },
+      orderBy: { staffId: 'asc' },
+      take: MAX_GERENTES_AVISADOS,
+    })
+    if (gerentes.length === MAX_GERENTES_AVISADOS) {
+      logger.warn('⚠️ [OnlineOrdering] página llena de gerentes al avisar que se llenaron los folios; puede haber más sin aviso', {
+        venueId,
+        tope: MAX_GERENTES_AVISADOS,
+      })
+    }
+    if (gerentes.length > 0) {
+      await tx.notification.createMany({
+        data: gerentes.map(g => ({
+          recipientId: g.staffId,
+          venueId,
+          type: NotificationType.ALERT,
+          priority: NotificationPriority.HIGH,
+          channels: [NotificationChannel.IN_APP],
+          entityType: 'Venue',
+          entityId: venueId,
+          title: 'Se llenaron los pedidos por pagar',
+          message: `Hay ${sinPagar} pedidos en línea esperando pago en caja y la tienda no recibe más hasta que se cobren o venzan. Cancela los que no vengan desde «Por pagar».`,
+          metadata: data,
+        })),
+      })
+    }
+    logger.warn('🧾 [OnlineOrdering] se llenaron los folios por pagar', { venueId, ...data, gerentesAvisados: gerentes.length })
+  }
+  throw new ConflictError('Hay muchos pedidos esperando pago. Pide directo en caja.', 'TOO_MANY_UNPAID_FOLIOS')
+}
+
 export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: CreateOnlineOrderOptions): Promise<CreateOnlineOrderResult> {
   const now = input.now ?? new Date()
   const externalId = `web:${input.idempotencyKey}`
 
-  // 1. R6: pagar al recoger exige el teléfono PROBADO por el OTP de WhatsApp, y que sea el del pedido. Tener un teléfono en
-  //    la ficha no prueba nada.
-  if (!input.customerId || !input.verifiedPhone || !phonesMatch(input.verifiedPhone, input.customer.phone)) {
-    throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
-  }
-  const customerId = input.customerId
+  // 1. T7: la identidad sale de la sesión sólo si probó el teléfono del PEDIDO por el OTP de WhatsApp (R6: tenerlo en la ficha no
+  //    prueba nada); si no, el pedido es anónimo (cliente y teléfono nulos). Qué exige el modo se decide abajo, al leer la tienda:
+  //    la repetición se busca antes (Codex r1 #10).
+  const sessionPhone =
+    input.customerId && input.verifiedPhone && phonesMatch(input.verifiedPhone, input.customer.phone) ? input.verifiedPhone : null
+  const customerId = sessionPhone ? input.customerId : null
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
-  const phone = canonicalPhoneE164(input.verifiedPhone) ?? `+${input.verifiedPhone.replace(/\D/g, '')}`
+  const phone = sessionPhone ? (canonicalPhoneE164(sessionPhone) ?? `+${sessionPhone.replace(/\D/g, '')}`) : null
   // R5: el total que vio el comensal (el Zod de la ruta ya validó «206.00»).
   const expectedTotal = new Prisma.Decimal(input.expectedTotal)
-  // A1: la huella decide si una repetición es SU pedido (M-3); se guarda al crear.
+  // A1: la huella decide si una repetición es SU pedido (M-3); se guarda al crear. T7: la anónima lleva cliente y teléfono ''.
   const requestHash = onlineOrderRequestHash({
     venueId: input.venueId,
-    customerId,
+    customerId: customerId ?? '',
     paymentMode: input.paymentMode,
     expectedTotal,
     items: input.items,
     customerName: input.customer.name,
-    customerPhone: phone,
+    customerPhone: phone ?? '',
   })
 
   const trackingToken = generateTrackingToken()
-  const acceptDeadlineAt = new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000)
   const note = input.note?.trim() ? input.note.trim() : null
 
   const keyOfRejection = rejectionKey(input.venueId, customerId, input.idempotencyKey)
@@ -416,7 +483,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       select: { id: true },
     })
     if (card) throw final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
-    const replay = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
+    const replay = await findReplay(tx, input.venueId, externalId, requestHash)
     if (replay) return replay
     const rejected = await tx.idempotencyRequest.findUnique({
       where: { organizationId_actorStaffId_endpoint_idempotencyKey: keyOfRejection },
@@ -446,6 +513,9 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   //      esperara otra conexión del pool atascaría una ráfaga. No necesitan el candado: un envío que leyó datos viejos encuentra,
   //      ya bajo la llave, el rechazo que guardó su reintento.
   let quote: QuoteResult
+  /** Tienda híbrida: se copia del ajuste al pedido y nunca cambia (`false` = folio de «Nadie»). */
+  let requiresAcceptance: boolean
+  let acceptDeadlineAt: Date
   try {
     // 2. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
     await opts.assertCanCreate()
@@ -457,6 +527,12 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         status: state.status,
         reason: state.reason,
       })
+    }
+    // «Nadie» sólo con `=== false` (como `getAcceptingStatus`): un ajuste sin el campo es «Mi equipo».
+    requiresAcceptance = state.config.requiresAcceptance !== false
+    // R6: «Mi equipo» exige el teléfono probado. T7: dentro del try para que su `catch` busque antes SU pedido (pudo nacer folio).
+    if (requiresAcceptance && !customerId) {
+      throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
     }
     if (!state.config.acceptsPayAtPickup) {
       // S8: la tienda vieja abierta en una pestaña muestra este texto ante un código que no conoce. Si la tarjeta SÍ está disponible
@@ -482,7 +558,26 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         quote: toPublicQuote(quote),
       })
     }
+    if (requiresAcceptance) {
+      acceptDeadlineAt = new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000)
+    } else {
+      // Codex r3 #4: el cobro del POS da por «Pagado» un saldo cero sin registrar nada; un folio de $0 nunca pasaría a preparación.
+      if (quote.total.isZero()) throw new BadRequestError('Tu pedido no tiene costo: pídelo directo en caja.', 'ZERO_TOTAL')
+      // R23: mín(ahora + 30 min, cierre de la franja vigente) en la zona del negocio; sin cierre, sólo 30 min. Se guarda y no se
+      // recalcula si cambia el horario.
+      const venue = await prisma.venue.findUnique({ where: { id: input.venueId }, select: { timezone: true } })
+      const cierre = closesAt(state.config.hours, now, venue?.timezone || 'America/Mexico_City')
+      const plazo = new Date(now.getTime() + FOLIO_TIMEOUT_MINUTES * 60_000)
+      acceptDeadlineAt = cierre && cierre < plazo ? cierre : plazo
+    }
   } catch (error) {
+    // T7: el 401 de «Mi equipo» no es definitivo (la tienda pide el código y reintenta con la MISMA llave), así que no se guarda;
+    //     antes busca bajo la llave lo ya decidido: SU pedido, aunque haya nacido folio antes del cambio de modo.
+    if (error instanceof AppError && error.code === 'PHONE_VERIFICATION_REQUIRED') {
+      const before = await prisma.$transaction(tx => decidedBefore(tx), TX_OPTIONS)
+      if (before) return before
+      throw error
+    }
     // 5. Un rechazo definitivo se decide en una transacción corta, bajo la llave: si ya hay pedido es SU pedido (R8, aunque el plan
     //    venza o la tienda cierre); si ya hay rechazo guardado, ése; si no, se guarda éste. Cualquier otro error sale tal cual.
     if (!isDefinitiveRejection(error)) throw error
@@ -505,16 +600,18 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
         await lockAdmission(tx, input.venueId)
 
-        const again = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
+        const again = await findReplay(tx, input.venueId, externalId, requestHash)
         if (again) return again
 
-        // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente.
-        const pendingByPhone =
-          (await tx.onlineOrder.count({
-            where: { ...awaitingAcceptanceWhere(input.venueId), order: { customerPhone: phone } },
-          })) + (await tx.onlineOrderCharge.count({ where: { ...liveCardDraftsWhere(input.venueId, now), customerPhone: phone } }))
-        if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
-          throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+        // Fase 2: los pedidos por aceptar MÁS los borradores de tarjeta con su sesión vigente. T7: sólo con teléfono.
+        if (phone) {
+          const pendingByPhone =
+            (await tx.onlineOrder.count({
+              where: { ...awaitingAcceptanceWhere(input.venueId), order: { customerPhone: phone } },
+            })) + (await tx.onlineOrderCharge.count({ where: { ...liveCardDraftsWhere(input.venueId, now), customerPhone: phone } }))
+          if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
+            throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+          }
         }
         const pendingInVenue =
           (await tx.onlineOrder.count({ where: awaitingAcceptanceWhere(input.venueId) })) +
@@ -525,6 +622,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
             reason: 'TOO_BUSY',
           })
         }
+        if (!requiresAcceptance) await admitFolio(tx, input.venueId, now)
 
         orderNumber = await pickOrderNumber(tx, input.venueId)
       } catch (error) {
@@ -545,8 +643,8 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
         requestHash,
         acceptDeadlineAt,
         whatsappConsent: input.whatsappConsent === true,
-        requiresAcceptance: true, // R22: hasta T7, todo pedido nace en «Mi equipo»
-        channel: null,
+        requiresAcceptance,
+        channel: input.channel ?? null,
       })
       return {
         orderId: created.orderId,
@@ -561,12 +659,15 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     }, TX_OPTIONS)
     if (result instanceof AppError) throw result // Codex r3: el rechazo ya quedó guardado
 
-    if (!result.replay) emitOnlineOrderCreated(input.venueId, { orderId: result.orderId, orderNumber: result.orderNumber, externalId }, now)
+    // T7: un folio sin pagar no se anuncia: las apps viejas lo tratarían como cuenta nueva (sale de las listas hasta pagarse).
+    if (!result.replay && requiresAcceptance) {
+      emitOnlineOrderCreated(input.venueId, { orderId: result.orderId, orderNumber: result.orderNumber, externalId }, now)
+    }
     return result
   } catch (error) {
     // Dos peticiones con la misma llave a la vez: gana una, la otra recibe al ganador (si es del mismo cliente, R8).
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const again = await findReplay(prisma, input.venueId, externalId, customerId, requestHash)
+      const again = await findReplay(prisma, input.venueId, externalId, requestHash)
       if (again) return again
     }
     throw error

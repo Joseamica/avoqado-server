@@ -79,6 +79,10 @@ export const unpaidFoliosWhere = (venueId: string) => ({
   requiresAcceptance: false,
   order: { paymentStatus: PaymentStatus.PENDING },
 })
+/** Tienda híbrida (R23): un folio vence a los 30 min o al cierre de la franja vigente, lo que pase primero. */
+export const FOLIO_TIMEOUT_MINUTES = 30
+/** Tienda híbrida (T3b): folios sin pagar por negocio; el siguiente recibe 409 y la tienda sigue abierta. El doble del tope de hoy. */
+export const MAX_UNPAID_FOLIOS_PER_VENUE = 60
 /** Fase 2: minutos que vive la sesión de pago con tarjeta antes de darse por abandonada. */
 export const CARD_CHECKOUT_TTL_MINUTES = 30
 /** Fase 2: un cargo atorado (p. ej. `CAPTURING`) más de estos minutos levanta alerta en el conciliador. */

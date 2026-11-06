@@ -167,9 +167,9 @@ export async function salirSiLaLlaveYaTienePago(
 }
 
 /** Pedidos en línea 1c (S1): quién recibe el aviso de un pedido web cancelado que después se cobró. */
-const ROLES_QUE_RECIBEN_EL_AVISO: StaffRole[] = [StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]
+export const ROLES_QUE_RECIBEN_EL_AVISO: StaffRole[] = [StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]
 /** Tope del reparto del aviso (regla de consultas acotadas): un negocio real tiene unos cuantos gerentes, no cientos. */
-const MAX_GERENTES_AVISADOS = 50
+export const MAX_GERENTES_AVISADOS = 50
 /**
  * Lo que `conciliarPedidoEnLinea` LEE de la cuenta al reabrirla. Va fuera de la llamada a propósito: la guarda de escritores del
  * contrato de precio (`orderContratoDePrecioWriters.test.ts`) busca `contratoDePrecio:` dentro de cada `order.update`, y aquí sólo

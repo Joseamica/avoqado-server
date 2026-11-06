@@ -147,9 +147,10 @@ export async function postOrder(req: Request, res: Response) {
       items: any[]
       paymentMode: 'PAY_AT_PICKUP' | 'CARD_ONLINE'
       expectedTotal: string
-      customer: { name: string; phone: string; email?: string }
+      customer: { name: string; phone?: string; email?: string }
       note?: string
       whatsappConsent?: boolean
+      channel?: 'QR' | 'LINK'
     }
     // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
     const opts = { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) }
@@ -163,7 +164,8 @@ export async function postOrder(req: Request, res: Response) {
           idempotencyKey: key,
           items: body.items,
           expectedTotal: body.expectedTotal,
-          customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+          // R7: con tarjeta el esquema exige el teléfono. R29: el borrador de tarjeta no guarda canal.
+          customer: { name: body.customer.name, phone: body.customer.phone as string, email: body.customer.email ?? null },
           note: body.note ?? null,
           whatsappConsent: body.whatsappConsent === true,
         },
@@ -172,8 +174,9 @@ export async function postOrder(req: Request, res: Response) {
       return res.status(draft.replay ? 200 : 201).json({ success: true, data: draft })
     }
 
-    // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. El servicio
-    // exige que el teléfono del pedido sea ése; sin sesión responde 401 PHONE_VERIFICATION_REQUIRED.
+    // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. En «Mi equipo»
+    // el servicio exige que el teléfono del pedido sea ése (sin sesión, 401 PHONE_VERIFICATION_REQUIRED); en «Nadie» basta el
+    // nombre y, sin sesión que coincida, el folio nace anónimo (T7).
     const auth = (req as any).customerAuth as CustomerAuthContext | null
 
     const result = await createOnlineOrder(
@@ -183,9 +186,10 @@ export async function postOrder(req: Request, res: Response) {
         items: body.items,
         paymentMode: 'PAY_AT_PICKUP',
         expectedTotal: body.expectedTotal,
-        customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+        customer: { name: body.customer.name, phone: body.customer.phone ?? null, email: body.customer.email ?? null },
         customerId: auth?.customerId ?? null,
         verifiedPhone: auth?.verifiedPhone ?? null,
+        channel: body.channel ?? null,
         note: body.note ?? null,
         whatsappConsent: body.whatsappConsent === true,
       },

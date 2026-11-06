@@ -73,6 +73,18 @@ describe('POST /orders despacha por paymentMode', () => {
     expect(createCardOnlineDraft).not.toHaveBeenCalled()
   })
 
+  it('T7: PAY_AT_PICKUP pasa el canal (QR o liga) y acepta el pedido sin teléfono («Nadie»)', async () => {
+    ;(createOnlineOrder as jest.Mock).mockClear()
+    const r = req('PAY_AT_PICKUP')
+    r.body.channel = 'QR'
+    r.body.customer = { name: 'María' }
+    await postOrder(r, res())
+    expect(createOnlineOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'QR', customer: { name: 'María', phone: null, email: null }, customerId: null }),
+      { assertCanCreate: expect.any(Function) },
+    )
+  })
+
   it('502 CARD_PROVIDER_UNAVAILABLE conserva su código: la tienda sabe que puede reintentar', async () => {
     ;(createCardOnlineDraft as jest.Mock).mockRejectedValueOnce(
       new AppError('No pudimos abrir la página de pago.', 502, true, 'CARD_PROVIDER_UNAVAILABLE'),
