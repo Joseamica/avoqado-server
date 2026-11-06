@@ -1229,6 +1229,53 @@ describe('getTrackingByToken', () => {
     for (const campo of ['customerPhone', 'customerEmail', 'customerName']) expect(cuenta).not.toHaveProperty(campo)
   })
 
+  const folioNadie = (over: Record<string, any> = {}, paymentStatus = 'PENDING') =>
+    ({
+      status: 'PENDING_ACCEPTANCE',
+      paymentMode: 'PAY_AT_PICKUP',
+      requiresAcceptance: false,
+      channel: 'QR',
+      acceptDeadlineAt: NOW,
+      estimatedReadyAt: null,
+      rejectReason: null,
+      createdAt: NOW,
+      venueId: 'v1',
+      order: {
+        orderNumber: 'W-0042',
+        total: D('93.00'),
+        paymentStatus,
+        items: [{ productName: 'Flautas', quantity: 1, notes: null, modifiers: [] }],
+        venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
+      },
+      ...over,
+    }) as any
+
+  it('T15: el seguimiento trae requiresAcceptance y channel', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie())
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ requiresAcceptance: false, channel: 'QR' })
+    expect((prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select).toMatchObject({ requiresAcceptance: true, channel: true })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({ requiresAcceptance: true, channel: null }))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ requiresAcceptance: true, channel: null })
+  })
+
+  it('T15 (fija lo de hoy): en «Nadie» canCancel es true mientras no se paga y false con un abono', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie())
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: true })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PARTIAL'))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PAID'))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ canCancel: false })
+  })
+
+  it('T15 (fija lo de hoy): un folio pagado trae paid true, su folio y sus renglones', async () => {
+    prismaMock.onlineOrder.findUnique.mockResolvedValue(folioNadie({}, 'PAID'))
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({
+      paid: true,
+      orderNumber: 'W-0042',
+      items: [{ name: 'Flautas', quantity: 1 }],
+    })
+  })
+
   it('1b: sin zona en el negocio, el seguimiento usa America/Mexico_City; sin contacto, nulos', async () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue({
       status: 'ACCEPTED',

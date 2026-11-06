@@ -720,6 +720,10 @@ export interface PublicTracking {
   rejectReason: OnlineOrderRejectReason | null
   createdAt: string
   canCancel: boolean
+  /** T15: `false` = folio de «Nadie» (nadie lo acepta). Opcional para quien ya lee esta respuesta. */
+  requiresAcceptance?: boolean
+  /** T15: por dónde llegó el pedido; `null` con tarjeta o si no se midió. */
+  channel?: 'QR' | 'LINK' | null
 }
 
 const VENUE_PUBLIC_SELECT = {
@@ -848,6 +852,8 @@ async function draftTracking(token: string): Promise<PublicTracking | null> {
     rejectReason: null,
     createdAt: c.createdAt.toISOString(),
     canCancel: false,
+    requiresAcceptance: true, // el borrador de tarjeta es de «Mi equipo»
+    channel: null,
   }
 }
 
@@ -857,6 +863,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     select: {
       status: true,
       paymentMode: true,
+      requiresAcceptance: true,
+      channel: true,
       acceptDeadlineAt: true,
       estimatedReadyAt: true,
       rejectReason: true,
@@ -907,5 +915,7 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
       row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
         ? pending && row.charge?.status === OnlineOrderChargeStatus.AUTHORIZED
         : pending,
+    requiresAcceptance: row.requiresAcceptance,
+    channel: (row.channel as 'QR' | 'LINK' | null) ?? null,
   }
 }
