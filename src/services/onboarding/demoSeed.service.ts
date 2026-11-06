@@ -1219,7 +1219,8 @@ async function seedTablesAndAreas(venueId: string) {
       data: {
         venueId,
         areaId: area.id,
-        number: `Mesa ${i}`,
+        // El número es el número: las apps y el panel le anteponen «Mesa». Con «Mesa 1» se leía «Mesa Mesa 1» (D20, 5-nov).
+        number: String(i),
         capacity: i <= 6 ? 4 : 6, // Mesas 1-6 para 4, 7-10 para 6
         qrCode: `DEMO-${venueId.substring(0, 8)}-T${i}`,
         active: true,

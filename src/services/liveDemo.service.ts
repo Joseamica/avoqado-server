@@ -292,14 +292,14 @@ async function createLiveDemoSession(sessionId: string): Promise<LiveDemoSession
  *
  * @param venueId - Venue ID to enable features for
  */
-async function enableAllFeaturesForLiveDemo(venueId: string): Promise<void> {
+export async function enableAllFeaturesForLiveDemo(venueId: string): Promise<void> {
   try {
     logger.info(`🎯 Enabling all features for live demo venue ${venueId}`)
 
-    // Get all active features
-    const features = await prisma.feature.findMany({
-      where: { active: true },
-    })
+    // Get all active features — except PLAN_PRO: the demo carries ONE plan, Premium, which already includes everything.
+    // 🔴 D21 (5-nov): with both plans on, the menu said Premium and «Tu plan» said Pro; two live plans is a state the rest
+    // of the server refuses («no se concede un plan encima de otro», concederPlanDecision).
+    const features = (await prisma.feature.findMany({ where: { active: true } })).filter(f => f.code !== 'PLAN_PRO')
 
     logger.info(`📦 Found ${features.length} active features to enable`)
 
