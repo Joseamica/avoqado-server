@@ -168,6 +168,11 @@ describe('T12 · listFolios contra Postgres', () => {
 
     expect(numeros(r.toPay)).toEqual([sinDinero.orderId, conAbono.orderId])
     expect(r.toPay[1]).toMatchObject({ paymentStatus: 'PARTIAL', remaining: 50, total: 100, paidAt: null })
+    // R79: con un abono el seguimiento público dice cuánto se pagó y cuánto falta (pesos, sin reembolsos)
+    const tokenAbono = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: conAbono.onlineOrderId } })).trackingToken
+    expect(await getTrackingByToken(tokenAbono)).toMatchObject({ paid: false, paidAt: null, amountPaid: 50, remaining: 50, total: 100 })
+    const tokenSin = (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: sinDinero.onlineOrderId } })).trackingToken
+    expect(await getTrackingByToken(tokenSin)).toMatchObject({ amountPaid: 0, remaining: 100 })
     // T18c: precios por renglón en la misma lectura de la página
     expect(r.toPay[0].items[0]).toMatchObject({ name: 'Flautas', quantity: 1, unitPrice: 100, total: 100 })
     // T18b: el folio saldado trae la hora del cobro real (Payment COMPLETED), en la misma lectura de la página

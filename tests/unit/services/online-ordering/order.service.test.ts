@@ -370,9 +370,40 @@ describe('createOnlineOrder', () => {
     expect(assertCanCreate).not.toHaveBeenCalled()
     expect(getAcceptingStatus).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
-    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    // R79: la ÚNICA lectura extra es la repetición por la llave (indexada); nada más, y sin pedido con esa llave sigue el 401.
+    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1)
+    expect((prismaMock.order.findUnique.mock.calls[0][0] as any).where).toEqual({
+      venueId_externalId: { venueId: 'v1', externalId: expect.stringMatching(/^web:/) },
+    })
     expect(prismaMock.idempotencyRequest.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('R79: la tienda pasó a «Mi equipo» y llega el reintento anónimo con la MISMA llave y pedido ⇒ recibe SU folio, no el 401', async () => {
+    const req = input({ customerId: null })
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })
+    const hash = onlineOrderRequestHash({
+      venueId: 'v1',
+      customerId: '',
+      paymentMode: req.paymentMode,
+      expectedTotal: new Prisma.Decimal(req.expectedTotal),
+      items: req.items,
+      customerName: req.customer.name,
+      customerPhone: '',
+    })
+    prismaMock.order.findUnique.mockResolvedValue({
+      id: 'ord1',
+      orderNumber: 'W-0042',
+      total: D('93.00'),
+      onlineOrder: { id: 'oo1', status: 'PENDING_ACCEPTANCE', trackingToken: 'T'.repeat(32), acceptDeadlineAt: NOW, requestHash: hash },
+    } as any)
+    await expect(createOnlineOrder(req, PUEDE_CREAR)).resolves.toMatchObject({
+      orderNumber: 'W-0042',
+      trackingToken: 'T'.repeat(32),
+      replay: true,
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
@@ -1065,7 +1096,7 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
     expect(online.requestHash).toBe(huella())
   })
 
-  it('R47 (reemplaza la repetición antes del modo de T7): crea en «Nadie», el negocio pasa a «Mi equipo» y la misma llave sin sesión ⇒ 401 sin leer la llave ni guardar nada', async () => {
+  it('R79 (reabre R47 sólo en esto): crea en «Nadie», el negocio pasa a «Mi equipo» y la misma llave y pedido sin sesión ⇒ recibe SU folio (una lectura por la llave), sin crear ni guardar nada', async () => {
     const primero = await createOnlineOrder(anon(), PUEDE_CREAR)
     const guardado = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
 
@@ -1084,8 +1115,12 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       }) as any,
     )
     prismaMock.idempotencyRequest.create.mockClear()
-    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
-    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).resolves.toMatchObject({
+      orderNumber: primero.orderNumber,
+      trackingToken: primero.trackingToken,
+      replay: true,
+    })
+    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1)
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
   })
@@ -1499,15 +1534,33 @@ describe('getTrackingByToken', () => {
     const at = new Date('2026-11-06T17:05:00.000Z')
     prismaMock.onlineOrder.findUnique.mockResolvedValue({
       ...base,
-      order: { ...base.order, customerName: 'María G.', payments: [{ createdAt: at }] },
+      order: { ...base.order, customerName: 'María G.', payments: [{ createdAt: at, amount: D('93.00') }] },
     })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: true, paidAt: at.toISOString() })
     const pagos = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select.payments
     expect(pagos).toMatchObject({ // un reembolso posterior NO es la hora de pago: sólo cobros (no REFUND)
       // type es nullable: un cobro con type NULL cuenta (como en orderBalance)
-      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1 })
+      where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 50 })
     prismaMock.onlineOrder.findUnique.mockResolvedValue({ ...base, order: { ...base.order, customerName: null, payments: [] } })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: null, paidAt: null })
+  })
+
+  it('R79: con un abono el seguimiento trae amountPaid y remaining en pesos (sin negativos); sin cobros, 0 y el total', async () => {
+    const base = folioNadie({}, 'PARTIAL')
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      ...base,
+      order: { ...base.order, customerName: 'María G.', payments: [{ createdAt: NOW, amount: D('40.00') }, { createdAt: NOW, amount: D('13.50') }] },
+    })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ paid: false, paidAt: null, amountPaid: 53.5, remaining: 39.5 })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({ ...base, order: { ...base.order, customerName: 'M', payments: [] } })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 0, remaining: 93 })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({
+      ...base,
+      order: { ...base.order, customerName: 'M', payments: [{ createdAt: NOW, amount: D('120.00') }] },
+    })
+    await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ amountPaid: 120, remaining: 0 })
+    const pagos = (prismaMock.onlineOrder.findUnique.mock.calls[0][0] as any).select.order.select.payments
+    expect(pagos).toMatchObject({ select: { amount: true }, take: 50 })
   })
 
   it('T18b: «Mi equipo» y tarjeta traen los mismos campos (aditivos)', async () => {
@@ -1515,7 +1568,7 @@ describe('getTrackingByToken', () => {
     const at = new Date('2026-11-06T17:05:00.000Z')
     prismaMock.onlineOrder.findUnique.mockResolvedValue({
       ...base,
-      order: { ...base.order, customerName: 'Luis', payments: [{ createdAt: at }] },
+      order: { ...base.order, customerName: 'Luis', payments: [{ createdAt: at, amount: D('93.00') }] },
     })
     await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ customerName: 'Luis', paidAt: at.toISOString() })
   })
@@ -1559,6 +1612,7 @@ describe('getTrackingByToken', () => {
         orderNumber: 'WABCE',
         total: D('93.00'),
         paymentStatus: 'PENDING',
+        payments: [],
         items: [],
         venue: { name: 'X', slug: 'x', timezone: '', address: null, city: null, state: null, zipCode: null, phone: null },
       },
@@ -1616,7 +1670,7 @@ describe('getTrackingByToken', () => {
         createdAt: NOW,
         venueId: 'v1',
         charge: { status: 'RELEASING' },
-        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', items: [], venue: VENUE },
+        order: { orderNumber: 'WABCD', total: D('250.00'), paymentStatus: 'PENDING', payments: [], items: [], venue: VENUE },
       } as any)
       await expect(getTrackingByToken('T'.repeat(32))).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'RELEASING' })
     })

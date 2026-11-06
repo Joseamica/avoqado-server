@@ -458,9 +458,6 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   // llave): sin él no se sabe si se puede pedir sin sesión. Ni plan, ni tienda, ni la llave, y nunca una fila de rechazo `anon:` (la
   // tienda pide el código y reintenta con la MISMA llave). En «Nadie» esa misma lectura es la de la tienda (paso 3).
   const ajustesSinSesion = customerId ? undefined : await getSettings(input.venueId)
-  if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
-    throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
-  }
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
   const phone = sessionPhone ? (canonicalPhoneE164(sessionPhone) ?? `+${sessionPhone.replace(/\D/g, '')}`) : null
@@ -476,6 +473,18 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     customerName: input.customer.name,
     customerPhone: phone ?? '',
   })
+
+  if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
+    // R79 (Codex fase 2 r1 #1): un folio creado en «Nadie» cuya respuesta se perdió, y la tienda pasó a «Mi equipo» antes del
+    // reintento: la MISMA llave con el MISMO pedido recibe SU folio (la misma lectura indexada de la repetición normal), no el 401.
+    // Es la única lectura extra y sólo en este camino; sin pedido con esa llave, 401 como siempre.
+    // Un pedido con esa llave pero OTRA huella (p. ej. nació con sesión, R47 T7a) sigue siendo 401, nunca 409.
+    const folio = await findReplay(prisma, input.venueId, externalId, requestHash).catch(e =>
+      e instanceof AppError && e.code === 'IDEMPOTENCY_KEY_CONFLICT' ? null : Promise.reject(e),
+    )
+    if (folio) return folio
+    throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
+  }
 
   const trackingToken = generateTrackingToken()
   const note = input.note?.trim() ? input.note.trim() : null
@@ -746,6 +755,9 @@ export interface PublicTracking {
   customerName?: string | null
   /** T18b: ISO del cobro COMPLETED más reciente de la cuenta pagada; `null` si no está pagada. */
   paidAt?: string | null
+  /** R79: lo cobrado (cobros COMPLETED que no son REFUND) y lo que falta, en pesos; con abono el folio no vence (R18). Opcionales. */
+  amountPaid?: number
+  remaining?: number
   estimatedReadyAt: string | null
   acceptDeadlineAt: string
   rejectReason: OnlineOrderRejectReason | null
@@ -909,7 +921,7 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
           paymentStatus: true,
           customerName: true,
           payments: { // `type` es nullable y `<> 'REFUND'` también descarta NULL; orderBalance cuenta NULL como cobro.
-          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } },
+          where: { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }, orderBy: { createdAt: 'desc' }, take: 50, select: { createdAt: true, amount: true } },
           venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,
@@ -928,6 +940,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     },
   })
   if (!row) return null
+  // R79: hasta 50 cobros recientes (un folio no tiene tantos); la suma es de los mismos cobros que dan `paidAt`.
+  const paidSoFar = row.order.payments.reduce((sum, p) => sum.plus(p.amount ?? 0), new Prisma.Decimal(0)).toDecimalPlaces(2)
   const pending = row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING
   return {
     orderNumber: row.order.orderNumber,
@@ -949,6 +963,8 @@ async function orderTracking(token: string): Promise<PublicTracking | null> {
     })),
     total: Number(new Prisma.Decimal(row.order.total).toFixed(2)),
     paid: row.order.paymentStatus === PaymentStatus.PAID,
+    amountPaid: paidSoFar.toNumber(),
+    remaining: Prisma.Decimal.max(new Prisma.Decimal(row.order.total).minus(paidSoFar), 0).toDecimalPlaces(2).toNumber(),
     customerName: row.order.customerName ?? null,
     paidAt: row.order.paymentStatus === PaymentStatus.PAID ? (row.order.payments[0]?.createdAt.toISOString() ?? null) : null,
     estimatedReadyAt: row.estimatedReadyAt ? row.estimatedReadyAt.toISOString() : null,
