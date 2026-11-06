@@ -101,7 +101,11 @@ const likeContaining = (text: string) => `%${text.replace(/[\\%_]/g, '\\$&')}%`
  * The clients «Clientes» lists, as a filter over `o`: the client rule, the hidden ones out — or only them (ruling 39) —
  * and the name search, all in the database, before the page and in the total.
  */
-function clientsFilter(teamOrgId: string | null, now: Date, opts: { onlyHidden: boolean; q?: string; conAltas?: boolean }): Prisma.Sql {
+export function clientsFilter(
+  teamOrgId: string | null,
+  now: Date,
+  opts: { onlyHidden: boolean; q?: string; conAltas?: boolean },
+): Prisma.Sql {
   const hidden = Prisma.sql`EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")`
   // The stalled signups (P1 = A) join only when the request asks; `clientSql` itself never changes (campaigns read it).
   const universe = opts.conAltas

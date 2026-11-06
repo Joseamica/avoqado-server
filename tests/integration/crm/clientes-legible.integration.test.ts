@@ -27,7 +27,7 @@ import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { getVenueBaseTier, getVenuePlanInfo } from '@/services/access/basePlan.service'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { clientFactsLateral, concesionComercialSql, ventanaDeAccesoSql } from '@/services/crm/clientFacts'
-import { getClientLive, listClients } from '@/services/crm/clients.service'
+import { clientsFilter, getClientLive, listClients } from '@/services/crm/clients.service'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `cfacts${Date.now()}`
@@ -44,8 +44,6 @@ let staffId: string
 let planProId: string
 let planPremiumId: string
 let n = 0
-let teamCreated = false
-let teamProgressCreated: string | null = null
 
 type Facts = {
   id: string
@@ -340,8 +338,6 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
   afterAll(async () => {
     jest.useRealTimers()
     // By the ids this file created, never a `where` that could be undefined.
-    if (teamProgressCreated) await prisma.onboardingProgress.deleteMany({ where: { organizationId: teamProgressCreated } })
-    if (teamCreated) await prisma.crmTeam.deleteMany({ where: { key: 'default', organizationId: { in: organizationIds } } })
     if (organizationIds.length) await prisma.crmHiddenClient.deleteMany({ where: { organizationId: { in: organizationIds } } })
     if (hybridContractIds.length) {
       await prisma.hybridContract.updateMany({ where: { id: { in: hybridContractIds } }, data: { endedAt: new Date() } })
@@ -666,7 +662,8 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
   // ── Las altas sin tarjeta entran a «Clientes» (Tarea 3) ───────────────────────────────────────────────────────────
 
   describe('altas sin tarjeta en «Clientes»', () => {
-    const superadmin = { staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true } as unknown as CrmAccess
+    // Lazy: `staffId` is set in `beforeAll`.
+    const sa = () => ({ staffId, isSuperadmin: true, ver: 'todos', editar: 'todos', configurar: true }) as unknown as CrmAccess
     const nameOf = (id: string) => prisma.organization.findUniqueOrThrow({ where: { id }, select: { name: true } }).then(o => o.name)
     /** Ids of the organizations this file made that «Clientes» lists, newest first, walking every page. */
     async function listed(filters: { altas?: boolean; ocultos?: boolean } = {}) {
@@ -674,7 +671,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       let cursor: string | undefined
       let total = 0
       do {
-        const page = await listClients(superadmin, { ...filters, q: suffix, limit: 100, cursor })
+        const page = await listClients(sa(), { ...filters, q: suffix, limit: 100, cursor })
         out.push(...page.rows.map(r => r.id))
         total = page.total
         cursor = page.nextCursor ?? undefined
@@ -703,7 +700,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
     it('una alta de la landing sin tarjeta sale en la lista con altas=1 y en getClientLive', async () => {
       const { organizationId } = await altaPropia('landing')
       expect((await listed({ altas: true })).ids).toContain(organizationId)
-      await expect(getClientLive(superadmin, organizationId, NOW)).resolves.toBeDefined()
+      await expect(getClientLive(sa(), organizationId, NOW)).resolves.toBeDefined()
     })
 
     it('una alta directa del panel sin tarjeta también', async () => {
@@ -714,7 +711,7 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
     it('🔴 una organización hecha por el superadmin sin cobros ni progreso NO sale', async () => {
       const { organizationId } = await orgWithVenue()
       expect((await listed({ altas: true })).ids).not.toContain(organizationId)
-      await expect(getClientLive(superadmin, organizationId, NOW)).rejects.toMatchObject({ code: 'CRM_NO_ES_CLIENTE' })
+      await expect(getClientLive(sa(), organizationId, NOW)).rejects.toMatchObject({ code: 'CRM_NO_ES_CLIENTE' })
     })
 
     it('🔴 una alta con progreso pero sin acquisitionSource (hecha a mano) NO sale', async () => {
@@ -735,24 +732,17 @@ describe('Los hechos de cada organización en una sola expresión (Postgres)', (
       expect((await listed({ altas: true, ocultos: true })).ids).toContain(organizationId)
     })
 
-    it('🔴 la organización del equipo nunca sale', async () => {
-      let team = await prisma.crmTeam.findUnique({ where: { key: 'default' }, select: { organizationId: true } })
-      if (!team) {
-        const organizationId = await org()
-        const venueId = await venue(organizationId)
-        team = await prisma.crmTeam.create({ data: { key: 'default', organizationId, venueId }, select: { organizationId: true } })
-        teamCreated = true
-      }
-      const has = await prisma.onboardingProgress.findUnique({ where: { organizationId: team.organizationId }, select: { id: true } })
-      if (!has) {
-        await prisma.onboardingProgress.create({
-          data: { organizationId: team.organizationId, completedSteps: [], acquisitionSource: 'landing' },
-        })
-        teamProgressCreated = team.organizationId
-      }
-      const name = await nameOf(team.organizationId)
-      const page = await listClients(superadmin, { altas: true, q: name, limit: 100 })
-      expect(page.rows.map(r => r.id)).not.toContain(team.organizationId)
+    it('🔴 la organización del equipo nunca sale (aunque tenga la forma de un alta sin tarjeta)', async () => {
+      // The test's own organization, with the 🟠 shape, is injected as the team: never touches the shared `CrmTeam` row.
+      const { organizationId } = await altaPropia()
+      const ids = async (teamOrgId: string | null) =>
+        (
+          await prisma.$queryRaw<Array<{ id: string }>>(
+            Prisma.sql`SELECT o."id" FROM "Organization" o WHERE o."id" = ${organizationId} AND ${clientsFilter(teamOrgId, NOW, { onlyHidden: false, conAltas: true })}`,
+          )
+        ).map(r => r.id)
+      expect(await ids(null)).toEqual([organizationId]) // control: with no team it does come out
+      expect(await ids(organizationId)).toEqual([])
     })
 
     it('al activar su plan (fila con Stripe) sigue saliendo si es cliente por clientSql, y deja de ser ALTA_SIN_TARJETA', async () => {
