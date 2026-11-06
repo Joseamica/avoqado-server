@@ -18,6 +18,7 @@ import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { ensureCrmDefaults, lockEditableTx, touchNoEarlierTx } from './accounts.service'
+import { cambioAlEditar, mismoTexto } from './loQueSeVio'
 import { scopeWhere, type CrmAccess } from './access.service'
 import type { MotivoDelAlta, Nivel, UsaEscrito } from './clientCodes'
 import { altaPendienteSql } from './clientFacts'
@@ -327,11 +328,6 @@ export async function ensureClientAccount(access: CrmAccess, organizationId: str
   }
   return result
 }
-
-/** «Lo que viste» against what is saved: trimmed, and '' is the same as null. */
-const mismoTexto = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim() === (b ?? '').trim()
-/** The editor's copy is stale: someone saved something else while it was open (C1 redesign: the SERVER decides, not the browser). */
-const cambioAlEditar = () => new ConflictError('Cambió mientras lo editabas: revisa y guarda otra vez.', 'CRM_CAMBIO_AL_EDITAR')
 
 /**
  * «✋ a mano» en Usa (C1, tarea 7): a seller with «Editar» writes what the client uses, with the reason, or clears it

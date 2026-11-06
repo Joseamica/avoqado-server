@@ -19,6 +19,8 @@ jest.mock('@/services/integrations/hubspot.client', () => ({
   isHubspotEnabled: () => false,
 }))
 
+import type { CrmAccess } from '@/services/crm/access.service'
+import { updateAccount } from '@/services/crm/ficha.service'
 import { applyEntry, recordSignupOutcome, saveLandingEntry } from '@/services/crm/inbound.service'
 import prisma from '@/utils/prismaClient'
 
@@ -31,8 +33,38 @@ const nextPhone = () => `55${PHONE_BASE}${String(++phoneSeq).padStart(2, '0')}`
 const accountIds: string[] = []
 const emails: string[] = []
 const stageIds: string[] = []
+const staffIds: string[] = []
 
-const form = (email: string) => ({
+/** Un vendedor que ve y edita todo (o sólo lo suyo), sobre una persona de verdad (los eventos llevan su id). */
+const seller = (staffId: string, over: Partial<CrmAccess> = {}): CrmAccess =>
+  ({
+    staffId,
+    isSuperadmin: false,
+    ver: 'todos',
+    editar: 'todos',
+    contactar: true,
+    exportar: false,
+    ventas: false,
+    cerrar: false,
+    bajas: false,
+    plantillas: false,
+    preparar: false,
+    mandar: false,
+    verCampanas: false,
+    equipo: false,
+    configurar: false,
+    campanas: false,
+    admin: false,
+    ...over,
+  }) as CrmAccess
+
+async function vendedor(alias: string) {
+  const { id } = await prisma.staff.create({ data: { email: `${alias}-${suffix}@test.mx`, firstName: alias, lastName: 'Ficha' } })
+  staffIds.push(id)
+  return id
+}
+
+const form = (email: string, over: Record<string, unknown> = {}) => ({
   firstName: 'Ana',
   lastName: 'Ficha',
   phone: nextPhone(),
@@ -43,6 +75,7 @@ const form = (email: string) => ({
   revenue: '500k-1m',
   modules: 'mesas',
   source: 'landing_restaurantes',
+  ...over,
 })
 
 async function stage() {
@@ -68,9 +101,9 @@ async function accountWithPerson(email: string, over: Record<string, unknown> = 
   return { accountId: account.id, contactId: account.contacts[0].id }
 }
 
-async function landingEntry(email: string) {
+async function landingEntry(email: string, receivedAt = new Date()) {
   emails.push(email)
-  const saved = await saveLandingEntry(form(email))
+  const saved = await saveLandingEntry(form(email), receivedAt)
   expect(saved).not.toBeNull()
   await recordSignupOutcome(saved!.entryId, null)
   return saved!.entryId
@@ -96,6 +129,10 @@ afterAll(async () => {
   }
   if (accountIds.length) await prisma.crmAccount.deleteMany({ where: { id: { in: accountIds } } })
   if (stageIds.length) await prisma.crmStage.deleteMany({ where: { id: { in: stageIds } } })
+  if (staffIds.length) {
+    await prisma.activityLog.deleteMany({ where: { staffId: { in: staffIds } } })
+    await prisma.staff.deleteMany({ where: { id: { in: staffIds } } })
+  }
 })
 
 describe('Bloque 0A: el buscador de identidad revalida bajo el candado que la persona siga en la cuenta', () => {
@@ -131,5 +168,76 @@ describe('Bloque 0A: el buscador de identidad revalida bajo el candado que la pe
     await applyEntry(entryId)
 
     expect(await prisma.crmInboundEntry.findUniqueOrThrow({ where: { id: entryId } })).toMatchObject({ accountId })
+  })
+})
+
+describe('Tarea 1 · PATCH /crm/accounts/:id: los datos del negocio con «lo que se vio»', () => {
+  it('PATCH giro con vio correcto → guardado, un ACCOUNT_EDIT {campo, de, a} y lastTouchAt movido', async () => {
+    const ana = await vendedor('ana-t1')
+    const { accountId } = await accountWithPerson(`t1a-${suffix}@test.mx`, {
+      giro: 'Cafetería',
+      lastTouchAt: new Date(Date.now() - 86_400_000),
+    })
+
+    await expect(updateAccount(seller(ana), accountId, { cambios: { giro: 'Bar' }, vio: { giro: 'Cafetería' } })).resolves.toEqual({
+      accountId,
+      cambiados: ['giro'],
+    })
+
+    const account = await prisma.crmAccount.findUniqueOrThrow({ where: { id: accountId } })
+    expect(account.giro).toBe('Bar')
+    expect(account.lastTouchAt.getTime()).toBeGreaterThan(Date.now() - 60_000)
+    const events = await prisma.crmTimelineEvent.findMany({ where: { accountId, kind: 'ACCOUNT_EDIT' }, take: 5 })
+    expect(events).toEqual([expect.objectContaining({ actorStaffId: ana, data: { campo: 'giro', de: 'Cafetería', a: 'Bar' } })])
+  })
+
+  it('🔴 otro escritor (la rutina de WhatsApp) llena el giro vacío y luego el vendedor guarda con vio null → 409 con ahora', async () => {
+    const ana = await vendedor('ana-t1b')
+    const { accountId } = await accountWithPerson(`t1b-${suffix}@test.mx`, { giro: null })
+    // Lo que `upsertWhatsapp` escribe bajo el candado de la fila: el giro que estaba vacío.
+    await prisma.crmAccount.update({ where: { id: accountId }, data: { giro: 'Barbería' } })
+
+    await expect(updateAccount(seller(ana), accountId, { cambios: { giro: 'Bar' }, vio: { giro: null } })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CAMBIO_AL_EDITAR',
+      details: { ahora: { giro: 'Barbería' } },
+    })
+    expect((await prisma.crmAccount.findUniqueOrThrow({ where: { id: accountId } })).giro).toBe('Barbería')
+  })
+
+  it('🔴 tras editar sucursales, una entrada de la landing recibida ANTES no cambia giro ni sucursales; una recibida DESPUÉS sí', async () => {
+    const ana = await vendedor('ana-t1c')
+    const email = `t1c-${suffix}@test.mx`
+    const { accountId } = await accountWithPerson(email, { giro: 'Bar', sucursales: 1 })
+    const vieja = await landingEntry(email, new Date(Date.now() - 60_000))
+
+    await updateAccount(seller(ana), accountId, { cambios: { sucursales: 5 }, vio: { sucursales: 1 } })
+    await applyEntry(vieja)
+    expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: accountId } })).toMatchObject({ giro: 'Bar', sucursales: 5 })
+
+    const nueva = await landingEntry(email, new Date(Date.now() + 1_000))
+    await applyEntry(nueva)
+    expect(await prisma.crmAccount.findUniqueOrThrow({ where: { id: accountId } })).toMatchObject({ giro: 'Cafetería', sucursales: 2 })
+  })
+
+  it('cuenta borrada (D7) a media edición → 404 y nada escrito', async () => {
+    const ana = await vendedor('ana-t1d')
+    const { accountId } = await accountWithPerson(`t1d-${suffix}@test.mx`)
+
+    let guardando: Promise<unknown> | undefined
+    await prisma.$transaction(
+      async tx => {
+        // Lo que hace «Eliminar» (D7): toma la fila y la borra. El guardado espera el candado y llega a una fila que ya no existe.
+        await tx.$queryRaw`SELECT "id" FROM "CrmAccount" WHERE "id" = ${accountId} FOR UPDATE`
+        guardando = updateAccount(seller(ana), accountId, { cambios: { giro: 'Bar' }, vio: { giro: null } }).catch(error => error)
+        await untilSomeoneWaitsForTheRow()
+        await tx.crmAccount.delete({ where: { id: accountId } })
+      },
+      { timeout: 20_000 },
+    )
+
+    expect(await guardando).toMatchObject({ statusCode: 404 })
+    expect(await prisma.crmAccount.findUnique({ where: { id: accountId } })).toBeNull()
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId } })).toBe(0)
   })
 })

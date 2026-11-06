@@ -13,6 +13,7 @@ import type { CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, moveStage, takeAccount } from '@/services/crm/accounts.service'
 import { completeActivity } from '@/services/crm/activities.service'
 import { ensureClientAccount } from '@/services/crm/clients.service'
+import { updateAccount } from '@/services/crm/ficha.service'
 import { updateTeamMember } from '@/services/crm/teamVenue.service'
 import { addEvent } from '@/services/crm/timeline.service'
 import prisma from '@/utils/prismaClient'
@@ -284,5 +285,26 @@ describe('CRM: two sellers on the same account at once', () => {
       await prisma.venue.deleteMany({ where: { id: venue.id } })
       await prisma.organization.deleteMany({ where: { id: organization.id } })
     }
+  })
+
+  // ── C2 · Ficha editable ────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('🔴 C2 T1: dos PATCH a la vez con el mismo vio y valores distintos → uno 200 y otro 409 con lo del primero; un solo ACCOUNT_EDIT', async () => {
+    const id = await newAccount({ ownerStaffId: ana })
+    await prisma.crmAccount.update({ where: { id }, data: { giro: 'Cafetería' } })
+
+    const { fulfilled, rejected } = settle(
+      await Promise.allSettled([
+        updateAccount(seller(ana!), id, { cambios: { giro: 'Bar' }, vio: { giro: 'Cafetería' } }),
+        updateAccount(seller(beto!), id, { cambios: { giro: 'Restaurante' }, vio: { giro: 'Cafetería' } }),
+      ]),
+    )
+
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    const { giro } = await prisma.crmAccount.findUniqueOrThrow({ where: { id } })
+    expect(['Bar', 'Restaurante']).toContain(giro)
+    expect(rejected[0]).toMatchObject({ statusCode: 409, code: 'CRM_CAMBIO_AL_EDITAR', details: { ahora: { giro } } })
+    expect(await prisma.crmTimelineEvent.count({ where: { accountId: id, kind: 'ACCOUNT_EDIT' } })).toBe(1)
   })
 })

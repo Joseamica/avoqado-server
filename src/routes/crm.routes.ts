@@ -56,6 +56,7 @@ import {
   searchOrganizationsSchema,
   sendAccountEmailSchema,
   sendAccountEmailV2Schema,
+  updateAccountSchema,
   sendCampaignSchema,
   sendTemplateTestSchema,
   templateIdSchema,
@@ -133,6 +134,8 @@ router.get('/organizations/search', editar, validateRequest(searchOrganizationsS
 router.get('/accounts', ver, validateRequest(listAccountsSchema), crmController.listAccounts)
 router.post('/accounts', editar, validateRequest(createAccountSchema), crmController.createAccount)
 router.get('/accounts/:id', ver, validateRequest(accountIdSchema), crmController.getAccount)
+// C2 · Ficha editable: the business's data with «lo que se vio» («Editar» with its scope, decided under the row's lock).
+router.patch('/accounts/:id', editar, validateRequest(updateAccountSchema), crmController.updateAccount)
 router.post('/accounts/:id/take', editar, validateRequest(accountIdSchema), crmController.takeAccount)
 // «Editar: todos» o «Equipo y llaves» (L6): the service decides, so a «propios» seller gets a 403 that says why.
 router.post(

@@ -36,6 +36,7 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 
 import router from '@/routes/crm.routes'
 import * as hubspotImport from '@/services/crm/hubspotImport.service'
+import * as fichaService from '@/services/crm/ficha.service'
 
 const app = express().use(express.json()).use('/crm', router)
 /** With the app's error handler reduced to what these tests read: the status, the code and the message. */
@@ -606,5 +607,52 @@ describe('POST /crm/accounts/:id/alta (C1, tarea 8)', () => {
     const ok = await request(app).post(PATH).send({ motivo: 'PRECIO', perdido: false })
     expect(ok.status).toBe(200)
     expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', motivo: 'PRECIO', texto: null, perdido: false })
+  })
+})
+
+describe('C2 · ficha editable: las rutas piden «Editar» (o «Ver») antes de llamar al servicio', () => {
+  const ACCOUNT = 'caccounta0000000000000001'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+  const spies: jest.SpyInstance[] = []
+  const espiar = (nombre: keyof typeof fichaService, valor: unknown) => {
+    const spy = jest.spyOn(fichaService, nombre as any).mockResolvedValue(valor as never)
+    spies.push(spy)
+    return spy
+  }
+  afterEach(() => spies.splice(0).forEach(spy => spy.mockRestore()))
+
+  describe('PATCH /crm/accounts/:id', () => {
+    const body = { cambios: { giro: 'Bar' }, vio: { giro: 'Cafetería' } }
+
+    it('🔴 sin «Editar» → 403; con «Ver» sin «Editar» → 403; el servicio no se llama', async () => {
+      const spy = espiar('updateAccount', { accountId: ACCOUNT, cambiados: ['giro'] })
+      access({ verScope: null, editarScope: null })
+      expect((await request(app).patch(`/crm/accounts/${ACCOUNT}`).send(body)).status).toBe(403)
+      access({ verScope: 'todos', editarScope: null })
+      expect((await request(app).patch(`/crm/accounts/${ACCOUNT}`).send(body)).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('con «Editar: propios» → 200 y llama al servicio con el cuerpo', async () => {
+      const spy = espiar('updateAccount', { accountId: ACCOUNT, cambiados: ['giro'] })
+      access({ verScope: 'propios', editarScope: 'propios' })
+      const res = await request(app).patch(`/crm/accounts/${ACCOUNT}`).send(body)
+      expect(res.status).toBe(200)
+      expect(res.body.data).toEqual({ accountId: ACCOUNT, cambiados: ['giro'] })
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ staffId: ADMIN_ID, editar: 'propios' }), ACCOUNT, body)
+    })
   })
 })

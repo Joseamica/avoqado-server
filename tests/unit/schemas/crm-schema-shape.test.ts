@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { createAccountSchema } from '@/schemas/crm.schema'
+import { createAccountSchema, updateAccountSchema } from '@/schemas/crm.schema'
 
 /**
  * CRM propio, tarea 1: la forma del esquema que usan las tareas siguientes, leída del DMMF (no necesita base).
@@ -215,5 +215,40 @@ describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)',
     expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null, perdido: false } }).success).toBe(true)
     expect(parse({ motivo: null, perdido: true, vio: { motivo: 'TERMINO', texto: null, perdido: false } }).success).toBe(false)
     expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null } }).success).toBe(false)
+  })
+})
+
+describe('C2 · updateAccountSchema (PATCH /crm/accounts/:id)', () => {
+  const ID = 'caccounta0000000000000001'
+  const parse = (body: unknown) => updateAccountSchema.safeParse({ params: { id: ID }, body })
+  const mensajes = (body: unknown) => {
+    const r = parse(body)
+    return r.success ? [] : r.error.issues.map(issue => issue.message)
+  }
+
+  it('cambios.source → 400 «Ese dato no se edita aquí»', () => {
+    expect(mensajes({ cambios: { source: 'LANDING' }, vio: { source: 'MANUAL' } })).toContain('Ese dato no se edita aquí')
+  })
+  it('cambios vacío → «Di qué cambias»', () => {
+    expect(mensajes({ cambios: {}, vio: {} })).toContain('Di qué cambias')
+  })
+  it("name '' → 400", () => {
+    expect(parse({ cambios: { name: '' }, vio: { name: 'Café' } }).success).toBe(false)
+  })
+  it('sucursales -1 → «Las sucursales no pueden ser negativas»', () => {
+    expect(mensajes({ cambios: { sucursales: -1 }, vio: { sucursales: 2 } })).toContain('Las sucursales no pueden ser negativas')
+  })
+  it('modulos con 21 → 400', () => {
+    const modulos = Array.from({ length: 21 }, (_, i) => `m${i}`)
+    expect(parse({ cambios: { modulos }, vio: { modulos: [] } }).success).toBe(false)
+  })
+  it('sin vio → 400; vio sin el campo que cambia → 400', () => {
+    expect(parse({ cambios: { giro: 'Bar' } }).success).toBe(false)
+    expect(mensajes({ cambios: { giro: 'Bar' }, vio: { sucursales: 1 } })).toContain('Falta lo que se veía antes de cambiarlo')
+  })
+  it("null borra y '' es null; vio acepta 500 caracteres", () => {
+    const r = parse({ cambios: { giro: '', referidoPor: null }, vio: { giro: 'x'.repeat(500), referidoPor: 'Luis' } })
+    expect(r.success).toBe(true)
+    expect(r.success && r.data.body.cambios).toEqual({ giro: null, referidoPor: null })
   })
 })

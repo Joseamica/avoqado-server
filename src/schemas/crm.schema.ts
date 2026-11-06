@@ -231,6 +231,73 @@ export const addNoteSchema = z.object({
   body: z.object({ text: text(5000, 'Escribe la nota') }),
 })
 
+// ── C2 · Ficha editable ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Texto que se puede borrar: '' y null son «vacío». */
+const nullableText = (max: number) =>
+  z.preprocess(
+    value => (typeof value === 'string' && value.trim() === '' ? null : value),
+    z.string({ invalid_type_error: 'Debe ser texto' }).trim().max(max, `Máximo ${max} caracteres`).nullable(),
+  )
+const sucursalesSchema = z
+  .number({ invalid_type_error: 'Las sucursales son un número' })
+  .int('Las sucursales son un número entero')
+  .min(0, 'Las sucursales no pueden ser negativas')
+  .max(10000, 'Máximo 10,000 sucursales')
+/** Lo que la pantalla enseñaba: puede ser más largo que lo editable (la landing guarda hasta 500 por texto). */
+const vioText = z.string({ invalid_type_error: 'Debe ser texto' }).max(500, 'Máximo 500 caracteres').nullable()
+/** Una llave opaca por CONTENIDO (como Stripe): nunca puede traer un correo, un teléfono ni un nombre. */
+const llaveDelIntento = z
+  .string({ required_error: 'Falta el identificador del intento', invalid_type_error: 'El identificador del intento no es válido' })
+  .uuid('El identificador del intento no es válido')
+
+/**
+ * PATCH /crm/accounts/:id — los datos del negocio (C2). `cambios` sólo con lo editable (`.strict()`: fuente, dueño, etapa y
+ * lo vivo son 400); `vio` = lo que la pantalla enseñaba de cada campo que cambia, obligatorio.
+ */
+export const updateAccountSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      cambios: z
+        .object(
+          {
+            name: text(200, 'El nombre del negocio es obligatorio'),
+            giro: nullableText(100),
+            ventasRango: nullableText(60),
+            sucursales: sucursalesSchema.nullable(),
+            modulos: z
+              .array(z.string({ invalid_type_error: 'Cada módulo es texto' }).trim().max(500, 'Máximo 500 caracteres por módulo'), {
+                invalid_type_error: 'Los módulos son una lista',
+              })
+              .max(20, 'Máximo 20 módulos'),
+            referidoPor: nullableText(200),
+          },
+          { required_error: 'Di qué cambias', invalid_type_error: 'Di qué cambias' },
+        )
+        .partial()
+        .strict('Ese dato no se edita aquí')
+        .refine(cambios => Object.keys(cambios).length > 0, 'Di qué cambias'),
+      vio: z
+        .object(
+          {
+            name: vioText,
+            giro: vioText,
+            ventasRango: vioText,
+            sucursales: z.number({ invalid_type_error: 'Las sucursales son un número' }).int().nullable(),
+            modulos: z.array(z.string().max(500, 'Máximo 500 caracteres por módulo')).max(100).nullable(),
+            referidoPor: vioText,
+          },
+          { required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Falta lo que se veía antes de cambiarlo' },
+        )
+        .partial(),
+    })
+    .refine(body => Object.keys(body.cambios).every(campo => campo in body.vio), {
+      message: 'Falta lo que se veía antes de cambiarlo',
+      path: ['vio'],
+    }),
+})
+
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,

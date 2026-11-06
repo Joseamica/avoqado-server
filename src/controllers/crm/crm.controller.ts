@@ -5,6 +5,7 @@ import * as accounts from '../../services/crm/accounts.service'
 import { addActivity, completeActivity, rescheduleActivity } from '../../services/crm/activities.service'
 import * as clients from '../../services/crm/clients.service'
 import * as erase from '../../services/crm/erase.service'
+import * as ficha from '../../services/crm/ficha.service'
 import { applyHubspot, previewHubspot } from '../../services/crm/hubspotImport.service'
 import * as reports from '../../services/crm/reports.service'
 import { addTeamMember, listTeamMembers, listTeamOptions, removeTeamMember, updateTeamMember } from '../../services/crm/teamVenue.service'
@@ -275,4 +276,11 @@ export async function applyHubspotImport(req: Request, res: Response): Promise<v
     throw new ValidationError('La casilla de los correos no es válida', 'CRM_IMPORT_ARCHIVO_INVALIDO')
   }
   res.json({ data: await applyHubspot(req.crmAccess!, contactos, negocios, { aceptaronCorreos: box === 'true' }) })
+}
+
+// ── C2 · Ficha editable ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/** PATCH /api/v1/crm/accounts/:id — the business's data, with what the screen showed (`vio`). */
+export async function updateAccount(req: Request, res: Response): Promise<void> {
+  res.json({ data: await ficha.updateAccount(req.crmAccess!, req.params.id, req.body) })
 }
