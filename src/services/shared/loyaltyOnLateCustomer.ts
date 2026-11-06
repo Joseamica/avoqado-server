@@ -12,6 +12,7 @@ import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
 import { esVentaYaCobrada, ventaTieneReembolso } from './ligaDeClienteEnVenta'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 import { esVentaNuevaDeCambio } from '@/services/exchanges/exchangeMarks'
+import { esPedidoDePlataforma } from './ordenImportada'
 
 /** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
 export { MARCA_LEALTAD_REABIERTA }
@@ -162,6 +163,7 @@ const VENTA_SELECT = {
   paymentStatus: true,
   total: true,
   tipAmount: true,
+  originSystem: true,
   customerId: true,
   loyaltyEligibleAt: true,
   loyaltyProcessedAt: true,
@@ -195,6 +197,31 @@ type LectorDeVenta = Pick<Prisma.TransactionClient, 'order' | 'payment' | 'excha
 interface Programa {
   stampsEnabled: boolean
   maxStampsPerDay: number
+}
+
+/**
+ * 🔴 D13 (hz:433063d4:D13, 5-nov): la base de puntos de una venta SALDADA = lo cobrado sin propina (la propina es del personal).
+ * En casi todas las ventas `Order.total` trae la propina (cada cobro lo reescribe así) y basta restarla. Un pedido de plataforma
+ * pagado por la app NO: la ingesta guarda el total SIN propina (`deliveryOrderIngestion.service.ts`, decisión del 18-ago) y
+ * restarla otra vez daba puntos de menos ($100 + $20 de propina ⇒ 80). Si después la caja cobró algo, su cobro reescribe el
+ * total CON propina: por eso ahí la base sale de sus cobros (sin reembolsos), que no dependen de quién escribió el total.
+ * La usan la liga tardía y el reconciliador de lealtad.
+ */
+export async function baseDeLealtadDeLaVenta(
+  db: Pick<Prisma.TransactionClient, 'payment'>,
+  venta: { id: string; venueId: string; originSystem: string | null; total: Prisma.Decimal | number; tipAmount: Prisma.Decimal | number | null },
+): Promise<number> {
+  if (!esPedidoDePlataforma(venta)) return Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0))
+  const cobrado = await db.payment.aggregate({
+    where: {
+      orderId: venta.id,
+      venueId: venta.venueId,
+      status: TransactionStatus.COMPLETED,
+      OR: [{ type: null }, { type: { not: PaymentType.REFUND } }],
+    },
+    _sum: { amount: true },
+  })
+  return Math.max(0, Number(cobrado._sum.amount ?? 0))
 }
 
 async function leerVenta(db: LectorDeVenta, venueId: string, orderId: string): Promise<Venta | null> {
@@ -676,12 +703,12 @@ export async function awardLoyaltyForLateCustomer(args: {
     // 🔴 SIEMPRE que sea elegible, aunque el sello de ESTE cliente ya exista (auditoría A #1): la llamada es idempotente y
     // completa los puntos o la visita que una caída entre el sello y los puntos hubiera dejado pendientes.
     if (esElegibleParaLealtad(foto, nowMs)) {
-      // Base: venta y cargos sin propina — la misma que el cobro y el reconciliador (la propina es del personal).
+      // Base: venta y cargos sin propina — la misma que el reconciliador (D13: un pedido de plataforma, de sus cobros).
       const resultado = await otorgarLealtadRespetandoReembolsos(
         {
           venueId,
           orderId,
-          orderTotal: Math.max(0, Number(venta.total) - Number(venta.tipAmount ?? 0)),
+          orderTotal: await baseDeLealtadDeLaVenta(prisma, { ...venta, venueId }),
           staffId: args.staffId ?? null,
           legacyCustomer: null,
         },

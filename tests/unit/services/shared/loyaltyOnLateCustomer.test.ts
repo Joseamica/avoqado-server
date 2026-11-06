@@ -303,6 +303,15 @@ describe('esElegibleParaLealtad (¿se corre —o se COMPLETA— la lealtad? audi
 })
 
 describe('awardLoyaltyForLateCustomer', () => {
+  it('🔴 D13: pedido de plataforma ($100 + $20 de propina, total guardado SIN propina) ⇒ base 100, no 80', async () => {
+    conVenta({ originSystem: 'DELIVERY_PLATFORM', total: D(100), tipAmount: D(20) })
+    ;(prismaMock.payment.aggregate as jest.Mock).mockResolvedValue({ _sum: { amount: D(100) } })
+    cardMock.mockResolvedValue({ stampsEarned: 4, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
+    prismaMock.stampEvent.findFirst.mockResolvedValueOnce(earnDeLaVenta({ stampsEarned: 4, stampsRequired: 7 }) as any)
+    await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
+    expect(awardMock).toHaveBeenCalledWith(expect.objectContaining({ orderTotal: 100 }), expect.anything())
+  })
+
   it('🔴 venta pagada hace 30 min: llama la lealtad con el actor y la base sin propina, y sella', async () => {
     cardMock.mockResolvedValue({ stampsEarned: 4, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
     prismaMock.stampEvent.findFirst.mockResolvedValueOnce(earnDeLaVenta({ stampsEarned: 4, stampsRequired: 7 }) as any)
