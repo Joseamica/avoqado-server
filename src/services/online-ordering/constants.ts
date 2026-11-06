@@ -79,6 +79,13 @@ export const unpaidFoliosWhere = (venueId: string) => ({
   requiresAcceptance: false,
   order: { paymentStatus: PaymentStatus.PENDING },
 })
+/**
+ * Tienda híbrida (T11): para el `AND` de las listas de «cuentas abiertas» (TPV y POS). Un folio por pagar se cobra desde la lista de
+ * folios de la caja; aquí saldría como una mesa fantasma. Un folio vencido con abono tardío ya no está `PENDING_ACCEPTANCE`: sí sale.
+ */
+export const NO_ES_FOLIO_POR_PAGAR = {
+  NOT: { onlineOrder: { is: { requiresAcceptance: false, status: OnlineOrderStatus.PENDING_ACCEPTANCE } } },
+}
 /** Tienda híbrida (R23): un folio vence a los 30 min o al cierre de la franja vigente, lo que pase primero. */
 export const FOLIO_TIMEOUT_MINUTES = 30
 /** Tienda híbrida (T3b): folios sin pagar por negocio; el siguiente recibe 409 y la tienda sigue abierta. El doble del tope de hoy. */
