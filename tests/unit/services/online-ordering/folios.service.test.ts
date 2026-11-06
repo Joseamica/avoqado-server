@@ -303,8 +303,19 @@ describe('syncPaidClosedFolios (dinero tardío que otro cobro terminó de saldar
   })
 })
 
+/** Una cancelación no termina «Entregado» (si `syncCancelled` falló en la pasada). */
+const CUENTA_VIVA = { status: { notIn: ['CANCELLED', 'DELETED'] } }
+
 describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar el día del negocio)', () => {
-  const fila = (k: string, status = 'ACCEPTED') => ({ id: `oo-${k}`, orderId: `ord-${k}`, venueId: 'v1', status, orderNumber: `F-${k}` })
+  const ACEPTADO = new Date('2026-11-05T12:00:00.000Z')
+  const fila = (k: string, status = 'ACCEPTED') => ({
+    id: `oo-${k}`,
+    orderId: `ord-${k}`,
+    venueId: 'v1',
+    status,
+    orderNumber: `F-${k}`,
+    acceptedAt: ACEPTADO,
+  })
   /** El texto SQL de la lectura: junta las partes fijas y los fragmentos `Prisma.raw` del template. */
   const sqlLeido = () => {
     const [strings, ...valores] = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
@@ -323,6 +334,7 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
     expect(sql).toContain("INTERVAL '4 hours'")
     expect(sql).toContain("ELSE 'America/Mexico_City'") // zona desconocida ⇒ la de respaldo
     expect(sql).toContain('LIMIT')
+    expect(sql).toMatch(/o\.status NOT IN \('CANCELLED', 'DELETED'\)/)
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
@@ -330,11 +342,11 @@ describe('cerrarFoliosDelDiaTerminado (decisión 18: «Entregado» al terminar e
     ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValueOnce([fila('A'), fila('B', 'READY')])
     await expect(cerrarFoliosDelDiaTerminado({}, NOW)).resolves.toBe(2)
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(1, {
-      where: { id: 'oo-A', status: 'ACCEPTED', requiresAcceptance: false },
+      where: { id: 'oo-A', status: 'ACCEPTED', requiresAcceptance: false, acceptedAt: ACEPTADO, order: CUENTA_VIVA },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: 'oo-B', status: 'READY', requiresAcceptance: false },
+      where: { id: 'oo-B', status: 'READY', requiresAcceptance: false, acceptedAt: ACEPTADO, order: CUENTA_VIVA },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled() // no toca la cuenta ni el dinero

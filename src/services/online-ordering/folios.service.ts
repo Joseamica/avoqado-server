@@ -19,10 +19,8 @@ import type { ReadCandidates } from './types'
  * con un `Payment` `REFUND` (el `PAID_ORDER` de `paidPickupSync` sí): un reembolso real deja la cuenta PAID, y un folio pagado y
  * reembolsado tiene que salir de «Por pagar» igual (decisión 18: lo saca una persona). Un abono parcial no entra: espera el resto.
  */
-const CUENTA_SALDADA: Prisma.OrderWhereInput = {
-  paymentStatus: { in: FOLIO_PAID_STATUSES },
-  status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
-}
+const CUENTA_VIVA: Prisma.OrderWhereInput = { status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] } }
+const CUENTA_SALDADA: Prisma.OrderWhereInput = { paymentStatus: { in: FOLIO_PAID_STATUSES }, ...CUENTA_VIVA }
 
 /** Dónde puede estar un folio que el dinero tardío revive: vencido, cancelado o rechazado (tabla 7b del diseño). */
 const FOLIO_CERRADO: OnlineOrderStatus[] = [
@@ -212,7 +210,7 @@ export async function syncPaidClosedFolios(
  * (corte de las 04:00 en la zona del negocio, la regla de `seAcaboElDiaDelNegocioDeSql`). El día se cuenta desde `acceptedAt`: el
  * folio que el dinero tardío pasó a la lista hoy (aunque se creó ayer) sale hasta el cierre de hoy. Sólo escribe `OnlineOrder`
  * (estado y `completedAt`): ni la cuenta, ni el dinero, ni la cocina; por eso no necesita el candado de la orden y basta el CAS por
- * fila sobre el estado leído y `requiresAcceptance:false` (si una persona lo entregó antes, el CAS pierde y no cuenta).
+ * fila sobre el estado, el `acceptedAt` (un folio revivido hoy no sale por un día viejo) y la cuenta viva (una cancelación no termina «Entregado»), con `requiresAcceptance:false` (si una persona lo entregó antes, el CAS pierde y no cuenta).
  * Lectura con tope (lo que sobre lo toma la siguiente pasada) y una escritura por fila; anuncia después, con actor de sistema.
  */
 export async function cerrarFoliosDelDiaTerminado(
@@ -221,12 +219,15 @@ export async function cerrarFoliosDelDiaTerminado(
   readCandidates: ReadCandidates = read => read(),
 ): Promise<number> {
   const rows = await readCandidates(
-    () => prisma.$queryRaw<Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; orderNumber: string }>>`
-      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, o."orderNumber"
+    () => prisma.$queryRaw<
+      Array<{ id: string; orderId: string; venueId: string; status: OnlineOrderStatus; acceptedAt: Date; orderNumber: string }>
+    >`
+      SELECT oo.id, oo."orderId", oo."venueId", oo.status::text AS status, oo."acceptedAt", o."orderNumber"
       FROM "OnlineOrder" oo
       JOIN "Order" o ON o.id = oo."orderId"
       WHERE oo."requiresAcceptance" = false
         AND oo.status IN ('ACCEPTED', 'READY')
+        AND o.status NOT IN ('CANCELLED', 'DELETED')
         ${scope.venueId !== undefined ? Prisma.sql`AND oo."venueId" = ${scope.venueId}` : Prisma.empty}
         AND ${Prisma.raw(seAcaboElDiaDelNegocioDeSql('oo."acceptedAt"', 'oo."venueId"', instanteUtcSql(now)))}
       ORDER BY oo.id ASC
@@ -236,7 +237,7 @@ export async function cerrarFoliosDelDiaTerminado(
   for (const row of rows) {
     try {
       const cas = await prisma.onlineOrder.updateMany({
-        where: { id: row.id, status: row.status, requiresAcceptance: false },
+        where: { id: row.id, status: row.status, requiresAcceptance: false, acceptedAt: row.acceptedAt, order: CUENTA_VIVA },
         data: { status: OnlineOrderStatus.COMPLETED, completedAt: now },
       })
       if (cas.count !== 1) continue

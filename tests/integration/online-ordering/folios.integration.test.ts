@@ -601,6 +601,14 @@ describe('T9b · «Entregado» sólo por una persona o al terminar el día del n
     await poner('America/Mexico_City')
   })
 
+  it('una cuenta cancelada no termina «Entregado» (si la sincronización de cancelaciones falló en la pasada)', async () => {
+    await poner('America/Mexico_City')
+    const x = await porEntregarDesde(Z('2026-11-05T12:00:00'))
+    await prisma.order.update({ where: { id: x.orderId }, data: { status: 'CANCELLED' } })
+    expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(0)
+    expect(await estado(x.onlineOrderId)).toBe('ACCEPTED')
+  })
+
   it('una persona que entrega antes gana: el cierre del día no escribe encima', async () => {
     await poner('America/Mexico_City')
     const x = await nuevoFolio()
