@@ -434,7 +434,8 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
       }) as never,
     )
 
-    const result = await applyManualDiscount('order-sc', 'FIXED_AMOUNT' as DiscountType, 50, 'Cortesía', 'staff-1')
+    // hz:e0b12f00:D1: deja en $0 los productos, así que va con permiso de cortesía (9º argumento).
+    const result = await applyManualDiscount('order-sc', 'FIXED_AMOUNT' as DiscountType, 50, 'Cortesía', 'staff-1', undefined, undefined, undefined, true)
 
     expect(result.success).toBe(true)
     expect(totalGuardado()).toBe(0)

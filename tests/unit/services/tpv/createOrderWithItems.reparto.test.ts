@@ -233,3 +233,62 @@ describe('/tpv: un descuento de % que pide aprobación ⇒ 400 y no crea la vent
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 })
+
+// hz:e0b12f00:D1 (founder, 6-nov: «corrige d1»): en «Cobrar», un descuento libre que deja en $0 lo que queda de los productos es
+// una cortesía y pide `orders:comp`. Lo decide el importe que calcula el servidor, no el `total` del cliente (Codex r1 #1).
+describe('/tpv: descuento libre que deja los productos en $0 ⇒ cortesía', () => {
+  const venta = (extra: Record<string, unknown>) =>
+    createOrderWithItems('venue-1', {
+      items: [{ productId: 'cafe', quantity: 1, unitPrice: 100 }],
+      staffId: 'staff-1',
+      taxAmount: 0,
+      subtotal: 100,
+      tip: 0,
+      ...extra,
+    } as any)
+
+  it('sin permiso de cortesía ⇒ 403 y no crea la venta', async () => {
+    armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
+    await expect(venta({ discount: 100, total: 0 })).rejects.toMatchObject({ statusCode: 403, message: 'No tienes permiso para dar cortesías' })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('aunque el cliente mande un centavo de total (la tolerancia lo deja pasar) ⇒ 403', async () => {
+    armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
+    await expect(venta({ discount: 100, total: 0.01 })).rejects.toMatchObject({ statusCode: 403 })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  // Una venta que queda en $0 se cierra con un pago de $0 (y su asignación): el doble los necesita.
+  const armarVentaEnCero = () => {
+    armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
+    tx.payment = { ...(prismaMock as any).payment, create: jest.fn(async () => ({ id: 'pay-1' })) }
+    tx.paymentAllocation = { create: jest.fn(async () => ({ id: 'pa-1' })) }
+  }
+
+  it('con permiso: se crea y la fila queda autorizada por quien cobra (lo resuelve el controlador)', async () => {
+    armarVentaEnCero()
+    await venta({ discount: 100, total: 0, canCompItems: true, performedBy: 'user-1', regaloAutorizadoPor: 'sv-quien-cobra' })
+    expect(creadas[0]).toMatchObject({ name: 'Descuento de la cuenta', amount: new Prisma.Decimal(100), authorizedById: 'sv-quien-cobra' })
+  })
+
+  // Codex r2 #1: el vendedor del cuerpo (`staffId` → 'sv-1') no es quien autorizó.
+  it('sin autorizador resuelto: no se atribuye al vendedor del cuerpo', async () => {
+    armarVentaEnCero()
+    await venta({ discount: 100, total: 0, canCompItems: true, performedBy: 'user-1' })
+    expect(creadas[0].authorizedById).toBeUndefined()
+  })
+
+  it('con el PIN de un gerente: la fila queda autorizada por el gerente del PIN', async () => {
+    armarVentaEnCero()
+    await venta({ discount: 100, total: 0, canCompItems: true, performedBy: 'user-1', regaloAutorizadoPor: 'sv-gerente' })
+    expect(creadas[0]).toMatchObject({ authorizedById: 'sv-gerente' })
+  })
+
+  it('un centavo menos que los productos, sin permiso ⇒ se crea como hoy, sin autorizador', async () => {
+    armarTx([{ id: 'oi-1', total: 100, discountAmount: 0, orderPromotionId: null }])
+    await venta({ discount: 99.99, total: 0.01 })
+    expect(creadas[0]).toMatchObject({ amount: new Prisma.Decimal(99.99) })
+    expect(creadas[0].authorizedById).toBeUndefined()
+  })
+})

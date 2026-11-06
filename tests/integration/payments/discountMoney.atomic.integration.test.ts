@@ -782,6 +782,60 @@ describe('existing discount policies', () => {
       ).toEqual([{ appliedById: null }])
     })
   })
+  // hz:e0b12f00:D1 (founder, 6-nov): un descuento manual que deja en $0 lo que queda de la cuenta es una cortesía.
+  describe('D1·$0: descuento manual que deja la cuenta en $0', () => {
+    it.each([
+      ['100 %', 'PERCENTAGE', 100],
+      ['fijo igual a lo que queda', 'FIXED_AMOUNT', 100],
+      ['fijo mayor que lo que queda', 'FIXED_AMOUNT', 500],
+    ] as const)('%s sin permiso de cortesía: 403 y no escribe', async (_n, type, value) => {
+      const o = await newOrder()
+      await expect(tpv.applyManualDiscount(venueId, o.id, type, value, 'Regalo', staffVenueId)).rejects.toMatchObject({
+        statusCode: 403,
+        message: 'No tienes permiso para dar cortesías',
+      })
+      expect((await snapshot(o.id)).discounts).toHaveLength(0)
+    })
+    it('50 % y luego 100 % de lo que queda sin permiso: el segundo es 403', async () => {
+      const o = await newOrder()
+      expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 50, 'Mitad', staffVenueId)).toMatchObject({ success: true, amount: 50 })
+      await expect(tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 100, 'Resto', staffVenueId)).rejects.toMatchObject({ statusCode: 403 })
+      expect((await snapshot(o.id)).discounts).toHaveLength(1)
+    })
+    it.each([
+      ['99 %', 'PERCENTAGE', 99, 99],
+      ['fijo un centavo menor', 'FIXED_AMOUNT', 99.99, 99.99],
+    ] as const)('%s sin permiso de cortesía: pasa como hoy', async (_n, type, value, amount) => {
+      const o = await newOrder()
+      expect(await tpv.applyManualDiscount(venueId, o.id, type, value, 'Casi', staffVenueId)).toMatchObject({ success: true, amount })
+    })
+    it('con permiso de cortesía: pasa y la autoriza quien la aplica', async () => {
+      const o = await newOrder()
+      expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 100, 'Regalo', staffVenueId, 'id-inventado', {})).toMatchObject({
+        success: true,
+        amount: 100,
+      })
+      expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true, isComp: true } })).toEqual({
+        authorizedById: staffVenueId,
+        isComp: false,
+      })
+    })
+    // Codex r2 #2: el dueño de la organización sin membresía puede regalar con su permiso, pero no elige el nombre del autorizador.
+    it('con permiso y sin membresía: el authorizedById del cliente no queda', async () => {
+      const o = await newOrder()
+      await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 100, 'Regalo', undefined, staffVenueId, {})
+      expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+        authorizedById: null,
+      })
+    })
+    it('con PIN de gerente: la autoriza quien tecleó el PIN', async () => {
+      const o = await newOrder()
+      await tpv.applyManualDiscount(venueId, o.id, 'FIXED_AMOUNT', 100, 'Regalo', undefined, undefined, { porPin: staffVenueId })
+      expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+        authorizedById: staffVenueId,
+      })
+    })
+  })
   it('D1: un descuento manual de % sigue sin pedir permiso de cortesía', async () => {
     const o = await newOrder()
     expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)).toMatchObject({
@@ -865,7 +919,8 @@ describe('existing discount policies', () => {
   it('PARTIAL remains allowed, caps the remaining base, and preserves paid balance', async () => {
     const o = await newOrder()
     await prisma.order.update({ where: { id: o.id }, data: { paymentStatus: 'PARTIAL', discountAmount: 95, paidAmount: 5 } })
-    expect(await tpv.applyManualDiscount(venueId, o.id, 'FIXED_AMOUNT', 20, 'Cap', staffVenueId)).toMatchObject({
+    // hz:e0b12f00:D1: el tope deja en $0 los últimos $5 de los productos, así que es una cortesía y va con su permiso (`{}`).
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'FIXED_AMOUNT', 20, 'Cap', staffVenueId, undefined, {})).toMatchObject({
       success: true,
       amount: 5,
       newOrderTotal: 16,

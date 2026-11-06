@@ -13,7 +13,7 @@ import { DiscountType } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import logger from '@/config/logger'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
-import { pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+import { conCortesiaSiRegala, pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 
 /** D3: la sesión de la TPV no trae `staffVenueId`; `appliedById` es la membresía de quien llama (sin ella, sin autor). */
 const membresiaDe = (req: Request) => discountTpvService.membresiaDeQuienLlama(req.params.venueId, req.authContext?.userId)
@@ -134,17 +134,12 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
     }
     const staffVenueId = await membresiaDe(req)
 
-    const result = await discountTpvService.applyManualDiscount(
-      venueId,
-      orderId,
-      type,
-      value,
-      reason,
-      staffVenueId,
-      authorizedById,
-      // D1: lo acredita `checkCortesiaEnDescuento` en la ruta (con el PIN de gerente que autorizó la cortesía, Codex r4 #3).
-      tieneCortesiaAutorizada(req) ? { porPin: pinDeLaCortesia(req) } : undefined,
+    // D1: una COMP la acredita `checkCortesiaEnDescuento` en la ruta (con el PIN que autorizó la cortesía, Codex r4 #3). Un % o
+    // fijo que resulta dejar la cuenta en $0 lo descubre el motor; entonces se pide `orders:comp` aquí (hz:e0b12f00:D1).
+    const result = await conCortesiaSiRegala(req, res, cortesia =>
+      discountTpvService.applyManualDiscount(venueId, orderId, type, value, reason, staffVenueId, authorizedById, cortesia),
     )
+    if (!result) return
 
     if (result.success) {
       res.status(200).json({

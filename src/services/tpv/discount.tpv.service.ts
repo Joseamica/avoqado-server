@@ -266,7 +266,20 @@ export async function applyManualDiscount(
     if (!cortesia) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
     authorizedById = cortesia.porPin ?? staffVenueId
   }
-  return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId, !!cortesia)
+  // hz:e0b12f00:D1: un % o fijo que deja la cuenta en $0 también es cortesía; el motor lo decide bajo su candado.
+  const autorizadorSiRegala = cortesia ? (cortesia.porPin ?? staffVenueId) : undefined
+  return discountEngine.applyManualDiscount(
+    orderId,
+    type,
+    value,
+    reason,
+    staffVenueId,
+    authorizedById,
+    undefined,
+    venueId,
+    !!cortesia,
+    autorizadorSiRegala,
+  )
 }
 
 // ==========================================

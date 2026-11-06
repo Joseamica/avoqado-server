@@ -596,3 +596,32 @@ describe('P12: la cortesía y el serializado guardan el total con el IVA aparte 
     expect(await snapshot(o.id)).toMatchObject({ subtotal: 120, total: 136, remaining: 136 })
   })
 })
+
+// hz:e0b12f00:D1 (founder, 6-nov): en la ruta vieja de la terminal, dejar en $0 lo que queda de los productos es una cortesía.
+describe('D1·$0: la ruta vieja de descuento que deja la cuenta en $0 pide permiso de cortesía', () => {
+  it('100 % sin permiso ⇒ 403 y la cuenta no cambia', async () => {
+    const o = await newOrder()
+    const antes = await snapshot(o.id)
+    await expect(
+      applyDiscount(venueId, o.id, { type: 'PERCENTAGE', value: 100, staffId, expectedVersion: o.version }),
+    ).rejects.toMatchObject({ statusCode: 403, message: 'No tienes permiso para dar cortesías' })
+    expect(await snapshot(o.id)).toEqual(antes)
+  })
+  it('dos de 50 % sin permiso: el segundo agota la cuenta ⇒ 403', async () => {
+    const o = await newOrder()
+    const uno = await applyDiscount(venueId, o.id, { type: 'PERCENTAGE', value: 50, staffId, expectedVersion: o.version })
+    await expect(
+      applyDiscount(venueId, o.id, { type: 'PERCENTAGE', value: 50, staffId, expectedVersion: uno.version }),
+    ).rejects.toMatchObject({ statusCode: 403 })
+  })
+  it('con permiso de cortesía ⇒ se aplica', async () => {
+    const o = await newOrder()
+    const r = await applyDiscount(venueId, o.id, { type: 'PERCENTAGE', value: 100, staffId, expectedVersion: o.version, puedeRegalar: true })
+    expect(Number(r.discountAmount)).toBeGreaterThan(0)
+  })
+  it('un fijo un centavo menor que los productos, sin permiso ⇒ se aplica como hoy', async () => {
+    const o = await newOrder()
+    const subtotal = Number((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).subtotal)
+    await applyDiscount(venueId, o.id, { type: 'FIXED_AMOUNT', value: subtotal - 0.01, staffId, expectedVersion: o.version })
+  })
+})

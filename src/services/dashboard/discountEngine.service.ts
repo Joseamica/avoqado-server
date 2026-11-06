@@ -10,7 +10,7 @@
  */
 
 import logger from '@/config/logger'
-import { BadRequestError, ForbiddenError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError, RegaloSinPermisoError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
@@ -1326,6 +1326,9 @@ export async function applyAutomaticDiscounts(
  * @param venueId - Authoritative tenant (TPV). With it, a missing Order THROWS instead of returning an error result
  * @param puedeRegalar - Quien aplica tiene `orders:comp` (D1). Falla cerrado: sin él, una cortesía (COMP) es 403. El
  *   `authorizedById` ya no decide: es sólo quién quedó registrado (puede faltar, p. ej. dueño sin membresía en la sucursal).
+ *   hz:e0b12f00:D1: un % o fijo que deja en $0 lo que queda de los productos también es cortesía y también lo exige.
+ * @param autorizadorSiRegala - Con `puedeRegalar`, quién queda como `authorizedById` si el descuento resulta ser un regalo (el
+ *   gerente del PIN o quien lo aplicó con su permiso). En un descuento que no regala no cambia nada.
  */
 export async function applyManualDiscount(
   orderId: string,
@@ -1337,6 +1340,7 @@ export async function applyManualDiscount(
   compReason?: string,
   venueId?: string,
   puedeRegalar = false,
+  autorizadorSiRegala?: string,
 ): Promise<ApplyDiscountResult> {
   return prisma.$transaction(async tx => {
     // The remaining base below comes from THIS read, under the canonical Order lock.
@@ -1388,6 +1392,15 @@ export async function applyManualDiscount(
 
     // Defensa final: el monto nunca puede exceder lo que queda por descontar.
     amount = Math.min(Math.round(amount * 100) / 100, remainingDiscountable)
+
+    // hz:e0b12f00:D1 (founder, 6-nov): dejar en $0 lo que queda de los productos es regalar la cuenta, aunque sea un % o un fijo.
+    // En centavos y con ESTE importe, no con el % del cliente (Codex r1 #1). La propina y el cargo por servicio no cuentan (r1 #2).
+    const regala = Math.round(amount * 100) >= Math.round(remainingDiscountable * 100)
+    if (regala && type !== 'COMP') {
+      if (!puedeRegalar) throw new RegaloSinPermisoError()
+      // Codex r2 #2: en un regalo nunca queda el `authorizedById` del cliente; sin autorizador verificado, queda vacío.
+      authorizedById = autorizadorSiRegala
+    }
 
     // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
     await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
