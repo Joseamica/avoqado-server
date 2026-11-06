@@ -364,6 +364,7 @@ export const listClientsSchema = z.object({
     cursor: existing('El cursor no es válido').optional(),
     limit: listQuery.limit,
     ocultos: flagQuery,
+    altas: flagQuery,
   }),
 })
 

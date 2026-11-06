@@ -20,6 +20,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { getPlanState, type PlanState } from '../dashboard/planState.service'
 import { scopeWhere, type CrmAccess } from './access.service'
 import { teamOrganizationId } from './inbound.service'
+import { altaPropiaPendienteSql } from './clientFacts'
 import { MONEY, REAL_VENUE, REAL_VENUE_SQL, VENUE_HAS_MONEY_SQL } from './sweep.service'
 
 const DEFAULT_PAGE = 50
@@ -100,9 +101,13 @@ const likeContaining = (text: string) => `%${text.replace(/[\\%_]/g, '\\$&')}%`
  * The clients «Clientes» lists, as a filter over `o`: the client rule, the hidden ones out — or only them (ruling 39) —
  * and the name search, all in the database, before the page and in the total.
  */
-function clientsFilter(teamOrgId: string | null, now: Date, opts: { onlyHidden: boolean; q?: string }): Prisma.Sql {
+function clientsFilter(teamOrgId: string | null, now: Date, opts: { onlyHidden: boolean; q?: string; conAltas?: boolean }): Prisma.Sql {
   const hidden = Prisma.sql`EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")`
-  return Prisma.sql`${clientSql(teamOrgId, now)}
+  // The stalled signups (P1 = A) join only when the request asks; `clientSql` itself never changes (campaigns read it).
+  const universe = opts.conAltas
+    ? Prisma.sql`(${clientSql(teamOrgId, now)} OR (${teamOrgId ? Prisma.sql`o."id" <> ${teamOrgId} AND ` : Prisma.empty}${altaPropiaPendienteSql()}))`
+    : clientSql(teamOrgId, now)
+  return Prisma.sql`${universe}
     AND ${opts.onlyHidden ? hidden : Prisma.sql`NOT ${hidden}`}${opts.q ? Prisma.sql` AND o."name" ILIKE ${likeContaining(opts.q)}` : Prisma.empty}`
 }
 
@@ -112,6 +117,8 @@ export interface ClientFilters {
   limit?: number
   /** Only the hidden ones (ruling 39), to bring one back. Only with «Configurar el CRM» (L7); for anyone else it is ignored. */
   ocultos?: boolean
+  /** Also list the signups that stopped before giving a card (P1 = A). Only the new SUPERADMIN and the MCP ask. */
+  altas?: boolean
 }
 
 const fullName = (person: { firstName: string; lastName: string }) => `${person.firstName} ${person.lastName}`.trim()
@@ -125,7 +132,11 @@ const fullName = (person: { firstName: string; lastName: string }) => `${person.
  */
 export async function listClients(access: CrmAccess, filters: ClientFilters = {}, now = new Date()) {
   const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE, 1), MAX_PAGE)
-  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: !!(filters.ocultos && access.configurar), q: filters.q })
+  const filter = clientsFilter(await teamOrganizationId(), now, {
+    onlyHidden: !!(filters.ocultos && access.configurar),
+    q: filters.q,
+    conAltas: filters.altas === true,
+  })
   // After the cursor's row in the same (createdAt DESC, id DESC) order; an unknown cursor leaves nothing after it.
   const after = filters.cursor
     ? Prisma.sql` AND (o."createdAt", o."id") < (SELECT c."createdAt", c."id" FROM "Organization" c WHERE c."id" = ${filters.cursor})`
@@ -235,7 +246,7 @@ export async function getLive(access: CrmAccess, accountId: string, now = new Da
  * client) answers the same 404 as `GET /accounts/:id/live` — this route never goes around the account scope.
  */
 export async function getClientLive(access: CrmAccess, organizationId: string, now = new Date()) {
-  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: false })
+  const filter = clientsFilter(await teamOrganizationId(), now, { onlyHidden: false, conAltas: true })
   const [client] = await prisma.$queryRaw<Array<{ id: string; crmAccountId: string | null }>>(Prisma.sql`
     SELECT o."id", (SELECT ca."id" FROM "CrmAccount" ca WHERE ca."organizationId" = o."id") AS "crmAccountId"
     FROM "Organization" o WHERE o."id" = ${organizationId} AND ${filter}`)

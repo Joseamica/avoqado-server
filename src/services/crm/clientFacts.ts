@@ -90,6 +90,20 @@ export function altaPendienteSql(): Prisma.Sql {
   )`
 }
 
+/**
+ * An «alta propia» that stopped at the plan screen, over `o`: `altaPendienteSql`, its `OnboardingProgress` carries an
+ * `acquisitionSource` (only the self-service signup and the landing write it) and it has at least one real venue (the
+ * business is created at «tipo de negocio», right before the plan screen). Organizations made by hand or signups that
+ * never got past the email code do not match. Does NOT exclude the team's organization: the caller does.
+ */
+export function altaPropiaPendienteSql(): Prisma.Sql {
+  return Prisma.sql`(
+    ${altaPendienteSql()}
+    AND EXISTS (SELECT 1 FROM "OnboardingProgress" op WHERE op."organizationId" = o."id" AND op."acquisitionSource" IS NOT NULL)
+    AND EXISTS (SELECT 1 FROM "Venue" v WHERE v."organizationId" = o."id" AND ${REAL_VENUE_SQL})
+  )`
+}
+
 /** An order of the venue `v` charged (fully or partly) in the window, of the given sources (SQL literals). */
 const paidOrder = (sources: Prisma.Sql, desde: Date, extra: Prisma.Sql = Prisma.empty) => Prisma.sql`EXISTS (
   SELECT 1 FROM "Order" o2

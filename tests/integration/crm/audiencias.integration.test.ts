@@ -390,6 +390,15 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
   // ── Clientes ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
   describe('clientes', () => {
+    it('🔴 el_publico_CLIENTES_no_gana_a_las_altas_sin_tarjeta (C1: las altas entran a «Clientes», no a las campañas)', async () => {
+      const ciudad = `Alta ${suffix}`
+      const org = await organizacion()
+      await venue(org, { name: 'Alta sin tarjeta', email: correo('alta-sin-tarjeta'), city: ciudad })
+      await prisma.onboardingProgress.create({ data: { organizationId: org, completedSteps: [], acquisitionSource: 'landing' } })
+
+      expect((await recorrer(clientes({}, ciudad))).filas).toEqual([])
+    })
+
     it('un_contrato_comercial_PREMIUM_sin_fila_de_plan_sale_como_PREMIUM_y_no_como_GRATIS', async () => {
       const ciudad = `Contrato ${suffix}`
       const v = await venue(await organizacion(), { name: 'Contrato', email: correo('contrato'), city: ciudad })

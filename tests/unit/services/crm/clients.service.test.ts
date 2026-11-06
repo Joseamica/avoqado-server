@@ -261,6 +261,33 @@ describe('listClients', () => {
   })
 })
 
+describe('altas sin tarjeta (C1, P1 = A)', () => {
+  const ALTA = `op."acquisitionSource" IS NOT NULL`
+
+  it('sin altas=1 el universo es exactamente clientSql: no aparece la rama de altas', async () => {
+    await listClients(access(), {}, NOW)
+    expect(pageQuery().sql).not.toContain(ALTA)
+    expect(countQuery().sql).not.toContain(ALTA)
+  })
+
+  it('con altas=1 la lista y el total suman la rama de altas, y ésta también excluye al equipo', async () => {
+    await listClients(access(), { altas: true }, NOW)
+    for (const query of [pageQuery(), countQuery()]) {
+      expect(query.sql).toContain(ALTA)
+      expect(query.sql).toMatch(/OR \(o\."id" <> \? AND /)
+      expect(query.sql).toContain('NOT EXISTS (SELECT 1 FROM "CrmHiddenClient"')
+    }
+  })
+
+  it('getClientLive abre siempre sobre el universo ampliado (la ficha de un 🟠 se abre)', async () => {
+    prismaMock.venue.findMany.mockResolvedValue([])
+    prismaMock.venue.count.mockResolvedValue(0)
+    clientsDb([])
+    await expect(getClientLive(access(), ORG, NOW)).rejects.toBeDefined()
+    expect(rawQueries()[0].sql).toContain(ALTA)
+  })
+})
+
 describe('organizaciones ocultas (ruling 39)', () => {
   const HIDDEN = 'NOT EXISTS (SELECT 1 FROM "CrmHiddenClient" h WHERE h."organizationId" = o."id")'
   const ONLY_HIDDEN = /(?<!NOT )EXISTS \(SELECT 1 FROM "CrmHiddenClient" h WHERE h\."organizationId" = o\."id"\)/
