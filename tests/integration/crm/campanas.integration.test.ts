@@ -573,6 +573,44 @@ describe('encolar: una transacción con la fila bloqueada', () => {
     }
   })
 
+  it('🔴 alguien quitado cuyo correo de origen trae U+00A0 al final no se cuenta, no se firma y no se encola', async () => {
+    // El correo crudo con un espacio que el `btrim` de SQL no quita (como el de un negocio); se manda normalizado. La landing guarda el
+    // correo ya normalizado: esta fila lo imita a propósito, porque llega por el mismo camino que un correo de negocio.
+    const crudo = `${correo('invisible')}\u00A0`
+    const { id: cuentaId } = await prisma.crmAccount.create({ data: { name: `Negocio invisible ${suffix}`, source: 'MANUAL', stageId } })
+    accountIds.push(cuentaId)
+    await prisma.crmEmailConsent.create({
+      data: {
+        email: crudo,
+        accountId: cuentaId,
+        entryId: `entry-invisible-${suffix}`,
+        consentAt: new Date(),
+        source: 'LANDING',
+        noticeVersion: 'v1',
+      },
+    })
+    try {
+      // Control: sin quitarla, sale normalizada y son 4.
+      expect(await audience.contarAudiencia(AUDIENCIA())).toMatchObject({ total: 4 })
+      const id = await borrador()
+      await updateCampaign(rafa, id, {
+        audience: { ...AUDIENCIA(), excluir: [correo('invisible')] },
+        basePublico: (await getCampaign(id)).huellaPublico,
+      })
+      process.env.CRM_CORREO_PRUEBAS = correo('rafa')
+      await expect(sendCampaignTest(rafa, id)).resolves.toMatchObject({ ok: true })
+      const vista = await previewSend(rafa, id)
+      expect(vista).toMatchObject({ total: 3, porSegmento: { PROSPECTOS: 3 }, bloqueados: 0 })
+
+      await expect(enqueueCampaign(rafa, id, vista.token!)).resolves.toEqual({ total: 3 })
+
+      const filas = await prisma.crmCampaignDelivery.findMany({ where: { campaignId: id }, orderBy: { email: 'asc' }, take: 10 })
+      expect(filas.map(f => f.email)).toEqual(['ana', 'beto', 'caro'].map(correo))
+    } finally {
+      await prisma.crmEmailConsent.deleteMany({ where: { email: crudo } })
+    }
+  })
+
   it('🔴 un agregado con el permiso en una cuenta archivada (A) y su contacto en una abierta (B) se encola con el nombre, el negocio y la cuenta de B', async () => {
     const email = correo('dos-cuentas')
     const nueva = async (data: { name: string; archivedAt?: Date; ownerStaffId?: string }) => {

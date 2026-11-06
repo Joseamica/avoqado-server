@@ -202,6 +202,12 @@ function rama(segmento: Segmento, contexto: Contexto): Prisma.Sql {
  *
  * El contacto se elige en UNA pasada sobre los contactos de los correos pedidos (DISTINCT ON), no con una subconsulta por persona: el
  * correo del contacto se compara normalizado, así que su índice no sirve, y 500 agregados serían 500 lecturas de la tabla.
+ *
+ * 🔴 Por eso la regla va DESENROLLADA aquí, con sus mismas tres piezas y no con `sqlCorreoAgregable`: el permiso es la propia fila `ec`, el
+ * contacto visible es `vc` (INNER JOIN, mismo `sqlCuentaVisible`) y la baja es `sqlBloqueado`. Con `sqlCorreoAgregable` el EXISTS del
+ * contacto se volvía un semi-join por persona que recorría la tabla de contactos (medido el 5-nov en la nube: 500 agregados × 7,500
+ * contactos = 1.37 s por página, también en «Ver quiénes»). Lo que dice que las dos son la misma regla son las pruebas de integración que
+ * comparan `personasNoElegibles` con la resolución.
  */
 function agregados(incluir: string[], { equipo }: Contexto): Prisma.Sql {
   return Prisma.sql`
@@ -210,7 +216,7 @@ function agregados(incluir: string[], { equipo }: Contexto): Prisma.Sql {
       NULLIF(btrim(vc."negocio"), '') AS "negocio",
       vc."vendedor", vc."accountId", NULL::text AS "venueName", 4 AS "prio", ''::text AS "orden", ec."id" AS "fila"
     FROM "CrmEmailConsent" ec
-    LEFT JOIN (
+    JOIN (
       SELECT DISTINCT ON (lower(btrim(c."email"))) lower(btrim(c."email")) AS "email",
         c."name", ca."name" AS "negocio", ${DUENO} AS "vendedor", ca."id" AS "accountId"
       FROM "CrmContact" c
@@ -219,7 +225,7 @@ function agregados(incluir: string[], { equipo }: Contexto): Prisma.Sql {
       WHERE lower(btrim(c."email")) = ANY(${incluir}::text[]) AND ${sqlCuentaVisible(Prisma.sql`ca`, equipo)}
       ORDER BY lower(btrim(c."email")), c."isPrimary" DESC, c."createdAt", c."id"
     ) vc ON vc."email" = ec."email"
-    WHERE ec."email" = ANY(${incluir}::text[]) AND ${sqlCorreoAgregable(Prisma.sql`ec."email"`, equipo)}`
+    WHERE ec."email" = ANY(${incluir}::text[]) AND NOT ${sqlBloqueado(Prisma.sql`ec."email"`)}`
 }
 
 /** Las ramas de una audiencia: una por público y, si hay personas agregadas, la suya. */
@@ -263,6 +269,13 @@ async function pagina(resolucion: Prisma.Sql, desde: string | null): Promise<Fil
     LIMIT ${LOTE}`)
 }
 
+/**
+ * Las personas quitadas, comparadas con el correo con el que se MANDA (`aDestinatario`). 🔴 El `btrim` de SQL sólo quita espacios ASCII y
+ * `normalizeEmail` también quita U+00A0, U+202F y U+FEFF: un correo de origen con uno de ésos pasa el filtro de SQL (`seleccionDistinta`)
+ * con el correo crudo, y «Quitar» guardó el normalizado. Por eso contar, el `conjuntoHash`, encolar y «Ver quiénes» lo vuelven a quitar aquí.
+ */
+const quitados = (audiencia: Audiencia) => new Set((audiencia.excluir ?? []).map(normalizeEmail))
+
 function aDestinatario(fila: Fila): Destinatario {
   const { reason, tipo } = PUBLICOS[fila.prio - 1]
   const vendedor = tipo === 'USUARIOS' ? VENDEDOR_DE_USUARIOS : fila.vendedor
@@ -283,7 +296,8 @@ function aDestinatario(fila: Fila): Destinatario {
 
 // ── Quién se puede agregar a mano (plan B, tarea 4; rediseño tras Codex r2, Familia 3) ──────────────────────────────────
 // UNA definición, decidida POR CORREO, que usan la revisión del PATCH (`personasNoElegibles`), la rama de `incluir` al resolver y el
-// buscador de «Agregar»: así nunca se agrega, se cuenta o se manda a alguien que otro de los tres no dejaría.
+// buscador de «Agregar»: así nunca se agrega, se cuenta o se manda a alguien que otro de los tres no dejaría. (La rama de `incluir` la
+// lleva desenrollada, con las mismas piezas, por rendimiento: ver `agregados`.)
 
 /**
  * La cuenta del CRM `cuenta` (un alias de `CrmAccount`) es VISIBLE: no está archivada, su organización no está oculta
@@ -342,12 +356,14 @@ async function porLotes(
   if (audiencia.segmentos.length === 0 && !audiencia.incluir?.length) return conjunto.digest('hex')
   const contexto: Contexto = { equipo: await teamOrganizationId(), ahora: new Date() }
   const resolucion = seleccionDistinta(ramas(audiencia, contexto), audiencia.excluir ?? [])
+  const excluidos = quitados(audiencia)
 
   let desde: string | null = null
   for (;;) {
     const filas = await pagina(resolucion, desde)
     if (filas.length === 0) break
-    const destinatarios = filas.map(aDestinatario)
+    // Quitados antes de los bloqueados: una persona quitada no cuenta como bloqueada.
+    const destinatarios = filas.map(aDestinatario).filter(d => !excluidos.has(d.email))
     // Un solo `IN` por lote de a lo más LOTE correos, nunca la audiencia entera.
     const bloqueados = await filtrarBloqueados(
       prisma,
@@ -393,7 +409,13 @@ export async function paginaDeDestinatarios(
     ORDER BY w."email"
     LIMIT ${opciones.limit + 1}`)
   const pagina = filas.slice(0, opciones.limit)
-  return { filas: pagina.map(aDestinatario), siguiente: filas.length > opciones.limit ? pagina[pagina.length - 1].email : null }
+  // El cursor es el último correo CRUDO de la página (el de la consulta), aunque esa fila sea de alguien quitado: así ninguna se repite
+  // ni se pierde. Por eso una página puede traer menos de `limit` filas.
+  const excluidos = quitados(audiencia)
+  return {
+    filas: pagina.map(aDestinatario).filter(d => !excluidos.has(d.email)),
+    siguiente: filas.length > opciones.limit ? pagina[pagina.length - 1].email : null,
+  }
 }
 
 /** Cuántas personas trae el buscador de «Agregar»: lo impone el servidor, no el cliente. */

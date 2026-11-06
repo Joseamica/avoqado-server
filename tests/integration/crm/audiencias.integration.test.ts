@@ -1037,6 +1037,86 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
       // Y la regla dice lo mismo: es agregable (por el contacto visible de B).
       expect(await personasNoElegibles([correo('dc-persona')])).toEqual([])
     })
+
+    it('🔴 entre_DOS_cuentas_visibles_incluir_toma_el_contacto_PRINCIPAL_aunque_sea_el_mas_nuevo', async () => {
+      const duena = await persona(correo('tb-duena'), { firstName: 'Paty', lastName: 'Principal' })
+      // La cuenta vieja tiene el permiso y un contacto NO principal, creado antes: si el orden fuera «el más viejo», ganaría ésta.
+      const vieja = await cuenta({ name: 'Negocio viejo' })
+      await prisma.crmContact.create({
+        data: {
+          accountId: vieja,
+          name: 'Nombre viejo',
+          email: correo('tb-persona'),
+          isPrimary: false,
+          createdAt: new Date(Date.now() - 60_000),
+        },
+      })
+      await consentimiento(correo('tb-persona'), vieja)
+      const nueva = await cuenta({ name: 'Negocio nuevo', ownerStaffId: duena.id })
+      await contacto(nueva, 'Nombre nuevo', correo('tb-persona'), true)
+
+      const { filas } = await recorrer({ segmentos: [], incluir: [correo('tb-persona')] })
+
+      expect(filas).toEqual([
+        {
+          email: correo('tb-persona'),
+          name: 'Nombre nuevo',
+          reason: 'PROSPECTO',
+          publico: 'AGREGADOS',
+          vars: { nombre: 'Nombre nuevo', negocio: 'Negocio nuevo', vendedor: 'Paty Principal' },
+          accountId: nueva,
+        },
+      ])
+      // El buscador de «Agregar» desempata igual (principal, luego el más viejo).
+      expect((await buscarPersonasParaCampana(correo('tb-persona'))).rows).toEqual([
+        expect.objectContaining({ email: correo('tb-persona'), nombre: 'Nombre nuevo', negocio: 'Negocio nuevo', agregable: true }),
+      ])
+    })
+
+    it('🔴 un_correo_de_negocio_con_un_espacio_invisible_al_final_y_quitado_no_se_cuenta_ni_se_firma_ni_se_entrega_ni_se_lista', async () => {
+      const ciudad = `Invisible ${suffix}`
+      // `normalizeEmail` (JS, el correo con el que se manda y el que guarda «Quitar») quita U+00A0, U+202F y U+FEFF; el `btrim` de SQL no.
+      const invisibles = { bom: '\uFEFF', nbsp: '\u00A0', nnbsp: '\u202F' }
+      for (const [alias, caracter] of Object.entries(invisibles)) {
+        await planPagado(await venue(await organizacion(), { email: `${correo(`inv-${alias}`)}${caracter}`, city: ciudad }), 'PRO')
+      }
+      await planPagado(await venue(await organizacion(), { email: correo('inv-queda'), city: ciudad }), 'PRO')
+      const quitadas = Object.keys(invisibles).map(alias => correo(`inv-${alias}`))
+      const publico = clientes({}, ciudad)
+
+      // Control: la regla de forma de SQL los deja pasar con el correo CRUDO (así el filtro de SQL no los iguala con lo que se quitó) y se
+      // mandan normalizados. Sin el filtro en JS, los tres de abajo saldrían.
+      expect(correos((await recorrer(publico)).filas)).toEqual([...quitadas, correo('inv-queda')].sort())
+      const [{ igual }] = await prisma.$queryRaw<Array<{ igual: boolean }>>(
+        Prisma.sql`SELECT lower(btrim(${`${quitadas[1]}\u00A0`})) = ${quitadas[1]} AS "igual"`,
+      )
+      expect(igual).toBe(false)
+
+      // Lo que guarda «Quitar»: el correo que enseñó «Ver quiénes», ya normalizado.
+      const aud: Audiencia = { ...publico, excluir: quitadas }
+      const soloQueda = hashDe([correo('inv-queda')])
+
+      const { filas, total, conjuntoHash } = await recorrer(aud)
+      expect(correos(filas)).toEqual([correo('inv-queda')])
+      expect({ total, conjuntoHash }).toEqual({ total: 1, conjuntoHash: soloQueda })
+      expect(await contarAudiencia(aud)).toEqual({
+        total: 1,
+        porSegmento: { PROSPECTOS: 0, CLIENTES: 1, USUARIOS: 0, AGREGADOS: 0 },
+        bloqueados: 0,
+        conjuntoHash: soloQueda,
+      })
+      // «Ver quiénes» tampoco la lista, y con páginas de 1 el cursor (el correo crudo) no repite ni pierde a nadie.
+      expect((await paginaDeDestinatarios(aud, { limit: 100 })).filas.map(d => d.email)).toEqual([correo('inv-queda')])
+      const vistos: string[] = []
+      let desde: string | undefined
+      for (let vuelta = 0; vuelta < 10; vuelta++) {
+        const { filas: pagina, siguiente } = await paginaDeDestinatarios(aud, { desde, limit: 1 })
+        vistos.push(...pagina.map(d => d.email))
+        if (siguiente === null) break
+        desde = siguiente
+      }
+      expect(vistos).toEqual([correo('inv-queda')])
+    })
   })
   // ── Buscar a quién agregar (plan B, tarea 7; rediseño tras Codex r2 y r3) ────────────────────────────────────────────────────
   // Sólo gente que ya está en el CRM y es VISIBLE (cuenta abierta, cliente no oculto, no del equipo). «Agregable» es lo mismo que
