@@ -10,6 +10,8 @@
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { validateCouponCode } from '../../services/dashboard/coupon.dashboard.service'
+import { textoDeRechazoDeCupon } from '../../services/shared/cuponDeLaVenta'
 
 // ==========================================
 // LIST COUPONS
@@ -300,174 +302,33 @@ export async function deleteCoupon(req: Request, res: Response) {
 /**
  * POST /api/v1/mobile/venues/:venueId/coupons/validate
  *
- * Validate a coupon code. Checks:
- * - Code exists and belongs to venue
- * - Coupon is active
- * - Parent discount is active
- * - Not expired / not before valid date
- * - Usage limit not exceeded
- * - Minimum purchase amount met (if orderTotal provided)
- * - Per-customer limit not exceeded (if customerId provided)
+ * Validate a coupon code with `validateCouponCode`. Minimum purchase needs `orderTotal`; the per-customer limit needs `customerId`.
  */
 export async function validateCoupon(req: Request, res: Response) {
   try {
     const { venueId } = req.params
     const { code, orderTotal, customerId } = req.body
 
-    if (!code || !code.trim()) {
+    if (typeof code !== 'string' || !code.trim()) {
       return res.status(400).json({ success: false, message: 'code es requerido' })
     }
 
-    const normalizedCode = code.toUpperCase().trim()
+    // D5: la MISMA regla que la creación de la venta y la terminal; aquí sólo se conserva la forma de la respuesta.
+    const validation = await validateCouponCode(
+      venueId,
+      code,
+      typeof orderTotal === 'number' ? orderTotal : undefined,
+      typeof customerId === 'string' && customerId ? customerId : undefined,
+    )
 
-    // Find the coupon with its parent discount
-    const coupon = await prisma.couponCode.findFirst({
-      where: {
-        code: normalizedCode,
-        discount: { venueId },
-      },
-      include: {
-        discount: {
-          select: {
-            id: true,
-            name: true,
-            type: true,
-            value: true,
-            scope: true,
-            maxDiscountAmount: true,
-            active: true,
-          },
-        },
-      },
-    })
-
-    if (!coupon) {
+    if (!validation.valid || !validation.coupon) {
       return res.json({
         success: true,
-        data: {
-          valid: false,
-          error: 'Codigo de cupon no encontrado',
-          errorCode: 'NOT_FOUND',
-        },
+        data: { valid: false, error: textoDeRechazoDeCupon(validation), errorCode: validation.errorCode },
       })
     }
 
-    // Check if coupon is active
-    if (!coupon.active) {
-      return res.json({
-        success: true,
-        data: {
-          valid: false,
-          error: 'El cupon esta inactivo',
-          errorCode: 'INACTIVE',
-        },
-      })
-    }
-
-    // Check if parent discount is active
-    if (!coupon.discount.active) {
-      return res.json({
-        success: true,
-        data: {
-          valid: false,
-          error: 'El descuento asociado a este cupon esta inactivo',
-          errorCode: 'INACTIVE',
-        },
-      })
-    }
-
-    const now = new Date()
-
-    // Check validity period — not started
-    if (coupon.validFrom && coupon.validFrom > now) {
-      return res.json({
-        success: true,
-        data: {
-          valid: false,
-          error: `El cupon aun no es valido. Valido desde ${coupon.validFrom.toISOString()}`,
-          errorCode: 'NOT_STARTED',
-        },
-      })
-    }
-
-    // Check validity period — expired
-    if (coupon.validUntil && coupon.validUntil < now) {
-      return res.json({
-        success: true,
-        data: {
-          valid: false,
-          error: 'El cupon ha expirado',
-          errorCode: 'EXPIRED',
-        },
-      })
-    }
-
-    // Check usage limit
-    if (coupon.maxUses !== null && coupon.currentUses >= coupon.maxUses) {
-      return res.json({
-        success: true,
-        data: {
-          valid: false,
-          error: 'El limite de usos del cupon ha sido alcanzado',
-          errorCode: 'USAGE_LIMIT',
-        },
-      })
-    }
-
-    // Check minimum purchase amount
-    if (coupon.minPurchaseAmount !== null && orderTotal !== undefined) {
-      if (orderTotal < Number(coupon.minPurchaseAmount)) {
-        return res.json({
-          success: true,
-          data: {
-            valid: false,
-            error: `Compra minima de ${Number(coupon.minPurchaseAmount)} requerida`,
-            errorCode: 'MIN_PURCHASE',
-          },
-        })
-      }
-    }
-
-    // Check per-customer usage limit
-    if (coupon.maxUsesPerCustomer !== null && customerId) {
-      const customerRedemptions = await prisma.couponRedemption.count({
-        where: {
-          couponCodeId: coupon.id,
-          customerId,
-        },
-      })
-
-      if (customerRedemptions >= coupon.maxUsesPerCustomer) {
-        return res.json({
-          success: true,
-          data: {
-            valid: false,
-            error: `Ya has usado este cupon ${coupon.maxUsesPerCustomer} vez/veces`,
-            errorCode: 'CUSTOMER_LIMIT',
-          },
-        })
-      }
-    }
-
-    // Coupon is valid
-    return res.json({
-      success: true,
-      data: {
-        valid: true,
-        coupon: {
-          id: coupon.id,
-          code: coupon.code,
-          discount: {
-            id: coupon.discount.id,
-            name: coupon.discount.name,
-            type: coupon.discount.type,
-            value: Number(coupon.discount.value),
-            scope: coupon.discount.scope,
-            maxDiscountAmount: coupon.discount.maxDiscountAmount ? Number(coupon.discount.maxDiscountAmount) : null,
-          },
-        },
-      },
-    })
+    return res.json({ success: true, data: { valid: true, coupon: validation.coupon } })
   } catch (error) {
     logger.error('Error validating coupon (mobile)', { error })
     return res.status(500).json({ success: false, message: 'Error al validar cupon' })

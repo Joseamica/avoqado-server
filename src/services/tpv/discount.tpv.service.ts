@@ -13,6 +13,7 @@ import logger from '@/config/logger'
 import { DiscountType, Prisma } from '@prisma/client'
 import * as discountEngine from '@/services/dashboard/discountEngine.service'
 import * as couponService from '@/services/dashboard/coupon.dashboard.service'
+import { apartarCupon, textoDeRechazoDeCupon } from '../shared/cuponDeLaVenta'
 import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -330,6 +331,18 @@ export async function applyCouponCode(
         error: 'This coupon has already been applied to this order',
       }
     }
+    // D5 (Codex r3 #3): una orden lleva UN cupón: el canje es uno por orden (`CouponRedemption.orderId` único) y el segundo nunca contaría.
+    if (order.orderDiscounts.some(od => od.couponCodeId)) {
+      return {
+        success: false,
+        discountName: discount.name,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'Esta cuenta ya tiene un cupón. Quítalo antes de aplicar otro.',
+      }
+    }
+    // D5 (Codex r3 #1): el mismo apartado que la venta nueva, bajo el mismo candado del descuento (lanza el 400 del límite).
+    await apartarCupon(tx, venueId, { id: coupon.id, code: coupon.code, discount: { id: discount.id }, minimo: null }, order.customerId)
 
     // 🔴 MONEY: contra lo que QUEDA por descontar, no contra el subtotal completo. Apilar
     // descuentos (cupón + predefinido + manual) descontaba más que la cuenta y dejaba `total`
@@ -536,13 +549,20 @@ export async function validateCoupon(
   discountType?: string
   discountValue?: number
   estimatedSavings?: number
+  // D5: ADITIVOS, los lee la TPV ≥ 2.16.2; las viejas siguen leyendo lo de arriba.
+  couponId?: string
+  code?: string
+  scope?: string
+  maxDiscountAmount?: number | null
+  errorCode?: string
 }> {
   const validation = await couponService.validateCouponCode(venueId, couponCode.toUpperCase(), orderTotal, customerId)
 
   if (!validation.valid || !validation.coupon) {
     return {
       valid: false,
-      message: validation.error || 'Invalid coupon',
+      message: textoDeRechazoDeCupon(validation),
+      errorCode: validation.errorCode,
     }
   }
 
@@ -569,5 +589,9 @@ export async function validateCoupon(
     discountType: discount.type,
     discountValue: Number(discount.value),
     estimatedSavings: Math.round(estimatedSavings * 100) / 100,
+    couponId: validation.coupon.id,
+    code: validation.coupon.code,
+    scope: discount.scope,
+    maxDiscountAmount: discount.maxDiscountAmount,
   }
 }

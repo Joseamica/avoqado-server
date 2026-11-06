@@ -152,9 +152,10 @@ describe('descuento histórico de cabecera (Codex r1 P1)', () => {
 })
 
 describe('fresh discount mutations', () => {
-  it.each(writers)('%s uses the canonical Order lock before any child/charge write', async (_name, run) => {
+  it.each(writers)('%s uses the canonical Order lock before any child/charge write', async (name, run) => {
     await run()
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+    // D5 (Codex r3 #1): el cupón toma, DESPUÉS del de la orden, el candado de su descuento para apartar el uso.
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(name === 'coupon' ? 2 : 1)
     for (const model of ['orderDiscount', 'orderServiceCharge'])
       for (const method of ['create', 'update', 'delete']) {
         const mock = tx[model][method]
@@ -177,12 +178,13 @@ describe('fresh discount mutations', () => {
     await expect(run()).rejects.toThrow(/Order not found/)
     expect(tx.orderDiscount.create).not.toHaveBeenCalled()
   })
-  it.each(writers)('%s scopes the canonical lock to the ROUTE venue, never to the Order own venue', async (_name, run) => {
+  it.each(writers)('%s scopes the canonical lock to the ROUTE venue, never to the Order own venue', async (name, run) => {
     // The Order claims another venue: a writer that derived the tenant from it (legacy path) would lock that one instead.
     tx.order.findUnique.mockResolvedValue({ ...order(), venueId: 'order-own-venue' })
     await run()
     expect(tx.order.findUnique.mock.calls.filter(([args]: any[]) => args?.select?.venueId)).toHaveLength(0)
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+    // D5 (Codex r3 #1): el cupón toma un segundo candado, el de su descuento, para apartar el uso; el primero sigue siendo el de la orden.
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(name === 'coupon' ? 2 : 1)
     // Tagged template: [strings, orderId, venueId] — the bound venue must be the route's.
     expect(Prisma.sql(tx.$queryRaw.mock.calls[0][0], ...tx.$queryRaw.mock.calls[0].slice(1)).values).toEqual(['order', 'venue'])
   })
@@ -972,5 +974,38 @@ describe('tarjetas de regalo: los automáticos no tocan una cuenta con renglones
     expect(tx.discount.findMany).not.toHaveBeenCalled()
     expect(tx.orderDiscount.create).not.toHaveBeenCalled()
     expect(tx.order.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('D5: la ruta vieja de cupón aparta como la venta nueva (Codex r3 #1 y #3)', () => {
+  it('una cuenta que ya trae otro cupón no acepta un segundo: el canje es uno por orden', async () => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), orderDiscounts: [{ id: 'od-a', couponCodeId: 'otro' }] })
+    expect(await tpv.applyCouponCode('venue', 'order', 'TEN', 'staff')).toMatchObject({
+      success: false,
+      error: 'Esta cuenta ya tiene un cupón. Quítalo antes de aplicar otro.',
+    })
+    expect(tx.orderDiscount.create).not.toHaveBeenCalled()
+  })
+
+  it('el último uso ya apartado por otra venta: se rechaza con el texto de la caja', async () => {
+    tx.couponCode.findFirst.mockResolvedValue({
+      id: 'coupon',
+      code: 'TEN',
+      active: true,
+      discount: { ...discount, maxUsesPerCustomer: null },
+      minPurchaseAmount: null,
+      maxUses: 1,
+      currentUses: 0,
+      maxUsesPerCustomer: null,
+      validFrom: null,
+      validUntil: null,
+      _count: { redemptions: 0 },
+    })
+    tx.orderDiscount.count.mockResolvedValue(1)
+    await expect(tpv.applyCouponCode('venue', 'order', 'TEN', 'staff')).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Este cupón ya alcanzó su límite de usos.',
+    })
+    expect(tx.orderDiscount.create).not.toHaveBeenCalled()
   })
 })

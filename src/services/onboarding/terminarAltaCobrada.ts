@@ -5,6 +5,7 @@ import { assertHybridOnboardingPurchase } from '../launchCampaigns/hybridPurchas
 import { PLAN_ACTIVATION_STATUS } from '../launchCampaigns/launchCampaignEnums'
 import * as onboardingProgressService from './onboardingProgress.service'
 import * as venueCreationService from './venueCreation.service'
+import { ALTA_DEL_ASISTENTE, altaSinTerminar } from '../mobile/altaSinTerminar'
 
 /**
  * 🔴 H0 (28-oct-2026): el alta cuyo plan ya quedó CONFIRMADO (cobrado o en prueba) se termina sola, sin esperar a que el
@@ -18,7 +19,15 @@ import * as venueCreationService from './venueCreation.service'
  *
  * Nunca cobra, nunca toca Stripe ni manda correos: el cobro (`activatePlan`) ya mandó los suyos.
  */
-export type ViaDelCierre = 'cobro' | 'navegador' | 'aviso-stripe' | 'barrido'
+export type ViaDelCierre = 'cobro' | 'navegador' | 'aviso-stripe' | 'barrido' | 'plan-regalado'
+
+/**
+ * Con un plan REGALADO por el SUPERADMIN (D1, 5-nov-2026) el plan ya está confirmado sin Stripe: cuenta el alta que no
+ * llegó a cobrar (NONE), la que rechazó la tarjeta (DECLINED) o la ya cobrada. Nunca con un cobro del alta EN CURSO.
+ */
+const ESTADOS_DEL_REGALO = [PLAN_ACTIVATION_STATUS.NONE, PLAN_ACTIVATION_STATUS.DECLINED, PLAN_ACTIVATION_STATUS.ACTIVE]
+/** Documentos en revisión: ese negocio lo activa el SUPERADMIN al revisarlos, no un regalo. */
+const KYC_EN_REVISION = ['PENDING_REVIEW', 'IN_REVIEW'] as const
 
 type NegocioDelAlta = { id: string; slug: string; name: string; status: string }
 
@@ -37,6 +46,8 @@ export interface OpcionesDelCierre {
    * cobro y el navegador NO lo hacen: esa marca también es el candado de un «Entrar» que puede seguir en curso.
    */
   repararParcial?: boolean
+  /** Sólo `plan-regalado`: el negocio al que se le regaló el plan. Si el alta de la organización es de otro, no se cierra. */
+  venueId?: string
 }
 
 async function leerAlta(organizationId: string) {
@@ -63,19 +74,27 @@ async function leerAlta(organizationId: string) {
 export async function terminarAltaCobrada(organizationId: string, opciones: OpcionesDelCierre): Promise<ResultadoDelCierre> {
   const { datos, p, venue, terminada } = await leerAlta(organizationId)
 
-  if (p.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE) return { estado: 'NADA', motivo: 'PLAN_NO_CONFIRMADO' }
+  const regalo = opciones.via === 'plan-regalado'
+  const confirmado = regalo
+    ? (ESTADOS_DEL_REGALO as readonly string[]).includes(String(p.planActivationStatus))
+    : p.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
+  if (!confirmado) return { estado: 'NADA', motivo: 'PLAN_NO_CONFIRMADO' }
   if (!p.termsAcceptedAt) return { estado: 'NADA', motivo: 'SIN_TERMINOS' }
-  if (!venue) return { estado: 'NADA', motivo: 'SIN_NEGOCIO' }
+  if (!venue || (regalo && venue.id !== opciones.venueId)) return { estado: 'NADA', motivo: 'SIN_NEGOCIO' }
   if (terminada) return { estado: 'YA_TERMINADA', venue }
   const parcial = !!p.completedAt
   if (parcial && !opciones.repararParcial) return { estado: 'NADA', motivo: 'CIERRE_EN_CURSO' }
 
   // Lo que la persona escribió en el asistente, antes de activar (como `completeV2Onboarding`). Idempotente y nunca bloquea:
   // el negocio ya existe.
-  const businessInfo = { ...datos.businessInfo, name: datos.businessInfo?.name?.trim() || 'Mi Negocio' }
-  await venueCreationService.applyBusinessInfoToVenue(venue.id, businessInfo, opciones.staffId).catch(error => {
-    logger.error('terminarAltaCobrada: no se pudieron aplicar los datos del negocio', { organizationId, venueId: venue.id, error })
-  })
+  // 🔴 Con un plan regalado NO (Codex D1 r1 #2): esa escritura va fuera de la transacción, así que un cierre fallido dejaría
+  // el negocio cambiado, y pisaría lo que el SUPERADMIN ya corrigió en el panel. El negocio ya nació con esos datos.
+  if (!regalo) {
+    const businessInfo = { ...datos.businessInfo, name: datos.businessInfo?.name?.trim() || 'Mi Negocio' }
+    await venueCreationService.applyBusinessInfoToVenue(venue.id, businessInfo, opciones.staffId).catch(error => {
+      logger.error('terminarAltaCobrada: no se pudieron aplicar los datos del negocio', { organizationId, venueId: venue.id, error })
+    })
+  }
 
   const datosDelNegocio: Record<string, string> = {}
   if (datos.identityInfo?.rfc) datosDelNegocio.rfc = datos.identityInfo.rfc
@@ -89,16 +108,27 @@ export async function terminarAltaCobrada(organizationId: string, opciones: Opci
   const ahora = new Date()
   const cerrada = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${organizationId} FOR UPDATE`
-    await assertHybridOnboardingPurchase(organizationId, plan?.hybridPurchaseId, tx)
+    // Con un regalo, la compra del alta que eligió y no pagó no cuenta (el plan es el regalado); una compra PENDIENTE sí frena.
+    await assertHybridOnboardingPurchase(organizationId, regalo ? undefined : plan?.hybridPurchaseId, tx)
     const marca = await tx.onboardingProgress.updateMany({
       where: parcial
         ? { organizationId, completedAt: { not: null }, planActivationStatus: PLAN_ACTIVATION_STATUS.ACTIVE }
-        : { organizationId, completedAt: null, planActivationStatus: PLAN_ACTIVATION_STATUS.ACTIVE },
+        : {
+            organizationId,
+            completedAt: null,
+            planActivationStatus: regalo ? { in: [...ESTADOS_DEL_REGALO] } : PLAN_ACTIVATION_STATUS.ACTIVE,
+          },
       data: parcial ? { currentStep: 7 } : { completedAt: ahora, currentStep: 7 },
     })
     if (marca.count === 0) return false
     // Sólo ONBOARDING → ACTIVE: un negocio suspendido o en revisión no se reactiva por terminar el alta.
-    await tx.venue.updateMany({ where: { id: venue.id, status: 'ONBOARDING' }, data: { status: 'ACTIVE' } })
+    // 🔴 Con un regalo, también sin documentos en revisión EN ESTA MISMA ESCRITURA (Codex D1 r2): unos documentos enviados
+    // entre la lectura y aquí lo dejarían activo. Si ya no se cumple, se deshace TODO el cierre (ninguna marca queda).
+    const activado = await tx.venue.updateMany({
+      where: { id: venue.id, status: 'ONBOARDING', ...(regalo ? { kycStatus: { notIn: [...KYC_EN_REVISION] } } : {}) },
+      data: { status: 'ACTIVE' },
+    })
+    if (regalo && activado.count === 0) throw new Error('El negocio cambió (documentos en revisión o ya no está en el alta): no se cierra')
     if (Object.keys(datosDelNegocio).length > 0) await tx.venue.update({ where: { id: venue.id }, data: datosDelNegocio })
     await tx.organization.updateMany({ where: { id: organizationId, onboardingCompletedAt: null }, data: { onboardingCompletedAt: ahora } })
     return true
@@ -138,5 +168,35 @@ export async function terminarAltaCobradaSinRomper(organizationId: string, opcio
       via: opciones.via,
       error: error instanceof Error ? error.message : String(error),
     })
+  }
+}
+
+/**
+ * 🔴 D1 (5-nov-2026): el SUPERADMIN regala el plan («Dar días de prueba», «Asignar plan comp», «Activar Pro») a quien se quedó
+ * en la pantalla de la tarjeta. Antes el plan quedaba vivo y el negocio en ONBOARDING: el DASHBOARD lo regresaba a `/setup` y
+ * el POS le decía «Termina de crear tu cuenta» (Taqueria El Patio, 5-nov). Ahora el alta se cierra como la del cobro.
+ *
+ * Sólo el alta VIGENTE sin terminar (`altaSinTerminar`) y sin documentos en revisión: un negocio que el SUPERADMIN tiene en
+ * ONBOARDING mientras revisa su KYC no se activa por esto. Nunca lanza ni deshace el regalo: un fallo se registra y el negocio queda como estaba.
+ */
+export async function terminarAltaPorPlanRegalado(venueId: string, staffId?: string): Promise<boolean> {
+  try {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { status: true, kycStatus: true, organizationId: true, organization: ALTA_DEL_ASISTENTE },
+    })
+    if (!venue || !altaSinTerminar(venue)) return false
+    // 🔴 Con sus documentos en revisión lo activa el SUPERADMIN al revisar, no un regalo (Codex D1 r1 #1): un negocio dado de
+    // alta por el SUPERADMIN cuyo dueño aceptó los términos en el asistente nuevo también cumple `altaSinTerminar`.
+    if ((KYC_EN_REVISION as readonly string[]).includes(venue.kycStatus)) return false
+    const r = await terminarAltaCobrada(venue.organizationId, { via: 'plan-regalado', staffId, venueId })
+    if (r.estado === 'NADA') logger.warn('Plan regalado sobre un alta sin terminar que no se pudo cerrar', { venueId, motivo: r.motivo })
+    return r.estado !== 'NADA'
+  } catch (error) {
+    logger.error('🚨 Plan regalado: no se pudo cerrar el alta; el negocio sigue en ONBOARDING', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
   }
 }

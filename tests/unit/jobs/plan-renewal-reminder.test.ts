@@ -1,11 +1,12 @@
 import type Stripe from 'stripe'
-import { PlanRenewalReminderJob, diasParaAvisar } from '@/jobs/plan-renewal-reminder.job'
+import { PlanRenewalReminderJob, TOPE_PRUEBAS, diasParaAvisar } from '@/jobs/plan-renewal-reminder.job'
 import { montoDelSiguienteCobro, noHabraCobro } from '@/services/billing/siguienteCobro'
 import logger from '@/config/logger'
 import { retry } from '@/utils/retry'
 import prisma from '@/utils/prismaClient'
 import emailService from '@/services/email.service'
 import * as planNotification from '@/services/access/planNotification.service'
+import { getPlanState } from '@/services/dashboard/planState.service'
 
 // Make retry transparent: just invoke the wrapped fn (deterministic, no backoff).
 jest.mock('@/utils/retry', () => ({
@@ -39,8 +40,13 @@ jest.mock('@/services/access/planNotification.service', () => ({
   resolvePlanNotificationTarget: jest.fn(),
 }))
 
+jest.mock('@/services/dashboard/planState.service', () => ({
+  __esModule: true,
+  getPlanState: jest.fn(),
+}))
+
 const mockPrisma = prisma as unknown as {
-  venueFeature: { findMany: jest.Mock; update: jest.Mock }
+  venueFeature: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
 }
 
 const DAY = 86400000
@@ -422,6 +428,7 @@ describe('PlanRenewalReminderJob.runNow', () => {
     expect((retry as jest.Mock).mock.calls.map(c => c[1].context)).toEqual([
       'plan-renewal-reminder.findMany',
       'plan-renewal-reminder.stamp',
+      'plan-renewal-reminder.pruebasSinTarjeta.findMany',
     ])
   })
 
@@ -527,5 +534,269 @@ describe('PlanRenewalReminderJob.runNow', () => {
       where: { id: 'vf2' },
       data: { renewalReminderSentAt: expect.any(Date) },
     })
+  })
+})
+
+// D2 (5-nov-2026): la prueba REGALADA del SUPERADMIN («Dar días de prueba», sin Stripe) se acababa sin avisarle al negocio.
+describe('PlanRenewalReminderJob.runNow — pruebas regaladas sin tarjeta', () => {
+  const NOW = Date.UTC(2026, 10, 27, 15) // 27-nov, 9:00 en CDMX (la hora del cron)
+  const FIN = new Date(Date.UTC(2026, 11, 5, 17, 19)) // 5-dic 11:19 CDMX: ~8.1 días
+  let freeSpy: jest.SpyInstance
+  let renewalSpy: jest.SpyInstance
+
+  const prueba = (overrides: Record<string, unknown> = {}) => ({
+    id: 'vf9',
+    venueId: 'v9',
+    endDate: FIN,
+    freeTrialNoticeFor: null as Date | null,
+    feature: { code: 'PLAN_PRO' },
+    venue: { slug: 'taqueria-el-patio', timezone: 'America/Mexico_City', status: 'ACTIVE' },
+    ...overrides,
+  })
+  // Lo que Facturación ve: el plan del negocio ES esta prueba de cortesía.
+  const cortesia = (fin: Date, overrides: Record<string, unknown> = {}) => ({
+    grandfathered: false,
+    origin: { kind: 'COMP', tier: 'PRO', currentPeriodEnd: fin.toISOString() },
+    ...overrides,
+  })
+  // La lectura de cobros (con Stripe) va vacía; la de pruebas regaladas devuelve `filas`.
+  const conPruebas = (filas: unknown[]) =>
+    mockPrisma.venueFeature.findMany.mockImplementation((args: { where: { stripeSubscriptionId: unknown } }) =>
+      Promise.resolve(args.where.stripeSubscriptionId === null ? filas : []),
+    )
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    jest.useFakeTimers({ now: NOW, doNotFake: ['nextTick', 'setImmediate'] })
+    freeSpy = jest.spyOn(emailService, 'sendPlanFreeTrialEndingEmail').mockResolvedValue(true)
+    renewalSpy = jest.spyOn(emailService, 'sendPlanRenewalReminderEmail').mockResolvedValue(true)
+    ;(planNotification.resolvePlanNotificationTarget as jest.Mock).mockResolvedValue({
+      email: 'ivonne@x.com',
+      locale: 'es',
+      venueName: 'Taqueria El Patio',
+      ownerName: 'Ivonne',
+    })
+    ;(getPlanState as jest.Mock).mockResolvedValue(cortesia(FIN))
+    mockPrisma.venueFeature.update.mockResolvedValue({})
+    mockPrisma.venueFeature.updateMany.mockResolvedValue({ count: 1 })
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+    freeSpy.mockRestore()
+    renewalSpy.mockRestore()
+  })
+
+  it('lee sólo planes activos sin Stripe de negocios activos, que vencen en <9 días y faltan por avisar para SU fecha, con tope', async () => {
+    conPruebas([])
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(mockPrisma.venueFeature.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          active: true,
+          stripeSubscriptionId: null,
+          suspendedAt: null,
+          endDate: { gt: new Date(NOW), lt: new Date(NOW + 9 * DAY) },
+          feature: { code: { in: ['PLAN_PRO', 'PLAN_PREMIUM'] } },
+          venue: { status: 'ACTIVE' },
+          // Las ya avisadas no ocupan el tope: sin esto, 200 avisadas tapaban para siempre a la 201 (Codex r1 #2).
+          AND: [
+            {
+              OR: [
+                { freeTrialNoticeFor: null },
+                { freeTrialNoticeFor: { lt: prisma.venueFeature.fields.endDate } },
+                { freeTrialNoticeFor: { gt: prisma.venueFeature.fields.endDate } },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ endDate: 'asc' }, { id: 'asc' }],
+        take: expect.any(Number),
+      }),
+    )
+  })
+
+  // 1. NEW FEATURE TESTS
+  it('vence en ~8 días → manda el aviso con la fecha y la zona del negocio, y sella LA FECHA sólo si sigue siendo la prueba', async () => {
+    conPruebas([prueba()])
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(getPlanState).toHaveBeenCalledWith('v9')
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+    const [to, data] = freeSpy.mock.calls[0]
+    expect(to).toBe('ivonne@x.com')
+    expect(data).toEqual({
+      locale: 'es',
+      venueName: 'Taqueria El Patio',
+      endDate: FIN,
+      planName: 'Pro',
+      timeZone: 'America/Mexico_City',
+      idempotencyKey: `prueba-regalada:vf9:${FIN.toISOString()}`,
+      // D3: con ≥ 72 h todavía puede quedarse con su plan desde Facturación.
+      billingUrl: expect.stringContaining('/venues/taqueria-el-patio/'),
+    })
+    expect(renewalSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.updateMany).toHaveBeenCalledWith({
+      where: { id: 'vf9', stripeSubscriptionId: null, endDate: FIN },
+      data: { freeTrialNoticeFor: FIN },
+    })
+    // 🔴 Codex r1 #1: nunca el sello del aviso de cobro, que lo leería como «ya avisado».
+    expect(mockPrisma.venueFeature.update).not.toHaveBeenCalled()
+  })
+
+  it('Premium → planName Premium', async () => {
+    conPruebas([prueba({ feature: { code: 'PLAN_PREMIUM' } })])
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy.mock.calls[0][1]).toMatchObject({ planName: 'Premium' })
+  })
+
+  it('zona del negocio inválida → CDMX', async () => {
+    conPruebas([prueba({ venue: { slug: 'x', timezone: 'GMT-6', status: 'ACTIVE' } })])
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy.mock.calls[0][1]).toMatchObject({ timeZone: 'America/Mexico_City' })
+  })
+
+  it('vence en más de 9 días → nada (aunque la consulta la trajera)', async () => {
+    const lejos = new Date(NOW + 10 * DAY)
+    conPruebas([prueba({ endDate: lejos })])
+    ;(getPlanState as jest.Mock).mockResolvedValue(cortesia(lejos))
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).not.toHaveBeenCalled()
+  })
+
+  it('ya se avisó ESTA fecha → no repite al día siguiente ni el último día', async () => {
+    conPruebas([prueba({ freeTrialNoticeFor: FIN })])
+    for (const dias of [0, 1, 8]) {
+      jest.setSystemTime(NOW + dias * DAY)
+      await new PlanRenewalReminderJob().runNow()
+    }
+    expect(freeSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.updateMany).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['se alargó dos días una prueba corta ya avisada', new Date(FIN.getTime() - 2 * DAY)],
+    ['se acortó una prueba ya avisada', new Date(FIN.getTime() + 5 * DAY)],
+  ])('%s → avisa otra vez con la fecha nueva (Codex r1 #3)', async (_caso, anunciada) => {
+    conPruebas([prueba({ freeTrialNoticeFor: anunciada })])
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+    expect(freeSpy.mock.calls[0][1]).toMatchObject({ endDate: FIN })
+  })
+
+  it.each([
+    ['tiene un plan pagado (CLASSIC)', { origin: { kind: 'CLASSIC', tier: 'PRO', currentPeriodEnd: null } }],
+    ['tiene un contrato (CONTRACT)', { origin: { kind: 'CONTRACT', tier: 'PRO', currentPeriodEnd: null } }],
+    ['Facturación muestra otra fila de cortesía', { origin: { kind: 'COMP', tier: 'PRO', currentPeriodEnd: '2027-01-01T00:00:00.000Z' } }],
+    ['es fundador (grandfathered)', { grandfathered: true }],
+  ])('%s → no se le dice que pasa a Gratis', async (_caso, cambio) => {
+    conPruebas([prueba()])
+    ;(getPlanState as jest.Mock).mockResolvedValue(cortesia(FIN, cambio))
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.updateMany).not.toHaveBeenCalled()
+  })
+
+  it.each(['CLOSED', 'SUSPENDED', 'LIVE_DEMO', 'TRIAL', 'ONBOARDING'])('negocio en %s → nada (Codex r1 #5)', async status => {
+    conPruebas([prueba({ venue: { slug: 'x', timezone: 'America/Mexico_City', status } })])
+    await new PlanRenewalReminderJob().runNow()
+    expect(getPlanState).not.toHaveBeenCalled()
+    expect(freeSpy).not.toHaveBeenCalled()
+  })
+
+  it('sin destinatario → nada, sin sellar', async () => {
+    conPruebas([prueba()])
+    ;(planNotification.resolvePlanNotificationTarget as jest.Mock).mockResolvedValue({ email: null, locale: 'es', venueName: 'X' })
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).not.toHaveBeenCalled()
+    expect(mockPrisma.venueFeature.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('el correo no sale → no sella; al día siguiente sí sale, con la misma llave, y sella', async () => {
+    conPruebas([prueba()])
+    freeSpy.mockResolvedValueOnce(false)
+    await new PlanRenewalReminderJob().runNow()
+    expect(mockPrisma.venueFeature.updateMany).not.toHaveBeenCalled()
+
+    jest.setSystemTime(NOW + DAY)
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).toHaveBeenCalledTimes(2)
+    expect(freeSpy.mock.calls[1][1].idempotencyKey).toBe(freeSpy.mock.calls[0][1].idempotencyKey)
+    expect(mockPrisma.venueFeature.updateMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('sólo la lectura y el sello pasan por retry, nunca el correo', async () => {
+    conPruebas([prueba()])
+    await new PlanRenewalReminderJob().runNow()
+    expect((retry as jest.Mock).mock.calls.map(c => c[1].context)).toEqual([
+      'plan-renewal-reminder.findMany',
+      'plan-renewal-reminder.pruebasSinTarjeta.findMany',
+      'plan-renewal-reminder.pruebasSinTarjeta.stamp',
+    ])
+  })
+
+  it('🔴 Codex r2: 200 fundadores en la primera página no tapan a la prueba que sí toca: se lee la página siguiente por llave', async () => {
+    const fundadores = Array.from({ length: TOPE_PRUEBAS }, (_, i) =>
+      prueba({ id: `vf-f${String(i).padStart(3, '0')}`, venueId: `fund-${i}` }),
+    )
+    const elegible = prueba({ id: 'vf-z', venueId: 'v-elegible' })
+    mockPrisma.venueFeature.findMany.mockImplementation((args: { where: { stripeSubscriptionId: unknown; AND?: unknown[] } }) => {
+      if (args.where.stripeSubscriptionId !== null) return Promise.resolve([])
+      return Promise.resolve((args.where.AND?.length ?? 0) > 1 ? [elegible] : fundadores)
+    })
+    ;(getPlanState as jest.Mock).mockImplementation(async (venueId: string) =>
+      cortesia(FIN, venueId.startsWith('fund-') ? { grandfathered: true } : {}),
+    )
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.venueFeature.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'vf-z' }) }),
+    )
+    const segunda = mockPrisma.venueFeature.findMany.mock.calls.map(c => c[0]).filter(a => a.where.stripeSubscriptionId === null)[1]
+    expect(segunda.where.AND[1]).toEqual({
+      OR: [{ endDate: { gt: FIN } }, { endDate: FIN, id: { gt: `vf-f${String(TOPE_PRUEBAS - 1).padStart(3, '0')}` } }],
+    })
+  })
+
+  // 2. REGRESSION TESTS
+  it('una fila que truena no detiene a las demás', async () => {
+    conPruebas([prueba(), prueba({ id: 'vf10', venueId: 'v10' })])
+    ;(getPlanState as jest.Mock).mockRejectedValueOnce(new Error('db')).mockResolvedValueOnce(cortesia(FIN))
+    await expect(new PlanRenewalReminderJob().runNow()).resolves.toBeUndefined()
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+    expect(mockPrisma.venueFeature.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'vf10' }) }),
+    )
+  })
+
+  it('si la lectura de cobros con Stripe truena, las pruebas regaladas se avisan igual', async () => {
+    mockPrisma.venueFeature.findMany.mockImplementation((args: { where: { stripeSubscriptionId: unknown } }) =>
+      args.where.stripeSubscriptionId === null ? Promise.resolve([prueba()]) : Promise.reject(new Error('P1001')),
+    )
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('el aviso de cobro (con Stripe) nunca manda el correo de prueba regalada', async () => {
+    mockPrisma.venueFeature.findMany.mockImplementation((args: { where: { stripeSubscriptionId: unknown } }) =>
+      Promise.resolve(args.where.stripeSubscriptionId === null ? [] : [row()]),
+    )
+    mockRetrieve.mockResolvedValue(stripeSub(8))
+    mockCreatePreview.mockResolvedValue({ amount_due: 115884 })
+    await new PlanRenewalReminderJob().runNow()
+    expect(renewalSpy).toHaveBeenCalledTimes(1)
+    expect(freeSpy).not.toHaveBeenCalled()
+  })
+
+  it('D3: con menos de 3 días el botón ya no lleva a Facturación (ahí ya no se ofrece), sino a escribirnos', async () => {
+    const pronto = new Date(NOW + 2 * DAY)
+    conPruebas([prueba({ endDate: pronto })])
+    ;(getPlanState as jest.Mock).mockResolvedValue(cortesia(pronto))
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy).toHaveBeenCalledTimes(1)
+    expect(freeSpy.mock.calls[0][1].billingUrl).toBeUndefined()
   })
 })

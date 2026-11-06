@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
@@ -31,7 +32,7 @@ export function registerFeatureTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'venue_features',
-    'What a venue you can access has turned ON: its active modules (included capabilities like serialized inventory, attendance) and its active paid features/add-ons (with category, monthly price, and whether each is paid, on trial, or suspended for non-payment), plus the recurring monthly cost of those add-ons. Answers "¿qué tengo activado / contratado? ¿qué módulos y features tengo? ¿cuánto pago al mes en add-ons?". Pass venueId. (For the base plan itself use subscription_status.)',
+    'What a venue you can access has turned ON: its active modules (included capabilities like serialized inventory, attendance) and its active paid features/add-ons (with category, monthly price, and whether each is paid, on trial, past due within its grace period, suspended for non-payment, or an expired trial), plus the recurring monthly cost of those add-ons. Answers "¿qué tengo activado / contratado? ¿qué módulos y features tengo? ¿cuánto pago al mes en add-ons?". Pass venueId. (For the base plan itself use subscription_status.)',
     {
       venueId: z.string().describe('Venue whose modules & features to read (must be in your scope)'),
     },
@@ -50,6 +51,8 @@ export function registerFeatureTools(server: McpServer, scope: McpScope) {
             startDate: true,
             endDate: true, // not-null = trial period (per schema), null = paid subscription
             suspendedAt: true,
+            gracePeriodEndsAt: true,
+            active: true,
             feature: { select: { code: true, name: true, category: true } },
           },
           orderBy: { startDate: 'asc' },
@@ -57,20 +60,36 @@ export function registerFeatureTools(server: McpServer, scope: McpScope) {
       ])
 
       const featureRows = features.map(f => {
-        const state = f.suspendedAt ? 'suspended' : f.endDate ? 'trial' : 'active'
+        // D4 + D6 (5-nov-2026): el estado sale de la regla única del portero (ventanaDeAcceso.ts), no sólo de `endDate`.
+        const ahora = new Date()
+        const conAcceso = daAcceso(f, ahora)
+        const state = f.suspendedAt
+          ? 'suspended'
+          : conAcceso
+            ? f.gracePeriodEndsAt
+              ? 'past_due'
+              : f.endDate
+                ? 'trial'
+                : 'active'
+            : f.gracePeriodEndsAt
+              ? 'suspended'
+              : 'expired'
         return {
           code: f.feature.code,
           name: f.feature.name,
           category: f.feature.category,
           monthlyPrice: round2(Number(f.monthlyPrice)),
-          state, // 'active' (paid) | 'trial' | 'suspended'
+          state, // 'active' (paid) | 'trial' | 'past_due' (payment failed, still in its grace) | 'suspended' (no access for non-payment) | 'expired' (trial ended)
           since: f.startDate.toISOString(),
           ...(f.endDate ? { trialEndsAt: f.endDate.toISOString() } : {}),
           ...(f.suspendedAt ? { suspendedAt: f.suspendedAt.toISOString() } : {}),
+          ...(f.gracePeriodEndsAt ? { gracePeriodEndsAt: f.gracePeriodEndsAt.toISOString() } : {}),
         }
       })
-      // Only paid (non-trial, non-suspended) add-ons count toward what's actually billed each month.
-      const monthlyFeatureCost = round2(featureRows.filter(f => f.state === 'active').reduce((s, f) => s + f.monthlyPrice, 0))
+      // Only paid add-ons count toward what's billed each month: active ones and those whose charge is being retried (past_due).
+      const monthlyFeatureCost = round2(
+        featureRows.filter(f => f.state === 'active' || f.state === 'past_due').reduce((s, f) => s + f.monthlyPrice, 0),
+      )
 
       return text({
         venueId,

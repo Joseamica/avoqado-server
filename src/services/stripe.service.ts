@@ -19,6 +19,8 @@ import { pausaDe } from '@/services/billing/siguienteCobro'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
+import { logAction } from './dashboard/activity-log.service'
+import { daAcceso } from './access/ventanaDeAcceso'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { ventaSueltaAbierta } from './access/ventaSuelta'
@@ -29,6 +31,7 @@ import {
   cerrarConflictoTerminado,
   registrarConflictoDeObligacion,
 } from './access/conflictosDeObligacion.service'
+import { descuentoDelPlan, type DescuentoDelPlan } from './billing/descuentoDelPlan'
 import {
   clasificarEstado,
   clasificarSuscripcion,
@@ -1143,6 +1146,11 @@ export interface CreatePlanCheckoutSessionInput {
   tierCode?: PlanTierCode
   venueName?: string
   venueSlug?: string
+  /**
+   * D3: fin de la prueba REGALADA del mismo plan. La prueba de Stripe termina ahí (primer cobro ese día) y no se aceptan
+   * códigos promocionales: un cupón de N meses empezaría a contar hoy y se gastaría antes del primer cobro.
+   */
+  trialEnd?: Date
 }
 
 /**
@@ -1174,13 +1182,14 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
           mode: 'subscription',
           customer: input.customerId,
           line_items: [{ price: price.id, quantity: 1 }],
-          allow_promotion_codes: true,
+          allow_promotion_codes: !input.trialEnd,
           // V5-A: sólo tarjeta (un pago diferido dejaría `active` sin haber cobrado) y caducidad de 30 min, el mínimo que
           // Stripe permite: una sesión que nadie abrió no queda viva para siempre.
           payment_method_types: ['card'],
           expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
           subscription_data: {
             description,
+            ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : {}),
             metadata: {
               kind: 'PLAN_CHECKOUT',
               venueId: input.venueId,
@@ -1338,6 +1347,7 @@ export async function entregarSuscripcionDePlan(entrada: {
           suspendedAt: true,
           gracePeriodEndsAt: true,
           paymentFailureCount: true,
+          endDate: true,
           updatedAt: true,
         },
         take: 2,
@@ -1468,8 +1478,10 @@ export async function entregarSuscripcionDePlan(entrada: {
             stripeSubscriptionItemId: null,
             stripePriceId,
             monthlyPrice: plan.monthlyPrice,
-            active: false,
-            endDate: null,
+            // 🔴 codex r1 #5 (D4 + D6): la obligación viaja con su cobranza Y con su acceso. Escribir `active:false` aquí
+            // le quitaba al negocio la gracia que le quedaba al cambiar de plan; una suspensión viaja igual (ya es `false`).
+            active: trasladada.active,
+            endDate: trasladada.endDate ?? null,
             trialEndDate: trialEnd,
             suspendedAt: trasladada.suspendedAt,
             gracePeriodEndsAt: trasladada.gracePeriodEndsAt,
@@ -1783,8 +1795,11 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   pausedUntil: Date | null
   interval: 'month' | 'year' | null
   grossAmountCents: number | null
+  /** D5: el cupón vigente (uno, entendible) para mostrar lo que de verdad paga; `null` = se muestra el precio de lista. */
+  descuento: DescuentoDelPlan | null
 }> {
-  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId), {
+  // D5: el detalle del cupón viene en la MISMA llamada (expand): sin él, `discounts` sólo trae ids.
+  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId, { expand: ['discounts.source.coupon.applies_to'] }), {
     retries: 3,
     shouldRetry: shouldRetryStripeError,
     context: 'stripe.retrievePlanSubscription',
@@ -1803,7 +1818,14 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     pausedUntil: pausaDe(sub),
     interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
+    descuento: descuentoDelPlan(sub as never, productoDe(sub.items.data[0]?.price.product)),
   }
+}
+
+/** El id del producto de un precio de Stripe, venga como id o expandido. */
+function productoDe(product: unknown): string | null {
+  if (typeof product === 'string') return product
+  return product && typeof product === 'object' && 'id' in product ? String((product as { id: string }).id) : null
 }
 
 /**
@@ -2289,37 +2311,53 @@ export async function generateBillingPortalUrl(customerId: string, returnUrl?: s
 }
 
 /**
- * Check if this is the first payment attempt for a subscription
- * Used to determine grace period eligibility (only for returning customers)
- *
- * @param subscriptionId - Stripe subscription ID
- * @returns true if this is the first payment attempt (no previous successful payments)
+ * 🔴 D6 (5-nov-2026): de dónde viene un negocio cuyo cobro falló.
+ * - `RECURRENTE`: ya pagó con dinero alguna vez (una factura pagada con `amount_paid > 0`) → 7 días de gracia.
+ * - `TRAS_PRUEBA`: sólo tiene la factura de $0 con la que Stripe abre una prueba (o un primer mes 100 % gratis) → 4 días
+ *   (founder). Antes esa factura de $0 contaba como «ya pagó» y recibía los 7.
+ * - `NUEVO`: ninguna factura pagada → suspensión al instante, como siempre.
+ * 100 facturas = años de mensualidades: si hay más y ninguna trae dinero, no se puede probar que nunca pagó → RECURRENTE.
+ * Si Stripe no contesta, lanza: quien llama deja el aviso FAILED y se reprocesa.
  */
-async function isFirstSubscriptionPayment(subscriptionId: string): Promise<boolean> {
-  try {
-    // Query Stripe for invoices with successful payments for this subscription
-    const invoices = await stripe.invoices.list({
-      subscription: subscriptionId,
-      status: 'paid',
-      limit: 1,
-    })
+export type HistorialDePago = 'RECURRENTE' | 'TRAS_PRUEBA' | 'NUEVO'
+export const DIAS_DE_GRACIA = { RECURRENTE: 7, TRAS_PRUEBA: 4 } as const
 
-    // If there are no paid invoices, this is the first payment attempt
-    const isFirstPayment = invoices.data.length === 0
+export async function historialDePago(subscriptionId: string): Promise<HistorialDePago> {
+  // 🔴 codex r4 #3: si Stripe no contesta, LANZA (el aviso queda FAILED y el reproceso clasifica bien). Antes caía a
+  // RECURRENTE y quien venía de una prueba recibía 7 días en vez de sus 4.
+  const invoices = await stripe.invoices.list({ subscription: subscriptionId, status: 'paid', limit: 100 })
+  const historial: HistorialDePago =
+    invoices.data.some(i => (i.amount_paid ?? 0) > 0) || invoices.has_more
+      ? 'RECURRENTE'
+      : invoices.data.length > 0
+        ? 'TRAS_PRUEBA'
+        : 'NUEVO'
+  logger.info(`🔍 Checked payment history for subscription ${subscriptionId}`, { historial, paidInvoiceCount: invoices.data.length })
+  return historial
+}
 
-    logger.info(`🔍 Checked payment history for subscription ${subscriptionId}`, {
-      isFirstPayment,
-      paidInvoiceCount: invoices.data.length,
-    })
+/** Momento desde el que corre la gracia: cuando Stripe finalizó la factura (y cobró por primera vez), o su creación. */
+const anclaDeLaFactura = (f: Stripe.Invoice) => new Date((f.status_transitions?.finalized_at ?? f.created) * 1000)
 
-    return isFirstPayment
-  } catch (error) {
-    logger.error('❌ Error checking subscription payment history', {
-      subscriptionId,
-      error: error instanceof Error ? error.message : 'Unknown error',
+/**
+ * 🔴 codex r5 (D4 + D6): una factura ya PAGADA quita las marcas que ELLA puso — la gracia (ancla + 4 o + 7 días) y, tras
+ * una prueba, el corte de 4 días en `endDate` (pagado ⇒ sin vencimiento). CAS por esos mismos valores: nunca toca una
+ * gracia de otra factura ni lo que otro escritor puso después. Es CONVERGENTE: cualquier reproceso del aviso llega al
+ * mismo resultado, sin depender de un «deshacer» que podía fallar o pisar a otro reproceso.
+ */
+async function quitarMarcasDeFacturaPagada(
+  fila: { id: string; gracePeriodEndsAt: Date | null; endDate: Date | null },
+  factura: Stripe.Invoice,
+): Promise<void> {
+  const ancla = anclaDeLaFactura(factura)
+  for (const dias of Object.values(DIAS_DE_GRACIA)) {
+    const fin = addDays(ancla, dias)
+    if (fila.gracePeriodEndsAt?.getTime() !== fin.getTime()) continue
+    const corte = fila.endDate?.getTime() === fin.getTime()
+    await prisma.venueFeature.updateMany({
+      where: { id: fila.id, gracePeriodEndsAt: fin, ...(corte ? { endDate: fin } : {}) },
+      data: { gracePeriodEndsAt: null, paymentFailureCount: 0, ...(corte ? { endDate: null } : {}) },
     })
-    // On error, assume it's NOT the first payment (safer to give grace period)
-    return false
   }
 }
 
@@ -2410,14 +2448,28 @@ export async function handlePaymentFailure(
     paymentFailureCount: attemptCount,
   }
 
-  // Check if this is the first payment attempt for this subscription
-  let isFirstPayment = false
-  if (attemptCount === 1) {
-    isFirstPayment = await isFirstSubscriptionPayment(subscriptionId)
+  // 🔴 D4 + D6 v4 (5-nov-2026): la gracia se ancla a la FACTURA que falló, no al reloj del servidor. Reprocesar el aviso
+  // escribe la misma fecha (codex D6 r2 #1) y un aviso ATRASADO de una factura ya pagada no reabre nada.
+  let factura: Stripe.Invoice | null = null
+  let historial: HistorialDePago | null = null
+  if (attemptCount === 1 && invoiceData?.invoiceId) {
+    factura = await stripe.invoices.retrieve(invoiceData.invoiceId) // si Stripe no contesta, el aviso queda FAILED y se reintenta
+    if (factura.status === 'paid' || factura.status === 'void') {
+      logger.warn('⚠️ Aviso de fallo ATRASADO: la factura ya está pagada o anulada; no se abre gracia ni se avisa', {
+        subscriptionId,
+        invoiceId: factura.id,
+        estadoDeLaFactura: factura.status,
+        venueId: venueFeature.venueId,
+      })
+      // Si un procesamiento anterior de este aviso alcanzó a dejar sus marcas y la factura ya se PAGÓ, se quitan aquí.
+      if (factura.status === 'paid') await quitarMarcasDeFacturaPagada(venueFeature, factura)
+      return
+    }
   }
+  if (attemptCount === 1) historial = await historialDePago(subscriptionId)
+  const isFirstPayment = historial === 'NUEVO'
 
-  // Set grace period on first failure (7 days) - ONLY for returning customers
-  if (attemptCount === 1) {
+  if (attemptCount === 1 && historial) {
     if (isFirstPayment) {
       // First-time customer: Immediate suspension, NO grace period
       updateData.gracePeriodEndsAt = null
@@ -2428,11 +2480,17 @@ export async function handlePaymentFailure(
         reason: 'First payment attempt failed - no grace period for new customers',
       })
     } else {
-      // Returning customer: 7-day grace period
-      updateData.gracePeriodEndsAt = addDays(now, 7)
-      // active stays TRUE during grace period
-      logger.info(`⏰ RETURNING CUSTOMER: Grace period granted for ${venueFeature.feature.name} (Venue: ${venueFeature.venue.name})`, {
+      const ancla = factura ? anclaDeLaFactura(factura) : now
+      const dias = DIAS_DE_GRACIA[historial === 'TRAS_PRUEBA' ? 'TRAS_PRUEBA' : 'RECURRENTE']
+      updateData.gracePeriodEndsAt = addDays(ancla, dias)
+      // 🔴 D6 (founder, 5-nov): tras una prueba son 4 días EXACTOS. El vencimiento pasa al fin de la gracia y la regla
+      // única (ventanaDeAcceso.ts) corta solo al vencer. Quien ya pagaba conserva lo de siempre: su gracia no quita
+      // acceso por sí sola y lo corta el 4.º intento.
+      if (historial === 'TRAS_PRUEBA') updateData.endDate = updateData.gracePeriodEndsAt
+      logger.info(`⏰ Grace period granted for ${venueFeature.feature.name} (Venue: ${venueFeature.venue.name})`, {
         subscriptionId,
+        historial,
+        dias,
         gracePeriodEndsAt: updateData.gracePeriodEndsAt,
       })
     }
@@ -2465,6 +2523,55 @@ export async function handlePaymentFailure(
   }
 
   await escribirPlanDeCobranzaConCas(venueFeature, updateData, { subscriptionId })
+
+  // 🔴 codex r1 #1: un pago pudo entrar MIENTRAS escribíamos, y `invoice.payment_succeeded` no escribe sobre una fila que
+  // todavía se veía sana. Se vuelve a preguntar por la factura: si ya se pagó, se quitan las marcas que acabamos de poner
+  // (CAS por sus valores) y no se avisa. Si esta consulta falla, se LANZA sin deshacer nada (codex r5): el reproceso ve la
+  // factura pagada y quita las marcas él mismo, o la ve abierta y escribe lo mismo. A un cliente nuevo no hace falta: su
+  // fila estaba apagada, así que el pago siempre la escribe y nuestro CAS ya habría fallado.
+  if (factura && !isFirstPayment && updateData.gracePeriodEndsAt) {
+    const otraVez = await stripe.invoices.retrieve(factura.id)
+    if (otraVez.status === 'paid') {
+      await quitarMarcasDeFacturaPagada(
+        { id: venueFeature.id, gracePeriodEndsAt: updateData.gracePeriodEndsAt, endDate: updateData.endDate ?? venueFeature.endDate },
+        otraVez,
+      )
+      logger.warn('⚠️ Cobranza: la factura se pagó mientras se registraba el fallo — se quitaron sus marcas', {
+        subscriptionId,
+        invoiceId: factura.id,
+        venueId: venueFeature.venueId,
+      })
+      return
+    }
+    // Anulada en medio: no hubo pago, así que el corte se queda; pero tampoco se avisa de un cobro que ya no existe.
+    if (otraVez.status === 'void') return
+  }
+
+  if (updateData.gracePeriodEndsAt) {
+    void logAction({
+      action: 'PLAN_PAYMENT_GRACE_STARTED',
+      entity: 'VenueFeature',
+      entityId: venueFeature.id,
+      venueId: venueFeature.venueId,
+      data: {
+        featureCode: venueFeature.feature.code,
+        historial,
+        gracePeriodEndsAt: updateData.gracePeriodEndsAt.toISOString(),
+        cortaElAcceso: !!updateData.endDate,
+        invoiceId: factura?.id ?? invoiceData?.invoiceId ?? null,
+        subscriptionId,
+      },
+    })
+  }
+  if (updateData.suspendedAt) {
+    void logAction({
+      action: 'PLAN_SUSPENDED_FOR_NONPAYMENT',
+      entity: 'VenueFeature',
+      entityId: venueFeature.id,
+      venueId: venueFeature.venueId,
+      data: { featureCode: venueFeature.feature.code, subscriptionId, motivo: isFirstPayment ? 'PRIMER_COBRO' : 'CUARTO_INTENTO' },
+    })
+  }
 
   logger.info(`📊 Updated failure tracking for ${venueFeature.feature.name} (Venue: ${venueFeature.venue.name})`, {
     attemptCount,
@@ -2558,8 +2665,15 @@ export async function handlePaymentFailure(
         const emailSent = await emailService.sendSubscriptionSuspendedEmail(recipient, {
           venueName: venueFeature.venue.name,
           featureName: venueFeature.feature.name,
-          suspendedAt: now,
-          gracePeriodEndsAt: updateData.gracePeriodEndsAt || addDays(now, 7),
+          // Tras una prueba el acceso ya se había cortado al vencer sus 4 días (`endDate`); la baja definitiva es 7 días
+          // después de la gracia (subscription-cancellation), que con 4 días ya no coincide con «hoy + 7» (codex D6 r1 #5).
+          // 🔴 codex r4 #4: «bloqueado desde» es el corte REAL — el más tardío de vencimiento y gracia, si ya pasaron los dos;
+          // si la fila todavía daba acceso (una gracia vigente), el bloqueo es hoy.
+          suspendedAt:
+            venueFeature.endDate && !daAcceso({ ...venueFeature, active: true, suspendedAt: null }, now)
+              ? new Date(Math.max(venueFeature.endDate.getTime(), venueFeature.gracePeriodEndsAt?.getTime() ?? 0))
+              : now,
+          gracePeriodEndsAt: venueFeature.gracePeriodEndsAt ? addDays(venueFeature.gracePeriodEndsAt, 7) : addDays(now, 7),
           billingPortalUrl,
           locale: target.locale,
         })

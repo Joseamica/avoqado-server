@@ -222,7 +222,8 @@ const prismaMock: any = {
   billV2: createMockModel(),
   // Stripe-related models
   feature: createMockModel(),
-  venueFeature: createMockModel(),
+  // `fields`: el aviso de la prueba regalada compara columna contra columna (`freeTrialNoticeFor` ≠ `endDate`).
+  venueFeature: Object.assign(createMockModel(), { fields: { endDate: { name: 'endDate' } } }),
   capabilityGrant: createMockModel(),
   hybridCampaign: createMockModel(),
   hybridPurchase: createMockModel(),

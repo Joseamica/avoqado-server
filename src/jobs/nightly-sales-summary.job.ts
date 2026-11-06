@@ -21,6 +21,7 @@ import emailService from '../services/email.service'
 import { utcTs } from '../utils/sqlDates'
 import { NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import { isItemLevelDiscountSql, lineRevenueSql } from '../services/dashboard/lineRevenue'
+import { sqlImpuestoQueSeCobraAparte } from '../services/shared/orderBalance'
 import { FRONTEND_URL } from '../config/env'
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -553,7 +554,10 @@ export async function getOrderSourcesBreakdown(
         o.subtotal - o."discountAmount"
         - (SELECT COALESCE(SUM(oi."discountAmount"), 0) FROM "OrderItem" oi
            WHERE oi."orderId" = o.id AND ${Prisma.raw(isItemLevelDiscountSql())})
-      , 0)), 0) as net_sales
+      , 0)
+      -- D16: the IVA an order charged ON TOP is part of what the customer paid (same rule as the summary's netSales),
+      -- added outside the clamp like computeStoredOrderTotal does.
+      + ${Prisma.raw(sqlImpuestoQueSeCobraAparte('o'))}), 0) as net_sales
     FROM "Order" o
     WHERE o."venueId" = ${venueId}
       AND o."createdAt" >= ${utcTs(startDate)}

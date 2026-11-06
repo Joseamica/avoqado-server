@@ -13,6 +13,7 @@ import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { derivePlanState, PAID_PLAN_TIER_CODES, IVA_RATE, type PlanStateValue } from '@/services/access/basePlan.service'
 import { getVenueBaseTier } from '@/services/access/basePlan.service'
+import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import {
   retrievePlanSubscription,
@@ -27,6 +28,8 @@ import { resolvePlanNotificationTarget } from '@/services/access/planNotificatio
 import { cancellationAuditData, toStripeCancellationDetails, type CancellationInput } from '@/services/shared/cancellationReason'
 import { hybridOfferDefinition } from '@/services/launchCampaigns/hybridOffer.schema'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { MARGEN_OFERTA_MS, finDePruebaDiferible } from '../billing/cobroDiferido'
+import { precioConDescuentoCents } from '../billing/descuentoDelPlan'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
 const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
@@ -141,6 +144,22 @@ export interface PlanOrigin {
   subscriptionId: string | null
   /** The contract purchase's last billing issue, for "pago pendiente". */
   paymentIssue: string | null
+  /**
+   * D3: COMP con fecha (prueba REGALADA) — el día del primer cobro si el dueño se queda HOY con su plan (= fin de la
+   * prueba). Sólo cuando faltan ≥ 72 h (`MARGEN_OFERTA_MS`); si no, `null` y Facturación no lo ofrece. Opcional y nuevo.
+   */
+  firstChargeAt?: string | null
+  /**
+   * D5: CLASSIC con un cupón vigente — lo que paga con el descuento (con IVA), cuánto descuenta y hasta cuándo. `price`
+   * sigue siendo el de lista. Nuevo y opcional: un cliente anterior lo ignora.
+   */
+  discount?: {
+    gross: number
+    percentOff: number | null
+    /** `once`: sólo el siguiente cobro · `repeating`: hasta `endsAt` · `forever`: sin fin. */
+    duration: 'once' | 'repeating' | 'forever'
+    endsAt: string | null
+  } | null
 }
 
 const NO_ORIGIN: PlanOrigin = {
@@ -172,6 +191,15 @@ function classicOrigin(
     currentPeriodEnd,
     cancelAt: stripeSub?.cancelAtPeriodEnd ? currentPeriodEnd : null,
     subscriptionId,
+    discount:
+      stripeSub?.descuento && stripeSub.grossAmountCents != null
+        ? {
+            gross: round2(precioConDescuentoCents(stripeSub.grossAmountCents, stripeSub.descuento) / 100),
+            percentOff: stripeSub.descuento.percentOff,
+            duration: stripeSub.descuento.duration,
+            endsAt: stripeSub.descuento.endsAt ? stripeSub.descuento.endsAt.toISOString() : null,
+          }
+        : null,
   }
 }
 
@@ -317,7 +345,13 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
   }
 
   const { state, hasPlan } = derivePlanState(
-    { active: vf.active, endDate: vf.endDate, suspendedAt: vf.suspendedAt, gracePeriodEndsAt: vf.gracePeriodEndsAt },
+    {
+      active: vf.active,
+      endDate: vf.endDate,
+      suspendedAt: vf.suspendedAt,
+      gracePeriodEndsAt: vf.gracePeriodEndsAt,
+      stripeSubscriptionId: vf.stripeSubscriptionId,
+    },
     stripeSub ? { status: stripeSub.status, cancelAtPeriodEnd: stripeSub.cancelAtPeriodEnd } : null,
   )
 
@@ -338,7 +372,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
 
   const tier = vf.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'
   const now = new Date()
-  const inWindow = vf.active && !vf.suspendedAt && (!vf.endDate || vf.endDate >= now)
+  const inWindow = daAcceso(vf, now)
   // Paid obligations first (CLASSIC → CONTRACT → COMP → NONE): "Tu plan" is what the owner pays for. A retired classic
   // row never wins, and a courtesy/trial row is not an obligation, so it only shows when nothing is paid.
   let origin: PlanOrigin =
@@ -346,7 +380,13 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       ? classicOrigin(tier, stripeSub, price, vf.stripeSubscriptionId)
       : await planContractOrigin(venueId)
   if (origin.kind === 'NONE' && inWindow) {
-    origin = { ...NO_ORIGIN, kind: 'COMP', tier, currentPeriodEnd: vf.endDate ? vf.endDate.toISOString() : null }
+    origin = {
+      ...NO_ORIGIN,
+      kind: 'COMP',
+      tier,
+      currentPeriodEnd: vf.endDate ? vf.endDate.toISOString() : null,
+      firstChargeAt: finDePruebaDiferible(vf, vf.feature.code, now.getTime(), MARGEN_OFERTA_MS)?.toISOString() ?? null,
+    }
   }
   const pauseOfferEligible = Boolean(
     stripeSub &&

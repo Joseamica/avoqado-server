@@ -121,7 +121,7 @@ describe('quoteCart', () => {
     const q = await quoteCart('v1', [{ productId: 'p-flautas', quantity: 1, modifiers: [{ modifierId: 'm2' }] }])
     expect(q.ok).toBe(false)
     expect(q.issues).toEqual([
-      { code: 'PRODUCT_UNAVAILABLE', productId: 'p-flautas', lineIndex: 0, message: 'Un platillo de tu pedido ya no está disponible.' },
+      { code: 'PRODUCT_UNAVAILABLE', productId: 'p-flautas', lineIndex: 0, message: 'Un producto de tu pedido ya no está disponible.' },
     ])
   })
 

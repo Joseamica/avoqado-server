@@ -16,7 +16,7 @@ import {
   updateReservation,
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
-import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { getReservationSettings, prendeCobroEnLinea, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { checkInReservationAndOpenOrder, undoCheckIn } from '@/services/reservation/checkIn.service'
 import { previewUndoNoShow, undoNoShow, type UndoNoShowPlan } from '@/services/reservation/undoNoShow.service'
 import { afterNoShowCorrection, PENDING_TEXT } from '@/services/reservation/noShowNotices.service'
@@ -972,26 +972,15 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       // guard in updateReservationSettings, but surfaced HERE so the operator sees
       // it at PREVIEW time — not only after confirm:true.
       //
-      // Bug fixed 2026-07-07 (found by /full-testing): checking only the incoming
-      // `update` — not the current row — blocked resaving an ALREADY-charging
-      // venue (legacy data predating this gate) even when the operator only
-      // touched an unrelated field. Baseline for "was charging" when a field
-      // isn't in `current` at all: 'none'/'at_venue' for all three fields (a
-      // human never explicitly activated it) — NOT getDefaultConfig()'s
-      // classUpfrontDefault='required' display-default, which is a product
-      // choice for brand-new venues, not evidence of activation.
-      const wasChargingDeposit = (current?.depositMode ?? 'none') !== 'none'
-      const wasChargingAppt = (current?.appointmentUpfrontDefault ?? 'at_venue') !== 'at_venue'
-      const wasChargingClass = (current?.classUpfrontDefault ?? 'at_venue') !== 'at_venue'
-      const wantsCharging =
-        (typeof update.depositMode === 'string' && update.depositMode !== 'none' && !wasChargingDeposit) ||
-        (typeof update.appointmentUpfrontDefault === 'string' && update.appointmentUpfrontDefault !== 'at_venue' && !wasChargingAppt) ||
-        (typeof update.classUpfrontDefault === 'string' && update.classUpfrontDefault !== 'at_venue' && !wasChargingClass)
+      // Bug fixed 2026-07-07 (found by /full-testing): compare against the CURRENT row, not only the
+      // incoming `update`. 🔴 D18 (5-nov-2026): one shared rule with the dashboard — with no row, the
+      // baseline is the default the venue already runs on (classes 'required'), not 'at_venue'.
+      const wantsCharging = prendeCobroEnLinea(current as Parameters<typeof prendeCobroEnLinea>[0], update)
       if (wantsCharging && !(await canVenueChargeOnline(venueId))) {
         return text({
           ok: false,
           error:
-            'Este negocio no puede cobrar en línea todavía. Da de alta un proveedor de e-commerce (Stripe/Mercado Pago) antes de activar depósitos o pago por adelantado en reservaciones.',
+            'Este negocio no puede cobrar en línea todavía. Conecta Stripe en Configuración › Integraciones antes de activar depósitos o pago por adelantado en reservaciones (Mercado Pago aún no cobra reservaciones); mientras tanto usa «Pagar en el local».',
         })
       }
 

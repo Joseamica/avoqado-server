@@ -199,4 +199,25 @@ describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
       expect.objectContaining({ timeout: expect.any(Number), maxNetworkRetries: 0 }),
     )
   })
+
+  // D3: quedarse con el plan de una prueba regalada — la prueba de Stripe termina en la fecha EXACTA del fin de la regalada.
+  it('con trialEnd: trial_end en segundos, sin códigos promocionales; sin él, igual que siempre', async () => {
+    const fin = new Date('2026-12-05T17:19:24.000Z')
+    await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      interval: 'monthly',
+      successUrl: 's',
+      cancelUrl: 'c',
+      trialEnd: fin,
+    })
+    const conPrueba = mockSessionCreate.mock.calls[0][0]
+    expect(conPrueba.subscription_data.trial_end).toBe(Math.floor(fin.getTime() / 1000))
+    expect(conPrueba.allow_promotion_codes).toBe(false)
+
+    await createPlanCheckoutSession({ venueId: 'v1', customerId: 'cus_1', interval: 'monthly', successUrl: 's', cancelUrl: 'c' })
+    const normal = mockSessionCreate.mock.calls[1][0]
+    expect(normal.subscription_data.trial_end).toBeUndefined()
+    expect(normal.allow_promotion_codes).toBe(true)
+  })
 })

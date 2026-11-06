@@ -131,6 +131,7 @@ export function leerVentaDeMostrador(
     specialRequests,
     discount,
     orderDiscountId,
+    couponCode,
     tip,
     note,
     splitType,
@@ -233,6 +234,18 @@ export function leerVentaDeMostrador(
     return { error: 'orderDiscountId debe ser el id de un descuento' }
   }
 
+  if (couponCode != null && (typeof couponCode !== 'string' || couponCode.trim().length < 3 || couponCode.trim().length > 30)) {
+    return { error: 'couponCode debe ser un código de 3 a 30 caracteres' }
+  }
+  if (couponCode != null && orderDiscountId != null) {
+    return { error: 'Una venta no puede llevar cupón y descuento de catálogo a la vez' }
+  }
+  // D5 (Codex r1 #3): el premio cambia el total después de crear la cuenta y la caja ajusta sólo su parte; con un cupón que el servidor
+  // recalcula, lo cobrado podía no ser la cuenta. Hasta resolverlo junto, no se combinan.
+  if (couponCode != null && typeof stampRewardId === 'string') {
+    return { error: 'Un cupón y un premio de sellos no se combinan en la misma venta. Quita uno de los dos.' }
+  }
+
   // 🔴 Propina NEGATIVA = descuento disfrazado. El servicio suma la propina al
   // total SIN clamp (`tipDecimal = tip/100`), así que un tip de -500 rebajaba
   // el total en silencio. El descuento sí se clampa (`max(0, discount)`); la
@@ -273,6 +286,8 @@ export function leerVentaDeMostrador(
       discount: typeof discount === 'number' ? discount : 0,
       // Descuento de catálogo de la cuenta (como `/tpv/with-items`); validado arriba.
       orderDiscountId: typeof orderDiscountId === 'string' ? orderDiscountId : null,
+      // D5: validado arriba; el servicio lo revalida y calcula en línea.
+      couponCode: typeof couponCode === 'string' ? couponCode.trim() : null,
       tip: opciones.conPropinaDeOrden && typeof tip === 'number' ? tip : 0,
       note,
       splitType,
@@ -316,7 +331,7 @@ export async function autoridadDeLaVenta(
   const hasCortesias = venta.items.some(item => item.isCortesia === true)
   // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
   // el escritor decide si la necesita sobre la fila que realmente calcula. Nunca tomarla del vendedor ni del body.
-  const needsCompAuthority = hasCortesias || !!venta.orderDiscountId || venta.items.some(item => !!item.discountId)
+  const needsCompAuthority = hasCortesias || !!venta.orderDiscountId || !!venta.couponCode || venta.items.some(item => !!item.discountId)
   const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
   if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
   return {

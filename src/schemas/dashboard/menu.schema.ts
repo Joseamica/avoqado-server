@@ -316,7 +316,10 @@ export const CreateProductSchema = z.object({
 export type CreateProductDto = z.infer<typeof CreateProductSchema>['body']
 
 export const UpdateProductSchema = z.object({
-  body: ProductBodyBase.partial().refine(nonInventoriableRefine, nonInventoriableMessage),
+  body: ProductBodyBase.partial()
+    // Versión que el panel obtuvo en su paso anterior (asistente de producto): si cambió en medio, 409 PRODUCT_CHANGED. Opcional.
+    .extend({ expectedUpdatedAt: z.string().datetime({ message: 'La versión del producto no es válida' }).optional() })
+    .refine(nonInventoriableRefine, nonInventoriableMessage),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
     productId: existingId('El ID del producto no es válido'),

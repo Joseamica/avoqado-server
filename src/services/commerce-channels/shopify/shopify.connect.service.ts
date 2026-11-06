@@ -107,7 +107,7 @@ export async function puedeConectarConAppPropia(venueId: string): Promise<boolea
   if (!venue || (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status)) return false
   const vf = await prisma.venueFeature.findFirst({
     where: { venueId, feature: { code: SHOPIFY_FEATURE } },
-    select: { active: true, endDate: true, suspendedAt: true },
+    select: { active: true, endDate: true, suspendedAt: true, gracePeriodEndsAt: true },
   })
   return !!vf && isActiveWindow(vf)
 }

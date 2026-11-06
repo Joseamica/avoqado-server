@@ -292,6 +292,29 @@ export async function ensureReservationSettings(venueId: string) {
 }
 
 /**
+ * ¿Este cambio PRENDE un cobro en línea (depósito o pago por adelantado) que hoy no rige?
+ *
+ * «Lo que rige hoy» es la fila guardada o, si no hay fila, el MISMO default con el que ya se leen
+ * los ajustes y se reservan clases (getDefaultConfig: clases 'required', citas 'at_venue', sin
+ * depósito). 🔴 D18 (5-nov-2026): antes se comparaba contra 'at_venue' y un negocio sin fila ni
+ * Stripe recibía 400 al guardar CUALQUIER ajuste, porque el panel reenvía el 'required' que le
+ * muestra. Reenviar lo que ya rige no prende ningún cobro nuevo. Lo usan el panel y la MCP.
+ */
+export function prendeCobroEnLinea(
+  current: { depositMode?: string | null; appointmentUpfrontDefault?: string | null; classUpfrontDefault?: string | null } | null,
+  next: { depositMode?: unknown; appointmentUpfrontDefault?: unknown; classUpfrontDefault?: unknown },
+): boolean {
+  const defaults = getDefaultConfig()
+  const prende = (siguiente: unknown, actual: string | null | undefined, porDefecto: string, apagado: string) =>
+    typeof siguiente === 'string' && siguiente !== apagado && (actual ?? porDefecto) === apagado
+  return (
+    prende(next.depositMode, current?.depositMode, defaults.deposits.mode, 'none') ||
+    prende(next.appointmentUpfrontDefault, current?.appointmentUpfrontDefault, defaults.payments.appointmentUpfrontDefault, 'at_venue') ||
+    prende(next.classUpfrontDefault, current?.classUpfrontDefault, defaults.payments.classUpfrontDefault, 'at_venue')
+  )
+}
+
+/**
  * Update reservation settings for a venue.
  */
 export async function updateReservationSettings(venueId: string, data: ReservationSettingsUpdateInput) {
@@ -313,19 +336,16 @@ export async function updateReservationSettings(venueId: string, data: Reservati
 
     // Only a genuine off→on transition needs the merchant rail. A legacy venue
     // may safely resave an already-charging value even when its rail is missing.
-    const nextDepositMode = typeof normalized.depositMode === 'string' ? normalized.depositMode : undefined
-    const nextApptUpfront = typeof normalized.appointmentUpfrontDefault === 'string' ? normalized.appointmentUpfrontDefault : undefined
-    const nextClassUpfront = typeof normalized.classUpfrontDefault === 'string' ? normalized.classUpfrontDefault : undefined
-    const enablesCharging =
-      (nextDepositMode !== undefined && nextDepositMode !== 'none' && (current?.depositMode ?? 'none') === 'none') ||
-      (nextApptUpfront !== undefined &&
-        nextApptUpfront !== 'at_venue' &&
-        (current?.appointmentUpfrontDefault ?? 'at_venue') === 'at_venue') ||
-      (nextClassUpfront !== undefined && nextClassUpfront !== 'at_venue' && (current?.classUpfrontDefault ?? 'at_venue') === 'at_venue')
+    const enablesCharging = prendeCobroEnLinea(current, {
+      depositMode: normalized.depositMode,
+      appointmentUpfrontDefault: normalized.appointmentUpfrontDefault,
+      classUpfrontDefault: normalized.classUpfrontDefault,
+    })
 
     if (enablesCharging && !(await canVenueChargeOnline(venueId))) {
+      // Hoy sólo Stripe Connect cobra reservaciones en línea (canVenueChargeOnline); Mercado Pago no.
       throw new BadRequestError(
-        'Necesitas dar de alta un proveedor de e-commerce (Stripe/Mercado Pago) para cobrar o pre-cobrar reservaciones.',
+        'Para cobrar por adelantado o pedir depósito en reservaciones necesitas conectar Stripe en Configuración › Integraciones. Mientras tanto elige «Pagar en el local» (y «Sin depósito»).',
       )
     }
 

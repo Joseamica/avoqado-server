@@ -3,8 +3,16 @@ import { NextFunction, Request, Response } from 'express'
 import prisma from '../utils/prismaClient'
 import { checkPermission } from './checkPermission.middleware'
 
-/** Con id de catálogo, `discount` sólo repite ese importe; sin id, el servicio aplica el número positivo como rebaja manual. */
-export const traeDescuentoManual = (body: any): boolean => !body?.orderDiscountId && typeof body?.discount === 'number' && body.discount > 0
+/** D5: en línea el servidor valida el cupón y calcula el monto. En una venta de la cola se ignora: ahí `discount` sí es libre. */
+const traeCuponEnLinea = (body: any): boolean => typeof body?.couponCode === 'string' && body.couponCode.trim() !== '' && body.isOfflineReplay !== true
+
+/** Con id de catálogo o cupón, `discount` sólo repite ese importe; sin ellos, el servicio aplica el número positivo como rebaja manual. */
+export const traeDescuentoManual = (body: any): boolean =>
+  !body?.orderDiscountId && !traeCuponEnLinea(body) && typeof body?.discount === 'number' && body.discount > 0
+
+/** Canjear un cupón en la venta pide lo mismo que validarlo en el POS. Sólo si lo trae: una venta sin cupón no paga nada extra. */
+export const checkCuponPermissionIfPresent = (req: Request, res: Response, next: NextFunction) =>
+  traeCuponEnLinea(req.body) ? checkPermission('coupons:redeem')(req, res, next) : next()
 
 export const checkDescuentoManualPermissionIfPresent = (req: Request, res: Response, next: NextFunction) =>
   traeDescuentoManual(req.body) ? checkPermission('discounts:apply')(req, res, next) : next()

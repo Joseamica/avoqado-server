@@ -357,6 +357,8 @@ export function filaDeDescuentoDeCatalogoEnCuenta(p: {
   montoPesos: number
   appliedById: string | null
   renglonesSinCortesia: string[]
+  /** D5: el tope del catálogo viaja en el reparto, como en `applyCouponCode`: el siguiente recálculo lo respeta. */
+  tope?: number | null
 }): Prisma.OrderDiscountUncheckedCreateInput {
   const { discount } = p
   return {
@@ -372,7 +374,7 @@ export function filaDeDescuentoDeCatalogoEnCuenta(p: {
     compReason: discount.type === 'COMP' ? discount.compReason || discount.name : null,
     appliedById: p.appliedById,
     appliedToItemIds: p.renglonesSinCortesia,
-    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: false, base: p.renglonesSinCortesia })),
+    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: false, base: p.renglonesSinCortesia, tope: p.tope })),
   }
 }
 

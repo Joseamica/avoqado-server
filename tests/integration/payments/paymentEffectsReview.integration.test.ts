@@ -428,7 +428,8 @@ it('refund financial commit includes pending commission reversal and referral re
     expect(refund.processorData).toMatchObject({ originalPaymentId: paymentId })
     expect(Number(refund.amount)).toBe(-100)
     const obligations = await prisma.paymentEffect.findMany({ where: { venueId, paymentId: refundId }, take: 10 })
-    expect(obligations.map(row => row.kind).sort()).toEqual(['COMMISSION', 'REFERRAL'])
+    // D6 (5-nov): la reversa de los puntos de la venta también nace con el reembolso.
+    expect(obligations.map(row => row.kind).sort()).toEqual(['COMMISSION', 'LOYALTY_POINTS_REVERSAL', 'REFERRAL'])
   } finally {
     release()
     await registration
