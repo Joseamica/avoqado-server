@@ -14,7 +14,7 @@ import type { CrmAccess } from '@/services/crm/access.service'
 import { addNote, getPending, moveStage, takeAccount } from '@/services/crm/accounts.service'
 import { completeActivity } from '@/services/crm/activities.service'
 import { ensureClientAccount } from '@/services/crm/clients.service'
-import { addContact, updateAccount } from '@/services/crm/ficha.service'
+import { addContact, updateAccount, updateContact } from '@/services/crm/ficha.service'
 import { updateTeamMember } from '@/services/crm/teamVenue.service'
 import { addEvent } from '@/services/crm/timeline.service'
 import prisma from '@/utils/prismaClient'
@@ -348,5 +348,46 @@ describe('CRM: two sellers on the same account at once', () => {
     expect(fulfilled).toHaveLength(1)
     expect(rejected).toEqual([expect.objectContaining({ statusCode: 409, code: 'CRM_PERSONA_YA_ESTA' })])
     expect(await prisma.crmContact.count({ where: { accountId: id } })).toBe(1)
+  })
+
+  it('🔴 Codex código r1 #2: el mismo correo en DOS negocios a la vez → uno se guarda y el otro da 409 CRM_POSIBLE_DUPLICADO con de quién es', async () => {
+    // Diez parejas: sin el candado de la identidad, alguna deja el correo en los dos negocios sin el aviso.
+    for (let n = 0; n < 10; n++) {
+      const [x, y] = [await newAccount({ ownerStaffId: ana }), await newAccount({ ownerStaffId: beto })]
+      const email = `cruce${n}-${suffix}@test.mx`
+
+      const { fulfilled, rejected } = settle(
+        await Promise.allSettled([
+          addContact(seller(ana!), x, { name: 'Ana', email, clientRequestId: randomUUID() }),
+          addContact(seller(beto!), y, { name: 'Ana', email, clientRequestId: randomUUID() }),
+        ]),
+      )
+
+      expect(fulfilled).toHaveLength(1)
+      expect(rejected).toEqual([expect.objectContaining({ statusCode: 409, code: 'CRM_POSIBLE_DUPLICADO' })])
+      const conCorreo = await prisma.crmContact.findMany({ where: { email }, select: { accountId: true }, take: 5 })
+      expect(conCorreo).toHaveLength(1)
+      expect(rejected[0].details.duplicates).toEqual([expect.objectContaining({ id: conCorreo[0].accountId })])
+    }
+  })
+
+  it('🔴 Codex código r1 #2: cambiar a la vez el teléfono de personas de DOS negocios al mismo → uno guarda y el otro da 409', async () => {
+    const [x, y] = [await newAccount({ ownerStaffId: ana }), await newAccount({ ownerStaffId: beto })]
+    const [px, py] = await Promise.all([
+      prisma.crmContact.create({ data: { accountId: x, name: 'Ana', isPrimary: true } }),
+      prisma.crmContact.create({ data: { accountId: y, name: 'Beto', isPrimary: true } }),
+    ])
+    const vista = (p: { name: string }) => ({ name: p.name, phoneE164: null, email: null, role: null, isPrimary: true })
+    const phone = `55${String(Date.now()).slice(-8)}`
+
+    const { fulfilled, rejected } = settle(
+      await Promise.allSettled([
+        updateContact(seller(ana!), x, px.id, { cambios: { phone }, vio: vista(px) }),
+        updateContact(seller(beto!), y, py.id, { cambios: { phone }, vio: vista(py) }),
+      ]),
+    )
+
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toEqual([expect.objectContaining({ statusCode: 409, code: 'CRM_POSIBLE_DUPLICADO' })])
   })
 })

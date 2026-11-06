@@ -756,7 +756,7 @@ export async function listContacts(access: CrmAccess, accountId: string, opts: {
 export async function findDuplicates(
   access: CrmAccess,
   contact: { phone?: string | null; email?: string | null },
-  opts: { exceptAccountId?: string } = {},
+  opts: { exceptAccountId?: string; db?: Prisma.TransactionClient } = {},
 ) {
   const phoneE164 = contact.phone ? canonicalPhoneE164(contact.phone) : null
   const email = contact.email?.trim().toLowerCase() || null
@@ -765,7 +765,8 @@ export async function findDuplicates(
   if (email) by.push({ email: { equals: email, mode: 'insensitive' } })
   if (!by.length) return []
 
-  const accounts = await prisma.crmAccount.findMany({
+  // Inside a transaction, ITS client (Codex código r1 #3): the global one needs a second connection of the pool.
+  const accounts = await (opts.db ?? prisma).crmAccount.findMany({
     where: { contacts: { some: { OR: by } }, ...(opts.exceptAccountId ? { id: { not: opts.exceptAccountId } } : {}) },
     select: { id: true, name: true, ownerStaffId: true, owner: { select: { firstName: true, lastName: true } } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],

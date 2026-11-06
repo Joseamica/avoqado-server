@@ -159,6 +159,46 @@ function installFichaFake() {
   jest.mocked(logAction).mockImplementation(async params => {
     db.logs.push(params)
   })
+
+  // 🔴 Codex código r1 #3: la transacción recibe SU cliente, distinto del `prisma` global. Una consulta por el global
+  // mientras hay una transacción abierta (otra conexión del pool) truena aquí, como se agotaría el pool en producción.
+  let enTx = false
+  let viaTx = false
+  const modelos = ['crmAccount', 'crmContact', 'crmTimelineEvent', 'crmEmailConsent', 'crmErased']
+  const tx: Row = {}
+  const vigilar = (fn: jest.Mock) => {
+    const impl = fn.getMockImplementation()
+    if (!impl) return
+    fn.mockImplementation((...args: unknown[]) => {
+      const desdeTx = viaTx
+      viaTx = false
+      if (enTx && !desdeTx) throw new Error('Se usó el prisma global dentro de una transacción (otra conexión)')
+      return impl(...args)
+    })
+  }
+  const porTx =
+    (fn: jest.Mock) =>
+    (...args: unknown[]) => {
+      viaTx = true
+      return fn(...args)
+    }
+  for (const model of modelos) {
+    tx[model] = {}
+    for (const [name, fn] of Object.entries(prismaMock[model]) as Array<[string, jest.Mock]>) {
+      vigilar(fn)
+      tx[model][name] = porTx(fn)
+    }
+  }
+  vigilar(prismaMock.$queryRaw)
+  tx.$queryRaw = porTx(prismaMock.$queryRaw)
+  prismaMock.$transaction.mockImplementation(async (callback: (client: Row) => unknown) => {
+    enTx = true
+    try {
+      return await callback(tx)
+    } finally {
+      enTx = false
+    }
+  })
   return db
 }
 
@@ -691,5 +731,56 @@ describe('Tarea 3 · removeContact: quitar persona', () => {
     })
     expect(db.events.length).toBe(n)
     expect(db.contacts).toEqual([ajena])
+  })
+})
+
+// ── Codex código r1 ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** ¿Es el candado de una identidad? (`$queryRaw` llega como plantilla o como `Prisma.sql`). */
+const esCandado = (call: unknown[]) => Array.isArray(call[0]) && (call[0] as string[]).join('?').includes('pg_advisory_xact_lock')
+
+describe('Codex código r1: llave con otro «principal», identidades entre cuentas y la transacción', () => {
+  it('🔴 #1: K creó a Ana como principal; llega K con isPrimary false → 409 CRM_LLAVE_CON_OTRO_CONTENIDO', async () => {
+    seedAccount()
+    seedContact({ name: 'Beto', isPrimary: true })
+    await addContact(access(), ACCOUNT, persona({ isPrimary: true }))
+    await expect(addContact(access(), ACCOUNT, persona({ isPrimary: false }))).rejects.toMatchObject({
+      code: 'CRM_LLAVE_CON_OTRO_CONTENIDO',
+    })
+  })
+
+  it('🔴 #1: K creó a Ana secundaria; alguien la hace principal; llega K igual → 409 (lo creado, leído hoy, ya es otro)', async () => {
+    seedAccount()
+    seedContact({ name: 'Beto', isPrimary: true })
+    const { contactId } = await addContact(access(), ACCOUNT, persona({ isPrimary: false }))
+    db.contacts.find(c => c.id === contactId)!.isPrimary = true
+    await expect(addContact(access(), ACCOUNT, persona({ isPrimary: false }))).rejects.toMatchObject({
+      code: 'CRM_LLAVE_CON_OTRO_CONTENIDO',
+    })
+  })
+
+  it('#1 regresión: la primera persona, sin pedir principal, nace principal y su reintento sigue siendo repetido', async () => {
+    seedAccount()
+    const r = await addContact(access(), ACCOUNT, persona())
+    await expect(addContact(access(), ACCOUNT, persona())).resolves.toMatchObject({ contactId: r.contactId, repetido: true })
+  })
+
+  it('🔴 #2: antes de buscar duplicados toma el candado de cada identidad que escribe, en orden fijo', async () => {
+    seedAccount()
+    await addContact(access(), ACCOUNT, persona({ email: 'Zeta@cafe.mx', phone: '55 1234 5678' }))
+    const candados = prismaMock.$queryRaw.mock.calls.filter(esCandado).map((call: unknown[]) => call[1])
+    expect(candados).toEqual(['crm:identidad:email:zeta@cafe.mx', 'crm:identidad:telefono:+525512345678'])
+    const ordenCandado = prismaMock.$queryRaw.mock.invocationCallOrder[prismaMock.$queryRaw.mock.calls.findIndex(esCandado)]
+    expect(ordenCandado).toBeLessThan(prismaMock.crmAccount.findMany.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 #2: cambiar el correo también toma su candado; cambiar sólo el puesto no toma ninguno', async () => {
+    seedAccount()
+    const ana = seedContact({ name: 'Ana', email: 'ana@cafe.mx' })
+    const candados = () => prismaMock.$queryRaw.mock.calls.filter(esCandado)
+    await updateContact(access(), ACCOUNT, ana.id, { cambios: { role: 'Dueña' }, vio: vistaDe(ana) })
+    expect(candados()).toHaveLength(0)
+    await updateContact(access(), ACCOUNT, ana.id, { cambios: { email: 'nueva@cafe.mx' }, vio: vistaDe(ana) })
+    expect(candados().map((call: unknown[]) => call[1])).toEqual(['crm:identidad:email:nueva@cafe.mx'])
   })
 })

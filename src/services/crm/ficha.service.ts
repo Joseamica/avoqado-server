@@ -149,6 +149,19 @@ async function personaDelNegocioTx(
   })
 }
 
+/**
+ * El candado de cada identidad que se va a escribir (Codex código r1 #2): dos altas del mismo correo o teléfono en negocios
+ * DISTINTOS se forman, y la segunda ve a la primera en su búsqueda de duplicados. En orden fijo (ordenadas) para que dos
+ * escritores con las mismas identidades nunca se esperen en cruz. Sin Redis: `pg_advisory_xact_lock`, se suelta al terminar.
+ */
+async function candadosDeIdentidadTx(tx: Prisma.TransactionClient, datos: { email: string | null; phoneE164: string | null }) {
+  const llaves = [
+    ...(datos.email ? [`crm:identidad:email:${datos.email.toLowerCase()}`] : []),
+    ...(datos.phoneE164 ? [`crm:identidad:telefono:${datos.phoneE164}`] : []),
+  ].sort()
+  for (const llave of llaves) await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${llave}))::text`
+}
+
 /** Las dos reglas de duplicados, sólo para el correo o teléfono que se escribe: del mismo negocio, y de otro. */
 async function revisarDuplicadosTx(
   tx: Prisma.TransactionClient,
@@ -157,10 +170,11 @@ async function revisarDuplicadosTx(
   datos: { email: string | null; phoneE164: string | null },
   opts: { esOtroNegocio?: boolean; exceptoId?: string },
 ) {
+  await candadosDeIdentidadTx(tx, datos)
   const misma = await personaDelNegocioTx(tx, accountId, datos, opts.exceptoId)
   if (misma) throw new ConflictError('Esa persona ya está en este negocio', 'CRM_PERSONA_YA_ESTA', { contactId: misma.id })
   if (opts.esOtroNegocio || (!datos.email && !datos.phoneE164)) return
-  const duplicates = await findDuplicates(access, { phone: datos.phoneE164, email: datos.email }, { exceptAccountId: accountId })
+  const duplicates = await findDuplicates(access, { phone: datos.phoneE164, email: datos.email }, { exceptAccountId: accountId, db: tx })
   if (duplicates.length) throw new ConflictError('Ya hay un negocio con ese teléfono o correo', 'CRM_POSIBLE_DUPLICADO', { duplicates })
 }
 
@@ -222,7 +236,13 @@ export async function addContact(
 
     const previo = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: { data: true } })
     if (previo) {
-      const data = (previo.data ?? {}) as { contactId?: string; casilla?: boolean; consentimiento?: boolean }
+      const data = (previo.data ?? {}) as {
+        contactId?: string
+        principal?: boolean
+        principalPedido?: boolean | null
+        casilla?: boolean
+        consentimiento?: boolean
+      }
       const hoy = data.contactId
         ? await tx.crmContact.findFirst({ where: { id: data.contactId, accountId }, select: PERSONA_SELECT })
         : null
@@ -233,7 +253,9 @@ export async function addContact(
         hoy.phoneE164 === pedido.phoneE164 &&
         hoy.email === pedido.email &&
         mismoTexto(hoy.role, pedido.role) &&
-        (input.isPrimary !== true || hoy.isPrimary) &&
+        // «Principal» exacto (Codex código r1 #1): lo que se pidió, y lo que esa llave creó tal como está hoy.
+        (input.isPrimary ?? null) === (data.principalPedido ?? null) &&
+        hoy.isPrimary === data.principal &&
         (data.casilla ?? false) === casilla &&
         // Con la casilla, el permiso sigue ahí — salvo que no se pudo escribir (correo eliminado por D7).
         (!casilla || permiso || data.consentimiento === false)
@@ -261,7 +283,7 @@ export async function addContact(
       kind: 'CONTACT_ADDED',
       actorStaffId: access.staffId,
       sourceKey,
-      data: { contactId, principal, casilla, consentimiento: casilla && permiso },
+      data: { contactId, principal, principalPedido: input.isPrimary ?? null, casilla, consentimiento: casilla && permiso },
     })
     return { contactId, permiso, escritas, repetido: false, organizationId: await organizacionTx(tx, accountId) }
   })
