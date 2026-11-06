@@ -1,11 +1,12 @@
 import type { CronJob } from 'cron'
+import type { PaymentStatus } from '@prisma/client'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { announceCancelledElsewhere, cerrarCanceladasReleyendo } from '../services/online-ordering/cancelledOrderSync'
 import { EXPIRY_BATCH_SIZE, OPEN_ORDER_STATUSES } from '../services/online-ordering/constants'
 import { cerrarFoliosDelDiaTerminado, syncPaidClosedFolios, syncPaidFolios } from '../services/online-ordering/folios.service'
 import { announceCollectedAutomatically, syncOnlineOrdersOfPaidPickups } from '../services/online-ordering/paidPickupSync'
-import { expireOnlineOrder } from '../services/online-ordering/transitions.service'
+import { expireOnlineOrder, netoCobradoPorCuenta } from '../services/online-ordering/transitions.service'
 import type { ReadCandidates } from '../services/online-ordering/types'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -21,6 +22,7 @@ interface ExpiryCandidate {
   orderId: string
   venueId: string
   acceptDeadlineAt: Date
+  order: { paymentStatus: PaymentStatus }
 }
 
 interface OnlineOrderAcceptanceExpiryDependencies {
@@ -174,22 +176,41 @@ export class OnlineOrderAcceptanceExpiryJob {
       for (let page = 0; page < EXPIRY_MAX_PAGES; page++) {
         const after = cursor
         // R1: sólo pedidos sin dinero y cuya cuenta sigue ABIERTA (A13): uno ya cobrado no vence, y una cuenta cerrada sin
-        // dinero (cortesía) no se puede cancelar, así que intentarlo en cada pasada sólo gasta un candado.
+        // dinero (cortesía) no se puede cancelar, así que intentarlo en cada pasada sólo gasta un candado. R44: también un folio con
+        // abono (PARTIAL), por si su dinero se reembolsó completo; su neto se mira abajo y otra vez bajo el candado.
         const candidates = (await this.readEntry('online-order-acceptance-expiry.findDue')(() =>
           this.dependencies.prisma.onlineOrder.findMany({
             where: {
               status: 'PENDING_ACCEPTANCE',
               acceptDeadlineAt: { lte: now },
-              order: { paymentStatus: 'PENDING', status: { in: [...OPEN_ORDER_STATUSES] } },
+              AND: [
+                {
+                  OR: [
+                    { order: { paymentStatus: 'PENDING', status: { in: [...OPEN_ORDER_STATUSES] } } },
+                    { requiresAcceptance: false, order: { paymentStatus: 'PARTIAL', status: { in: [...OPEN_ORDER_STATUSES] } } },
+                  ],
+                },
+              ],
               ...(after ? { OR: [{ acceptDeadlineAt: { gt: after.at } }, { acceptDeadlineAt: after.at, id: { gt: after.id } }] } : {}),
             },
-            select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
+            select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true, order: { select: { paymentStatus: true } } },
             orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
             take: EXPIRY_BATCH_SIZE,
           }),
         )) as ExpiryCandidate[]
 
+        // R44: el neto sólo de los folios con abono del lote, en UNA consulta. Uno con dinero neto no vence (R18) y ni se intenta.
+        // ponytail: un abono vivo vuelve a leerse en cada pasada (va primero por su plazo viejo); son raros y caben en las 10 páginas.
+        const abonados = candidates.filter(c => c.order.paymentStatus === 'PARTIAL').map(c => c.orderId)
+        const netos = await this.readEntry('online-order-acceptance-expiry.netos')(() =>
+          netoCobradoPorCuenta(this.dependencies.prisma, abonados),
+        )
+
         for (const candidate of candidates) {
+          if (netos.get(candidate.orderId)?.gt(0)) {
+            noop += 1
+            continue
+          }
           try {
             const r = await this.dependencies.expireOrder({ venueId: candidate.venueId, orderId: candidate.orderId, now })
             if (r.outcome === 'OK') expired += 1

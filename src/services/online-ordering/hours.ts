@@ -66,7 +66,7 @@ export function isWithinHours(hours: HorarioSemanal | null | undefined, now: Dat
 }
 
 /**
- * T4: ¿a qué hora cierra la franja vigente? `null` si no hay horario o `now` está fuera de horario.
+ * T4: ¿a qué hora cierra la franja vigente? `null` si no hay horario, `now` está fuera de horario o no hay un cierre futuro (R45).
  * R32: junta las franjas contiguas (09–13 + 13–17 ⇒ cierra 17:00; martes 20–00 + miércoles 00–02 ⇒ 02:00).
  * Trabaja en minutos desde la medianoche local de hoy (ayer = −1440, mañana = +1440).
  */
@@ -105,5 +105,12 @@ export function closesAt(hours: HorarioSemanal | null | undefined, now: Date, ti
   date.setUTCDate(date.getUTCDate() + dayShift)
   const hh = String(Math.floor(endMin / 60)).padStart(2, '0')
   const mm = String(endMin % 60).padStart(2, '0')
-  return fromZonedTime(`${date.toISOString().slice(0, 10)}T${hh}:${mm}:00`, timezone)
+  const wall = `${date.toISOString().slice(0, 10)}T${hh}:${mm}:00`
+  const cierre = fromZonedTime(wall, timezone)
+  if (cierre > now) return cierre
+  // R45: con el negocio abierto el cierre nunca queda en o antes de ahora. En la hora repetida (el reloj se atrasa) es la aparición
+  // POSTERIOR; si tampoco hay cierre futuro (esa hora no existe ese día), null: quien fija el plazo usa sus 30 min.
+  // ponytail: supone cambios de horario de 1 h (los de México y EE. UU.); otra amplitud cae en null = 30 min.
+  const otraVez = new Date(cierre.getTime() + 3_600_000)
+  return otraVez > now && formatInTimeZone(otraVez, timezone, "yyyy-MM-dd'T'HH:mm:ss") === wall ? otraVez : null
 }

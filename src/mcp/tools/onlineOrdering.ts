@@ -66,6 +66,9 @@ const AUDIT: Record<Action, string> = {
 
 /** El mismo texto de la API (`accept` del controlador móvil): un folio no se prepara sin pago. */
 const FOLIO_SIN_PAGAR = 'Este pedido se cobra antes de prepararlo'
+/** R46: un folio no se rechaza; se quita con CANCELAR. Nunca promete «no se le cobró nada» (§5: un efectivo sin red puede subir después). */
+const FOLIO_NO_SE_RECHAZA =
+  'Este pedido se paga en caja y no se rechaza; no se aplicó nada. Para quitarlo usa CANCELAR (pide el permiso de cancelar cuentas sin cobro).'
 /** Rechazos del servicio al guardar los ajustes que se dicen en texto, sin error (nada se escribió). */
 const AJUSTES_RECHAZADOS = new Set(['NO_PAYMENT_MODE', 'PAY_AT_PICKUP_REQUIRED', 'HOURS_REQUIRED', 'NO_FOLIO_DEVICE'])
 
@@ -180,6 +183,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       const pendingAction = action === 'ACCEPT' || action === 'REJECT'
       // T13: un folio por pagar («Nadie» acepta) también se puede cancelar; uno de «Mi equipo» por aceptar se rechaza, no se cancela.
       const folio = order.requiresAcceptance === false
+      // R46: el servicio también responde STALE (la API del POS y del panel), aquí se dice antes de la vista previa.
+      if (action === 'REJECT' && folio) return text({ ok: false, status: order.status, error: FOLIO_NO_SE_RECHAZA })
       const vigente: string[] = pendingAction
         ? ['PENDING_ACCEPTANCE']
         : action === 'CANCEL' && folio

@@ -22,7 +22,7 @@ import { authorKitchenTickets } from '@/services/kds/kitchenTicketAuthoring.serv
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { cerrarCanceladasReleyendo } from '@/services/online-ordering/cancelledOrderSync'
-import { cerrarFoliosDelDiaTerminado, syncPaidFolios } from '@/services/online-ordering/folios.service'
+import { cerrarFoliosDelDiaTerminado, listFolios, syncPaidFolios } from '@/services/online-ordering/folios.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import {
   acceptOnlineOrder,
@@ -37,6 +37,7 @@ import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
+import { OnlineOrderAcceptanceExpiryJob } from '@/jobs/online-order-acceptance-expiry.job'
 import { crearFixture, exigir, exigirBaseDesechable, type Fixture } from '../payments/webhookCheckpoint.fixture'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
@@ -414,9 +415,14 @@ describe('T9 · dinero tardío sobre un folio cerrado: «Por entregar», nunca �
     expect(await comandas(orderId)).toBeLessThanOrEqual(1)
   })
 
-  it('lo mismo con un folio REJECTED por el MCP', async () => {
+  it('lo mismo con un folio REJECTED (R46: un folio ya no se rechaza; el estado queda sólo por datos que lo traigan)', async () => {
     const { orderId, onlineOrderId } = await nuevoFolio()
-    expect(await rejectOnlineOrder({ venueId: f.venueId, orderId, staffId: null, reason: 'OTHER' })).toMatchObject({ outcome: 'OK' })
+    // R46: lo que dejaba el rechazo se escribe directo: el folio REJECTED y su cuenta CANCELLED.
+    await prisma.onlineOrder.update({
+      where: { id: onlineOrderId },
+      data: { status: 'REJECTED', rejectedAt: new Date(), rejectReason: 'OTHER' },
+    })
+    await prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } })
     await colaSinRed(orderId, CINCUENTA)
     expect((await pedido(onlineOrderId)).status).toBe('REJECTED')
 
@@ -439,6 +445,53 @@ describe('T9 · dinero tardío sobre un folio cerrado: «Por entregar», nunca �
     await efectivoDelPos(abonado.orderId, CINCUENTA)
     await pasada()
     expect((await pedido(abonado.onlineOrderId)).status).toBe('EXPIRED')
+  })
+})
+
+describe('R44 · folio con su abono reembolsado completo (cuenta PARTIAL, dinero neto 0)', () => {
+  /** El trabajo de cada 30 s, con sus dependencias reales (sin cron). */
+  const pasarElTrabajo = () => new OnlineOrderAcceptanceExpiryJob({ cron: { start: jest.fn(), stop: jest.fn() } as never }).checkNow()
+  const porPagar = async () => (await listFolios({ venueId: f.venueId })).toPay.map(o => o.orderId)
+  const vencerPlazo = (onlineOrderId: string) =>
+    prisma.onlineOrder.update({ where: { id: onlineOrderId }, data: { acceptDeadlineAt: new Date(Date.now() - 60_000) } })
+
+  it('abono de $50 de $100 y reembolso REAL de $50 ⇒ pasado el plazo el trabajo lo vence; la cuenta queda intacta (PARTIAL, sin cancelar) y sale de «Por pagar»; si después llega dinero, revive', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    // El reembolso en efectivo sale del cajón: pide un turno abierto.
+    await prisma.shift.create({ data: { venueId: f.venueId, staffId: f.staffId, startTime: new Date(), status: 'OPEN', startingCash: 0 } })
+    const abono = await efectivoDelPos(orderId, CINCUENTA)
+    await issueRefund({ venueId: f.venueId, paymentId: abono.paymentId, amount: CINCUENTA, reason: 'RETURNED_GOODS', staffId: f.staffId })
+    expect(await prisma.payment.count({ where: { orderId, type: 'REFUND', status: 'COMPLETED' } })).toBe(1)
+    const antes = await cuenta(orderId)
+    expect(antes).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' }) // el reembolso no la recalcula (deuda ajena)
+    expect(await porPagar()).toContain(orderId) // dentro del plazo sigue «Por pagar»
+
+    await vencerPlazo(onlineOrderId)
+    await pasarElTrabajo()
+
+    expect((await pedido(onlineOrderId)).status).toBe('EXPIRED')
+    const despues = await cuenta(orderId)
+    expect(despues).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' }) // ni cancelada ni tocada
+    expect(despues.paidAmount.toString()).toBe(antes.paidAmount.toString())
+    expect(await porPagar()).not.toContain(orderId)
+
+    // Llega dinero después: el cobro salda la cuenta y la pasada lo revive a «Por entregar» (`syncPaidClosedFolios`), como hoy.
+    await efectivoDelPos(orderId, CINCUENTA)
+    expect((await cuenta(orderId)).paymentStatus).toBe('PAID')
+    await pasada()
+    await porEntregar(onlineOrderId)
+  })
+
+  it('control (R18): un abono SIN reembolso no vence aunque pase el plazo, y sigue en «Por pagar»', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await efectivoDelPos(orderId, CINCUENTA)
+    await vencerPlazo(onlineOrderId)
+
+    await pasarElTrabajo()
+
+    expect((await pedido(onlineOrderId)).status).toBe('PENDING_ACCEPTANCE')
+    expect(await cuenta(orderId)).toMatchObject({ status: 'PENDING', paymentStatus: 'PARTIAL' })
+    expect(await porPagar()).toContain(orderId)
   })
 })
 
@@ -639,6 +692,23 @@ describe('T13 · «Cancelar folio» (personal) sobre un folio por pagar', () => 
     expect(await cancelar(orderId)).toEqual({ outcome: 'HAS_PAYMENTS' })
     expect((await pedido(onlineOrderId)).status).toBe(antes)
     expect((await cuenta(orderId)).status).not.toBe('CANCELLED')
+  })
+
+  it('R46: «Rechazar» un folio responde STALE y no toca nada: el folio se quita con «Cancelar folio»', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    expect(await rejectOnlineOrder({ venueId: f.venueId, orderId, staffId: f.staffId, reason: 'OTHER' })).toEqual({
+      outcome: 'STALE',
+      status: 'PENDING_ACCEPTANCE',
+    })
+    expect((await pedido(onlineOrderId)).status).toBe('PENDING_ACCEPTANCE')
+    expect((await cuenta(orderId)).status).toBe('PENDING')
+    // «Mi equipo» sigue rechazando como hoy.
+    const equipo = await nuevoFolio({ equipo: true })
+    expect(await rejectOnlineOrder({ venueId: f.venueId, orderId: equipo.orderId, staffId: f.staffId, reason: 'OTHER' })).toEqual({
+      outcome: 'OK',
+      status: 'REJECTED',
+    })
+    expect((await cuenta(equipo.orderId)).status).toBe('CANCELLED')
   })
 
   it('un pedido de «Mi equipo» por aceptar sigue en STALE y no se toca', async () => {

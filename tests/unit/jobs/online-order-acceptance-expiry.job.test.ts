@@ -1,4 +1,5 @@
 // tests/unit/jobs/online-order-acceptance-expiry.job.test.ts
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -17,8 +18,8 @@ import { DATABASE_JOB_SCHEDULES } from '@/jobs/jobSchedules'
 
 const NOW = new Date('2026-10-14T18:30:10.000Z')
 const CANDIDATES = [
-  { orderId: 'ord1', venueId: 'v1' },
-  { orderId: 'ord2', venueId: 'v2' },
+  { orderId: 'ord1', venueId: 'v1', order: { paymentStatus: 'PENDING' } },
+  { orderId: 'ord2', venueId: 'v2', order: { paymentStatus: 'PENDING' } },
 ]
 
 async function retryOnce<T>(operation: () => Promise<T>, options: { shouldRetry?: (e: unknown) => boolean }): Promise<T> {
@@ -35,6 +36,7 @@ function harness(
     candidates?: typeof CANDIDATES
     expireOrder?: jest.Mock
     findMany?: jest.Mock
+    groupBy?: jest.Mock
     syncCancelled?: jest.Mock
     syncPaidPickups?: jest.Mock
     syncPaidFolios?: jest.Mock
@@ -44,6 +46,7 @@ function harness(
 ) {
   const cron = { start: jest.fn(), stop: jest.fn() }
   const findMany = o.findMany ?? jest.fn().mockResolvedValue(o.candidates ?? CANDIDATES)
+  const groupBy = o.groupBy ?? jest.fn().mockResolvedValue([])
   const expireOrder = o.expireOrder ?? jest.fn().mockResolvedValue({ outcome: 'OK', status: 'EXPIRED' })
   const syncCancelled = o.syncCancelled ?? jest.fn().mockResolvedValue(0)
   const syncPaidPickups = o.syncPaidPickups ?? jest.fn().mockResolvedValue(0)
@@ -52,7 +55,7 @@ function harness(
   const cerrarFoliosDelDia = o.cerrarFoliosDelDia ?? jest.fn().mockResolvedValue(0)
   const now = jest.fn(() => NOW)
   const job = new OnlineOrderAcceptanceExpiryJob({
-    prisma: { onlineOrder: { findMany } } as never,
+    prisma: { onlineOrder: { findMany }, payment: { groupBy } } as never,
     cron: cron as never,
     expireOrder,
     retryEntry: retryOnce as never,
@@ -63,7 +66,19 @@ function harness(
     cerrarFoliosDelDia,
     now,
   })
-  return { job, cron, findMany, expireOrder, syncCancelled, syncPaidPickups, syncPaidFolios, syncPaidClosedFolios, cerrarFoliosDelDia, now }
+  return {
+    job,
+    cron,
+    findMany,
+    groupBy,
+    expireOrder,
+    syncCancelled,
+    syncPaidPickups,
+    syncPaidFolios,
+    syncPaidClosedFolios,
+    cerrarFoliosDelDia,
+    now,
+  }
 }
 
 beforeEach(() => {
@@ -85,10 +100,21 @@ describe('online-order-acceptance-expiry.job', () => {
       where: {
         status: 'PENDING_ACCEPTANCE',
         acceptDeadlineAt: { lte: NOW },
-        // A13: una cuenta ya cerrada sin dinero (cortesía, COMPLETED) no se vuelve a intentar vencer en cada pasada.
-        order: { paymentStatus: 'PENDING', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } },
+        AND: [
+          {
+            OR: [
+              // A13: una cuenta ya cerrada sin dinero (cortesía, COMPLETED) no se vuelve a intentar vencer en cada pasada.
+              { order: { paymentStatus: 'PENDING', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } } },
+              // R44: un folio con abono (PARTIAL), por si su dinero se reembolsó completo.
+              {
+                requiresAcceptance: false,
+                order: { paymentStatus: 'PARTIAL', status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] } },
+              },
+            ],
+          },
+        ],
       },
-      select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true },
+      select: { id: true, orderId: true, venueId: true, acceptDeadlineAt: true, order: { select: { paymentStatus: true } } },
       orderBy: [{ acceptDeadlineAt: 'asc' }, { id: 'asc' }],
       take: 100,
     })
@@ -127,8 +153,9 @@ describe('online-order-acceptance-expiry.job', () => {
       orderId: `bloq${i}`,
       venueId: 'v1',
       acceptDeadlineAt: at,
+      order: { paymentStatus: 'PENDING' },
     }))
-    const vencible = { id: 'oo-999', orderId: 'ord-ok', venueId: 'v2', acceptDeadlineAt: at }
+    const vencible = { id: 'oo-999', orderId: 'ord-ok', venueId: 'v2', acceptDeadlineAt: at, order: { paymentStatus: 'PENDING' } }
     const findMany = jest.fn().mockResolvedValueOnce(bloqueados).mockResolvedValueOnce([vencible])
     const expireOrder = jest.fn(async (i: { orderId: string }) =>
       i.orderId === 'ord-ok' ? { outcome: 'OK', status: 'EXPIRED' } : { outcome: 'HAS_PAYMENTS' },
@@ -149,6 +176,35 @@ describe('online-order-acceptance-expiry.job', () => {
     const segunda = findMany.mock.calls[1][0]
     expect(segunda.where.OR).toEqual([{ acceptDeadlineAt: { gt: at } }, { acceptDeadlineAt: at, id: { gt: 'oo-099' } }])
     expect(findMany).toHaveBeenCalledTimes(2) // la segunda página vino incompleta: la pasada termina
+  })
+
+  it('R44: también lee folios con abono (PARTIAL); su neto sale de UNA consulta del lote y sólo se intenta vencer el de neto 0 (R18: un abono vivo ni se intenta)', async () => {
+    const at = new Date('2026-10-14T18:00:00.000Z')
+    const findMany = jest.fn().mockResolvedValue([
+      { id: 'a', orderId: 'sin-dinero', venueId: 'v1', acceptDeadlineAt: at, order: { paymentStatus: 'PENDING' } },
+      { id: 'b', orderId: 'reembolsado', venueId: 'v1', acceptDeadlineAt: at, order: { paymentStatus: 'PARTIAL' } },
+      { id: 'c', orderId: 'abonado', venueId: 'v2', acceptDeadlineAt: at, order: { paymentStatus: 'PARTIAL' } },
+    ])
+    const D = (v: string) => new Prisma.Decimal(v)
+    const groupBy = jest.fn().mockResolvedValue([
+      { orderId: 'reembolsado', _sum: { amount: D('0.00'), tipAmount: D('0.00') } },
+      { orderId: 'abonado', _sum: { amount: D('50.00'), tipAmount: D('0.00') } },
+    ])
+    const h = harness({ findMany, groupBy })
+
+    await expect(h.job.checkNow()).resolves.toMatchObject({ scanned: 3, expired: 2, noop: 1, errors: 0 })
+    expect(groupBy).toHaveBeenCalledTimes(1)
+    expect(groupBy.mock.calls[0][0]).toMatchObject({
+      by: ['orderId'],
+      where: { orderId: { in: ['reembolsado', 'abonado'] }, status: 'COMPLETED' },
+    })
+    expect(h.expireOrder.mock.calls.map(([i]: any[]) => i.orderId)).toEqual(['sin-dinero', 'reembolsado'])
+  })
+
+  it('R44: sin folios con abono en el lote no consulta pagos', async () => {
+    const h = harness()
+    await h.job.checkNow()
+    expect(h.groupBy).not.toHaveBeenCalled()
   })
 
   it('usa UN solo instante por pasada y vence cada candidato en su venue', async () => {

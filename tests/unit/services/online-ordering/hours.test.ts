@@ -141,7 +141,12 @@ describe('closesAt', () => {
     expect(iso(closesAt(h, new Date('2026-10-14T07:00:00Z'), TZ))).toBe('2026-10-14T08:00:00.000Z')
   })
   it('dos franjas 09–13 y 17–21, a las 12:00 ⇒ 13:00', () => {
-    const h = week({ tuesday: day(true, [['09:00', '13:00'], ['17:00', '21:00']]) })
+    const h = week({
+      tuesday: day(true, [
+        ['09:00', '13:00'],
+        ['17:00', '21:00'],
+      ]),
+    })
     expect(iso(closesAt(h, new Date('2026-10-13T18:00:00Z'), TZ))).toBe('2026-10-13T19:00:00.000Z')
   })
   it('fuera de horario ⇒ null', () => {
@@ -156,12 +161,43 @@ describe('closesAt', () => {
     expect(iso(closesAt(h, new Date('2026-10-13T17:00:00Z'), 'America/Tijuana'))).toBe('2026-10-14T04:00:00.000Z')
   })
   it('R32: 09–13 + 13–17 a las 12:00 ⇒ 17:00', () => {
-    const h = week({ tuesday: day(true, [['09:00', '13:00'], ['13:00', '17:00']]) })
+    const h = week({
+      tuesday: day(true, [
+        ['09:00', '13:00'],
+        ['13:00', '17:00'],
+      ]),
+    })
     expect(iso(closesAt(h, new Date('2026-10-13T18:00:00Z'), TZ))).toBe('2026-10-13T23:00:00.000Z')
   })
   it('R32: martes 20:00–24:00 + miércoles 00:00–02:00, martes 23:00 ⇒ miércoles 02:00', () => {
     // el formato no tiene «24:00»: el cierre «00:00» (menor que la apertura) es la medianoche
     const h = week({ tuesday: day(true, [['20:00', '00:00']]), wednesday: day(true, [['00:00', '02:00']]) })
     expect(iso(closesAt(h, new Date('2026-10-14T05:00:00Z'), TZ))).toBe('2026-10-14T08:00:00.000Z')
+  })
+
+  describe('R45: el cierre nunca queda en o antes de «ahora» con el negocio abierto (cambio de horario)', () => {
+    // Tijuana, domingo 1-nov-2026: a las 02:00 PDT el reloj regresa a 01:00 PST; de 01:00 a 01:59 pasa dos veces.
+    const TIJ = 'America/Tijuana'
+    const madrugada = week({ sunday: day(true, [['00:00', '01:45']]) })
+
+    it('en la SEGUNDA aparición de las 01:15 (09:15Z) cierra en la segunda de las 01:45 (09:45Z), no en la primera (08:45Z)', () => {
+      const now = new Date('2026-11-01T09:15:00Z')
+      expect(isWithinHours(madrugada, now, TIJ)).toBe(true)
+      expect(iso(closesAt(madrugada, now, TIJ))).toBe('2026-11-01T09:45:00.000Z')
+    })
+
+    it('en la PRIMERA aparición de las 01:15 (08:15Z) sigue siendo la primera de las 01:45 (08:45Z)', () => {
+      expect(iso(closesAt(madrugada, new Date('2026-11-01T08:15:00Z'), TIJ))).toBe('2026-11-01T08:45:00.000Z')
+    })
+
+    it('si la hora de cierre no existe ese día (el reloj salta de 02:00 a 03:00) y no hay cierre futuro, null: el folio usa sus 30 min', () => {
+      // Domingo 8-mar-2026: a las 02:00 PST salta a 03:00 PDT; «02:30» no existe. A las 01:50 PST (09:50Z) sigue abierto.
+      const marzo = week({ sunday: day(true, [['01:00', '02:30']]) })
+      const now = new Date('2026-03-08T09:50:00Z')
+      expect(isWithinHours(marzo, now, TIJ)).toBe(true)
+      const cierre = closesAt(marzo, now, TIJ)
+      expect(cierre === null || cierre.getTime() > now.getTime()).toBe(true)
+      expect(cierre).toBeNull()
+    })
   })
 })

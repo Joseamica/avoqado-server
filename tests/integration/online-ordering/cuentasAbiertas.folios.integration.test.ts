@@ -157,15 +157,37 @@ const idsTpv = async () => (await getOrders(f.venueId)).map(o => o.id)
 const idsPos = async () => (await listOrders(f.venueId, { page: 1, pageSize: 100 })).data.map((o: { id: string }) => o.id)
 
 describe('T11 · cuentas abiertas sin folios por pagar', () => {
-  it('un folio por pagar no sale en la TPV ni en el POS; uno de «Mi equipo» por aceptar sigue saliendo', async () => {
+  it('un folio por pagar no sale en la TPV ni en el POS; uno de «Mi equipo» por aceptar y una cuenta normal SIN pedido en línea siguen saliendo', async () => {
     const folio = await nuevoFolio()
     const equipo = await nuevoFolio({ equipo: true })
+    // La vigilancia del peor fallo del despliegue: el `NOT … is` no puede esconder las cuentas que no tienen pedido en línea.
+    const normal = await prisma.order.create({
+      data: {
+        venueId: f.venueId,
+        orderNumber: `N-${randomUUID().slice(0, 8)}`,
+        type: 'DINE_IN',
+        source: 'POS',
+        originSystem: 'AVOQADO',
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        subtotal: 100,
+        discountAmount: 0,
+        taxAmount: 0,
+        tipAmount: 0,
+        total: 100,
+        paidAmount: 0,
+        remainingBalance: 100,
+      },
+    })
     const tpv = await idsTpv()
     const pos = await idsPos()
     expect(tpv).not.toContain(folio.orderId)
     expect(pos).not.toContain(folio.orderId)
     expect(tpv).toContain(equipo.orderId)
     expect(pos).toContain(equipo.orderId)
+    expect(tpv).toContain(normal.id)
+    expect(pos).toContain(normal.id)
   })
 
   it('un folio vencido con abono tardío sí sale: su cuenta reabierta se cobra en las cuentas abiertas', async () => {

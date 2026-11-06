@@ -39,7 +39,7 @@ import { closesAt } from './hours'
 import { MAX_GERENTES_AVISADOS, ROLES_QUE_RECIBEN_EL_AVISO } from '@/services/shared/cuentaCancelada'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
-import { buildVenueContact, type VenueContact } from './settings.service'
+import { buildVenueContact, getSettings, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './card/confirm.service'
@@ -445,11 +445,17 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   const externalId = `web:${input.idempotencyKey}`
 
   // 1. T7: la identidad sale de la sesión sólo si probó el teléfono del PEDIDO por el OTP de WhatsApp (R6: tenerlo en la ficha no
-  //    prueba nada); si no, el pedido es anónimo (cliente y teléfono nulos). Qué exige el modo se decide abajo, al leer la tienda:
-  //    la repetición se busca antes (Codex r1 #10).
+  //    prueba nada); si no, el pedido es anónimo (cliente y teléfono nulos).
   const sessionPhone =
     input.customerId && input.verifiedPhone && phonesMatch(input.verifiedPhone, input.customer.phone) ? input.verifiedPhone : null
   const customerId = sessionPhone ? input.customerId : null
+  // R47: sin esa sesión, «Mi equipo» responde 401 de inmediato. La única lectura es el modo de la tienda (su fila de ajustes, por su
+  // llave): sin él no se sabe si se puede pedir sin sesión. Ni plan, ni tienda, ni la llave, y nunca una fila de rechazo `anon:` (la
+  // tienda pide el código y reintenta con la MISMA llave). En «Nadie» esa misma lectura es la de la tienda (paso 3).
+  const ajustesSinSesion = customerId ? undefined : await getSettings(input.venueId)
+  if (ajustesSinSesion && ajustesSinSesion.requiresAcceptance !== false) {
+    throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
+  }
   // R23: la forma canónica de la casa (la misma que compara `phonesMatch`: `+521…` → `+52…`); si no la entiende, «+» y sólo
   // dígitos.
   const phone = sessionPhone ? (canonicalPhoneE164(sessionPhone) ?? `+${sessionPhone.replace(/\D/g, '')}`) : null
@@ -521,19 +527,16 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     await opts.assertCanCreate()
 
     // 3. ¿La tienda está recibiendo pedidos?
-    const state = await getAcceptingStatus(input.venueId, now)
+    const state = await getAcceptingStatus(input.venueId, now, ajustesSinSesion)
     if (state.status !== 'OPEN') {
       throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${state.status}`, {
         status: state.status,
         reason: state.reason,
       })
     }
-    // «Nadie» sólo con `=== false` (como `getAcceptingStatus`): un ajuste sin el campo es «Mi equipo».
+    // «Nadie» sólo con `=== false` (como `getAcceptingStatus`): un ajuste sin el campo es «Mi equipo». R6/R47: un anónimo sólo
+    // llega aquí en «Nadie» (la tienda se leyó con los mismos ajustes del paso 1).
     requiresAcceptance = state.config.requiresAcceptance !== false
-    // R6: «Mi equipo» exige el teléfono probado. T7: dentro del try para que su `catch` busque antes SU pedido (pudo nacer folio).
-    if (requiresAcceptance && !customerId) {
-      throw new UnauthorizedError('Verifica tu teléfono por WhatsApp para pedir y pagar al recoger.', 'PHONE_VERIFICATION_REQUIRED')
-    }
     if (!state.config.acceptsPayAtPickup) {
       // S8: la tienda vieja abierta en una pestaña muestra este texto ante un código que no conoce. Si la tarjeta SÍ está disponible
       // (misma regla que `paymentModes.cardOnline` de GET /info), le dice qué hacer. El código no cambia.
@@ -571,13 +574,6 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       acceptDeadlineAt = cierre && cierre < plazo ? cierre : plazo
     }
   } catch (error) {
-    // T7: el 401 de «Mi equipo» no es definitivo (la tienda pide el código y reintenta con la MISMA llave), así que no se guarda;
-    //     antes busca bajo la llave lo ya decidido: SU pedido, aunque haya nacido folio antes del cambio de modo.
-    if (error instanceof AppError && error.code === 'PHONE_VERIFICATION_REQUIRED') {
-      const before = await prisma.$transaction(tx => decidedBefore(tx), TX_OPTIONS)
-      if (before) return before
-      throw error
-    }
     // 5. Un rechazo definitivo se decide en una transacción corta, bajo la llave: si ya hay pedido es SU pedido (R8, aunque el plan
     //    venza o la tienda cierre); si ya hay rechazo guardado, ése; si no, se guarda éste. Cualquier otro error sale tal cual.
     if (!isDefinitiveRejection(error)) throw error

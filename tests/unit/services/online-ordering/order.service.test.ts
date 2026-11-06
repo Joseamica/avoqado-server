@@ -119,6 +119,8 @@ beforeEach(() => {
   prismaMock.onlineOrder.create.mockImplementation(async (a: any) => ({ id: 'oo1', ...a.data }) as any)
   // Codex r3: los rechazos guardados de la llave (tabla genérica `IdempotencyRequest`). Por omisión, ninguno.
   prismaMock.idempotencyRequest = { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) }
+  // R47: sin sesión el servicio lee SÓLO el modo de la tienda; sin fila de ajustes es «Mi equipo» (R37).
+  prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
 })
 
 describe('createOnlineOrder', () => {
@@ -357,13 +359,36 @@ describe('createOnlineOrder', () => {
     })
   })
 
-  it('sin sesión de cliente es 401 PHONE_VERIFICATION_REQUIRED (R6); antes busca SU pedido (T7) y no crea nada', async () => {
-    await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({
+  it('R47: sin sesión de cliente, en «Mi equipo», es 401 PHONE_VERIFICATION_REQUIRED (R6) leyendo SÓLO el modo de la tienda: ni plan, ni tienda, ni la llave, ni una fila de rechazo', async () => {
+    const assertCanCreate = jest.fn(async () => {})
+    await expect(createOnlineOrder(input({ customerId: null }), { assertCanCreate })).rejects.toMatchObject({
       statusCode: 401,
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
-    expect(prismaMock.order.findUnique).toHaveBeenCalledTimes(1) // la repetición, bajo la llave
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledWith({ where: { venueId: 'v1' } })
+    expect(assertCanCreate).not.toHaveBeenCalled()
+    expect(getAcceptingStatus).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('R47: con la tienda cerrada o el plan vencido, el anónimo de «Mi equipo» sigue siendo 401 y no guarda un rechazo `anon:`', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...OPEN, status: 'CLOSED', reason: 'OUTSIDE_HOURS' })
+    const vencido = { assertCanCreate: async () => Promise.reject(new ForbiddenError('Plan vencido', 'PLAN_REQUIRED')) }
+    await expect(createOnlineOrder(input({ customerId: null }), vencido)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
+    await expect(createOnlineOrder(input({ customerId: null }), PUEDE_CREAR)).rejects.toMatchObject({ code: 'PHONE_VERIFICATION_REQUIRED' })
+    expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('con sesión probada no se lee el modo aparte: lo trae la lectura de la tienda (una sola vez)', async () => {
+    await createOnlineOrder(input(), PUEDE_CREAR)
+    expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
+    expect(getAcceptingStatus).toHaveBeenCalledTimes(1)
   })
 
   it('una sesión sin teléfono verificado por WhatsApp (correo, contraseña, token viejo) es 401 (R6)', async () => {
@@ -706,14 +731,22 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
   })
 
-  it('T7: un 401 PHONE_VERIFICATION_REQUIRED abre SÓLO la transacción corta de la llave (busca SU pedido) y no se guarda', async () => {
+  it('R47: un 401 PHONE_VERIFICATION_REQUIRED no abre transacción ni toma la llave, y no se guarda', async () => {
     await expect(createOnlineOrder(input({ verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({
       code: 'PHONE_VERIFICATION_REQUIRED',
     })
-    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
-    expect((prismaMock.$executeRaw as jest.Mock).mock.calls.map(([, key]) => key)).toEqual([KEY_LOCK])
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.$executeRaw).not.toHaveBeenCalled()
     expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled() // la tienda pide el código y reintenta con la MISMA llave
     expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('R47 (T7 a): el reintento SIN sesión de un pedido que nació CON sesión es 401, no 409 IDEMPOTENCY_KEY_CONFLICT', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(existing() as any) // su pedido, con la huella de la sesión
+    await expect(createOnlineOrder(input({ customerId: null, verifiedPhone: null }), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 401,
+      code: 'PHONE_VERIFICATION_REQUIRED',
+    })
   })
 
   describe('Codex r3: la primera decisión sobre una llave es durable (un envío tardío recibe el mismo rechazo)', () => {
@@ -937,7 +970,15 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
   const dia = { enabled: true, ranges: [{ open: '09:00', close: '21:00' }] }
   const HORARIO = { monday: dia, tuesday: dia, wednesday: dia, thursday: dia, friday: dia, saturday: dia, sunday: dia }
 
-  beforeEach(() => (getAcceptingStatus as jest.Mock).mockResolvedValue(NADIE))
+  beforeEach(() => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(NADIE)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: false })
+  })
+  /** El negocio pasa a «Mi equipo»: lo dicen su fila de ajustes (R47) y la lectura de la tienda. */
+  const aMiEquipo = () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue({ requiresAcceptance: true })
+  }
 
   it('en «Nadie», sin sesión ni teléfono, crea el folio con customerId null, sin teléfono, requiresAcceptance false y channel QR', async () => {
     const res = await createOnlineOrder(anon(), PUEDE_CREAR)
@@ -982,6 +1023,22 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
     expect((prismaMock.onlineOrder.create.mock.calls[1][0] as any).data.acceptDeadlineAt.toISOString()).toBe('2026-10-14T15:30:00.000Z')
   })
 
+  it('R45: en la hora repetida de Tijuana (01:30 PST, 2.ª vez) el plazo es el cierre de las 01:45 que viene (09:45Z), nunca uno ya pasado', async () => {
+    const madrugada = { ...HORARIO, sunday: { enabled: true, ranges: [{ open: '00:00', close: '01:45' }] } }
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: madrugada } })
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ timezone: 'America/Tijuana' } as any)
+    const r = await createOnlineOrder(anon({ now: new Date('2026-11-01T09:30:00.000Z') }), PUEDE_CREAR)
+    expect(r.acceptDeadlineAt).toBe('2026-11-01T09:45:00.000Z')
+  })
+
+  it('R45: si el cierre del día no existe (el reloj salta) y no hay uno futuro, el plazo es ahora + 30 min', async () => {
+    const marzo = { ...HORARIO, sunday: { enabled: true, ranges: [{ open: '01:00', close: '02:30' }] } }
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({ ...NADIE, config: { ...NADIE.config, hours: marzo } })
+    prismaMock.venue.findUnique.mockResolvedValueOnce({ timezone: 'America/Tijuana' } as any)
+    const r = await createOnlineOrder(anon({ now: new Date('2026-03-08T09:50:00.000Z') }), PUEDE_CREAR)
+    expect(r.acceptDeadlineAt).toBe('2026-03-08T10:20:00.000Z')
+  })
+
   it('en «Nadie» un pedido de $0.00 responde 400 ZERO_TOTAL «Tu pedido no tiene costo: pídelo directo en caja» (rechazo guardado)', async () => {
     ;(quoteCart as jest.Mock).mockResolvedValue({ ...QUOTE_OK, subtotal: D('0'), total: D('0') })
     const err = await createOnlineOrder(anon({ expectedTotal: '0.00' }), PUEDE_CREAR).catch((e: unknown) => e)
@@ -1008,11 +1065,12 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
     expect(online.requestHash).toBe(huella())
   })
 
-  it('repetición antes del modo: crea en «Nadie», el negocio pasa a «Mi equipo» y la misma llave sin teléfono ⇒ SU folio, nunca 401', async () => {
+  it('R47 (reemplaza la repetición antes del modo de T7): crea en «Nadie», el negocio pasa a «Mi equipo» y la misma llave sin sesión ⇒ 401 sin leer la llave ni guardar nada', async () => {
     const primero = await createOnlineOrder(anon(), PUEDE_CREAR)
     const guardado = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
 
-    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
+    aMiEquipo()
+    prismaMock.order.findUnique.mockClear()
     prismaMock.order.findUnique.mockResolvedValue(
       existing({
         customerId: null,
@@ -1026,9 +1084,8 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
       }) as any,
     )
     prismaMock.idempotencyRequest.create.mockClear()
-    const otra = await createOnlineOrder(anon(), PUEDE_CREAR)
-    expect(otra).toMatchObject({ replay: true, trackingToken: primero.trackingToken, orderNumber: primero.orderNumber })
-    expect(otra.acceptDeadlineAt).toBe(primero.acceptDeadlineAt)
+    await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
     expect(prismaMock.idempotencyRequest.create).not.toHaveBeenCalled()
   })
@@ -1093,7 +1150,7 @@ describe('Tienda híbrida T7: pedir en «Nadie» (nombre, folio, plazo y repetic
   })
 
   it('«Mi equipo» sigue exigiendo PHONE_VERIFICATION_REQUIRED (sin sesión, o con un teléfono que no es el probado)', async () => {
-    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(MI_EQUIPO)
+    aMiEquipo()
     await expect(createOnlineOrder(anon(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 401, code: 'PHONE_VERIFICATION_REQUIRED' })
     await expect(createOnlineOrder(input({ verifiedPhone: '+525511112222' }), PUEDE_CREAR)).rejects.toMatchObject({
       statusCode: 401,

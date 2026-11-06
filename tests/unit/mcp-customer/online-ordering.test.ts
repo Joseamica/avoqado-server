@@ -314,6 +314,19 @@ describe('online_order_respond', () => {
     expect(r).toMatchObject({ ok: false, error: 'Este pedido se cobra antes de prepararlo' })
   })
 
+  it('R46: REJECT sobre un folio responde STALE (se quita con CANCELAR), ni la vista previa ni la respuesta prometen «no se le cobró nada»', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PENDING' })
+    for (const confirm of [undefined, true]) {
+      const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'REJECT', reason: 'OTHER', confirm }))
+      expect(r).toMatchObject({ ok: false, status: 'PENDING_ACCEPTANCE' })
+      expect(r.requiresConfirmation).toBeUndefined()
+      expect(r.error).toContain('CANCELAR')
+      expect(JSON.stringify(r)).not.toMatch(/no se le cobr/i)
+    }
+    expect(mockReject).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
   it('T16: CANCEL sobre un folio por pagar se permite; sobre un pedido de «Mi equipo» por aceptar sigue rechazado', async () => {
     mockGetInboxOrder.mockResolvedValue({ ...pending, requiresAcceptance: false, paymentStatus: 'PENDING' })
     mockCancel.mockResolvedValue({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })

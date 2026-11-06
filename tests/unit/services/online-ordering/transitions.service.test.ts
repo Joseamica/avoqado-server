@@ -34,7 +34,7 @@ jest.mock('@/communication/sockets/managers/socketManager', () => ({
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
-import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
+import { devolverCanjesDeVentaAnuladaEnTx, findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
@@ -334,6 +334,15 @@ describe('rejectOnlineOrder', () => {
     await expect(rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
+
+  it('R46: un folio (`requiresAcceptance:false`) no se rechaza: STALE con su estado, sin escribir ni avisar (se quita con «Cancelar folio»)', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ requiresAcceptance: false }) as any)
+    await expect(rejectOnlineOrder({ ...base, reason: 'OTHER' })).resolves.toEqual({ outcome: 'STALE', status: 'PENDING_ACCEPTANCE' })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(notifyOrderEvent).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
 })
 
 describe('expireOnlineOrder', () => {
@@ -360,6 +369,82 @@ describe('expireOnlineOrder', () => {
     prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ order: PAID }) as any)
     await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  describe('R44: un folio cuyo abono se reembolsó completo (cuenta PARTIAL con dinero neto 0)', () => {
+    const PARCIAL = { paymentStatus: 'PARTIAL', paidAmount: D('50.00') }
+    const folio = (requiresAcceptance = false) => row({ requiresAcceptance, acceptDeadlineAt: NOW, order: PARCIAL })
+    /** Σ de los Payment COMPLETED de la cuenta (los reembolsos son filas negativas). */
+    const neto = (amount: string, tipAmount = '0') =>
+      prismaMock.payment.groupBy.mockResolvedValue([{ orderId: 'ord1', _sum: { amount: D(amount), tipAmount: D(tipAmount) } }])
+    beforeEach(() => prismaMock.payment.groupBy.mockResolvedValue([]))
+
+    it('vence (EXPIRED) SIN cancelar la cuenta ni devolver canjes; el CAS repite estado, hora y requiresAcceptance:false', async () => {
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(folio() as any)
+      neto('0.00')
+      await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'OK', status: 'EXPIRED' })
+
+      const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+      expect(cas.where).toEqual({
+        id: 'oo1',
+        status: { in: ['PENDING_ACCEPTANCE'] },
+        acceptDeadlineAt: { lte: NOW },
+        requiresAcceptance: false,
+      })
+      expect(cas.data).toEqual({ status: 'EXPIRED', expiredAt: NOW })
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled() // la cuenta queda como la dejó el reembolso
+      expect(devolverCanjesDeVentaAnuladaEnTx).not.toHaveBeenCalled() // la venta no se anula
+      // El neto se lee bajo el candado, sólo de esta cuenta y de lo COMPLETED.
+      expect(prismaMock.payment.groupBy).toHaveBeenCalledWith(
+        expect.objectContaining({ by: ['orderId'], where: { orderId: { in: ['ord1'] }, status: 'COMPLETED' } }),
+      )
+      expect((prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.payment.groupBy.mock.invocationCallOrder[0],
+      )
+      expect(notifyOrderEvent).toHaveBeenCalledWith('ord1', 'EXPIRED')
+      expect(socketManager.broadcastToVenue).toHaveBeenCalledWith(
+        'v1',
+        'order_updated',
+        expect.objectContaining({ onlineStatus: 'EXPIRED' }),
+      )
+      const payload = (socketManager.broadcastToVenue as jest.Mock).mock.calls[0][2]
+      expect(payload).not.toHaveProperty('status') // la cuenta no se movió
+    })
+
+    it('con dinero neto (un abono que sigue) NO vence: HAS_PAYMENTS (R18)', async () => {
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(folio() as any)
+      neto('50.00')
+      await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('la propina cuenta: importe devuelto pero propina sin devolver ⇒ hay dinero y no vence', async () => {
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(folio() as any)
+      neto('0.00', '10.00')
+      await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('con un cobro de terminal en curso tampoco vence: HAS_PAYMENTS', async () => {
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(folio() as any)
+      neto('0.00')
+      ;(findLiveTerminalCharge as jest.Mock).mockResolvedValue({ requestId: 'tpr1' })
+      await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('sólo el folio y sólo al vencer: «Mi equipo» con la misma cuenta, o la clienta que cancela, siguen en HAS_PAYMENTS', async () => {
+      neto('0.00')
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(folio(true) as any)
+      await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
+      prismaMock.onlineOrder.findFirst.mockResolvedValue(folio() as any)
+      prismaMock.onlineOrder.findUnique.mockResolvedValue({ orderId: 'ord1', venueId: 'v1' } as any)
+      await expect(cancelOnlineOrderByCustomer({ venueId: 'v1', trackingToken: 't'.repeat(64), now: NOW })).resolves.toEqual({
+        outcome: 'HAS_PAYMENTS',
+      })
+      expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    })
   })
 })
 
