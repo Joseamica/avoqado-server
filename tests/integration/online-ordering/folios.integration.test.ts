@@ -648,7 +648,29 @@ describe('T13 · «Cancelar folio» (personal) sobre un folio por pagar', () => 
     expect((await cuenta(orderId)).status).not.toBe('CANCELLED')
   })
 
+  it('orden (a): primero «Cancelar folio», después el cobro: folio y cuenta cancelados, el cobro se rechaza y no hay Payment', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    expect(await cancelar(orderId)).toEqual({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })
+    await expect(efectivoDelPos(orderId)).rejects.toBeDefined()
+    expect(await prisma.payment.count({ where: { orderId } })).toBe(0)
+    expect((await cuenta(orderId)).status).toBe('CANCELLED')
+    expect((await pedido(onlineOrderId)).status).toBe('CANCELLED_BY_STAFF')
+  })
+
+  it('orden (b): primero el cobro, después «Cancelar folio»: se niega por el dinero y la cuenta queda cobrada', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await efectivoDelPos(orderId)
+    const r = await cancelar(orderId)
+    // Lo que pasa de verdad: el cobro deja el folio «Por entregar» (T9) y la guarda de dinero bajo candado lo frena.
+    expect(r).toEqual({ outcome: 'HAS_PAYMENTS' })
+    expect((await cuenta(orderId)).status).not.toBe('CANCELLED')
+    expect((await pedido(onlineOrderId)).status).not.toBe('CANCELLED_BY_STAFF')
+    expect(await prisma.payment.count({ where: { orderId, status: 'COMPLETED' } })).toBe(1)
+  })
+
   it('carrera: el cobro de la caja y «Cancelar folio» a la vez: gana uno solo, nunca dinero nuevo sobre una cuenta cancelada', async () => {
+    let ganoCobro = 0
+    let ganoCancelar = 0
     for (let ronda = 0; ronda < 4; ronda++) {
       const { orderId, onlineOrderId } = await nuevoFolio()
       const [cobro, cancelacion] = await Promise.allSettled([efectivoDelPos(orderId), cancelar(orderId)])
@@ -658,13 +680,16 @@ describe('T13 · «Cancelar folio» (personal) sobre un folio por pagar', () => 
       const folioFinal = await pedido(onlineOrderId)
       const cancelo = cancelacion.status === 'fulfilled' && cancelacion.value.outcome === 'OK'
 
+      expect([cobro.status === 'fulfilled', cancelo]).toContain(true) // al menos uno ganó
       if (cancelo) {
+        ganoCancelar++
         // Ganó «Cancelar folio»: la cuenta cancelada, sin un solo pago, y el cobro nuevo se rechazó.
         expect(cobro.status).toBe('rejected')
         expect(dinero).toBe(0)
         expect(cuentaFinal.status).toBe('CANCELLED')
         expect(folioFinal.status).toBe('CANCELLED_BY_STAFF')
       } else {
+        ganoCobro++
         // Ganó el cobro: queda cobrado y NO cancelado; la cancelación se negó por el dinero (o el folio ya cambió).
         expect(cobro.status).toBe('fulfilled')
         expect(dinero).toBe(1)
@@ -674,5 +699,7 @@ describe('T13 · «Cancelar folio» (personal) sobre un folio por pagar', () => 
       }
       await f.limpiar()
     }
+    // Informativo (no se exige >0 de cada lado: sería inestable; para eso están los órdenes (a) y (b)).
+    console.info(`T13 carrera: ganó el cobro ${ganoCobro}, ganó «Cancelar folio» ${ganoCancelar}`)
   })
 })
