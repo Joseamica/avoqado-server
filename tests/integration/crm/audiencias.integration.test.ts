@@ -350,14 +350,66 @@ describe('Públicos de las campañas del CRM contra Postgres', () => {
 
       const mios = filas.filter(d => /^(elena-socia|otra-persona|carlos-principal)/.test(d.email))
       expect(correos(mios)).toEqual([correo('elena-socia'), correo('otra-persona')])
-      // Elena: el contacto de la cuenta con ESE correo. La otra persona no tiene contacto: cae en el principal.
+      // Elena: el contacto de la cuenta con ESE correo. La otra persona no tiene contacto: sin nombre (C2, Codex plan r2 H3),
+      // nunca el del principal; el correo armado saluda con el nombre del negocio.
       expect(mios.find(d => d.email === correo('elena-socia'))).toMatchObject({
         reason: 'PROSPECTO',
         name: 'Elena Socia',
         accountId: id,
         vars: { nombre: 'Elena Socia', negocio: 'Cafetería La Esquina', vendedor: 'Lupe Ventas' },
       })
-      expect(mios.find(d => d.email === correo('otra-persona'))).toMatchObject({ name: 'Carlos Principal', accountId: id })
+      const otra = mios.find(d => d.email === correo('otra-persona'))!
+      expect(otra).toMatchObject({ accountId: id, vars: { negocio: 'Cafetería La Esquina', vendedor: 'Lupe Ventas' } })
+      expect(otra).not.toHaveProperty('name')
+      expect(otra.vars).not.toHaveProperty('nombre')
+    })
+
+    describe('C2 Bloque 0D: el nombre sale sólo de un contacto con ESE correo (Codex plan r2 H3)', () => {
+      /** Ana (con permiso) y Beto, principal, en el mismo negocio. */
+      async function anaYBeto(alias: string) {
+        const id = await cuenta({ name: `Negocio ${alias}` })
+        const beto = await contacto(id, 'Beto', correo(`${alias}-beto`), true)
+        const ana = await contacto(id, 'Ana', correo(`${alias}-ana`), false)
+        await consentimiento(correo(`${alias}-ana`), id)
+        return { id, ana, beto }
+      }
+      const filaDe = async (email: string) => (await recorrer({ segmentos: [{ tipo: 'PROSPECTOS' }] })).filas.find(d => d.email === email)
+
+      it('con Ana presente → vars.nombre «Ana»', async () => {
+        await anaYBeto('d0a')
+        expect(await filaDe(correo('d0a-ana'))).toMatchObject({ name: 'Ana', vars: { nombre: 'Ana' } })
+      })
+
+      it('🔴 se quita a Ana → ana@ sigue en PROSPECTOS sin nombre (nunca «Beto»)', async () => {
+        const { ana, id } = await anaYBeto('d0b')
+        const antes = await prospectosDe(/^d0b-/)
+        await prisma.crmContact.delete({ where: { id: ana.id } })
+
+        const fila = await filaDe(correo('d0b-ana'))
+        expect(fila).toMatchObject({ accountId: id, vars: { negocio: 'Negocio d0b' } })
+        expect(fila).not.toHaveProperty('name')
+        expect(fila!.vars).not.toHaveProperty('nombre')
+        // La pertenencia no cambia: el permiso es de la dirección (§4.2-9).
+        expect(await prospectosDe(/^d0b-/)).toEqual(antes)
+      })
+
+      it('🔴 se cambia el correo de Ana → ana@ sigue sin nombre (nunca «Beto»)', async () => {
+        const { ana } = await anaYBeto('d0c')
+        await prisma.crmContact.update({ where: { id: ana.id }, data: { email: correo('d0c-ana-nuevo') } })
+
+        const fila = await filaDe(correo('d0c-ana'))
+        expect(fila).toBeDefined()
+        expect(fila).not.toHaveProperty('name')
+        expect(fila!.vars).not.toHaveProperty('nombre')
+      })
+
+      it('dos contactos con ana@ → el principal', async () => {
+        const id = await cuenta({ name: 'Negocio d0d' })
+        await contacto(id, 'Ana secundaria', correo('d0d-ana'), false)
+        await contacto(id, 'Ana principal', correo('d0d-ana'), true)
+        await consentimiento(correo('d0d-ana'), id)
+        expect(await filaDe(correo('d0d-ana'))).toMatchObject({ name: 'Ana principal', vars: { nombre: 'Ana principal' } })
+      })
     })
 
     it('sale_Brenda_que_marco_la_casilla_y_no_Ana_que_comparte_su_telefono', async () => {
