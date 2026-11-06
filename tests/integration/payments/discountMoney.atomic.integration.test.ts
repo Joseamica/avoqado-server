@@ -5,8 +5,10 @@ import prisma from '@/utils/prismaClient'
 import * as lock from '@/services/shared/paymentShiftClaim'
 import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
 import * as tpv from '@/services/tpv/discount.tpv.service'
+import * as controller from '@/controllers/tpv/discount.tpv.controller'
 import { applyDiscountToOrder, evaluateAutomaticDiscounts } from '@/services/dashboard/discountEngine.service'
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+import { logAction } from '@/services/dashboard/activity-log.service'
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
@@ -692,6 +694,111 @@ describe('existing discount policies', () => {
     const o = await newOrder()
     expect(await tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId, true)).toMatchObject({ success: true, amount: 100 })
   })
+  // D1 (hz:f34960c5:D1): las hermanas de D14 — descuento de catálogo COMP y cortesía manual — piden `orders:comp`.
+  it('D1: un descuento de catálogo COMP sin permiso de cortesía responde 403 y no escribe', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100 } })
+    const o = await newOrder()
+    await expect(tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId)).rejects.toMatchObject({
+      statusCode: 403,
+      message: 'No tienes permiso para dar cortesías',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
+  })
+  it('D1: con permiso de cortesía el COMP del catálogo descuenta todo lo que queda', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100 } })
+    const o = await newOrder()
+    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId, {})).toMatchObject({
+      success: true,
+      amount: 100,
+    })
+  })
+  it('D1: una cortesía manual sin permiso responde 403 aunque traiga un authorizedById', async () => {
+    const o = await newOrder()
+    await expect(tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', staffVenueId, staffVenueId)).rejects.toMatchObject({
+      statusCode: 403,
+      message: 'No tienes permiso para dar cortesías',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
+  })
+  // La sesión de la TPV no trae `staffVenueId` (Codex D1 r1 #1): el controlador resuelve la membresía (D3, abajo).
+  it('D1: con permiso, la cortesía manual la autoriza quien la aplica, no el id que manda el cliente', async () => {
+    const o = await newOrder()
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', staffVenueId, 'id-inventado', {})).toMatchObject({
+      success: true,
+      amount: 100,
+    })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
+  it('D1: con PIN de gerente, la cortesía manual la autoriza quien tecleó el PIN', async () => {
+    const o = await newOrder()
+    await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, undefined, { porPin: staffVenueId })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
+  // Codex D1 r2 #2: el dueño de la organización tiene el permiso aunque no tenga membresía en la sucursal.
+  it('D1: con permiso y sin membresía en el negocio, la cortesía manual se aplica sin autorizador registrado', async () => {
+    const o = await newOrder()
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined, undefined, {})).toMatchObject({
+      success: true,
+      amount: 100,
+    })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: null,
+    })
+  })
+  // D3 (hz:f34960c5:D3): la sesión de la TPV no trae `staffVenueId`; el controlador resuelve la membresía de quien llama.
+  describe('D3: el descuento de la TPV queda a nombre de quien lo aplicó', () => {
+    async function porLaRuta(handler: (req: any, res: any, next: any) => Promise<void>, orderId: string, body: object, userId = staffId) {
+      const req = { params: { venueId, orderId }, body, query: {}, headers: {}, authContext: { userId, venueId, role: 'MANAGER' } }
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
+      const next = jest.fn()
+      await handler(req, res, next)
+      expect(next).not.toHaveBeenCalled()
+      return prisma.orderDiscount.findMany({ where: { orderId }, select: { appliedById: true } })
+    }
+    it.each([
+      ['manual', controller.applyManualDiscount, () => ({ type: 'PERCENTAGE', value: 10, reason: 'Manual' })],
+      ['predefinido', controller.applyPredefinedDiscount, () => ({ discountId })],
+      ['cupón', controller.applyCouponCode, () => ({ couponCode })],
+      ['automático', controller.applyAutomaticDiscounts, () => ({})],
+    ] as const)('%s: appliedById = la membresía de quien llama', async (_nombre, handler, body) => {
+      const o = await newOrder()
+      expect(await porLaRuta(handler, o.id, body())).toEqual([{ appliedById: staffVenueId }])
+    })
+    // Codex D1 r3 #2: la bitácora guarda a la PERSONA (Staff.id), no la membresía (violaba la FK de ActivityLog).
+    it('predefinido: la bitácora DISCOUNT_APPLIED lleva el Staff de quien llama', async () => {
+      ;(logAction as jest.Mock).mockClear()
+      const o = await newOrder()
+      await porLaRuta(controller.applyPredefinedDiscount, o.id, { discountId })
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'DISCOUNT_APPLIED', staffId }))
+    })
+    it('sin membresía en este negocio (superadmin): se aplica igual y queda sin autor, como hoy', async () => {
+      const o = await newOrder()
+      expect(
+        await porLaRuta(controller.applyManualDiscount, o.id, { type: 'PERCENTAGE', value: 10, reason: 'x' }, 'sin-membresia'),
+      ).toEqual([{ appliedById: null }])
+    })
+  })
+  it('D1: un descuento manual de % sigue sin pedir permiso de cortesía', async () => {
+    const o = await newOrder()
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'PERCENTAGE', 10, 'Manual', staffVenueId)).toMatchObject({
+      success: true,
+      amount: 10,
+    })
+  })
+  // Codex D1 r3 #1: el cupón tampoco se salta la «aprobación de gerente» de su descuento (D2).
+  it('D2: un cupón de un % que pide aprobación se rechaza y no escribe', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { requiresApproval: true } })
+    const o = await newOrder()
+    expect(await tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId, true)).toMatchObject({
+      success: false,
+      error: 'This discount requires manager approval',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
+  })
   it('D14: un cupón de % sigue sin pedir permiso de cortesía', async () => {
     const o = await newOrder()
     expect(await tpv.applyCouponCode(venueId, o.id, couponCode, staffVenueId)).toMatchObject({ success: true, amount: 10 })
@@ -704,6 +811,42 @@ describe('existing discount policies', () => {
       success: false,
       error: 'This discount requires manager approval',
     })
+  })
+  // D2 (hz:f34960c5:D2): «requiere aprobación de gerente» ya no se cumple con cualquier id que mande la app. La cortesía que la
+  // pide la aprueba quien tiene `orders:comp` (el gerente del PIN o, sin PIN, la membresía de quien la aplica, como D1).
+  it('D2: una cortesía que pide aprobación, con permiso de cortesía, la autoriza quien la aplica', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100, requiresApproval: true } })
+    const o = await newOrder()
+    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, staffVenueId, {})).toMatchObject({
+      success: true,
+      amount: 100,
+    })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
+  it('D2: con PIN de gerente, la cortesía que pide aprobación la autoriza quien tecleó el PIN', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100, requiresApproval: true } })
+    const o = await newOrder()
+    await tpv.applyPredefinedDiscount(venueId, o.id, discountId, undefined, { porPin: staffVenueId })
+    expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
+      authorizedById: staffVenueId,
+    })
+  })
+  it('D2: con permiso de cortesía y sin membresía en el negocio, la cortesía que pide aprobación se aplica', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { type: 'COMP', value: 100, requiresApproval: true } })
+    const o = await newOrder()
+    expect(await tpv.applyPredefinedDiscount(venueId, o.id, discountId, undefined, {})).toMatchObject({ success: true, amount: 100 })
+  })
+  // Fuera de la cortesía no hay todavía un permiso que apruebe: bajo el candado se rechaza aunque llegue un autorizador.
+  it('D2: un % que pide aprobación se rechaza bajo el candado aunque llegue un autorizador, y no escribe', async () => {
+    await prisma.discount.update({ where: { id: discountId }, data: { requiresApproval: true } })
+    const o = await newOrder()
+    expect(await applyDiscountToOrder(o.id, discountId, staffVenueId, staffVenueId, venueId, true)).toMatchObject({
+      success: false,
+      error: 'This discount requires manager approval',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
   })
   it('predefined keeps its public errors: inactive rule 404, ineligible rule 400', async () => {
     const o = await newOrder()

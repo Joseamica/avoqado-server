@@ -63,6 +63,16 @@ export interface OrderDiscountSummary {
   createdAt: Date
 }
 
+/**
+ * D3 (hz:f34960c5:D3): la membresía activa (`StaffVenue.id`) de quien llama en este negocio. La sesión de la TPV no trae
+ * `staffVenueId` (ver `AuthContext` en `security.ts`) y `OrderDiscount.appliedById` es FK a `StaffVenue`. Sin membresía
+ * (superadmin) → `undefined`: el descuento se aplica igual, sin autor.
+ */
+export async function membresiaDeQuienLlama(venueId: string, userId?: string): Promise<string | undefined> {
+  if (!userId) return undefined
+  return (await prisma.staffVenue.findFirst({ where: { venueId, staffId: userId, active: true }, select: { id: true } }))?.id
+}
+
 // ==========================================
 // GET AVAILABLE DISCOUNTS
 // ==========================================
@@ -199,20 +209,23 @@ export async function applyAutomaticDiscounts(
  * @param orderId - Order ID
  * @param discountId - Discount ID to apply
  * @param staffVenueId - Staff venue ID applying the discount
- * @param authorizedById - Manager's staff venue ID (required for comps/approval)
+ * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él), como en `applyManualDiscount`.
+ *   D2 (hz:f34960c5:D2): el autorizador ya no lo manda el cliente; es el gerente del PIN o quien aplica (`staffVenueId`, D3).
  */
 export async function applyPredefinedDiscount(
   venueId: string,
   orderId: string,
   discountId: string,
-  staffVenueId: string,
-  authorizedById?: string,
+  staffVenueId: string | undefined,
+  cortesia?: { porPin?: string },
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying predefined discount`, { venueId, orderId, discountId })
 
   // The engine decides everything on the locked Order, in its own transaction: tenant (404), PAID (400), catalog
   // rule active (404), eligibility with the hand-picked id forced (400, see `forceDiscountId`), amount and tax.
-  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId)
+  // D2: una regla que «requiere aprobación» sólo la aprueba ese autorizador, y el motor sólo lo acepta en una cortesía.
+  const authorizedById = cortesia ? (cortesia.porPin ?? staffVenueId) : undefined
+  return discountEngine.applyDiscountToOrder(orderId, discountId, staffVenueId, authorizedById, venueId, cortesia !== undefined)
 }
 
 // ==========================================
@@ -229,7 +242,9 @@ export async function applyPredefinedDiscount(
  * @param value - Discount value
  * @param reason - Reason for the discount
  * @param staffVenueId - Staff venue ID applying the discount
- * @param authorizedById - Manager's staff venue ID (required for comps)
+ * @param authorizedById - Ignorado en una cortesía (D1)
+ * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él): si usó el PIN de gerente, la membresía
+ *   de quien lo tecleó. La cortesía la autoriza ese gerente o, sin PIN, quien la aplica (`staffVenueId`).
  */
 export async function applyManualDiscount(
   venueId: string,
@@ -237,13 +252,21 @@ export async function applyManualDiscount(
   type: DiscountType,
   value: number,
   reason: string,
-  staffVenueId: string,
+  staffVenueId: string | undefined,
   authorizedById?: string,
+  cortesia?: { porPin?: string },
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
   // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
-  return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId)
+  // D1 (hz:f34960c5:D1): una cortesía manual pide `orders:comp`; antes bastaba cualquier `authorizedById` que mandara el
+  // cliente, sin verificar. La autoriza el gerente del PIN o, sin PIN, la membresía de quien la aplica (D3: el controlador la
+  // resuelve con `membresiaDeQuienLlama`). Sin membresía activa (dueño de la organización, superadmin) queda sin autorizador.
+  if (type === 'COMP') {
+    if (!cortesia) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
+    authorizedById = cortesia.porPin ?? staffVenueId
+  }
+  return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId, !!cortesia)
 }
 
 // ==========================================
@@ -264,7 +287,7 @@ export async function applyCouponCode(
   venueId: string,
   orderId: string,
   couponCode: string,
-  staffVenueId: string,
+  staffVenueId: string | undefined,
   puedeRegalar = false,
 ): Promise<ApplyCouponResult> {
   logger.info(`🎟️ TPV Applying coupon code`, { venueId, orderId, couponCode })
@@ -345,6 +368,17 @@ export async function applyCouponCode(
     }
     // D14: regalar la cuenta con un cupón pide el permiso de cortesía, igual que la venta de D5 (`order.tpv.service.ts`). Antes del apartado.
     if (discount.type === 'COMP' && !puedeRegalar) throw new ForbiddenError('No tienes permiso para dar cortesías')
+    // D2 (Codex D1 r3 #1): un cupón no es la puerta de atrás de la «aprobación de gerente». Igual que el catálogo: una cortesía
+    // la aprueba `orders:comp` (arriba); un % o fijo que pide aprobación todavía no tiene aprobador y se rechaza.
+    if (discount.requiresApproval && discount.type !== 'COMP') {
+      return {
+        success: false,
+        discountName: discount.name,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'This discount requires manager approval',
+      }
+    }
     // D5 (Codex r3 #1): el mismo apartado que la venta nueva, bajo el mismo candado del descuento (lanza el 400 del límite).
     await apartarCupon(tx, venueId, { id: coupon.id, code: coupon.code, discount: { id: discount.id }, minimo: null }, order.customerId)
 

@@ -13,6 +13,10 @@ import { DiscountType } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import logger from '@/config/logger'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
+
+/** D3: la sesión de la TPV no trae `staffVenueId`; `appliedById` es la membresía de quien llama (sin ella, sin autor). */
+const membresiaDe = (req: Request) => discountTpvService.membresiaDeQuienLlama(req.params.venueId, req.authContext?.userId)
 
 // ==========================================
 // GET AVAILABLE DISCOUNTS
@@ -52,8 +56,7 @@ export async function getAvailableDiscounts(req: Request, res: Response, next: N
 export async function applyAutomaticDiscounts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, orderId } = req.params
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
     const result = await discountTpvService.applyAutomaticDiscounts(venueId, orderId, staffVenueId)
 
@@ -79,11 +82,17 @@ export async function applyAutomaticDiscounts(req: Request, res: Response, next:
 export async function applyPredefinedDiscount(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, orderId } = req.params
-    const { discountId, authorizedById } = req.body as { discountId: string; authorizedById?: string }
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    // D2 (hz:f34960c5:D2): el `authorizedById` del cuerpo ya no cuenta; la aprobación sale del permiso comprobado en la ruta.
+    const { discountId } = req.body as { discountId: string }
+    const staffVenueId = await membresiaDe(req)
 
-    const result = await discountTpvService.applyPredefinedDiscount(venueId, orderId, discountId, staffVenueId, authorizedById)
+    const result = await discountTpvService.applyPredefinedDiscount(
+      venueId,
+      orderId,
+      discountId,
+      staffVenueId,
+      tieneCortesiaAutorizada(req) ? { porPin: pinDeLaCortesia(req) } : undefined,
+    )
 
     if (result.success) {
       res.status(200).json({
@@ -123,10 +132,19 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
       reason: string
       authorizedById?: string
     }
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
-    const result = await discountTpvService.applyManualDiscount(venueId, orderId, type, value, reason, staffVenueId, authorizedById)
+    const result = await discountTpvService.applyManualDiscount(
+      venueId,
+      orderId,
+      type,
+      value,
+      reason,
+      staffVenueId,
+      authorizedById,
+      // D1: lo acredita `checkCortesiaEnDescuento` en la ruta (con el PIN de gerente que autorizó la cortesía, Codex r4 #3).
+      tieneCortesiaAutorizada(req) ? { porPin: pinDeLaCortesia(req) } : undefined,
+    )
 
     if (result.success) {
       res.status(200).json({
@@ -161,8 +179,7 @@ export async function applyCouponCode(req: Request, res: Response, next: NextFun
   try {
     const { venueId, orderId } = req.params
     const { couponCode } = req.body as { couponCode: string }
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
     // D14: un cupón de cortesía regala la cuenta; el servicio lo rechaza si quien llama no tiene `orders:comp` (como la venta de D5).
     const puedeRegalar = await tienePermisoEnVenue(req, 'orders:comp')

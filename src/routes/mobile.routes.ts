@@ -123,7 +123,12 @@ import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema
 import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent, checkCuponPermissionIfPresent, traeDescuentoManual } from '../middlewares/cortesiaPidePermiso.middleware'
+import {
+  checkCortesiaEnDescuento,
+  checkCortesiaPermissionIfPresent,
+  checkCuponPermissionIfPresent,
+  traeDescuentoManual,
+} from '../middlewares/cortesiaPidePermiso.middleware'
 import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
 
 const router = Router()
@@ -3398,6 +3403,8 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
+  // D1 (hz:f34960c5:D1): un descuento de cuenta tipo cortesía (COMP) pide `orders:comp`, con PIN de gerente.
+  checkCortesiaEnDescuento,
   orderMobileController.applyOrderDiscount,
 )
 

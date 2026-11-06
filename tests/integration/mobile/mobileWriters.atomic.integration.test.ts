@@ -658,6 +658,31 @@ describe('split writers take the Venue before the source Order (deleteVenue orde
   })
 })
 
+// D1 (hz:f34960c5:D1): el descuento de cuenta del POS (y su replay sin red) regala con un COMP del catálogo sólo con `orders:comp`.
+describe('D1 — un descuento de cuenta tipo cortesía pide permiso de cortesía', () => {
+  let compId: string
+  beforeAll(async () => {
+    compId = (await prisma.discount.create({ data: { venueId, name: 'Cortesía', type: 'COMP', value: 100, scope: 'ORDER' } })).id
+  })
+  afterAll(async () => {
+    await prisma.orderDiscount.deleteMany({ where: { discountId: compId } })
+    await prisma.discount.delete({ where: { id: compId } })
+  })
+  it('sin permiso responde 403 y no escribe', async () => {
+    const o = await newOrder()
+    await expect(applyOrderDiscount(venueId, o.id, compId, staffId)).rejects.toMatchObject({
+      statusCode: 403,
+      message: 'No tienes permiso para dar cortesías',
+    })
+    expect((await snapshot(o.id)).discounts).toHaveLength(0)
+  })
+  it('con permiso se aplica', async () => {
+    const o = await newOrder()
+    await applyOrderDiscount(venueId, o.id, compId, staffId, true)
+    expect((await snapshot(o.id)).discounts).toHaveLength(1)
+  })
+})
+
 describe('fresh decisions after waiting', () => {
   it('applyDiscount caps a fixed discount against the subtotal and discount read after waiting', async () => {
     const o = await newOrder()

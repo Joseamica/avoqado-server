@@ -132,7 +132,12 @@ import {
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
 import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
-import { checkCortesiaPermissionIfPresent, checkCuponPermissionIfPresent, checkDescuentoManualPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import {
+  checkCortesiaPermissionIfPresent,
+  checkCuponPermissionIfPresent,
+  checkDescuentoManualPermissionIfPresent,
+  checkCortesiaEnDescuento,
+} from '../middlewares/cortesiaPidePermiso.middleware'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
@@ -5557,7 +5562,7 @@ router.post(
  *               authorizedById:
  *                 type: string
  *                 format: cuid
- *                 description: Required for discounts that require approval
+ *                 description: Ignored since D2 — approval comes from the manager PIN (x-permission-override) or the caller's own orders:comp; only a COMP rule can be approved
  *     responses:
  *       200:
  *         description: Discount applied successfully
@@ -5569,6 +5574,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('discounts:apply'),
   validateRequest(applyPredefinedDiscountSchema),
+  // D1 (hz:f34960c5:D1): si el descuento regala (COMP), pide `orders:comp`. Después de validar el cuerpo.
+  checkCortesiaEnDescuento,
   discountController.applyPredefinedDiscount,
 )
 
@@ -5628,6 +5635,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('discounts:apply'),
   validateRequest(applyManualDiscountSchema),
+  // D1 (hz:f34960c5:D1): si el descuento regala (COMP), pide `orders:comp`. Después de validar el cuerpo.
+  checkCortesiaEnDescuento,
   discountController.applyManualDiscount,
 )
 

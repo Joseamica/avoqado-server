@@ -105,6 +105,8 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
     prismaMock.discount.update.mockResolvedValue({})
     // Los caminos de descuento ahora recalculan los cargos por servicio: sin filas, 0.
     prismaMock.orderServiceCharge.findMany.mockResolvedValue([])
+    // D3 (Codex D1 r3 #2): `appliedById`/`authorizedById` son membresías (StaffVenue.id); la bitácora guarda a su PERSONA.
+    prismaMock.staffVenue.findUnique.mockImplementation(async ({ where }: any) => ({ staffId: `persona-de-${where.id}` }))
   })
 
   it('fires DISCOUNT_APPLIED with correct fields on successful apply', async () => {
@@ -117,7 +119,7 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
     expect(mockLogAction).toHaveBeenCalledTimes(1)
     expect(mockLogAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        staffId: 'staff-11',
+        staffId: 'persona-de-staff-11',
         venueId: 'venue-42',
         action: 'DISCOUNT_APPLIED',
         entity: 'Order',
@@ -137,7 +139,7 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
 
     expect(mockLogAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        staffId: 'manager-99',
+        staffId: 'persona-de-manager-99',
         action: 'DISCOUNT_APPLIED',
       }),
     )
