@@ -15,6 +15,9 @@ import logger from '@/config/logger'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 
+/** D3: la sesión de la TPV no trae `staffVenueId`; `appliedById` es la membresía de quien llama (sin ella, sin autor). */
+const membresiaDe = (req: Request) => discountTpvService.membresiaDeQuienLlama(req.params.venueId, req.authContext?.userId)
+
 // ==========================================
 // GET AVAILABLE DISCOUNTS
 // ==========================================
@@ -53,8 +56,7 @@ export async function getAvailableDiscounts(req: Request, res: Response, next: N
 export async function applyAutomaticDiscounts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, orderId } = req.params
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
     const result = await discountTpvService.applyAutomaticDiscounts(venueId, orderId, staffVenueId)
 
@@ -81,8 +83,7 @@ export async function applyPredefinedDiscount(req: Request, res: Response, next:
   try {
     const { venueId, orderId } = req.params
     const { discountId, authorizedById } = req.body as { discountId: string; authorizedById?: string }
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
     const result = await discountTpvService.applyPredefinedDiscount(
       venueId,
@@ -131,8 +132,7 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
       reason: string
       authorizedById?: string
     }
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
     const result = await discountTpvService.applyManualDiscount(
       venueId,
@@ -143,7 +143,7 @@ export async function applyManualDiscount(req: Request, res: Response, next: Nex
       staffVenueId,
       authorizedById,
       // D1: lo acredita `checkCortesiaEnDescuento` en la ruta (con PIN de gerente: `overrideAuthorizedBy`).
-      tieneCortesiaAutorizada(req) ? { userId: authContext?.userId, porPin: authContext?.overrideAuthorizedBy } : undefined,
+      tieneCortesiaAutorizada(req) ? { porPin: (req as any).authContext?.overrideAuthorizedBy } : undefined,
     )
 
     if (result.success) {
@@ -179,8 +179,7 @@ export async function applyCouponCode(req: Request, res: Response, next: NextFun
   try {
     const { venueId, orderId } = req.params
     const { couponCode } = req.body as { couponCode: string }
-    const authContext = (req as any).authContext
-    const staffVenueId = authContext?.staffVenueId
+    const staffVenueId = await membresiaDe(req)
 
     // D14: un cupón de cortesía regala la cuenta; el servicio lo rechaza si quien llama no tiene `orders:comp` (como la venta de D5).
     const puedeRegalar = await tienePermisoEnVenue(req, 'orders:comp')

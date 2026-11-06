@@ -1320,7 +1320,7 @@ export async function applyManualDiscount(
   type: DiscountType,
   value: number,
   name: string,
-  appliedById: string,
+  appliedById: string | undefined,
   authorizedById?: string,
   compReason?: string,
   venueId?: string,

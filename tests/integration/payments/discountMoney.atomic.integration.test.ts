@@ -5,6 +5,7 @@ import prisma from '@/utils/prismaClient'
 import * as lock from '@/services/shared/paymentShiftClaim'
 import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
 import * as tpv from '@/services/tpv/discount.tpv.service'
+import * as controller from '@/controllers/tpv/discount.tpv.controller'
 import { applyDiscountToOrder, evaluateAutomaticDiscounts } from '@/services/dashboard/discountEngine.service'
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
@@ -718,12 +719,10 @@ describe('existing discount policies', () => {
     })
     expect((await snapshot(o.id)).discounts).toHaveLength(0)
   })
-  // La sesión de la TPV no trae `staffVenueId` (Codex D1 r1 #1): la membresía se busca por el usuario.
+  // La sesión de la TPV no trae `staffVenueId` (Codex D1 r1 #1): el controlador resuelve la membresía (D3, abajo).
   it('D1: con permiso, la cortesía manual la autoriza quien la aplica, no el id que manda el cliente', async () => {
     const o = await newOrder()
-    expect(
-      await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, 'id-inventado', { userId: staffId }),
-    ).toMatchObject({
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', staffVenueId, 'id-inventado', {})).toMatchObject({
       success: true,
       amount: 100,
     })
@@ -733,10 +732,7 @@ describe('existing discount policies', () => {
   })
   it('D1: con PIN de gerente, la cortesía manual la autoriza quien tecleó el PIN', async () => {
     const o = await newOrder()
-    await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, undefined, {
-      userId: 'sin-membresia',
-      porPin: staffVenueId,
-    })
+    await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, undefined, { porPin: staffVenueId })
     expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
       authorizedById: staffVenueId,
     })
@@ -744,13 +740,38 @@ describe('existing discount policies', () => {
   // Codex D1 r2 #2: el dueño de la organización tiene el permiso aunque no tenga membresía en la sucursal.
   it('D1: con permiso y sin membresía en el negocio, la cortesía manual se aplica sin autorizador registrado', async () => {
     const o = await newOrder()
-    expect(
-      await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined as any, undefined, {
-        userId: 'dueno-sin-membresia',
-      }),
-    ).toMatchObject({ success: true, amount: 100 })
+    expect(await tpv.applyManualDiscount(venueId, o.id, 'COMP', 100, 'Invitación', undefined, undefined, {})).toMatchObject({
+      success: true,
+      amount: 100,
+    })
     expect(await prisma.orderDiscount.findFirst({ where: { orderId: o.id }, select: { authorizedById: true } })).toEqual({
       authorizedById: null,
+    })
+  })
+  // D3 (hz:f34960c5:D3): la sesión de la TPV no trae `staffVenueId`; el controlador resuelve la membresía de quien llama.
+  describe('D3: el descuento de la TPV queda a nombre de quien lo aplicó', () => {
+    async function porLaRuta(handler: (req: any, res: any, next: any) => Promise<void>, orderId: string, body: object, userId = staffId) {
+      const req = { params: { venueId, orderId }, body, query: {}, headers: {}, authContext: { userId, venueId, role: 'MANAGER' } }
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
+      const next = jest.fn()
+      await handler(req, res, next)
+      expect(next).not.toHaveBeenCalled()
+      return prisma.orderDiscount.findMany({ where: { orderId }, select: { appliedById: true } })
+    }
+    it.each([
+      ['manual', controller.applyManualDiscount, () => ({ type: 'PERCENTAGE', value: 10, reason: 'Manual' })],
+      ['predefinido', controller.applyPredefinedDiscount, () => ({ discountId })],
+      ['cupón', controller.applyCouponCode, () => ({ couponCode })],
+      ['automático', controller.applyAutomaticDiscounts, () => ({})],
+    ] as const)('%s: appliedById = la membresía de quien llama', async (_nombre, handler, body) => {
+      const o = await newOrder()
+      expect(await porLaRuta(handler, o.id, body())).toEqual([{ appliedById: staffVenueId }])
+    })
+    it('sin membresía en este negocio (superadmin): se aplica igual y queda sin autor, como hoy', async () => {
+      const o = await newOrder()
+      expect(
+        await porLaRuta(controller.applyManualDiscount, o.id, { type: 'PERCENTAGE', value: 10, reason: 'x' }, 'sin-membresia'),
+      ).toEqual([{ appliedById: null }])
     })
   })
   it('D1: un descuento manual de % sigue sin pedir permiso de cortesía', async () => {

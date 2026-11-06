@@ -33,12 +33,13 @@ import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middl
 
 const applyCouponMock = discountTpvService.applyCouponCode as jest.Mock
 const permisoMock = tienePermisoEnVenue as jest.Mock
+const membresiaMock = discountTpvService.membresiaDeQuienLlama as jest.Mock
 
 function appDeCupon() {
   const app = express()
   app.use(express.json())
   app.post('/venues/:venueId/orders/:orderId/discounts/coupon', (req, _res, next) => {
-    ;(req as any).authContext = { venueId: req.params.venueId, userId: 'staff-1', staffVenueId: 'sv-1' }
+    ;(req as any).authContext = { venueId: req.params.venueId, userId: 'staff-1' }
     next()
   })
   app.post('/venues/:venueId/orders/:orderId/discounts/coupon', controller.applyCouponCode)
@@ -51,6 +52,10 @@ const aplicar = () => request(appDeCupon()).post('/venues/v1/orders/o1/discounts
 beforeEach(() => {
   jest.clearAllMocks()
   permisoMock.mockResolvedValue(false)
+  // D3: la sesión real de la TPV no trae `staffVenueId`; el controlador lo resuelve por usuario + negocio.
+  membresiaMock.mockImplementation(async (venueId: string, userId?: string) =>
+    venueId === 'v1' && userId === 'staff-1' ? 'sv-1' : undefined,
+  )
 })
 
 describe('POST cupón TPV — rechazos lanzados llevan `error` para la TPV', () => {
@@ -188,10 +193,7 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
     await request(app({ userId: 'u-cajera', overrideAuthorizedBy: 'sv-gerente' }))
       .post('/venues/v1/orders/o1/discounts/manual')
       .send({ type: 'COMP', value: 100, reason: 'Invitación', authorizedById: 'id-inventado' })
-    expect(manualMock).toHaveBeenCalledWith('v1', 'o1', 'COMP', 100, 'Invitación', undefined, 'id-inventado', {
-      userId: 'u-cajera',
-      porPin: 'sv-gerente',
-    })
+    expect(manualMock).toHaveBeenCalledWith('v1', 'o1', 'COMP', 100, 'Invitación', undefined, 'id-inventado', { porPin: 'sv-gerente' })
   })
 
   it('manual sin acreditación: el servicio no recibe cortesía', async () => {
@@ -208,5 +210,19 @@ describe('D1: descuento predefinido y manual de la TPV reciben la acreditación 
       .post('/venues/v1/orders/o1/discounts/apply')
       .send({ discountId: 'd-comp' })
     expect(predefinidoMock).toHaveBeenCalledWith('v1', 'o1', 'd-comp', undefined, undefined, true)
+  })
+
+  // D3 (hz:f34960c5:D3): con la sesión real (sin `staffVenueId`), el servicio recibe la membresía de quien llama.
+  it('D3: manual y predefinido pasan la membresía resuelta por usuario + negocio', async () => {
+    acreditado.mockReturnValue(false)
+    await request(app({ userId: 'staff-1' }))
+      .post('/venues/v1/orders/o1/discounts/manual')
+      .send({ type: 'PERCENTAGE', value: 10, reason: 'x' })
+    await request(app({ userId: 'staff-1' }))
+      .post('/venues/v1/orders/o1/discounts/apply')
+      .send({ discountId: 'd1' })
+    expect(membresiaMock).toHaveBeenCalledWith('v1', 'staff-1')
+    expect(manualMock.mock.calls[0][5]).toBe('sv-1')
+    expect(predefinidoMock.mock.calls[0][3]).toBe('sv-1')
   })
 })

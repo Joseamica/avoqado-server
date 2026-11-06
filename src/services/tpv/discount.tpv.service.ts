@@ -63,6 +63,16 @@ export interface OrderDiscountSummary {
   createdAt: Date
 }
 
+/**
+ * D3 (hz:f34960c5:D3): la membresía activa (`StaffVenue.id`) de quien llama en este negocio. La sesión de la TPV no trae
+ * `staffVenueId` (ver `AuthContext` en `security.ts`) y `OrderDiscount.appliedById` es FK a `StaffVenue`. Sin membresía
+ * (superadmin) → `undefined`: el descuento se aplica igual, sin autor.
+ */
+export async function membresiaDeQuienLlama(venueId: string, userId?: string): Promise<string | undefined> {
+  if (!userId) return undefined
+  return (await prisma.staffVenue.findFirst({ where: { venueId, staffId: userId, active: true }, select: { id: true } }))?.id
+}
+
 // ==========================================
 // GET AVAILABLE DISCOUNTS
 // ==========================================
@@ -206,7 +216,7 @@ export async function applyPredefinedDiscount(
   venueId: string,
   orderId: string,
   discountId: string,
-  staffVenueId: string,
+  staffVenueId: string | undefined,
   authorizedById?: string,
   puedeRegalar = false,
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
@@ -232,8 +242,8 @@ export async function applyPredefinedDiscount(
  * @param reason - Reason for the discount
  * @param staffVenueId - Staff venue ID applying the discount
  * @param authorizedById - Ignorado en una cortesía (D1)
- * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él): su usuario y, si usó el PIN de gerente,
- *   la membresía de quien lo tecleó. La cortesía la autoriza ese gerente o, sin PIN, la membresía de quien la aplica.
+ * @param cortesia - Sólo si quien aplica tiene `orders:comp` (D1; falla cerrado sin él): si usó el PIN de gerente, la membresía
+ *   de quien lo tecleó. La cortesía la autoriza ese gerente o, sin PIN, quien la aplica (`staffVenueId`).
  */
 export async function applyManualDiscount(
   venueId: string,
@@ -241,23 +251,19 @@ export async function applyManualDiscount(
   type: DiscountType,
   value: number,
   reason: string,
-  staffVenueId: string,
+  staffVenueId: string | undefined,
   authorizedById?: string,
-  cortesia?: { userId?: string; porPin?: string },
+  cortesia?: { porPin?: string },
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🎟️ TPV Applying manual discount`, { venueId, orderId, type, value, reason })
 
   // The engine locks this venue's Order and rechecks existence/PAID on the locked photo (404 / 400 as before).
   // D1 (hz:f34960c5:D1): una cortesía manual pide `orders:comp`; antes bastaba cualquier `authorizedById` que mandara el
-  // cliente, sin verificar. La autoriza el gerente del PIN o, sin PIN, la membresía de quien la aplica (la sesión de la TPV
-  // no trae `staffVenueId`). Sin membresía activa (dueño de la organización, superadmin) queda sin autorizador registrado.
+  // cliente, sin verificar. La autoriza el gerente del PIN o, sin PIN, la membresía de quien la aplica (D3: el controlador la
+  // resuelve con `membresiaDeQuienLlama`). Sin membresía activa (dueño de la organización, superadmin) queda sin autorizador.
   if (type === 'COMP') {
     if (!cortesia) throw new ForbiddenError('No tienes permiso para dar cortesías', 'PERMISSION_DENIED')
-    authorizedById =
-      cortesia.porPin ??
-      (cortesia.userId
-        ? (await prisma.staffVenue.findFirst({ where: { venueId, staffId: cortesia.userId, active: true }, select: { id: true } }))?.id
-        : undefined)
+    authorizedById = cortesia.porPin ?? staffVenueId
   }
   return discountEngine.applyManualDiscount(orderId, type, value, reason, staffVenueId, authorizedById, undefined, venueId, !!cortesia)
 }
@@ -280,7 +286,7 @@ export async function applyCouponCode(
   venueId: string,
   orderId: string,
   couponCode: string,
-  staffVenueId: string,
+  staffVenueId: string | undefined,
   puedeRegalar = false,
 ): Promise<ApplyCouponResult> {
   logger.info(`🎟️ TPV Applying coupon code`, { venueId, orderId, couponCode })
