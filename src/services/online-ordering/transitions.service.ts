@@ -569,6 +569,15 @@ class OnlineOrderChangedDuringCancel extends Error {}
 const STAFF_CANCELLABLE: OnlineOrderStatus[] = [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY]
 
 /**
+ * T13: además, un FOLIO por pagar (`PENDING_ACCEPTANCE` con `requiresAcceptance === false`, la clienta pidió y paga en caja) se
+ * puede cancelar por personal. Un pedido de «Mi equipo» por aceptar no: ése se acepta o se rechaza. Una sola condición, la
+ * misma en la lectura y en el CAS de dentro de la transacción.
+ */
+const STAFF_CANCELLABLE_WHERE = {
+  OR: [{ status: { in: STAFF_CANCELLABLE } }, { status: OnlineOrderStatus.PENDING_ACCEPTANCE, requiresAcceptance: false }],
+}
+
+/**
  * R1: cancelar por personal NO escribe la `Order` a mano. Reutiliza `cancelOrder` de `order.mobile.service.ts` —candado de
  * cocina → orden (`lockTableOrderScope`), retiro de comandas, `assertOrderCancellableUnderLock` (sin dinero ni cobro vivo) y
  * los avisos de después del commit— y hace el CAS del pedido en línea con su gancho `dentroDeLaTx`, en la MISMA transacción.
@@ -583,10 +592,12 @@ export async function cancelOnlineOrderByStaff(i: {
 }): Promise<TransitionResult> {
   const row = await prisma.onlineOrder.findFirst({
     where: { orderId: i.orderId, venueId: i.venueId },
-    select: { id: true, status: true, order: { select: { orderNumber: true } } },
+    select: { id: true, status: true, requiresAcceptance: true, order: { select: { orderNumber: true } } },
   })
   if (!row) return { outcome: 'NOT_FOUND' }
-  if (!STAFF_CANCELLABLE.includes(row.status)) return { outcome: 'STALE', status: row.status }
+  const cancellable =
+    STAFF_CANCELLABLE.includes(row.status) || (row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.requiresAcceptance === false)
+  if (!cancellable) return { outcome: 'STALE', status: row.status }
 
   const { cancelOrder } = await import('@/services/mobile/order.mobile.service')
   let cancelledAt = i.now ?? new Date()
@@ -594,7 +605,7 @@ export async function cancelOnlineOrderByStaff(i: {
     await cancelOrder(i.venueId, i.orderId, undefined, i.staffId ?? undefined, async tx => {
       cancelledAt = i.now ?? new Date() // ya con el candado de la orden
       const cas = await tx.onlineOrder.updateMany({
-        where: { id: row.id, status: { in: STAFF_CANCELLABLE } },
+        where: { id: row.id, ...STAFF_CANCELLABLE_WHERE },
         data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt, cancelledBy: i.staffId ?? 'STAFF' },
       })
       if (cas.count !== 1) throw new OnlineOrderChangedDuringCancel()

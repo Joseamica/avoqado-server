@@ -476,7 +476,10 @@ describe('cancelOnlineOrderByStaff (R1: reutiliza la cancelación existente)', (
     const r = await cancelOnlineOrderByStaff(base)
     expect(cancelOrder).toHaveBeenCalledWith('v1', 'ord1', undefined, 'staff1', expect.any(Function))
     const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
-    expect(cas.where).toEqual({ id: 'oo1', status: { in: ['ACCEPTED', 'READY'] } })
+    expect(cas.where).toEqual({
+      id: 'oo1',
+      OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: 'PENDING_ACCEPTANCE', requiresAcceptance: false }],
+    })
     expect(cas.data).toEqual({ status: 'CANCELLED_BY_STAFF', cancelledAt: NOW, cancelledBy: 'staff1' })
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled() // la Order la escribe la cancelación existente
     expect(r).toEqual({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })
@@ -490,10 +493,42 @@ describe('cancelOnlineOrderByStaff (R1: reutiliza la cancelación existente)', (
     expect(notifyOrderEvent).not.toHaveBeenCalled()
   })
 
-  it('un pedido que no está aceptado ni listo es STALE sin tocar la cuenta', async () => {
-    prismaMock.onlineOrder.findFirst.mockResolvedValue({ id: 'oo1', status: 'PENDING_ACCEPTANCE', order: { orderNumber: 'WABCD' } } as any)
+  it('un pedido de «Mi equipo» por aceptar sigue sin poder cancelarse por aquí (STALE) sin tocar la cuenta', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({
+      id: 'oo1',
+      status: 'PENDING_ACCEPTANCE',
+      requiresAcceptance: true,
+      order: { orderNumber: 'WABCD' },
+    } as any)
     await expect(cancelOnlineOrderByStaff(base)).resolves.toEqual({ outcome: 'STALE', status: 'PENDING_ACCEPTANCE' })
     expect(cancelOrder).not.toHaveBeenCalled()
+  })
+
+  it('un folio por pagar (PENDING_ACCEPTANCE, sin aceptación) se cancela: CANCELLED_BY_STAFF, y el CAS repite la condición', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({
+      id: 'oo1',
+      status: 'PENDING_ACCEPTANCE',
+      requiresAcceptance: false,
+      order: { orderNumber: 'WABCD' },
+    } as any)
+    const r = await cancelOnlineOrderByStaff(base)
+    expect(r).toEqual({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })
+    const cas = prismaMock.onlineOrder.updateMany.mock.calls[0][0] as any
+    expect(cas.where).toEqual({
+      id: 'oo1',
+      OR: [{ status: { in: ['ACCEPTED', 'READY'] } }, { status: 'PENDING_ACCEPTANCE', requiresAcceptance: false }],
+    })
+  })
+
+  it('un folio por pagar con dinero responde HAS_PAYMENTS', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({
+      id: 'oo1',
+      status: 'PENDING_ACCEPTANCE',
+      requiresAcceptance: false,
+      order: { orderNumber: 'WABCD' },
+    } as any)
+    ;(cancelOrder as jest.Mock).mockRejectedValue(new BadRequestError('Cannot cancel a paid order'))
+    await expect(cancelOnlineOrderByStaff(base)).resolves.toEqual({ outcome: 'HAS_PAYMENTS' })
   })
 
   // H6: con mocks no hay transacción que revertir. Aquí sólo se prueba que el gancho LANZA (es lo que hace que la transacción

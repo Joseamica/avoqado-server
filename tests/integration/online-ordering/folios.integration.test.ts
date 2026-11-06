@@ -27,6 +27,7 @@ import { listInbox } from '@/services/online-ordering/inbox.service'
 import {
   acceptOnlineOrder,
   markOnlineOrderDelivered,
+  cancelOnlineOrderByStaff,
   expireOnlineOrder,
   rejectOnlineOrder,
 } from '@/services/online-ordering/transitions.service'
@@ -618,5 +619,60 @@ describe('T9b · «Entregado» sólo por una persona o al terminar el día del n
     const r = await entregarPorPersona(x.orderId)
     expect(r.outcome).toBe('OK')
     expect(await cierra(Z('2026-11-06T04:00:00'))).toBe(0)
+  })
+})
+
+describe('T13 · «Cancelar folio» (personal) sobre un folio por pagar', () => {
+  const cancelar = (orderId: string) => cancelOnlineOrderByStaff({ venueId: f.venueId, orderId, staffId: f.staffId })
+
+  it('sin dinero: el folio queda CANCELLED_BY_STAFF y su cuenta CANCELLED (cancelOrder real)', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    expect(await cancelar(orderId)).toEqual({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })
+    expect((await pedido(onlineOrderId)).status).toBe('CANCELLED_BY_STAFF')
+    expect((await cuenta(orderId)).status).toBe('CANCELLED')
+  })
+
+  it('con un abono: HAS_PAYMENTS y nada cambia', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio()
+    await efectivoDelPos(orderId, CINCUENTA)
+    const antes = (await pedido(onlineOrderId)).status
+    expect(await cancelar(orderId)).toEqual({ outcome: 'HAS_PAYMENTS' })
+    expect((await pedido(onlineOrderId)).status).toBe(antes)
+    expect((await cuenta(orderId)).status).not.toBe('CANCELLED')
+  })
+
+  it('un pedido de «Mi equipo» por aceptar sigue en STALE y no se toca', async () => {
+    const { orderId, onlineOrderId } = await nuevoFolio({ equipo: true })
+    expect(await cancelar(orderId)).toEqual({ outcome: 'STALE', status: 'PENDING_ACCEPTANCE' })
+    expect((await pedido(onlineOrderId)).status).toBe('PENDING_ACCEPTANCE')
+    expect((await cuenta(orderId)).status).not.toBe('CANCELLED')
+  })
+
+  it('carrera: el cobro de la caja y «Cancelar folio» a la vez: gana uno solo, nunca dinero nuevo sobre una cuenta cancelada', async () => {
+    for (let ronda = 0; ronda < 4; ronda++) {
+      const { orderId, onlineOrderId } = await nuevoFolio()
+      const [cobro, cancelacion] = await Promise.allSettled([efectivoDelPos(orderId), cancelar(orderId)])
+
+      const dinero = await prisma.payment.count({ where: { orderId, status: 'COMPLETED' } })
+      const cuentaFinal = await cuenta(orderId)
+      const folioFinal = await pedido(onlineOrderId)
+      const cancelo = cancelacion.status === 'fulfilled' && cancelacion.value.outcome === 'OK'
+
+      if (cancelo) {
+        // Ganó «Cancelar folio»: la cuenta cancelada, sin un solo pago, y el cobro nuevo se rechazó.
+        expect(cobro.status).toBe('rejected')
+        expect(dinero).toBe(0)
+        expect(cuentaFinal.status).toBe('CANCELLED')
+        expect(folioFinal.status).toBe('CANCELLED_BY_STAFF')
+      } else {
+        // Ganó el cobro: queda cobrado y NO cancelado; la cancelación se negó por el dinero (o el folio ya cambió).
+        expect(cobro.status).toBe('fulfilled')
+        expect(dinero).toBe(1)
+        expect(cuentaFinal.status).not.toBe('CANCELLED')
+        expect(folioFinal.status).not.toBe('CANCELLED_BY_STAFF')
+        if (cancelacion.status === 'fulfilled') expect(['HAS_PAYMENTS', 'STALE']).toContain(cancelacion.value.outcome)
+      }
+      await f.limpiar()
+    }
   })
 })
