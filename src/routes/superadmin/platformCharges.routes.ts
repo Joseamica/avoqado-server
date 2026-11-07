@@ -4,6 +4,7 @@ import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as controller from '@/controllers/superadmin/platformCharges.controller'
 import {
   createChargeSchema,
+  createChargeV2Schema,
   groupOccurrencesSchema,
   invoiceOccurrenceSchema,
   linkInvoiceSchema,
@@ -44,6 +45,7 @@ import {
  *   POST  /api/v1/superadmin/platform-charges/:id/resume
  */
 const router = Router()
+router.post('/v2', validateRequest(createChargeV2Schema), checkPermission('platform-billing:issue'), controller.createCharge)
 
 // Pantalla: tarjetas y filas
 router.get('/summary', checkPermission('platform-billing:view'), controller.getSummary)

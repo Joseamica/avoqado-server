@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import {
   createChargeSchema,
+  createChargeV2Schema,
   groupOccurrencesSchema,
   invoiceOccurrenceSchema,
   linkInvoiceSchema,
@@ -35,6 +36,17 @@ const COBRO = {
   concepts: [RENTA],
   invoiceMode: 'MANUAL',
 }
+
+describe('contrato del alta protegida', () => {
+  it('v2 exige folio UUID y staff esperado, mientras el contrato anterior los sigue omitiendo', () => {
+    expect(createChargeSchema.safeParse({ body: COBRO }).success).toBe(true)
+    expect(createChargeV2Schema.safeParse({ body: COBRO }).success).toBe(false)
+    const body = { ...COBRO, clientRequestId: 'd1e18d64-a50b-4e9a-8bab-9257b5fcdfcc', expectedStaffId: 'staff' }
+    expect(createChargeV2Schema.safeParse({ body }).success).toBe(true)
+    expect(createChargeV2Schema.safeParse({ body: { ...body, clientRequestId: 'roto' } }).success).toBe(false)
+    expect(createChargeV2Schema.safeParse({ body: { ...body, expectedStaffId: undefined } }).success).toBe(false)
+  })
+})
 
 /** Los mensajes de error de un parseo, o `[]` si pasó. */
 const errores = (schema: { safeParse: (x: unknown) => any }, entrada: unknown): string[] => {
@@ -484,6 +496,7 @@ describe('platformCharges.routes — permisos y orden', () => {
   it('las rutas del spec existen, cada una con UN permiso, y la subruta no pasa un rol suelto a authorizeRole', () => {
     expect(rutas.map(r => `${r.metodo} ${r.ruta}`).sort()).toEqual(
       [
+        'POST /v2',
         'GET /summary',
         'GET /occurrences',
         'GET /occurrences/groups',

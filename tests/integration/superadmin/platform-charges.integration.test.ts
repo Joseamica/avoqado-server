@@ -28,6 +28,7 @@ jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({ resolveFiscalProv
 import { Prisma, StaffRole } from '@prisma/client'
 import type { PlatformCfdiStatus, PlatformChargeFrequency, PlatformChargeInvoiceMode } from '@prisma/client'
 import jwt from 'jsonwebtoken'
+import { randomUUID } from 'node:crypto'
 import app from '@/app'
 import { aTiempo, esperarBloqueado } from '@tests/__helpers__/candadosDePostgres'
 import { startApiServer, api } from '@tests/__helpers__/apiServer'
@@ -426,6 +427,87 @@ async function esperaElCandado(pid: number) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+describe('alta recuperable: identidad, PostgreSQL y contrato v2', () => {
+  const body = () => ({
+    customerType: 'STANDALONE' as const,
+    customerName: unico('Reintento'),
+    frequency: 'ONE_TIME' as const,
+    anchorDate: todayInMexico(new Date()),
+    concepts: [RENTA],
+    invoiceMode: 'NONE' as const,
+    clientRequestId: randomUUID(),
+    expectedStaffId: superId,
+  })
+
+  it('dos copias esperan el mismo candado y sólo queda un cobro, una fecha y una auditoría', async () => {
+    const input = body()
+    const held = aparcarLaTransaccion(1)
+    let first: ReturnType<typeof createCharge> | undefined
+    let second: ReturnType<typeof createCharge> | undefined
+    try {
+      first = createCharge(input, superId)
+      const pid = await aTiempo(held.pid, 30_000, 'alta guardada sin commit')
+      second = createCharge(input, superId)
+      const wait = await esperarBloqueado(prisma, { bloqueadoPor: [pid], consulta: /pg_advisory_xact_lock/, ms: 15_000 })
+      expect(wait).not.toBeNull()
+      held.soltar()
+      const [a, b] = await Promise.all([first, second])
+      creado.charges.push(a.id)
+      expect(b.id).toBe(a.id)
+      expect(await prisma.platformCharge.count({ where: { clientRequestId: input.clientRequestId } })).toBe(1)
+      expect(await ocurrenciasDe(a.id)).toHaveLength(1)
+      expect(await bitacoras('PLATFORM_CHARGE_CREATED', a.id, 1)).toHaveLength(1)
+    } finally {
+      held.soltar()
+      await Promise.allSettled([first, second])
+      held.restaurar()
+    }
+  })
+
+  it('v2 exige identidad y dueño; replay devuelve 201 y no expone su huella', async () => {
+    const input = body()
+    const missing = await post('/v2', { ...input, clientRequestId: undefined })
+    expect(missing.status).toBe(400)
+    const wrongOwner = await post('/v2', { ...input, expectedStaffId: 'otro' })
+    expect(wrongOwner.status).toBe(409)
+    expect(await prisma.platformCharge.count({ where: { clientRequestId: input.clientRequestId } })).toBe(0)
+    const a = await post('/v2', input)
+    expect(a.status).toBe(201)
+    creado.charges.push(a.body.data.id)
+    const b = await post('/v2', input)
+    expect(b.status).toBe(201)
+    expect(b.body.data.id).toBe(a.body.data.id)
+    expect(b.body.data).not.toHaveProperty('clientRequestId')
+    expect(b.body.data).not.toHaveProperty('createRequestHash')
+  })
+
+  it('una factura ya anexada se reproduce antes de validar; rollback del anexo no consume la identidad', async () => {
+    const profile = await nuevoPerfil()
+    const cfdi = await nuevaFactura({ billingTaxProfileId: profile.id })
+    const input = {
+      customerType: 'STANDALONE' as const,
+      customerName: unico('Factura replay'),
+      anchorDate: todayInMexico(new Date()),
+      invoiceId: cfdi.id,
+      clientRequestId: randomUUID(),
+      expectedStaffId: superId,
+    }
+    const a = await createCharge(input, superId)
+    creado.charges.push(a.id)
+    const b = await createCharge(input, superId, new Date('2030-01-01T18:00:00Z'))
+    expect(b.id).toBe(a.id)
+    expect(await ocurrenciasDe(a.id)).toHaveLength(1)
+    expect((await facturaDe(cfdi.id)).platformChargeOccurrenceId).toBe((await ocurrenciasDe(a.id))[0].id)
+    expect(await bitacoras('PLATFORM_CHARGE_CREATED', a.id, 1)).toHaveLength(1)
+    const rejected = { ...input, clientRequestId: randomUUID() }
+    await expect(createCharge(rejected, superId)).rejects.toMatchObject({ statusCode: 409, details: { chargeCreateRejected: true } })
+    expect(await prisma.platformCharge.count({ where: { clientRequestId: rejected.clientRequestId } })).toBe(0)
+    const corrected = await createCharge({ ...body(), clientRequestId: rejected.clientRequestId }, superId)
+    creado.charges.push(corrected.id)
+    expect(await ocurrenciasDe(corrected.id)).toHaveLength(1)
+  })
+})
+
 describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JWT y Postgres reales)', () => {
   const RUTAS: Array<['get' | 'post' | 'patch', string]> = [
     ['get', '/summary'],

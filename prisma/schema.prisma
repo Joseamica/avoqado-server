@@ -19136,6 +19136,8 @@ model PlatformCharge {
   invoiceMode         PlatformChargeInvoiceMode
   pausedAt            DateTime?
   createdById         String
+  clientRequestId     String?                   @unique
+  createRequestHash   String?
   createdAt           DateTime                  @default(now())
   updatedAt           DateTime                  @updatedAt
 

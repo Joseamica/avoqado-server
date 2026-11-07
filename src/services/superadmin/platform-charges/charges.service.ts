@@ -14,9 +14,11 @@
  * - Fechas: días de calendario de CDMX (`'YYYY-MM-DD'`), sólo con los helpers de `schedule.ts`. Dinero: centavos enteros.
  */
 import { BillingCustomerType, PlatformChargeFrequency, PlatformChargeInvoiceMode } from '@prisma/client'
+import { createHash } from 'node:crypto'
+import { z } from 'zod'
 import type { BillingTaxProfile, PlatformCfdi, PlatformCharge, Prisma } from '@prisma/client'
 import logger from '@/config/logger'
-import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import AppError, { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import { attachInvoiceInTx, conceptsFromInvoice } from './invoice-link.service'
@@ -80,6 +82,8 @@ export interface ChargeInput {
 export type CreateChargeInput = Omit<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'> &
   Partial<Pick<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'>> & {
     invoiceId?: string
+    clientRequestId?: string
+    expectedStaffId?: string
     /**
      * «¿Te debe las fechas pasadas?» (founder, 6-nov: «A»). `false` = ya las pagó: las fechas antes de hoy no se crean y el cobro
      * empieza en la primera desde hoy (el ancla se guarda igual). Sin él, o `true`, lo pasado nace vencido como siempre. Una sola
@@ -569,52 +573,125 @@ function audit(action: string, charge: PlatformCharge, actorId: string, data: Pr
  * tiene intentos. Una factura que no cabe en el modelo del 16 % no da de alta nada: resumirla la volvería a timbrar mal.
  */
 export async function createCharge(input: CreateChargeInput, actorId: string, now: Date = new Date()): Promise<PlatformCharge> {
+  if (input.expectedStaffId && input.expectedStaffId !== actorId) {
+    throw new ConflictError('La sesión cambió: vuelve a entrar con la persona que inició el alta', 'PLATFORM_CHARGE_CREATE_SESSION_CHANGED')
+  }
+  const requestId = input.clientRequestId
+  if (requestId !== undefined && !z.string().uuid().safeParse(requestId).success) {
+    throw new BadRequestError('El folio del intento no es válido')
+  }
+  // Orden fijo y sin defaults de fecha: la misma petición conserva su huella aunque el cobro luego se edite.
+  const requestHash = requestId
+    ? createHash('sha256')
+        .update(
+          JSON.stringify({
+            customerType: input.customerType,
+            organizationId: cleanId(input.organizationId),
+            venueId: cleanId(input.venueId),
+            customerName: input.customerName?.trim(),
+            billingTaxProfileId: cleanId(input.billingTaxProfileId),
+            frequency: input.frequency ?? null,
+            anchorDate: input.anchorDate,
+            invoiceMode: input.invoiceMode ?? null,
+            invoiceId: cleanId(input.invoiceId),
+            pastDatesOwed: input.pastDatesOwed !== false,
+            concepts:
+              input.concepts?.map(c => ({
+                description: c.description?.trim(),
+                amountCents: c.amountCents,
+                ivaMode: c.ivaMode,
+                satProductKey: c.satProductKey?.trim() ?? '',
+                satUnitKey: c.satUnitKey?.trim() ?? '',
+              })) ?? null,
+          }),
+        )
+        .digest('hex')
+    : null
   const today = todayInMexico(now)
   const invoiceId = cleanId(input.invoiceId)
-  const fields = normalizeFields(invoiceId ? { ...input, frequency: 'ONE_TIME', invoiceMode: 'MANUAL' } : input, true, invoiceId !== null)
-  // Con factura, `concepts` aún no está: se completa dentro de la transacción, con lo que dice la factura.
-  const draft: ChargeState = {
-    ...(fields as ChargeState),
-    organizationId: fields.organizationId ?? null,
-    venueId: fields.venueId ?? null,
-    // El perfil de un cobro desde factura lo decide la factura (`profileOfInvoice`), no el cuerpo.
-    billingTaxProfileId: invoiceId ? null : (fields.billingTaxProfileId ?? null),
-  }
-  if (!invoiceId) assertConceptKeys(draft)
-  assertAnchorInWindow(draft.anchorDate, today)
-
-  const { charge, state, linked } = await prisma.$transaction(async tx => {
-    let state = draft
-    let cfdi: PlatformCfdi | null = null
-    if (invoiceId) {
-      cfdi = await tx.platformCfdi.findUnique({ where: { id: invoiceId } })
-      if (!cfdi) throw new NotFoundError('Esa factura ya no existe: revisa la lista', 'PLATFORM_CHARGE_INVOICE_LINK_NOT_FOUND')
-      const concepts = conceptsFromInvoice(cfdi)
-      if (!concepts) {
-        throw new ConflictError(
-          `No se puede dar de alta un cobro desde ${invoiceName(cfdi)}: no cabe en lo que «Por cobrar» sabe calcular (IVA del 16 %, sin ` +
-            'descuentos ni exentos, con los totales al centavo)',
-          'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
-        )
+  let checkedEmpty = false
+  const { charge, state, linked } = await prisma
+    .$transaction(async tx => {
+      if (requestId) {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`platform-charge:create:${requestId}`}))::text`
+        const previous = await tx.platformCharge.findUnique({ where: { clientRequestId: requestId } })
+        if (previous) {
+          if (previous.createdById !== actorId) throw new ConflictError('Ese folio ya se utilizó', 'PLATFORM_CHARGE_CREATE_CONFLICT')
+          if (previous.createRequestHash !== requestHash) {
+            throw new ConflictError(
+              'Ese intento ya guardó un cobro con otros datos. Recupera el alta anterior.',
+              'PLATFORM_CHARGE_CREATE_CONFLICT',
+              { chargeId: previous.id },
+            )
+          }
+          return { charge: previous, state: null, linked: null }
+        }
+        checkedEmpty = true
       }
-      state = { ...draft, concepts }
-      assertConceptKeys(state)
-    }
-    await assertCustomerAndProfile(tx, state)
-    if (cfdi) state = { ...state, billingTaxProfileId: await profileOfInvoice(tx, cfdi, state) }
+      const fields = normalizeFields(
+        invoiceId ? { ...input, frequency: 'ONE_TIME', invoiceMode: 'MANUAL' } : input,
+        true,
+        invoiceId !== null,
+      )
+      // Con factura, `concepts` aún no está: se completa dentro de la transacción, con lo que dice la factura.
+      const draft: ChargeState = {
+        ...(fields as ChargeState),
+        organizationId: fields.organizationId ?? null,
+        venueId: fields.venueId ?? null,
+        // El perfil de un cobro desde factura lo decide la factura (`profileOfInvoice`), no el cuerpo.
+        billingTaxProfileId: invoiceId ? null : (fields.billingTaxProfileId ?? null),
+      }
+      if (!invoiceId) assertConceptKeys(draft)
+      assertAnchorInWindow(draft.anchorDate, today)
 
-    const created = await tx.platformCharge.create({ data: { ...dbFields(state), createdById: actorId } })
-    await lockCharge(tx, created.id)
-    const from = input.pastDatesOwed === false && state.anchorDate < today ? today : state.anchorDate
-    await generateOccurrences(tx, created, from, addDays(today, GENERATE_AHEAD_DAYS))
-    if (!cfdi) return { charge: created, state, linked: null }
+      let state = draft
+      let cfdi: PlatformCfdi | null = null
+      if (invoiceId) {
+        cfdi = await tx.platformCfdi.findUnique({ where: { id: invoiceId } })
+        if (!cfdi) throw new NotFoundError('Esa factura ya no existe: revisa la lista', 'PLATFORM_CHARGE_INVOICE_LINK_NOT_FOUND')
+        const concepts = conceptsFromInvoice(cfdi)
+        if (!concepts) {
+          throw new ConflictError(
+            `No se puede dar de alta un cobro desde ${invoiceName(cfdi)}: no cabe en lo que «Por cobrar» sabe calcular (IVA del 16 %, sin ` +
+              'descuentos ni exentos, con los totales al centavo)',
+            'PLATFORM_CHARGE_INVOICE_LINK_NOT_REPRESENTABLE',
+          )
+        }
+        state = { ...draft, concepts }
+        assertConceptKeys(state)
+      }
+      await assertCustomerAndProfile(tx, state)
+      if (cfdi) state = { ...state, billingTaxProfileId: await profileOfInvoice(tx, cfdi, state) }
 
-    // Un cobro de una sola vez tiene UNA fecha, y acaba de nacer con el alta.
-    const occurrence = await tx.platformChargeOccurrence.findFirst({ where: { chargeId: created.id }, orderBy: { dueDate: 'asc' } })
-    if (!occurrence) throw new Error(`El cobro ${created.id} no creó su fecha: no se puede anexar la factura`)
-    const updated = (await attachInvoiceInTx(tx, occurrence, cfdi, now)) ?? occurrence
-    return { charge: created, state, linked: { cfdi, previousTotalCents: occurrence.totalCents, updated } }
-  })
+      const created = await tx.platformCharge.create({
+        data: {
+          ...dbFields(state),
+          createdById: actorId,
+          ...(requestId ? { clientRequestId: requestId, createRequestHash: requestHash } : {}),
+        },
+      })
+      await lockCharge(tx, created.id)
+      const from = input.pastDatesOwed === false && state.anchorDate < today ? today : state.anchorDate
+      await generateOccurrences(tx, created, from, addDays(today, GENERATE_AHEAD_DAYS))
+      if (!cfdi) return { charge: created, state, linked: null }
+
+      // Un cobro de una sola vez tiene UNA fecha, y acaba de nacer con el alta.
+      const occurrence = await tx.platformChargeOccurrence.findFirst({ where: { chargeId: created.id }, orderBy: { dueDate: 'asc' } })
+      if (!occurrence) throw new Error(`El cobro ${created.id} no creó su fecha: no se puede anexar la factura`)
+      const updated = (await attachInvoiceInTx(tx, occurrence, cfdi, now)) ?? occurrence
+      return { charge: created, state, linked: { cfdi, previousTotalCents: occurrence.totalCents, updated } }
+    })
+    .catch(error => {
+      if (checkedEmpty && error instanceof AppError && error.statusCode < 500) {
+        error.details = {
+          ...(typeof error.details === 'object' && error.details !== null ? error.details : {}),
+          chargeCreateRejected: true,
+        }
+      }
+      throw error
+    })
+
+  if (!state) return charge
 
   audit('PLATFORM_CHARGE_CREATED', charge, actorId, {
     customerType: state.customerType,
