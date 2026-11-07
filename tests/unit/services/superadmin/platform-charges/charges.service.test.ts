@@ -341,6 +341,89 @@ beforeEach(() => {
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 describe('platform-charges/charges.service — createCharge (NEW)', () => {
+  it('recupera el mismo cobro al repetir la identidad del alta, sin volver a crear ni auditar', async () => {
+    const filas: ReturnType<typeof cobro>[] = []
+    prismaMock.platformCharge.create.mockImplementation(async ({ data }: any) => {
+      const row = cobro({ ...data, id: `alta-${filas.length + 1}` })
+      filas.push(row)
+      return row
+    })
+    prismaMock.platformCharge.findUnique.mockImplementation(
+      async ({ where }: any) => filas.find(row => (row as any).clientRequestId === where.clientRequestId) ?? null,
+    )
+    const input = { ...entrada(), clientRequestId: 'd1e18d64-a50b-4e9a-8bab-9257b5fcdfcc' }
+
+    const primero = await createCharge(input, 'staff-1', AHORA)
+    const repetido = await createCharge(input, 'staff-1', AHORA)
+
+    expect(repetido.id).toBe(primero.id)
+    expect(filas).toHaveLength(1)
+    expect(mockLogAction).toHaveBeenCalledTimes(1)
+  })
+
+  describe('identidad del alta', () => {
+    const key = 'd1e18d64-a50b-4e9a-8bab-9257b5fcdfcc'
+    let filas: ReturnType<typeof cobro>[]
+    beforeEach(() => {
+      filas = []
+      prismaMock.platformCharge.findUnique.mockImplementation(
+        async ({ where }: any) => filas.find(row => (row as any).clientRequestId === where.clientRequestId) ?? null,
+      )
+      prismaMock.platformCharge.create.mockImplementation(async ({ data }: any) => {
+        const row = cobro({ ...data, id: `alta-${filas.length + 1}` })
+        filas.push(row)
+        return row
+      })
+    })
+
+    it('reproduce tras editar/pausar y más de un año, sin volver a validar el perfil ni generar fechas', async () => {
+      const input = { ...entrada(), clientRequestId: key }
+      const first = await createCharge(input, 'staff-1', AHORA)
+      Object.assign(filas[0], { customerName: 'Corregido', pausedAt: AHORA })
+      prismaMock.billingTaxProfile.findUnique.mockRejectedValue(new Error('perfil no disponible'))
+      prismaMock.platformChargeOccurrence.createMany.mockClear()
+      const replay = await createCharge(input, 'staff-1', new Date('2028-11-02T18:00:00Z'))
+      expect(replay).toMatchObject({ id: first.id, customerName: 'Corregido', pausedAt: AHORA })
+      expect(prismaMock.platformChargeOccurrence.createMany).not.toHaveBeenCalled()
+      expect(mockLogAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('rechaza otro cuerpo y otro actor sin crear; sólo el dueño recibe el id recuperable', async () => {
+      const input = { ...entrada(), clientRequestId: key }
+      const first = await createCharge(input, 'staff-1', AHORA)
+      await expect(createCharge({ ...input, customerName: 'Otro' }, 'staff-1', AHORA)).rejects.toMatchObject({
+        statusCode: 409,
+        details: { chargeId: first.id },
+      })
+      await expect(createCharge(input, 'staff-2', AHORA)).rejects.toMatchObject({ statusCode: 409, details: undefined })
+      expect(filas).toHaveLength(1)
+    })
+
+    it('un rechazo permite corregir con la MISMA clave; una copia tardía no crea otro cobro', async () => {
+      const input = { ...entrada(), anchorDate: '2028-01-01', clientRequestId: key }
+      await expect(createCharge(input, 'staff-1', AHORA)).rejects.toMatchObject({ details: { chargeCreateRejected: true } })
+      const saved = await createCharge({ ...input, anchorDate: '2026-11-02' }, 'staff-1', AHORA)
+      await expect(createCharge(input, 'staff-1', new Date('2027-12-01T18:00:00Z'))).rejects.toMatchObject({
+        statusCode: 409,
+        details: { chargeId: saved.id },
+      })
+      expect(filas).toHaveLength(1)
+    })
+
+    it('dos claves distintas permiten dos altas intencionales iguales', async () => {
+      await createCharge({ ...entrada(), clientRequestId: key }, 'staff-1', AHORA)
+      await createCharge({ ...entrada(), clientRequestId: '7cc9f8d7-e888-43c5-a98f-ed5b7ce79edf' }, 'staff-1', AHORA)
+      expect(filas).toHaveLength(2)
+    })
+
+    it('una cookie de otra persona rechaza el primer POST sin crear', async () => {
+      await expect(
+        createCharge({ ...entrada(), clientRequestId: key, expectedStaffId: 'staff-1' }, 'staff-2', AHORA),
+      ).rejects.toMatchObject({ code: 'PLATFORM_CHARGE_CREATE_SESSION_CHANGED' })
+      expect(filas).toHaveLength(0)
+    })
+  })
+
   it('con ancla hace 30 días genera desde el ancla hasta hoy+7, con la foto de conceptos, totales y modo', async () => {
     const creado = await createCharge(entrada({ anchorDate: '2026-10-03' }), 'staff-1', AHORA)
 
@@ -1848,7 +1931,6 @@ describe('platform-charges/charges.service — sin factura (NONE) y las claves d
         expect((error as BadRequestError).message).toBe(FALTAN_CLAVES)
         expect((error as BadRequestError).statusCode).toBe(400)
       }
-      expect(prismaMock.$transaction).not.toHaveBeenCalled() // se rechaza antes de abrir una transacción
       ningunaEscritura()
     })
   })
@@ -3048,10 +3130,9 @@ describe('platform-charges/charges.service — 🔴 alta desde una factura (crea
       ningunaEscritura()
     })
 
-    it('la fecha fuera de ±366 días se rechaza igual que sin factura, antes de abrir la transacción', async () => {
+    it('la fecha fuera de ±366 días se rechaza igual que sin factura, sin escribir', async () => {
       await expect(createCharge(alta({ anchorDate: '2028-01-01' }), 'staff-1', AHORA)).rejects.toThrow(/366 días/)
 
-      expect(prismaMock.$transaction).not.toHaveBeenCalled()
       ningunaEscritura()
     })
 

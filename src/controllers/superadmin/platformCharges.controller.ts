@@ -20,7 +20,8 @@ const actorOf = (req: Request): string => (req as any).authContext.userId
  * medianoche UTC se pintaría un día antes en CDMX). Lo mismo que `dueDate` en las ocurrencias.
  */
 export function chargeView(row: PlatformCharge) {
-  return { ...row, anchorDate: dbToCalendarDay(row.anchorDate) }
+  const { clientRequestId: _requestId, createRequestHash: _requestHash, ...visible } = row
+  return { ...visible, anchorDate: dbToCalendarDay(row.anchorDate) }
 }
 
 // ── Pantalla «Por cobrar» ───────────────────────────────────────────────────────────────────────────────────────────────────

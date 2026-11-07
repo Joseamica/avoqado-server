@@ -73,6 +73,8 @@ const chargeFields = {
 const createChargeBody = z
   .object({
     ...chargeFields,
+    clientRequestId: z.string().uuid('El folio del intento no es válido').optional(),
+    expectedStaffId: optionalId,
     frequency: frequency.optional(),
     concepts: concepts.optional(),
     invoiceMode: invoiceMode.optional(),
@@ -93,6 +95,14 @@ const createChargeBody = z
   })
 
 export const createChargeSchema = z.object({ body: createChargeBody })
+export const createChargeV2Schema = z.object({
+  body: createChargeBody.superRefine((body, ctx) => {
+    if (!body.clientRequestId)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['clientRequestId'], message: 'Falta el folio del intento' })
+    if (!body.expectedStaffId)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['expectedStaffId'], message: 'Falta la persona que inició el alta' })
+  }),
+})
 
 /** Editar manda sólo lo que cambia; lo que no viene no se toca. */
 export const updateChargeSchema = z.object({ body: z.object(chargeFields).partial() })
