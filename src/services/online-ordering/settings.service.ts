@@ -43,8 +43,16 @@ function rowToConfig(row: OnlineOrderingSettings): OnlineOrderingSettingsRead {
 
 /** Ajustes del venue; sin fila devuelve los defaults (apagado). */
 export async function getSettings(venueId: string): Promise<OnlineOrderingSettingsRead> {
+  return (await getSettingsWithSaved(venueId)).settings
+}
+
+/** Igual que `getSettings` y además dice si la fila existe (R66: `saved` false = siguen los ajustes de fábrica), en UNA sola lectura. */
+export async function getSettingsWithSaved(venueId: string): Promise<{ settings: OnlineOrderingSettingsRead; saved: boolean }> {
   const row = await prisma.onlineOrderingSettings.findUnique({ where: { venueId } })
-  return row ? rowToConfig(row) : { ...DEFAULT_CONFIG, lastInboxPollAt: null, lastToPayPollAt: null }
+  return {
+    settings: row ? rowToConfig(row) : { ...DEFAULT_CONFIG, lastInboxPollAt: null, lastToPayPollAt: null },
+    saved: !!row,
+  }
 }
 
 export interface VenueContact {

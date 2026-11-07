@@ -27,6 +27,7 @@ import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import { esVentaYaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
+import { computeOrderBalance, type OrderBalance } from '@/services/shared/orderBalance'
 
 /**
  * 🔴 R7-1 (ronda 7 post-QA de sellos tardíos; decisión del founder del 16-oct, «como Square»): una venta cobrada queda CERRADA. El
@@ -187,7 +188,8 @@ export async function createManualPayment(
         }
         let anchorOrderId: string
         let anchorOrderTotal: Prisma.Decimal
-        let paidSoFar: Prisma.Decimal
+        // T18f: el saldo CANÓNICO de la cuenta existente tras este pago (`computeOrderBalance`); null en la orden sombra.
+        let saldoCanonico: OrderBalance | null = null
         let aggregatedTipAmount: Prisma.Decimal = tipAmount
         let isShadow = false
         // Captured from the existing order in Mode 1 so the post-payment update
@@ -297,35 +299,17 @@ export async function createManualPayment(
           orderItems = order.items ?? []
           yaEstabaPagada = order.paymentStatus === 'PAID'
 
-          // ✅ TPV ALIGNMENT: paidSoFar sums (amount + tip) for prior COMPLETED payments,
-          // matching how TPV's totalPaid is computed. Without including tips, partial
-          // tip payments leave paidAmount and Order.total inconsistent.
-          paidSoFar = order.payments.reduce(
-            (acc: Prisma.Decimal, p: { amount: Prisma.Decimal | null; tipAmount: Prisma.Decimal | null }) =>
-              acc.plus(p.amount ?? 0).plus(p.tipAmount ?? 0),
-            new Prisma.Decimal(0),
-          )
-          // Tips on the Order row aggregate ALL payment tips. Without this the
-          // order's tipAmount stays at 0 and per-order tip reports undercount.
-          const priorTips = order.payments.reduce(
-            (acc: Prisma.Decimal, p: { tipAmount: Prisma.Decimal | null }) => acc.plus(p.tipAmount ?? 0),
-            new Prisma.Decimal(0),
-          )
-          aggregatedTipAmount = priorTips.plus(tipAmount)
+          // 🔴 T18f (Codex fase 2 r3 #2): lo pagado, el total y el saldo salen de la función CANÓNICA (`computeOrderBalance`), la misma
+          // que usa la terminal (`updateOrderTotalsForStandalonePayment`): propinas dentro del total y de lo pagado, IVA aparte según el
+          // contrato, y un REFUND NO reabre saldo (antes se sumaban TODOS los COMPLETED, con el reembolso negativo restando).
+          // Las filas ya vienen con `type`: sin él un reembolso sería indistinguible de un cobro negativo.
+          const saldoAntes = computeOrderBalance(order, order.payments)
+          saldoCanonico = computeOrderBalance(order, [...order.payments, { amount, tipAmount, type: 'REGULAR' }])
+          aggregatedTipAmount = saldoCanonico.tipAmount
+          anchorOrderTotal = saldoCanonico.total
 
-          // Order total recomputed to include cumulative tips (TPV pattern).
-          // Tax is left as-is; manual payments don't recompute tax.
-          const orderTax = new Prisma.Decimal(order.taxAmount ?? 0)
-          // 🔴 La mercancía se topa en 0 ANTES de sumar el impuesto y la propina (misma regla que `computeStoredOrderTotal`):
-          // desde B2/B2c la cabecera `discountAmount` es la Σ de las filas SIN tope y puede pasar el subtotal; restarla entera
-          // se comía el IVA aparte y daba por saldada una cuenta con un pago menor a lo que debe (Codex B2c r1, barrido F1).
-          const mercancia = Prisma.Decimal.max(new Prisma.Decimal(0), orderSubtotal.minus(orderDiscount))
-          anchorOrderTotal = mercancia.plus(orderTax).plus(aggregatedTipAmount)
-
-          const grossThisPayment = amount.plus(tipAmount)
-          const newTotalPaid = paidSoFar.plus(grossThisPayment)
-          if (newTotalPaid.greaterThan(anchorOrderTotal)) {
-            throw new BadRequestError(`El pago excede el saldo pendiente. Pendiente: ${anchorOrderTotal.minus(paidSoFar).toFixed(2)}`)
+          if (saldoCanonico.paidAmount.greaterThan(anchorOrderTotal)) {
+            throw new BadRequestError(`El pago excede el saldo pendiente. Pendiente: ${saldoAntes.remainingBalance.toFixed(2)}`)
           }
 
           // Customer metrics + loyalty are only queued on FULL SETTLEMENT, matching
@@ -333,7 +317,7 @@ export async function createManualPayment(
           // inflate totalVisits (4 partials of a $100 order = 4 visits instead of 1)
           // and disconnect from TPV semantics. Both metrics and loyalty fire ONCE
           // per order, with the FINAL order total — not per-payment amounts.
-          if (newTotalPaid.equals(anchorOrderTotal)) {
+          if (saldoCanonico.isFullyPaid) {
             // Final order total drives BOTH loyalty (when there's a customer to
             // earn) and metrics (for every customer on the order, regardless of
             // primary). Set unconditionally on full settlement so metrics never
@@ -425,7 +409,6 @@ export async function createManualPayment(
           })
           anchorOrderId = shadow.id
           anchorOrderTotal = shadowTotal
-          paidSoFar = new Prisma.Decimal(0)
 
           // If a customer was attached, also create the OrderCustomer link as
           // primary so loyalty / per-customer reports surface this entry. Queue
@@ -536,16 +519,17 @@ export async function createManualPayment(
           // and recomputes Order.total = subtotal + tax - discount + cumulative tips.
           // Without this, reports that join Order.total vs Payment.netAmount see
           // different sums (e.g. order.total=100, payment.netAmount=110, paidAmount=100).
-          const grossThisPayment = amount.plus(tipAmount)
-          const newTotalPaid = paidSoFar.plus(grossThisPayment)
-          const fullyPaid = newTotalPaid.greaterThanOrEqualTo(anchorOrderTotal)
+          // T18f: el saldo canónico calculado arriba (Modo 1; la sombra no entra a esta rama).
+          const saldo = saldoCanonico!
+          const newTotalPaid = saldo.paidAmount
+          const fullyPaid = saldo.isFullyPaid
 
           await tx.order.update({
             where: { id: anchorOrderId },
             data: {
               paymentStatus: fullyPaid ? 'PAID' : 'PARTIAL',
               paidAmount: newTotalPaid,
-              remainingBalance: Prisma.Decimal.max(new Prisma.Decimal(0), anchorOrderTotal.minus(newTotalPaid)),
+              remainingBalance: saldo.remainingBalance,
               tipAmount: aggregatedTipAmount,
               total: anchorOrderTotal,
               // Flip status to COMPLETED only when the order is fully settled —

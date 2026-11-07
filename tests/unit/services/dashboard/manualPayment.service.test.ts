@@ -257,6 +257,75 @@ describe('manualPayment.service', () => {
         }),
       )
     })
+    // 🔴 T18f (Codex fase 2 r3 #2): el pago manual guarda lo pagado y el saldo con `computeOrderBalance`; un REFUND no reabre saldo.
+    const cobrarManual = async (payments: any[], amount: string) => {
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(185),
+        taxAmount: new Prisma.Decimal(0),
+        discountAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(185),
+        paymentStatus: 'PARTIAL',
+        payments,
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
+        cb({
+          $queryRaw: filaDeOrdenBloqueada(),
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+          shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+          orderCustomer: { create: jest.fn() },
+          venueTransaction: { create: jest.fn() },
+          paymentAllocation: { create: jest.fn() },
+        }),
+      )
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount,
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+      return orderUpdate.mock.calls[0][0].data
+    }
+    const D = (n: number | string) => new Prisma.Decimal(n)
+
+    it('T18f (caso de Codex): cuenta $185, abono $100, reembolso −$40 y pago manual $85 ⇒ pagado 185 y falta 0 (el reembolso no reabre saldo)', async () => {
+      const data = await cobrarManual(
+        [
+          { amount: D(100), tipAmount: D(0), status: 'COMPLETED', type: 'REGULAR' },
+          { amount: D(-40), tipAmount: D(0), status: 'COMPLETED', type: 'REFUND' },
+        ],
+        '85',
+      )
+      expect(Number(data.paidAmount)).toBe(185)
+      expect(Number(data.remainingBalance)).toBe(0)
+      expect(data.paymentStatus).toBe('PAID')
+    })
+
+    it('T18f: cuenta común sin folio ni reembolsos: pago manual parcial $40 de $185 ⇒ pagado 40, falta 145, PARTIAL', async () => {
+      const data = await cobrarManual([], '40')
+      expect(Number(data.paidAmount)).toBe(40)
+      expect(Number(data.remainingBalance)).toBe(145)
+      expect(data.paymentStatus).toBe('PARTIAL')
+    })
+
+    it('T18f: el tope «excede el saldo» usa el saldo canónico: con $100 cobrado y un −$40 de reembolso quedan $85, no $125', async () => {
+      await expect(
+        cobrarManual(
+          [
+            { amount: D(100), tipAmount: D(0), status: 'COMPLETED', type: 'REGULAR' },
+            { amount: D(-40), tipAmount: D(0), status: 'COMPLETED', type: 'REFUND' },
+          ],
+          '100',
+        ),
+      ).rejects.toThrow(BadRequestError)
+    })
+
     // 🔴 MONEY (Codex B2c r1, barrido F1): desde B2/B2c la cabecera `discountAmount` es la Σ de las filas SIN tope y puede
     // pasar el subtotal (cortesía encima de un fijo de cuenta). El cobro topa la mercancía en 0; con la cabecera nominal este
     // camino restaba de más y se comía el IVA que va aparte: 150 + 16 − 160 = 6 ⇒ un pago de $6 SALDABA una cuenta que debe $16.

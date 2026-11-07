@@ -349,7 +349,7 @@ export type FolioSection = 'toPay' | 'toDeliver'
 
 /**
  * Tienda híbrida (T12): la lista de la caja (TPV, POS y panel). «Por pagar» = folios sin saldar (`foliosPorPagarWhere`, R42) y «Por
- * entregar» = folios pagados que nadie ha entregado (`ACCEPTED`), del más viejo al más nuevo. Cada sección es una página de
+ * entregar» = folios pagados que nadie ha entregado (`ACCEPTED` o `READY`, cada uno con su `status`), del más viejo al más nuevo. Cada sección es una página de
  * `INBOX_PAGE_SIZE` leída con `tope + 1` y sigue por `(createdAt, id)` con el cursor de la Bandeja; `counts` son exactos.
  * Sin `section`: la primera página de las dos. Con `section` y `cursor`: la siguiente de ésa y la otra vacía.
  * R43: antes de leer corre lo mismo que la Bandeja, así lo que la caja acaba de cobrar ya está en «Por entregar».
@@ -376,11 +376,18 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   const now = reloj()
 
   const porPagar = foliosPorPagarWhere(p.venueId)
-  const porEntregar = { venueId: p.venueId, requiresAcceptance: false, status: OnlineOrderStatus.ACCEPTED }
-  const page = (where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
+  // T18i (R98): «Por entregar» = pagado y aún no entregado: ACCEPTED y también READY (tras «Listo» el folio sigue ahí hasta «Entregado»;
+  // el cierre del día ya los trata igual). El cursor es (createdAt, id): no depende del status, así un folio que pasa de ACCEPTED a
+  // READY entre páginas no se salta ni se repite.
+  const porEntregar = {
+    venueId: p.venueId,
+    requiresAcceptance: false,
+    status: { in: [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY] },
+  }
+  const page = (db: Prisma.TransactionClient, where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
     p.section && p.section !== mine
       ? Promise.resolve([] as Awaited<ReturnType<typeof prisma.onlineOrder.findMany<{ select: typeof INBOX_SELECT }>>>)
-      : prisma.onlineOrder.findMany({
+      : db.onlineOrder.findMany({
           where: {
             ...where,
             ...(after && p.section === mine
@@ -391,11 +398,17 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
           take: INBOX_PAGE_SIZE + 1,
           select: INBOX_SELECT,
         })
-  const [payRows, deliverRows, toPayCount, toDeliverCount, settings] = await Promise.all([
-    page(porPagar, 'toPay'),
-    page(porEntregar, 'toDeliver'),
-    prisma.onlineOrder.count({ where: porPagar }),
-    prisma.onlineOrder.count({ where: porEntregar }),
+  // T18g (Codex fase 2 r4): las páginas y los conteos salen de UNA misma foto (sólo lectura, RepeatableRead): un folio que nace entre
+  // lecturas ya no puede salir en la lista con los conteos en 0. Las mismas 4 consultas acotadas de antes; los ajustes van aparte.
+  const [[payRows, deliverRows, toPayCount, toDeliverCount], settings] = await Promise.all([
+    prisma.$transaction(
+      async tx => {
+        const pay = await page(tx, porPagar, 'toPay')
+        const deliver = await page(tx, porEntregar, 'toDeliver')
+        return [pay, deliver, await tx.onlineOrder.count({ where: porPagar }), await tx.onlineOrder.count({ where: porEntregar })] as const
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 10_000, maxWait: 5_000 },
+    ),
     getSettings(p.venueId),
   ])
 
@@ -404,7 +417,8 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   const enabled = settings.enabled
   const requiresAcceptance = settings.requiresAcceptance
   // El mosaico sigue mientras haya folios vivos aunque se cambie a «Mi equipo» o se apague la tienda: se cobran o vencen.
-  const showTile = (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0
+  // Defensivo: una lista con folios siempre enciende el mosaico, aunque los conteos digan otra cosa.
+  const showTile = (enabled && !requiresAcceptance) || toPayCount + toDeliverCount > 0 || toPay.length + toDeliver.length > 0
   return {
     serverTime: now.toISOString(),
     enabled,

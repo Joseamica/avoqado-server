@@ -75,6 +75,7 @@ jest.mock('@/services/online-ordering/transitions.service', () => ({
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({
   getSettings: (...a: unknown[]) => mockGetSettings(...(a as [])),
+  getSettingsWithSaved: async (...a: unknown[]) => ({ settings: await mockGetSettings(...(a as [])), saved: true }),
   updateSettings: (...a: unknown[]) => mockUpdateSettings(...(a as [])),
   pauseOnlineOrdering: (...a: unknown[]) => mockPause(...(a as [])),
   storeRequirements: (...a: unknown[]) => mockRequirements(...(a as [])),
