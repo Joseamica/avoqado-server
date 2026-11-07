@@ -39,6 +39,11 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { crearNegocioDePrueba, esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
+/** S5b: `withDeadlockRetry` arma su propio objeto de opciones, así que el presupuesto del cobro se reconoce por valor, no por identidad. */
+const esPresupuestoDelCobro = (o: unknown) =>
+  (o as { timeout?: number; maxWait?: number } | undefined)?.timeout === ORDER_LOCK_WAIT_BUDGET.timeout &&
+  (o as { maxWait?: number } | undefined)?.maxWait === ORDER_LOCK_WAIT_BUDGET.maxWait
+
 jest.setTimeout(90000)
 
 const D = (v: number) => new Prisma.Decimal(v)
@@ -279,7 +284,7 @@ describe('pay-new-order · Postgres real', () => {
     const medidas: Array<{ ordenesCreadas: number; escriturasDelPremio: number }> = []
     const transaccionReal = prisma.$transaction.bind(prisma) as (fn: unknown, opts?: unknown) => Promise<unknown>
     const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, opts?: unknown) => {
-      if (typeof fn !== 'function' || opts !== ORDER_LOCK_WAIT_BUDGET) return transaccionReal(fn, opts)
+      if (typeof fn !== 'function' || !esPresupuestoDelCobro(opts)) return transaccionReal(fn, opts)
       return transaccionReal(async (tx: Prisma.TransactionClient) => {
         const m = await loQueEscribe(tx, () => (fn as (t: Prisma.TransactionClient) => Promise<unknown>)(tx))
         medidas.push({ ordenesCreadas: m.ordenesCreadas, escriturasDelPremio: m.escriturasDelPremio })

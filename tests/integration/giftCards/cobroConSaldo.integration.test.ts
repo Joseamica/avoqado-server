@@ -39,6 +39,11 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
 import type { TxConReintento } from '@/utils/serializableRetry'
 
+/** S5b: `withDeadlockRetry` arma su propio objeto de opciones, así que el presupuesto del cobro se reconoce por valor, no por identidad. */
+const esPresupuestoDelCobro = (o: unknown) =>
+  (o as { timeout?: number; maxWait?: number } | undefined)?.timeout === ORDER_LOCK_WAIT_BUDGET.timeout &&
+  (o as { maxWait?: number } | undefined)?.maxWait === ORDER_LOCK_WAIT_BUDGET.maxWait
+
 jest.setTimeout(90000)
 
 const SUF = `saldo-${process.pid}-${Date.now()}`
@@ -860,9 +865,10 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
     const aPuedeSeguir = new Promise<void>(resolve => (dejarSeguirA = resolve))
     const transaccionReal = prisma.$transaction.bind(prisma) as (fn: unknown, opts?: unknown) => Promise<unknown>
     let cobros = 0
+    let contando = false // la retención T también usa el presupuesto del cobro: sólo cuentan A y B
     const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, opts?: unknown) => {
       const p = transaccionReal(fn, opts)
-      if (opts !== ORDER_LOCK_WAIT_BUDGET || cobros++ > 0) return p
+      if (!contando || !esPresupuestoDelCobro(opts) || cobros++ > 0) return p
       return p.catch(async (e: unknown) => {
         await aPuedeSeguir
         throw e
@@ -872,6 +878,7 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
     const enVuelo: Promise<unknown>[] = [T.transaccion]
     try {
       const pidT = await T.pid
+      contando = true
       const A = payGiftCardBalanceOnOrder(venueId, orderId, pedido)
       enVuelo.push(A.catch(() => undefined))
       const pidA = await esperarAQueAlguienEspereA(pidT)
