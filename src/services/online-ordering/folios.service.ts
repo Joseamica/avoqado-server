@@ -349,7 +349,7 @@ export type FolioSection = 'toPay' | 'toDeliver'
 
 /**
  * Tienda híbrida (T12): la lista de la caja (TPV, POS y panel). «Por pagar» = folios sin saldar (`foliosPorPagarWhere`, R42) y «Por
- * entregar» = folios pagados que nadie ha entregado (`ACCEPTED`), del más viejo al más nuevo. Cada sección es una página de
+ * entregar» = folios pagados que nadie ha entregado (`ACCEPTED` o `READY`, cada uno con su `status`), del más viejo al más nuevo. Cada sección es una página de
  * `INBOX_PAGE_SIZE` leída con `tope + 1` y sigue por `(createdAt, id)` con el cursor de la Bandeja; `counts` son exactos.
  * Sin `section`: la primera página de las dos. Con `section` y `cursor`: la siguiente de ésa y la otra vacía.
  * R43: antes de leer corre lo mismo que la Bandeja, así lo que la caja acaba de cobrar ya está en «Por entregar».
@@ -376,7 +376,14 @@ export async function listFolios(p: { venueId: string; section?: FolioSection; c
   const now = reloj()
 
   const porPagar = foliosPorPagarWhere(p.venueId)
-  const porEntregar = { venueId: p.venueId, requiresAcceptance: false, status: OnlineOrderStatus.ACCEPTED }
+  // T18i (R98): «Por entregar» = pagado y aún no entregado: ACCEPTED y también READY (tras «Listo» el folio sigue ahí hasta «Entregado»;
+  // el cierre del día ya los trata igual). El cursor es (createdAt, id): no depende del status, así un folio que pasa de ACCEPTED a
+  // READY entre páginas no se salta ni se repite.
+  const porEntregar = {
+    venueId: p.venueId,
+    requiresAcceptance: false,
+    status: { in: [OnlineOrderStatus.ACCEPTED, OnlineOrderStatus.READY] },
+  }
   const page = (db: Prisma.TransactionClient, where: Prisma.OnlineOrderWhereInput, mine: FolioSection) =>
     p.section && p.section !== mine
       ? Promise.resolve([] as Awaited<ReturnType<typeof prisma.onlineOrder.findMany<{ select: typeof INBOX_SELECT }>>>)
