@@ -573,6 +573,8 @@ const prismaMock: any = {
   emailSuppression: createMockModel(),
   crmWhatsappMessage: createMockModel(),
   crmErased: createMockModel(),
+  // C2 Tarea 5: el RFC de la ficha sale del emisor de facturas.
+  fiscalEmisor: createMockModel(),
   // La fila del aviso del cupo de Resend (`services/email/resendQuota.ts`): el CAS que avisa una vez por día.
   emailQuotaAlert: createMockModel(),
   // Add $connect and $disconnect for connection management

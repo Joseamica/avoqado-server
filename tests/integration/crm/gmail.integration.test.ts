@@ -224,7 +224,8 @@ describe('🔴 mandarCorreo reserva mientras completarConexion cambia de A a B',
 
     const [resultadoEnvio, { redirect }] = await Promise.all([envio, conexion])
     expect(redirect).toBe('https://superadmin.test/crm/gmail?conectado=1')
-    expect(resultadoEnvio).toEqual({ value: { status: 'DESCONOCIDO' } })
+    // C2 (0B): la respuesta dice a qué dirección fue ese intento.
+    expect(resultadoEnvio).toEqual({ value: { status: 'DESCONOCIDO', para: contact.email } })
 
     const mensaje = await prisma.crmEmailMessage.findUniqueOrThrow({ where: { clientRequestId } })
     const conA = mensaje.fromEmail === A

@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { createAccountSchema } from '@/schemas/crm.schema'
+import { createAccountSchema, removeContactSchema, updateAccountSchema, updateContactSchema } from '@/schemas/crm.schema'
 
 /**
  * CRM propio, tarea 1: la forma del esquema que usan las tareas siguientes, leída del DMMF (no necesita base).
@@ -223,5 +223,96 @@ describe('POST /crm/accounts/:id/alta: «¿Por qué se quedó?» (C1, tarea 8)',
     expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null, perdido: false } }).success).toBe(true)
     expect(parse({ motivo: null, perdido: true, vio: { motivo: 'TERMINO', texto: null, perdido: false } }).success).toBe(false)
     expect(parse({ motivo: null, perdido: true, vio: { motivo: null, texto: null } }).success).toBe(false)
+  })
+})
+
+describe('C2 · updateAccountSchema (PATCH /crm/accounts/:id)', () => {
+  const ID = 'caccounta0000000000000001'
+  const parse = (body: unknown) => updateAccountSchema.safeParse({ params: { id: ID }, body })
+  const mensajes = (body: unknown) => {
+    const r = parse(body)
+    return r.success ? [] : r.error.issues.map(issue => issue.message)
+  }
+
+  it('cambios.source → 400 «Ese dato no se edita aquí»', () => {
+    expect(mensajes({ cambios: { source: 'LANDING' }, vio: { source: 'MANUAL' } })).toContain('Ese dato no se edita aquí')
+  })
+  it('cambios vacío → «Di qué cambias»', () => {
+    expect(mensajes({ cambios: {}, vio: {} })).toContain('Di qué cambias')
+  })
+  it("name '' → 400", () => {
+    expect(parse({ cambios: { name: '' }, vio: { name: 'Café' } }).success).toBe(false)
+  })
+  it('sucursales -1 → «Las sucursales no pueden ser negativas»', () => {
+    expect(mensajes({ cambios: { sucursales: -1 }, vio: { sucursales: 2 } })).toContain('Las sucursales no pueden ser negativas')
+  })
+  it('modulos con 21 → 400', () => {
+    const modulos = Array.from({ length: 21 }, (_, i) => `m${i}`)
+    expect(parse({ cambios: { modulos }, vio: { modulos: [] } }).success).toBe(false)
+  })
+  it('sin vio → 400; vio sin el campo que cambia → 400', () => {
+    expect(parse({ cambios: { giro: 'Bar' } }).success).toBe(false)
+    expect(mensajes({ cambios: { giro: 'Bar' }, vio: { sucursales: 1 } })).toContain('Falta lo que se veía antes de cambiarlo')
+  })
+  it("null borra y '' es null; vio acepta 500 caracteres", () => {
+    const r = parse({ cambios: { giro: '', referidoPor: null }, vio: { giro: 'x'.repeat(500), referidoPor: 'Luis' } })
+    expect(r.success).toBe(true)
+    expect(r.success && r.data.body.cambios).toEqual({ giro: null, referidoPor: null })
+  })
+})
+
+describe('C2 · updateContactSchema y removeContactSchema', () => {
+  const params = { id: 'caccounta0000000000000001', contactId: 'ccontacta0000000000000001' }
+  const vio = { name: 'Ana', phoneE164: null, email: 'ana@cafe.mx', role: null, isPrimary: true }
+  const mensajes = (body: unknown) => {
+    const r = updateContactSchema.safeParse({ params, body })
+    return r.success ? [] : r.error.issues.map(issue => issue.message)
+  }
+
+  it('cambios vacío sin casilla → «Di qué cambias»; con la casilla sola, vale', () => {
+    expect(mensajes({ cambios: {}, vio })).toContain('Di qué cambias')
+    expect(mensajes({ cambios: {}, vio, aceptaCorreos: true })).toEqual([])
+  })
+  it('un dato que no es de la persona → «Ese dato no se edita aquí»; vio incompleto → 400', () => {
+    expect(mensajes({ cambios: { accountId: 'x' }, vio })).toContain('Ese dato no se edita aquí')
+    expect(mensajes({ cambios: { role: 'X' }, vio: { name: 'Ana' } }).length).toBeGreaterThan(0)
+  })
+  it('correo en minúsculas, teléfono inválido → 400, "" borra', () => {
+    const r = updateContactSchema.safeParse({ params, body: { cambios: { email: ' Ana@Cafe.MX ', role: '' }, vio } })
+    expect(r.success && r.data.body.cambios).toEqual({ email: 'ana@cafe.mx', role: null })
+    expect(mensajes({ cambios: { phone: '12' }, vio })).toContain('El teléfono no es válido')
+  })
+  it('quitar pide la persona que se veía', () => {
+    expect(removeContactSchema.safeParse({ params, body: { vio } }).success).toBe(true)
+    expect(removeContactSchema.safeParse({ params, body: {} }).success).toBe(false)
+  })
+})
+
+describe('Codex código r2: «vio» acepta lo que la base pueda tener; los valores nuevos siguen con su tope', () => {
+  const params = { id: 'caccounta0000000000000001', contactId: 'ccontacta0000000000000001' }
+  // HubSpot junta nombre y apellido de hasta 500 cada uno: una persona puede tener un nombre de 1,001 caracteres.
+  const largo = 'N'.repeat(601)
+  const vio = { name: largo, phoneE164: '+525512345678', email: `${'a'.repeat(600)}@cafe.mx`, role: 'R'.repeat(700), isPrimary: true }
+
+  it('🔴 una persona con nombre de 601 caracteres se puede corregir a uno corto y se puede quitar', () => {
+    expect(updateContactSchema.safeParse({ params, body: { cambios: { name: 'Ana' }, vio } }).success).toBe(true)
+    expect(updateContactSchema.safeParse({ params, body: { cambios: {}, vio, aceptaCorreos: true } }).success).toBe(true)
+    expect(removeContactSchema.safeParse({ params, body: { vio } }).success).toBe(true)
+  })
+
+  it('🔴 los datos del negocio: vio largo pasa; el valor nuevo sigue con su tope', () => {
+    const body = (cambios: Record<string, unknown>) => ({
+      params: { id: params.id },
+      body: {
+        cambios,
+        vio: { name: 'X'.repeat(1001), giro: 'G'.repeat(900), referidoPor: 'R'.repeat(900), modulos: Array(150).fill('m') },
+      },
+    })
+    expect(updateAccountSchema.safeParse(body({ name: 'Café' })).success).toBe(true)
+    expect(updateAccountSchema.safeParse(body({ name: 'X'.repeat(201) })).success).toBe(false)
+  })
+
+  it('el nombre nuevo de la persona sigue con su tope de 200', () => {
+    expect(updateContactSchema.safeParse({ params, body: { cambios: { name: 'X'.repeat(201) }, vio } }).success).toBe(false)
   })
 })

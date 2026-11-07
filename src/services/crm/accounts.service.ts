@@ -19,6 +19,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { normalizeEmail } from '../marketing/emailSuppression.service'
 import { getCrmAccess, scopeWhere, type CrmAccess } from './access.service'
 import { escribirConsentimientoDelEquipoTx } from './consent.service'
+import { mismoTexto } from './loQueSeVio'
 import { movePendingActivitiesTx, type OwnerChangeReason } from './ownership'
 import { addEvent } from './timeline.service'
 
@@ -569,12 +570,19 @@ const ACTIVITIES_CAP = 50
 // account's history outgrows it.
 const TIMELINE_CAP = 100
 const EMAIL_KINDS = new Set(['EMAIL_SENT', 'EMAIL_RECEIVED'])
+/**
+ * C2: the people events, named LIVE when painted (they never store a person's data). Only these: an `EMAIL_SENT` also
+ * carries `contactId`, and an email of yesterday must never be painted with whoever that person is today (pasada §a19).
+ */
+const CONTACT_KINDS = new Set(['CONTACT_ADDED', 'CONTACT_EDITED', 'CONTACT_REMOVED'])
 
-/** The `messageId` an email event carries, as a one-or-none list. */
-function messageIdOf(data: Prisma.JsonValue): string[] {
-  const messageId = data && typeof data === 'object' && !Array.isArray(data) ? data.messageId : undefined
-  return typeof messageId === 'string' ? [messageId] : []
+/** A string field of an event's `data`, as a one-or-none list. */
+function idOf(data: Prisma.JsonValue, field: 'messageId' | 'contactId'): string[] {
+  const value = data && typeof data === 'object' && !Array.isArray(data) ? data[field] : undefined
+  return typeof value === 'string' ? [value] : []
 }
+/** The `messageId` an email event carries, as a one-or-none list. */
+const messageIdOf = (data: Prisma.JsonValue) => idOf(data, 'messageId')
 
 /** Names of these people in one query. */
 export async function staffNames(ids: Array<string | null>): Promise<Map<string, string>> {
@@ -599,7 +607,7 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
   // Each contact's consent comes from `CrmEmailConsent`, by the person's email (Codex plan r2 H4): ONE query for this
   // account's contacts. `CrmAccount.consent*` is still returned as it was (no field leaves an API response).
   const contactEmails = [...new Set(account.contacts.flatMap(contact => (contact.email?.trim() ? [normalizeEmail(contact.email)] : [])))]
-  const [activities, activitiesTotal, events, eventsTotal, consents] = await Promise.all([
+  const [activities, activitiesTotal, events, eventsTotal, consents, contactsTotal] = await Promise.all([
     prisma.crmActivity.findMany({
       where: { accountId: id, doneAt: null },
       select: { id: true, type: true, title: true, dueAt: true, assigneeStaffId: true },
@@ -621,20 +629,32 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
           take: contactEmails.length,
         })
       : [],
+    // C2: the ficha brings the first 50 people; the rest come from `listContacts`, so it says how many there are.
+    prisma.crmContact.count({ where: { accountId: id } }),
   ])
   // The page's email events carry only ids (Codex plan r1 #11): their subject, snippet and status come from
   // `CrmEmailMessage`, in ONE query bounded by the page.
   const emailIds = [...new Set(events.flatMap(event => (EMAIL_KINDS.has(event.kind) ? messageIdOf(event.data) : [])))]
-  const [names, emails] = await Promise.all([
+  const contactIds = [...new Set(events.flatMap(event => (CONTACT_KINDS.has(event.kind) ? idOf(event.data, 'contactId') : [])))]
+  const [names, emails, people] = await Promise.all([
     staffNames([...activities.map(activity => activity.assigneeStaffId), ...events.map(event => event.actorStaffId)]),
     emailIds.length
       ? prisma.crmEmailMessage.findMany({
           where: { id: { in: emailIds }, accountId: id },
-          select: { id: true, subject: true, snippet: true, direction: true, status: true, error: true, fromEmail: true },
+          select: { id: true, subject: true, snippet: true, direction: true, status: true, error: true, fromEmail: true, toEmail: true },
           take: emailIds.length,
         })
       : [],
+    // ONE query for the page's people, only of THIS account: a contactId of another one is never named.
+    contactIds.length
+      ? prisma.crmContact.findMany({
+          where: { id: { in: contactIds }, accountId: id },
+          select: { id: true, name: true },
+          take: contactIds.length,
+        })
+      : [],
   ])
+  const personById = new Map(people.map(contact => [contact.id, contact]))
   const emailById = new Map(emails.map(({ id: messageId, ...email }) => [messageId, email]))
   const consentByEmail = new Map(consents.map(consent => [consent.email, consent]))
   const person = (staffId: string | null) => (staffId ? { id: staffId, name: names.get(staffId) ?? null } : null)
@@ -658,6 +678,7 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
       source: account.consentSource,
     },
     qualificationAvailable: account.qualificationAvailable,
+    contactsTotal,
     contacts: account.contacts.map(contact => {
       const consent = contact.email?.trim() ? consentByEmail.get(normalizeEmail(contact.email)) : undefined
       return { ...contact, consentAt: consent?.consentAt ?? null, noticeVersion: consent?.noticeVersion ?? null }
@@ -670,10 +691,59 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
       events: events.map(({ actorStaffId, ...event }) => {
         const [messageId] = EMAIL_KINDS.has(event.kind) ? messageIdOf(event.data) : []
         const email = messageId ? emailById.get(messageId) : undefined
-        return { ...event, actor: person(actorStaffId), ...(email ? { email } : {}) }
+        // null = that person is no longer in this business.
+        const contacto = CONTACT_KINDS.has(event.kind) ? { contacto: personById.get(idOf(event.data, 'contactId')[0] ?? '') ?? null } : {}
+        return { ...event, actor: person(actorStaffId), ...(email ? { email } : {}), ...contacto }
       }),
       total: eventsTotal,
     },
+  }
+}
+
+const CONTACTS_PAGE = 50
+// Codex código r4: the SUPERADMIN asks one growing page (50, 100, 150…) instead of a cursor that can vanish; capped here.
+const CONTACTS_CAP = 500
+
+/**
+ * The people of one account, 50 at a time (C2, Codex plan r1 H5): the ficha brings the first 50 and these the rest, so no
+ * person is out of reach. Same order and fields as the ficha's, with each email's consent read in ONE query; page capped at
+ * 500 by the server, with the real total (the SUPERADMIN raises `limit` 50, 100, 150… with no cursor). 404 when the caller cannot see the account.
+ */
+export async function listContacts(access: CrmAccess, accountId: string, opts: { cursor?: string; limit?: number } = {}) {
+  const visible = await prisma.crmAccount.findFirst({
+    where: { AND: [{ id: accountId }, scopeWhere(access, 'ver')] },
+    select: { id: true },
+  })
+  if (!visible) throw accountNotFound()
+  const take = Math.min(Math.max(opts.limit ?? CONTACTS_PAGE, 1), CONTACTS_CAP)
+  const [found, total] = await Promise.all([
+    prisma.crmContact.findMany({
+      where: { accountId },
+      select: DETAIL_SELECT.contacts.select,
+      // The ficha's order (`DETAIL_SELECT.contacts`), written out so the pagination guard sees its unique tiebreak.
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      take: take + 1,
+      ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+    }),
+    prisma.crmContact.count({ where: { accountId } }),
+  ])
+  const page = found.slice(0, take)
+  const emails = [...new Set(page.flatMap(contact => (contact.email?.trim() ? [normalizeEmail(contact.email)] : [])))]
+  const consents = emails.length
+    ? await prisma.crmEmailConsent.findMany({
+        where: { email: { in: emails } },
+        select: { email: true, consentAt: true, noticeVersion: true },
+        take: emails.length,
+      })
+    : []
+  const consentByEmail = new Map(consents.map(consent => [consent.email, consent]))
+  return {
+    rows: page.map(contact => {
+      const consent = contact.email?.trim() ? consentByEmail.get(normalizeEmail(contact.email)) : undefined
+      return { ...contact, consentAt: consent?.consentAt ?? null, noticeVersion: consent?.noticeVersion ?? null }
+    }),
+    nextCursor: found.length > take ? page[page.length - 1].id : null,
+    total,
   }
 }
 
@@ -681,9 +751,14 @@ export async function getAccount(access: CrmAccess, id: string, now = new Date()
 
 /**
  * Accounts that already have a person with this phone or email (spec §5.2: they warn, they are not unique). A «propios»
- * seller learns WHOSE another seller's account is, so they can ask — never which one or its name.
+ * seller learns WHOSE another seller's account is, so they can ask — never which one or its name. `exceptAccountId` (C2):
+ * the account being edited is not «another business» (its own people are checked apart, `CRM_PERSONA_YA_ESTA`).
  */
-export async function findDuplicates(access: CrmAccess, contact: { phone?: string | null; email?: string | null }) {
+export async function findDuplicates(
+  access: CrmAccess,
+  contact: { phone?: string | null; email?: string | null },
+  opts: { exceptAccountId?: string; db?: Prisma.TransactionClient } = {},
+) {
   const phoneE164 = contact.phone ? canonicalPhoneE164(contact.phone) : null
   const email = contact.email?.trim().toLowerCase() || null
   const by: Prisma.CrmContactWhereInput[] = []
@@ -691,8 +766,9 @@ export async function findDuplicates(access: CrmAccess, contact: { phone?: strin
   if (email) by.push({ email: { equals: email, mode: 'insensitive' } })
   if (!by.length) return []
 
-  const accounts = await prisma.crmAccount.findMany({
-    where: { contacts: { some: { OR: by } } },
+  // Inside a transaction, ITS client (Codex código r1 #3): the global one needs a second connection of the pool.
+  const accounts = await (opts.db ?? prisma).crmAccount.findMany({
+    where: { contacts: { some: { OR: by } }, ...(opts.exceptAccountId ? { id: { not: opts.exceptAccountId } } : {}) },
     select: { id: true, name: true, ownerStaffId: true, owner: { select: { firstName: true, lastName: true } } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: DUPLICATES_CAP,
@@ -1102,11 +1178,35 @@ export async function reactivate(access: CrmAccess, id: string) {
   })
 }
 
-export async function addNote(access: CrmAccess, id: string, input: { text: string }) {
+/**
+ * A note in the timeline. With `clientRequestId` (C2, `POST …/notes/v2`; like Stripe): under the row's lock, the same key
+ * with the same text is the note already written — answered without writing or touching —, and with another text a 409
+ * `CRM_LLAVE_CON_OTRO_CONTENIDO`. Its `sourceKey` carries only the account and the key. Without it (`/notes` and
+ * `crm_add_note`), as before.
+ */
+export async function addNote(access: CrmAccess, id: string, input: { text: string; clientRequestId?: string }) {
   const now = new Date()
   return prisma.$transaction(async tx => {
+    const sourceKey = input.clientRequestId ? `nota:${id}:${input.clientRequestId}` : undefined
+    if (sourceKey) {
+      await lockEditableTx(tx, access, id)
+      const previa = await tx.crmTimelineEvent.findUnique({ where: { sourceKey }, select: { data: true } })
+      if (previa) {
+        const texto = (previa.data as { text?: string } | null)?.text
+        if (!mismoTexto(texto, input.text)) {
+          throw new ConflictError('Ese intento guardó otra nota: revisa la Historia', 'CRM_LLAVE_CON_OTRO_CONTENIDO')
+        }
+        return rowTx(tx, id, now)
+      }
+    }
     await touchEditableTx(tx, access, id, now)
-    await addEvent(tx, { accountId: id, kind: 'NOTE', actorStaffId: access.staffId, data: { text: input.text } })
+    await addEvent(tx, {
+      accountId: id,
+      kind: 'NOTE',
+      actorStaffId: access.staffId,
+      data: { text: input.text },
+      ...(sourceKey ? { sourceKey } : {}),
+    })
     return rowTx(tx, id, now)
   })
 }

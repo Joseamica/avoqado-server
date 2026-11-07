@@ -107,9 +107,11 @@ function prospectos(segmento: Extract<Segmento, { tipo: 'PROSPECTOS' }>): Prisma
     LEFT JOIN "CrmStage" cs ON cs."id" = ca."stageId"
     LEFT JOIN "Staff" ow ON ow."id" = ca."ownerStaffId"
     LEFT JOIN LATERAL (
+      -- Sólo un contacto con ESE correo (C2, Codex plan r2 H3): si se quitó a la persona o cambió su correo, sin nombre
+      -- (el correo saluda con el nombre del negocio), nunca el de otra persona del negocio.
       SELECT c."name" FROM "CrmContact" c
-      WHERE c."accountId" = ca."id"
-      ORDER BY COALESCE(lower(btrim(c."email")) = lower(btrim(ec."email")), false) DESC, c."isPrimary" DESC, c."createdAt", c."id"
+      WHERE c."accountId" = ca."id" AND lower(btrim(c."email")) = lower(btrim(ec."email"))
+      ORDER BY c."isPrimary" DESC, c."createdAt", c."id"
       LIMIT 1
     ) ct ON true
     WHERE ${cuenta}`

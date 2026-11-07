@@ -165,7 +165,10 @@ export async function gmailCallback(req: Request, res: Response): Promise<void> 
   res.redirect(302, redirect)
 }
 
-/** POST /api/v1/crm/accounts/:id/emails — «Mandar correo». `ENVIADO`, or `DESCONOCIDO` when we cannot know yet. */
+/**
+ * POST /api/v1/crm/accounts/:id/emails and …/emails/v2 — «Mandar correo». `ENVIADO`, or `DESCONOCIDO` when we cannot know
+ * yet, with `para` (the address of that attempt). Only v2 carries `paraCorreo` (its schema requires it; the old one strips it).
+ */
 export async function sendAccountEmail(req: Request, res: Response): Promise<void> {
   res.json({ data: await mandarCorreo(req.crmAccess!, { ...req.body, accountId: req.params.id }) })
 }

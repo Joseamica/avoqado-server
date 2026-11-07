@@ -58,11 +58,17 @@ export interface MandarCorreoInput {
   blocks: BloqueCampana[]
   /** El clic: lo genera el diálogo al abrirse, así un doble clic manda una vez. */
   clientRequestId: string
+  /**
+   * La dirección que la pantalla enseñó (C2, Codex plan r1 H4): sólo la manda la ruta nueva `…/emails/v2`. Si ya no es la de
+   * la persona, 409 antes de reservar; si el clic ya existía con otra, 409 (un intento nunca se atribuye a otra dirección).
+   */
+  paraCorreo?: string
 }
 
-type Respuesta = { status: 'ENVIADO' | 'DESCONOCIDO' }
+/** `para` = la dirección de ESE intento (C2, Codex plan r2 H2): un reintento nunca se lee como enviado a otra. */
+type Respuesta = { status: 'ENVIADO' | 'DESCONOCIDO'; para: string }
 
-const PREVIO_SELECT = { status: true, staffId: true, accountId: true, error: true } satisfies Prisma.CrmEmailMessageSelect
+const PREVIO_SELECT = { status: true, staffId: true, accountId: true, error: true, toEmail: true } satisfies Prisma.CrmEmailMessageSelect
 type Previo = Prisma.CrmEmailMessageGetPayload<{ select: typeof PREVIO_SELECT }>
 
 interface FilaConexion {
@@ -75,15 +81,24 @@ interface FilaConexion {
 const noSeManda = (motivo: string) => new ValidationError(`No se manda: ${motivo}`, 'CRM_CORREO_BLOQUEADO', { motivo })
 const reconecta = () => new ConflictError(RECONECTA, 'CRM_GMAIL_RECONECTA')
 
-/** Lo que ya pasó con ese clic. Nunca devuelve lo de otra persona ni de otra cuenta. */
-function respuestaDe(previo: Previo, actor: CrmAccess, accountId: string): Respuesta {
+/**
+ * Lo que ya pasó con ese clic, con la dirección a la que fue. Nunca devuelve lo de otra persona ni de otra cuenta, y nunca
+ * contesta por un intento que iba a otra dirección que la que la pantalla enseña (C2, Codex plan r2 H2).
+ */
+function respuestaDe(previo: Previo, actor: CrmAccess, accountId: string, paraCorreo?: string): Respuesta {
   if (previo.staffId !== actor.staffId || previo.accountId !== accountId) {
     throw new ConflictError('Ese envío ya existe', 'CRM_CORREO_DUPLICADO')
   }
-  if (previo.status === 'ENVIADO') return { status: 'ENVIADO' }
-  if (previo.status === 'FALLIDO') throw new ValidationError(`No salió: ${previo.error ?? 'Gmail no lo aceptó'}`, 'CRM_GMAIL_RECHAZADO')
+  const para = previo.toEmail
+  if (paraCorreo !== undefined && normalizeEmail(paraCorreo) !== para) {
+    throw new ConflictError('Ese intento fue a otra dirección: revísalo o manda uno nuevo', 'CRM_INTENTO_A_OTRO_CORREO', { para })
+  }
+  if (previo.status === 'ENVIADO') return { status: 'ENVIADO', para }
+  if (previo.status === 'FALLIDO') {
+    throw new ValidationError(`No salió: ${previo.error ?? 'Gmail no lo aceptó'}`, 'CRM_GMAIL_RECHAZADO', { para })
+  }
   // ENVIANDO (el primer clic sigue en camino) o DESCONOCIDO: no sabemos todavía, y no se manda otro.
-  return { status: 'DESCONOCIDO' }
+  return { status: 'DESCONOCIDO', para }
 }
 
 const extracto = (texto: string) => texto.replace(/\s+/g, ' ').trim().slice(0, 200)
@@ -106,19 +121,23 @@ async function cerrarIncierto(id: string, status: 'FALLIDO' | 'DESCONOCIDO', err
  * lista de prueba o rechazado por Gmail; 409 sin Gmail conectado o «Reconecta tu Gmail»; 503 la app no está configurada.
  */
 export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): Promise<Respuesta> {
-  const { accountId, contactId, subject, blocks, clientRequestId } = input
+  const { accountId, contactId, subject, blocks, clientRequestId, paraCorreo } = input
   if (!gmailConfigurado()) throw new ServiceUnavailableError(NO_CONFIGURADO, 'CRM_GMAIL_NO_CONFIGURADO')
   assertSinVariablesDesconocidas(subject, blocks)
 
   // El mismo clic otra vez: su respuesta, nunca otro correo.
   const previo = await prisma.crmEmailMessage.findUnique({ where: { clientRequestId }, select: PREVIO_SELECT })
-  if (previo) return respuestaDe(previo, actor, accountId)
+  if (previo) return respuestaDe(previo, actor, accountId, paraCorreo)
 
   // 1. La cuenta en el alcance de quien manda (si no, 404 como si no existiera) y el contacto con correo: la MISMA lectura
   // que la vista previa con datos reales.
   const { account, contact } = await cuentaYContactoEnAlcance(actor, accountId, contactId)
   const toEmail = contact?.email?.trim() ? normalizeEmail(contact.email) : null
   if (!contact || !toEmail) throw new ValidationError('Ese contacto no tiene correo', 'CRM_CONTACTO_SIN_CORREO')
+  // C2 (Codex plan r1 H4): la persona cambió de correo mientras el vendedor escribía. Nada se reserva ni sale.
+  if (paraCorreo !== undefined && normalizeEmail(paraCorreo) !== toEmail) {
+    throw new ConflictError('El correo de esta persona cambió: revisa a quién se lo mandas', 'CRM_CORREO_CAMBIO', { ahora: toEmail })
+  }
 
   const conexion = await prisma.crmGmailConnection.findUnique({ where: { staffId: actor.staffId }, select: { status: true } })
   if (!conexion) throw new ConflictError('Conecta tu Gmail en «Mi Gmail» para mandar correo', 'CRM_GMAIL_NO_CONECTADO')
@@ -183,11 +202,11 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
     // El mismo `clientRequestId` lo reservó otra persona (otro candado): su fila, nunca otro correo.
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const existente = await prisma.crmEmailMessage.findUnique({ where: { clientRequestId }, select: PREVIO_SELECT })
-      if (existente) return respuestaDe(existente, actor, accountId)
+      if (existente) return respuestaDe(existente, actor, accountId, paraCorreo)
     }
     throw error
   }
-  if ('previo' in reserva) return respuestaDe(reserva.previo, actor, accountId)
+  if ('previo' in reserva) return respuestaDe(reserva.previo, actor, accountId, paraCorreo)
   const { fila, id, rfcMessageId } = reserva
 
   // 3. El MIME (del vendedor, a la persona, con nuestro Message-ID: con él se reconoce en el hilo y en «Enviados») y el
@@ -222,11 +241,11 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
   try {
     enviado = (await gmail.users.messages.send({ userId: 'me', requestBody: { raw } }, { timeout: TIMEOUT_MS })).data
   } catch (error) {
-    return resolverFalla(error, { id, staffId: actor.staffId, version: fila.version })
+    return resolverFalla(error, { id, staffId: actor.staffId, version: fila.version, para: toEmail })
   }
   if (!enviado?.id) {
     await cerrarIncierto(id, 'DESCONOCIDO', ERROR_SIN_RESPUESTA)
-    return { status: 'DESCONOCIDO' }
+    return { status: 'DESCONOCIDO', para: toEmail }
   }
 
   // 5. Gmail lo aceptó. Si guardarlo falla, la respuesta es DESCONOCIDO y la fila queda para la reconciliación.
@@ -238,7 +257,7 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
     })
   } catch (error) {
     logger.error('[CRM] Gmail accepted the email but it could not be saved', { messageId: id, error: mensajeDe(error) })
-    return { status: 'DESCONOCIDO' }
+    return { status: 'DESCONOCIDO', para: toEmail }
   }
   void logAction({
     staffId: actor.staffId,
@@ -248,10 +267,10 @@ export async function mandarCorreo(actor: CrmAccess, input: MandarCorreoInput): 
     entityId: id,
     data: { accountId, contactId },
   })
-  return { status: 'ENVIADO' }
+  return { status: 'ENVIADO', para: toEmail }
 }
 
-async function resolverFalla(error: unknown, envio: { id: string; staffId: string; version: number }): Promise<Respuesta> {
+async function resolverFalla(error: unknown, envio: { id: string; staffId: string; version: number; para: string }): Promise<Respuesta> {
   // Las credenciales ya no sirven: el token no se pudo renovar, así que el correo NO salió.
   if (esInvalidGrant(error)) {
     await cerrarIncierto(envio.id, 'FALLIDO', RECONECTA)
@@ -272,12 +291,13 @@ async function resolverFalla(error: unknown, envio: { id: string; staffId: strin
     throw new ValidationError(
       'Gmail no aceptó el correo, así que no salió. Revisa la dirección del contacto o intenta más tarde',
       'CRM_GMAIL_RECHAZADO',
+      { para: envio.para },
     )
   }
   // Sin respuesta (timeout, red) o un 5xx: Gmail pudo haberlo mandado. No sabemos.
   logger.warn('[CRM] Gmail did not answer the send', { messageId: envio.id, status, error: mensajeDe(error) })
   await cerrarIncierto(envio.id, 'DESCONOCIDO', ERROR_SIN_RESPUESTA)
-  return { status: 'DESCONOCIDO' }
+  return { status: 'DESCONOCIDO', para: envio.para }
 }
 
 // ── Reconciliar lo que no sabemos si salió ────────────────────────────────────────────────────────────────────────────

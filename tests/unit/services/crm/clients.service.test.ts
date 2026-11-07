@@ -14,7 +14,7 @@ import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { altaPendienteSql, ingresoSql, monedaDelPagoSql } from '@/services/crm/clientFacts'
+import { altaPendienteSql, clientFactsLateral, ingresoSql, monedaDelPagoSql } from '@/services/crm/clientFacts'
 import { planesPorSucursal } from '@/services/crm/clientPage'
 import { ingresoColumnas } from '@/services/crm/clientsSql'
 import {
@@ -122,6 +122,7 @@ const MODELS = [
   'terminal',
   'payment',
   'staff',
+  'fiscalEmisor',
 ] as const
 
 beforeEach(() => {
@@ -130,6 +131,7 @@ beforeEach(() => {
   prismaMock.$queryRaw.mockReset()
   prismaMock.crmTeam.findUnique.mockResolvedValue({ organizationId: TEAM_ORG })
   prismaMock.crmAccount.findMany.mockResolvedValue([])
+  prismaMock.fiscalEmisor.findMany.mockResolvedValue([])
   clientsDb()
 })
 
@@ -1709,5 +1711,133 @@ describe('setAltaMotivo (C1, tarea 8)', () => {
       code: 'CRM_NO_ES_TUYO',
     })
     expect(prismaMock.crmAccount.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('C2 Tarea 5: lo vivo gana Usa, último cobro, «Cobrado · 30 días» y RFC', () => {
+  function linked(
+    venues: Array<Record<string, unknown>> = [
+      { id: VENUE, name: 'Centro', status: 'ACTIVE', kycStatus: 'VERIFIED', demoExpiresAt: null, _count: { terminals: 2 } },
+    ],
+  ) {
+    prismaMock.crmAccount.findFirst.mockResolvedValue({ organizationId: ORG })
+    prismaMock.venue.findMany.mockResolvedValue(venues)
+    prismaMock.venue.count.mockResolvedValue(venues.length)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(null)
+    prismaMock.terminal.count.mockResolvedValue(0)
+    prismaMock.organization.findUnique.mockResolvedValue({ seatCapExempt: false })
+    jest.mocked(getPlanState).mockResolvedValue(planState())
+  }
+  const hechos = {
+    usaMedido: 'TERMINAL',
+    usaVisto: 'POS',
+    usaAviso: true,
+    usaEscrito: true,
+    estado: 'COBRA',
+    ultimoCobroAt: new Date('2026-10-30T15:00:00.000Z'),
+  }
+  function respuestas(over: { cobrado?: Record<string, unknown> } = {}) {
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => {
+      if (query.sql.includes('AS "usaEscrito"')) return [hechos]
+      if (query.sql.includes('AS "cobradoMXN"')) return [over.cobrado ?? { cobradoMXN: new Prisma.Decimal('900'), otraMoneda: false }]
+      if (query.sql.includes('AS "terminales"')) return [{ organizationId: ORG, terminales: 1, pos: 2 }]
+      return []
+    })
+  }
+
+  it('🔴 usa y estado salen de la misma lateral y columnas que la fila de la lista; el porqué sólo de la cuenta en «Ver»', async () => {
+    linked()
+    respuestas()
+    prismaMock.crmAccount.findMany.mockResolvedValue([
+      { usaManual: 'POS', usaManualPorque: 'Lo vi', usaManualById: OTHER, usaManualAt: NOW },
+    ])
+    prismaMock.staff.findMany.mockResolvedValue([{ id: OTHER, firstName: 'Ana', lastName: 'Pérez' }])
+
+    const live = (await getLive(access({ ventas: true }), ACCOUNT, NOW)) as Record<string, any>
+
+    expect(live.usa).toEqual({
+      visto: 'POS',
+      medido: 'TERMINAL',
+      manual: true,
+      aviso: true,
+      detalle: { porque: 'Lo vi', por: { id: OTHER, name: 'Ana Pérez' }, at: NOW },
+      aparatos: { terminales: 1, pos: 2 },
+    })
+    expect(live.estado).toEqual({ codigo: 'COBRA', ultimoCobroAt: hechos.ultimoCobroAt })
+    const consulta = rawQueries().find(query => query.sql.includes('AS "usaEscrito"'))!
+    expect(consulta.sql).toContain(clientFactsLateral(NOW).sql)
+    expect(consulta.values).toContain(ORG)
+    expect(prismaMock.crmAccount.findMany.mock.calls[0][0]).toMatchObject({
+      where: { AND: [{ organizationId: ORG }, { OR: [{ ownerStaffId: SELLER }, { ownerStaffId: null }] }] },
+      take: 1,
+    })
+  })
+
+  it('sin cuenta visible, el ✋ dice su valor pero no el porqué', async () => {
+    linked()
+    respuestas()
+    const live = (await getLive(access(), ACCOUNT, NOW)) as Record<string, any>
+    expect(live.usa).toMatchObject({ visto: 'POS', manual: true, detalle: null })
+  })
+
+  it('«Cobrado · 30 días» en MXN de las sucursales reales desde hace 30 días, con la misma regla de moneda que la ficha', async () => {
+    linked()
+    respuestas({ cobrado: { cobradoMXN: new Prisma.Decimal('900'), otraMoneda: true } })
+    const live = (await getLive(access({ ventas: true }), ACCOUNT, NOW)) as Record<string, any>
+    expect(live).toMatchObject({ cobrado30: new Prisma.Decimal('900'), cobrado30OtraMoneda: true })
+    const consulta = rawQueries().find(query => query.sql.includes('AS "cobradoMXN"'))!
+    expect(consulta.sql).toContain(monedaDelPagoSql.sql)
+    expect(consulta.values).toEqual(expect.arrayContaining([ORG, new Date(NOW.getTime() - 30 * 24 * 3_600_000)]))
+  })
+
+  it('🔴 sin «Ver ventas», cobrado30 null, ventasBloqueadas y ni se consulta', async () => {
+    linked()
+    respuestas()
+    const live = (await getLive(access({ ventas: false }), ACCOUNT, NOW)) as Record<string, any>
+    expect(live).toMatchObject({ cobrado30: null, cobrado30OtraMoneda: null, ventasBloqueadas: true })
+    expect(rawQueries().some(query => query.sql.includes('AS "cobradoMXN"'))).toBe(false)
+  })
+
+  it('fiscal: del emisor de facturas de sus sucursales, sin repetir RFC y a lo más 5; nunca Venue.rfc', async () => {
+    linked()
+    respuestas()
+    prismaMock.fiscalEmisor.findMany.mockResolvedValue([
+      { rfc: 'AAA010101AAA', legalName: 'Café SA' },
+      { rfc: 'AAA010101AAA', legalName: 'Café SA' },
+      ...['B', 'C', 'D', 'E', 'F'].map(l => ({ rfc: `${l}${l}${l}010101AAA`, legalName: `Razón ${l}` })),
+    ])
+    const live = (await getLive(access(), ACCOUNT, NOW)) as Record<string, any>
+    expect(live.fiscal).toEqual([
+      { rfc: 'AAA010101AAA', razonSocial: 'Café SA' },
+      ...['B', 'C', 'D', 'E'].map(l => ({ rfc: `${l}${l}${l}010101AAA`, razonSocial: `Razón ${l}` })),
+    ])
+    expect(prismaMock.fiscalEmisor.findMany.mock.calls[0][0]).toMatchObject({ where: { venueId: { in: [VENUE] } } })
+    expect(JSON.stringify(prismaMock.venue.findMany.mock.calls)).not.toContain('rfc')
+  })
+
+  it('🔴 la ficha hace el mismo número de consultas con 20 sucursales que con 2 (sin N+1, salvo el plan por sucursal de antes)', async () => {
+    const venue = (i: number) => ({
+      id: `cvenue${String(i).padStart(19, '0')}`,
+      name: `S${i}`,
+      status: 'ACTIVE',
+      kycStatus: null,
+      demoExpiresAt: null,
+      _count: { terminals: 0 },
+    })
+    const cuenta = async (n: number) => {
+      linked(Array.from({ length: n }, (_, i) => venue(i)))
+      respuestas()
+      prismaMock.$queryRaw.mockClear()
+      prismaMock.fiscalEmisor.findMany.mockClear()
+      prismaMock.crmAccount.findMany.mockClear()
+      await getLive(access({ ventas: true }), ACCOUNT, NOW)
+      return (
+        prismaMock.$queryRaw.mock.calls.length +
+        prismaMock.fiscalEmisor.findMany.mock.calls.length +
+        prismaMock.crmAccount.findMany.mock.calls.length
+      )
+    }
+    expect(await cuenta(20)).toBe(await cuenta(2))
   })
 })

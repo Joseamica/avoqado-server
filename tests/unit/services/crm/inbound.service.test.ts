@@ -11,7 +11,15 @@ import { FAKE_LOST_STAGE_ID, FAKE_STAGE_ID, installCrmInboundFake } from '@tests
 import logger from '@/config/logger'
 import { notifyNewProspect, notifyReturningProspect } from '@/services/crm/digest.service'
 import { erasedHashes } from '@/services/crm/erase.service'
-import { applyEntry, recordSignupOutcome, sanitizeEntry, saveLandingEntry, type SignupOutcome } from '@/services/crm/inbound.service'
+import {
+  applyEntry,
+  recordSignupOutcome,
+  resolveAccountTx,
+  sanitizeEntry,
+  saveLandingEntry,
+  type Identity,
+  type SignupOutcome,
+} from '@/services/crm/inbound.service'
 import { esCorreoDePrueba } from '@/services/crm/internalEmail'
 
 jest.mock('@/services/crm/digest.service', () => ({ notifyNewProspect: jest.fn(), notifyReturningProspect: jest.fn() }))
@@ -1453,5 +1461,90 @@ describe('la casilla «Quiero recibir novedades de Avoqado por correo» (CRM fas
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: ana.id })
     expect(db.consents.some(consent => consent.email === BRENDA)).toBe(queda)
     expect(consentEvents()).toHaveLength(queda ? 1 : 0)
+  })
+})
+
+describe('C2 Bloque 0A: el buscador de identidad revalida bajo el candado que la persona siga en la cuenta (Codex plan r1 H1)', () => {
+  const PHONE = '+525512345678'
+  const OTHER_EMAIL = 'otra@cafe.mx'
+  const id = (prefix: string, n: number) => `c${prefix}${String(n).padStart(24 - prefix.length, '0')}`
+  const who = (over: Partial<Identity> = {}): Identity => ({ emails: [EMAIL], phones: [], organizationId: null, ...over })
+  function seedPerson(n: number, contact: { email?: string | null; phoneE164?: string | null }, lastTouchAt = new Date()) {
+    const row = seedAccount({ id: id('acctperson', n), source: 'WHATSAPP', externalKey: `+52550000000${n}`, lastTouchAt })
+    const person = { id: id('cont', n), accountId: row.id, name: 'Ana', email: contact.email ?? null, phoneE164: contact.phoneE164 ?? null }
+    db.contacts.push(person)
+    return { account: row, person }
+  }
+  /** What a seller of the ficha commits while this writer waits for the row: runs `then` each time it locks one of `ids`. */
+  function onLocks(then: (accountId: string) => void) {
+    const answer = prismaMock.$queryRaw.getMockImplementation()
+    prismaMock.$queryRaw.mockImplementation(async (first: TemplateStringsArray, ...values: unknown[]) => {
+      if (Array.isArray(first) && first.join('?').includes('FOR UPDATE')) then(values[0] as string)
+      return answer ? answer(first, ...values) : []
+    })
+  }
+
+  it('🔴 por EMAIL: la cuenta que ya bloqueada no tiene a nadie con ese correo se vuelve a buscar (null si ya no hay otra)', async () => {
+    const { account, person } = seedPerson(1, { email: EMAIL })
+    onLocks(locked => locked === account.id && Object.assign(person, { email: OTHER_EMAIL }))
+
+    await expect(resolveAccountTx(prismaMock as any, who())).resolves.toBeNull()
+  })
+
+  it('🔴 por EMAIL: si otra cuenta sí tiene ese correo, devuelve ésa', async () => {
+    const { account, person } = seedPerson(1, { email: EMAIL })
+    const other = seedPerson(2, { email: EMAIL }, new Date(Date.now() - DAY))
+    onLocks(locked => locked === account.id && Object.assign(person, { email: OTHER_EMAIL }))
+
+    await expect(resolveAccountTx(prismaMock as any, who())).resolves.toEqual({
+      id: other.account.id,
+      organizationId: null,
+      via: 'EMAIL',
+    })
+  })
+
+  it('🔴 por PHONE: igual, con el teléfono', async () => {
+    const { account, person } = seedPerson(1, { phoneE164: PHONE })
+    onLocks(locked => locked === account.id && Object.assign(person, { phoneE164: null }))
+
+    await expect(resolveAccountTx(prismaMock as any, who({ emails: [], phones: [PHONE] }))).resolves.toBeNull()
+  })
+
+  it('sin cambios, la misma persona sigue llevando a su cuenta (regresión)', async () => {
+    const { account } = seedPerson(1, { email: EMAIL })
+
+    await expect(resolveAccountTx(prismaMock as any, who())).resolves.toEqual({ id: account.id, organizationId: null, via: 'EMAIL' })
+  })
+
+  it('por ORGANIZATION y por KEY no pregunta por personas', async () => {
+    seedAccount({ id: id('acctorg', 1), externalKey: 'otra-llave', organizationId: ORG })
+    seedAccount({ id: id('acctkey', 1), source: 'LANDING', externalKey: EMAIL })
+
+    await expect(resolveAccountTx(prismaMock as any, who({ organizationId: ORG }))).resolves.toMatchObject({ via: 'ORGANIZATION' })
+    await expect(resolveAccountTx(prismaMock as any, who({ key: { source: 'LANDING', externalKey: EMAIL } }))).resolves.toMatchObject({
+      via: 'KEY',
+    })
+    expect(prismaMock.crmContact.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('si cambia en los 3 intentos → el error de hoy («kept changing»)', async () => {
+    const people = [1, 2, 3].map(n => seedPerson(n, { email: EMAIL }, new Date(Date.now() - n * MINUTE)))
+    onLocks(locked => {
+      const hit = people.find(({ account }) => account.id === locked)
+      if (hit) hit.person.email = OTHER_EMAIL
+    })
+
+    await expect(resolveAccountTx(prismaMock as any, who())).rejects.toThrow('kept changing')
+  })
+
+  it('🔴 de punta a punta: una entrada de ana@ no regresa a la cuenta a la que el vendedor le quitó a ana@', async () => {
+    const { account, person } = seedPerson(1, { email: EMAIL })
+    onLocks(locked => locked === account.id && Object.assign(person, { email: OTHER_EMAIL }))
+    const entry = seedEntry({ signupOutcome: null })
+
+    await applyEntry(entry.id)
+
+    expect(db.entries[0].accountId).not.toBe(account.id)
+    expect(db.contacts.filter(contact => contact.accountId === account.id)).toEqual([expect.objectContaining({ email: OTHER_EMAIL })])
   })
 })

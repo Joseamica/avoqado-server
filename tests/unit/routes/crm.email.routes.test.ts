@@ -15,6 +15,7 @@ import * as templatesService from '@/services/crm/email/templates.service'
 import * as campaignsService from '@/services/crm/email/campaigns.service'
 import * as audienceService from '@/services/crm/email/audience.service'
 import * as teamService from '@/services/crm/teamVenue.service'
+import * as gmailSendService from '@/services/crm/email/gmailSend.service'
 
 const STAFF = 'cstaffemail00000000000001'
 const TEMPLATE = 'ctemplate0000000000000001'
@@ -663,6 +664,58 @@ describe('el Gmail del vendedor — sólo «Mandar correo» (crm:contactar)', ()
       .send({ ...EMAIL_BODY, clientRequestId: 'a b"<script>' })
     expect(raro.status).toBe(400)
     expect(raro.body.message).toContain('El identificador del envío no es válido')
+  })
+
+  describe('C2 Bloque 0B: POST /crm/accounts/:id/emails/v2 (Codex plan r6 H1)', () => {
+    let spy: jest.SpyInstance
+    beforeEach(() => {
+      spy = jest.spyOn(gmailSendService, 'mandarCorreo').mockResolvedValue({ status: 'ENVIADO', para: 'ana@cafe.mx' })
+    })
+    afterEach(() => spy.mockRestore())
+
+    it('🔴 sin paraCorreo → 400 y el servicio no se llama', async () => {
+      soloContactar()
+      const res = await request(app).post(`/crm/accounts/${ACCOUNT}/emails/v2`).send(EMAIL_BODY)
+      expect(res.status).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('con paraCorreo «no-es-correo» → 400', async () => {
+      soloContactar()
+      const res = await request(app)
+        .post(`/crm/accounts/${ACCOUNT}/emails/v2`)
+        .send({ ...EMAIL_BODY, paraCorreo: 'no-es-correo' })
+      expect(res.status).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('sin «Contactar» → 403', async () => {
+      soloCampanas()
+      const res = await request(app)
+        .post(`/crm/accounts/${ACCOUNT}/emails/v2`)
+        .send({ ...EMAIL_BODY, paraCorreo: 'ana@cafe.mx' })
+      expect(res.status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('con paraCorreo, llega al servicio en minúsculas y contesta para', async () => {
+      soloContactar()
+      const res = await request(app)
+        .post(`/crm/accounts/${ACCOUNT}/emails/v2`)
+        .send({ ...EMAIL_BODY, paraCorreo: ' Ana@Cafe.MX ' })
+      expect(res.status).toBe(200)
+      expect(res.body.data).toEqual({ status: 'ENVIADO', para: 'ana@cafe.mx' })
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ accountId: ACCOUNT, paraCorreo: 'ana@cafe.mx' }))
+    })
+
+    it('🔴 la ruta vieja /emails sigue igual para el SUPERADMIN viejo: no acepta ni compara paraCorreo', async () => {
+      soloContactar()
+      const res = await request(app)
+        .post(`/crm/accounts/${ACCOUNT}/emails`)
+        .send({ ...EMAIL_BODY, paraCorreo: 'otra@cafe.mx' })
+      expect(res.status).toBe(200)
+      expect(spy.mock.calls[0][1]).not.toHaveProperty('paraCorreo')
+    })
   })
 
   describe('GET /crm/gmail/callback — la vuelta de Google, sin exigir sesión', () => {

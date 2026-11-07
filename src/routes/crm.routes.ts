@@ -55,6 +55,13 @@ import {
   rescheduleActivitySchema,
   searchOrganizationsSchema,
   sendAccountEmailSchema,
+  sendAccountEmailV2Schema,
+  updateAccountSchema,
+  addContactSchema,
+  addNoteV2Schema,
+  listContactsSchema,
+  updateContactSchema,
+  removeContactSchema,
   sendCampaignSchema,
   sendTemplateTestSchema,
   templateIdSchema,
@@ -132,6 +139,13 @@ router.get('/organizations/search', editar, validateRequest(searchOrganizationsS
 router.get('/accounts', ver, validateRequest(listAccountsSchema), crmController.listAccounts)
 router.post('/accounts', editar, validateRequest(createAccountSchema), crmController.createAccount)
 router.get('/accounts/:id', ver, validateRequest(accountIdSchema), crmController.getAccount)
+// C2 · Ficha editable: the business's data with «lo que se vio» («Editar» with its scope, decided under the row's lock).
+router.patch('/accounts/:id', editar, validateRequest(updateAccountSchema), crmController.updateAccount)
+// The people of an account, 50 at a time (the ficha brings the first 50 and says the total).
+router.get('/accounts/:id/contacts', ver, validateRequest(listContactsSchema), crmController.listContacts)
+router.post('/accounts/:id/contacts', editar, validateRequest(addContactSchema), crmController.addContact)
+router.patch('/accounts/:id/contacts/:contactId', editar, validateRequest(updateContactSchema), crmController.updateContact)
+router.post('/accounts/:id/contacts/:contactId/remove', editar, validateRequest(removeContactSchema), crmController.removeContact)
 router.post('/accounts/:id/take', editar, validateRequest(accountIdSchema), crmController.takeAccount)
 // «Editar: todos» o «Equipo y llaves» (L6): the service decides, so a «propios» seller gets a 403 that says why.
 router.post(
@@ -149,6 +163,8 @@ router.post('/accounts/:id/reactivate', editar, validateRequest(accountIdSchema)
 // «Eliminar», forever (D7): the real superadmin only — founder, 2-nov — which the service checks; «Configurar» is the door (L7).
 router.post('/accounts/:id/delete', configurar, validateRequest(deleteAccountSchema), crmController.deleteAccount)
 router.post('/accounts/:id/notes', editar, validateRequest(addNoteSchema), crmController.addNote)
+// C2: «Comentar» with the attempt's key, required: an older SERVIDOR answers 404 before writing (Codex r7).
+router.post('/accounts/:id/notes/v2', editar, validateRequest(addNoteV2Schema), crmController.addNote)
 router.post('/accounts/:id/activities', editar, validateRequest(addActivitySchema), crmController.createActivity)
 
 // What is live in Avoqado for one account; «Ver ventas» is decided inside, so without it the ficha says it is hidden.
@@ -242,6 +258,8 @@ router.get('/gmail', contactar, crmEmailController.gmailStatus)
 router.get('/gmail/connect', contactar, crmEmailController.gmailConnect)
 router.post('/gmail/disconnect', contactar, crmEmailController.gmailDisconnect)
 router.post('/accounts/:id/emails', contactar, validateRequest(sendAccountEmailSchema), crmEmailController.sendAccountEmail)
+// C2: the same send with the address the screen showed (`paraCorreo`); the route above stays for the screens of before.
+router.post('/accounts/:id/emails/v2', contactar, validateRequest(sendAccountEmailV2Schema), crmEmailController.sendAccountEmail)
 
 // «Dar de baja este correo» (the opposition, from the ficha): the person stops receiving anything from Avoqado. «Bajas de
 // correo», que va sola (L1, L8).

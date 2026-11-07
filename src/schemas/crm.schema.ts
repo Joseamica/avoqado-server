@@ -231,6 +231,187 @@ export const addNoteSchema = z.object({
   body: z.object({ text: text(5000, 'Escribe la nota') }),
 })
 
+// ── C2 · Ficha editable ───────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Texto que se puede borrar: '' y null son «vacío». */
+const nullableText = (max: number) =>
+  z.preprocess(
+    value => (typeof value === 'string' && value.trim() === '' ? null : value),
+    z.string({ invalid_type_error: 'Debe ser texto' }).trim().max(max, `Máximo ${max} caracteres`).nullable(),
+  )
+const sucursalesSchema = z
+  .number({ invalid_type_error: 'Las sucursales son un número' })
+  .int('Las sucursales son un número entero')
+  .min(0, 'Las sucursales no pueden ser negativas')
+  .max(10000, 'Máximo 10,000 sucursales')
+/**
+ * Lo que la pantalla enseñaba: SIN tope propio (Codex código r2). Tiene que poder devolver cualquier valor que la base tenga, y
+ * hay escritores que guardan más que lo editable (HubSpot junta nombre y apellido de 500 cada uno; las columnas son `text`).
+ * Lo acota el límite del cuerpo de la petición. Los valores NUEVOS de `cambios` siguen con su tope.
+ */
+const vioText = z.string({ invalid_type_error: 'Debe ser texto' }).nullable()
+/** Una llave opaca por CONTENIDO (como Stripe): nunca puede traer un correo, un teléfono ni un nombre. */
+const llaveDelIntento = z
+  .string({ required_error: 'Falta el identificador del intento', invalid_type_error: 'El identificador del intento no es válido' })
+  .uuid('El identificador del intento no es válido')
+
+/**
+ * PATCH /crm/accounts/:id — los datos del negocio (C2). `cambios` sólo con lo editable (`.strict()`: fuente, dueño, etapa y
+ * lo vivo son 400); `vio` = lo que la pantalla enseñaba de cada campo que cambia, obligatorio.
+ */
+export const updateAccountSchema = z.object({
+  params: byId,
+  body: z
+    .object({
+      cambios: z
+        .object(
+          {
+            name: text(200, 'El nombre del negocio es obligatorio'),
+            giro: nullableText(100),
+            ventasRango: nullableText(60),
+            sucursales: sucursalesSchema.nullable(),
+            modulos: z
+              .array(z.string({ invalid_type_error: 'Cada módulo es texto' }).trim().max(500, 'Máximo 500 caracteres por módulo'), {
+                invalid_type_error: 'Los módulos son una lista',
+              })
+              .max(20, 'Máximo 20 módulos'),
+            referidoPor: nullableText(200),
+          },
+          { required_error: 'Di qué cambias', invalid_type_error: 'Di qué cambias' },
+        )
+        .partial()
+        .strict('Ese dato no se edita aquí')
+        .refine(cambios => Object.keys(cambios).length > 0, 'Di qué cambias'),
+      vio: z
+        .object(
+          {
+            name: vioText,
+            giro: vioText,
+            ventasRango: vioText,
+            sucursales: z.number({ invalid_type_error: 'Las sucursales son un número' }).int().nullable(),
+            modulos: z.array(z.string({ invalid_type_error: 'Cada módulo es texto' })).nullable(),
+            referidoPor: vioText,
+          },
+          { required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Falta lo que se veía antes de cambiarlo' },
+        )
+        .partial(),
+    })
+    .refine(body => Object.keys(body.cambios).every(campo => campo in body.vio), {
+      message: 'Falta lo que se veía antes de cambiarlo',
+      path: ['vio'],
+    }),
+})
+
+/** Sí o no de la ficha. */
+const siNo = (que: string) => z.boolean({ invalid_type_error: `${que} es sí o no` }).optional()
+
+/**
+ * POST /crm/accounts/:id/contacts — «+ Agregar persona» (C2). La casilla sólo con correo; `clientRequestId` es la llave del
+ * intento (UUID, obligatoria).
+ */
+export const addContactSchema = z.object({
+  params: byId,
+  body: contactSchema
+    .extend({
+      isPrimary: siNo('Principal'),
+      aceptaCorreos: siNo('Aceptó recibir correos'),
+      esOtroNegocio: siNo('Es otro negocio'),
+      clientRequestId: llaveDelIntento,
+    })
+    .refine(contact => contact.aceptaCorreos !== true || !!contact.email, {
+      message: 'Para que reciba correos, escribe su correo',
+      path: ['email'],
+    }),
+})
+
+const byContact = z.object({ id: cuid, contactId: cuid })
+const blankIsNull = (value: unknown) => (typeof value === 'string' && value.trim() === '' ? null : value)
+/** La persona como la enseñó la ficha: completa, para comparar lo que cambia (y todo, al quitarla). */
+const personaVista = z.object(
+  {
+    // Sin tope propio, como `vioText` (Codex código r2): lo que la base tenga.
+    name: z.string({ required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Debe ser texto' }),
+    phoneE164: vioText,
+    email: vioText,
+    role: vioText,
+    isPrimary: z.boolean({ required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Principal es sí o no' }),
+  },
+  { required_error: 'Falta lo que se veía antes de cambiarlo', invalid_type_error: 'Falta lo que se veía antes de cambiarlo' },
+)
+
+/**
+ * PATCH /crm/accounts/:id/contacts/:contactId — cambiar a una persona (C2). `cambios` vacío sólo con la casilla
+ * («Aceptó recibir correos»): marcarla sola sí es un cambio.
+ */
+export const updateContactSchema = z.object({
+  params: byContact,
+  body: z
+    .object({
+      cambios: z
+        .object(
+          {
+            name: text(200, 'El nombre de la persona es obligatorio'),
+            phone: z.preprocess(
+              blankIsNull,
+              z
+                .string({ invalid_type_error: 'El teléfono no es válido' })
+                .trim()
+                .max(30, 'El teléfono no es válido')
+                .refine(value => canonicalPhoneE164(value) !== null, 'El teléfono no es válido')
+                .nullable(),
+            ),
+            email: z.preprocess(
+              blankIsNull,
+              z
+                .string({ invalid_type_error: 'El correo no es válido' })
+                .trim()
+                .toLowerCase()
+                .email('El correo no es válido')
+                .max(254, 'El correo es demasiado largo')
+                .nullable(),
+            ),
+            role: nullableText(100),
+            isPrimary: z.boolean({ invalid_type_error: 'Principal es sí o no' }),
+          },
+          { required_error: 'Di qué cambias', invalid_type_error: 'Di qué cambias' },
+        )
+        .partial()
+        .strict('Ese dato no se edita aquí'),
+      vio: personaVista,
+      aceptaCorreos: siNo('Aceptó recibir correos'),
+      esOtroNegocio: siNo('Es otro negocio'),
+    })
+    .refine(body => Object.keys(body.cambios).length > 0 || body.aceptaCorreos === true, {
+      message: 'Di qué cambias',
+      path: ['cambios'],
+    }),
+})
+
+/** POST /crm/accounts/:id/contacts/:contactId/remove — quitar a una persona, con la persona que se veía. */
+export const removeContactSchema = z.object({ params: byContact, body: z.object({ vio: personaVista }) })
+
+/**
+ * POST /crm/accounts/:id/notes/v2 — «Comentar» con la llave del intento OBLIGATORIA (C2, Codex r7): un SERVIDOR viejo
+ * contesta 404 a esta ruta antes de escribir. `addNoteSchema` (la ruta de hoy) no cambia, para las pantallas viejas.
+ */
+export const addNoteV2Schema = z.object({
+  params: byId,
+  body: z.object({ text: text(5000, 'Escribe la nota'), clientRequestId: llaveDelIntento }),
+})
+
+/** GET /crm/accounts/:id/contacts — las personas de un negocio, de 50 en 50 (el servidor topa en 100). */
+export const listContactsSchema = z.object({
+  params: byId,
+  query: z.object({
+    cursor: cuid.optional(),
+    limit: z.coerce
+      .number({ invalid_type_error: 'El límite es un número' })
+      .int('El límite es un número entero')
+      .min(1, 'El límite es al menos 1')
+      .optional(),
+  }),
+})
+
 /** POST /crm/accounts/:id/delete — the account's name, typed, so a wrong click deletes nothing (D7). */
 export const deleteAccountSchema = z.object({
   params: byId,
@@ -559,6 +740,23 @@ export const sendAccountEmailSchema = z.object({
     clientRequestId: z
       .string({ required_error: 'Falta el identificador del envío', invalid_type_error: 'El identificador del envío no es válido' })
       .regex(/^[A-Za-z0-9_-]{8,100}$/, 'El identificador del envío no es válido'),
+  }),
+})
+
+/**
+ * POST /crm/accounts/:id/emails/v2 — «Mandar correo» con la dirección que la pantalla enseñó (C2, Codex plan r1 H4 y r6 H1).
+ * `paraCorreo` OBLIGATORIO: un SERVIDOR viejo contesta 404 a esta ruta antes de mandar, en vez de tirar el campo y mandar a
+ * la dirección de ahora. `sendAccountEmailSchema` (la ruta de hoy) no cambia, para las pantallas viejas.
+ */
+export const sendAccountEmailV2Schema = z.object({
+  params: byId,
+  body: sendAccountEmailSchema.shape.body.extend({
+    paraCorreo: z
+      .string({ required_error: 'Falta la dirección a la que se manda', invalid_type_error: 'La dirección no es válida' })
+      .trim()
+      .toLowerCase()
+      .email('La dirección no es válida')
+      .max(254, 'La dirección no es válida'),
   }),
 })
 

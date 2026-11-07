@@ -152,7 +152,7 @@ function mimeEnviado(): string {
 
 describe('mandarCorreo: el camino feliz', () => {
   it('reserva bajo el candado, deja el evento de la ficha ANTES de mandar, manda desde el Gmail y lo deja ENVIADO', async () => {
-    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'ENVIADO' })
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'ENVIADO', para: 'brenda@cafe.mx' })
 
     // 1. El candado de la conexión, y de ESA lectura salen la cuenta y el token.
     expect(sqlDe(prismaMock.$queryRaw.mock.calls[0])).toMatch(/FROM "CrmGmailConnection" WHERE "staffId" = \?.*FOR UPDATE/s)
@@ -341,7 +341,7 @@ describe('mandarCorreo: cuando Gmail no contesta o falla', () => {
 
   it('🔴 un timeout deja DESCONOCIDO (nunca reintenta solo) y el evento de la ficha ya existía', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('timeout of 30000ms exceeded'), { code: 'ETIMEDOUT' }))
-    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO' })
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO', para: 'brenda@cafe.mx' })
     expect(mockSend).toHaveBeenCalledTimes(1)
     expect(prismaMock.crmTimelineEvent.createMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.crmEmailMessage.updateMany).toHaveBeenCalledWith({
@@ -352,12 +352,12 @@ describe('mandarCorreo: cuando Gmail no contesta o falla', () => {
 
   it('un 5xx también es DESCONOCIDO: Google pudo haberlo mandado', async () => {
     mockSend.mockRejectedValue(httpError(503, { error: { message: 'Backend Error' } }))
-    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO' })
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO', para: 'brenda@cafe.mx' })
   })
 
   it('si Google contesta y el guardado falla, la respuesta es DESCONOCIDO (la fila queda para reconciliar)', async () => {
     prismaMock.crmEmailMessage.updateMany.mockRejectedValue(new Error('P1001: no se pudo llegar a la base'))
-    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO' })
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO', para: 'brenda@cafe.mx' })
     expect(mockSend).toHaveBeenCalledTimes(1)
   })
 
@@ -493,7 +493,7 @@ describe('reconciliarDesconocidos: lo que no sabemos si salió', () => {
 
   it('un timeout de envío seguido de la reconciliación que lo encuentra termina ENVIADO', async () => {
     mockSend.mockRejectedValue(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))
-    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO' })
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO', para: 'brenda@cafe.mx' })
 
     prismaMock.crmEmailMessage.findMany.mockResolvedValue([
       pendiente({ status: 'DESCONOCIDO', error: 'Gmail no contestó', createdAt: new Date(NOW.getTime() - 3 * MIN) }),
@@ -568,5 +568,89 @@ describe('reconciliarDesconocidos: lo que no sabemos si salió', () => {
     delete process.env.CRM_GMAIL_CLIENT_ID
     await reconciliarDesconocidos(NOW)
     expect(prismaMock.crmGmailConnection.findMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('C2 Bloque 0B: «Mandar correo» compara la dirección que se vio (Codex plan r1 H4, r2 H2, r3 H4)', () => {
+  const previo = (over: Record<string, unknown> = {}) => ({
+    status: 'ENVIADO',
+    staffId: STAFF,
+    accountId: ACCOUNT,
+    error: null,
+    toEmail: 'anterior@cafe.mx',
+    ...over,
+  })
+
+  it('🔴 paraCorreo anterior@ y la persona ya tiene otra dirección, sin intento previo → 409 CRM_CORREO_CAMBIO con ahora; ni reserva, ni evento, ni Gmail', async () => {
+    await expect(mandarCorreo(actor(), input({ paraCorreo: 'anterior@cafe.mx' }))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_CORREO_CAMBIO',
+      details: { ahora: 'brenda@cafe.mx' },
+    })
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+    expect(prismaMock.crmEmailMessage.create).not.toHaveBeenCalled()
+    expect(prismaMock.crmTimelineEvent.createMany).not.toHaveBeenCalled()
+    expect(mockSend).not.toHaveBeenCalled()
+  })
+
+  it('paraCorreo igual (con mayúsculas o espacios) → manda y contesta para', async () => {
+    await expect(mandarCorreo(actor(), input({ paraCorreo: '  BRENDA@cafe.mx ' }))).resolves.toEqual({
+      status: 'ENVIADO',
+      para: 'brenda@cafe.mx',
+    })
+    expect(mockSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 Codex r2 H2: el intento X salió a anterior@, la persona ya tiene otra, y llega X con paraCorreo de la nueva → 409 CRM_INTENTO_A_OTRO_CORREO con para anterior@; nunca ENVIADO', async () => {
+    prismaMock.crmEmailMessage.findUnique.mockResolvedValue(previo())
+    await expect(mandarCorreo(actor(), input({ paraCorreo: 'brenda@cafe.mx' }))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CRM_INTENTO_A_OTRO_CORREO',
+      details: { para: 'anterior@cafe.mx' },
+    })
+    expect(mockSend).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el mismo X con paraCorreo anterior@ → ENVIADO con para anterior@, sin reservar otro', async () => {
+    prismaMock.crmEmailMessage.findUnique.mockResolvedValue(previo())
+    await expect(mandarCorreo(actor(), input({ paraCorreo: 'anterior@cafe.mx' }))).resolves.toEqual({
+      status: 'ENVIADO',
+      para: 'anterior@cafe.mx',
+    })
+    expect(prismaMock.crmEmailMessage.create).not.toHaveBeenCalled()
+    expect(mockSend).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el mismo X dentro del candado (dos clics a la vez) también compara la dirección', async () => {
+    prismaMock.crmEmailMessage.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(previo({ status: 'ENVIANDO' }))
+    prismaMock.crmAccount.findFirst.mockResolvedValue({
+      name: 'Café Brenda',
+      contacts: [{ id: CONTACT, name: 'Brenda', email: 'nuevo@cafe.mx' }],
+    })
+    process.env.CRM_CORREO_PRUEBAS = 'nuevo@cafe.mx'
+    await expect(mandarCorreo(actor(), input({ paraCorreo: 'nuevo@cafe.mx' }))).rejects.toMatchObject({
+      code: 'CRM_INTENTO_A_OTRO_CORREO',
+      details: { para: 'anterior@cafe.mx' },
+    })
+    expect(prismaMock.crmEmailMessage.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r3 H4: una llave que nunca llegó, reenviada sin paraCorreo, es un envío normal: pasa las bajas, la lista de prueba y crea su reserva', async () => {
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'ENVIADO', para: 'brenda@cafe.mx' })
+    expect(prismaMock.crmEmailOptOut.findUnique).toHaveBeenCalled()
+    expect(prismaMock.crmEmailMessage.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 el mismo X sin paraCorreo (SUPERADMIN viejo) → su estado con para', async () => {
+    prismaMock.crmEmailMessage.findUnique.mockResolvedValue(previo({ status: 'DESCONOCIDO' }))
+    await expect(mandarCorreo(actor(), input())).resolves.toEqual({ status: 'DESCONOCIDO', para: 'anterior@cafe.mx' })
+  })
+
+  it('un intento FALLIDO dice a qué dirección iba', async () => {
+    prismaMock.crmEmailMessage.findUnique.mockResolvedValue(previo({ status: 'FALLIDO', error: 'Gmail no lo aceptó (400)' }))
+    await expect(mandarCorreo(actor(), input({ paraCorreo: 'anterior@cafe.mx' }))).rejects.toMatchObject({
+      code: 'CRM_GMAIL_RECHAZADO',
+      details: { para: 'anterior@cafe.mx' },
+    })
   })
 })

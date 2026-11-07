@@ -97,6 +97,12 @@ describe('crm team routes', () => {
       { route: 'GET /accounts', keys: ver },
       { route: 'POST /accounts', keys: editar },
       { route: 'GET /accounts/:id', keys: ver },
+      // C2 · Ficha editable: los datos del negocio y sus personas, con «Editar»; leer las personas, con «Ver».
+      { route: 'PATCH /accounts/:id', keys: editar },
+      { route: 'GET /accounts/:id/contacts', keys: ver },
+      { route: 'POST /accounts/:id/contacts', keys: editar },
+      { route: 'PATCH /accounts/:id/contacts/:contactId', keys: editar },
+      { route: 'POST /accounts/:id/contacts/:contactId/remove', keys: editar },
       { route: 'POST /accounts/:id/take', keys: editar },
       // L6: «Editar: todos» o «Equipo y llaves», decided by the service: a «propios» seller gets a 403 that says why.
       { route: 'POST /accounts/:id/reassign', keys: [['crm:editar', 'crm:equipo']] },
@@ -110,6 +116,7 @@ describe('crm team routes', () => {
       // «Eliminar» (D7): «Configurar el CRM» es la puerta; el servicio sólo deja pasar al superadmin real (L7).
       { route: 'POST /accounts/:id/delete', keys: configurar },
       { route: 'POST /accounts/:id/notes', keys: editar },
+      { route: 'POST /accounts/:id/notes/v2', keys: editar },
       { route: 'POST /accounts/:id/activities', keys: editar },
       // Task 9: what is live, «Clientes» and the reports with «Ver negocios»; the CSV with its own key.
       { route: 'GET /accounts/:id/live', keys: ver },
@@ -160,6 +167,7 @@ describe('crm team routes', () => {
       { route: 'GET /gmail/connect', keys: ['crm:contactar'] },
       { route: 'POST /gmail/disconnect', keys: ['crm:contactar'] },
       { route: 'POST /accounts/:id/emails', keys: ['crm:contactar'] },
+      { route: 'POST /accounts/:id/emails/v2', keys: ['crm:contactar'] },
       // «Dar de baja este correo» (la oposición): «Bajas de correo», que va sola (L8).
       { route: 'POST /opt-outs', keys: ['crm:bajas'] },
       // «Importar lo de HubSpot» (task 8, L7).

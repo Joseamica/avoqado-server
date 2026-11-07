@@ -15,6 +15,7 @@
  * email is NOT here on purpose — it is mass and cannot be undone, so only a person does it, from the screens.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { randomUUID } from 'crypto'
 import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { ForbiddenError } from '@/errors/AppError'
@@ -27,6 +28,7 @@ import {
   getInitialStage,
   getPending,
   listAccounts,
+  listContacts,
   listLostReasons,
   listStages,
   lose,
@@ -51,6 +53,7 @@ import { listClients } from '@/services/crm/clients.service'
 import { getCampaign, listCampaigns } from '@/services/crm/email/campaigns.service'
 import { listTemplates } from '@/services/crm/email/templates.service'
 import { deleteAccount, ErasedIdentityError, sameName } from '@/services/crm/erase.service'
+import { addContact, removeContact, updateAccount, updateContact, type PersonaVista } from '@/services/crm/ficha.service'
 import { accountForTx } from '@/services/crm/inbound.service'
 import { getReports } from '@/services/crm/reports.service'
 import { addEvent } from '@/services/crm/timeline.service'
@@ -497,6 +500,29 @@ function campana(row: Awaited<ReturnType<typeof getCampaign>>) {
 
 const accountId = z.string().cuid('El id del negocio no es válido')
 
+// ── C2: la ficha editable por MCP ─────────────────────────────────────────────────────────────────────────────────────
+
+type CampoMcp = 'nombre' | 'giro' | 'ventasRango' | 'sucursales' | 'modulos' | 'referidoPor'
+const aServicio = (campo: CampoMcp) => (campo === 'nombre' ? 'name' : campo)
+const aMcp = (campo: string) => (campo === 'name' ? 'nombre' : campo)
+
+/** Los datos del negocio con los nombres del MCP; con `campos`, sólo ésos. */
+function datosMcp(datos: Record<string, unknown>, campos: string[] = Object.keys(datos)) {
+  return Object.fromEntries(campos.filter(campo => campo in datos).map(campo => [aMcp(campo), datos[campo]]))
+}
+
+const personaMcp = (p: PersonaVista) => ({ nombre: p.name, telefono: p.phoneE164, correo: p.email, puesto: p.role, principal: p.isPrimary })
+
+/**
+ * Los rechazos del servicio que traen algo que contestar (`conLlave` sólo devuelve el mensaje y el código): el código, sus
+ * detalles y la base `{ ok:false, code, error }`. null para cualquier otro error, que sigue su camino.
+ */
+function rechazoConDetalles(error: unknown) {
+  const e = error as { isOperational?: unknown; code?: string; message?: string; details?: Record<string, unknown> }
+  if (typeof error !== 'object' || error === null || e.isOperational !== true || !e.code || !e.details) return null
+  return { code: e.code, details: e.details, base: { ok: false as const, code: e.code, error: e.message } }
+}
+
 export function registerCrmTools(server: McpServer, scope: McpScope): void {
   if (!scope.isSuperAdmin) return
 
@@ -619,6 +645,180 @@ export function registerCrmTools(server: McpServer, scope: McpScope): void {
         await addNote(access, id, { text: note })
         await audit('CRM_NOTE_ADDED', id)
         return { ok: true, accountId: id, yaEstaba: false }
+      }),
+  )
+
+  // ── C2 · Ficha editable: capa delgada sobre los MISMOS servicios de la ficha (Tareas 1–4). Ninguna regla propia: «lo que
+  // se vio», «¿ya está hecho?», duplicados y llaves son del servicio; aquí sólo se traducen argumentos y respuestas.
+
+  server.tool(
+    'crm_update_account',
+    'Cambia los datos de un negocio del CRM: nombre, giro, ventas al mes, sucursales, módulos que le interesan y «Lo ' +
+      'recomendó». DOS PASOS: sin «vio» (lo que tenías de cada dato que cambias) contesta lo que hay ahora y no cambia nada; ' +
+      'con «vio», guarda sólo si nadie lo cambió mientras tanto (si no, contesta lo de ahora). null borra un dato, salvo el ' +
+      'nombre. ' +
+      SOLO,
+    {
+      accountId,
+      cambios: z
+        .object({
+          nombre: z.string().trim().min(1, 'El nombre del negocio es obligatorio').max(200).optional(),
+          giro: z.string().trim().max(100).nullable().optional(),
+          ventasRango: z.string().trim().max(60).nullable().optional(),
+          sucursales: z.number().int().min(0, 'Las sucursales no pueden ser negativas').max(10000).nullable().optional(),
+          modulos: z.array(z.string().trim().max(500)).max(20, 'Máximo 20 módulos').optional(),
+          referidoPor: z.string().trim().max(200).nullable().optional(),
+        })
+        .describe('Sólo los datos que cambias'),
+      vio: z
+        .object({
+          // Sin tope propio (Codex código r2): lo que la base tenga.
+          nombre: z.string().nullable().optional(),
+          giro: z.string().nullable().optional(),
+          ventasRango: z.string().nullable().optional(),
+          sucursales: z.number().int().nullable().optional(),
+          modulos: z.array(z.string()).nullable().optional(),
+          referidoPor: z.string().nullable().optional(),
+        })
+        .optional()
+        .describe('Lo que tenías de cada dato que cambias, tal como lo contestó la primera llamada'),
+    },
+    async ({ accountId: id, cambios, vio }) =>
+      conLlave(scope, 'crm:editar', async access => {
+        const pedidos = Object.keys(cambios) as Array<keyof typeof cambios>
+        if (!pedidos.length) return { ok: false, error: 'Di qué cambias.' }
+        if (!vio || pedidos.some(campo => !(campo in vio))) {
+          const guardado = await prisma.crmAccount.findFirst({
+            where: { AND: [{ id }, scopeWhere(access, 'ver')] },
+            select: { name: true, giro: true, ventasRango: true, sucursales: true, modulos: true, referidoPor: true },
+          })
+          if (!guardado) return { ok: false, error: 'No encontramos ese negocio.', code: 'CRM_ACCOUNT_NOT_FOUND' }
+          return { ok: false, requiereVio: true, ahora: datosMcp(guardado, pedidos.map(aServicio)) }
+        }
+        try {
+          const r = await updateAccount(access, id, {
+            cambios: Object.fromEntries(pedidos.map(campo => [aServicio(campo), cambios[campo]])),
+            vio: Object.fromEntries(pedidos.map(campo => [aServicio(campo), vio[campo]])),
+          })
+          if (r.cambiados.length) await audit('CRM_ACCOUNT_UPDATED_BY_MCP', id, { campos: r.cambiados })
+          return { ok: true, accountId: id, cambiados: r.cambiados.map(aMcp) }
+        } catch (error) {
+          const conflicto = rechazoConDetalles(error)
+          if (conflicto?.code === 'CRM_CAMBIO_AL_EDITAR') {
+            return { ...conflicto.base, ahora: datosMcp(conflicto.details.ahora as Record<string, unknown>) }
+          }
+          throw error
+        }
+      }),
+  )
+
+  server.tool(
+    'crm_set_contact',
+    'Agrega, cambia o quita una persona de un negocio del CRM. AGREGAR pide el nombre y el teléfono o el correo; «llave» ' +
+      'es opcional (un identificador UUID tuyo: repetir la misma llave con lo mismo no la duplica). CAMBIAR y QUITAR piden ' +
+      'el id de la persona y «vio» (cómo estaba): sin ellos contestan las personas del negocio, de 50 en 50, y no cambian ' +
+      'nada. Si el teléfono o el correo ya es de otro negocio, avisa de quién es y sólo se guarda con esOtroNegocio. No ' +
+      'marca el permiso de correos: eso lo afirma una persona en la ficha. ' +
+      SOLO,
+    {
+      accountId,
+      accion: z.enum(['AGREGAR', 'CAMBIAR', 'QUITAR']).describe('Qué hacer con la persona'),
+      contactId: z.string().cuid('El id de la persona no es válido').optional().describe('Para CAMBIAR y QUITAR'),
+      nombre: z.string().trim().min(1, 'El nombre de la persona es obligatorio').max(200).optional(),
+      telefono: z
+        .string()
+        .trim()
+        .max(30)
+        .refine(value => canonicalPhoneE164(value) !== null, 'El teléfono no es válido')
+        .nullable()
+        .optional(),
+      correo: z.string().trim().toLowerCase().email('El correo no es válido').max(254).nullable().optional(),
+      puesto: z.string().trim().max(100).nullable().optional(),
+      principal: z.boolean().optional(),
+      esOtroNegocio: z.boolean().optional().describe('Sí, es otro negocio: guardar aunque el teléfono o el correo ya sea de otro'),
+      vio: z
+        .object({
+          // Sin tope propio (Codex código r2): lo que la base tenga.
+          nombre: z.string(),
+          telefono: z.string().nullable(),
+          correo: z.string().nullable(),
+          puesto: z.string().nullable(),
+          principal: z.boolean(),
+        })
+        .optional()
+        .describe('Cómo estaba la persona, tal como lo contestó la lista'),
+      cursor: z.string().cuid().optional().describe('Para la siguiente página de personas'),
+      llave: z.string().uuid('La llave es un UUID').optional().describe('Para AGREGAR: el mismo intento repetido no se duplica'),
+    },
+    async input =>
+      conLlave(scope, 'crm:editar', async access => {
+        const { accountId: id, accion } = input
+        try {
+          if (accion === 'AGREGAR') {
+            if (!input.nombre) return { ok: false, error: 'Di el nombre de la persona.' }
+            if (!input.telefono && !input.correo) return { ok: false, error: 'Para agregar a alguien, di el teléfono o el correo.' }
+            const r = await addContact(access, id, {
+              name: input.nombre,
+              phone: input.telefono ?? null,
+              email: input.correo ?? null,
+              role: input.puesto ?? null,
+              isPrimary: input.principal,
+              esOtroNegocio: input.esOtroNegocio,
+              // Opaca: nunca sale del correo, el teléfono ni el nombre. Sin ella, cada llamada es un intento nuevo.
+              clientRequestId: input.llave ?? randomUUID(),
+            })
+            if (!r.repetido) await audit('CRM_CONTACT_ADDED_BY_MCP', id, { contactId: r.contactId })
+            return { ok: true, contactId: r.contactId, ...(r.repetido ? { repetido: true } : {}) }
+          }
+          if (!input.contactId || !input.vio) {
+            const pagina = await listContacts(access, id, { cursor: input.cursor })
+            return {
+              ok: false,
+              requiereVio: true,
+              total: pagina.total,
+              hayMas: pagina.nextCursor !== null,
+              nextCursor: pagina.nextCursor,
+              personas: pagina.rows.map(persona => ({ id: persona.id, ...personaMcp(persona) })),
+            }
+          }
+          const vio: PersonaVista = {
+            name: input.vio.nombre,
+            phoneE164: input.vio.telefono,
+            email: input.vio.correo,
+            role: input.vio.puesto,
+            isPrimary: input.vio.principal,
+          }
+          if (accion === 'QUITAR') {
+            const r = await removeContact(access, id, input.contactId, { vio })
+            if (!r.yaNoEstaba) await audit('CRM_CONTACT_REMOVED_BY_MCP', id, { contactId: r.contactId })
+            return { ok: true, contactId: r.contactId, yaNoEstaba: r.yaNoEstaba }
+          }
+          const cambios = Object.fromEntries(
+            (
+              [
+                ['name', input.nombre],
+                ['phone', input.telefono],
+                ['email', input.correo],
+                ['role', input.puesto],
+                ['isPrimary', input.principal],
+              ] as const
+            ).filter(([, valor]) => valor !== undefined),
+          )
+          if (!Object.keys(cambios).length) return { ok: false, error: 'Di qué cambias.' }
+          const r = await updateContact(access, id, input.contactId, { cambios, vio, esOtroNegocio: input.esOtroNegocio })
+          if (r.cambiados.length) await audit('CRM_CONTACT_UPDATED_BY_MCP', id, { contactId: r.contactId })
+          return { ok: true, contactId: r.contactId, cambiados: r.cambiados }
+        } catch (error) {
+          const rechazo = rechazoConDetalles(error)
+          if (!rechazo) throw error
+          const { code, details, base } = rechazo
+          if (code === 'CRM_PERSONA_YA_ESTA') return { ...base, contactId: details.contactId }
+          if (code === 'CRM_POSIBLE_DUPLICADO') return { ...base, candidatos: details.duplicates }
+          if (code === 'CRM_CAMBIO_AL_EDITAR' || code === 'CRM_LLAVE_CON_OTRO_CONTENIDO') {
+            return { ...base, ahora: personaMcp(details.ahora as PersonaVista) }
+          }
+          throw error
+        }
       }),
   )
 

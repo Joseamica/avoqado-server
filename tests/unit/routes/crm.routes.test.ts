@@ -36,6 +36,8 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
 
 import router from '@/routes/crm.routes'
 import * as hubspotImport from '@/services/crm/hubspotImport.service'
+import * as fichaService from '@/services/crm/ficha.service'
+import * as accountsService from '@/services/crm/accounts.service'
 
 const app = express().use(express.json()).use('/crm', router)
 /** With the app's error handler reduced to what these tests read: the status, the code and the message. */
@@ -606,5 +608,167 @@ describe('POST /crm/accounts/:id/alta (C1, tarea 8)', () => {
     const ok = await request(app).post(PATH).send({ motivo: 'PRECIO', perdido: false })
     expect(ok.status).toBe(200)
     expect(ok.body.data).toEqual({ accountId: 'caccounta0000000000000001', motivo: 'PRECIO', texto: null, perdido: false })
+  })
+})
+
+describe('C2 · ficha editable: las rutas piden «Editar» (o «Ver») antes de llamar al servicio', () => {
+  const ACCOUNT = 'caccounta0000000000000001'
+  const access = (over: Record<string, unknown>) =>
+    prismaMock.platformAccess.findUnique.mockResolvedValue({
+      id: 'caccessrw0000000000000009',
+      staffId: ADMIN_ID,
+      verScope: 'todos',
+      editarScope: null,
+      contactar: false,
+      campanas: false,
+      exportar: false,
+      ventas: false,
+      admin: false,
+      ...SIN_FINAS,
+      ...over,
+    })
+  const spies: jest.SpyInstance[] = []
+  const espiar = (nombre: keyof typeof fichaService, valor: unknown) => {
+    const spy = jest.spyOn(fichaService, nombre as any).mockResolvedValue(valor as never)
+    spies.push(spy)
+    return spy
+  }
+  afterEach(() => spies.splice(0).forEach(spy => spy.mockRestore()))
+
+  describe('PATCH /crm/accounts/:id', () => {
+    const body = { cambios: { giro: 'Bar' }, vio: { giro: 'Cafetería' } }
+
+    it('🔴 sin «Editar» → 403; con «Ver» sin «Editar» → 403; el servicio no se llama', async () => {
+      const spy = espiar('updateAccount', { accountId: ACCOUNT, cambiados: ['giro'] })
+      access({ verScope: null, editarScope: null })
+      expect((await request(app).patch(`/crm/accounts/${ACCOUNT}`).send(body)).status).toBe(403)
+      access({ verScope: 'todos', editarScope: null })
+      expect((await request(app).patch(`/crm/accounts/${ACCOUNT}`).send(body)).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('con «Editar: propios» → 200 y llama al servicio con el cuerpo', async () => {
+      const spy = espiar('updateAccount', { accountId: ACCOUNT, cambiados: ['giro'] })
+      access({ verScope: 'propios', editarScope: 'propios' })
+      const res = await request(app).patch(`/crm/accounts/${ACCOUNT}`).send(body)
+      expect(res.status).toBe(200)
+      expect(res.body.data).toEqual({ accountId: ACCOUNT, cambiados: ['giro'] })
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ staffId: ADMIN_ID, editar: 'propios' }), ACCOUNT, body)
+    })
+  })
+
+  describe('POST /crm/accounts/:id/contacts', () => {
+    const body = { name: 'Ana', email: 'ana@cafe.mx', clientRequestId: '11111111-1111-4111-8111-111111111111' }
+
+    it('🔴 sin «Editar» → 403 y el servicio no se llama; con «Editar» → 201', async () => {
+      const spy = espiar('addContact', {
+        contactId: 'ccontact00000000000000001',
+        permisoDelCorreo: false,
+        consentimientoRegistrado: false,
+        repetido: false,
+      })
+      access({ verScope: 'todos', editarScope: null })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts`).send(body)).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+      access({ verScope: 'propios', editarScope: 'propios' })
+      const res = await request(app).post(`/crm/accounts/${ACCOUNT}/contacts`).send(body)
+      expect(res.status).toBe(201)
+      expect(spy).toHaveBeenCalledWith(expect.anything(), ACCOUNT, body)
+    })
+
+    it('🔴 clientRequestId «ana@ejemplo.mx» o cualquier no-UUID → 400; la casilla sin correo → 400', async () => {
+      const spy = espiar('addContact', {})
+      access({ verScope: 'todos', editarScope: 'todos' })
+      for (const malo of [
+        { ...body, clientRequestId: 'ana@ejemplo.mx' },
+        { ...body, clientRequestId: undefined },
+      ]) {
+        expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts`).send(malo)).status).toBe(400)
+      }
+      const sinCorreo = await request(app)
+        .post(`/crm/accounts/${ACCOUNT}/contacts`)
+        .send({ name: 'Ana', aceptaCorreos: true, clientRequestId: body.clientRequestId })
+      expect(sinCorreo.status).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('PATCH /crm/accounts/:id/contacts/:contactId y POST …/remove', () => {
+    const CONTACT = 'ccontacta0000000000000001'
+    const vio = { name: 'Ana', phoneE164: null, email: 'ana@cafe.mx', role: null, isPrimary: true }
+
+    it('🔴 las dos rutas sin «Editar» → 403 y el servicio no se llama', async () => {
+      const cambiar = espiar('updateContact', {})
+      const quitar = espiar('removeContact', {})
+      access({ verScope: 'todos', editarScope: null })
+      expect(
+        (
+          await request(app)
+            .patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`)
+            .send({ cambios: { role: 'X' }, vio })
+        ).status,
+      ).toBe(403)
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}/remove`).send({ vio })).status).toBe(403)
+      expect(cambiar).not.toHaveBeenCalled()
+      expect(quitar).not.toHaveBeenCalled()
+    })
+
+    it('con «Editar» llegan al servicio; cambios vacío sin casilla → 400 «Di qué cambias»; con la casilla sola, sí', async () => {
+      const cambiar = espiar('updateContact', { contactId: CONTACT, cambiados: [] })
+      const quitar = espiar('removeContact', { contactId: CONTACT, yaNoEstaba: false })
+      access({ verScope: 'todos', editarScope: 'todos' })
+      expect((await request(app).patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`).send({ cambios: {}, vio })).status).toBe(400)
+      const casilla = await request(app)
+        .patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`)
+        .send({ cambios: {}, vio, aceptaCorreos: true })
+      expect(casilla.status).toBe(200)
+      expect(cambiar).toHaveBeenCalledWith(expect.anything(), ACCOUNT, CONTACT, { cambios: {}, vio, aceptaCorreos: true })
+      const fijo = await request(app)
+        .patch(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}`)
+        .send({ cambios: { accountId: 'x' }, vio })
+      expect(fijo.status).toBe(400)
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/contacts/${CONTACT}/remove`).send({ vio })).status).toBe(200)
+      expect(quitar).toHaveBeenCalledWith(expect.anything(), ACCOUNT, CONTACT, { vio })
+    })
+  })
+
+  describe('GET /crm/accounts/:id/contacts y POST /crm/accounts/:id/notes/v2', () => {
+    const K = '11111111-1111-4111-8111-111111111111'
+
+    it('GET …/contacts sin «Ver» → 403; con «Ver» → 200 con cursor y límite', async () => {
+      const spy = jest.spyOn(accountsService, 'listContacts').mockResolvedValue({ rows: [], nextCursor: null, total: 0 })
+      spies.push(spy)
+      access({ verScope: null, editarScope: null })
+      expect((await request(app).get(`/crm/accounts/${ACCOUNT}/contacts`)).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+      access({ verScope: 'propios', editarScope: null })
+      const ok = await request(app).get(`/crm/accounts/${ACCOUNT}/contacts?cursor=ccontact00000000000000049&limit=500`)
+      expect(ok.status).toBe(200)
+      expect(spy).toHaveBeenCalledWith(expect.anything(), ACCOUNT, { cursor: 'ccontact00000000000000049', limit: 500 })
+    })
+
+    it('🔴 Codex r7: /notes/v2 sin clientRequestId → 400 y el servicio no se llama; llave no-UUID → 400; sin «Editar» → 403', async () => {
+      const spy = jest.spyOn(accountsService, 'addNote').mockResolvedValue({} as never)
+      spies.push(spy)
+      access({ verScope: 'todos', editarScope: 'todos' })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola' })).status).toBe(400)
+      expect(
+        (await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola', clientRequestId: 'ana@x.mx' })).status,
+      ).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+      access({ verScope: 'todos', editarScope: null })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola', clientRequestId: K })).status).toBe(403)
+      expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('/notes/v2 con llave llega al servicio con ella; /notes con el cuerpo de hoy sigue igual (sin llave)', async () => {
+      const spy = jest.spyOn(accountsService, 'addNote').mockResolvedValue({} as never)
+      spies.push(spy)
+      access({ verScope: 'todos', editarScope: 'todos' })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes/v2`).send({ text: 'Hola', clientRequestId: K })).status).toBe(201)
+      expect(spy).toHaveBeenLastCalledWith(expect.anything(), ACCOUNT, { text: 'Hola', clientRequestId: K })
+      expect((await request(app).post(`/crm/accounts/${ACCOUNT}/notes`).send({ text: 'Hola', clientRequestId: K })).status).toBe(201)
+      expect(spy).toHaveBeenLastCalledWith(expect.anything(), ACCOUNT, { text: 'Hola' })
+    })
   })
 })

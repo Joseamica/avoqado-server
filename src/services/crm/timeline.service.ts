@@ -24,6 +24,15 @@ export const TIMELINE_KINDS = [
   // Correo uno a uno (fase 2): `data` sólo lleva ids; el asunto, el extracto y el estado se leen de `CrmEmailMessage`.
   'EMAIL_SENT',
   'EMAIL_RECEIVED',
+  // Ficha editable (C2). Nunca datos de personas: el nombre de la persona se lee en vivo al pintar la Historia.
+  // `data`: `{ campo, de?, a? }`, uno por campo; sin valores para name y referidoPor (pueden ser nombres de personas).
+  'ACCOUNT_EDIT',
+  // `data`: `{ contactId, principal, casilla, consentimiento }`; `sourceKey` `contacto:<cuenta>:<llave UUID>`.
+  'CONTACT_ADDED',
+  // `data`: `{ contactId, campos[], consentimiento? }`.
+  'CONTACT_EDITED',
+  // `data`: `{ contactId, eraPrincipal }`.
+  'CONTACT_REMOVED',
 ] as const
 
 export type TimelineKind = (typeof TIMELINE_KINDS)[number]
