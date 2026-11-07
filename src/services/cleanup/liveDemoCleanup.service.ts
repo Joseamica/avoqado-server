@@ -8,6 +8,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { addHours } from 'date-fns'
 import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
@@ -44,7 +45,7 @@ export const DELETION_TIMEOUT_MS = 60_000
 /** Espera por un lugar en el pool: en el minuto :00 este job compite con ~40 crones. */
 const DELETION_MAX_WAIT_MS = 10_000
 
-type DbClient = Prisma.TransactionClient
+type DbClient = TxConReintento
 
 interface DisposableDemoSession {
   id: string
@@ -58,7 +59,7 @@ export function createDisposableDemoSessionDeletion(
   const db = overrides.prisma ?? prisma
   return async (session: DisposableDemoSession): Promise<number> => {
     try {
-      return await db.$transaction(
+      return await withDeadlockRetry(
         async tx => {
           // B9 ronda 1: el presupuesto de espera de la transacción, creado al entrar.
           const presupuesto = PresupuestoDeEspera.para(DELETION_TIMEOUT_MS)
@@ -102,7 +103,7 @@ export function createDisposableDemoSessionDeletion(
           const sesion = await tx.liveDemoSession.deleteMany({ where: { id: session.id } })
           return mermaBorrada + filasBorradas + sesion.count
         },
-        { timeout: DELETION_TIMEOUT_MS, maxWait: DELETION_MAX_WAIT_MS },
+        { etiqueta: 'createDisposableDemoSessionDeletion', cliente: db, timeout: DELETION_TIMEOUT_MS, maxWait: DELETION_MAX_WAIT_MS },
       )
     } catch (error) {
       if (isH1ProvenanceConstraint(error) || (error as { code?: string }).code === 'STAFF_HAS_H1_PROVENANCE') {
@@ -455,7 +456,6 @@ export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<
   // bloquea a ella es `OrderPromotion`, que ya cayó con las órdenes del paso 1.
   await borrar(tx.orderPromotion.deleteMany({ where: { promotion: { venueId } } }))
   await borrar(tx.promotion.deleteMany({ where: { venueId } }))
-
 
   // Upsell: la REGLA cascadea desde su producto sugerido, así que muere en el paso 5 — pero la
   // aceptación la referencia con RESTRICT y no cuelga del producto. Va antes que los productos.

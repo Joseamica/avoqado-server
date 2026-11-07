@@ -22,6 +22,7 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 
 /**
@@ -338,15 +339,19 @@ export async function assignCustomersToGroup(venueId: string, groupId: string, c
   }
 
   // Assign customers to group
-  await prisma.customer.updateMany({
-    where: {
-      id: { in: customerIds },
-      venueId,
-    },
-    data: {
-      customerGroupId: groupId,
-    },
-  })
+  await withDeadlockRetry(
+    tx =>
+      tx.customer.updateMany({
+        where: {
+          id: { in: customerIds },
+          venueId,
+        },
+        data: {
+          customerGroupId: groupId,
+        },
+      }),
+    { etiqueta: 'assignCustomersToGroup' },
+  )
 
   return {
     success: true,
@@ -372,16 +377,20 @@ export async function removeCustomersFromGroup(venueId: string, groupId: string,
   }
 
   // Remove customers from group (set customerGroupId to null)
-  const result = await prisma.customer.updateMany({
-    where: {
-      id: { in: customerIds },
-      venueId,
-      customerGroupId: groupId,
-    },
-    data: {
-      customerGroupId: null,
-    },
-  })
+  const result = await withDeadlockRetry(
+    tx =>
+      tx.customer.updateMany({
+        where: {
+          id: { in: customerIds },
+          venueId,
+          customerGroupId: groupId,
+        },
+        data: {
+          customerGroupId: null,
+        },
+      }),
+    { etiqueta: 'removeCustomersFromGroup' },
+  )
 
   return {
     success: true,

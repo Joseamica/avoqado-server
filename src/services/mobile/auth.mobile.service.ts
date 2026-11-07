@@ -10,6 +10,7 @@
 
 import { AuthMethod, type VenueStatus, type Session } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
@@ -1018,32 +1019,35 @@ export async function deleteOwnAccount(staffId: string): Promise<void> {
   const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { id: true, active: true } })
   if (!staff) throw new AuthenticationError('Cuenta no encontrada')
 
-  await prisma.$transaction(async tx => {
-    // Revoke every way in: venue/org memberships, passkeys, push tokens.
-    await tx.staffVenue.deleteMany({ where: { staffId } })
-    await tx.staffOrganization.deleteMany({ where: { staffId } })
-    await tx.staffPasskey.deleteMany({ where: { staffId } })
-    await tx.deviceToken.deleteMany({ where: { staffId } })
+  await withDeadlockRetry(
+    async tx => {
+      // Revoke every way in: venue/org memberships, passkeys, push tokens.
+      await tx.staffVenue.deleteMany({ where: { staffId } })
+      await tx.staffOrganization.deleteMany({ where: { staffId } })
+      await tx.staffPasskey.deleteMany({ where: { staffId } })
+      await tx.deviceToken.deleteMany({ where: { staffId } })
 
-    // Scrub PII and deactivate. Email is globally unique, so replace it with a
-    // stable non-routable sentinel to free the real address and block re-login.
-    await tx.staff.update({
-      where: { id: staffId },
-      data: {
-        active: false,
-        email: `deleted-${staffId}@deleted.avoqado.io`,
-        firstName: 'Cuenta',
-        lastName: 'eliminada',
-        phone: null,
-        photoUrl: null,
-        password: null,
-        googleId: null,
-        emailVerified: false,
-        emailVerificationCode: null,
-        emailVerificationExpires: null,
-      },
-    })
-  })
+      // Scrub PII and deactivate. Email is globally unique, so replace it with a
+      // stable non-routable sentinel to free the real address and block re-login.
+      await tx.staff.update({
+        where: { id: staffId },
+        data: {
+          active: false,
+          email: `deleted-${staffId}@deleted.avoqado.io`,
+          firstName: 'Cuenta',
+          lastName: 'eliminada',
+          phone: null,
+          photoUrl: null,
+          password: null,
+          googleId: null,
+          emailVerified: false,
+          emailVerificationCode: null,
+          emailVerificationExpires: null,
+        },
+      })
+    },
+    { etiqueta: 'deleteOwnAccount' },
+  )
 
   logger.info('[mobile] account deleted (self-service)', { staffId })
 }

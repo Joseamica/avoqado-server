@@ -213,111 +213,114 @@ export async function mintNormalAppointmentHold(input: MintNormalAppointmentHold
   assertHoldInterval(input)
   const { productIds } = normalizeBookedProductIds({ productIds: input.productIds })
 
-  return withSerializableRetry(async tx => {
-    // 🔴 Fase 1 — el gate va DENTRO de esta transacción, antes de tocar capacidad. Antes
-    // corría en el controlador, en una transacción corta aparte: entre esa lectura y este
-    // minteo cabía un rechazo, y el cliente rechazado se quedaba con el lugar apartado diez
-    // minutos. `undefined` = no viene de una superficie pública (staff), no se gatea.
-    if (input.customerId !== undefined) {
-      await assertCustomerCanCreateReservation(tx, { customerId: input.customerId, venueId: input.venueId })
-    }
-
-    const settings = await getReservationSettings(input.venueId, tx)
-    let heldEndsAt: Date
-
-    if (input.windowSemantics === 'base') {
-      const resolved = await resolveAppointmentWindow(tx, {
-        venueId: input.venueId,
-        productIds,
-        startsAt: input.startsAt,
-        baseEndsAt: input.endsAt,
-        modifierSelections: input.modifierSelections ?? [],
-        settings,
-      })
-      heldEndsAt = resolved.finalEndsAt
-    } else {
-      await resolveCanonicalAppointmentDuration(tx, {
-        venueId: input.venueId,
-        productIds,
-        settings,
-      })
-      await assertLegacyAppointmentDurationFloor(tx, {
-        venueId: input.venueId,
-        productIds,
-        rawDurationMin: (input.endsAt.getTime() - input.startsAt.getTime()) / 60_000,
-        settings,
-      })
-      await resolveModifierSelections(tx, productIds, input.modifierSelections ?? [])
-      heldEndsAt = input.endsAt
-    }
-
-    await lockAppointmentVenue(tx, input.venueId)
-    const checkedAt = new Date()
-    if (!settings.publicBooking.enabled) {
-      throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
-    }
-    enforceBookingWindow(input.startsAt, settings.scheduling, checkedAt)
-
-    if (input.staffId && settings.publicBooking.showStaffPicker !== true) {
-      throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
-    }
-
-    let effectiveStaffId: string | null = null
-    if (input.staffId || shouldAutoAssign(true, settings)) {
-      effectiveStaffId = await resolveStaffAssignment(tx, {
-        venueId: input.venueId,
-        productIds,
-        startsAt: input.startsAt,
-        endsAt: heldEndsAt,
-        checkedAt,
-        settings,
-        requestedStaffId: input.staffId,
-      })
-    }
-
-    const externalBlock = await checkExternalBusyBlock(tx, {
-      venueId: input.venueId,
-      staffId: effectiveStaffId,
-      startsAt: input.startsAt,
-      endsAt: heldEndsAt,
-    })
-    if (externalBlock) {
-      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-    }
-
-    const globalLimit = isStaffAware(settings)
-      ? (settings.scheduling.pacingMaxPerSlot ?? null)
-      : effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
-    if (globalLimit !== null) {
-      const { reservations, holds } = await countAppointmentOccupancy(tx, {
-        venueId: input.venueId,
-        startsAt: input.startsAt,
-        endsAt: heldEndsAt,
-        checkedAt,
-      })
-      if (reservations + holds >= globalLimit) {
-        throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+  return withSerializableRetry(
+    async tx => {
+      // 🔴 Fase 1 — el gate va DENTRO de esta transacción, antes de tocar capacidad. Antes
+      // corría en el controlador, en una transacción corta aparte: entre esa lectura y este
+      // minteo cabía un rechazo, y el cliente rechazado se quedaba con el lugar apartado diez
+      // minutos. `undefined` = no viene de una superficie pública (staff), no se gatea.
+      if (input.customerId !== undefined) {
+        await assertCustomerCanCreateReservation(tx, { customerId: input.customerId, venueId: input.venueId })
       }
-    }
 
-    const expiresAt = new Date(checkedAt.getTime() + SLOT_HOLD_TTL_MS)
-    return tx.slotHold.create({
-      data: {
+      const settings = await getReservationSettings(input.venueId, tx)
+      let heldEndsAt: Date
+
+      if (input.windowSemantics === 'base') {
+        const resolved = await resolveAppointmentWindow(tx, {
+          venueId: input.venueId,
+          productIds,
+          startsAt: input.startsAt,
+          baseEndsAt: input.endsAt,
+          modifierSelections: input.modifierSelections ?? [],
+          settings,
+        })
+        heldEndsAt = resolved.finalEndsAt
+      } else {
+        await resolveCanonicalAppointmentDuration(tx, {
+          venueId: input.venueId,
+          productIds,
+          settings,
+        })
+        await assertLegacyAppointmentDurationFloor(tx, {
+          venueId: input.venueId,
+          productIds,
+          rawDurationMin: (input.endsAt.getTime() - input.startsAt.getTime()) / 60_000,
+          settings,
+        })
+        await resolveModifierSelections(tx, productIds, input.modifierSelections ?? [])
+        heldEndsAt = input.endsAt
+      }
+
+      await lockAppointmentVenue(tx, input.venueId)
+      const checkedAt = new Date()
+      if (!settings.publicBooking.enabled) {
+        throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
+      }
+      enforceBookingWindow(input.startsAt, settings.scheduling, checkedAt)
+
+      if (input.staffId && settings.publicBooking.showStaffPicker !== true) {
+        throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+      }
+
+      let effectiveStaffId: string | null = null
+      if (input.staffId || shouldAutoAssign(true, settings)) {
+        effectiveStaffId = await resolveStaffAssignment(tx, {
+          venueId: input.venueId,
+          productIds,
+          startsAt: input.startsAt,
+          endsAt: heldEndsAt,
+          checkedAt,
+          settings,
+          requestedStaffId: input.staffId,
+        })
+      }
+
+      const externalBlock = await checkExternalBusyBlock(tx, {
         venueId: input.venueId,
+        staffId: effectiveStaffId,
         startsAt: input.startsAt,
         endsAt: heldEndsAt,
-        productIds,
-        classSessionId: null,
-        staffId: effectiveStaffId,
-        heldForReservationId: null,
-        windowSemantics: input.windowSemantics ?? null,
-        partySize: Math.max(1, input.partySize ?? 1),
-        expiresAt,
-        fingerprint: input.fingerprint ?? null,
-      },
-      select: { id: true, expiresAt: true, staffId: true },
-    })
-  })
+      })
+      if (externalBlock) {
+        throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+      }
+
+      const globalLimit = isStaffAware(settings)
+        ? (settings.scheduling.pacingMaxPerSlot ?? null)
+        : effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
+      if (globalLimit !== null) {
+        const { reservations, holds } = await countAppointmentOccupancy(tx, {
+          venueId: input.venueId,
+          startsAt: input.startsAt,
+          endsAt: heldEndsAt,
+          checkedAt,
+        })
+        if (reservations + holds >= globalLimit) {
+          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+        }
+      }
+
+      const expiresAt = new Date(checkedAt.getTime() + SLOT_HOLD_TTL_MS)
+      return tx.slotHold.create({
+        data: {
+          venueId: input.venueId,
+          startsAt: input.startsAt,
+          endsAt: heldEndsAt,
+          productIds,
+          classSessionId: null,
+          staffId: effectiveStaffId,
+          heldForReservationId: null,
+          windowSemantics: input.windowSemantics ?? null,
+          partySize: Math.max(1, input.partySize ?? 1),
+          expiresAt,
+          fingerprint: input.fingerprint ?? null,
+        },
+        select: { id: true, expiresAt: true, staffId: true },
+      })
+    },
+    { reintentarInterbloqueo: true, etiqueta: 'mintNormalAppointmentHold' },
+  )
 }
 
 export async function mintRescheduleAppointmentHold(input: MintRescheduleAppointmentHoldInput): Promise<MintedNormalAppointmentHold> {

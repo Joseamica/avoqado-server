@@ -185,4 +185,37 @@ describe('cleanDemoData (trial→real conversion)', () => {
     )
     expect(sinAcotar).toEqual([])
   })
+  // S5b (red por traba, R65 b): el resultado nace dentro de cada intento y sale en el retorno.
+  describe('tras un 40P01 sólo cuenta el intento ganador', () => {
+    const abortarElPrimerIntento = () => {
+      let llamada = 0
+      prismaMock.$transaction.mockImplementation((async (cb: any) => {
+        const r = await cb(prismaMock)
+        if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+        return r
+      }) as any)
+    }
+    afterEach(() => {
+      prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+    })
+
+    it('los conteos son los del segundo intento, no los del abortado', async () => {
+      ;(prismaMock.payment.deleteMany as jest.Mock).mockResolvedValueOnce({ count: 5 }).mockResolvedValue({ count: 2 })
+      abortarElPrimerIntento()
+
+      const r = await cleanDemoData(VENUE_ID)
+
+      expect(r.deletedPayments).toBe(2)
+    })
+
+    it('un «salto» (GIFT_CARDS) del intento abortado no se queda pegado al resultado del ganador', async () => {
+      ;(prismaMock.giftCard.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'gc1' }).mockResolvedValue(null)
+      abortarElPrimerIntento()
+
+      const r = await cleanDemoData(VENUE_ID)
+
+      expect(r.skippedReason).toBeUndefined()
+      expect(prismaMock.payment.deleteMany).toHaveBeenCalled()
+    })
+  })
 })

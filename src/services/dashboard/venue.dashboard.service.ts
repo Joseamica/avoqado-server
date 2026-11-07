@@ -25,6 +25,7 @@
  * - Framework independent: Could switch from Express to Fastify without touching services
  */
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
 import { storeCreditAvailable } from '../storeCredit/storeCreditTender'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
@@ -432,287 +433,290 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
   })
 
   // Use a transaction to delete all related data in the correct order
-  await prisma.$transaction(async tx => {
-    // B9: el presupuesto de espera de la transacción, creado al entrar.
-    const presupuesto = PresupuestoDeEspera.para(TIMEOUT_BORRADO_MS)
-    // La fila del negocio queda BLOQUEADA hasta confirmar: quien quiera ligarle un cliente de Stripe
-    // (`getOrCreateStripeCustomer` lo reclama con un UPDATE condicional) espera, y ya no encuentra el negocio.
-    const [bloqueada] = await tomarCandado(
-      tx,
-      () => tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
+  await withDeadlockRetry(
+    async tx => {
+      // B9: el presupuesto de espera de la transacción, creado al entrar.
+      const presupuesto = PresupuestoDeEspera.para(TIMEOUT_BORRADO_MS)
+      // La fila del negocio queda BLOQUEADA hasta confirmar: quien quiera ligarle un cliente de Stripe
+      // (`getOrCreateStripeCustomer` lo reclama con un UPDATE condicional) espera, y ya no encuentra el negocio.
+      const [bloqueada] = await tomarCandado(
+        tx,
+        () => tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
       SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE /* B9:sede:exclusivo */`,
-      { presupuesto },
-    )
-    if (bloqueada?.stripeCustomerId) throw negocioConCuentaDeCobro()
-    // Pago al personal (fase 3, B9): con la fila ya bloqueada, en OTRA sentencia, ve el primer devengo que confirmó quien
-    // esperábamos. Una sede con historia de pago al personal no se borra.
-    if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('borrar')
-    // Tarjetas de regalo (nota 1 del coordinador, C6): el saldo vendido es dinero de los clientes del negocio y la libreta es
-    // de sólo inserción. Con la fila ya bloqueada, un sobre que se esté creando espera y luego choca con su llave foránea.
-    if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } }))
-      throw new ConflictError(
-        'Este negocio vendió tarjetas de regalo: su saldo es dinero de sus clientes y no se puede borrar. Ciérralo para conservar su historial.',
-        'VENUE_HAS_GIFT_CARDS',
+        { presupuesto },
       )
+      if (bloqueada?.stripeCustomerId) throw negocioConCuentaDeCobro()
+      // Pago al personal (fase 3, B9): con la fila ya bloqueada, en OTRA sentencia, ve el primer devengo que confirmó quien
+      // esperábamos. Una sede con historia de pago al personal no se borra.
+      if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('borrar')
+      // Tarjetas de regalo (nota 1 del coordinador, C6): el saldo vendido es dinero de los clientes del negocio y la libreta es
+      // de sólo inserción. Con la fila ya bloqueada, un sobre que se esté creando espera y luego choca con su llave foránea.
+      if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } }))
+        throw new ConflictError(
+          'Este negocio vendió tarjetas de regalo: su saldo es dinero de sus clientes y no se puede borrar. Ciérralo para conservar su historial.',
+          'VENUE_HAS_GIFT_CARDS',
+        )
 
-    logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
+      logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
 
-    // El crédito restringe sus cobros: el cambio del mismo negocio se elimina primero.
-    await tx.exchangeCreditLink.deleteMany({ where: { venueId } })
-    await tx.exchange.deleteMany({ where: { venueId } })
+      // El crédito restringe sus cobros: el cambio del mismo negocio se elimina primero.
+      await tx.exchangeCreditLink.deleteMany({ where: { venueId } })
+      await tx.exchange.deleteMany({ where: { venueId } })
 
-    // 1. Delete OrderItems (depends on Orders)
-    const orderIds = await tx.order.findMany({
-      where: { venueId },
-      select: { id: true },
-    })
-    const orderIdList = orderIds.map(o => o.id)
-
-    if (orderIdList.length > 0) {
-      const deletedOrderItems = await tx.orderItem.deleteMany({
-        where: { orderId: { in: orderIdList } },
-      })
-      logger.info(`  ✓ Deleted ${deletedOrderItems.count} OrderItems`)
-
-      // 2. Delete OrderItemModifiers (depends on OrderItems)
-      const deletedOrderItemModifiers = await tx.orderItemModifier.deleteMany({
-        where: { orderItem: { orderId: { in: orderIdList } } },
-      })
-      logger.info(`  ✓ Deleted ${deletedOrderItemModifiers.count} OrderItemModifiers`)
-
-      // 3. Delete Payments (depends on Orders)
-      const deletedPayments = await tx.payment.deleteMany({
-        where: { orderId: { in: orderIdList } },
-      })
-      logger.info(`  ✓ Deleted ${deletedPayments.count} Payments`)
-
-      // 4. Delete PaymentAllocations (depends on Payments)
-      const deletedPaymentAllocations = await tx.paymentAllocation.deleteMany({
-        where: { payment: { orderId: { in: orderIdList } } },
-      })
-      logger.info(`  ✓ Deleted ${deletedPaymentAllocations.count} PaymentAllocations`)
-
-      // 5. Delete VenueTransactions (depends on Payments via paymentId)
-      const paymentIds = await tx.payment.findMany({
-        where: { orderId: { in: orderIdList } },
+      // 1. Delete OrderItems (depends on Orders)
+      const orderIds = await tx.order.findMany({
+        where: { venueId },
         select: { id: true },
       })
-      const paymentIdList = paymentIds.map(p => p.id)
+      const orderIdList = orderIds.map(o => o.id)
 
-      if (paymentIdList.length > 0) {
-        const deletedVenueTransactions = await tx.venueTransaction.deleteMany({
-          where: { paymentId: { in: paymentIdList } },
+      if (orderIdList.length > 0) {
+        const deletedOrderItems = await tx.orderItem.deleteMany({
+          where: { orderId: { in: orderIdList } },
         })
-        logger.info(`  ✓ Deleted ${deletedVenueTransactions.count} VenueTransactions`)
+        logger.info(`  ✓ Deleted ${deletedOrderItems.count} OrderItems`)
+
+        // 2. Delete OrderItemModifiers (depends on OrderItems)
+        const deletedOrderItemModifiers = await tx.orderItemModifier.deleteMany({
+          where: { orderItem: { orderId: { in: orderIdList } } },
+        })
+        logger.info(`  ✓ Deleted ${deletedOrderItemModifiers.count} OrderItemModifiers`)
+
+        // 3. Delete Payments (depends on Orders)
+        const deletedPayments = await tx.payment.deleteMany({
+          where: { orderId: { in: orderIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedPayments.count} Payments`)
+
+        // 4. Delete PaymentAllocations (depends on Payments)
+        const deletedPaymentAllocations = await tx.paymentAllocation.deleteMany({
+          where: { payment: { orderId: { in: orderIdList } } },
+        })
+        logger.info(`  ✓ Deleted ${deletedPaymentAllocations.count} PaymentAllocations`)
+
+        // 5. Delete VenueTransactions (depends on Payments via paymentId)
+        const paymentIds = await tx.payment.findMany({
+          where: { orderId: { in: orderIdList } },
+          select: { id: true },
+        })
+        const paymentIdList = paymentIds.map(p => p.id)
+
+        if (paymentIdList.length > 0) {
+          const deletedVenueTransactions = await tx.venueTransaction.deleteMany({
+            where: { paymentId: { in: paymentIdList } },
+          })
+          logger.info(`  ✓ Deleted ${deletedVenueTransactions.count} VenueTransactions`)
+        }
+
+        // 6. Delete Orders
+        const deletedOrders = await tx.order.deleteMany({
+          where: { venueId },
+        })
+        logger.info(`  ✓ Deleted ${deletedOrders.count} Orders`)
       }
 
-      // 6. Delete Orders
-      const deletedOrders = await tx.order.deleteMany({
+      // 7. Delete Product-related data
+      const productIds = await tx.product.findMany({
         where: { venueId },
-      })
-      logger.info(`  ✓ Deleted ${deletedOrders.count} Orders`)
-    }
-
-    // 7. Delete Product-related data
-    const productIds = await tx.product.findMany({
-      where: { venueId },
-      select: { id: true },
-    })
-    const productIdList = productIds.map(p => p.id)
-
-    if (productIdList.length > 0) {
-      // Delete RecipeLines (depends on Recipes)
-      const recipeIds = await tx.recipe.findMany({
-        where: { productId: { in: productIdList } },
         select: { id: true },
       })
-      const recipeIdList = recipeIds.map(r => r.id)
+      const productIdList = productIds.map(p => p.id)
 
-      if (recipeIdList.length > 0) {
-        const deletedRecipeLines = await tx.recipeLine.deleteMany({
-          where: { recipeId: { in: recipeIdList } },
+      if (productIdList.length > 0) {
+        // Delete RecipeLines (depends on Recipes)
+        const recipeIds = await tx.recipe.findMany({
+          where: { productId: { in: productIdList } },
+          select: { id: true },
         })
-        logger.info(`  ✓ Deleted ${deletedRecipeLines.count} RecipeLines`)
+        const recipeIdList = recipeIds.map(r => r.id)
+
+        if (recipeIdList.length > 0) {
+          const deletedRecipeLines = await tx.recipeLine.deleteMany({
+            where: { recipeId: { in: recipeIdList } },
+          })
+          logger.info(`  ✓ Deleted ${deletedRecipeLines.count} RecipeLines`)
+        }
+
+        // Delete Recipes
+        const deletedRecipes = await tx.recipe.deleteMany({
+          where: { productId: { in: productIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedRecipes.count} Recipes`)
+
+        // Delete ProductModifierGroups
+        const deletedProductModifierGroups = await tx.productModifierGroup.deleteMany({
+          where: { productId: { in: productIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedProductModifierGroups.count} ProductModifierGroups`)
+
+        // Delete Inventory records
+        const deletedInventory = await tx.inventory.deleteMany({
+          where: { productId: { in: productIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedInventory.count} Inventory records`)
+
+        // Hard delete Products (venue deletion is destructive, so we remove all data)
+        const deletedProducts = await tx.product.deleteMany({
+          where: { venueId },
+        })
+        logger.info(`  ✓ Deleted ${deletedProducts.count} Products`)
+      }
+      // Variantes: el padre va después de sus productos (Product.productGroupId es RESTRICT). Fuera del `if`: un padre sin
+      // productos también bloquearía el borrado de su categoría (ProductGroup.categoryId es RESTRICT).
+      await tx.productGroup.deleteMany({ where: { venueId } })
+
+      // 8. Delete Modifiers and ModifierGroups
+      const modifierGroupIds = await tx.modifierGroup.findMany({
+        where: { venueId },
+        select: { id: true },
+      })
+      const modifierGroupIdList = modifierGroupIds.map(mg => mg.id)
+
+      if (modifierGroupIdList.length > 0) {
+        const deletedModifiers = await tx.modifier.deleteMany({
+          where: { groupId: { in: modifierGroupIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedModifiers.count} Modifiers`)
       }
 
-      // Delete Recipes
-      const deletedRecipes = await tx.recipe.deleteMany({
-        where: { productId: { in: productIdList } },
-      })
-      logger.info(`  ✓ Deleted ${deletedRecipes.count} Recipes`)
-
-      // Delete ProductModifierGroups
-      const deletedProductModifierGroups = await tx.productModifierGroup.deleteMany({
-        where: { productId: { in: productIdList } },
-      })
-      logger.info(`  ✓ Deleted ${deletedProductModifierGroups.count} ProductModifierGroups`)
-
-      // Delete Inventory records
-      const deletedInventory = await tx.inventory.deleteMany({
-        where: { productId: { in: productIdList } },
-      })
-      logger.info(`  ✓ Deleted ${deletedInventory.count} Inventory records`)
-
-      // Hard delete Products (venue deletion is destructive, so we remove all data)
-      const deletedProducts = await tx.product.deleteMany({
+      const deletedModifierGroups = await tx.modifierGroup.deleteMany({
         where: { venueId },
       })
-      logger.info(`  ✓ Deleted ${deletedProducts.count} Products`)
-    }
-    // Variantes: el padre va después de sus productos (Product.productGroupId es RESTRICT). Fuera del `if`: un padre sin
-    // productos también bloquearía el borrado de su categoría (ProductGroup.categoryId es RESTRICT).
-    await tx.productGroup.deleteMany({ where: { venueId } })
+      logger.info(`  ✓ Deleted ${deletedModifierGroups.count} ModifierGroups`)
 
-    // 8. Delete Modifiers and ModifierGroups
-    const modifierGroupIds = await tx.modifierGroup.findMany({
-      where: { venueId },
-      select: { id: true },
-    })
-    const modifierGroupIdList = modifierGroupIds.map(mg => mg.id)
-
-    if (modifierGroupIdList.length > 0) {
-      const deletedModifiers = await tx.modifier.deleteMany({
-        where: { groupId: { in: modifierGroupIdList } },
+      // 9. Delete MenuCategories and MenuCategoryAssignments
+      const categoryIds = await tx.menuCategory.findMany({
+        where: { venueId },
+        select: { id: true },
       })
-      logger.info(`  ✓ Deleted ${deletedModifiers.count} Modifiers`)
-    }
+      const categoryIdList = categoryIds.map(c => c.id)
 
-    const deletedModifierGroups = await tx.modifierGroup.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedModifierGroups.count} ModifierGroups`)
+      if (categoryIdList.length > 0) {
+        const deletedMenuCategoryAssignments = await tx.menuCategoryAssignment.deleteMany({
+          where: { categoryId: { in: categoryIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedMenuCategoryAssignments.count} MenuCategoryAssignments`)
+      }
 
-    // 9. Delete MenuCategories and MenuCategoryAssignments
-    const categoryIds = await tx.menuCategory.findMany({
-      where: { venueId },
-      select: { id: true },
-    })
-    const categoryIdList = categoryIds.map(c => c.id)
-
-    if (categoryIdList.length > 0) {
-      const deletedMenuCategoryAssignments = await tx.menuCategoryAssignment.deleteMany({
-        where: { categoryId: { in: categoryIdList } },
+      const deletedMenuCategories = await tx.menuCategory.deleteMany({
+        where: { venueId },
       })
-      logger.info(`  ✓ Deleted ${deletedMenuCategoryAssignments.count} MenuCategoryAssignments`)
-    }
+      logger.info(`  ✓ Deleted ${deletedMenuCategories.count} MenuCategories`)
 
-    const deletedMenuCategories = await tx.menuCategory.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedMenuCategories.count} MenuCategories`)
-
-    // 10. Delete RawMaterials and related data
-    const rawMaterialIds = await tx.rawMaterial.findMany({
-      where: { venueId },
-      select: { id: true },
-    })
-    const rawMaterialIdList = rawMaterialIds.map(rm => rm.id)
-
-    if (rawMaterialIdList.length > 0) {
-      const deletedStockBatches = await tx.stockBatch.deleteMany({
-        where: { rawMaterialId: { in: rawMaterialIdList } },
+      // 10. Delete RawMaterials and related data
+      const rawMaterialIds = await tx.rawMaterial.findMany({
+        where: { venueId },
+        select: { id: true },
       })
-      logger.info(`  ✓ Deleted ${deletedStockBatches.count} StockBatches`)
+      const rawMaterialIdList = rawMaterialIds.map(rm => rm.id)
 
-      const deletedRawMaterialMovements = await tx.rawMaterialMovement.deleteMany({
-        where: { rawMaterialId: { in: rawMaterialIdList } },
+      if (rawMaterialIdList.length > 0) {
+        const deletedStockBatches = await tx.stockBatch.deleteMany({
+          where: { rawMaterialId: { in: rawMaterialIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedStockBatches.count} StockBatches`)
+
+        const deletedRawMaterialMovements = await tx.rawMaterialMovement.deleteMany({
+          where: { rawMaterialId: { in: rawMaterialIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedRawMaterialMovements.count} RawMaterialMovements`)
+
+        const deletedLowStockAlerts = await tx.lowStockAlert.deleteMany({
+          where: { rawMaterialId: { in: rawMaterialIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedLowStockAlerts.count} LowStockAlerts`)
+      }
+
+      const deletedRawMaterials = await tx.rawMaterial.deleteMany({
+        where: { venueId },
       })
-      logger.info(`  ✓ Deleted ${deletedRawMaterialMovements.count} RawMaterialMovements`)
+      logger.info(`  ✓ Deleted ${deletedRawMaterials.count} RawMaterials`)
 
-      const deletedLowStockAlerts = await tx.lowStockAlert.deleteMany({
-        where: { rawMaterialId: { in: rawMaterialIdList } },
+      // 11. Delete StaffVenue relationships
+      const deletedStaffVenue = await tx.staffVenue.deleteMany({
+        where: { venueId },
       })
-      logger.info(`  ✓ Deleted ${deletedLowStockAlerts.count} LowStockAlerts`)
-    }
+      logger.info(`  ✓ Deleted ${deletedStaffVenue.count} StaffVenue relationships`)
 
-    const deletedRawMaterials = await tx.rawMaterial.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedRawMaterials.count} RawMaterials`)
-
-    // 11. Delete StaffVenue relationships
-    const deletedStaffVenue = await tx.staffVenue.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedStaffVenue.count} StaffVenue relationships`)
-
-    // 12. Delete VenueFeatures
-    const deletedVenueFeatures = await tx.venueFeature.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedVenueFeatures.count} VenueFeatures`)
-
-    // 13. Delete VenueSettings
-    const deletedVenueSettings = await tx.venueSettings.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedVenueSettings.count} VenueSettings`)
-
-    // 14. Delete Terminals
-    const deletedTerminals = await tx.terminal.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedTerminals.count} Terminals`)
-
-    // 15. Delete Reviews (not linked to payments, which cascade delete automatically)
-    const deletedReviews = await tx.review.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedReviews.count} Reviews`)
-
-    // 16. Delete Areas and Tables
-    const areaIds = await tx.area.findMany({
-      where: { venueId },
-      select: { id: true },
-    })
-    const areaIdList = areaIds.map(a => a.id)
-
-    if (areaIdList.length > 0) {
-      const deletedTables = await tx.table.deleteMany({
-        where: { areaId: { in: areaIdList } },
+      // 12. Delete VenueFeatures
+      const deletedVenueFeatures = await tx.venueFeature.deleteMany({
+        where: { venueId },
       })
-      logger.info(`  ✓ Deleted ${deletedTables.count} Tables`)
-    }
+      logger.info(`  ✓ Deleted ${deletedVenueFeatures.count} VenueFeatures`)
 
-    const deletedAreas = await tx.area.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedAreas.count} Areas`)
+      // 13. Delete VenueSettings
+      const deletedVenueSettings = await tx.venueSettings.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedVenueSettings.count} VenueSettings`)
 
-    // 17. Delete other venue-related data
-    const deletedVenuePaymentConfig = await tx.venuePaymentConfig.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedVenuePaymentConfig.count} VenuePaymentConfigs`)
+      // 14. Delete Terminals
+      const deletedTerminals = await tx.terminal.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedTerminals.count} Terminals`)
 
-    const deletedVenuePricingStructure = await tx.venuePricingStructure.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedVenuePricingStructure.count} VenuePricingStructures`)
+      // 15. Delete Reviews (not linked to payments, which cascade delete automatically)
+      const deletedReviews = await tx.review.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedReviews.count} Reviews`)
 
-    const deletedVenueRolePermissions = await tx.venueRolePermission.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedVenueRolePermissions.count} VenueRolePermissions`)
+      // 16. Delete Areas and Tables
+      const areaIds = await tx.area.findMany({
+        where: { venueId },
+        select: { id: true },
+      })
+      const areaIdList = areaIds.map(a => a.id)
 
-    const deletedMonthlyVenueProfit = await tx.monthlyVenueProfit.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedMonthlyVenueProfit.count} MonthlyVenueProfits`)
+      if (areaIdList.length > 0) {
+        const deletedTables = await tx.table.deleteMany({
+          where: { areaId: { in: areaIdList } },
+        })
+        logger.info(`  ✓ Deleted ${deletedTables.count} Tables`)
+      }
 
-    // Puestos de RH (fase 1a): la asignación referencia su puesto con RESTRICT y los dos caen con el cascade del venue.
-    // Se van primero, en UNA sentencia (la cadena `supersedesId` se revisa al final), igual que en liveDemoCleanup.
-    const deletedStaffAssignments = await tx.staffAssignment.deleteMany({
-      where: { venueId },
-    })
-    logger.info(`  ✓ Deleted ${deletedStaffAssignments.count} StaffAssignments`)
+      const deletedAreas = await tx.area.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedAreas.count} Areas`)
 
-    // 18. Finally, delete the Venue itself
-    await tx.venue.delete({
-      where: { id: venueId },
-    })
-    logger.info(`  ✅ Venue ${venueId} deleted successfully`)
-  }, OPCIONES_BORRADO)
+      // 17. Delete other venue-related data
+      const deletedVenuePaymentConfig = await tx.venuePaymentConfig.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedVenuePaymentConfig.count} VenuePaymentConfigs`)
+
+      const deletedVenuePricingStructure = await tx.venuePricingStructure.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedVenuePricingStructure.count} VenuePricingStructures`)
+
+      const deletedVenueRolePermissions = await tx.venueRolePermission.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedVenueRolePermissions.count} VenueRolePermissions`)
+
+      const deletedMonthlyVenueProfit = await tx.monthlyVenueProfit.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedMonthlyVenueProfit.count} MonthlyVenueProfits`)
+
+      // Puestos de RH (fase 1a): la asignación referencia su puesto con RESTRICT y los dos caen con el cascade del venue.
+      // Se van primero, en UNA sentencia (la cadena `supersedesId` se revisa al final), igual que en liveDemoCleanup.
+      const deletedStaffAssignments = await tx.staffAssignment.deleteMany({
+        where: { venueId },
+      })
+      logger.info(`  ✓ Deleted ${deletedStaffAssignments.count} StaffAssignments`)
+
+      // 18. Finally, delete the Venue itself
+      await tx.venue.delete({
+        where: { id: venueId },
+      })
+      logger.info(`  ✅ Venue ${venueId} deleted successfully`)
+    },
+    { etiqueta: 'deleteVenue', ...OPCIONES_BORRADO },
+  )
 
   logger.info(`🎉 Venue deletion complete for venueId: ${venueId}`)
 

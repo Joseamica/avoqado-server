@@ -558,7 +558,7 @@
     },
     "src/services/dashboard/creditPack.public.service.ts#findOrCreateCustomer": {
       "etiqueta": "findOrCreateCustomer",
-      "cantidad": 2,
+      "cantidad": 1,
       "nota": "SENTENCIA: cada sentencia en su propio withDeadlockRetry, sin juntarlas."
     },
     "src/services/dashboard/creditPack.public.service.ts#fulfillPurchase": {
@@ -591,7 +591,7 @@
     },
     "src/services/dashboard/customer.dashboard.service.ts#updateCustomerMetrics": {
       "etiqueta": "updateCustomerMetrics",
-      "cantidad": 1
+      "cantidad": 2
     },
     "src/services/dashboard/customerGroup.dashboard.service.ts#assignCustomersToGroup": {
       "etiqueta": "assignCustomersToGroup",

@@ -2,6 +2,7 @@ import { Request, Response } from 'express'
 import asyncHandler from '../../utils/asyncHandler'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { page, escapeHtml } from './publicHtml'
 import { verifyCustomerUnsubscribeToken, verifyBirthdateCaptureToken } from '../../utils/customerActionToken'
 import { revokeMarketingConsent } from '../../services/customer/consent.service'
@@ -158,10 +159,14 @@ export const postBirthdateCapture = asyncHandler(async (req: Request, res: Respo
 
   // Escribe SÓLO si birthDate sigue null — nunca sobrescribe lo que el cliente ya nos dijo,
   // aunque el token ya haya quedado consumido arriba.
-  const written = await prisma.customer.updateMany({
-    where: { id: data.customerId, venueId: data.venueId, birthDate: null },
-    data: { birthDate: parsedDate },
-  })
+  const written = await withDeadlockRetry(
+    tx =>
+      tx.customer.updateMany({
+        where: { id: data.customerId, venueId: data.venueId, birthDate: null },
+        data: { birthDate: parsedDate },
+      }),
+    { etiqueta: 'postBirthdateCapture' },
+  )
   if (written.count === 0) {
     return res.status(409).type('html').send(ALREADY_REGISTERED_PAGE)
   }

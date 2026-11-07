@@ -77,6 +77,10 @@ describe('Customer Dashboard Service', () => {
     jest.clearAllMocks()
     // Sin colas «Once» sobrantes de `$queryRaw` entre pruebas (ids de la búsqueda, el agregado de saldos de H6, métricas).
     prismaMock.$queryRaw.mockReset()
+    // S5b: las escrituras sueltas ahora van por `withDeadlockRetry` (una `$transaction` de un solo paso). Un `mockResolvedValue([...])` de una
+    // prueba anterior (la lista de clientes usa la forma en arreglo) no debe contaminar a las siguientes.
+    prismaMock.$transaction.mockReset()
+    prismaMock.$transaction.mockImplementation((async (a: any) => (typeof a === 'function' ? a(prismaMock) : undefined)) as any)
   })
 
   describe('getCustomers', () => {
@@ -1282,6 +1286,37 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
       expect.anything(),
       expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }),
     )
+  })
+
+  it('🔴 S5b · tras un 40P01 sólo cuenta el intento ganador: lo liquidado, el vale y el aviso salen de su retorno', async () => {
+    const { applySalePosting } = jest.requireMock('@/services/inventory/inventoryPosting.service') as { applySalePosting: jest.Mock }
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    // Intento 1: gana el CAS, crea pago y vale y LUEGO Postgres lo aborta. Intento 2: la cuenta ya no está pendiente (otro camino la cobró).
+    prismaMock.order.findFirst.mockReset()
+    prismaMock.order.findFirst
+      .mockResolvedValueOnce({
+        id: 'order-1',
+        total: new Decimal(100),
+        tipAmount: new Decimal(0),
+        remainingBalance: new Decimal(100),
+        paymentStatus: 'PENDING',
+        version: 1,
+      } as any)
+      .mockResolvedValue(null)
+    let llamada = 0
+    prismaMock.$transaction.mockImplementation((async (cb: any) => {
+      const r = await cb(prismaMock)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    }) as any)
+
+    const result = await settleCustomerBalance('venue-1', CLIENTE)
+
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1) // lo escribió el intento abortado y se deshizo con él
+    expect(result.settledOrderCount).toBe(0)
+    expect(result.settledAmount).toBe(0)
+    expect(applySalePosting).not.toHaveBeenCalled()
+    expect(onOrderPaidMock).not.toHaveBeenCalled()
   })
 
   it('R8: la orden que gana el CAS activa los sobres de una cuenta de tarjetas en la MISMA transacción', async () => {

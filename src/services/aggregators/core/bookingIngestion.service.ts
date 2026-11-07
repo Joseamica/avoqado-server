@@ -54,7 +54,10 @@ export async function ingestBookingRequested(conn: Conn, ev: BookingEv, now: Dat
       return denyTx(tx, conn, ev, null, 'OTHER')
     })
   } else {
-    outcome = await withSerializableRetry(tx => decideTx(tx, conn, ev, link.classSessionId, now))
+    outcome = await withSerializableRetry(tx => decideTx(tx, conn, ev, link.classSessionId, now), {
+      reintentarInterbloqueo: true,
+      etiqueta: 'ingestBookingRequested',
+    })
   }
 
   return finish(conn, ev, outcome)

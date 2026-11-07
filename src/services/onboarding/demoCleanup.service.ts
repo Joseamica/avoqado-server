@@ -52,6 +52,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -93,39 +94,39 @@ interface CleanupResult {
 export async function cleanDemoData(venueId: string, staffId?: string | null): Promise<CleanupResult> {
   logger.info(`🧹 Starting demo data cleanup for venue: ${venueId}`)
 
-  const result: CleanupResult = {
-    deletedOrders: 0,
-    deletedPayments: 0,
-    deletedReviews: 0,
-    deletedMovements: 0,
-    deletedBatches: 0,
-    deletedMerchantAccounts: 0,
-    deletedCustomers: 0,
-    deletedRecipeLines: 0,
-    deletedRecipes: 0,
-    deletedInventory: 0,
-    deletedProducts: 0,
-    deletedModifiers: 0,
-    deletedModifierGroups: 0,
-    deletedMenuCategories: 0,
-    deletedMenus: 0,
-    deletedTables: 0,
-    deletedAreas: 0,
-    deletedCustomerGroups: 0,
-    deletedLoyaltyConfig: 0,
-    deletedRawMaterials: 0,
-  }
-
-  // Use transaction to ensure atomicity
-  await prisma.$transaction(
+  // Use transaction to ensure atomicity. R65 b: el resultado nace DENTRO de cada intento y sale en el retorno; un intento abortado por
+  // 40P01 no deja conteos a medias.
+  const result = await withDeadlockRetry(
     async tx => {
+      const result: CleanupResult = {
+        deletedOrders: 0,
+        deletedPayments: 0,
+        deletedReviews: 0,
+        deletedMovements: 0,
+        deletedBatches: 0,
+        deletedMerchantAccounts: 0,
+        deletedCustomers: 0,
+        deletedRecipeLines: 0,
+        deletedRecipes: 0,
+        deletedInventory: 0,
+        deletedProducts: 0,
+        deletedModifiers: 0,
+        deletedModifierGroups: 0,
+        deletedMenuCategories: 0,
+        deletedMenus: 0,
+        deletedTables: 0,
+        deletedAreas: 0,
+        deletedCustomerGroups: 0,
+        deletedLoyaltyConfig: 0,
+        deletedRawMaterials: 0,
+      }
       // ⭐ (C6 concern 1): con una sola tarjeta vendida no se borra nada (ver la cabecera). Dentro de la transacción, antes de borrar.
       // r1 (R2): primero la fila del negocio en FOR UPDATE (choca con el KEY SHARE que toma la llave foránea de un sobre que se está
       // vendiendo, como `deleteVenue`); la consulta de tarjetas va en OTRA sentencia y ve la venta que esperamos.
       await tx.$queryRaw`SELECT 1 FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
       if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } })) {
         result.skippedReason = 'GIFT_CARDS'
-        return
+        return result
       }
 
       // ==========================================
@@ -484,8 +485,10 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       // NOTE: non-demo Inventory and RawMaterial stock is intentionally NOT
       // reset. The user captured that stock during the trial — it is real
       // data and must survive the conversion untouched.
+      return result
     },
     {
+      etiqueta: 'cleanDemoData',
       timeout: 120000, // 2 minute timeout for comprehensive cleanup
     },
   )

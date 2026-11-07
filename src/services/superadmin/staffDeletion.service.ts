@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
 import { moveOpenAccountsTx } from '@/services/crm/ownership'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 
 const H1_CONSTRAINT_MARKERS = [
   'ActivityLog_actorStaffId',
@@ -35,7 +36,7 @@ export function isH1ProvenanceConstraint(error: unknown): boolean {
 }
 
 export async function deleteOrRetainStaffWithH1ProvenanceTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   staffId: string,
   afterStaffLock?: (staffId: string) => Promise<void>,
 ) {
@@ -138,7 +139,10 @@ export function createStaffDeletionService(
   const dependencies = { prisma: overrides.prisma ?? prisma, afterStaffLock: overrides.afterStaffLock }
   return async (staffId: string) => {
     try {
-      return await dependencies.prisma.$transaction(tx => deleteOrRetainStaffWithH1ProvenanceTx(tx, staffId, dependencies.afterStaffLock))
+      return await withDeadlockRetry(tx => deleteOrRetainStaffWithH1ProvenanceTx(tx, staffId, dependencies.afterStaffLock), {
+        etiqueta: 'createStaffDeletionService',
+        cliente: dependencies.prisma,
+      })
     } catch (error) {
       if (isH1ProvenanceConstraint(error)) {
         throw new ConflictError('El usuario conserva provenance inmutable de catálogo', 'STAFF_HAS_H1_PROVENANCE')

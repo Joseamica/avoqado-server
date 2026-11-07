@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { personSearchWhere } from '../personSearch'
@@ -207,11 +208,15 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       const newTags = applyTagChanges(c.tags, add ?? [], remove ?? [])
       try {
         // Customer was resolved from a venue-scoped query, so update-by-id stays in-tenant.
-        const updated = await prisma.customer.update({
-          where: { id: c.id },
-          data: { tags: newTags },
-          select: { firstName: true, lastName: true, tags: true },
-        })
+        const updated = await withDeadlockRetry(
+          tx =>
+            tx.customer.update({
+              where: { id: c.id },
+              data: { tags: newTags },
+              select: { firstName: true, lastName: true, tags: true },
+            }),
+          { etiqueta: 'registerCustomerTools' },
+        )
         await auditMcpWrite(scope, {
           action: 'CUSTOMER_TAGS_SET',
           entity: 'Customer',
@@ -265,11 +270,15 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       const c = matches[0]
       const newNotes = c.notes ? `${c.notes}\n${note}` : note // append — never overwrite existing context
       try {
-        const updated = await prisma.customer.update({
-          where: { id: c.id },
-          data: { notes: newNotes },
-          select: { firstName: true, lastName: true, notes: true },
-        })
+        const updated = await withDeadlockRetry(
+          tx =>
+            tx.customer.update({
+              where: { id: c.id },
+              data: { notes: newNotes },
+              select: { firstName: true, lastName: true, notes: true },
+            }),
+          { etiqueta: 'registerCustomerTools' },
+        )
         await auditMcpWrite(scope, {
           action: 'CUSTOMER_NOTE_ADDED',
           entity: 'Customer',

@@ -23,6 +23,7 @@
 import { Prisma, CustomerApprovalStatus } from '@prisma/client'
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { dedupeKey } from '@/services/reservation/customerApprovalOutbox.service'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 export const CUSTOMER_APPROVAL_PENDING = 'CUSTOMER_APPROVAL_PENDING' as const
 export const CUSTOMER_APPROVAL_REJECTED = 'CUSTOMER_APPROVAL_REJECTED' as const
@@ -94,7 +95,7 @@ type LockedCustomer = {
  *   escritura, pero deja pasar los FK.
  */
 async function lockCustomer(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   customerId: string,
   venueId: string,
   mode: 'SHARE' | 'NO KEY UPDATE',
@@ -125,7 +126,7 @@ async function lockCustomer(
  * revierte, la solicitud de aprobación se revierte con él.
  */
 export async function activateCustomerAccount(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: { customerId: string; venueId: string; origin: ActivationOrigin },
 ): Promise<{ approvalStatus: CustomerApprovalStatus; requestsApproval: boolean; approvalVersion: number }> {
   const requireCustomerApproval = await venueRequiresApproval(tx, input.venueId)
@@ -211,7 +212,7 @@ export async function assertCustomerCanCreateReservation(
  * Acepta un Customer SIN cuenta activada: es la preaprobación anticipada (§3ter del diseño).
  */
 export async function decideCustomerApproval(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   input: {
     customerId: string
     venueId: string

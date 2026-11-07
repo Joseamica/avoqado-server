@@ -23,7 +23,7 @@ import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
-import { withSerializableRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry, withSerializableRetry } from '@/utils/serializableRetry'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 import {
@@ -1947,310 +1947,313 @@ async function createClassReservation(
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
-  return withSerializableRetry(async tx => {
-    // Fase 1: el gate va primero, dentro de la MISMA tx que aparta el lugar. Las clases
-    // tienen su propia transacción (lock de la sesión) y no pasan por `createReservation`,
-    // así que el gate del servicio de citas no las cubre.
-    await assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId })
+  return withSerializableRetry(
+    async tx => {
+      // Fase 1: el gate va primero, dentro de la MISMA tx que aparta el lugar. Las clases
+      // tienen su propia transacción (lock de la sesión) y no pasan por `createReservation`,
+      // así que el gate del servicio de citas no las cubre.
+      await assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId })
 
-    // Lock the ClassSession row and verify it exists + belongs to venue
-    const session = await lockClassSession(tx, venueId, body.classSessionId)
+      // Lock the ClassSession row and verify it exists + belongs to venue
+      const session = await lockClassSession(tx, venueId, body.classSessionId)
 
-    if (session.status !== 'SCHEDULED') {
-      throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
-    }
+      if (session.status !== 'SCHEDULED') {
+        throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
+      }
 
-    // External calendar busy-block check (Google Calendar et al.).
-    // Class reservations bypass `reservationService.createReservation`, so the
-    // check has to be re-applied here. Class sessions are venue-master only
-    // (no per-instructor staff field on the booking), so staffId stays null.
-    const externalBlock = await checkExternalBusyBlock(tx, {
-      venueId,
-      staffId: null,
-      startsAt: session.startsAt,
-      endsAt: session.endsAt,
-    })
-    if (externalBlock) {
-      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-    }
+      // External calendar busy-block check (Google Calendar et al.).
+      // Class reservations bypass `reservationService.createReservation`, so the
+      // check has to be re-applied here. Class sessions are venue-master only
+      // (no per-instructor staff field on the booking), so staffId stays null.
+      const externalBlock = await checkExternalBusyBlock(tx, {
+        venueId,
+        staffId: null,
+        startsAt: session.startsAt,
+        endsAt: session.endsAt,
+      })
+      if (externalBlock) {
+        throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+      }
 
-    // Enforce admin booking-window policy (maxAdvanceDays / minNoticeMin).
-    // ValidationError -> 422.
-    reservationService.enforceBookingWindow(session.startsAt, moduleConfig?.scheduling)
+      // Enforce admin booking-window policy (maxAdvanceDays / minNoticeMin).
+      // ValidationError -> 422.
+      reservationService.enforceBookingWindow(session.startsAt, moduleConfig?.scheduling)
 
-    // Verify the product is CLASS and active
-    const product = await tx.product.findFirst({
-      where: { id: session.productId, venueId },
-      select: { type: true, active: true, layoutConfig: true, requireCreditForBooking: true, price: true, upfrontPolicy: true },
-    })
-    if (!product || product.type !== 'CLASS') {
-      throw new BadRequestError('El producto asociado no es una clase valida')
-    }
-    if (!product.active) {
-      throw new BadRequestError('Este servicio ya no esta disponible')
-    }
+      // Verify the product is CLASS and active
+      const product = await tx.product.findFirst({
+        where: { id: session.productId, venueId },
+        select: { type: true, active: true, layoutConfig: true, requireCreditForBooking: true, price: true, upfrontPolicy: true },
+      })
+      if (!product || product.type !== 'CLASS') {
+        throw new BadRequestError('El producto asociado no es una clase valida')
+      }
+      if (!product.active) {
+        throw new BadRequestError('Este servicio ya no esta disponible')
+      }
 
-    // Block booking if product requires credit and none provided
-    if (product.requireCreditForBooking && !body.creditItemBalanceId) {
-      throw new BadRequestError('Este servicio requiere un credito para reservar. Compra un paquete de creditos primero.')
-    }
+      // Block booking if product requires credit and none provided
+      if (product.requireCreditForBooking && !body.creditItemBalanceId) {
+        throw new BadRequestError('Este servicio requiere un credito para reservar. Compra un paquete de creditos primero.')
+      }
 
-    // Resolve effective upfront-payment policy (per-product override or venue default).
-    // When 'required' and the customer is paying cash (no creditItemBalanceId), we
-    // create the reservation in PENDING + depositStatus PENDING — the wrapper will
-    // then create a Stripe Checkout session and the webhook flips it to CONFIRMED
-    // when payment succeeds. Without this enforcement the widget could (and did)
-    // skip payment entirely and land a CONFIRMED reservation for free.
-    const effectiveUpfrontPolicy = resolveUpfrontPolicy(
-      { type: product.type, upfrontPolicy: product.upfrontPolicy },
-      {
-        appointmentUpfrontDefault: moduleConfig?.payments?.appointmentUpfrontDefault,
-        classUpfrontDefault: moduleConfig?.payments?.classUpfrontDefault,
-      },
-    )
-    const willUseCredits = !!body.creditItemBalanceId
-    const cashPrice = Number(product.price ?? 0)
-    const policyDemandsUpfrontCash = effectiveUpfrontPolicy === 'required' && !willUseCredits && cashPrice > 0
-    // Only mint a Stripe checkout when the venue actually has a working merchant.
-    // Otherwise fall back to "pay at venue" semantics (CONFIRMED + amount owed).
-    // This keeps venues that haven't onboarded Stripe yet from breaking when the
-    // policy resolves to 'required' — the most honest behavior is "your spot is
-    // held, you owe $X at the venue" rather than 400'ing the customer.
-    const requiresUpfrontCash = policyDemandsUpfrontCash && hasStripeMerchant
-    const owesAtVenue = policyDemandsUpfrontCash && !hasStripeMerchant
-    if (owesAtVenue) {
-      logger.warn(
-        `⚠️ [CLASS BOOKING] upfrontPolicy=required but venue ${venueId} has no Stripe merchant — falling back to pay-at-venue (owes ${cashPrice * requestedPartySize})`,
+      // Resolve effective upfront-payment policy (per-product override or venue default).
+      // When 'required' and the customer is paying cash (no creditItemBalanceId), we
+      // create the reservation in PENDING + depositStatus PENDING — the wrapper will
+      // then create a Stripe Checkout session and the webhook flips it to CONFIRMED
+      // when payment succeeds. Without this enforcement the widget could (and did)
+      // skip payment entirely and land a CONFIRMED reservation for free.
+      const effectiveUpfrontPolicy = resolveUpfrontPolicy(
+        { type: product.type, upfrontPolicy: product.upfrontPolicy },
+        {
+          appointmentUpfrontDefault: moduleConfig?.payments?.appointmentUpfrontDefault,
+          classUpfrontDefault: moduleConfig?.payments?.classUpfrontDefault,
+        },
       )
-    }
+      const willUseCredits = !!body.creditItemBalanceId
+      const cashPrice = Number(product.price ?? 0)
+      const policyDemandsUpfrontCash = effectiveUpfrontPolicy === 'required' && !willUseCredits && cashPrice > 0
+      // Only mint a Stripe checkout when the venue actually has a working merchant.
+      // Otherwise fall back to "pay at venue" semantics (CONFIRMED + amount owed).
+      // This keeps venues that haven't onboarded Stripe yet from breaking when the
+      // policy resolves to 'required' — the most honest behavior is "your spot is
+      // held, you owe $X at the venue" rather than 400'ing the customer.
+      const requiresUpfrontCash = policyDemandsUpfrontCash && hasStripeMerchant
+      const owesAtVenue = policyDemandsUpfrontCash && !hasStripeMerchant
+      if (owesAtVenue) {
+        logger.warn(
+          `⚠️ [CLASS BOOKING] upfrontPolicy=required but venue ${venueId} has no Stripe merchant — falling back to pay-at-venue (owes ${cashPrice * requestedPartySize})`,
+        )
+      }
 
-    // Sum enrolled from active reservations (under the ClassSession lock + SERIALIZABLE)
-    const enrolled = await sumOccupiedSeats(tx, body.classSessionId)
-    const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
+      // Sum enrolled from active reservations (under the ClassSession lock + SERIALIZABLE)
+      const enrolled = await sumOccupiedSeats(tx, body.classSessionId)
+      const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
 
-    if (enrolled + requestedPartySize > effectiveCapacity) {
-      throw new ConflictError(
-        `No hay suficientes lugares disponibles. Disponibles: ${effectiveCapacity - enrolled}, solicitados: ${requestedPartySize}`,
-      )
-    }
+      if (enrolled + requestedPartySize > effectiveCapacity) {
+        throw new ConflictError(
+          `No hay suficientes lugares disponibles. Disponibles: ${effectiveCapacity - enrolled}, solicitados: ${requestedPartySize}`,
+        )
+      }
 
-    // Validate spotIds against product layout (if layout exists and spots were selected)
-    if (requestedSpotIds.length > 0 && product.layoutConfig) {
-      const layout = product.layoutConfig as { spots?: { id: string; enabled: boolean }[] }
-      const validSpotIds = new Set((layout.spots ?? []).filter(s => s.enabled).map(s => s.id))
+      // Validate spotIds against product layout (if layout exists and spots were selected)
+      if (requestedSpotIds.length > 0 && product.layoutConfig) {
+        const layout = product.layoutConfig as { spots?: { id: string; enabled: boolean }[] }
+        const validSpotIds = new Set((layout.spots ?? []).filter(s => s.enabled).map(s => s.id))
 
-      for (const spotId of requestedSpotIds) {
-        if (!validSpotIds.has(spotId)) {
-          throw new BadRequestError(`Lugar "${spotId}" no es valido`)
+        for (const spotId of requestedSpotIds) {
+          if (!validSpotIds.has(spotId)) {
+            throw new BadRequestError(`Lugar "${spotId}" no es valido`)
+          }
+        }
+
+        // Check that requested spots are not already taken
+        const takenReservations = await tx.reservation.findMany({
+          where: {
+            classSessionId: body.classSessionId,
+            status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+            spotIds: { hasSome: requestedSpotIds },
+          },
+          select: { spotIds: true },
+        })
+        if (takenReservations.length > 0) {
+          const takenIds = takenReservations.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
+          throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`)
         }
       }
 
-      // Check that requested spots are not already taken
-      const takenReservations = await tx.reservation.findMany({
-        where: {
-          classSessionId: body.classSessionId,
-          status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
-          spotIds: { hasSome: requestedSpotIds },
-        },
-        select: { spotIds: true },
+      const confirmationCode = reservationService.generateConfirmationCode()
+
+      // Ensure uniqueness
+      const existing = await tx.reservation.findUnique({
+        where: { venueId_confirmationCode: { venueId, confirmationCode } },
+        select: { id: true },
       })
-      if (takenReservations.length > 0) {
-        const takenIds = takenReservations.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
-        throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`)
-      }
-    }
+      const finalCode = existing ? reservationService.generateConfirmationCode() : confirmationCode
 
-    const confirmationCode = reservationService.generateConfirmationCode()
+      // Fase 0.B: la reserva se liga SÓLO al Customer de la sesión. Antes aquí había un
+      // auto-link por email/teléfono del body (query raw sobre "Customer" con phonesMatch);
+      // se retiró porque el body no confiere identidad — ver resolveClassCustomerBinding.
+      // El portal sigue mostrando la reserva invitada por guestEmail/guestPhone.
+      const binding = resolveClassCustomerBinding({ sessionCustomerId })
+      const matchedCustomer = binding.customerId ? { id: binding.customerId } : null
 
-    // Ensure uniqueness
-    const existing = await tx.reservation.findUnique({
-      where: { venueId_confirmationCode: { venueId, confirmationCode } },
-      select: { id: true },
-    })
-    const finalCode = existing ? reservationService.generateConfirmationCode() : confirmationCode
+      // Three states for the reservation row:
+      // 1. requiresUpfrontCash (policy=required + venue has Stripe): PENDING +
+      //    depositStatus=PENDING + amount set. Webhook will flip to CONFIRMED+PAID
+      //    after Stripe checkout succeeds.
+      // 2. owesAtVenue (policy=required + venue lacks Stripe): CONFIRMED + amount
+      //    set + depositStatus stays NULL. Encodes "spot held, customer owes $X
+      //    at the venue" — staff/dashboard can read this combination to know the
+      //    customer needs to pay on arrival.
+      // 3. else (policy=at_venue/optional, or credits paid): standard CONFIRMED.
+      const effectiveStatus: ReservationStatus = requiresUpfrontCash ? 'PENDING' : initialStatus
+      const upfrontAmount = requiresUpfrontCash || owesAtVenue ? cashPrice * requestedPartySize : null
+      const ownerAtVenueNote = owesAtVenue
+        ? `[PAY-AT-VENUE] Cliente debe $${cashPrice * requestedPartySize} al llegar (venue sin Stripe configurado)`
+        : null
+      const mergedSpecialRequests = [body.specialRequests ?? null, ownerAtVenueNote].filter(Boolean).join(' • ') || null
 
-    // Fase 0.B: la reserva se liga SÓLO al Customer de la sesión. Antes aquí había un
-    // auto-link por email/teléfono del body (query raw sobre "Customer" con phonesMatch);
-    // se retiró porque el body no confiere identidad — ver resolveClassCustomerBinding.
-    // El portal sigue mostrando la reserva invitada por guestEmail/guestPhone.
-    const binding = resolveClassCustomerBinding({ sessionCustomerId })
-    const matchedCustomer = binding.customerId ? { id: binding.customerId } : null
+      const reservation = await tx.reservation.create({
+        data: {
+          venueId,
+          confirmationCode: finalCode,
+          classSessionId: body.classSessionId,
+          productId: session.productId,
+          startsAt: session.startsAt,
+          endsAt: session.endsAt,
+          // Una CLASE no lleva buffer post-servicio (es de citas): el bloque de
+          // agenda coincide con la sesión.
+          blockedEndsAt: session.endsAt,
+          duration: session.duration,
+          status: effectiveStatus,
+          channel: 'WEB',
+          customerId: matchedCustomer?.id ?? null,
+          guestName: body.guestName,
+          guestPhone: body.guestPhone,
+          guestEmail: body.guestEmail ?? null,
+          partySize: requestedPartySize,
+          spotIds: requestedSpotIds,
+          specialRequests: mergedSpecialRequests,
+          depositAmount: upfrontAmount,
+          depositStatus: requiresUpfrontCash ? 'PENDING' : null,
+          confirmedAt: requiresUpfrontCash ? null : autoConfirm ? new Date() : null,
+          statusLog: [
+            {
+              status: effectiveStatus,
+              at: new Date().toISOString(),
+              by: null,
+              ...(owesAtVenue ? { note: 'pay-at-venue', amountOwed: cashPrice * requestedPartySize } : {}),
+            },
+          ],
+        },
+      })
 
-    // Three states for the reservation row:
-    // 1. requiresUpfrontCash (policy=required + venue has Stripe): PENDING +
-    //    depositStatus=PENDING + amount set. Webhook will flip to CONFIRMED+PAID
-    //    after Stripe checkout succeeds.
-    // 2. owesAtVenue (policy=required + venue lacks Stripe): CONFIRMED + amount
-    //    set + depositStatus stays NULL. Encodes "spot held, customer owes $X
-    //    at the venue" — staff/dashboard can read this combination to know the
-    //    customer needs to pay on arrival.
-    // 3. else (policy=at_venue/optional, or credits paid): standard CONFIRMED.
-    const effectiveStatus: ReservationStatus = requiresUpfrontCash ? 'PENDING' : initialStatus
-    const upfrontAmount = requiresUpfrontCash || owesAtVenue ? cashPrice * requestedPartySize : null
-    const ownerAtVenueNote = owesAtVenue
-      ? `[PAY-AT-VENUE] Cliente debe $${cashPrice * requestedPartySize} al llegar (venue sin Stripe configurado)`
-      : null
-    const mergedSpecialRequests = [body.specialRequests ?? null, ownerAtVenueNote].filter(Boolean).join(' • ') || null
+      // ---- Credit redemption (if creditItemBalanceId provided) ----
+      // Charges N credits where N = requestedPartySize (one credit per seat).
+      let creditRedeemed = false
+      let creditsUsed = 0
+      if (body.creditItemBalanceId) {
+        // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401.
+        const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId, venueId })
 
-    const reservation = await tx.reservation.create({
-      data: {
-        venueId,
-        confirmationCode: finalCode,
-        classSessionId: body.classSessionId,
-        productId: session.productId,
-        startsAt: session.startsAt,
-        endsAt: session.endsAt,
-        // Una CLASE no lleva buffer post-servicio (es de citas): el bloque de
-        // agenda coincide con la sesión.
-        blockedEndsAt: session.endsAt,
-        duration: session.duration,
-        status: effectiveStatus,
-        channel: 'WEB',
-        customerId: matchedCustomer?.id ?? null,
-        guestName: body.guestName,
-        guestPhone: body.guestPhone,
-        guestEmail: body.guestEmail ?? null,
-        partySize: requestedPartySize,
-        spotIds: requestedSpotIds,
-        specialRequests: mergedSpecialRequests,
-        depositAmount: upfrontAmount,
-        depositStatus: requiresUpfrontCash ? 'PENDING' : null,
-        confirmedAt: requiresUpfrontCash ? null : autoConfirm ? new Date() : null,
-        statusLog: [
-          {
-            status: effectiveStatus,
-            at: new Date().toISOString(),
-            by: null,
-            ...(owesAtVenue ? { note: 'pay-at-venue', amountOwed: cashPrice * requestedPartySize } : {}),
-          },
-        ],
-      },
-    })
-
-    // ---- Credit redemption (if creditItemBalanceId provided) ----
-    // Charges N credits where N = requestedPartySize (one credit per seat).
-    let creditRedeemed = false
-    let creditsUsed = 0
-    if (body.creditItemBalanceId) {
-      // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401.
-      const customer = await requireSessionCustomerForCredits(tx, { sessionCustomerId, venueId })
-
-      // Lock and verify balance
-      const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
+        // Lock and verify balance
+        const balances = await tx.$queryRaw<{ id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string }[]>`
         SELECT id, "remainingQuantity", "creditPackPurchaseId", "productId"
         FROM "CreditItemBalance"
         WHERE id = ${body.creditItemBalanceId}
         FOR UPDATE
       `
 
-      if (balances.length === 0) {
-        throw new BadRequestError('Balance de credito no encontrado')
-      }
+        if (balances.length === 0) {
+          throw new BadRequestError('Balance de credito no encontrado')
+        }
 
-      const balance = balances[0]
+        const balance = balances[0]
 
-      if (balance.productId !== session.productId) {
-        throw new BadRequestError('El credito no corresponde al producto de esta clase')
-      }
+        if (balance.productId !== session.productId) {
+          throw new BadRequestError('El credito no corresponde al producto de esta clase')
+        }
 
-      if (balance.remainingQuantity < requestedPartySize) {
-        throw new BadRequestError(
-          `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${requestedPartySize}. Compra mas creditos para continuar.`,
+        if (balance.remainingQuantity < requestedPartySize) {
+          throw new BadRequestError(
+            `No tienes suficientes creditos. Disponibles: ${balance.remainingQuantity}, necesarios: ${requestedPartySize}. Compra mas creditos para continuar.`,
+          )
+        }
+
+        // Verify purchase is active and not expired
+        const purchase = await tx.creditPackPurchase.findUnique({
+          where: { id: balance.creditPackPurchaseId },
+          select: { status: true, expiresAt: true, customerId: true },
+        })
+
+        if (!purchase || purchase.customerId !== customer.id) {
+          throw new BadRequestError('Credito no valido para este cliente')
+        }
+
+        if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
+          throw new BadRequestError('Los creditos ya no estan activos')
+        }
+
+        if (purchase.expiresAt && purchase.expiresAt < new Date()) {
+          throw new BadRequestError('Los creditos han expirado')
+        }
+
+        // Decrement balance by partySize (one credit per seat)
+        await tx.creditItemBalance.update({
+          where: { id: body.creditItemBalanceId },
+          data: { remainingQuantity: { decrement: requestedPartySize } },
+        })
+
+        // Create single credit transaction with negative quantity = seats
+        await tx.creditTransaction.create({
+          data: {
+            venueId,
+            customerId: customer.id,
+            creditPackPurchaseId: balance.creditPackPurchaseId,
+            creditItemBalanceId: body.creditItemBalanceId,
+            type: 'REDEEM',
+            quantity: -requestedPartySize,
+            reservationId: reservation.id,
+            reason: requestedPartySize > 1 ? `Reserva de ${requestedPartySize} lugares` : null,
+          },
+        })
+
+        // Check if purchase is exhausted
+        const remainingBalances = await tx.creditItemBalance.findMany({
+          where: {
+            creditPackPurchaseId: balance.creditPackPurchaseId,
+            remainingQuantity: { gt: 0 },
+          },
+        })
+
+        if (remainingBalances.length === 0) {
+          await tx.creditPackPurchase.update({
+            where: { id: balance.creditPackPurchaseId },
+            data: { status: CreditPurchaseStatus.EXHAUSTED },
+          })
+        }
+
+        creditRedeemed = true
+        creditsUsed = requestedPartySize
+        logger.info(
+          `✅ [CREDIT REDEEM] ${requestedPartySize} credit(s) redeemed for reservation ${reservation.confirmationCode} | balance=${body.creditItemBalanceId}`,
         )
       }
 
-      // Verify purchase is active and not expired
-      const purchase = await tx.creditPackPurchase.findUnique({
-        where: { id: balance.creditPackPurchaseId },
-        select: { status: true, expiresAt: true, customerId: true },
-      })
-
-      if (!purchase || purchase.customerId !== customer.id) {
-        throw new BadRequestError('Credito no valido para este cliente')
-      }
-
-      if (purchase.status !== CreditPurchaseStatus.ACTIVE) {
-        throw new BadRequestError('Los creditos ya no estan activos')
-      }
-
-      if (purchase.expiresAt && purchase.expiresAt < new Date()) {
-        throw new BadRequestError('Los creditos han expirado')
-      }
-
-      // Decrement balance by partySize (one credit per seat)
-      await tx.creditItemBalance.update({
-        where: { id: body.creditItemBalanceId },
-        data: { remainingQuantity: { decrement: requestedPartySize } },
-      })
-
-      // Create single credit transaction with negative quantity = seats
-      await tx.creditTransaction.create({
-        data: {
-          venueId,
-          customerId: customer.id,
-          creditPackPurchaseId: balance.creditPackPurchaseId,
-          creditItemBalanceId: body.creditItemBalanceId,
-          type: 'REDEEM',
-          quantity: -requestedPartySize,
-          reservationId: reservation.id,
-          reason: requestedPartySize > 1 ? `Reserva de ${requestedPartySize} lugares` : null,
-        },
-      })
-
-      // Check if purchase is exhausted
-      const remainingBalances = await tx.creditItemBalance.findMany({
-        where: {
-          creditPackPurchaseId: balance.creditPackPurchaseId,
-          remainingQuantity: { gt: 0 },
-        },
-      })
-
-      if (remainingBalances.length === 0) {
-        await tx.creditPackPurchase.update({
-          where: { id: balance.creditPackPurchaseId },
-          data: { status: CreditPurchaseStatus.EXHAUSTED },
-        })
-      }
-
-      creditRedeemed = true
-      creditsUsed = requestedPartySize
       logger.info(
-        `✅ [CREDIT REDEEM] ${requestedPartySize} credit(s) redeemed for reservation ${reservation.confirmationCode} | balance=${body.creditItemBalanceId}`,
+        `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ` (${creditsUsed} credit${creditsUsed > 1 ? 's' : ''})` : ''}`,
       )
-    }
 
-    logger.info(
-      `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ` (${creditsUsed} credit${creditsUsed > 1 ? 's' : ''})` : ''}`,
-    )
-
-    // ---- Google Calendar push outbox (Phase 2 — spec §14.2) ----
-    // One event per class, not per attendee. Enqueue UPDATE_ROSTER (debounced
-    // 30s) so the worker coalesces multiple attendee mutations into a single
-    // events.patch on the class's pushed event. No per-reservation CREATE.
-    const classSession = await tx.classSession.findUnique({
-      where: { id: body.classSessionId },
-      select: { assignedStaffId: true },
-    })
-    if (classSession) {
-      const classTargets = await resolveClassSessionPushTargets(tx, {
-        venueId,
-        assignedStaffId: classSession.assignedStaffId ?? null,
+      // ---- Google Calendar push outbox (Phase 2 — spec §14.2) ----
+      // One event per class, not per attendee. Enqueue UPDATE_ROSTER (debounced
+      // 30s) so the worker coalesces multiple attendee mutations into a single
+      // events.patch on the class's pushed event. No per-reservation CREATE.
+      const classSession = await tx.classSession.findUnique({
+        where: { id: body.classSessionId },
+        select: { assignedStaffId: true },
       })
-      if (classTargets.length > 0) {
-        await enqueuePush(tx, {
-          source: { kind: 'class', classSessionId: body.classSessionId },
+      if (classSession) {
+        const classTargets = await resolveClassSessionPushTargets(tx, {
           venueId,
-          operation: 'UPDATE_ROSTER',
-          targetConnectionIds: classTargets.map(t => t.id),
-          debounceUntil: new Date(Date.now() + 30_000),
+          assignedStaffId: classSession.assignedStaffId ?? null,
         })
-        // Debounced — sweeper publishes after window. No immediate RMQ push.
+        if (classTargets.length > 0) {
+          await enqueuePush(tx, {
+            source: { kind: 'class', classSessionId: body.classSessionId },
+            venueId,
+            operation: 'UPDATE_ROSTER',
+            targetConnectionIds: classTargets.map(t => t.id),
+            debounceUntil: new Date(Date.now() + 30_000),
+          })
+          // Debounced — sweeper publishes after window. No immediate RMQ push.
+        }
       }
-    }
-    await enqueuePassSessionSync(tx, venueId, body.classSessionId)
+      await enqueuePassSessionSync(tx, venueId, body.classSessionId)
 
-    return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
-  })
+      return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
+    },
+    { reintentarInterbloqueo: true, etiqueta: 'createClassReservation' },
+  )
 }
 
 // ==========================================
@@ -2406,34 +2409,37 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       // external busy-block check runs against the same snapshot the create
       // commits with.
       const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
-      hold = await prisma.$transaction(async tx => {
-        // Fase 1: el gate, primero y dentro de ESTA transacción — igual que en la rama de
-        // cita. Orden de locks: Customer → sesión de clase, el mismo en todos los caminos.
-        await assertCustomerCanCreateReservation(tx, { customerId: holdCustomerId, venueId: venue.id })
+      hold = await withDeadlockRetry(
+        async tx => {
+          // Fase 1: el gate, primero y dentro de ESTA transacción — igual que en la rama de
+          // cita. Orden de locks: Customer → sesión de clase, el mismo en todos los caminos.
+          await assertCustomerCanCreateReservation(tx, { customerId: holdCustomerId, venueId: venue.id })
 
-        const externalBlock = await checkExternalBusyBlock(tx, {
-          venueId: venue.id,
-          staffId: null,
-          startsAt,
-          endsAt,
-        })
-        if (externalBlock) {
-          throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-        }
-        return tx.slotHold.create({
-          data: {
+          const externalBlock = await checkExternalBusyBlock(tx, {
             venueId: venue.id,
+            staffId: null,
             startsAt,
             endsAt,
-            productIds,
-            classSessionId: body.classSessionId ?? null,
-            partySize: Math.max(1, body.partySize ?? 1),
-            expiresAt,
-            fingerprint: body.fingerprint ?? null,
-          },
-          select: { id: true, expiresAt: true },
-        })
-      })
+          })
+          if (externalBlock) {
+            throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+          }
+          return tx.slotHold.create({
+            data: {
+              venueId: venue.id,
+              startsAt,
+              endsAt,
+              productIds,
+              classSessionId: body.classSessionId ?? null,
+              partySize: Math.max(1, body.partySize ?? 1),
+              expiresAt,
+              fingerprint: body.fingerprint ?? null,
+            },
+            select: { id: true, expiresAt: true },
+          })
+        },
+        { etiqueta: 'createHold' },
+      )
     }
 
     res.status(201).json({

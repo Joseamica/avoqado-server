@@ -20,6 +20,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/utils/serializableRetry', () => ({
   withSerializableRetry: jest.fn((fn: any) => fn(prismaMock)),
+  withDeadlockRetry: jest.fn((fn: any) => fn(prismaMock)),
 }))
 
 jest.mock('@/services/superadmin/platformSettings.service', () => ({
