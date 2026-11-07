@@ -33,6 +33,7 @@ import { NO_SE_PUEDE_POR_ARTICULOS } from '@/services/fiscal/cobradoDeLaOrden'
 import { TOPES_POR_ORDEN } from '@/services/fiscal/librosDeOrdenes'
 import { metodoParaAlcanceFiscal, paymentInFiscalScope } from '@/services/fiscal/fiscalScope'
 import { prismaMock } from '../../../__helpers__/setup'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 const VENUE = 'cmvixy2n100006kwa5fvmb7r7'
 const ORDER = 'cmvixy2n200016kwa586a3ucx'
@@ -157,7 +158,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
   it('writes a credit refund over a card payment with method OTHER, fundsFlow EXTERNAL_RECORDED, merchantAccountId null and the EC tender snapshot', async () => {
     // original: CREDIT_CARD, AVOQADO_PROCESSED, merchantAccountId MERCHANT
     await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada({ moneyAs: creditoDeCambio, skipNegativeCostObligation: true, exchangeMark: { exchangeId: EXCHANGE, role: 'CREDIT' } }),
     )
 
@@ -191,7 +192,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
   it('the tender commission reversal never rides on a moneyAs row', async () => {
     const conComision = cobroBloqueado({ tenderTypeId: 'cmviy09m80000mywa91q33l6q', tenderCommissionPercent: new Prisma.Decimal(30) })
     await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada(
         { moneyAs: creditoDeCambio, tenderCommission: 'REVERSE_PROPORTIONAL', exchangeMark: { exchangeId: EXCHANGE, role: 'CREDIT' } },
         conComision,
@@ -204,7 +205,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
 
   it('does not open the negative cost obligation with skipNegativeCostObligation', async () => {
     await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada({ moneyAs: creditoDeCambio, skipNegativeCostObligation: true, exchangeMark: { exchangeId: EXCHANGE, role: 'CREDIT' } }),
     )
     expect(asegurarObligacionDeCostoNegativo).not.toHaveBeenCalled()
@@ -212,15 +213,19 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
     // Control: sin la bandera, la obligación se abre como siempre, en la misma transacción.
     jest.clearAllMocks()
     prismaMock.payment.create.mockResolvedValue({ id: REFUND } as never)
-    await writeRefundInTx(tx, entrada())
+    await writeRefundInTx(tx as unknown as TxConReintento, entrada())
     expect(asegurarObligacionDeCostoNegativo).toHaveBeenCalledWith(tx, ORIGINAL, REFUND)
   })
 
   it('throws when moneyAs and devolverCon come together', async () => {
-    await expect(writeRefundInTx(tx, entrada({ moneyAs: creditoDeCambio, devolverCon: 'CASH' }))).rejects.toMatchObject({ statusCode: 400 })
+    await expect(
+      writeRefundInTx(tx as unknown as TxConReintento, entrada({ moneyAs: creditoDeCambio, devolverCon: 'CASH' })),
+    ).rejects.toMatchObject({ statusCode: 400 })
     // Tampoco «Devolver con» el mismo medio del cobro (que solo valdría «como siempre»): son dos respuestas a la misma pregunta.
     const efectivo = cobroBloqueado({ method: 'CASH', merchantAccountId: null, fundsFlow: 'CASH_DRAWER' })
-    await expect(writeRefundInTx(tx, entrada({ moneyAs: creditoDeCambio, devolverCon: 'CASH' }, efectivo))).rejects.toMatchObject({
+    await expect(
+      writeRefundInTx(tx as unknown as TxConReintento, entrada({ moneyAs: creditoDeCambio, devolverCon: 'CASH' }, efectivo)),
+    ).rejects.toMatchObject({
       statusCode: 400,
     })
     expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
@@ -229,7 +234,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
 
   it('without moneyAs preserves the cash refund fields and leaves the date to Prisma', async () => {
     const efectivo = cobroBloqueado({ method: 'CASH', merchantAccountId: null, fundsFlow: 'CASH_DRAWER' })
-    await writeRefundInTx(tx, entrada({ salesRefundCents: 5000 }, efectivo))
+    await writeRefundInTx(tx as unknown as TxConReintento, entrada({ salesRefundCents: 5000 }, efectivo))
 
     expect(prismaMock.payment.create.mock.calls[0][0]).toStrictEqual({
       data: {
@@ -286,7 +291,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
       tenderSystemKind: 'EXCHANGE_CREDIT',
     })
     await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada(
         { moneyAs: raizEnEfectivo, exchangeMark: { exchangeId: EXCHANGE, role: 'DIFFERENCE', rootPaymentId: ROOT } },
         cobroConCredito,
@@ -304,7 +309,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
 
   it('a CREDIT row carries rootPaymentId only inside the exchange mark', async () => {
     await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada({ moneyAs: creditoDeCambio, exchangeMark: { exchangeId: EXCHANGE, role: 'CREDIT', rootPaymentId: ROOT } }),
     )
 
@@ -316,7 +321,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
 
   it('with cash excluded from accounting, a chain cash refund is excluded from autoposting like an ordinary cash refund', async () => {
     const efectivo = cobroBloqueado({ method: 'CASH', merchantAccountId: null, fundsFlow: 'CASH_DRAWER' })
-    await writeRefundInTx(tx, entrada({}, efectivo))
+    await writeRefundInTx(tx as unknown as TxConReintento, entrada({}, efectivo))
     const cobroConCredito = cobroBloqueado({
       id: PAYMENT_2,
       method: 'OTHER',
@@ -326,7 +331,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
       tenderSystemKind: 'EXCHANGE_CREDIT',
     })
     await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada({ moneyAs: raizEnEfectivo, exchangeMark: { exchangeId: EXCHANGE, role: 'CHAIN', rootPaymentId: ROOT } }, cobroConCredito),
     )
 
@@ -340,7 +345,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
 
   it('accepts a $0 credit anchor only with the CREDIT mark and moneyAs', async () => {
     const r = await writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       entrada({
         salesRefundCents: 0,
         refundedItems: [{ orderItemId: ORDER_ITEM, quantity: 1, amountCents: 0 }],
@@ -362,7 +367,7 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
     ['moneyAs without a mark', { moneyAs: creditoDeCambio }],
     ['an ordinary refund', {}],
   ])('rejects a $0 refund with %s', async (_caso, extra) => {
-    await expect(writeRefundInTx(tx, entrada({ salesRefundCents: 0, ...extra }))).rejects.toThrow(
+    await expect(writeRefundInTx(tx as unknown as TxConReintento, entrada({ salesRefundCents: 0, ...extra }))).rejects.toThrow(
       'El monto a devolver debe ser mayor que cero.',
     )
     expect(prismaMock.payment.create).not.toHaveBeenCalled()

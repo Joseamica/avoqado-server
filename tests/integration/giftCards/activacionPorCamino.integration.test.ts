@@ -41,6 +41,7 @@ import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { settleStandalonePaymentInTx } from '@/services/tpv/payment.tpv.service'
 import { limpiarNegocioDePrueba } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -192,7 +193,9 @@ describe('R8 · activación de sobres · Postgres real', () => {
     })
 
     // A6 r1: la activación se vuelve a pedir (otro cierre, la revisión) sobre la MISMA cuenta: sigue UNA sola anomalía.
-    await prisma.$transaction(tx => activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId: r.orderId, staffId }))
+    await prisma.$transaction(tx =>
+      activarSobresDeCuentaPagadaEnTx(tx as unknown as TxConReintento, { venueId, orderId: r.orderId, staffId }),
+    )
     expect((await anomaliasDe(r.orderId)).map(a => a.category)).toEqual(['GIFT_CARD_PAID_WITH_DEACTIVATED'])
     expect(await estadoDe([r.sobres[0].id])).toEqual({ sobres: [['DEACTIVATED', '0.00', false]], activaciones: 0 })
   })
@@ -255,7 +258,7 @@ describe('R8 · activación de sobres · Postgres real', () => {
             idempotencyKey: llave,
           },
         })
-        return settleStandalonePaymentInTx(tx, venueId, r.orderId, pago, staffId)
+        return settleStandalonePaymentInTx(tx as unknown as TxConReintento, venueId, r.orderId, pago, staffId)
       })
 
     expect(await cobroDeTerminal(`${SUF}-terminal-1`)).toMatchObject({ firstSettlement: false })

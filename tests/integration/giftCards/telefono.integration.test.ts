@@ -55,6 +55,7 @@ import { requestOtp, verifyOtp } from '@/services/public/otpAuth.public.service'
 import { payGiftCardBalanceOnOrder, payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { crearNegocioDePrueba, esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90000)
 
@@ -487,7 +488,7 @@ describe('teléfono + código (1b S5) · Postgres real', () => {
     let soltar!: () => void
     const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
     const transaccion = prisma.$transaction(async tx => {
-      await lockGiftCardsForUpdate(tx, [giftCardId])
+      await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [giftCardId])
       avisar(await pidDe(tx))
       await puedeSoltar
     }, PRESUPUESTO)

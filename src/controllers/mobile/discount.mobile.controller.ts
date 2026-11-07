@@ -9,6 +9,7 @@
 
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import logger from '../../config/logger'
 import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from '../../services/dashboard/reglasDeDescuento'
 
@@ -144,55 +145,59 @@ export async function createDiscount(req: Request, res: Response) {
 
     const staffVenueId = (req.authContext as any)?.staffVenueId
 
-    const discount = await prisma.discount.create({
-      data: {
-        venueId,
-        name: name.trim(),
-        description: description || null,
-        type,
-        value: type === 'COMP' ? 100 : value,
-        scope: scope || 'ORDER',
-        targetItemIds: targetItemIds || [],
-        targetCategoryIds: targetCategoryIds || [],
-        targetModifierIds: targetModifierIds || [],
-        targetModifierGroupIds: targetModifierGroupIds || [],
-        customerGroupId: customerGroupId || null,
-        isAutomatic: isAutomatic ?? false,
-        priority: priority ?? 0,
-        minPurchaseAmount: minPurchaseAmount ?? null,
-        maxDiscountAmount: maxDiscountAmount ?? null,
-        minQuantity: minQuantity ?? null,
-        buyQuantity: buyQuantity ?? null,
-        getQuantity: getQuantity ?? null,
-        getDiscountPercent: getDiscountPercent ?? null,
-        buyItemIds: buyItemIds || [],
-        getItemIds: getItemIds || [],
-        validFrom: validFrom ? new Date(validFrom) : null,
-        validUntil: validUntil ? new Date(validUntil) : null,
-        daysOfWeek: daysOfWeek || [],
-        timeFrom: timeFrom || null,
-        timeUntil: timeUntil || null,
-        maxTotalUses: maxTotalUses ?? null,
-        maxUsesPerCustomer: maxUsesPerCustomer ?? null,
-        requiresApproval: requiresApproval ?? false,
-        compReason: compReason || null,
-        applyBeforeTax: applyBeforeTax ?? true,
-        modifyTaxBasis: modifyTaxBasis ?? true,
-        isStackable: isStackable ?? false,
-        stackPriority: stackPriority ?? 0,
-        active: active ?? true,
-        createdById: staffVenueId || null,
-      },
-      include: {
-        customerGroup: {
-          select: {
-            id: true,
-            name: true,
-            color: true,
+    const discount = await withDeadlockRetry(
+      tx =>
+        tx.discount.create({
+          data: {
+            venueId,
+            name: name.trim(),
+            description: description || null,
+            type,
+            value: type === 'COMP' ? 100 : value,
+            scope: scope || 'ORDER',
+            targetItemIds: targetItemIds || [],
+            targetCategoryIds: targetCategoryIds || [],
+            targetModifierIds: targetModifierIds || [],
+            targetModifierGroupIds: targetModifierGroupIds || [],
+            customerGroupId: customerGroupId || null,
+            isAutomatic: isAutomatic ?? false,
+            priority: priority ?? 0,
+            minPurchaseAmount: minPurchaseAmount ?? null,
+            maxDiscountAmount: maxDiscountAmount ?? null,
+            minQuantity: minQuantity ?? null,
+            buyQuantity: buyQuantity ?? null,
+            getQuantity: getQuantity ?? null,
+            getDiscountPercent: getDiscountPercent ?? null,
+            buyItemIds: buyItemIds || [],
+            getItemIds: getItemIds || [],
+            validFrom: validFrom ? new Date(validFrom) : null,
+            validUntil: validUntil ? new Date(validUntil) : null,
+            daysOfWeek: daysOfWeek || [],
+            timeFrom: timeFrom || null,
+            timeUntil: timeUntil || null,
+            maxTotalUses: maxTotalUses ?? null,
+            maxUsesPerCustomer: maxUsesPerCustomer ?? null,
+            requiresApproval: requiresApproval ?? false,
+            compReason: compReason || null,
+            applyBeforeTax: applyBeforeTax ?? true,
+            modifyTaxBasis: modifyTaxBasis ?? true,
+            isStackable: isStackable ?? false,
+            stackPriority: stackPriority ?? 0,
+            active: active ?? true,
+            createdById: staffVenueId || null,
           },
-        },
-      },
-    })
+          include: {
+            customerGroup: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
+          },
+        }),
+      { etiqueta: 'createDiscount' },
+    )
 
     logger.info(`Discount created (mobile): ${discount.name} (${discount.id}) for venue ${venueId}`)
 
@@ -284,54 +289,58 @@ export async function updateDiscount(req: Request, res: Response) {
       return res.status(400).json({ success: false, message: 'El valor del monto fijo debe ser positivo' })
     }
 
-    const discount = await prisma.discount.update({
-      where: dondeEscribir(discountId, existing, cambio),
-      data: {
-        ...(name !== undefined && { name: name.trim() }),
-        ...(description !== undefined && { description }),
-        ...(type !== undefined && { type }),
-        ...(value !== undefined && { value }),
-        ...(scope !== undefined && { scope }),
-        ...(targetItemIds !== undefined && { targetItemIds }),
-        ...(targetCategoryIds !== undefined && { targetCategoryIds }),
-        ...(targetModifierIds !== undefined && { targetModifierIds }),
-        ...(targetModifierGroupIds !== undefined && { targetModifierGroupIds }),
-        ...(customerGroupId !== undefined && { customerGroupId }),
-        ...(isAutomatic !== undefined && { isAutomatic }),
-        ...(priority !== undefined && { priority }),
-        ...(minPurchaseAmount !== undefined && { minPurchaseAmount }),
-        ...(maxDiscountAmount !== undefined && { maxDiscountAmount }),
-        ...(minQuantity !== undefined && { minQuantity }),
-        ...(buyQuantity !== undefined && { buyQuantity }),
-        ...(getQuantity !== undefined && { getQuantity }),
-        ...(getDiscountPercent !== undefined && { getDiscountPercent }),
-        ...(buyItemIds !== undefined && { buyItemIds }),
-        ...(getItemIds !== undefined && { getItemIds }),
-        ...(validFrom !== undefined && { validFrom: validFrom ? new Date(validFrom) : null }),
-        ...(validUntil !== undefined && { validUntil: validUntil ? new Date(validUntil) : null }),
-        ...(daysOfWeek !== undefined && { daysOfWeek }),
-        ...(timeFrom !== undefined && { timeFrom }),
-        ...(timeUntil !== undefined && { timeUntil }),
-        ...(maxTotalUses !== undefined && { maxTotalUses }),
-        ...(maxUsesPerCustomer !== undefined && { maxUsesPerCustomer }),
-        ...(requiresApproval !== undefined && { requiresApproval }),
-        ...(compReason !== undefined && { compReason }),
-        ...(applyBeforeTax !== undefined && { applyBeforeTax }),
-        ...(modifyTaxBasis !== undefined && { modifyTaxBasis }),
-        ...(isStackable !== undefined && { isStackable }),
-        ...(stackPriority !== undefined && { stackPriority }),
-        ...(active !== undefined && { active }),
-      },
-      include: {
-        customerGroup: {
-          select: {
-            id: true,
-            name: true,
-            color: true,
+    const discount = await withDeadlockRetry(
+      tx =>
+        tx.discount.update({
+          where: dondeEscribir(discountId, existing, cambio),
+          data: {
+            ...(name !== undefined && { name: name.trim() }),
+            ...(description !== undefined && { description }),
+            ...(type !== undefined && { type }),
+            ...(value !== undefined && { value }),
+            ...(scope !== undefined && { scope }),
+            ...(targetItemIds !== undefined && { targetItemIds }),
+            ...(targetCategoryIds !== undefined && { targetCategoryIds }),
+            ...(targetModifierIds !== undefined && { targetModifierIds }),
+            ...(targetModifierGroupIds !== undefined && { targetModifierGroupIds }),
+            ...(customerGroupId !== undefined && { customerGroupId }),
+            ...(isAutomatic !== undefined && { isAutomatic }),
+            ...(priority !== undefined && { priority }),
+            ...(minPurchaseAmount !== undefined && { minPurchaseAmount }),
+            ...(maxDiscountAmount !== undefined && { maxDiscountAmount }),
+            ...(minQuantity !== undefined && { minQuantity }),
+            ...(buyQuantity !== undefined && { buyQuantity }),
+            ...(getQuantity !== undefined && { getQuantity }),
+            ...(getDiscountPercent !== undefined && { getDiscountPercent }),
+            ...(buyItemIds !== undefined && { buyItemIds }),
+            ...(getItemIds !== undefined && { getItemIds }),
+            ...(validFrom !== undefined && { validFrom: validFrom ? new Date(validFrom) : null }),
+            ...(validUntil !== undefined && { validUntil: validUntil ? new Date(validUntil) : null }),
+            ...(daysOfWeek !== undefined && { daysOfWeek }),
+            ...(timeFrom !== undefined && { timeFrom }),
+            ...(timeUntil !== undefined && { timeUntil }),
+            ...(maxTotalUses !== undefined && { maxTotalUses }),
+            ...(maxUsesPerCustomer !== undefined && { maxUsesPerCustomer }),
+            ...(requiresApproval !== undefined && { requiresApproval }),
+            ...(compReason !== undefined && { compReason }),
+            ...(applyBeforeTax !== undefined && { applyBeforeTax }),
+            ...(modifyTaxBasis !== undefined && { modifyTaxBasis }),
+            ...(isStackable !== undefined && { isStackable }),
+            ...(stackPriority !== undefined && { stackPriority }),
+            ...(active !== undefined && { active }),
           },
-        },
-      },
-    })
+          include: {
+            customerGroup: {
+              select: {
+                id: true,
+                name: true,
+                color: true,
+              },
+            },
+          },
+        }),
+      { etiqueta: 'updateDiscount' },
+    )
 
     logger.info(`Discount updated (mobile): ${discount.name} (${discount.id})`)
 
@@ -373,9 +382,13 @@ export async function deleteDiscount(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: 'Descuento no encontrado' })
     }
 
-    await prisma.discount.delete({
-      where: { id: discountId },
-    })
+    await withDeadlockRetry(
+      tx =>
+        tx.discount.delete({
+          where: { id: discountId },
+        }),
+      { etiqueta: 'deleteDiscount' },
+    )
 
     logger.info(`Discount deleted (mobile): ${existing.name} (${discountId})`)
 

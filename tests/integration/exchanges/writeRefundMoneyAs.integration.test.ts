@@ -26,6 +26,7 @@ import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeR
 import type { RefundMoneySemantics } from '@/services/dashboard/refund.dashboard.service'
 import { ensureExchangeCreditTender, resolveExchangeCreditTenderInTx } from '@/services/exchanges/exchangeCreditTender'
 import { crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -173,7 +174,7 @@ it('a credit refund over a real card payment leaves no TRANSACTION_COST effect r
 
   const { refundPaymentId } = await prisma.$transaction(async tx =>
     writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       devolucion(pago, {
         moneyAs: await semanticaDelCredito(tx, pago),
         skipNegativeCostObligation: true,
@@ -231,7 +232,7 @@ it('a credit refund over a real card payment leaves no TRANSACTION_COST effect r
 
   // Control: una devolución de siempre del mismo tipo de cobro SÍ reabre su obligación (la siembra es la de un cobro real).
   const otro = await cobroConTarjeta(200)
-  await prisma.$transaction(tx => writeRefundInTx(tx, devolucion(otro, {})))
+  await prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, devolucion(otro, {})))
   expect(await efectoDeCosto(otro.id)).toMatchObject({ status: 'PENDING', lastError: 'REFUND_COST' })
   expect(await ventaDelTurno()).toBe('260')
 })
@@ -245,7 +246,7 @@ it('a $0 credit anchor is stored with its quantities and moves no money', async 
 
   const { refundPaymentId } = await prisma.$transaction(async tx =>
     writeRefundInTx(
-      tx,
+      tx as unknown as TxConReintento,
       devolucion(pago, {
         salesRefundCents: 0,
         refundedItems: [{ orderItemId: renglon.id, quantity: 1, amountCents: 0 }],
@@ -264,8 +265,8 @@ it('a $0 credit anchor is stored with its quantities and moves no money', async 
   expect(await efectoDeCosto(pago.id)).toMatchObject({ status: 'DONE' })
 
   // Fuera del camino del crédito, el $0 se sigue rechazando y no se escribe nada.
-  await expect(prisma.$transaction(tx => writeRefundInTx(tx, devolucion(pago, { salesRefundCents: 0 })))).rejects.toThrow(
-    'El monto a devolver debe ser mayor que cero.',
-  )
+  await expect(
+    prisma.$transaction(tx => writeRefundInTx(tx as unknown as TxConReintento, devolucion(pago, { salesRefundCents: 0 }))),
+  ).rejects.toThrow('El monto a devolver debe ser mayor que cero.')
   expect(await prisma.payment.count({ where: { type: 'REFUND', orderId: pago.orderId } })).toBe(1)
 })

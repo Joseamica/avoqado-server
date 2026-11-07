@@ -13,6 +13,7 @@ import { metodoParaAlcanceFiscal, paymentInFiscalScope } from '@/services/fiscal
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 import { seedClothingSale } from './seedExchange'
 import { sembrarVentaDeTarjetas } from '../giftCards/sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -67,7 +68,11 @@ async function expectNoExchange(s: Seed, before: number) {
   expect(await prisma.inventoryPosting.count({ where: { venueId: s.venueId } })).toBe(0)
   expect(await eventsOf(s)).toEqual([])
 }
-beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/))
+beforeAll(() =>
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(
+    /^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/,
+  ),
+)
 beforeEach(() => jest.clearAllMocks())
 afterEach(() => jest.restoreAllMocks())
 afterAll(async () => {
@@ -266,8 +271,8 @@ describe('exchange difference without a terminal (RF2)', () => {
     await prisma.$transaction(async tx => {
       const tender = await resolveGiftCardTenderForChargeInTx(tx, s.venueId)
       await tx.payment.update({ where: { id: s.payments[0].id }, data: tender })
-      const cards = await lockGiftCardsForUpdate(tx, sale.giftCardIds)
-      await canjearSobresEnTx(tx, {
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, sale.giftCardIds)
+      await canjearSobresEnTx(tx as unknown as TxConReintento, {
         venueId: s.venueId,
         orderId: s.order.id,
         paymentId: s.payments[0].id,

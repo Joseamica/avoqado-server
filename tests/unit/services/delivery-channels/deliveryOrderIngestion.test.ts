@@ -1008,4 +1008,25 @@ describe('ingestDeliveryOrder', () => {
       expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
     })
   })
+  it('[repetirNoDuplica:ingestDeliveryOrder] 40P01 tras crear el pedido: si al reintentar ya existe, ni vale ni aviso de «creado» del intento abortado', async () => {
+    // Intento 1: pedido nuevo (crea el renglón y el vale) y se aborta. Intento 2: otro camino ya lo había ingerido.
+    ;(prisma.order.findUnique as jest.Mock).mockReset()
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValue(existingOrderRow)
+    createSalePostingInTxMock.mockResolvedValueOnce({ id: 'posting-del-abortado', status: 'PENDING' })
+    let llamada = 0
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      const r = await fn(prisma)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+
+    const result = await ingestDeliveryOrder(makeNormalized(), link)
+
+    expect(llamada).toBeGreaterThanOrEqual(2)
+    expect(createSalePostingInTxMock).toHaveBeenCalledTimes(1) // sólo el intento 1 (el abortado)
+    expect(applySalePostingMock).not.toHaveBeenCalled() // el vale del intento abortado se deshizo con él: no se aplica
+    expect(result.created).toBe(false)
+    expect(socketManager.broadcastToVenue).toHaveBeenCalledWith('venue1', SocketEventType.ORDER_UPDATED, expect.anything())
+    expect(socketManager.broadcastToVenue).not.toHaveBeenCalledWith('venue1', SocketEventType.ORDER_CREATED, expect.anything())
+  })
 })

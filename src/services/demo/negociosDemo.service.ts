@@ -36,6 +36,7 @@ import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import bcrypt from 'bcryptjs'
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { deleteVenueDataTx, DELETION_TIMEOUT_MS } from '@/services/cleanup/liveDemoCleanup.service'
 import { conNegocio, DOMINIO_DEMO, olvidarNegocioDemo } from './candadoDemo'
@@ -402,7 +403,7 @@ async function recrearNegocio(bp: VenueBlueprint, organizationId: string, usuari
   const otro = anteriores.find(v => v.status !== VenueStatus.LIVE_DEMO)
   if (otro) throw new Error(`🚨 El usuario de «${bp.name}» está en un negocio ${otro.status}, no LIVE_DEMO: no se toca`)
 
-  const venue = await prisma.$transaction(
+  const venue = await withDeadlockRetry(
     async tx => {
       // Candado de la fila y estado releído ANTES de borrar: si un SUPERADMIN aprobó el KYC entre la lectura de arriba y
       // aquí, el negocio ya es real y no se toca (Codex r6, 1). Ordenados por id para no cruzarse con otro candado.
@@ -454,7 +455,7 @@ async function recrearNegocio(bp: VenueBlueprint, organizationId: string, usuari
       })
       return nuevo
     },
-    { timeout: DELETION_TIMEOUT_MS },
+    { etiqueta: 'recrearNegocio', timeout: DELETION_TIMEOUT_MS },
   )
 
   for (const v of anteriores) olvidarNegocioDemo(v.id)
@@ -992,20 +993,24 @@ async function seedCustomers(bp: VenueBlueprint, venueId: string): Promise<Array
   const now = new Date()
 
   for (const c of pool) {
-    const cust = await prisma.customer.create({
-      data: {
-        venueId,
-        firstName: c.first,
-        lastName: c.last,
-        phone: c.phone,
-        loyaltyPoints: c.points,
-        totalVisits: Math.max(1, Math.round(c.points / 50)),
-        firstVisitAt: subDays(now, 60),
-        lastVisitAt: subDays(now, Math.floor(Math.random() * 7)),
-        marketingConsent: true,
-        active: true,
-      },
-    })
+    const cust = await withDeadlockRetry(
+      tx =>
+        tx.customer.create({
+          data: {
+            venueId,
+            firstName: c.first,
+            lastName: c.last,
+            phone: c.phone,
+            loyaltyPoints: c.points,
+            totalVisits: Math.max(1, Math.round(c.points / 50)),
+            firstVisitAt: subDays(now, 60),
+            lastVisitAt: subDays(now, Math.floor(Math.random() * 7)),
+            marketingConsent: true,
+            active: true,
+          },
+        }),
+      { etiqueta: 'seedCustomers' },
+    )
     created.push({ id: cust.id, name: `${c.first} ${c.last}`, phone: c.phone })
   }
   logger.info(`   ✅ ${created.length} clientes con puntos de lealtad`)

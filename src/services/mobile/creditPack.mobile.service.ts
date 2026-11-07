@@ -10,6 +10,7 @@
 
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import type { CreditPackSnapshot } from '@/services/shared/creditPacksOnPaidOrder'
@@ -38,7 +39,7 @@ type PackWithItems = {
  * `deliveryKey` es la llave de la entrega del POS: su unicidad por negocio deja a lo más una compra (D4).
  */
 export async function grantPackInTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   args: {
     pack: PackWithItems
     venueId: string
@@ -220,7 +221,7 @@ export async function sellPackInPerson(
 
   let purchase
   try {
-    purchase = await prisma.$transaction(
+    purchase = await withDeadlockRetry(
       async tx =>
         grantPackInTx(tx, {
           pack: vendido,
@@ -233,7 +234,7 @@ export async function sellPackInPerson(
           // 🔴 D17: vendido desde el carrito, el cobro de la orden ya sumó al «Total gastado»; aquí no se repite.
           countSpend: !opts?.cobradoEnOrden,
         }),
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      { etiqueta: 'sellPackInPerson', isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     )
   } catch (err) {
     // Dos a la vez con la misma llave: pasa una sola. La perdedora tropieza con el índice único (P2002), con la serialización
@@ -302,9 +303,9 @@ export async function fulfillCreditPackPurchaseFromPayment(args: {
 
   let purchase
   try {
-    purchase = await prisma.$transaction(
+    purchase = await withDeadlockRetry(
       async tx => grantPackInTx(tx, { pack: pack as PackWithItems, venueId, customerId, staffId, amountPaid, paymentId, note }),
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      { etiqueta: 'fulfillCreditPackPurchaseFromPayment', isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     )
   } catch (err) {
     // Dos llamadas a la vez con el mismo cobro: la unicidad de `paymentId` deja pasar

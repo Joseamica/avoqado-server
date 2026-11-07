@@ -11,6 +11,7 @@
 import bcrypt from 'bcryptjs'
 import { CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
@@ -85,20 +86,24 @@ export async function updateProfile(venueId: string, customerId: string, data: {
     }
   }
 
-  const customer = await prisma.customer.update({
-    where: { id: customerId },
-    data: {
-      ...(data.firstName !== undefined ? { firstName: data.firstName } : {}),
-      ...(data.lastName !== undefined ? { lastName: data.lastName } : {}),
-    },
-    select: {
-      id: true,
-      firstName: true,
-      lastName: true,
-      email: true,
-      phone: true,
-    },
-  })
+  const customer = await withDeadlockRetry(
+    tx =>
+      tx.customer.update({
+        where: { id: customerId },
+        data: {
+          ...(data.firstName !== undefined ? { firstName: data.firstName } : {}),
+          ...(data.lastName !== undefined ? { lastName: data.lastName } : {}),
+        },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+        },
+      }),
+    { etiqueta: 'updateProfile' },
+  )
 
   return { customer }
 }

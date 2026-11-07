@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { validateCouponCode, type CouponValidationResult } from '../dashboard/coupon.dashboard.service'
 import { calculateDiscountCents } from './discount.service'
@@ -73,7 +74,10 @@ export function montoDelCupon(discount: any, basePesos: number): number {
 }
 
 /** La fila de cuenta ya armada, ligada al cupón: el canje y el reporte la encuentran por `couponCodeId`. */
-export function ligarCupon(fila: Prisma.OrderDiscountUncheckedCreateInput, cupon: CuponDeLaVenta): Prisma.OrderDiscountUncheckedCreateInput {
+export function ligarCupon(
+  fila: Prisma.OrderDiscountUncheckedCreateInput,
+  cupon: CuponDeLaVenta,
+): Prisma.OrderDiscountUncheckedCreateInput {
   return {
     ...fila,
     discountId: cupon.discount.id,
@@ -92,7 +96,7 @@ export function ligarCupon(fila: Prisma.OrderDiscountUncheckedCreateInput, cupon
 const APARTADO = { status: { notIn: ['CANCELLED', 'DELETED'] }, couponRedemption: { is: null } } satisfies Prisma.OrderWhereInput
 
 /** El candado es del DESCUENTO (Codex r2 #1): sus límites los comparten todos sus códigos. Lo toman apartar y canjear. */
-async function bloquearDescuento(tx: Prisma.TransactionClient, discountId: string): Promise<void> {
+async function bloquearDescuento(tx: TxConReintento, discountId: string): Promise<void> {
   await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`avoqado:cupon-descuento:v1:${discountId}`}, 0))::text`)
 }
 
@@ -103,7 +107,7 @@ async function bloquearDescuento(tx: Prisma.TransactionClient, discountId: strin
  * El canje nunca rechaza: para entonces el dinero ya se cobró con la rebaja.
  */
 export async function apartarCupon(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   cupon: CuponDeLaVenta,
   customerId: string | null | undefined,
@@ -125,7 +129,9 @@ export async function apartarCupon(
     if (fresco.currentUses + apartados >= fresco.maxUses) throw agotado()
   }
   if (fresco.discount.maxTotalUses != null) {
-    const apartados = await tx.orderDiscount.count({ where: { couponCode: { discountId: fresco.discount.id }, order: { venueId, ...APARTADO } } })
+    const apartados = await tx.orderDiscount.count({
+      where: { couponCode: { discountId: fresco.discount.id }, order: { venueId, ...APARTADO } },
+    })
     if (fresco.discount.currentUses + apartados >= fresco.discount.maxTotalUses) throw agotado()
   }
   const porCliente = fresco.maxUsesPerCustomer ?? fresco.discount.maxUsesPerCustomer
@@ -135,13 +141,14 @@ export async function apartarCupon(
       tx.couponRedemption.count({ where: { ...delCupon, customerId } }),
       tx.orderDiscount.count({ where: { ...delCupon, order: { venueId, customerId, ...APARTADO } } }),
     ])
-    if (canjes + apartados >= porCliente) throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'CUSTOMER_LIMIT', limite: porCliente }))
+    if (canjes + apartados >= porCliente)
+      throw new BadRequestError(textoDeRechazoDeCupon({ errorCode: 'CUSTOMER_LIMIT', limite: porCliente }))
   }
 }
 
 /** El canje en la transacción de quien llama: el registro y los dos contadores juntos, bajo el candado del descuento. */
 export async function canjearCuponEnTx(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   c: { orderId: string; couponCodeId: string; discountId: string; customerId: string | null; amountSaved: Prisma.Decimal | number },
 ): Promise<void> {
   await bloquearDescuento(tx, c.discountId)
@@ -171,7 +178,10 @@ export async function finalizeCouponsForOrder(venueId: string, orderId: string):
 
   const { id: couponCodeId, code, discountId } = fila.couponCode
   try {
-    await prisma.$transaction(tx => canjearCuponEnTx(tx, { orderId, couponCodeId, discountId, customerId: order.customerId, amountSaved: fila.amount }))
+    await withDeadlockRetry(
+      tx => canjearCuponEnTx(tx, { orderId, couponCodeId, discountId, customerId: order.customerId, amountSaved: fila.amount }),
+      { etiqueta: 'finalizeCouponsForOrder' },
+    )
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return
     throw error

@@ -1572,12 +1572,41 @@ function paymentResultStableUntilAudit(payment: AstCall, audit: AstCall): boolea
   return Boolean(result && ts.isIdentifier(result.name) && objectBindingStableUntilAudit(result.name, audit, new Set(['id']), false))
 }
 
+/** Un `withDeadlockRetry` canónico abre en el cliente global: sus opciones son un literal y no traen `cliente` (otro cliente = tx no canónico). */
+function deadlockRetryOptionsAreCanonical(invocation: ts.CallExpression): boolean {
+  const options = invocation.arguments[1]
+  if (!options || !ts.isObjectLiteralExpression(options)) return false
+  const checker = SOURCE_CHECKERS.get(invocation.getSourceFile())
+  return !options.properties.some(p => {
+    if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) return staticPropertyName(p.name) === 'cliente'
+    // Un `cliente` escondido en un spread (`...opciones`): si el verificador resuelve el tipo del spread y trae `cliente`, tampoco es canónico.
+    if (ts.isSpreadAssignment(p) && checker) return Boolean(checker.getTypeAtLocation(p.expression).getProperty('cliente'))
+    return false
+  })
+}
+
+function isCanonicalDeadlockRetryImport(identifier: ts.Identifier, context: AstCall): boolean {
+  const declarations = identifierSymbol(identifier, context.sourceFile)?.declarations ?? []
+  if (declarations.length !== 1 || !ts.isImportSpecifier(declarations[0])) return false
+  const specifier = declarations[0]
+  const importDeclaration = specifier.parent.parent.parent
+  return Boolean(
+    !specifier.isTypeOnly &&
+      (specifier.propertyName ?? specifier.name).text === 'withDeadlockRetry' &&
+      ts.isImportDeclaration(importDeclaration) &&
+      ts.isStringLiteral(importDeclaration.moduleSpecifier) &&
+      /(^|\/)utils\/serializableRetry$/.test(importDeclaration.moduleSpecifier.text),
+  )
+}
+
 function canonicalTransactionCallbackOwns(parameter: ts.ParameterDeclaration, context: AstCall): boolean {
   const callback = parameter.parent
   if ((!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) || callback.parameters[0] !== parameter) return false
   const invocation = callback.parent
   if (!ts.isCallExpression(invocation) || invocation.arguments[0] !== callback || invocation.questionDotToken) return false
   const callee = invocation.expression
+  // S5b (red por traba): `withDeadlockRetry(cuerpo, …)` de `utils/serializableRetry` abre la misma transacción canónica que `prisma.$transaction`.
+  if (ts.isIdentifier(callee)) return isCanonicalDeadlockRetryImport(callee, context) && deadlockRetryOptionsAreCanonical(invocation)
   if ((!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) || callee.questionDotToken) return false
   if (staticPropertyName(callee) !== '$transaction') return false
   const receiver = receiverOf(callee)
@@ -3275,6 +3304,26 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
   it('POS serializa llave natural, clasifica en tx y sólo en la rama existing hace Order→Shift', () => {
     const calls = parseCalls('src/services/pos-sync/posSyncOrder.service.ts')
     expect(posNaturalKeyClassificationIsSafe(calls, 'processPosOrderEvent')).toBe(true)
+  })
+
+  it('withDeadlockRetry es dueño del tx canónico sólo con opciones literales y sin `cliente`', () => {
+    const camino = (opciones: string) => {
+      const calls = parseCalls(
+        'fixture.ts',
+        `import { withDeadlockRetry } from '@/utils/serializableRetry'
+         declare const conCliente: { cliente: unknown; timeout: number }
+         declare const sinCliente: { timeout: number }
+         export async function f(otro: unknown) { await withDeadlockRetry(async tx => { await tx.payment.create({ data: {} }) }, ${opciones}) }`,
+      )
+      const pago = calls.find(c => c.node.expression.getText() === 'tx.payment.create')!
+      return transactionPathForPayment(pago)
+    }
+    expect(camino("{ etiqueta: 'f' }")).toEqual([])
+    expect(camino("{ etiqueta: 'f', cliente: otro }")).toBeUndefined()
+    expect(camino("{ etiqueta: 'f', cliente }")).toBeUndefined()
+    expect(camino("{ etiqueta: 'f', ...conCliente }")).toBeUndefined()
+    expect(camino("{ etiqueta: 'f', ...sinCliente }")).toEqual([])
+    expect(camino('opciones')).toBeUndefined()
   })
 
   it('fixtures mutantes no certifican lock condicional, bulk Order-after-Shift ni clasificación POS exterior', () => {

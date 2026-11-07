@@ -30,6 +30,7 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
 
 jest.mock('@/utils/serializableRetry', () => ({
   withSerializableRetry: jest.fn((fn: any) => fn(prismaMock)),
+  withDeadlockRetry: jest.fn((fn: any) => fn(prismaMock)),
 }))
 
 // Deterministic VAT rate for the application-fee calc (createCheckoutSession).

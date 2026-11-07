@@ -16,6 +16,7 @@
 
 import { LoyaltyTransactionType, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
@@ -107,7 +108,7 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
  * between the discount and the totals.
  */
 export async function redeemPointsToOrderInTransaction(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   orderId: string,
   customerId: string,
@@ -231,9 +232,9 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
 
   // Venue configuration is not Order data: read before the lock; its checks keep their original order below.
   const config = await getOrCreateLoyaltyConfig(venueId)
-  const { pointsToBurn, discountAmount, newBalance, totals } = await prisma.$transaction(
+  const { pointsToBurn, discountAmount, newBalance, totals } = await withDeadlockRetry(
     tx => redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, points, staffId, config),
-    ORDER_LOCK_WAIT_BUDGET,
+    { etiqueta: 'redeemPointsToOrder', ...ORDER_LOCK_WAIT_BUDGET },
   )
 
   void (await import('../dashboard/activity-log.service')).logAction({
@@ -259,7 +260,7 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
  * together. No-op for ordinary discounts.
  */
 export async function refundLoyaltyForOrderDiscount(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   venueId: string,
   row: { id: string; loyaltyTransactionId: string | null },
   staffId?: string,

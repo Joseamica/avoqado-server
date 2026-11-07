@@ -18,6 +18,7 @@ jest.mock('@/services/public/customerBookingAccess.service', () => ({
 jest.mock('@/utils/serializableRetry', () => ({
   __esModule: true,
   withSerializableRetry: jest.fn(),
+  withDeadlockRetry: jest.fn(async (fn: any) => fn({})),
 }))
 jest.mock('@/services/reservation/appointmentSlotHold.service', () => ({
   __esModule: true,
@@ -29,7 +30,7 @@ jest.mock('@/services/reservation/appointmentSlotHold.service', () => ({
 }))
 
 import { assertCustomerCanCreateReservation, activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
-import { withSerializableRetry } from '@/utils/serializableRetry'
+import { withSerializableRetry, withDeadlockRetry } from '@/utils/serializableRetry'
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import * as settingsService from '@/services/dashboard/reservationSettings.service'
 import { createReservationForConsumer } from '@/services/consumer/reservation.consumer.service'
@@ -63,6 +64,7 @@ describe('Gate de aprobación — reservas de CITA (createReservation)', () => {
     jest.clearAllMocks()
     // El proyecto resetea implementaciones entre tests: se re-arman aquí, no en la fábrica.
     ;(withSerializableRetry as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    ;(withDeadlockRetry as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
     GATE.mockResolvedValue(undefined)
   })
 
@@ -133,6 +135,7 @@ describe('Gate de aprobación — reserva de CLASE desde la app del consumidor',
   beforeEach(() => {
     jest.clearAllMocks()
     ;(withSerializableRetry as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
+    ;(withDeadlockRetry as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
     GATE.mockResolvedValue(undefined)
     ;(activateCustomerAccount as jest.Mock).mockResolvedValue({ approvalStatus: 'PENDING', requestsApproval: true, approvalVersion: 0 })
     prismaMock.venue.findFirst.mockResolvedValue({ id: VENUE, slug: 'estudio', name: 'Estudio' } as any)

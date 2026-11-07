@@ -15,6 +15,7 @@ import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.serv
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
@@ -598,7 +599,7 @@ export async function updateOrder(
   const topologyWrite = tableId !== undefined || status !== undefined
   // 🔴 R4-2: tocar el cliente se decide bajo el candado de la venta (como toda escritura de su atribución).
   const tocaCliente = customerId !== undefined
-  const update = async (client: Prisma.TransactionClient) => {
+  const update = async (client: TxConReintento) => {
     // Con topología, `lockTableOrderScope` ya toma ESTA venta `FOR UPDATE` (más fuerte que el candado de la liga). Sin ella,
     // si la petición toca el cliente, la PRIMERA sentencia es el candado de la liga (`bloquearVentaParaLiga`).
     if (!topologyWrite && tocaCliente && !(await bloquearVentaParaLiga(client, { venueId, orderId })))
@@ -763,8 +764,12 @@ export async function updateOrder(
     if (cancelando) await desactivarSobresPendientesDeCuentaEnTx(client, { venueId, orderId, staffId: null })
     return { updatedOrder, cancelando, valesSoltados }
   }
-  const { updatedOrder, cancelando, valesSoltados } =
-    topologyWrite || tocaCliente ? await prisma.$transaction(update, { timeout: 15_000, maxWait: 5_000 }) : await update(prisma)
+  // S5b: siempre por withDeadlockRetry, también sin cambio de mesa, estado ni cliente (antes `update(prisma)`, una sola sentencia).
+  const { updatedOrder, cancelando, valesSoltados } = await withDeadlockRetry(update, {
+    etiqueta: 'updateOrder',
+    timeout: 15_000,
+    maxWait: 5_000,
+  })
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // 🔴 La deducción por CAMBIO DE STATUS se retiró (audit Codex xhigh 2026-08-14).
@@ -813,9 +818,10 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
   // reportes con el cobro registrado y el stock ya deducido — sin reembolso ni reposición. El camino correcto es
   // reembolsar primero. Se revisan paymentStatus Y los Payments reales porque hay estados inconsistentes históricos
   // (PENDING con pagos COMPLETED); un `Payment.type` nulo (legacy) cuenta como dinero.
-  let valesSoltados: ValesSoltados | null = null
-  const cancelledOrder = await prisma.$transaction(
+  // R65 b: `valesSoltados` nace DENTRO de cada intento y sale en el retorno.
+  const { cancelledOrder, valesSoltados } = await withDeadlockRetry(
     async tx => {
+      let valesSoltados: ValesSoltados | null = null
       // Primero el candado de comandas (mismo orden que el armado): la cocina deja de ver la cuenta anulada.
       await retirarComandasDeVentaAnulada(tx, venueId, orderId)
       await assertOrderCancellableUnderLock(
@@ -839,9 +845,9 @@ export async function deleteOrder(venueId: string, orderId: string, performedBy?
       })
       // Spec § 5.1.8: los sobres PENDING de una cuenta de tarjetas sin cobrar quedan DEACTIVATED.
       await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId, staffId: null })
-      return cancelada
+      return { cancelledOrder: cancelada, valesSoltados }
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { etiqueta: 'deleteOrder', timeout: 15_000, maxWait: 5_000 },
   )
 
   logAction({
@@ -887,25 +893,28 @@ export async function cancelarCuentaSinCobrar(
   datosDeBitacora?: Record<string, unknown>,
 ) {
   const { cancelOrderInTransaction, publishCancelledOrder } = await import('@/services/mobile/order.mobile.service')
-  const result = await prisma.$transaction(async tx => {
-    // La mesa y el pedido en línea no cambian bajo una cancelación: se leen sin candado, antes del orden de candados del POS.
-    const order = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: { id: true, tableId: true, onlineOrder: { select: { id: true } } },
-    })
-    if (!order) throw new NotFoundError('Esta cuenta no existe en este negocio.')
-    // La mesa se vuelve a revisar bajo el candado (`rechazarCuentaDeMesa`): ésta sólo evita tomar candados de más.
-    if (order.tableId) throw new BadRequestError(MENSAJE_CUENTA_DE_MESA, 'ORDER_IS_TABLE')
-    if (order.onlineOrder) {
-      throw new BadRequestError('Es un pedido en línea: cancélalo desde «Pedidos en línea».', 'ORDER_IS_ONLINE')
-    }
-    return cancelOrderInTransaction(tx, venueId, orderId, undefined, staffId, undefined, {
-      contarPagosRegistrados: true,
-      rechazarYaCancelada: true,
-      rechazarCuentaDeMesa: true,
-      mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
-    })
-  }, ORDER_LOCK_WAIT_BUDGET)
+  const result = await withDeadlockRetry(
+    async tx => {
+      // La mesa y el pedido en línea no cambian bajo una cancelación: se leen sin candado, antes del orden de candados del POS.
+      const order = await tx.order.findFirst({
+        where: { id: orderId, venueId },
+        select: { id: true, tableId: true, onlineOrder: { select: { id: true } } },
+      })
+      if (!order) throw new NotFoundError('Esta cuenta no existe en este negocio.')
+      // La mesa se vuelve a revisar bajo el candado (`rechazarCuentaDeMesa`): ésta sólo evita tomar candados de más.
+      if (order.tableId) throw new BadRequestError(MENSAJE_CUENTA_DE_MESA, 'ORDER_IS_TABLE')
+      if (order.onlineOrder) {
+        throw new BadRequestError('Es un pedido en línea: cancélalo desde «Pedidos en línea».', 'ORDER_IS_ONLINE')
+      }
+      return cancelOrderInTransaction(tx, venueId, orderId, undefined, staffId, undefined, {
+        contarPagosRegistrados: true,
+        rechazarYaCancelada: true,
+        rechazarCuentaDeMesa: true,
+        mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
+      })
+    },
+    { etiqueta: 'cancelarCuentaSinCobrar', ...ORDER_LOCK_WAIT_BUDGET },
+  )
   await publishCancelledOrder(venueId, result, staffId, motivo, datosDeBitacora)
 }
 
@@ -973,167 +982,174 @@ export async function settleOrder(
   // pasando, y el Payment se creaba por el saldo VIEJO: $160 de pagos contra
   // una orden de $100, con paidAmount pisado. Con el CAS sobre `version`, un
   // cambio entre la relectura y la transición hace count=0 y no se cobra nada.
-  let postingId: string | null = null
-  let settlementPaymentId: string | null = null
   // Base de venta SIN propina para la lealtad, leída DENTRO de la transacción: es la misma base
   // que entregan los demás canales (`Math.max(0, total − propina)`).
-  let baseParaLealtad = 0
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
   const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
     '@/services/mobile/areaTicketV7.mobile.service'
   )
-  let sesionDeValesCerrada = false
-  const settledAmount = await prisma.$transaction(async tx => {
-    // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), antes del candado de la venta:
-    // el orden de la finalización y del registrador de la terminal.
-    const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
-    sesionDeValesCerrada = false
-    await lockExistingOrderForPayment(tx, { venueId, orderId })
-    const fresh = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: {
-        total: true,
-        remainingBalance: true,
-        tipAmount: true,
-        paymentStatus: true,
-        version: true,
-        status: true,
-        thirdPartyCashDue: true,
-      },
-    })
-    if (!fresh) return null
-    // Rappi 2b (T7): liquidar crea un efectivo NUEVO sin propina ni lo de Rappi ⇒ 409 antes de escribir.
-    rechazarAccionDeCobroSobreRappiEnEfectivo(fresh)
-    // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se «liquida» en efectivo.
-    await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
-    // 🔴 Founder 3-oct / Codex r13 #3: «liquidar» crea en este momento un efectivo a nombre del negocio: es un cobro NUEVO. Sobre una
-    // cancelada o borrada ⇒ 400 con el texto del founder, dentro de la transacción y bajo el candado: nada se escribe. (No hay llave
-    // que resolver: la liquidación no la recibe.)
-    rechazarCobroNuevoSobreCancelada(fresh.status)
-    const freshRemaining = Number(fresh.remainingBalance)
-    if (freshRemaining <= 0 || fresh.paymentStatus === 'PAID') return null
+  // R65 b: lo que el cuerpo deja para después del commit nace DENTRO de cada intento y sale en el retorno.
+  const { settledAmount, postingId, settlementPaymentId, baseParaLealtad, sesionDeValesCerrada } = await withDeadlockRetry(
+    async tx => {
+      let postingId: string | null = null
+      let settlementPaymentId: string | null = null
+      let baseParaLealtad = 0
+      let sesionDeValesCerrada = false
+      const settledAmount = await (async () => {
+        // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), antes del candado de la venta:
+        // el orden de la finalización y del registrador de la terminal.
+        const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+        sesionDeValesCerrada = false
+        await lockExistingOrderForPayment(tx, { venueId, orderId })
+        const fresh = await tx.order.findFirst({
+          where: { id: orderId, venueId },
+          select: {
+            total: true,
+            remainingBalance: true,
+            tipAmount: true,
+            paymentStatus: true,
+            version: true,
+            status: true,
+            thirdPartyCashDue: true,
+          },
+        })
+        if (!fresh) return null
+        // Rappi 2b (T7): liquidar crea un efectivo NUEVO sin propina ni lo de Rappi ⇒ 409 antes de escribir.
+        rechazarAccionDeCobroSobreRappiEnEfectivo(fresh)
+        // Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se «liquida» en efectivo.
+        await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
+        // 🔴 Founder 3-oct / Codex r13 #3: «liquidar» crea en este momento un efectivo a nombre del negocio: es un cobro NUEVO. Sobre una
+        // cancelada o borrada ⇒ 400 con el texto del founder, dentro de la transacción y bajo el candado: nada se escribe. (No hay llave
+        // que resolver: la liquidación no la recibe.)
+        rechazarCobroNuevoSobreCancelada(fresh.status)
+        const freshRemaining = Number(fresh.remainingBalance)
+        if (freshRemaining <= 0 || fresh.paymentStatus === 'PAID') return null
 
-    // 🔴 La FUENTE DE VERDAD del saldo son los Payments, no el denormalizado
-    // de la orden (audit ronda 3): el escritor legacy del TPV
-    // (updateOrderTotalsForStandalonePayment, payment.tpv.service.ts:810)
-    // commitea el Payment PRIMERO y escribe los totales de la orden DESPUÉS,
-    // a ciegas — un settle en esa ventana veía remainingBalance intacto y
-    // cobraba el saldo completo encima del pago recién commiteado. El monto a
-    // liquidar es el MÍNIMO entre el saldo denormalizado y (total − Σ pagos
-    // COMPLETED): nunca puede exceder lo que los pagos reales dejan pendiente,
-    // aunque el escritor legacy no participe de ningún candado.
-    const paidAgg = await tx.payment.aggregate({
-      where: { orderId, venueId, status: 'COMPLETED' },
-      _sum: { amount: true, tipAmount: true },
-    })
-    const paidSum = Number(paidAgg._sum.amount ?? 0)
-    const priorCompletedPaymentCount = await countPriorCompletedPayments(tx, { venueId, orderId })
-    // `Order.total` incluye propinas acumuladas (así lo escribe el TPV); se
-    // comparan peras con peras restando la propina de ambos lados.
-    const orderTotalSansTips = Number(fresh.total) - Number(fresh.tipAmount ?? 0)
-    const remainingByPayments = Math.max(0, Number((orderTotalSansTips - paidSum).toFixed(2)))
-    const toSettle = Math.min(freshRemaining, remainingByPayments)
-    if (toSettle <= 0) return null
-    baseParaLealtad = Math.max(0, orderTotalSansTips)
+        // 🔴 La FUENTE DE VERDAD del saldo son los Payments, no el denormalizado
+        // de la orden (audit ronda 3): el escritor legacy del TPV
+        // (updateOrderTotalsForStandalonePayment, payment.tpv.service.ts:810)
+        // commitea el Payment PRIMERO y escribe los totales de la orden DESPUÉS,
+        // a ciegas — un settle en esa ventana veía remainingBalance intacto y
+        // cobraba el saldo completo encima del pago recién commiteado. El monto a
+        // liquidar es el MÍNIMO entre el saldo denormalizado y (total − Σ pagos
+        // COMPLETED): nunca puede exceder lo que los pagos reales dejan pendiente,
+        // aunque el escritor legacy no participe de ningún candado.
+        const paidAgg = await tx.payment.aggregate({
+          where: { orderId, venueId, status: 'COMPLETED' },
+          _sum: { amount: true, tipAmount: true },
+        })
+        const paidSum = Number(paidAgg._sum.amount ?? 0)
+        const priorCompletedPaymentCount = await countPriorCompletedPayments(tx, { venueId, orderId })
+        // `Order.total` incluye propinas acumuladas (así lo escribe el TPV); se
+        // comparan peras con peras restando la propina de ambos lados.
+        const orderTotalSansTips = Number(fresh.total) - Number(fresh.tipAmount ?? 0)
+        const remainingByPayments = Math.max(0, Number((orderTotalSansTips - paidSum).toFixed(2)))
+        const toSettle = Math.min(freshRemaining, remainingByPayments)
+        if (toSettle <= 0) return null
+        baseParaLealtad = Math.max(0, orderTotalSansTips)
 
-    // El CAS va amarrado a `version` Y a `remainingBalance`: cerca a los
-    // escritores que sí incrementan version y a cualquier update ya visible.
-    const transition = await tx.order.updateMany({
-      where: {
-        id: orderId,
-        venueId,
-        paymentStatus: { in: ['PENDING', 'PARTIAL'] },
-        version: fresh.version,
-        remainingBalance: fresh.remainingBalance as any,
-      },
-      data: {
-        paymentStatus: 'PAID',
-        paidAmount: fresh.total,
-        remainingBalance: 0,
-        version: { increment: 1 },
-        // 🔴 Liquidar ES el momento en que la orden queda PAGADA: marca la elegibilidad de lealtad
-        // igual que la PAX y el efectivo móvil (revisión del 5-sep-2026). Sin esta columna el
-        // reconciliador (`loyalty-reconciliation.job`) nunca vería esta orden, y si la acreditación
-        // de abajo falla el sello se perdía para siempre — sin un solo error.
-        loyaltyEligibleAt: new Date(),
-        loyaltyStaffId: actorStaffId,
-      },
-    })
-    if (transition.count === 0) {
-      return null
-    }
+        // El CAS va amarrado a `version` Y a `remainingBalance`: cerca a los
+        // escritores que sí incrementan version y a cualquier update ya visible.
+        const transition = await tx.order.updateMany({
+          where: {
+            id: orderId,
+            venueId,
+            paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+            version: fresh.version,
+            remainingBalance: fresh.remainingBalance as any,
+          },
+          data: {
+            paymentStatus: 'PAID',
+            paidAmount: fresh.total,
+            remainingBalance: 0,
+            version: { increment: 1 },
+            // 🔴 Liquidar ES el momento en que la orden queda PAGADA: marca la elegibilidad de lealtad
+            // igual que la PAX y el efectivo móvil (revisión del 5-sep-2026). Sin esta columna el
+            // reconciliador (`loyalty-reconciliation.job`) nunca vería esta orden, y si la acreditación
+            // de abajo falla el sello se perdía para siempre — sin un solo error.
+            loyaltyEligibleAt: new Date(),
+            loyaltyStaffId: actorStaffId,
+          },
+        })
+        if (transition.count === 0) {
+          return null
+        }
 
-    const shiftAmount = new Prisma.Decimal(toSettle)
-    const shiftTip = new Prisma.Decimal(0)
-    const shiftClaim = await claimShiftForCapturedPayment(tx, {
-      venueId,
-      amountPesos: shiftAmount,
-      tipPesos: shiftTip,
-      incrementTotalOrders: priorCompletedPaymentCount === 0,
-      orderId,
-    })
+        const shiftAmount = new Prisma.Decimal(toSettle)
+        const shiftTip = new Prisma.Decimal(0)
+        const shiftClaim = await claimShiftForCapturedPayment(tx, {
+          venueId,
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+          incrementTotalOrders: priorCompletedPaymentCount === 0,
+          orderId,
+        })
 
-    // Create a payment record to track the settlement
-    const settlementPayment = await tx.payment.create({
-      data: {
-        venueId,
-        orderId,
-        shiftId: shiftClaim.shiftId ? shiftClaim.shiftId : undefined,
-        amount: toSettle,
-        tipAmount: 0,
-        method: 'CASH', // Default to cash for manual settlements
-        // 🔴 Decisión del founder (27-ago): el efectivo liquidado desde el dashboard SÍ entró
-        // al cajón. Sello explícito para no depender del fallback por método (fase 2).
-        fundsFlow: 'CASH_DRAWER',
-        status: 'COMPLETED',
-        feePercentage: 0,
-        feeAmount: 0,
-        netAmount: toSettle,
-        source: 'OTHER',
-        processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
-      },
-    })
+        // Create a payment record to track the settlement
+        const settlementPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId,
+            shiftId: shiftClaim.shiftId ? shiftClaim.shiftId : undefined,
+            amount: toSettle,
+            tipAmount: 0,
+            method: 'CASH', // Default to cash for manual settlements
+            // 🔴 Decisión del founder (27-ago): el efectivo liquidado desde el dashboard SÍ entró
+            // al cajón. Sello explícito para no depender del fallback por método (fase 2).
+            fundsFlow: 'CASH_DRAWER',
+            status: 'COMPLETED',
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: toSettle,
+            source: 'OTHER',
+            processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
+          },
+        })
 
-    await recordPendingPaymentShiftReconciliation(tx, {
-      claim: shiftClaim,
-      venueId,
-      paymentId: settlementPayment.id,
-      orderId,
-      staffId: actorStaffId,
-      channel: 'settleOrder',
-      amountPesos: shiftAmount,
-      tipPesos: shiftTip,
-      reconciliationEnabled,
-    })
+        await recordPendingPaymentShiftReconciliation(tx, {
+          claim: shiftClaim,
+          venueId,
+          paymentId: settlementPayment.id,
+          orderId,
+          staffId: actorStaffId,
+          channel: 'settleOrder',
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+          reconciliationEnabled,
+        })
 
-    // 🔴 El fiado liquidado TAMBIÉN descuenta (fase 5). Las órdenes pay-later
-    // nacen con items reales y la mercancía salió cuando se sirvió; bajo la
-    // regla vigente ("se descuenta al quedar pagada"), liquidar ES ese momento.
-    // Era el único camino de cobro que marcaba PAID sin tocar inventario.
-    // El vale nace DENTRO del CAS: quien pierde la carrera no llega aquí, así
-    // que dos liquidaciones concurrentes no pueden descontar dos veces.
-    const itemsParaPosting = await tx.orderItem.findMany({
-      where: { orderId },
-      include: { modifiers: { include: { modifier: true } } },
-    })
-    const posting = await createSalePostingInTx(tx, {
-      venueId,
-      orderId,
-      items: itemsParaPosting as any,
-      staffId: null,
-    })
-    postingId = posting?.id ?? null
-    // R8 / Review Focus 3: liquidar desde el dashboard activa los sobres de una cuenta de tarjetas en esta transacción.
-    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: actorStaffId, items: itemsParaPosting })
-    settlementPaymentId = settlementPayment.id
-    // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
-    if (vales) sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId })
-    // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
-    await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
+        // 🔴 El fiado liquidado TAMBIÉN descuenta (fase 5). Las órdenes pay-later
+        // nacen con items reales y la mercancía salió cuando se sirvió; bajo la
+        // regla vigente ("se descuenta al quedar pagada"), liquidar ES ese momento.
+        // Era el único camino de cobro que marcaba PAID sin tocar inventario.
+        // El vale nace DENTRO del CAS: quien pierde la carrera no llega aquí, así
+        // que dos liquidaciones concurrentes no pueden descontar dos veces.
+        const itemsParaPosting = await tx.orderItem.findMany({
+          where: { orderId },
+          include: { modifiers: { include: { modifier: true } } },
+        })
+        const posting = await createSalePostingInTx(tx, {
+          venueId,
+          orderId,
+          items: itemsParaPosting as any,
+          staffId: null,
+        })
+        postingId = posting?.id ?? null
+        // R8 / Review Focus 3: liquidar desde el dashboard activa los sobres de una cuenta de tarjetas en esta transacción.
+        await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: actorStaffId, items: itemsParaPosting })
+        settlementPaymentId = settlementPayment.id
+        // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+        if (vales) sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId })
+        // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+        await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
 
-    return toSettle
-  }, ORDER_LOCK_WAIT_BUDGET)
+        return toSettle
+      })()
+      return { settledAmount, postingId, settlementPaymentId, baseParaLealtad, sesionDeValesCerrada }
+    },
+    { etiqueta: 'settleOrder', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   // Fase 2 de la unificación de caja: la liquidación en efectivo TAMBIÉN sube el cajón.
   // Antes el reporte de ventas subía y el arqueo no ⇒ FALTANTE falso al cerrar. Va DESPUÉS

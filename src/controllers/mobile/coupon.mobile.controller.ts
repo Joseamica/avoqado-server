@@ -9,6 +9,7 @@
 
 import { Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import logger from '../../config/logger'
 import { CAMBIO_CRUZADO, dondeEscribir, esCambioCruzado, validarCambioDeDescuento } from '../../services/dashboard/reglasDeDescuento'
 import { validateCouponCode } from '../../services/dashboard/coupon.dashboard.service'
@@ -126,28 +127,32 @@ export async function createCoupon(req: Request, res: Response) {
       })
     }
 
-    const coupon = await prisma.couponCode.create({
-      data: {
-        discountId,
-        code: normalizedCode,
-        maxUses: maxUses ?? null,
-        maxUsesPerCustomer: maxUsesPerCustomer ?? null,
-        minPurchaseAmount: minPurchaseAmount ?? null,
-        validFrom: validFrom ? new Date(validFrom) : null,
-        validUntil: validUntil ? new Date(validUntil) : null,
-        active: active ?? true,
-      },
-      include: {
-        discount: {
-          select: {
-            id: true,
-            name: true,
-            type: true,
-            value: true,
+    const coupon = await withDeadlockRetry(
+      tx =>
+        tx.couponCode.create({
+          data: {
+            discountId,
+            code: normalizedCode,
+            maxUses: maxUses ?? null,
+            maxUsesPerCustomer: maxUsesPerCustomer ?? null,
+            minPurchaseAmount: minPurchaseAmount ?? null,
+            validFrom: validFrom ? new Date(validFrom) : null,
+            validUntil: validUntil ? new Date(validUntil) : null,
+            active: active ?? true,
           },
-        },
-      },
-    })
+          include: {
+            discount: {
+              select: {
+                id: true,
+                name: true,
+                type: true,
+                value: true,
+              },
+            },
+          },
+        }),
+      { etiqueta: 'createCoupon' },
+    )
 
     logger.info(`Coupon created (mobile): ${normalizedCode} for discount ${discount.name}`)
 
@@ -226,28 +231,32 @@ export async function updateCoupon(req: Request, res: Response) {
       }
     }
 
-    const coupon = await prisma.couponCode.update({
-      where: dondeEscribir(couponId, existing, cambio),
-      data: {
-        ...(normalizedCode !== undefined && { code: normalizedCode }),
-        ...(maxUses !== undefined && { maxUses }),
-        ...(maxUsesPerCustomer !== undefined && { maxUsesPerCustomer }),
-        ...(minPurchaseAmount !== undefined && { minPurchaseAmount }),
-        ...(validFrom !== undefined && { validFrom: validFrom ? new Date(validFrom) : null }),
-        ...(validUntil !== undefined && { validUntil: validUntil ? new Date(validUntil) : null }),
-        ...(active !== undefined && { active }),
-      },
-      include: {
-        discount: {
-          select: {
-            id: true,
-            name: true,
-            type: true,
-            value: true,
+    const coupon = await withDeadlockRetry(
+      tx =>
+        tx.couponCode.update({
+          where: dondeEscribir(couponId, existing, cambio),
+          data: {
+            ...(normalizedCode !== undefined && { code: normalizedCode }),
+            ...(maxUses !== undefined && { maxUses }),
+            ...(maxUsesPerCustomer !== undefined && { maxUsesPerCustomer }),
+            ...(minPurchaseAmount !== undefined && { minPurchaseAmount }),
+            ...(validFrom !== undefined && { validFrom: validFrom ? new Date(validFrom) : null }),
+            ...(validUntil !== undefined && { validUntil: validUntil ? new Date(validUntil) : null }),
+            ...(active !== undefined && { active }),
           },
-        },
-      },
-    })
+          include: {
+            discount: {
+              select: {
+                id: true,
+                name: true,
+                type: true,
+                value: true,
+              },
+            },
+          },
+        }),
+      { etiqueta: 'updateCoupon' },
+    )
 
     logger.info(`Coupon updated (mobile): ${coupon.code}`)
 
@@ -290,9 +299,13 @@ export async function deleteCoupon(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: 'Cupon no encontrado' })
     }
 
-    await prisma.couponCode.delete({
-      where: { id: couponId },
-    })
+    await withDeadlockRetry(
+      tx =>
+        tx.couponCode.delete({
+          where: { id: couponId },
+        }),
+      { etiqueta: 'deleteCoupon' },
+    )
 
     logger.info(`Coupon deleted (mobile): ${existing.code} (${couponId})`)
 

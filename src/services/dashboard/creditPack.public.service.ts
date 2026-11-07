@@ -15,7 +15,7 @@ import { Prisma, CreditPurchaseStatus, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
-import { withSerializableRetry } from '@/utils/serializableRetry'
+import { withDeadlockRetry, withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
@@ -181,7 +181,9 @@ export async function createCheckoutSession(
   // persona, no se le cobra un paquete que no va a poder usar. Al revés (cobrar y rechazar
   // luego) el dinero YA es suyo: por eso rechazar NO revoca créditos ya acreditados, y por
   // eso el único punto donde se puede evitar el problema es aquí.
-  await prisma.$transaction(async tx => assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId }))
+  await withDeadlockRetry(async tx => assertCustomerCanCreateReservation(tx, { customerId: sessionCustomerId, venueId }), {
+    etiqueta: 'createCheckoutSession',
+  })
 
   const pack = await prisma.creditPack.findFirst({
     where: { id: packId, venueId, active: true },
@@ -518,55 +520,58 @@ export async function fulfillPurchase(checkoutSessionId: string, connectAccountI
   const amountPaid = new Prisma.Decimal((session.amount_total || 0) / 100)
 
   // Create everything in a transaction
-  const purchase = await prisma.$transaction(async tx => {
-    // Create purchase
-    const newPurchase = await tx.creditPackPurchase.create({
-      data: {
-        venueId,
-        customerId: customer.id,
-        creditPackId: pack.id,
-        stripeCheckoutSessionId: checkoutSessionId,
-        stripePaymentIntentId: session.payment_intent as string,
-        amountPaid,
-        expiresAt,
-        status: CreditPurchaseStatus.ACTIVE,
-      },
-    })
-
-    // Create item balances and transactions
-    for (const item of pack.items) {
-      const balance = await tx.creditItemBalance.create({
-        data: {
-          creditPackPurchaseId: newPurchase.id,
-          creditPackItemId: item.id,
-          productId: item.productId,
-          originalQuantity: item.quantity,
-          remainingQuantity: item.quantity,
-        },
-      })
-
-      await tx.creditTransaction.create({
+  const purchase = await withDeadlockRetry(
+    async tx => {
+      // Create purchase
+      const newPurchase = await tx.creditPackPurchase.create({
         data: {
           venueId,
           customerId: customer.id,
-          creditPackPurchaseId: newPurchase.id,
-          creditItemBalanceId: balance.id,
-          type: 'PURCHASE',
-          quantity: item.quantity,
+          creditPackId: pack.id,
+          stripeCheckoutSessionId: checkoutSessionId,
+          stripePaymentIntentId: session.payment_intent as string,
+          amountPaid,
+          expiresAt,
+          status: CreditPurchaseStatus.ACTIVE,
         },
       })
-    }
 
-    // Update customer totalSpent
-    await tx.customer.update({
-      where: { id: customer.id },
-      data: {
-        totalSpent: { increment: amountPaid },
-      },
-    })
+      // Create item balances and transactions
+      for (const item of pack.items) {
+        const balance = await tx.creditItemBalance.create({
+          data: {
+            creditPackPurchaseId: newPurchase.id,
+            creditPackItemId: item.id,
+            productId: item.productId,
+            originalQuantity: item.quantity,
+            remainingQuantity: item.quantity,
+          },
+        })
 
-    return newPurchase
-  })
+        await tx.creditTransaction.create({
+          data: {
+            venueId,
+            customerId: customer.id,
+            creditPackPurchaseId: newPurchase.id,
+            creditItemBalanceId: balance.id,
+            type: 'PURCHASE',
+            quantity: item.quantity,
+          },
+        })
+      }
+
+      // Update customer totalSpent
+      await tx.customer.update({
+        where: { id: customer.id },
+        data: {
+          totalSpent: { increment: amountPaid },
+        },
+      })
+
+      return newPurchase
+    },
+    { etiqueta: 'fulfillPurchase' },
+  )
 
   logger.info('✅ [CREDIT PACK] Purchase fulfilled', {
     purchaseId: purchase.id,
@@ -896,7 +901,12 @@ async function findOrCreateCustomer(venueId: string, email?: string, phone?: str
     throw new BadRequestError('Se requiere email o telefono del cliente')
   }
   const existente = await findGuestCustomer(venueId, email, phone)
-  return existente ?? prisma.customer.create({ data: { venueId, ...(phone ? { phone } : { email: email! }) } })
+  return (
+    existente ??
+    withDeadlockRetry(tx => tx.customer.create({ data: { venueId, ...(phone ? { phone } : { email: email! }) } }), {
+      etiqueta: 'findOrCreateCustomer',
+    })
+  )
 }
 
 /**

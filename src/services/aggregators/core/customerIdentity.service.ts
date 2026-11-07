@@ -3,6 +3,7 @@ import logger from '@/config/logger'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { normalizePhoneE164 } from '@/utils/phone'
 import { PassUser, Provider } from './types'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 /** Separa el nombre del socio en nombre y apellidos. */
 function splitName(full: string): { firstName: string; lastName: string | null } {
@@ -29,7 +30,7 @@ const isUniqueViolation = (e: unknown): boolean => (e as { code?: unknown } | nu
  * Debe llamarse dentro de una transacción (usa SAVEPOINT). Nunca registra nombre, correo ni teléfono: sólo ids.
  */
 export async function resolvePassCustomer(
-  tx: Prisma.TransactionClient,
+  tx: TxConReintento,
   p: { venueId: string; provider: Provider; externalUserId: string; user: PassUser },
 ): Promise<{ customerId: string; created: boolean }> {
   const identityKey = { venueId: p.venueId, provider: p.provider, externalUserId: p.externalUserId }

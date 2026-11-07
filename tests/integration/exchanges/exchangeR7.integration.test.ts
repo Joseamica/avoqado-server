@@ -8,6 +8,7 @@ import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim
 import { resolveExchangeCreditTenderInTx, ensureExchangeCreditTender } from '@/services/exchanges/exchangeCreditTender'
 import { barreraDeFila } from '../commission/_mundoComisiones'
 import { seedClothingSale } from './seedExchange'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn(async () => undefined) }))
@@ -106,7 +107,7 @@ describe('R7: conjuntos de candados y venta resultante dentro de sus topes', () 
     expect(s.order.id < second.id).toBe(true)
     const barrier = await barreraDeFila('Order', second.id)
     const merge = Promise.allSettled([
-      prisma.$transaction(tx => mergeOrdersInTransaction(tx, s.venueId, s.order.id, second.id, s.staffId), {
+      prisma.$transaction(tx => mergeOrdersInTransaction(tx as unknown as TxConReintento, s.venueId, s.order.id, second.id, s.staffId), {
         timeout: 30000,
         maxWait: 5000,
       }),

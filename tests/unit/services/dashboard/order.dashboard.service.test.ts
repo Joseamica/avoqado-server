@@ -492,3 +492,73 @@ describe('settleOrder — crea el vale de deducción', () => {
     expect(createSalePostingSettleMock).not.toHaveBeenCalled()
   })
 })
+
+// ── S5b (red por traba): lo que sale tras el commit es del intento GANADOR (R65 b) ──
+import * as cashDrawer from '@/services/shared/cashDrawerPosting'
+import * as areaTicketV7 from '@/services/mobile/areaTicketV7.mobile.service'
+import { logAction as logActionMock } from '@/services/dashboard/activity-log.service'
+
+describe('order.dashboard.service — la red por traba (40P01)', () => {
+  const abortarElPrimerIntento = () => {
+    let llamada = 0
+    prismaMock.$transaction.mockImplementation(async (cb: any) => {
+      const r = await cb(prismaMock)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+    return () => llamada
+  }
+  afterEach(() => {
+    jest.restoreAllMocks()
+    prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+  })
+
+  it('[repetirNoDuplica:deleteOrder] cancelar: los vales que se avisan son los del intento ganador, una sola vez', async () => {
+    prismaMock.$queryRaw.mockImplementation((async (q: { raw?: readonly string[] }) =>
+      q?.raw?.join('').includes('"OrderDiscount"') ? [] : [{ id: 'order-1' }]) as any)
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING' } as any)
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING' } as any)
+    prismaMock.kdsOrder.findMany.mockResolvedValue([])
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
+    prismaMock.kdsOrder.updateMany.mockResolvedValue({ count: 0 })
+    prismaMock.payment.count.mockResolvedValue(0 as any)
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+    prismaMock.order.update.mockResolvedValue({ id: 'order-1', venueId: 'venue-1', status: 'CANCELLED' } as any)
+    jest
+      .spyOn(areaTicketV7, 'soltarValesAlCancelarLaVenta')
+      .mockResolvedValueOnce({ sessionId: 'sesion-1', ticketIds: ['t1'] } as any)
+      .mockResolvedValueOnce({ sessionId: 'sesion-2', ticketIds: ['t2'] } as any)
+    const intentos = abortarElPrimerIntento()
+    ;(logActionMock as jest.Mock).mockClear()
+
+    await deleteOrder('venue-1', 'order-1')
+
+    expect(intentos()).toBe(2)
+    const avisos = (logActionMock as jest.Mock).mock.calls.map(c => c[0]).filter(a => a.action === 'AREA_TICKET_CHECKOUT_CANCELLED')
+    expect(avisos).toHaveLength(1)
+    expect(avisos[0].entityId).toBe('sesion-2')
+  })
+
+  it('[repetirNoDuplica:settleOrder] liquidar: el cajón y el aviso salen con el pago del intento GANADOR, una sola vez', async () => {
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: 0, tipAmount: 0 } } as any)
+    prismaMock.order.findFirst.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      total: 100,
+      remainingBalance: 100,
+      paymentStatus: 'PENDING',
+    } as any)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.payment.create.mockResolvedValueOnce({ id: 'pay-1' } as any).mockResolvedValueOnce({ id: 'pay-2' } as any)
+    const cajon = jest.spyOn(cashDrawer, 'postCashSaleToDrawer').mockResolvedValue(undefined as any)
+    const intentos = abortarElPrimerIntento()
+
+    const res = await settleOrder('venue-1', 'order-1')
+
+    expect(intentos()).toBeGreaterThanOrEqual(2)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(2) // el primero se deshizo con su intento
+    expect(res.settledAmount).toBe(100)
+    expect(cajon).toHaveBeenCalledTimes(1)
+    expect(cajon).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'pay-2' }))
+  })
+})

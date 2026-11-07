@@ -56,6 +56,7 @@ import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
 import { payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
 import { crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(90000)
 
@@ -97,8 +98,8 @@ const ventaNueva = (proofToken: string, monto: number) => ({
 
 const abonar = (customerId: string, monto: number, tipo: 'CAMBIO' | 'REEMBOLSO') =>
   prisma.$transaction(async tx => {
-    const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
-    return abonarSaldoAFavorEnTx(tx, {
+    const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId, customerId })
+    return abonarSaldoAFavorEnTx(tx as unknown as TxConReintento, {
       preparado,
       monto: D(monto),
       staffId,
@@ -151,7 +152,7 @@ beforeAll(async () => {
   // La regalada queda guardada en la cartera de Ana: también tiene cliente y NO es saldo a favor.
   await prisma.giftCard.update({ where: { id: regaladaId }, data: { customerId: ana.id } })
   await prisma.$transaction(tx =>
-    operarSobreDeGerenteEnTx(tx, {
+    operarSobreDeGerenteEnTx(tx as unknown as TxConReintento, {
       venueId,
       giftCardId: saldoId,
       staffId,

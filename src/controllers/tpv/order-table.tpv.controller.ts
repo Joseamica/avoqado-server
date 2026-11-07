@@ -2,6 +2,7 @@ import { Request, Response } from 'express'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '../../services/mobile/service-charge.mobile.service'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { ORDER_LOCK_WAIT_BUDGET } from '../../services/shared/paymentShiftClaim'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
@@ -120,9 +121,9 @@ export async function mergeOrders(req: Request, res: Response): Promise<void> {
       return
     }
 
-    const result = await prisma.$transaction(
+    const result = await withDeadlockRetry(
       tx => orderMobileService.mergeOrdersInTransaction(tx, venueId, orderId, sourceOrderId, staffId),
-      ORDER_LOCK_WAIT_BUDGET,
+      { etiqueta: 'mergeOrders', ...ORDER_LOCK_WAIT_BUDGET },
     )
     try {
       await orderMobileService.publishMergedOrders(venueId, result, staffId)
@@ -156,9 +157,9 @@ export async function cancelOrder(req: Request, res: Response): Promise<void> {
     const staffId = (req as any).authContext?.userId as string | undefined
 
     const cancellationReason = typeof reason === 'string' ? reason : undefined
-    const result = await prisma.$transaction(
+    const result = await withDeadlockRetry(
       tx => orderMobileService.cancelOrderInTransaction(tx, venueId, orderId, cancellationReason, staffId),
-      ORDER_LOCK_WAIT_BUDGET,
+      { etiqueta: 'cancelOrder', ...ORDER_LOCK_WAIT_BUDGET },
     )
     try {
       await orderMobileService.publishCancelledOrder(venueId, result, staffId, cancellationReason)

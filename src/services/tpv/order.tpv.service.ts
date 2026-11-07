@@ -1,7 +1,15 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry } from '../../utils/serializableRetry'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
-import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError, RegaloSinPermisoError } from '../../errors/AppError'
+import {
+  NotFoundError,
+  BadRequestError,
+  ConflictError,
+  ValidationError,
+  ForbiddenError,
+  RegaloSinPermisoError,
+} from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
@@ -1257,240 +1265,243 @@ export async function createOrderWithItems(
   }
 
   async function runCreateOrderTransaction() {
-    return prisma.$transaction(async tx => {
-      if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
-      // D5 (Codex r1 #1): bajo el candado del cupón, contra los canjes y las ventas sin cobrar que ya lo traen.
-      if (cupon) await apartarCupon(tx, venueId, cupon, input.customerId)
-      // El turno de caja es del NEGOCIO, no de quien abre la orden (`../shared/turnoDeCaja.ts`).
-      const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+    return withDeadlockRetry(
+      async tx => {
+        if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
+        // D5 (Codex r1 #1): bajo el candado del cupón, contra los canjes y las ventas sin cobrar que ya lo traen.
+        if (cupon) await apartarCupon(tx, venueId, cupon, input.customerId)
+        // El turno de caja es del NEGOCIO, no de quien abre la orden (`../shared/turnoDeCaja.ts`).
+        const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
 
-      // New Cobrar V1 keeps total/subtotal gross-net semantics explicit:
-      // OrderItem.total and Order.subtotal are gross, reductions live in discountAmount.
-      const isFreeCart = totalPesos === 0
-      // Un carrito gratis termina y crea su Payment en esta misma transacción, así que su
-      // pertenencia debe GANARSE antes de estampar ambas filas. Si el cierre tomó OPEN → CLOSING
-      // entre la lectura y este CAS, el carrito sigue siendo válido pero queda sin turno: monto
-      // cero, sin falsa anomalía monetaria y, sobre todo, sin mover `updatedAt=claimedAt`.
-      let freeCartShiftId: string | null = null
-      if (isFreeCart && currentShift) {
-        const claimed = await tx.shift.updateMany({
-          where: { id: currentShift.id, venueId, status: 'OPEN', endTime: null },
-          data: { totalOrders: { increment: 1 } },
-        })
-        if (claimed.count === 1) freeCartShiftId = currentShift.id
-      }
-      const orderShiftId = isFreeCart ? freeCartShiftId : (currentShift?.id ?? null)
-      const order = await tx.order.create({
-        data: {
-          venueId,
-          tableId: input.tableId || null,
-          customerId: input.customerId || null,
-          covers: 1,
-          orderNumber,
-          // Estampar la llave de idempotencia: sin esto el dedup del retry
-          // nunca encontraría la orden original.
-          externalId,
-          servedById: input.staffId,
-          createdById: input.staffId,
-          terminalId: resolvedTerminalId,
-          // 🔴 La orden nace en el turno de caja abierto AHORA: se toma en el mostrador, con
-          // el cajero enfrente. Para una orden pendiente se reusa el `currentShift`; para el
-          // carrito gratis se usa el id que GANÓ el CAS de arriba, que es el mismo que se estampa
-          // en el Payment. Nunca una segunda consulta: si el turno cerrara entre las dos lecturas,
-          // la orden y su cobro podrían caer en turnos distintos.
-          // Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
-          shiftId: orderShiftId,
-          status: isFreeCart ? 'COMPLETED' : 'PENDING',
-          paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
-          kitchenStatus: 'PENDING',
-          ...(isFreeCart && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
-          type: input.orderType || 'TAKEOUT',
-          source: input.source || 'TPV',
-          subtotal: decimalFromPesos(grossSubtotalPesos),
-          discountAmount: decimalFromPesos(discountAmountPesos),
-          taxAmount: 0,
-          contratoDePrecio: 'IVA_INCLUIDO',
-          tipAmount: 0,
-          total: decimalFromPesos(totalPesos),
-          paidAmount: 0,
-          remainingBalance: decimalFromPesos(totalPesos),
-          completedAt: isFreeCart ? new Date() : null,
-          specialRequests: normalizeNotes(input.note),
-          version: 1,
-        },
-      })
-
-      const createdItems: Array<{ id: string; line: PreparedCheckoutLine }> = []
-
-      for (const line of preparedLines) {
-        const item = await tx.orderItem.create({
-          data: {
-            orderId: order.id,
-            productId: line.product?.id || null,
-            productName: line.product?.name || line.input.name || 'Otro importe',
-            productSku: line.product?.sku || null,
-            categoryName: line.product?.category?.name || null,
-            quantity: line.input.quantity,
-            unitPrice: line.product ? line.product.price : decimalFromPesos(Number(line.input.unitPrice || 0)),
-            discountAmount: decimalFromPesos(line.lineDiscountPesos),
-            taxAmount: 0,
-            total: decimalFromPesos(line.lineGrossPesos),
-            isCortesia: !!line.input.isCortesia,
-            cortesiaReason: line.input.isCortesia ? normalizeNotes(line.input.cortesiaReason) : null,
-            appliedDiscountId: line.appliedDiscount?.id || null,
-            notes: normalizeNotes(line.input.notes),
-            modifiers: {
-              create: line.modifierRows.map(modifier => ({
-                modifierId: modifier.id,
-                name: modifier.name,
-                quantity: 1,
-                price: modifier.price,
-              })),
-            },
-          },
-        })
-
-        createdItems.push({ id: item.id, line })
-      }
-
-      const cortesiaItems = createdItems.filter(item => item.line.input.isCortesia)
-      // La misma fila, la misma acción y el mismo descuento de cuenta que la orden de mobile (`../shared/discount.service`).
-      const enCortesia = (item: (typeof createdItems)[number]) => ({
-        id: item.id,
-        brutoPesos: item.line.lineGrossPesos,
-        motivo: item.line.input.cortesiaReason,
-      })
-      if (cortesiaItems.length > 0) {
-        await tx.orderDiscount.create({
-          data: filaDeCortesias({ orderId: order.id, renglones: cortesiaItems.map(enCortesia), appliedById: activeStaffVenue.id }),
-        })
-      }
-
-      for (const item of createdItems.filter(item => item.line.appliedDiscount)) {
-        await tx.orderDiscount.create({
-          data: buildItemDiscountRow({
-            orderId: order.id,
-            itemId: item.id,
-            discount: item.line.appliedDiscount!,
-            discountAmountPesos: item.line.lineDiscountPesos,
-            appliedById: activeStaffVenue.id,
-          }),
-        })
-      }
-
-      if (orderDiscount && orderDiscountPesos > 0) {
-        const fila = filaDeDescuentoDeCatalogoEnCuenta({
-          orderId: order.id,
-          discount: orderDiscount,
-          montoPesos: orderDiscountPesos,
-          appliedById: activeStaffVenue.id,
-          renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
-          tope:
-            cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null
-              ? Number(orderDiscount.maxDiscountAmount)
-              : null,
-        })
-        await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
-      }
-      if (!orderDiscount && orderDiscountPesos > 0) {
-        // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
-        await tx.orderDiscount.create({
-          data: filaDeDescuentoDeCuenta({
-            orderId: order.id,
-            montoPesos: orderDiscountPesos,
-            appliedById: activeStaffVenue.id,
-            // Codex r2 #1: el autorizador lo resuelve el controlador (gerente del PIN o quien cobra), nunca el vendedor del cuerpo.
-            ...(descuentoLibreRegala ? { authorizedById: input.regaloAutorizadoPor } : {}),
-          }),
-        })
-      }
-      if (cortesiaItems.length > 0 || createdItems.some(item => item.line.appliedDiscount) || orderDiscountPesos > 0) {
-        await sincronizarRepartos(tx, order.id)
-      }
-
-      const usedDiscountIds = [...new Set(createdItems.map(item => item.line.appliedDiscount?.id).filter(Boolean) as string[])]
-      // El cupón sube sus contadores al canjearse (`finalizeCouponsForOrder`): aquí contaría dos veces.
-      if (orderDiscount?.id && !cupon) usedDiscountIds.push(orderDiscount.id)
-      if (usedDiscountIds.length > 0) {
-        await tx.discount.updateMany({
-          where: { id: { in: [...new Set(usedDiscountIds)] } },
-          data: { currentUses: { increment: 1 } },
-        })
-      }
-
-      for (const item of cortesiaItems) {
-        await tx.orderAction.create({
-          data: accionDeCortesia({
-            orderId: order.id,
-            performedById: input.staffId,
-            renglon: enCortesia(item),
-            productId: item.line.product?.id || null,
-            productName: item.line.product?.name || item.line.input.name || 'Otro importe',
-          }),
-        })
-      }
-
-      if (input.customerId) {
-        await tx.orderCustomer.create({
-          data: {
-            orderId: order.id,
-            customerId: input.customerId,
-            isPrimary: true,
-          },
-        })
-      }
-
-      if (isFreeCart) {
-        // A $0 cortesía cart still needs a Payment row so financial views can
-        // distinguish a completed free cart from an abandoned pending order.
-        const payment = await tx.payment.create({
+        // New Cobrar V1 keeps total/subtotal gross-net semantics explicit:
+        // OrderItem.total and Order.subtotal are gross, reductions live in discountAmount.
+        const isFreeCart = totalPesos === 0
+        // Un carrito gratis termina y crea su Payment en esta misma transacción, así que su
+        // pertenencia debe GANARSE antes de estampar ambas filas. Si el cierre tomó OPEN → CLOSING
+        // entre la lectura y este CAS, el carrito sigue siendo válido pero queda sin turno: monto
+        // cero, sin falsa anomalía monetaria y, sobre todo, sin mover `updatedAt=claimedAt`.
+        let freeCartShiftId: string | null = null
+        if (isFreeCart && currentShift) {
+          const claimed = await tx.shift.updateMany({
+            where: { id: currentShift.id, venueId, status: 'OPEN', endTime: null },
+            data: { totalOrders: { increment: 1 } },
+          })
+          if (claimed.count === 1) freeCartShiftId = currentShift.id
+        }
+        const orderShiftId = isFreeCart ? freeCartShiftId : (currentShift?.id ?? null)
+        const order = await tx.order.create({
           data: {
             venueId,
-            orderId: order.id,
-            shiftId: freeCartShiftId,
-            processedById: input.staffId,
-            amount: 0,
+            tableId: input.tableId || null,
+            customerId: input.customerId || null,
+            covers: 1,
+            orderNumber,
+            // Estampar la llave de idempotencia: sin esto el dedup del retry
+            // nunca encontraría la orden original.
+            externalId,
+            servedById: input.staffId,
+            createdById: input.staffId,
+            terminalId: resolvedTerminalId,
+            // 🔴 La orden nace en el turno de caja abierto AHORA: se toma en el mostrador, con
+            // el cajero enfrente. Para una orden pendiente se reusa el `currentShift`; para el
+            // carrito gratis se usa el id que GANÓ el CAS de arriba, que es el mismo que se estampa
+            // en el Payment. Nunca una segunda consulta: si el turno cerrara entre las dos lecturas,
+            // la orden y su cobro podrían caer en turnos distintos.
+            // Opcional a propósito — un negocio que no abrió caja sigue vendiendo.
+            shiftId: orderShiftId,
+            status: isFreeCart ? 'COMPLETED' : 'PENDING',
+            paymentStatus: isFreeCart ? 'PAID' : 'PENDING',
+            kitchenStatus: 'PENDING',
+            ...(isFreeCart && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+            type: input.orderType || 'TAKEOUT',
+            source: input.source || 'TPV',
+            subtotal: decimalFromPesos(grossSubtotalPesos),
+            discountAmount: decimalFromPesos(discountAmountPesos),
+            taxAmount: 0,
+            contratoDePrecio: 'IVA_INCLUIDO',
             tipAmount: 0,
-            method: 'OTHER',
-            source: 'TPV',
-            status: 'COMPLETED',
-            splitType: 'FULLPAYMENT',
-            type: 'REGULAR',
-            processor: 'AVOQADO',
-            processorData: {
-              type: 'FREE_CART',
-              reason: 'total_zero_cortesia_or_discount',
-            },
-            feePercentage: 0,
-            feeAmount: 0,
-            netAmount: 0,
-            posRawData: {
-              source: 'TPV_COBRAR_WITH_ITEMS',
-            },
+            total: decimalFromPesos(totalPesos),
+            paidAmount: 0,
+            remainingBalance: decimalFromPesos(totalPesos),
+            completedAt: isFreeCart ? new Date() : null,
+            specialRequests: normalizeNotes(input.note),
+            version: 1,
           },
         })
 
-        await tx.paymentAllocation.create({
-          data: {
-            paymentId: payment.id,
-            orderId: order.id,
-            amount: 0,
-          },
+        const createdItems: Array<{ id: string; line: PreparedCheckoutLine }> = []
+
+        for (const line of preparedLines) {
+          const item = await tx.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: line.product?.id || null,
+              productName: line.product?.name || line.input.name || 'Otro importe',
+              productSku: line.product?.sku || null,
+              categoryName: line.product?.category?.name || null,
+              quantity: line.input.quantity,
+              unitPrice: line.product ? line.product.price : decimalFromPesos(Number(line.input.unitPrice || 0)),
+              discountAmount: decimalFromPesos(line.lineDiscountPesos),
+              taxAmount: 0,
+              total: decimalFromPesos(line.lineGrossPesos),
+              isCortesia: !!line.input.isCortesia,
+              cortesiaReason: line.input.isCortesia ? normalizeNotes(line.input.cortesiaReason) : null,
+              appliedDiscountId: line.appliedDiscount?.id || null,
+              notes: normalizeNotes(line.input.notes),
+              modifiers: {
+                create: line.modifierRows.map(modifier => ({
+                  modifierId: modifier.id,
+                  name: modifier.name,
+                  quantity: 1,
+                  price: modifier.price,
+                })),
+              },
+            },
+          })
+
+          createdItems.push({ id: item.id, line })
+        }
+
+        const cortesiaItems = createdItems.filter(item => item.line.input.isCortesia)
+        // La misma fila, la misma acción y el mismo descuento de cuenta que la orden de mobile (`../shared/discount.service`).
+        const enCortesia = (item: (typeof createdItems)[number]) => ({
+          id: item.id,
+          brutoPesos: item.line.lineGrossPesos,
+          motivo: item.line.input.cortesiaReason,
         })
-        // D5 (Codex r2 #3): nace pagada sin pasar por ningún cobro: su cupón se canjea AQUÍ, con la venta, o no se cuenta nunca.
-        if (cupon) {
-          await canjearCuponEnTx(tx, {
-            orderId: order.id,
-            couponCodeId: cupon.id,
-            discountId: cupon.discount.id,
-            customerId: input.customerId || null,
-            amountSaved: decimalFromPesos(orderDiscountPesos),
+        if (cortesiaItems.length > 0) {
+          await tx.orderDiscount.create({
+            data: filaDeCortesias({ orderId: order.id, renglones: cortesiaItems.map(enCortesia), appliedById: activeStaffVenue.id }),
           })
         }
-      }
 
-      return order
-    }, ORDER_LOCK_WAIT_BUDGET)
+        for (const item of createdItems.filter(item => item.line.appliedDiscount)) {
+          await tx.orderDiscount.create({
+            data: buildItemDiscountRow({
+              orderId: order.id,
+              itemId: item.id,
+              discount: item.line.appliedDiscount!,
+              discountAmountPesos: item.line.lineDiscountPesos,
+              appliedById: activeStaffVenue.id,
+            }),
+          })
+        }
+
+        if (orderDiscount && orderDiscountPesos > 0) {
+          const fila = filaDeDescuentoDeCatalogoEnCuenta({
+            orderId: order.id,
+            discount: orderDiscount,
+            montoPesos: orderDiscountPesos,
+            appliedById: activeStaffVenue.id,
+            renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
+            tope:
+              cupon && orderDiscount.type === 'PERCENTAGE' && orderDiscount.maxDiscountAmount != null
+                ? Number(orderDiscount.maxDiscountAmount)
+                : null,
+          })
+          await tx.orderDiscount.create({ data: cupon ? ligarCupon(fila, cupon) : fila })
+        }
+        if (!orderDiscount && orderDiscountPesos > 0) {
+          // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
+          await tx.orderDiscount.create({
+            data: filaDeDescuentoDeCuenta({
+              orderId: order.id,
+              montoPesos: orderDiscountPesos,
+              appliedById: activeStaffVenue.id,
+              // Codex r2 #1: el autorizador lo resuelve el controlador (gerente del PIN o quien cobra), nunca el vendedor del cuerpo.
+              ...(descuentoLibreRegala ? { authorizedById: input.regaloAutorizadoPor } : {}),
+            }),
+          })
+        }
+        if (cortesiaItems.length > 0 || createdItems.some(item => item.line.appliedDiscount) || orderDiscountPesos > 0) {
+          await sincronizarRepartos(tx, order.id)
+        }
+
+        const usedDiscountIds = [...new Set(createdItems.map(item => item.line.appliedDiscount?.id).filter(Boolean) as string[])]
+        // El cupón sube sus contadores al canjearse (`finalizeCouponsForOrder`): aquí contaría dos veces.
+        if (orderDiscount?.id && !cupon) usedDiscountIds.push(orderDiscount.id)
+        if (usedDiscountIds.length > 0) {
+          await tx.discount.updateMany({
+            where: { id: { in: [...new Set(usedDiscountIds)] } },
+            data: { currentUses: { increment: 1 } },
+          })
+        }
+
+        for (const item of cortesiaItems) {
+          await tx.orderAction.create({
+            data: accionDeCortesia({
+              orderId: order.id,
+              performedById: input.staffId,
+              renglon: enCortesia(item),
+              productId: item.line.product?.id || null,
+              productName: item.line.product?.name || item.line.input.name || 'Otro importe',
+            }),
+          })
+        }
+
+        if (input.customerId) {
+          await tx.orderCustomer.create({
+            data: {
+              orderId: order.id,
+              customerId: input.customerId,
+              isPrimary: true,
+            },
+          })
+        }
+
+        if (isFreeCart) {
+          // A $0 cortesía cart still needs a Payment row so financial views can
+          // distinguish a completed free cart from an abandoned pending order.
+          const payment = await tx.payment.create({
+            data: {
+              venueId,
+              orderId: order.id,
+              shiftId: freeCartShiftId,
+              processedById: input.staffId,
+              amount: 0,
+              tipAmount: 0,
+              method: 'OTHER',
+              source: 'TPV',
+              status: 'COMPLETED',
+              splitType: 'FULLPAYMENT',
+              type: 'REGULAR',
+              processor: 'AVOQADO',
+              processorData: {
+                type: 'FREE_CART',
+                reason: 'total_zero_cortesia_or_discount',
+              },
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: 0,
+              posRawData: {
+                source: 'TPV_COBRAR_WITH_ITEMS',
+              },
+            },
+          })
+
+          await tx.paymentAllocation.create({
+            data: {
+              paymentId: payment.id,
+              orderId: order.id,
+              amount: 0,
+            },
+          })
+          // D5 (Codex r2 #3): nace pagada sin pasar por ningún cobro: su cupón se canjea AQUÍ, con la venta, o no se cuenta nunca.
+          if (cupon) {
+            await canjearCuponEnTx(tx, {
+              orderId: order.id,
+              couponCodeId: cupon.id,
+              discountId: cupon.discount.id,
+              customerId: input.customerId || null,
+              amountSaved: decimalFromPesos(orderDiscountPesos),
+            })
+          }
+        }
+
+        return order
+      },
+      { etiqueta: 'createOrderWithItems', ...ORDER_LOCK_WAIT_BUDGET },
+    )
   }
 
   const fullOrder = await fetchOrderForTpvResponse(createdOrder.id)
@@ -2573,7 +2584,7 @@ export async function removeOrderItem(
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🗑️ [ORDER SERVICE] Removing item ${orderItemId} from order ${orderId} (expected version: ${expectedVersion})`)
 
-  const { updatedOrder, itemToRemove, recorte } = await prisma.$transaction(
+  const { updatedOrder, itemToRemove, recorte } = await withDeadlockRetry(
     async tx => {
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
@@ -2766,7 +2777,7 @@ export async function removeOrderItem(
       )
       return { updatedOrder, itemToRemove, recorte }
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { etiqueta: 'removeOrderItem', timeout: 15_000, maxWait: 5_000 },
   )
 
   void logAction({
@@ -2850,7 +2861,7 @@ export function anulacionExigeOrdenSinCobroVivo(_input: { isVoidingAllItems: boo
 export async function compItems(venueId: string, orderId: string, input: CompItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`🚫 [ORDER SERVICE] Comping items for order ${orderId} | reason: ${input.reason}`)
 
-  const { updatedOrder, compAmount, itemCount, newTotal, recorte } = await prisma.$transaction(
+  const { updatedOrder, compAmount, itemCount, newTotal, recorte } = await withDeadlockRetry(
     async tx => {
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
         throw new NotFoundError('Order not found')
@@ -3084,7 +3095,7 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
       return { updatedOrder: updated, compAmount, itemCount: itemsToComp.length, newTotal, recorte }
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { etiqueta: 'compItems', timeout: 15_000, maxWait: 5_000 },
   )
 
   void logAction({
@@ -3145,9 +3156,10 @@ interface VoidItemsInput {
 export async function voidItems(venueId: string, orderId: string, input: VoidItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`❌ [ORDER SERVICE] Voiding ${input.itemIds.length} items from order ${orderId} | reason: ${input.reason}`)
 
-  let valesSoltados: ValesSoltados | null = null
-  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte } = await prisma.$transaction(
+  // R65 b: `valesSoltados` nace DENTRO de cada intento y sale en el retorno.
+  const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados } = await withDeadlockRetry(
     async tx => {
+      let valesSoltados: ValesSoltados | null = null
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
       // sin renglones, abajo retira sus comandas de la pantalla de cocina sin cruzarse con un armado en curso.
       await tomarCandadoDeComandas(tx, orderId)
@@ -3455,9 +3467,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
           },
         })
         .catch(conflictoSiLaMovieron)
-      return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte }
+      return { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte, valesSoltados }
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { etiqueta: 'voidItems', timeout: 15_000, maxWait: 5_000 },
   )
   // D2: los vales que anular todo dejó libres, firmados por quien está autenticado (después del commit, Codex r3 #1).
   if (valesSoltados) {
@@ -3677,11 +3689,7 @@ export async function applyDiscount(
       discountAmount = Math.min(discountAmount, remainingDiscountable)
       // hz:e0b12f00:D1 (founder, 6-nov): dejar en $0 lo que queda de los productos es una cortesía. Con este importe, en centavos;
       // aquí dos de 50 % sí pueden agotar la cuenta (cada % es sobre el subtotal: Codex r1, «bases»).
-      if (
-        !input.puedeRegalar &&
-        remainingDiscountable > 0 &&
-        Math.round(discountAmount * 100) >= Math.round(remainingDiscountable * 100)
-      ) {
+      if (!input.puedeRegalar && remainingDiscountable > 0 && Math.round(discountAmount * 100) >= Math.round(remainingDiscountable * 100)) {
         throw new RegaloSinPermisoError()
       }
 
@@ -4320,7 +4328,8 @@ export async function createAndAddCustomerToOrder(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      await prisma.$transaction(
+      // R65 b: el cliente creado y si la venta estaba cobrada salen en el RETORNO del intento que hizo commit.
+      const creado = await withDeadlockRetry(
         async tx => {
           // 🔴 F1: el candado de la venta PRIMERO, y el estado vigente bajo él.
           const venta = await leerVentaBajoCandado(tx, venueId, orderId)
@@ -4335,8 +4344,6 @@ export async function createAndAddCustomerToOrder(
               firstVisitAt: new Date(),
             },
           })
-          nuevoClienteId = newCustomer.id
-          cobrada = venta.cobrada
 
           // La liga, con la MISMA regla que `addCustomerToOrder`: primario sólo si no hay primario y (cuenta abierta o con
           // permiso); a una venta cobrada sin permiso, acompañante (F1). Reapertura como ÚLTIMA escritura si aplica.
@@ -4357,12 +4364,15 @@ export async function createAndAddCustomerToOrder(
           logger.info(
             `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${liga.esPrimario}`,
           )
+          return { nuevoClienteId: newCustomer.id, cobrada: venta.cobrada }
         },
         // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), con el aislamiento
         // de siempre, como la liga del POS: el candado ya pone en fila a las ligas. En Serializable, la que esperaba el candado
         // perdía (40001) cada vez que otra cambiaba la venta, y con 6 ligas a la vez agotaba sus 5 intentos (D10, 27-oct-2026).
-        ORDER_LOCK_WAIT_BUDGET,
+        { etiqueta: 'createAndAddCustomerToOrder', ...ORDER_LOCK_WAIT_BUDGET },
       )
+      nuevoClienteId = creado.nuevoClienteId
+      cobrada = creado.cobrada
       // Success - exit the retry loop
       break
     } catch (error: any) {

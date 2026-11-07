@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
@@ -276,47 +277,50 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
 
   // 🔴 Candado de la orden (Plan3b) ANTES de releer la instancia y el estado: el retiro, sus líneas y el total se
   // deciden y escriben sobre la misma foto.
-  const recorte = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
-      throw new NotFoundError('No encontramos esa promoción en la cuenta.')
-    }
-    // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
-    await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
-    const found = await tx.orderPromotion.findFirst({
-      where: { id: orderPromotionId, orderId, order: { venueId } },
-      select: { id: true, order: { select: { paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true } } },
-    })
-    if (!found) {
-      throw new NotFoundError('No encontramos esa promoción en la cuenta.')
-    }
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(found.order)
-    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de promoción')
-    // De una cuenta pagada no se borra una venta: eso es un reembolso, con su
-    // rastro. Borrar líneas históricas dejaría el corte sin cuadrar.
-    if (found.order.paymentStatus === 'PAID' || found.order.paymentStatus === 'REFUNDED') {
-      throw new BadRequestError('Esta cuenta ya se pagó: retira la promoción con un reembolso, no borrándola.')
-    }
+  const recorte = await withDeadlockRetry(
+    async tx => {
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
+        throw new NotFoundError('No encontramos esa promoción en la cuenta.')
+      }
+      // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+      await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
+      const found = await tx.orderPromotion.findFirst({
+        where: { id: orderPromotionId, orderId, order: { venueId } },
+        select: { id: true, order: { select: { paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true } } },
+      })
+      if (!found) {
+        throw new NotFoundError('No encontramos esa promoción en la cuenta.')
+      }
+      // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+      // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+      rechazarSiEsImportada(found.order)
+      await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de promoción')
+      // De una cuenta pagada no se borra una venta: eso es un reembolso, con su
+      // rastro. Borrar líneas históricas dejaría el corte sin cuadrar.
+      if (found.order.paymentStatus === 'PAID' || found.order.paymentStatus === 'REFUNDED') {
+        throw new BadRequestError('Esta cuenta ya se pagó: retira la promoción con un reembolso, no borrándola.')
+      }
 
-    // R7-1 (ruling de B2): el resto de cabecera sin fila se congela ANTES de recortar; si no, el recálculo (Σ filas) lo perdería.
-    await conservarDescuentoHistorico(tx, orderId, found.order.discountAmount)
-    // P4 (founder, 1-oct): lo dirigido a las líneas del combo (un premio de cartilla) se retira con su beneficio ANTES de
-    // borrarlas; si no, el premio seguía restando sobre el resto de la cuenta.
-    const lineas = await tx.orderItem.findMany({ where: { orderId, orderPromotionId }, select: { id: true } })
-    const resultado = await recortarDescuentosDeRenglones(tx, orderId, { renglones: lineas.map(l => l.id), venueId })
-    await tx.orderItem.deleteMany({ where: { orderPromotionId } })
-    await tx.orderPromotion.delete({ where: { id: orderPromotionId } })
-    // El total de la orden deja de incluir la promoción EN la misma transacción
-    // (audit 2026-08-13: quitar el combo de $99 dejaba el total en $199).
-    await recalculateOrderTotals(
-      orderId,
-      Math.max(0, Number(found.order.discountAmount ?? 0) - resultado.recortadoPesos),
-      Number(found.order.paidAmount ?? 0),
-      tx,
-    )
-    return resultado
-  }, ORDER_LOCK_WAIT_BUDGET)
+      // R7-1 (ruling de B2): el resto de cabecera sin fila se congela ANTES de recortar; si no, el recálculo (Σ filas) lo perdería.
+      await conservarDescuentoHistorico(tx, orderId, found.order.discountAmount)
+      // P4 (founder, 1-oct): lo dirigido a las líneas del combo (un premio de cartilla) se retira con su beneficio ANTES de
+      // borrarlas; si no, el premio seguía restando sobre el resto de la cuenta.
+      const lineas = await tx.orderItem.findMany({ where: { orderId, orderPromotionId }, select: { id: true } })
+      const resultado = await recortarDescuentosDeRenglones(tx, orderId, { renglones: lineas.map(l => l.id), venueId })
+      await tx.orderItem.deleteMany({ where: { orderPromotionId } })
+      await tx.orderPromotion.delete({ where: { id: orderPromotionId } })
+      // El total de la orden deja de incluir la promoción EN la misma transacción
+      // (audit 2026-08-13: quitar el combo de $99 dejaba el total en $199).
+      await recalculateOrderTotals(
+        orderId,
+        Math.max(0, Number(found.order.discountAmount ?? 0) - resultado.recortadoPesos),
+        Number(found.order.paidAmount ?? 0),
+        tx,
+      )
+      return resultado
+    },
+    { etiqueta: 'removePromotionFromOrder', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   for (const r of recorte.retiradas) {
     void logAction({

@@ -44,6 +44,7 @@ import { recorrerLibros } from '../../../../src/services/fiscal/librosDeOrdenes'
 import { formaPagoDeLaNota, type LoadedRefundForCreditNote } from '../../../../src/services/fiscal/cfdiCreditNote.service'
 import { writeRefundInTx, type CobroBloqueado, type WriteRefundInput } from '../../../../src/services/dashboard/refund.dashboard.service'
 import { prepararSobreDeSaldoAFavorEnTx } from '@/services/giftCards/giftCardLedger'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -300,7 +301,7 @@ describe('la nota de crédito', () => {
       remainingBeforeCents: 50000,
     } as unknown as CobroBloqueado
     await writeRefundInTx(
-      ftx as unknown as Prisma.TransactionClient,
+      ftx as unknown as Prisma.TransactionClient as unknown as TxConReintento,
       {
         originalPaymentId: 'p1',
         venueId: 'v1',

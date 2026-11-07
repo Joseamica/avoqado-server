@@ -48,7 +48,6 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
     if (!parsed.success || parsed.data.action !== 'redeemLoyaltyPoints')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await loyaltyMobileService.redeemPointsToOrderInTransaction(
         tx,
@@ -58,8 +57,9 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
         manifest.payload.points,
         staffId,
       )
-      auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
+      const auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
       return {
+        audit: auditData,
         response: {
           status: 200,
           body: {
@@ -75,6 +75,7 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({ action: 'LOYALTY_POINTS_REDEEMED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     }

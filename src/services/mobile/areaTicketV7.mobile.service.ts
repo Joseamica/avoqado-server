@@ -45,7 +45,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { createStockBatch } from '../dashboard/fifoBatch.service'
 import { convertUnit } from '../../utils/unitConversion'
 import prisma from '../../utils/prismaClient'
-import { withSerializableRetry } from '../../utils/serializableRetry'
+import { withDeadlockRetry, withSerializableRetry } from '../../utils/serializableRetry'
 import { lockOrdersForUpdate } from '../shared/tableOrderLock'
 import { utcTs } from '../../utils/sqlDates'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
@@ -1904,42 +1904,46 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
   }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
 
-  let ordenCancelada: string | null = null
-  const cancelled = await prisma.$transaction(
+  // R65 b: lo que el cuerpo deja para después del commit nace DENTRO de cada intento y sale en el retorno.
+  const { cancelled, ordenCancelada } = await withDeadlockRetry(
     async tx => {
-      await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
-      const fresh = await tx.areaTicketCheckoutSession.findFirst({
-        where: { id: sessionId, venueId },
-        include: { order: { include: { payments: { where: { status: 'COMPLETED' }, select: { id: true } } } } },
-      })
-      if (!fresh) throw new NotFoundError('La sesión de caja no existe.')
-      if (fresh.status === AreaTicketCheckoutStatus.CANCELLED) {
-        return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
-      }
-      if (fresh.order?.payments.length) {
-        throw domainError(409, 'CHECKOUT_HAS_PAYMENT', 'La venta ya tiene abonos; no puede cancelarse directamente.')
-      }
-      if (!checkoutStatusIn(fresh.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) {
-        throw domainError(409, 'CHECKOUT_CANNOT_CANCEL', `La sesión está en estado ${fresh.status}.`)
-      }
-      // 🔴 Diseño §C.6: cancelar la venta CANCELA su orden, así que va bajo el MISMO candado de `Order` que la admisión de
-      // un cobro de terminal y el registro del dinero, respetando la jerarquía de vales: sesión (arriba) → tickets
-      // ORDER BY id → Order. Ya con el candado: relectura, sin dinero y sin cobro de terminal vivo (409 del contrato).
-      await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE "venueId" = ${venueId} AND "checkoutSessionId" = ${fresh.id} ORDER BY id FOR UPDATE`
-      if (fresh.orderId) {
-        await assertOrderCancellableUnderLock(tx, { venueId, orderId: fresh.orderId })
-        // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
-        await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId: fresh.orderId, staffId, camino: 'cancelAreaTicketCheckout' })
-        const cancelacion = await tx.order.updateMany({
-          where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
-          data: { status: 'CANCELLED', version: { increment: 1 } },
+      let ordenCancelada: string | null = null
+      const cancelled = await (async () => {
+        await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
+        const fresh = await tx.areaTicketCheckoutSession.findFirst({
+          where: { id: sessionId, venueId },
+          include: { order: { include: { payments: { where: { status: 'COMPLETED' }, select: { id: true } } } } },
         })
-        if (cancelacion.count > 0) ordenCancelada = fresh.orderId
-      }
-      await liberarValesYCancelarSesion(tx, { venueId, sessionId: fresh.id, cancelIdempotencyKey: idempotencyKey })
-      return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
+        if (!fresh) throw new NotFoundError('La sesión de caja no existe.')
+        if (fresh.status === AreaTicketCheckoutStatus.CANCELLED) {
+          return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
+        }
+        if (fresh.order?.payments.length) {
+          throw domainError(409, 'CHECKOUT_HAS_PAYMENT', 'La venta ya tiene abonos; no puede cancelarse directamente.')
+        }
+        if (!checkoutStatusIn(fresh.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) {
+          throw domainError(409, 'CHECKOUT_CANNOT_CANCEL', `La sesión está en estado ${fresh.status}.`)
+        }
+        // 🔴 Diseño §C.6: cancelar la venta CANCELA su orden, así que va bajo el MISMO candado de `Order` que la admisión de
+        // un cobro de terminal y el registro del dinero, respetando la jerarquía de vales: sesión (arriba) → tickets
+        // ORDER BY id → Order. Ya con el candado: relectura, sin dinero y sin cobro de terminal vivo (409 del contrato).
+        await tx.$queryRaw`SELECT id FROM "AreaTicket" WHERE "venueId" = ${venueId} AND "checkoutSessionId" = ${fresh.id} ORDER BY id FOR UPDATE`
+        if (fresh.orderId) {
+          await assertOrderCancellableUnderLock(tx, { venueId, orderId: fresh.orderId })
+          // 🔴 LEALTAD (hz:a8104ac8:D1): el premio de sellos y los puntos canjeados vuelven al cliente, como al quitar el descuento.
+          await devolverCanjesDeVentaAnuladaEnTx(tx, { venueId, orderId: fresh.orderId, staffId, camino: 'cancelAreaTicketCheckout' })
+          const cancelacion = await tx.order.updateMany({
+            where: { id: fresh.orderId, venueId, paymentStatus: 'PENDING' },
+            data: { status: 'CANCELLED', version: { increment: 1 } },
+          })
+          if (cancelacion.count > 0) ordenCancelada = fresh.orderId
+        }
+        await liberarValesYCancelarSesion(tx, { venueId, sessionId: fresh.id, cancelIdempotencyKey: idempotencyKey })
+        return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
+      })()
+      return { cancelled, ordenCancelada }
     },
-    { timeout: 15_000, maxWait: 5_000 },
+    { etiqueta: 'cancelAreaTicketCheckout', timeout: 15_000, maxWait: 5_000 },
   )
 
   // Las pantallas abiertas se enteran de que la orden de la venta ya no es una cuenta viva (auditoría Fable 11-sep,

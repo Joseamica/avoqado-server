@@ -21,6 +21,7 @@ import {
   revertirCanjeEnTx,
 } from '@/services/giftCards/giftCardLedger'
 import { esperarAQueAlguienEspereA, pidDe } from '../giftCards/sembrarTarjetasDeRegalo'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.setTimeout(60000)
 
@@ -70,7 +71,7 @@ async function tarjetaRegaladaGuardada(customerId: string, telefono: string) {
 }
 
 const abonar = (tx: Prisma.TransactionClient, preparado: Awaited<ReturnType<typeof prepararSobreDeSaldoAFavorEnTx>>, monto: number) =>
-  abonarSaldoAFavorEnTx(tx, {
+  abonarSaldoAFavorEnTx(tx as unknown as TxConReintento, {
     preparado,
     monto: D(monto),
     staffId,
@@ -88,7 +89,7 @@ describe('saldo a favor en la libreta · Postgres real', () => {
     const cajaUnoTieneElCandado = new Promise<void>(resolve => (avisarQueTieneCandado = resolve))
 
     const cajaUno = prisma.$transaction(async tx => {
-      const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
+      const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId, customerId })
       avisarQueTieneCandado()
       // La caja dos de verdad espera el candado de la clienta (no la suerte de un setTimeout).
       await esperarAQueAlguienEspereA(await pidDe(tx))
@@ -96,7 +97,7 @@ describe('saldo a favor en la libreta · Postgres real', () => {
     }, PRESUPUESTO)
     const cajaDos = cajaUnoTieneElCandado.then(() =>
       prisma.$transaction(async tx => {
-        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
+        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId, customerId })
         return { vio: preparado.sobre, abono: await abonar(tx, preparado, 150) }
       }, PRESUPUESTO),
     )
@@ -149,8 +150,15 @@ describe('saldo a favor en la libreta · Postgres real', () => {
     const origen = { orderId: cuid(), refundPaymentId: cuid() }
     const abonarUnaVez = () =>
       prisma.$transaction(async tx => {
-        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
-        return abonarSaldoAFavorEnTx(tx, { preparado, monto: D(50), staffId, origen, folio: 'R-1', tipo: 'REEMBOLSO' })
+        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId, customerId })
+        return abonarSaldoAFavorEnTx(tx as unknown as TxConReintento, {
+          preparado,
+          monto: D(50),
+          staffId,
+          origen,
+          folio: 'R-1',
+          tipo: 'REEMBOLSO',
+        })
       }, PRESUPUESTO)
 
     const primera = await abonarUnaVez()
@@ -171,21 +179,48 @@ describe('saldo a favor en la libreta · Postgres real', () => {
     const nuevo = () => ({ orderId: cuid(), refundPaymentId: cuid() })
     // Un sobre de saldo de $8,000 del que se gastan $6,000: quedan $2,000 y $6,000 que todavía pueden regresar.
     const { giftCardId } = await prisma.$transaction(async tx => {
-      const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
-      return abonarSaldoAFavorEnTx(tx, { preparado, monto: D(8000), staffId, origen: nuevo(), folio: 'F-1', tipo: 'CAMBIO' })
+      const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId, customerId })
+      return abonarSaldoAFavorEnTx(tx as unknown as TxConReintento, {
+        preparado,
+        monto: D(8000),
+        staffId,
+        origen: nuevo(),
+        folio: 'F-1',
+        tipo: 'CAMBIO',
+      })
     }, PRESUPUESTO)
     const cobroConSaldo = cuid()
     await prisma.$transaction(async tx => {
-      const cards = await lockGiftCardsForUpdate(tx, [giftCardId])
-      return canjearSobresEnTx(tx, { venueId, orderId: cuid(), paymentId: cobroConSaldo, amount: D(6000), cards, staffId })
+      const cards = await lockGiftCardsForUpdate(tx as unknown as TxConReintento, [giftCardId])
+      return canjearSobresEnTx(tx as unknown as TxConReintento, {
+        venueId,
+        orderId: cuid(),
+        paymentId: cobroConSaldo,
+        amount: D(6000),
+        cards,
+        staffId,
+      })
     }, PRESUPUESTO)
 
     // Como el Cambio de S5: preparar → regresar $1,000 de lo pagado con saldo a ese sobre → abonar el resto a saldo.
     const cambio = (abono: number) =>
       prisma.$transaction(async tx => {
-        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx, { venueId, customerId })
-        await revertirCanjeEnTx(tx, { venueId, originalPaymentId: cobroConSaldo, refundPaymentId: cuid(), amount: D(1000), staffId })
-        return abonarSaldoAFavorEnTx(tx, { preparado, monto: D(abono), staffId, origen: nuevo(), folio: 'F-2', tipo: 'CAMBIO' })
+        const preparado = await prepararSobreDeSaldoAFavorEnTx(tx as unknown as TxConReintento, { venueId, customerId })
+        await revertirCanjeEnTx(tx as unknown as TxConReintento, {
+          venueId,
+          originalPaymentId: cobroConSaldo,
+          refundPaymentId: cuid(),
+          amount: D(1000),
+          staffId,
+        })
+        return abonarSaldoAFavorEnTx(tx as unknown as TxConReintento, {
+          preparado,
+          monto: D(abono),
+          staffId,
+          origen: nuevo(),
+          folio: 'F-2',
+          tipo: 'CAMBIO',
+        })
       }, PRESUPUESTO)
 
     // Tras el reverso: $3,000 de saldo + $5,000 que pueden regresar + $2,500 = $10,500 ⇒ se rechaza y la transacción se deshace.

@@ -1,5 +1,6 @@
 import { CustomerApprovalStatus, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '../../utils/serializableRetry'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
@@ -127,34 +128,41 @@ export async function verifyOtp(args: {
   // Fase 1: consumir el reto, resolver la identidad (Consumer + Customer + vínculo) y decidir
   // la aprobación viven en UNA transacción. Antes eran escrituras sueltas: si algo tronaba a
   // medias, el código quedaba quemado y el Consumer huérfano, y el cliente tenía que pedir otro.
-  const { customer, approvalStatus } = await prisma.$transaction(async tx => {
-    // 🔴 CAS, no `update` ciego. El reto se leyó FUERA de la transacción: dos verificaciones
-    // simultáneas con el código correcto leían el mismo reto sin consumir y ambas emitían
-    // token — el "un solo uso" no era tal. Condicionar en `consumedAt: null` deja pasar
-    // exactamente a una; la que pierde recibe el mismo 400 que un código ya usado.
-    const consumed = await tx.otpChallenge.updateMany({
-      where: { id: challenge.id, consumedAt: null },
-      data: { consumedAt: new Date() },
-    })
-    if (consumed.count !== 1) {
-      throw new BadRequestError('Ese código ya se usó. Pide uno nuevo.')
-    }
+  const { customer, approvalStatus } = await withDeadlockRetry(
+    async tx => {
+      // 🔴 CAS, no `update` ciego. El reto se leyó FUERA de la transacción: dos verificaciones
+      // simultáneas con el código correcto leían el mismo reto sin consumir y ambas emitían
+      // token — el "un solo uso" no era tal. Condicionar en `consumedAt: null` deja pasar
+      // exactamente a una; la que pierde recibe el mismo 400 que un código ya usado.
+      const consumed = await tx.otpChallenge.updateMany({
+        where: { id: challenge.id, consumedAt: null },
+        data: { consumedAt: new Date() },
+      })
+      if (consumed.count !== 1) {
+        throw new BadRequestError('Ese código ya se usó. Pide uno nuevo.')
+      }
 
-    const customer = await resolveIdentity(tx, args.venueId, args.channel === 'whatsapp' ? { phone: destination } : { email: destination })
-    // Fase 0.B: el código fue correcto, pero una cuenta desactivada por el venue no recibe
-    // token. `=== false` a propósito: `active` es @default(true) en DB; un registro sin el
-    // campo (mocks, selects parciales) no debe volverse "inactivo" por accidente. Al lanzar
-    // aquí, el rollback devuelve el reto sin consumir — el código sigue sirviendo.
-    if (customer.active === false) {
-      throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
-    }
+      const customer = await resolveIdentity(
+        tx,
+        args.venueId,
+        args.channel === 'whatsapp' ? { phone: destination } : { email: destination },
+      )
+      // Fase 0.B: el código fue correcto, pero una cuenta desactivada por el venue no recibe
+      // token. `=== false` a propósito: `active` es @default(true) en DB; un registro sin el
+      // campo (mocks, selects parciales) no debe volverse "inactivo" por accidente. Al lanzar
+      // aquí, el rollback devuelve el reto sin consumir — el código sigue sirviendo.
+      if (customer.active === false) {
+        throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
+      }
 
-    // R7: verificar el teléfono para PEDIR no activa la cuenta de reservas (no pide aprobación ni manda sus avisos).
-    if (args.purpose === 'ORDERING') return { customer, approvalStatus: customer.approvalStatus }
-    const conNombre = await ponerNombreSiFalta(tx, customer, args.firstName)
-    const activation = await activateCustomerAccount(tx, { customerId: conNombre.id, venueId: args.venueId, origin: 'OTP' })
-    return { customer: conNombre, approvalStatus: activation.approvalStatus }
-  })
+      // R7: verificar el teléfono para PEDIR no activa la cuenta de reservas (no pide aprobación ni manda sus avisos).
+      if (args.purpose === 'ORDERING') return { customer, approvalStatus: customer.approvalStatus }
+      const conNombre = await ponerNombreSiFalta(tx, customer, args.firstName)
+      const activation = await activateCustomerAccount(tx, { customerId: conNombre.id, venueId: args.venueId, origin: 'OTP' })
+      return { customer: conNombre, approvalStatus: activation.approvalStatus }
+    },
+    { etiqueta: 'verifyOtp' },
+  )
 
   // Post-commit: si la transacción falló, nadie recibe sesión.
   // H1: para PEDIR, el token de PEDIDOS (prueba el teléfono; reservas y portal lo rechazan). Sin `purpose`, el de siempre.
@@ -210,7 +218,7 @@ async function findGuestNameFromPastReservations(
   return {}
 }
 
-async function resolveIdentity(tx: Prisma.TransactionClient, venueId: string, key: { phone?: string; email?: string }) {
+async function resolveIdentity(tx: TxConReintento, venueId: string, key: { phone?: string; email?: string }) {
   let consumer
   if (key.phone) {
     // Un cliente que entró con el OTP viejo tiene su Consumer SIN lada (`+5543453965`). Se busca también esa forma para no

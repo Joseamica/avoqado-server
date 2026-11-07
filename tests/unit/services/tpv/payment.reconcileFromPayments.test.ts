@@ -196,6 +196,28 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
     expect(createSalePostingInTxMock).not.toHaveBeenCalled()
   })
 
+  it('[repetirNoDuplica:updateOrderTotalsForStandalonePayment] el intento ABORTADO (40P01) no deja nada: la pasada reintenta la escritura completa y sólo el ganador cuenta', async () => {
+    // Intento 1: escribe (order.update) y se aborta; intento 2: escribe de nuevo y hace commit.
+    const update = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 'ord-ABORTADO', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] })
+      .mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] })
+    let llamada = 0
+    p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
+      llamada++
+      const r = await fn(lockedTx(update))
+      if (llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+
+    const resultado = await reconcileOrderFromPayments('ord-1')
+
+    expect(llamada).toBe(2)
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(resultado).toEqual({ orderId: 'ord-1', warning: null, written: true })
+    expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+  })
+
   it('R8: cerrar una cuenta ya cubierta activa sus sobres en la MISMA tx aunque no nazca vale (idempotente)', async () => {
     activarSobresMock.mockResolvedValue({ activated: ['gc-1'] })
     const renglones = [{ id: 'it-1', giftCardId: 'gc-1' }]

@@ -137,6 +137,16 @@ function hasCallerTransaction(arg: ts.Expression | undefined): boolean {
   return !(ts.isIdentifier(value) && value.text === 'undefined') && !ts.isVoidExpression(value)
 }
 
+/** `{ etiqueta: 'x', ...OPCIONES }` de `withDeadlockRetry` vale lo que `OPCIONES`; con propiedades propias (timeout, maxWait) se deja el literal. */
+function opcionesDelReintento(options: ts.Expression | undefined): ts.Expression | undefined {
+  if (!options || !ts.isObjectLiteralExpression(options)) return options
+  const spreads = options.properties.filter(ts.isSpreadAssignment)
+  const otras = options.properties.filter(
+    p => !ts.isSpreadAssignment(p) && !(ts.isPropertyAssignment(p) && p.name.getText() === 'etiqueta'),
+  )
+  return spreads.length === 1 && otras.length === 0 ? spreads[0].expression : options
+}
+
 /** Resolve a named callback in its nearest lexical block, never an unrelated top-level homonym. */
 function transactionCallback(callback: ts.Expression, call: ts.CallExpression): ts.Node {
   if (!ts.isIdentifier(callback)) return callback
@@ -193,11 +203,12 @@ function scanSources() {
         const callee = calleeName(n)
         if (callee) calls.push({ callee, owner: keyOf(n), file: rel, args: n.arguments.map(a => a.getText(sf)), argNodes: n.arguments })
         const callback = n.arguments[0]
-        if (callee === '$transaction' && callback && !ts.isArrayLiteralExpression(callback))
+        // S5b (red por traba): `withDeadlockRetry(cuerpo, { etiqueta, ...opciones })` abre la misma transacción que `$transaction(cuerpo, opciones)`.
+        if ((callee === '$transaction' || callee === 'withDeadlockRetry') && callback && !ts.isArrayLiteralExpression(callback))
           transactions.push({
             owner: keyOf(n),
             line: sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1,
-            options: n.arguments[1],
+            options: callee === 'withDeadlockRetry' ? opcionesDelReintento(n.arguments[1]) : n.arguments[1],
             callees: calleesOf(transactionCallback(callback, n)),
           })
         if (ts.isPropertyAccessExpression(n.expression) && ts.isPropertyAccessExpression(n.expression.expression)) {
@@ -799,7 +810,7 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': LOCK,
   'src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider': [
-    'withDeliveryOrderLock(',
+    'withDeliveryOrderLockConReintento(',
     ...LOCK,
   ],
   'src/services/mobile/kdsOutOfStock.mobile.service.ts#enviarYAplicar': ['withDeliveryOrderLock(', ...LOCK],
@@ -1483,11 +1494,11 @@ describe('Mesas lock/budget scanner regressions', () => {
     const sf = source(text)
     let result: Transaction | undefined
     const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && calleeName(node) === '$transaction') {
+      if (ts.isCallExpression(node) && (calleeName(node) === '$transaction' || calleeName(node) === 'withDeadlockRetry')) {
         result = {
           owner: ownerOf(node),
           line: 1,
-          options: node.arguments[1],
+          options: calleeName(node) === 'withDeadlockRetry' ? opcionesDelReintento(node.arguments[1]) : node.arguments[1],
           callees: calleesOf(transactionCallback(node.arguments[0], node)),
         }
       }
@@ -1540,6 +1551,17 @@ describe('Mesas lock/budget scanner regressions', () => {
     expect(budgetOf(noBudget.options)).not.toEqual(ONE_BUDGET)
     expect(budgetOf(opener(local.replace('OPTIONS', '{ timeout: 5000, maxWait: 2000 }')).options)).not.toEqual(ONE_BUDGET)
     expect(budgetOf(opener(local.replace('OPTIONS', 'ORDER_LOCK_WAIT_BUDGET')).options)).toEqual(ONE_BUDGET)
+  })
+
+  it('withDeadlockRetry: `{ etiqueta, ...ORDER_LOCK_WAIT_BUDGET }` vale el presupuesto; sin presupuesto o con otro, se señala', () => {
+    const local = 'async function f() { return withDeadlockRetry(async tx => lockTableOrderScope(tx), OPTIONS) }'
+    const con = opener(local.replace('OPTIONS', "{ etiqueta: 'f', ...ORDER_LOCK_WAIT_BUDGET }"))
+    expect(con.callees.some(c => c.name === 'lockTableOrderScope')).toBe(true)
+    expect(budgetOf(con.options)).toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', "{ etiqueta: 'f' }")).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace(', OPTIONS', '')).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', "{ etiqueta: 'f', timeout: 5000, maxWait: 2000 }")).options)).not.toEqual(ONE_BUDGET)
+    expect(budgetOf(opener(local.replace('OPTIONS', "{ etiqueta: 'f', timeout: 15_000, maxWait: 5_000 }")).options)).toEqual(ONE_BUDGET)
   })
 
   it('does not use a homonymous callback from another lexical scope', () => {

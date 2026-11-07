@@ -8,7 +8,8 @@
  *    `writeRefundInTx` (que reclama el turno): ver `sobresDelCanje`. El saldo a favor (al final) entra en el mismo lugar: su candado
  *    por clienta y su sobre van después de los Payments y antes del Shift.
  */
-import { Prisma, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
+import { Prisma, type PrismaClient, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
+import type { TxConReintento } from '@/utils/serializableRetry'
 import { addDays, addMonths } from 'date-fns'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -26,7 +27,6 @@ import { GiftCardError } from './giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, MAXIMO_POR_SOBRE, formatoPesos } from './giftCardLimits'
 import { TERMINOS_VIGENTES } from './giftCardTerms'
 
-type Tx = Prisma.TransactionClient
 const CERO = () => new Prisma.Decimal(0)
 const DIAS_DE_GRACIA_TRAS_REVERSO = 90
 const LLAVE_DE_OPERACION = /^[A-Za-z0-9_:-]{8,128}$/
@@ -87,7 +87,25 @@ const fechaAscNullsLast = (a: Date | null, b: Date | null): number =>
  * transacciones vieran el mismo par en orden distinto (40P01). El orden de CONSUMO (vencen antes → activados antes → id), el que
  * usa el canje, se aplica en memoria con lo leído bajo el candado.
  */
-export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<LockedGiftCard[]> {
+type Lee<M> = {
+  [K in Extract<
+    keyof M,
+    'findUnique' | 'findFirst' | 'findMany' | 'findUniqueOrThrow' | 'findFirstOrThrow' | 'count' | 'aggregate' | 'groupBy'
+  >]: M[K]
+}
+/**
+ * Lo que sólo LEE puede llamarse con el cliente global o con cualquier `tx`: de cada tabla sólo los métodos de lectura (nada de
+ * `create`/`update`/`delete`). Lo que escribe o bloquea pide `TxConReintento`. (`$queryRaw` queda para las lecturas en SQL.)
+ */
+export type DbDeLectura = {
+  giftCard: Lee<Prisma.TransactionClient['giftCard']>
+  giftCardActivity: Lee<Prisma.TransactionClient['giftCardActivity']>
+  payment: Lee<Prisma.TransactionClient['payment']>
+  orderItem: Lee<Prisma.TransactionClient['orderItem']>
+  order: Lee<Prisma.TransactionClient['order']>
+} & Pick<Prisma.TransactionClient, '$queryRaw'>
+
+export async function lockGiftCardsForUpdate(tx: TxConReintento, ids: string[]): Promise<LockedGiftCard[]> {
   const unicos = [...new Set(ids)]
   if (unicos.length === 0) return []
   const filas = await tx.$queryRaw<
@@ -137,7 +155,7 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
 }
 
 /** Los sobres que un cobro con saldo descontó: un reverso los bloquea ANTES de `writeRefundInTx`. */
-export async function sobresDelCanje(tx: Tx, p: { venueId: string; paymentId: string }): Promise<string[]> {
+export async function sobresDelCanje(tx: DbDeLectura, p: { venueId: string; paymentId: string }): Promise<string[]> {
   const filas = await tx.giftCardActivity.findMany({
     where: { venueId: p.venueId, paymentId: p.paymentId, type: 'REDEEM' },
     select: { giftCardId: true },
@@ -153,7 +171,7 @@ export async function sobresDelCanje(tx: Tx, p: { venueId: string; paymentId: st
  * src/services/shared/orderBalance.ts); se toma su valor absoluto. La revisión nocturna (B7) mide con esta MISMA función.
  */
 export async function dineroDeLaCuenta(
-  tx: Tx,
+  tx: DbDeLectura,
   p: { venueId: string; orderId: string },
 ): Promise<{ cobrado: Prisma.Decimal; reembolsado: Prisma.Decimal; conservado: Prisma.Decimal }> {
   const cobros = await tx.payment.aggregate({
@@ -178,7 +196,7 @@ export async function dineroDeLaCuenta(
  * Si el dinero ya se devolvió completo (la cancelación con reembolso de R2) o lo que queda ya se entregó en mercancía con esos sobres
  * antes de desactivarlos (B7 r1, `medirDineroSinRespaldo`), no hay nada que avisar.
  */
-async function avisarSiCobraSobresDesactivados(tx: Tx, p: { venueId: string; orderId: string }): Promise<void> {
+async function avisarSiCobraSobresDesactivados(tx: TxConReintento, p: { venueId: string; orderId: string }): Promise<void> {
   const m = await medirDineroSinRespaldo(tx, p)
   if (!m?.sinRespaldo) return
   await recordGiftCardAnomaly(tx, {
@@ -209,7 +227,7 @@ export interface DineroSinRespaldo {
  * 🔴 Una sola definición: la usan el cobro (A6, `avisarSiCobraSobresDesactivados`) y la revisión nocturna (B7).
  * `null` = ningún sobre desactivado: cada sobre respalda su monto y ni se consulta el dinero (el segundo cierre de una venta normal).
  */
-export async function medirDineroSinRespaldo(tx: Tx, p: { venueId: string; orderId: string }): Promise<DineroSinRespaldo | null> {
+export async function medirDineroSinRespaldo(tx: DbDeLectura, p: { venueId: string; orderId: string }): Promise<DineroSinRespaldo | null> {
   const sobres = await tx.giftCard.findMany({
     where: { venueId: p.venueId, orderItem: { is: { orderId: p.orderId } } },
     select: { id: true, status: true, initialAmount: true },
@@ -257,7 +275,7 @@ export function dineroSinRespaldoEnTexto(m: DineroSinRespaldo) {
  * Sin sobres PENDING y con alguno DEACTIVATED (cuenta cancelada que recibió dinero), no reactiva y avisa (ruling A6).
  */
 export async function activarSobresDeCuentaPagadaEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; orderId: string; staffId?: string | null; items?: ReadonlyArray<{ giftCardId?: string | null }> },
 ): Promise<{ activated: string[] }> {
   if (p.items && !p.items.some(item => item.giftCardId != null)) return { activated: [] }
@@ -350,7 +368,7 @@ export async function activarSobresDeCuentaPagadaEnTx(
 
 /** Descuenta `amount` (venta + propina) de los sobres ya bloqueados, en el orden del candado. Un REDEEM por sobre. */
 export async function canjearSobresEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: {
     venueId: string
     orderId: string
@@ -436,7 +454,7 @@ function mensajeDeSobreDesactivadoEnReembolso(cuales: string, cuantos: number): 
  * sólo cambia el texto (allí el cajero cobra lo que falta con otro medio).
  */
 export async function rechazarSiRegresaASobreDesactivado(
-  tx: Tx,
+  tx: TxConReintento,
   venueId: string,
   cards: ReadonlyArray<{ id: string; status: GiftCardStatus }>,
   mensaje: (cuales: string, cuantos: number) => string = mensajeDeSobreDesactivadoEnReembolso,
@@ -459,7 +477,7 @@ export async function rechazarSiRegresaASobreDesactivado(
 
 /** Regresa al saldo lo de un cobro con saldo (spec § 5.5). Idempotente por `refundPaymentId`; nunca pasa de lo canjeado. */
 export async function revertirCanjeEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; originalPaymentId: string; refundPaymentId: string; amount: Prisma.Decimal; staffId?: string | null },
 ): Promise<Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }>> {
   const reversoYaEscrito = async () => {
@@ -575,7 +593,7 @@ export async function revertirCanjeEnTx(
 }
 
 /** Lo que los canjes de un sobre todavía pueden regresar con un reembolso (REDEEM − REDEEM_REVERSAL): cuenta para el tope por sobre. */
-async function canjeadoQuePuedeRegresar(tx: Tx, venueId: string, giftCardId: string): Promise<Prisma.Decimal> {
+async function canjeadoQuePuedeRegresar(tx: DbDeLectura, venueId: string, giftCardId: string): Promise<Prisma.Decimal> {
   const movimientos = await tx.giftCardActivity.groupBy({
     by: ['type'],
     where: { venueId, giftCardId, type: { in: ['REDEEM', 'REDEEM_REVERSAL'] } },
@@ -585,7 +603,7 @@ async function canjeadoQuePuedeRegresar(tx: Tx, venueId: string, giftCardId: str
   return Prisma.Decimal.max(CERO(), sumaDe('REDEEM').minus(sumaDe('REDEEM_REVERSAL')))
 }
 
-async function codigoVigente(tx: Tx, venueId: string, giftCardId: string): Promise<{ display: string; last4: string }> {
+async function codigoVigente(tx: DbDeLectura, venueId: string, giftCardId: string): Promise<{ display: string; last4: string }> {
   const s = await tx.giftCard.findFirst({ where: { id: giftCardId, venueId }, select: { codeEnc: true, codeLast4: true } })
   if (!s) throw noEncontrada()
   return { display: formatGiftCardCode(decryptGiftCardCode(s.codeEnc)), last4: s.codeLast4 }
@@ -598,7 +616,7 @@ async function codigoVigente(tx: Tx, venueId: string, giftCardId: string): Promi
  * segundo ve el renglón. `replay` es la única fuente de «nuevo o repetición» para la bitácora (r1, F9).
  */
 export async function operarSobreDeGerenteEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; giftCardId: string; staffId: string; operationKey: string; op: OperacionDeGerente },
 ): Promise<{ activityIds: string[]; nuevoCodigo?: { display: string; last4: string }; replay: boolean }> {
   if (!LLAVE_DE_OPERACION.test(p.operationKey ?? '')) {
@@ -773,7 +791,7 @@ export async function operarSobreDeGerenteEnTx(
  * que le quedaba. La anomalía `REFUND_WITHOUT_CANCEL` la escribe el gancho de B1.
  */
 export async function desactivarSobresDeCuentaEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: {
     venueId: string
     orderId: string
@@ -843,7 +861,7 @@ export async function desactivarSobresDeCuentaEnTx(
 
 /** Spec § 5.1.8: una cuenta de tarjetas que se cancela ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse. */
 export async function desactivarSobresPendientesDeCuentaEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: { venueId: string; orderId: string; staffId?: string | null },
 ): Promise<{ desactivados: string[] }> {
   const pendientes = await tx.giftCard.findMany({
@@ -899,7 +917,7 @@ export function esSobreDeSaldoAFavorSql(alias: string): Prisma.Sql {
   return Prisma.sql`EXISTS (SELECT 1 FROM "GiftCardActivity" saldo_a_favor_act WHERE saldo_a_favor_act."giftCardId" = ${Prisma.raw(`"${alias}"`)}.id AND saldo_a_favor_act.type = 'ACTIVATE' AND saldo_a_favor_act."refundPaymentId" IS NOT NULL)`
 }
 
-export async function esSobreDeSaldoAFavor(tx: Tx, giftCardId: string): Promise<boolean> {
+export async function esSobreDeSaldoAFavor(tx: DbDeLectura, giftCardId: string): Promise<boolean> {
   const [fila] = await tx.$queryRaw<Array<{ es: boolean }>>`
     SELECT ${esSobreDeSaldoAFavorSql('g')} AS es FROM "GiftCard" g WHERE g.id = ${giftCardId}`
   return fila?.es === true
@@ -909,7 +927,7 @@ export async function esSobreDeSaldoAFavor(tx: Tx, giftCardId: string): Promise<
  * Cuáles de estos sobres del negocio son de saldo a favor, en UNA consulta con EL predicado (una página del panel o del MCP: ≤100 ids,
  * sin una consulta por renglón). Sin ids no consulta.
  */
-export async function sobresDeSaldoAFavorEntre(db: Tx, venueId: string, ids: string[]): Promise<Set<string>> {
+export async function sobresDeSaldoAFavorEntre(db: DbDeLectura, venueId: string, ids: string[]): Promise<Set<string>> {
   const unicos = [...new Set(ids)]
   if (unicos.length === 0) return new Set()
   const filas = await db.$queryRaw<Array<{ id: string }>>`
@@ -934,7 +952,10 @@ export interface SobrePreparado {
  * (hallazgo 2: el gasto con saldo bloquea el sobre antes del turno, `order.mobile.service.ts:5589`). Un `preparado` sirve para el
  * `abonarSaldoAFavorEnTx` de la MISMA transacción.
  */
-export async function prepararSobreDeSaldoAFavorEnTx(tx: Tx, p: { venueId: string; customerId: string }): Promise<SobrePreparado> {
+export async function prepararSobreDeSaldoAFavorEnTx(
+  tx: TxConReintento,
+  p: { venueId: string; customerId: string },
+): Promise<SobrePreparado> {
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${'saldo-a-favor:' + p.venueId + ':' + p.customerId}))::text`
   const cliente = await tx.customer.findFirst({
     where: { id: p.customerId, venueId: p.venueId },
@@ -994,7 +1015,7 @@ export interface AbonoDeSaldoAFavor {
  * la búsqueda y la prueba por teléfono sólo aceptan WHATSAPP, y la entrega nunca lo manda sola (sería un código al portador).
  */
 export async function abonarSaldoAFavorEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: {
     preparado: SobrePreparado
     monto: Prisma.Decimal
@@ -1160,7 +1181,7 @@ export const mensajeTelefonoDesactualizado = (actualLast4: string | null): strin
  * `expectedPhoneLast4`, compara y cambia: una petición A→B que llega después de B→C responde 409 `STORE_CREDIT_PHONE_OUTDATED`.
  */
 export async function cambiarTelefonoDeSaldoAFavorEnTx(
-  tx: Tx,
+  tx: TxConReintento,
   p: {
     venueId: string
     giftCardId: string

@@ -3,6 +3,7 @@ import { Prisma, OrderType, type PosSyncIntent } from '@prisma/client'
 import { z } from 'zod'
 import AppError, { BadRequestError, NotFoundError, ForbiddenError, ConflictError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
@@ -249,11 +250,13 @@ export type DomainResult<A extends Action = Action> = A extends Action
       response: Applied<A>['originalResponse']
       affectedRefs: HttpEnvelope['affectedRefs']
       cancelEffects?: CancellationEffects
+      /** R65 b: lo que el manejador antes asignaba afuera (la bitácora); sale en el retorno del intento ganador y NO se guarda en el sobre. */
+      audit?: unknown
     } & (Applied<A> extends { effects: infer E } ? { effects: E } : {})
   : never
 export type OriginalResponse = z.infer<typeof responses.removeServiceCharge>
 export type OperationReply =
-  | { kind: 'TERMINAL'; envelope: HttpEnvelope; appliedNow: boolean }
+  | { kind: 'TERMINAL'; envelope: HttpEnvelope; appliedNow: boolean; audit?: unknown }
   | { kind: 'RETRY'; code: 'OPERATION_OUTCOME_PENDING' }
 
 export class DomainRejected extends Error {
@@ -587,58 +590,61 @@ async function insertRejected(
 }
 export function executeHttpOperation<A extends Action>(
   input: OperationInput<A>,
-  mutate: (tx: Prisma.TransactionClient) => Promise<DomainResult<A>>,
+  mutate: (tx: TxConReintento) => Promise<DomainResult<A>>,
 ): Promise<OperationReply> {
   return databaseOutcome(async () => {
     const i: OperationInput = { ...input, manifest: parseManifest(input.manifest) }
     const prior = await lookup(i)
     if (prior) return recovered(decode(prior, i, true))
     try {
-      const envelope = await prisma.$transaction(async tx => {
-        await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${ORDER_LOCK_WAIT_BUDGET.timeout}ms`}, true)`
-        const reservation = await tx.posSyncIntent.create({
-          data: {
-            venueId: i.venueId,
-            staffId: i.actorId,
-            deviceId: i.operation.deviceId,
-            seq: null,
-            localRef: null,
-            type: HTTP_TYPE,
-            idempotencyKey: HTTP_PREFIX + i.operation.id,
-            status: 'PROCESSING',
-          },
-        })
-        let result: DomainResult<A>
-        try {
-          result = await mutate(tx)
-        } catch (error) {
-          if (error instanceof BadRequestError || error instanceof NotFoundError)
-            throw new DomainRejected({ status: error.statusCode, code: error.code ?? 'OPERATION_REJECTED', message: error.message })
-          throw error
-        }
-        const e = serializeEnvelope(
-          envelopeSchema.parse({
-            protocol: HTTP_TYPE,
-            action: i.manifest.action,
-            request: binding(i, i.actorId),
-            originalResponse: result.response,
-            outcome: 'APPLIED',
-            affectedRefs: result.affectedRefs,
-            ...('effects' in result ? { effects: result.effects } : {}),
-          }),
-        )
-        await tx.posSyncIntent.update({
-          where: { id: reservation.id },
-          data: {
-            status: 'ACKED',
-            errorCode: null,
-            resultJson: e as Prisma.InputJsonValue,
-            ...(i.manifest.action === 'cancelOrder' && result.cancelEffects ? { cancelEffectsJson: result.cancelEffects } : {}),
-          },
-        })
-        return e
-      }, ORDER_LOCK_WAIT_BUDGET)
-      return { kind: 'TERMINAL', envelope, appliedNow: true }
+      const { envelope, audit } = await withDeadlockRetry(
+        async tx => {
+          await tx.$queryRaw`SELECT set_config('lock_timeout', ${`${ORDER_LOCK_WAIT_BUDGET.timeout}ms`}, true)`
+          const reservation = await tx.posSyncIntent.create({
+            data: {
+              venueId: i.venueId,
+              staffId: i.actorId,
+              deviceId: i.operation.deviceId,
+              seq: null,
+              localRef: null,
+              type: HTTP_TYPE,
+              idempotencyKey: HTTP_PREFIX + i.operation.id,
+              status: 'PROCESSING',
+            },
+          })
+          let result: DomainResult<A>
+          try {
+            result = await mutate(tx)
+          } catch (error) {
+            if (error instanceof BadRequestError || error instanceof NotFoundError)
+              throw new DomainRejected({ status: error.statusCode, code: error.code ?? 'OPERATION_REJECTED', message: error.message })
+            throw error
+          }
+          const e = serializeEnvelope(
+            envelopeSchema.parse({
+              protocol: HTTP_TYPE,
+              action: i.manifest.action,
+              request: binding(i, i.actorId),
+              originalResponse: result.response,
+              outcome: 'APPLIED',
+              affectedRefs: result.affectedRefs,
+              ...('effects' in result ? { effects: result.effects } : {}),
+            }),
+          )
+          await tx.posSyncIntent.update({
+            where: { id: reservation.id },
+            data: {
+              status: 'ACKED',
+              errorCode: null,
+              resultJson: e as Prisma.InputJsonValue,
+              ...(i.manifest.action === 'cancelOrder' && result.cancelEffects ? { cancelEffectsJson: result.cancelEffects } : {}),
+            },
+          })
+          return { envelope: e, audit: result.audit }
+        },
+        { etiqueta: 'executeHttpOperation', ...ORDER_LOCK_WAIT_BUDGET },
+      )
+      return { kind: 'TERMINAL', envelope, appliedNow: true, audit }
     } catch (error) {
       if (isReceiptKeyCollision(error)) {
         const winner = await lookup(i)

@@ -21,6 +21,7 @@ import {
   whatsappConfigurado,
 } from '@/services/whatsapp.service'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { utcTs } from '@/utils/sqlDates'
 import { conNegocio } from '@/services/demo/candadoDemo'
@@ -131,11 +132,17 @@ const soloIds = (ids: string[] | undefined): Prisma.Sql => (ids ? Prisma.sql`AND
 /**
  * UN `UPDATE … RETURNING`: la subconsulta toma filas con `FOR UPDATE SKIP LOCKED` y el `WHERE` exterior repite la condición,
  * así que bajo READ COMMITTED una segunda transacción que llega tarde la reevalúa y no gana. Suma el intento y sella el reclamo.
- * `db` sólo lo pasa la prueba de la carrera, para sostener un reclamo sin confirmar (molde de S2); la entrega usa el global.
+ * `reclamarEntregasEnTx` sólo lo llama la prueba de la carrera, para sostener un reclamo sin confirmar (molde de S2); la entrega
+ * usa `reclamarEntregas`, que es esta sentencia en su propio `withDeadlockRetry` (red por traba, S5b).
  */
-export async function reclamarEntregas(
+export async function reclamarEntregas(p: { ahora: Date; ids?: string[]; limite?: number }): Promise<EntregaReclamada[]> {
+  if (p.ids && p.ids.length === 0) return []
+  return withDeadlockRetry(tx => reclamarEntregasEnTx(p, tx), { etiqueta: 'reclamarEntregas' })
+}
+
+export async function reclamarEntregasEnTx(
   p: { ahora: Date; ids?: string[]; limite?: number },
-  db: Pick<Prisma.TransactionClient, '$queryRaw'> = prisma,
+  db: TxConReintento,
 ): Promise<EntregaReclamada[]> {
   if (p.ids && p.ids.length === 0) return []
   const limite = Math.max(1, Math.min(LOTE_DE_ENTREGA, p.limite ?? LOTE_DE_ENTREGA))
@@ -165,7 +172,8 @@ export async function hayEntregasPendientes(ahora: Date): Promise<boolean> {
 /** Las atoradas pasan a FAILED con `UNCONFIRMED`. El reclamo se conserva: si el envío viejo sí termina, su resultado gana. */
 async function cerrarAtoradas(ahora: Date, ids: string[] | undefined): Promise<Atorada[]> {
   if (ids && ids.length === 0) return []
-  return prisma.$queryRaw<Atorada[]>`
+  return withDeadlockRetry(
+    tx => tx.$queryRaw<Atorada[]>`
     UPDATE "GiftCard" AS g
     SET "deliveryStatus" = 'FAILED', "deliveryErrorCode" = 'UNCONFIRMED', "deliveryNextAttemptAt" = NULL, "updatedAt" = ${utcTs(ahora)}
     WHERE g.id IN (
@@ -176,7 +184,9 @@ async function cerrarAtoradas(ahora: Date, ids: string[] | undefined): Promise<A
       FOR UPDATE SKIP LOCKED
     )
       AND ${atorada(G, ahora)}
-    RETURNING g.id, g."venueId", g."deliveryChannel"::text AS "deliveryChannel"`
+    RETURNING g.id, g."venueId", g."deliveryChannel"::text AS "deliveryChannel"`,
+    { etiqueta: 'cerrarAtoradas' },
+  )
 }
 
 /** Q19: el `logger.error` de cada tarjeta que no se entregó. Sin teléfono, correo, liga ni código. */
@@ -233,14 +243,21 @@ export function llaveDeCorreo(e: Pick<EntregaReclamada, 'id' | 'deliveryOperatio
  */
 async function escribirResultado(e: EntregaReclamada, negocio: string, data: Prisma.GiftCardUpdateManyMutationInput): Promise<boolean> {
   const r = await guardar(e, () =>
-    prisma.giftCard.updateMany({ where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt, pageToken: e.pageToken }, data }),
+    withDeadlockRetry(
+      tx => tx.giftCard.updateMany({ where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt, pageToken: e.pageToken }, data }),
+      { etiqueta: 'escribirResultado' },
+    ),
   )
   if (r.count === 1) return true
   const reinicio = await guardar(e, () =>
-    prisma.giftCard.updateMany({
-      where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt },
-      data: { deliveryClaimedAt: null, deliveryAttempts: 0, deliveryNextAttemptAt: null },
-    }),
+    withDeadlockRetry(
+      tx =>
+        tx.giftCard.updateMany({
+          where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt },
+          data: { deliveryClaimedAt: null, deliveryAttempts: 0, deliveryNextAttemptAt: null },
+        }),
+      { etiqueta: 'escribirResultado' },
+    ),
   )
   logger.warn('🎁 [tarjetas de regalo] entrega: la tarjeta cambió mientras se enviaba; ese resultado no se escribe', {
     venueId: e.venueId,
@@ -373,10 +390,14 @@ async function nombresDeNegocios(venueIds: string[]): Promise<Map<string, string
  * solo `ahora`). Si otro ya la tomó (un reenvío, o una vuelta que la reclamó), no se toca.
  */
 async function soltar(restantes: EntregaReclamada[]): Promise<void> {
-  const r = await prisma.giftCard.updateMany({
-    where: { id: { in: restantes.map(x => x.id) }, deliveryClaimedAt: restantes[0].deliveryClaimedAt },
-    data: { deliveryClaimedAt: null, deliveryAttempts: { decrement: 1 } },
-  })
+  const r = await withDeadlockRetry(
+    tx =>
+      tx.giftCard.updateMany({
+        where: { id: { in: restantes.map(x => x.id) }, deliveryClaimedAt: restantes[0].deliveryClaimedAt },
+        data: { deliveryClaimedAt: null, deliveryAttempts: { decrement: 1 } },
+      }),
+    { etiqueta: 'soltar' },
+  )
   logger.warn('🎁 [tarjetas de regalo] entrega: se acabó el tiempo de la vuelta; las que faltan quedan para la siguiente', {
     giftCardIds: restantes.map(x => x.id),
     soltadas: r.count,
@@ -440,10 +461,14 @@ export async function entregarTarjetas(p: { ids?: string[]; ahora?: Date } = {})
  */
 export async function marcarEntregaFallidaPorMensaje(messageId: string, codigo: CodigoDeAviso = 'WHATSAPP_UNDELIVERED'): Promise<boolean> {
   anotarFalloTemprano(messageId, codigo)
-  const r = await prisma.giftCard.updateMany({
-    where: { deliveryMessageId: messageId, deliveryStatus: 'SENT' },
-    data: { deliveryStatus: 'FAILED', deliveryErrorCode: codigo },
-  })
+  const r = await withDeadlockRetry(
+    tx =>
+      tx.giftCard.updateMany({
+        where: { deliveryMessageId: messageId, deliveryStatus: 'SENT' },
+        data: { deliveryStatus: 'FAILED', deliveryErrorCode: codigo },
+      }),
+    { etiqueta: 'marcarEntregaFallidaPorMensaje' },
+  )
   if (r.count === 0) return false
   const filas = await prisma.giftCard.findMany({
     where: { deliveryMessageId: messageId, deliveryStatus: 'FAILED' },

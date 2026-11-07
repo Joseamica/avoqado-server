@@ -1,5 +1,6 @@
 import { Prisma, ReferralRewardType, ReferralRewardRecurrence } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import logger from '@/config/logger'
 import { generateReferralCode } from './referralCode.service'
 
@@ -314,7 +315,9 @@ export async function backfillLegacyReferralCodes(venueId: string, venuePrefix: 
         venuePrefix,
         customerName: composeName(c.firstName, c.lastName),
       })
-      await prisma.customer.update({ where: { id: c.id }, data: { referralCode: code } })
+      await withDeadlockRetry(tx => tx.customer.update({ where: { id: c.id }, data: { referralCode: code } }), {
+        etiqueta: 'backfillLegacyReferralCodes',
+      })
       processed++
     }
   }

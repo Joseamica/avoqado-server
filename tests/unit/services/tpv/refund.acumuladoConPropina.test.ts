@@ -605,3 +605,35 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
     expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
   })
 })
+
+describe('[repetirNoDuplica:recordRefund] S5b — recordRefund: la red por traba (40P01) deja sólo el intento ganador', () => {
+  it('el reparto venta/propina nace dentro de cada intento y el efecto del cajón sale UNA vez', async () => {
+    const { postCashRefundToDrawer } = jest.requireMock('@/services/shared/cashDrawerPosting') as { postCashRefundToDrawer: jest.Mock }
+    armar({}, [])
+    // La propina pedida (50) excede la del cobro (20): el reparto la ajusta a 20. El primer intento corre completo y LUEGO Postgres lo aborta.
+    let llamada = 0
+    ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => {
+      const r = await fn(prismaMock)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+
+    await refundService.recordRefund(VENUE, { ...cuerpo(5000), tipRefundCents: 5000 } as never, 'staff-1')
+
+    expect((prismaMock as any).$transaction).toHaveBeenCalledTimes(2)
+    const creados = (prismaMock as any).payment.create.mock.calls.map((c: any[]) => c[0].data)
+    expect(creados).toHaveLength(2)
+    // Mismo reparto en los dos intentos: el del segundo no parte de lo que dejó el primero.
+    expect(creados[1].amount).toEqual(creados[0].amount)
+    expect(creados[1].tipAmount).toEqual(creados[0].tipAmount)
+    expect(Number(creados[1].tipAmount)).toBe(-20)
+    // Y el reparto se ajusta en CADA intento desde lo PEDIDO (5000): si el cuerpo leyera el valor externo ya reasignado por el
+    // primer intento (2000), el segundo ya no avisaría el ajuste.
+    const logger = jest.requireMock('@/config/logger').default as { warn: jest.Mock }
+    const avisos = logger.warn.mock.calls.filter((c: any[]) => c[0] === 'Refund tip split adjusted to the remaining sale/tip balance')
+    expect(avisos).toHaveLength(2)
+    expect(avisos.map((c: any[]) => c[1].requestedTipCents)).toEqual([5000, 5000])
+    // Lo de después del commit (cajón) sale una sola vez.
+    expect(postCashRefundToDrawer).toHaveBeenCalledTimes(1)
+  })
+})

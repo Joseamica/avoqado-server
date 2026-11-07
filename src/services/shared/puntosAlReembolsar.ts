@@ -4,6 +4,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA } from '@/services/dashboard/loyalty.dashboard.service'
 import { EXCHANGE_REFUND_ROLE, WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, origenEconomicoDeDevolucion } from '@/services/exchanges/exchangeMarks'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry, type TxConReintento } from '@/utils/serializableRetry'
 
 /**
  * D6 (5-nov-2026): al reembolsar una venta, el cliente pierde los puntos que ganó con ella (la regla de Square, help 6130).
@@ -47,7 +48,7 @@ const marcaDelCambio = (processorData: Prisma.JsonValue) =>
  * La reversa de UNA devolución. Quien llama ya tiene el candado de la venta. Sin puntos en esa venta, o con su reversa ya escrita, no
  * hace nada.
  */
-async function reversaEnTx(tx: Prisma.TransactionClient, venueId: string, orderId: string, devolucion: Devolucion) {
+async function reversaEnTx(tx: TxConReintento, venueId: string, orderId: string, devolucion: Devolucion) {
   const earn = await tx.loyaltyTransaction.findFirst({
     where: { orderId, type: LoyaltyTransactionType.EARN, customer: { venueId } },
     orderBy: { createdAt: 'asc' },
@@ -157,10 +158,13 @@ export async function quitarPuntosPorReembolso(venueId: string, refundPaymentId:
   if (marcaDelCambio(refund.processorData)?.role === EXCHANGE_REFUND_ROLE.CREDIT) return
 
   const orderId = await ventaDeLosPuntos(venueId, { orderId: refund.orderId, processorData: refund.processorData })
-  const movimiento = await prisma.$transaction(async tx => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
-    return reversaEnTx(tx, venueId, orderId, refund)
-  }, PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA)
+  const movimiento = await withDeadlockRetry(
+    async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+      return reversaEnTx(tx, venueId, orderId, refund)
+    },
+    { etiqueta: 'quitarPuntosPorReembolso', ...PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA },
+  )
   if (!movimiento) return
 
   void logAction({
@@ -179,7 +183,7 @@ export async function quitarPuntosPorReembolso(venueId: string, refundPaymentId:
  * no le quita la lealtad a la venta original. Esto las pone al corriente, en la MISMA transacción del EARN y bajo su candado, para que la
  * venta siga dando puntos sólo sobre lo que no regresó. Quien llama sólo entra si la venta tuvo un cambio: no es el camino de cada cobro.
  */
-export async function quitarDevolucionesDelCambioEnTx(tx: Prisma.TransactionClient, venueId: string, orderId: string): Promise<void> {
+export async function quitarDevolucionesDelCambioEnTx(tx: TxConReintento, venueId: string, orderId: string): Promise<void> {
   // Por páginas y hasta que no quede ninguna: cada reversa escrita sale sola de la consulta (`NOT EXISTS`). Sin el gemelo del crédito ni
   // lo que sólo devolvió propina. La raíz, en SQL: lo devuelto en la venta nueva de un cambio también viene de los cobros de ésta.
   for (;;) {

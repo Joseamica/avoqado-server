@@ -386,9 +386,7 @@ describe('PaymentLink Service', () => {
       })
 
       it('si otro guardado puso otro cliente primero, responde 409 y no toca nada más', async () => {
-        prismaMock.paymentLink.findUnique
-          .mockResolvedValueOnce(sinCliente())
-          .mockResolvedValueOnce({ customerId: 'customer-B' } as any)
+        prismaMock.paymentLink.findUnique.mockResolvedValueOnce(sinCliente()).mockResolvedValueOnce({ customerId: 'customer-B' } as any)
         prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
         prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
         await expect(
@@ -430,9 +428,7 @@ describe('PaymentLink Service', () => {
       })
 
       it('si otro guardado puso el MISMO cliente primero, sigue sin error', async () => {
-        prismaMock.paymentLink.findUnique
-          .mockResolvedValueOnce(sinCliente())
-          .mockResolvedValueOnce({ customerId: 'customer-A' } as any)
+        prismaMock.paymentLink.findUnique.mockResolvedValueOnce(sinCliente()).mockResolvedValueOnce({ customerId: 'customer-A' } as any)
         prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
         prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
         prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
@@ -1653,6 +1649,74 @@ describe('PaymentLink Service', () => {
       expect(prismaMock.order.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ customerId: 'customer-A' }) }),
       )
+    })
+
+    // S5b (red por traba, R65 b): tras un 40P01 sólo cuenta el intento GANADOR; lo de después del commit sale de su retorno.
+    const abortarElPrimerIntento = () => {
+      let llamada = 0
+      prismaMock.$transaction.mockImplementation(async (cb: any) => {
+        const r = await cb(prismaMock)
+        if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+        return r
+      })
+      return () => llamada
+    }
+    const armarPersistente = (...ordenes: string[]) => {
+      prismaMock.checkoutSession.update.mockResolvedValue({} as any)
+      prismaMock.paymentLink.update.mockResolvedValue({} as any)
+      prismaMock.payment.create.mockResolvedValue({ id: 'payment-123' } as any)
+      for (const id of ordenes) prismaMock.order.create.mockResolvedValueOnce({ id, orderNumber: 'PL-123', items: [] } as any)
+    }
+
+    it('[repetirNoDuplica:finalizePaymentLinkCheckout] Stripe: los puntos y el vale van con la orden del intento GANADOR, una sola vez', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession())
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CUSTOMER_ID })
+      armarPersistente('order-S1', 'order-S2')
+      mockCreateSalePostingInTx.mockReset()
+      mockCreateSalePostingInTx.mockResolvedValueOnce({ id: 'posting-S1' }).mockResolvedValueOnce({ id: 'posting-S2' })
+      const intentos = abortarElPrimerIntento()
+      mockEarnPoints.mockClear()
+      mockApplySalePosting.mockClear()
+
+      try {
+        await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
+
+        expect(intentos()).toBeGreaterThanOrEqual(2)
+        expect(mockEarnPoints).toHaveBeenCalledTimes(1)
+        expect(mockEarnPoints.mock.calls[0][3]).toBe('order-S2')
+        expect(mockApplySalePosting).toHaveBeenCalledTimes(1)
+        expect(mockApplySalePosting.mock.calls[0][0]).toBe('posting-S2')
+      } finally {
+        prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+      }
+    })
+
+    it('[repetirNoDuplica:finalizeMercadoPagoCheckout] MercadoPago: si al reintentar otro aviso ya confirmó, NO se acreditan puntos ni vale con la orden del intento abortado', async () => {
+      prismaMock.checkoutSession.findUnique
+        .mockResolvedValueOnce(mpSession())
+        // Dentro de la transacción: el intento 1 la ve libre y crea su orden; el intento 2 ya la ve cobrada (el IPN concurrente confirmó).
+        .mockResolvedValueOnce({ paymentId: null })
+        .mockResolvedValueOnce({ paymentId: 'payment-del-ipn' })
+      prismaMock.customer.findFirst.mockResolvedValue({ id: CUSTOMER_ID })
+      armarPersistente('order-A')
+      mockCreateSalePostingInTx.mockReset()
+      mockCreateSalePostingInTx.mockResolvedValue({ id: 'posting-A' })
+      const intentos = abortarElPrimerIntento()
+      mockEarnPoints.mockClear()
+      mockApplySalePosting.mockClear()
+      mockUpdateCustomerMetrics.mockClear()
+
+      try {
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 777 })
+
+        expect(intentos()).toBe(2)
+        expect(prismaMock.order.create).toHaveBeenCalledTimes(1) // sólo el intento abortado la creó, y se deshizo
+        expect(mockEarnPoints).not.toHaveBeenCalled()
+        expect(mockUpdateCustomerMetrics).not.toHaveBeenCalled()
+        expect(mockApplySalePosting).not.toHaveBeenCalled()
+      } finally {
+        prismaMock.$transaction.mockImplementation(((cb: any) => cb(prismaMock)) as any)
+      }
     })
 
     it('snapshot de otro venue falla cerrado y nunca adopta al pagador', async () => {

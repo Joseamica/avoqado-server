@@ -10,6 +10,7 @@
 import { storeCreditDeClientes, type StoreCreditDeCliente } from '../storeCredit/customerStoreCreditBalance'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import prisma from '@/utils/prismaClient'
+import { withDeadlockRetry } from '@/utils/serializableRetry'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { CustomerApprovalStatus, OnlineOrderPaymentMode, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
@@ -457,30 +458,32 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     }
   }
 
-  const customer = await prisma.customer
-    .create({
-      data: {
-        venueId, // ✅ CRITICAL: Multi-tenant assignment
-        email: normalizedEmail,
-        phone,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        birthDate: data.birthDate,
-        gender: data.gender,
-        customerGroupId: data.customerGroupId,
-        notes: data.notes,
-        tags: data.tags || [],
-        // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — el ledger de
-        // consent.service es el ÚNICO escritor de ese campo (Task 3). El default
-        // Boolean @default(false) de Prisma basta para "sin consentimiento".
-      },
-      include: {
-        customerGroup: true,
-      },
-    })
-    .catch(error => {
-      throw contactoRepetido(error, data.email, phone)
-    })
+  const customer = await withDeadlockRetry(
+    tx =>
+      tx.customer.create({
+        data: {
+          venueId, // ✅ CRITICAL: Multi-tenant assignment
+          email: normalizedEmail,
+          phone,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          birthDate: data.birthDate,
+          gender: data.gender,
+          customerGroupId: data.customerGroupId,
+          notes: data.notes,
+          tags: data.tags || [],
+          // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — el ledger de
+          // consent.service es el ÚNICO escritor de ese campo (Task 3). El default
+          // Boolean @default(false) de Prisma basta para "sin consentimiento".
+        },
+        include: {
+          customerGroup: true,
+        },
+      }),
+    { etiqueta: 'createCustomer' },
+  ).catch(error => {
+    throw contactoRepetido(error, data.email, phone)
+  })
 
   logger.info(`Customer created: ${customer.id} (${customer.email || customer.phone})`, {
     venueId,
@@ -541,7 +544,9 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
         venuePrefix: cfg.codePrefix ?? venue?.slug ?? customer.venueId.slice(-8),
         customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
       })
-      await prisma.customer.update({ where: { id: customer.id }, data: { referralCode: code } })
+      await withDeadlockRetry(tx => tx.customer.update({ where: { id: customer.id }, data: { referralCode: code } }), {
+        etiqueta: 'createCustomer',
+      })
 
       // Welcome email — only fire if the customer is contactable via
       // email AND has opted in to marketing. Both checks are required
@@ -668,7 +673,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
   // aterriza degrada al default seguro (sin consentimiento) y no merece bloquear el resto del
   // update; un opt-out (revoke) es evidencia legal de que la persona YA NO quiere marketing —
   // perderlo en silencio es peor que rechazar el PUT entero, así que su excepción se PROPAGA
-  // (fail CLOSED) y nada se escribe (corre antes del `prisma.customer.update` de abajo).
+  // (fail CLOSED) y nada se escribe (corre antes del `withDeadlockRetry(… customer.update …)` de abajo).
   let consentWarning: ConsentWarning | undefined
   if (data.marketingConsent !== undefined && data.marketingConsent !== existingCustomer.marketingConsent) {
     if (data.marketingConsent) {
@@ -690,33 +695,35 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     }
   }
 
-  const updatedCustomer = await prisma.customer
-    .update({
-      where: { id: customerId },
-      data: {
-        email: normalizedEmail,
-        phone,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        birthDate: data.birthDate,
-        gender: data.gender,
-        customerGroupId: data.customerGroupId,
-        notes: data.notes,
-        tags: data.tags,
-        // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
-        // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
-        // hubo cambio de verdad).
-        active: data.active,
-      },
-      include: {
-        customerGroup: true,
-      },
-    })
-    .catch(error => {
-      // Dos aparatos asignan el mismo teléfono/correo a la vez: los dos pasan la búsqueda de arriba y el índice único
-      // frena al segundo. Es el mismo «ya registrado», no un 500 (Codex r1 #7, editar cliente desde el POS).
-      throw contactoRepetido(error, data.email, phone)
-    })
+  const updatedCustomer = await withDeadlockRetry(
+    tx =>
+      tx.customer.update({
+        where: { id: customerId },
+        data: {
+          email: normalizedEmail,
+          phone,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          birthDate: data.birthDate,
+          gender: data.gender,
+          customerGroupId: data.customerGroupId,
+          notes: data.notes,
+          tags: data.tags,
+          // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
+          // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
+          // hubo cambio de verdad).
+          active: data.active,
+        },
+        include: {
+          customerGroup: true,
+        },
+      }),
+    { etiqueta: 'updateCustomer' },
+  ).catch(error => {
+    // Dos aparatos asignan el mismo teléfono/correo a la vez: los dos pasan la búsqueda de arriba y el índice único
+    // frena al segundo. Es el mismo «ya registrado», no un 500 (Codex r1 #7, editar cliente desde el POS).
+    throw contactoRepetido(error, data.email, phone)
+  })
 
   logger.info(`Customer updated: ${customerId}`, {
     venueId,
@@ -751,10 +758,14 @@ export async function deleteCustomer(venueId: string, customerId: string) {
   }
 
   // Soft delete (set active=false)
-  await prisma.customer.update({
-    where: { id: customerId },
-    data: { active: false },
-  })
+  await withDeadlockRetry(
+    tx =>
+      tx.customer.update({
+        where: { id: customerId },
+        data: { active: false },
+      }),
+    { etiqueta: 'deleteCustomer' },
+  )
 
   logger.info(`Customer soft-deleted: ${customerId}`, {
     venueId,
@@ -926,7 +937,6 @@ export async function settleCustomerBalance(
   //
   // 🔴 Y también deduce: marcaba PAID sin tocar inventario. El vale nace dentro
   // del mismo CAS, así que el perdedor tampoco puede descontar.
-  const postingIds: string[] = []
   // 🔴 LA lista de lo que ESTA llamada liquidó de verdad — no las que estaban
   // pendientes al leer al cliente. TODO lo que se reporta hacia afuera sale de
   // aquí: el hook de referidos, el conteo, el monto, el mensaje y el
@@ -938,149 +948,155 @@ export async function settleCustomerBalance(
   // Payment ($600) pero se le respondía al cajero "3 order(s) totaling 900" y se
   // escribía un ActivityLog con 900 — la bitácora contando el dinero DOS veces,
   // justo el registro del que dependemos para investigar un incidente.
-  const settled: Array<{ orderId: string; amount: number; paymentId?: string; baseParaLealtad: number }> = []
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const targetOrderIds = [...new Set(pendingOrders.map(oc => oc.order.id))].sort()
   // R11-8: los vales v7 de cada venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
   const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
     '@/services/mobile/areaTicketV7.mobile.service'
   )
-  let sesionesDeValesCerradas = 0
-  await prisma.$transaction(async tx => {
-    sesionesDeValesCerradas = 0
-    // El mismo cerco de borrado de demo que el cobro individual, antes de reclamar cualquier fila de su unidad.
-    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
-    // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
-    // toma el conjunto completo de Orders en orden estable; sólo después puede
-    // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
-    // esperando Order B frente a un writer unitario que ya posee B.
-    // R11-8: TODAS las sesiones/vales antes de cualquier Order; después la unión canónica de ventas, como topología y fiscal.
-    const sesionesDeVales = new Map<string, NonNullable<Awaited<ReturnType<typeof lockAreaTicketCheckoutHierarchy>>>['session']>()
-    for (const orderId of targetOrderIds) {
-      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId }, { lockOrder: false })
-      if (vales) sesionesDeVales.set(orderId, vales.session)
-    }
-    await lockOrdersForUpdate(tx, { venueId, orderIds: targetOrderIds })
+  // R65 b: lo que el cuerpo acumula (cobros, vales, sesiones cerradas) nace DENTRO de cada intento y sale en su RETORNO; un intento
+  // abortado por 40P01 no deja nada a medias y lo de después del commit lee sólo lo del ganador.
+  const { settled, postingIds, sesionesDeValesCerradas } = await withDeadlockRetry(
+    async tx => {
+      const settled: Array<{ orderId: string; amount: number; paymentId?: string; baseParaLealtad: number }> = []
+      const postingIds: string[] = []
+      let sesionesDeValesCerradas = 0
+      // El mismo cerco de borrado de demo que el cobro individual, antes de reclamar cualquier fila de su unidad.
+      await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
+      // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
+      // toma el conjunto completo de Orders en orden estable; sólo después puede
+      // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
+      // esperando Order B frente a un writer unitario que ya posee B.
+      // R11-8: TODAS las sesiones/vales antes de cualquier Order; después la unión canónica de ventas, como topología y fiscal.
+      const sesionesDeVales = new Map<string, NonNullable<Awaited<ReturnType<typeof lockAreaTicketCheckoutHierarchy>>>['session']>()
+      for (const orderId of targetOrderIds) {
+        const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId }, { lockOrder: false })
+        if (vales) sesionesDeVales.set(orderId, vales.session)
+      }
+      await lockOrdersForUpdate(tx, { venueId, orderIds: targetOrderIds })
 
-    for (const orderId of targetOrderIds) {
-      // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y
-      // fencing se releen bajo lock y con alcance tenant+cliente.
-      const fresh = await tx.order.findFirst({
-        where: { id: orderId, venueId, orderCustomers: { some: { customerId } }, ...NO_ES_COBRO_DEL_MOMENTO },
-        select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true, thirdPartyCashDue: true },
-      })
-      if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue
-      // Rappi 2b (T7): el barrido no liquida un pedido de Rappi en efectivo (no sabe repartir venta, propina y lo de Rappi).
-      if (esRappiEnEfectivo(fresh)) continue
-      // Pedidos en línea fase 2 (Codex r1 C1): la selección ya los excluye; bajo el candado, la guarda de siempre (T8).
-      await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
+      for (const orderId of targetOrderIds) {
+        // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y
+        // fencing se releen bajo lock y con alcance tenant+cliente.
+        const fresh = await tx.order.findFirst({
+          where: { id: orderId, venueId, orderCustomers: { some: { customerId } }, ...NO_ES_COBRO_DEL_MOMENTO },
+          select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true, thirdPartyCashDue: true },
+        })
+        if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue
+        // Rappi 2b (T7): el barrido no liquida un pedido de Rappi en efectivo (no sabe repartir venta, propina y lo de Rappi).
+        if (esRappiEnEfectivo(fresh)) continue
+        // Pedidos en línea fase 2 (Codex r1 C1): la selección ya los excluye; bajo el candado, la guarda de siempre (T8).
+        await assertNotCardOnlineOrderInTx(tx, { venueId, orderId })
 
-      const paidAgg = await tx.payment.aggregate({
-        where: { orderId, venueId, status: 'COMPLETED' },
-        _sum: { amount: true, tipAmount: true },
-      })
-      const paidSum = new Prisma.Decimal(paidAgg._sum.amount ?? 0)
-      const orderTotalSansTips = new Prisma.Decimal(fresh.total).minus(fresh.tipAmount ?? 0)
-      const remainingByPayments = Prisma.Decimal.max(0, orderTotalSansTips.minus(paidSum)).toDecimalPlaces(2)
-      const remainingBalance = Prisma.Decimal.min(new Prisma.Decimal(fresh.remainingBalance), remainingByPayments).toDecimalPlaces(2)
-      if (remainingBalance.lte(0)) continue
+        const paidAgg = await tx.payment.aggregate({
+          where: { orderId, venueId, status: 'COMPLETED' },
+          _sum: { amount: true, tipAmount: true },
+        })
+        const paidSum = new Prisma.Decimal(paidAgg._sum.amount ?? 0)
+        const orderTotalSansTips = new Prisma.Decimal(fresh.total).minus(fresh.tipAmount ?? 0)
+        const remainingByPayments = Prisma.Decimal.max(0, orderTotalSansTips.minus(paidSum)).toDecimalPlaces(2)
+        const remainingBalance = Prisma.Decimal.min(new Prisma.Decimal(fresh.remainingBalance), remainingByPayments).toDecimalPlaces(2)
+        if (remainingBalance.lte(0)) continue
 
-      const transition = await tx.order.updateMany({
-        where: {
-          id: orderId,
+        const transition = await tx.order.updateMany({
+          where: {
+            id: orderId,
+            venueId,
+            paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+            ...CUENTA_NO_CANCELADA, // la candidata pudo cancelarse entre la lectura del cliente y el candado
+            version: fresh.version,
+            remainingBalance: fresh.remainingBalance as any,
+          },
+          data: {
+            paymentStatus: 'PAID',
+            paidAmount: fresh.total,
+            remainingBalance: 0,
+            version: { increment: 1 },
+            // 🔴 Liquidar ES el momento en que la orden queda PAGADA: elegibilidad de lealtad como en
+            // la PAX y el efectivo móvil (revisión del 5-sep-2026). Todo lo que este camino liquida
+            // tiene cliente por construcción — era el sello que más seguro se perdía.
+            loyaltyEligibleAt: new Date(),
+            loyaltyStaffId: actorStaffId,
+          },
+        })
+        if (transition.count === 0) continue
+        const priorCompletedPaymentCount =
+          (await tx.payment.count({
+            where: { orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
+          })) ?? 0
+        // Se registra el MISMO `remainingBalance` que va al Payment de abajo: el
+        // monto reportado es la suma exacta de los pagos creados, no un recálculo
+        // que pueda divergir de ellos.
+        const remainingBalancePesos = remainingBalance.toNumber()
+        settled.push({ orderId, amount: remainingBalancePesos, baseParaLealtad: Math.max(0, orderTotalSansTips.toNumber()) })
+
+        const shiftAmount = remainingBalance
+        const shiftTip = new Prisma.Decimal(0)
+        const shiftClaim = await claimShiftForCapturedPayment(tx, {
           venueId,
-          paymentStatus: { in: ['PENDING', 'PARTIAL'] },
-          ...CUENTA_NO_CANCELADA, // la candidata pudo cancelarse entre la lectura del cliente y el candado
-          version: fresh.version,
-          remainingBalance: fresh.remainingBalance as any,
-        },
-        data: {
-          paymentStatus: 'PAID',
-          paidAmount: fresh.total,
-          remainingBalance: 0,
-          version: { increment: 1 },
-          // 🔴 Liquidar ES el momento en que la orden queda PAGADA: elegibilidad de lealtad como en
-          // la PAX y el efectivo móvil (revisión del 5-sep-2026). Todo lo que este camino liquida
-          // tiene cliente por construcción — era el sello que más seguro se perdía.
-          loyaltyEligibleAt: new Date(),
-          loyaltyStaffId: actorStaffId,
-        },
-      })
-      if (transition.count === 0) continue
-      const priorCompletedPaymentCount =
-        (await tx.payment.count({
-          where: { orderId, venueId, status: 'COMPLETED', type: { not: 'REFUND' } },
-        })) ?? 0
-      // Se registra el MISMO `remainingBalance` que va al Payment de abajo: el
-      // monto reportado es la suma exacta de los pagos creados, no un recálculo
-      // que pueda divergir de ellos.
-      const remainingBalancePesos = remainingBalance.toNumber()
-      settled.push({ orderId, amount: remainingBalancePesos, baseParaLealtad: Math.max(0, orderTotalSansTips.toNumber()) })
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+          incrementTotalOrders: priorCompletedPaymentCount === 0,
+          orderId,
+        })
 
-      const shiftAmount = remainingBalance
-      const shiftTip = new Prisma.Decimal(0)
-      const shiftClaim = await claimShiftForCapturedPayment(tx, {
-        venueId,
-        amountPesos: shiftAmount,
-        tipPesos: shiftTip,
-        incrementTotalOrders: priorCompletedPaymentCount === 0,
-        orderId,
-      })
+        // Create a payment record to track the settlement
+        const settlementPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId,
+            shiftId: shiftClaim.shiftId ? shiftClaim.shiftId : undefined,
+            amount: remainingBalance,
+            tipAmount: 0,
+            method: 'CASH', // Default to cash for manual settlements
+            // 🔴 Decisión del founder (27-ago): este efectivo SÍ entró al cajón (fase 2).
+            fundsFlow: 'CASH_DRAWER',
+            status: 'COMPLETED',
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: remainingBalance,
+            source: 'OTHER',
+            processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
+          },
+        })
 
-      // Create a payment record to track the settlement
-      const settlementPayment = await tx.payment.create({
-        data: {
+        await recordPendingPaymentShiftReconciliation(tx, {
+          claim: shiftClaim,
+          venueId,
+          paymentId: settlementPayment.id,
+          orderId,
+          staffId: actorStaffId,
+          channel: 'settleCustomerBalance',
+          amountPesos: shiftAmount,
+          tipPesos: shiftTip,
+          reconciliationEnabled,
+        })
+
+        settled[settled.length - 1].paymentId = settlementPayment.id
+
+        const itemsParaPosting = await tx.orderItem.findMany({
+          where: { orderId },
+          include: { modifiers: { include: { modifier: true } } },
+        })
+        const posting = await createSalePostingInTx(tx, {
           venueId,
           orderId,
-          shiftId: shiftClaim.shiftId ? shiftClaim.shiftId : undefined,
-          amount: remainingBalance,
-          tipAmount: 0,
-          method: 'CASH', // Default to cash for manual settlements
-          // 🔴 Decisión del founder (27-ago): este efectivo SÍ entró al cajón (fase 2).
-          fundsFlow: 'CASH_DRAWER',
-          status: 'COMPLETED',
-          feePercentage: 0,
-          feeAmount: 0,
-          netAmount: remainingBalance,
-          source: 'OTHER',
-          processorData: notes ? { settlementNote: notes, settledViaDashboard: true } : { settledViaDashboard: true },
-        },
-      })
-
-      await recordPendingPaymentShiftReconciliation(tx, {
-        claim: shiftClaim,
-        venueId,
-        paymentId: settlementPayment.id,
-        orderId,
-        staffId: actorStaffId,
-        channel: 'settleCustomerBalance',
-        amountPesos: shiftAmount,
-        tipPesos: shiftTip,
-        reconciliationEnabled,
-      })
-
-      settled[settled.length - 1].paymentId = settlementPayment.id
-
-      const itemsParaPosting = await tx.orderItem.findMany({
-        where: { orderId },
-        include: { modifiers: { include: { modifier: true } } },
-      })
-      const posting = await createSalePostingInTx(tx, {
-        venueId,
-        orderId,
-        items: itemsParaPosting as any,
-        staffId: null,
-      })
-      if (posting?.id) postingIds.push(posting.id)
-      // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
-      const sesion = sesionesDeVales.get(orderId)
-      if (sesion && (await cerrarSesionDeValesAlCerrarLaVenta(tx, sesion, { venueId, orderId }))) sesionesDeValesCerradas += 1
-      // R8: liquidar el saldo de un cliente también activa los sobres de una cuenta de tarjetas.
-      await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: null, items: itemsParaPosting })
-      // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
-      await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
-    }
-  }, ORDER_LOCK_WAIT_BUDGET)
+          items: itemsParaPosting as any,
+          staffId: null,
+        })
+        if (posting?.id) postingIds.push(posting.id)
+        // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+        const sesion = sesionesDeVales.get(orderId)
+        if (sesion && (await cerrarSesionDeValesAlCerrarLaVenta(tx, sesion, { venueId, orderId }))) sesionesDeValesCerradas += 1
+        // R8: liquidar el saldo de un cliente también activa los sobres de una cuenta de tarjetas.
+        await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: null, items: itemsParaPosting })
+        // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+        await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
+      }
+      return { settled, postingIds, sesionesDeValesCerradas }
+    },
+    { etiqueta: 'settleCustomerBalance', ...ORDER_LOCK_WAIT_BUDGET },
+  )
 
   // D10-B: liquidar en efectivo una cuenta con una tarjeta en duda deja su rastro. Sin esperarlo, y de una en una: «Liquidar todo»
   // puede traer muchas cuentas y esto no debe gastar una conexión por cada una al mismo tiempo.
@@ -1239,65 +1255,68 @@ export async function updateCustomerMetrics(
   options?: { skipVisit?: boolean },
 ) {
   if (orderId) {
-    const applied = await prisma.$transaction(async tx => {
-      // Metrics for different orders of the same customer must serialize. Without
-      // the row lock, two payments can read the same counters and the later
-      // absolute update silently overwrites the earlier one.
-      const [customer] = await tx.$queryRaw<
-        Array<{ id: string; venueId: string; totalVisits: number; totalSpent: Prisma.Decimal; firstVisitAt: Date | null }>
-      >`
+    const applied = await withDeadlockRetry(
+      async tx => {
+        // Metrics for different orders of the same customer must serialize. Without
+        // the row lock, two payments can read the same counters and the later
+        // absolute update silently overwrites the earlier one.
+        const [customer] = await tx.$queryRaw<
+          Array<{ id: string; venueId: string; totalVisits: number; totalSpent: Prisma.Decimal; firstVisitAt: Date | null }>
+        >`
         SELECT "id", "venueId", "totalVisits", "totalSpent", "firstVisitAt"
         FROM "Customer"
         WHERE "id" = ${customerId}
         FOR UPDATE
       `
 
-      if (!customer) {
-        logger.warn(`Customer ${customerId} not found for metrics update`)
-        return false
-      }
-      if (venueId && customer.venueId !== venueId) {
-        logger.warn('Customer metrics tenant mismatch ignored', { customerId, orderId, venueId, customerVenueId: customer.venueId })
-        return false
-      }
+        if (!customer) {
+          logger.warn(`Customer ${customerId} not found for metrics update`)
+          return false
+        }
+        if (venueId && customer.venueId !== venueId) {
+          logger.warn('Customer metrics tenant mismatch ignored', { customerId, orderId, venueId, customerVenueId: customer.venueId })
+          return false
+        }
 
-      const existing = await tx.customerOrderMetric.findUnique({
-        where: { customerId_orderId: { customerId, orderId } },
-        select: { id: true },
-      })
-      if (existing) return false
+        const existing = await tx.customerOrderMetric.findUnique({
+          where: { customerId_orderId: { customerId, orderId } },
+          select: { id: true },
+        })
+        if (existing) return false
 
-      const newTotalVisits = customer.totalVisits + 1
-      const newTotalSpent = customer.totalSpent.toNumber() + orderTotal
-      const now = new Date()
+        const newTotalVisits = customer.totalVisits + 1
+        const newTotalSpent = customer.totalSpent.toNumber() + orderTotal
+        const now = new Date()
 
-      await tx.customerOrderMetric.create({
-        data: { customerId, orderId, venueId: customer.venueId, amount: orderTotal },
-      })
-      if (options?.skipVisit) {
-        // No es una visita nueva: el gasto sí sube; el promedio se reparte entre las visitas que ya había (sin visitas, no se toca).
+        await tx.customerOrderMetric.create({
+          data: { customerId, orderId, venueId: customer.venueId, amount: orderTotal },
+        })
+        if (options?.skipVisit) {
+          // No es una visita nueva: el gasto sí sube; el promedio se reparte entre las visitas que ya había (sin visitas, no se toca).
+          await tx.customer.update({
+            where: { id: customerId },
+            data: {
+              totalSpent: newTotalSpent,
+              ...(customer.totalVisits > 0 ? { averageOrderValue: newTotalSpent / customer.totalVisits } : {}),
+            },
+          })
+          return true
+        }
         await tx.customer.update({
           where: { id: customerId },
           data: {
+            totalVisits: newTotalVisits,
             totalSpent: newTotalSpent,
-            ...(customer.totalVisits > 0 ? { averageOrderValue: newTotalSpent / customer.totalVisits } : {}),
+            averageOrderValue: newTotalSpent / newTotalVisits,
+            lastVisitAt: now,
+            firstVisitAt: customer.firstVisitAt || now,
           },
         })
-        return true
-      }
-      await tx.customer.update({
-        where: { id: customerId },
-        data: {
-          totalVisits: newTotalVisits,
-          totalSpent: newTotalSpent,
-          averageOrderValue: newTotalSpent / newTotalVisits,
-          lastVisitAt: now,
-          firstVisitAt: customer.firstVisitAt || now,
-        },
-      })
 
-      return true
-    })
+        return true
+      },
+      { etiqueta: 'updateCustomerMetrics' },
+    )
 
     if (applied) {
       logger.info(`Customer metrics updated: ${customerId}`, { customerId, orderId, orderTotal })
@@ -1325,16 +1344,20 @@ export async function updateCustomerMetrics(
   const newTotalSpent = customer.totalSpent.toNumber() + orderTotal
   const newAverageOrderValue = newTotalSpent / newTotalVisits
 
-  await prisma.customer.update({
-    where: { id: customerId },
-    data: {
-      totalVisits: newTotalVisits,
-      totalSpent: newTotalSpent,
-      averageOrderValue: newAverageOrderValue,
-      lastVisitAt: new Date(),
-      firstVisitAt: customer.firstVisitAt || new Date(), // Set only if null
-    },
-  })
+  await withDeadlockRetry(
+    tx =>
+      tx.customer.update({
+        where: { id: customerId },
+        data: {
+          totalVisits: newTotalVisits,
+          totalSpent: newTotalSpent,
+          averageOrderValue: newAverageOrderValue,
+          lastVisitAt: new Date(),
+          firstVisitAt: customer.firstVisitAt || new Date(), // Set only if null
+        },
+      }),
+    { etiqueta: 'updateCustomerMetrics' },
+  )
 
   logger.info(`Customer metrics updated: ${customerId}`, {
     customerId,
@@ -1363,20 +1386,23 @@ export async function decideCustomerApprovalFromDashboard(
   customerId: string,
   input: { decision: 'APPROVED' | 'REJECTED'; reason?: string; expectedVersion: number; actorStaffId: string },
 ): Promise<{ approvalStatus: CustomerApprovalStatus; approvalVersion: number; changed: boolean }> {
-  return prisma.$transaction(async tx => {
-    const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
-    if (!venue) throw new NotFoundError('Negocio no encontrado')
+  return withDeadlockRetry(
+    async tx => {
+      const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+      if (!venue) throw new NotFoundError('Negocio no encontrado')
 
-    return decideCustomerApproval(tx, {
-      customerId,
-      venueId,
-      organizationId: venue.organizationId,
-      decision: input.decision,
-      reason: input.reason,
-      expectedVersion: input.expectedVersion,
-      actorStaffId: input.actorStaffId,
-    })
-  })
+      return decideCustomerApproval(tx, {
+        customerId,
+        venueId,
+        organizationId: venue.organizationId,
+        decision: input.decision,
+        reason: input.reason,
+        expectedVersion: input.expectedVersion,
+        actorStaffId: input.actorStaffId,
+      })
+    },
+    { etiqueta: 'decideCustomerApprovalFromDashboard' },
+  )
 }
 
 /**

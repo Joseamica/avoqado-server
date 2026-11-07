@@ -22,6 +22,7 @@ import {
   type EscritorReasignacion,
   type OrdenFoto,
 } from '@/services/shared/reasignarCobro'
+import type { TxConReintento } from '@/utils/serializableRetry'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 
@@ -490,7 +491,7 @@ describe('Codex r6 #1: reasignar un cobro a una cancelada con IVA aparte, con la
                       tipAmount: new Prisma.Decimal((cobro.tipAmount ?? 0).toString()),
                     }
                   : { amount: new Prisma.Decimal(0), tipAmount: new Prisma.Decimal(0) }
-                await settleStandalonePaymentInTx(tx, venueId, id, pago, undefined, false, conEfectos)
+                await settleStandalonePaymentInTx(tx as unknown as TxConReintento, venueId, id, pago, undefined, false, conEfectos)
               })(),
             ),
           fijarCompletadoEn: (id, cuando) =>

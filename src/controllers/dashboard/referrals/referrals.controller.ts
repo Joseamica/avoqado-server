@@ -4,6 +4,7 @@ import * as capture from '../../../services/referrals/referralCapture.service'
 import * as reads from '../../../services/referrals/referralReads.service'
 import * as grants from '../../../services/referrals/referralGrant.service'
 import prisma from '../../../utils/prismaClient'
+import { withDeadlockRetry } from '../../../utils/serializableRetry'
 import { ReferralStatus, ReferralTier } from '@prisma/client'
 
 // ==========================================
@@ -312,7 +313,9 @@ export async function generateCustomerCodeHandler(req: Request, res: Response, n
       venuePrefix: cfg.codePrefix || customer.venue.name,
       customerName,
     })
-    await prisma.customer.update({ where: { id: customer.id }, data: { referralCode } })
+    await withDeadlockRetry(tx => tx.customer.update({ where: { id: customer.id }, data: { referralCode } }), {
+      etiqueta: 'generateCustomerCodeHandler',
+    })
     res.json({ referralCode })
   } catch (e) {
     next(e)

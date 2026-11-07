@@ -43,6 +43,8 @@ const createMockGroupCustomer = (overrides: Record<string, any> = {}) => ({
 describe('CustomerGroup Dashboard Service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // S5b: las asignaciones van por withDeadlockRetry (una $transaction de un paso); la lista usa la forma en arreglo.
+    prismaMock.$transaction.mockImplementation((async (a: any) => (typeof a === 'function' ? a(prismaMock) : undefined)) as any)
   })
 
   describe('getCustomerGroups', () => {

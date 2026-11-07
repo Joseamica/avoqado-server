@@ -361,7 +361,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       })
     }
 
-    const order = await orderMobileService.createOrderWithItems(venueId, { ...venta.input, ...(await autoridadDeLaVenta(req, venta.input)) })
+    const order = await orderMobileService.createOrderWithItems(venueId, {
+      ...venta.input,
+      ...(await autoridadDeLaVenta(req, venta.input)),
+    })
 
     res.status(201).json({
       success: true,
@@ -694,7 +697,6 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
     if (!parsed.success || parsed.data.action !== 'compItem')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const { compOrderItemInTransaction } = await import('../../services/mobile/comp-item.mobile.service')
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await compOrderItemInTransaction(tx, {
@@ -705,7 +707,7 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
         staffId,
         captureBenefits: true,
       })
-      auditData = {
+      const auditData = {
         orderId,
         reason: manifest.payload.reason,
         productName: r.item.productName,
@@ -714,6 +716,7 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
       }
       if (!r.recorte.benefits) throw new Error('Missing in-transaction benefit capture')
       return {
+        audit: auditData,
         response: { status: 200, body: { success: true, data: { itemId, reason: manifest.payload.reason, ...r.totals } } },
         effects: { discountBenefits: r.recorte.benefits },
         affectedRefs: [
@@ -737,6 +740,7 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({ action: 'ORDER_ITEM_COMPED', entity: 'OrderItem', entityId: itemId, staffId, venueId, data: auditData })
     }
@@ -769,11 +773,10 @@ export const compWholeOrder = async (req: Request, res: Response, next: NextFunc
     if (!parsed.success || parsed.data.action !== 'compWholeOrder')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const { compWholeOrderInTransaction } = await import('../../services/mobile/comp-item.mobile.service')
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await compWholeOrderInTransaction(tx, { venueId, orderId, reason: manifest.payload.reason, staffId, captureBenefits: true })
-      auditData = {
+      const auditData = {
         reason: manifest.payload.reason,
         items: r.items.length,
         amount: r.compedAmount,
@@ -782,6 +785,7 @@ export const compWholeOrder = async (req: Request, res: Response, next: NextFunc
       }
       if (!r.recorte.benefits) throw new Error('Missing in-transaction benefit capture')
       return {
+        audit: auditData,
         response: {
           status: 200,
           body: {
@@ -811,6 +815,7 @@ export const compWholeOrder = async (req: Request, res: Response, next: NextFunc
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({ action: 'ORDER_COMPED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     }
@@ -910,7 +915,6 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
     if (!parsed.success || parsed.data.action !== 'applyOrderDiscount')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await orderMobileService.applyOrderDiscountInTransaction(
         tx,
@@ -920,8 +924,9 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
         staffId,
         tieneCortesiaAutorizada(req),
       )
-      auditData = { discountId: manifest.refs.discountId, name: r.row.name, amount: Number(r.row.amount) }
+      const auditData = { discountId: manifest.refs.discountId, name: r.row.name, amount: Number(r.row.amount) }
       return {
+        audit: auditData,
         response: {
           status: 200,
           body: { success: true, data: { orderDiscountId: r.row.id, name: r.row.name, amount: Number(r.row.amount), ...r.totals } },
@@ -932,6 +937,7 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({ action: 'ORDER_DISCOUNT_APPLIED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     }
@@ -963,11 +969,14 @@ export const mergeOrders = async (req: Request, res: Response, next: NextFunctio
     if (!parsed.success || parsed.data.action !== 'mergeOrders')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let result: Awaited<ReturnType<typeof orderMobileService.mergeOrdersInTransaction>> | undefined
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
-      result = await orderMobileService.mergeOrdersInTransaction(tx, venueId, orderId, manifest.refs.sourceOrderId, staffId)
-      return { response: { status: 200, body: { success: true, data: result.data } }, affectedRefs: result.affectedRefs }
+      const result = await orderMobileService.mergeOrdersInTransaction(tx, venueId, orderId, manifest.refs.sourceOrderId, staffId)
+      return { audit: result, response: { status: 200, body: { success: true, data: result.data } }, affectedRefs: result.affectedRefs }
     })
+    const result =
+      reply.kind === 'TERMINAL'
+        ? (reply.audit as Awaited<ReturnType<typeof orderMobileService.mergeOrdersInTransaction>> | undefined)
+        : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
       try {
         await orderMobileService.publishMergedOrders(venueId, result, staffId)
@@ -998,11 +1007,11 @@ export const splitOrderBySeat = async (req: Request, res: Response, next: NextFu
     const parsed = manifestSchema.safeParse({ action: 'splitOrderBySeat', refs: { orderId }, payload: {} })
     if (!parsed.success || parsed.data.action !== 'splitOrderBySeat')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
-    let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest: parsed.data }, async tx => {
       const r = await orderMobileService.splitOrderBySeatInTransaction(tx, venueId, orderId, staffId)
-      auditData = { seats: r.seatsToMove, created: r.results.length }
+      const auditData = { seats: r.seatsToMove, created: r.results.length }
       return {
+        audit: auditData,
         response: {
           status: 200,
           body: {
@@ -1020,6 +1029,7 @@ export const splitOrderBySeat = async (req: Request, res: Response, next: NextFu
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow)
       void logAction({ action: 'ORDER_SPLIT_BY_SEAT', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     return sendHttpOperationReply(res, operation, reply)
@@ -1046,10 +1056,9 @@ export const removeOrderDiscount = async (req: Request, res: Response, next: Nex
     if (!parsed.success || parsed.data.action !== 'removeOrderDiscount')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await orderMobileService.removeOrderDiscountInTransaction(tx, venueId, orderId, manifest.refs.orderDiscountId, staffId)
-      auditData = {
+      const auditData = {
         orderDiscountId: manifest.refs.orderDiscountId,
         name: r.row.name,
         pointsRefunded: r.refund?.pointsRefunded ?? 0,
@@ -1057,6 +1066,7 @@ export const removeOrderDiscount = async (req: Request, res: Response, next: Nex
         taxReturned: Number(r.row.taxReduction ?? 0),
       }
       return {
+        audit: auditData,
         response: { status: 200, body: { success: true, data: r.totals } },
         effects: { loyaltyRefund: r.refund, stampRefund: r.stampRefund },
         affectedRefs: [
@@ -1077,6 +1087,7 @@ export const removeOrderDiscount = async (req: Request, res: Response, next: Nex
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
       void logAction({ action: 'ORDER_DISCOUNT_REMOVED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     }
@@ -1106,11 +1117,11 @@ export const splitOrder = async (req: Request, res: Response, next: NextFunction
     if (!parsed.success || parsed.data.action !== 'splitOrder')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let auditData: Parameters<typeof logAction>[0]['data']
     const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
       const r = await orderMobileService.splitOrderItemsInTransaction(tx, venueId, orderId, manifest.payload.itemIds, staffId, true)
-      auditData = { newOrderId: r.newOrder.id, newOrderNumber: r.newOrder.orderNumber, items: r.movedCount }
+      const auditData = { newOrderId: r.newOrder.id, newOrderNumber: r.newOrder.orderNumber, items: r.movedCount }
       return {
+        audit: auditData,
         response: {
           status: 200,
           body: {
@@ -1129,6 +1140,7 @@ export const splitOrder = async (req: Request, res: Response, next: NextFunction
         ],
       }
     })
+    const auditData = reply.kind === 'TERMINAL' ? (reply.audit as Parameters<typeof logAction>[0]['data'] | undefined) : undefined
     if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow)
       void logAction({ action: 'ORDER_SPLIT', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
     return sendHttpOperationReply(res, operation, reply)

@@ -1010,3 +1010,82 @@ describe('D5: la ruta vieja de cupón aparta como la venta nueva (Codex r3 #1 y 
     expect(tx.orderDiscount.create).not.toHaveBeenCalled()
   })
 })
+
+describe('S5b — la red por traba (40P01): sólo se publica la bitácora del intento ganador (R65 b)', () => {
+  const abortarElPrimerIntento = () => {
+    let llamada = 0
+    globalDb.$transaction.mockImplementation(async (cb: any) => {
+      const r = await cb(tx)
+      if (++llamada === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      return r
+    })
+    return () => llamada
+  }
+
+  it('[repetirNoDuplica:removeDiscountFromOrder] quitar un descuento: DISCOUNT_REMOVED sale UNA vez aunque el primer intento ya la había acumulado', async () => {
+    const intentos = abortarElPrimerIntento()
+
+    await tpv.removeDiscount('venue', 'order', 'od', 'staff')
+
+    expect(intentos()).toBe(2)
+    expect((logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'DISCOUNT_REMOVED')).toHaveLength(1)
+  })
+
+  it('[repetirNoDuplica:applyAutomaticDiscounts] los automáticos: la bitácora publicada es la de UNA sola pasada, no la de las dos', async () => {
+    // Referencia sin traba: cuántas bitácoras deja una pasada.
+    await tpv.applyAutomaticDiscounts('venue', 'order', 'staff')
+    const porPasada = (logAction as jest.Mock).mock.calls.length
+    expect(porPasada).toBeGreaterThan(0)
+    ;(logAction as jest.Mock).mockClear()
+    creada = null
+    tx = db()
+    tx.orderDiscount.create.mockImplementation(
+      async ({ data }: any) => (creada = { id: 'od-nueva', createdAt: new Date(0), appliedToItemIds: [], ...data }),
+    )
+    tx.orderDiscount.findMany.mockImplementation(async () => (creada ? [creada] : []))
+    tx.order.findUniqueOrThrow = jest.fn(async () => tx.order.findUnique())
+    const intentos = abortarElPrimerIntento()
+
+    await tpv.applyAutomaticDiscounts('venue', 'order', 'staff')
+
+    expect(intentos()).toBe(2)
+    expect((logAction as jest.Mock).mock.calls).toHaveLength(porPasada)
+  })
+  it('[repetirNoDuplica:applyAutomaticDiscounts] motor real: dos descuentos, traba en los contadores y sólo uno vigente al reintentar ⇒ logAction recibe sólo el aviso del que quedó', async () => {
+    tx.discount.findMany
+      .mockResolvedValueOnce([
+        { ...discount, id: 'z-first', priority: 10 },
+        { ...discount, id: 'a-second', priority: 5 },
+      ])
+      .mockResolvedValue([{ ...discount, id: 'a-second', priority: 5 }])
+    // Intento 1: aplica los dos y la traba salta al escribir el PRIMER contador (los avisos de los dos ya estaban acumulados).
+    tx.discount.update.mockRejectedValueOnce(Object.assign(new Error('deadlock detected'), { code: '40P01' })).mockResolvedValue({})
+    ;(logAction as jest.Mock).mockClear()
+
+    const r = await tpv.applyAutomaticDiscounts('venue', 'order', 'staff')
+
+    expect(r).toMatchObject({ applied: 1 })
+    const avisos = (logAction as jest.Mock).mock.calls.map(c => c[0])
+    expect(avisos).toHaveLength(1)
+    expect(avisos[0]).toMatchObject({ data: expect.objectContaining({ discountId: 'a-second' }) })
+  })
+
+  it('[repetirNoDuplica:applyDiscountToOrder] aplicar un descuento: el aviso del intento abortado no sale; el ganador (rechazado por aprobación) no publica nada', async () => {
+    let llamada = 0
+    globalDb.$transaction.mockImplementation(async (cb: any) => {
+      const r = await cb(tx)
+      if (++llamada === 1) {
+        // El intento 2 ya lo encuentra «requiere aprobación» (el negocio lo cambió): contesta sin escribir ni avisar.
+        tx.discount.findMany.mockResolvedValue([{ ...discount, requiresApproval: true }])
+        throw Object.assign(new Error('deadlock detected'), { code: '40P01' })
+      }
+      return r
+    })
+    ;(logAction as jest.Mock).mockClear()
+
+    await tpv.applyPredefinedDiscount('venue', 'order', 'discount', 'staff')
+
+    expect(llamada).toBe(2)
+    expect((logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'DISCOUNT_APPLIED')).toHaveLength(0)
+  })
+})
