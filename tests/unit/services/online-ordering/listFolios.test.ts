@@ -66,10 +66,10 @@ beforeEach(() => {
   ;(cerrarCanceladasReleyendo as jest.Mock).mockResolvedValue([])
   prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => {
     if (!esLista(a)) return []
-    return a.where.status === 'ACCEPTED' ? POR_ENTREGAR : POR_PAGAR
+    return a.where.status === 'PENDING_ACCEPTANCE' ? POR_PAGAR : POR_ENTREGAR
   }) as any)
   prismaMock.onlineOrder.count.mockImplementation((async (a: any) =>
-    a.where.status === 'ACCEPTED' ? CONTEOS.toDeliver : CONTEOS.toPay) as any)
+    a.where.status === 'PENDING_ACCEPTANCE' ? CONTEOS.toPay : CONTEOS.toDeliver) as any)
 })
 
 // T18g: las páginas y los conteos se leen en UNA transacción de sólo lectura (el mock la ejecuta contra el mismo prismaMock).
@@ -125,8 +125,8 @@ describe('listFolios', () => {
     // un `tx` DISTINTO del prismaMock global: si una lectura se escapa al `prisma`, se ve en el global
     const tx = {
       onlineOrder: {
-        findMany: jest.fn(async (a: any) => (a.where.status === 'ACCEPTED' ? POR_ENTREGAR : POR_PAGAR)),
-        count: jest.fn(async (a: any) => (a.where.status === 'ACCEPTED' ? CONTEOS.toDeliver : CONTEOS.toPay)),
+        findMany: jest.fn(async (a: any) => (a.where.status === 'PENDING_ACCEPTANCE' ? POR_PAGAR : POR_ENTREGAR)),
+        count: jest.fn(async (a: any) => (a.where.status === 'PENDING_ACCEPTANCE' ? CONTEOS.toPay : CONTEOS.toDeliver)),
       },
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(tx))
@@ -156,6 +156,22 @@ describe('listFolios', () => {
     const r = await listFolios({ venueId: 'v1', now: NOW })
     expect(r.toPay).toHaveLength(1)
     expect(r).toMatchObject({ showTile: true, pollSeconds: 30 })
+  })
+
+  it('T18i: «Por entregar» es pagado y no entregado: la consulta y el conteo piden ACCEPTED y READY, y cada folio trae su status', async () => {
+    POR_ENTREGAR = [row(3, { status: 'ACCEPTED', paymentStatus: 'PAID' }), row(4, { status: 'READY', paymentStatus: 'PAID' })]
+    CONTEOS = { toPay: 0, toDeliver: 2 }
+    const r = await listFolios({ venueId: 'v1', now: NOW })
+    expect(r.toDeliver.map(o => [o.orderNumber, o.status])).toEqual([
+      ['F-3', 'ACCEPTED'],
+      ['F-4', 'READY'],
+    ])
+    expect(r.counts.toDeliver).toBe(2)
+    const entregar = listas().find(q => q.where.status !== 'PENDING_ACCEPTANCE')
+    expect(entregar.where).toEqual({ venueId: 'v1', requiresAcceptance: false, status: { in: ['ACCEPTED', 'READY'] } })
+    const cuenta = (prismaMock.onlineOrder.count.mock.calls as any[][]).map(c => c[0]).find(q => q.where.status !== 'PENDING_ACCEPTANCE')
+    expect(cuenta.where).toEqual(entregar.where) // el conteo sigue a la lista
+    expect(entregar.take).toBe(INBOX_PAGE_SIZE + 1)
   })
 
   it('un folio con abono (PARTIAL) sale en toPay con su remaining y cuenta en counts.toPay; uno cuya cuenta se canceló no sale', async () => {

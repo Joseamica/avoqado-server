@@ -239,7 +239,7 @@ describe('T12 · listFolios contra Postgres', () => {
     expect(r.counts).toEqual({ toPay: 0, toDeliver: 1 })
   })
 
-  it('«Listo» lo saca de toDeliver', async () => {
+  it('«Listo» NO lo saca de toDeliver (sigue pagado y sin entregar, con su status); «Entregado» sí; un COMPLETED no sale', async () => {
     const { orderId } = await nuevoFolio()
     await efectivoDeLaTpv(orderId, CIEN)
     expect(numeros((await listFolios({ venueId: f.venueId })).toDeliver)).toEqual([orderId])
@@ -247,7 +247,35 @@ describe('T12 · listFolios contra Postgres', () => {
     await expect(markOnlineOrderReady({ venueId: f.venueId, orderId, staffId: f.staffId })).resolves.toMatchObject({ outcome: 'OK' })
 
     const r = await listFolios({ venueId: f.venueId })
-    expect(r.toDeliver).toEqual([])
-    expect(r.counts.toDeliver).toBe(0)
+    expect(r.toDeliver.map(x => [x.orderId, x.status])).toEqual([[orderId, 'READY']])
+    expect(r.counts.toDeliver).toBe(1)
+
+    await markOnlineOrderDelivered({ venueId: f.venueId, orderId, staffId: f.staffId })
+    const fin = await listFolios({ venueId: f.venueId })
+    expect(fin.toDeliver).toEqual([])
+    expect(fin.counts.toDeliver).toBe(0)
+  })
+
+  it('paginación con ACCEPTED y READY mezclados: sigue por (createdAt, id), sin saltar ni repetir aunque uno pase de ACCEPTED a READY entre páginas', async () => {
+    const ids: string[] = []
+    for (let i = 0; i < 101; i++) {
+      const { orderId } = await nuevoFolio()
+      await efectivoDeLaTpv(orderId, CIEN)
+      ids.push(orderId)
+    }
+    // la sincronización de pagados es acotada por pasada: se corren dos para que los 101 queden en «Por entregar»
+    await listFolios({ venueId: f.venueId })
+    await listFolios({ venueId: f.venueId })
+    const p1 = await listFolios({ venueId: f.venueId, section: 'toDeliver' })
+    expect(p1.toDeliver).toHaveLength(100)
+    expect(p1.counts.toDeliver).toBe(101)
+    // entre páginas: uno de la página siguiente (el 101) y uno de la ya leída pasan a «Listo»
+    await markOnlineOrderReady({ venueId: f.venueId, orderId: ids[100], staffId: f.staffId })
+    await markOnlineOrderReady({ venueId: f.venueId, orderId: ids[0], staffId: f.staffId })
+    const p2 = await listFolios({ venueId: f.venueId, section: 'toDeliver', cursor: p1.nextCursors.toDeliver! })
+    expect(p2.toDeliver.map(x => x.orderId)).toEqual([ids[100]])
+    expect(p2.toDeliver[0].status).toBe('READY')
+    const vistos = [...p1.toDeliver, ...p2.toDeliver].map(x => x.orderId)
+    expect(new Set(vistos).size).toBe(101)
   })
 })
