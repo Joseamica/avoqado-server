@@ -64,6 +64,32 @@ export function usaDeLaFila(row: UsaDeLaFila, visible: UsaEscritoVisible | undef
   }
 }
 
+/** «Ingreso» of a row as `ingresoColumnas` selects it (C1b). */
+export interface IngresoDeLaFila {
+  ingreso: string
+  mensualidad: string | null
+  pistaIngreso: string | null
+  transacciones30d: { toString(): string } | number | null
+  /** Card money through Avoqado in another currency (never converted nor added). Null when the money is not shown. */
+  otraMoneda: boolean | null
+}
+
+/**
+ * The «Ingreso» cell: the code, the paid level, the opportunity, the card money through Avoqado in 30 days in MXN pesos and
+ * whether some came in another currency. Money only for whoever has «Ver ventas» (the SQL already left it out of a client
+ * the caller does not see) and only on a row that has card money through Avoqado.
+ */
+export function ingresoDeLaFila(row: IngresoDeLaFila, conVentas: boolean) {
+  const conTransacciones = conVentas && (row.ingreso === 'TRANSACCIONES' || row.ingreso === 'AMBOS')
+  return {
+    codigo: row.ingreso,
+    mensualidad: row.mensualidad,
+    transacciones30d: conTransacciones && row.transacciones30d != null ? Number(row.transacciones30d.toString()) : null,
+    otraMoneda: conTransacciones && row.otraMoneda != null ? row.otraMoneda : null,
+    pista: row.pistaIngreso,
+  }
+}
+
 /** The count of stalled signups by reason, every key present (zeros included). */
 export function conteosDe(row: Record<string, number | undefined> | undefined) {
   const of = (key: string) => row?.[key] ?? 0

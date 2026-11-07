@@ -55,7 +55,7 @@ import {
   summarizeOccurrences,
 } from '@/services/superadmin/platform-charges/occurrences.service'
 import type { InvoiceCategory, OccurrenceFilters, OccurrenceGroupBy } from '@/services/superadmin/platform-charges/occurrences.service'
-import { calendarDayToDb, dbToCalendarDay, todayInMexico } from '@/services/superadmin/platform-charges/schedule'
+import { addDays, calendarDayToDb, dbToCalendarDay, todayInMexico } from '@/services/superadmin/platform-charges/schedule'
 import { computeChargeTotals, conceptToCfdiLine } from '@/services/superadmin/platform-charges/totals'
 import type { ChargeConcept } from '@/services/superadmin/platform-charges/types'
 import prisma from '@/utils/prismaClient'
@@ -746,6 +746,64 @@ describe('API de SUPERADMIN: el guardia real y la forma de lo que sale (HTTP, JW
 
     const inexistente = await post('/no-existe/resume')
     expect(inexistente.status).toBe(404)
+  })
+
+  it('«Próximo cobro» por HTTP: la lista trae la fecha aunque falten más de 7 días; pagar la mueve a la siguiente y pausar la quita', async () => {
+    const hoy = todayInMexico(new Date())
+    const lejos = addDays(hoy, 20)
+    const lejano = await nuevoCobro({ customerName: unico('Lejano'), frequency: 'MONTHLY', anchorDate: lejos }, new Date())
+    const semanal = await nuevoCobro({ customerName: unico('Semanal'), frequency: 'WEEKLY', anchorDate: hoy }, new Date())
+    const proximo = async (cobro: { id: string; customerName: string }) => {
+      const res = await get(`/?q=${encodeURIComponent(cobro.customerName)}`)
+      expect(res.status).toBe(200)
+      return res.body.data.find((fila: { id: string }) => fila.id === cobro.id)?.nextDueDate
+    }
+
+    // Su primera fecha cae en 20 días: todavía no existe en «Fechas de cobro», pero la columna ya la dice.
+    expect(await ocurrenciasDe(lejano.id)).toHaveLength(0)
+    expect(await proximo(lejano)).toBe(lejos)
+
+    // Semanal desde hoy: toca hoy; pagada, toca dentro de 7 días; pausado, no hay próximo.
+    expect(await proximo(semanal)).toBe(hoy)
+    const deHoy = await porFecha(semanal.id, hoy)
+    expect((await post(`/occurrences/${deHoy.id}/pay`, { invoice: false })).status).toBe(200)
+    expect(await proximo(semanal)).toBe(addDays(hoy, 7))
+    expect((await post(`/${semanal.id}/pause`, { skipOverdue: true })).status).toBe(200)
+    expect(await proximo(semanal)).toBeNull()
+  })
+
+  it('«¿te las debe?» por HTTP: con pastDatesOwed=false lo pasado no nace (y la bitácora lo dice); sin el campo nace vencido como siempre', async () => {
+    const hoy = todayInMexico(new Date())
+    const perfil = await nuevoPerfil()
+    const alta = async (extra: object) => {
+      const res = await post('/', {
+        customerType: 'STANDALONE',
+        customerName: unico('Desde antes'),
+        billingTaxProfileId: perfil.id,
+        frequency: 'WEEKLY',
+        anchorDate: addDays(hoy, -21),
+        concepts: [RENTA, LICENCIA],
+        invoiceMode: 'AUTOMATIC',
+        ...extra,
+      })
+      expect(res.status).toBe(201)
+      creado.charges.push(res.body.data.id)
+      return res.body.data.id as string
+    }
+
+    const yaPagado = await alta({ pastDatesOwed: false })
+    expect(await resumen(yaPagado)).toEqual([`${hoy}:PENDING`, `${addDays(hoy, 7)}:PENDING`])
+    const [bitacora] = await bitacoras('PLATFORM_CHARGE_CREATED', yaPagado, 1)
+    expect(bitacora?.data).toMatchObject({ pastDatesOwed: false, anchorDate: addDays(hoy, -21) })
+
+    const comoSiempre = await alta({})
+    expect((await resumen(comoSiempre)).slice(0, 3)).toEqual([
+      `${addDays(hoy, -21)}:PENDING`,
+      `${addDays(hoy, -14)}:PENDING`,
+      `${addDays(hoy, -7)}:PENDING`,
+    ])
+
+    expect((await post('/', { customerType: 'STANDALONE', customerName: unico('X'), pastDatesOwed: 'no' })).status).toBe(400)
   })
 })
 

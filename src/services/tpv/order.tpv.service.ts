@@ -1,7 +1,7 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
-import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError } from '../../errors/AppError'
+import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError, RegaloSinPermisoError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { NO_ES_FOLIO_POR_PAGAR } from '../online-ordering/constants'
@@ -701,6 +701,8 @@ type TpvCreateOrderWithItemsInput = {
   /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
   canCompItems?: boolean
   performedBy?: string
+  /** Server-owned (hz:e0b12f00:D1): quien autorizó un descuento libre que deja la cuenta en $0 (el gerente del PIN o la membresía de quien cobra). */
+  regaloAutorizadoPor?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
@@ -1208,6 +1210,15 @@ export async function createOrderWithItems(
   if (totalPesos < 0) {
     throw new BadRequestError('Order total cannot be negative')
   }
+  // hz:e0b12f00:D1 (founder, 6-nov): un descuento libre (sin catálogo ni cupón) que deja en $0 lo que queda de los productos es
+  // una cortesía. Con el importe y la base del SERVIDOR, en centavos: el `total` del cliente tolera un centavo (Codex r1 #1). Va
+  // después de la búsqueda idempotente, así que un reintento de una venta ya creada recibe su orden (r1 #5).
+  const descuentoLibreRegala =
+    !orderDiscount &&
+    orderDiscountPesos > 0 &&
+    baseDeLaCuentaPesos > 0 &&
+    Math.round(orderDiscountPesos * 100) >= Math.round(baseDeLaCuentaPesos * 100)
+  if (descuentoLibreRegala && (input.canCompItems !== true || !input.performedBy)) throw new RegaloSinPermisoError()
 
   let resolvedTerminalId = input.terminalId || null
   if (!resolvedTerminalId && input.deviceSerialNumber) {
@@ -1384,7 +1395,13 @@ export async function createOrderWithItems(
       if (!orderDiscount && orderDiscountPesos > 0) {
         // P2 (founder, 1-oct): el descuento libre de la terminal tiene su fila; sólo en la cabecera, un recálculo lo borraba.
         await tx.orderDiscount.create({
-          data: filaDeDescuentoDeCuenta({ orderId: order.id, montoPesos: orderDiscountPesos, appliedById: activeStaffVenue.id }),
+          data: filaDeDescuentoDeCuenta({
+            orderId: order.id,
+            montoPesos: orderDiscountPesos,
+            appliedById: activeStaffVenue.id,
+            // Codex r2 #1: el autorizador lo resuelve el controlador (gerente del PIN o quien cobra), nunca el vendedor del cuerpo.
+            ...(descuentoLibreRegala ? { authorizedById: input.regaloAutorizadoPor } : {}),
+          }),
         })
       }
       if (cortesiaItems.length > 0 || createdItems.some(item => item.line.appliedDiscount) || orderDiscountPesos > 0) {
@@ -3538,6 +3555,8 @@ interface ApplyDiscountInput {
   staffId: string // Staff member performing the action
   itemIds?: string[] // Optional: apply to specific items (null = order-level)
   expectedVersion: number // Optimistic locking
+  /** Server-owned (hz:e0b12f00:D1): quien llama tiene `orders:comp` (o lo autorizó el PIN de un gerente). */
+  puedeRegalar?: boolean
 }
 
 /**
@@ -3656,6 +3675,15 @@ export async function applyDiscount(
       // no puede dar negativo.
       const remainingDiscountable = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
       discountAmount = Math.min(discountAmount, remainingDiscountable)
+      // hz:e0b12f00:D1 (founder, 6-nov): dejar en $0 lo que queda de los productos es una cortesía. Con este importe, en centavos;
+      // aquí dos de 50 % sí pueden agotar la cuenta (cada % es sobre el subtotal: Codex r1, «bases»).
+      if (
+        !input.puedeRegalar &&
+        remainingDiscountable > 0 &&
+        Math.round(discountAmount * 100) >= Math.round(remainingDiscountable * 100)
+      ) {
+        throw new RegaloSinPermisoError()
+      }
 
       logger.info(`  💰 Calculated discount: $${discountAmount} (disponible: $${remainingDiscountable})`)
 

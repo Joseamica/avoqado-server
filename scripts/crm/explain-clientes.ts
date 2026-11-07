@@ -12,7 +12,7 @@
  * - `--equipo`: the sales team's organization, excluded as in production (`CrmTeam`); without it, nothing is excluded.
  * - `--conjunto produccion`: only the heaviest variants, so production does not get hundreds of calls.
  * - `--ids`: also print what ONE page adds (task 5, C3) for these organizations — their venues, redemptions, devices and
- *   signups; with `--sucursales`, their contracts; with `--cuentas`, the newest note of each account. The very builders of
+ *   signups, and the ficha's «Ingreso» of the first one (C1b); with `--sucursales`, their contracts; with `--cuentas`, the newest note of each account. The very builders of
  *   `clientPageSql.ts` that the page runs. Use a real page's ids (at most 100).
  * - `--compatible`: for production BEFORE the C1 migration (Codex r1 #6): the new `CrmAccount` columns become typed NULLs
  *   (and `altaPerdido` false), and it stops if any name of a new column is left. It measures the heavy part (the facts
@@ -27,9 +27,9 @@
 import { writeFileSync } from 'fs'
 import { Prisma } from '@prisma/client'
 import type { CrmAccess } from '../../src/services/crm/access.service'
-import { ESTADOS, MOTIVOS_DEL_ALTA, NIVELES, USA } from '../../src/services/crm/clientCodes'
+import { ESTADOS, INGRESOS, MOTIVOS_DEL_ALTA, NIVELES, PISTAS_DE_INGRESO, USA } from '../../src/services/crm/clientCodes'
 import { altaSql, aparatosSql, canjesSql, comentariosSql, contratosSql, sucursalesSql } from '../../src/services/crm/clientPageSql'
-import { clientsQueries, type ClientFilters } from '../../src/services/crm/clientsSql'
+import { clientsQueries, ingresoDeOrganizacionSql, type ClientFilters } from '../../src/services/crm/clientsSql'
 
 const STAFF_FICTICIO = 'cexplainstaff000000000001'
 
@@ -44,6 +44,7 @@ export const VARIANTES: Variante[] = [
   ...ESTADOS.map(estado => conAltas(`estado=${estado}`, { estado })),
   ...[...MOTIVOS_DEL_ALTA, 'SIN_MOTIVO' as const].map(motivo => conAltas(`motivo=${motivo}`, { motivo })),
   ...(['MIOS', 'SIN_DUENO'] as const).map(dueno => conAltas(`dueno=${dueno}`, { dueno })),
+  ...[...INGRESOS, ...PISTAS_DE_INGRESO].map(ingreso => conAltas(`ingreso=${ingreso}`, { ingreso })),
   { nombre: 'hoy (sin filtros ni altas)', filters: {} },
 ]
 
@@ -56,6 +57,10 @@ const PESADAS = [
   'nivel=FREE',
   'motivo=PRECIO',
   'dueno=SIN_DUENO',
+  'ingreso=TRANSACCIONES',
+  'ingreso=NINGUNO',
+  'ingreso=TARJETA_OTRA_TERMINAL',
+  'ingreso=SOLO_EFECTIVO',
 ]
 export const VARIANTES_PRODUCCION: Variante[] = PESADAS.map(nombre => VARIANTES.find(variante => variante.nombre === nombre)!)
 
@@ -116,6 +121,7 @@ function sentenciasDeLaPagina(args: string[], now: Date): Array<[string, Prisma.
     ['canjes', canjesSql(ids)],
     ['aparatos', aparatosSql(ids)],
     ['alta', altaSql(ids)],
+    ['ingreso de la ficha', ingresoDeOrganizacionSql(ids[0], now, true)],
     ...(sucursales.length ? [['contratos', contratosSql(sucursales, now)] as [string, Prisma.Sql]] : []),
     ...(cuentas.length ? [['comentarios', comentariosSql(cuentas)] as [string, Prisma.Sql]] : []),
   ]
@@ -128,8 +134,9 @@ export function explainClientes(args: string[], now = new Date()): string[] {
   const variantes = option(args, '--conjunto') === 'produccion' ? VARIANTES_PRODUCCION : VARIANTES
   const base = { staffId, editar: null, configurar: false } as unknown as CrmAccess
   const alcances: Array<[string, CrmAccess]> = [
-    ['todos', { ...base, isSuperadmin: true, ver: 'todos' }],
-    ['propios', { ...base, isSuperadmin: false, ver: 'propios' }],
+    // C1b: «todos» with «Ver ventas» measures the page WITH the card money; «propios» without it.
+    ['todos', { ...base, isSuperadmin: true, ver: 'todos', ventas: true }],
+    ['propios', { ...base, isSuperadmin: false, ver: 'propios', ventas: false }],
   ]
   const lines: string[] = []
   const explain = (sql: Prisma.Sql) => {

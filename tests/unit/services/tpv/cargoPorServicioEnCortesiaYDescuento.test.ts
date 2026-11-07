@@ -293,6 +293,7 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
       reason: 'Cortesía total',
       staffId: STAFF_ID,
       expectedVersion: 1,
+      puedeRegalar: true, // hz:e0b12f00:D1: dejar en $0 los productos pide permiso de cortesía
     })
 
     expect(datosGuardados().total).toBe(35)
@@ -317,7 +318,8 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
     )
     mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
 
-    await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(253))
+    // hz:e0b12f00:D1: agota lo que queda de los productos, así que va con permiso de cortesía.
+    await applyDiscount(VENUE_ID, ORDER_ID, { ...descuentoFijo(253), puedeRegalar: true })
 
     const guardado = datosGuardados()
     expect(guardado.discountAmount).toBe(253) // 25.30 + 227.70, no 278.30
@@ -343,7 +345,7 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
     )
     mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
 
-    await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(500))
+    await applyDiscount(VENUE_ID, ORDER_ID, { ...descuentoFijo(500), puedeRegalar: true }) // hz:e0b12f00:D1
 
     expect(datosGuardados().discountAmount).toBe(253)
     expect(datosGuardados().total).toBe(30)
@@ -571,6 +573,7 @@ describe('🔴 cargo por servicio PORCENTUAL: se recalcula sobre la base nueva',
         reason: 'Cortesía total',
         staffId: STAFF_ID,
         expectedVersion: 1,
+        puedeRegalar: true, // hz:e0b12f00:D1
       })
 
       // 0 de mercancía + 0 de cargo + 20 de propina. La propina NO se toca: es del mesero.

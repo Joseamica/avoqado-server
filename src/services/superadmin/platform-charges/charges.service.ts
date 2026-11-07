@@ -22,7 +22,15 @@ import prisma from '@/utils/prismaClient'
 import { attachInvoiceInTx, conceptsFromInvoice } from './invoice-link.service'
 import { lockCharge, withChargeLock } from './lock'
 import { invoiceName } from './occurrences.service'
-import { addDays, calendarDayToDb, dbToCalendarDay, isSamePeriodAsMarked, occurrenceDatesBetween, todayInMexico } from './schedule'
+import {
+  addDays,
+  calendarDayToDb,
+  dbToCalendarDay,
+  isSamePeriodAsMarked,
+  nextDueDate,
+  occurrenceDatesBetween,
+  todayInMexico,
+} from './schedule'
 import { computeChargeTotals, hasSatKeys } from './totals'
 import { LINKED_LIVE, LIVE_INVOICE_STATUSES, type CalendarDay, type ChargeConcept } from './types'
 
@@ -70,7 +78,15 @@ export interface ChargeInput {
  * vienen, se ignoran: el servidor los deriva de la factura (conceptos de ella, una sola vez, MANUAL). Sin `invoiceId` siguen siendo obligatorios.
  */
 export type CreateChargeInput = Omit<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'> &
-  Partial<Pick<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'>> & { invoiceId?: string }
+  Partial<Pick<ChargeInput, 'concepts' | 'frequency' | 'invoiceMode'>> & {
+    invoiceId?: string
+    /**
+     * «¿Te debe las fechas pasadas?» (founder, 6-nov: «A»). `false` = ya las pagó: las fechas antes de hoy no se crean y el cobro
+     * empieza en la primera desde hoy (el ancla se guarda igual). Sin él, o `true`, lo pasado nace vencido como siempre. Una sola
+     * vez no cambia: su única fecha es lo que se cobra.
+     */
+    pastDatesOwed?: boolean
+  }
 
 export interface ListChargesFilters {
   /** Sin `status` se listan todos los cobros. */
@@ -589,7 +605,8 @@ export async function createCharge(input: CreateChargeInput, actorId: string, no
 
     const created = await tx.platformCharge.create({ data: { ...dbFields(state), createdById: actorId } })
     await lockCharge(tx, created.id)
-    await generateOccurrences(tx, created, state.anchorDate, addDays(today, GENERATE_AHEAD_DAYS))
+    const from = input.pastDatesOwed === false && state.anchorDate < today ? today : state.anchorDate
+    await generateOccurrences(tx, created, from, addDays(today, GENERATE_AHEAD_DAYS))
     if (!cfdi) return { charge: created, state, linked: null }
 
     // Un cobro de una sola vez tiene UNA fecha, y acaba de nacer con el alta.
@@ -607,6 +624,8 @@ export async function createCharge(input: CreateChargeInput, actorId: string, no
     invoiceMode: state.invoiceMode,
     conceptCount: state.concepts.length,
     ...(invoiceId ? { invoiceId } : {}),
+    // Quien dio de alta declaró pagado lo anterior a hoy: por eso esas fechas no existen.
+    ...(input.pastDatesOwed === false ? { pastDatesOwed: false } : {}),
   })
   if (linked) {
     // Lo mismo que deja `linkInvoice` al anexar a una fecha que ya existía.
@@ -776,7 +795,8 @@ export function pageParams(filters: { page?: number; pageSize?: number }): { pag
  */
 export async function listCharges(
   filters: ListChargesFilters,
-): Promise<{ rows: PlatformCharge[]; total: number; page: number; pageSize: number }> {
+  now: Date = new Date(),
+): Promise<{ rows: ChargeWithNextDue[]; total: number; page: number; pageSize: number }> {
   const where: Prisma.PlatformChargeWhereInput = {}
   if (filters.status === 'active') where.pausedAt = null
   else if (filters.status === 'paused') where.pausedAt = { not: null }
@@ -794,7 +814,42 @@ export async function listCharges(
     }),
     prisma.platformCharge.count({ where }),
   ])
-  return { rows, total, page, pageSize }
+  return { rows: await withNextDueDates(rows, now), total, page, pageSize }
+}
+
+export type ChargeWithNextDue = PlatformCharge & { nextDueDate: CalendarDay | null }
+
+/**
+ * «Próximo cobro» de cada fila de la página: dos consultas agregadas para toda la página (la primera pendiente y la última pagada
+ * u omitida), nunca una por fila. Un cobro pausado no genera fechas: no tiene próximo.
+ */
+async function withNextDueDates(rows: PlatformCharge[], now: Date): Promise<ChargeWithNextDue[]> {
+  if (rows.length === 0) return []
+  const chargeId = { in: rows.map(row => row.id) }
+  const [pending, marked] = await Promise.all([
+    prisma.platformChargeOccurrence.groupBy({ by: ['chargeId'], where: { chargeId, status: 'PENDING' }, _min: { dueDate: true } }),
+    prisma.platformChargeOccurrence.groupBy({
+      by: ['chargeId'],
+      where: { chargeId, status: { in: ['PAID', 'SKIPPED'] } },
+      _max: { dueDate: true },
+    }),
+  ])
+  const day = (date: Date | null | undefined): CalendarDay | null => (date ? dbToCalendarDay(date) : null)
+  const firstPending = new Map(pending.map(group => [group.chargeId, day(group._min?.dueDate)]))
+  const lastMarked = new Map(marked.map(group => [group.chargeId, day(group._max?.dueDate)]))
+  const today = todayInMexico(now)
+  return rows.map(row => ({
+    ...row,
+    nextDueDate: row.pausedAt
+      ? null
+      : nextDueDate(
+          row.frequency,
+          dbToCalendarDay(row.anchorDate),
+          today,
+          firstPending.get(row.id) ?? null,
+          lastMarked.get(row.id) ?? null,
+        ),
+  }))
 }
 
 /**

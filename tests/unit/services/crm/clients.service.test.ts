@@ -14,8 +14,9 @@ import logger from '@/config/logger'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { PRODUCTION_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import type { CrmAccess } from '@/services/crm/access.service'
-import { altaPendienteSql } from '@/services/crm/clientFacts'
+import { altaPendienteSql, ingresoSql, monedaDelPagoSql } from '@/services/crm/clientFacts'
 import { planesPorSucursal } from '@/services/crm/clientPage'
+import { ingresoColumnas } from '@/services/crm/clientsSql'
 import {
   clientsQueries,
   ensureClientAccount,
@@ -155,6 +156,14 @@ const filterOf = (query: Prisma.Sql) => {
   return (from.includes('ORDER BY') ? from.slice(0, from.indexOf('ORDER BY')) : from).trim()
 }
 
+/** The month query of the ficha («Cobrado este mes»): one raw statement over the organization's real venues. */
+const isMes = (query: Prisma.Sql) => query.sql.includes('AS "ventasMXN"')
+/** Answers the month query with `row` and everything else as before. */
+function mesDb(row: { ventasMXN: Prisma.Decimal | null; otraMoneda: boolean }) {
+  const antes = prismaMock.$queryRaw.getMockImplementation()
+  prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (isMes(query) ? [row] : antes ? antes(query) : []))
+}
+
 /** A row of the page as the SQL returns it. */
 const client = (over: Record<string, unknown> = {}) => ({
   id: ORG,
@@ -206,7 +215,8 @@ describe('listClients', () => {
     // The total counts the same thing the page lists, with the same binds.
     const count = countQuery()
     expect(filterOf(count)).toBe(filterOf(page))
-    expect(count.values).toEqual(page.values.slice(PRODUCTION_VENUE_STATUSES.length, -1))
+    // The page's select list adds its own binds before the filter: `yaCobro` and «Ingreso» (C1b) for the page's rows.
+    expect(count.values).toEqual(page.values.slice(PRODUCTION_VENUE_STATUSES.length + ingresoColumnas(NOW, false).values.length, -1))
   })
 
   it('sin_equipo_creado_no_excluye_nada_de_mas', async () => {
@@ -491,6 +501,117 @@ describe('filtros, columnas y total de C1 (Tarea 4)', () => {
     expect(conteos.values).toContain('%tacos%')
     expect(conteos.values).not.toContain('POS')
     expect(conteos.values).not.toContain('COBRA')
+  })
+})
+
+describe('Ingreso (C1b)', () => {
+  const sqlOf = (query: Prisma.Sql) => query.sql.replace(/\s+/g, ' ')
+
+  it('el filtro ingreso va en el WHERE de la página y del total, antes del cursor: categoría sobre f.ingreso, pista sobre f.pistaIngreso', async () => {
+    await listClients(access(), { ingreso: 'TRANSACCIONES', cursor: ORG_2 }, NOW)
+    await listClients(access(), { ingreso: 'TARJETA_OTRA_TERMINAL' }, NOW)
+    for (const query of [pageQuery(0), countQuery(0)]) {
+      expect(sqlOf(query)).toContain('f."ingreso" = ?')
+      expect(query.values).toContain('TRANSACCIONES')
+    }
+    const page = sqlOf(pageQuery(0))
+    expect(page.indexOf('f."ingreso" = ?')).toBeLessThan(page.indexOf('(o."createdAt", o."id") <'))
+    expect(sqlOf(countQuery(1))).toContain('f."pistaIngreso" = ?')
+    expect(sqlOf(countQuery(1))).not.toContain('f."ingreso" = ?')
+    expect(countQuery(1).values).toContain('TARJETA_OTRA_TERMINAL')
+  })
+
+  it('🔴 el monto sólo se suma con «Ver ventas», en la misma sentencia de la página y nunca en el total', async () => {
+    await listClients(access({ ventas: false }), {}, NOW)
+    expect(sqlOf(pageQuery(0))).toContain('NULL::numeric AS "transacciones30d"')
+    expect(sqlOf(pageQuery(0))).not.toContain('SUM(p."amount")')
+    await listClients(access({ ventas: true }), {}, NOW)
+    const page = sqlOf(pageQuery(1))
+    expect(page).toContain('(SELECT SUM(p."amount")')
+    expect(page).toContain(`p."fundsFlow" IS NOT DISTINCT FROM 'AVOQADO_PROCESSED'`)
+    expect(sqlOf(countQuery(1))).not.toContain('SUM(p."amount")')
+  })
+
+  it('🔴 una sola expresión: la celda selecciona el mismo texto de ingresoSql que la lateral le da al filtro', async () => {
+    await listClients(access({ ventas: true }), { ingreso: 'AMBOS' }, NOW)
+    const page = pageQuery(0).sql
+    const { ingreso, mensualidad, pista } = ingresoSql(NOW)
+    for (const expr of [ingreso, mensualidad, pista]) {
+      // Once in the lateral (what the filter reads) and once in the select list (what the cell paints).
+      expect(page.split(expr.sql).length - 1).toBe(2)
+    }
+    // The total only has the lateral's copy.
+    expect(countQuery(0).sql.split(ingreso.sql).length - 1).toBe(1)
+  })
+
+  it('cada fila trae su ingreso (el monto en pesos, número) y meta dice ingreso: 1', async () => {
+    clientsDb([
+      client({
+        ingreso: 'AMBOS',
+        mensualidad: 'PRO',
+        pistaIngreso: null,
+        transacciones30d: new Prisma.Decimal('4488.00'),
+        otraMoneda: true,
+      }),
+      client({
+        id: ORG_2,
+        ingreso: 'NINGUNO',
+        mensualidad: null,
+        pistaIngreso: 'TARJETA_OTRA_TERMINAL',
+        transacciones30d: null,
+        otraMoneda: false,
+      }),
+    ])
+    const result = await listClients(access({ ventas: true }), {}, NOW)
+    expect(result).toMatchObject({ ingreso: 1, legible: 1 })
+    expect(result.rows[0].ingreso).toEqual({ codigo: 'AMBOS', mensualidad: 'PRO', transacciones30d: 4488, otraMoneda: true, pista: null })
+    expect(result.rows[1].ingreso).toEqual({
+      codigo: 'NINGUNO',
+      mensualidad: null,
+      transacciones30d: null,
+      otraMoneda: null,
+      pista: 'TARJETA_OTRA_TERMINAL',
+    })
+  })
+
+  it('🔴 aunque la base devolviera un monto, sin «Ver ventas» la fila no lo lleva', async () => {
+    clientsDb([
+      client({
+        ingreso: 'TRANSACCIONES',
+        mensualidad: null,
+        pistaIngreso: null,
+        transacciones30d: new Prisma.Decimal('10'),
+        otraMoneda: true,
+      }),
+    ])
+    const result = await listClients(access({ ventas: false }), {}, NOW)
+    expect(result.rows[0].ingreso).toEqual({
+      codigo: 'TRANSACCIONES',
+      mensualidad: null,
+      transacciones30d: null,
+      otraMoneda: null,
+      pista: null,
+    })
+  })
+
+  it('🔴 Codex r1 #1: con «Ver ventas» y «propios», el dinero va dentro del alcance de la cuenta (el mismo que abre la ficha)', async () => {
+    await listClients(access({ ventas: true }), {}, NOW)
+    const page = sqlOf(pageQuery(0))
+    expect(page).toContain('CASE WHEN (ca."ownerStaffId" = ? OR ca."ownerStaffId" IS NULL) THEN (SELECT SUM(p."amount")')
+    expect(page).toContain('CASE WHEN (ca."ownerStaffId" = ? OR ca."ownerStaffId" IS NULL) THEN EXISTS (SELECT 1 FROM "Venue" v')
+    await listClients(access({ ventas: true, ver: 'todos' }), {}, NOW)
+    expect(sqlOf(pageQuery(1))).toContain('CASE WHEN TRUE THEN (SELECT SUM(p."amount")')
+  })
+
+  it('🔴 Codex r1 #3: el monto sólo suma MXN (la moneda sale de la sesión de pago) y lo de otra moneda sólo se marca', async () => {
+    await listClients(access({ ventas: true, ver: 'todos' }), {}, NOW)
+    const page = sqlOf(pageQuery(0))
+    const moneda = monedaDelPagoSql.sql.replace(/\s+/g, ' ')
+    // Codex r2 #1: a link from before aed515013 (no `paymentId`) is found by its `sessionId`.
+    expect(moneda).toContain(`cs."sessionId" = p."processorId" AND cs."paymentId" IS NULL`)
+    expect(page).toContain(`${moneda} = 'MXN'`)
+    expect(page).toContain(`${moneda} <> 'MXN'`)
+    expect(page).toContain('AS "otraMoneda"')
   })
 })
 
@@ -846,46 +967,76 @@ describe('getLive', () => {
     expect((live as { venues: Array<{ id: string; demo: boolean }> }).venues.map(v => v.demo)).toEqual([false, true, true])
   })
 
+  it('C1b: la ficha lee el ingreso de la organización con la misma expresión de la lista; el monto sólo con «Ver ventas»', async () => {
+    linked()
+    const fila = {
+      ingreso: 'TRANSACCIONES',
+      mensualidad: null,
+      pistaIngreso: 'TARJETA_OTRA_TERMINAL',
+      transacciones30d: new Prisma.Decimal('350'),
+      otraMoneda: false,
+    }
+    prismaMock.$queryRaw.mockImplementation(async (query: Prisma.Sql) => (query.sql.includes('AS "pistaIngreso"') ? [fila] : []))
+    const con = await getLive(access({ ventas: true }), ACCOUNT, NOW)
+    expect(con).toMatchObject({
+      ingreso: { codigo: 'TRANSACCIONES', mensualidad: null, transacciones30d: 350, otraMoneda: false, pista: 'TARJETA_OTRA_TERMINAL' },
+    })
+    const consulta = rawQueries().find(query => query.sql.includes('AS "pistaIngreso"'))!
+    // The same expression the list paints and the filter reads.
+    expect(consulta.sql).toContain(ingresoSql(NOW).ingreso.sql)
+    expect(consulta.values).toContain(ORG)
+    expect(consulta.sql).toContain('SUM(p."amount")')
+
+    prismaMock.$queryRaw.mockClear()
+    const sin = await getLive(access({ ventas: false }), ACCOUNT, NOW)
+    expect(sin).toMatchObject({ ingreso: { codigo: 'TRANSACCIONES', transacciones30d: null, otraMoneda: null } })
+    expect(rawQueries().find(query => query.sql.includes('AS "pistaIngreso"'))!.sql).not.toContain('SUM(p."amount")')
+  })
+
+  it('C1b: si la lectura del ingreso no trae fila, la ficha dice ingreso null (no inventa)', async () => {
+    linked()
+    expect(await getLive(access(), ACCOUNT, NOW)).toMatchObject({ ingreso: null })
+  })
+
   it('vivo_sin_llave_ventas_no_trae_ventas', async () => {
     linked()
     const live = await getLive(access({ ventas: false }), ACCOUNT, NOW)
 
-    expect(live).toMatchObject({ ligada: true, ventasMes: null, ventasBloqueadas: true })
+    expect(live).toMatchObject({ ligada: true, ventasMes: null, ventasMesOtraMoneda: null, ventasBloqueadas: true })
     // Not even read: what the seller may not see never leaves the database.
-    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    expect(rawQueries().some(isMes)).toBe(false)
   })
 
-  it('vivo_con_llave_ventas_suma_el_mes_de_ciudad_de_mexico', async () => {
+  it('vivo_con_llave_ventas_suma_el_mes_de_ciudad_de_mexico (sólo MXN; otra moneda se marca, Codex r2 #3)', async () => {
     linked()
+    mesDb({ ventasMXN: new Prisma.Decimal('1500.50'), otraMoneda: true })
     const live = await getLive(access({ ventas: true }), ACCOUNT, NOW)
 
-    expect(live).toMatchObject({ ventasBloqueadas: false })
+    expect(live).toMatchObject({ ventasBloqueadas: false, ventasMesOtraMoneda: true })
     expect(live.ligada && live.ventasMes?.toString()).toBe('1500.5')
-    // October in Mexico City: 1-oct 00:00 (06:00Z) up to, not including, 1-nov 00:00 (06:00Z). Real money, real venues.
-    expect(prismaMock.payment.aggregate).toHaveBeenCalledWith({
-      where: {
-        ...MONEY,
-        createdAt: { gte: new Date('2026-10-01T06:00:00.000Z'), lt: new Date('2026-11-01T06:00:00.000Z') },
-        venue: { organizationId: ORG, ...REAL_VENUE },
-      },
-      _sum: { amount: true },
-    })
+    // October in Mexico City: 1-oct 00:00 (06:00Z) up to, not including, 1-nov 00:00 (06:00Z). Real money, real venues, MXN.
+    const mes = rawQueries().filter(isMes)
+    expect(mes[0].values).toEqual(expect.arrayContaining([ORG, new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T06:00:00.000Z')]))
+    const sql = mes[0].sql.replace(/\s+/g, ' ')
+    expect(sql).toContain(`p."status" = 'COMPLETED' AND p."amount" > 0`)
+    expect(sql).toContain('v."demoExpiresAt" IS NULL')
+    expect(sql).toContain(`= 'MXN') AS "ventasMXN"`)
+    expect(sql).toContain(`cs."sessionId" = p."processorId" AND cs."paymentId" IS NULL`)
 
     // 21:00 of 31-oct in Mexico City is already November in UTC: still October here.
     await getLive(access({ ventas: true }), ACCOUNT, new Date('2026-11-01T03:00:00.000Z'))
-    expect(prismaMock.payment.aggregate.mock.calls[1][0].where.createdAt).toEqual({
-      gte: new Date('2026-10-01T06:00:00.000Z'),
-      lt: new Date('2026-11-01T06:00:00.000Z'),
-    })
+    expect(rawQueries().filter(isMes)[1].values).toEqual(
+      expect.arrayContaining([new Date('2026-10-01T06:00:00.000Z'), new Date('2026-11-01T06:00:00.000Z')]),
+    )
 
     // December rolls over to January of the next year; a month without sales is $0, not null.
-    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null } })
+    mesDb({ ventasMXN: null, otraMoneda: false })
     const december = await getLive(access({ ventas: true }), ACCOUNT, new Date('2026-12-15T18:00:00.000Z'))
-    expect(prismaMock.payment.aggregate.mock.calls[2][0].where.createdAt).toEqual({
-      gte: new Date('2026-12-01T06:00:00.000Z'),
-      lt: new Date('2027-01-01T06:00:00.000Z'),
-    })
+    expect(rawQueries().filter(isMes)[2].values).toEqual(
+      expect.arrayContaining([new Date('2026-12-01T06:00:00.000Z'), new Date('2027-01-01T06:00:00.000Z')]),
+    )
     expect(december.ligada && december.ventasMes?.toString()).toBe('0')
+    expect(december).toMatchObject({ ventasMesOtraMoneda: false })
   })
 
   it('vivo_plan_por_contrato_sin_fila_clasica', async () => {
@@ -1043,8 +1194,9 @@ describe('getClientLive (ruling 47): a client without a CRM account opens its li
     expect(seller).toEqual(await getLive(access({ ventas: false }), ACCOUNT, NOW))
     expect(seller).toMatchObject({ ligada: true, organizationId: ORG, ventasMes: null, ventasBloqueadas: true })
     expect(seller.venues[0]).not.toHaveProperty('kycStatus')
-    expect(prismaMock.payment.aggregate).not.toHaveBeenCalled()
+    expect(rawQueries().some(isMes)).toBe(false)
     // The same locks: «Ver ventas» brings the month, «Configurar el CRM» the KYC.
+    mesDb({ ventasMXN: new Prisma.Decimal('1500.50'), otraMoneda: false })
     const admin = await getClientLive(access({ ventas: true, configurar: true }), ORG, NOW)
     expect(admin).toMatchObject({ ventasBloqueadas: false, venues: [expect.objectContaining({ kycStatus: 'VERIFIED' })] })
     expect(admin.ventasMes?.toString()).toBe('1500.5')
